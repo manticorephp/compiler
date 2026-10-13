@@ -228,9 +228,12 @@ final class TypeCheck
             $p = $params[$pi];
             if ($p->variadic) { break; }
             // Coercive mode: an object bound to a `string` param is rendered by its
-            // `__toString`. Left alone, the callee read the object POINTER as string bytes.
+            // `__toString`, a scalar by its text. Left alone, the callee read the
+            // object POINTER, or the raw int (`$this->escape(404)`), as string bytes.
+            $ak = $arg->type->kind;
             if ($p->type->kind === Type::KIND_STRING && !$p->byRef
-                && ($arg->type->kind === Type::KIND_OBJ || $arg->type->kind === Type::KIND_CELL)
+                && ($ak === Type::KIND_OBJ || $ak === Type::KIND_CELL || $ak === Type::KIND_INT
+                    || $ak === Type::KIND_FLOAT || $ak === Type::KIND_BOOL)
                 && !isset($this->ffiFns[$fnName]) && !isset($this->claimFns[$fnName])
                 && $site->args[$ai] === $arg) {
                 $cast = new \Compile\Mir\Cast('string', $arg, Type::string_());
