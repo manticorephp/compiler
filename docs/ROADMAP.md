@@ -64,7 +64,7 @@ function compiles and fails at run time with `Call to undefined function`.
 **P0 — every application**
 - [~] Core 92 % — remaining `get_defined_vars`, `get_class_vars` [#215] · [x] `SPL` 100 % [#214]
 - [~] `password_*`, `crypt` — argon2, DES crypt open [#212] · [x] `hash` KDFs/copy/update_stream [#213]
-- [ ] `openssl` 7 % — encrypt/decrypt, digest, sign/verify, pkey, x509 over libcrypto [#211]
+- [ ] `openssl` ~40 % — slice 1 done (encrypt/decrypt, digest, sign/verify, pkey RSA/EC, rsa crypt, x509 read/parse, pbkdf2); csr/pkcs7/pkcs12/cms/spki/dh/seal remain [#211]
 - [ ] PDO `pgsql` / `mysql` drivers [#210]
 - [~] `standard` 82 % · `date` 84 % — tail tracked in [#218]
 - [~] `Reflection` 62 % — interface reflection, declaring class, defaults of plain functions

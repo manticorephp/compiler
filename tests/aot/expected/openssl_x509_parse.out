@@ -1,0 +1,239 @@
+string(18) "OpenSSLCertificate"
+bool(false)
+Array
+(
+    [name] => /C=UA/ST=Kyiv/O=Manticore/OU=Compiler/CN=example.test/emailAddress=a@b.c
+    [subject] => Array
+        (
+            [C] => UA
+            [ST] => Kyiv
+            [O] => Manticore
+            [OU] => Compiler
+            [CN] => example.test
+            [emailAddress] => a@b.c
+        )
+
+    [hash] => 097eb704
+    [issuer] => Array
+        (
+            [C] => UA
+            [ST] => Kyiv
+            [O] => Manticore
+            [OU] => Compiler
+            [CN] => example.test
+            [emailAddress] => a@b.c
+        )
+
+    [version] => 2
+    [serialNumber] => 335812727627494321938
+    [serialNumberHex] => 1234567890ABCDEF12
+    [validFrom] => 261013101702Z
+    [validTo] => 21260919101702Z
+    [validFrom_time_t] => 1791886622
+    [validTo_time_t] => 4945486622
+    [signatureTypeSN] => RSA-SHA256
+    [signatureTypeLN] => sha256WithRSAEncryption
+    [signatureTypeNID] => 668
+    [purposes] => Array
+        (
+            [1] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => sslclient
+                )
+
+            [2] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => sslserver
+                )
+
+            [3] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => nssslserver
+                )
+
+            [4] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => smimesign
+                )
+
+            [5] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => smimeencrypt
+                )
+
+            [6] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => crlsign
+                )
+
+            [7] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => any
+                )
+
+            [8] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => ocsphelper
+                )
+
+            [9] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => timestampsign
+                )
+
+            [10] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => codesign
+                )
+
+        )
+
+    [extensions] => Array
+        (
+            [subjectKeyIdentifier] => A2:A7:0C:75:2E:6C:8C:26:B3:E4:55:9A:F9:B9:77:79:C3:BE:47:DA
+            [subjectAltName] => DNS:example.test, DNS:www.example.test
+            [basicConstraints] => CA:TRUE
+            [keyUsage] => Digital Signature, Certificate Sign
+        )
+
+)
+Array
+(
+    [name] => /C=UA/ST=Kyiv/O=Manticore/OU=Compiler/CN=example.test/emailAddress=a@b.c
+    [subject] => Array
+        (
+            [countryName] => UA
+            [stateOrProvinceName] => Kyiv
+            [organizationName] => Manticore
+            [organizationalUnitName] => Compiler
+            [commonName] => example.test
+            [emailAddress] => a@b.c
+        )
+
+    [hash] => 097eb704
+    [issuer] => Array
+        (
+            [countryName] => UA
+            [stateOrProvinceName] => Kyiv
+            [organizationName] => Manticore
+            [organizationalUnitName] => Compiler
+            [commonName] => example.test
+            [emailAddress] => a@b.c
+        )
+
+    [version] => 2
+    [serialNumber] => 335812727627494321938
+    [serialNumberHex] => 1234567890ABCDEF12
+    [validFrom] => 261013101702Z
+    [validTo] => 21260919101702Z
+    [validFrom_time_t] => 1791886622
+    [validTo_time_t] => 4945486622
+    [signatureTypeSN] => RSA-SHA256
+    [signatureTypeLN] => sha256WithRSAEncryption
+    [signatureTypeNID] => 668
+    [purposes] => Array
+        (
+            [1] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => SSL client
+                )
+
+            [2] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => SSL server
+                )
+
+            [3] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => Netscape SSL server
+                )
+
+            [4] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => S/MIME signing
+                )
+
+            [5] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => S/MIME encryption
+                )
+
+            [6] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => CRL signing
+                )
+
+            [7] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => Any Purpose
+                )
+
+            [8] => Array
+                (
+                    [0] => 1
+                    [1] => 1
+                    [2] => OCSP helper
+                )
+
+            [9] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => Time Stamp signing
+                )
+
+            [10] => Array
+                (
+                    [0] => 
+                    [1] => 1
+                    [2] => Code signing
+                )
+
+        )
+
+    [extensions] => Array
+        (
+            [subjectKeyIdentifier] => A2:A7:0C:75:2E:6C:8C:26:B3:E4:55:9A:F9:B9:77:79:C3:BE:47:DA
+            [subjectAltName] => DNS:example.test, DNS:www.example.test
+            [basicConstraints] => CA:TRUE
+            [keyUsage] => Digital Signature, Certificate Sign
+        )
+
+)
+bool(true)
+string(64) "3d21d3e93606ffce4081d4a2327285a53d0d9ff5fa33515a2268a8fa52aa156b"
+bool(false)

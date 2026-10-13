@@ -21,7 +21,7 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **1004 / 2135** · classes **200 / 327** · codegen builtins 240 · lowered 37 · stdlib globals 1137 · prelude globals 1190
+Functions **1025 / 2135** · classes **201 / 327** · codegen builtins 240 · lowered 37 · stdlib globals 1172 · prelude globals 1207
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
@@ -51,7 +51,7 @@ Functions **1004 / 2135** · classes **200 / 327** · codegen builtins 240 · lo
 | [mbstring](#mbstring) | 40 / 65 | 0 / 0 | 62% |
 | [mysqli](#mysqli) | 0 / 106 | 0 / 6 | 0% |
 | [odbc](#odbc) | 0 / 48 | 0 / 2 | 0% |
-| [openssl](#openssl) | 4 / 64 | 1 / 3 | 7% |
+| [openssl](#openssl) | 25 / 64 | 2 / 3 | 40% |
 | [pcntl](#pcntl) | 14 / 25 | 0 / 1 | 54% |
 | [pcre](#pcre) | 10 / 11 | 0 / 0 | 91% |
 | [PDO](#pdo) | 0 / 1 | 4 / 4 | 80% |
@@ -156,7 +156,7 @@ Types: `Random\Engine\Mt19937` `Random\Engine\PcgOneseq128XslRr64` `Random\Engin
 
 #### `Runtime\*` — internal
 
-198 functions and 2 types under `Runtime\Libc`, `Runtime\Pcre`, `Runtime\Openssl`,
+283 functions and 2 types under `Runtime\Libc`, `Runtime\Pcre`, `Runtime\Openssl`,
 `Runtime\Iconv`, `Runtime\Crypto`, `Runtime\Stdlib`: the libc / PCRE2 / OpenSSL bindings the
 stdlib is written over (`src/Runtime/*.php`). Not user API; listed only by count.
 
@@ -171,7 +171,7 @@ Functions (39): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 1546 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 1577 — not user API.
 
 ## Per extension
 
@@ -533,21 +533,21 @@ Classes: `Odbc\Connection` `Odbc\Result`
 
 ### openssl
 
-Functions 4 / 64 · classes 1 / 3
+Functions 25 / 64 · classes 2 / 3
 
-<details><summary>implemented (5)</summary>
+<details><summary>implemented (27)</summary>
 
-`openssl_csr_get_subject`<sup>p</sup> `openssl_pkey_get_details`<sup>p</sup> `openssl_pkey_get_public`<sup>p</sup> `openssl_x509_fingerprint`<sup>p</sup>
+`openssl_cipher_iv_length`<sup>s</sup> `openssl_cipher_key_length`<sup>s</sup> `openssl_csr_get_subject`<sup>p</sup> `openssl_decrypt`<sup>s</sup> `openssl_digest`<sup>s</sup> `openssl_encrypt`<sup>s</sup> `openssl_error_string`<sup>s</sup> `openssl_get_cipher_methods`<sup>s</sup> `openssl_get_md_methods`<sup>s</sup> `openssl_pbkdf2`<sup>s</sup> `openssl_pkey_export`<sup>p</sup> `openssl_pkey_get_details`<sup>p</sup> `openssl_pkey_get_private`<sup>p</sup> `openssl_pkey_get_public`<sup>p</sup> `openssl_pkey_new`<sup>p</sup> `openssl_private_decrypt`<sup>p</sup> `openssl_private_encrypt`<sup>p</sup> `openssl_public_decrypt`<sup>p</sup> `openssl_public_encrypt`<sup>p</sup> `openssl_random_pseudo_bytes`<sup>s</sup> `openssl_sign`<sup>p</sup> `openssl_verify`<sup>p</sup> `openssl_x509_fingerprint`<sup>p</sup> `openssl_x509_parse`<sup>p</sup> `openssl_x509_read`<sup>p</sup>
 
-Classes: `OpenSSLAsymmetricKey`
+Classes: `OpenSSLAsymmetricKey` `OpenSSLCertificate`
 
 </details>
 
-<details><summary>missing (62)</summary>
+<details><summary>missing (40)</summary>
 
-`openssl_cipher_iv_length` `openssl_cipher_key_length` `openssl_cms_decrypt` `openssl_cms_encrypt` `openssl_cms_read` `openssl_cms_sign` `openssl_cms_verify` `openssl_csr_export` `openssl_csr_export_to_file` `openssl_csr_get_public_key` `openssl_csr_new` `openssl_csr_sign` `openssl_decrypt` `openssl_dh_compute_key` `openssl_digest` `openssl_encrypt` `openssl_error_string` `openssl_free_key` `openssl_get_cert_locations` `openssl_get_cipher_methods` `openssl_get_curve_names` `openssl_get_md_methods` `openssl_get_privatekey` `openssl_get_publickey` `openssl_open` `openssl_pbkdf2` `openssl_pkcs12_export` `openssl_pkcs12_export_to_file` `openssl_pkcs12_read` `openssl_pkcs7_decrypt` `openssl_pkcs7_encrypt` `openssl_pkcs7_read` `openssl_pkcs7_sign` `openssl_pkcs7_verify` `openssl_pkey_derive` `openssl_pkey_export` `openssl_pkey_export_to_file` `openssl_pkey_free` `openssl_pkey_get_private` `openssl_pkey_new` `openssl_private_decrypt` `openssl_private_encrypt` `openssl_public_decrypt` `openssl_public_encrypt` `openssl_random_pseudo_bytes` `openssl_seal` `openssl_sign` `openssl_spki_export` `openssl_spki_export_challenge` `openssl_spki_new` `openssl_spki_verify` `openssl_verify` `openssl_x509_check_private_key` `openssl_x509_checkpurpose` `openssl_x509_export` `openssl_x509_export_to_file` `openssl_x509_free` `openssl_x509_parse` `openssl_x509_read` `openssl_x509_verify`
+`openssl_cms_decrypt` `openssl_cms_encrypt` `openssl_cms_read` `openssl_cms_sign` `openssl_cms_verify` `openssl_csr_export` `openssl_csr_export_to_file` `openssl_csr_get_public_key` `openssl_csr_new` `openssl_csr_sign` `openssl_dh_compute_key` `openssl_free_key` `openssl_get_cert_locations` `openssl_get_curve_names` `openssl_get_privatekey` `openssl_get_publickey` `openssl_open` `openssl_pkcs12_export` `openssl_pkcs12_export_to_file` `openssl_pkcs12_read` `openssl_pkcs7_decrypt` `openssl_pkcs7_encrypt` `openssl_pkcs7_read` `openssl_pkcs7_sign` `openssl_pkcs7_verify` `openssl_pkey_derive` `openssl_pkey_export_to_file` `openssl_pkey_free` `openssl_seal` `openssl_spki_export` `openssl_spki_export_challenge` `openssl_spki_new` `openssl_spki_verify` `openssl_x509_check_private_key` `openssl_x509_checkpurpose` `openssl_x509_export` `openssl_x509_export_to_file` `openssl_x509_free` `openssl_x509_verify`
 
-Classes: `OpenSSLCertificate` `OpenSSLCertificateSigningRequest`
+Classes: `OpenSSLCertificateSigningRequest`
 
 </details>
 
