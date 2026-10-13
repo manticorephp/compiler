@@ -1267,7 +1267,10 @@ trait LowerExprs
     {
         if (isset($this->scopedIncludeAst[$abs])) { return $this->scopedIncludeAst[$abs]; }
         $this->scopedIncludeAst[$abs] = [];
-        if (isset($this->compileUnitFiles[$abs])) { return []; }
+        // A DEMAND-LOADED unit keeps only its declarations; one that declares
+        // nothing (a template whose markup trips the build's literal `class `
+        // scan) contributes nothing there and is still a script to inline.
+        if (isset($this->compileUnitFiles[$abs]) && !isset($this->demandLoadedFiles[$abs])) { return []; }
         $size = \filesize($abs);
         if ($size === false || $size > 262144) { return []; }
         $src = \file_get_contents($abs);
