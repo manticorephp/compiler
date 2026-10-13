@@ -28,6 +28,8 @@ $c = openssl_x509_read($cert);
 var_dump(get_class($c));
 foreach ([true, false] as $short) {
     $p = openssl_x509_parse($c, $short);
+    // purpose 10 (codesign) exists only in OpenSSL >= 3.2; keep the ids every version has
+    $p['purposes'] = array_filter($p['purposes'], fn($k) => $k < 10, ARRAY_FILTER_USE_KEY);
     print_r($p);
 }
 var_dump(openssl_x509_parse($cert) === openssl_x509_parse($c));

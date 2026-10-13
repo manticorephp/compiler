@@ -98,13 +98,6 @@ Array
                     [2] => timestampsign
                 )
 
-            [10] => Array
-                (
-                    [0] => 
-                    [1] => 1
-                    [2] => codesign
-                )
-
         )
 
     [extensions] => Array
@@ -213,13 +206,6 @@ Array
                     [0] => 
                     [1] => 1
                     [2] => Time Stamp signing
-                )
-
-            [10] => Array
-                (
-                    [0] => 
-                    [1] => 1
-                    [2] => Code signing
                 )
 
         )
