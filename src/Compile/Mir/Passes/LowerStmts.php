@@ -629,6 +629,10 @@ trait LowerStmts
             foreach ($body->stmts as $s) { $stmts[] = $s; }
             $body = new Block($stmts, Type::void());
         }
+        if ($stmt->valueByRef) {
+            $bound = $this->foreachBindingCapturedRef($array, $stmt->expr, $keyVar, $valueVar, $body);
+            if ($bound !== null) { return $bound; }
+        }
         // `foreach ($config as $name => $config)`: php iterates the array the
         // variable held when the loop began, and the binding overwrites only the
         // variable. Iterating the slot itself read each bound VALUE back as the
@@ -646,6 +650,54 @@ trait LowerStmts
         }
         return $this->hoistForeachSubject(
             new Foreach_($array, $keyVar, $valueVar, $stmt->valueByRef, $body));
+    }
+
+    /**
+     * `foreach ($xs as $k => &$v)` whose `$v` a closure in the body captures BY
+     * REFERENCE: each iteration binds `$v = &$xs[$k]`, as php does.
+     *
+     * A by-ref loop variable is otherwise a COPY written back into the element
+     * at the step. A closure capturing `&$v` captured that one copy's box, so
+     * every closure of the loop shared it and saw the last element (symfony's
+     * EventDispatcher::optimizeListeners wraps each lazy listener this way, and
+     * every wrapper called the last listener), and the write-back stored the
+     * box ADDRESS into the element. The element reference ({@see RefAddr_}) is
+     * a box of its own per element, so the loop iterates under a dummy value
+     * name and {@see Foreach_::$bindRef} drops the write-back.
+     *
+     * A subject that is not a variable, property or element is bound to a local
+     * first: php's by-ref loop over a temporary walks a copy of it too.
+     * ponytail: a property / element subject is re-evaluated for the binding;
+     * an index with side effects would run twice.
+     */
+    private function foreachBindingCapturedRef(Node $array, \Parser\Ast\Expr $subject, ?string $keyVar, string $valueVar, Block $body): ?Node
+    {
+        $ls = new \Compile\Mir\LocalSlots();
+        $ls->collectByRefCaptured($body);
+        if (!isset($ls->byRefCaptured[$valueVar])) { return null; }
+        $n = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $pre = [];
+        $sk = $subject->kind;
+        if ($sk === 'Variable') {
+            $base = new LoadLocal($this->varName($subject), Type::unknown());
+        } elseif ($sk === 'PropertyAccess' || $sk === 'ArrayAccess') {
+            $base = $this->lowerExpr($subject);
+        } else {
+            $tmp = '__fe_rb_' . $n;
+            $pre[] = new StoreLocal($tmp, $array, Type::void());
+            $array = new LoadLocal($tmp, Type::unknown());
+            $base = new LoadLocal($tmp, Type::unknown());
+        }
+        $kv = $keyVar ?? '__fe_rk_' . $n;
+        $lv = new ArrayAccess_($base, new LoadLocal($kv, Type::unknown()), Type::unknown());
+        $stmts = [new RefAddr_($valueVar, $lv, $lv->type)];
+        foreach ($body->stmts as $s) { $stmts[] = $s; }
+        $fe = new Foreach_($array, $kv, '__fe_rv_' . $n, true, new Block($stmts, Type::void()));
+        $fe->bindRef = true;
+        if ($pre === []) { return $fe; }
+        $pre[] = $fe;
+        return new Block($pre, Type::void());
     }
 
     /**

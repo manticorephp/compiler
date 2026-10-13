@@ -1470,6 +1470,10 @@ final class Foreach_ extends Node
      *  generator's resume drops on its way out of the frame.
      * @var array<string, MemoryOp_> */
     public array $ownLive = [];
+    /** The body binds the real loop variable by reference itself (`$v = &$xs[$k]`,
+     *  {@see Passes\LowerStmts::foreachBindingCapturedRef}); `$valueVar` is a dummy
+     *  and the by-ref step must not write it back into the element. */
+    public bool $bindRef = false;
 
     public function accept(EmitVisitor $v): string
     {

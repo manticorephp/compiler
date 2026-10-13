@@ -1841,19 +1841,21 @@ trait EmitLlvmControl
             // therefore the next one to visit.
             $out .= '  br i1 ' . $has . ', label %' . $wbL . ', label %' . $condLabel . "\n";
             $out .= $wbL . ":\n";
-            $out .= $this->foreachElemAddrUnified($na2, $pos);
-            $wv = $this->ssa->allocReg();
-            $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
-            $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $na2, $wv, $fe->array->type->element);
-            $wb = $this->lastValue;
-            $out .= $this->foreachRefTargetAddr($this->feAddr, $fe->array->type);
-            $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
+            if (!$fe->bindRef) {
+                $out .= $this->foreachElemAddrUnified($na2, $pos);
+                $wv = $this->ssa->allocReg();
+                $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+                $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $na2, $wv, $fe->array->type->element);
+                $wb = $this->lastValue;
+                $out .= $this->foreachRefTargetAddr($this->feAddr, $fe->array->type);
+                $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
+            }
             $np = $this->ssa->allocReg();
             $out .= '  ' . $np . ' = add i64 ' . $pos . ", 1\n";
             $out .= '  store i64 ' . $np . ', ptr ' . $iSlot . "\n";
             $out .= '  br label %' . $condLabel . "\n";
         } else {
-            if ($fe->byRef) {
+            if ($fe->byRef && !$fe->bindRef) {
                 $out .= $this->foreachElemAddrUnified($arr, $si);
                 $wAddr = $this->feAddr;
                 $wv = $this->ssa->allocReg();

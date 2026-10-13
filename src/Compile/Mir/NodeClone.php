@@ -221,7 +221,9 @@ final class NodeClone
         }
         if ($k === Node::KIND_FOREACH) {
             $x = self::asForeach($n);
-            return new Foreach_(self::node($x->array), $x->keyVar, $x->valueVar, $x->byRef, self::asBlock(self::node($x->body)));
+            $fc = new Foreach_(self::node($x->array), $x->keyVar, $x->valueVar, $x->byRef, self::asBlock(self::node($x->body)));
+            $fc->bindRef = $x->bindRef;
+            return $fc;
         }
         if ($k === Node::KIND_SWITCH) {
             $x = self::asSwitch($n);
