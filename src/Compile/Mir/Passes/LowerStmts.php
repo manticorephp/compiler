@@ -409,7 +409,8 @@ trait LowerStmts
             // bare `array` local can't carry, e.g. `@var array<string, Type>`).
             if ($stmt->docComment !== null && $lowered instanceof StoreLocal) {
                 $vt = $this->docTagType($stmt->docComment, '@var', $lowered->name);
-                if ($vt === null) { $vt = $this->docTagType($stmt->docComment, '@var', ''); }
+                // The unnamed form only: `@var T $m` names ANOTHER variable and says nothing about this one.
+                if ($vt === null && !\preg_match('/@var\s[^$@]*\$[A-Za-z_]/', $stmt->docComment)) { $vt = $this->docTagType($stmt->docComment, '@var', ''); }
                 if ($vt !== null) {
                     $lowered->declaredType = $this->lowerTypeHint($vt);
                     // `/** @var Box<float> $b */ $b = new Box();` — the binding is
