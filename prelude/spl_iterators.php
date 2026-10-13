@@ -13,23 +13,6 @@
  * and a FilterIterator re-tests from the inner iterator's current position.
  */
 
-interface OuterIterator extends Iterator
-{
-    public function getInnerIterator(): ?Iterator;
-}
-
-interface RecursiveIterator extends Iterator
-{
-    public function hasChildren(): bool;
-
-    public function getChildren(): ?RecursiveIterator;
-}
-
-interface SeekableIterator extends Iterator
-{
-    public function seek(int $offset): void;
-}
-
 class IteratorIterator implements OuterIterator
 {
     private Iterator $__inner;
@@ -75,6 +58,32 @@ class IteratorIterator implements OuterIterator
     {
         $this->__inner->next();
         $this->__fetch();
+    }
+
+    /** Drop the cached position (spl_dual_it_free). */
+    protected function __free(): void
+    {
+        $this->__valid = false;
+        $this->__current = null;
+        $this->__key = null;
+    }
+
+    /** Cache the inner iterator's position without asking valid() (spl_dual_it_fetch, check_more=0). */
+    protected function __fetchRaw(): void
+    {
+        $this->__valid = true;
+        $this->__current = $this->__inner->current();
+        $this->__key = $this->__inner->key();
+    }
+
+    protected function __setCurrent(mixed $v): void
+    {
+        $this->__current = $v;
+    }
+
+    protected function __setKey(mixed $k): void
+    {
+        $this->__key = $k;
     }
 
     /** Cache the inner iterator's position, as php's does. */
@@ -1086,8 +1095,16 @@ class DirectoryIterator extends SplFileInfo implements SeekableIterator
             throw new UnexpectedValueException(static::class . '::__construct(' . $directory
                 . '): Failed to open directory: No such file or directory');
         }
-        while (($e = \readdir($h)) !== false) { $this->__entries[] = $e; }
+        $entries = [];
+        while (($e = \readdir($h)) !== false) { $entries[] = $e; }
         \closedir($h);
+        $this->__load($entries, $directory);
+    }
+
+    /** Adopt a ready entry list (DirectoryIterator's constructor, and GlobIterator's). */
+    protected function __load(array $entries, string $directory): void
+    {
+        $this->__entries = $entries;
         $this->__dir = \rtrim($directory, '/');
         if ($this->__dir === '' ) { $this->__dir = '/'; }
         $this->__pos = 0;
@@ -1242,6 +1259,11 @@ class FilesystemIterator extends DirectoryIterator
     {
         return $this->__fsFlags;
     }
+
+    protected function __setFsFlags(int $flags): void
+    {
+        $this->__fsFlags = $flags;
+    }
 }
 
 class RecursiveDirectoryIterator extends FilesystemIterator implements RecursiveIterator
@@ -1283,6 +1305,677 @@ class RecursiveDirectoryIterator extends FilesystemIterator implements Recursive
     {
         if (($this->__flags() & self::KEY_AS_FILENAME) !== 0) { return $this->getFilename(); }
         return $this->getPathname();
+    }
+}
+
+class LimitIterator extends IteratorIterator
+{
+    private int $__lOffset = 0;
+    private int $__lCount = -1;
+    private int $__lPos = 0;
+
+    public function __construct(Iterator $iterator, int $offset = 0, int $limit = -1)
+    {
+        if ($offset < 0) {
+            throw new ValueError('LimitIterator::__construct(): Argument #2 ($offset) must be greater than or equal to 0');
+        }
+        if ($limit < -1) {
+            throw new ValueError('LimitIterator::__construct(): Argument #3 ($limit) must be greater than or equal to -1');
+        }
+        parent::__construct($iterator);
+        $this->__lOffset = $offset;
+        $this->__lCount = $limit;
+    }
+
+    public function rewind(): void
+    {
+        $this->__free();
+        $this->__lPos = 0;
+        $inner = $this->getInnerIterator();
+        $inner->rewind();
+        $this->seek($this->__lOffset);
+    }
+
+    public function valid(): bool
+    {
+        return ($this->__lCount === -1 || $this->__lPos < $this->__lOffset + $this->__lCount) && parent::valid();
+    }
+
+    public function next(): void
+    {
+        $this->__free();
+        $inner = $this->getInnerIterator();
+        $inner->next();
+        $this->__lPos = $this->__lPos + 1;
+        if ($this->__lCount === -1 || $this->__lPos < $this->__lOffset + $this->__lCount) {
+            $this->__fetch();
+        }
+    }
+
+    public function seek(int $offset): int
+    {
+        $this->__free();
+        if ($offset < $this->__lOffset) {
+            throw new OutOfBoundsException('Cannot seek to ' . $offset . ' which is below the offset ' . $this->__lOffset);
+        }
+        if ($this->__lCount !== -1 && $offset >= $this->__lOffset + $this->__lCount) {
+            throw new OutOfBoundsException('Cannot seek to ' . $offset . ' which is behind offset '
+                . $this->__lOffset . ' plus count ' . $this->__lCount);
+        }
+        $inner = $this->getInnerIterator();
+        if ($offset !== $this->__lPos && $inner instanceof SeekableIterator) {
+            $inner->seek($offset);
+            $this->__lPos = $offset;
+            if (($this->__lCount === -1 || $this->__lPos < $this->__lOffset + $this->__lCount) && $inner->valid()) {
+                $this->__fetch();
+            }
+        } else {
+            if ($offset < $this->__lPos) {
+                $this->__free();
+                $this->__lPos = 0;
+                $inner->rewind();
+            }
+            while ($offset > $this->__lPos && $inner->valid()) {
+                $this->__free();
+                $inner->next();
+                $this->__lPos = $this->__lPos + 1;
+            }
+            if ($inner->valid()) {
+                $this->__fetch();
+            }
+        }
+        return $this->__lPos;
+    }
+
+    public function getPosition(): int
+    {
+        return $this->__lPos;
+    }
+}
+
+class InfiniteIterator extends IteratorIterator
+{
+    public function __construct(Iterator $iterator)
+    {
+        parent::__construct($iterator);
+    }
+
+    public function next(): void
+    {
+        $inner = $this->getInnerIterator();
+        $this->__free();
+        $inner->next();
+        if ($inner->valid()) {
+            $this->__fetchRaw();
+        } else {
+            $this->__free();
+            $inner->rewind();
+            if ($inner->valid()) {
+                $this->__fetchRaw();
+            }
+        }
+    }
+}
+
+class NoRewindIterator extends IteratorIterator
+{
+    public function __construct(Iterator $iterator)
+    {
+        parent::__construct($iterator);
+    }
+
+    public function rewind(): void {}
+
+    public function valid(): bool
+    {
+        $inner = $this->getInnerIterator();
+        return $inner->valid();
+    }
+
+    public function key(): mixed
+    {
+        $inner = $this->getInnerIterator();
+        return $inner->key();
+    }
+
+    public function current(): mixed
+    {
+        $inner = $this->getInnerIterator();
+        return $inner->current();
+    }
+
+    public function next(): void
+    {
+        $inner = $this->getInnerIterator();
+        $inner->next();
+    }
+}
+
+class CachingIterator extends IteratorIterator implements ArrayAccess, Countable, Stringable
+{
+    public const CALL_TOSTRING = 1;
+    public const CATCH_GET_CHILD = 16;
+    public const TOSTRING_USE_KEY = 2;
+    public const TOSTRING_USE_CURRENT = 4;
+    public const TOSTRING_USE_INNER = 8;
+    public const FULL_CACHE = 256;
+
+    private int $__cf = 1;
+    private bool $__cvalid = false;
+    /** @var array<mixed> */
+    private array $__cache = [];
+    private string $__zstr = '';
+    private bool $__zhas = false;
+    protected ?CachingIterator $__zchildren = null;
+
+    public function __construct(Iterator $iterator, int $flags = CachingIterator::CALL_TOSTRING)
+    {
+        if (!self::__flagsOk($flags)) {
+            throw new ValueError('CachingIterator::__construct(): Argument #2 ($flags) must contain only one of CachingIterator::CALL_TOSTRING, CachingIterator::TOSTRING_USE_KEY, CachingIterator::TOSTRING_USE_CURRENT, or CachingIterator::TOSTRING_USE_INNER');
+        }
+        parent::__construct($iterator);
+        $this->__cf = $flags & 0xFFFF;
+    }
+
+    private static function __flagsOk(int $flags): bool
+    {
+        $n = 0;
+        foreach ([1, 2, 4, 8] as $bit) {
+            if (($flags & $bit) !== 0) { $n = $n + 1; }
+        }
+        return $n <= 1;
+    }
+
+    public function rewind(): void
+    {
+        $this->__free();
+        $inner = $this->getInnerIterator();
+        $inner->rewind();
+        $this->__cache = [];
+        $this->__cnext();
+    }
+
+    public function valid(): bool
+    {
+        return $this->__cvalid;
+    }
+
+    public function next(): void
+    {
+        $this->__cnext();
+    }
+
+    private function __cnext(): void
+    {
+        $inner = $this->getInnerIterator();
+        $this->__free();
+        $this->__zstr = '';
+        $this->__zhas = false;
+        $this->__zchildren = null;
+        if (!$inner->valid()) {
+            $this->__cvalid = false;
+            return;
+        }
+        $this->__fetchRaw();
+        $this->__cvalid = true;
+        if (($this->__cf & 256) !== 0) {
+            $this->__cache[$this->key()] = $this->current();
+        }
+        if ($this instanceof RecursiveCachingIterator) {
+            try {
+                if ($inner->hasChildren()) {
+                    $this->__zchildren = new RecursiveCachingIterator($inner->getChildren(), $this->__cf);
+                }
+            } catch (Throwable $e) {
+                if (($this->__cf & 16) === 0) { throw $e; }
+            }
+        }
+        if (($this->__cf & (8 | 1)) !== 0) {
+            if (($this->__cf & 8) !== 0) {
+                if (!($inner instanceof Stringable)) {
+                    throw new Error('Object of class ' . \get_class($inner) . ' could not be converted to string');
+                }
+                $this->__zstr = (string)$inner;
+            } else {
+                $this->__zstr = (string)$this->current();
+            }
+            $this->__zhas = true;
+        }
+        $inner->next();
+    }
+
+    public function hasNext(): bool
+    {
+        $inner = $this->getInnerIterator();
+        return $inner->valid();
+    }
+
+    public function __toString(): string
+    {
+        if (($this->__cf & (1 | 2 | 4 | 8)) === 0) {
+            throw new BadMethodCallException(static::class . ' does not fetch string value (see CachingIterator::__construct)');
+        }
+        if (($this->__cf & 2) !== 0) { return (string)$this->key(); }
+        if (($this->__cf & 4) !== 0) { return (string)$this->current(); }
+        return $this->__zhas ? $this->__zstr : '';
+    }
+
+    public function getFlags(): int
+    {
+        return $this->__cf;
+    }
+
+    public function setFlags(int $flags): void
+    {
+        if (!self::__flagsOk($flags)) {
+            throw new ValueError('CachingIterator::setFlags(): Argument #1 ($flags) must contain only one of CachingIterator::CALL_TOSTRING, CachingIterator::TOSTRING_USE_KEY, CachingIterator::TOSTRING_USE_CURRENT, or CachingIterator::TOSTRING_USE_INNER');
+        }
+        if (($this->__cf & 1) !== 0 && ($flags & 1) === 0) {
+            throw new InvalidArgumentException('Unsetting flag CALL_TO_STRING is not possible');
+        }
+        if (($this->__cf & 8) !== 0 && ($flags & 8) === 0) {
+            throw new InvalidArgumentException('Unsetting flag TOSTRING_USE_INNER is not possible');
+        }
+        if (($flags & 256) !== 0 && ($this->__cf & 256) === 0) {
+            $this->__cache = [];
+        }
+        $this->__cf = $flags & 0xFFFF;
+    }
+
+    private function __needCache(): void
+    {
+        if (($this->__cf & 256) === 0) {
+            throw new BadMethodCallException(static::class . ' does not use a full cache (see CachingIterator::__construct)');
+        }
+    }
+
+    public function offsetGet(mixed $key): mixed
+    {
+        $this->__needCache();
+        return $this->__cache[$key] ?? null;
+    }
+
+    public function offsetSet(mixed $key, mixed $value): void
+    {
+        $this->__needCache();
+        $this->__cache[$key] = $value;
+    }
+
+    public function offsetExists(mixed $key): bool
+    {
+        $this->__needCache();
+        return isset($this->__cache[$key]);
+    }
+
+    public function offsetUnset(mixed $key): void
+    {
+        $this->__needCache();
+        unset($this->__cache[$key]);
+    }
+
+    public function getCache(): array
+    {
+        $this->__needCache();
+        return $this->__cache;
+    }
+
+    public function count(): int
+    {
+        $this->__needCache();
+        return \count($this->__cache);
+    }
+}
+
+class RecursiveCachingIterator extends CachingIterator implements RecursiveIterator
+{
+    public function __construct(Iterator $iterator, int $flags = RecursiveCachingIterator::CALL_TOSTRING)
+    {
+        parent::__construct($iterator, $flags);
+    }
+
+    public function hasChildren(): bool
+    {
+        return $this->__zchildren !== null;
+    }
+
+    public function getChildren(): ?RecursiveCachingIterator
+    {
+        return $this->__zchildren;
+    }
+}
+
+class RegexIterator extends FilterIterator
+{
+    public const USE_KEY = 1;
+    public const INVERT_MATCH = 2;
+    public const MATCH = 0;
+    public const GET_MATCH = 1;
+    public const ALL_MATCHES = 2;
+    public const SPLIT = 3;
+    public const REPLACE = 4;
+
+    public ?string $replacement = null;
+    private string $__rx = '';
+    private int $__rmode = 0;
+    private int $__rflags = 0;
+    private int $__rpreg = 0;
+
+    public function __construct(Iterator $iterator, string $pattern, int $mode = RegexIterator::MATCH, int $flags = 0, int $pregFlags = 0)
+    {
+        if ($mode < 0 || $mode > 4) {
+            throw new ValueError('RegexIterator::__construct(): Argument #3 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE');
+        }
+        parent::__construct($iterator);
+        $this->__rx = $pattern;
+        $this->__rmode = $mode;
+        $this->__rflags = $flags;
+        $this->__rpreg = $pregFlags;
+    }
+
+    public function accept(): bool
+    {
+        if (!parent::valid()) { return false; }
+        if (($this->__rflags & 1) !== 0) {
+            $subject = (string)$this->key();
+        } else {
+            $cur = $this->current();
+            if (\is_array($cur)) { return false; }
+            $subject = (string)$cur;
+        }
+        $ok = false;
+        $mode = $this->__rmode;
+        if ($mode === 0) {
+            $ok = \preg_match($this->__rx, $subject) > 0;
+        } elseif ($mode === 1) {
+            $m = [];
+            $ok = \preg_match($this->__rx, $subject, $m, $this->__rpreg) > 0;
+            $this->__setCurrent($m);
+        } elseif ($mode === 2) {
+            $m = [];
+            $n = \preg_match_all($this->__rx, $subject, $m, $this->__rpreg === 0 ? 1 : $this->__rpreg);
+            $this->__setCurrent($m);
+            $ok = $n > 0;
+        } elseif ($mode === 3) {
+            $parts = \preg_split($this->__rx, $subject, -1, $this->__rpreg);
+            $this->__setCurrent($parts);
+            $ok = \count($parts) > 1;
+        } else {
+            $count = 0;
+            $res = \preg_replace($this->__rx, (string)$this->replacement, $subject, -1, $count);
+            if (($this->__rflags & 1) !== 0) { $this->__setKey($res); } else { $this->__setCurrent($res); }
+            $ok = $count > 0;
+        }
+        if (($this->__rflags & 2) !== 0) { return !$ok; }
+        return $ok;
+    }
+
+    public function getMode(): int
+    {
+        return $this->__rmode;
+    }
+
+    public function setMode(int $mode): void
+    {
+        if ($mode < 0 || $mode > 4) {
+            throw new ValueError('RegexIterator::setMode(): Argument #1 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE');
+        }
+        $this->__rmode = $mode;
+    }
+
+    public function getFlags(): int
+    {
+        return $this->__rflags;
+    }
+
+    public function setFlags(int $flags): void
+    {
+        $this->__rflags = $flags;
+    }
+
+    public function getPregFlags(): int
+    {
+        return $this->__rpreg;
+    }
+
+    public function setPregFlags(int $pregFlags): void
+    {
+        $this->__rpreg = $pregFlags;
+    }
+
+    public function getRegex(): string
+    {
+        return $this->__rx;
+    }
+}
+
+class RecursiveRegexIterator extends RegexIterator implements RecursiveIterator
+{
+    public function __construct(RecursiveIterator $iterator, string $pattern, int $mode = RecursiveRegexIterator::MATCH, int $flags = 0, int $pregFlags = 0)
+    {
+        parent::__construct($iterator, $pattern, $mode, $flags, $pregFlags);
+    }
+
+    public function accept(): bool
+    {
+        if (!$this->valid()) { return false; }
+        $cur = $this->current();
+        if (\is_array($cur)) { return \count($cur) > 0; }
+        return parent::accept();
+    }
+
+    public function hasChildren(): bool
+    {
+        $inner = $this->getInnerIterator();
+        return $inner instanceof RecursiveIterator && $inner->hasChildren();
+    }
+
+    public function getChildren(): RecursiveRegexIterator
+    {
+        $inner = $this->getInnerIterator();
+        return new static($inner->getChildren(), $this->getRegex(), $this->getMode(), $this->getFlags(), $this->getPregFlags());
+    }
+}
+
+class ParentIterator extends RecursiveFilterIterator
+{
+    public function __construct(RecursiveIterator $iterator)
+    {
+        parent::__construct($iterator);
+    }
+
+    public function accept(): bool
+    {
+        return $this->getInnerIterator()->hasChildren();
+    }
+}
+
+class RecursiveArrayIterator extends ArrayIterator implements RecursiveIterator
+{
+    public const CHILD_ARRAYS_ONLY = 4;
+
+    public function hasChildren(): bool
+    {
+        $c = $this->current();
+        return \is_array($c) || (\is_object($c) && ($this->getFlags() & 4) === 0);
+    }
+
+    public function getChildren(): ?RecursiveArrayIterator
+    {
+        $c = $this->current();
+        if ($c instanceof RecursiveArrayIterator) { return $c; }
+        return new static($c, $this->getFlags());
+    }
+}
+
+class MultipleIterator implements Iterator
+{
+    public const MIT_NEED_ANY = 0;
+    public const MIT_NEED_ALL = 1;
+    public const MIT_KEYS_NUMERIC = 0;
+    public const MIT_KEYS_ASSOC = 2;
+
+    /** @var Iterator[] */
+    private array $__mits = [];
+    /** @var array<mixed> */
+    private array $__minfos = [];
+    private int $__mflags = 1;
+
+    public function __construct(int $flags = MultipleIterator::MIT_NEED_ALL | MultipleIterator::MIT_KEYS_NUMERIC)
+    {
+        $this->__mflags = $flags;
+    }
+
+    public function getFlags(): int
+    {
+        return $this->__mflags;
+    }
+
+    public function setFlags(int $flags): void
+    {
+        $this->__mflags = $flags;
+    }
+
+    public function attachIterator(Iterator $iterator, string|int|null $info = null): void
+    {
+        if ($info === null && ($this->__mflags & 2) !== 0) {
+            // php defers this to current()/key(), when the info is read
+        }
+        if ($info !== null) {
+            foreach ($this->__mits as $i => $it) {
+                if ($it !== $iterator && $this->__minfos[$i] === $info) {
+                    throw new InvalidArgumentException('Key duplication error');
+                }
+            }
+        }
+        foreach ($this->__mits as $i => $it) {
+            if ($it === $iterator) {
+                $this->__minfos[$i] = $info;
+                return;
+            }
+        }
+        $this->__mits[] = $iterator;
+        $this->__minfos[] = $info;
+    }
+
+    public function detachIterator(Iterator $iterator): void
+    {
+        $its = [];
+        $infos = [];
+        foreach ($this->__mits as $i => $it) {
+            if ($it !== $iterator) {
+                $its[] = $it;
+                $infos[] = $this->__minfos[$i];
+            }
+        }
+        $this->__mits = $its;
+        $this->__minfos = $infos;
+    }
+
+    public function containsIterator(Iterator $iterator): bool
+    {
+        foreach ($this->__mits as $it) {
+            if ($it === $iterator) { return true; }
+        }
+        return false;
+    }
+
+    public function countIterators(): int
+    {
+        return \count($this->__mits);
+    }
+
+    public function rewind(): void
+    {
+        foreach ($this->__mits as $it) { $it->rewind(); }
+    }
+
+    public function valid(): bool
+    {
+        if (\count($this->__mits) === 0) { return false; }
+        $expect = ($this->__mflags & 1) !== 0;
+        foreach ($this->__mits as $it) {
+            if ($it->valid() !== $expect) { return !$expect; }
+        }
+        return $expect;
+    }
+
+    public function next(): void
+    {
+        foreach ($this->__mits as $it) { $it->next(); }
+    }
+
+    public function current(): mixed
+    {
+        return $this->__mall(true);
+    }
+
+    public function key(): mixed
+    {
+        return $this->__mall(false);
+    }
+
+    private function __mall(bool $cur): array
+    {
+        $what = $cur ? 'current' : 'key';
+        if (\count($this->__mits) === 0) {
+            throw new RuntimeException('Called ' . $what . '() on an invalid iterator');
+        }
+        $out = [];
+        foreach ($this->__mits as $i => $it) {
+            if ($it->valid()) {
+                $v = $cur ? $it->current() : $it->key();
+            } elseif (($this->__mflags & 1) !== 0) {
+                throw new RuntimeException('Called ' . $what . '() with non valid sub iterator');
+            } else {
+                $v = null;
+            }
+            if (($this->__mflags & 2) !== 0) {
+                $info = $this->__minfos[$i];
+                if ($info === null) {
+                    throw new InvalidArgumentException('Sub-Iterator is associated with NULL');
+                }
+                $out[$info] = $v;
+            } else {
+                $out[] = $v;
+            }
+        }
+        return $out;
+    }
+}
+
+interface SplObserver
+{
+    public function update(SplSubject $subject): void;
+}
+
+interface SplSubject
+{
+    public function attach(SplObserver $observer): void;
+
+    public function detach(SplObserver $observer): void;
+
+    public function notify(): void;
+}
+
+class GlobIterator extends FilesystemIterator implements Countable
+{
+    private int $__globCount = 0;
+
+    public function __construct(string $pattern, int $flags = FilesystemIterator::KEY_AS_PATHNAME | FilesystemIterator::CURRENT_AS_FILEINFO)
+    {
+        $this->__setFsFlags($flags);
+        $found = \glob($pattern);
+        $names = [];
+        // ponytail: one directory for every match (wildcards only in the last
+        // path segment); a pattern like /a/*/x would need a per-entry directory.
+        foreach ($found === false ? [] : $found as $path) { $names[] = \basename($path); }
+        $this->__globCount = \count($names);
+        $this->__load($names, \dirname($pattern));
+    }
+
+    public function count(): int
+    {
+        return $this->__globCount;
     }
 }
 

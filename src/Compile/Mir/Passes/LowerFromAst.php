@@ -511,6 +511,8 @@ final class LowerFromAst implements Pass
     /** Inject the built-in SPL ArrayIterator / ArrayObject classes (gated on
      *  the user program referencing them — see Main.php). */
     public bool $includeArrayClasses = false;
+    /** `class_uses()` — DEMAND-GATED on the call; generates `__mc_class_uses_tbl`. */
+    public bool $includeClassUses = false;
     /** SPL array-class prelude source, read by Main from `prelude/spl_arrays.php`. */
     public string $arrayClassesSrc = '';
     /** SPL iterators / file-system iterators / data structures, read by Main from
@@ -561,6 +563,12 @@ final class LowerFromAst implements Pass
     /** Manticore\Ds (typed fixed-width arrays over the native buffer) —
      *  DEMAND-GATED. Braced-namespace tree with no dependencies of its own. */
     public string $dsSrc = '';
+    /** ext/random (Random\Randomizer, engines) — DEMAND-GATED braced-namespace tree. */
+    public string $randomSrc = '';
+    /** Filter\ exceptions (ext/filter) — braced namespace, always included. */
+    public string $filterSrc = '';
+    /** filter_var / filter_input entry points (global functions) — DEMAND-GATED. */
+    public string $filterFnsSrc = '';
 
     /**
      * Bundled-stdlib function declarations (parsed from `src/Runtime/**`)
@@ -1085,6 +1093,19 @@ final class LowerFromAst implements Pass
                 $jfn = $this->lowerFunction($jstmt->decl);
                 $jfn->isPrelude = true;
                 $module->addFunction($jfn);
+            }
+        }
+
+        // class_uses(): trait use is erased by lowering, so the answer is written
+        // out from the declarations, as the arms below are.
+        if ($this->includeClassUses) {
+            $cuProg = \Parser\Parser::parseSource("<?php\n" . $this->classUsesSrc());
+            foreach ($cuProg->statements as $custmt) {
+                if ($custmt->kind !== 'Function') { continue; }
+                $this->fnDecls[$custmt->decl->name] = $custmt->decl;
+                $cufn = $this->lowerFunction($custmt->decl);
+                $cufn->isPrelude = true;
+                $module->addFunction($cufn);
             }
         }
 
@@ -3940,6 +3961,28 @@ final class LowerFromAst implements Pass
             $body = $this->lowerExpr($arm->body);
             $arms[] = new MatchArm_($conds, $body);
         }
+        // No `default`: php throws UnhandledMatchError. The subject is read again
+        // for the message, so an impure one is evaluated ONCE into a temp that
+        // the (synthesised) default arm reads back.
+        $hasDefault = false;
+        foreach ($arms as $a) {
+            if ($a->conds === null) { $hasDefault = true; }
+        }
+        if (!$hasDefault) {
+            $sk = $subject->kind;
+            if ($sk === Node::KIND_LOAD_LOCAL || $sk === Node::KIND_INT_CONST
+                || $sk === Node::KIND_STRING_CONST || $sk === Node::KIND_BOOL_CONST) {
+                $again = \Compile\Mir\NodeClone::node($subject);
+            } else {
+                $tmp = '__match_' . (string)$this->destrCounter;
+                $this->destrCounter = $this->destrCounter + 1;
+                $again = new LoadLocal($tmp, Type::unknown());
+                $subject = new StoreLocal($tmp, $subject, Type::unknown());
+            }
+            $msg = new Call('__mc_unhandled_match_msg', [$again], Type::string_());
+            $err = new NewObj('UnhandledMatchError', [$msg], Type::obj('UnhandledMatchError'));
+            $arms[] = new MatchArm_(null, new Throw_($err, Type::void()));
+        }
         return new Match_($subject, $arms, Type::unknown());
     }
 
@@ -5095,7 +5138,8 @@ final class LowerFromAst implements Pass
     private const RESOLVED_FNS = [
         'function_exists' => true, 'defined' => true, 'constant' => true,
         'compact' => true, 'call_user_func' => true, 'call_user_func_array' => true,
-        'trigger_error' => true,
+        'trigger_error' => true, 'user_error' => true, 'get_called_class' => true,
+        'get_included_files' => true, 'get_required_files' => true,
     ];
 
     /** Whether a function name is already declared (user or stdlib extern / alias)
@@ -5531,6 +5575,33 @@ final class LowerFromAst implements Pass
     private function dynStaticName(\Parser\Ast\DynamicStaticAccess $e): string { return $e->name; }
     private function dynStaticReceiver(\Parser\Ast\DynamicStaticAccess $e): \Parser\Ast\Expr { return $e->receiver; }
     private function declName(\Parser\Ast\ClassDecl $d): string { return $d->name; }
+
+    /**
+     * PHP source for `class_uses()`: the DIRECT traits of
+     * every declared class, trait and enum (`[]` when it uses none), false for a
+     * name nobody declared. One `case` per declaration — a lookup run only by a
+     * program that calls class_uses().
+     */
+    private function classUsesSrc(): string
+    {
+        $arms = '';
+        $decls = [];
+        foreach ($this->classDecls as $d) { $decls[$d->name] = $d; }
+        foreach ($this->traitTable as $d) { $decls[$d->name] = $d; }
+        foreach ($decls as $name => $d) {
+            $lit = [];
+            foreach ($d->uses as $t) {
+                $tn = \ltrim($t, '\\');
+                $lit[] = "'" . \addcslashes($tn, "'\\") . "' => '" . \addcslashes($tn, "'\\") . "'";
+            }
+            $key = \addcslashes(\strtolower(\ltrim($name, '\\')), "'\\");
+            $arms .= "    case '" . $key . "': return [" . \implode(', ', $lit) . "];\n";
+        }
+        return "function class_uses(object|string \$object_or_class, bool \$autoload = true): array|false {\n"
+            . "  \$n = \\is_object(\$object_or_class) ? \\get_class(\$object_or_class) : \$object_or_class;\n"
+            . "  switch (\\strtolower(\\ltrim(\$n, '\\\\'))) {\n" . $arms
+            . "  }\n  return false;\n}\n";
+    }
 
     /**
      * `$cls::CONST` / `$cls::$sp` with a runtime class-name string. Lower to a

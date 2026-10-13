@@ -2196,6 +2196,11 @@ trait InferNodes
             $bt = $this->inferNode($arm->body);
             if ($arm->body->kind !== Node::KIND_THROW) {
                 $exit = $exit === null ? $this->localTypes : $this->joinLocals($exit, $this->localTypes);
+            } else {
+                // Nor does its (void) type: joined in, it erased every sibling arm
+                // to `unknown` and `echo match (…) { => "s", default => throw … }`
+                // printed the string's address.
+                continue;
             }
             $arrJoin = $first ? null : $this->armArrayJoin($result, $bt);
             if ($first) { $result = $bt; $first = false; }

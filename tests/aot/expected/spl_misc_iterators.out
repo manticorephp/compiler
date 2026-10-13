@@ -1,0 +1,46 @@
+a=1 a=1 b=2 c=3 
+23
+0=apple 2=avocado 4=a1b22 
+1=banana 3=cherry 
+4["1","1"] 
+4[["1","22"]] 
+1["b","","a"] 
+0=#pple 1=b#n#n# 2=#voc#do 4=#1b22 
+two=2 three=3 
+000/b/
+1
+RegexIterator::setMode(): Argument #1 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE
+RegexIterator::__construct(): Argument #3 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE
+a=1
+b
+ c=2
+ d
+  e=3
+f=4
+g
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+0=test1 1=test4 2=test5 
+1:2 1:2 3:1 
+[0,0][1,"a"] [1,1][2,"b"] 
+{"num":0,"let":0}{"num":1,"let":"a"} {"num":1,"let":1}{"num":2,"let":"b"} {"num":2,"let":null}{"num":3,"let":null} 
+22
+bool(true)
+bool(false)
+int(2)
+Key duplication error
+bool(false)
+Called current() on an invalid iterator
+bool(false)
+Called current() with non valid sub iterator
+Called key() with non valid sub iterator
+bool(true)
+array(2) {
+  [0]=>
+  int(2)
+  [1]=>
+  NULL
+}
+Sub-Iterator is associated with NULL

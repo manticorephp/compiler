@@ -165,6 +165,10 @@ trait LowerPrelude
             // buffering the output of.
             $src .= $this->obSrc;
         }
+        if ($this->filterFnsSrc !== '') {
+            // Calls the stdlib validators and throws Filter\ (parsed after this blob).
+            $src .= $this->filterFnsSrc;
+        }
         if ($this->autoloadSrc !== '') {
             // Order-independent — the queue holds callables and calls nothing
             // else in the prelude.
@@ -243,7 +247,8 @@ trait LowerPrelude
             $own = new \Compile\Mir\PreludeDemand([
                 "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
                 "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
-                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc,
+                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->randomSrc,
+                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->filterSrc,
             ]);
             if (!$this->includeArrayFnsExt
                 && $own->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($this->arrayFnsExtSrc))) {
@@ -315,6 +320,16 @@ trait LowerPrelude
         if ($this->dsSrc !== '') {
             $ds = \Parser\Parser::parseSource("<?php\n" . $this->dsSrc);
             foreach ($ds->statements as $s) { $stmts[] = $s; }
+        }
+        // Random\ — braced namespaces, names nothing outside the core.
+        if ($this->randomSrc !== '') {
+            $rn = \Parser\Parser::parseSource("<?php\n" . $this->randomSrc);
+            foreach ($rn->statements as $s) { $stmts[] = $s; }
+        }
+        // Filter\ — braced namespace, extends \Exception only.
+        if ($this->filterSrc !== '') {
+            $fl = \Parser\Parser::parseSource("<?php\n" . $this->filterSrc);
+            foreach ($fl->statements as $s) { $stmts[] = $s; }
         }
         return $stmts;
     }
@@ -1318,6 +1333,50 @@ trait LowerPrelude
             // sort flags
             // ext/hash: the only flag php defines for hash_init().
             'HASH_HMAC' => 1,
+            // ext/hash mhash ids, crypt() and password_* integers.
+            'MHASH_CRC32' => 0,
+            'MHASH_MD5' => 1,
+            'MHASH_SHA1' => 2,
+            'MHASH_HAVAL256' => 3,
+            'MHASH_RIPEMD160' => 5,
+            'MHASH_TIGER' => 7,
+            'MHASH_GOST' => 8,
+            'MHASH_CRC32B' => 9,
+            'MHASH_HAVAL224' => 10,
+            'MHASH_HAVAL192' => 11,
+            'MHASH_HAVAL160' => 12,
+            'MHASH_HAVAL128' => 13,
+            'MHASH_TIGER128' => 14,
+            'MHASH_TIGER160' => 15,
+            'MHASH_MD4' => 16,
+            'MHASH_SHA256' => 17,
+            'MHASH_ADLER32' => 18,
+            'MHASH_SHA224' => 19,
+            'MHASH_SHA512' => 20,
+            'MHASH_SHA384' => 21,
+            'MHASH_WHIRLPOOL' => 22,
+            'MHASH_RIPEMD128' => 23,
+            'MHASH_RIPEMD256' => 24,
+            'MHASH_RIPEMD320' => 25,
+            'MHASH_SNEFRU256' => 27,
+            'MHASH_MD2' => 28,
+            'MHASH_FNV132' => 29,
+            'MHASH_FNV1A32' => 30,
+            'MHASH_FNV164' => 31,
+            'MHASH_FNV1A64' => 32,
+            'MHASH_JOAAT' => 33,
+            'MHASH_CRC32C' => 34,
+            'MHASH_MURMUR3A' => 35,
+            'MHASH_MURMUR3C' => 36,
+            'MHASH_MURMUR3F' => 37,
+            'MHASH_XXH32' => 38,
+            'MHASH_XXH64' => 39,
+            'MHASH_XXH3' => 40,
+            'MHASH_XXH128' => 41,
+            'PASSWORD_BCRYPT_DEFAULT_COST' => 12, 'CRYPT_SALT_LENGTH' => 123, 'CRYPT_STD_DES' => 1,
+            'CRYPT_EXT_DES' => 1, 'CRYPT_MD5' => 1, 'CRYPT_BLOWFISH' => 1, 'CRYPT_SHA256' => 1,
+            'CRYPT_SHA512' => 1, 'PASSWORD_ARGON2_DEFAULT_MEMORY_COST' => 65536,
+            'PASSWORD_ARGON2_DEFAULT_TIME_COST' => 4, 'PASSWORD_ARGON2_DEFAULT_THREADS' => 1,
             // ext/random: the mt_srand() engine variants.
             'MT_RAND_MT19937' => 0, 'MT_RAND_PHP' => 1,
             // ext/zlib: the container a gz* function wraps its DEFLATE stream in.
@@ -1492,7 +1551,13 @@ trait LowerPrelude
             'FILTER_FLAG_ENCODE_AMP' => 64, 'FILTER_FLAG_ALLOW_FRACTION' => 4096,
             'FILTER_FLAG_ALLOW_THOUSAND' => 8192, 'FILTER_FLAG_ALLOW_SCIENTIFIC' => 16384,
             'FILTER_FLAG_IPV4' => 1048576, 'FILTER_FLAG_IPV6' => 2097152,
-            'FILTER_FLAG_EMAIL_UNICODE' => 1048576,
+            'FILTER_FLAG_EMAIL_UNICODE' => 1048576, 'FILTER_FLAG_HOSTNAME' => 1048576,
+            'FILTER_THROW_ON_FAILURE' => 268435456, 'FILTER_SANITIZE_STRING' => 513,
+            'FILTER_SANITIZE_STRIPPED' => 513, 'FILTER_FLAG_STRIP_BACKTICK' => 512,
+            'FILTER_FLAG_NO_ENCODE_QUOTES' => 128, 'FILTER_FLAG_EMPTY_STRING_NULL' => 256,
+            'FILTER_FLAG_PATH_REQUIRED' => 262144, 'FILTER_FLAG_QUERY_REQUIRED' => 524288,
+            'FILTER_FLAG_NO_RES_RANGE' => 4194304, 'FILTER_FLAG_NO_PRIV_RANGE' => 8388608,
+            'FILTER_FLAG_GLOBAL_RANGE' => 536870912,
             // ext-intl grapheme_extract() type selector — php's own values
             // (host-invariant). The intl-grapheme polyfill defines these behind
             // `if (!defined(...))`, redundant once predefined here.
@@ -1527,6 +1592,8 @@ trait LowerPrelude
         if (isset($floats[$name])) { return new FloatConst($floats[$name], Type::float_()); }
 
         $strs = [
+            'PASSWORD_DEFAULT' => '2y', 'PASSWORD_BCRYPT' => '2y', 'PASSWORD_ARGON2I' => 'argon2i',
+            'PASSWORD_ARGON2ID' => 'argon2id', 'PASSWORD_ARGON2_PROVIDER' => 'standard',
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
             'PHP_VERSION' => '8.5.11', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
