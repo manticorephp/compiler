@@ -2459,7 +2459,7 @@ trait EmitLlvmBuiltins
         $out .= $this->coerceToPtr();
         $pathP = $this->lastValue;
         $slots = $this->includeSlots;
-        if (\count($slots) === 0) {
+        if (\count($slots) === 0 && !isset($this->definedFns[$this->mangle('__mc_require_runtime')])) {
             $this->rt->needsTagged = true;
             $f = $this->ssa->allocReg();
             $out .= '  ' . $f . " = call i64 @__manticore_box_bool(i64 0)\n";
@@ -2541,6 +2541,7 @@ trait EmitLlvmBuiltins
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
+        $out .= $this->inclRuntimeFallback($pathP, $res);
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $loaded = $this->ssa->allocReg();
@@ -2552,6 +2553,22 @@ trait EmitLlvmBuiltins
         // three through one alloca, so it inherits the least-proven of them.
         // Marking it boxed would assert something not established here.
         return $this->finishI64($out, $loaded);
+    }
+
+    /**
+     * A path that is no compile unit: a file the program WROTE at run time
+     * (symfony's router cache, `require`d back). `__mc_require_runtime` reads it
+     * when it is pure data and answers false otherwise — php's answer for a
+     * missing file, and what this chain answered for every such path.
+     */
+    private function inclRuntimeFallback(string $pathP, string $res): string
+    {
+        if (!isset($this->definedFns[$this->mangle('__mc_require_runtime')])) { return ''; }
+        $pi = $this->ssa->allocReg();
+        $out = '  ' . $pi . ' = ptrtoint ptr ' . $pathP . " to i64\n";
+        $v = $this->ssa->allocReg();
+        $out .= '  ' . $v . ' = call i64 @manticore___mc_require_runtime(i64 ' . $pi . ")\n";
+        return $out . '  store i64 ' . $v . ', ptr ' . $res . "\n";
     }
 
     /**
