@@ -557,6 +557,8 @@ final class InferTypes implements Pass
     private array $aliasTargets = [];
     /** @var string[] */
     private array $aliasSources = [];
+    /** @var array<string,string> by-ref foreach value var → the array local it walks: a store to it IS an element store */
+    private array $byRefFeBind = [];
     /** fn name => [local name => true]: locals a post-inference store scan proved
      *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
     /** @var array<string, bool> locals a RefCell_ points at, in the function

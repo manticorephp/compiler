@@ -1,6 +1,5 @@
 <?php
 // foreach over a typed array bound to a #[TypeDef] yields the plain scalar, not the element type
-// issue: #107
 use Manticore\Ds\UInt16Array;
 
 #[TypeDef(repr: 'u16')]

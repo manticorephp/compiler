@@ -2983,7 +2983,8 @@ trait EmitLlvmRuntime
         if ($this->classIsA($cls->name, 'Manticore\\Ds\\Map') || $this->classIsA($cls->name, 'Manticore\\Ds\\Set')) {
             return '@__cc_hmap_walk';
         }
-        if ($this->classIsA($cls->name, 'SplFixedArray') || $this->classIsA($cls->name, 'Manticore\\Ds\\Vec')) { return '@__cc_nbuf_walk'; }
+        if ($this->classIsA($cls->name, 'SplFixedArray') || $this->classIsA($cls->name, 'Manticore\\Ds\\Vec')
+            || $this->classIsA($cls->name, 'Manticore\\Ds\\TypedArray')) { return '@__cc_nbuf_walk'; }
         return '';
     }
 

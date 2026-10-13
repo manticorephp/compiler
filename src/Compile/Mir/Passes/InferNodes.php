@@ -397,6 +397,7 @@ trait InferNodes
         $this->assocValClasses = [];
         $this->aliasTargets = [];
         $this->aliasSources = [];
+        $this->byRefFeBind = [];
         $this->emptyArrValLocals = [];
         $this->nestedScalarStoreLocals = [];
         $this->nestedCellVecLocals = [];
@@ -2027,6 +2028,16 @@ trait InferNodes
                     $elem = $bound;
                     $node->fixedBuf = true;
                 }
+            }
+            // A typed array bound to a #[TypeDef] (`UInt16Array<Kind>`): the
+            // iterator hands back the carrier in a cell, and the loop variable is
+            // the TypeDef — the emitter unboxes the carrier at the step.
+            if ($node->iterAggregate && !$node->byRef && $elem->kind === Type::KIND_CELL
+                && isset($this->classes[$cls]) && $this->classImplementsT($cls, 'Manticore\\Ds\\TypedArray')) {
+                // A reified binding is its own class: its offsetGet already returns the bound type.
+                $ogCls = $this->resolveMethodClass($cls, 'offsetGet');
+                $bound = $this->genericReturnType($cls, 'offsetGet', $at) ?? ($ogCls !== '' ? ($this->sigs[$ogCls . '__offsetGet'] ?? null) : null);
+                if ($bound !== null && $bound->typeDefClass() !== null) { $elem = $bound; }
             }
             if ($node->iterClass === '' && !$node->byRef) {
                 // A plain object walks its properties, as get_object_vars()

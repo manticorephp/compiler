@@ -5998,6 +5998,22 @@ trait EmitLlvmExpr
                 return \implode('', $chunks);
             }
         }
+        // An ERASED element (vec[unknown]) is not a cell: its nested arrays ride RAW,
+        // decoded by the buffer's hint, so the element-chain comparator below would
+        // read them as cells. Tag both arrays shallowly and compare by value like a
+        // cell does.
+        if ($isEq || $isNe) {
+            if ($lk === Type::KIND_ARRAY && $rk === Type::KIND_ARRAY
+                && (($c->left->type->element !== null && $c->left->type->element->kind === Type::KIND_UNKNOWN)
+                    || ($c->right->type->element !== null && $c->right->type->element->kind === Type::KIND_UNKNOWN))) {
+                $this->lastValue = $l; $this->lastValueType = $lt;
+                $chunks[] = $this->shallowBoxToCell($c->left->type);
+                $l = $this->lastValue; $lt = 'i64'; $lk = Type::KIND_CELL;
+                $this->lastValue = $r; $this->lastValueType = $rt;
+                $chunks[] = $this->shallowBoxToCell($c->right->type);
+                $r = $this->lastValue; $rt = 'i64'; $rk = Type::KIND_CELL;
+            }
+        }
         // Two statically-typed ARRAYS compare BY VALUE in PHP, recursively: `==`
         // is same-count + loosely-equal values per key (order-independent),
         // `===` adds order and strictness, and ordering goes by count first. The
