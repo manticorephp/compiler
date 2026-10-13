@@ -66,7 +66,7 @@ function compiles and fails at run time with `Call to undefined function`.
 - [ ] `SPL` iterators (`LimitIterator`, `CachingIterator`, `RegexIterator`, `RecursiveArrayIterator`, …), `class_uses` [#214]
 - [ ] `password_*`, `crypt` [#212] · `hash_pbkdf2`/`hkdf`/`copy`/`update_stream` [#213]
 - [ ] `openssl` 7 % — encrypt/decrypt, digest, sign/verify, pkey, x509 over libcrypto [#211]
-- [ ] PDO `pgsql` / `mysql` drivers, `sqlite3` classes [#210]
+- [ ] PDO `pgsql` / `mysql` drivers [#210]
 - [~] `standard` 82 % · `date` 84 % — tail tracked in [#218]
 - [~] `Reflection` 62 % — interface reflection, declaring class, defaults of plain functions
 - [~] `mbstring` 62 % — remaining: `mb_convert_variables`, `mb_parse_str`, `mb_http_*`,
