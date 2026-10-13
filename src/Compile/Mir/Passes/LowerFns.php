@@ -1260,7 +1260,7 @@ trait LowerFns
             $out[] = new \Compile\Mir\Ternary(
                 $this->lowerExpr(\Parser\Ast\Expr::call('array_key_exists', [$idx, $src], $span)),
                 $this->lowerExpr(\Parser\Ast\Expr::arrayAccess($tmp, $idx, $span)),
-                $this->lowerOmittedParam($params[$j], $selfClass),
+                $this->lowerOmittedParam($params[$j], $selfClass, $params, $astArgs),
                 Type::unknown());
         }
         $tail = \Parser\Ast\Expr::call('array_slice', [$tmp, \Parser\Ast\Expr::int($vidx - $si, $span)], $span);
