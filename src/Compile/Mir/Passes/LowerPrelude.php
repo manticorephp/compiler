@@ -1408,7 +1408,7 @@ trait LowerPrelude
             'SORT_DESC' => 3, 'SORT_ASC' => 4, 'SORT_LOCALE_STRING' => 5,
             'SORT_NATURAL' => 6, 'SORT_FLAG_CASE' => 8,
             // count / array_filter
-            'COUNT_NORMAL' => 0, 'COUNT_RECURSIVE' => 1,
+            'COUNT_NORMAL' => 0, 'COUNT_RECURSIVE' => 1, 'CASE_LOWER' => 0, 'CASE_UPPER' => 1,
             'ARRAY_FILTER_USE_KEY' => 2, 'ARRAY_FILTER_USE_BOTH' => 1,
             // round modes
             'PHP_ROUND_HALF_UP' => 1, 'PHP_ROUND_HALF_DOWN' => 2,
