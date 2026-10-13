@@ -1,6 +1,5 @@
 <?php
 // `$s(...)`, `$c::$m()`, `$n?->f($x)` on null and string-keyed nested destructuring give wrong output
-// issue: #35
 final class K { public static function hi(string $w): string { return "hi $w"; } public function f(int $x): int { return $x; } }
 $s = 'strtoupper';
 $fc = $s(...);
