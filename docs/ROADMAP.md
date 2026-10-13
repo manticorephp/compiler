@@ -72,7 +72,7 @@ function compiles and fails at run time with `Call to undefined function`.
       `mb_convert_kana`, `mb_strcut` on stateful encodings
 
 **P1 — web frameworks**
-- [ ] `xml` SAX parser [#216] · `random` classes [#217] · `fileinfo` [#219] · `dom` 28 % [#220]
+- [ ] `xml` SAX parser [#216] · [x] `random` classes [#217] · `fileinfo` [#219] · `dom` 28 % [#220]
       · `filter` 11 % [#221] · `posix` / `pcntl` [#222]
 - [ ] `xmlwriter`, `xmlreader`, `libxml` loaders (see #225)
 - [ ] `mysqli`, `pgsql` procedural APIs after the PDO drivers
