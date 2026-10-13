@@ -321,3 +321,166 @@ function hash_final(HashContext $context, bool $binary = false): string
 
     return hash($context->algo, $context->buf, $binary);
 }
+
+/** Algorithms usable with HMAC / pbkdf2 / hkdf (the cryptographic ones). @return string[] */
+function hash_hmac_algos(): array
+{
+    return ['md5', 'sha1', 'sha224', 'sha256', 'sha384', 'sha512'];
+}
+
+/** A copy of a running context; php's HashContext is cloneable only through here. */
+function hash_copy(HashContext $context): HashContext
+{
+    if ($context->done) {
+        throw new \TypeError('hash_copy(): Argument #1 ($context) must be a valid, non-finalized HashContext');
+    }
+    $c = new HashContext();
+    $c->algo = $context->algo;
+    $c->buf = $context->buf;
+    $c->key = $context->key;
+    $c->hmac = $context->hmac;
+
+    return $c;
+}
+
+function hash_update_file(HashContext $context, string $filename, $stream_context = null): bool
+{
+    $c = \file_get_contents($filename);
+    if ($c === false) {
+        return false;
+    }
+
+    return \hash_update($context, $c);
+}
+
+/** Feed up to $length bytes (all, for -1) of $stream; returns the bytes consumed. */
+function hash_update_stream(HashContext $context, $stream, int $length = -1): int
+{
+    $n = 0;
+    while ($length < 0 || $n < $length) {
+        $want = 8192;
+        if ($length >= 0 && $length - $n < $want) { $want = $length - $n; }
+        $chunk = \fread($stream, $want);
+        if ($chunk === false || $chunk === '') { break; }
+        \hash_update($context, $chunk);
+        $n = $n + \strlen($chunk);
+    }
+
+    return $n;
+}
+
+function __mc_hmac_algo_or_throw(string $fn, string $algo): int
+{
+    $id = \__mc_algo_id($algo);
+    if ($id < 0) {
+        throw new \ValueError($fn . '(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm');
+    }
+
+    return $id;
+}
+
+function hash_pbkdf2(string $algo, string $password, string $salt, int $iterations, int $length = 0,
+    bool $binary = false, array $options = []): string
+{
+    $id = \__mc_hmac_algo_or_throw('hash_pbkdf2', $algo);
+    if ($iterations <= 0) {
+        throw new \ValueError('hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0');
+    }
+    if ($length < 0) {
+        throw new \ValueError('hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0');
+    }
+    $dlen = \__mc_algo_len($id);
+    if ($length === 0) { $length = $binary ? $dlen : 2 * $dlen; }
+    $want = $binary ? $length : intdiv($length + 1, 2);
+    $out = '';
+    $block = 1;
+    while (\strlen($out) < $want) {
+        $u = \hash_hmac($algo, $salt . \__mc_u32be($block), $password, true);
+        $t = $u;
+        for ($i = 1; $i < $iterations; $i = $i + 1) {
+            $u = \hash_hmac($algo, $u, $password, true);
+            $t = $t ^ $u;
+        }
+        $out = $out . $t;
+        $block = $block + 1;
+    }
+    $out = \substr($out, 0, $want);
+
+    return $binary ? $out : \substr(\bin2hex($out), 0, $length);
+}
+
+/** RFC 5869 HKDF; always raw bytes. */
+function hash_hkdf(string $algo, string $key, int $length = 0, string $info = '', string $salt = ''): string
+{
+    $id = \__mc_hmac_algo_or_throw('hash_hkdf', $algo);
+    if ($key === '') {
+        throw new \ValueError('hash_hkdf(): Argument #2 ($key) must not be empty');
+    }
+    $dlen = \__mc_algo_len($id);
+    if ($length < 0) {
+        throw new \ValueError('hash_hkdf(): Argument #3 ($length) must be greater than or equal to 0');
+    }
+    if ($length === 0) {
+        $length = $dlen;
+    } elseif ($length > $dlen * 255) {
+        throw new \ValueError('hash_hkdf(): Argument #3 ($length) must be less than or equal to ' . ($dlen * 255));
+    }
+    if ($salt === '') { $salt = \str_repeat("\0", $dlen); }
+    $prk = \hash_hmac($algo, $key, $salt, true);
+    $out = '';
+    $t = '';
+    for ($i = 1; \strlen($out) < $length; $i = $i + 1) {
+        $t = \hash_hmac($algo, $t . $info . \chr($i), $prk, true);
+        $out = $out . $t;
+    }
+
+    return \substr($out, 0, $length);
+}
+
+/** mhash id -> hash() algo name; '' for ids this build does not carry. */
+function __mc_mhash_name(int $id): string
+{
+    if ($id === 0) { return 'crc32'; }
+    if ($id === 1) { return 'md5'; }
+    if ($id === 2) { return 'sha1'; }
+    if ($id === 9) { return 'crc32b'; }
+    if ($id === 17) { return 'sha256'; }
+    if ($id === 19) { return 'sha224'; }
+    if ($id === 20) { return 'sha512'; }
+    if ($id === 21) { return 'sha384'; }
+    if ($id === 41) { return 'xxh128'; }
+    return '';
+}
+
+function mhash_count(): int
+{
+    return 41;
+}
+
+function mhash_get_hash_name(int $algo): string|false
+{
+    $n = \__mc_mhash_name($algo);
+
+    return $n === '' ? false : \strtoupper($n);
+}
+
+function mhash_get_block_size(int $algo): int|false
+{
+    $n = \__mc_mhash_name($algo);
+    if ($n === '') { return false; }
+
+    return \strlen(\hash($n, '', true));
+}
+
+function mhash(int $algo, string $data, ?string $key = null): string|false
+{
+    $n = \__mc_mhash_name($algo);
+    if ($n === '') { return false; }
+    if ($key !== null) {
+        if (\__mc_algo_id($n) < 0) { return false; }
+
+        return \hash_hmac($n, $data, $key, true);
+    }
+
+    return \hash($n, $data, true);
+}

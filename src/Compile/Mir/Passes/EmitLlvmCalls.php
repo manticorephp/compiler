@@ -4244,6 +4244,18 @@ trait EmitLlvmCalls
             $out .= '  call void @__mir_array_release_buf(ptr ' . $src . ")\n";
             $a->type = $paramType;
         }
+        // An int/bool arg to a declared `float` param converts numerically
+        // (sitofp) — else the integer bits bitcast through the i64 ABI carrier
+        // and the callee reads a garbage double. Every call path (function,
+        // ctor, static, method) funnels its by-value args through here.
+        if ($paramType !== null && $paramType->kind === Type::KIND_FLOAT
+            && ($a->type->kind === Type::KIND_INT || $a->type->kind === Type::KIND_BOOL)) {
+            $out .= $this->coerceToI64();
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
+            $this->lastValue = $d;
+            $this->lastValueType = 'double';
+        }
         return $out;
     }
 
@@ -4495,19 +4507,6 @@ trait EmitLlvmCalls
             } else {
                 $litMark = \count($this->litElemDropRegs);
                 $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai] ?? null);
-                // An int/bool arg to a declared `float` param converts
-                // numerically (sitofp) — else the integer bits bitcast through
-                // the i64 ABI carrier and the callee reads a garbage double
-                // (`number_format(5)`, `f(5)` for `f(float $x)`).
-                $pt = $ptypes[$ai] ?? null;
-                if ($pt !== null && $pt->kind === Type::KIND_FLOAT
-                    && ($a->type->kind === Type::KIND_INT || $a->type->kind === Type::KIND_BOOL)) {
-                    $out .= $this->coerceToI64();
-                    $d = $this->ssa->allocReg();
-                    $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
-                    $this->lastValue = $d;
-                    $this->lastValueType = 'double';
-                }
                 // ABI: every fn takes i64 args. Float / ptr values
                 // cross the boundary as the bit-pattern in i64.
                 $out .= $this->coerceToI64();

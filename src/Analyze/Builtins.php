@@ -121,6 +121,7 @@ final class Builtins
             '__mc_json_escape', '__mir_str_replace_one', '__mir_float_repr', 'strncmp', 'strcmp',
             '__mc_errno', '__mc_fmt_int', '__mc_fmt_float', '__mc_fmt_str',
             'isset', 'empty', 'unset', 'list', 'compact', 'define', 'defined',
+            'get_called_class', 'get_included_files', 'get_required_files',
             'constant', 'function_exists', 'call_user_func', 'call_user_func_array',
             // Array-pointer family — emitBuiltin handles these inline, so they
             // appear in NO prelude file and in no `.o.sig`. Their absence here

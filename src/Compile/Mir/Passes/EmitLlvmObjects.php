@@ -761,19 +761,6 @@ trait EmitLlvmObjects
                 } else {
                     $litMark = \count($this->litElemDropRegs);
                     $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai + 1] ?? null);
-                    // An int/bool arg to a declared `float` ctor param converts
-                    // numerically (sitofp) — else the integer bits cross the i64
-                    // ABI carrier and the property reads a garbage double
-                    // (`new C($i)` for `__construct(float $x)`). Mirrors emitCall.
-                    $pt = $ptypes[$ai + 1] ?? null;
-                    if ($pt !== null && $pt->kind === Type::KIND_FLOAT
-                        && ($a->type->kind === Type::KIND_INT || $a->type->kind === Type::KIND_BOOL)) {
-                        $out .= $this->coerceToI64();
-                        $d = $this->ssa->allocReg();
-                        $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
-                        $this->lastValue = $d;
-                        $this->lastValueType = 'double';
-                    }
                     $out .= $this->coerceToI64();
                     // A fresh CELL temp is dropped by its TAGGED word ({@see
                     // EmitLlvmCalls::emitCall}, same arm).

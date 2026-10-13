@@ -187,6 +187,38 @@ function class_implements(object|string $objectOrClass, bool $autoload = true): 
 }
 
 /**
+ * `get_mangled_object_vars($object)` — every property of the instance under its
+ * MANGLED key (`"\0*\0p"` protected, `"\0Class\0p"` private), declared slots
+ * first in the property table's order, then the dynamic ones. An uninitialized
+ * typed slot is absent, as in php.
+ *
+ * @return array<mixed>
+ */
+function get_mangled_object_vars(object $object): array
+{
+    $out = [];
+    $declared = [];
+    foreach ((new \ReflectionClass($object))->getProperties() as $p) {
+        if ($p->isStatic()) { continue; }
+        $n = $p->getName();
+        $declared[$n] = true;
+        if (!$p->isInitialized($object)) { continue; }
+        $key = $n;
+        if ($p->isProtected()) {
+            $key = "\0*\0" . $n;
+        } elseif ($p->isPrivate()) {
+            $key = "\0" . $p->getDeclaringClass()->getName() . "\0" . $n;
+        }
+        $out[$key] = $p->getValue($object);
+    }
+    foreach (\get_object_vars($object) as $k => $v) {
+        if (!isset($declared[$k])) { $out[$k] = $v; }
+    }
+
+    return $out;
+}
+
+/**
  * `class_parents($objectOrClass)` — every ancestor as a `name => name` map,
  * nearest first, php's own shape. False when the class is unknown; $autoload is
  * accepted and ignored, there being nothing to autoload in a whole-program build.

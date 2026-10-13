@@ -252,6 +252,19 @@ trait LowerExprs
                     [$this->lowerExpr($expr->args[0]), $this->lowerExpr($expr->args[1])], Type::int_());
                 return new Block($stmts, Type::int_());
             }
+            // `get_called_class()` is `static::class`.
+            if ($fnBare === 'get_called_class' && \count($expr->args) === 0) {
+                return $this->lowerExpr(\Parser\Ast\Expr::staticAccess('static', 'class', $expr->span));
+            }
+            // An AOT binary has no include graph: the script itself is the one
+            // file php would list (every `require` is inlined at build time).
+            if (($fnBare === 'get_included_files' || $fnBare === 'get_required_files')
+                && \count($expr->args) === 0) {
+                $real = \realpath($this->lowerSourceFile);
+                return new ArrayLit([new ArrayElement_(null,
+                    new StringConst($real === false ? $this->lowerSourceFile : $real, Type::string_()))],
+                    Type::unknown());
+            }
             // `compact('a', 'b', ...)` with STRING-LITERAL names → an assoc array
             // built from the named locals (`['a' => $a, 'b' => $b]`). PHP resolves
             // the names from the runtime symbol table; AOT has no runtime name→slot
@@ -418,7 +431,7 @@ trait LowerExprs
             // The last argument is 1 when the call was written `@trigger_error`
             // ({@see lowerUnary}) — the one thing `@` has to mean now that a
             // diagnostic can actually be printed.
-            if ($fnBare === 'trigger_error' && \count($expr->args) >= 1
+            if (($fnBare === 'trigger_error' || $fnBare === 'user_error') && \count($expr->args) >= 1
                 && \count($expr->args) <= 2) {
                 $msg = $this->lowerExpr($expr->args[0]);
                 $lvl = \count($expr->args) > 1

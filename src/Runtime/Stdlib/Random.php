@@ -298,6 +298,16 @@ function getrandmax(): int
 }
 
 /**
+ * `lcg_value` — a float in the open interval (0, 1). php's combined linear
+ * congruential generator is not reproducible (seeded from the clock and pid), so
+ * a uniform 53-bit secure draw is an equivalent contract.
+ */
+function lcg_value(): float
+{
+    return \random_int(1, 9007199254740991) / 9007199254740992.0;
+}
+
+/**
  * `str_shuffle` — php_string_shuffle verbatim: Fisher-Yates walked downwards
  * off php_mt_rand_range, so a seeded run matches php byte for byte.
  */

@@ -1,0 +1,8 @@
+B A B
+h:512:hi
+h:1024:plain
+1 core_scope_fns.php 1
+zv-ok
+core spl
+running,protected,full,runs,collected,threshold,buffer_size,roots,application_time,collector_time,destructor_time,free_time
+10001 0
