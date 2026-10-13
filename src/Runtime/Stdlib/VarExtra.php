@@ -240,3 +240,87 @@ function is_string(mixed $value): bool
 {
     return \is_string($value);
 }
+
+/** A php variable name: `[A-Za-z_\x7f-\xff][A-Za-z0-9_\x7f-\xff]*`. */
+function __mc_extract_valid_name(string $n): bool
+{
+    $len = \strlen($n);
+    if ($len === 0) { return false; }
+    for ($i = 0; $i < $len; $i = $i + 1) {
+        $c = \ord($n[$i]);
+        if ($c === 95 || ($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122) || $c >= 127) { continue; }
+        if ($i > 0 && $c >= 48 && $c <= 57) { continue; }
+        return false;
+    }
+    return true;
+}
+
+/**
+ * The assignments `extract($arr, $flags, $prefix)` performs, as name => value,
+ * plus the count php returns under the key '' (never a valid variable name).
+ * `$exists` says which candidate locals are defined in the caller's scope; the
+ * caller (a compiler expansion) performs the stores, since locals are slots.
+ * @param array<string, bool> $exists
+ * @return array<string, mixed>
+ */
+function __mc_extract_plan(array $arr, int $flags, string $prefix, bool $hasPrefix, array $exists, bool $global): array
+{
+    $refs = ($flags & 256) !== 0;
+    $type = $flags & 255;
+    if ($flags < 0 || $type > 6) {
+        throw new \ValueError('extract(): Argument #2 ($flags) must be a valid extract type');
+    }
+    if ($type > 1 && $type < 6 && !$hasPrefix) {
+        throw new \ValueError('extract(): Argument #3 ($prefix) is required when using this extract type');
+    }
+    if ($prefix !== '' && !__mc_extract_valid_name($prefix)) {
+        throw new \ValueError('extract(): Argument #3 ($prefix) must be a valid identifier');
+    }
+    if ($refs) {
+        throw new \Error('extract(): EXTR_REFS is not supported (variables cannot alias array elements)');
+    }
+    $out = [];
+    $count = 0;
+    foreach ($arr as $k => $v) {
+        $isStr = \is_string($k);
+        $key = (string)$k;
+        $has = $isStr && isset($exists[$key]) && $exists[$key];
+        $name = '';
+        if ($type === 0 || $type === 1 || $type === 6) {
+            if (!$isStr || !__mc_extract_valid_name($key)) { continue; }
+            if ($type === 1 && ($has || $key === 'this')) { continue; }
+            if ($type === 6 && !$has) { continue; }
+            if ($global && $key === 'GLOBALS') { continue; }
+            $name = $key;
+        } elseif ($type === 3) {
+            if ($isStr && $key === '') { continue; }
+            $name = $prefix . '_' . $key;
+        } elseif ($type === 4) {
+            $name = ($isStr && $key !== 'this' && __mc_extract_valid_name($key)) ? $key : $prefix . '_' . $key;
+        } elseif ($type === 5) {
+            if (!$has) { continue; }
+            $name = $prefix . '_' . $key;
+        } else {
+            if (!$isStr || $key === '') { continue; }
+            if ($has || $key === 'this') {
+                $name = $prefix . '_' . $key;
+            } else {
+                if (!__mc_extract_valid_name($key)) { continue; }
+                $name = $key;
+            }
+        }
+        if (!__mc_extract_valid_name($name)) { continue; }
+        if ($name === 'this') { throw new \Error('Cannot re-assign $this'); }
+        $out[$name] = $v;
+        $exists[$name] = true;
+        $count = $count + 1;
+    }
+    $out[''] = $count;
+    return $out;
+}
+
+/** The count `extract()` returns, out of an {@see __mc_extract_plan}. @param array<string, mixed> $plan */
+function __mc_extract_count(array $plan): int
+{
+    return (int)$plan[''];
+}

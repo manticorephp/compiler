@@ -1,0 +1,2 @@
+[<?= $title ?>|<?= $count ?? "-" ?>]
+<?php $seen = strlen($title); ?>

@@ -128,7 +128,8 @@ Compute-heavy code already runs 2–50× faster than php 8.5; associative arrays
 - [ ] References that agree with their target's representation
 - [ ] Integer overflow promoting to float (needs value-range analysis)
 - [ ] Visibility enforcement (`__get` on inaccessible members, `(array)` key mangling)
-- [ ] `extract()`, `settype()`, `goto` into loops, `ReflectionEnum`
+- [x] `extract()` (+ an `include` inside a function runs the template in its scope)
+- [ ] `settype()`, `goto` into loops, `ReflectionEnum`
 
 Known semantic gaps in detail: [`gaps.md`](gaps.md).
 

@@ -1410,6 +1410,9 @@ trait LowerPrelude
             // count / array_filter
             'COUNT_NORMAL' => 0, 'COUNT_RECURSIVE' => 1, 'CASE_LOWER' => 0, 'CASE_UPPER' => 1,
             'ARRAY_FILTER_USE_KEY' => 2, 'ARRAY_FILTER_USE_BOTH' => 1,
+            'EXTR_OVERWRITE' => 0, 'EXTR_SKIP' => 1, 'EXTR_PREFIX_SAME' => 2, 'EXTR_PREFIX_ALL' => 3,
+            'EXTR_PREFIX_INVALID' => 4, 'EXTR_PREFIX_IF_EXISTS' => 5, 'EXTR_IF_EXISTS' => 6,
+            'EXTR_REFS' => 256,
             // round modes
             'PHP_ROUND_HALF_UP' => 1, 'PHP_ROUND_HALF_DOWN' => 2,
             'PHP_ROUND_HALF_EVEN' => 3, 'PHP_ROUND_HALF_ODD' => 4,

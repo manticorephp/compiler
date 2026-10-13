@@ -5869,6 +5869,16 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $dlAbs[__mc_abs_source_path((string)$dlPath)] = true;
         }
         $lower->demandLoadedFiles = $dlAbs;
+        /** @var array<string, bool> $unitAbs */
+        $unitAbs = [];
+        foreach ($includeSlots as $unitPath => $_slot) {
+            $unitAbs[(string)$unitPath] = true;
+        }
+        $entryAbs = __mc_abs_source_path(isset($paths[$lastIdx]) ? $paths[$lastIdx] : '');
+        if ($entryAbs !== '') {
+            $unitAbs[$entryAbs] = true;
+        }
+        $lower->compileUnitFiles = $unitAbs;
         // Reserved-attribute errors (#[Override] with no parent, a bad target, a
         // repeat) abort the build by default; analysis collects them instead.
         if ($collect !== null) {

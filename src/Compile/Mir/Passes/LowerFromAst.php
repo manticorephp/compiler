@@ -600,6 +600,28 @@ final class LowerFromAst implements Pass
      *  psr-4 / classmap), set by the driver — {@see dropShadowedBuiltinTypes} */
     public array $demandLoadedFiles = [];
 
+    /** @var array<string, bool> absolute paths of every COMPILE UNIT, set by the
+     *  driver. An `include` inside a function of a file NOT in this set is
+     *  inlined at the site, in the includer's scope ({@see lowerScopedInclude}). */
+    public array $compileUnitFiles = [];
+
+    /** @var array<string, \Parser\Ast\Stmt[]> parsed inlinable include targets
+     *  by absolute path; an uninlinable one maps to an empty list. */
+    private array $scopedIncludeAst = [];
+
+    /** @var array<string, bool> inlinable include targets that read `$this`. */
+    private array $scopedIncludeThis = [];
+
+    /** @var array<string, bool> include targets being inlined right now (cycle guard). */
+    private array $scopedIncludeStack = [];
+
+    /** True while lowering `__main`'s own statements: a top-level include keeps
+     *  the eager model there. */
+    private bool $lowerInMain = false;
+
+    /** An `extract()` site was lowered: {@see ExtractScope::expand} runs at the end. */
+    private bool $sawExtract = false;
+
     /** True once at least one stdlib extern was injected → driver links stdlib.o. */
     public bool $externInjected = false;
 
@@ -1444,7 +1466,9 @@ final class LowerFromAst implements Pass
             // suppress a top-level out-argument's init.
             $this->currentRefParamNames = [];
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
+            $this->lowerInMain = true;
             $mainStmts[] = $this->lowerStmt($stmt);
+            $this->lowerInMain = false;
             if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
             $lowerMainCount = $lowerMainCount + 1;
         }
@@ -1696,6 +1720,9 @@ final class LowerFromAst implements Pass
         foreach ($module->functions as $fd) {
             $odecl = $this->fnDecls[$fd->name] ?? null;
             if ($odecl !== null) { $fd->overloadOf = $this->overloadTarget($this->fnDeclAttrs($odecl)); }
+        }
+        if ($this->sawExtract) {
+            ExtractScope::expand($module);
         }
         $module->markPassApplied(self::NAME);
         return $module;

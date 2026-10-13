@@ -1,0 +1,25 @@
+overwrite n=3 {"a":1,"b":[2,3],"c":null}
+skip n=1 {"a":"old","b":2}
+skip-param n=1 {"context":["c"],"name":"n","z":"Z"}
+prefix-same n=2 {"a":"old","b":2,"p_a":1}
+prefix-all n=3 {"p_0":"zero","p_7":"seven","p_a":1}
+prefix-invalid n=4 {"ok":1,"q_0":"zero","q_1x":"digit","q_this":"me"}
+prefix-if-exists n=1 {"a":"old","p_a":1,"p_b":"unset"}
+if-exists n=1 {"a":1,"b":"unset"}
+invalid n=2 {"_ok":5,"\u00fcn\u00ef":6}
+unread n=3
+Error: Cannot re-assign $this
+ValueError: extract(): Argument #2 ($flags) must be a valid extract type
+ValueError: extract(): Argument #3 ($prefix) is required when using this extract type
+ValueError: extract(): Argument #3 ($prefix) must be a valid identifier
+[Hello|3]
+seen=5
+[Bye|-]
+seen=3
+<h1>T&C</h1>
+  <li>0: a&lt;b</li>
+  <li>1: c</li>
+<p><view> none</p>
+body { color: red; }
+3
+2:me@here
