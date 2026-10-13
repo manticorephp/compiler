@@ -1479,8 +1479,14 @@ final class Foreach_ extends Node
      *  (`@extends SplFixedArray<Token>`) whose loop the emitter runs over the
      *  native buffer, binding each element as that class's pointer
      *  ({@see Passes\EmitLlvmHmap::emitForeachDs}); {@see $iterValueType} is the class.
-     *  Not copied by {@see NodeClone}: InferTypes sets it on every run. Declared LAST. */
+     *  Not copied by {@see NodeClone}: InferTypes sets it on every run. */
     public bool $fixedBuf = false;
+
+    /** Object-iterator path: the type `key()` of {@see $iterClass} answers — a
+     *  +1 like {@see $iterValueType}'s, so the key variable owns it
+     *  ({@see Passes\OwnershipFlow::scanForeach}). Set by InferTypes on every
+     *  run, not copied by {@see NodeClone}. Declared LAST. */
+    public ?Type $iterKeyType = null;
 
     public function accept(EmitVisitor $v): string
     {

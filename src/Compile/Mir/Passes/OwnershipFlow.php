@@ -1302,8 +1302,15 @@ final class OwnershipFlow implements Pass
             // is +1 on every arm, as `current()` is
             // ({@see InsertMemoryOps::foreachValueSlotType}).
             $ic = $fe->iterClass;
+            // A concrete Iterator CLASS answers `key()` under the method return
+            // convention too: a +1 of whatever it returns. Bound as a borrow, the
+            // key ArrayIterator hands out (a header name) leaked once per step.
+            $kct = $fe->iterKeyType;
+            $classStep = $at->kind === Type::KIND_OBJ && $ic !== '' && isset($this->classes[$ic])
+                && $ic !== 'Generator' && $kct !== null && $this->keyString($kct) !== '';
+            if ($classStep) { $kt = $kct; }
             if ($at->kind === Type::KIND_OBJ
-                && (($at->class ?? '') === 'Generator' || $ic === 'Generator' || ($ic !== '' && !isset($this->classes[$ic])))
+                && (($at->class ?? '') === 'Generator' || $ic === 'Generator' || ($ic !== '' && !isset($this->classes[$ic])) || $classStep)
                 && !isset($this->mixedHere[$key]) && $this->keyString($kt) !== '') {
                 $k = $this->intern($key, $this->keyString($kt), $kt);
                 $lat->feKeyName[$id] = $key;
