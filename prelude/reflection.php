@@ -178,7 +178,7 @@ function get_defined_constants(bool $categorize = false): array
 function class_implements(object|string $objectOrClass, bool $autoload = true): array|false
 {
     $name = \is_object($objectOrClass) ? \get_class($objectOrClass) : $objectOrClass;
-    if (!\class_exists($name) && !\interface_exists($name)) { return false; }
+    if (!\class_exists($name) && !\interface_exists($name) && !\trait_exists($name)) { return false; }
     $names = (new \ReflectionClass($name))->getInterfaceNames();
     $out = [];
     foreach ($names as $iface) { $out[$iface] = $iface; }
@@ -228,7 +228,7 @@ function get_mangled_object_vars(object $object): array
 function class_parents(object|string $objectOrClass, bool $autoload = true): array|false
 {
     $name = \is_object($objectOrClass) ? \get_class($objectOrClass) : $objectOrClass;
-    if (!\class_exists($name)) { return false; }
+    if (!\class_exists($name) && !\interface_exists($name) && !\trait_exists($name)) { return false; }
     $out = [];
     $rc = new \ReflectionClass($name);
     $p = $rc->getParentClass();
