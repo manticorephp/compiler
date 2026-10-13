@@ -1077,6 +1077,15 @@ trait EmitLlvmExpr
      * a `!== null` test reads garbage — it fired the array path on an `int`
      * property and handed __mir_array_loose_eq the raw value 1 as a pointer.
      */
+    /** Identity-compared elements (enum / closure) match only the very same class on both sides. */
+    private function idElemMismatch(?Type $a, ?Type $b): bool
+    {
+        $ia = $a !== null && $a->kind === Type::KIND_OBJ && ($this->isEnumClass($a->class ?? '') || $this->isClosureClass($a->class ?? ''));
+        $ib = $b !== null && $b->kind === Type::KIND_OBJ && ($this->isEnumClass($b->class ?? '') || $this->isClosureClass($b->class ?? ''));
+        if (!$ia && !$ib) { return false; }
+        return !($ia && $ib) || $a->class !== $b->class;
+    }
+
     private function elemChainOf(?Type $t, int $depth = 0): int
     {
         if ($t === null || $depth > 12) {
@@ -1089,8 +1098,10 @@ trait EmitLlvmExpr
         }
         if ($t->kind === Type::KIND_OBJ) {
             $cls = $t->class ?? '';
-            if ($this->isEnumClass($cls) || $this->objTypeIsStruct($t) || $this->isClosureClass($cls)
-                || $cls === 'Ffi\\Ptr') {
+            // an enum case (ordinal word) and a closure env (pointer word) are equal
+            // only when identical: compare the raw words as ints
+            if ($this->isEnumClass($cls) || $this->isClosureClass($cls)) { return self::EK_INT; }
+            if ($this->objTypeIsStruct($t) || $cls === 'Ffi\\Ptr') {
                 return self::EK_NONE;
             }
             return self::EK_OBJ;
@@ -4812,6 +4823,7 @@ trait EmitLlvmExpr
             $eka = $this->elemChainOf($n->left->type->element);
             $ekb = $this->elemChainOf($n->right->type->element);
             if ($eka !== self::EK_NONE && $ekb !== self::EK_NONE
+                && !$this->idElemMismatch($n->left->type->element, $n->right->type->element)
                 && $this->chainsComparable($eka, $ekb)) {
                 $this->rt->needsTaggedCompare = true;
                 $lp = $l;
@@ -5993,6 +6005,7 @@ trait EmitLlvmExpr
             $eka = $this->elemChainOf($c->left->type->element);
             $ekb = $this->elemChainOf($c->right->type->element);
             if ($eka !== self::EK_NONE && $ekb !== self::EK_NONE
+                && !$this->idElemMismatch($c->left->type->element, $c->right->type->element)
                 && $this->chainsComparable($eka, $ekb)) {
                 $this->rt->needsTaggedCompare = true;
                 $lp = $l;
