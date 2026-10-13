@@ -3946,6 +3946,9 @@ trait EmitLlvmObjects
     /** @var array<string, bool> name/argc => does any candidate take a by-ref param */
     private array $dynRefParamMemo = [];
 
+    /** @var array<string, string> inline-fallback shape key => helper symbol, or "" when not served */
+    private array $dynInlSyms = [];
+
     private function dynMethodHasRefParam(array $methods, int $argc): bool
     {
         foreach ($methods as $m => $_ignored) {
@@ -4282,17 +4285,30 @@ trait EmitLlvmObjects
     }
 
     /**
-     * Extract the old erased spread dispatcher into a reusable helper. This is
-     * intentionally separate from the table ABI: a table miss must retain the
-     * complete by-ref/variadic/undefined-method semantics of the inline path,
-     * but repeating that path inside every generator resume function is the
-     * source of the fat-IR blowup.
+     * The inline-only fallback of a table dispatch ({@see emitDynMethodDispatch})
+     * as ONE helper per shape, `i64 (i64 recv, ptr name, ptr args)`. On that
+     * path every arm reads its arguments out of the packed array, so the body
+     * depends only on the receiver's static type, the scope, the name set and
+     * the argument shape — and every site agreeing on those spliced the same
+     * chain: one arm per method of every table-less class (the prelude's
+     * Reflection, Intl, PDO, Ds…), 1 381 arms in each `__call` forwarder
+     * symfony has. '' when the shape is not served (a union receiver, whose
+     * atoms the key does not spell); the caller keeps the inline chain.
+     *
+     * @param array<string, Type> $methods
      */
-    private function dynamicMethodSpreadFallbackHelper(array $methods, int $line): string
+    private function dynamicMethodSpreadFallbackHelper(\Compile\Mir\DynProp_ $dp, array $methods, int $fixedN, Type $resT): string
     {
-        $key = 'spread|' . \implode('|', \array_keys($methods));
-        $sym = '@manticore_dyn_spread_' . $this->mangle($key);
-        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $rt = $dp->object->type;
+        $rk = $rt->kind;
+        if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN && $rk !== Type::KIND_OBJ) { return ''; }
+        // No scope in the key: the scope already chose the name set, and the
+        // arms themselves never consult it ({@see emitDynMethodInlineFallback}).
+        $key = 'inl|' . $rk . ':' . ($rt->class ?? '') . '|' . (string)$fixedN . '|' . $resT->kind;
+        foreach ($methods as $m => $mt) { $key .= '|' . (string)$m . ':' . $mt->kind . ':' . ($mt->class ?? ''); }
+        if (isset($this->dynInlSyms[$key])) { return $this->dynInlSyms[$key]; }
+        $sym = '@' . $this->mirHelperSym('__mir_dyninl_' . (string)\count($this->dynInlSyms));
+        $this->dynInlSyms[$key] = $sym;
 
         $oldSsa = $this->ssa;
         $oldLocals = $this->locals;
@@ -4337,24 +4353,39 @@ trait EmitLlvmObjects
         $body = 'define internal i64 ' . $sym . "(i64 %obj, ptr %name, ptr %args) {\nentry:\n";
         $body .= '  ' . $objSlot . " = alloca i64\n  store i64 %obj, ptr " . $objSlot . "\n";
         $body .= '  ' . $nameSlot . " = alloca i64\n";
-        $body .= '  %nameI = ptrtoint ptr %name to i64\n  store i64 %nameI, ptr ' . $nameSlot . "\n";
+        $body .= "  %nameI = ptrtoint ptr %name to i64\n  store i64 %nameI, ptr " . $nameSlot . "\n";
         $body .= '  ' . $argsSlot . " = alloca i64\n";
-        $body .= '  %argsI = ptrtoint ptr %args to i64\n  store i64 %argsI, ptr ' . $argsSlot . "\n";
+        $body .= "  %argsI = ptrtoint ptr %args to i64\n  store i64 %argsI, ptr " . $argsSlot . "\n";
 
-        $recv = new \Compile\Mir\LoadLocal('__mc_dyn_obj', Type::unknown());
+        $recv = new \Compile\Mir\LoadLocal('__mc_dyn_obj', $rt);
         $name = new \Compile\Mir\LoadLocal('__mc_dyn_name', Type::string_());
-        $args = new \Compile\Mir\LoadLocal('__mc_dyn_args', Type::vec(Type::cell()));
-        $dp = new \Compile\Mir\DynProp_($recv, $name, Type::cell());
-        $spread = new \Compile\Mir\Spread_($args, Type::cell());
-        $iv = new \Compile\Mir\Invoke_($dp, [$spread], Type::cell());
+        $vecT = Type::vec(Type::cell());
+        $hdp = new \Compile\Mir\DynProp_($recv, $name, $dp->type);
+        $hdp->scope = $dp->scope;
+        $hdp->line = $dp->line;
+        $armArgs = [];
+        if ($fixedN < 0) {
+            $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT), Type::cell());
+        } else {
+            for ($i = 0; $i < $fixedN; $i++) {
+                $armArgs[] = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT),
+                    new \Compile\Mir\IntConst($i, Type::int_()), Type::cell());
+            }
+        }
+        $iv = new \Compile\Mir\Invoke_($hdp, $armArgs, $resT);
         // Call the old inline implementation directly. Re-entering
         // emitDynMethodCall here would re-run candidate inference against the
         // synthetic nodes and can observe the helper's temporary LocalSlots as
         // if they were a real source call.
-        $body .= $this->emitDynMethodInlineFallback($dp, $iv, $methods);
+        $body .= $this->emitDynMethodInlineFallback($hdp, $iv, $methods);
+        $body .= $this->coerceToI64();
         $result = $this->lastValue;
         $body .= '  ret i64 ' . $result . "\n}\n\n";
-        $this->dynamicMethodHelpers[$key] = $body;
+        if ($this->irIsClosed($body)) {
+            $this->dynamicMethodHelpers[$key] = $body;
+        } else {
+            $this->dynInlSyms[$key] = '';
+        }
 
         $this->ssa = $oldSsa;
         $this->locals = $oldLocals;
@@ -4374,7 +4405,7 @@ trait EmitLlvmObjects
         $this->cellProv = $oldCellProv;
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
-        return $sym;
+        return $this->dynInlSyms[$key];
     }
 
     /** Some operand of the dynamic call is not a local yet, and every such one
@@ -5015,7 +5046,9 @@ trait EmitLlvmObjects
             $pack = $op;
         }
         $needsNodes = false;
-        $inline = $this->dynInlineOnlyNames($methods, $needsNodes);
+        /** @var array<string, bool> $nodeNames */
+        $nodeNames = [];
+        $inline = $this->dynInlineOnlyNames($methods, $needsNodes, $nodeNames);
         // A by-ref / variadic arm binds the caller's own argument EXPRESSIONS, so
         // those must be safe to emit a second time. Every other arm (a prelude
         // class's by-value method) reads the arguments back out of the packed
@@ -5066,7 +5099,43 @@ trait EmitLlvmObjects
         $inlL = $this->ssa->allocLabel('dynd.inline');
         $out .= '  br i1 ' . $hit . ', label %' . $endL . ', label %' . $inlL . "\n";
         $out .= $inlL . ":\n";
-        if ($inline !== []) {
+        // The names whose every holder reads its arguments from the pack go to
+        // a shared helper; only a by-ref / variadic name keeps an inline arm
+        // over the caller's own argument nodes, ahead of the helper call.
+        /** @var array<string, Type> $packNames */
+        $packNames = [];
+        foreach ($inline as $m => $mt) {
+            if (!isset($nodeNames[(string)$m])) { $packNames[(string)$m] = $mt; }
+        }
+        $inlSym = $packNames !== []
+            ? $this->dynamicMethodSpreadFallbackHelper($dp, $packNames, $pack !== null ? -1 : \count($fixedArgs), $iv->type)
+            : '';
+        if ($inlSym !== '') {
+            foreach ($inline as $m => $retT) {
+                if (isset($packNames[(string)$m])) { continue; }
+                $hitL = $this->ssa->allocLabel('dynm.hit');
+                $nextL = $this->ssa->allocLabel('dynm.next');
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr((string)$m) . ")\n";
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $out .= $this->emitMethodCall(new \Compile\Mir\MethodCall_($recv, (string)$m, $iv->args, $retT));
+                $out .= $this->boxToCell($retT);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+            // The receiver is a pure read here ({@see dynPureRead} above): read
+            // again in its own representation, which the helper's local is typed as.
+            $out .= $this->emitNode($recv);
+            $out .= $this->coerceToI64();
+            $fr = $this->ssa->allocReg();
+            $out .= '  ' . $fr . ' = call i64 ' . $inlSym . '(i64 ' . $this->lastValue . ', ptr ' . $keyP
+                  . ', ptr ' . $argsP . ")\n";
+            $out .= '  store i64 ' . $fr . ', ptr ' . $res . "\n";
+        } elseif ($inline !== []) {
             $ivArms = $iv;
             if (!$needsNodes) {
                 $argsName = '__dynd_args' . \substr($this->ssa->allocReg(), 2);
@@ -5115,7 +5184,7 @@ trait EmitLlvmObjects
      * @param array<string, Type> $methods
      * @return array<string, Type>
      */
-    private function dynInlineOnlyNames(array $methods, bool &$needsNodes): array
+    private function dynInlineOnlyNames(array $methods, bool &$needsNodes, array &$nodeNames): array
     {
         $out = [];
         $needsNodes = false;
@@ -5143,7 +5212,7 @@ trait EmitLlvmObjects
                 // user class inherits it (Exception::__toString in every user
                 // exception) — by-value all the same.
                 $declPrelude = $this->classes[$decl]->isPreludeClass;
-                if (!$sigOk || ($inTable && !$declPrelude)) { $needsNodes = true; }
+                if (!$sigOk || ($inTable && !$declPrelude)) { $needsNodes = true; $nodeNames[(string)$m] = true; }
             }
         }
         return $out;
