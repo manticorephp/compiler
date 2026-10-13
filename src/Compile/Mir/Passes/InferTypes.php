@@ -553,6 +553,10 @@ final class InferTypes implements Pass
     /** @var array<string,array<string,bool>> per-array-local set of coarse store
      *  value classes, collected pre-inference to detect heterogeneity. */
     private array $assocValClasses = [];
+    /** @var string[] `ref_alias` targets of the function being inferred, parallel to {@see $aliasSources}. */
+    private array $aliasTargets = [];
+    /** @var string[] */
+    private array $aliasSources = [];
     /** fn name => [local name => true]: locals a post-inference store scan proved
      *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
     /** @var array<string, bool> locals a RefCell_ points at, in the function

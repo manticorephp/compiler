@@ -1,6 +1,5 @@
 <?php
 // Appending null to a raw int array through a reference stores raw 0, so isset() of that slot is true (php: false).
-// issue: #88
 $gi = [1, 2];
 $r = &$gi;
 $r[] = null;

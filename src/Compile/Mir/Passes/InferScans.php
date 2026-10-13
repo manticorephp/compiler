@@ -2643,6 +2643,11 @@ trait InferScans
     /** The per-node half of the container-shape scan — see {@see scanLocalShapes}. */
     private function scanAssocNode(Node $n): void
     {
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            $this->aliasTargets[] = $n->target;
+            $this->aliasSources[] = $n->source;
+            return;
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
