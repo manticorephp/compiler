@@ -246,11 +246,20 @@ trait InferScans
                     // a `name → Param[]` map would erase it through the assoc.
                     foreach ($module->functions as $cfn) {
                         if ($cfn->name === $ctorName) {
+                            // Only a param the ctor stores AS IS (`$this->p = $p`,
+                            // what promotion lowers to) reveals the property's
+                            // type; a same-named param the ctor merely reads gave
+                            // HeaderBag::$headers its ctor arg's assoc[string,
+                            // string] while set() stored arrays into it, and the
+                            // element drop then leaked every inner array.
+                            /** @var array<string,bool> $stored */
+                            $stored = [];
+                            $this->ctorStoredParams($cfn->body, $stored);
                             // The ctor's first param is the implicit `$this`;
                             // call args align with the rest, so drop it.
                             foreach ($cfn->params as $param) {
                                 if ($param->name === 'this') { continue; }
-                                $pnames[] = $param->name;
+                                $pnames[] = isset($stored[$param->name]) ? $param->name : '';
                             }
                         }
                     }
@@ -300,6 +309,24 @@ trait InferScans
             }
         }
         foreach (Walk::children($n) as $c) { $this->scanCtorPropNode($c, $module); }
+    }
+
+    /**
+     * The names `p` of every `$this->p = $p` in a constructor body.
+     * @param array<string,bool> $out
+     */
+    private function ctorStoredParams(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $sp = $n;
+            $obj = $sp->object;
+            $val = $sp->value;
+            if ($obj->kind === Node::KIND_LOAD_LOCAL && $obj->name === 'this'
+                && $val->kind === Node::KIND_LOAD_LOCAL && $val->name === $sp->property) {
+                $out[$sp->property] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->ctorStoredParams($c, $out); }
     }
 
     /**
