@@ -187,6 +187,18 @@ class OpenSSLCertificate
     }
 }
 
+/** A PKCS#10 certificate request handle; carries the PEM it was read from. */
+#[\Manticore\Attr\Uncomparable]
+class OpenSSLCertificateSigningRequest
+{
+    public string $pem = '';
+
+    public function __construct(string $pem)
+    {
+        $this->pem = $pem;
+    }
+}
+
 /**
  * `openssl_x509_fingerprint($cert, $algo, $binary)` — the digest of the DER
  * body. That is the whole definition: a fingerprint identifies the encoded
@@ -219,8 +231,9 @@ function openssl_x509_fingerprint(OpenSSLCertificate|string $certificate, string
  *
  * @return array<string,mixed>|false
  */
-function openssl_csr_get_subject(string $csr, bool $short_names = true)
+function openssl_csr_get_subject(OpenSSLCertificateSigningRequest|string $csr, bool $short_names = true)
 {
+    if ($csr instanceof OpenSSLCertificateSigningRequest) { $csr = $csr->pem; }
     $der = \__mc_pem_der($csr, 'CERTIFICATE REQUEST');
     if ($der === '') { $der = \__mc_pem_der($csr, 'NEW CERTIFICATE REQUEST'); }
     if ($der === '') { return false; }
@@ -266,26 +279,21 @@ function __mc_x509_spki(string $der): string
 }
 
 /**
- * `openssl_pkey_get_public($public_key)` — accepts a certificate PEM or a bare
- * PUBLIC KEY PEM, as php does, and answers an opaque handle.
+ * `openssl_pkey_get_public($public_key)` — a key object, a certificate, a PUBLIC KEY
+ * PEM or a private key (its public half), as php accepts; answers an opaque handle.
  *
  * @return OpenSSLAsymmetricKey|false
  */
-function openssl_pkey_get_public(string $public_key)
+function openssl_pkey_get_public(mixed $public_key)
 {
-    $spki = \__mc_pem_der($public_key, 'PUBLIC KEY');
-    if ($spki === '') {
-        $cert = \__mc_pem_der($public_key, 'CERTIFICATE');
-        if ($cert === '') { return false; }
-        $spki = \__mc_x509_spki($cert);
-    }
-    if ($spki === '') { return false; }
-    $t = \__mc_der_tlv($spki, 0);
-    if (\count($t) === 0 || $t[0] !== 0x30) { return false; }
+    if ($public_key instanceof OpenSSLAsymmetricKey) { return new OpenSSLAsymmetricKey($public_key->spki); }
+    $pem = \__mc_ossl_pub_of($public_key);
+    if ($pem === '') { return false; }
+    $der = \__mc_pem_der(\__mc_ossl_spki_pem($pem), 'PUBLIC KEY');
+    if ($der === '') { return false; }
 
-    return new OpenSSLAsymmetricKey($spki);
+    return new OpenSSLAsymmetricKey($der);
 }
-
 /** DER wrapped as a PEM block, base64 in 64-character lines. */
 function __mc_der_pem(string $der, string $label): string
 {
@@ -300,54 +308,17 @@ function __mc_der_pem(string $der, string $label): string
 }
 
 /**
- * `openssl_pkey_get_details($key)` — php's four keys, in php's order:
- * bits, key, rsa, type. The modulus comes back with its DER sign byte stripped,
- * which is why `n` is 256 bytes for a 2048-bit key and not 257.
- *
- * Only RSA is answered; an EC or DSA key returns false rather than a wrong
- * shape, because `type` and the algorithm sub-array would both be lies.
+ * `openssl_pkey_get_details($key)` — bits, key, the per-type array (rsa / dsa / dh /
+ * ec / ed25519 / ...) and type, in php's order. A public-only handle answers the
+ * public half of the parameters.
  *
  * @return array<string,mixed>|false
  */
 function openssl_pkey_get_details(OpenSSLAsymmetricKey $key)
 {
-    $d = $key->spki;
-    $outer = \__mc_der_tlv($d, 0);
-    if (\count($outer) === 0) { return false; }
-    $alg = \__mc_der_tlv($d, $outer[1]);
-    if (\count($alg) === 0) { return false; }
-    $algOid = \__mc_der_tlv($d, $alg[1]);
-    if (\count($algOid) === 0) { return false; }
-    if (\__mc_der_oid($d, $algOid[1], $algOid[2]) !== '1.2.840.113549.1.1.1') { return false; }
-    $bitstr = \__mc_der_tlv($d, $alg[3]);
-    if (\count($bitstr) === 0 || $bitstr[0] !== 0x03) { return false; }
-    // A BIT STRING's first content byte counts the unused trailing bits; the
-    // key sequence starts after it.
-    $seq = \__mc_der_tlv($d, $bitstr[1] + 1);
-    if (\count($seq) === 0 || $seq[0] !== 0x30) { return false; }
-    $nT = \__mc_der_tlv($d, $seq[1]);
-    if (\count($nT) === 0) { return false; }
-    $eT = \__mc_der_tlv($d, $nT[3]);
-    if (\count($eT) === 0) { return false; }
-    $n = \substr($d, $nT[1], $nT[2]);
-    while (\strlen($n) > 1 && \ord($n[0]) === 0) { $n = \substr($n, 1); }
-    $e = \substr($d, $eT[1], $eT[2]);
-    while (\strlen($e) > 1 && \ord($e[0]) === 0) { $e = \substr($e, 1); }
-    // The bit length is the modulus's, counted from its top set bit.
-    $bits = (\strlen($n) - 1) * 8;
-    $top = \ord($n[0]);
-    while ($top > 0) {
-        $bits = $bits + 1;
-        $top = $top >> 1;
-    }
-    /** @var array<string,mixed> $out */
-    $out = [];
-    $out['bits'] = $bits;
-    $out['key'] = \__mc_der_pem($d, 'PUBLIC KEY');
-    $out['rsa'] = ['n' => $n, 'e' => $e];
-    $out['type'] = 0;
+    if ($key->priv !== '') { return \__mc_ossl_pkey_details($key->priv, true); }
 
-    return $out;
+    return \__mc_ossl_pkey_details(\__mc_der_pem($key->spki, 'PUBLIC KEY'), false);
 }
 
 // ── libcrypto-backed half: keys, signatures, raw RSA, certificate parse ──────
@@ -417,15 +388,24 @@ function openssl_pkey_new(?array $options = null)
     $type = 0;
     $bits = 2048;
     $curve = '';
+    $dhP = '';
+    $dhG = '';
     if ($options !== null) {
         if (isset($options['private_key_type'])) { $type = (int)$options['private_key_type']; }
         if (isset($options['private_key_bits'])) { $bits = (int)$options['private_key_bits']; }
         if (isset($options['curve_name'])) { $curve = (string)$options['curve_name']; }
+        if (isset($options['dh'])) {
+            $dh = $options['dh'];
+            if (\is_array($dh)) {
+                if (isset($dh['p'])) { $dhP = (string)$dh['p']; }
+                if (isset($dh['g'])) { $dhG = (string)$dh['g']; }
+            }
+        }
     }
     if ($type === 0 && $bits < 384) {
         throw new \ValueError('openssl_pkey_new(): Private key length must be at least 384 bits, ' . $bits . ' given');
     }
-    $priv = \__mc_ossl_pkey_new($type, $bits, $curve);
+    $priv = \__mc_ossl_pkey_new($type, $bits, $curve, $dhP, $dhG);
     if ($priv === '') { return false; }
 
     return \__mc_ossl_key_object($priv);
@@ -544,4 +524,533 @@ function openssl_x509_parse(OpenSSLCertificate|string $certificate, bool $short_
     $pem = $certificate instanceof OpenSSLCertificate ? $certificate->pem : \__mc_ossl_arg_text($certificate);
 
     return \__mc_ossl_x509_parse($pem, $short_names);
+}
+/** @return OpenSSLAsymmetricKey|false */
+function openssl_get_publickey(mixed $public_key)
+{
+    return \openssl_pkey_get_public($public_key);
+}
+
+/** @return OpenSSLAsymmetricKey|false */
+function openssl_get_privatekey(mixed $private_key, ?string $passphrase = null)
+{
+    return \openssl_pkey_get_private($private_key, $passphrase);
+}
+
+/** No-op since php 8.0: handles are objects and freed with their last reference. */
+function openssl_pkey_free(OpenSSLAsymmetricKey $key): void
+{
+}
+
+/** No-op since php 8.0. */
+function openssl_x509_free(OpenSSLCertificate $certificate): void
+{
+}
+
+/** @param array<string,mixed>|null $options */
+function openssl_pkey_export_to_file(mixed $key, string $output_filename, ?string $passphrase = null, ?array $options = null): bool
+{
+    $priv = \__mc_ossl_priv_of($key, null);
+    if ($priv === '') { return false; }
+    $pem = \__mc_ossl_priv_export($priv, $passphrase === null ? '' : $passphrase);
+    if ($pem === '') { return false; }
+
+    return \file_put_contents($output_filename, $pem) !== false;
+}
+
+function openssl_x509_export(OpenSSLCertificate|string $certificate, #[\Manticore\Attr\RefOut] ?string &$output, bool $no_text = true): bool
+{
+    $pem = $certificate instanceof OpenSSLCertificate ? $certificate->pem : \__mc_ossl_arg_text($certificate);
+    $out = \__mc_ossl_x509_export($pem, $no_text);
+    if ($out === '') { return false; }
+    $output = $out;
+
+    return true;
+}
+
+function openssl_x509_export_to_file(OpenSSLCertificate|string $certificate, string $output_filename, bool $no_text = true): bool
+{
+    $pem = $certificate instanceof OpenSSLCertificate ? $certificate->pem : \__mc_ossl_arg_text($certificate);
+    $out = \__mc_ossl_x509_export($pem, $no_text);
+    if ($out === '') { return false; }
+
+    return \file_put_contents($output_filename, $out) !== false;
+}
+
+/** 1 when the certificate was signed by the key, 0 when not, -1 on error. */
+function openssl_x509_verify(OpenSSLCertificate|string $certificate, mixed $public_key): int
+{
+    $pub = \__mc_ossl_pub_of($public_key);
+    if ($pub === '') {
+        throw new \ValueError('openssl_x509_verify(): Argument #2 ($public_key) must be a valid public key');
+    }
+    $pem = $certificate instanceof OpenSSLCertificate ? $certificate->pem : \__mc_ossl_arg_text($certificate);
+
+    return \__mc_ossl_x509_verify($pem, $pub);
+}
+
+function openssl_x509_check_private_key(OpenSSLCertificate|string $certificate, mixed $private_key): bool
+{
+    $priv = \__mc_ossl_priv_of($private_key, null);
+    if ($priv === '') {
+        throw new \ValueError('openssl_x509_check_private_key(): Argument #2 ($private_key) must be a valid private key');
+    }
+    $pem = $certificate instanceof OpenSSLCertificate ? $certificate->pem : \__mc_ossl_arg_text($certificate);
+
+    return \__mc_ossl_x509_check_key($pem, $priv);
+}
+
+/**
+ * @param string[] $ca_info files or directories of trusted certificates
+ * @return bool|int true when verified for the purpose, false when rejected, -1 on error
+ */
+function openssl_x509_checkpurpose(OpenSSLCertificate|string $certificate, int $purpose, array $ca_info = [], ?string $untrusted_certificates_file = null)
+{
+    $pem = $certificate instanceof OpenSSLCertificate ? $certificate->pem : \__mc_ossl_arg_text($certificate);
+    $extra = '';
+    if ($untrusted_certificates_file !== null) {
+        $c = \file_get_contents($untrusted_certificates_file);
+        if ($c === false) { return -1; }
+        $extra = $c;
+    }
+    $r = \__mc_ossl_x509_checkpurpose($pem, $purpose, $ca_info, $extra);
+
+    return $r < 0 ? -1 : $r === 1;
+}
+
+/** Shared secret of two keys (ECDH / X25519 / DH). */
+function openssl_pkey_derive(mixed $public_key, mixed $private_key, int $key_length = 0): string|false
+{
+    $pub = \__mc_ossl_pub_of($public_key);
+    $priv = \__mc_ossl_priv_of($private_key, null);
+    if ($pub === '' || $priv === '') {
+        throw new \ValueError('openssl_pkey_derive(): Argument #' . ($pub === '' ? '1 ($public_key)' : '2 ($private_key)') . ' must be a valid key');
+    }
+    $r = \__mc_ossl_derive($priv, $pub);
+    if ($r === false) { return false; }
+    $r = (string)$r;
+    if ($key_length > 0 && $key_length < \strlen($r)) { return \substr($r, 0, $key_length); }
+
+    return $r;
+}
+
+/** DH shared secret of the raw public value $public_key with the DH key $private_key. */
+function openssl_dh_compute_key(string $public_key, OpenSSLAsymmetricKey $private_key): string|false
+{
+    $outer = \__mc_der_tlv($private_key->spki, 0);
+    if (\count($outer) === 0) { return false; }
+    $alg = \__mc_der_tlv($private_key->spki, $outer[1]);
+    if (\count($alg) === 0) { return false; }
+    // Same AlgorithmIdentifier (the DH parameters), the peer's value as the key.
+    $algRaw = \substr($private_key->spki, $outer[1], $alg[3] - $outer[1]);
+    $bits = \__mc_ossl_der(3, "\0" . \__mc_ossl_der_uint($public_key));
+    $peer = \__mc_ossl_pem(\__mc_ossl_der(0x30, $algRaw . $bits), 'PUBLIC KEY');
+    if ($private_key->priv === '') { return false; }
+    $r = \__mc_ossl_derive($private_key->priv, $peer);
+
+    return $r === false ? false : (string)$r;
+}
+
+// ── CSR ───────────────────────────────────────────────────────────────────
+
+/** Reject the options that need an openssl.cnf, which this build has no parser for. @param array<string,mixed> $options */
+function __mc_ossl_no_config(string $fn, array $options): void
+{
+    foreach (['config', 'req_extensions', 'x509_extensions'] as $k) {
+        if (isset($options[$k])) {
+            throw new \ValueError($fn . '(): the "' . $k . '" option is not supported (no openssl.cnf support)');
+        }
+    }
+}
+
+function __mc_ossl_csr_pem(OpenSSLCertificateSigningRequest|string $csr): string
+{
+    return $csr instanceof OpenSSLCertificateSigningRequest ? $csr->pem : \__mc_ossl_arg_text($csr);
+}
+
+/**
+ * `openssl_csr_new($dn, &$private_key, $options)` — signs a request for $dn with the
+ * given key, or with a fresh one (RSA 2048 unless `private_key_bits` / `private_key_type`
+ * / `curve_name` say otherwise) that is stored back into $private_key.
+ *
+ * @param array<string,mixed> $distinguished_names
+ * @param array<string,mixed>|null $options
+ * @param array<string,mixed>|null $extra_attributes
+ * @return OpenSSLCertificateSigningRequest|false
+ */
+function openssl_csr_new(array $distinguished_names, mixed &$private_key, ?array $options = null, ?array $extra_attributes = null)
+{
+    if ($options !== null) { \__mc_ossl_no_config('openssl_csr_new', $options); }
+    if ($extra_attributes !== null && \count($extra_attributes) > 0) {
+        throw new \ValueError('openssl_csr_new(): Argument #4 ($extra_attributes) is not supported');
+    }
+    $priv = $private_key === null ? '' : \__mc_ossl_priv_of($private_key, null);
+    if ($priv === '') {
+        $k = \openssl_pkey_new($options);
+        if ($k === false) { return false; }
+        $private_key = $k;
+        $priv = $k->priv;
+    }
+    $digest = 'sha256';
+    if ($options !== null && isset($options['digest_alg'])) { $digest = (string)$options['digest_alg']; }
+    /** @var array<string,string> $dn */
+    $dn = [];
+    foreach ($distinguished_names as $name => $value) { $dn[(string)$name] = (string)$value; }
+    $pem = \__mc_ossl_csr_new($dn, $priv, $digest);
+    if ($pem === '') { return false; }
+
+    return new OpenSSLCertificateSigningRequest($pem);
+}
+
+function openssl_csr_export(OpenSSLCertificateSigningRequest|string $csr, #[\Manticore\Attr\RefOut] ?string &$output, bool $no_text = true): bool
+{
+    $out = \__mc_ossl_csr_export(\__mc_ossl_csr_pem($csr), $no_text);
+    if ($out === '') { return false; }
+    $output = $out;
+
+    return true;
+}
+
+function openssl_csr_export_to_file(OpenSSLCertificateSigningRequest|string $csr, string $output_filename, bool $no_text = true): bool
+{
+    $out = \__mc_ossl_csr_export(\__mc_ossl_csr_pem($csr), $no_text);
+    if ($out === '') { return false; }
+
+    return \file_put_contents($output_filename, $out) !== false;
+}
+
+/** @return OpenSSLAsymmetricKey|false */
+function openssl_csr_get_public_key(OpenSSLCertificateSigningRequest|string $csr, bool $short_names = true)
+{
+    $spki = \__mc_ossl_csr_pubkey(\__mc_ossl_csr_pem($csr));
+    if ($spki === '') { return false; }
+
+    return new OpenSSLAsymmetricKey(\__mc_pem_der($spki, 'PUBLIC KEY'));
+}
+
+/**
+ * `openssl_csr_sign($csr, $ca, $key, $days, $options, $serial)` — a certificate for the
+ * request, issued by $ca (self-signed when null) under $private_key.
+ *
+ * @param array<string,mixed>|null $options
+ * @return OpenSSLCertificate|false
+ */
+function openssl_csr_sign(OpenSSLCertificateSigningRequest|string $csr, OpenSSLCertificate|string|null $ca_certificate, mixed $private_key, int $days, ?array $options = null, int $serial = 0)
+{
+    if ($options !== null) { \__mc_ossl_no_config('openssl_csr_sign', $options); }
+    $priv = \__mc_ossl_priv_of($private_key, null);
+    if ($priv === '') {
+        throw new \ValueError('openssl_csr_sign(): Argument #3 ($private_key) must be a valid private key');
+    }
+    $ca = '';
+    if ($ca_certificate !== null) {
+        $ca = $ca_certificate instanceof OpenSSLCertificate ? $ca_certificate->pem : \__mc_ossl_arg_text($ca_certificate);
+    }
+    $digest = 'sha256';
+    if ($options !== null && isset($options['digest_alg'])) { $digest = (string)$options['digest_alg']; }
+    $pem = \__mc_ossl_csr_sign(\__mc_ossl_csr_pem($csr), $ca, $priv, $days, $digest, $serial);
+    if ($pem === '') { return false; }
+
+    return new OpenSSLCertificate($pem);
+}
+
+// ── seal / open ───────────────────────────────────────────────────────────
+
+/**
+ * `openssl_seal` — a random session key encrypts $data under $cipher_algo and is itself
+ * RSA-encrypted (PKCS#1 v1.5) for every public key, exactly what EVP_Seal does.
+ *
+ * @param string[] $encrypted_keys
+ * @param array<int,mixed> $public_key
+ */
+function openssl_seal(string $data, #[\Manticore\Attr\RefOut] ?string &$sealed_data, #[\Manticore\Attr\RefOut] ?array &$encrypted_keys, array $public_key, string $cipher_algo, #[\Manticore\Attr\RefOut] ?string &$iv = null): int|false
+{
+    if (\count($public_key) === 0) {
+        throw new \ValueError('openssl_seal(): Argument #4 ($public_key) cannot be empty');
+    }
+    $keyLen = \openssl_cipher_key_length($cipher_algo);
+    $ivLen = \openssl_cipher_iv_length($cipher_algo);
+    $key = \random_bytes((int)$keyLen);
+    $ivBytes = $ivLen > 0 ? \random_bytes((int)$ivLen) : '';
+    $sealed = \openssl_encrypt($data, $cipher_algo, $key, 1, $ivBytes);
+    if ($sealed === false) { return false; }
+    /** @var string[] $keys */
+    $keys = [];
+    foreach ($public_key as $pk) {
+        $pem = \__mc_ossl_pub_of($pk);
+        if ($pem === '') {
+            throw new \ValueError('openssl_seal(): Argument #4 ($public_key) must contain only valid public keys');
+        }
+        $ek = \__mc_ossl_rsa(0, $key, $pem, 1);
+        if ($ek === false) { return false; }
+        $keys[] = (string)$ek;
+    }
+    $sealed_data = (string)$sealed;
+    $encrypted_keys = $keys;
+    $iv = $ivBytes;
+
+    return \strlen((string)$sealed);
+}
+
+function openssl_open(string $data, #[\Manticore\Attr\RefOut] ?string &$output, string $encrypted_key, mixed $private_key, string $cipher_algo, ?string $iv = null): bool
+{
+    $priv = \__mc_ossl_priv_of($private_key, null);
+    if ($priv === '') {
+        throw new \ValueError('openssl_open(): Argument #4 ($private_key) must be a valid private key');
+    }
+    $ivLen = (int)\openssl_cipher_iv_length($cipher_algo);
+    if ($ivLen > 0 && ($iv === null || \strlen($iv) === 0)) {
+        throw new \ValueError('openssl_open(): Argument #6 ($iv) cannot be null for the chosen cipher algorithm');
+    }
+    $key = \__mc_ossl_rsa(1, $encrypted_key, $priv, 1);
+    if ($key === false) { return false; }
+    $plain = \openssl_decrypt($data, $cipher_algo, (string)$key, 1, $ivLen > 0 ? (string)$iv : '');
+    if ($plain === false) { return false; }
+    $output = (string)$plain;
+
+    return true;
+}
+
+// ── SPKAC ─────────────────────────────────────────────────────────────────
+
+/** `SPKAC=<base64>` for the key and challenge. */
+function openssl_spki_new(mixed $private_key, string $challenge, int $digest_algo = 2): string|false
+{
+    $priv = \__mc_ossl_priv_of($private_key, null);
+    if ($priv === '') {
+        throw new \ValueError('openssl_spki_new(): Argument #1 ($private_key) must be a valid private key');
+    }
+    $r = \__mc_ossl_spki_new($priv, $challenge, \__mc_ossl_algo_name('openssl_spki_new', $digest_algo));
+
+    return $r === '' ? false : $r;
+}
+
+function openssl_spki_verify(string $spki): bool
+{
+    return \__mc_ossl_spki_verify($spki);
+}
+
+function openssl_spki_export(string $spki): string|false
+{
+    $r = \__mc_ossl_spki_export($spki);
+
+    return $r === '' ? false : $r;
+}
+
+function openssl_spki_export_challenge(string $spki): string|false
+{
+    $r = \__mc_ossl_spki_challenge($spki);
+
+    return $r === false ? false : (string)$r;
+}
+
+// ── PKCS#12 ───────────────────────────────────────────────────────────────
+
+/** The PEM of every certificate named by $extracerts (a PEM string, array of them, or a file). */
+function __mc_ossl_cert_bundle(mixed $certs): string
+{
+    if ($certs instanceof OpenSSLCertificate) { return $certs->pem; }
+    if (\is_string($certs)) { return \__mc_ossl_arg_text($certs); }
+    if (\is_array($certs)) {
+        $out = '';
+        foreach ($certs as $c) { $out = $out . \__mc_ossl_cert_bundle($c); }
+
+        return $out;
+    }
+
+    return '';
+}
+
+/** @param array<string,mixed>|null $options */
+function __mc_ossl_p12_blob(mixed $certificate, mixed $private_key, string $passphrase, ?array $options): string
+{
+    $cert = \__mc_ossl_cert_bundle($certificate);
+    $priv = \__mc_ossl_priv_of($private_key, null);
+    if ($cert === '' || $priv === '') {
+        throw new \ValueError('openssl_pkcs12_export(): the certificate and private key must be valid');
+    }
+    $friendly = '';
+    $extra = '';
+    if ($options !== null) {
+        if (isset($options['friendly_name'])) { $friendly = (string)$options['friendly_name']; }
+        if (isset($options['extracerts'])) { $extra = \__mc_ossl_cert_bundle($options['extracerts']); }
+    }
+
+    return \__mc_ossl_p12_export($cert, $priv, $passphrase, $friendly, $extra);
+}
+
+/** @param array<string,mixed>|null $options */
+function openssl_pkcs12_export(mixed $certificate, #[\Manticore\Attr\RefOut] ?string &$output, mixed $private_key, string $passphrase, array $options = []): bool
+{
+    $der = \__mc_ossl_p12_blob($certificate, $private_key, $passphrase, $options);
+    if ($der === '') { return false; }
+    $output = $der;
+
+    return true;
+}
+
+/** @param array<string,mixed> $options */
+function openssl_pkcs12_export_to_file(mixed $certificate, string $output_filename, mixed $private_key, string $passphrase, array $options = []): bool
+{
+    $der = \__mc_ossl_p12_blob($certificate, $private_key, $passphrase, $options);
+    if ($der === '') { return false; }
+
+    return \file_put_contents($output_filename, $der) !== false;
+}
+
+/** @param array<string,mixed> $certificates */
+function openssl_pkcs12_read(string $pkcs12, #[\Manticore\Attr\RefOut] ?array &$certificates, string $passphrase): bool
+{
+    $r = \__mc_ossl_p12_read($pkcs12, $passphrase);
+    if (\count($r) === 0) { return false; }
+    $certificates = $r;
+
+    return true;
+}
+
+// ── PKCS#7 ────────────────────────────────────────────────────────────────
+
+/** php writes the caller's headers ("Key: value" lines) ahead of the S-MIME body. @param array<int|string,string>|null $headers */
+function __mc_ossl_p7_headers(?array $headers): string
+{
+    $out = '';
+    if ($headers === null) { return $out; }
+    foreach ($headers as $k => $v) {
+        $out = $out . (\is_int($k) ? (string)$v : $k . ': ' . $v) . "\n";
+    }
+
+    return $out;
+}
+
+/** @param array<int|string,string>|null $headers */
+function openssl_pkcs7_sign(string $input_filename, string $output_filename, OpenSSLCertificate|string $certificate, mixed $private_key, ?array $headers, int $flags = 64, ?string $untrusted_certificates_filename = null): bool
+{
+    $data = \file_get_contents($input_filename);
+    if ($data === false) { return false; }
+    $priv = \__mc_ossl_priv_of($private_key, null);
+    if ($priv === '') {
+        throw new \ValueError('openssl_pkcs7_sign(): Argument #4 ($private_key) must be a valid private key');
+    }
+    $extra = '';
+    if ($untrusted_certificates_filename !== null) {
+        $c = \file_get_contents($untrusted_certificates_filename);
+        if ($c === false) { return false; }
+        $extra = $c;
+    }
+    $smime = \__mc_ossl_p7_sign($data, \__mc_ossl_cert_bundle($certificate), $priv, $extra, $flags);
+    if ($smime === '') { return false; }
+
+    return \file_put_contents($output_filename, \__mc_ossl_p7_headers($headers) . $smime) !== false;
+}
+
+/**
+ * @param array<int,string> $ca_info
+ * @return bool|int true when the signature verifies, false when not, -1 on error
+ */
+function openssl_pkcs7_verify(string $input_filename, int $flags, ?string $signers_certificates_filename = null, array $ca_info = [], ?string $untrusted_certificates_filename = null, ?string $content = null, ?string $output_filename = null)
+{
+    $smime = \file_get_contents($input_filename);
+    if ($smime === false) { return -1; }
+    $untrusted = '';
+    if ($untrusted_certificates_filename !== null) {
+        $c = \file_get_contents($untrusted_certificates_filename);
+        if ($c === false) { return -1; }
+        $untrusted = $c;
+    }
+    $r = \__mc_ossl_p7_verify($smime, $flags, $ca_info, $untrusted, '');
+    $status = (int)$r[0];
+    if ($status === 1) {
+        if ($signers_certificates_filename !== null) {
+            \file_put_contents($signers_certificates_filename, (string)$r[2]);
+        }
+        // $content is where the verified data (signature stripped) goes. php also names an
+        // $output_filename and leaves it empty for a successful verification, so it is not written.
+        if ($content !== null) {
+            \file_put_contents($content, (string)$r[1]);
+        }
+    }
+    return $status < 0 ? -1 : $status === 1;
+}
+
+/**
+ * @param OpenSSLCertificate|string|array<int,mixed> $certificate
+ * @param array<int|string,string>|null $headers
+ */
+function openssl_pkcs7_encrypt(string $input_filename, string $output_filename, mixed $certificate, ?array $headers, int $flags = 0, int $cipher_algo = 5): bool
+{
+    $data = \file_get_contents($input_filename);
+    if ($data === false) { return false; }
+    /** @var array<int,string> $names */
+    $names = [0 => 'rc2-40-cbc', 1 => 'rc2-cbc', 2 => 'rc2-64-cbc', 3 => 'des-cbc', 4 => 'des-ede3-cbc',
+              5 => 'aes-128-cbc', 6 => 'aes-192-cbc', 7 => 'aes-256-cbc'];
+    if (!isset($names[$cipher_algo])) {
+        throw new \ValueError('openssl_pkcs7_encrypt(): Argument #6 ($cipher_algo) must be a valid cipher algorithm');
+    }
+    /** @var string[] $pems */
+    $pems = [];
+    if (\is_array($certificate)) {
+        foreach ($certificate as $c) { $pems[] = \__mc_ossl_cert_bundle($c); }
+    } else {
+        $pems[] = \__mc_ossl_cert_bundle($certificate);
+    }
+    $smime = \__mc_ossl_p7_encrypt($data, $pems, $names[$cipher_algo], $flags);
+    if ($smime === '') { return false; }
+
+    return \file_put_contents($output_filename, \__mc_ossl_p7_headers($headers) . $smime) !== false;
+}
+
+function openssl_pkcs7_decrypt(string $input_filename, string $output_filename, OpenSSLCertificate|string $certificate, mixed $private_key = null): bool
+{
+    $smime = \file_get_contents($input_filename);
+    if ($smime === false) { return false; }
+    $pem = \__mc_ossl_cert_bundle($certificate);
+    $priv = \__mc_ossl_priv_of($private_key === null ? $certificate : $private_key, null);
+    if ($priv === '') { return false; }
+    $plain = \__mc_ossl_p7_decrypt($smime, $pem, $priv);
+    if ($plain === false) { return false; }
+
+    return \file_put_contents($output_filename, (string)$plain) !== false;
+}
+
+/**
+ * `openssl_pkcs7_read($data, &$certificates)` — the certificates of a PEM PKCS#7
+ * SignedData, read straight from the DER (SignedData's `[0] certificates` field).
+ *
+ * @param string[] $certificates
+ */
+function openssl_pkcs7_read(string $data, #[\Manticore\Attr\RefOut] ?array &$certificates): bool
+{
+    $der = \__mc_pem_der($data, 'PKCS7');
+    if ($der === '') { $der = \__mc_pem_der($data, 'CERTIFICATE'); }
+    if ($der === '') { return false; }
+    $ci = \__mc_der_tlv($der, 0);                       // ContentInfo
+    if (\count($ci) === 0) { return false; }
+    $oid = \__mc_der_tlv($der, $ci[1]);
+    if (\count($oid) === 0) { return false; }
+    $wrap = \__mc_der_tlv($der, $oid[3]);              // [0] EXPLICIT
+    if (\count($wrap) === 0) { return false; }
+    $sd = \__mc_der_tlv($der, $wrap[1]);               // SignedData
+    if (\count($sd) === 0) { return false; }
+    /** @var string[] $out */
+    $out = [];
+    $p = $sd[1];
+    $end = $sd[1] + $sd[2];
+    while ($p < $end) {
+        $t = \__mc_der_tlv($der, $p);
+        if (\count($t) === 0) { return false; }
+        if ($t[0] === 0xA0) {                           // [0] IMPLICIT certificates
+            $q = $t[1];
+            $qEnd = $t[1] + $t[2];
+            while ($q < $qEnd) {
+                $c = \__mc_der_tlv($der, $q);
+                if (\count($c) === 0) { return false; }
+                $out[] = \__mc_der_pem(\substr($der, $q, $c[3] - $q), 'CERTIFICATE');
+                $q = $c[3];
+            }
+        }
+        $p = $t[3];
+    }
+    $certificates = $out;
+
+    return true;
 }
