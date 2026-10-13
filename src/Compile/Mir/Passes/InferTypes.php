@@ -1342,7 +1342,7 @@ final class InferTypes implements Pass
                 $vk = $se->value->type->kind;
                 // A definitely-mixed stored value (a `mixed` param / cell):
                 // the slot holds NaN-boxed cells.
-                if ($vk === Type::KIND_CELL && $se->index->kind !== Node::KIND_NULL_CONST) {
+                if ($vk === Type::KIND_CELL) {
                     $this->cellElemPropsFound[$key] = true;
                 }
                 // Element stores of DIFFERENT representations (append included):
