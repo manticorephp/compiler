@@ -693,7 +693,7 @@ trait EmitLlvmControl
         $el = $at->element;
         if (!$fe->ownCoOwn && ($el === null || $el->kind === Type::KIND_UNKNOWN
             || $el->kind === Type::KIND_CELL || $this->own->flavorOf($el) > 0)) { return ''; }
-        if ($fe->keyVar !== null && !$at->isVec()) { return ''; }
+        if ($fe->keyVar !== null && !$at->isVec() && !$this->litKeysAreConstants($fe->array)) { return ''; }
         // A literal holds one reference on each array element (a fresh one
         // transferred, a borrowed one retained); `vecbuf` is the ARGUMENT
         // answer, where the call gives those back. Here nobody else does: the
@@ -703,6 +703,24 @@ trait EmitLlvmControl
             return $this->nestedArrFlavor($el, $at->isAssoc() ? 'assoc' : 'vec');
         }
         return $this->freshRcArgFlavor($fe->array);
+    }
+
+    /**
+     * A literal whose every key is written out as a constant: the key the loop
+     * hands out is a static string or an int, which outlives the array, so the
+     * loop may release it. Refused, `foreach (['a' => [..]] as $k => $v)` leaked
+     * the literal on every pass.
+     */
+    private function litKeysAreConstants(Node $n): bool
+    {
+        if (!($n instanceof \Compile\Mir\ArrayLit)) { return false; }
+        foreach ($n->elements as $el) {
+            $k = $el->key;
+            if ($k === null || ($k->kind !== Node::KIND_STRING_CONST && $k->kind !== Node::KIND_INT_CONST)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = '', string $flavor = ''): string
