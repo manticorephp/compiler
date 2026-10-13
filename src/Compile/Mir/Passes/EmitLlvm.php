@@ -795,6 +795,7 @@ final class EmitLlvm implements EmitVisitor
             // asm + @__mir_current_fiber (mirrors the needsExceptions pre-scan).
             if ($fn->name === '__mc_fiber_run') { $this->rt->needsFibers = true; }
         }
+        $this->propagateEscapingRefParams($module);
         // Pre-scan for `$gen->throw($e)`: a yield resume point must check for
         // an injected exception. Must be known BEFORE emitting any generator
         // body (emitYield emits the check inline). Over-triggering on a user
@@ -4088,6 +4089,93 @@ final class EmitLlvm implements EmitVisitor
             if ($p->byRef && isset($names[$p->name])) { $this->escapingRefParams[$fn->name][$i] = true; }
             $i = $i + 1;
         }
+    }
+
+    /**
+     * A by-ref param handed on BY REF to a param that escapes escapes too:
+     * symfony's `get()` → `doGet($id, $b, &$inline = null)` → `createService(…,
+     * $inline)` → `doResolveServices(…, $inline)`, whose generator captures it.
+     * The omitted default is backed where `doGet` is called, so that is the frame
+     * whose slot must be a box. Fixpoint over the module's direct calls.
+     */
+    private function propagateEscapingRefParams(Module $module): void
+    {
+        if ($this->escapingRefParams === []) { return; }
+        $changed = true;
+        $guard = 0;
+        while ($changed && $guard < 16) {
+            $changed = false;
+            $guard = $guard + 1;
+            foreach ($module->functions as $fn) {
+                /** @var array<string, int> $refIdx */
+                $refIdx = [];
+                $i = 0;
+                foreach ($fn->params as $p) {
+                    if ($p->byRef && !isset($this->escapingRefParams[$fn->name][$i])) { $refIdx[$p->name] = $i; }
+                    $i = $i + 1;
+                }
+                if ($refIdx === []) { continue; }
+                /** @var array<string, bool> $hit */
+                $hit = [];
+                $this->escapingRefArgs($fn->body, $refIdx, $hit);
+                foreach ($hit as $name => $_) {
+                    $this->escapingRefParams[$fn->name][$refIdx[$name]] = true;
+                    $changed = true;
+                }
+            }
+        }
+    }
+
+    /**
+     * Which of `$refIdx`'s locals `$n` passes as a bare variable to an escaping
+     * by-ref param of a directly resolvable callee.
+     * @param array<string, int> $refIdx @param array<string, bool> $hit
+     */
+    private function escapingRefArgs(Node $n, array $refIdx, array &$hit): void
+    {
+        $key = '';
+        $off = 0;
+        $args = [];
+        if ($n->kind === Node::KIND_CALL) {
+            $key = $this->escCallKey($n);
+            $args = $this->escArgs;
+        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $key = $this->escStaticKey($n);
+            $args = $this->escArgs;
+        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
+            $key = $this->escMethodKey($n);
+            $args = $this->escArgs;
+            $off = 1;
+        }
+        if ($key !== '' && isset($this->escapingRefParams[$key])) {
+            foreach ($args as $ai => $a) {
+                if ($a->kind === Node::KIND_LOAD_LOCAL && isset($refIdx[$a->name])
+                    && ($this->escapingRefParams[$key][(int)$ai + $off] ?? false)) {
+                    $hit[$a->name] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->escapingRefArgs($c, $refIdx, $hit); }
+    }
+
+    /** @var Node[] the args of the call the last esc*Key read */
+    private array $escArgs = [];
+
+    private function escCallKey(\Compile\Mir\Call $c): string { $this->escArgs = $c->args; return $c->function; }
+
+    private function escStaticKey(\Compile\Mir\StaticCall_ $c): string
+    {
+        $this->escArgs = $c->args;
+        $cls = $this->resolveMethodClass($c->class, $c->method);
+        return ($cls !== '' ? $cls : $c->class) . '__' . $c->method;
+    }
+
+    private function escMethodKey(\Compile\Mir\MethodCall_ $c): string
+    {
+        $this->escArgs = $c->args;
+        $rc = $c->object->type->class ?? '';
+        $cls = $rc !== '' ? $this->resolveMethodClass($rc, $c->method) : '';
+        return $cls !== '' ? $cls . '__' . $c->method : '';
     }
 
     private function bodyHasClosure(Node $n): bool
