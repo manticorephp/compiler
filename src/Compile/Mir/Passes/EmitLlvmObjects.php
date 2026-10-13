@@ -6127,6 +6127,16 @@ trait EmitLlvmObjects
                         $out .= $this->arrayBaseToPtr($aa->array->type);
                     }
                     $arrPtr = $this->lastValue;
+                    // An ABSENT nested parent stays absent: the write-back below
+                    // would otherwise create the key php's unset never creates.
+                    $nestedEndL = '';
+                    if ($aa->array->kind === Node::KIND_ARRAY_ACCESS) {
+                        $nIsNull = $this->ssa->allocReg();
+                        $nestedDoL = $this->ssa->allocLabel('unset.do');
+                        $nestedEndL = $this->ssa->allocLabel('unset.nend');
+                        $out .= '  ' . $nIsNull . ' = icmp eq ptr ' . $arrPtr . ", null\n";
+                        $out .= '  br i1 ' . $nIsNull . ', label %' . $nestedEndL . ', label %' . $nestedDoL . "\n" . $nestedDoL . ":\n";
+                    }
                     $keyIsCell = $this->keyRidesCellChannel($aa->index);
                     $keyIsString = $aa->index->type->kind === Type::KIND_STRING
                         || $aa->index->kind === Node::KIND_STRING_CONST;
@@ -6196,6 +6206,9 @@ trait EmitLlvmObjects
                         $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                     }
                     if ($dropFlavor !== '') { $out .= $this->elemSlotReleaseIr($curE, $dropFlavor, $dropArr); }
+                    if ($nestedEndL !== '') {
+                        $out .= '  br label %' . $nestedEndL . "\n" . $nestedEndL . ":\n";
+                    }
                 }
                 if ($uEndL !== '') {
                     $out .= '  br label %' . $uEndL . "\n" . $uEndL . ":\n";
