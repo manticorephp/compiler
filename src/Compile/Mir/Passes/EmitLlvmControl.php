@@ -705,21 +705,6 @@ trait EmitLlvmControl
         return $this->freshRcArgFlavor($fe->array);
     }
 
-    /**
-     * The pairwise release of a {@see foreachBodyMutatesBase} snapshot, or ''
-     * when no flavor is known (the copy then stays a bounded leak rather than
-     * dropping refs it may not hold). An erased / cell base and a cell element
-     * walk by the buffer's hint, as the copy's adopt does.
-     */
-    private function snapshotReleaseFlavor(Type $at, string $baseKind): string
-    {
-        if ($baseKind === Type::KIND_CELL || $baseKind === Type::KIND_UNKNOWN) { return 'veccellown'; }
-        if (!$at->isArray()) { return ''; }
-        $el = $at->element;
-        if ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN) { return 'veccellown'; }
-        return $this->discardReleaseFlavor($at);
-    }
-
     private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = '', string $flavor = ''): string
     {
         $out = '';
@@ -1643,9 +1628,7 @@ trait EmitLlvmControl
         // SNAPSHOT of a by-value foreach, so the deletions do not disturb the
         // walk. That is not free here: an unset on a packed buffer promotes it
         // to the hashed layout, which RELOCATES, and the loop would keep
-        // walking the freed base. Copy up front for this shape only; the copy
-        // is a bounded leak (conservative direction — never free a buffer the
-        // body may still hand out).
+        // walking the freed base. Copy up front for this shape only.
         $snapSlot = '';
         $snapFlavor = '';
         if ($this->foreachBodyMutatesBase($fe)) {
@@ -1653,15 +1636,17 @@ trait EmitLlvmControl
             $out .= '  ' . $snap . ' = call ptr @__mir_array_copy(ptr ' . $arr . ")\n";
             $arr = $snap;
             // The copy is a VALUE copy that owns its element refs: the loop gives
-            // it back at its end and on every jump out, pairwise like its adopt.
-            $snapFlavor = $this->snapshotReleaseFlavor($fe->array->type, $bk);
-            if ($snapFlavor !== '') {
-                $snapSlot = $this->ssa->allocReg();
-                $out .= '  ' . $snapSlot . " = alloca i64\n";
-                $sw = $this->ssa->allocReg();
-                $out .= '  ' . $sw . ' = ptrtoint ptr ' . $snap . " to i64\n";
-                $out .= '  store i64 ' . $sw . ', ptr ' . $snapSlot . "\n";
-            }
+            // it back at its end and on every jump out. `__mir_array_copy` adopts
+            // by the buffer's hint, else by its repr bits, so only the plain
+            // release mirrors it. A static flavor (`_ownel_cell`) dropped every
+            // element of an unstamped buffer the copy had adopted none of:
+            // `foreach ((array) $obj …)` with a write freed the object's arrays.
+            $snapFlavor = 'vec';
+            $snapSlot = $this->ssa->allocReg();
+            $out .= '  ' . $snapSlot . " = alloca i64\n";
+            $sw = $this->ssa->allocReg();
+            $out .= '  ' . $sw . ' = ptrtoint ptr ' . $snap . " to i64\n";
+            $out .= '  store i64 ' . $sw . ', ptr ' . $snapSlot . "\n";
         }
         // Empty vec/assoc literals lower to a null ptr; reading the length
         // word from null faults. Redirect a null base to a shared zero word
