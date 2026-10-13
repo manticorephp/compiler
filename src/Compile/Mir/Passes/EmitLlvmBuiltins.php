@@ -90,8 +90,12 @@ trait EmitLlvmBuiltins
      */
     private bool $cellifyMoveBlocked = false;
 
+    /** Line of the builtin call being emitted: the line its trace frame reports. */
+    private int $btCallLine = 0;
+
     private function emitBuiltin(Call $c): ?string
     {
+        $this->btCallLine = $c->line;
         $mark = \count($this->arrArgTempRegs);
         $ir = $this->emitBuiltinDispatch($c);
         if ($ir === null) { $this->dropArrArgTempsFrom($mark); return null; }
@@ -163,6 +167,22 @@ trait EmitLlvmBuiltins
         if ($f !== '' && \str_starts_with($reg, '%')) {
             $this->arrArgTempRegs[] = $reg;
             $this->arrArgTempFlavors[] = $f;
+        }
+        return $out;
+    }
+
+    /**
+     * A fresh OBJECT argument a builtin only inspects (`gettype(mk())`): registered
+     * so it is given back right after the builtin, as php does, not at statement end.
+     * Call straight after emitting `$a`; leaves lastValue the same word as a ptr.
+     */
+    private function regFreshObjArg(Node $a): string
+    {
+        if ($a->type->kind !== Type::KIND_OBJ || $this->freshRcArgFlavor($a) !== 'obj') { return ''; }
+        $out = $this->coerceToPtr();
+        if (\str_starts_with($this->lastValue, '%')) {
+            $this->arrArgTempRegs[] = $this->lastValue;
+            $this->arrArgTempFlavors[] = 'obj';
         }
         return $out;
     }
@@ -3852,14 +3872,14 @@ trait EmitLlvmBuiltins
         $out .= $this->emitNode($args[1]); $out .= $this->coerceIntArg($args[1]); $b = $this->lastValue;
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = icmp eq i64 ' . $b . ", 0\n";
-        $out .= $this->emitThrowIf($z, 'DivisionByZeroError', 'Division by zero');
+        $out .= $this->emitThrowIf($z, 'DivisionByZeroError', 'Division by zero', 'intdiv');
         $m1 = $this->ssa->allocReg();
         $out .= '  ' . $m1 . ' = icmp eq i64 ' . $b . ", -1\n";
         $mn = $this->ssa->allocReg();
         $out .= '  ' . $mn . ' = icmp eq i64 ' . $a . ", -9223372036854775808\n";
         $ovf = $this->ssa->allocReg();
         $out .= '  ' . $ovf . ' = and i1 ' . $m1 . ', ' . $mn . "\n";
-        $out .= $this->emitThrowIf($ovf, 'ArithmeticError', 'Division of PHP_INT_MIN by -1 is not an integer');
+        $out .= $this->emitThrowIf($ovf, 'ArithmeticError', 'Division of PHP_INT_MIN by -1 is not an integer', 'intdiv');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = sdiv i64 ' . $a . ', ' . $b . "\n";
         return $this->finishI64($out, $reg);
@@ -4346,6 +4366,7 @@ trait EmitLlvmBuiltins
                 && ($kind === Type::KIND_NULL || $kind === $ak))
             || ($ak === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
             $out = $this->emitNode($a);
+            $out .= $this->regFreshObjArg($a);
             $out .= $this->coerceToI64();
             $pred = $kind === Type::KIND_NULL ? 'eq' : 'ne';
             $cmp = $this->ssa->allocReg();
@@ -4369,6 +4390,13 @@ trait EmitLlvmBuiltins
             $out = $this->emitNode($a);
             $out .= $this->coerceToI64();
             $v = $this->lastValue;
+            // A fresh `mixed` result tested for object-ness is given back right after
+            // the test ({@see SpillFreshBases::emitterReleasesObjArg}).
+            if ($kind === Type::KIND_OBJ && $a->type->kind === Type::KIND_CELL
+                && \str_starts_with($v, '%') && $this->freshRcArgFlavor($a) === 'cell') {
+                $this->arrArgTempRegs[] = $v;
+                $this->arrArgTempFlavors[] = 'cell';
+            }
             $slot = $this->ssa->allocReg();
             $out .= '  ' . $slot . " = alloca i64\n";
             $out .= '  store i64 0, ptr ' . $slot . "\n";
@@ -4549,6 +4577,7 @@ trait EmitLlvmBuiltins
                 $objName = $debug ? 'resource (stream)' : 'resource';
             }
             $out = $this->emitNode($a);
+            $out .= $this->regFreshObjArg($a);
             $out .= $this->coerceToI64();
             $isN = $this->ssa->allocReg();
             $out .= '  ' . $isN . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
@@ -4837,7 +4866,7 @@ trait EmitLlvmBuiltins
         $n = $this->lastValue;
         $neg = $this->ssa->allocReg();
         $out .= '  ' . $neg . ' = icmp slt i64 ' . $n . ", 0\n";
-        $out .= $this->emitThrowIf($neg, 'ValueError', 'str_repeat(): Argument #2 ($times) must be greater than or equal to 0');
+        $out .= $this->emitThrowIf($neg, 'ValueError', 'str_repeat(): Argument #2 ($times) must be greater than or equal to 0', 'str_repeat');
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_str_repeat(ptr ' . $s . ', i64 ' . $n . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
