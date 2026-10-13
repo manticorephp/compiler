@@ -361,6 +361,7 @@ trait InferNodes
         $this->strLitKeyLocals = [];
         $this->cellElemLocals = [];
         $this->assocValClasses = [];
+        $this->byRefFeBind = [];
         $this->emptyArrValLocals = [];
         $this->nestedScalarStoreLocals = [];
         $this->nestedCellVecLocals = [];

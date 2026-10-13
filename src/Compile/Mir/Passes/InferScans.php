@@ -2643,6 +2643,10 @@ trait InferScans
     /** The per-node half of the container-shape scan — see {@see scanLocalShapes}. */
     private function scanAssocNode(Node $n): void
     {
+        if ($n->kind === Node::KIND_FOREACH) {
+            $fe = $n;
+            if ($fe->byRef && $fe->array->kind === Node::KIND_LOAD_LOCAL) { $this->byRefFeBind[$fe->valueVar] = $fe->array->name; }
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
@@ -2693,6 +2697,17 @@ trait InferScans
                 }
             }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
+            // `foreach ($a as &$v) { $v = X; }` writes X into $a's element.
+            $bsl = $n;
+            if (isset($this->byRefFeBind[$bsl->name])) {
+                $bcls = $this->coarseValueClass($bsl->value);
+                $barr = $this->byRefFeBind[$bsl->name];
+                if ($bcls !== '') {
+                    if (!isset($this->assocValClasses[$barr])) { $this->assocValClasses[$barr] = []; }
+                    $this->assocValClasses[$barr][$bcls] = true;
+                }
+                $this->recordDisqualified[$barr] = true;
+            }
             // Seed the value-class set from an array-LITERAL assignment too, so a
             // later differing store promotes to a cell element: `$r = [1,2]` (num)
             // then `$r[0] = "a"` (string) is a genuinely mixed array — without the
