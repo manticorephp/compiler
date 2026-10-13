@@ -1576,7 +1576,11 @@ trait InferNodes
                 $this->localTypes = $saved;
                 $this->narrowFromNegatedCond($node->cond);
             } else {
-                $this->localTypes = $this->mergeLocals($saved, $thenLocals);
+                // A guard narrows the READ, not the slot: past the merge an
+                // unstored local is what it entered as ({@see unnarrowedSlots}).
+                // Joined narrowed, `obj<Throwable>` ∪ `obj<I>` typed a raw
+                // object pointer `cell` and get_debug_type() answered "float".
+                $this->localTypes = $this->mergeLocals($saved, $thenSlots);
             }
             return Type::void();
         }
@@ -1593,7 +1597,7 @@ trait InferNodes
         if ($thenDiv && !$elseDiv)      { $this->localTypes = $elseLocals; }
         elseif ($elseDiv && !$thenDiv)  { $this->localTypes = $thenLocals; }
         else {
-            $this->localTypes = $this->mergeLocals($thenLocals, $elseLocals);
+            $this->localTypes = $this->mergeLocals($thenSlots, $elseLocals);
             // The slot leaves both arms raw now, whatever another merge of the
             // same name decided: `cellMergeLocals` is per NAME, not per merge.
             foreach ($agreed as $name => $t) {
