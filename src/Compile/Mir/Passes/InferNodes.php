@@ -2200,6 +2200,11 @@ trait InferNodes
             $arrJoin = $first ? null : $this->armArrayJoin($result, $bt);
             if ($first) { $result = $bt; $first = false; }
             elseif ($arrJoin !== null) { $result = $arrJoin; }
+            // object arms of different classes: a static union, as a ternary does
+            elseif (($result->kind === Type::KIND_OBJ || $result->kind === Type::KIND_UNION)
+                && ($bt->kind === Type::KIND_OBJ || $bt->kind === Type::KIND_UNION)) {
+                $result = $this->objUnion([$result, $bt]);
+            }
             elseif ($result->kind === $bt->kind) { /* keep */ }
             elseif ($result->kind === Type::KIND_CELL || $bt->kind === Type::KIND_CELL
                 || ($this->isValueKind($result) && $this->isValueKind($bt))) {
