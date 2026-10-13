@@ -161,8 +161,21 @@ final class DemoteCharLocals
         } elseif ($n->kind === Node::KIND_SWITCH) {
             $this->scanCharSwitch($n);
         }
-        foreach (Walk::children($n) as $c) { $this->scan($c); }
+        $kids = Walk::children($n);
+        $last = \count($kids) - 1;
+        foreach ($kids as $i => $c) {
+            // An assignment whose VALUE is consumed (`$v .= $p = $s[$i]`) hands
+            // the character on as a string: demoted, the concat appended the
+            // byte's decimal digits (symfony Dotenv read `dev` as `100101118`).
+            if ($c->kind === Node::KIND_STORE_LOCAL
+                && ($n->kind !== Node::KIND_BLOCK || ($i === $last && $n->type->kind !== Type::KIND_VOID))) {
+                $this->defIsCharRead[$this->storeName($c)] = false;
+            }
+            $this->scan($c);
+        }
     }
+
+    private function storeName(StoreLocal $s): string { return $s->name; }
 
     /**
      * `switch ($c) { case '+': … }` — a fan of equality tests written as one
