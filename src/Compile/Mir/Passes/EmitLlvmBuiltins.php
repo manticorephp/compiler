@@ -6799,7 +6799,11 @@ trait EmitLlvmBuiltins
         // class, so the literal would be the empty string.
         if (!$erased && \count($cands) <= 1) {
             $out = $this->emitNode($args[0]);
-            $lit = $this->strLitId($this->pool->intern($this->displayClassName($cls)));
+            // The one candidate, not the static name: an INTERFACE (or a class
+            // the program never declares) with a single implementor is that
+            // implementor at run time, and get_class() answered `I`.
+            $exact = \count($cands) === 1 ? $cands[0] : $cls;
+            $lit = $this->strLitId($this->pool->intern($this->displayClassName($exact)));
             if ($nullName !== '') {
                 $out .= $this->coerceToI64();
                 $isN = $this->ssa->allocReg();
