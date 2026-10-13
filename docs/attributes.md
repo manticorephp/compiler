@@ -14,8 +14,8 @@ Two namespaces:
 (`#[Struct]`), `Attr\Struct`, and `Manticore\Attr\Struct`. Two consequences.
 First, a `use` statement is optional — the bare form is what the test suite and
 the compiler's own source use. Second, `Manticore\Attr\TypeDef` is accepted by
-name even though **no such class file exists** (`src/Manticore/Attr/` holds only
-`Struct`, `RefOut` and `CellArg`), so write `#[TypeDef]` bare.
+name even though **no such class file exists** (`src/Manticore/Attr/` holds
+`Struct`, `RefOut`, `CellArg`, `Overload`, `CompareKey`, `CompareNone` and `Uncomparable`), so write `#[TypeDef]` bare.
 
 ---
 
@@ -298,6 +298,32 @@ carried in the `.sig` exactly like `byref` / `refout`. Used across
 `src/Runtime/Stdlib/{Format,Csv,Encoding,Sockets}.php`.
 
 ---
+
+## Overloads
+
+### `Manticore\Attr\Overload`
+
+`#[Overload('name')]` declares a function as a more precise variant of another one. A call to
+`name` whose arguments statically fit the overload's parameters is compiled as a call to the
+overload instead.
+
+```php
+use Manticore\Attr\Overload;
+
+function shout(array|string $v): array|string { /* php's union signature */ }
+
+#[Overload('shout')]
+function shout_str(string $v): string { /* same answer, string only */ }
+
+echo strlen(shout('abc'));   // statically a string: calls shout_str, result typed string
+```
+
+The canonical function stays php-faithful: an erased (`mixed`) argument and a call through a
+function-name string still reach it. An overload only buys precision — a return type the union
+signature cannot state, and a body that skips the run-time dispatch — so it **must answer exactly
+what the canonical function answers** for the same arguments. The stdlib uses it for hot
+functions such as `preg_replace`. Function targets only. Superset feature: php has no oracle
+for it (`tests/aot/cases/overload_attr.php`).
 
 ## Object comparison
 

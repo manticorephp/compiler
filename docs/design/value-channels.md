@@ -1,6 +1,8 @@
 # W4 — self-describing value channels
 
-_Branch `w4`, off main `b17ede4` (2026-09-20). The epic named in
+Status: **in progress** (verifier landed; remaining producers tracked as issues). Makes every cell-typed slot self-describing so the compiler can check, not assume, its representation.
+
+_Started 2026-09-20. The epic named in
 [backend-and-build-strategy.md](backend-and-build-strategy.md) §W4; the work
 cellguard deferred (its Tasks 7, 8, 10 — see [cellguard.md](cellguard.md))._
 
@@ -143,7 +145,7 @@ pair's ARRAY. `LowerTypes::lowerTypeHint` now lowers `array{…}` to
 `vec[cell]` / `assoc[string,cell]`. Witness `w4_array_shape_doc` (fails on
 main's binary). gen3 builds and both witnesses pass on it.
 
-**Verifier (step 3) — landed 2026-09-22 (branch `verifier`).**
+**Verifier (step 3) — landed 2026-09-22.**
 `MANTICORE_CELLGUARD=strict` fails the build on any `raw -> cell` edge the
 emitter-seam census sees (`EmitLlvmCellGuard`, `Main.php` refuses to write the
 object), and `bin/build` now exports it by default: the compiler and the

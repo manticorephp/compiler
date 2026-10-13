@@ -164,7 +164,7 @@ because time passed. With `pingInterval` at `0`, a read timeout is silently re-a
 forever; nothing ever probes a silent peer that way, so this is only safe for a
 connection you know is otherwise alive.
 
-## Limits
+## Limits and limitations
 
 `maxFrameSize` (default = `maxMessageSize`, 16 MiB) is checked from the frame header
 **before** the payload is read, so an oversized frame never gets buffered; over the

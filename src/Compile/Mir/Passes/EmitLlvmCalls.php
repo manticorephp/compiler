@@ -2675,7 +2675,9 @@ trait EmitLlvmCalls
             if ($t->isArray()) {
                 $out .= $this->emitCellArrayToTyped($t);
             } else {
+                $this->intGuardOff = true;
                 $out .= $this->unboxCellToType($t);
+                $this->intGuardOff = false;
             }
             $out .= $this->coerceToI64();
             $sp = $this->ssa->allocReg();
@@ -2729,7 +2731,9 @@ trait EmitLlvmCalls
             // the scratch holds the decoded value, re-boxed by type after.
             $this->lastValue = $cv;
             $this->lastValueType = 'i64';
+            $this->intGuardOff = true;
             $out .= $this->unboxCellToType($pt);
+            $this->intGuardOff = false;
             if ($this->lastValueType === 'double') {
                 $bits = $this->ssa->allocReg();
                 $out .= '  ' . $bits . ' = bitcast double ' . $this->lastValue . " to i64\n";
@@ -3595,8 +3599,10 @@ trait EmitLlvmCalls
             }
             if ($this->lastCallWasBuiltin) { return ''; }
             if (!isset($this->sigs->paramTypes[$fname])) { return ''; }
-            // A by-ref-returning fn yields an address, not an owned value.
-            if ($this->sigs->returnsByRef[$fname] ?? false) { return ''; }
+            // Value context derefs the address and takes a +1 copy
+            // ({@see byRefValueCopyRetainIr}). Only an array copy is counted; a raw
+            // string/object word is not retained there, so releasing it would double-free.
+            if (($this->sigs->returnsByRef[$fname] ?? false) && $s->type->kind !== Type::KIND_ARRAY) { return ''; }
         } elseif ($k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_STATIC_CALL) {
             return '';
         }
@@ -3615,7 +3621,8 @@ trait EmitLlvmCalls
     private function emitSpreadOperand(Node $operand): string
     {
         $out = $this->emitNode($operand);
-        return $out . ($operand->type->kind === Type::KIND_CELL ? $this->cellToPtr() : $this->coerceToPtr());
+        $k = $operand->type->kind;
+        return $out . ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN ? $this->cellToPtr() : $this->coerceToPtr());
     }
 
     /**
@@ -3684,6 +3691,19 @@ trait EmitLlvmCalls
         }
         $cnt = '';
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
+            if ($k > $firstParam && ($vmask[$k] ?? false)) {
+                // Fixed params first, then the variadic: the rest of the pack, renumbered,
+                // is its ONE vec argument ($k == $firstParam is the whole array, above).
+                $tel = $ptypes[$k]->element ?? null;
+                if ($tel === null || $tel->kind === Type::KIND_UNKNOWN) { $tel = Type::cell(); }
+                $srcI = $this->ssa->allocReg();
+                $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
+                $this->lastValue = $srcI;
+                $this->lastValueType = 'i64';
+                $out .= $this->emitCellArrayToTyped(Type::vec($tel), true, (string)($k - $firstParam));
+                $regs[] = $this->lastValue;
+                break;
+            }
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arrReg
                   . ', i64 ' . (string)($k - $firstParam) . ")\n";
@@ -3713,6 +3733,17 @@ trait EmitLlvmCalls
                 $ev = $this->lastValue;
             }
             $def = $pdefs[$k] ?? null;
+            if ($def === null && $fnKey !== '' && !($vmask[$k] ?? false)) {
+                // A required parameter the pack is too short for: php's ArgumentCountError.
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $short = $this->ssa->allocReg();
+                $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                $out .= $this->emitThrowIf($short, 'ArgumentCountError',
+                    'Too few arguments to function ' . \str_replace('__', '::', $fnKey) . '()');
+            }
             if ($def !== null) {
                 if ($cnt === '') {
                     $out .= $this->arrayCountFromPtrIr($arrReg);
@@ -3727,6 +3758,16 @@ trait EmitLlvmCalls
                 $out .= '  ' . $sel . ' = select i1 ' . $has . ', i64 ' . $ev
                       . ', i64 ' . $dv . "\n";
                 $ev = $sel;
+            } elseif ($fnKey !== '' && !($vmask[$k] ?? false) && !($this->sigs->refParams[$fnKey][$k] ?? false)) {
+                // A REQUIRED param the pack is too short to reach.
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $short = $this->ssa->allocReg();
+                $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                $out .= $this->emitThrowIf($short, 'ArgumentCountError',
+                    'Too few arguments to function ' . $fnKey . '()');
             }
             // A BY-REF parameter dereferences what it is handed: a VALUE from
             // the pack crashed it. php binds the pack's element, a temporary
@@ -3822,6 +3863,13 @@ trait EmitLlvmCalls
                 $out .= $this->emitParamDefault($def, $ptypes[$pi], $tmask[$pi] ?? false);
                 $this->lastPadArgs .= $sep . 'i64 ' . $this->lastValue;
             } else {
+                // A required, non-variadic parameter the call left out: php's ArgumentCountError.
+                if (!($this->sigs->variadicParams[$fnKey][$pi] ?? false)) {
+                    $out .= $this->emitNode(new Call('__mir_throw_argcount_error', [
+                        new \Compile\Mir\StringConst('Too few arguments to function '
+                            . \str_replace('__', '::', $fnKey) . '()', Type::string_()),
+                    ], Type::cell()));
+                }
                 $this->lastPadArgs .= $sep . 'i64 0';
             }
             $pi = $pi + 1;
@@ -3922,7 +3970,24 @@ trait EmitLlvmCalls
             && $this->propertyOffsetOrNull($a->object, $a->property) === null
             && $this->fixedPropertyHolders($a->property) !== [];
         $seedIsCell = $erasedProp && $a->type->kind === Type::KIND_CELL;
-        if (!$erasedProp || $seedIsCell) {
+        // Any OTHER property kind read off an erased receiver arrives as a cell
+        // too, and the callee reads the slot as the raw string / object / scalar
+        // its parameter declares: hand it the unboxed value (owning a reference
+        // the callee releases on overwrite) and write what it leaves back through
+        // the class_id writer, which drops the slot's old reference.
+        $erasedScalar = !$erasedProp && $pt !== null
+            && $a->kind === Node::KIND_PROPERTY_ACCESS
+            && $a->type->kind === Type::KIND_CELL
+            && $a->object->kind === Node::KIND_LOAD_LOCAL
+            && \in_array($pt->kind, [Type::KIND_STRING, Type::KIND_INT, Type::KIND_FLOAT, Type::KIND_BOOL, Type::KIND_OBJ, Type::KIND_UNION], true)
+            && $this->propertyOffsetOrNull($a->object, $a->property) === null
+            && $this->fixedPropertyHolders($a->property) !== [];
+        if ($erasedScalar) {
+            $out .= $this->unboxCellToType($pt);
+            $out .= $this->coerceToI64();
+            $fl = $this->discardReleaseFlavor($pt);
+            if ($fl !== '') { $out .= $this->rcRetainReg($this->lastValue, $fl); }
+        } elseif (!$erasedProp || $seedIsCell) {
             $out .= $this->ownRefSeed($a, $this->lastValue);
         }
         $seedCell = $this->lastValue;
@@ -3935,9 +4000,28 @@ trait EmitLlvmCalls
         $out .= '  ' . $addr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
         $this->lastRefSlotDrop = ($pt !== null && $this->isOmittedDefaultArg($srcArgc, $ai, $a))
             ? $this->omittedRefSlotDrop($tmp, $pt, $arrayHinted) : '';
-        if ($erasedProp) {
+        if ($erasedScalar) {
             $this->rt->needsTagged = true;
             $wb = $this->emitObjPtrOf($a->object);
+            $objp = $this->lastValue;
+            $nv = $this->ssa->allocReg();
+            $wb .= '  ' . $nv . ' = load i64, ptr ' . $tmp . "\n";
+            $this->lastValue = $nv;
+            $this->lastValueType = 'i64';
+            if ($pt->kind === Type::KIND_FLOAT) {
+                $dv = $this->ssa->allocReg();
+                $wb .= '  ' . $dv . ' = bitcast i64 ' . $nv . " to double\n";
+                $this->lastValue = $dv;
+                $this->lastValueType = 'double';
+            }
+            $wb .= $this->boxToCell($pt);
+            $wb .= '  call void ' . $this->cellPropertyWriteHelper($a->property, '', true)
+                 . '(ptr ' . $objp . ', i64 ' . $this->lastValue . ")\n";
+            $this->lastRefSlotDrop .= $wb;
+        }
+        if ($erasedProp) {
+            $this->rt->needsTagged = true;
+            $wb =$this->emitObjPtrOf($a->object);
             $objp = $this->lastValue;
             $nv = $this->ssa->allocReg();
             $wb .= '  ' . $nv . ' = load i64, ptr ' . $tmp . "\n";
@@ -3945,7 +4029,7 @@ trait EmitLlvmCalls
             $wb .= '  ' . $np . ' = inttoptr i64 ' . $nv . " to ptr\n";
             $cv = $this->ssa->allocReg();
             $wb .= '  ' . $cv . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
-            $wb .= '  call void ' . $this->cellPropertyWriteHelper($a->property)
+            $wb .= '  call void ' . $this->cellPropertyWriteHelper($a->property, '', $seedIsCell)
                  . '(ptr ' . $objp . ', i64 ' . $cv . ")\n";
             if ($seedIsCell) { $wb .= $this->rcReleaseReg($seedCell, 'cell'); }
             $this->lastRefSlotDrop .= $wb;
@@ -4067,6 +4151,18 @@ trait EmitLlvmCalls
         $out = $this->emitNode($a);
         $this->litElemCollect = $wasCollect;
         $this->litElemCalleeElem = $wasCalleeElem;
+        // A variadic pack is a literal of the written args; cell (mixed) args make it
+        // a vec[cell] bound to a typed `int ...$m`. Rebuild it at the de-cellify
+        // boundary (MOVING the values, dropping the bare cell buffer), then retype the
+        // node so the post-call release is the typed vec's.
+        if ($collect && $a instanceof ArrayLit && $paramType !== null
+            && $this->needsDeCellify($paramType, $a->type)) {
+            $out .= $this->coerceToPtr();
+            $src = $this->lastValue;
+            $out .= $this->emitCellArrayToTyped($paramType);
+            $out .= '  call void @__mir_array_release_buf(ptr ' . $src . ")\n";
+            $a->type = $paramType;
+        }
         return $out;
     }
 
@@ -4116,6 +4212,22 @@ trait EmitLlvmCalls
     }
 
     private function emitCall(Call $n): string
+    {
+        $c = $n;
+        if (\str_starts_with($c->function, '__mc_fuse_ds') && \count($c->args) > 0
+            && $c->args[0]->kind === Node::KIND_LOAD_LOCAL && $c->args[0]->type->kind === Type::KIND_OBJ) {
+            // A fused Ds callback method (`$m->reduce(fn …)`) stands in for a method call on its receiver.
+            $m = \preg_replace('/^__mc_fuse_ds(.*)_[0-9]+$/', '$1', $c->function);
+            $z0 = $this->emitNode($c->args[0]) . $this->coerceToI64();
+            $z = $this->ssa->allocReg();
+            $z0 .= '  ' . $z . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+            return $z0 . $this->emitThrowIf($z, 'Error', 'Call to a member function ' . $m . '() on null')
+                . $this->emitCallUnguarded($n);
+        }
+        return $this->emitCallUnguarded($n);
+    }
+
+    private function emitCallUnguarded(Call $n): string
     {
         $c = $n;
         $b = $this->emitBuiltin($c);
@@ -4325,6 +4437,8 @@ trait EmitLlvmCalls
                 // `trim(json_encode($x))` leaked the whole document.
                 $cellArgTemp = $this->isFreshCellTemp($a) ? $this->lastValue : '';
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
+                $cso = $this->takeCellStrArgOwn();
+                if ($cso !== '') { $argTemps[] = $cso; }
                 $argList .= 'i64 ' . $this->lastValue;
                 if ($cellArgTemp !== '') {
                     $rcArgRegs[] = $cellArgTemp; $rcArgFlavs[] = 'cell';

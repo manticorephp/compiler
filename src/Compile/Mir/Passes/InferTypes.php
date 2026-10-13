@@ -832,6 +832,12 @@ final class InferTypes implements Pass
 
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
+
+    /** @var array<string, bool> class → no class at or below it reads `offsetGet` through anything but SplFixedArray's own */
+    private array $fixedArrayGetPlainMemo = [];
+
+    /** @var array<string, bool> class → no class at or below it overrides getIterator */
+    private array $fixedArrayIterPlainMemo = [];
     /** @var array<string, string[]> {@see Module::$interfaceAncestors} */
     private array $interfaceAncestors = [];
 
@@ -2905,6 +2911,18 @@ final class InferTypes implements Pass
             // a raw bit pattern (a float printed as its bits, a string as its
             // pointer). Promote the NAME to a cell — it carries its own tag —
             // and re-run the function so EVERY store to it boxes.
+            // Two DIFFERENT closure literals meeting at the back-edge (`$g = fn () => $g();` in
+            // a loop): the name holds a callable of unknown shape, not either literal's class.
+            if (Type::isClosureLike($st) && Type::isClosureLike($bt)
+                && $st->kind === Type::KIND_OBJ && $bt->kind === Type::KIND_OBJ
+                && ($st->class ?? '') !== ($bt->class ?? '')) {
+                $out[$name] = Type::closure();
+                if (!isset($this->nullLoopLocals[$name])) {
+                    $this->nullLoopLocals[$name] = Type::closure();
+                    $this->loopPromoGrew = true;
+                }
+                continue;
+            }
             if ($st->kind === $bt->kind) { continue; }
             // A `null` slot the body assigns a POINTER: keep the body's type for
             // the whole function ({@see $nullLoopLocals}). Must precede the

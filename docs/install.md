@@ -117,7 +117,7 @@ runtime.
   at the floor; Ubuntu 22.04 (2.35) and Debian 12 (2.36) have room.
 
   ⚠ **The floor is the symbol versions a binary REFERENCES, not the glibc of the
-  machine that built it.** This is worth stating because we got it wrong in the
+  machine that built it.** A common assumption is wrong in the
   other direction: a compiler built on trixie (glibc 2.41) was expected to be
   unusable on bookworm (2.36), and it ran there without complaint — it asks for
   nothing newer than 2.34. Building on the older base is still the right default,
@@ -233,7 +233,6 @@ Both macOS and Linux build the compiler from the pinned bootstrap release, self-
 and the self-host fixpoint. To reproduce the Linux build + suite in a container,
 see [`tools/docker/README.md`](../tools/docker/README.md).
 
-[issue #1]: https://github.com/manticorephp/compiler/issues/1
 
 ---
 
@@ -292,7 +291,7 @@ assemble step — clang is older than 15. Install a newer LLVM and make sure bar
 `clang` on `PATH` resolves to it (apt.llvm.org installs `clang-21`, not `clang`).
 
 **`undefined reference to 'pcre2_compile_8'`** (and six siblings) at
-link — this was [issue #1], the macOS-only symbol scraper. If you see it on a
+link — a macOS-only symbol-scraper failure. If you see it on a
 current checkout, `tools/link_stubs.sh` failed to recognise your linker's
 diagnostic format; it prints the raw linker output when that happens, so file
 that output as a bug.

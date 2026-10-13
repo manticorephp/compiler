@@ -1,5 +1,5 @@
 <?php
-// ReflectionProperty::setValue on a property with a set hook segfaults.
+// ReflectionProperty::setValue on a set-hook property segfaults
 class Box {
     public string $name = 'init' {
         set { echo "hook(", $value, ")\n"; $this->name = strtoupper($value); }

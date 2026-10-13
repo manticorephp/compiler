@@ -69,7 +69,7 @@ scripts stop hand-rolling clang/stub/link steps.
 
 ## #2 — how user programs get the stdlib (DECISION PENDING)
 
-Measured (this session, debug-ish build, arm64):
+Measured (debug-ish build, arm64):
 
 - Tiny user compile, current two-object link: **0.54 s**.
 - Lower + `-O2` clang of all of `src/Runtime` (`--emit-library`): **0.35 s**,

@@ -1,6 +1,6 @@
 # The superset — what Manticore adds on top of PHP
 
-Manticore's north star is that PHP **feels like PHP**: the interpreter is the oracle, and
+Manticore's design goal is that PHP **feels like PHP**: the interpreter is the oracle, and
 `tools/difftest.sh` compares our output against it case by case. Everything on that side of
 the line is *parity* work, and it is not what this document is about.
 

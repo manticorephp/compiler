@@ -655,6 +655,32 @@ trait EmitLlvmExpr
         $out .= "  %s = call ptr @__manticore_tagged_to_str(i64 %v)\n";
         $out .= "  ret ptr %s\n";
         $out .= "}\n";
+        // The string-PARAMETER boundary: a Stringable object renders through the
+        // program's soft __toString hook (null hook or a null answer = not
+        // Stringable: the plain strip stays). Not folded into the function above:
+        // emitPtrArg also reaches it for an object bound to a builtin's POINTER
+        // argument (__mc_refl_of), where rendering would replace the object.
+        $out .= "\ndefine ptr @__manticore_cell_to_strptr_s(i64 %v) {\n";
+        $out .= "entry:\n";
+        $out .= "  %istag = icmp ugt i64 %v, -4503599627370496\n";
+        $out .= "  %ts = lshr i64 %v, 48\n";
+        $out .= "  %nib = and i64 %ts, 15\n";
+        $out .= "  %e8 = icmp eq i64 %nib, 8\n";
+        $out .= "  %isobj = and i1 %istag, %e8\n";
+        $out .= "  %hk = load ptr, ptr @__mir_obj_to_str_soft_hook\n";
+        $out .= "  %hkn = icmp ne ptr %hk, null\n";
+        $out .= "  %tryo = and i1 %isobj, %hkn\n";
+        $out .= "  br i1 %tryo, label %objtry, label %plain\n";
+        $out .= "objtry:\n";
+        $out .= "  %os = call ptr %hk(i64 %v)\n";
+        $out .= "  %osn = icmp eq ptr %os, null\n";
+        $out .= "  br i1 %osn, label %plain, label %objret\n";
+        $out .= "objret:\n";
+        $out .= "  ret ptr %os\n";
+        $out .= "plain:\n";
+        $out .= "  %pl = call ptr @__manticore_cell_to_strptr(i64 %v)\n";
+        $out .= "  ret ptr %pl\n";
+        $out .= "}\n";
         return $out;
     }
 
@@ -805,6 +831,31 @@ trait EmitLlvmExpr
         $out .= "fast:\n  %s = shl i64 %v, 16\n  %r = ashr i64 %s, 16\n  ret i64 %r\n";
         $out .= "slow:\n  %x = call i64 @__manticore_tagged_to_int_slow(i64 %v)\n  ret i64 %x\n}\n";
         return $out;
+    }
+
+    /**
+     * Why a cell cannot become an `int` parameter / return value: 0 it can, 1 it
+     * is null, 2 an array, 3 a string with no numeric prefix (php's TypeError;
+     * a leading-numeric string still coerces). Called before
+     * {@see cellToIntArgRuntime}, which would answer 0 for all of them.
+     */
+    private function cellIntBadRuntime(): string
+    {
+        $m = (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK;
+        $o  = "\ndefine i32 @__manticore_cell_int_bad(i64 %v) alwaysinline {\n";
+        $o .= "entry:\n  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %ok, label %slow\n";
+        $o .= "slow:\n  %istag = icmp ugt i64 %v, -4503599627370496\n  br i1 %istag, label %tagged, label %ok\n";
+        $o .= "tagged:\n  %nib = and i64 %hi, 15\n  switch i64 %nib, label %ok [\n    i64 3, label %null\n    i64 7, label %arr\n    i64 4, label %str\n  ]\n";
+        $o .= "ok:\n  ret i32 0\nnull:\n  ret i32 1\narr:\n  ret i32 2\n";
+        $o .= "str:\n  %sp = and i64 %v, " . $m . "\n  %sptr = inttoptr i64 %sp to ptr\n  br label %ws\n";
+        $o .= "ws:\n  %p = phi ptr [ %sptr, %str ], [ %p1, %wsn ]\n  %c = load i8, ptr %p\n";
+        $o .= "  %t = sub i8 %c, 9\n  %le = icmp ule i8 %t, 4\n  %sps = icmp eq i8 %c, 32\n  %w = or i1 %le, %sps\n  br i1 %w, label %wsn, label %sign\n";
+        $o .= "wsn:\n  %p1 = getelementptr i8, ptr %p, i64 1\n  br label %ws\n";
+        $o .= "sign:\n  %pl = icmp eq i8 %c, 43\n  %mi = icmp eq i8 %c, 45\n  %sg = or i1 %pl, %mi\n  br i1 %sg, label %sgn, label %chk\n";
+        $o .= "sgn:\n  %p2 = getelementptr i8, ptr %p, i64 1\n  %c2 = load i8, ptr %p2\n  br label %chk\n";
+        $o .= "chk:\n  %cc = phi i8 [ %c, %sign ], [ %c2, %sgn ]\n  %d = sub i8 %cc, 48\n  %isd = icmp ule i8 %d, 9\n  %isdot = icmp eq i8 %cc, 46\n  %good = or i1 %isd, %isdot\n  br i1 %good, label %ok, label %bad\n";
+        $o .= "bad:\n  ret i32 3\n}\n";
+        return $o;
     }
 
     /**
@@ -1405,7 +1456,42 @@ trait EmitLlvmExpr
         $out .= "  ret i64 %oez\n";
         $out .= "objmix:\n";
         $out .= "  %anyobj = or i1 %aobj, %bobj\n";
-        $out .= "  br i1 %anyobj, label %objgreater, label %rowarr\n";
+        $out .= "  br i1 %anyobj, label %objstr, label %rowarr\n";
+        // An object against a string compares its __toString() (the program's
+        // hook, null when no class declares one) with the string.
+        $out .= "objstr:\n";
+        $out .= "  %osta = icmp eq i64 %ta, 4\n";
+        $out .= "  %ostb = icmp eq i64 %tb, 4\n";
+        $out .= "  %os1 = and i1 %aobj, %ostb\n";
+        $out .= "  %os2 = and i1 %bobj, %osta\n";
+        $out .= "  %os = or i1 %os1, %os2\n";
+        $out .= "  %osh = load ptr, ptr @__mir_obj_to_str_soft_hook\n";
+        $out .= "  %osnn = icmp ne ptr %osh, null\n";
+        $out .= "  %osok = and i1 %os, %osnn\n";
+        $out .= "  br i1 %osok, label %osdo, label %objgreater\n";
+        $out .= "osdo:\n";
+        $out .= "  %osov = select i1 %os1, i64 %a, i64 %b\n";
+        $out .= "  %ossv = select i1 %os1, i64 %b, i64 %a\n";
+        $out .= "  %osostr = call ptr %osh(i64 %osov)\n";
+        $out .= "  %osnul = icmp eq ptr %osostr, null\n";
+        $out .= "  br i1 %osnul, label %objgreater, label %osdo2\n";
+        $out .= "osdo2:\n";
+        $out .= "  %osspi = and i64 %ossv, $mask\n";
+        $out .= "  %ossp = inttoptr i64 %osspi to ptr\n";
+        if ($eq) {
+            $out .= "  %osle = call i1 @__mir_str_loose_eq(ptr %osostr, ptr %ossp)\n";
+            $out .= "  %osres = zext i1 %osle to i64\n";
+        } else {
+            $out .= "  %osc = call i64 @__mir_str_cmp(ptr %osostr, ptr %ossp)\n";
+            $out .= "  %osneg = sub i64 0, %osc\n";
+            $out .= "  %osoc = select i1 %os1, i64 %osc, i64 %osneg\n";
+            $out .= "  %oslt = icmp slt i64 %osoc, 0\n";
+            $out .= "  %osgt = icmp sgt i64 %osoc, 0\n";
+            $out .= "  %ossel = select i1 %osgt, i64 1, i64 0\n";
+            $out .= "  %osres = select i1 %oslt, i64 -1, i64 %ossel\n";
+        }
+        $out .= "  call void @__mir_rc_release_str(ptr %osostr)\n";
+        $out .= "  ret i64 %osres\n";
         $out .= "objgreater:\n";
         $out .= $eq
             ? "  ret i64 0\n"
@@ -2227,9 +2313,11 @@ trait EmitLlvmExpr
         $target = $isFloat ? 'double' : 'i64';
         $op = $isFloat ? $floatOp : $intOp;
         $out = $this->emitNode($left);
+        $out .= $this->cellArithGuard($left, $left, $right, $intOp);
         $out .= $this->coerceArithOperand($left, $isFloat);
         $l = $this->lastValue;
         $out .= $this->emitNode($right);
+        $out .= $this->cellArithGuard($right, $left, $right, $intOp);
         $out .= $this->coerceArithOperand($right, $isFloat);
         $r = $this->lastValue;
         if ($op === 'srem') {
@@ -2239,6 +2327,63 @@ trait EmitLlvmExpr
         $out .= '  ' . $reg . ' = ' . $op . ' ' . $target . ' ' . $l . ', ' . $r . "\n";
         $this->lastValue = $reg;
         $this->lastValueType = $target;
+        return $out;
+    }
+
+    /**
+     * A `mixed` operand that is an array or a non-numeric string is php's
+     * TypeError ("Unsupported operand types: string + int"); the cell would
+     * otherwise be read as an int. The operand names come from the operands
+     * themselves when they are plain loads or literals (re-read only inside the
+     * cold throw block), else from their static types.
+     */
+    private function cellArithGuard(Node $operand, Node $left, Node $right, string $intOp): string
+    {
+        if ($operand->type->kind !== Type::KIND_CELL) { return ''; }
+        $this->rt->needsCellToIntArg = true;
+        $this->rt->needsStrtol = true;
+        $sym = ['add' => '+', 'sub' => '-', 'mul' => '*', 'srem' => '%'][$intOp] ?? '';
+        if ($sym === '') { return ''; }
+        $bad = $this->ssa->allocReg();
+        $cnd = $this->ssa->allocReg();
+        $out = '  ' . $bad . ' = call i32 @__manticore_cell_int_bad(i64 ' . $this->lastValue . ")\n";
+        $out .= '  ' . $cnd . ' = icmp ugt i32 ' . $bad . ", 1\n";
+        $head = 'Unsupported operand types: ';
+        $mid = ' ' . $sym . ' ';
+        $st = static fn (Node $n): string => $n->type->kind === Type::KIND_CELL ? 'mixed' : $n->type->toString();
+        $rt = static fn (Node $n): bool => $n->type->kind === Type::KIND_CELL && $n->kind === Node::KIND_LOAD_LOCAL;
+        $lit = static fn (string $t): \Compile\Mir\StringConst => new \Compile\Mir\StringConst($t, Type::string_());
+        $dbg = static fn (Node $n): Call => new Call('get_debug_type', [$n], Type::string_());
+        // Constant pieces fold into one literal: a Concat in the cold block is not free of emitter state.
+        if (!$rt($left) && !$rt($right)) {
+            $msg = $lit($head . $st($left) . $mid . $st($right));
+        } else {
+            $msg = new \Compile\Mir\Concat(
+                new \Compile\Mir\Concat($lit($head), $rt($left) ? $dbg($left) : $lit($st($left))),
+                new \Compile\Mir\Concat($lit($mid), $rt($right) ? $dbg($right) : $lit($st($right))),
+            );
+        }
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $thr = new Call('__mir_throw_type_error', [$msg], Type::cell());
+        $thr = $this->emitThrowNodeIf($cnd, $thr);
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
+        return $out . $thr;
+    }
+
+    /** Branch on the i1 `$cond` into a cold block that evaluates `$thrower` (a throwing call). */
+    private function emitThrowNodeIf(string $cond, Node $thrower): string
+    {
+        $thr = $this->ssa->allocLabel('arith.throw');
+        $ok = $this->ssa->allocLabel('arith.ok');
+        $out = '  br i1 ' . $cond . ', label %' . $thr . ', label %' . $ok . "\n";
+        $out .= $thr . ":\n";
+        $savedB = $this->lastCallWasBuiltin;
+        $out .= $this->emitNode($thrower);
+        $this->lastCallWasBuiltin = $savedB;
+        $out .= '  br label %' . $ok . "\n";
+        $out .= $ok . ":\n";
         return $out;
     }
 
@@ -2288,6 +2433,7 @@ trait EmitLlvmExpr
         $out .= $thr . ":\n";
         $saved = $this->lastValue;
         $savedT = $this->lastValueType;
+        $savedB = $this->lastCallWasBuiltin;
         $out .= $this->emitNode(new \Compile\Mir\Throw_(
             new \Compile\Mir\NewObj($class, [
                 new \Compile\Mir\StringConst($message, Type::string_()),
@@ -2300,6 +2446,7 @@ trait EmitLlvmExpr
         $out .= $ok . ":\n";
         $this->lastValue = $saved;
         $this->lastValueType = $savedT;
+        $this->lastCallWasBuiltin = $savedB;
         return $out;
     }
 
@@ -5077,6 +5224,20 @@ trait EmitLlvmExpr
     private function emitCmp(Cmp $n): string
     {
         $c = $n;
+        // A loose compare of an object against a string compares its
+        // __toString() with the string; the object's address was compared.
+        if ($c->op !== '===' && $c->op !== '!==') {
+            $lo = $c->left->type;
+            $ro = $c->right->type;
+            if ($lo->kind === Type::KIND_OBJ && $ro->kind === Type::KIND_STRING
+                && $this->resolveMethodClass($lo->class ?? '', '__toString') !== '') {
+                return $this->emitCmp(new Cmp(new \Compile\Mir\Cast('string', $c->left, Type::string_()), $c->right, $c->op));
+            }
+            if ($ro->kind === Type::KIND_OBJ && $lo->kind === Type::KIND_STRING
+                && $this->resolveMethodClass($ro->class ?? '', '__toString') !== '') {
+                return $this->emitCmp(new Cmp($c->left, new \Compile\Mir\Cast('string', $c->right, Type::string_()), $c->op));
+            }
+        }
         // `X === null` / `!== null` (and == / !=) — null-ness is a
         // compile-time property of the operand's type (the i64 carrier
         // can't tell null from int 0 at runtime). Evaluate the non-null
@@ -6251,8 +6412,20 @@ trait EmitLlvmExpr
         return $t;
     }
 
+    private bool $collectCellStrOwn = false;
+    private string $cellStrOwn = '';
+
+    /** i64 reg of the fresh string a cell→string arg unbox rendered, or ''. */
+    private function takeCellStrArgOwn(): string
+    {
+        $o = $this->cellStrOwn;
+        $this->cellStrOwn = '';
+        return $o;
+    }
+
     private function unboxCellArg(Node $a, array $ptypes, int $pi, array $ahmask = []): string
     {
+        $this->cellStrOwn = '';
         $ak = $a->type->kind;
         $pt = $ptypes[$pi] ?? null;
         // The call-argument cell sink: `$pt` is the PARAMETER's declared type
@@ -6317,7 +6490,9 @@ trait EmitLlvmExpr
         }
         if ($ak !== Type::KIND_CELL) { return $this->nestedArgConform($a->type, $pt); }
         if ($pt === null) { return ''; }
+        $this->collectCellStrOwn = true;
         $out = $this->unboxCellToType($pt);
+        $this->collectCellStrOwn = false;
         $out .= $this->nestedArgConform($a->type, $pt);
         // ABI: every arg crosses as i64. A FLOAT param is the one unboxing that
         // leaves a `double` behind (the tag has to be read to get a real value
@@ -6374,6 +6549,8 @@ trait EmitLlvmExpr
      * would mis-read (a boxed `false` is non-zero → truthy; a boxed array
      * inttoptr's the tagged bits → fault).
      */
+    private bool $intGuardOff = false;
+
     private function unboxCellToType(Type $pt): string
     {
         // See through a reference before decoding it. This is the single most
@@ -6410,8 +6587,21 @@ trait EmitLlvmExpr
         if ($pk === Type::KIND_INT) {
             $this->rt->needsCellToIntArg = true;
             $this->rt->needsStrtol = true;
+            $keep = $this->lastValue;
+            $out = '';
+            // A by-ref scratch holds a callee's OUTPUT: a null there is no argument.
+            foreach ($this->intGuardOff ? [] : [[1, 'null'], [2, 'array'], [3, 'string']] as $bw) {
+                if ($out === '') {
+                    $bad = $this->ssa->allocReg();
+                    $out = '  ' . $bad . ' = call i32 @__manticore_cell_int_bad(i64 ' . $keep . ")\n";
+                }
+                $cnd = $this->ssa->allocReg();
+                $out .= '  ' . $cnd . ' = icmp eq i32 ' . $bad . ', ' . (string)$bw[0] . "\n";
+                $out .= $this->emitThrowIf($cnd, 'TypeError', 'Argument must be of type int, ' . $bw[1] . ' given');
+            }
+            $this->lastValue = $keep;
             $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call i64 @__manticore_cell_to_int_arg(i64 ' . $this->lastValue . ")\n";
+            $out .= '  ' . $r . ' = call i64 @__manticore_cell_to_int_arg(i64 ' . $keep . ")\n";
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
             return $out;
@@ -6454,13 +6644,24 @@ trait EmitLlvmExpr
             $this->rt->needsCellToStrPtr = true;
             $this->rt->needsTaggedToStr = true;
             $r = $this->ssa->allocReg();
-            $out = '  ' . $r . ' = call ptr @__manticore_cell_to_strptr(i64 '
+            $out = '  ' . $r . ' = call ptr @__manticore_cell_to_strptr_s(i64 '
                  . $this->lastValue . ")\n";
             // Hand back an i64 like the plain strip did: this helper serves
             // every cell→string boundary, and a `return` site stores the result
             // straight into an i64 slot without coercing.
             $ri = $this->ssa->allocReg();
             $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";
+            if ($this->collectCellStrOwn) {
+                // A rendered scalar is a fresh string the CALLER must free after
+                // the call; a stripped pointer is the cell's own (null = borrowed).
+                $pm = $this->ssa->allocReg();
+                $out .= '  ' . $pm . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $ne = $this->ssa->allocReg();
+                $out .= '  ' . $ne . ' = icmp ne i64 ' . $ri . ', ' . $pm . "\n";
+                $ow = $this->ssa->allocReg();
+                $out .= '  ' . $ow . ' = select i1 ' . $ne . ', i64 ' . $ri . ", i64 0\n";
+                $this->cellStrOwn = $ow;
+            }
             $this->lastValue = $ri;
             $this->lastValueType = 'i64';
             return $out;

@@ -1,5 +1,7 @@
 # Backend & build strategy — the 2026-09 direction
 
+Status: **shipped in part** (CI, `--fast` build and the object cache landed; later items are direction). Argues against writing an own arm64/amd64 backend and lays out the build-speed and CI ladder instead.
+
 _Written 2026-09-07 on `7b8a02f`, after the T5/T6 memory + IR-volume epics._
 
 Answers one question: **now that self-hosting is the floor and real applications are the
@@ -101,7 +103,7 @@ value. Fast loop finds bugs; only an `-O2` gate clears them.
 compiles fastest and produces a binary ~50% slower — which is why it is a debugger
 setting, not an iteration setting.
 
-Shipped (2026-09-07, branch `ci`):
+Shipped (2026-09-07):
 
 - **`bin/build --fast`** — `-O1`, application only, to `bin/manticore.fast`. Refuses to
   write `bin/manticore`, refuses `--verify`, never rebuilds `lib/*.o`. 71 s vs 83 s.
@@ -122,7 +124,7 @@ not for throughput.
 Exit: a filtered `tests/aot` run and a single-program compile measurably faster; every runner
 prints its opt level.
 
-### W1 — CI. Days. **Highest return per hour in the list.** ✅ built 2026-09-07 (branch `ci`)
+### W1 — CI. Days. **Highest return per hour in the list.** ✅ built 2026-09-07
 
 `tools/docker/gate.sh` is now the ONE definition of a Linux gate — `tools/docker/run_tests.sh`
 and both workflows call it, so a CI green and a local green mean the same thing.

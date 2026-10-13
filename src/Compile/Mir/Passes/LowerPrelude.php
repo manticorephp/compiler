@@ -337,8 +337,12 @@ trait LowerPrelude
     private function objToStrSrc(): string
     {
         $body = '';
-        $dispatch = "function __mir_obj_to_str(mixed \$v): string {\n"
-            . "  switch (__mir_object_class_id(\$v)) {\n";
+        $head = "  switch (__mir_object_class_id(\$v)) {\n";
+        $dispatch = "function __mir_obj_to_str(mixed \$v): string {\n" . $head;
+        // The same dispatch answering null instead of throwing for a class with no
+        // __toString: a cell reaching a string-typed consumer renders a Stringable
+        // and keeps its plain pointer strip for any other object.
+        $soft = "function __mir_obj_to_str_soft(mixed \$v): ?string {\n" . $head;
         $arm = 0;
         $helperByOwner = [];
         foreach ($this->walkableClassesDerivedFirst() as $cname) {
@@ -347,6 +351,7 @@ trait LowerPrelude
             if (isset($helperByOwner[$owner])) {
                 $helper = $helperByOwner[$owner];
                 $dispatch .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
+                $soft .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
                 continue;
             }
             $helper = '__mir_obj_to_str_arm_' . (string)$arm;
@@ -355,9 +360,10 @@ trait LowerPrelude
                 . "  if (\$v instanceof \\" . $owner . ") { return \$v->__toString(); }\n"
                 . "  return '';\n}\n";
             $dispatch .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
+            $soft .= "    case " . (string)$this->classTable[$cname]->classId . ": return " . $helper . "(\$v);\n";
             $arm = $arm + 1;
         }
-        return $body . $dispatch . "  }\n"
+        return $body . $soft . "  }\n  return null;\n}\n" . $dispatch . "  }\n"
             . "  throw new \\Error('Object of class ' . \\get_class(\$v) . ' could not be converted to string');\n}\n";
     }
 
@@ -415,6 +421,7 @@ trait LowerPrelude
             // An enum-case singleton renders `enum(Enum::Case)` — detected via its
             // class descriptor before the class-id dispatch (enums aren't classes here).
             . "  \$en = __mir_enum_name(\$v); if (\$en !== '') { echo 'enum(', \$en, \")\\n\"; return; }\n"
+            . "  if (\$v instanceof \\Closure) { echo \"object(Closure)#1 (0) {\\n\", \$pad, \"}\\n\"; return; }\n"
             . "  switch (__mir_object_class_id(\$v)) {\n";
         $arm = 0;
         foreach ($names as $cname) {

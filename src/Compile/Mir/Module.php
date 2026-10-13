@@ -35,6 +35,9 @@ final class Module
 
     /** @var array<string, string[]> class → the traits it uses directly (reflection: getTraits) */
     public array $classTraitNames = [];
+    /** @var array<string, array<string, MethodMeta>> interface → its own declared
+     *  methods, for reflection (an interface has no ClassDef). */
+    public array $interfaceMethods = [];
 
     /** @var array<string, true> the interfaces php itself declares (prelude /
      *  runtime library) — ReflectionClass::isInternal(). */

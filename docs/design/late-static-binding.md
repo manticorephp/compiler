@@ -1,5 +1,7 @@
 # Late static binding
 
+Status: **shipped.** How `static::` is resolved at compile time through per-descendant method copies.
+
 PHP's `static::` resolves to the *called* class at runtime, not the class that
 lexically defines the method. Manticore has no runtime metadata and monomorphises
 aggressively, so LSB is implemented the same way: **per-descendant method copies**,

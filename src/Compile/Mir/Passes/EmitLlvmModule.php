@@ -763,6 +763,7 @@ trait EmitLlvmModule
         }
         if ($this->rt->needsCellToIntArg) {
             $out .= $this->cellToIntArgRuntime();
+            $out .= $this->cellIntBadRuntime();
         }
         if ($this->rt->needsStrtol) {
             $out .= $this->strToIntRuntime();
@@ -2079,6 +2080,7 @@ trait EmitLlvmModule
         }
         if ($this->hasObjToStr) {
             $header .= "  store ptr @manticore___mir_obj_to_str, ptr @__mir_obj_to_str_hook\n";
+            $header .= "  store ptr @manticore___mir_obj_to_str_soft, ptr @__mir_obj_to_str_soft_hook\n";
         }
         // Destructors still owed run AFTER the shutdown queue (registered next, so
         // atexit's LIFO runs it first) and BEFORE the ob drain: php's order.

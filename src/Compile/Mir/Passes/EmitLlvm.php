@@ -335,6 +335,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, true> interface names (interface_exists fold) */
     private array $interfaceNames = [];
+    /** @var array<string, array<string, \Compile\Mir\MethodMeta>> {@see Module::$interfaceMethods} */
+    private array $interfaceMethods = [];
     /** @var array<string, true> {@see Module::$internalInterfaceNames} */
     private array $internalInterfaceNames = [];
 
@@ -492,6 +494,9 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, bool> class → every class below it reads through
      *  SplFixedArray::offsetGet ({@see EmitLlvmArrays::emitFixedArrayGet}) */
     private array $fixedArrayPlain = [];
+
+    /** @var array<string, bool> {@see EmitLlvmHmap::foreachFixedArrayPlain} per static class */
+    private array $fixedArrayIterPlain = [];
     /** @var array<string, bool> …and whether the body emitted such a store */
     private array $feCellFlagSet = [];
     /**
@@ -692,6 +697,7 @@ final class EmitLlvm implements EmitVisitor
         $this->typeDefs = $module->typeDefs;
         $this->methodDisplay = $module->needsBacktrace ? $module->methodDisplay : [];
         $this->interfaceNames = $module->interfaceNames;
+        $this->interfaceMethods = $module->interfaceMethods;
         $this->internalInterfaceNames = $module->internalInterfaceNames;
         $this->interfaceAncestors = $module->interfaceAncestors;
         $this->traitNames = $module->traitNames;
@@ -2785,9 +2791,11 @@ final class EmitLlvm implements EmitVisitor
         $this->rt->needsStrtod = true;
         $out = $this->emitNode($left);
         $out .= $this->boxToCell($left->type);
+        $out .= $this->cellArithGuard($left, $left, $right, $op);
         $l = $this->lastValue;
         $out .= $this->emitNode($right);
         $out .= $this->boxToCell($right->type);
+        $out .= $this->cellArithGuard($right, $left, $right, $op);
         $r = $this->lastValue;
         $reg = $this->ssa->allocReg();
         if ($op === 'add' || $op === 'sub') {

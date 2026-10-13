@@ -167,6 +167,11 @@ final class InsertMemoryOps implements Pass
             }
             return self::elemReadCoOwns($el, $enums, $classes) ? $el : null;
         }
+        // A buffer loop over a SplFixedArray bound to a class hands out the
+        // element's +1 as that class's pointer ({@see Foreach_::$fixedBuf}).
+        if ($fe->fixedBuf && $fe->iterValueType !== null) {
+            return self::elemReadCoOwns($fe->iterValueType, $enums, $classes) ? $fe->iterValueType : null;
+        }
         $ic = $fe->iterClass;
         if ($ic === 'Generator' || ($ic !== '' && !isset($classes[$ic]))) { return Type::cell(); }
         // A concrete Iterator CLASS: `current()` is a method, so its answer is

@@ -1,6 +1,8 @@
 # Decision: what to do about scoped inference
 
-_2026-09-08, after W3 step 2 ([`../superpowers/plans/2026-09-08-w3b-front-end.md`](../superpowers/plans/2026-09-08-w3b-front-end.md))._
+Status: **decided** (scoped inference is not adopted). Records why re-inferring only the changed functions does not reproduce a full pass.
+
+_2026-09-08, after the W3 front-end work (internal plan, not in the repository)._
 
 ## The question
 

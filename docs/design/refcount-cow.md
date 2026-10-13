@@ -1,5 +1,7 @@
 # Refcount + copy-on-write — why this model
 
+Status: **shipped.** Rationale for refcounting with copy-on-write instead of a tracing GC.
+
 Rationale for Manticore's memory model. The **layout and encoding** live in
 [`memory-abi.md`](memory-abi.md); this doc is the argument for the design, kept because the
 question "why not a GC?" keeps coming back.

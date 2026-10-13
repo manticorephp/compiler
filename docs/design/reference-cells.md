@@ -1,11 +1,11 @@
 # Reference cells — a `&` that is a value
 
-Status: **implemented through main `f58e5d6` (2026-09-14).** `[&$a]`, `[&$this->p]`,
+Status: **implemented (as of 2026-09-14).** `[&$a]`, `[&$this->p]`,
 `[&$a[$k]]`, `[$v, &$v]`, `$a[$k] = &$v`, cell-alias ownership, `unset` breaking the
 binding and a mutated `mixed` by-ref param all match php; the deepclone witness is
 byte-identical. Still open: a `PropertyAccess` as the TARGET of `=&` (a copy), the
 static-property source, `&...$vars`, `R:` in `serialize` and the var_dump `&` marker.
-The box is counted and a property is promoted in place since br `refbox` (2026-09-23),
+The box is counted and a property is promoted in place since 2026-09-23,
 so `clone` now shares the BINDING as php does. The refusal this replaced
 (`LowerFromAst::lowerArrayLit`, "an array literal cannot bind an element by
 reference") is gone. The rest of this document is the design as it was decided.
@@ -198,7 +198,7 @@ the original's writes. Copying the CELL — which is what the clone path does no
 after the crash fix — copies the value, not the binding.
 
 ⇒ The property holds `cell(REF, box)` rather than merely being cell-typed — the
-same box indirection the local promotion has. Shipped (br `refbox`, 2026-09-23)
+same box indirection the local promotion has. Shipped (2026-09-23)
 as an IN-PLACE promotion, the way an array element is promoted, not as the
 allocation-time box first planned here: the object may be allocated in another
 module (a prelude or library class) that never saw the `&`, so only the `&`

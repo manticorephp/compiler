@@ -113,6 +113,21 @@ final class Ty
         return false;
     }
 
+    /**
+     * Without `declare(strict_types=1)` php COERCES between scalars (an int into
+     * a `string` slot, a string into an `int`), so a scalar/scalar mismatch is
+     * only a finding in a strict file.
+     */
+    public static function coercedScalars(Ty $target, Ty $source, string $path): bool
+    {
+        $t = $target->kind;
+        $s = $source->kind;
+        $sc = [self::KIND_BOOL => true, self::KIND_INT => true, self::KIND_FLOAT => true, self::KIND_STRING => true];
+        if (!isset($sc[$t]) || !isset($sc[$s])) { return false; }
+        $src = \is_readable($path) ? \file_get_contents($path) : false;
+        return $src === false || \preg_match('/declare\s*\(\s*strict_types\s*=\s*1\b/', $src) !== 1;
+    }
+
     public function display(): string
     {
         if ($this->kind === self::KIND_NULL) { return 'null'; }

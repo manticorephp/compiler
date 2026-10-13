@@ -1,0 +1,7 @@
+direct: ArgumentCountError
+method: ArgumentCountError
+dyn-method: ArgumentCountError
+dyn-method-spread: ArgumentCountError
+dyn-method-lead-spread: ArgumentCountError
+dyn-func: ArgumentCountError
+call_user_func: ArgumentCountError
