@@ -37,8 +37,31 @@ function gc_collect_cycles(): int
     return 0;
 }
 
-function gc_mem_caches(): int
+/**
+ * php 8.5's key set. Every counter reads zero: this collector is manual-trigger
+ * only and keeps no run statistics, so there is nothing else honest to report.
+ *
+ * @return array<string,mixed>
+ */
+function gc_status(): array
 {
+    return [
+        'running' => false,
+        'protected' => false,
+        'full' => false,
+        'runs' => 0,
+        'collected' => 0,
+        'threshold' => 10001,
+        'buffer_size' => 16384,
+        'roots' => 0,
+        'application_time' => 0.0,
+        'collector_time' => 0.0,
+        'destructor_time' => 0.0,
+        'free_time' => 0.0,
+    ];
+}
+
+function gc_mem_caches(): int{
     return 0;
 }
 

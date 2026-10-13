@@ -21,14 +21,14 @@ at run time with `Call to undefined function`.
 
 ## Summary
 
-Functions **984 / 2135** · classes **180 / 327** · codegen builtins 240 · lowered 33 · stdlib globals 1106 · prelude globals 1170
+Functions **998 / 2135** · classes **198 / 327** · codegen builtins 240 · lowered 37 · stdlib globals 1109 · prelude globals 1178
 
 | Extension | Functions | Classes | Coverage |
 |---|---|---|---|
 | [bcmath](#bcmath) | 0 / 14 | 0 / 1 | 0% |
 | [bz2](#bz2) | 0 / 10 | 0 / 0 | 0% |
 | [calendar](#calendar) | 0 / 18 | 0 / 0 | 0% |
-| [Core](#core) | 46 / 62 | 34 / 40 | 78% |
+| [Core](#core) | 55 / 62 | 39 / 40 | 92% |
 | [ctype](#ctype) | 11 / 11 | 0 / 0 | 100% |
 | [curl](#curl) | 32 / 35 | 3 / 6 | 85% |
 | [date](#date) | 38 / 48 | 15 / 15 | 84% |
@@ -73,7 +73,7 @@ Functions **984 / 2135** · classes **180 / 327** · codegen builtins 240 · low
 | [soap](#soap) | 0 / 2 | 0 / 8 | 0% |
 | [sockets](#sockets) | 37 / 37 | 2 / 2 | 100% |
 | [sodium](#sodium) | 0 / 110 | 0 / 1 | 0% |
-| [SPL](#spl) | 10 / 15 | 42 / 55 | 74% |
+| [SPL](#spl) | 15 / 15 | 55 / 55 | 100% |
 | [sqlite3](#sqlite3) | 0 / 0 | 0 / 4 | 0% |
 | [standard](#standard) | 455 / 544 | 2 / 6 | 83% |
 | [sysvmsg](#sysvmsg) | 0 / 7 | 0 / 1 | 0% |
@@ -167,7 +167,7 @@ Functions (39): `apcu_add`<sup>s</sup> `apcu_clear_cache`<sup>s</sup> `apcu_dele
 
 Types (4): `FdPollHandle` `FiberExit` `Resource` `StreamPollHandle`
 
-Internal helpers (`__*`, `manticore_*`, `mc_*`): 1511 — not user API.
+Internal helpers (`__*`, `manticore_*`, `mc_*`): 1512 — not user API.
 
 ## Per extension
 
@@ -205,21 +205,21 @@ Functions 0 / 18 · classes 0 / 0
 
 ### Core
 
-Functions 46 / 62 · classes 34 / 40
+Functions 55 / 62 · classes 39 / 40
 
-<details><summary>implemented (80)</summary>
+<details><summary>implemented (94)</summary>
 
-`class_alias`<sup>b</sup> `class_exists`<sup>b</sup> `debug_backtrace`<sup>b</sup> `define`<sup>l</sup> `defined`<sup>l</sup> `die`<sup>b</sup> `enum_exists`<sup>b</sup> `error_reporting`<sup>p</sup> `exit`<sup>b</sup> `extension_loaded`<sup>l</sup> `func_get_arg`<sup>l</sup> `func_get_args`<sup>l</sup> `func_num_args`<sup>l</sup> `function_exists`<sup>l</sup> `gc_collect_cycles`<sup>b</sup> `gc_disable`<sup>s</sup> `gc_enable`<sup>s</sup> `gc_enabled`<sup>s</sup> `gc_mem_caches`<sup>s</sup> `get_class`<sup>b</sup> `get_class_methods`<sup>b</sup> `get_declared_classes`<sup>p</sup> `get_declared_interfaces`<sup>p</sup> `get_declared_traits`<sup>p</sup> `get_defined_constants`<sup>p</sup> `get_defined_functions`<sup>l</sup> `get_object_vars`<sup>b</sup> `get_parent_class`<sup>b</sup> `get_resource_id`<sup>s</sup> `get_resource_type`<sup>s</sup> `interface_exists`<sup>b</sup> `is_a`<sup>b</sup> `is_subclass_of`<sup>b</sup> `method_exists`<sup>b</sup> `property_exists`<sup>b</sup> `restore_error_handler`<sup>p</sup> `restore_exception_handler`<sup>p</sup> `set_error_handler`<sup>p</sup> `set_exception_handler`<sup>p</sup> `strcasecmp`<sup>s</sup> `strcmp`<sup>l</sup> `strlen`<sup>b</sup> `strncasecmp`<sup>s</sup> `strncmp`<sup>l</sup> `trait_exists`<sup>b</sup> `trigger_error`<sup>l</sup>
+`class_alias`<sup>b</sup> `class_exists`<sup>b</sup> `debug_backtrace`<sup>b</sup> `debug_print_backtrace`<sup>p</sup> `define`<sup>l</sup> `defined`<sup>l</sup> `die`<sup>b</sup> `enum_exists`<sup>b</sup> `error_reporting`<sup>p</sup> `exit`<sup>b</sup> `extension_loaded`<sup>l</sup> `func_get_arg`<sup>l</sup> `func_get_args`<sup>l</sup> `func_num_args`<sup>l</sup> `function_exists`<sup>l</sup> `gc_collect_cycles`<sup>b</sup> `gc_disable`<sup>s</sup> `gc_enable`<sup>s</sup> `gc_enabled`<sup>s</sup> `gc_mem_caches`<sup>s</sup> `gc_status`<sup>s</sup> `get_called_class`<sup>l</sup> `get_class`<sup>b</sup> `get_class_methods`<sup>b</sup> `get_declared_classes`<sup>p</sup> `get_declared_interfaces`<sup>p</sup> `get_declared_traits`<sup>p</sup> `get_defined_constants`<sup>p</sup> `get_defined_functions`<sup>l</sup> `get_included_files`<sup>l</sup> `get_loaded_extensions`<sup>s</sup> `get_mangled_object_vars`<sup>p</sup> `get_object_vars`<sup>b</sup> `get_parent_class`<sup>b</sup> `get_required_files`<sup>l</sup> `get_resource_id`<sup>s</sup> `get_resource_type`<sup>s</sup> `interface_exists`<sup>b</sup> `is_a`<sup>b</sup> `is_subclass_of`<sup>b</sup> `method_exists`<sup>b</sup> `property_exists`<sup>b</sup> `restore_error_handler`<sup>p</sup> `restore_exception_handler`<sup>p</sup> `set_error_handler`<sup>p</sup> `set_exception_handler`<sup>p</sup> `strcasecmp`<sup>s</sup> `strcmp`<sup>l</sup> `strlen`<sup>b</sup> `strncasecmp`<sup>s</sup> `strncmp`<sup>l</sup> `trait_exists`<sup>b</sup> `trigger_error`<sup>l</sup> `user_error`<sup>l</sup> `zend_version`<sup>s</sup>
 
-Classes: `AllowDynamicProperties` `ArgumentCountError` `ArithmeticError` `ArrayAccess` `Attribute` `BackedEnum`<sup>i</sup> `Closure`<sup>i</sup> `Countable` `DelayedTargetValidation` `Deprecated` `DivisionByZeroError` `Error` `Exception` `Fiber` `FiberError` `Generator`<sup>i</sup> `InternalIterator` `Iterator` `IteratorAggregate` `NoDiscard` `Override` `ReturnTypeWillChange` `SensitiveParameter` `SensitiveParameterValue` `Serializable`<sup>i</sup> `stdClass` `Stringable` `Throwable` `Traversable` `TypeError` `UnitEnum`<sup>i</sup> `ValueError` `WeakMap` `WeakReference`
+Classes: `AllowDynamicProperties` `ArgumentCountError` `ArithmeticError` `ArrayAccess` `Attribute` `BackedEnum`<sup>i</sup> `ClosedGeneratorException` `Closure`<sup>i</sup> `CompileError` `Countable` `DelayedTargetValidation` `Deprecated` `DivisionByZeroError` `Error` `ErrorException` `Exception` `Fiber` `FiberError` `Generator`<sup>i</sup> `InternalIterator` `Iterator` `IteratorAggregate` `NoDiscard` `Override` `ParseError` `ReturnTypeWillChange` `SensitiveParameter` `SensitiveParameterValue` `Serializable`<sup>i</sup> `stdClass` `Stringable` `Throwable` `Traversable` `TypeError` `UnhandledMatchError` `UnitEnum`<sup>i</sup> `ValueError` `WeakMap` `WeakReference`
 
 </details>
 
-<details><summary>missing (22)</summary>
+<details><summary>missing (8)</summary>
 
-`clone` `debug_print_backtrace` `gc_status` `get_called_class` `get_class_vars` `get_defined_vars` `get_error_handler` `get_exception_handler` `get_extension_funcs` `get_included_files` `get_loaded_extensions` `get_mangled_object_vars` `get_required_files` `get_resources` `user_error` `zend_version`
+`clone` `get_class_vars` `get_defined_vars` `get_error_handler` `get_exception_handler` `get_extension_funcs` `get_resources`
 
-Classes: `ClosedGeneratorException` `CompileError` `ErrorException` `ParseError` `RequestParseBodyException` `UnhandledMatchError`
+Classes: `RequestParseBodyException`
 
 </details>
 
@@ -815,21 +815,13 @@ Classes: `SodiumException`
 
 ### SPL
 
-Functions 10 / 15 · classes 42 / 55
+Functions 15 / 15 · classes 55 / 55
 
-<details><summary>implemented (52)</summary>
+<details><summary>implemented (70)</summary>
 
-`class_implements`<sup>p</sup> `class_parents`<sup>p</sup> `iterator_apply`<sup>p</sup> `iterator_count`<sup>p</sup> `iterator_to_array`<sup>p</sup> `spl_autoload_functions`<sup>p</sup> `spl_autoload_register`<sup>p</sup> `spl_autoload_unregister`<sup>p</sup> `spl_object_hash`<sup>s</sup> `spl_object_id`<sup>b</sup>
+`class_implements`<sup>p</sup> `class_parents`<sup>p</sup> `class_uses`<sup>p</sup> `iterator_apply`<sup>p</sup> `iterator_count`<sup>p</sup> `iterator_to_array`<sup>p</sup> `spl_autoload`<sup>p</sup> `spl_autoload_call`<sup>p</sup> `spl_autoload_extensions`<sup>p</sup> `spl_autoload_functions`<sup>p</sup> `spl_autoload_register`<sup>p</sup> `spl_autoload_unregister`<sup>p</sup> `spl_classes`<sup>p</sup> `spl_object_hash`<sup>s</sup> `spl_object_id`<sup>b</sup>
 
-Classes: `AppendIterator` `ArrayIterator` `ArrayObject` `BadFunctionCallException` `BadMethodCallException` `CallbackFilterIterator` `DirectoryIterator` `DomainException` `EmptyIterator` `FilesystemIterator` `FilterIterator` `InvalidArgumentException` `IteratorIterator` `LengthException` `LogicException` `OuterIterator` `OutOfBoundsException` `OutOfRangeException` `OverflowException` `RangeException` `RecursiveCallbackFilterIterator` `RecursiveDirectoryIterator` `RecursiveFilterIterator` `RecursiveIterator` `RecursiveIteratorIterator` `RecursiveTreeIterator` `RuntimeException` `SeekableIterator` `SplDoublyLinkedList` `SplFileInfo` `SplFileObject` `SplFixedArray` `SplHeap` `SplMaxHeap` `SplMinHeap` `SplObjectStorage` `SplPriorityQueue` `SplQueue` `SplStack` `SplTempFileObject` `UnderflowException` `UnexpectedValueException`
-
-</details>
-
-<details><summary>missing (18)</summary>
-
-`class_uses` `spl_autoload` `spl_autoload_call` `spl_autoload_extensions` `spl_classes`
-
-Classes: `CachingIterator` `GlobIterator` `InfiniteIterator` `LimitIterator` `MultipleIterator` `NoRewindIterator` `ParentIterator` `RecursiveArrayIterator` `RecursiveCachingIterator` `RecursiveRegexIterator` `RegexIterator` `SplObserver` `SplSubject`
+Classes: `AppendIterator` `ArrayIterator` `ArrayObject` `BadFunctionCallException` `BadMethodCallException` `CachingIterator` `CallbackFilterIterator` `DirectoryIterator` `DomainException` `EmptyIterator` `FilesystemIterator` `FilterIterator` `GlobIterator` `InfiniteIterator` `InvalidArgumentException` `IteratorIterator` `LengthException` `LimitIterator` `LogicException` `MultipleIterator` `NoRewindIterator` `OuterIterator` `OutOfBoundsException` `OutOfRangeException` `OverflowException` `ParentIterator` `RangeException` `RecursiveArrayIterator` `RecursiveCachingIterator` `RecursiveCallbackFilterIterator` `RecursiveDirectoryIterator` `RecursiveFilterIterator` `RecursiveIterator` `RecursiveIteratorIterator` `RecursiveRegexIterator` `RecursiveTreeIterator` `RegexIterator` `RuntimeException` `SeekableIterator` `SplDoublyLinkedList` `SplFileInfo` `SplFileObject` `SplFixedArray` `SplHeap` `SplMaxHeap` `SplMinHeap` `SplObjectStorage` `SplObserver` `SplPriorityQueue` `SplQueue` `SplStack` `SplSubject` `SplTempFileObject` `UnderflowException` `UnexpectedValueException`
 
 </details>
 

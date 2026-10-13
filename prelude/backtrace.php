@@ -49,3 +49,24 @@ function __mir_bt_frames(array $names, array $lines, string $file): array
     }
     return $out;
 }
+
+/**
+ * `debug_print_backtrace()` — `#N file(line): Class->fn()` per frame, outermost
+ * last. Frames carry no argument values here (see the header), so the argument
+ * list prints empty and `DEBUG_BACKTRACE_IGNORE_ARGS` changes nothing.
+ */
+function debug_print_backtrace(int $options = 0, int $limit = 0): void
+{
+    // Frame 0 is this function's own: php's builtin has none.
+    $frames = \debug_backtrace();
+    $n = \count($frames) - 1;
+    if ($limit > 0 && $n > $limit) { $n = $limit; }
+    $i = 0;
+    while ($i < $n) {
+        $f = $frames[$i + 1];
+        $name = $f['function'];
+        if (isset($f['class'])) { $name = $f['class'] . $f['type'] . $name; }
+        echo '#', $i, ' ', $f['file'], '(', $f['line'], '): ', $name, "()\n";
+        $i = $i + 1;
+    }
+}

@@ -62,9 +62,8 @@ Priority is how many real applications reach a function, not the percentage. A m
 function compiles and fails at run time with `Call to undefined function`.
 
 **P0 — every application**
-- [ ] Core audit false negatives (`get_called_class`, `get_defined_vars`, `ErrorException`, `UnhandledMatchError`, …) — triage real vs audit-blind [#215]
-- [ ] `SPL` iterators (`LimitIterator`, `CachingIterator`, `RegexIterator`, `RecursiveArrayIterator`, …), `class_uses` [#214]
-- [ ] `password_*`, `crypt` [#212] · `hash_pbkdf2`/`hkdf`/`copy`/`update_stream` [#213]
+- [~] Core 92 % — remaining `get_defined_vars`, `get_class_vars` [#215] · [x] `SPL` 100 % [#214]
+- [~] `password_*`, `crypt` — argon2, DES crypt open [#212] · [x] `hash` KDFs/copy/update_stream [#213]
 - [ ] `openssl` 7 % — encrypt/decrypt, digest, sign/verify, pkey, x509 over libcrypto [#211]
 - [ ] PDO `pgsql` / `mysql` drivers [#210]
 - [~] `standard` 82 % · `date` 84 % — tail tracked in [#218]

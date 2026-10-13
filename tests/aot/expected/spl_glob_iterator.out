@@ -1,0 +1,8 @@
+3 3
+D/a.txt a.txt SplFileInfo 5
+D/b.txt b.txt SplFileInfo 5
+D/d.txt d.txt SplFileInfo 5
+a.txt D/a.txt
+b.txt D/b.txt
+d.txt D/d.txt
+0
