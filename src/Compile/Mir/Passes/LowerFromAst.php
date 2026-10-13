@@ -561,6 +561,10 @@ final class LowerFromAst implements Pass
     /** Manticore\Ds (typed fixed-width arrays over the native buffer) —
      *  DEMAND-GATED. Braced-namespace tree with no dependencies of its own. */
     public string $dsSrc = '';
+    /** Filter\ exceptions (ext/filter) — braced namespace, always included. */
+    public string $filterSrc = '';
+    /** filter_var / filter_input entry points (global functions) — DEMAND-GATED. */
+    public string $filterFnsSrc = '';
 
     /**
      * Bundled-stdlib function declarations (parsed from `src/Runtime/**`)

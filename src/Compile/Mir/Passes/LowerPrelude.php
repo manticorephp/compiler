@@ -165,6 +165,10 @@ trait LowerPrelude
             // buffering the output of.
             $src .= $this->obSrc;
         }
+        if ($this->filterFnsSrc !== '') {
+            // Calls the stdlib validators and throws Filter\ (parsed after this blob).
+            $src .= $this->filterFnsSrc;
+        }
         if ($this->autoloadSrc !== '') {
             // Order-independent — the queue holds callables and calls nothing
             // else in the prelude.
@@ -243,7 +247,7 @@ trait LowerPrelude
             $own = new \Compile\Mir\PreludeDemand([
                 "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
                 "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
-                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc,
+                "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->filterSrc,
             ]);
             if (!$this->includeArrayFnsExt
                 && $own->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($this->arrayFnsExtSrc))) {
@@ -315,6 +319,11 @@ trait LowerPrelude
         if ($this->dsSrc !== '') {
             $ds = \Parser\Parser::parseSource("<?php\n" . $this->dsSrc);
             foreach ($ds->statements as $s) { $stmts[] = $s; }
+        }
+        // Filter\ — braced namespace, extends \Exception only.
+        if ($this->filterSrc !== '') {
+            $fl = \Parser\Parser::parseSource("<?php\n" . $this->filterSrc);
+            foreach ($fl->statements as $s) { $stmts[] = $s; }
         }
         return $stmts;
     }
@@ -1492,7 +1501,13 @@ trait LowerPrelude
             'FILTER_FLAG_ENCODE_AMP' => 64, 'FILTER_FLAG_ALLOW_FRACTION' => 4096,
             'FILTER_FLAG_ALLOW_THOUSAND' => 8192, 'FILTER_FLAG_ALLOW_SCIENTIFIC' => 16384,
             'FILTER_FLAG_IPV4' => 1048576, 'FILTER_FLAG_IPV6' => 2097152,
-            'FILTER_FLAG_EMAIL_UNICODE' => 1048576,
+            'FILTER_FLAG_EMAIL_UNICODE' => 1048576, 'FILTER_FLAG_HOSTNAME' => 1048576,
+            'FILTER_THROW_ON_FAILURE' => 268435456, 'FILTER_SANITIZE_STRING' => 513,
+            'FILTER_SANITIZE_STRIPPED' => 513, 'FILTER_FLAG_STRIP_BACKTICK' => 512,
+            'FILTER_FLAG_NO_ENCODE_QUOTES' => 128, 'FILTER_FLAG_EMPTY_STRING_NULL' => 256,
+            'FILTER_FLAG_PATH_REQUIRED' => 262144, 'FILTER_FLAG_QUERY_REQUIRED' => 524288,
+            'FILTER_FLAG_NO_RES_RANGE' => 4194304, 'FILTER_FLAG_NO_PRIV_RANGE' => 8388608,
+            'FILTER_FLAG_GLOBAL_RANGE' => 536870912,
             // ext-intl grapheme_extract() type selector — php's own values
             // (host-invariant). The intl-grapheme polyfill defines these behind
             // `if (!defined(...))`, redundant once predefined here.
