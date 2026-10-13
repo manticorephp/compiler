@@ -5669,12 +5669,10 @@ trait EmitLlvmObjects
         $out .= $this->arrayPtrOrEmptyIr($cv);
         $arr = $this->arrayPtrReg;
         $out .= $this->emitLookupWord($arr, $key, $keyIsCell, $keyIsString, $aa->index);
-        // Absent and present-but-NULL are both unset: one test on the word.
-        $nn = $this->ssa->allocReg();
-        $out .= '  ' . $nn . ' = icmp ne i64 ' . $this->lastValue . ", -3659174697238528\n";
-        $nnz = $this->ssa->allocReg();
-        $out .= '  ' . $nnz . ' = zext i1 ' . $nn . " to i64\n";
-        $out .= '  store i64 ' . $nnz . ', ptr ' . $slot . "\n";
+        // Absent and present-but-NULL are both unset; a RAW int buffer has no
+        // NULL, its word may even equal the boxed one, so it answers by address.
+        $out .= $this->lookupPresent($aa, $this->lastValue, true);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
 
         $out .= $endL . ":\n";
@@ -5724,11 +5722,11 @@ trait EmitLlvmObjects
      * is read at RUN TIME: CELL-hinted → the word test, anything else → the address.
      * (A null array answers the miss word either way.)
      */
-    private function lookupPresent(\Compile\Mir\ArrayAccess_ $aa, string $word): string
+    private function lookupPresent(\Compile\Mir\ArrayAccess_ $aa, string $word, bool $erased = false): string
     {
         $el = $aa->array->type->element;
         $nn = $this->ssa->allocReg();
-        if ($el !== null && $el->kind === Type::KIND_INT) {
+        if ($erased || ($el !== null && $el->kind === Type::KIND_INT)) {
             $arr = $this->lookupArr;
             $isNull = $this->ssa->allocReg();
             $out = '  ' . $isNull . ' = icmp eq ptr ' . $arr . ", null\n";
@@ -5741,7 +5739,10 @@ trait EmitLlvmObjects
             $hn = $this->ssa->allocReg();
             $out .= '  ' . $hn . ' = and i64 ' . $fl . ', ' . \Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
             $isCell = $this->ssa->allocReg();
-            $out .= '  ' . $isCell . ' = icmp eq i64 ' . $hn . ', ' . \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
+            // An erased subject can hold any buffer: only a RAW INT one needs the
+            // address test, every other hint keeps the word test.
+            $out .= '  ' . $isCell . ' = icmp ' . ($erased ? 'ne' : 'eq') . ' i64 ' . $hn . ', '
+                  . ($erased ? \Compile\MemoryAbi::ARRAY_ELEM_HINT_INT : \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) . "\n";
             $byAddr = $this->ssa->allocReg();
             $out .= '  ' . $byAddr . ' = icmp ne ptr ' . $this->lookupAddr . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
             $byWord = $this->ssa->allocReg();
