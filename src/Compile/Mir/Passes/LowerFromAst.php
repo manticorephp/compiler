@@ -663,6 +663,10 @@ final class LowerFromAst implements Pass
     private int $closureCounter = 0;
     private int $destrCounter = 0;
 
+    /** Names a `static` / `global` statement bound to a module cell, per function (an over-approximation across closures).
+     *  @var array<string, array<string, bool>> */
+    private array $cellDecls = [];
+
     /** Counter for the `__lv_N` temps {@see LowerStmts::hoistLvalueStmt} makes. */
     private int $lvCounter = 0;
 
@@ -3876,6 +3880,7 @@ final class LowerFromAst implements Pass
             : $this->currentLowerFn;
         $nodes = [];
         foreach ($stmt->decls as $d) {
+            $this->cellDecls[$this->currentLowerClass . '::' . $this->currentLowerFn][$d->name] = true;
             $cell = '@' . $this->sanitizeSym($rawBase . '__sl_' . $d->name);
             $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
             $guard = '';

@@ -578,8 +578,12 @@ trait LowerStmts
         /** @var Node[] $bind */
         $bind = [];
         $keyVar = null;
+        // A `static` / `global` variable lives in a module cell, not in the loop's
+        // slot: bind a synthetic local and store it through the ordinary
+        // assignment, which knows the cell.
+        $fnKey = $this->currentLowerClass . '::' . $this->currentLowerFn;
         if ($stmt->key !== null) {
-            if ($stmt->key->kind === 'Variable') {
+            if ($stmt->key->kind === 'Variable' && !isset($this->cellDecls[$fnKey][$this->varName($stmt->key)])) {
                 $keyVar = $this->varName($stmt->key);
             } else {
                 $keyVar = '__fe_key_' . (string)$this->destrCounter;
@@ -612,7 +616,8 @@ trait LowerStmts
             return $this->hoistForeachSubject(
                 new Foreach_($array, $keyVar, $tmp, $stmt->valueByRef, new Block($stmts, Type::void())));
         }
-        if ($stmt->value->kind === 'Variable') {
+        if ($stmt->value->kind === 'Variable'
+            && ($stmt->valueByRef || !isset($this->cellDecls[$fnKey][$this->varName($stmt->value)]))) {
             $valueVar = $this->varName($stmt->value);
         } else {
             $valueVar = '__fe_val_' . (string)$this->destrCounter;
@@ -703,6 +708,7 @@ trait LowerStmts
     {
         $nodes = [];
         foreach ($stmt->names as $name) {
+            $this->cellDecls[$this->currentLowerClass . '::' . $this->currentLowerFn][$name] = true;
             $cell = '@g_' . $name;
             $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
             $this->module->addGlobalVarName($name);
