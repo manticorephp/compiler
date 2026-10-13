@@ -662,3 +662,27 @@ function strtotime(string $datetime, ?int $baseTimestamp = null): int|false
     }
     return $r;
 }
+
+/**
+ * The zone a datetime STRING spells out ("... Europe/Paris", "... +02:30", "...Z", "... EST"),
+ * as a DateTimeZone name, or '' when it names none. Call it only on a string the
+ * parser already accepted.
+ */
+function __mc_dt_str_zone(string $str): string
+{
+    $m = [];
+    if (\preg_match('/(?:^|[\s\d])([A-Za-z_]+\/[A-Za-z_+-]+(?:\/[A-Za-z_]+)?)\s*$/', $str, $m) === 1
+        && \__mc_tz_open_ci($m[1]) >= 0) {
+        return $m[1];
+    }
+    if (\substr(\ltrim($str), 0, 1) === '@') {
+        return '';
+    }
+    if (\preg_match('/([+-])(\d{2}):?(\d{2})\s*$/', $str, $m) === 1) {
+        return $m[1] . $m[2] . ':' . $m[3];
+    }
+    if (\preg_match('/([A-Za-z]{1,5})\s*$/', $str, $m) === 1 && \__mc_dt_abbroff(\strtolower($m[1])) !== -99999) {
+        return \strtoupper($m[1]);
+    }
+    return '';
+}
