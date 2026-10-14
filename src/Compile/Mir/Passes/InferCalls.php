@@ -1062,7 +1062,10 @@ trait InferCalls
         if (!$differ) {
             // Arrays of different ELEMENT shapes share a representation but not a
             // view: the call must read the join, not whichever body came first.
-            return $shapeDiffers && $acc !== null ? $acc : null;
+            // The join's element is ERASED: unionWith takes an unrefined element
+            // for a bottom, so a bare-`array` body's `vec[unknown]` let the other
+            // body's `vec[obj]` win and its strings were read as objects.
+            return $shapeDiffers && $acc !== null ? $acc->withElement(Type::unknown()) : null;
         }
         return $numeric ? Type::numericCell() : Type::cell();
     }

@@ -3694,6 +3694,7 @@ final class InferTypes implements Pass
         /** @var Type $found */
         $found = null;
         $first = null;
+        $shapeDiffers = false;
         foreach ($this->declarersOf($method) as $cn) {
             $sig = $this->sigs[$cn . '__' . $method] ?? null;
             if ($sig === null) { continue; }
@@ -3706,10 +3707,11 @@ final class InferTypes implements Pass
             // objects ({@see virtualReturnJoin} joins the same way).
             elseif ($sig->kind === Type::KIND_ARRAY && $first !== null
                 && $this->elemReprShape($sig) !== $this->elemReprShape($first)) {
+                $shapeDiffers = true;
                 $found = $found->unionWith($sig);
             }
         }
-        return $found;
+        return $shapeDiffers ? $found->withElement(Type::unknown()) : $found;
     }
 
     /**
