@@ -313,6 +313,9 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, bool> {@see Module::$callableArrayMethods} */
     private array $callableArrayMethods = [];
 
+    /** @var array<string, bool> {@see Module::$callableStaticStrings} */
+    private array $callableStaticStrings = [];
+
     /** `#[TypeDef]` value types. Never in {@see $classes}: nothing is emitted for
      *  them — no descriptor, no drop fn. Consulted only to turn `$byte->value` into the
      *  receiver itself and `$byte->method()` into a direct call.
@@ -687,6 +690,7 @@ final class EmitLlvm implements EmitVisitor
         $this->hasClassAlias = $module->hasClassAlias;
         $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
         $this->callableArrayMethods = $module->callableArrayMethods;
+        $this->callableStaticStrings = $module->callableStaticStrings;
         $this->enums = $module->enums;
         $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
         $this->nothrow = \Compile\Mir\NothrowSummary::fromModule($module);

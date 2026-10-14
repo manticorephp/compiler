@@ -838,6 +838,36 @@ trait EmitLlvmCalls
                 $out .= $nextL . ":\n";
             }
         }
+        // `'Class::method'` strings the module spells: a static method named by
+        // string. Its symbol carries a `__`, so no function arm above reaches it.
+        if (!$hasSpread) {
+            foreach ($this->callableStaticStrings as $csName => $_) {
+                $csName = (string)$csName;
+                $sep = \strpos($csName, '::');
+                $ccls = \ltrim(\substr($csName, 0, $sep), '\\');
+                $cm = \substr($csName, $sep + 2);
+                if (!isset($this->classes[$ccls]) || !$this->methodIsStatic($ccls, $cm)
+                    || $this->staticMethodHasNoImpl($ccls, $cm)) { continue; }
+                $csSym = $this->resolveMethodClass($ccls, $cm) . '__' . $cm;
+                $csPt = $this->sigs->paramTypes[$csSym] ?? null;
+                if ($csPt === null || !$this->dynfArityFits($csSym, $argc) || $this->anyRefParam($csSym)
+                    || !$this->dynArmTypesEmittable($csPt, $iv->args)) { continue; }
+                $csRt = $this->sigs->returnType[$csSym] ?? Type::cell();
+                $hitL = $this->ssa->allocLabel('dynf.shit');
+                $nextL = $this->ssa->allocLabel('dynf.snext');
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($csName) . ")\n";
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $out .= $this->emitNode(new \Compile\Mir\StaticCall_($ccls, $cm, $iv->args, $csRt));
+                $out .= $this->boxToCell($csRt);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+        }
         if ($dynfSyms !== []) {
             $out .= $hasSpread
                 ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr)
@@ -1708,6 +1738,7 @@ trait EmitLlvmCalls
                     $out .= $this->emitRefValueSlot($a, $calleeParams[$capCnt + $pi] ?? null, -1, $pi);
                     $padDrops .= $this->lastRefSlotDrop;
                 }
+                $out .= $this->coerceToI64();
                 $argList .= ', i64 ' . $this->lastValue;
                 $argTypes .= ', i64';
                 $pi = $pi + 1;
@@ -1933,7 +1964,7 @@ trait EmitLlvmCalls
                 $this->lastValueType = 'double';
             }
             if ($n->type->kind === Type::KIND_CELL) {
-                $out .= $this->boxInvokeResultIr();
+                $out .= $this->boxInvokeResultIr($known && ($this->sigs->returnType[$fn] ?? null) !== null && $this->sigs->returnType[$fn]->kind === Type::KIND_CELL);
                 $this->markCellOpaque($this->lastValue);
             }
             return $out;
@@ -1950,7 +1981,7 @@ trait EmitLlvmCalls
         // a double: box it by its allocator magic. The closure's +1 moves into
         // the cell. A tagged scalar passes through.
         if ($n->type->kind === Type::KIND_CELL) {
-            $out .= $this->boxInvokeResultIr();
+            $out .= $this->boxInvokeResultIr($known && ($this->sigs->returnType[$fn] ?? null) !== null && $this->sigs->returnType[$fn]->kind === Type::KIND_CELL);
             $this->markCellOpaque($this->lastValue);
         }
         return $out;
@@ -1962,9 +1993,12 @@ trait EmitLlvmCalls
      * a raw word is a container — boxed by its allocator magic — or a null
      * pointer, which is a `?Class` returning null, not the integer 0.
      */
-    private function boxInvokeResultIr(): string
+    private function boxInvokeResultIr(bool $selfDescribing = false): string
     {
         $out = $this->coerceToI64();
+        // A callee declared to return a cell hands back a tagged word, null
+        // included (CELL_NULL): a raw 0 there is the float 0.0, not a null pointer.
+        if ($selfDescribing) { return $out; }
         $raw = $this->lastValue;
         $out .= $this->boxUnknownShallowIr();
         $z = $this->ssa->allocReg();

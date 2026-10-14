@@ -1557,6 +1557,7 @@ final class LowerFromAst implements Pass
             }
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
+        foreach ($module->functions as $cfn) { $this->collectCallableStaticStrings($cfn->body, $module); }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
@@ -1682,6 +1683,20 @@ final class LowerFromAst implements Pass
             }
         }
         foreach (Walk::children($node) as $child) { $this->collectCallableArrayMethods($child, $module); }
+    }
+
+    /**
+     * `'Class::method'` string literals into {@see Module::$callableStaticStrings}:
+     * the only names an erased invoke of a string callable can resolve to a
+     * static method ({@see EmitLlvmCalls::emitDynFnCall}).
+     */
+    private function collectCallableStaticStrings(Node $node, Module $module): void
+    {
+        if ($node instanceof \Compile\Mir\StringConst
+            && \preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*::[A-Za-z_][A-Za-z0-9_]*$/', $node->value) === 1) {
+            $module->callableStaticStrings[$node->value] = true;
+        }
+        foreach (Walk::children($node) as $child) { $this->collectCallableStaticStrings($child, $module); }
     }
 
     private function moduleHasDynamicMethodInvoke(Module $module): bool

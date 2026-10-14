@@ -8004,7 +8004,7 @@ trait EmitLlvmObjects
         if ($m !== 'rewind' && $m !== 'valid' && $m !== 'current' && $m !== 'key' && $m !== 'next') { return ''; }
         $obj = $mc->object;
         $spilled = $obj->kind === Node::KIND_STORE_LOCAL;
-        if ($obj->kind !== Node::KIND_LOAD_LOCAL && $obj->kind !== Node::KIND_PROPERTY_ACCESS && !$spilled) { return ''; }
+        $pure = $obj->kind === Node::KIND_LOAD_LOCAL || $obj->kind === Node::KIND_PROPERTY_ACCESS || $spilled;
         $ok = $obj->type->kind;
         $ocls = \strtolower(\ltrim($ok === Type::KIND_OBJ ? ($obj->type->class ?? '') : '', '\\'));
         $may = $ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN
@@ -8018,6 +8018,22 @@ trait EmitLlvmObjects
             // it ONCE, then every arm reads the local — a pure receiver again.
             $out .= $this->emitNode($obj);
             $obj = new \Compile\Mir\LoadLocal($this->asStoreLocalNode($obj)->name, $obj->type);
+            $mc->object = $obj;
+        }
+        $tmpName = '';
+        if (!$pure) {
+            // An impure receiver (a call result) is evaluated ONCE into a
+            // hidden slot; every arm then reads the slot.
+            $tmpName = '@itg.recv.' . (string)$this->iterCounter;
+            $this->iterCounter = $this->iterCounter + 1;
+            $tmpSlot = $this->ssa->allocReg();
+            $this->locals->slots[$tmpName] = $tmpSlot;
+            $out .= $this->emitNode($obj);
+            $out .= $this->coerceToI64();
+            $out .= '  ' . $tmpSlot . " = alloca i64\n";
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmpSlot . "\n";
+            $spilledStore = $obj;
+            $obj = new \Compile\Mir\LoadLocal($tmpName, $obj->type);
             $mc->object = $obj;
         }
         $out .= $this->emitNode($obj);
@@ -8051,7 +8067,8 @@ trait EmitLlvmObjects
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $this->inGenArmEmit = false;
-        if ($spilled) { $mc->object = $spilledStore; }
+        if ($spilled || $tmpName !== '') { $mc->object = $spilledStore; }
+        if ($tmpName !== '') { unset($this->locals->slots[$tmpName]); }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
