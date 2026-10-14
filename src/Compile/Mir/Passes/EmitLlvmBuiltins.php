@@ -8246,7 +8246,7 @@ trait EmitLlvmBuiltins
         $tgtWord = $this->lastValue;
         $strP = $this->ssa->allocReg();
         $tkind = $args[1]->type->kind;
-        if ($tkind === Type::KIND_CELL || $tkind === Type::KIND_UNKNOWN) {
+        if ($tkind === Type::KIND_CELL) {
             // A boxed word is no address: a string payload is stripped, a
             // scalar rendered. (An object cell takes the class-id arm below.)
             $this->rt->needsCellToStrPtr = true;
@@ -8302,6 +8302,24 @@ trait EmitLlvmBuiltins
                 $out .= $tobjL . ":\n";
                 $tp = $this->ssa->allocReg();
                 $out .= '  ' . $tp . ' = inttoptr i64 ' . $tgtI . " to ptr\n";
+            } elseif ($tk === Type::KIND_UNKNOWN) {
+                // An ERASED target is a raw pointer: an object carries the rc tag
+                // at -8, a string does not.
+                $chkL = $this->ssa->allocLabel('isa.tchk');
+                $nzT = $this->ssa->allocReg();
+                $out .= '  ' . $nzT . ' = icmp ugt i64 ' . $tgtI . ", 65535\n";
+                $out .= '  br i1 ' . $nzT . ', label %' . $chkL . ', label %' . $tstrL . "\n";
+                $out .= $chkL . ":\n";
+                $tp = $this->ssa->allocReg();
+                $out .= '  ' . $tp . ' = inttoptr i64 ' . $tgtI . " to ptr\n";
+                $mpT = $this->ssa->allocReg();
+                $out .= '  ' . $mpT . ' = getelementptr inbounds i8, ptr ' . $tp . ", i64 -8\n";
+                $mvT = $this->ssa->allocReg();
+                $out .= '  ' . $mvT . ' = load i64, ptr ' . $mpT . "\n";
+                $isObjT = $this->ssa->allocReg();
+                $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $mvT . ', ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+                $out .= '  br i1 ' . $isObjT . ', label %' . $tobjL . ', label %' . $tstrL . "\n";
+                $out .= $tobjL . ":\n";
             } else {
                 $out .= $this->cellTagIr($tgtI);
                 $isObjT = $this->ssa->allocReg();
@@ -8322,7 +8340,9 @@ trait EmitLlvmBuiltins
             $out .= '  br label %' . $doneL . "\n";
             if ($tk !== Type::KIND_OBJ) {
                 $out .= $tstrL . ":\n";
-                $out .= '  ' . $strP . ' = call ptr @__manticore_cell_to_strptr_s(i64 ' . $tgtWord . ")\n";
+                if ($tk === Type::KIND_CELL) {
+                    $out .= '  ' . $strP . ' = call ptr @__manticore_cell_to_strptr_s(i64 ' . $tgtWord . ")\n";
+                }
             }
         }
         $hit = $this->ssa->allocReg();

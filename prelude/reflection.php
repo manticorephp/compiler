@@ -2052,7 +2052,9 @@ function __mc_refl_type_of(string $decl, bool $nullable): object
  * reconstruct the argument array / a fresh instance — the arguments were lowered
  * as ordinary expressions, so arrays / enum cases / constants all come back.
  */
-class ReflectionAttribute
+interface Reflector extends Stringable {}
+
+class ReflectionAttribute implements Reflector
 {
     /** Match the filter by exact class name only — is-a matching is not
      *  implemented, so a filter naming a PARENT of the attribute class does not
@@ -2103,6 +2105,38 @@ class ReflectionAttribute
         return __mc_refl_call0($this->argsFn);
     }
 
+    /** php's `Attribute [ Name ] { - Arguments [n] { Argument #i [ ... ] } }`. */
+    public function __toString(): string
+    {
+        $args = $this->getArguments();
+        $out = "Attribute [ " . $this->name . " ]";
+        if (\count($args) === 0) { return $out . "\n"; }
+        $out .= " {\n  - Arguments [" . \count($args) . "] {\n";
+        $i = 0;
+        foreach ($args as $k => $v) {
+            $out .= "    Argument #" . $i . " [ " . (\is_string($k) ? $k . " = " : "") . self::fmtArg($v) . " ]\n";
+            $i = $i + 1;
+        }
+        return $out . "  }\n}\n";
+    }
+
+    private static function fmtArg(mixed $v): string
+    {
+        if ($v === null) { return "NULL"; }
+        if ($v === true) { return "true"; }
+        if ($v === false) { return "false"; }
+        if (\is_string($v)) { return "'" . $v . "'"; }
+        if (\is_array($v)) {
+            $parts = [];
+            $list = \array_is_list($v);
+            foreach ($v as $k => $e) {
+                $parts[] = ($list ? "" : (\is_string($k) ? "'" . $k . "' => " : $k . " => ")) . self::fmtArg($e);
+            }
+            return "[" . \implode(", ", $parts) . "]";
+        }
+        if (\is_object($v)) { return "Object"; }
+        return (string)$v;
+    }
     /** A fresh instance of the attribute class, its arguments applied. */
     public function newInstance(): object
     {
