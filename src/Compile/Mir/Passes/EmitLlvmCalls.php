@@ -1708,6 +1708,7 @@ trait EmitLlvmCalls
                     $out .= $this->emitRefValueSlot($a, $calleeParams[$capCnt + $pi] ?? null, -1, $pi);
                     $padDrops .= $this->lastRefSlotDrop;
                 }
+                $out .= $this->coerceToI64();
                 $argList .= ', i64 ' . $this->lastValue;
                 $argTypes .= ', i64';
                 $pi = $pi + 1;

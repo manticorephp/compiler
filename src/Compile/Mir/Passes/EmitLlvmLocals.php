@@ -1605,6 +1605,30 @@ trait EmitLlvmLocals
         return $out === null ? null : $pre . $out;
     }
 
+    /**
+     * The address of a dynamic property `$o->p` of a bag class (stdClass): the
+     * bag's element slot, vivified as an array element is. null when the
+     * receiver is no known bag class.
+     */
+    private function emitBagElemAddr(PropertyAccess_ $pa): ?string
+    {
+        $cd = $this->classes[$pa->object->type->class ?? ''] ?? null;
+        if ($cd === null || !$cd->usesBag()) { return null; }
+        $out = $this->emitNode($pa->object);
+        $out .= $this->cellToPtr();
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . ' = getelementptr inbounds i8, ptr ' . $this->lastValue
+              . ', i64 ' . (string)$cd->bagOffset() . "\n";
+        $ep = $this->ssa->allocReg();
+        $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot_str(ptr ' . $slot . ', ptr '
+              . $this->strLitId($this->pool->intern($pa->property)) . ")\n";
+        $addr = $this->ssa->allocReg();
+        $out .= '  ' . $addr . ' = ptrtoint ptr ' . $ep . " to i64\n";
+        $this->lastValue = $addr;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function byRefAddrOfRaw(Node $a): ?string
     {
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
@@ -1673,7 +1697,8 @@ trait EmitLlvmLocals
             // the object's class_id instead. Asks the same predicate the offset
             // itself comes from, so the two cannot drift.
             if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
-                return $this->emitPropAddrByClassId($pa->object, $pa->property);
+                $byId = $this->emitPropAddrByClassId($pa->object, $pa->property);
+                return $byId ?? $this->emitBagElemAddr($pa);
             }
             $out = $this->emitNode($pa->object);
             $out .= $this->coerceToPtr();
