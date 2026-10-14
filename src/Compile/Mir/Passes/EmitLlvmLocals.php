@@ -1793,6 +1793,24 @@ trait EmitLlvmLocals
                 $out .= '  ' . $nb . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
                 $out .= '  store i64 ' . $nb . ', ptr ' . $viewCell . "\n";
             }
+            // A cell element that is already a REF cell (`$r = &$a[$k]` earlier):
+            // the storage is its box, so answer the box's value address. The slot
+            // itself would let the callee overwrite the REF cell and detach `$r`.
+            if (!$isAppend && $aa->type->kind === Type::KIND_CELL) {
+                $rw = $this->ssa->allocReg();
+                $out .= '  ' . $rw . ' = load i64, ptr ' . $ep . "\n";
+                $rh = $this->ssa->allocReg();
+                $out .= '  ' . $rh . ' = and i64 ' . $rw . ", -281474976710656\n";
+                $rIs = $this->ssa->allocReg();
+                $out .= '  ' . $rIs . ' = icmp eq i64 ' . $rh . ', ' . (string)(\Compile\MemoryAbi::CELL_REF_TAG_BITS) . "\n";
+                $rb = $this->ssa->allocReg();
+                $out .= '  ' . $rb . ' = and i64 ' . $rw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $rbp = $this->ssa->allocReg();
+                $out .= '  ' . $rbp . ' = inttoptr i64 ' . $rb . " to ptr\n";
+                $ep2 = $this->ssa->allocReg();
+                $out .= '  ' . $ep2 . ' = select i1 ' . $rIs . ', ptr ' . $rbp . ', ptr ' . $ep . "\n";
+                $ep = $ep2;
+            }
             $out .= $close;
             $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $ep . " to i64\n";
