@@ -838,6 +838,36 @@ trait EmitLlvmCalls
                 $out .= $nextL . ":\n";
             }
         }
+        // `'Class::method'` strings the module spells: a static method named by
+        // string. Its symbol carries a `__`, so no function arm above reaches it.
+        if (!$hasSpread) {
+            foreach ($this->callableStaticStrings as $csName => $_) {
+                $csName = (string)$csName;
+                $sep = \strpos($csName, '::');
+                $ccls = \ltrim(\substr($csName, 0, $sep), '\\');
+                $cm = \substr($csName, $sep + 2);
+                if (!isset($this->classes[$ccls]) || !$this->methodIsStatic($ccls, $cm)
+                    || $this->staticMethodHasNoImpl($ccls, $cm)) { continue; }
+                $csSym = $this->resolveMethodClass($ccls, $cm) . '__' . $cm;
+                $csPt = $this->sigs->paramTypes[$csSym] ?? null;
+                if ($csPt === null || !$this->dynfArityFits($csSym, $argc) || $this->anyRefParam($csSym)
+                    || !$this->dynArmTypesEmittable($csPt, $iv->args)) { continue; }
+                $csRt = $this->sigs->returnType[$csSym] ?? Type::cell();
+                $hitL = $this->ssa->allocLabel('dynf.shit');
+                $nextL = $this->ssa->allocLabel('dynf.snext');
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($csName) . ")\n";
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $out .= $this->emitNode(new \Compile\Mir\StaticCall_($ccls, $cm, $iv->args, $csRt));
+                $out .= $this->boxToCell($csRt);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+        }
         if ($dynfSyms !== []) {
             $out .= $hasSpread
                 ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr)
