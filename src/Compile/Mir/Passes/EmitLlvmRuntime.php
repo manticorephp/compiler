@@ -2175,10 +2175,7 @@ trait EmitLlvmRuntime
      */
     private function methodTrampField(\Compile\Mir\ClassDef $cls, \Compile\Mir\MethodMeta $mm, string $name): string
     {
-        if ($mm->isAbstract) { return 'null'; }
-        foreach ($mm->params as $p) {
-            if ($p->byRef) { return 'null'; }
-        }
+        if (!\Compile\Mir\Passes\TrampolineSynth::reflectable($mm)) { return 'null'; }
         $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
         $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name);
         // Only reference a trampoline that was actually synthesized — a data
