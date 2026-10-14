@@ -1461,7 +1461,7 @@ trait EmitLlvmRuntime
         $out .= "  br i1 %hasd, label %dropit, label %dofree\n";
         $out .= "dropit:\n";
         $out .= "  %df = inttoptr i64 %dv to ptr\n";
-        $out .= "  call void %df(ptr %p)\n";
+        $out .= "  call void %df(ptr %p, i64 4)\n";
         $out .= "  br label %dofree\n";
         $out .= "dofree:\n";
         // Clear the magic first: a stale pointer released twice then bails at
@@ -3132,6 +3132,104 @@ end:
         return \strtr($ir, $r);
     }
 
+    /**
+     * A Closure-typed property is a TRANSPARENT edge of the object holding it:
+     * `Request -> Closure -> Request` is a cycle the object-only walk could not
+     * see. When the env's only reference is that property (rc == 1) its
+     * captured objects are the holder's children, walked through the env's own
+     * drop fn ({@see EmitLlvmCalls::closureRcFn} modes 0..3). An env shared with
+     * anyone else is left alone — its count is not the holder's to subtract.
+     * `__cc_closure_free` is the white-node release: the env's non-object
+     * captures go back, the captured objects were reclaimed by the walk, and
+     * the env itself is freed; a shared env takes the ordinary release.
+     */
+    private function ccClosureIr(): string
+    {
+        $magic = (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC;
+        $mask = (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK;
+        $mOff = (string)\Compile\MemoryAbi::STRING_HASH_OFFSET;
+        $dOff = (string)\Compile\MemoryAbi::CLOSURE_DROP_OFFSET;
+        $hdr = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $sole = "  %pi = ptrtoint ptr %p to i64\n"
+            . "  %lo = icmp ult i64 %v, 65536\n"
+            . '  %hi = icmp ugt i64 %v, ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . "  %bad = or i1 %lo, %hi\n"
+            . "  br i1 %bad, label %none, label %hdr\n"
+            . "hdr:\n"
+            . '  %mp = getelementptr inbounds i8, ptr %p, i64 ' . $mOff . "\n"
+            . "  %m = load i64, ptr %mp\n"
+            . '  %mm = and i64 %m, ' . $mask . "\n"
+            . '  %ism = icmp eq i64 %mm, ' . $magic . "\n"
+            . "  br i1 %ism, label %rcb, label %none\n"
+            . "rcb:\n"
+            . "  %rp = getelementptr inbounds i8, ptr %p, i64 -8\n"
+            . "  %c = load i64, ptr %rp\n"
+            . "  %one = icmp eq i64 %c, 1\n"
+            . "  br i1 %one, label %solec, label %none\n";
+        $out = "define void @__cc_closure_walk(i64 %v, i64 %a) {\nentry:\n"
+            . "  %p = inttoptr i64 %v to ptr\n" . $sole
+            . "solec:\n"
+            . '  %dp = getelementptr inbounds i8, ptr %p, i64 ' . $dOff . "\n"
+            . "  %dv = load i64, ptr %dp\n"
+            . "  %hasd = icmp ne i64 %dv, 0\n"
+            . "  br i1 %hasd, label %dropit, label %none\n"
+            . "dropit:\n"
+            . "  %df = inttoptr i64 %dv to ptr\n"
+            . "  call void %df(ptr %p, i64 %a)\n"
+            . "  br label %none\n"
+            . "none:\n  ret void\n}\n";
+        $out .= "define void @__cc_closure_free(i64 %v) {\nentry:\n"
+            . "  %p = inttoptr i64 %v to ptr\n"
+            . "  %nul = icmp eq i64 %v, 0\n"
+            . "  br i1 %nul, label %done, label %chk\n"
+            . "chk:\n"
+            . str_replace('label %none', 'label %shared', $sole)
+            . "solec:\n"
+            . '  %dp = getelementptr inbounds i8, ptr %p, i64 ' . $dOff . "\n"
+            . "  %dv = load i64, ptr %dp\n"
+            . "  %hasd = icmp ne i64 %dv, 0\n"
+            . "  br i1 %hasd, label %dropit, label %dofree\n"
+            . "dropit:\n"
+            . "  %df = inttoptr i64 %dv to ptr\n"
+            . "  call void %df(ptr %p, i64 -1)\n"
+            . "  br label %dofree\n"
+            . "dofree:\n"
+            . "  store i64 0, ptr %mp\n"
+            . '  %base = getelementptr inbounds i8, ptr %p, i64 -' . $hdr . "\n"
+            . "  call void @free(ptr %base)\n"
+            . "  br label %done\n"
+            . "shared:\n"
+            . "  call void @__mir_closure_release(ptr %p)\n"
+            . "  br label %done\n"
+            . "done:\n  ret void\n}\n";
+        // A `Closure|X|null` slot is a CELL holding the env as an object-tagged
+        // word; the env is told apart from an object by its header magic.
+        $cellEnv = "  %tg = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+            . '  %sh = lshr i64 %v, ' . (string)\Compile\MemoryAbi::CELL_TAG_SHIFT . "\n"
+            . '  %nib = and i64 %sh, ' . (string)\Compile\MemoryAbi::CELL_TAG_MASK . "\n"
+            . '  %isobj = icmp eq i64 %nib, ' . (string)\Compile\MemoryAbi::CELL_TAG_OBJ . "\n"
+            . "  %okt = and i1 %tg, %isobj\n"
+            . '  %pl = and i64 %v, ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . '  %big = icmp ugt i64 %pl, ' . (string)\Compile\MemoryAbi::CELL_OBJ_MIN_PAYLOAD . "\n"
+            . "  %okp = and i1 %okt, %big\n"
+            . "  br i1 %okp, label %hdr, label %done\n"
+            . "hdr:\n"
+            . "  %p = inttoptr i64 %pl to ptr\n"
+            . '  %mp = getelementptr inbounds i8, ptr %p, i64 ' . $mOff . "\n"
+            . "  %m = load i64, ptr %mp\n"
+            . '  %mm = and i64 %m, ' . $mask . "\n"
+            . '  %ism = icmp eq i64 %mm, ' . $magic . "\n"
+            . "  br i1 %ism, label %clo, label %done\n"
+            . "clo:\n";
+        $out .= "define void @__cc_cellclo_walk(i64 %v, i64 %a) {\nentry:\n" . $cellEnv
+            . "  call void @__cc_closure_walk(i64 %pl, i64 %a)\n  br label %done\n"
+            . "done:\n  ret void\n}\n";
+        $out .= "define void @__cc_cellclo_free(i64 %v) {\nentry:\n" . $cellEnv
+            . "  call void @__cc_closure_free(i64 %pl)\n  br label %done\n"
+            . "done:\n  ret void\n}\n";
+        return $out;
+    }
+
     private function ccRuntime(): string
     {
         $rcMask   = (string)\Compile\MemoryAbi::RC_MASK;
@@ -3383,6 +3481,22 @@ end:
                 }
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
+                if ($this->isClosureValueType($pt)) {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__cc_closure_walk(i64 %v' . $s . ', i64 %a)' . "\n";
+                    $k = $k + 1;
+                    continue;
+                }
+                if ($this->discardReleaseFlavor($pt) === 'cell') {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__cc_cellclo_walk(i64 %v' . $s . ', i64 %a)' . "\n";
+                    $k = $k + 1;
+                    continue;
+                }
                 if ($this->discardReleaseFlavor($pt) !== 'obj') { continue; }
                 $s = (string)$k;
                 $off = (string)$cls->propertyOffset($pn);
@@ -3431,6 +3545,7 @@ end:
                   . (string)(\strlen($raw2) + 2) . ' x i8] c"' . $raw2 . '\0A\00", align 1' . "\n";
         }
         $out .= $defs;
+        $out .= $this->ccClosureIr();
         $out .= "define void @__manticore_cc_children(ptr %s, i64 %a) {\nentry:\n";
         if ($cases === '') {
             $out .= "  ret void\n}\n";
@@ -3479,7 +3594,23 @@ end:
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 $flavor = $this->classDropFlavor($cls, $pn, $pt);
+                if ($flavor === 'cell') {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__cc_cellclo_free(i64 %v' . $s . ")\n";
+                    $k = $k + 1;
+                    continue;
+                }
                 if ($flavor === '' || $flavor === 'obj') { continue; }
+                if ($flavor === 'closure') {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__cc_closure_free(i64 %v' . $s . ")\n";
+                    $k = $k + 1;
+                    continue;
+                }
                 $rel = $this->dropHelperFor($flavor);
                 if ($rel === '') { continue; }
                 $s = (string)$k;

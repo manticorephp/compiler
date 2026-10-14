@@ -54,8 +54,13 @@ final class MemoryAbi
      * The hash index also uses `HMAP_SLOT_DEAD` (u32 0xFFFFFFFE): a delete
      * leaves a dead slot instead of back-shifting; lookups skip it, an insert
      * reuses it after a miss.
+     *
+     * v21: a capturing closure's DROP fn (`env-16`) takes a mode — `drop(env, 4)`
+     * releases the captures, 0..3 / -1 are the cycle collector's walk of a
+     * Closure-typed property. A v20 fn takes no mode and would release the
+     * captured objects of a node the collector is reclaiming.
      */
-    public const VERSION = 20;
+    public const VERSION = 21;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 

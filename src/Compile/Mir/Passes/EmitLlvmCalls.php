@@ -520,6 +520,33 @@ trait EmitLlvmCalls
     private function emitClosureDropFns(): string
     {
         $out = '';
+        if ($this->closureDrops !== []) {
+            // The collector's view of a captured object: a heap object that
+            // carries the rc tag is a child, anything else is left alone.
+            $out .= "define internal void @__mc_cc_obj(i64 %v, i64 %a) {\nentry:\n"
+                . "  %lo = icmp ult i64 %v, 65536\n"
+                . '  %hi = icmp ugt i64 %v, ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+                . "  %bad = or i1 %lo, %hi\n"
+                . "  br i1 %bad, label %done, label %chk\n"
+                . "chk:\n"
+                . "  %op = inttoptr i64 %v to ptr\n"
+                . "  %mp = getelementptr inbounds i8, ptr %op, i64 -8\n"
+                . "  %m = load i64, ptr %mp\n"
+                . '  %ok = icmp eq i64 %m, ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n"
+                . "  br i1 %ok, label %go, label %done\n"
+                . "go:\n"
+                . "  call void @__manticore_cc_child_apply(ptr %op, i64 %a)\n"
+                . "  br label %done\n"
+                . "done:\n  ret void\n}\n";
+            if (!$this->rt->needsCc) {
+                $this->weakSyms['__manticore_cc_child_apply'] = true;
+                $this->weakSyms['__cc_closure_walk'] = true;
+                $this->weakSyms['__cc_closure_free'] = true;
+                $out .= "declare extern_weak void @__manticore_cc_child_apply(ptr, i64)\n";
+                $out .= "declare extern_weak void @__cc_closure_walk(i64, i64)\n";
+                $out .= "declare extern_weak void @__cc_closure_free(i64)\n";
+            }
+        }
         foreach ($this->closureDrops as $fnName => $flavors) {
             $out .= $this->closureRcFn($fnName, $flavors, false);
             $out .= $this->closureRcFn($fnName, $flavors, true);
@@ -531,8 +558,32 @@ trait EmitLlvmCalls
     private function closureRcFn(string $fnName, array $flavors, bool $retain): string
     {
         $suffix = $retain ? '__mc_retain' : '__mc_drop';
+        // The DROP twin takes a mode (`$a`): 4 releases every capture; 0..3 are
+        // the cycle collector's walk actions over the captured objects (the env
+        // is a transparent edge of the object holding its sole reference); -1
+        // is the collector freeing that holder, which already reclaimed the
+        // captured objects through the walk and so skips them.
         $out = 'define internal void @manticore_' . $this->mangle($fnName . $suffix)
-             . "(ptr %env) {\nentry:\n";
+             . ($retain ? "(ptr %env) {\nentry:\n" : "(ptr %env, i64 %a) {\nentry:\n");
+        if (!$retain) {
+            $out .= "  %ccwalk = icmp ult i64 %a, 4\n";
+            $out .= "  br i1 %ccwalk, label %walk, label %rel\n";
+            $out .= "walk:\n";
+            $j = 0;
+            foreach ($flavors as $flavor) {
+                $j = $j + 1;
+                if ($flavor !== 'obj' && $flavor !== 'closure') { continue; }
+                $wg = $this->ssa->allocReg();
+                $out .= '  ' . $wg . ' = getelementptr inbounds i64, ptr %env, i64 ' . (string)$j . "\n";
+                $wv = $this->ssa->allocReg();
+                $out .= '  ' . $wv . ' = load i64, ptr ' . $wg . "\n";
+                $out .= '  call void @' . ($flavor === 'obj' ? '__mc_cc_obj' : '__cc_closure_walk')
+                      . '(i64 ' . $wv . ", i64 %a)\n";
+            }
+            $out .= "  ret void\n";
+            $out .= "rel:\n";
+            $out .= "  %ccfree = icmp slt i64 %a, 0\n";
+        }
         $i = 0;
         foreach ($flavors as $flavor) {
             $i = $i + 1;
@@ -581,6 +632,25 @@ trait EmitLlvmCalls
                 $fn = $retain ? '__mir_closure_retain' : '__mir_closure_release';
             } else {
                 $fn = $retain ? '__mir_rc_retain' : '__mir_rc_release';
+            }
+            if (!$retain && $flavor === 'obj') {
+                $out .= '  br i1 %ccfree, label %objskip' . (string)$i . ', label %objrel' . (string)$i . "\n";
+                $out .= 'objrel' . (string)$i . ":\n";
+                $out .= '  call void @' . $fn . '(ptr ' . $p . ")\n";
+                $out .= '  br label %objskip' . (string)$i . "\n";
+                $out .= 'objskip' . (string)$i . ":\n";
+                continue;
+            }
+            if (!$retain && $flavor === 'closure') {
+                $out .= '  br i1 %ccfree, label %clofree' . (string)$i . ', label %clorel' . (string)$i . "\n";
+                $out .= 'clofree' . (string)$i . ":\n";
+                $out .= '  call void @__cc_closure_free(i64 ' . $v . ")\n";
+                $out .= '  br label %closkip' . (string)$i . "\n";
+                $out .= 'clorel' . (string)$i . ":\n";
+                $out .= '  call void @' . $fn . '(ptr ' . $p . ")\n";
+                $out .= '  br label %closkip' . (string)$i . "\n";
+                $out .= 'closkip' . (string)$i . ":\n";
+                continue;
             }
             $out .= '  call void @' . $fn . '(ptr ' . $p . ")\n";
         }

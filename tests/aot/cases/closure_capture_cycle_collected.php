@@ -1,6 +1,5 @@
 <?php
 // A cycle through a closure's capture (object -> closure property -> captured object) is not collected by gc_collect_cycles().
-// issue: #246
 class Req
 {
     public array $pad = [1, 2, 3, 4, 5, 6, 7, 8];
