@@ -321,6 +321,8 @@ final class LowerFromAst implements Pass
     private bool $sawGetDefinedFns = false;
     /** @var array<string, bool> lowercased method names any `[$x, 'name']` literal spells, static receiver included */
     private array $callableNamesAnyRecv = [];
+    /** A `$c::$m(…)` site was lowered: the dispatcher needs every static method of a user class. */
+    private bool $dynStaticAnyMethod = false;
     /** A `Closure::fromCallable` of a runtime value was lowered ({@see closureFromSource}). */
     private bool $needsClosureFrom = false;
     /** @var array<string, bool> functions the PROGRAM declares (lowercased) —
@@ -1759,13 +1761,16 @@ final class LowerFromAst implements Pass
      */
     private function synthStaticCallable(Module $module): void
     {
-        if ($this->callableNamesAnyRecv === []) { return; }
+        if ($this->callableNamesAnyRecv === [] && !$this->dynStaticAnyMethod) { return; }
         /** @var array<int, array{0: string, 1: string, 2: bool}> $arms */
         $arms = [];
         foreach ($module->classes as $cd) {
             foreach ($cd->methodMeta as $mn => $mm) {
-                if (!$mm->isStatic || $mm->isAbstract || $mm->visibility !== 'public') { continue; }
-                if (!isset($this->callableNamesAnyRecv[\strtolower((string)$mn)])) { continue; }
+                if (!$mm->isStatic || $mm->isAbstract) { continue; }
+                // `$c::$m()` runs inside a class too (`self::$method()` reaches a private one).
+                $any = $this->dynStaticAnyMethod && !$cd->isPreludeClass;
+                if (!$any && ($mm->visibility !== 'public'
+                    || !isset($this->callableNamesAnyRecv[\strtolower((string)$mn)]))) { continue; }
                 $byRef = false;
                 foreach ($mm->params as $p) { if ($p->byRef) { $byRef = true; } }
                 if ($byRef) { continue; }
@@ -6082,39 +6087,32 @@ final class LowerFromAst implements Pass
         $method = $e->method;
         $args = $e->args;
         $span = $e->span;
-        // `$c::$m(args)`: the method name is a variable too, so every STATIC method of a
-        // user class is a candidate arm, selected on (class, method) at run time.
-        $methodVar = \strncmp($method, '$', 1) === 0 ? \substr($method, 1) : '';
-        $names = [];
-        $pairs = [];
-        foreach ($this->classTable as $cname => $cd) {
-            if ($this->isTypeDef($cname)) { continue; }
-            if ($methodVar !== '') {
-                if ($cd->isPreludeClass) { continue; }
-                foreach ($cd->methodMeta as $mn => $mm) {
-                    if ($mm->isStatic && !$mm->isAbstract) { $pairs[] = [$cname, (string)$mn]; }
-                }
-                continue;
-            }
-            if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
-        }
         $nameExpr = \Parser\Ast\Expr::ternary(
             \Parser\Ast\Expr::call('is_object', [$recv], $span),
             \Parser\Ast\Expr::call('get_class', [$recv], $span),
             $recv,
             $span,
         );
+        // `$c::$m(args)` / `$c::$m(...)`: class AND method are runtime values — the
+        // static callable `[$c, $m]`, run through the one module-wide dispatcher
+        // `__mc_static_callable` ({@see synthStaticCallable}). An arm per (class,
+        // method) at every site was 1.4M IR lines per site in symfony.
+        if (\strncmp($method, '$', 1) === 0) {
+            $this->dynStaticAnyMethod = true;
+            $callable = \Parser\Ast\Expr::arrayLit([
+                new \Parser\Ast\ArrayElement(null, $nameExpr),
+                new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::variable(\substr($method, 1), $span)),
+            ], $span);
+            return $this->lowerExpr(\Parser\Ast\Expr::invoke($callable, $args, $span));
+        }
+        $names = [];
+        foreach ($this->classTable as $cname => $cd) {
+            if ($this->isTypeDef($cname)) { continue; }
+            if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
+        }
         $tmp = '__dynrc' . (string)$this->destrCounter;
         $this->destrCounter = $this->destrCounter + 1;
         $chain = \Parser\Ast\Expr::null($span);
-        for ($i = \count($pairs) - 1; $i >= 0; $i = $i - 1) {
-            $cond = \Parser\Ast\Expr::binary('&&',
-                \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($pairs[$i][0], $span), $span),
-                \Parser\Ast\Expr::binary('===', \Parser\Ast\Expr::variable($methodVar, $span), new \Parser\Ast\StringLiteral($pairs[$i][1], $span), $span),
-                $span);
-            $then = \Parser\Ast\Expr::staticCall($pairs[$i][0], $pairs[$i][1], $args, $span);
-            $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
-        }
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
             $cond = \Parser\Ast\Expr::binary('===', $this->dynArmName($nameExpr, $tmp, $i, $span), new \Parser\Ast\StringLiteral($cname, $span), $span);

@@ -4766,7 +4766,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // declarations are in the module. They must not disable the precise
         // walker reachability pass: Symfony’s generated tier roots contain many
         // such guards, while the genuinely open cases use a runtime name.
+        // `$cls::make()` / `$cls::$m()` runs a static method of a class named at run time,
+        // whose `new static` instantiates a class no literal names.
         if (preg_match("/\\bnew\\s+\\$/", $source)
+            || preg_match("/\\$[A-Za-z_][A-Za-z0-9_]*::\\$?[A-Za-z_][A-Za-z0-9_]*\\s*\\(/", $source)
             || preg_match("/\\bunserialize\\s*\\(/", $source)
             || preg_match("/ReflectionClass|class_alias/", $source)
             || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
