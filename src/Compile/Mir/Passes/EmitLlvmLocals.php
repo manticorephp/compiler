@@ -1019,7 +1019,7 @@ trait EmitLlvmLocals
             // co-owns a borrowed buffer/object exactly as a static slot does
             // (a fresh temp transfers, a borrow is retained).
             $vk0 = $sl->value->type->kind;
-            if ($sl->value->type->isArray() || $vk0 === Type::KIND_OBJ) {
+            if ($sl->value->type->isArray() || $vk0 === Type::KIND_OBJ || $vk0 === Type::KIND_STRING) {
                 $out .= $this->coerceToI64();
                 $rawV = $this->lastValue;
                 $out .= $this->rcRetainByType($sl->value, $rawV, null, 3);
