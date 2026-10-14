@@ -472,6 +472,16 @@ trait LowerPrelude
                             $vis = ':"' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . '":private';
                         }
                     }
+                    $tdc = isset($cd->propertyTypes[$p]) ? $cd->propertyTypes[$p]->typeDefClass() : null;
+                    if ($tdc !== null && isset($this->classTable[$tdc]) && $this->classTable[$tdc]->typeDefProp !== '') {
+                        // An erased #[TypeDef] slot is its carrier scalar: rebuild the
+                        // one-field object php prints, from the carrier.
+                        $tdd = $this->classTable[$tdc];
+                        $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  ';"
+                            . " echo 'object(" . $tdd->display() . ")#1 (1) {', \"\\n\", \$pad, '    [\"" . $tdd->typeDefProp . "\"]=>', \"\\n\", \$pad, '    ';"
+                            . " __mir_var_dump(\$v->" . $p . "->" . $tdd->typeDefProp . ", \$indent + 2); echo \$pad, \"  }\\n\";\n";
+                        continue;
+                    }
                     $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
                 }
                 if ($cd->usesBag()) {

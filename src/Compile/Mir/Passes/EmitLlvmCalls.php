@@ -1234,6 +1234,7 @@ trait EmitLlvmCalls
         if ($fn !== '' && isset($this->classes[$fn])
             && $this->resolveMethodClass($fn, '__invoke') !== '') {
             $call = new \Compile\Mir\MethodCall_($iv->callee, '__invoke', $iv->args, $n->type);
+            $call->srcArgc = \count($iv->args);
             return $this->emitMethodCall($call);
         }
         // An ERASED callee — a `mixed`/`callable` param, an element read out of a
@@ -1477,6 +1478,7 @@ trait EmitLlvmCalls
             $out .= '  br i1 ' . $isRc . ', label %' . $objL . ', label %' . $cloL . "\n";
             $out .= $objL . ":\n";
             $mc = new \Compile\Mir\MethodCall_($n->callee, '__invoke', $n->args, Type::cell());
+            $mc->srcArgc = \count($n->args);
             $out .= $this->emitNode($mc);
             $out .= $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
@@ -1620,7 +1622,13 @@ trait EmitLlvmCalls
             ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
         $packNode = $this->closurePackNode;
         $packTarget = $this->closurePackTarget;
+        // A known closure that reads func_get_args() takes its surplus arguments through
+        // the overflow channel ({@see EmitLlvm::faPush}), not as extra call operands.
+        $faSurplus = $known && $dynSpread === -1 && ($this->sigs->usesFuncArgs[$fn] ?? false)
+            && !\in_array(true, $this->sigs->variadicParams[$fn] ?? [], true);
+        $faDeclared = \count($calleeParams) - $capCnt;
         foreach ($callArgs as $a) {
+            if ($faSurplus && $pi >= $faDeclared) { continue; }
             // Argument unpacking `$fn(...$arr)`: expand the array across the
             // closure's remaining declared params (fixed-arity), boxing each
             // scalar element per the uniform closure ABI. A DYNAMIC callee has
@@ -1766,8 +1774,11 @@ trait EmitLlvmCalls
         // site, so the channel is armed whenever the module has any func-args
         // callee at all. {@see EmitLlvm::faPop} makes over-arming safe.
         $faN = \count($iv->args);
+        // A closure call is a frame of its own in a trace (`{closure}`).
+        $btClosure = $this->rt->needsBacktrace;
+        if ($btClosure) { $out .= $this->btPush('{closure}', $n->line); }
         $out .= $known
-            ? $this->faPush($fn, $faN)
+            ? $this->faPush($fn, $faN, $faSurplus ? $iv->args : [], $capCnt)
             : ($this->rt->needsFuncArgs
                 ? '  store i64 ' . (string)$faN . ", ptr @__mir_fa_argc\n" : '');
         $reg = $this->ssa->allocReg();
@@ -1811,6 +1822,7 @@ trait EmitLlvmCalls
             $out .= '  ' . $reg . ' = call i64 (' . $argTypes . ') ' . $fp . '(' . $argList . ")\n";
             $out .= $padDrops;
         }
+        if ($btClosure) { $out .= $this->btPop(); }
         $out .= $this->faPop();
         foreach ($intArgBoxes as $ib) { $out .= $this->rcReleaseReg($ib, 'cell'); }
         $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
@@ -2106,6 +2118,10 @@ trait EmitLlvmCalls
     private function closureArgRepr(Type $at, ?Type $pt, ?Node $src = null): string
     {
         if ($this->closureArgOwnsBox($at, $pt)) { return $this->boxToCell($at, $src); }
+        // an enum case rides as its ordinal; an erased param needs the case singleton
+        if ($this->isEnumType($at) && ($pt === null || $pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN)) {
+            return $this->shallowBoxToCell($at);
+        }
         if ($this->isCellBoxableArg($at) || $this->isClosureValueType($at)
             || $this->own->condFlavor($at) === 'obj') {
             return $this->boxToCell($at);
@@ -3254,6 +3270,8 @@ trait EmitLlvmCalls
             // ({@see byRefValueCopyRetainIr}). Only an array copy is counted; a raw
             // string/object word is not retained there, so releasing it would double-free.
             if (($this->sigs->returnsByRef[$fname] ?? false) && $s->type->kind !== Type::KIND_ARRAY) { return ''; }
+        } elseif ($k === Node::KIND_NEW_OBJ) {
+            // `new C();` in statement position: nobody binds the +1, php destroys it here.
         } elseif ($k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_STATIC_CALL) {
             return '';
         }
@@ -3261,7 +3279,8 @@ trait EmitLlvmCalls
         // discardReleaseFlavor leaves closures out for its container callers.
         $flavor = $this->isClosureValueType($s->type) ? 'closure' : $this->discardReleaseFlavor($s->type);
         if ($flavor === '') { return ''; }
-        return $this->rcReleaseReg($this->lastValue, $flavor);
+        $pre = $k === Node::KIND_NEW_OBJ ? $this->coerceToI64() : '';
+        return $pre . $this->rcReleaseReg($this->lastValue, $flavor);
     }
 
     /**

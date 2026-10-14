@@ -5656,12 +5656,10 @@ trait EmitLlvmObjects
         $out .= $this->arrayPtrOrEmptyIr($cv);
         $arr = $this->arrayPtrReg;
         $out .= $this->emitLookupWord($arr, $key, $keyIsCell, $keyIsString, $aa->index);
-        // Absent and present-but-NULL are both unset: one test on the word.
-        $nn = $this->ssa->allocReg();
-        $out .= '  ' . $nn . ' = icmp ne i64 ' . $this->lastValue . ", -3659174697238528\n";
-        $nnz = $this->ssa->allocReg();
-        $out .= '  ' . $nnz . ' = zext i1 ' . $nn . " to i64\n";
-        $out .= '  store i64 ' . $nnz . ', ptr ' . $slot . "\n";
+        // Absent and present-but-NULL are both unset; a RAW int buffer has no
+        // NULL, its word may even equal the boxed one, so it answers by address.
+        $out .= $this->lookupPresent($aa, $this->lastValue, true);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
 
         $out .= $endL . ":\n";
@@ -5711,11 +5709,11 @@ trait EmitLlvmObjects
      * is read at RUN TIME: CELL-hinted → the word test, anything else → the address.
      * (A null array answers the miss word either way.)
      */
-    private function lookupPresent(\Compile\Mir\ArrayAccess_ $aa, string $word): string
+    private function lookupPresent(\Compile\Mir\ArrayAccess_ $aa, string $word, bool $erased = false): string
     {
         $el = $aa->array->type->element;
         $nn = $this->ssa->allocReg();
-        if ($el !== null && $el->kind === Type::KIND_INT) {
+        if ($erased || ($el !== null && $el->kind === Type::KIND_INT)) {
             $arr = $this->lookupArr;
             $isNull = $this->ssa->allocReg();
             $out = '  ' . $isNull . ' = icmp eq ptr ' . $arr . ", null\n";
@@ -5728,7 +5726,10 @@ trait EmitLlvmObjects
             $hn = $this->ssa->allocReg();
             $out .= '  ' . $hn . ' = and i64 ' . $fl . ', ' . \Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
             $isCell = $this->ssa->allocReg();
-            $out .= '  ' . $isCell . ' = icmp eq i64 ' . $hn . ', ' . \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL . "\n";
+            // An erased subject can hold any buffer: only a RAW INT one needs the
+            // address test, every other hint keeps the word test.
+            $out .= '  ' . $isCell . ' = icmp ' . ($erased ? 'ne' : 'eq') . ' i64 ' . $hn . ', '
+                  . ($erased ? \Compile\MemoryAbi::ARRAY_ELEM_HINT_INT : \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) . "\n";
             $byAddr = $this->ssa->allocReg();
             $out .= '  ' . $byAddr . ' = icmp ne ptr ' . $this->lookupAddr . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
             $byWord = $this->ssa->allocReg();
@@ -6114,6 +6115,16 @@ trait EmitLlvmObjects
                         $out .= $this->arrayBaseToPtr($aa->array->type);
                     }
                     $arrPtr = $this->lastValue;
+                    // An ABSENT nested parent stays absent: the write-back below
+                    // would otherwise create the key php's unset never creates.
+                    $nestedEndL = '';
+                    if ($aa->array->kind === Node::KIND_ARRAY_ACCESS) {
+                        $nIsNull = $this->ssa->allocReg();
+                        $nestedDoL = $this->ssa->allocLabel('unset.do');
+                        $nestedEndL = $this->ssa->allocLabel('unset.nend');
+                        $out .= '  ' . $nIsNull . ' = icmp eq ptr ' . $arrPtr . ", null\n";
+                        $out .= '  br i1 ' . $nIsNull . ', label %' . $nestedEndL . ', label %' . $nestedDoL . "\n" . $nestedDoL . ":\n";
+                    }
                     $keyIsCell = $this->keyRidesCellChannel($aa->index);
                     $keyIsString = $aa->index->type->kind === Type::KIND_STRING
                         || $aa->index->kind === Node::KIND_STRING_CONST;
@@ -6183,6 +6194,9 @@ trait EmitLlvmObjects
                         $out .= $this->keyTempRelease($aa->index, $key, $keyIsCell);
                     }
                     if ($dropFlavor !== '') { $out .= $this->elemSlotReleaseIr($curE, $dropFlavor, $dropArr); }
+                    if ($nestedEndL !== '') {
+                        $out .= '  br label %' . $nestedEndL . "\n" . $nestedEndL . ":\n";
+                    }
                 }
                 if ($uEndL !== '') {
                     $out .= '  br label %' . $uEndL . "\n" . $uEndL . ":\n";
@@ -6279,6 +6293,25 @@ trait EmitLlvmObjects
                         $out .= '  br label %' . $endU . "\n";
                         $out .= $endU . ":\n";
                     }
+                }
+            }
+            // `unset($o->{$name})`: a dynamic property lives in the bag; drop the entry.
+            if ($t->kind === Node::KIND_DYN_PROP) {
+                $dcls = $t->object->type->class ?? '';
+                if ($dcls !== '' && isset($this->classes[$dcls]) && $this->classes[$dcls]->usesBag()) {
+                    $out .= $this->emitDynMemberKey($t->name);
+                    $dKey = $this->lastValue;
+                    $out .= $this->emitNode($t->object);
+                    $out .= $this->coerceToPtr();
+                    $dObj = $this->lastValue;
+                    $dg = $this->ssa->allocReg();
+                    $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $dObj
+                          . ', i64 ' . (string)$this->classes[$dcls]->bagOffset() . "\n";
+                    $dBagI = $this->ssa->allocReg();
+                    $out .= '  ' . $dBagI . ' = load i64, ptr ' . $dg . "\n";
+                    $dBagP = $this->ssa->allocReg();
+                    $out .= '  ' . $dBagP . ' = inttoptr i64 ' . $dBagI . " to ptr\n";
+                    $out .= '  call void @__mir_array_unset_str(ptr ' . $dBagP . ', ptr ' . $dKey . ")\n";
                 }
             }
             // vec element unset still deferred (needs hole / shift semantics).

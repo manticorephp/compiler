@@ -553,6 +553,12 @@ final class InferTypes implements Pass
     /** @var array<string,array<string,bool>> per-array-local set of coarse store
      *  value classes, collected pre-inference to detect heterogeneity. */
     private array $assocValClasses = [];
+    /** @var string[] `ref_alias` targets of the function being inferred, parallel to {@see $aliasSources}. */
+    private array $aliasTargets = [];
+    /** @var string[] */
+    private array $aliasSources = [];
+    /** @var array<string,string> by-ref foreach value var → the array local it walks: a store to it IS an element store */
+    private array $byRefFeBind = [];
     /** fn name => [local name => true]: locals a post-inference store scan proved
      *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
     /** @var array<string, bool> locals a RefCell_ points at, in the function
@@ -1338,7 +1344,7 @@ final class InferTypes implements Pass
                 $vk = $se->value->type->kind;
                 // A definitely-mixed stored value (a `mixed` param / cell):
                 // the slot holds NaN-boxed cells.
-                if ($vk === Type::KIND_CELL && $se->index->kind !== Node::KIND_NULL_CONST) {
+                if ($vk === Type::KIND_CELL) {
                     $this->cellElemPropsFound[$key] = true;
                 }
                 // Element stores of DIFFERENT representations (append included):
@@ -1944,6 +1950,15 @@ final class InferTypes implements Pass
                         ? $this->unionTypes($observed[$gname], $t)
                         : $t;
                 }
+            }
+        } elseif ($n->kind === Node::KIND_STORE_STATIC_PROP && \str_starts_with($n->global, '@g_')) {
+            // `$GLOBALS['x'] = v` stores straight into the module cell, so a
+            // `global $x` elsewhere must type from it: with no top-level `$x = …`
+            // the decl stayed its hard-lowered `int` and read the array as a number.
+            $gname = \substr($n->global, 3);
+            $vt = $n->value->type;
+            if (isset($this->mainGlobalNames[$gname]) && $vt->kind !== Type::KIND_UNKNOWN) {
+                $observed[$gname] = isset($observed[$gname]) ? $this->unionTypes($observed[$gname], $vt) : $vt;
             }
         } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
             // `global $g; $g[] = v` is a STORE_ELEMENT, not a StoreLocal, so the
