@@ -4818,6 +4818,10 @@ trait EmitLlvmExpr
         if ($ts !== '') {
             return $this->emitToStringCall($ts, $this->staticClassOf($operand));
         }
+        if ($operand->type->kind === Type::KIND_UNION) {
+            $u = $this->emitUnionToString($operand->type);
+            if ($u !== '') { return $u; }
+        }
         $noStr = $this->objectWithoutToStringIr($operand);
         if ($noStr !== null) {
             return $noStr;

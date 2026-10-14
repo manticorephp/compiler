@@ -684,6 +684,7 @@ final class EmitLlvm implements EmitVisitor
         $this->magicPropertyHoldersCache = [];
         $this->propertyReadHelpers = [];
         $this->dynamicMethodHelpers = [];
+        $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;
         $this->reflectNames = $module->reflectNames;
         $this->reflectAll = $module->reflectAll;
@@ -838,6 +839,7 @@ final class EmitLlvm implements EmitVisitor
         $this->needsBoxUnknownFn = false;
         $this->eidxNeeded = [];
         $this->newDynNeeded = [];
+        $this->newDynRestNeeded = [];
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
@@ -2031,6 +2033,10 @@ final class EmitLlvm implements EmitVisitor
      *  chain each ({@see EmitLlvmObjects::emitNewDynFns}). */
     /** @var array<string, \Compile\Mir\NewDynShape> */
     private array $newDynNeeded = [];
+
+    /** {@see EmitLlvmObjects::emitNewDynByTable}'s shared rest chains: symbol → [srcArgc, boxResult]. */
+    /** @var array<string, array{0: int, 1: bool}> */
+    private array $newDynRestNeeded = [];
 
     /**
      * Erased-interface dispatchers this module needs
@@ -3815,6 +3821,35 @@ final class EmitLlvm implements EmitVisitor
      */
     private function emitToStringCall(string $tsClass, string $staticClass = ''): string
     {
+        return $this->emitToStringDispatch($tsClass, $this->toStringCandidates($staticClass, $tsClass));
+    }
+
+    /**
+     * `__toString` of an object union (`obj<Ref>|obj<TRef>`, a match over two
+     * `new`s): every atom's candidates, dispatched like {@see emitToStringCall}.
+     * '' when an atom is not an object whose class answers `__toString`.
+     */
+    private function emitUnionToString(Type $t): string
+    {
+        $cands = [];
+        $first = '';
+        foreach ($t->atoms as $at) {
+            $cls = $at->kind === Type::KIND_OBJ ? ($at->class ?? '') : '';
+            if ($cls === '') { return ''; }
+            $ts = $this->resolveMethodClass($cls, '__toString');
+            if ($ts === '') { return ''; }
+            if ($first === '') { $first = $ts; }
+            foreach ($this->toStringCandidates($cls, $ts) as $c) {
+                if (!\in_array($c, $cands, true)) { $cands[] = $c; }
+            }
+        }
+        if ($first === '') { return ''; }
+        return $this->emitToStringDispatch($first, $cands);
+    }
+
+    /** @param string[] $cands */
+    private function emitToStringDispatch(string $tsClass, array $cands): string
+    {
         $out = $this->coerceToI64();
         $obj = $this->lastValue;
         // VIRTUAL, when the static type has descendants that answer differently.
@@ -3824,8 +3859,9 @@ final class EmitLlvm implements EmitVisitor
         // ReflectionType hierarchy is the witness: every subclass returned the
         // base's empty string. Reuses the ordinary method dispatch, so the two
         // cannot drift.
-        $cands = $this->toStringCandidates($staticClass, $tsClass);
-        if (\count($cands) > 1) {
+        $bodies = [];
+        foreach ($cands as $c) { $bodies[$this->resolveMethodClass($c, '__toString')] = true; }
+        if (\count($bodies) > 1) {
             $targets = [];
             foreach ($cands as $c) {
                 $targets[$c] = $this->resolveMethodClass($c, '__toString') . '____toString';

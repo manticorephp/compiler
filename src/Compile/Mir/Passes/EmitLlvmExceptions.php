@@ -248,7 +248,7 @@ trait EmitLlvmExceptions
     /** A raise the emitter synthesises: `@__mc_throw`, or a php-bodied `__mir_*_error` thrower. */
     private function ehRaiseCallee(string $c): bool
     {
-        return $c === '@__mc_throw'
+        return $c === '@__mc_throw' || \str_starts_with($c, '@__mc_raise.')
             || (\str_starts_with($c, '@manticore___mir_') && \str_ends_with($c, '_error'));
     }
 
@@ -772,6 +772,8 @@ trait EmitLlvmExceptions
     private function emitThrow(\Compile\Mir\Throw_ $n): string
     {
         $this->rt->needsExceptions = true;
+        $raise = $this->emitRaise($n->value);
+        if ($raise !== '') { return $raise; }
         $out = $this->emitNode($n->value);
         // `throw $e` where $e came off an ERASED channel — a `mixed` array
         // element, an untyped property, a `\Throwable` handed through a cell —
@@ -804,6 +806,112 @@ trait EmitLlvmExceptions
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * `throw new C('literal', 0, null)` of a prelude Throwable — the shape of
+     * every raise the emitter synthesises (a dispatch arm's argument count and
+     * type checks, arithmetic, `Class not found`) — as one call of a cold helper
+     * per class ({@see raiseHelper}). Inline, each was ~40 lines (allocation,
+     * defaults, the ctor frame, the ctor, the trace capture): 185k of them were
+     * a third of a symfony app's IR. '' when `$v` is not that shape.
+     */
+    private function emitRaise(Node $v): string
+    {
+        if (!($v instanceof \Compile\Mir\NewObj) || $v->bare) { return ''; }
+        $a = $v->args;
+        if (\count($a) !== 3
+            || !($a[0] instanceof \Compile\Mir\StringConst)
+            || !($a[1] instanceof \Compile\Mir\IntConst) || $a[1]->value !== 0
+            || $a[2]->kind !== Node::KIND_NULL_CONST) {
+            return '';
+        }
+        $sym = $this->raiseHelper(\ltrim($v->class, '\\'));
+        if ($sym === '') { return ''; }
+        $out = $this->emitNode($a[0]);
+        $out .= $this->coerceToI64();
+        $out .= '  call void ' . $sym . '(i64 ' . $this->lastValue . ', i64 ' . (string)$v->line . ")\n  unreachable\n";
+        $out .= $this->emitDeadLabel();
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** @var array<string, bool> classes {@see raiseHelper} declined */
+    private array $raiseRejected = [];
+
+    /**
+     * `void (i64 msg, i64 line)`: what {@see emitNewObj} + {@see emitThrow} emit
+     * for `throw new $class(msg, 0, null)` at line `line`, once per module.
+     * Internal: the capture stores this module's source file, as the inline
+     * capture does — a prelude `linkonce_odr` body calling it stays equivalent
+     * in whichever module's copy the link keeps. The ctor frame it
+     * pushes is popped before the capture, so its line is never seen. '' when
+     * the class is not a prelude Throwable taking `(string, int, ?Throwable)`.
+     */
+    private function raiseHelper(string $class): string
+    {
+        $key = 'raise:' . $class;
+        $sym = '@' . $this->mirHelperSym('__mc_raise.' . $this->mangle($class));
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        if (isset($this->raiseRejected[$class])) { return ''; }
+        $cd = $this->classes[$class] ?? null;
+        $ctorClass = $cd === null ? '' : $this->resolveMethodClass($class, '__construct');
+        $ctorKey = $ctorClass . '____construct';
+        $pt = $this->sigs->paramTypes[$ctorKey] ?? [];
+        $tm = $this->sigs->taggedParams[$ctorKey] ?? [];
+        $rm = $this->sigs->refParams[$ctorKey] ?? [];
+        if ($cd === null || !$cd->isPreludeClass || $cd->isAbstract || $ctorClass === ''
+            || !$this->classImplements($class, 'Throwable')
+            || \count($pt) !== 4
+            || $pt[1]->kind !== Type::KIND_STRING || $pt[2]->kind !== Type::KIND_INT
+            || ($tm[1] ?? false) || ($tm[2] ?? false) || ($tm[3] ?? false)
+            || ($rm[1] ?? false) || ($rm[2] ?? false) || ($rm[3] ?? false)
+            || ($this->sigs->usesFuncArgs[$ctorKey] ?? false)) {
+            $this->raiseRejected[$class] = true;
+            return '';
+        }
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $body = $this->emitObjAllocInit($cd);
+        $obj = $this->lastValue;
+        $body .= $this->emitPropDefaultsCall($class, $obj);
+        $oi = $this->ssa->allocReg();
+        $body .= '  ' . $oi . ' = ptrtoint ptr ' . $obj . " to i64\n";
+        $target = $this->lsbTarget($ctorClass, '__construct', $class);
+        if ($this->rt->needsBacktrace) {
+            $body .= $this->btPushInline($this->strLitId($this->pool->intern('__construct')), '0', '');
+        }
+        $cr = $this->ssa->allocReg();
+        $body .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($target) . '(i64 ' . $oi . ", i64 %msg, i64 0, i64 0)\n";
+        $body .= $this->btPop();
+        $lp = $this->ssa->allocReg();
+        $body .= '  ' . $lp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset('line') . "\n";
+        $body .= '  store i64 %line, ptr ' . $lp . "\n";
+        $fp = $this->ssa->allocReg();
+        $body .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset('file') . "\n";
+        $fs = $this->ssa->allocReg();
+        $body .= '  ' . $fs . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
+        $body .= '  store i64 ' . $fs . ', ptr ' . $fp . "\n";
+        if ($this->rt->needsBacktrace) {
+            foreach (['traceNames' => '@__mir_bt_name', 'traceLines' => '@__mir_bt_line'] as $prop => $g) {
+                $body .= $this->emitBtVec($g);
+                $vec = $this->lastValue;
+                $pp = $this->ssa->allocReg();
+                $body .= '  ' . $pp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+                $body .= '  store i64 ' . $vec . ', ptr ' . $pp . "\n";
+            }
+        }
+        $body .= $this->emitRethrowAt($obj);
+        $this->dynamicMethodHelpers[$key] = 'define internal void ' . $sym . "(i64 %msg, i64 %line) noinline cold {\nentry:\n"
+            . $body . "}\n\n";
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        return $sym;
     }
 
     /**

@@ -350,6 +350,13 @@ trait EmitLlvmObjects
             $out .= 'define linkonce_odr i64 @' . $sym . '(' . $params . ") noinline {\nentry:\n"
                   . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
         }
+        foreach ($this->newDynRestNeeded as $sym => [$srcArgc, $boxResult]) {
+            $this->rt->needsStrcmp = true;
+            $body = $this->newDynChainIr('%ndy.n', [], [], [], $srcArgc, $boxResult,
+                '%ndy.s', Type::cell(), $this->newDynTable()[2]);
+            $out .= 'define linkonce_odr i64 @' . $sym . "(ptr %ndy.n, ptr %ndy.s) noinline {\nentry:\n"
+                  . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        }
         return $out;
     }
 
@@ -573,9 +580,15 @@ trait EmitLlvmObjects
         }
         $out .= '  br label %' . $endL . "\n";
         $out .= $chainL . ":\n";
-        $out .= $this->newDynChainIr($namePtr, [], [], [], $n->srcArgc, $boxResult,
-                                     $argsP, Type::cell(), $inTable);
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        // The classes the table does not serve (every prelude class: Reflection,
+        // Intl, PDO, Ds…) depend on nothing of the site but argc and boxing:
+        // one chain per pair, called — spliced, each site carried all its arms.
+        $rest = $this->mirHelperSym('__mir_newdyn_rest_' . \str_replace('-', 'm', (string)$n->srcArgc)
+            . ($boxResult ? '_b' : '_r'));
+        $this->newDynRestNeeded[$rest] = [$n->srcArgc, $boxResult];
+        $rr = $this->ssa->allocReg();
+        $out .= '  ' . $rr . ' = call i64 @' . $rest . '(ptr ' . $namePtr . ', ptr ' . $argsP . ")\n";
+        $out .= '  store i64 ' . $rr . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         if ($fresh) {
@@ -4344,8 +4357,8 @@ trait EmitLlvmObjects
      * the argument shape — and every site agreeing on those spliced the same
      * chain: one arm per method of every table-less class (the prelude's
      * Reflection, Intl, PDO, Ds…), 1 381 arms in each `__call` forwarder
-     * symfony has. '' when the shape is not served (a union receiver, whose
-     * atoms the key does not spell); the caller keeps the inline chain.
+     * symfony has. '' when the shape is not served (a union with a non-object
+     * atom); the caller keeps the inline chain.
      *
      * @param array<string, Type> $methods
      */
@@ -4353,10 +4366,21 @@ trait EmitLlvmObjects
     {
         $rt = $dp->object->type;
         $rk = $rt->kind;
-        if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN && $rk !== Type::KIND_OBJ) { return ''; }
+        if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN && $rk !== Type::KIND_OBJ
+            && $rk !== Type::KIND_UNION) { return ''; }
+        $recvKey = $rt->class ?? '';
+        // An object union spells its atoms: symfony's RedisTrait::pipeline()
+        // calls `$redis->{$command}(...$args)` on `\Redis|\RedisCluster|…` at
+        // four sites, each splicing ~1 000 arms.
+        if ($rk === Type::KIND_UNION) {
+            foreach ($rt->atoms as $at) {
+                if ($at->kind !== Type::KIND_OBJ || ($at->class ?? '') === '') { return ''; }
+                $recvKey .= $at->class . '|';
+            }
+        }
         // No scope in the key: the scope already chose the name set, and the
         // arms themselves never consult it ({@see emitDynMethodInlineFallback}).
-        $key = 'inl|' . $rk . ':' . ($rt->class ?? '') . '|' . (string)$fixedN . '|' . $resT->kind;
+        $key = 'inl|' . $rk . ':' . $recvKey . '|' . (string)$fixedN . '|' . $resT->kind;
         foreach ($methods as $m => $mt) { $key .= '|' . (string)$m . ':' . $mt->kind . ':' . ($mt->class ?? ''); }
         if (isset($this->dynInlSyms[$key])) { return $this->dynInlSyms[$key]; }
         $sym = '@' . $this->mirHelperSym('__mir_dyninl_' . (string)\count($this->dynInlSyms));
