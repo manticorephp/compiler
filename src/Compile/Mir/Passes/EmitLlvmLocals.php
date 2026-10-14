@@ -1342,11 +1342,14 @@ trait EmitLlvmLocals
      */
     private function refParamOverwriteIr(string $name, string $slotPtr, string $val, bool $selfLoad = false): string
     {
-        if ($this->frame->isClosure || $this->frame->isTrampoline) { return ''; }
+        if ($this->frame->isTrampoline) { return ''; }
         $pt = $this->locals->refParamTypes[$name] ?? null;
         if ($pt === null || isset($this->locals->aliasLocals[$name])
             || isset($this->locals->ownedBoxes[$name])) { return ''; }
         $flavor = $this->discardReleaseFlavor($pt);
+        // A closure's by-ref parameter is cell-typed by the ABI: the caller hands
+        // over cell storage that owns its value. Only that cell flavor is known.
+        if ($this->frame->isClosure && ($flavor !== 'cell' || isset($this->locals->captureRefs[$name]))) { return ''; }
         if ($flavor === '') {
             // The one refusal the design keeps: an erased parameter names no
             // representation for the old word, so it is left to leak.
