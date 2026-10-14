@@ -1693,7 +1693,7 @@ final class LowerFromAst implements Pass
     private function collectCallableStaticStrings(Node $node, Module $module): void
     {
         if ($node instanceof \Compile\Mir\StringConst
-            && \preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*::[A-Za-z_][A-Za-z0-9_]*$/', $node->value) === 1) {
+            && \preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*::([A-Za-z_][A-Za-z0-9_]*)?$/', $node->value) === 1) {
             $module->callableStaticStrings[$node->value] = true;
         }
         foreach (Walk::children($node) as $child) { $this->collectCallableStaticStrings($child, $module); }

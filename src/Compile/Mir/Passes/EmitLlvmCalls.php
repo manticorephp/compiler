@@ -589,6 +589,44 @@ trait EmitLlvmCalls
     }
 
     /** `$closure(args)` → load captures from the struct, call __closure_N. */
+    /**
+     * The static methods an erased string-callable invoke can reach, as
+     * canonical `Class::method` names (declared case) mapped to true. Built from
+     * {@see Module::$callableStaticStrings}: a full `'C::m'` literal names one
+     * method; a `'C::'` prefix (the head of `'C::' . $m`) names every static
+     * method of C. A name no class declares, an instance method or a method
+     * without a body is dropped.
+     * @return array<string, bool>
+     */
+    private function staticStringArms(): array
+    {
+        if ($this->staticStringArmsDone) { return $this->staticStringArmsMemo; }
+        /** @var array<string, string> $byLower */
+        $byLower = [];
+        foreach ($this->classes as $cn => $_) { $byLower[\strtolower((string)$cn)] = (string)$cn; }
+        /** @var array<string, bool> $arms */
+        $arms = [];
+        foreach ($this->callableStaticStrings as $lit => $_) {
+            $lit = (string)$lit;
+            $sep = \strpos($lit, '::');
+            $cls = $byLower[\strtolower(\ltrim(\substr($lit, 0, $sep), '\\'))] ?? '';
+            if ($cls === '') { continue; }
+            $want = \substr($lit, $sep + 2);
+            for ($c = $cls; $c !== '' && isset($this->classes[$c]); $c = $this->classes[$c]->parent) {
+                foreach ($this->classes[$c]->methodNames as $mn => $__) {
+                    $mn = (string)$mn;
+                    if ($want !== '' && \strcasecmp($mn, $want) !== 0) { continue; }
+                    if (isset($arms[$cls . '::' . $mn]) || !$this->methodIsStatic($cls, $mn)
+                        || $this->staticMethodHasNoImpl($cls, $mn)) { continue; }
+                    $arms[$cls . '::' . $mn] = true;
+                }
+            }
+        }
+        $this->staticStringArmsMemo = $arms;
+        $this->staticStringArmsDone = true;
+        return $arms;
+    }
+
     /** `$f(args)` / call_user_func($f, args) with `$f` a runtime function-name
      *  string. strcmp the name against each arity-compatible FREE user function
      *  and reuse the normal Call path for the match, boxing the result to a
@@ -838,35 +876,45 @@ trait EmitLlvmCalls
                 $out .= $nextL . ":\n";
             }
         }
-        // `'Class::method'` strings the module spells: a static method named by
-        // string. Its symbol carries a `__`, so no function arm above reaches it.
-        if (!$hasSpread) {
-            foreach ($this->callableStaticStrings as $csName => $_) {
-                $csName = (string)$csName;
-                $sep = \strpos($csName, '::');
-                $ccls = \ltrim(\substr($csName, 0, $sep), '\\');
-                $cm = \substr($csName, $sep + 2);
-                if (!isset($this->classes[$ccls]) || !$this->methodIsStatic($ccls, $cm)
-                    || $this->staticMethodHasNoImpl($ccls, $cm)) { continue; }
-                $csSym = $this->resolveMethodClass($ccls, $cm) . '__' . $cm;
-                $csPt = $this->sigs->paramTypes[$csSym] ?? null;
-                if ($csPt === null || !$this->dynfArityFits($csSym, $argc) || $this->anyRefParam($csSym)
-                    || !$this->dynArmTypesEmittable($csPt, $iv->args)) { continue; }
-                $csRt = $this->sigs->returnType[$csSym] ?? Type::cell();
-                $hitL = $this->ssa->allocLabel('dynf.shit');
-                $nextL = $this->ssa->allocLabel('dynf.snext');
-                $cmp = $this->ssa->allocReg();
-                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($csName) . ")\n";
-                $eq = $this->ssa->allocReg();
-                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
-                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
-                $out .= $hitL . ":\n";
-                $out .= $this->emitNode(new \Compile\Mir\StaticCall_($ccls, $cm, $iv->args, $csRt));
-                $out .= $this->boxToCell($csRt);
-                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-                $out .= '  br label %' . $endL . "\n";
-                $out .= $nextL . ":\n";
-            }
+        // `'Class::method'` strings the module spells (or a `'Class::'` prefix a
+        // runtime concat extends): a static method named by string. Its symbol
+        // carries a `__`, so no function arm above reaches it. php matches both
+        // halves case-insensitively and accepts a leading backslash.
+        $staticArms = $hasSpread ? [] : $this->staticStringArms();
+        if ($staticArms !== []) {
+            $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
+            $bs = $this->ssa->allocReg();
+            $out .= '  ' . $bs . ' = load i8, ptr ' . $keyP . "\n";
+            $isBs = $this->ssa->allocReg();
+            $out .= '  ' . $isBs . ' = icmp eq i8 ' . $bs . ", 92\n";
+            $keyTail = $this->ssa->allocReg();
+            $out .= '  ' . $keyTail . ' = getelementptr i8, ptr ' . $keyP . ", i64 1\n";
+            $keyS = $this->ssa->allocReg();
+            $out .= '  ' . $keyS . ' = select i1 ' . $isBs . ', ptr ' . $keyTail . ', ptr ' . $keyP . "\n";
+        }
+        foreach ($staticArms as $csName => $_) {
+            $csName = (string)$csName;
+            $sep = \strpos($csName, '::');
+            $ccls = \substr($csName, 0, $sep);
+            $cm = \substr($csName, $sep + 2);
+            $csSym = $this->resolveMethodClass($ccls, $cm) . '__' . $cm;
+            $csPt = $this->sigs->paramTypes[$csSym] ?? null;
+            if ($csPt === null || !$this->dynfArityFits($csSym, $argc) || $this->anyRefParam($csSym)
+                || !$this->dynArmTypesEmittable($csPt, $iv->args)) { continue; }
+            $csRt = $this->sigs->returnType[$csSym] ?? Type::cell();
+            $hitL = $this->ssa->allocLabel('dynf.shit');
+            $nextL = $this->ssa->allocLabel('dynf.snext');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcasecmp(ptr ' . $keyS . ', ptr ' . $this->litStr($csName) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $out .= $this->emitNode(new \Compile\Mir\StaticCall_($ccls, $cm, $iv->args, $csRt));
+            $out .= $this->boxToCell($csRt);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
         }
         if ($dynfSyms !== []) {
             $out .= $hasSpread

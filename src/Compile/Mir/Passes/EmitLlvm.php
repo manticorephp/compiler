@@ -316,6 +316,10 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, bool> {@see Module::$callableStaticStrings} */
     private array $callableStaticStrings = [];
 
+    /** @var array<string, bool> {@see EmitLlvmCalls::staticStringArms} */
+    private array $staticStringArmsMemo = [];
+    private bool $staticStringArmsDone = false;
+
     /** `#[TypeDef]` value types. Never in {@see $classes}: nothing is emitted for
      *  them — no descriptor, no drop fn. Consulted only to turn `$byte->value` into the
      *  receiver itself and `$byte->method()` into a direct call.
