@@ -1579,9 +1579,12 @@ trait EmitLlvmBuiltins
         // Co-own exactly what the static arm would have: an rc-carrying element
         // kind takes its +1 through the tag (`__mir_cell_retain` is the mirror of
         // the `__mir_cell_drop` the rebuilt array's release runs per element);
-        // a scalar kind owns nothing on either arm.
-        if ($ek === Type::KIND_STRING || $ek === Type::KIND_OBJ || ($ek === Type::KIND_ARRAY && !$move)
-            || $ek === Type::KIND_CLOSURE) {
+        // a scalar kind owns nothing on either arm. Whatever the static arm
+        // retains, this one does too: an all-object UNION element (symfony's
+        // `VirtualStub|UninitializedStub` map) retained there and borrowed here,
+        // so the rebuilt array's release freed stubs a static cache still held.
+        if ($elemRetain !== '' || $ek === Type::KIND_STRING || $ek === Type::KIND_OBJ
+            || ($ek === Type::KIND_ARRAY && !$move) || $ek === Type::KIND_CLOSURE) {
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
             $out .= '  call void @__mir_cell_retain(i64 ' . $dynBoxed . ")\n";
