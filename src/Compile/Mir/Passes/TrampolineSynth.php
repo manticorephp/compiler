@@ -28,8 +28,9 @@ use Compile\Mir\MethodMeta;
  * Dog's body). One trampoline per declared method, not per inheritor.
  *
  * NOT invokable (no trampoline; the rmeta row's tramp stays null): abstract and
- * interface methods, a method with a by-ref parameter. Ф2 does not
- * forward by-ref through the boxed array.
+ * interface methods. A by-ref parameter binds the boxed array's element: a REF
+ * cell in `$a` (`invokeArgs($o, [&$x])`) writes through, a plain value is a
+ * throwaway the callee's write is discarded on, as php's.
  */
 final class TrampolineSynth
 {
@@ -114,7 +115,17 @@ final class TrampolineSynth
              . "(int \$t, array \$a): mixed {\n" . $body . "}\n";
     }
 
-    /** True when a method can carry a uniform invoke trampoline. */
+    /** True when a method can carry a reflection invoke trampoline (by-ref params included). */
+    public static function reflectable(MethodMeta $mm): bool
+    {
+        return !$mm->isAbstract;
+    }
+
+    /**
+     * True when the DYNAMIC-dispatch tables may call a method through its
+     * trampoline: a by-ref parameter must reach the inline dispatcher, which
+     * writes back to the caller's variable.
+     */
     public static function invokable(MethodMeta $mm): bool
     {
         if ($mm->isAbstract) { return false; }
@@ -146,7 +157,7 @@ final class TrampolineSynth
             if ($mn === '__construct' || $mn === '__call') { continue; }
             $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
             if ($decl !== $cls->name) { continue; }   // emitted by the declaring class
-            if (!self::invokable($mm)) { continue; }
+            if (!self::reflectable($mm)) { continue; }
             $out .= self::methodTramp($cls->name, $mn, $mm);
         }
         return $out;

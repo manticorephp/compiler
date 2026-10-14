@@ -1740,6 +1740,10 @@ trait InferNodes
         } elseif ($lt->kind === Type::KIND_UNKNOWN
             && $rt->kind !== Type::KIND_NULL && $rt->kind !== Type::KIND_UNKNOWN) {
             $node->type = $rt;
+        } elseif ($lt->kind === Type::KIND_OBJ && $rt->kind === Type::KIND_OBJ
+            && ($lt->class ?? '') !== ($rt->class ?? '')) {
+            // `$a ?? new Other`: either arm's class can come out, as for `?:`.
+            $node->type = $this->objUnion([$lt, $rt]);
         } elseif ($lt->kind !== $rt->kind
             && ($this->isValueKind($lt) || $lt->kind === Type::KIND_CELL)
             && ($this->isValueKind($rt) || $rt->kind === Type::KIND_CELL)) {

@@ -881,6 +881,14 @@ trait InferCalls
             }
             return $node->type;
         }
+        // `Iterator::valid(): bool` — the interface has no ClassDef to borrow a
+        // sig from, and the receiver may hold a Generator frame, which answers
+        // the same raw bool.
+        if ($objType->kind === Type::KIND_OBJ && $node->method === 'valid'
+            && \strtolower(\ltrim($objType->class ?? '', '\\')) === 'iterator') {
+            $node->type = Type::bool_();
+            return $node->type;
+        }
         // Resolve the method's declared return type via the class
         // table — `Class__method` was registered with that type as
         // its sig during the function pre-pass.

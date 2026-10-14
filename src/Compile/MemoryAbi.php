@@ -574,7 +574,7 @@ final class MemoryAbi
      *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,
      *     i64 nattrs, ptr attrs }`.
      *  `tramp` is the method's uniform `(i64 recv, ptr args) -> i64 cell` entry
-     *  (null = not invokable: abstract / interface / a by-ref param); `arity`
+     *  (null = not invokable: abstract / interface); `arity`
      *  packs `required | (total << 8) | (variadic << 16)`; `params` points at a
      *  `[nparams x PARAM]` table for a method row, or a `{ type, getter, setter }`
      *  extra struct for a property row (Ф3). `nattrs`/`attrs` are the member's

@@ -1557,6 +1557,7 @@ final class LowerFromAst implements Pass
             }
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
+        foreach ($module->functions as $cfn) { $this->collectCallableStaticStrings($cfn->body, $module); }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
@@ -1682,6 +1683,20 @@ final class LowerFromAst implements Pass
             }
         }
         foreach (Walk::children($node) as $child) { $this->collectCallableArrayMethods($child, $module); }
+    }
+
+    /**
+     * `'Class::method'` string literals into {@see Module::$callableStaticStrings}:
+     * the only names an erased invoke of a string callable can resolve to a
+     * static method ({@see EmitLlvmCalls::emitDynFnCall}).
+     */
+    private function collectCallableStaticStrings(Node $node, Module $module): void
+    {
+        if ($node instanceof \Compile\Mir\StringConst
+            && \preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*::([A-Za-z_][A-Za-z0-9_]*)?$/', $node->value) === 1) {
+            $module->callableStaticStrings[$node->value] = true;
+        }
+        foreach (Walk::children($node) as $child) { $this->collectCallableStaticStrings($child, $module); }
     }
 
     private function moduleHasDynamicMethodInvoke(Module $module): bool
@@ -3514,8 +3529,11 @@ final class LowerFromAst implements Pass
         }
         $call = new StaticCall_($class, $method, $loads, Type::unknown(), $scope);
         $body = new Block([new Return_($call, Type::void())], Type::void());
-        return $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class,
+        $node = $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class,
             $this->methodDeclaresErasedArray($class, $method));
+        $this->module->functions[\count($this->module->functions) - 1]->fccTarget = $method;
+        $this->module->functions[\count($this->module->functions) - 1]->fccTargetClass = $class;
+        return $node;
     }
 
     /** Closure capturing `$recv` and forwarding to `$recv->$method(...)`.
@@ -3552,12 +3570,16 @@ final class LowerFromAst implements Pass
             $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
             $node = $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown());
             $this->module->functions[\count($this->module->functions) - 1]->fccMethod = $method;
+            $this->module->functions[\count($this->module->functions) - 1]->fccTarget = $method;
             return $node;
         }
         [$mir, $loads] = $this->fccParamsAndArgs($declParams, $cls);
         $body = new MethodCall_(new LoadLocal("__frecv", $recv->type), $method, $loads, Type::unknown());
-        return $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown(),
+        $node = $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown(),
             $cls !== '' && $this->methodDeclaresErasedArray($cls, $method), $declParams);
+        $this->module->functions[\count($this->module->functions) - 1]->fccTarget = $method;
+        $this->module->functions[\count($this->module->functions) - 1]->fccTargetClass = $cls;
+        return $node;
     }
 
     /** A string callable `"fn"` / `"C::m"` applied to `$astArgs`. */

@@ -1103,7 +1103,7 @@ trait EmitLlvmBuiltins
             $this->markCellBoxed($this->lastValue);
             return $ret;
         }
-        if ($k === Type::KIND_NULL) {
+        if ($k === Type::KIND_NULL || $k === Type::KIND_VOID) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . " = call i64 @__manticore_box_null()\n";
             $ret = $this->finishI64($out, $r);
