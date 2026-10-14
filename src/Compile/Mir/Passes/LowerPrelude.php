@@ -472,6 +472,16 @@ trait LowerPrelude
                             $vis = ':"' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . '":private';
                         }
                     }
+                    $tdc = isset($cd->propertyTypes[$p]) ? $cd->propertyTypes[$p]->typeDefClass() : null;
+                    if ($tdc !== null && isset($this->classTable[$tdc]) && $this->classTable[$tdc]->typeDefProp !== '') {
+                        // An erased #[TypeDef] slot is its carrier scalar: rebuild the
+                        // one-field object php prints, from the carrier.
+                        $tdd = $this->classTable[$tdc];
+                        $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  ';"
+                            . " echo 'object(" . $tdd->display() . ")#1 (1) {', \"\\n\", \$pad, '    [\"" . $tdd->typeDefProp . "\"]=>', \"\\n\", \$pad, '    ';"
+                            . " __mir_var_dump(\$v->" . $p . "->" . $tdd->typeDefProp . ", \$indent + 2); echo \$pad, \"  }\\n\";\n";
+                        continue;
+                    }
                     $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
                 }
                 if ($cd->usesBag()) {
@@ -1378,6 +1388,72 @@ trait LowerPrelude
             'MHASH_XXH64' => 39,
             'MHASH_XXH3' => 40,
             'MHASH_XXH128' => 41,
+            'PKCS7_TEXT' => 1,
+            'PKCS7_NOCERTS' => 2,
+            'PKCS7_NOSIGS' => 4,
+            'PKCS7_NOCHAIN' => 8,
+            'PKCS7_NOINTERN' => 16,
+            'PKCS7_NOVERIFY' => 32,
+            'PKCS7_DETACHED' => 64,
+            'PKCS7_BINARY' => 128,
+            'PKCS7_NOATTR' => 256,
+            'PKCS7_NOSMIMECAP' => 512,
+            'PKCS7_NOOLDMIMETYPE' => 1024,
+            'PKCS7_CRLFEOL' => 2048,
+            'PKCS7_NOCRL' => 8192,
+            'PKCS7_NO_DUAL_CONTENT' => 65536,
+            'OPENSSL_CIPHER_RC2_40' => 0,
+            'OPENSSL_CIPHER_RC2_128' => 1,
+            'OPENSSL_CIPHER_RC2_64' => 2,
+            'OPENSSL_CIPHER_DES' => 3,
+            'OPENSSL_CIPHER_3DES' => 4,
+            'OPENSSL_CIPHER_AES_128_CBC' => 5,
+            'OPENSSL_CIPHER_AES_192_CBC' => 6,
+            'OPENSSL_CIPHER_AES_256_CBC' => 7,
+            'OPENSSL_CMS_TEXT' => 1,
+            'OPENSSL_CMS_NOCERTS' => 2,
+            'OPENSSL_CMS_NOSIGS' => 12,
+            'OPENSSL_CMS_NOINTERN' => 16,
+            'OPENSSL_CMS_NOVERIFY' => 32,
+            'OPENSSL_CMS_DETACHED' => 64,
+            'OPENSSL_CMS_BINARY' => 128,
+            'OPENSSL_CMS_NOATTR' => 256,
+            'OPENSSL_CMS_OLDMIMETYPE' => 1024,
+            'OPENSSL_RAW_DATA' => 1,
+            'OPENSSL_ZERO_PADDING' => 2,
+            'OPENSSL_DONT_ZERO_PAD_KEY' => 4,
+            'OPENSSL_ALGO_SHA1' => 1,
+            'OPENSSL_ALGO_MD5' => 2,
+            'OPENSSL_ALGO_MD4' => 3,
+            'OPENSSL_ALGO_SHA224' => 6,
+            'OPENSSL_ALGO_SHA256' => 7,
+            'OPENSSL_ALGO_SHA384' => 8,
+            'OPENSSL_ALGO_SHA512' => 9,
+            'OPENSSL_ALGO_RMD160' => 10,
+            'OPENSSL_PKCS1_PADDING' => 1,
+            'OPENSSL_NO_PADDING' => 3,
+            'OPENSSL_PKCS1_OAEP_PADDING' => 4,
+            'OPENSSL_PKCS1_PSS_PADDING' => 6,
+            'OPENSSL_KEYTYPE_RSA' => 0,
+            'OPENSSL_KEYTYPE_DSA' => 1,
+            'OPENSSL_KEYTYPE_DH' => 2,
+            'OPENSSL_KEYTYPE_EC' => 3,
+            'OPENSSL_KEYTYPE_X25519' => 4,
+            'OPENSSL_KEYTYPE_ED25519' => 5,
+            'OPENSSL_KEYTYPE_X448' => 6,
+            'OPENSSL_KEYTYPE_ED448' => 7,
+            'X509_PURPOSE_SSL_CLIENT' => 1,
+            'X509_PURPOSE_SSL_SERVER' => 2,
+            'X509_PURPOSE_NS_SSL_SERVER' => 3,
+            'X509_PURPOSE_SMIME_SIGN' => 4,
+            'X509_PURPOSE_SMIME_ENCRYPT' => 5,
+            'X509_PURPOSE_CRL_SIGN' => 6,
+            'X509_PURPOSE_ANY' => 7,
+            'X509_PURPOSE_OCSP_HELPER' => 8,
+            'X509_PURPOSE_TIMESTAMP_SIGN' => 9,
+            'OPENSSL_ENCODING_DER' => 0,
+            'OPENSSL_ENCODING_SMIME' => 1,
+            'OPENSSL_ENCODING_PEM' => 2,
             'PASSWORD_BCRYPT_DEFAULT_COST' => 12, 'CRYPT_SALT_LENGTH' => 123, 'CRYPT_STD_DES' => 1,
             'CRYPT_EXT_DES' => 1, 'CRYPT_MD5' => 1, 'CRYPT_BLOWFISH' => 1, 'CRYPT_SHA256' => 1,
             'CRYPT_SHA512' => 1, 'PASSWORD_ARGON2_DEFAULT_MEMORY_COST' => 65536,

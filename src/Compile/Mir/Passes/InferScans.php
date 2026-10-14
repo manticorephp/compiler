@@ -2721,6 +2721,15 @@ trait InferScans
     /** The per-node half of the container-shape scan — see {@see scanLocalShapes}. */
     private function scanAssocNode(Node $n): void
     {
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            $this->aliasTargets[] = $n->target;
+            $this->aliasSources[] = $n->source;
+            return;
+        }
+        if ($n->kind === Node::KIND_FOREACH) {
+            $fe = $n;
+            if ($fe->byRef && $fe->array->kind === Node::KIND_LOAD_LOCAL) { $this->byRefFeBind[$fe->valueVar] = $fe->array->name; }
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_LOAD_LOCAL) {
@@ -2761,6 +2770,8 @@ trait InferScans
                 // A nested store `$a[k][…] = v` where the value is a scalar: mark
                 // the OUTER base local so an empty inner `[]` promotes to vec[cell].
                 $base = $se->array->array;
+                // Any depth: `$a[k1][k2][…] = v` mutates the root just as `$a[k][…]` does.
+                while ($base->kind === Node::KIND_ARRAY_ACCESS) { $base = $base->array; }
                 if ($base->kind === Node::KIND_LOAD_LOCAL) {
                     $bname = $base->name;
                     $this->recordDisqualified[$bname] = true; // nested mutation
@@ -2771,6 +2782,17 @@ trait InferScans
                 }
             }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL) {
+            // `foreach ($a as &$v) { $v = X; }` writes X into $a's element.
+            $bsl = $n;
+            if (isset($this->byRefFeBind[$bsl->name])) {
+                $bcls = $this->coarseValueClass($bsl->value);
+                $barr = $this->byRefFeBind[$bsl->name];
+                if ($bcls !== '') {
+                    if (!isset($this->assocValClasses[$barr])) { $this->assocValClasses[$barr] = []; }
+                    $this->assocValClasses[$barr][$bcls] = true;
+                }
+                $this->recordDisqualified[$barr] = true;
+            }
             // Seed the value-class set from an array-LITERAL assignment too, so a
             // later differing store promotes to a cell element: `$r = [1,2]` (num)
             // then `$r[0] = "a"` (string) is a genuinely mixed array — without the

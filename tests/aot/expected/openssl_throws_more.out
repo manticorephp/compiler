@@ -1,0 +1,38 @@
+openssl_x509_read(): X.509 Certificate cannot be retrieved
+openssl_x509_export(): X.509 Certificate cannot be retrieved
+openssl_x509_export_to_file(): X.509 Certificate cannot be retrieved
+openssl_x509_fingerprint(): X.509 Certificate cannot be retrieved
+openssl_x509_verify(): Don't know how to get public key from this private key
+openssl_x509_check_private_key(): Supplied key param is a public key
+openssl_x509_checkpurpose(): Argument #3 ($ca_info) names an unreadable path: DIR/none
+openssl_pkey_get_public(): Don't know how to get public key from this private key
+openssl_pkey_derive(): Don't know how to get public key from this private key
+openssl_pkey_export(): Argument #1 ($key) must be a valid private key
+openssl_pkey_export_to_file(): Argument #1 ($key) must be a valid private key
+openssl_pkey_new(): Missing configuration value: "curve_name" not set
+openssl_pkey_new(): Unknown elliptic curve (short) name nosuch
+openssl_csr_export(): X.509 Certificate Signing Request cannot be retrieved
+openssl_csr_export_to_file(): X.509 Certificate Signing Request cannot be retrieved
+openssl_csr_sign(): X.509 Certificate Signing Request cannot be retrieved
+openssl_csr_sign(): X.509 Certificate cannot be retrieved
+openssl_csr_sign(): Private key does not correspond to signing cert
+openssl_csr_new(): the "config" option is not supported (no openssl.cnf support)
+openssl_spki_verify(): Unable to decode supplied SPKAC
+openssl_spki_export(): Unable to decode supplied SPKAC
+openssl_spki_export_challenge(): Unable to decode SPKAC
+openssl_seal(): Argument #4 ($public_key) must not be empty
+openssl_seal(): Argument #4 ($public_key) must contain only valid public keys
+openssl_encrypt(): Key length cannot be set for the cipher algorithm
+openssl_cms_sign(): Error opening input file DIR/none!
+openssl_cms_sign(): X.509 Certificate cannot be retrieved
+openssl_cms_sign(): Detached signatures not possible with S/MIME encoding
+openssl_cms_sign(): Argument $encoding must be OPENSSL_ENCODING_DER, OPENSSL_ENCODING_SMIME or OPENSSL_ENCODING_PEM
+openssl_cms_verify(): Argument $encoding must be OPENSSL_ENCODING_DER, OPENSSL_ENCODING_SMIME or OPENSSL_ENCODING_PEM
+openssl_cms_decrypt(): X.509 Certificate cannot be retrieved
+openssl_cms_decrypt(): Unable to get private key
+openssl_cms_encrypt(): Argument #7 ($cipher_algo) must be a valid cipher algorithm
+openssl_pkcs7_sign(): Error opening input file DIR/none!
+openssl_pkcs7_sign(): X.509 Certificate cannot be retrieved
+openssl_pkcs7_decrypt(): X.509 Certificate cannot be retrieved
+openssl_pkcs7_decrypt(): Unable to get private key
+openssl_pkcs7_encrypt(): Argument #6 ($cipher_algo) must be a valid cipher algorithm

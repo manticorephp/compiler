@@ -2372,6 +2372,14 @@ trait EmitLlvmRuntime
                 // members and storage untouched.
                 $body .= "  %dsm = load i64, ptr @__mir_dtor_only\n";
                 $body .= "  store i64 0, ptr @__mir_dtor_only\n";
+                // Mode 2 is the cycle collector's pre-pass ({@see ccRuntime}): a prelude class's
+                // destructor frees native storage the collector frees itself, so it is skipped.
+                if ($this->classes[$dtorCls]->isPreludeClass) {
+                    $body .= "  %dsc = icmp eq i64 %dsm, 2\n";
+                    $body .= "  br i1 %dsc, label %ccskip, label %dsw\n";
+                    $body .= "ccskip:\n  ret void\n";
+                    $body .= "dsw:\n";
+                }
                 $body .= "  %dso = icmp ne i64 %dsm, 0\n";
                 $body .= "  br i1 %dso, label %sweepd, label %dchk\n";
                 $body .= "sweepd:\n";
@@ -2977,7 +2985,8 @@ trait EmitLlvmRuntime
         if ($this->classIsA($cls->name, 'Manticore\\Ds\\Map') || $this->classIsA($cls->name, 'Manticore\\Ds\\Set')) {
             return '@__cc_hmap_walk';
         }
-        if ($this->classIsA($cls->name, 'SplFixedArray') || $this->classIsA($cls->name, 'Manticore\\Ds\\Vec')) { return '@__cc_nbuf_walk'; }
+        if ($this->classIsA($cls->name, 'SplFixedArray') || $this->classIsA($cls->name, 'Manticore\\Ds\\Vec')
+            || $this->classIsA($cls->name, 'Manticore\\Ds\\TypedArray')) { return '@__cc_nbuf_walk'; }
         return '';
     }
 
@@ -3730,10 +3739,38 @@ end:
         // this same loop, and the root arm must recognise it as already on the
         // garbage list rather than as a black rc-0 root to free a second time.
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $GRAY . ")\n";
-        $out .= "  call void @__manticore_cc_children(ptr %s, i64 3)\n";
+        // Pre-order: php runs the destructors of a collected cycle in discovery order.
         $out .= "  call void @__cc_gpush(ptr %s, i64 0)\n";
+        $out .= "  call void @__manticore_cc_children(ptr %s, i64 3)\n";
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
+        // ── the destructor of one garbage entry, run BEFORE any entry is freed ──
+        // php runs every destructor of a collected cycle first and frees after,
+        // so a destructor may still read its siblings. One-shot "destructor only"
+        // mode, exactly as the shutdown sweep: rc held across the call, members
+        // untouched, the called-bit set so the later drop skips it. An object
+        // whose class has no destructor is not in the registry and is skipped.
+        $out .= "define void @__cc_gdtor(ptr %o) {\n";
+        $out .= "entry:\n";
+        $out .= "  %found = call i1 @__mir_dtor_unreg(ptr %o)\n";
+        $out .= "  br i1 %found, label %rdo, label %rdone\n";
+        $out .= "rdo:\n";
+        $out .= "  %rwp = getelementptr i8, ptr %o, i64 8\n";
+        $out .= "  %rw = load i64, ptr %rwp\n";
+        $out .= "  %rwh = add i64 %rw, 1\n";
+        $out .= "  store i64 %rwh, ptr %rwp\n";
+        $out .= "  %di = load i64, ptr %o\n";
+        $out .= "  %dp = inttoptr i64 %di to ptr\n";
+        $out .= "  %dfp = getelementptr i8, ptr %dp, i64 8\n";
+        $out .= "  %df = load ptr, ptr %dfp\n";
+        $out .= "  store i64 2, ptr @__mir_dtor_only\n";
+        $out .= "  call void %df(ptr %o)\n";
+        $out .= "  store i64 0, ptr @__mir_dtor_only\n";
+        $out .= "  %rw2 = load i64, ptr %rwp\n";
+        $out .= "  %rwd = sub i64 %rw2, 1\n";
+        $out .= "  store i64 %rwd, ptr %rwp\n";
+        $out .= "  br label %rdone\n";
+        $out .= "rdone:\n  ret void\n}\n";
         // ── the deferred free of one garbage entry ──
         $out .= "define void @__cc_gfree(ptr %s, i64 %kind) {\n";
         $out .= "entry:\n";
@@ -3911,6 +3948,24 @@ end:
         $out .= "  store i64 %cin, ptr %ip\n";
         $out .= "  br label %cr\n";
         $out .= "crd:\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %dq\n";
+        $out .= "dq:\n";
+        $out .= "  %dqi = load i64, ptr %ip\n";
+        $out .= "  %dqc = load i64, ptr @__manticore_cc_gcount\n";
+        $out .= "  %dqgo = icmp slt i64 %dqi, %dqc\n";
+        $out .= "  br i1 %dqgo, label %dqb, label %dqd\n";
+        $out .= "dqb:\n";
+        $out .= "  %dqbuf = load ptr, ptr @__manticore_cc_garbage\n";
+        $out .= "  %dqsp = getelementptr i64, ptr %dqbuf, i64 %dqi\n";
+        $out .= "  %dqw = load i64, ptr %dqsp\n";
+        $out .= "  %dqpi = and i64 %dqw, -2\n";
+        $out .= "  %dqp = inttoptr i64 %dqpi to ptr\n";
+        $out .= "  call void @__cc_gdtor(ptr %dqp)\n";
+        $out .= "  %dqn = add i64 %dqi, 1\n";
+        $out .= "  store i64 %dqn, ptr %ip\n";
+        $out .= "  br label %dq\n";
+        $out .= "dqd:\n";
         $out .= "  store i64 0, ptr %ip\n";
         $out .= "  br label %gr\n";
         $out .= "gr:\n";

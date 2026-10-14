@@ -795,6 +795,12 @@ trait EmitLlvmControl
         $out .= $bodyL . ":\n";
         $out .= $this->ehMarkRaise($this->iterProtoStep($dyn, $iterSlot, $iterNode, 'current'), $fe->ownLive);
         $out .= $this->coerceToI64();
+        $vt = $fe->iterValueType;
+        if ($vt !== null && $vt->typeDefClass() !== null && !isset($this->classes[$fe->iterClass])) {
+            // A #[TypeDef] element rides the iterator's tagged cell as its carrier.
+            $out .= $this->unboxCellToType($vt);
+            $out .= $this->coerceToI64();
+        }
         $cur = $this->lastValue;
         // `current()` is +1 on every arm — a method's return convention, and
         // the generator arm retains to match — so a co-owning loop variable

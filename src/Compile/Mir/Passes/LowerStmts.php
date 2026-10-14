@@ -243,6 +243,13 @@ trait LowerStmts
         // A yield value is only available after the resume: evaluate it before the
         // store's base, whose SSA values do not survive the resume switch.
         if ($v->kind === 'Yield' && $e->target->kind !== 'Variable') { $v = $this->lvTemp($v); }
+        // php reads a plain-variable dim LATE (at the store, after the value):
+        // `$a[$i] = $i++` keys on the NEW $i. Evaluate a value that writes
+        // a variable first, so the store's own read of the dim sees the write.
+        if ($e->target->kind === 'ArrayAccess' && $this->lvHasVarDim($e->target)
+            && ($v->kind === 'IncDec' || $v->kind === 'Assign' || $v->kind === 'CompoundAssign')) {
+            $v = $this->lvTemp($v);
+        }
         if ($t === $e->target && $v === $e->value) { return null; }
         return new \Parser\Ast\Assign($t, $v, $e->span);
     }
@@ -305,6 +312,44 @@ trait LowerStmts
         }
         if (!$changed) { return null; }
         return new \Parser\Ast\CallExpr($e->function, $args, $e->span);
+    }
+
+    private function lvHasVarDim(\Parser\Ast\Expr $e): bool
+    {
+        while ($e->kind === 'ArrayAccess') {
+            if ($e->index !== null && $e->index->kind === 'Variable') { return true; }
+            $e = $e->array;
+        }
+        return false;
+    }
+
+    /**
+     * Expression-context twin of {@see hoistLvalueStmt}: `while ($w[f()]++ < 3)`,
+     * `echo mk()->a[] = 5`. The dims / receiver are evaluated once into temps
+     * and the Block answers the rewritten expression's value. The temps are
+     * not unset (a value block ends in its value); they die with the frame.
+     */
+    private function hoistLvalueExpr(\Parser\Ast\Expr $e): ?Node
+    {
+        $k = $e->kind;
+        if ($k !== 'Assign' && $k !== 'CompoundAssign' && $k !== 'IncDec') { return null; }
+        $outerHoist = $this->lvHoist;
+        $outerTemps = $this->lvTemps;
+        $this->lvHoist = [];
+        $this->lvTemps = [];
+        $rewritten = $k === 'Assign' ? $this->hoistAssign($e)
+            : ($k === 'CompoundAssign' ? $this->hoistCompound($e) : $this->hoistIncDec($e));
+        $r = null;
+        if ($rewritten !== null && $this->lvTemps !== []) {
+            $stmts = $this->lvHoist;
+            $this->lvHoist = [];
+            $this->lvTemps = [];
+            $stmts[] = $this->lowerExpr($rewritten);
+            $r = new Block($stmts, Type::unknown());
+        }
+        $this->lvHoist = $outerHoist;
+        $this->lvTemps = $outerTemps;
+        return $r;
     }
 
     /** The target chain with every effectful dim / receiver replaced by a temp. */
@@ -409,10 +454,8 @@ trait LowerStmts
             // bare `array` local can't carry, e.g. `@var array<string, Type>`).
             if ($stmt->docComment !== null && $lowered instanceof StoreLocal) {
                 $vt = $this->docTagType($stmt->docComment, '@var', $lowered->name);
-                // An unnamed `@var T` only: `/** @var Foo $p */` above `$type = ...`
-                // annotates `$p` (a foreach value), and typing `$type` as Foo made a
-                // string concat call Foo::__toString on the string.
-                if ($vt === null) { $vt = $this->docTagType($stmt->docComment, '@var', '', true); }
+                // The unnamed form only: `@var T $m` names ANOTHER variable and says nothing about this one.
+                if ($vt === null && !\preg_match('/@var\s[^$@]*\$[A-Za-z_]/', $stmt->docComment)) { $vt = $this->docTagType($stmt->docComment, '@var', ''); }
                 if ($vt !== null) {
                     $lowered->declaredType = $this->lowerTypeHint($vt);
                     // `/** @var Box<float> $b */ $b = new Box();` — the binding is
@@ -561,6 +604,13 @@ trait LowerStmts
         return new Block($stmts, Type::void());
     }
 
+    /** A discarded `x++` is `++x`: no old value to keep. */
+    private function discardedIncDec(\Parser\Ast\Expr $e): \Parser\Ast\Expr
+    {
+        if ($e->kind !== 'IncDec' || $e->prefix) { return $e; }
+        return new \Parser\Ast\IncDec($e->op, true, $e->operand, $e->span);
+    }
+
     private function lowerClauseExpr(\Parser\Ast\Expr $e): Node
     {
         $e = $this->discardedIncDec($e);
@@ -584,8 +634,12 @@ trait LowerStmts
         /** @var Node[] $bind */
         $bind = [];
         $keyVar = null;
+        // A `static` / `global` variable lives in a module cell, not in the loop's
+        // slot: bind a synthetic local and store it through the ordinary
+        // assignment, which knows the cell.
+        $fnKey = $this->currentLowerClass . '::' . $this->currentLowerFn;
         if ($stmt->key !== null) {
-            if ($stmt->key->kind === 'Variable') {
+            if ($stmt->key->kind === 'Variable' && !isset($this->cellDecls[$fnKey][$this->varName($stmt->key)])) {
                 $keyVar = $this->varName($stmt->key);
             } else {
                 $keyVar = '__fe_key_' . (string)$this->destrCounter;
@@ -618,7 +672,8 @@ trait LowerStmts
             return $this->hoistForeachSubject(
                 new Foreach_($array, $keyVar, $tmp, $stmt->valueByRef, new Block($stmts, Type::void())));
         }
-        if ($stmt->value->kind === 'Variable') {
+        if ($stmt->value->kind === 'Variable'
+            && ($stmt->valueByRef || !isset($this->cellDecls[$fnKey][$this->varName($stmt->value)]))) {
             $valueVar = $this->varName($stmt->value);
         } else {
             $valueVar = '__fe_val_' . (string)$this->destrCounter;
@@ -776,6 +831,7 @@ trait LowerStmts
     {
         $nodes = [];
         foreach ($stmt->names as $name) {
+            $this->cellDecls[$this->currentLowerClass . '::' . $this->currentLowerFn][$name] = true;
             $cell = '@g_' . $name;
             $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
             $this->module->addGlobalVarName($name);

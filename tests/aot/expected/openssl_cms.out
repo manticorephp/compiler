@@ -1,0 +1,55 @@
+constants 1 2 12 16 32 64 128 256 1024
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(true)
+bool(false)
+bool(false)
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(false)
+bool(true)
+smime 0 verify true false
+bool(true)
+smime 384 verify true true
+bool(true)
+smime 2 verify true false
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+der 0 verify true false
+bool(true)
+der 384 verify true true
+bool(true)
+der 2 verify true false
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+pem 0 verify true false
+bool(true)
+pem 384 verify true true
+bool(true)
+pem 2 verify true false
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+true sg=- ct=data pk=-
+true sg=data ct=data pk=-
+true sg=- ct=data pk=empty
+true sg=data ct=data pk=data
+false sg=- ct=data pk=empty
+false sg=- ct=- pk=-

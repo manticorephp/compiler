@@ -694,6 +694,11 @@ final class SpillFreshBases
                 }
             }
         }
+        // A nullsafe receiver temp (`__ns_N`, {@see LowerFromAst::lowerNullsafeProp}) is
+        // dead once the statement is: release it there, as php destroys the temporary.
+        if ($k === Node::KIND_STORE_LOCAL && \str_starts_with($this->asStoreLocal($n)->name, '__ns_')) {
+            $this->pending[] = $this->asStoreLocal($n);
+        }
         // Anything else — including a Block in EXPRESSION position (a
         // conditional's arm), whose spills belong to the enclosing statement.
         foreach (Walk::children($n) as $c) { $this->visit($c); }
@@ -1121,10 +1126,21 @@ final class SpillFreshBases
             $ma->subject = $this->consume($ma->subject);
         } elseif ($k === Node::KIND_CALL) {
             $call = $this->asCall($n);
-            if ($this->isTypePredicate($call->function) && \count($call->args) === 1) {
+            if ($this->isTypePredicate($call->function) && \count($call->args) === 1
+                && !$this->emitterReleasesObjArg($call->function, $call->args[0])) {
                 $call->args = [$this->consume($call->args[0])];
             }
         }
+    }
+
+    /** `is_object(mk())` / `is_null(mk())`: the emitter gives the fresh object back right after the test. */
+    private function emitterReleasesObjArg(string $fn, Node $arg): bool
+    {
+        $p = \strrpos($fn, chr(92));
+        $bare = $p === false ? $fn : \substr($fn, $p + 1);
+        $k = $arg->type->kind;
+        return ($bare === 'is_object' && ($k === Type::KIND_OBJ || $k === Type::KIND_CELL))
+            || ($bare === 'is_null' && $k === Type::KIND_OBJ);
     }
 
     private function isTypePredicate(string $fn): bool
@@ -1295,6 +1311,7 @@ final class SpillFreshBases
 
     // Typed reads — a base-typed `$n` resolves fields by OFFSET under
     // self-host and would pick the wrong slot ({@see VivifyRefArgs}).
+    private function asStoreLocal(Node $n): StoreLocal { return $n; }
     private function asStoreElement(Node $n): \Compile\Mir\StoreElement { return $n; }
     private function asStoreProperty(Node $n): \Compile\Mir\StoreProperty { return $n; }
     private function asStoreDynProp(Node $n): \Compile\Mir\StoreDynProp_ { return $n; }

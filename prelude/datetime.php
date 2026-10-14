@@ -94,6 +94,14 @@ class DateTimeZone
         }
         $zid = \__mc_tz_open($timezone);
         if ($zid < 0) {
+            $ao = \__mc_dt_abbroff(\strtolower($timezone));
+            if ($ao !== -99999) {
+                $this->tzoffset = $ao;
+                $this->tztype = 2;
+                $this->tzname = \strtoupper($timezone);
+                $this->tzid = \__mc_tz_open('UTC');
+                return;
+            }
             throw new DateInvalidTimeZoneException('DateTimeZone::__construct(): Unknown or bad timezone (' . $timezone . ')');
         }
         $this->tzname = $timezone;
@@ -123,7 +131,7 @@ class DateTimeZone
 
     public function getOffset(DateTimeInterface $datetime): int
     {
-        if ($this->tztype === 1) {
+        if ($this->tztype !== 3) {
             return $this->tzoffset;
         }
         return \__mc_tz_offset($this->tzid, $datetime->getTimestamp());
@@ -362,6 +370,15 @@ class DateTime implements DateTimeInterface
         }
         $this->ts = $t;
         $this->us = \__mc_dt_us(0, 0);
+        // a zone written in the string wins over the argument
+        $zn = \__mc_dt_str_zone($datetime);
+        if ($zn !== '') {
+            $tz = new DateTimeZone($zn);
+            $this->zname = $tz->getName();
+            $this->zid = $tz->__mcId();
+            $this->ztype = $tz->__mcType();
+            $this->zoff = $tz->__mcOffset();
+        }
     }
 
     public function __mcTs(): int { return $this->ts; }
@@ -545,6 +562,15 @@ class DateTimeImmutable implements DateTimeInterface
         }
         $this->ts = $t;
         $this->us = \__mc_dt_us(0, 0);
+        // a zone written in the string wins over the argument
+        $zn = \__mc_dt_str_zone($datetime);
+        if ($zn !== '') {
+            $tz = new DateTimeZone($zn);
+            $this->zname = $tz->getName();
+            $this->zid = $tz->__mcId();
+            $this->ztype = $tz->__mcType();
+            $this->zoff = $tz->__mcOffset();
+        }
     }
 
     public function __mcTs(): int { return $this->ts; }

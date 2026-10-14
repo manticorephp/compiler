@@ -1266,6 +1266,7 @@ final class Ownership
             return false;
         }
         if ($this->returnCondNormalized($v, $erasedArray)) { return false; }
+        if ($this->isUserOffsetGetRead($v)) { return false; }
         if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return false; }
         if ($tk === Type::KIND_OBJ && $v instanceof Cast && $v->target === 'object') { return false; }
         if ($isArr && $v instanceof Cast && self::castArrayMints($v)) { return false; }
@@ -1304,10 +1305,17 @@ final class Ownership
         if ($v instanceof Cast && $v->target === 'object') { return false; }
         if ($k === Node::KIND_LOAD_LOCAL && $moved) { return false; }
         if ($this->returnCondNormalized($v, $erasedArray)) { return false; }
+        if ($this->isUserOffsetGetRead($v)) { return false; }
         // A numeric op's cell is minted by its helper ({@see tempCellOwned}).
         if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
             && $v->type->isNumericCell()) { return false; }
         return true;
+    }
+
+    /** `$o[$k]` on a user ArrayAccess class is a real `offsetGet` call: a +1 already owned. */
+    private function isUserOffsetGetRead(Node $v): bool
+    {
+        return $v instanceof ArrayAccess_ && !$v->probe && self::userOffsetGetBase($v->array->type, $this->ctx->classes);
     }
 
     /** The one call that is not a +1: `__mir_fiber_current()` reads the running

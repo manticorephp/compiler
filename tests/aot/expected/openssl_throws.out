@@ -1,0 +1,13 @@
+ValueError: openssl_encrypt(): Argument #2 ($cipher_algo) must be a valid cipher algorithm
+ValueError: openssl_cipher_iv_length(): Argument #1 ($cipher_algo) must be a valid cipher algorithm
+ValueError: openssl_cipher_key_length(): Argument #1 ($cipher_algo) must be a valid cipher algorithm
+ValueError: openssl_encrypt(): Argument #5 ($iv) must be exactly 16 bytes long for this cipher, 5 given
+ValueError: openssl_encrypt(): Using an empty Initialization Vector (iv) is potentially insecure and not recommended
+ValueError: openssl_digest(): Argument #2 ($digest_algo) must be a valid digest algorithm
+ValueError: openssl_random_pseudo_bytes(): Argument #1 ($length) must be greater than 0
+ValueError: openssl_pbkdf2(): Argument #3 ($key_length) must be greater than 0
+ValueError: openssl_pbkdf2(): Argument #5 ($digest_algo) must be a valid digest algorithm
+ValueError: openssl_sign(): Argument #3 ($private_key) must be a valid private key
+ValueError: openssl_verify(): Argument #3 ($public_key) must be a valid public key
+ValueError: openssl_public_encrypt(): Argument #3 ($public_key) must be a valid key
+bool(false)

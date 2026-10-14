@@ -708,6 +708,10 @@ final class LowerFromAst implements Pass
     private int $closureCounter = 0;
     private int $destrCounter = 0;
 
+    /** Names a `static` / `global` statement bound to a module cell, per function (an over-approximation across closures).
+     *  @var array<string, array<string, bool>> */
+    private array $cellDecls = [];
+
     /** Counter for the `__lv_N` temps {@see LowerStmts::hoistLvalueStmt} makes. */
     private int $lvCounter = 0;
 
@@ -4163,6 +4167,7 @@ final class LowerFromAst implements Pass
             : $this->currentLowerFn;
         $nodes = [];
         foreach ($stmt->decls as $d) {
+            $this->cellDecls[$this->currentLowerClass . '::' . $this->currentLowerFn][$d->name] = true;
             $cell = '@' . $this->sanitizeSym($rawBase . '__sl_' . $d->name);
             $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
             $guard = '';
@@ -4337,6 +4342,11 @@ final class LowerFromAst implements Pass
             $dp = $this->dynPropBase($expr->target);
             if ($dp !== null) { return $this->lowerDynPropStore($dp, $expr); }
         }
+        if ($expr->target->kind === 'ArrayLit' && $this->destructureHasRef($expr->target)) {
+            return $this->lowerRefDestructure($expr->target, $expr->value);
+        }
+        $h = $this->hoistLvalueExpr($expr);
+        if ($h !== null) { return $h; }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
     }
 
@@ -6072,9 +6082,20 @@ final class LowerFromAst implements Pass
         $method = $e->method;
         $args = $e->args;
         $span = $e->span;
+        // `$c::$m(args)`: the method name is a variable too, so every STATIC method of a
+        // user class is a candidate arm, selected on (class, method) at run time.
+        $methodVar = \strncmp($method, '$', 1) === 0 ? \substr($method, 1) : '';
         $names = [];
+        $pairs = [];
         foreach ($this->classTable as $cname => $cd) {
             if ($this->isTypeDef($cname)) { continue; }
+            if ($methodVar !== '') {
+                if ($cd->isPreludeClass) { continue; }
+                foreach ($cd->methodMeta as $mn => $mm) {
+                    if ($mm->isStatic && !$mm->isAbstract) { $pairs[] = [$cname, (string)$mn]; }
+                }
+                continue;
+            }
             if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
         }
         $nameExpr = \Parser\Ast\Expr::ternary(
@@ -6086,6 +6107,14 @@ final class LowerFromAst implements Pass
         $tmp = '__dynrc' . (string)$this->destrCounter;
         $this->destrCounter = $this->destrCounter + 1;
         $chain = \Parser\Ast\Expr::null($span);
+        for ($i = \count($pairs) - 1; $i >= 0; $i = $i - 1) {
+            $cond = \Parser\Ast\Expr::binary('&&',
+                \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($pairs[$i][0], $span), $span),
+                \Parser\Ast\Expr::binary('===', \Parser\Ast\Expr::variable($methodVar, $span), new \Parser\Ast\StringLiteral($pairs[$i][1], $span), $span),
+                $span);
+            $then = \Parser\Ast\Expr::staticCall($pairs[$i][0], $pairs[$i][1], $args, $span);
+            $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
+        }
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
             $cond = \Parser\Ast\Expr::binary('===', $this->dynArmName($nameExpr, $tmp, $i, $span), new \Parser\Ast\StringLiteral($cname, $span), $span);
@@ -6317,12 +6346,54 @@ final class LowerFromAst implements Pass
         return new Block($stmts, Type::void());
     }
 
+    private function destructureHasRef(\Parser\Ast\ArrayLit $t): bool
+    {
+        foreach ($t->elements as $el) {
+            if ($el->byRef) { return true; }
+            if ($el->value !== null && $el->value->kind === 'ArrayLit' && $this->destructureHasRef($el->value)) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * `[&$a, $b] = $src` → `$a = &$src[0]; $b = $src[1];`. The source is an
+     * lvalue and is named once per element, so an effectful one is evaluated
+     * into a temp first.
+     */
+    private function lowerRefDestructure(\Parser\Ast\ArrayLit $target, \Parser\Ast\Expr $src): Node
+    {
+        $stmts = [];
+        if (!$this->astIsPlainRead($src)) {
+            $tmp = '__destr_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $stmts[] = $this->storeToTarget(new \Parser\Ast\Variable($tmp, $src->span), $this->lowerExpr($src));
+            $src = new \Parser\Ast\Variable($tmp, $src->span);
+        }
+        $idx = 0;
+        foreach ($target->elements as $el) {
+            if ($el->value === null) { $idx = $idx + 1; continue; }
+            $key = $el->key ?? new \Parser\Ast\IntLiteral($idx, $target->span);
+            $access = new \Parser\Ast\ArrayAccess($src, $key, $target->span);
+            if ($el->value->kind === 'ArrayLit' && $this->destructureHasRef($el->value)) {
+                $stmts[] = $this->lowerRefDestructure($el->value, $access);
+            } elseif ($el->byRef) {
+                $stmts[] = $this->lowerRefAssign(new \Parser\Ast\RefAssign($el->value, $access, $target->span));
+            } else {
+                $stmts[] = $this->storeToTarget($el->value, $this->lowerExpr($access));
+            }
+            $idx = $idx + 1;
+        }
+        return new Block($stmts, Type::void());
+    }
+
     /** `$t op= v` → `$t = ($t op v)`. */
     private function lowerCompoundAssign(\Parser\Ast\CompoundAssign $expr): Node
     {
         // `$GLOBALS += […]` is a WRITE of the whole array (a php 8.1 fatal), so
         // say so — lowering the target as a read below would blame the read.
         if ($this->isGlobalsVar($expr->target)) { $this->rejectGlobalsWrite(); }
+        $h = $this->hoistLvalueExpr($expr);
+        if ($h !== null) { return $h; }
         $read = $this->lowerExpr($expr->target);
         $value = $this->lowerExpr($expr->value);
         // `$t ??= v` → `$t ?? ($t = v)`: php writes only when `$t` is null or
@@ -6345,6 +6416,8 @@ final class LowerFromAst implements Pass
         $op = $expr->op === '++' ? '+' : '-';
         if ($operand->kind !== 'Variable') {
             // `$this->p++` / `$a[$k]++` — no plain-local slot. Desugar to
+            $h = $this->hoistLvalueExpr($expr);
+            if ($h !== null) { return $h; }
             // `target = target ± 1` (a compound assign). A postfix used as a
             // value (statement context is rewritten to prefix by the caller)
             // saves the OLD value in a temp and answers it.

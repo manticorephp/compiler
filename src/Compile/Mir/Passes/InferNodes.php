@@ -220,6 +220,40 @@ trait InferNodes
      * false and answered `-268435340`. The element-cell fact is about the ARRAY
      * the slot holds, which a cell slot already decodes by tag.
      */
+    /**
+     * `$r = &$a` makes two names ONE array: a store through either decides the
+     * element channel of both, so the shape facts of an alias pair are pooled
+     * ({@see scanAssocNode}). Left apart, `$r[] = null` cellified `$r` while
+     * `$a` kept raw ints and read the stored null back as 0.
+     */
+    private function mergeAliasShapeFacts(): void
+    {
+        $n = \count($this->aliasTargets);
+        for ($round = 0; $round <= $n; $round++) {
+            $changed = false;
+            for ($i = 0; $i < $n; $i++) {
+                $a = $this->aliasTargets[$i];
+                $b = $this->aliasSources[$i];
+                for ($dir = 0; $dir < 2; $dir++) {
+                    $from = $dir === 0 ? $a : $b;
+                    $to = $dir === 0 ? $b : $a;
+                    foreach ($this->assocValClasses[$from] ?? [] as $cls => $_) {
+                        if (!isset($this->assocValClasses[$to][$cls])) {
+                            $this->assocValClasses[$to][$cls] = true;
+                            $changed = true;
+                        }
+                    }
+                    if (isset($this->assocLocals[$from]) && !isset($this->assocLocals[$to])) { $this->assocLocals[$to] = true; $changed = true; }
+                    if (isset($this->cellKeyLocals[$from]) && !isset($this->cellKeyLocals[$to])) { $this->cellKeyLocals[$to] = true; $changed = true; }
+                    if (isset($this->intKeyLocals[$from]) && !isset($this->intKeyLocals[$to])) { $this->intKeyLocals[$to] = true; $changed = true; }
+                    if (isset($this->strLitKeyLocals[$from]) && !isset($this->strLitKeyLocals[$to])) { $this->strLitKeyLocals[$to] = true; $changed = true; }
+                    if (isset($this->recordDisqualified[$from]) && !isset($this->recordDisqualified[$to])) { $this->recordDisqualified[$to] = true; $changed = true; }
+                }
+            }
+            if (!$changed) { break; }
+        }
+    }
+
     private function seedCellElemLocal(string $name): void
     {
         $pt = $this->currentParamTypes[$name] ?? null;
@@ -361,6 +395,9 @@ trait InferNodes
         $this->strLitKeyLocals = [];
         $this->cellElemLocals = [];
         $this->assocValClasses = [];
+        $this->aliasTargets = [];
+        $this->aliasSources = [];
+        $this->byRefFeBind = [];
         $this->emptyArrValLocals = [];
         $this->nestedScalarStoreLocals = [];
         $this->nestedCellVecLocals = [];
@@ -382,6 +419,7 @@ trait InferNodes
         $strAssigned = [];
         // ONE walk for all three shape scans ({@see InferScans::scanLocalShapes}).
         $this->scanLocalShapes($fn->body, $incTargets, $strAssigned);
+        $this->mergeAliasShapeFacts();
         foreach ($incTargets as $name => $unused) {
             if (isset($strAssigned[$name])) { $this->incStrLocals[$name] = true; }
         }
@@ -2003,6 +2041,16 @@ trait InferNodes
                     $node->fixedBuf = true;
                 }
             }
+            // A typed array bound to a #[TypeDef] (`UInt16Array<Kind>`): the
+            // iterator hands back the carrier in a cell, and the loop variable is
+            // the TypeDef — the emitter unboxes the carrier at the step.
+            if ($node->iterAggregate && !$node->byRef && $elem->kind === Type::KIND_CELL
+                && isset($this->classes[$cls]) && $this->classImplementsT($cls, 'Manticore\\Ds\\TypedArray')) {
+                // A reified binding is its own class: its offsetGet already returns the bound type.
+                $ogCls = $this->resolveMethodClass($cls, 'offsetGet');
+                $bound = $this->genericReturnType($cls, 'offsetGet', $at) ?? ($ogCls !== '' ? ($this->sigs[$ogCls . '__offsetGet'] ?? null) : null);
+                if ($bound !== null && $bound->typeDefClass() !== null) { $elem = $bound; }
+            }
             if ($node->iterClass === '' && !$node->byRef) {
                 // A plain object walks its properties, as get_object_vars()
                 // hands them ({@see EmitLlvmControl::emitForeach}).
@@ -2218,6 +2266,11 @@ trait InferNodes
             $arrJoin = $first ? null : $this->armArrayJoin($result, $bt);
             if ($first) { $result = $bt; $first = false; }
             elseif ($arrJoin !== null) { $result = $arrJoin; }
+            // object arms of different classes: a static union, as a ternary does
+            elseif (($result->kind === Type::KIND_OBJ || $result->kind === Type::KIND_UNION)
+                && ($bt->kind === Type::KIND_OBJ || $bt->kind === Type::KIND_UNION)) {
+                $result = $this->objUnion([$result, $bt]);
+            }
             elseif ($result->kind === $bt->kind) { /* keep */ }
             elseif ($result->kind === Type::KIND_CELL || $bt->kind === Type::KIND_CELL
                 || ($this->isValueKind($result) && $this->isValueKind($bt))) {
