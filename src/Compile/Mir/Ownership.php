@@ -1303,6 +1303,7 @@ final class Ownership
             return false;
         }
         if ($v instanceof Cast && $v->target === 'object') { return false; }
+        if ($v instanceof Cast && self::castArrayMints($v)) { return false; }
         if ($k === Node::KIND_LOAD_LOCAL && $moved) { return false; }
         if ($this->returnCondNormalized($v, $erasedArray)) { return false; }
         if ($this->isUserOffsetGetRead($v)) { return false; }
@@ -1763,7 +1764,12 @@ final class Ownership
     {
         if ($c->target !== 'array') { return false; }
         $ok = $c->operand->type->kind;
-        return $ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN || $ok === Type::KIND_UNION
+        // An OBJECT mints too: its declared slots are built into a fresh assoc
+        // (and a bag-only class's bag is retained). Read as a borrow, the
+        // result was retained again on return and never released in a local —
+        // `(array)$e` leaked the whole property map per cast.
+        return $ok === Type::KIND_OBJ
+            || $ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN || $ok === Type::KIND_UNION
             || $ok === Type::KIND_STRING || $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
             || $ok === Type::KIND_BOOL || $ok === Type::KIND_NULL;
     }

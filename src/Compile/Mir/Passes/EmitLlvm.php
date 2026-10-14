@@ -3449,6 +3449,15 @@ final class EmitLlvm implements EmitVisitor
         // brings its own, a borrow is retained by rcRetainByType's closure arm).
         if ($this->isClosureValueType($pt)) { return 'closure'; }
         $flavor = $this->discardReleaseFlavor($pt);
+        // A bare `array` slot whose element erased to `unknown` is still an array,
+        // and owns it: every overwrite gives the old buffer back through the
+        // repr-dispatching `__mir_array_release`. With no flavor the drop body
+        // skipped the slot and leaked the last value whole — FlattenException's
+        // `private array $trace`, ~5 KB a Symfony error page.
+        if ($flavor === '' && $pt->kind === Type::KIND_UNKNOWN
+            && ($cls->propertyArrayHinted[$prop] ?? false)) {
+            $flavor = 'vec';
+        }
         if (!\Compile\Debug::$rcPropDrop) { return $flavor; }
         if ($this->moduleIsLibrary || $cls->isExternClass || $cls->isPreludeClass) { return $flavor; }
         // A BARE `array` slot names no element type, so it gets no element-aware
