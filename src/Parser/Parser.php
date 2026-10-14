@@ -2948,6 +2948,24 @@ final class Parser
             }
             return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $span);
         }
+        // `new static::$cls(args)` / `new Foo::$cls(args)` — the class is the VALUE
+        // of a static property (PHP's new_variable). Left to parseClassName it
+        // read `new static` and then a static call through a local `$cls`.
+        $save = $this->pos;
+        $literal = $this->parseClassNameLiteral();
+        $dc = $this->peek();
+        $pv = $this->tokens[$this->pos + 1] ?? null;
+        if ($dc->kind === TokenKind::DoubleColon && $pv !== null && $pv->kind === TokenKind::Variable && $pv->lexeme !== '$') {
+            $this->advance();
+            $this->advance();
+            $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $span);
+            $dargs = [];
+            if ($this->check(TokenKind::OpenParen)) {
+                $dargs = $this->parseArgList();
+            }
+            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $span);
+        }
+        $this->pos = $save;
         $class = $this->parseClassName();
         $args = [];
         if ($this->check(TokenKind::OpenParen)) {
