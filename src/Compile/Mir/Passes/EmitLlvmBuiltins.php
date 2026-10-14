@@ -8073,7 +8073,7 @@ trait EmitLlvmBuiltins
         // the name is only known at runtime, so enumerate the module's classes and
         // match the runtime string against each, testing the operand's class_id
         // against that class's is-a id set (same idiom as emitNewDynObj).
-        if ($target === '' && $this->classArgIsRuntime($args[1])) {
+        if ($this->classArgIsObject($args[1]) || ($target === '' && $this->classArgIsRuntime($args[1]))) {
             return $this->biIsADynamic($args, $strict, $allowString === true);
         }
         $sub = $this->reflClassName($args[0]);
@@ -8174,6 +8174,15 @@ trait EmitLlvmBuiltins
         return !($c !== '' && ($this->isEnumClass($c) || $this->isClosureClass($c)));
     }
 
+    /** A target-class arg that is an OBJECT (`$x instanceof $obj`): php tests against the
+     *  object's runtime class. An enum case or a closure carries no class descriptor. */
+    private function classArgIsObject(Node $arg): bool
+    {
+        if ($arg->type->kind !== Type::KIND_OBJ) { return false; }
+        $c = $arg->type->class ?? '';
+        return !($c !== '' && ($this->isEnumClass($c) || $this->isClosureClass($c)));
+    }
+
     /** A target-class arg named by a runtime value (string / cell / unknown),
      *  not a compile-time class name. */
     private function classArgIsRuntime(Node $arg): bool
@@ -8234,8 +8243,17 @@ trait EmitLlvmBuiltins
         $obj = $this->lastValue;
         $out .= $this->emitNode($args[1]);
         $out .= $this->coerceToI64();
+        $tgtWord = $this->lastValue;
         $strP = $this->ssa->allocReg();
-        $out .= '  ' . $strP . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+        $tkind = $args[1]->type->kind;
+        if ($tkind === Type::KIND_CELL || $tkind === Type::KIND_UNKNOWN) {
+            // A boxed word is no address: a string payload is stripped, a
+            // scalar rendered. (An object cell takes the class-id arm below.)
+            $this->rt->needsCellToStrPtr = true;
+            $this->rt->needsTaggedToStr = true;
+        } else {
+            $out .= '  ' . $strP . ' = inttoptr i64 ' . $tgtWord . " to ptr\n";
+        }
 
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -8270,6 +8288,43 @@ trait EmitLlvmBuiltins
         // them in one symfony resolver, and clang's SLP vectorizer spent seconds
         // on each.
         $this->rt->needsIsaDyn = true;
+        // `$x instanceof $obj`: the target is the OBJECT's class, not a name.
+        $tk = $args[1]->type->kind;
+        $tgtI = $tgtWord;
+        $tobjL = '';
+        if ($tk === Type::KIND_OBJ || $tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN) {
+            $tobjL = $this->ssa->allocLabel('isa.tobj');
+            $tstrL = $this->ssa->allocLabel('isa.tstr');
+            if ($tk === Type::KIND_OBJ) {
+                $isObjT = $this->ssa->allocReg();
+                $out .= '  ' . $isObjT . ' = icmp ne i64 ' . $tgtI . ", 0\n";
+                $out .= '  br i1 ' . $isObjT . ', label %' . $tobjL . ', label %' . $doneL . "\n";
+                $out .= $tobjL . ":\n";
+                $tp = $this->ssa->allocReg();
+                $out .= '  ' . $tp . ' = inttoptr i64 ' . $tgtI . " to ptr\n";
+            } else {
+                $out .= $this->cellTagIr($tgtI);
+                $isObjT = $this->ssa->allocReg();
+                $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+                $out .= '  br i1 ' . $isObjT . ', label %' . $tobjL . ', label %' . $tstrL . "\n";
+                $out .= $tobjL . ":\n";
+                $tpay = $this->ssa->allocReg();
+                $out .= '  ' . $tpay . ' = and i64 ' . $tgtI . ", 281474976710655\n";
+                $tp = $this->ssa->allocReg();
+                $out .= '  ' . $tp . ' = inttoptr i64 ' . $tpay . " to ptr\n";
+            }
+            $out .= $this->emitLoadClassId($tp);
+            $tcid = $this->classIdReg;
+            $thit = $this->ssa->allocReg();
+            $out .= '  ' . $thit . ' = call i64 @' . $this->mirHelperSym('__mir_isa_dyn_id') . '(i64 ' . $cid . ', i64 ' . $tcid
+                  . ', i64 ' . ($strict ? '1' : '0') . ")\n";
+            $out .= '  store i64 ' . $thit . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $doneL . "\n";
+            if ($tk !== Type::KIND_OBJ) {
+                $out .= $tstrL . ":\n";
+                $out .= '  ' . $strP . ' = call ptr @__manticore_cell_to_strptr_s(i64 ' . $tgtWord . ")\n";
+            }
+        }
         $hit = $this->ssa->allocReg();
         $out .= '  ' . $hit . ' = call i64 @' . $this->mirHelperSym('__mir_isa_dyn') . '(i64 ' . $cid . ', ptr ' . $strP
               . ', i64 ' . ($strict ? '1' : '0') . ")\n";
