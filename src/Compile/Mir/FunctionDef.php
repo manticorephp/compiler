@@ -137,6 +137,13 @@ final class FunctionDef
     public string $fccMethod = '';
 
     /**
+     * A first-class-callable shim `$o->m(...)` / `C::m(...)`: the method it forwards
+     * to. Lets the shim carry the caller's as-written argument count through to a
+     * target that reads func_num_args() (see EmitLlvm's signature scan). '' otherwise.
+     */
+    public string $fccTarget = '';
+
+    /**
      * Set by {@see Passes\OwnershipFlow}: the leaf statements a raise inside
      * may leave the frame from while locals the statement never names are
      * Own — a throw the emitter synthesises (a division by zero, a TypeError)

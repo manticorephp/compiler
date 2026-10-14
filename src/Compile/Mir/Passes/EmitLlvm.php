@@ -797,6 +797,7 @@ final class EmitLlvm implements EmitVisitor
             // asm + @__mir_current_fiber (mirrors the needsExceptions pre-scan).
             if ($fn->name === '__mc_fiber_run') { $this->rt->needsFibers = true; }
         }
+        $this->armFccShims($module->functions);
         // Pre-scan for `$gen->throw($e)`: a yield resume point must check for
         // an injected exception. Must be known BEFORE emitting any generator
         // body (emitYield emits the check inline). Over-triggering on a user
@@ -3959,6 +3960,28 @@ final class EmitLlvm implements EmitVisitor
         return '  ' . $d . " = load i64, ptr @__mir_bt_depth\n"
              . '  ' . $d1 . ' = sub i64 ' . $d . ", 1\n"
              . '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
+    }
+
+    /**
+     * A first-class-callable shim forwards its caller's argument count: it is
+     * armed (pushed to) like a func-args callee so the count survives the hop
+     * to a target that reads func_num_args(). Over-approximate by method name —
+     * arming a shim whose real target does not read it is harmless (faPop).
+     * @param FunctionDef[] $fns
+     */
+    private function armFccShims(array $fns): void
+    {
+        foreach ($fns as $shim) {
+            if ($shim->fccTarget === '' || $shim->usesFuncArgs) { continue; }
+            $suffix = '__' . $shim->fccTarget;
+            foreach ($fns as $t) {
+                if (!$t->usesFuncArgs || \strlen($t->name) < \strlen($suffix)) { continue; }
+                if (\substr($t->name, -\strlen($suffix)) === $suffix) {
+                    $this->sigs->usesFuncArgs[$shim->name] = true;
+                    break;
+                }
+            }
+        }
     }
 
     /**
