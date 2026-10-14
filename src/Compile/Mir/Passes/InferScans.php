@@ -816,6 +816,10 @@ trait InferScans
         // Pass 2: params whose elements are used as strings.
         $this->strParamsFound = [];
         $this->detectStringElemUse($fn->body, $cand);
+        // The body's own element writes must agree with the guess: symfony's
+        // `AbstractString::wrap` reads `(string)` elements AND stores `new static(…)`
+        // and nested arrays back into them, which a vec[string] cannot hold.
+        $this->dropRefutedElemGuesses($fn->body);
         foreach ($this->strParamsFound as $pname => $unused) {
             $idx = $cand[$pname];
             // Fetch the Param object to a local before mutating its (mutable)
@@ -830,6 +834,22 @@ trait InferScans
             $param->elemGuessed = true;
             $this->localTypes[$pname] = $vt;
         }
+    }
+
+    /** Drop a string-element guess for a param the body stores a non-string element into. */
+    private function dropRefutedElemGuesses(Node $n): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $n;
+            $base = $se->array;
+            $val = $se->value;
+            if ($base->kind === Node::KIND_LOAD_LOCAL && isset($this->strParamsFound[$base->name])) {
+                $strCast = false;
+                if ($val->kind === Node::KIND_CAST) { $vc = $val; $strCast = $vc->target === 'string'; }
+                if (!$strCast && !$this->isStringOperand($val)) { unset($this->strParamsFound[$base->name]); }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->dropRefutedElemGuesses($c); }
     }
 
     /**
