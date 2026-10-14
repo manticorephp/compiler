@@ -2012,8 +2012,10 @@ trait EmitLlvmCalls
                 $this->lastValueType = 'double';
             }
             if ($n->type->kind === Type::KIND_CELL) {
-                $out .= $this->boxInvokeResultIr($known && ($this->sigs->returnType[$fn] ?? null) !== null && $this->sigs->returnType[$fn]->kind === Type::KIND_CELL);
+                $out .= $this->boxInvokeResultIr();
                 $this->markCellOpaque($this->lastValue);
+            } elseif ($n->type->kind === Type::KIND_OBJ || $n->type->kind === Type::KIND_CLOSURE) {
+                $out .= $this->unboxNullObjResultIr();
             }
             return $out;
         }
@@ -2029,31 +2031,47 @@ trait EmitLlvmCalls
         // a double: box it by its allocator magic. The closure's +1 moves into
         // the cell. A tagged scalar passes through.
         if ($n->type->kind === Type::KIND_CELL) {
-            $out .= $this->boxInvokeResultIr($known && ($this->sigs->returnType[$fn] ?? null) !== null && $this->sigs->returnType[$fn]->kind === Type::KIND_CELL);
+            $out .= $this->boxInvokeResultIr();
             $this->markCellOpaque($this->lastValue);
+        } elseif ($n->type->kind === Type::KIND_OBJ || $n->type->kind === Type::KIND_CLOSURE) {
+            $out .= $this->unboxNullObjResultIr();
         }
         return $out;
     }
 
     /**
      * The cell of a closure call's result (lastValue). Under the uniform ABI a
-     * scalar comes back already tagged and an array / object / closure RAW, so
-     * a raw word is a container — boxed by its allocator magic — or a null
-     * pointer, which is a `?Class` returning null, not the integer 0.
+     * scalar comes back already tagged (a float 0.0 is the word 0) and an array /
+     * object / closure RAW; a null object is returned as the tagged NULL cell by
+     * its producer ({@see EmitLlvmModule::emitReturn}), so a raw word is a
+     * container, boxed by its allocator magic, or the float 0.0 — never a null.
      */
-    private function boxInvokeResultIr(bool $selfDescribing = false): string
+    private function boxInvokeResultIr(): string
     {
         $out = $this->coerceToI64();
-        // A callee declared to return a cell hands back a tagged word, null
-        // included (CELL_NULL): a raw 0 there is the float 0.0, not a null pointer.
-        if ($selfDescribing) { return $out; }
         $raw = $this->lastValue;
         $out .= $this->boxUnknownShallowIr();
+        // The probe reads a 0 word as the raw int 0; as a tagged result it is 0.0.
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = icmp eq i64 ' . $raw . ", 0\n";
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = select i1 ' . $z . ', i64 ' . (string)\Compile\MemoryAbi::CELL_NULL
-            . ', i64 ' . $this->lastValue . "\n";
+        $out .= '  ' . $r . ' = select i1 ' . $z . ', i64 0, i64 ' . $this->lastValue . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * A typed object result of a closure call: the producer's tagged NULL cell
+     * back to the raw null pointer a typed consumer reads.
+     */
+    private function unboxNullObjResultIr(): string
+    {
+        $out = $this->coerceToI64();
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = icmp eq i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $z . ', i64 0, i64 ' . $this->lastValue . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
