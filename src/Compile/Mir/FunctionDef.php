@@ -143,6 +143,9 @@ final class FunctionDef
      */
     public string $fccTarget = '';
 
+    /** Static class of the shim's receiver / `C::` ('' when unknown): narrows {@see $fccTarget} to that class and its subclasses. */
+    public string $fccTargetClass = '';
+
     /**
      * Set by {@see Passes\OwnershipFlow}: the leaf statements a raise inside
      * may leave the frame from while locals the statement never names are

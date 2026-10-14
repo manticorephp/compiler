@@ -3973,7 +3973,8 @@ final class EmitLlvm implements EmitVisitor
     /**
      * A first-class-callable shim forwards its caller's argument count: it is
      * armed (pushed to) like a func-args callee so the count survives the hop
-     * to a target that reads func_num_args(). Over-approximate by method name —
+     * to a target that reads func_num_args(). Narrowed to the receiver class and its
+     * subclasses when known, else over-approximate by method name —
      * arming a shim whose real target does not read it is harmless (faPop).
      * @param FunctionDef[] $fns
      */
@@ -3981,6 +3982,20 @@ final class EmitLlvm implements EmitVisitor
     {
         foreach ($fns as $shim) {
             if ($shim->fccTarget === '' || $shim->usesFuncArgs) { continue; }
+            $tc = \ltrim($shim->fccTargetClass, '\\');
+            if ($tc !== '' && isset($this->classes[$tc])) {
+                // The receiver's class and every subclass that may override the method.
+                foreach ($this->classes as $kn => $_) {
+                    $kn = (string)$kn;
+                    if (!$this->classIsA($kn, $tc)) { continue; }
+                    $holder = $this->resolveMethodClass($kn, $shim->fccTarget);
+                    if ($holder !== '' && ($this->sigs->usesFuncArgs[$holder . '__' . $shim->fccTarget] ?? false)) {
+                        $this->sigs->usesFuncArgs[$shim->name] = true;
+                        break;
+                    }
+                }
+                continue;
+            }
             $suffix = '__' . $shim->fccTarget;
             foreach ($fns as $t) {
                 if (!$t->usesFuncArgs || \strlen($t->name) < \strlen($suffix)) { continue; }

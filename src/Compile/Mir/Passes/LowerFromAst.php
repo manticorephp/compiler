@@ -3532,6 +3532,7 @@ final class LowerFromAst implements Pass
         $node = $this->finishClosure([], $declParams, $body, null, [], false, false, false, $class,
             $this->methodDeclaresErasedArray($class, $method));
         $this->module->functions[\count($this->module->functions) - 1]->fccTarget = $method;
+        $this->module->functions[\count($this->module->functions) - 1]->fccTargetClass = $class;
         return $node;
     }
 
@@ -3577,6 +3578,7 @@ final class LowerFromAst implements Pass
         $node = $this->buildClosureNode($mir, ['__frecv'], [$recv->type], [$recv], $body, Type::unknown(),
             $cls !== '' && $this->methodDeclaresErasedArray($cls, $method), $declParams);
         $this->module->functions[\count($this->module->functions) - 1]->fccTarget = $method;
+        $this->module->functions[\count($this->module->functions) - 1]->fccTargetClass = $cls;
         return $node;
     }
 

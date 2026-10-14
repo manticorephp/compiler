@@ -73,10 +73,15 @@ final class ResolveMethodFcc implements Pass
                 // An interface / abstract / erased receiver: no single declaration
                 // speaks for it (see resolveMulti).
                 $multi = $this->resolveMulti($fn, $module, $byName, $byLower, $cls, $fn->fccMethod);
-                if ($multi !== null) { $module->functions[$i] = $multi; }
+                if ($multi !== null) {
+                    $multi->fccTarget = $fn->fccMethod;
+                    $module->functions[$i] = $multi;
+                }
                 continue;
             }
             $module->functions[$i] = $this->rebuild($fn, $target);
+            $module->functions[$i]->fccTarget = $fn->fccMethod;
+            $module->functions[$i]->fccTargetClass = $cls;
             if ($module->reflClosureWanted) {
                 $mm = $this->methodMetaFor($module, $cls, $fn->fccMethod);
                 if ($mm !== null) { $module->reflClosureMeta[$fn->name] = $mm; }
