@@ -311,6 +311,10 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_fiber_ctx_free')         { return $this->biFiberCtxFree($args); }
         if ($name === '__mir_fiber_main_ctx')         { return $this->biFiberMainCtx($args); }
         if ($name === 'count' || $name === 'sizeof')  { return $this->biCount($args); }
+        if ($name === 'array_key_exists') {
+            $ake = $this->biArrayKeyExists($args);
+            if ($ake !== null) { return $ake; }
+        }
         // NOT builtins — the two stdlib entries LowerExprs rewrites a moded
         // `count()` into. They are intercepted here only to answer a COUNTABLE
         // receiver, which php resolves through `->count()` for EVERY mode and
@@ -2821,11 +2825,73 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToI64();
             return $this->emitCountableOrArray($out, $this->lastValue, $args[0]);
         }
+        $out = $this->emitArrOrEmptyArg($args[0]);
+        $out .= $this->arrayCountFromPtrIr($this->lastValue);
+        return $this->finishI64($out, $this->lastValue);
+    }
+
+    /**
+     * `array_key_exists($k, $a)` → one hash probe: `__mir_array_isset_int` /
+     * `_str` / `_cell`, which answer KEY presence (a NULL value counts) and fold
+     * a canonical decimal string onto its int key; a null / bool / float key
+     * takes php's key cast. An erased operand that holds no array answers
+     * false; an object operand or a key of any other kind is left to the
+     * stdlib body (null).
+     *
+     * @param Node[] $args
+     */
+    private function biArrayKeyExists(array $args): ?string
+    {
+        if (\count($args) !== 2) { return null; }
+        $kk = $args[0]->type->kind;
+        $ak = $args[1]->type->kind;
+        if ($ak !== Type::KIND_ARRAY && $ak !== Type::KIND_CELL && $ak !== Type::KIND_UNKNOWN) { return null; }
+        if ($kk === Type::KIND_INT) {
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToI64();
+            $key = $this->lastValue;
+            $out .= $this->emitArrOrEmptyArg($args[1]);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_int(ptr ' . $this->lastValue . ', i64 ' . $key . ")\n";
+            return $this->finishI64($out, $r);
+        }
+        if ($kk === Type::KIND_STRING) {
+            $out = $this->emitPtrArg($args[0]);
+            $key = $this->lastValue;
+            $out .= $this->emitArrOrEmptyArg($args[1]);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_str(ptr ' . $this->lastValue . ', ptr ' . $key . ", i64 0, i64 0)\n";
+            $out .= $this->freeStrTemp($args[0], $key);
+            return $this->finishI64($out, $r);
+        }
+        $scalar = $kk === Type::KIND_NULL || $kk === Type::KIND_BOOL || $kk === Type::KIND_FLOAT;
+        if ($kk !== Type::KIND_CELL && !$scalar) { return null; }
+        // A `mixed` key, or a null / bool / float one boxed to its cell:
+        // `__mir_array_isset_cell` applies php's key cast.
+        $this->rt->needsCellKey = true;
         $out = $this->emitNode($args[0]);
+        $fresh = !$scalar && $this->isFreshCellTemp($args[0]);
+        $out .= $scalar ? $this->boxToCell($args[0]->type) : $this->coerceToI64();
+        $key = $this->lastValue;
+        $out .= $this->emitArrOrEmptyArg($args[1]);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_array_isset_cell(ptr ' . $this->lastValue . ', i64 ' . $key . ")\n";
+        if ($fresh) { $out .= $this->rcReleaseReg($key, 'cell'); }
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * Emit an array operand of a builtin that only INSPECTS it, leaving the
+     * buffer pointer in lastValue (`ptr`). An erased operand not holding an
+     * array reads as the empty array. A fresh temp is registered for release.
+     */
+    private function emitArrOrEmptyArg(Node $a): string
+    {
+        $out = $this->emitNode($a);
         $arrPtrCellWord = $this->lastValue;
-        if ($args[0]->type->kind === Type::KIND_CELL) {
+        if ($a->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
-        } elseif ($args[0]->type->kind === Type::KIND_UNKNOWN) {
+        } elseif ($a->type->kind === Type::KIND_UNKNOWN) {
             // An ERASED operand is not known to be an array, and `inttoptr` of a
             // tagged word read its tag bits as a length — `count()` over a value
             // yielded by a generator behind an `iterable` answered garbage. Same
@@ -2842,17 +2908,14 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToPtr();
         }
         $arrPtr = $this->lastValue;
-        $out .= $this->arrayCountFromPtrIr($arrPtr);
-        $cnt = $this->lastValue;
         // A 'cell' release wants the TAGGED word; handing it the masked payload
         // makes `__mir_cell_drop` a no-op, so the release was emitted and freed
         // nothing ({@see emitArrPtrArg}, which had the same hole).
-        $cellWord = $args[0]->type->kind === Type::KIND_CELL ? $arrPtrCellWord : '';
-        // ★ A FRESH array temp dies here. `count()` answers an int, so nothing
-        // it returns can reference an element — the one array builtin where
-        // that needs no further proof. `count(explode($d, $s))` leaked the
-        // whole exploded vec on every call, 3.2 KB a call.
-        $af = $this->freshRcArgFlavor($args[0]);
+        $cellWord = $a->type->kind === Type::KIND_CELL ? $arrPtrCellWord : '';
+        // ★ A FRESH array temp dies after the builtin. Only for a builtin whose
+        // result cannot reference an element (`count`, `array_key_exists`).
+        // `count(explode($d, $s))` leaked the whole exploded vec on every call.
+        $af = $this->freshRcArgFlavor($a);
         $relReg = $arrPtr;
         // The same i64 invariant {@see emitArrPtrArg} keeps.
         if ($af === 'cell' && \str_starts_with($relReg, '%')) {
@@ -2866,7 +2929,9 @@ trait EmitLlvmBuiltins
             $this->arrArgTempRegs[] = $relReg;
             $this->arrArgTempFlavors[] = $af;
         }
-        return $this->finishI64($out, $cnt);
+        $this->lastValue = $arrPtr;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /**

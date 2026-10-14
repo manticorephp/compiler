@@ -436,120 +436,95 @@ trait EmitLlvmExpr
      * Runtime dispatch for a `mixed`/cell array key (e.g. ArrayAccess
      * `offsetGet/Set` with a `mixed $key`). A PHP array key is int OR string,
      * decided at runtime; the static get/set/isset/unset helpers are typed, so
-     * branch on the cell tag (PTR=4 → string key, else int) and route to the
-     * matching typed helper. The string tag math is inlined; the int key is
-     * de-boxed via `__mir_ckey_unbox_int` (from the always-emitted array
-     * runtime, NOT the `needsTagged`-gated general helper) so a heap-bigint key
-     * past 2^47 round-trips instead of truncating to 48 bits. Keys carry no rc
-     * here (offset interning is the array's concern).
+     * {@see cellKeyDispatch} casts the key and routes to the matching one.
      */
     private function cellKeyRuntime(): string
     {
-        // PAYLOAD_MASK = 281474976710655; PTR/string tag = 4.
-        $out  = "\ndefine ptr @__mir_array_set_cell(ptr %arr, i64 %k, i64 %val) {\n";
-        $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
-        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
-        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
-        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
-        $out .= "  br i1 %isstr, label %s, label %i\n";
-        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  %r1 = call ptr @__mir_array_set_str(ptr %arr, ptr %kp, i64 %val, i64 0, i64 0)\n  ret ptr %r1\n";
-        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
-        $out .= "  %r2 = call ptr @__mir_array_set_int(ptr %arr, i64 %ki, i64 %val)\n  ret ptr %r2\n}\n";
-
-        $out .= "define i64 @__mir_array_get_cell(ptr %arr, i64 %k) {\n";
-        $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
-        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
-        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
-        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
-        $out .= "  br i1 %isstr, label %s, label %i\n";
-        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  %r1 = call i64 @__mir_array_get_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret i64 %r1\n";
-        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
-        $out .= "  %r2 = call i64 @__mir_array_get_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
-
-        $out .= "define ptr @__mir_array_lookup_cell(ptr %arr, i64 %k) {\n";
-        $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
-        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
-        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
-        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
-        $out .= "  br i1 %isstr, label %s, label %i\n";
-        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  %r1 = call ptr @__mir_array_lookup_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret ptr %r1\n";
-        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
-        $out .= "  %r2 = call ptr @__mir_array_lookup_int(ptr %arr, i64 %ki)\n  ret ptr %r2\n}\n\n";
-        $out .= "define i64 @__mir_array_isset_cell(ptr %arr, i64 %k) {\n";
-        $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
-        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
-        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
-        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
-        $out .= "  br i1 %isstr, label %s, label %i\n";
-        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  %r1 = call i64 @__mir_array_isset_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret i64 %r1\n";
-        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
-        $out .= "  %r2 = call i64 @__mir_array_isset_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
-
-        // `&$a[$k]` as a STORABLE reference with a CELL key — `$k` off a
-        // foreach over a `mixed` array is int-or-string at runtime (the
-        // deepclone witness). Same dispatch as get_cell, onto ref_box.
-        $out .= "define ptr @__mir_array_ref_box_cell(ptr %slot, i64 %k) {\n";
-        $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
-        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
-        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
-        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
-        $out .= "  br i1 %isstr, label %s, label %i\n";
-        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  %r1 = call ptr @__mir_array_ref_box_str(ptr %slot, ptr %kp)\n  ret ptr %r1\n";
-        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
-        $out .= "  %r2 = call ptr @__mir_array_ref_box(ptr %slot, i64 %ki)\n  ret ptr %r2\n}\n";
-
-        $out .= "define void @__mir_array_unset_cell(ptr %arr, i64 %k) {\n";
-        $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
-        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
-        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
-        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
-        $out .= "  br i1 %isstr, label %s, label %i\n";
-        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  call void @__mir_array_unset_str(ptr %arr, ptr %kp)\n  ret void\n";
-        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
-        $out .= "  call void @__mir_array_unset_int(ptr %arr, i64 %ki)\n  ret void\n}\n";
-
-        // The relocating form, for a base the caller can write back: an int key
-        // on a PACKED buffer has to promote first ({@see UnifiedArrayRuntime::emitUnsetAt}),
-        // and the void form above leaves that unset a silent no-op.
-        $out .= "define ptr @__mir_array_unset_cell_at(ptr %arr, i64 %k) {\n";
-        $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
-        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
-        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
-        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
-        $out .= "  br i1 %isstr, label %s, label %i\n";
-        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  %r3 = call ptr @__mir_array_unset_str_at(ptr %arr, ptr %kp)\n  ret ptr %r3\n";
-        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
-        $out .= "  %r = call ptr @__mir_array_unset_at(ptr %arr, i64 %ki)\n  ret ptr %r\n}\n";
-
-        // Where a live by-ref foreach's element went after the body
-        // ({@see EmitLlvmControl::emitForeach}): the position of the key the
-        // walk captured (`__mir_array_key_cell_at`), -1 when the body removed it.
-        $out .= "define i64 @__mir_array_pos_cell(ptr %arr, i64 %k) {\n";
-        $out .= "entry:\n";
-        $out .= "  %istag = icmp ugt i64 %k, -4503599627370496\n";
-        $out .= "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n";
-        $out .= "  %tag = select i1 %istag, i64 %nib, i64 6\n";
-        $out .= "  %isstr = icmp eq i64 %tag, 4\n";
-        $out .= "  br i1 %isstr, label %s, label %i\n";
-        $out .= "s:\n  %pp = and i64 %k, 281474976710655\n  %kp = inttoptr i64 %pp to ptr\n";
-        $out .= "  %r1 = call i64 @__mir_array_pos_str(ptr %arr, ptr %kp, i64 0, i64 0)\n  ret i64 %r1\n";
-        $out .= "i:\n  %ki = call i64 @__mir_ckey_unbox_int(i64 %k)\n";
-        $out .= "  %r2 = call i64 @__mir_array_pos_int(ptr %arr, i64 %ki)\n  ret i64 %r2\n}\n";
+        // [name, return, params, string-key call, int-key call]. `%kp` / `%ki`
+        // are the normalised key ({@see cellKeyDispatch}).
+        $helpers = [
+            ['__mir_array_set_cell', 'ptr', 'ptr %arr, i64 %k, i64 %val',
+                'call ptr @__mir_array_set_str(ptr %arr, ptr %kp, i64 %val, i64 0, i64 0)',
+                'call ptr @__mir_array_set_int(ptr %arr, i64 %ki, i64 %val)'],
+            ['__mir_array_get_cell', 'i64', 'ptr %arr, i64 %k',
+                'call i64 @__mir_array_get_str(ptr %arr, ptr %kp, i64 0, i64 0)',
+                'call i64 @__mir_array_get_int(ptr %arr, i64 %ki)'],
+            ['__mir_array_lookup_cell', 'ptr', 'ptr %arr, i64 %k',
+                'call ptr @__mir_array_lookup_str(ptr %arr, ptr %kp, i64 0, i64 0)',
+                'call ptr @__mir_array_lookup_int(ptr %arr, i64 %ki)'],
+            // Key PRESENCE (a NULL value counts) — `array_key_exists`.
+            ['__mir_array_isset_cell', 'i64', 'ptr %arr, i64 %k',
+                'call i64 @__mir_array_isset_str(ptr %arr, ptr %kp, i64 0, i64 0)',
+                'call i64 @__mir_array_isset_int(ptr %arr, i64 %ki)'],
+            // `&$a[$k]` as a STORABLE reference with a CELL key — `$k` off a
+            // foreach over a `mixed` array (the deepclone witness).
+            ['__mir_array_ref_box_cell', 'ptr', 'ptr %slot, i64 %k',
+                'call ptr @__mir_array_ref_box_str(ptr %slot, ptr %kp)',
+                'call ptr @__mir_array_ref_box(ptr %slot, i64 %ki)'],
+            ['__mir_array_unset_cell', 'void', 'ptr %arr, i64 %k',
+                'call void @__mir_array_unset_str(ptr %arr, ptr %kp)',
+                'call void @__mir_array_unset_int(ptr %arr, i64 %ki)'],
+            // The relocating form, for a base the caller can write back: an int
+            // key on a PACKED buffer has to promote first
+            // ({@see UnifiedArrayRuntime::emitUnsetAt}).
+            ['__mir_array_unset_cell_at', 'ptr', 'ptr %arr, i64 %k',
+                'call ptr @__mir_array_unset_str_at(ptr %arr, ptr %kp)',
+                'call ptr @__mir_array_unset_at(ptr %arr, i64 %ki)'],
+            // Where a live by-ref foreach's element went after the body
+            // ({@see EmitLlvmControl::emitForeach}); -1 when the body removed it.
+            ['__mir_array_pos_cell', 'i64', 'ptr %arr, i64 %k',
+                'call i64 @__mir_array_pos_str(ptr %arr, ptr %kp, i64 0, i64 0)',
+                'call i64 @__mir_array_pos_int(ptr %arr, i64 %ki)'],
+        ];
+        $out = '';
+        foreach ($helpers as $h) {
+            $out .= "\ndefine " . $h[1] . ' @' . $h[0] . '(' . $h[2] . ") {\n" . $this->cellKeyDispatch();
+            foreach (['s' => $h[3], 'i' => $h[4]] as $lbl => $call) {
+                $out .= $lbl . ":\n";
+                $out .= $h[1] === 'void'
+                    ? '  ' . $call . "\n  ret void\n"
+                    : '  %r' . $lbl . ' = ' . $call . "\n  ret " . $h[1] . ' %r' . $lbl . "\n";
+            }
+            $out .= "}\n";
+        }
         return $out;
+    }
+
+    /**
+     * The shared prologue of the `*_cell` key helpers: php's array-key cast of
+     * a `mixed` key `%k`. A string (tag 4) lands in `%s` with `%kp`; NULL is
+     * the key "" (`%s` too); an int / bigint, a bool (0/1) and a float
+     * (truncated; NaN / out of range → 0, `zend_dval_to_lval`) land in `%i`
+     * with `%ki`. Keys carry no rc here (offset interning is the array's
+     * concern). The int key is de-boxed via `__mir_ckey_unbox_int` (always
+     * emitted with the array runtime) so a heap-bigint key past 2^47
+     * round-trips instead of truncating to 48 bits.
+     */
+    private function cellKeyDispatch(): string
+    {
+        $empty = 'getelementptr inbounds (i8, ptr @.cstr.empty, i64 '
+            . (string)\Compile\MemoryAbi::STRING_HEADER_SIZE . ')';
+        return "entry:\n"
+            . "  %istag = icmp ugt i64 %k, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+            . "  %ts = lshr i64 %k, 48\n  %nib = and i64 %ts, 15\n"
+            . "  %tag = select i1 %istag, i64 %nib, i64 6\n"
+            . "  switch i64 %tag, label %iint [ i64 4, label %sptr i64 3, label %snull i64 2, label %ibool i64 6, label %idbl ]\n"
+            . "sptr:\n  %pp = and i64 %k, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n  %kp0 = inttoptr i64 %pp to ptr\n  br label %s0\n"
+            . "snull:\n  br label %s0\n"
+            . "s0:\n  %kp = phi ptr [ %kp0, %sptr ], [ " . $empty . ", %snull ]\n  br label %s\n"
+            . "iint:\n  %ki0 = call i64 @__mir_ckey_unbox_int(i64 %k)\n  br label %i0\n"
+            . "ibool:\n  %kb = and i64 %k, 1\n  br label %i0\n"
+            . "idbl:\n  %kf = bitcast i64 %k to double\n"
+            . "  %klo = fcmp oge double %kf, 0xC3E0000000000000\n"
+            . "  %khi = fcmp olt double %kf, 0x43E0000000000000\n"
+            . "  %kin = and i1 %klo, %khi\n"
+            . "  %kfs = select i1 %kin, double %kf, double 0.0\n"
+            . "  %kd0 = fptosi double %kfs to i64\n"
+            // A zero exponent is a raw non-negative int a producer left in the
+            // cell, not a float: keep the word (the pre-normalisation answer).
+            . "  %kex = lshr i64 %k, 52\n  %kraw = icmp eq i64 %kex, 0\n"
+            . "  %kd = select i1 %kraw, i64 %k, i64 %kd0\n  br label %i0\n"
+            . "i0:\n  %ki = phi i64 [ %ki0, %iint ], [ %kb, %ibool ], [ %kd, %idbl ]\n  br label %i\n";
     }
 
     /**
@@ -4200,6 +4175,14 @@ trait EmitLlvmExpr
                         $this->lastValue = $decl; $this->lastValueType = 'ptr';
                         return $out;
                     }
+                } elseif ($cd !== null && !$cd->usesBag()) {
+                    // Neither declared slots nor a bag: the object ends at its
+                    // header, so the bag word below would be read past the end.
+                    $e0 = $this->ssa->allocReg();
+                    $out .= '  ' . $e0 . " = call ptr @__mir_array_alloc(i64 0)\n";
+                    $out .= '  store i64 0, ptr ' . $e0 . "\n";
+                    $this->lastValue = $e0; $this->lastValueType = 'ptr';
+                    return $out;
                 }
                 $bagOff = $this->bagOffsetOf($c->operand);
                 $bg = $this->ssa->allocReg();
@@ -4209,6 +4192,11 @@ trait EmitLlvmExpr
                 $bagP = $this->ssa->allocReg();
                 $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
                 if (!$declared) {
+                    // CO-OWNED, like every other arm of the cast: the result is
+                    // owned by whoever consumes it ({@see Ownership::castArrayMints}),
+                    // and a borrowed bag would be freed out from under the object.
+                    $this->rt->needsRc = true;
+                    $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
                     $this->lastValue = $bagP; $this->lastValueType = 'ptr';
                     return $out;
                 }
