@@ -9013,6 +9013,22 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'i64';
             return $out;
         }
+        // A bare / nullable `array` hint erases the slot's type to UNKNOWN, and
+        // boxRawValue passes an unknown through as an already-boxed cell: the raw
+        // buffer pointer reached `(array)$o` / get_object_vars as a denormal
+        // float. The property READ boxes it the same way
+        // ({@see EmitLlvmObjects::emitFixedPropLoad}).
+        if (($cd->propertyArrayHinted[$pn] ?? false) && $pt->kind === Type::KIND_UNKNOWN) {
+            $this->rt->needsTagged = true;
+            $ap = $this->ssa->allocReg();
+            $out .= '  ' . $ap . ' = inttoptr i64 ' . $v . " to ptr\n";
+            $ab = $this->ssa->allocReg();
+            $out .= '  ' . $ab . ' = call i64 @__manticore_box_array(ptr ' . $ap . ")\n";
+            $this->propCellMode = 1;
+            $this->lastValue = $ab;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $out .= $this->boxRawValue($v, $pt);
         $this->propCellMode = $this->boxRawValueBorrows($pt) ? 1 : 2;
         return $out;
