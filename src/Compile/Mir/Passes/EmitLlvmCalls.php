@@ -1933,7 +1933,7 @@ trait EmitLlvmCalls
                 $this->lastValueType = 'double';
             }
             if ($n->type->kind === Type::KIND_CELL) {
-                $out .= $this->boxInvokeResultIr();
+                $out .= $this->boxInvokeResultIr($known && ($this->sigs->returnType[$fn] ?? null) !== null && $this->sigs->returnType[$fn]->kind === Type::KIND_CELL);
                 $this->markCellOpaque($this->lastValue);
             }
             return $out;
@@ -1950,7 +1950,7 @@ trait EmitLlvmCalls
         // a double: box it by its allocator magic. The closure's +1 moves into
         // the cell. A tagged scalar passes through.
         if ($n->type->kind === Type::KIND_CELL) {
-            $out .= $this->boxInvokeResultIr();
+            $out .= $this->boxInvokeResultIr($known && ($this->sigs->returnType[$fn] ?? null) !== null && $this->sigs->returnType[$fn]->kind === Type::KIND_CELL);
             $this->markCellOpaque($this->lastValue);
         }
         return $out;
@@ -1962,9 +1962,12 @@ trait EmitLlvmCalls
      * a raw word is a container — boxed by its allocator magic — or a null
      * pointer, which is a `?Class` returning null, not the integer 0.
      */
-    private function boxInvokeResultIr(): string
+    private function boxInvokeResultIr(bool $selfDescribing = false): string
     {
         $out = $this->coerceToI64();
+        // A callee declared to return a cell hands back a tagged word, null
+        // included (CELL_NULL): a raw 0 there is the float 0.0, not a null pointer.
+        if ($selfDescribing) { return $out; }
         $raw = $this->lastValue;
         $out .= $this->boxUnknownShallowIr();
         $z = $this->ssa->allocReg();
