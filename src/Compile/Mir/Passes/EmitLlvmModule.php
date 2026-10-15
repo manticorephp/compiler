@@ -2841,8 +2841,13 @@ trait EmitLlvmModule
         $out = '';
         $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
+        // A param promoted to a cell ({@see arrayHintedEntryMask} skips it) still ARRIVES tagged — a NULL cell
+        // for an omitted `?array` — and copying that word dereferenced the tag. Strip it: the identity on a raw
+        // pointer, 0 for a null, and the box-back planted at body entry re-tags the copy.
+        $mk = $this->ssa->allocReg();
+        $out .= '  ' . $mk . ' = and i64 ' . $ld . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
         $lp = $this->ssa->allocReg();
-        $out .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
+        $out .= '  ' . $lp . ' = inttoptr i64 ' . $mk . " to ptr\n";
         $cp = $this->ssa->allocReg();
         if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
             // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so

@@ -1213,7 +1213,24 @@ trait EmitLlvmBuiltins
         // instead: an already-boxed word passes through, a raw container is
         // identified from its allocator magic, and anything else is left exactly
         // as it was, which is what the whole erased path does today.
-        if ($k === Type::KIND_UNKNOWN) { return $this->boxUnknownShallowIr(); }
+        if ($k === Type::KIND_UNKNOWN) {
+            // A bare `?array` param rides as a raw pointer: its null is the word 0, which the probe below
+            // would take for the INT 0 (`$a ??= $_SERVER['argv']` then never saw null).
+            if ($src !== null && $src->kind === Node::KIND_LOAD_LOCAL && isset($this->arrayHintedParams[$src->name])) {
+                $out = $this->coerceToI64();
+                $raw = $this->lastValue;
+                $out .= $this->boxUnknownShallowIr();
+                $boxed = $this->lastValue;
+                $nl = $this->ssa->allocReg();
+                $isz = $this->ssa->allocReg();
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $nl . " = call i64 @__manticore_box_null()\n";
+                $out .= '  ' . $isz . ' = icmp eq i64 ' . $raw . ", 0\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $isz . ', i64 ' . $nl . ', i64 ' . $boxed . "\n";
+                return $this->finishI64($out, $sel);
+            }
+            return $this->boxUnknownShallowIr();
+        }
         $helper = ($k === Type::KIND_BOOL) ? '__manticore_box_bool' : '__manticore_box_int';
         $out = $this->coerceToI64();
         $r = $this->ssa->allocReg();
