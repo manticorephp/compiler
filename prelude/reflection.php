@@ -955,6 +955,31 @@ class ReflectionMethod extends ReflectionFunctionAbstract
         return $out;
     }
 
+    /** php's dump of a method: its modifiers, parameters and return type. */
+    public function __toString(): string
+    {
+        $mods = '';
+        if ($this->isAbstract()) { $mods .= 'abstract '; }
+        if ($this->isFinal()) { $mods .= 'final '; }
+        if ($this->isStatic()) { $mods .= 'static '; }
+        $mods .= $this->isPublic() ? 'public' : ($this->isProtected() ? 'protected' : 'private');
+        $decl = $this->getDeclaringClass()->getName();
+        $info = '<user' . ($this->isConstructor() ? ', ctor' : '') . ($decl !== $this->class ? ', inherits ' . $decl : '') . '>';
+        $out = 'Method [ ' . $info . ' ' . $mods . ' method ' . $this->name . " ] {\n";
+        $file = $this->getFileName();
+        if ($file !== false && $file !== '') {
+            $out .= '  @@ ' . $file . ' ' . (string) $this->getStartLine() . ' - ' . (string) $this->getStartLine() . "\n";
+        }
+        $params = $this->getParameters();
+        if (\count($params) > 0) {
+            $out .= "\n  - Parameters [" . (string) \count($params) . "] {\n";
+            foreach ($params as $p) { $out .= '    ' . (string) $p . "\n"; }
+            $out .= "  }\n";
+        }
+        if ($this->hasReturnType()) { $out .= '  - Return [ ' . (string) $this->getReturnType() . " ]\n"; }
+        return $out . "}\n";
+    }
+
     public function getNumberOfParameters(): int
     {
         return __mc_refl_row_nparams($this->row);
@@ -1307,6 +1332,20 @@ class ReflectionProperty
     public function getName(): string
     {
         return $this->name;
+    }
+
+    /** php's dump of a property: modifiers, type, name and default. */
+    public function __toString(): string
+    {
+        $out = 'Property [ ' . ($this->isPublic() ? 'public' : ($this->isProtected() ? 'protected' : 'private'));
+        if ($this->isStatic()) { $out .= ' static'; }
+        if ($this->isReadonly()) { $out .= ' readonly'; }
+        if ($this->hasType()) { $out .= ' ' . (string) $this->getType(); }
+        $out .= ' $' . $this->name;
+        if ($this->hasDefaultValue() && !$this->isPromoted()) {
+            $out .= ' = ' . __mc_refl_param_default_text($this->getDefaultValue());
+        }
+        return $out . " ]\n";
     }
 
     public function hasType(): bool
