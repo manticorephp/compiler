@@ -1390,31 +1390,50 @@ trait InferNodes
 
     private function inferDiv(Div $n): Type
     {
-        $this->inferNode($n->left);
-        $this->inferNode($n->right);
+        $lt = $this->inferNode($n->left);
+        $rt = $this->inferNode($n->right);
         // PHP `/` is float UNLESS both operands are int and evenly divisible
         // (then int). A runtime int|float result would have to ride a numeric
         // cell, which cascades into array-index / concat / `+=` contexts that
         // expect a raw scalar (net regression for a low-value parity nit); the
         // literal case is folded in ConstFold instead. A variable `int / int`
         // stays float.
-        $t = Type::float_();
+        $t = $this->operatorHookType($lt, $rt) ?? Type::float_();
         $n->type = $t;
         return $t;
     }
 
     private function inferMod(Mod $n): Type
     {
-        $this->inferNode($n->left);
-        $this->inferNode($n->right);
-        $t = Type::int_();
+        $lt = $this->inferNode($n->left);
+        $rt = $this->inferNode($n->right);
+        $t = $this->operatorHookType($lt, $rt) ?? Type::int_();
         $n->type = $t;
         return $t;
+    }
+
+    /**
+     * Operator overloading ({@see InlineClosures::tryOperator}): when either operand is a
+     * statically typed object whose class declares `__operator`, the arithmetic node
+     * yields that hook's return type — not int/float — so the local it is stored in
+     * keeps its object type and the rewrite sees it. Null otherwise.
+     */
+    private function operatorHookType(Type $l, Type $r): ?Type
+    {
+        foreach ([$l, $r] as $t) {
+            if ($t->kind !== Type::KIND_OBJ || $t->class === null) { continue; }
+            $decl = $this->resolveMethodClass($t->class, '__operator');
+            if ($decl === '') { continue; }
+            return $this->sigs[$decl . '____operator'] ?? null;
+        }
+        return null;
     }
 
     private function inferNeg(Neg $node): Type
     {
         $t = $this->inferNode($node->operand);
+        $hook = $this->operatorHookType($t, $t);
+        if ($hook !== null) { $node->type = $hook; return $hook; }
         if ($t->kind === Type::KIND_FLOAT) {
             $node->type = Type::float_();
         } else if ($t->kind === Type::KIND_INT) {

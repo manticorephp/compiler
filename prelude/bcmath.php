@@ -135,6 +135,54 @@ namespace BcMath {
             return \bccomp($this->value, $b, $s);
         }
 
+        /**
+         * Operator hook ({@see \Compile\Mir\Passes\InlineClosures::tryOperator}): `$n + 1`,
+         * `2 ** $n`, `-$n` run the matching method. `$swapped` = this was the RIGHT operand.
+         * A float operand is truncated to int, as in Zend.
+         */
+        public function __operator(string $op, mixed $other, bool $swapped): Number
+        {
+            $o = self::coerce($op, $other, $swapped);
+            $l = $swapped ? $o : $this;
+            $r = $swapped ? $this : $o;
+            return match ($op) {
+                '+' => $l->add($r),
+                '-' => $l->sub($r),
+                '*' => $l->mul($r),
+                '/' => $l->div($r),
+                '%' => $l->mod($r),
+                '**' => $l->pow($r),
+            };
+        }
+
+        /** Ordering hook for `< <= > >= == != <=>`. A non-numeric string is uncomparable: answers 1. */
+        public function __compare(mixed $other): int
+        {
+            if (\is_string($other) && !\preg_match('/^[+-]?(\d+(\.\d*)?|\.\d+)$/', $other)) {
+                return 1;
+            }
+            return $this->compare(self::coerce('<=>', $other, false));
+        }
+
+        private static function coerce(string $op, mixed $x, bool $swapped): Number
+        {
+            if ($x instanceof Number) {
+                return $x;
+            }
+            if (\is_int($x) || \is_float($x) || $x === null || \is_bool($x)) {
+                return new Number((int) $x);
+            }
+            if (\is_string($x)) {
+                if (!\preg_match('/^[+-]?(\d+(\.\d*)?|\.\d+)$/', $x)) {
+                    throw new \ValueError(($swapped ? 'Left' : 'Right') . ' string operand cannot be converted to BcMath\Number');
+                }
+                return new Number($x);
+            }
+            $me = 'BcMath\Number';
+            $you = \get_debug_type($x);
+            throw new \TypeError('Unsupported operand types: ' . ($swapped ? $you . ' ' . $op . ' ' . $me : $me . ' ' . $op . ' ' . $you));
+        }
+
         public function __toString(): string
         {
             return $this->value;

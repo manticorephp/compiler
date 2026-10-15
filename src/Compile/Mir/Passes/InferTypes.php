@@ -2172,6 +2172,8 @@ final class InferTypes implements Pass
     {
         $lt = $this->inferNode($left);
         $rt = $this->inferNode($right);
+        $hook = $this->operatorHookType($lt, $rt);
+        if ($hook !== null) { return $hook; }
         if ($lt->kind === Type::KIND_FLOAT || $rt->kind === Type::KIND_FLOAT) {
             return Type::float_();
         }
