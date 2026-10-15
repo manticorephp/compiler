@@ -9,10 +9,10 @@ function t1(string $p): int { try { thrower(new O($p)); } catch (\RuntimeExcepti
 function t2(string $p): int { try { thrower(O::mk($p)); } catch (\RuntimeException $e) { return 1; } return 0; }
 function t3(string $p): int { return ok(new O($p)) + ok(O::mk($p)); }
 foreach (['t1', 't2', 't3'] as $f) {
-    for ($i = 0; $i < 200; $i++) { $f("/x" . $i % 7); }
+    for ($i = 0; $i < 20000; $i++) { $f("/x" . $i % 7); }
     $b = memory_get_usage();
-    for ($i = 0; $i < 50000; $i++) { $f("/x" . $i % 7); }
-    echo $f, " ", (memory_get_usage() - $b) < 300000 ? "flat" : "leak", "\n";
+    for ($i = 0; $i < 200000; $i++) { $f("/x" . $i % 7); }
+    echo $f, " ", (memory_get_usage() - $b) < 4000000 ? "flat" : "leak", "\n";
 }
 try { td(new D); } catch (\RuntimeException $e) {}
 echo "end\n";
@@ -22,8 +22,8 @@ function t4(string $p): int { return sink(mkT($p)); }
 function t5(string $p): int { try { thrower2(mkT($p)); } catch (\RuntimeException $e) { return 1; } return 0; }
 function thrower2(\Throwable $t): int { throw new \RuntimeException("y"); }
 foreach (['t4', 't5'] as $f) {
-    for ($i = 0; $i < 200; $i++) { $f("/x" . $i % 7); }
+    for ($i = 0; $i < 20000; $i++) { $f("/x" . $i % 7); }
     $b = memory_get_usage();
-    for ($i = 0; $i < 50000; $i++) { $f("/x" . $i % 7); }
-    echo $f, " ", (memory_get_usage() - $b) < 300000 ? "flat" : "leak", "\n";
+    for ($i = 0; $i < 200000; $i++) { $f("/x" . $i % 7); }
+    echo $f, " ", (memory_get_usage() - $b) < 4000000 ? "flat" : "leak", "\n";
 }

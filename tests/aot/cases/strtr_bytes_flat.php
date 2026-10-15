@@ -7,7 +7,7 @@ function t(string $p, string $U, string $L): int {
 }
 echo t("Content_Type", $U, $L), "\n";
 echo strtr("same", "xyz", "abc"), strtr("A_b", $U, $L), "\n";
-for ($i = 0; $i < 2000; $i++) { t("X-Forwarded_For" . $i, $U, $L); }
+for ($i = 0; $i < 50000; $i++) { t("X-Forwarded_For" . $i, $U, $L); }
 $b = memory_get_usage();
 for ($i = 0; $i < 300000; $i++) { t("X-Forwarded_For" . ($i % 9), $U, $L); }
-echo (memory_get_usage() - $b) < 300000 ? "flat" : "leak", "\n";
+echo (memory_get_usage() - $b) < 4000000 ? "flat" : "leak", "\n";

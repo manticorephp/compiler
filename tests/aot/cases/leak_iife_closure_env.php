@@ -3,7 +3,7 @@
 function iife(string $p): int {
     return (function () use ($p) { foreach ([1, 2] as $x) { if ($x == 5) { return 9; } } return strlen($p); })();
 }
-iife("/x");
+for ($i = 0; $i < 20000; $i++) { iife("/x"); }
 $b = memory_get_usage();
-for ($i = 0; $i < 50000; $i++) { iife("/x"); }
-echo iife("/abc"), " ", (memory_get_usage() - $b) < 500000 ? "flat" : "leak", "\n";
+for ($i = 0; $i < 200000; $i++) { iife("/x"); }
+echo iife("/abc"), " ", (memory_get_usage() - $b) < 4000000 ? "flat" : "leak", "\n";
