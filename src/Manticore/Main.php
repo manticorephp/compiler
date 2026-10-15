@@ -4982,6 +4982,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $dsMapSrc = prelude_src_or_empty("ds_map.php");
     // ext/random — Random\Randomizer + engines, braced namespaces, DEMAND-GATED on the `Random` qualifier.
     $randomSrc = prelude_src_or_empty("random.php");
+    // ext/bcmath — BcMath\Number over the stdlib bc* functions, DEMAND-GATED on the `BcMath` qualifier.
+    $bcmathSrc = prelude_src_or_empty("bcmath.php");
     if ($dsSrc !== "" && $dsMapSrc !== "") {
         $dsSrc .= "\n" . $dsMapSrc;
     }
@@ -5213,6 +5215,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // trees above: nobody reaches `Int32Array` without writing `Ds\`.
     $useDs = $demand->mentions('Ds');
     $useRandom = $demand->mentions('Random');
+    $useBcmath = $demand->mentions('BcMath');
     // Filter\ exceptions are UNCONDITIONAL: the stdlib's filter_var() throws one by name
     // (`new $cls`) and the stdlib build cannot see a demand-gated prelude class.
     $useFilter = true;
@@ -5805,6 +5808,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->wsSrc = $useWs ? $wsSrc : "";
         $lower->dsSrc = $useDs ? $dsSrc : "";
         $lower->randomSrc = $useRandom ? $randomSrc : "";
+        $lower->bcmathSrc = $useBcmath ? $bcmathSrc : "";
         $lower->filterSrc = $useFilter ? $filterSrc : "";
         $lower->filterFnsSrc = $useFilterFns ? $filterFnsSrc : "";
         $lower->xmlSrc = $useXml ? $xmlSrc : "";
@@ -6327,6 +6331,7 @@ function analyze_prelude_files(): array
         "async.php",
         "pcntl.php",
         "random.php",
+        "bcmath.php",
         // Function-only prelude files. Omitting these is invisible in a normal
         // build (they are injected on demand all the same) but makes the
         // closed-world undefined-function rule report every one of their

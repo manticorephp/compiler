@@ -565,6 +565,8 @@ final class LowerFromAst implements Pass
     public string $dsSrc = '';
     /** ext/random (Random\Randomizer, engines) — DEMAND-GATED braced-namespace tree. */
     public string $randomSrc = '';
+    /** ext/bcmath (BcMath\Number) — DEMAND-GATED braced-namespace tree. */
+    public string $bcmathSrc = '';
     /** Filter\ exceptions (ext/filter) — braced namespace, always included. */
     public string $filterSrc = '';
     /** filter_var / filter_input entry points (global functions) — DEMAND-GATED. */

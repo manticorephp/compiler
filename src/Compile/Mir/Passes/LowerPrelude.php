@@ -248,6 +248,7 @@ trait LowerPrelude
                 "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
                 "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
                 "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->randomSrc,
+                "<?php\n" . $this->bcmathSrc,
                 "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->filterSrc,
             ]);
             if (!$this->includeArrayFnsExt
@@ -325,6 +326,11 @@ trait LowerPrelude
         if ($this->randomSrc !== '') {
             $rn = \Parser\Parser::parseSource("<?php\n" . $this->randomSrc);
             foreach ($rn->statements as $s) { $stmts[] = $s; }
+        }
+        // BcMath\ — braced namespace, calls the stdlib bc* functions only.
+        if ($this->bcmathSrc !== '') {
+            $bm = \Parser\Parser::parseSource("<?php\n" . $this->bcmathSrc);
+            foreach ($bm->statements as $s) { $stmts[] = $s; }
         }
         // Filter\ — braced namespace, extends \Exception only.
         if ($this->filterSrc !== '') {
