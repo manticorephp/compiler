@@ -103,6 +103,10 @@ final class ClassDef
     /** `final class` / `abstract class` — PHP reports these, and nothing in MIR
      *  recorded them because dispatch never needed to ask. */
     public bool $isFinal = false;
+
+    /** Declared `readonly class`: an undeclared-property write is `Error: Cannot create
+     *  dynamic property`. Carried across the `.sig` as `roclass`. */
+    public bool $isReadonlyClass = false;
     public bool $isAbstract = false;
 
     /** Names of properties declared `array` (or a typed array). `clone` must

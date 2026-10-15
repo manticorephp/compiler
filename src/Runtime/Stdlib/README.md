@@ -7,7 +7,7 @@ no import and no registration.
 
 ## Files
 
-55 files, grouped by surface:
+56 files, grouped by surface:
 
 | Group | Files |
 |---|---|
@@ -15,7 +15,7 @@ no import and no registration.
 | Strings | `Html.php` (entities, `strip_tags`), `Strings.php`, `StringsExtra.php`, `NatCompare.php`, `Format.php` (the `printf` family), `Scanf.php`, `Encoding.php`, `Mbstring*.php` (mbstring; `MbstringTables.php` is generated), `Iconv.php` |
 | Character classes | `Ctype.php` |
 | Regex | `Pcre.php` (the `preg_*` family over host PCRE2) |
-| Math / random | `MathExtra.php`, `Random.php`, `Xxhash.php` |
+| Math / random | `MathExtra.php`, `Bcmath.php`, `Random.php`, `Xxhash.php` |
 | Date & time | `Time.php`, `DateCivil.php`, `DateFormat.php`, `DateFuncs.php`, `DateOps.php`, `DateParse.php`, `TzIf.php`, `TzInfo.php` |
 | Filesystem | `Io.php`, `Fs.php`, `FsRest.php`, `Stat.php`, `Path.php` |
 | Structured formats | `Csv.php`, `Ini.php` |

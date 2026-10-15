@@ -2123,6 +2123,7 @@ final class InferTypes implements Pass
             || $n === 'round' || $n === 'fmod' || $n === 'sin' || $n === 'cos'
             || $n === 'tan' || $n === 'asin' || $n === 'acos' || $n === 'atan'
             || $n === 'atan2' || $n === 'sinh' || $n === 'cosh' || $n === 'tanh'
+            || $n === 'log1p' || $n === 'expm1' || $n === 'asinh' || $n === 'acosh' || $n === 'atanh'
             || $n === 'exp' || $n === 'log' || $n === 'log10' || $n === 'hypot'
             || $n === 'pi' || $n === 'deg2rad' || $n === 'rad2deg';
     }
@@ -2172,6 +2173,8 @@ final class InferTypes implements Pass
     {
         $lt = $this->inferNode($left);
         $rt = $this->inferNode($right);
+        $hook = $this->operatorHookType($lt, $rt);
+        if ($hook !== null) { return $hook; }
         if ($lt->kind === Type::KIND_FLOAT || $rt->kind === Type::KIND_FLOAT) {
             return Type::float_();
         }

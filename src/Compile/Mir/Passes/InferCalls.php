@@ -158,10 +158,15 @@ trait InferCalls
 
     private function inferCall(Call $node): Type
     {
+        $argTypes = [];
         foreach ($node->args as $a) {
-            $this->inferNode($a);
+            $argTypes[] = $this->inferNode($a);
         }
         $callee = $node->function;
+        if ($callee === 'pow' && \count($argTypes) === 2) {
+            $hook = $this->operatorHookType($argTypes[0], $argTypes[1]);
+            if ($hook !== null) { $node->type = $hook; return $hook; }
+        }
         $this->adoptLitParamElem($node->args, $callee, 0);
         $this->inferUnshiftElem($node);
         // A tagged-cell builtin (`strpos` → int|false, `getenv` →
@@ -545,6 +550,7 @@ trait InferCalls
             || $n === 'sin' || $n === 'cos' || $n === 'tan'
             || $n === 'asin' || $n === 'acos' || $n === 'atan' || $n === 'atan2'
             || $n === 'sinh' || $n === 'cosh' || $n === 'tanh'
+            || $n === 'log1p' || $n === 'expm1' || $n === 'asinh' || $n === 'acosh' || $n === 'atanh'
             || $n === 'exp' || $n === 'log' || $n === 'log10'
             || $n === 'hypot' || $n === 'pi' || $n === 'deg2rad' || $n === 'rad2deg'
             || $n === 'peek_f64') {

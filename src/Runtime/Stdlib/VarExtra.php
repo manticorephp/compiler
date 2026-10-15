@@ -100,7 +100,8 @@ function extension_loaded(string $extension): bool
     // answers the EXPRESSION form. Two lists, one truth — change both.
     return $e === 'pcre' || $e === 'json' || $e === 'ctype'
         || $e === 'openssl' || $e === 'core' || $e === 'standard'
-        || $e === 'tokenizer' || $e === 'mbstring' || $e === 'intl';
+        || $e === 'tokenizer' || $e === 'mbstring' || $e === 'intl'
+        || $e === 'bcmath';
 }
 
 
@@ -238,4 +239,113 @@ function is_object(mixed $value): bool
 function is_string(mixed $value): bool
 {
     return \is_string($value);
+}
+
+/** `doubleval()` — the alias of floatval(). */
+function doubleval(mixed $value): float
+{
+    return \floatval($value);
+}
+
+/**
+ * php's `getrusage()`: struct rusage by Zend's key names. `ru_maxrss` is raw
+ * (bytes on Darwin, kilobytes on Linux), as php reports it. Layout: two
+ * timevals, then 14 longs from offset 32 — identical on Darwin and glibc.
+ *
+ * @return array<string,int>|false
+ */
+function getrusage(int $mode = 0): array|false
+{
+    $buf = \Runtime\Libc\calloc(1, 256);
+    if (\Runtime\Libc\sys_getrusage($mode, $buf) !== 0) {
+        \Runtime\Libc\free($buf);
+        return false;
+    }
+    $r = [
+        'ru_oublock' => \peek_i64($buf, 96), 'ru_inblock' => \peek_i64($buf, 88),
+        'ru_msgsnd' => \peek_i64($buf, 104), 'ru_msgrcv' => \peek_i64($buf, 112),
+        'ru_maxrss' => \peek_i64($buf, 32), 'ru_ixrss' => \peek_i64($buf, 40),
+        'ru_idrss' => \peek_i64($buf, 48), 'ru_minflt' => \peek_i64($buf, 64),
+        'ru_majflt' => \peek_i64($buf, 72), 'ru_nsignals' => \peek_i64($buf, 120),
+        'ru_nvcsw' => \peek_i64($buf, 128), 'ru_nivcsw' => \peek_i64($buf, 136),
+        'ru_nswap' => \peek_i64($buf, 80),
+        // Darwin's tv_usec is 32-bit inside a 16-byte timeval; mask the pad away.
+        'ru_utime.tv_usec' => \peek_i64($buf, 8) & 0xFFFFFFFF, 'ru_utime.tv_sec' => \peek_i64($buf, 0),
+        'ru_stime.tv_usec' => \peek_i64($buf, 24) & 0xFFFFFFFF, 'ru_stime.tv_sec' => \peek_i64($buf, 16),
+    ];
+    \Runtime\Libc\free($buf);
+    return $r;
+}
+
+/**
+ * php's `gettimeofday()`: float seconds, or [sec, usec, minuteswest, dsttime]
+ * with the zone taken from the default timezone like php does.
+ *
+ * @return array<string,int>|float
+ */
+function gettimeofday(bool $as_float = false): array|float
+{
+    $ns = \__mir_clock_ns(0);
+    if ($as_float) {
+        return (float)$ns / 1000000000.0;
+    }
+    $sec = \intdiv($ns, 1000000000);
+    return [
+        'sec' => $sec,
+        'usec' => \intdiv($ns - $sec * 1000000000, 1000),
+        'minuteswest' => -\intdiv((int)\date('Z', $sec), 60),
+        'dsttime' => (int)\date('I', $sec),
+    ];
+}
+
+/** @return float[]|false */
+function sys_getloadavg(): array|false
+{
+    $buf = \Runtime\Libc\calloc(1, 32);
+    $n = \Runtime\Libc\sys_getloadavg($buf, 3);
+    if ($n !== 3) {
+        \Runtime\Libc\free($buf);
+        return false;
+    }
+    $r = [\peek_f64($buf, 0), \peek_f64($buf, 8), \peek_f64($buf, 16)];
+    \Runtime\Libc\free($buf);
+    return $r;
+}
+
+/** Name of the process's user (php reports the main script's owner). */
+function get_current_user(): string
+{
+    $pw = \Runtime\Libc\sys_getpwuid(\Runtime\Libc\sys_getuid());
+    if ($pw === null) {
+        return '';
+    }
+    return \cstr_to_str(\int_to_ptr(\peek_i64($pw, 0)));
+}
+
+/** The process's uid (php reports the main script's owner). */
+function getmyuid(): int|false
+{
+    return \Runtime\Libc\sys_getuid();
+}
+
+/** The process's gid (php reports the main script's group). */
+function getmygid(): int|false
+{
+    return \Runtime\Libc\sys_getgid();
+}
+
+/**
+ * `phpversion()`: the PHP_VERSION this build tracks, or for a loaded extension the
+ * same (bundled extensions share the engine version), else false.
+ */
+function phpversion(?string $extension = null): string|false
+{
+    if ($extension === null) {
+        return \PHP_VERSION;
+    }
+    $want = \strtolower($extension);
+    foreach (\get_loaded_extensions() as $e) {
+        if (\strtolower($e) === $want) { return \PHP_VERSION; }
+    }
+    return false;
 }

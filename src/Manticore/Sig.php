@@ -158,6 +158,7 @@ final class Sig
             . ",\"parent\":" . self::jsonStr($cd->parent)
             . ",\"ifaces\":[" . self::jsonStrList($cd->interfaces) . "]"
             . ",\"final\":" . self::jsonBool($cd->isFinal)
+            . ",\"roclass\":" . self::jsonBool($cd->isReadonlyClass)
             . ",\"abstract\":" . self::jsonBool($cd->isAbstract)
             . ",\"struct\":" . self::jsonBool($cd->isStruct)
             . ",\"bag\":" . self::jsonBool($cd->hasBag)
@@ -1050,6 +1051,7 @@ final class Sig
             $m->parent = (string)($c["parent"] ?? '');
             foreach ($c["ifaces"] as $i) { $m->interfaces[] = (string)$i; }
             $m->isFinal = self::truthy($c["final"] ?? false);
+            $m->isReadonlyClass = self::truthy($c["roclass"] ?? false);
             $m->isAbstract = self::truthy($c["abstract"] ?? false);
             $m->isStruct = self::truthy($c["struct"] ?? false);
             $m->hasBag = self::truthy($c["bag"] ?? false);

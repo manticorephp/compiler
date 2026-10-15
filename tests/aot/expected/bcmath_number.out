@@ -1,0 +1,94 @@
+"1.50" N(1.50,2)
+"-0.00" N(0.00,2)
+"+3" N(3,0)
+"007.10" N(7.10,2)
+".5" N(0.5,1)
+"1." N(1,0)
+"" N(0,0)
+"-.5" N(-0.5,1)
+"abc" ValueError: BcMath\Number::__construct(): Argument #1 ($num) is not well-formed
+"1e5" ValueError: BcMath\Number::__construct(): Argument #1 ($num) is not well-formed
+" 1" ValueError: BcMath\Number::__construct(): Argument #1 ($num) is not well-formed
+"1.2.3" ValueError: BcMath\Number::__construct(): Argument #1 ($num) is not well-formed
+"-00.10" N(-0.10,2)
+N(5,0)
+N(-9223372036854775808,0)
+N(3.75,2)
+N(3.75000,5)
+N(3,0)
+ValueError: BcMath\Number::add(): Argument #2 ($scale) must be between 0 and 2147483647
+N(3.7,1)
+N(-1.0,1)
+N(2.75,2)
+N(3.375,3)
+N(3.3,1)
+N(3.375000000,9)
+N(0.3333333333,10)
+N(0.5,1)
+N(0.50,2)
+N(0.46153846153,11)
+N(0.33,2)
+N(2.5,1)
+DivisionByZeroError: Division by zero
+DivisionByZeroError: Modulo by zero
+N(1.5,1)
+N(0.000,3)
+N(-1,0)
+N(1,0)
+N(8,0)
+N(6.25,2)
+N(0.1111111111,10)
+N(42.8,1)
+N(0.16,2)
+ValueError: BcMath\Number::pow(): Argument #1 ($exponent) exponent cannot have a fractional part
+N(1,0)
+DivisionByZeroError: Negative power of zero
+ValueError: BcMath\Number::pow(): Argument #1 ($exponent) exponent is too large
+N(4,0)
+N(4.00,2)
+ValueError: Base number cannot have a fractional part
+ValueError: BcMath\Number::powmod(): Argument #1 ($exponent) must be greater than or equal to 0
+DivisionByZeroError: Modulo by zero
+ValueError: BcMath\Number::powmod(): Argument #2 ($modulus) cannot have a fractional part
+ValueError: BcMath\Number::powmod(): Argument #2 ($modulus) is not well-formed
+N(1.4142135623,10)
+N(1.581138830084,12)
+N(1.58113883,8)
+N(4,0)
+ValueError: Base number must be greater than or equal to 0
+N(0.000,3)
+ValueError: BcMath\Number::sqrt(): Argument #1 ($scale) must be between 0 and 2147483647
+N(2,0)
+N(-3,0)
+N(-2,0)
+N(0,0)
+N(3,0)
+N(2.57,2)
+N(1.50000,5)
+N(1300,0)
+N(1.6,1)
+N(-1.6,1)
+0
+0
+-1
+1
+ValueError: BcMath\Number::compare(): Argument #1 ($num) is not well-formed
+ValueError: BcMath\Number::add(): Argument #1 ($num) is not well-formed
+'1.50'
+'1.5/1'
+O:13:"BcMath\Number":1:{s:5:"value";s:4:"1.50";}
+BcMath\Number 1.50 2
+N(1.5,1)
+Exception: Invalid serialization data for BcMath\Number object
+Error: Cannot modify readonly property BcMath\Number::$value
+Error: Cannot modify readonly property BcMath\Number::$scale
+N(1.5,1)
+true
+true
+object(BcMath\Number)#1 (2) {
+  ["value"]=>
+  string(3) "1.5"
+  ["scale"]=>
+  int(1)
+}
+{"value":"1.5","scale":1}

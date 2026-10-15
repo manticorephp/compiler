@@ -61,6 +61,8 @@ final class StringArithmetic
                 $infer = new Infer($idx, $scope);
                 $l = $infer->of($e->left);
                 $r = $infer->of($e->right);
+                // An object operand may overload the operator (`__operator`, BcMath\Number).
+                if ($l->kind === Ty::KIND_OBJECT || $r->kind === Ty::KIND_OBJECT) { continue; }
                 $lStr = $l->kind === Ty::KIND_STRING;
                 $rStr = $r->kind === Ty::KIND_STRING;
                 if (!$lStr && !$rStr) { continue; }

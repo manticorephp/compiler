@@ -342,6 +342,11 @@ trait EmitLlvmBuiltins
         if ($name === 'sinh')                         { return $this->biFloatUnary($args, 'sinh'); }
         if ($name === 'cosh')                         { return $this->biFloatUnary($args, 'cosh'); }
         if ($name === 'tanh')                         { return $this->biFloatUnary($args, 'tanh'); }
+        if ($name === 'log1p')                      { return $this->biFloatUnary($args, 'log1p'); }
+        if ($name === 'expm1')                      { return $this->biFloatUnary($args, 'expm1'); }
+        if ($name === 'asinh')                      { return $this->biFloatUnary($args, 'asinh'); }
+        if ($name === 'acosh')                      { return $this->biFloatUnary($args, 'acosh'); }
+        if ($name === 'atanh')                      { return $this->biFloatUnary($args, 'atanh'); }
         if ($name === 'exp')                          { return $this->biFloatUnary($args, 'llvm.exp.f64'); }
         if ($name === 'log10')                        { return $this->biFloatUnary($args, 'llvm.log10.f64'); }
         if ($name === 'log')                          { return $this->biLog($args); }

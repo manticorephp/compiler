@@ -1,0 +1,3 @@
+Error: Cannot create dynamic property R::$foo
+Error: Cannot unset readonly property R::$v
+Error: Cannot modify readonly property R::$v

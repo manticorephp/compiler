@@ -1,0 +1,17 @@
+ru_oublock,ru_inblock,ru_msgsnd,ru_msgrcv,ru_maxrss,ru_ixrss,ru_idrss,ru_minflt,ru_majflt,ru_nsignals,ru_nvcsw,ru_nivcsw,ru_nswap,ru_utime.tv_usec,ru_utime.tv_sec,ru_stime.tv_usec,ru_stime.tv_sec
+bool(true)
+bool(true)
+sec,usec,minuteswest,dsttime
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+int(3)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(false)

@@ -124,7 +124,10 @@ function __mc_format(string $fmt, array $args): string
             $core = $custom
                 ? ('%' . $signPart . $precPart . $conv)
                 : ('%' . ($left ? '-' : '') . $signPart . ($zero ? '0' : '') . $width . $precPart . $conv);
-            $piece = \__mc_fmt_float($core, $fv);
+            // php prints a non-finite float as NaN / INF / -INF and ignores width, sign and precision.
+            $piece = ($fv !== $fv || $fv - $fv !== 0.0)
+                ? ($fv !== $fv ? 'NaN' : ($fv < 0.0 ? '-INF' : 'INF'))
+                : \__mc_fmt_float($core, $fv);
         } elseif ($conv === 'e' || $conv === 'E' || $conv === 'g' || $conv === 'G') {
             // Exponent conversions: snprintf gives C's 2-digit exponent (`e+04`),
             // which __mc_fix_exp shrinks to PHP's minimum (`e+4`). That changes the
@@ -135,8 +138,11 @@ function __mc_format(string $fmt, array $args): string
             // %e/%E drop a negative zero's sign like %f; %g/%G KEEP it (`-0`).
             if ($ev === 0.0 && ($conv === 'e' || $conv === 'E')) { $ev = 0.0; }
             $core = '%' . $signPart . $precPart . $conv;
-            $piece = \__mc_fix_exp(\__mc_fmt_float($core, $ev));
-            if ($width > 0) {
+            $nonFinite = $ev !== $ev || $ev - $ev !== 0.0;
+            $piece = $nonFinite
+                ? ($ev !== $ev ? 'NaN' : ($ev < 0.0 ? '-INF' : 'INF'))
+                : \__mc_fix_exp(\__mc_fmt_float($core, $ev));
+            if ($width > 0 && !$nonFinite) {
                 $pc = $custom ? $pad[0] : (($zero && !$left) ? '0' : ' ');
                 $piece = \__mc_pad($piece, $width, $pc, $left);
             }
@@ -162,7 +168,11 @@ function __mc_format(string $fmt, array $args): string
             $piece = \__mc_fmt_int($core, $arg);
         }
         $isExp = ($conv === 'e' || $conv === 'E' || $conv === 'g' || $conv === 'G');
-        if ($custom && $width > 0 && !$isExp) {
+        $nonFinitePiece = ($conv === 'f' || $conv === 'F' || $isExp)
+            && ($piece === 'NaN' || $piece === 'INF' || $piece === '-INF');
+        if ($nonFinitePiece) {
+            // width / pad do not apply to NaN and INF
+        } elseif ($custom && $width > 0 && !$isExp) {
             // e/E/g/G already padded above (after the exponent fix)
             $piece = \__mc_pad($piece, $width, $pad[0], $left);
         } elseif (($conv === 'b') && $width > 0) {
