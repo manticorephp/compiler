@@ -2473,6 +2473,17 @@ class ReflectionClassConstant
         return $consts[$this->name] ?? null;
     }
 
+    /**
+     * A class constant's attributes. The compiler keeps no attribute rows for constants yet (#244), so
+     * this answers none: right for a constant that carries none, which is what Symfony's
+     * ReflectionClassResource hashes through here.
+     * @return ReflectionAttribute[]
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array
+    {
+        return [];
+    }
+
     public function getDeclaringClass(): ReflectionClass
     {
         return new ReflectionClass($this->class);
