@@ -875,6 +875,7 @@ trait LowerClasses
         $cd->propertyFloat32 = $m->propertyFloat32;
         $cd->attributes = $m->attributes;
         $cd->isFinal = $m->isFinal;
+        $cd->isReadonlyClass = $m->isReadonlyClass;
         $cd->isAbstract = $m->isAbstract;
         // Widths land BEFORE the offsets are recomputed below — propertyOffset
         // walks them, so checking first would measure the pre-stamp layout.

@@ -105,7 +105,7 @@ final class ClassDef
     public bool $isFinal = false;
 
     /** Declared `readonly class`: an undeclared-property write is `Error: Cannot create
-     *  dynamic property`. Not carried across the `.sig` (an imported class reads false). */
+     *  dynamic property`. Carried across the `.sig` as `roclass`. */
     public bool $isReadonlyClass = false;
     public bool $isAbstract = false;
 
