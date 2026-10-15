@@ -991,7 +991,16 @@ trait EmitLlvmBuiltins
         // owner but this site — `$fixed->offsetSet($i, new Token($t))` kept
         // every token of every file php-cs-fixer ever tokenized.
         if ($t->kind === Type::KIND_OBJ) {
-            if ($src === null || $this->isClosureValueType($t) || $this->freshRcArgFlavor($src) !== 'obj') { return ''; }
+            if ($src === null) { return ''; }
+            // A fresh closure env (a literal, a call's +1) boxes the same way:
+            // `set_error_handler(fn () => …)` kept one env per call.
+            if ($this->isClosureValueType($t)) {
+                if ($this->freshRcArgFlavor($src) !== 'closure') { return ''; }
+                $raw = $this->ssa->allocReg();
+                return '  ' . $raw . ' = and i64 ' . $cellReg . ", 281474976710655\n"
+                     . $this->rcReleaseReg($raw, 'closure');
+            }
+            if ($this->freshRcArgFlavor($src) !== 'obj') { return ''; }
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
             return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
@@ -2823,7 +2832,7 @@ trait EmitLlvmBuiltins
             && $this->ifaceMethodHolders('Countable', 'count') !== []) {
             $out = $this->emitNode($args[0]);
             $out .= $this->coerceToI64();
-            return $this->emitCountableOrArray($out, $this->lastValue, $args[0]);
+            return $this->emitCountableOrArray($out, $this->lastValue, $args[0], '', '', $this->freshRcArgFlavor($args[0]));
         }
         $out = $this->emitArrOrEmptyArg($args[0]);
         $out .= $this->arrayCountFromPtrIr($this->lastValue);
@@ -2968,6 +2977,7 @@ trait EmitLlvmBuiltins
             return null;
         }
         $out = $this->emitNode($arg);
+        $af = $this->freshRcArgFlavor($arg);
         $out .= $this->boxToCell($arg->type, $arg);
         $cv = $this->lastValue;
         $modeReg = '';
@@ -2976,7 +2986,7 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToI64();
             $modeReg = $this->lastValue;
         }
-        return $this->emitCountableOrArray($out, $cv, $arg, $c->function, $modeReg);
+        return $this->emitCountableOrArray($out, $cv, $arg, $c->function, $modeReg, $af);
     }
 
     /**
@@ -3039,7 +3049,7 @@ trait EmitLlvmBuiltins
      * argument when it takes one.
      */
     private function emitCountableOrArray(string $out, string $cv, Node $arg,
-                                          string $walkerFn = '', string $modeReg = ''): string
+                                          string $walkerFn = '', string $modeReg = '', string $argFlavor = ''): string
     {
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -3090,6 +3100,8 @@ trait EmitLlvmBuiltins
         $out .= $endL . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        // A fresh operand (`count($bag->all())` over an erased `array` return) dies here.
+        if ($argFlavor !== '') { $out .= $this->rcReleaseReg($cv, $argFlavor); }
         return $this->finishI64($out, $r);
     }
 
@@ -8568,6 +8580,9 @@ trait EmitLlvmBuiltins
                 $un = $this->ssa->allocReg();
                 $out .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props
                       . ', ptr ' . $bagP . ")\n";
+                // `+` copied (and co-owned) the declared map: release it.
+                $this->rt->needsRc = true;
+                $out .= '  call void @__mir_array_release(ptr ' . $props . ")\n";
                 $out .= '  store ptr ' . $un . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $endL . ":\n";
@@ -8754,6 +8769,8 @@ trait EmitLlvmBuiltins
                 $un = $this->ssa->allocReg();
                 $bodies .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props
                          . ', ptr ' . $bagP . ")\n";
+                $this->rt->needsRc = true;
+                $bodies .= '  call void @__mir_array_release(ptr ' . $props . ")\n";
                 $props = $un;
             }
             $pi = $this->ssa->allocReg();
@@ -9069,6 +9086,14 @@ trait EmitLlvmBuiltins
                       . $cur . ', ptr ' . $this->litStr($mangle ? $this->mangledPropKey($cd, $pn) : $pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
                 $cur = $next;
             }
+        }
+        // The map OWNS one count of every cell it holds (above): say so in its
+        // repr and hint, so a copy (`+`, a mutated closure param's prologue copy) co-owns
+        // them and a repr-mode release drops them. Unstamped, a copy shared the
+        // words uncounted and outlived the map's own drop of them.
+        if ($n > 0) {
+            $out .= $this->emitReprStamp($cur, \Compile\MemoryAbi::ARRAY_REPR_CELL);
+            $out .= $this->emitElemHintStamp($cur, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
         }
         $this->lastValue = $cur;
         $this->lastValueType = 'ptr';

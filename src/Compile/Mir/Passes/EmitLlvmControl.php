@@ -898,6 +898,9 @@ trait EmitLlvmControl
         if ($k === Node::KIND_CAST && $arm->type->kind === Type::KIND_STRING) {
             return $this->isFreshStringTemp($arm);
         }
+        // `(array)$obj` builds a fresh map (Caster::castObject's
+        // `$o instanceof \Closure ? [] : (array) $o`): retained again, it leaked whole.
+        if ($arm instanceof \Compile\Mir\Cast && \Compile\Mir\Ownership::castArrayMints($arm)) { return true; }
         return $this->condOwnsResult($arm);
     }
 

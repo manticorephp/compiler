@@ -2534,6 +2534,9 @@ trait EmitLlvmRuntime
                     $pIr .= '  ' . $bv . ' = load ptr, ptr ' . $bg . "\n";
                     $pIr .= '  ' . $un . ' = call ptr @__mir_array_union(ptr '
                           . $pRes . ', ptr ' . $bv . ")\n";
+                    // `+` COPIES its left side, co-owning its REPR_CELL elements: the
+                    // declared map is dead now.
+                    $pIr .= '  call void @__mir_array_release(ptr ' . $pRes . ")\n";
                     $pRes = $un;
                 }
                 $sym = \Compile\Mir\RuntimeLibrary::propsFnSymbol((int)$id);
@@ -2577,6 +2580,7 @@ trait EmitLlvmRuntime
                     $cIr .= '  ' . $cbv . ' = load ptr, ptr ' . $cbg . "\n";
                     $cIr .= '  ' . $cun . ' = call ptr @__mir_array_union(ptr '
                           . $cRes . ', ptr ' . $cbv . ")\n";
+                    $cIr .= '  call void @__mir_array_release(ptr ' . $cRes . ")\n";
                     $cRes = $cun;
                 }
                 $csym = \Compile\Mir\RuntimeLibrary::cmpViewFnSymbol((int)$id);

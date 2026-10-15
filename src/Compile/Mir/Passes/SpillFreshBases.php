@@ -1150,7 +1150,7 @@ final class SpillFreshBases
         foreach ([
             'is_null', 'is_object', 'is_array', 'is_string', 'is_int', 'is_integer', 'is_long',
             'is_float', 'is_double', 'is_bool', 'is_scalar', 'is_numeric', 'is_iterable',
-            'is_countable', 'is_callable', 'is_resource', 'boolval',
+            'is_countable', 'is_callable', 'is_resource', 'boolval', 'gettype', 'get_debug_type',
         ] as $name) {
             if ($name === $bare) { return true; }
         }
@@ -1300,13 +1300,13 @@ final class SpillFreshBases
         }
         $k = $b->kind;
         if ($k === Node::KIND_CALL) { return !isset($this->notOwned[\ltrim($this->asCall($b)->function, '\\')]); }
-        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) { return true; }
         if ($k === Node::KIND_ARRAY_ACCESS) {
             $aa = $this->asArrayAccess($b);
             return !$aa->probe && \Compile\Mir\Ownership::userOffsetGetBase($aa->array->type, $this->classDefs);
         }
         if ($t->kind !== Type::KIND_OBJ) { return false; }
-        return $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
+        return $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
     }
 
     // Typed reads — a base-typed `$n` resolves fields by OFFSET under

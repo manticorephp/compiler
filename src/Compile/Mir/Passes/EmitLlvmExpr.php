@@ -4206,6 +4206,11 @@ trait EmitLlvmExpr
                 $un = $this->ssa->allocReg();
                 $out .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $decl
                       . ', ptr ' . $bagP . ")\n";
+                // `+` COPIES its left side, co-owning its REPR_CELL elements: the
+                // declared map is dead now.
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= '  call void @__mir_array_release(ptr ' . $decl . ")\n";
                 $this->lastValue = $un; $this->lastValueType = 'ptr';
                 return $out;
             }

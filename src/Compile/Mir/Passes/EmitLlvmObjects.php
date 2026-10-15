@@ -6607,6 +6607,18 @@ trait EmitLlvmObjects
         // Once unboxed the payload IS raw, so the retain is chosen from the
         // declared type instead of the cell's null (which retains nothing).
         $out .= $this->rcRetainByType($n->value, $val, $dcT, 5);
+        // An already-boxed value into a CELL slot: the slot drops the old word by
+        // tag below, so a borrowed one (a `mixed` param) takes its count by tag
+        // too — rcRetainByType bails on a cell. `Hook::install(fn …)` stored a
+        // closure its caller then released.
+        $vk = $n->value->type->kind;
+        if (($dk === Type::KIND_CELL || $dk === Type::KIND_UNKNOWN) && $box && ($vk === Type::KIND_CELL || $vk === Type::KIND_UNKNOWN)) {
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+            $out .= $this->retainCellPayload($n->value);
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+        }
         if ($box) {
             $out .= $this->boxForViewSlot($vt, $n->value);
             $val = $this->lastValue;

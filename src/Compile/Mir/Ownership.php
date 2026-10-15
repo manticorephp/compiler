@@ -827,7 +827,7 @@ final class Ownership
         $bare = $p === false ? $fn : \substr($fn, $p + 1);
         foreach ([
             'explode', 'str_split', 'preg_split', 'array_keys', 'array_values',
-            'range', 'array_fill', 'str_getcsv',
+            'range', 'array_fill', 'str_getcsv', 'get_object_vars',
         ] as $n) {
             if ($n === $bare) { return true; }
         }
@@ -1760,7 +1760,7 @@ final class Ownership
 
     /** `(array)$v` over a runtime-dispatched operand hands back an OWNED array on every arm
      *  ({@see Passes\EmitLlvmExpr::emitCast}): a retained array, a fresh `[]`, `[$v]` or property bag. */
-    private static function castArrayMints(Cast $c): bool
+    public static function castArrayMints(Cast $c): bool
     {
         if ($c->target !== 'array') { return false; }
         $ok = $c->operand->type->kind;

@@ -3759,7 +3759,8 @@ trait EmitLlvmCalls
             // popping and kept every popped token.
             if ($this->lastCallWasBuiltin && ($fname === 'array_pop' || $fname === 'array_shift')) {
                 $pk = $s->type->kind;
-                $pf = ($pk === Type::KIND_CELL || $pk === Type::KIND_UNKNOWN) ? 'cell' : $this->discardReleaseFlavor($s->type);
+                $pf = ($pk === Type::KIND_CELL || $pk === Type::KIND_UNKNOWN) ? 'cell'
+                    : ($this->isClosureValueType($s->type) ? 'closure' : $this->discardReleaseFlavor($s->type));
                 if ($pf === '') { return ''; }
                 $out = $this->coerceToI64();
                 return $out . $this->rcReleaseReg($this->lastValue, $pf);
@@ -3772,7 +3773,8 @@ trait EmitLlvmCalls
             if (($this->sigs->returnsByRef[$fname] ?? false) && $s->type->kind !== Type::KIND_ARRAY) { return ''; }
         } elseif ($k === Node::KIND_NEW_OBJ) {
             // `new C();` in statement position: nobody binds the +1, php destroys it here.
-        } elseif ($k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_STATIC_CALL) {
+        } elseif ($k !== Node::KIND_METHOD_CALL && $k !== Node::KIND_STATIC_CALL && $k !== Node::KIND_INVOKE) {
+            // An invoke returns under the same +1 convention ({@see \Compile\Mir\Ownership::tempCellOwned}).
             return '';
         }
         // A returned closure is +1 like an object ({@see InsertMemoryOps::isOwnedObj});
