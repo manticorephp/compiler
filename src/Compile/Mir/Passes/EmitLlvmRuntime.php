@@ -4621,6 +4621,7 @@ end:
             $out .= "  ret i64 -3940649673949184\n";
             $out .= "}\n";
         }
+        if ($this->rt->needsStrtrBytes) { $out .= $this->lib->strtrBytes(); }
         if ($this->rt->needsStrcspn) {
             // strcspn($s, $chars, $off, $len): bytes from $off before the first
             // byte that IS in $chars (the whole span if none is). Binary-safe —

@@ -378,6 +378,7 @@ trait EmitLlvmBuiltins
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
         if ($name === '__mc_crc32b' && \count($args) === 1) { return $this->biCrc32b($args); }
+        if ($name === 'strtr__bytes' && \count($args) === 3) { return $this->biStrtrBytes($args); }
         if ($name === '__float_bits')                 { return $this->biFloatBits($args); }
         if ($name === '__ugt')                        { return $this->biUgt($args); }
         if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
@@ -5120,6 +5121,34 @@ trait EmitLlvmBuiltins
         $out .= $this->freeStrTemp($args[0], $s);
         $out .= $this->freeStrTemp($args[1], $cs);
         return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `strtr__bytes($s, $from, $to)` — the byte-map form of strtr in one native pass (the PHP body in
+     * Runtime/Stdlib/StringsExtra.php is the builder's fallback). A fresh +1 string; an input with
+     * nothing to translate comes back as itself, retained, so `HeaderBag`'s per-key lower-casing allocates nothing.
+     * @param Node[] $args
+     */
+    private function biStrtrBytes(array $args): string
+    {
+        $this->rt->needsStrtrBytes = true;
+        $this->rt->needsConcat = true;   // __mir_strlen + __mir_str_alloc
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $from = $this->lastValue;
+        $out .= $this->emitPtrArg($args[2]);
+        $to = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_strtr_bytes(ptr ' . $s . ', ptr ' . $from . ', ptr ' . $to . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $out .= $this->freeStrTemp($args[1], $from);
+        $out .= $this->freeStrTemp($args[2], $to);
+        $this->lastValue = $reg; $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /** `__mc_crc32b(string): int` — the reflected CRC-32 (php's crc32()) as a

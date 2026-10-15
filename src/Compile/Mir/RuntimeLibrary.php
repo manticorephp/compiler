@@ -1693,6 +1693,86 @@ final class RuntimeLibrary
         return $out;
     }
 
+    /**
+     * `__mir_strtr_bytes(s, from, to) -> ptr` — strtr's byte-map form. A 256-byte table (the identity,
+     * copied from a constant) is patched with `from[j] -> to[j]` for j < min(len), the LAST duplicate
+     * winning as php's does; the string is scanned for its first translated byte. None: the input itself,
+     * retained. Else one buffer, the untouched prefix copied whole and the rest mapped in place.
+     */
+    public function strtrBytes(): string
+    {
+        $ident = '';
+        for ($i = 0; $i < 256; $i = $i + 1) { $ident .= \sprintf('\\%02X', $i); }
+        $out  = "\n@__mir_ident256 = private unnamed_addr constant [256 x i8] c\"" . $ident . "\"\n";
+        $out .= "define ptr @__mir_strtr_bytes(ptr %s, ptr %from, ptr %to) {\nentry:\n";
+        $out .= "  %ls = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %lf = call i64 @__mir_strlen(ptr %from)\n";
+        $out .= "  %lt = call i64 @__mir_strlen(ptr %to)\n";
+        $out .= "  %lflt = icmp ult i64 %lf, %lt\n";
+        $out .= "  %m = select i1 %lflt, i64 %lf, i64 %lt\n";
+        $out .= "  %mz = icmp eq i64 %m, 0\n";
+        $out .= "  br i1 %mz, label %same, label %mk\n";
+        $out .= "mk:\n";
+        $out .= "  %tab = alloca [256 x i8], align 1\n";
+        $out .= "  call ptr @memcpy(ptr %tab, ptr @__mir_ident256, i64 256)\n";
+        $out .= "  br label %ploop\n";
+        $out .= "ploop:\n";
+        $out .= "  %j = phi i64 [0, %mk], [%j2, %pbody]\n";
+        $out .= "  %pd = icmp sge i64 %j, %m\n";
+        $out .= "  br i1 %pd, label %scan, label %pbody\n";
+        $out .= "pbody:\n";
+        $out .= "  %fp = getelementptr inbounds i8, ptr %from, i64 %j\n";
+        $out .= "  %fb = load i8, ptr %fp\n";
+        $out .= "  %tp = getelementptr inbounds i8, ptr %to, i64 %j\n";
+        $out .= "  %tb = load i8, ptr %tp\n";
+        $out .= "  %fi = zext i8 %fb to i64\n";
+        $out .= "  %slot = getelementptr inbounds [256 x i8], ptr %tab, i64 0, i64 %fi\n";
+        $out .= "  store i8 %tb, ptr %slot\n";
+        $out .= "  %j2 = add i64 %j, 1\n";
+        $out .= "  br label %ploop\n";
+        $out .= "scan:\n";
+        $out .= "  %i = phi i64 [0, %ploop], [%i2, %sbody]\n";
+        $out .= "  %sd = icmp sge i64 %i, %ls\n";
+        $out .= "  br i1 %sd, label %same, label %sbody\n";
+        $out .= "sbody:\n";
+        $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %c = load i8, ptr %sp\n";
+        $out .= "  %ci = zext i8 %c to i64\n";
+        $out .= "  %cp = getelementptr inbounds [256 x i8], ptr %tab, i64 0, i64 %ci\n";
+        $out .= "  %r = load i8, ptr %cp\n";
+        $out .= "  %diff = icmp ne i8 %r, %c\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  br i1 %diff, label %found, label %scan\n";
+        $out .= "found:\n";
+        $out .= "  %sz = add i64 %ls, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
+        $out .= "  call ptr @memcpy(ptr %buf, ptr %s, i64 %i)\n";
+        $out .= "  br label %mloop\n";
+        $out .= "mloop:\n";
+        $out .= "  %k = phi i64 [%i, %found], [%k2, %mbody]\n";
+        $out .= "  %md = icmp sge i64 %k, %ls\n";
+        $out .= "  br i1 %md, label %fin, label %mbody\n";
+        $out .= "mbody:\n";
+        $out .= "  %ksp = getelementptr inbounds i8, ptr %s, i64 %k\n";
+        $out .= "  %kc = load i8, ptr %ksp\n";
+        $out .= "  %kci = zext i8 %kc to i64\n";
+        $out .= "  %kcp = getelementptr inbounds [256 x i8], ptr %tab, i64 0, i64 %kci\n";
+        $out .= "  %kr = load i8, ptr %kcp\n";
+        $out .= "  %kdp = getelementptr inbounds i8, ptr %buf, i64 %k\n";
+        $out .= "  store i8 %kr, ptr %kdp\n";
+        $out .= "  %k2 = add i64 %k, 1\n";
+        $out .= "  br label %mloop\n";
+        $out .= "fin:\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %ls\n";
+        $out .= "  store i8 0, ptr %np\n";
+        $out .= "  ret ptr %buf\n";
+        $out .= "same:\n";
+        $out .= "  call void @__mir_rc_retain_str(ptr %s)\n";
+        $out .= "  ret ptr %s\n";
+        $out .= "}\n";
+        return $out;
+    }
+
     public function caseConv(string $fn, int $lo, int $hi, int $delta): string
     {
         $out  = "\ndefine ptr @" . $fn . "(ptr %s) {\n";
