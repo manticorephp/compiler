@@ -1,0 +1,29 @@
+decimal_point,thousands_sep,int_curr_symbol,currency_symbol,mon_decimal_point,mon_thousands_sep,positive_sign,negative_sign,int_frac_digits,frac_digits,p_cs_precedes,p_sep_by_space,n_cs_precedes,n_sep_by_space,p_sign_posn,n_sign_posn,grouping,mon_grouping
+string(1) "."
+string(0) ""
+int(127)
+array(0) {
+}
+0 0 3 14d1e591f62b4822f9507161e702710d
+0 2 4 8c5e59241a7675caa48da7e73c76e458
+0 3 5 6203478754ff7854c155f0ba8d594da1
+0 16 3 14d1e591f62b4822f9507161e702710d
+0 19 5 e71c42f76cb9cf1e18cc70ac4ee15ba5
+0 32 3 14d1e591f62b4822f9507161e702710d
+0 35 5 e71c42f76cb9cf1e18cc70ac4ee15ba5
+1 0 251 ec4a587f5e3916336989896db6fa2018
+1 2 252 394c29aabde7d012dd78d78a8802adb3
+1 3 253 84fd3017d0519ef97fb280944e37bbf5
+1 16 3 14d1e591f62b4822f9507161e702710d
+1 19 5 e71c42f76cb9cf1e18cc70ac4ee15ba5
+1 32 251 ec4a587f5e3916336989896db6fa2018
+1 35 253 84fd3017d0519ef97fb280944e37bbf5
+{"\"":"&quot;","&":"&amp;","'":"&#039;","<":"&lt;",">":"&gt;"}
+{"\"":"&quot;","&":"&amp;","'":"&#039;","<":"&lt;",">":"&gt;","\u00a0":"&nbsp;","\u00a1":"&iexcl;","\u00a2":"&cent;"}
+101 d41d8cd98f00b204e9800998ecf8427e
+5
+6465662031323320e2e1e020616263 6162630ae2e1e00a3132330a646566
+e22028782920e1e0 e1e00ae220287829
+ 
+610a20e1e00d620a 610a20e1e00d620a
+e620616263206465662067686920e5e4e320e2e1e0 e2e1e00ae5e4e30a6768690a6465660ae620616263

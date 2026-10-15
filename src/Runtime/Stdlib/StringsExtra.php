@@ -1386,3 +1386,91 @@ function strcoll(string $string1, string $string2): int
     }
     return $a === $b ? 0 : ($a < $b ? -\ord($string2[$n]) : \ord($string1[$n]));
 }
+
+/** Hebrev: convert logical Hebrew text (ISO-8859-8) to visual text. Port of php's string.c. */
+function hebrev(string $string, int $max_chars_per_line = 0): string
+{
+    $n = \strlen($string);
+    if ($n === 0) { return ""; }
+    /** @var string[] $heb */
+    $heb = \array_fill(0, $n, "");
+    $tgt = $n - 1;
+    $bs = 0; $be = 0; $tmp = 0;
+    $b0 = \ord($string[0]);
+    $hebBlock = $b0 >= 224 && $b0 <= 250;
+    do {
+        if ($hebBlock) {
+            while ($tmp + 1 < $n && $be < $n - 1) {
+                $c = $string[$tmp + 1];
+                $o = \ord($c);
+                if (!(($o >= 224 && $o <= 250) || $c === " " || $c === "\t" || \ctype_punct($c) || $c === "\n")) { break; }
+                $tmp++; $be++;
+            }
+            for ($i = $bs + 1; $i <= $be + 1; $i++) {
+                $c = $string[$i - 1];
+                if ($c === "(") { $c = ")"; } elseif ($c === ")") { $c = "("; }
+                elseif ($c === "[") { $c = "]"; } elseif ($c === "]") { $c = "["; }
+                elseif ($c === "{") { $c = "}"; } elseif ($c === "}") { $c = "{"; }
+                elseif ($c === "<") { $c = ">"; } elseif ($c === ">") { $c = "<"; }
+                elseif ($c === "\\") { $c = "/"; } elseif ($c === "/") { $c = "\\"; }
+                $heb[$tgt] = $c;
+                $tgt--;
+            }
+            $hebBlock = false;
+        } else {
+            while ($tmp + 1 < $n && $be < $n - 1) {
+                $c = $string[$tmp + 1];
+                $o = \ord($c);
+                if (($o >= 224 && $o <= 250) || $c === "\n") { break; }
+                $tmp++; $be++;
+            }
+            while ($be > $bs) {
+                $c = $string[$tmp];
+                if (!($c === " " || $c === "\t" || \ctype_punct($c)) || $c === "/" || $c === "-") { break; }
+                $tmp--; $be--;
+            }
+            for ($i = $be + 1; $i >= $bs + 1; $i--) {
+                $heb[$tgt] = $string[$i - 1];
+                $tgt--;
+            }
+            $hebBlock = true;
+        }
+        $bs = $be + 1;
+    } while ($be < $n - 1);
+
+    $out = "";
+    $begin = $n - 1;
+    $end = $n - 1;
+    while (true) {
+        $cc = 0;
+        while (($max_chars_per_line === 0 || $cc < $max_chars_per_line) && $begin > 0) {
+            $cc++;
+            $begin--;
+            if ($begin <= 0 || $heb[$begin] === "\n" || $heb[$begin] === "\r") {
+                while ($begin > 0 && ($heb[$begin - 1] === "\n" || $heb[$begin - 1] === "\r")) { $begin--; $cc++; }
+                break;
+            }
+        }
+        if ($cc === $max_chars_per_line) {
+            $ncc = $cc;
+            $nb = $begin;
+            while ($ncc > 0) {
+                $c = $heb[$nb];
+                if ($c === " " || $c === "\t" || $c === "\n" || $c === "\r") { break; }
+                $nb++;
+                $ncc--;
+            }
+            if ($ncc > 0) { $begin = $nb; }
+        }
+        $ob = $begin;
+        if ($heb[$begin] === " " || $heb[$begin] === "\t") { $heb[$begin] = "\n"; }
+        while ($begin <= $end && ($heb[$begin] === "\n" || $heb[$begin] === "\r")) { $begin++; }
+        for ($i = $begin; $i <= $end; $i++) { $out = $out . $heb[$i]; }
+        for ($i = $ob; $i <= $end && ($heb[$i] === "\n" || $heb[$i] === "\r"); $i++) { $out = $out . $heb[$i]; }
+        $begin = $ob;
+        if ($begin <= 0) { break; }
+        $begin--;
+        $end = $begin;
+    }
+    return $out;
+}

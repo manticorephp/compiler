@@ -83,3 +83,29 @@ function dba_list(): array
 {
     return [];
 }
+
+
+/** CONNECTION_NORMAL: a CLI process has no client connection. */
+function connection_status(): int
+{
+    return 0;
+}
+
+/** Process title is kept in-process only (no prctl / setproctitle). */
+function __mc_proc_title(?string $set = null): string
+{
+    static $title = '';
+    if ($set !== null) { $title = $set; }
+    return $title;
+}
+
+function cli_get_process_title(): string
+{
+    return \__mc_proc_title();
+}
+
+function cli_set_process_title(string $title): bool
+{
+    \__mc_proc_title($title);
+    return true;
+}

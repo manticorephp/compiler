@@ -1,0 +1,32 @@
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+bool(true)
+array(0) {
+}
+array(1) {
+  ["http"]=>
+  array(1) {
+    ["method"]=>
+    string(4) "POST"
+  }
+}
+bool(true)
+array(1) {
+  ["http"]=>
+  array(2) {
+    ["method"]=>
+    string(4) "POST"
+    ["header"]=>
+    string(4) "X: y"
+  }
+}
+bool(true)
+array(1) {
+  ["http"]=>
+  array(1) {
+    ["method"]=>
+    string(3) "PUT"
+  }
+}
