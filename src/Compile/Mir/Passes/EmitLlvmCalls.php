@@ -1429,7 +1429,8 @@ trait EmitLlvmCalls
         if (!$this->invokePinsCallee($iv, $iv->callee)) {
             // A closure LITERAL callee (`(function () use ($x) {…})()`) is a fresh +1
             // nobody else binds: give it back once the call returns.
-            if ($iv->callee->kind === Node::KIND_CLOSURE) {
+            // A generator closure is the exception: the Generator keeps borrowing the env.
+            if ($iv->callee->kind === Node::KIND_CLOSURE && !$n->type->isGenerator()) {
                 $this->rt->needsClosureRc = true;
                 $env = $this->lastValue;
                 $out .= $this->emitClosureStructInvoke($n, $env);
