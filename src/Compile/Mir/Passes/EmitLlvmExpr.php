@@ -4619,6 +4619,26 @@ trait EmitLlvmExpr
         $out .= $endL . ":\n";
         return $out;
     }
+    /**
+     * `%$res = __mir_obj_to_str($v)` for an object cell. The dispatcher is generated from THIS program's
+     * class table, so a library module (the stdlib, whose `str_replace`/`preg_replace` bodies coerce an
+     * object subject) has only a local copy with no arm for a user class. A library goes through the hook
+     * the main module publishes, falling back to its own copy when no program did.
+     */
+    private function objToStrCallIr(string $v, string $res): string
+    {
+        // $this->emitLibrary, not $this->moduleIsLibrary: the latter is false for the stdlib.
+        if (!$this->emitLibrary) {
+            return '  ' . $res . ' = call ptr @manticore___mir_obj_to_str(i64 ' . $v . ")\n";
+        }
+        $hk = $this->ssa->allocReg();
+        $has = $this->ssa->allocReg();
+        $fp = $this->ssa->allocReg();
+        $out  = '  ' . $hk . " = load ptr, ptr @__mir_obj_to_str_hook\n";
+        $out .= '  ' . $has . ' = icmp ne ptr ' . $hk . ", null\n";
+        $out .= '  ' . $fp . ' = select i1 ' . $has . ', ptr ' . $hk . ", ptr @manticore___mir_obj_to_str\n";
+        return $out . '  ' . $res . ' = call ptr ' . $fp . '(i64 ' . $v . ")\n";
+    }
     private function coerceCellToStr(string $v): string
     {
         $this->rt->needsTaggedToStr = true;
@@ -4650,7 +4670,7 @@ trait EmitLlvmExpr
         $os = $this->ssa->allocReg();
         // The dispatcher takes the CELL itself: its arms are `instanceof`, which
         // unboxes on the tag the same way every other cell consumer does.
-        $out .= '  ' . $os . ' = call ptr @manticore___mir_obj_to_str(i64 ' . $v . ")\n";
+        $out .= $this->objToStrCallIr($v, $os);
         $out .= '  store ptr ' . $os . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $scaL . ":\n";
@@ -6382,7 +6402,7 @@ trait EmitLlvmExpr
         $out .= '  br i1 ' . $isObj . ', label %' . $objL . ', label %' . $scaL . "\n";
         $out .= $objL . ":\n";
         $os = $this->ssa->allocReg();
-        $out .= '  ' . $os . ' = call ptr @manticore___mir_obj_to_str(i64 ' . $v . ")\n";
+        $out .= $this->objToStrCallIr($v, $os);
         $out .= $this->emitOutStr($os);
         $out .= '  br label %' . $endL . "\n";
         $out .= $scaL . ":\n";

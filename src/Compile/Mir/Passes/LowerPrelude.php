@@ -360,7 +360,7 @@ trait LowerPrelude
         $soft = "function __mir_obj_to_str_soft(mixed \$v): ?string {\n" . $head;
         $arm = 0;
         $helperByOwner = [];
-        foreach ($this->walkableClassesDerivedFirst() as $cname) {
+        foreach ($this->walkableClassesDerivedFirst(true) as $cname) {
             $owner = $this->methodOwnerClass($cname, "__toString");
             if ($owner === "") { continue; }
             if (isset($helperByOwner[$owner])) {
@@ -573,7 +573,8 @@ trait LowerPrelude
         return $p !== false && isset($this->walkerReachableClasses[\substr($cname, $p + 1)]);
     }
 
-    private function walkableClassesDerivedFirst(): array
+    /** @param bool $all every class, not only the ones a walker reaches (a `__toString` arm must not depend on reachability) */
+    private function walkableClassesDerivedFirst(bool $all = false): array
     {
         $names = [];
         $depths = [];
@@ -581,7 +582,7 @@ trait LowerPrelude
             if ($cname === "stdClass") { continue; }
             if ($cd->isStruct) { continue; }
             if ($this->isTypeDef($cname)) { continue; }
-            if ($this->walkerReachabilityKnown) {
+            if ($this->walkerReachabilityKnown && !$all) {
                 // A prelude class is born inside a builtin (date_create(),
                 // IntlTimeZone::createTimeZone()), where no user `new` names it;
                 // without an arm the bag walk reads a declared object as a bag.

@@ -196,6 +196,44 @@ final class TypeCheck
     }
 
     /**
+     * Codegen builtins have no declared signature, so the string cast {@see checkArgs} inserts for a
+     * `string` parameter never reached them: `strlen($stringable)` counted the object's bytes and
+     * `strtoupper($stringable)` upper-cased its pointer. These take their text through `__toString`
+     * in php; an object bound to one of their string positions is rendered here. Positions only —
+     * `get_class`, `spl_object_id`, `method_exists`, `__mc_refl_of` take the object itself.
+     *
+     * @var array<string, int[]>
+     */
+    private const STRING_ARG_BUILTINS = [
+        'strlen' => [0], 'strtolower' => [0], 'strtoupper' => [0], 'ucfirst' => [0], 'lcfirst' => [0],
+        'ucwords' => [0], 'trim' => [0], 'ltrim' => [0], 'rtrim' => [0], 'chop' => [0], 'strrev' => [0],
+        'str_repeat' => [0], 'substr' => [0], 'nl2br' => [0], 'addslashes' => [0], 'md5' => [0],
+        'sha1' => [0], 'crc32' => [0], 'bin2hex' => [0], 'base64_encode' => [0], 'urlencode' => [0],
+        'rawurlencode' => [0], 'htmlspecialchars' => [0], 'htmlentities' => [0], 'strip_tags' => [0],
+        'wordwrap' => [0], 'str_word_count' => [0], 'ctype_alpha' => [0], 'is_numeric' => [],
+        'strpos' => [0, 1], 'stripos' => [0, 1], 'strrpos' => [0, 1], 'strripos' => [0, 1],
+        'strstr' => [0, 1], 'stristr' => [0, 1], 'strrchr' => [0, 1], 'str_contains' => [0, 1],
+        'str_starts_with' => [0, 1], 'str_ends_with' => [0, 1], 'strcmp' => [0, 1], 'strcasecmp' => [0, 1],
+        'strncmp' => [0, 1], 'strncasecmp' => [0, 1], 'strnatcmp' => [0, 1], 'strnatcasecmp' => [0, 1],
+        'substr_count' => [0, 1], 'strspn' => [0, 1], 'strcspn' => [0, 1], 'similar_text' => [0, 1],
+        'levenshtein' => [0, 1], 'str_pad' => [0, 2], 'explode' => [0, 1],
+    ];
+
+    private function renderStringableBuiltinArgs(string $fnName, Node $site): void
+    {
+        $key = \strtolower(\ltrim($fnName, '\\'));
+        $pos = self::STRING_ARG_BUILTINS[$key] ?? null;
+        if ($pos === null || isset($this->ffiFns[$fnName])) { return; }
+        foreach ($pos as $ai) {
+            if (!isset($site->args[$ai])) { continue; }
+            $arg = $site->args[$ai];
+            if ($arg->kind === Node::KIND_SPREAD || $arg->type->kind !== Type::KIND_OBJ) { continue; }
+            $cast = new \Compile\Mir\Cast('string', $arg, Type::string_());
+            $cast->line = $arg->line;
+            $site->args[$ai] = $cast;
+        }
+    }
+    /**
      * @param Node[] $args
      *
      * Map each positional arg to its declared param. An implicit leading
@@ -206,7 +244,7 @@ final class TypeCheck
     private function checkArgs(string $fnName, string $label, array $args, string $inFn, int $recv, Node $site): void
     {
         $params = $this->paramsByFn[$fnName] ?? null;
-        if ($params === null) { return; }
+        if ($params === null) { $this->renderStringableBuiltinArgs($fnName, $site); return; }
         // A Monomorphize clone is named `first$mono$p0_vec_cell`; the message names the source function.
         $m = \strpos($label, '$mono$');
         if ($m !== false) { $label = \substr($label, 0, $m); }
