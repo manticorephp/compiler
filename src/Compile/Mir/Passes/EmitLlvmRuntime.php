@@ -3865,6 +3865,10 @@ end:
         $out .= "  %isdd = icmp eq i64 %col, " . (string)\Compile\MemoryAbi::COLOR_DEAD . "\n";
         $out .= "  br i1 %isdd, label %mrshell, label %mrlive\n";
         $out .= "mrshell:\n";
+        // A freed shell is a freed object: counting it keeps the adaptive threshold at its default.
+        $out .= "  %shfr = load i64, ptr @__manticore_cc_freed\n";
+        $out .= "  %shfr1 = add i64 %shfr, 1\n";
+        $out .= "  store i64 %shfr1, ptr @__manticore_cc_freed\n";
         $out .= "  %shbase = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->poolFreeCall('%shbase');
         $out .= "  br label %mrn\n";
@@ -3881,6 +3885,9 @@ end:
         $out .= "  %mralive = icmp sgt i64 %mrv2, 0\n";
         $out .= "  br i1 %mralive, label %mrn, label %mrfree2\n";
         $out .= "mrfree2:\n";
+        $out .= "  %mf0 = load i64, ptr @__manticore_cc_freed\n";
+        $out .= "  %mf1 = add i64 %mf0, 1\n";
+        $out .= "  store i64 %mf1, ptr @__manticore_cc_freed\n";
         $out .= "  %fbase = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
         $out .= $this->poolFreeCall('%fbase');

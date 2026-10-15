@@ -2081,7 +2081,7 @@ trait EmitLlvmObjects
         // every subtype holds the slot, and the class_id default is what keeps
         // a store into one that does not off a foreign offset.
         if ($within === '' && \count($fixed) === 1 && !$hasBag && $magic === []) {
-            $out .= $this->emitCellSlotStore($objPtr, $fixed[0], $prop, $cellVal);
+            $out .= $this->emitCellSlotStoreDropping($objPtr, $fixed[0], $prop, $cellVal, true, true);
             $this->lastValue = $cellVal;
             $this->lastValueType = 'i64';
             return $out;
@@ -2091,10 +2091,40 @@ trait EmitLlvmObjects
         // dispatch on class_id — through the shared writer, as reads already do
         // ({@see cellPropertyReadHelper}): the switch spliced into every site put
         // 11k DOMNode/SimpleXMLElement __set arms into php-cs-fixer.
-        $out .= '  call void ' . $this->cellPropertyWriteHelper($prop, $within)
+        $out .= '  call void ' . $this->cellPropertyWriteHelper($prop, $within, true, true)
               . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
         $this->lastValue = $cellVal;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * {@see emitCellSlotStore} that gives the OLD slot value back after the new one is in:
+     * a raw rc slot by its flavor (`$dropRaw`, the by-ref write-back's rule), a boxed CELL slot
+     * by tag (`$dropBoxed`; it owns what it holds). A slot a `&` promoted is not dropped:
+     * its word is a REF cell, not the value.
+     */
+    private function emitCellSlotStoreDropping(string $obj, ClassDef $cd, string $prop, string $cellVal, bool $dropRaw, bool $dropBoxed): string
+    {
+        $oldSlot = '';
+        $oldFlavor = '';
+        $spt = $cd->propertyTypes[$prop] ?? null;
+        if ($spt !== null && $cd->propertyWidth($prop) === 8) {
+            if ($this->cellPropBoxed($spt, $cd->name, $prop)) {
+                if ($dropBoxed && !isset($this->refCellPropNames[$prop])) { $oldFlavor = 'cell'; }
+            } elseif ($dropRaw && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))) {
+                $oldFlavor = $this->discardReleaseFlavor($spt);
+            }
+        }
+        $out = '';
+        if ($oldFlavor !== '') {
+            $og = $this->ssa->allocReg();
+            $oldSlot = $this->ssa->allocReg();
+            $out .= '  ' . $og . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+            $out .= '  ' . $oldSlot . ' = load i64, ptr ' . $og . "\n";
+        }
+        $out .= $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
+        if ($oldSlot !== '') { $out .= $this->rcReleaseReg($oldSlot, $oldFlavor); }
         return $out;
     }
 
@@ -3613,11 +3643,11 @@ trait EmitLlvmObjects
      * everything that depends only on the class and the name: each holder's slot
      * store, the `__set` arms, and the bag default.
      */
-    private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false): string
+    private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false, bool $dropBoxed = false): string
     {
         $key = '__mc_prop_write_' . $this->mangle($prop)
              . ($within === '' ? '' : '__in_' . $this->mangle($within))
-             . ($dropOld ? '__drop' : '');
+             . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '');
         $sym = '@manticore_' . $key;
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
@@ -3657,22 +3687,7 @@ trait EmitLlvmObjects
             // element array is cellified into a fresh copy, so the seed never
             // aliased the slot) must give the slot's OLD buffer back: the raw
             // overwrite below would strand it, and every element it holds.
-            $oldSlot = '';
-            $oldFlavor = '';
-            $spt = $cd->propertyTypes[$prop] ?? null;
-            if ($dropOld && $spt !== null && !$this->cellPropBoxed($spt, $cd->name, $prop)
-                && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))
-                && $cd->propertyWidth($prop) === 8) {
-                $oldFlavor = $this->discardReleaseFlavor($spt);
-                if ($oldFlavor !== '') {
-                    $og = $this->ssa->allocReg();
-                    $oldSlot = $this->ssa->allocReg();
-                    $bodies .= '  ' . $og . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
-                    $bodies .= '  ' . $oldSlot . ' = load i64, ptr ' . $og . "\n";
-                }
-            }
-            $bodies .= $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
-            if ($oldSlot !== '') { $bodies .= $this->rcReleaseReg($oldSlot, $oldFlavor); }
+            $bodies .= $this->emitCellSlotStoreDropping($obj, $cd, $prop, $cellVal, $dropOld, $dropBoxed);
             $bodies .= '  br label %' . $end . "\n";
         }
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {
