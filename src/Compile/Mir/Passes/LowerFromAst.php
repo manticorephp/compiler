@@ -5175,6 +5175,7 @@ final class LowerFromAst implements Pass
     private const RESOLVED_FNS = [
         'function_exists' => true, 'defined' => true, 'constant' => true,
         'compact' => true, 'call_user_func' => true, 'call_user_func_array' => true,
+        'forward_static_call' => true, 'forward_static_call_array' => true,
         'trigger_error' => true, 'user_error' => true, 'get_called_class' => true,
         'get_included_files' => true, 'get_required_files' => true,
     ];

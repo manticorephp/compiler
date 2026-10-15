@@ -258,6 +258,12 @@ function error_get_last(): ?array
     return __McErrors::$lastError;
 }
 
+/** Forget the last diagnostic: `error_get_last()` answers null again. */
+function error_clear_last(): void
+{
+    __McErrors::$lastError = [];
+}
+
 /**
  * The real `trigger_error`. `$file` / `$line` are filled in by the lowering
  * from the CALL SITE's span (a prelude function cannot see its caller's
