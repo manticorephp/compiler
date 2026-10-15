@@ -5085,7 +5085,8 @@ final class LowerFromAst implements Pass
     {
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
-            || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl';
+            || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl'
+            || $ext === 'bcmath';
     }
 
     /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),

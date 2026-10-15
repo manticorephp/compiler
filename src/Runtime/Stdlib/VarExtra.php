@@ -100,7 +100,8 @@ function extension_loaded(string $extension): bool
     // answers the EXPRESSION form. Two lists, one truth — change both.
     return $e === 'pcre' || $e === 'json' || $e === 'ctype'
         || $e === 'openssl' || $e === 'core' || $e === 'standard'
-        || $e === 'tokenizer' || $e === 'mbstring' || $e === 'intl';
+        || $e === 'tokenizer' || $e === 'mbstring' || $e === 'intl'
+        || $e === 'bcmath';
 }
 
 

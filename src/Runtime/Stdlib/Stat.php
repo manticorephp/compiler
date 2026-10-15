@@ -485,7 +485,7 @@ function zend_version(): string
 function get_loaded_extensions(bool $zend_extensions = false): array
 {
     if ($zend_extensions) { return []; }
-    return ['Core', 'date', 'pcre', 'zlib', 'openssl', 'ctype', 'json', 'mbstring', 'SPL', 'standard'];
+    return ['Core', 'date', 'pcre', 'zlib', 'openssl', 'ctype', 'json', 'mbstring', 'SPL', 'standard', 'bcmath'];
 }
 
 /**
