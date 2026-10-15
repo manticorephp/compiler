@@ -1173,14 +1173,14 @@ final class SpillFreshBases
         }
     }
 
-    /** `is_object(mk())` / `is_null(mk())`: the emitter gives the fresh object back right after the test. */
+    /** `is_object(mk())` / `is_null(mk())` / `gettype(mk())`: the emitter gives the fresh object back right after the test. */
     private function emitterReleasesObjArg(string $fn, Node $arg): bool
     {
         $p = \strrpos($fn, chr(92));
         $bare = $p === false ? $fn : \substr($fn, $p + 1);
         $k = $arg->type->kind;
         return ($bare === 'is_object' && ($k === Type::KIND_OBJ || $k === Type::KIND_CELL))
-            || ($bare === 'is_null' && $k === Type::KIND_OBJ);
+            || (($bare === 'is_null' || $bare === 'gettype' || $bare === 'get_debug_type') && $k === Type::KIND_OBJ);
     }
 
     private function isTypePredicate(string $fn): bool
