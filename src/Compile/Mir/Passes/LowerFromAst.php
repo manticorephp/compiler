@@ -582,6 +582,10 @@ final class LowerFromAst implements Pass
     public string $dsSrc = '';
     /** ext/random (Random\Randomizer, engines) — DEMAND-GATED braced-namespace tree. */
     public string $randomSrc = '';
+    /** ext/bcmath (BcMath\Number) — DEMAND-GATED braced-namespace tree. */
+    public string $bcmathSrc = '';
+    /** Manticore\Overloadable — the operator-overloading interface (braced namespace). */
+    public string $overloadSrc = '';
     /** Filter\ exceptions (ext/filter) — braced namespace, always included. */
     public string $filterSrc = '';
     /** filter_var / filter_input entry points (global functions) — DEMAND-GATED. */
@@ -5490,7 +5494,8 @@ final class LowerFromAst implements Pass
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
             || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl'
-            || $ext === 'session';
+            || $ext === 'session'
+            || $ext === 'bcmath';
     }
 
     /** A type-tagged key for a compile-time scalar expression (`s:`/`i:`/`b:`/`n:`),
@@ -5575,6 +5580,7 @@ final class LowerFromAst implements Pass
     private const RESOLVED_FNS = [
         'function_exists' => true, 'defined' => true, 'constant' => true,
         'compact' => true, 'call_user_func' => true, 'call_user_func_array' => true,
+        'forward_static_call' => true, 'forward_static_call_array' => true,
         'trigger_error' => true, 'user_error' => true, 'get_called_class' => true,
         'get_included_files' => true, 'get_required_files' => true,
     ];

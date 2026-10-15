@@ -412,7 +412,7 @@ trait LowerFns
     {
         return [
             'acos', 'array_first', 'array_key_first', 'array_key_last',
-            'array_keys', 'array_last', 'array_values', 'asin', 'atan',
+            'array_keys', 'array_last', 'array_values', 'acosh', 'asin', 'asinh', 'atan', 'atanh', 'expm1', 'log1p',
             'atan2', 'ceil', 'cos', 'cosh', 'debug_backtrace', 'deg2rad',
             'exp', 'explode', 'floor', 'flush', 'fmod',
             'func_get_arg', 'func_get_args', 'func_num_args', 'hypot',

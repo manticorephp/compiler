@@ -1,0 +1,69 @@
+inc(a) string(1) "b"
+inc(z) string(2) "aa"
+inc(Az) string(2) "Ba"
+inc(zz) string(3) "aaa"
+inc(Zz) string(3) "AAa"
+inc(9) string(2) "10"
+inc(99) string(3) "100"
+inc(a9) string(2) "b0"
+inc(Zz9) string(4) "AAa0"
+inc() ValueError: str_increment(): Argument #1 ($string) must not be empty
+inc(a-b) ValueError: str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters
+dec(b) string(1) "a"
+dec(a) ValueError: str_decrement(): Argument #1 ($string) "a" is out of decrement range
+dec(aa) string(1) "z"
+dec(A0) string(1) "9"
+dec(10) string(1) "9"
+dec(100) string(2) "99"
+dec(0) ValueError: str_decrement(): Argument #1 ($string) "0" is out of decrement range
+dec(09) ValueError: str_decrement(): Argument #1 ($string) "09" is out of decrement range
+dec(Ab) string(2) "Aa"
+dec() ValueError: str_decrement(): Argument #1 ($string) must not be empty
+dec(!) ValueError: str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters
+"a b=3Dc" true
+"caf=C3=A9" true
+"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=\r\nxxxxxxxxxxxxxxxxxxxxxxxxx" true
+"line\r\nnext" true
+"tab=09=20\r\n" true
+"=3D" true
+"" true
+"ab"
+"AB"
+"x y"
+"=4G"
+""
+"ab"
+"="
+"`\n" true
+"!80``\n`\n" true
+"#86)C\n`\n" true
+"+:&5L;&\\@=V]R;&0`\n`\n" true
+"M>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ\nM>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ\n>>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ>'EZ\n`\n" true
+ValueError: convert_uudecode(): Argument #1 ($data) is not a valid uuencoded string
+ValueError: convert_uudecode(): Argument #1 ($data) is not a valid uuencoded string
+R163 R163 A226 T522 P236 H555 0000 A000 L300 0000 
+0MPSN NFT SXWRTS WX SFR SNS TJ FST LF BRJ 0M  FN 0M EBR
+ValueError: metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0
+""=>int(0)
+" "=>int(0)
+"1"=>int(1)
+"+1"=>int(1)
+"-1"=>int(-1)
+"1k"=>int(1024)
+"1K"=>int(1024)
+" 1 k"=>int(1024)
+"1m"=>int(1048576)
+"1G"=>int(1073741824)
+"012"=>int(10)
+"0x1f"=>int(31)
+"0b11"=>int(3)
+"0o17"=>int(15)
+"0x1fk"=>int(31744)
+"1kb"=>ValueError: Invalid quantity "1kb": unknown multiplier "b", interpreting as "1" for backwards compatibility
+"1.5k"=>ValueError: Invalid quantity "1.5k", interpreting as "1k" for backwards compatibility
+"0o"=>ValueError: Invalid quantity "0o": no digits after base prefix, interpreting as "0" for backwards compatibility
+"k"=>ValueError: Invalid quantity "k": no valid leading digits, interpreting as "0" for backwards compatibility
+"1t"=>ValueError: Invalid quantity "1t": unknown multiplier "t", interpreting as "1" for backwards compatibility
+"0a"=>ValueError: Invalid prefix "0a", interpreting as "0" for backwards compatibility
+"9223372036854775808"=>ValueError: Invalid quantity "9223372036854775808": value is out of range, using overflow result for backwards compatibility
+"1\t2"=>ValueError: Invalid quantity "1\t2": unknown multiplier "2", interpreting as "1\t" for backwards compatibility

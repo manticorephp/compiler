@@ -2636,3 +2636,24 @@ function __mc_http_read_response(\Resource $sock, bool $followable = false): arr
         return [$body, '', $code];
     }
 }
+
+/**
+ * `socket_get_status()` — alias of stream_get_meta_data().
+ * @return array<string,mixed>
+ */
+function socket_get_status(\Resource $stream): array
+{
+    return \stream_get_meta_data($stream);
+}
+
+/** `socket_set_blocking()` — alias of stream_set_blocking(). */
+function socket_set_blocking(\Resource $stream, bool $enable): bool
+{
+    return \stream_set_blocking($stream, $enable);
+}
+
+/** `socket_set_timeout()` — alias of stream_set_timeout(). */
+function socket_set_timeout(\Resource $stream, int $seconds, int $microseconds = 0): bool
+{
+    return \stream_set_timeout($stream, $seconds, $microseconds);
+}

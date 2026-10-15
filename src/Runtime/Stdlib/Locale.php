@@ -48,3 +48,22 @@ function setlocale(int $category, mixed $locales = null): mixed
     if (\ptr_to_int($r) === 0) { return false; }
     return __mc_cstr($r);
 }
+
+
+/**
+ * localeconv() for the "C" locale only (what a fresh process has); a setlocale()
+ * to another locale is NOT reflected. 127 is CHAR_MAX, as glibc/Darwin report.
+ * @return array<string,mixed>
+ */
+function localeconv(): array
+{
+    return [
+        'decimal_point' => '.', 'thousands_sep' => '', 'int_curr_symbol' => '',
+        'currency_symbol' => '', 'mon_decimal_point' => '', 'mon_thousands_sep' => '',
+        'positive_sign' => '', 'negative_sign' => '',
+        'int_frac_digits' => 127, 'frac_digits' => 127, 'p_cs_precedes' => 127,
+        'p_sep_by_space' => 127, 'n_cs_precedes' => 127, 'n_sep_by_space' => 127,
+        'p_sign_posn' => 127, 'n_sign_posn' => 127,
+        'grouping' => [], 'mon_grouping' => [],
+    ];
+}

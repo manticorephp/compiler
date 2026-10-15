@@ -174,3 +174,58 @@ function fdiv(float $num1, float $num2): float
     $neg = ($num1 < 0.0) !== (\__float_bits($num2) < 0);
     return $neg ? -INF : INF;
 }
+
+/** PHP 8.5 `fpow()` — C `pow()` on floats: no int semantics, no exceptions (0 ** -1 is INF). */
+function fpow(float $num, float $exponent): float
+{
+    return \pow($num, $exponent);
+}
+/*
+ * log1p / expm1 / asinh / acosh / atanh are codegen builtins (libm). These bodies are the
+ * bootstrap twins the previous compiler generation links (it has never heard of the
+ * builtins); the new compiler shadows them. Kahan's formulas, not correctly rounded.
+ */
+function log1p(float $num): float
+{
+    $u = 1.0 + $num;
+    if ($u == 1.0) {
+        return $num;
+    }
+    return \log($u) * $num / ($u - 1.0);
+}
+
+function expm1(float $num): float
+{
+    $u = \exp($num);
+    if ($u == 1.0) {
+        return $num;
+    }
+    $um1 = $u - 1.0;
+    if ($um1 == -1.0) {
+        return -1.0;
+    }
+    if (\is_infinite($u)) {
+        return $u;
+    }
+    return $um1 * $num / \log($u);
+}
+
+function asinh(float $num): float
+{
+    $a = \abs($num);
+    $r = \log1p($a + $a * $a / (1.0 + \sqrt(1.0 + $a * $a)));
+    return $num < 0.0 ? -$r : $r;
+}
+
+function acosh(float $num): float
+{
+    if ($num < 1.0) {
+        return NAN;
+    }
+    return \log($num + \sqrt($num * $num - 1.0));
+}
+
+function atanh(float $num): float
+{
+    return 0.5 * \log1p(2.0 * $num / (1.0 - $num));
+}

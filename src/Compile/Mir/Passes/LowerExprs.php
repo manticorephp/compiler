@@ -147,7 +147,9 @@ trait LowerExprs
             }
             // `call_user_func($cb, ...$rest)` → invoke $cb with the rest args,
             // reusing the Invoke path (literal / FCC / const-callable dispatch).
-            if ($fnBare === 'call_user_func' && \count($expr->args) >= 1) {
+            // `forward_static_call` is the same call; php additionally forwards the late-static-binding
+            // class, which a static callable here resolves on its own (no forwarding is modelled).
+            if (($fnBare === 'call_user_func' || $fnBare === 'forward_static_call') && \count($expr->args) >= 1) {
                 $rest = [];
                 $ci = 1;
                 while ($ci < \count($expr->args)) { $rest[] = $expr->args[$ci]; $ci = $ci + 1; }
@@ -160,7 +162,7 @@ trait LowerExprs
             // Call that emitCall expands) or the known-closure invoke path.
             // Array/static/method callable + a runtime array remains
             // unsupported (StaticCall_/MethodCall_ don't expand a spread).
-            if ($fnBare === 'call_user_func_array' && \count($expr->args) === 2) {
+            if (($fnBare === 'call_user_func_array' || $fnBare === 'forward_static_call_array') && \count($expr->args) === 2) {
                 if ($expr->args[1]->kind === 'ArrayLit') {
                     $spread = [];
                     foreach ($this->arrayLitElements($expr->args[1]) as $el) {

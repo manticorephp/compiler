@@ -145,6 +145,20 @@ function set_exception_handler(mixed $callback): mixed
     return $prev;
 }
 
+/** php 8.5: the active error handler, or null when none is installed. */
+function get_error_handler(): mixed
+{
+    $n = \count(__McErrors::$errorHandlers);
+    return $n > 0 ? __McErrors::$errorHandlers[$n - 1] : null;
+}
+
+/** php 8.5: the active exception handler, or null when none is installed. */
+function get_exception_handler(): mixed
+{
+    $n = \count(__McErrors::$exceptionHandlers);
+    return $n > 0 ? __McErrors::$exceptionHandlers[$n - 1] : null;
+}
+
 /** Pop one exception handler. */
 function restore_exception_handler(): bool
 {
@@ -242,6 +256,12 @@ function error_get_last(): ?array
 {
     if (\count(__McErrors::$lastError) === 0) { return null; }
     return __McErrors::$lastError;
+}
+
+/** Forget the last diagnostic: `error_get_last()` answers null again. */
+function error_clear_last(): void
+{
+    __McErrors::$lastError = [];
 }
 
 /**

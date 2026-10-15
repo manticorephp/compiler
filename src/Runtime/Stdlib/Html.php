@@ -763,3 +763,43 @@ function strip_tags(string $string, string $allowed_tags = ""): string
     }
     return $out;
 }
+
+
+/**
+ * get_html_translation_table(). HTML_SPECIALCHARS = 0, HTML_ENTITIES = 1 (the
+ * constants are not defined by the stdlib). Supported: ENT_HTML401 / ENT_XHTML /
+ * ENT_XML1 over UTF-8 or ISO-8859-1. Zend's ENT_HTML5 table (1500+ names) and the
+ * other single-byte charsets throw ValueError instead of answering wrongly.
+ * @return array<string,string>
+ */
+function get_html_translation_table(int $table = 0, int $flags = 11, string $encoding = "UTF-8"): array
+{
+    $doctype = $flags & 48;
+    if ($doctype === 48 && $table === 1) {
+        throw new \ValueError("get_html_translation_table(): ENT_HTML5 entity table is not supported");
+    }
+    $enc = \strtoupper($encoding);
+    $latin1 = $enc === "ISO-8859-1" || $enc === "ISO8859-1";
+    if (!$latin1 && $enc !== "UTF-8" && $enc !== "") {
+        throw new \ValueError("get_html_translation_table(): charset \"" . $encoding . "\" is not supported");
+    }
+    /** @var array<string,string> $t */
+    $t = [];
+    if (($flags & 2) !== 0) { $t["\""] = "&quot;"; }
+    $t["&"] = "&amp;";
+    if (($flags & 1) !== 0) { $t["'"] = ($doctype === 16 || $doctype === 48 || ($doctype === 32 && $table === 0)) ? "&apos;" : "&#039;"; }
+    $t["<"] = "&lt;";
+    $t[">"] = "&gt;";
+    if ($table === 1 && $doctype !== 16) {
+        foreach (\__mc_html_entities_enc() as $ch => $name) {
+            if (\strlen($ch) === 1) { continue; }
+            if ($latin1) {
+                if (\strlen($ch) !== 2 || \ord($ch[0]) !== 0xC2 && \ord($ch[0]) !== 0xC3) { continue; }
+                $t[\chr(((\ord($ch[0]) & 3) << 6) | (\ord($ch[1]) & 63))] = "&" . $name . ";";
+            } else {
+                $t[$ch] = "&" . $name . ";";
+            }
+        }
+    }
+    return $t;
+}

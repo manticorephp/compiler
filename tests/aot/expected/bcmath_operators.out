@@ -1,0 +1,28 @@
+0: 13.5 s1
+1: 7.5 s1
+2: 31.5 s1
+3: 3.5 s1
+4: 1.5 s1
+5: 110.25 s2
+6: 8 s0
+7: -0.5 s1
+8: 11.75 s2
+9: 11.5 s1
+10: -10.5 s1
+11: false
+12: true
+13: true
+14: 1
+15: true
+16: true
+17: true
+18: ValueError: Right string operand cannot be converted to BcMath\Number
+19: ValueError: Left string operand cannot be converted to BcMath\Number
+20: DivisionByZeroError: Division by zero
+21: TypeError: Unsupported operand types: BcMath\Number + array
+22: false
+23: 26.0 s1
+24: 0.3333333333 s10
+9.0
+1.5
+0 1 2 

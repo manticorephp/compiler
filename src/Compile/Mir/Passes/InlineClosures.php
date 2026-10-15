@@ -80,6 +80,10 @@ final class InlineClosures implements Pass
     private array $captureCount = [];
     private ?Module $module = null;
     private int $fuseCounter = 0;
+    /** Rewriting a closure body: operator overloading only, no inlining / fusion. */
+    private bool $opOnly = false;
+    /** The node being rewritten is a whole statement (its value is unused). */
+    private bool $stmtPos = false;
     /** @var array<string,FunctionDef> every function by name (Ds method bodies to clone) */
     private array $fnByName = [];
     /** While a Ds method body is cloned: the local holding its callback. */
@@ -108,10 +112,13 @@ final class InlineClosures implements Pass
         }
         foreach ($fns as $rawFn) {
             $fn = $this->fnDef($rawFn);
-            // Never rewrite inside a closure body itself — keep the original
-            // available as an inline source and avoid recursive surprises.
-            if (isset($this->captureCount[$fn->name])) { continue; }
+            // Never inline/fuse inside a closure body itself — keep the original
+            // available as an inline source and avoid recursive surprises. Operator
+            // overloading still applies there: it is a per-node rewrite, and the
+            // untouched `$a + $b` on an object would run as integer arithmetic.
+            $this->opOnly = isset($this->captureCount[$fn->name]);
             $fn->body = $this->rewriteBlock($fn->body);
+            $this->opOnly = false;
         }
         $module->markPassApplied(self::NAME);
         return $module;
@@ -120,9 +127,134 @@ final class InlineClosures implements Pass
     private function rewriteBlock(Block $b): Block
     {
         $out = [];
-        foreach ($b->stmts as $s) { $out[] = $this->rewrite($s); }
+        foreach ($b->stmts as $s) {
+            $this->stmtPos = $s->kind === Node::KIND_INCDEC;
+            $out[] = $this->rewrite($s);
+            $this->stmtPos = false;
+        }
         $b->stmts = $out;
         return $b;
+    }
+
+    /**
+     * Operator overloading for an internal class (`BcMath\Number`, …): php lets a
+     * C-level class hook `+ - * / % ** <=> == < …`; userland has no such thing,
+     * so here a class opts in by declaring
+     *   `__operator(string $op, mixed $other, bool $swapped): static`  (arithmetic)
+     *   `__compare(mixed $other): int`                                 (ordering / ==)
+     * `$swapped` = the object was the RIGHT operand (`2 - $n`). Only a STATICALLY
+     * typed object operand is rewritten; an erased/cell operand keeps the old
+     * runtime behaviour (TypeError). `===` / `!==` stay identity.
+     */
+    private function tryOperator(Node $n): ?Node
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_NEG) {
+            if (!$this->hasHook($n->operand, '__operator')) { return null; }
+            return $this->opCall($n->operand, '__operator', [
+                new \Compile\Mir\StringConst('*', Type::string_()),
+                new \Compile\Mir\IntConst(-1, Type::int_()),
+                new \Compile\Mir\BoolConst(false, Type::bool_()),
+            ], $n->type);
+        }
+        if ($k === Node::KIND_CALL) {
+            if ($n->function !== 'pow' || \count($n->args) !== 2) { return null; }
+            return $this->arith('**', $n->args[0], $n->args[1], $n->type);
+        }
+        if ($k === Node::KIND_ADD) { return $this->arith('+', $n->left, $n->right, $n->type); }
+        if ($k === Node::KIND_SUB) { return $this->arith('-', $n->left, $n->right, $n->type); }
+        if ($k === Node::KIND_MUL) { return $this->arith('*', $n->left, $n->right, $n->type); }
+        if ($k === Node::KIND_DIV) { return $this->arith('/', $n->left, $n->right, $n->type); }
+        if ($k === Node::KIND_MOD) { return $this->arith('%', $n->left, $n->right, $n->type); }
+        if ($k === Node::KIND_SPACESHIP) {
+            if ($this->hasHook($n->left, '__compare')) { return $this->opCall($n->left, '__compare', [$n->right], Type::int_()); }
+            if ($this->hasHook($n->right, '__compare')) {
+                return new \Compile\Mir\Neg($this->opCall($n->right, '__compare', [$n->left], Type::int_()), Type::int_());
+            }
+            return null;
+        }
+        if ($k === Node::KIND_CMP) {
+            $op = $n->op;
+            if ($op === '===' || $op === '!==') { return null; }
+            if ($this->hasHook($n->left, '__compare')) {
+                return new \Compile\Mir\Cmp(
+                    $this->opCall($n->left, '__compare', [$n->right], Type::int_()),
+                    new \Compile\Mir\IntConst(0, Type::int_()), $op);
+            }
+            if ($this->hasHook($n->right, '__compare')) {
+                $flip = $op === '<' ? '>' : ($op === '>' ? '<' : ($op === '<=' ? '>=' : ($op === '>=' ? '<=' : $op)));
+                return new \Compile\Mir\Cmp(
+                    $this->opCall($n->right, '__compare', [$n->left], Type::int_()),
+                    new \Compile\Mir\IntConst(0, Type::int_()), $flip);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * `++$n` / `--$n` on an Overloadable local → `$n = $n->__operator('+', 1)`. A postfix
+     * form is accepted only as a whole statement (its old value would be unused); used as a
+     * value it would have to answer the OLD value, so it is refused rather than answering the new one.
+     */
+    private function tryIncDec(Node $n): ?Node
+    {
+        if (!$this->hasHook($n, '__operator')) { return null; }
+        if (!$n->prefix && !$this->stmtPos) {
+            throw new \RuntimeException(
+                'MIR.lower: postfix ' . $n->op . $n->op . ' on an Overloadable object is supported only as a statement; write ' . $n->op . $n->op . '$' . $n->name
+            );
+        }
+        $call = $this->opCall(
+            new LoadLocal($n->name, $n->type),
+            '__operator',
+            [
+                new \Compile\Mir\StringConst($n->op, Type::string_()),
+                new \Compile\Mir\IntConst(1, Type::int_()),
+                new \Compile\Mir\BoolConst(false, Type::bool_()),
+            ],
+            $n->type
+        );
+        return new \Compile\Mir\StoreLocal($n->name, $call, $n->type);
+    }
+
+    private function arith(string $op, Node $l, Node $r, Type $type): ?Node
+    {
+        if ($this->hasHook($l, '__operator')) {
+            return $this->opCall($l, '__operator', [
+                new \Compile\Mir\StringConst($op, Type::string_()), $r,
+                new \Compile\Mir\BoolConst(false, Type::bool_())], $type);
+        }
+        if ($this->hasHook($r, '__operator')) {
+            return $this->opCall($r, '__operator', [
+                new \Compile\Mir\StringConst($op, Type::string_()), $l,
+                new \Compile\Mir\BoolConst(true, Type::bool_())], $type);
+        }
+        return null;
+    }
+
+    /** @param Node[] $args */
+    private function opCall(Node $obj, string $method, array $args, Type $type): Node
+    {
+        return new MethodCall_($obj, $method, $args, $type);
+    }
+
+    /** Whether `$n` is statically an object whose class (or an ancestor) implements Manticore\Overloadable. */
+    private function hasHook(Node $n, string $method): bool
+    {
+        $t = $n->type;
+        if ($t->kind !== Type::KIND_OBJ || $this->module === null) { return false; }
+        $c = $t->class ?? '';
+        $guard = 0;
+        while ($c !== '' && $guard < 32) {
+            $guard = $guard + 1;
+            $cd = $this->module->classes[$c] ?? null;
+            if ($cd === null) { return false; }
+            foreach ($cd->interfaces as $i) {
+                if (\ltrim($i, '\\') === 'Manticore\\Overloadable') { return true; }
+            }
+            $c = $cd->parent;
+        }
+        return false;
     }
 
     /** Recurse every node, rebuilding children; splice at an eligible invoke. */
@@ -136,8 +268,14 @@ final class InlineClosures implements Pass
             if ($this->dsCbVar !== '' && $n->callee->kind === Node::KIND_LOAD_LOCAL && $this->loadLocal($n->callee)->name === $this->dsCbVar) {
                 return $this->dsCallbackExpr($n);
             }
+            if ($this->opOnly) { return $n; }
             $spliced = $this->tryInline($n);
             return $spliced ?? $n;
+        }
+
+        if ($n->kind === Node::KIND_INCDEC) {
+            $inc = $this->tryIncDec($n);
+            if ($inc !== null) { return $inc; }
         }
 
         // ── Leaves (no sub-nodes that can hold an invoke) ──
@@ -154,17 +292,17 @@ final class InlineClosures implements Pass
         }
 
         // ── Binary (left,right) ──
-        if ($n->kind === Node::KIND_ADD) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
-        if ($n->kind === Node::KIND_SUB) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
-        if ($n->kind === Node::KIND_MUL) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
-        if ($n->kind === Node::KIND_DIV) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
-        if ($n->kind === Node::KIND_MOD) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
-        if ($n->kind === Node::KIND_SPACESHIP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
-        if ($n->kind === Node::KIND_CMP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
+        if ($n->kind === Node::KIND_ADD) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $this->tryOperator($n) ?? $n; }
+        if ($n->kind === Node::KIND_SUB) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $this->tryOperator($n) ?? $n; }
+        if ($n->kind === Node::KIND_MUL) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $this->tryOperator($n) ?? $n; }
+        if ($n->kind === Node::KIND_DIV) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $this->tryOperator($n) ?? $n; }
+        if ($n->kind === Node::KIND_MOD) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $this->tryOperator($n) ?? $n; }
+        if ($n->kind === Node::KIND_SPACESHIP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $this->tryOperator($n) ?? $n; }
+        if ($n->kind === Node::KIND_CMP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $this->tryOperator($n) ?? $n; }
         if ($n->kind === Node::KIND_CONCAT) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
         if ($n->kind === Node::KIND_BITOP) { $n->left = $this->rewrite($n->left); $n->right = $this->rewrite($n->right); return $n; }
         // ── Unary (operand) ──
-        if ($n->kind === Node::KIND_NEG)    { $n->operand = $this->rewrite($n->operand); return $n; }
+        if ($n->kind === Node::KIND_NEG)    { $n->operand = $this->rewrite($n->operand); return $this->tryOperator($n) ?? $n; }
         if ($n->kind === Node::KIND_NOT)    { $n->operand = $this->rewrite($n->operand); return $n; }
         if ($n->kind === Node::KIND_BITNOT) { $n->operand = $this->rewrite($n->operand); return $n; }
         if ($n->kind === Node::KIND_CAST) {
@@ -195,6 +333,9 @@ final class InlineClosures implements Pass
             $args = [];
             foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
             $n->args = $args;
+            $op = $this->tryOperator($n);
+            if ($op !== null) { return $op; }
+            if ($this->opOnly) { return $n; }
             $fused = $this->tryFuseArrayFn($n);
             return $fused ?? $n;
         }
@@ -301,7 +442,11 @@ final class InlineClosures implements Pass
         if ($n->kind === Node::KIND_FOR) {
             if ($n->init !== null) { $n->init = $this->rewrite($n->init); }
             if ($n->cond !== null) { $n->cond = $this->rewrite($n->cond); }
-            if ($n->step !== null) { $n->step = $this->rewrite($n->step); }
+            if ($n->step !== null) {
+                $this->stmtPos = $n->step->kind === Node::KIND_INCDEC;
+                $n->step = $this->rewrite($n->step);
+                $this->stmtPos = false;
+            }
             $this->rewriteBlock($n->body);
             return $n;
         }

@@ -1965,3 +1965,61 @@ function getcwd(): string|false
     \Runtime\Libc\free($buf);
     return $s;
 }
+
+
+// ── stream defaults / include-path resolution ──────────────────────────
+
+/** The default stream context (stream_context_get_default / _set_default). */
+function __mc_default_context(): \Resource
+{
+    static $d = null;
+    if ($d === null) { $d = \stream_context_create(); }
+    return $d;
+}
+
+/** @param array<string,mixed>|null $options */
+function stream_context_get_default(?array $options = null): \Resource
+{
+    $d = \__mc_default_context();
+    if ($options !== null) { \stream_context_set_option($d, $options); }
+    return $d;
+}
+
+/** @param array<string,mixed> $options */
+function stream_context_set_default(array $options): \Resource
+{
+    $d = \__mc_default_context();
+    \stream_context_set_option($d, $options);
+    return $d;
+}
+
+/** Only the 'options' key is honoured; a 'notification' callback is ignored. @param array<string,mixed> $params */
+function stream_context_set_params(\Resource $context, array $params): bool
+{
+    if (isset($params['options']) && \is_array($params['options'])) {
+        \stream_context_set_option($context, $params['options']);
+    }
+    return true;
+}
+
+/** No stream filters are implemented yet, so the honest list is empty. @return string[] */
+function stream_get_filters(): array
+{
+    return [];
+}
+
+function stream_resolve_include_path(string $filename): string|false
+{
+    $abs = \strlen($filename) > 0 && $filename[0] === '/';
+    $rel = \substr($filename, 0, 2) === './' || \substr($filename, 0, 3) === '../';
+    if ($abs || $rel) {
+        return \file_exists($filename) ? \realpath($filename) : false;
+    }
+    $inc = \get_include_path();
+    foreach (\explode(':', $inc === false ? '' : $inc) as $dir) {
+        if ($dir === '') { continue; }
+        $p = $dir . '/' . $filename;
+        if (\file_exists($p)) { return \realpath($p); }
+    }
+    return false;
+}

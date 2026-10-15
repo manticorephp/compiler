@@ -2699,6 +2699,30 @@ trait EmitLlvmObjects
         return '';
     }
 
+    /** Whether `$cls` or an ancestor is declared `readonly class`. */
+    private function isReadonlyClassChain(string $cls): bool
+    {
+        $c = $cls;
+        while ($c !== '' && isset($this->classes[$c])) {
+            if ($this->classes[$c]->isReadonlyClass) { return true; }
+            $c = $this->classes[$c]->parent;
+        }
+        return false;
+    }
+
+    /** `throw new Error($msg)` in place. */
+    private function emitThrowError(string $msg): string
+    {
+        return $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                new \Compile\Mir\StringConst($msg, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        ));
+    }
+
     private function emitStoreProperty(\Compile\Mir\StoreProperty $n): string
     {
         // A UNION receiver has no single layout: dispatch the store on the runtime
@@ -2753,6 +2777,13 @@ trait EmitLlvmObjects
                 );
                 return $out . $this->emitNode($throw);
             }
+        }
+        // `readonly class`: a property that is not declared cannot be created.
+        if ($roCls !== '' && $this->isReadonlyClassChain($roCls)
+            && $this->classes[$roCls]->propertyOffset($n->property) === -1
+            && $this->resolveMethodClass($roCls, '__set') === '') {
+            return $this->emitNode($n->value)
+                . $this->emitThrowError('Cannot create dynamic property ' . $roCls . '::$' . $n->property);
         }
         // PHP 8.4 property hook: a set hook replaces the write (unless bypassed —
         // default init — or we are inside this property's own hook).
@@ -6397,6 +6428,12 @@ trait EmitLlvmObjects
             if ($t->kind === Node::KIND_PROPERTY_ACCESS) {
                 $upa = $t;
                 $ucls = $upa->object->type->class ?? '';
+                // A readonly property cannot be unset from outside its declaring class.
+                $uro = $ucls !== '' ? $this->readonlyDeclClass($ucls, $upa->property) : '';
+                if ($uro !== '' && !\str_starts_with($this->frame->name, $uro . '__')) {
+                    $out .= $this->emitThrowError('Cannot unset readonly property ' . $uro . '::$' . $upa->property);
+                    continue;
+                }
                 if ($ucls !== '' && isset($this->classes[$ucls])
                     && $this->classes[$ucls]->propertyOffset($upa->property) === -1) {
                     $unCls = $this->resolveMethodClass($ucls, '__unset');

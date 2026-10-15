@@ -248,6 +248,7 @@ trait LowerPrelude
                 "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
                 "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
                 "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->randomSrc,
+                "<?php\n" . $this->bcmathSrc, "<?php\n" . $this->overloadSrc,
                 "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->filterSrc,
             ]);
             if (!$this->includeArrayFnsExt
@@ -325,6 +326,16 @@ trait LowerPrelude
         if ($this->randomSrc !== '') {
             $rn = \Parser\Parser::parseSource("<?php\n" . $this->randomSrc);
             foreach ($rn->statements as $s) { $stmts[] = $s; }
+        }
+        // Manticore\Overloadable — braced namespace, an interface only.
+        if ($this->overloadSrc !== '') {
+            $ov = \Parser\Parser::parseSource("<?php\n" . $this->overloadSrc);
+            foreach ($ov->statements as $s) { $stmts[] = $s; }
+        }
+        // BcMath\ — braced namespace, calls the stdlib bc* functions only.
+        if ($this->bcmathSrc !== '') {
+            $bm = \Parser\Parser::parseSource("<?php\n" . $this->bcmathSrc);
+            foreach ($bm->statements as $s) { $stmts[] = $s; }
         }
         // Filter\ — braced namespace, extends \Exception only.
         if ($this->filterSrc !== '') {
@@ -1533,6 +1544,7 @@ trait LowerPrelude
             // htmlspecialchars / entities
             'ENT_NOQUOTES' => 0, 'ENT_COMPAT' => 2, 'ENT_QUOTES' => 3,
             'ENT_IGNORE' => 4, 'ENT_SUBSTITUTE' => 8, 'ENT_DISALLOWED' => 128,
+            'HTML_SPECIALCHARS' => 0, 'HTML_ENTITIES' => 1,
             'ENT_HTML401' => 0, 'ENT_XML1' => 16, 'ENT_XHTML' => 32, 'ENT_HTML5' => 48,
             // filesystem: fseek whence + file_put_contents / flock flags
             'SEEK_SET' => 0, 'SEEK_CUR' => 1, 'SEEK_END' => 2,

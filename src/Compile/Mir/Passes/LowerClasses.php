@@ -628,6 +628,7 @@ trait LowerClasses
         $cd->methodMeta = $methodMeta;
         $cd->attributes = $this->attrNames($decl->attributes);
         $cd->isFinal = $decl->isFinal;
+        $cd->isReadonlyClass = $decl->isReadonly;
         $cd->isAbstract = $decl->isAbstract;
         // Narrow slots: a property declared as a `#[TypeDef(repr: 'u8')]` occupies
         // ONE byte, not a word. This is where `repr` stops being a validated label
@@ -874,6 +875,7 @@ trait LowerClasses
         $cd->propertyFloat32 = $m->propertyFloat32;
         $cd->attributes = $m->attributes;
         $cd->isFinal = $m->isFinal;
+        $cd->isReadonlyClass = $m->isReadonlyClass;
         $cd->isAbstract = $m->isAbstract;
         // Widths land BEFORE the offsets are recomputed below — propertyOffset
         // walks them, so checking first would measure the pre-stamp layout.

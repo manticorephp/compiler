@@ -45,6 +45,7 @@ final class ExternClassMeta
     public array $interfaces = [];
 
     public bool $isFinal = false;
+    public bool $isReadonlyClass = false;
     public bool $isAbstract = false;
     public bool $isStruct = false;
     public bool $hasBag = false;
