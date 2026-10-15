@@ -307,7 +307,7 @@ final class OwnershipFlow implements Pass
             // A bare `array` param the prologue copies (a closure's, whose uniform
             // ABI erases it) holds the frame's own copy: owned under the erased
             // class, or every `unset($a[$k]); return $a;` caster leaked the copy.
-            if ($ks === '' && isset($this->erasedParams[$p->name]) && !$fn->isGenerator
+            if ($ks === '' && $isClosure && isset($this->erasedParams[$p->name]) && !$fn->isGenerator
                 && VecCopyOnAssign::paramCopiedOnEntry($fn, $p, $isClosure)) {
                 $k = $this->intern($p->name, Ownership::ERASED_ARR, $p->type);
                 $entry[$p->name] = $k;
