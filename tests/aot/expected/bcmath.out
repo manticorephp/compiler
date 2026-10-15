@@ -1,0 +1,61 @@
+"0.00"
+"0.00"
+"0.00"
+"1.00"
+"0.50"
+"1.00"
+"0.00"
+"12.50"
+ValueError: bcadd(): Argument #1 ($num1) is not well-formed
+ValueError: bcadd(): Argument #1 ($num1) is not well-formed
+ValueError: bcadd(): Argument #1 ($num1) is not well-formed
+"1111111110111111111011111111100"
+"-0.005"
+"-1.50"
+"0.0000"
+"-121932631356500531.3472031691"
+"0.00"
+"0.33333333333333333333"
+"-2.5"
+DivisionByZeroError: Division by zero
+"-1.5"
+"1"
+DivisionByZeroError: Modulo by zero
+["-3","-1.5"]
+DivisionByZeroError: Division by zero
+1
+1
+0
+-1
+"1267650600228229401496703205376"
+"3"
+"0.250"
+"-243"
+DivisionByZeroError: Negative power of zero
+ValueError: bcpow(): Argument #2 ($exponent) cannot have a fractional part
+ValueError: bcpow(): Argument #2 ($exponent) is too large
+"1.414213562373095048801688724209"
+"0.000316227766"
+ValueError: bcsqrt(): Argument #1 ($num) must be greater than or equal to 0
+"445"
+"-3"
+ValueError: bcpowmod(): Argument #2 ($exponent) must be greater than or equal to 0
+DivisionByZeroError: Modulo by zero
+ValueError: bcpowmod(): Argument #1 ($num) cannot have a fractional part
+"-2"
+"1"
+"0"
+"2"
+"3.14"
+"1.500"
+"1.6"
+"-1.6"
+"1200"
+"1.00"
+int(0)
+int(0)
+int(3)
+3.000
+0.333
+ValueError: bcscale(): Argument #1 ($scale) must be between 0 and 2147483647
+ValueError: bcadd(): Argument #3 ($scale) must be between 0 and 2147483647
