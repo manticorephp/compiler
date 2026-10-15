@@ -32,7 +32,7 @@ not here.
 - [x] Language: classes, interfaces, traits, enums, closures, generators, attributes,
       first-class callables, readonly, match, dynamic calls and `new $cls`
 - [x] Standard library highlights: full `array_*`, `ext/intl` (100%), `session`, `sockets`,
-      `json`, `tokenizer`, `iconv`, `ctype`, `bcmath` (functions), most of `mbstring`, `curl`, `pdo_sqlite`
+      `json`, `tokenizer`, `iconv`, `ctype`, `bcmath` (functions and `BcMath\Number`), most of `mbstring`, `curl`, `pdo_sqlite`
 - [x] Beyond PHP (superset): structured async I/O, FFI, a module system, HTTP/1.1 server,
       WebSocket client and server, typed native containers (`Manticore\Ds`)
 - [~] Overall PHP function coverage: **967 / 2135** functions, **169 / 327** classes
@@ -80,7 +80,7 @@ function compiles and fails at run time with `Call to undefined function`.
 
 **P2 — common**
 - [~] `zlib` 50 % (one-shot + incremental done over libz; `gz*` streams open) · [ ] `zip` [#225]
-- [ ] `bcmath` `BcMath\Number` (functions done) · `gmp` [#223] · [ ] `sodium` + argon2 [#224] · [ ] `gd`
+- [x] `bcmath` (functions + `BcMath\Number`) · [ ] `gmp` [#223] · [ ] `sodium` + argon2 [#224] · [ ] `gd`
 
 **P3 — on request:** `calendar`, `gettext`, `readline`, `bz2`, `ftp`, `ldap`, `soap`, `odbc`,
 `snmp`, `tidy`, SysV IPC, `exif`, `dba`, `Phar`. `mb_ereg*` is parked (Oniguruma is EOL).

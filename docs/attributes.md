@@ -208,7 +208,7 @@ error naming the class, the site and the fix:
 | you wrote | why it is refused |
 |---|---|
 | `$a === $b` | PHP compares object **identity**; two `new U8(5)` are not identical. Compare `$a->value === $b->value`. (`==` is fine — PHP's loose object compare is field-wise, so it agrees.) |
-| `$a + $b` | PHP has no operator overloading: `php` raises `TypeError`. The erased form would quietly compute a number instead. Operate on the carrier. |
+| `$a + $b` | PHP has no operator overloading: `php` raises `TypeError`. The erased form would quietly compute a number instead. Operate on the carrier. (A regular class can opt in with `Manticore\Overloadable`, see [superset §5.1](superset.md).) |
 | `$x instanceof U8` | there is no class id left to test. |
 | `var_dump($x)` | `php` prints `object(U8)#1 { … }`; the erased form is a number. Same for `print_r` / `var_export` / `get_class` / `is_object` / `json_encode` / `serialize` / `gettype`. |
 | a `mixed` slot | boxing into a tagged cell drops the type, and everything downstream sees a bare number. Declare the parameter / property / return as the TypeDef. |

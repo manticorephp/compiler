@@ -8,7 +8,7 @@
 //
 // Deviation: round()'s $mode is an int (PHP_ROUND_HALF_*, 1..4); Zend takes the
 // RoundingMode enum, which Manticore does not have yet.
-// Operators (+ - * / % ** <=> ==) are not here: a separate compiler pass owns them.
+// Operators (+ - * / % ** <=> ==) come from Manticore\Overloadable (prelude/overloadable.php), not from this body.
 namespace BcMath {
 
     final readonly class Number implements \Stringable, \Manticore\Overloadable

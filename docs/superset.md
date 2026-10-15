@@ -226,6 +226,48 @@ rather than checked and discarded:
   inspectable. ⚠ The dumps do not link the stdlib, so a call into it resolves as `unknown`;
   read the final binary when that matters.
 
+### 5.1 Operator overloading — `Manticore\Overloadable` (`prelude/overloadable.php`)
+
+Zend has no userland operator overloading (only internal classes such as `GMP` and
+`BcMath\Number` hook operators in C). Here a class opts in by implementing the interface:
+
+```php
+final class Money implements \Manticore\Overloadable
+{
+    public function __operator(string $op, mixed $other, bool $swapped): static { /* … */ }
+    public function __compare(mixed $other): int { /* … */ }
+}
+```
+
+| source | compiled as |
+|---|---|
+| `$a + $b`, `-`, `*`, `/`, `%`, `**` / `pow()` | `$a->__operator('+', $b, false)`; object on the right (`2 - $a`) → `$a->__operator('-', 2, true)` |
+| `-$a` | `$a->__operator('*', -1, false)` |
+| `$a += $b`, `$a *= 2`, `++$a`, `--$a` | the same calls, assigned back (`++` passes `'+'`, `1`) |
+| `<`, `<=`, `>`, `>=`, `==`, `!=`, `<=>` | `$a->__compare($b)` against 0 (operands flipped when the object is on the right) |
+| `===`, `!==` | untouched — identity |
+
+Rules and limits:
+
+- **Static types only.** The rewrite is made by `InlineClosures::tryOperator` and fires only when
+  an operand's *static* type is an object whose class (or an ancestor) implements
+  `Overloadable`. Closure bodies are rewritten too. An operand reaching the operator as
+  `mixed`/erased (`function plus(mixed $x, mixed $y) { return $x + $y; }`, `array_reduce` over an
+  untyped array) is **not** rewritten and computes on the pointer instead of raising Zend's
+  `TypeError` — open, repro `tests/aot/repro/crash/overloadable_erased_operand.php` (#263). Type
+  the parameter or the container (`Number $x`, `Number[]`).
+- Postfix `$a++` / `$a--` is accepted only as a whole statement; used as a value it is a
+  compile error (it would have to answer the old value).
+- The hooks are ordinary methods, so under Zend the class still loads but its operators raise
+  `TypeError`; only `BcMath\Number` has a Zend oracle (below).
+- Zero cost when unused: nothing is rewritten for a class that does not implement the interface.
+
+`BcMath\Number` (`prelude/bcmath.php`, php 8.4) implements it and follows Zend's result scales and
+exceptions (`DivisionByZeroError`, `ValueError` for a non-numeric string operand, `TypeError`
+for an array). It is the only overloaded class with a php oracle. Known deviation: `round()`
+takes the `PHP_ROUND_HALF_*` int, not the `RoundingMode` enum, which does not exist here yet.
+The class is `readonly` and demand-gated: a program that never names `BcMath\` carries none of it.
+
 ---
 
 ## 6. Memory ([docs/memory.md](memory.md))
@@ -288,6 +330,7 @@ Kept here so the boundary stays honest:
 | accept classification | `async_accept_errno` — asserted through the errno **selector**, never a raw number, so it reads the same on both hosts |
 | resolver | `dns_resolv_conf`, `async_dns_resolver` — text-fixture parsers, no network |
 | FFI / attributes | the stdlib itself is the test: every `Runtime\Libc` binding rides them |
+| operator overloading | `operator_overload`, `bcmath_operators`, `bcmath_number` — hand-written expected; `BcMath\Number` is also checkable against php 8.4 |
 | modules | `tests/aot/cases/manifest_app/` (a directory fixture, not a `-k`-selectable case) plus the compiler's own self-host build |
 | everything with a Zend answer | `tools/difftest.sh` |
 
