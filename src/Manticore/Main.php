@@ -3612,7 +3612,9 @@ function build_compile_module(
     // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
     // them across parts, so without this the originals all stayed: the compiler
     // built in 8 parts came out 20.5 MB against 14.3 MB for one unit.
-    $linkExtra = $linkExtra . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections");
+    // -lm as cmd_compile does: libm is separate on glibc/musl, and a manifest application that calls
+    // floor/fmod/pow/... (Symfony's) fails to link without it. Darwin folds libm into libSystem.
+    $linkExtra = $linkExtra . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections -lm");
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
