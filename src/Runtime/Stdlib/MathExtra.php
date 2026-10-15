@@ -174,3 +174,9 @@ function fdiv(float $num1, float $num2): float
     $neg = ($num1 < 0.0) !== (\__float_bits($num2) < 0);
     return $neg ? -INF : INF;
 }
+
+/** PHP 8.5 `fpow()` — C `pow()` on floats: no int semantics, no exceptions (0 ** -1 is INF). */
+function fpow(float $num, float $exponent): float
+{
+    return \pow($num, $exponent);
+}

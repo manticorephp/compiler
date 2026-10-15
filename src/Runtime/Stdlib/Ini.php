@@ -455,3 +455,117 @@ function get_cfg_var(string $option): mixed
 {
     return \ini_get($option);
 }
+
+/**
+ * php 8.2 `ini_parse_quantity()`. Where php warns and carries on with a best-effort value
+ * (bad multiplier, no digits, overflow), this throws ValueError carrying php's warning text.
+ */
+function ini_parse_quantity(string $shorthand): int
+{
+    $nl = \strlen($shorthand);
+    $a = 0;
+    $z = $nl;
+    $ws = " \t\n\v\f\r";
+    while ($a < $z && \strpos($ws, $shorthand[$a]) !== false) { $a = $a + 1; }
+    while ($z > $a && \strpos($ws, $shorthand[$z - 1]) !== false) { $z = $z - 1; }
+    if ($a === $z) { return 0; }
+    $neg = false;
+    $p = $a;
+    if ($shorthand[$p] === '-') { $neg = true; $p = $p + 1; }
+    elseif ($shorthand[$p] === '+') { $p = $p + 1; }
+    $base = 0;
+    if ($p === $z) { throw new \ValueError('Invalid quantity "' . __mc_ini_qesc($shorthand) . '": no valid leading digits, interpreting as "0" for backwards compatibility'); }
+    if ($z - $p >= 2 && $shorthand[$p] === '0') {
+        $px = \strtolower($shorthand[$p + 1]);
+        if ($px === 'x') { $base = 16; } elseif ($px === 'o') { $base = 8; } elseif ($px === 'b') { $base = 2; }
+        if ($base === 0 && !\ctype_digit($shorthand[$p + 1]) && \strpos('kKmMgG', $shorthand[$p + 1]) === false) {
+            throw new \ValueError('Invalid prefix "' . \substr($shorthand, $p, 2) . '", interpreting as "0" for backwards compatibility');
+        }
+        if ($base !== 0) {
+            $p = $p + 2;
+            if ($p === $z || !\ctype_alnum($shorthand[$p])) {
+                throw new \ValueError('Invalid quantity "' . __mc_ini_qesc($shorthand) . '": no digits after base prefix, interpreting as "0" for backwards compatibility');
+            }
+        }
+    }
+    if ($base === 0) { $base = ($shorthand[$p] === '0') ? 8 : 10; }
+    $v = 0;
+    $nd = 0;
+    $overflow = false;
+    while ($p < $z) {
+        $c = \ord($shorthand[$p]);
+        if ($c >= 48 && $c <= 57) { $d = $c - 48; }
+        elseif ($c >= 97 && $c <= 102) { $d = $c - 87; }
+        elseif ($c >= 65 && $c <= 70) { $d = $c - 55; }
+        else { break; }
+        if ($d >= $base) { break; }
+        if ($v < \intdiv(\PHP_INT_MIN + $d, $base)) { $overflow = true; }
+        else { $v = $v * $base - $d; }
+        $nd = $nd + 1;
+        $p = $p + 1;
+    }
+    if ($nd === 0) {
+        throw new \ValueError('Invalid quantity "' . __mc_ini_qesc($shorthand) . '": no valid leading digits, interpreting as "0" for backwards compatibility');
+    }
+    $digitsEnd = $p;
+    while ($p < $z && \strpos($ws, $shorthand[$p]) !== false) { $p = $p + 1; }
+    if ($p < $z) {
+        $m = $shorthand[$z - 1];
+        $lm = \strtolower($m);
+        $shift = $lm === 'k' ? 10 : ($lm === 'm' ? 20 : ($lm === 'g' ? 30 : 0));
+        if ($shift === 0) {
+            throw new \ValueError('Invalid quantity "' . __mc_ini_qesc($shorthand) . '": unknown multiplier "' . __mc_ini_qesc($m) . '", interpreting as "' . __mc_ini_qesc(\substr($shorthand, 0, $p)) . '" for backwards compatibility');
+        }
+        if ($p !== $z - 1) {
+            throw new \ValueError('Invalid quantity "' . __mc_ini_qesc($shorthand) . '", interpreting as "' . __mc_ini_qesc(\substr($shorthand, 0, $p) . $m) . '" for backwards compatibility');
+        }
+        if ($v < (\PHP_INT_MIN >> $shift)) { $overflow = true; }
+        else { $v = $v << $shift; }
+    }
+    if (!$neg && $v === \PHP_INT_MIN) { $overflow = true; }
+    if ($overflow) {
+        throw new \ValueError('Invalid quantity "' . __mc_ini_qesc($shorthand) . '": value is out of range, using overflow result for backwards compatibility');
+    }
+    return $neg ? $v : -$v;
+}
+
+function __mc_ini_qesc(string $s): string
+{
+    $out = '';
+    $n = \strlen($s);
+    for ($i = 0; $i < $n; $i++) {
+        $c = \ord($s[$i]);
+        if ($c >= 32 && $c <= 126 && $c !== 92) { $out = $out . $s[$i]; continue; }
+        if ($c === 10) { $out = $out . '\n'; }
+        elseif ($c === 13) { $out = $out . '\r'; }
+        elseif ($c === 9) { $out = $out . '\t'; }
+        elseif ($c === 12) { $out = $out . '\f'; }
+        elseif ($c === 11) { $out = $out . '\v'; }
+        elseif ($c === 92) { $out = $out . '\\\\'; }
+        elseif ($c === 27) { $out = $out . '\e'; }
+        else { $out = $out . '\x' . \strtoupper(\str_pad(\dechex($c), 2, '0', STR_PAD_LEFT)); }
+    }
+    return $out;
+}
+
+/** `ini_alter()` — the alias of ini_set(). */
+function ini_alter(string $option, mixed $value): mixed
+{
+    return \ini_set($option, $value);
+}
+
+/** The include path; default as php's compiled-in one. Shares ini_get's override slot. */
+function get_include_path(): string|false
+{
+    $v = \__mc_ini_store(0, 'include_path', '');
+    return $v !== "\x00" ? $v : '.:/usr/share/php';
+}
+
+/** Returns the old include path, or false (leaving it unchanged) for an empty one. */
+function set_include_path(string $include_path): string|false
+{
+    if ($include_path === '') { return false; }
+    $old = \get_include_path();
+    \__mc_ini_store(1, 'include_path', $include_path);
+    return $old;
+}

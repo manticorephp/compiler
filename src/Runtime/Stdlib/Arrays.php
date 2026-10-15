@@ -613,3 +613,9 @@ function __mc_func_get_arg(#[\Manticore\Attr\CellArg] array $all, int $n, int $i
     }
     return null;
 }
+
+/** `key_exists()` — the alias of array_key_exists(). */
+function key_exists(int|string $key, array $array): bool
+{
+    return \array_key_exists($key, $array);
+}

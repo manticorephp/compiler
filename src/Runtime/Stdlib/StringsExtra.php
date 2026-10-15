@@ -1034,3 +1034,355 @@ function utf8_decode(string $string): string
 
     return $out;
 }
+
+function str_increment(string $string): string
+{
+    $len = \strlen($string);
+    if ($len === 0) { throw new \ValueError('str_increment(): Argument #1 ($string) must not be empty'); }
+    for ($k = 0; $k < $len; $k++) {
+        $c = \ord($string[$k]);
+        if (!(($c >= 48 && $c <= 57) || ($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122))) {
+            throw new \ValueError('str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters');
+        }
+    }
+    $i = $len - 1;
+    while ($i >= 0) {
+        $c = $string[$i];
+        if ($c === 'z') { $string[$i] = 'a'; }
+        elseif ($c === 'Z') { $string[$i] = 'A'; }
+        elseif ($c === '9') { $string[$i] = '0'; }
+        else { $string[$i] = \chr(\ord($c) + 1); return $string; }
+        $i = $i - 1;
+    }
+    $f = $string[0];
+    $pre = $f === '0' ? '1' : ($f === 'a' ? 'a' : 'A');
+    return $pre . $string;
+}
+
+function str_decrement(string $string): string
+{
+    $len = \strlen($string);
+    if ($len === 0) { throw new \ValueError('str_decrement(): Argument #1 ($string) must not be empty'); }
+    for ($k = 0; $k < $len; $k++) {
+        $c = \ord($string[$k]);
+        if (!(($c >= 48 && $c <= 57) || ($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122))) {
+            throw new \ValueError('str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters');
+        }
+    }
+    $first = $string[0];
+    $orig = $string;
+    $i = $len - 1;
+    while ($i >= 0) {
+        $c = $string[$i];
+        if ($c === 'a') { $string[$i] = 'z'; }
+        elseif ($c === 'A') { $string[$i] = 'Z'; }
+        elseif ($c === '0') { $string[$i] = '9'; }
+        else { $string[$i] = \chr(\ord($c) - 1); break; }
+        $i = $i - 1;
+    }
+    if ($first === '0' || ($i < 0 && $len === 1)) {
+        throw new \ValueError('str_decrement(): Argument #1 ($string) "' . $orig . '" is out of decrement range');
+    }
+    // borrow out of a leading a/A drops it ("aa" -> "z"); "10" -> "9"
+    if ($i < 0 || ($len > 1 && $string[0] === '0')) {
+        $string = \substr($string, 1);
+    }
+    return $string;
+}
+
+function quoted_printable_encode(string $string): string
+{
+    $len = \strlen($string);
+    $out = '';
+    $lp = 0;
+    $hex = '0123456789ABCDEF';
+    $i = 0;
+    while ($i < $len) {
+        $c = \ord($string[$i]);
+        $i = $i + 1;
+        if ($c === 13 && $i < $len && $string[$i] === "\n") {
+            $out = $out . "\r\n";
+            $i = $i + 1;
+            $lp = 0;
+            continue;
+        }
+        $nextCr = $i < $len && $string[$i] === "\r";
+        if ($c < 32 || $c >= 127 || $c === 61 || ($c === 32 && $nextCr)) {
+            $lp = $lp + 3;
+            if (($lp > 75 && $c <= 0x7f)
+                || ($c > 0x7f && $c <= 0xdf && $lp + 3 > 75)
+                || ($c > 0xdf && $c <= 0xef && $lp + 6 > 75)
+                || ($c > 0xef && $c <= 0xf4 && $lp + 9 > 75)) {
+                $out = $out . "=\r\n";
+                $lp = 3;
+            }
+            $out = $out . '=' . $hex[$c >> 4] . $hex[$c & 15];
+        } else {
+            $lp = $lp + 1;
+            if ($lp > 75) {
+                $out = $out . "=\r\n";
+                $lp = 1;
+            }
+            $out = $out . $string[$i - 1];
+        }
+    }
+    return $out;
+}
+
+function quoted_printable_decode(string $string): string
+{
+    $nul = \strpos($string, "\0");
+    if ($nul !== false) { $string = \substr($string, 0, $nul); }
+    $len = \strlen($string);
+    $out = '';
+    $i = 0;
+    while ($i < $len) {
+        $ch = $string[$i];
+        if ($ch !== '=') { $out = $out . $ch; $i = $i + 1; continue; }
+        if ($i + 2 < $len && \ctype_xdigit($string[$i + 1]) && \ctype_xdigit($string[$i + 2])) {
+            $out = $out . \chr(\hexdec($string[$i + 1] . $string[$i + 2]));
+            $i = $i + 3;
+            continue;
+        }
+        $k = 1;
+        while ($i + $k < $len && ($string[$i + $k] === ' ' || $string[$i + $k] === "\t")) { $k = $k + 1; }
+        if ($i + $k >= $len) { $i = $i + $k; }
+        elseif ($string[$i + $k] === "\r" && $i + $k + 1 < $len && $string[$i + $k + 1] === "\n") { $i = $i + $k + 2; }
+        elseif ($string[$i + $k] === "\r" || $string[$i + $k] === "\n") { $i = $i + $k + 1; }
+        else { $out = $out . '='; $i = $i + 1; }
+    }
+    return $out;
+}
+
+function convert_uuencode(string $string): string
+{
+    $len = \strlen($string);
+    $out = '';
+    $pos = 0;
+    while ($pos < $len) {
+        $n = $len - $pos;
+        if ($n > 45) { $n = 45; }
+        $out = $out . ($n === 0 ? '`' : \chr(($n & 63) + 32));
+        for ($j = 0; $j < $n; $j += 3) {
+            $b0 = \ord($string[$pos + $j]);
+            $b1 = $pos + $j + 1 < $len ? \ord($string[$pos + $j + 1]) : 0;
+            $b2 = $pos + $j + 2 < $len ? \ord($string[$pos + $j + 2]) : 0;
+            $q = [$b0 >> 2, (($b0 << 4) & 48) | (($b1 >> 4) & 15), (($b1 << 2) & 60) | (($b2 >> 6) & 3), $b2 & 63];
+            foreach ($q as $v) { $out = $out . ($v === 0 ? '`' : \chr($v + 32)); }
+        }
+        $out = $out . "\n";
+        $pos = $pos + $n;
+    }
+    return $out . "`\n";
+}
+
+/** One uuencoded byte's 6-bit value; past the end it reads as NUL, like php's terminator. */
+function __mc_uu_dec(string $s, int $i, int $e): int
+{
+    return $i < $e ? ((\ord($s[$i]) - 32) & 63) : ((0 - 32) & 63);
+}
+
+/** Where php warns and answers false (empty or malformed input), this throws ValueError. */
+function convert_uudecode(string $string): string|false
+{
+    $e = \strlen($string);
+    $bad = 'convert_uudecode(): Argument #1 ($data) is not a valid uuencoded string';
+    if ($e === 0) { throw new \ValueError($bad); }
+    $out = '';
+    $s = 0;
+    $total = 0;
+    $len = 0;
+    while ($s < $e) {
+        $len = __mc_uu_dec($string, $s, $e);
+        $s = $s + 1;
+        if ($len === 0) { break; }
+        if ($len > $e) { throw new \ValueError($bad); }
+        $total = $total + $len;
+        $ee = $s + ($len === 45 ? 60 : (int)\floor($len * 1.33));
+        if ($ee > $e) { throw new \ValueError($bad); }
+        while ($s < $ee) {
+            if ($s + 4 > $e) { throw new \ValueError($bad); }
+            $out = $out . \chr(((__mc_uu_dec($string, $s, $e) << 2) | (__mc_uu_dec($string, $s + 1, $e) >> 4)) & 255)
+                . \chr(((__mc_uu_dec($string, $s + 1, $e) << 4) | (__mc_uu_dec($string, $s + 2, $e) >> 2)) & 255)
+                . \chr(((__mc_uu_dec($string, $s + 2, $e) << 6) | __mc_uu_dec($string, $s + 3, $e)) & 255);
+            $s = $s + 4;
+        }
+        if ($len < 45) { break; }
+        $s = $s + 1;
+    }
+    if ($total > \strlen($out)) {
+        $out = $out . \chr(((__mc_uu_dec($string, $s, $e) << 2) | (__mc_uu_dec($string, $s + 1, $e) >> 4)) & 255);
+        if ($total > 1) {
+            $out = $out . \chr(((__mc_uu_dec($string, $s + 1, $e) << 4) | (__mc_uu_dec($string, $s + 2, $e) >> 2)) & 255);
+            if ($total > 2) { $out = $out . \chr(((__mc_uu_dec($string, $s + 2, $e) << 6) | __mc_uu_dec($string, $s + 3, $e)) & 255); }
+        }
+    }
+    return \substr($out, 0, $total);
+}
+
+function soundex(string $string): string
+{
+    // 0 = vowel-ish (dropped, resets run), -1 = H/W (transparent)
+    $table = [0, 1, 2, 3, 0, 1, 2, -1, 0, 2, 2, 4, 5, 5, 0, 1, 2, 6, 2, 3, 0, 1, -1, 2, 0, 2];
+    $len = \strlen($string);
+    $res = '';
+    $small = 0;
+    $last = -1;
+    for ($i = 0; $i < $len && $small < 4; $i++) {
+        $code = \ord($string[$i]);
+        if ($code >= 97 && $code <= 122) { $code = $code - 32; }
+        if ($code < 65 || $code > 90) { continue; }
+        if ($small === 0) {
+            $res = $res . \chr($code);
+            $small = 1;
+            $last = $table[$code - 65];
+        } else {
+            $c = $table[$code - 65];
+            if ($c !== $last) {
+                $last = $c;
+                if ($c > 0) { $res = $res . (string)$c; $small = $small + 1; }
+            }
+        }
+    }
+    while ($small < 4) { $res = $res . '0'; $small = $small + 1; }
+    return $res;
+}
+
+function metaphone(string $string, int $max_phonemes = 0): string
+{
+    if ($max_phonemes < 0) {
+        throw new \ValueError('metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0');
+    }
+    // bit 1 vowel, 2 pass-through (FJLMNR), 4 affects H (CGPST), 8 soft (EIY), 16 no GH->F (BDH)
+    $codes = [1, 16, 4, 16, 9, 2, 4, 16, 9, 2, 0, 2, 2, 2, 1, 4, 0, 2, 4, 4, 1, 0, 0, 0, 8, 0];
+    $w = \strtoupper($string);
+    $n = \strlen($w);
+    $nul = \strpos($w, "\0");
+    if ($nul !== false) { $n = $nul; }
+    $out = '';
+    $i = 0;
+    while ($i < $n && !\ctype_alpha($w[$i])) { $i = $i + 1; }
+    if ($i >= $n) { return ''; }
+    $c = $w[$i];
+    $nx = $i + 1 < $n ? $w[$i + 1] : '';
+    if ($c === 'A') {
+        if ($nx === 'E') { $out = 'E'; $i = $i + 2; } else { $out = 'A'; $i = $i + 1; }
+    } elseif ($c === 'G' || $c === 'K' || $c === 'P') {
+        if ($nx === 'N') { $out = 'N'; $i = $i + 2; }
+    } elseif ($c === 'W') {
+        if ($nx === 'R') { $out = 'R'; $i = $i + 2; }
+        elseif ($nx === 'H' || ($nx !== '' && \ctype_alpha($nx) && ($codes[\ord($nx) - 65] & 1))) { $out = 'W'; $i = $i + 2; }
+    } elseif ($c === 'X') {
+        $out = 'S'; $i = $i + 1;
+    } elseif ($c === 'E' || $c === 'I' || $c === 'O' || $c === 'U') {
+        $out = $c; $i = $i + 1;
+    }
+    $plen = \strlen($out);
+    for (; $i < $n && ($max_phonemes === 0 || $plen < $max_phonemes); $i++) {
+        $c = $w[$i];
+        if (!\ctype_alpha($c)) { continue; }
+        $last = $i >= 1 ? $w[$i - 1] : '';
+        if ($c === $last && $c !== 'C') { continue; }
+        $nx = $i + 1 < $n ? $w[$i + 1] : '';
+        $an = $nx !== '' && $i + 2 < $n ? $w[$i + 2] : '';
+        $skip = 0;
+        $nxCode = ($nx !== '' && \ctype_alpha($nx)) ? $codes[\ord($nx) - 65] : 0;
+        $anCode = ($an !== '' && \ctype_alpha($an)) ? $codes[\ord($an) - 65] : 0;
+        $lastCode = ($last !== '' && \ctype_alpha($last)) ? $codes[\ord($last) - 65] : 0;
+        $p = '';
+        if ($c === 'B') {
+            if ($last !== 'M') { $p = 'B'; }
+        } elseif ($c === 'C') {
+            if ($nxCode & 8) {
+                if ($an === 'A' && $nx === 'I') { $p = 'X'; }
+                elseif ($last === 'S') { }
+                else { $p = 'S'; }
+            } elseif ($nx === 'H') {
+                $p = 'X';
+                $skip = 1;
+            } else { $p = 'K'; }
+        } elseif ($c === 'D') {
+            if ($nx === 'G' && ($anCode & 8)) { $p = 'J'; $skip = 1; } else { $p = 'T'; }
+        } elseif ($c === 'G') {
+            if ($nx === 'H') {
+                $b3 = $i >= 3 ? $w[$i - 3] : '';
+                $b4 = $i >= 4 ? $w[$i - 4] : '';
+                $b3Code = ($b3 !== '' && \ctype_alpha($b3)) ? $codes[\ord($b3) - 65] : 0;
+                if (!(($b3Code & 16) || $b4 === 'H')) { $p = 'F'; $skip = 1; }
+            } elseif ($nx === 'N') {
+                $a3 = $i + 3 < $n ? $w[$i + 3] : '';
+                if ($an === '' || !\ctype_alpha($an) || ($an === 'E' && $a3 === 'D')) { }
+                else { $p = 'K'; }
+            } elseif (($nxCode & 8) && $last !== 'G') { $p = 'J'; }
+            else { $p = 'K'; }
+        } elseif ($c === 'H') {
+            if (($nxCode & 1) && !($lastCode & 4)) { $p = 'H'; }
+        } elseif ($c === 'K') {
+            if ($last !== 'C') { $p = 'K'; }
+        } elseif ($c === 'P') {
+            $p = $nx === 'H' ? 'F' : 'P';
+        } elseif ($c === 'Q') {
+            $p = 'K';
+        } elseif ($c === 'S') {
+            if ($nx === 'I' && ($an === 'O' || $an === 'A')) { $p = 'X'; }
+            elseif ($nx === 'H') { $p = 'X'; $skip = 1; }
+            else { $p = 'S'; }
+        } elseif ($c === 'T') {
+            if ($nx === 'I' && ($an === 'O' || $an === 'A')) { $p = 'X'; }
+            elseif ($nx === 'H') { $p = '0'; $skip = 1; }
+            elseif (!($nx === 'C' && $an === 'H')) { $p = 'T'; }
+        } elseif ($c === 'V') {
+            $p = 'F';
+        } elseif ($c === 'W') {
+            if ($nxCode & 1) { $p = 'W'; }
+        } elseif ($c === 'X') {
+            $p = 'KS';
+        } elseif ($c === 'Y') {
+            if ($nxCode & 1) { $p = 'Y'; }
+        } elseif ($c === 'Z') {
+            $p = 'S';
+        } elseif ($c === 'F' || $c === 'J' || $c === 'L' || $c === 'M' || $c === 'N' || $c === 'R') {
+            $p = $c;
+        }
+        $out = $out . $p;
+        $plen = $plen + \strlen($p);
+        $i = $i + $skip;
+    }
+    return $out;
+}
+
+/** `utf8_encode()` — ISO-8859-1 to UTF-8 (deprecated in php 8.2, still present). */
+function utf8_encode(string $string): string
+{
+    $out = '';
+    $len = \strlen($string);
+    for ($i = 0; $i < $len; $i++) {
+        $c = \ord($string[$i]);
+        if ($c < 0x80) { $out = $out . $string[$i]; }
+        else { $out = $out . \chr(0xC0 | ($c >> 6)) . \chr(0x80 | ($c & 0x3F)); }
+    }
+    return $out;
+}
+
+/** `chop()` — the alias of rtrim(). */
+function chop(string $string, string $characters = " \n\r\t\v\x00"): string
+{
+    return \rtrim($string, $characters);
+}
+
+/**
+ * `strcoll()` under the C locale, the only one a compiled binary runs in: byte-wise
+ * comparison, answering the difference of the first differing bytes (php answers
+ * whatever the host strcoll does — only the sign is portable).
+ */
+function strcoll(string $string1, string $string2): int
+{
+    $a = \strlen($string1);
+    $b = \strlen($string2);
+    $n = $a < $b ? $a : $b;
+    for ($i = 0; $i < $n; $i++) {
+        $d = \ord($string1[$i]) - \ord($string2[$i]);
+        if ($d !== 0) { return $d; }
+    }
+    return $a === $b ? 0 : ($a < $b ? -\ord($string2[$n]) : \ord($string1[$n]));
+}

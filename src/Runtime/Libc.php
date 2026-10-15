@@ -705,6 +705,20 @@ function sys_getpid(): int {}
 #[Library('c'), Symbol('getppid'), CType('int')]
 function sys_getppid(): int {}
 
+#[Library('c'), Symbol('getuid'), CType('int')]
+function sys_getuid(): int {}
+
+#[Library('c'), Symbol('getgid'), CType('int')]
+function sys_getgid(): int {}
+
+// `struct passwd *getpwuid(uid_t uid)` — pw_name is the first field.
+#[Library('c'), Symbol('getpwuid')]
+function sys_getpwuid(#[CType('int')] int $uid): Ptr {}
+
+// `int getloadavg(double loadavg[], int nelem)` — samples written, -1 on failure.
+#[Library('c'), Symbol('getloadavg'), CType('int')]
+function sys_getloadavg(Ptr $loadavg, #[CType('int')] int $nelem): int {}
+
 #[Library('c'), Symbol('alarm')]
 function sys_alarm(#[CType('unsigned int')] int $seconds): int {}
 
