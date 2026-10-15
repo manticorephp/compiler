@@ -86,6 +86,9 @@ final class SpillFreshBases
     /** @var array<string, bool> classes whose instances are not rc-managed */
     private array $notRc = [];
 
+    /** @var array<string, bool> classes that define a `__destruct`, or have a descendant that does */
+    private array $dtorCls = [];
+
     /** @var array<string, array<int, bool>> fn name → per-param by-ref mask */
     private array $refMasks = [];
 
@@ -162,6 +165,17 @@ final class SpillFreshBases
         }
         foreach ($module->enums as $name => $unused) { $this->notRc[$name] = true; }
         foreach ($module->typeDefs as $name => $unused) { $this->notRc[$name] = true; }
+        $this->dtorCls = [];
+        foreach ($module->classes as $name => $cd) {
+            if (!isset($cd->methodNames['__destruct'])) { continue; }
+            $c = $name;
+            $guard = 0;
+            while ($c !== '' && isset($module->classes[$c]) && $guard < 256) {
+                $this->markDtorClass($c);
+                $c = $module->classes[$c]->parent;
+                $guard = $guard + 1;
+            }
+        }
         $this->closureCaptures = $module->closureCaptures;
         $statT = \Compile\Stats::now();
         $this->esc = \Compile\Mir\EscapeSummaries::fromModule($module);
@@ -713,7 +727,8 @@ final class SpillFreshBases
      * gets an owner: a temporary has no name, so no cleanup pad drops it, and
      * the call that throws (or a later argument that does) leaked it. The
      * hidden local is `unset` after the statement like any other spill.
-     * Objects keep their temporary — a destructor must run where php runs it.
+     * An object whose class (and every subclass) has no destructor is spilled too;
+     * one with a destructor keeps its temporary — it must run where php runs it.
      */
     private function spillFreshArgs(Node $n): void
     {
@@ -726,6 +741,11 @@ final class SpillFreshBases
         $byRef = [];
         foreach ($this->refArgIndexes($n) as $ri) { $byRef[$ri] = true; }
         $shift = ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_INVOKE) ? 1 : 0;
+        // Closure::bind / ->bindTo / ->call store the new `$this` in the copy WITHOUT a count when
+        // the source env has no retain function (issue #262): an object spilled here would be freed
+        // under the bound closure at the end of the statement.
+        $rebind = ($k === Node::KIND_STATIC_CALL && \strtolower(\ltrim($this->asStaticCall($n)->class, '\\')) === 'closure')
+            || ($k === Node::KIND_METHOD_CALL && ($this->asMethodCall($n)->method === 'bindTo' || $this->asMethodCall($n)->method === 'call'));
         $cnt = \count($args);
         for ($i = 0; $i < $cnt; $i = $i + 1) {
             $a = $args[$i];
@@ -733,14 +753,34 @@ final class SpillFreshBases
             if ($this->loopDepth > 0 && $a->allocKind === AllocationKind::ARENA) { continue; }
             $t = $a->type->kind;
             $closure = $t === Type::KIND_CLOSURE || ($t === Type::KIND_OBJ && ($a->type->class ?? '') === 'Closure');
-            if ($t !== Type::KIND_STRING && $t !== Type::KIND_ARRAY && !$closure) { continue; }
+            $plainObj = !$rebind && $t === Type::KIND_OBJ && !$closure && $this->destructorFreeObj($a->type);
+            if ($t !== Type::KIND_STRING && $t !== Type::KIND_ARRAY && !$closure && !$plainObj) { continue; }
             // A nested array's release helper exists only to the depth the runtime emits.
             if ($t === Type::KIND_ARRAY && ($a->type->element === null || $a->type->element->kind === Type::KIND_ARRAY)) { continue; }
             $ak = $a->kind;
-            if ($ak !== Node::KIND_ARRAY_LIT && $ak !== Node::KIND_CONCAT && $ak !== Node::KIND_CLOSURE
+            if ($ak !== Node::KIND_ARRAY_LIT && $ak !== Node::KIND_CONCAT && $ak !== Node::KIND_CLOSURE && $ak !== Node::KIND_NEW_OBJ
                 && !$this->isFreshValue($a)) { continue; }
             $this->setOperand($n, $i + $shift, $this->spill($a));
         }
+    }
+
+    /** `$c` and every interface it implements, transitively, may hold an instance that runs a destructor. */
+    private function markDtorClass(string $c): void
+    {
+        if (isset($this->dtorCls[$c])) { return; }
+        $this->dtorCls[$c] = true;
+        if (!isset($this->classDefs[$c])) { return; }
+        $cd = $this->classDefs[$c];
+        foreach ($cd->interfaces as $i) { $this->markDtorClass(\ltrim((string)$i, '\\')); }
+        if ($cd->parent !== '') { $this->markDtorClass($cd->parent); }
+    }
+
+    /** An rc-managed class (or interface) none of whose instances runs a destructor: its temporary may live to the statement's end. */
+    private function destructorFreeObj(Type $t): bool
+    {
+        $cls = $t->class ?? '';
+        return $cls !== '' && !isset($this->notRc[$cls]) && !isset($this->dtorCls[$cls])
+            && !\str_starts_with($cls, '__closure_');
     }
 
     private function rewriteRead(Node $n): void
