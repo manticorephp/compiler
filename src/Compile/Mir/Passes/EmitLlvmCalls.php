@@ -1349,6 +1349,14 @@ trait EmitLlvmCalls
         // may take it off its slot (a hook that unregisters itself), which now
         // gives the count back. Hold one for the call, as php does.
         if (!$this->invokePinsCallee($iv, $iv->callee)) {
+            // A closure LITERAL callee (`(function () use ($x) {…})()`) is a fresh +1
+            // nobody else binds: give it back once the call returns.
+            if ($iv->callee->kind === Node::KIND_CLOSURE) {
+                $this->rt->needsClosureRc = true;
+                $env = $this->lastValue;
+                $out .= $this->emitClosureStructInvoke($n, $env);
+                return $out . '  call void @__mir_closure_release(ptr ' . $env . ")\n";
+            }
             return $out . $this->emitClosureStructInvoke($n, $this->lastValue);
         }
         $this->rt->needsClosureRc = true;
