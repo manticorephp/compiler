@@ -206,7 +206,7 @@ final class InlineClosures implements Pass
         return new MethodCall_($obj, $method, $args, $type);
     }
 
-    /** Whether `$n` is statically an object whose class (or an ancestor) declares `$method`. */
+    /** Whether `$n` is statically an object whose class (or an ancestor) implements Manticore\Overloadable. */
     private function hasHook(Node $n, string $method): bool
     {
         $t = $n->type;
@@ -217,7 +217,9 @@ final class InlineClosures implements Pass
             $guard = $guard + 1;
             $cd = $this->module->classes[$c] ?? null;
             if ($cd === null) { return false; }
-            if (isset($cd->methodNames[$method])) { return true; }
+            foreach ($cd->interfaces as $i) {
+                if (\ltrim($i, '\\') === 'Manticore\\Overloadable') { return true; }
+            }
             $c = $cd->parent;
         }
         return false;

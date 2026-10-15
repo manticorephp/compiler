@@ -248,7 +248,7 @@ trait LowerPrelude
                 "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
                 "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
                 "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->randomSrc,
-                "<?php\n" . $this->bcmathSrc,
+                "<?php\n" . $this->bcmathSrc, "<?php\n" . $this->overloadSrc,
                 "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->filterSrc,
             ]);
             if (!$this->includeArrayFnsExt
@@ -326,6 +326,11 @@ trait LowerPrelude
         if ($this->randomSrc !== '') {
             $rn = \Parser\Parser::parseSource("<?php\n" . $this->randomSrc);
             foreach ($rn->statements as $s) { $stmts[] = $s; }
+        }
+        // Manticore\Overloadable — braced namespace, an interface only.
+        if ($this->overloadSrc !== '') {
+            $ov = \Parser\Parser::parseSource("<?php\n" . $this->overloadSrc);
+            foreach ($ov->statements as $s) { $stmts[] = $s; }
         }
         // BcMath\ — braced namespace, calls the stdlib bc* functions only.
         if ($this->bcmathSrc !== '') {

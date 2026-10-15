@@ -1,6 +1,6 @@
 <?php
-// Superset: a class opts into operators with __operator / __compare (no Zend oracle).
-final class Money
+// Superset: a class opts into operators via Manticore\Overloadable (no Zend oracle).
+final class Money implements \Manticore\Overloadable
 {
     public function __construct(public readonly int $cents) {}
 

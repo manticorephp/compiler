@@ -11,7 +11,7 @@
 // Operators (+ - * / % ** <=> ==) are not here: a separate compiler pass owns them.
 namespace BcMath {
 
-    final readonly class Number implements \Stringable
+    final readonly class Number implements \Stringable, \Manticore\Overloadable
     {
         public string $value;
         public int $scale;

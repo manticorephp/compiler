@@ -567,6 +567,8 @@ final class LowerFromAst implements Pass
     public string $randomSrc = '';
     /** ext/bcmath (BcMath\Number) — DEMAND-GATED braced-namespace tree. */
     public string $bcmathSrc = '';
+    /** Manticore\Overloadable — the operator-overloading interface (braced namespace). */
+    public string $overloadSrc = '';
     /** Filter\ exceptions (ext/filter) — braced namespace, always included. */
     public string $filterSrc = '';
     /** filter_var / filter_input entry points (global functions) — DEMAND-GATED. */

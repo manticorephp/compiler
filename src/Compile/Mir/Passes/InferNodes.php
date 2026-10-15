@@ -1422,6 +1422,7 @@ trait InferNodes
     {
         foreach ([$l, $r] as $t) {
             if ($t->kind !== Type::KIND_OBJ || $t->class === null) { continue; }
+            if (!$this->classImplementsT($t->class, 'Manticore\\Overloadable')) { continue; }
             $decl = $this->resolveMethodClass($t->class, '__operator');
             if ($decl === '') { continue; }
             return $this->sigs[$decl . '____operator'] ?? null;
