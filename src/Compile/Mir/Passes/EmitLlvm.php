@@ -316,6 +316,13 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, bool> {@see Module::$callableArrayMethods} */
     private array $callableArrayMethods = [];
 
+    /** @var array<string, bool> {@see Module::$callableStaticStrings} */
+    private array $callableStaticStrings = [];
+
+    /** @var array<string, bool> {@see EmitLlvmCalls::staticStringArms} */
+    private array $staticStringArmsMemo = [];
+    private bool $staticStringArmsDone = false;
+
     /** `#[TypeDef]` value types. Never in {@see $classes}: nothing is emitted for
      *  them — no descriptor, no drop fn. Consulted only to turn `$byte->value` into the
      *  receiver itself and `$byte->method()` into a direct call.
@@ -691,6 +698,7 @@ final class EmitLlvm implements EmitVisitor
         $this->hasClassAlias = $module->hasClassAlias;
         $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
         $this->callableArrayMethods = $module->callableArrayMethods;
+        $this->callableStaticStrings = $module->callableStaticStrings;
         $this->enums = $module->enums;
         $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
         $this->nothrow = \Compile\Mir\NothrowSummary::fromModule($module);
@@ -803,6 +811,7 @@ final class EmitLlvm implements EmitVisitor
             if ($fn->name === '__mc_fiber_run') { $this->rt->needsFibers = true; }
         }
         $this->propagateEscapingRefParams($module);
+        $this->armFccShims($module->functions);
         // Pre-scan for `$gen->throw($e)`: a yield resume point must check for
         // an injected exception. Must be known BEFORE emitting any generator
         // body (emitYield emits the check inline). Over-triggering on a user
@@ -4015,6 +4024,43 @@ final class EmitLlvm implements EmitVisitor
         return '  ' . $d . " = load i64, ptr @__mir_bt_depth\n"
              . '  ' . $d1 . ' = sub i64 ' . $d . ", 1\n"
              . '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
+    }
+
+    /**
+     * A first-class-callable shim forwards its caller's argument count: it is
+     * armed (pushed to) like a func-args callee so the count survives the hop
+     * to a target that reads func_num_args(). Narrowed to the receiver class and its
+     * subclasses when known, else over-approximate by method name —
+     * arming a shim whose real target does not read it is harmless (faPop).
+     * @param FunctionDef[] $fns
+     */
+    private function armFccShims(array $fns): void
+    {
+        foreach ($fns as $shim) {
+            if ($shim->fccTarget === '' || $shim->usesFuncArgs) { continue; }
+            $tc = \ltrim($shim->fccTargetClass, '\\');
+            if ($tc !== '' && isset($this->classes[$tc])) {
+                // The receiver's class and every subclass that may override the method.
+                foreach ($this->classes as $kn => $_) {
+                    $kn = (string)$kn;
+                    if (!$this->classIsA($kn, $tc)) { continue; }
+                    $holder = $this->resolveMethodClass($kn, $shim->fccTarget);
+                    if ($holder !== '' && ($this->sigs->usesFuncArgs[$holder . '__' . $shim->fccTarget] ?? false)) {
+                        $this->sigs->usesFuncArgs[$shim->name] = true;
+                        break;
+                    }
+                }
+                continue;
+            }
+            $suffix = '__' . $shim->fccTarget;
+            foreach ($fns as $t) {
+                if (!$t->usesFuncArgs || \strlen($t->name) < \strlen($suffix)) { continue; }
+                if (\substr($t->name, -\strlen($suffix)) === $suffix) {
+                    $this->sigs->usesFuncArgs[$shim->name] = true;
+                    break;
+                }
+            }
+        }
     }
 
     /**

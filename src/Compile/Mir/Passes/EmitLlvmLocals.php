@@ -1039,7 +1039,7 @@ trait EmitLlvmLocals
             // co-owns a borrowed buffer/object exactly as a static slot does
             // (a fresh temp transfers, a borrow is retained).
             $vk0 = $sl->value->type->kind;
-            if ($sl->value->type->isArray() || $vk0 === Type::KIND_OBJ) {
+            if ($sl->value->type->isArray() || $vk0 === Type::KIND_OBJ || $vk0 === Type::KIND_STRING) {
                 $out .= $this->coerceToI64();
                 $rawV = $this->lastValue;
                 $out .= $this->rcRetainByType($sl->value, $rawV, null, 3);
@@ -1641,6 +1641,30 @@ trait EmitLlvmLocals
      *  ({@see byRefAddrOfRaw}); its elements ride the buffer's hint, not a cell. */
     private string $refElemBase = '';
 
+    /**
+     * The address of a dynamic property `$o->p` of a bag class (stdClass): the
+     * bag's element slot, vivified as an array element is. null when the
+     * receiver is no known bag class.
+     */
+    private function emitBagElemAddr(PropertyAccess_ $pa): ?string
+    {
+        $cd = $this->classes[$pa->object->type->class ?? ''] ?? null;
+        if ($cd === null || !$cd->usesBag()) { return null; }
+        $out = $this->emitNode($pa->object);
+        $out .= $this->cellToPtr();
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . ' = getelementptr inbounds i8, ptr ' . $this->lastValue
+              . ', i64 ' . (string)$cd->bagOffset() . "\n";
+        $ep = $this->ssa->allocReg();
+        $out .= '  ' . $ep . ' = call ptr @__mir_array_ref_slot_str(ptr ' . $slot . ', ptr '
+              . $this->strLitId($this->pool->intern($pa->property)) . ")\n";
+        $addr = $this->ssa->allocReg();
+        $out .= '  ' . $addr . ' = ptrtoint ptr ' . $ep . " to i64\n";
+        $this->lastValue = $addr;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function byRefAddrOfRaw(Node $a): ?string
     {
         $this->refElemBase = '';
@@ -1710,7 +1734,8 @@ trait EmitLlvmLocals
             // the object's class_id instead. Asks the same predicate the offset
             // itself comes from, so the two cannot drift.
             if ($this->propertyOffsetOrNull($pa->object, $pa->property) === null) {
-                return $this->emitPropAddrByClassId($pa->object, $pa->property);
+                $byId = $this->emitPropAddrByClassId($pa->object, $pa->property);
+                return $byId ?? $this->emitBagElemAddr($pa);
             }
             $out = $this->emitNode($pa->object);
             $out .= $this->coerceToPtr();
@@ -1838,6 +1863,24 @@ trait EmitLlvmLocals
             // (an erased `array` may hold a typed one): the by-ref call decodes it.
             if ($aa->array->kind === Node::KIND_LOAD_LOCAL && $a->type->kind === Type::KIND_CELL) {
                 $this->refElemBase = $baseSlot;
+            }
+            // A cell element that is already a REF cell (`$r = &$a[$k]` earlier):
+            // the storage is its box, so answer the box's value address. The slot
+            // itself would let the callee overwrite the REF cell and detach `$r`.
+            if (!$isAppend && $aa->type->kind === Type::KIND_CELL) {
+                $rw = $this->ssa->allocReg();
+                $out .= '  ' . $rw . ' = load i64, ptr ' . $ep . "\n";
+                $rh = $this->ssa->allocReg();
+                $out .= '  ' . $rh . ' = and i64 ' . $rw . ", -281474976710656\n";
+                $rIs = $this->ssa->allocReg();
+                $out .= '  ' . $rIs . ' = icmp eq i64 ' . $rh . ', ' . (string)(\Compile\MemoryAbi::CELL_REF_TAG_BITS) . "\n";
+                $rb = $this->ssa->allocReg();
+                $out .= '  ' . $rb . ' = and i64 ' . $rw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $rbp = $this->ssa->allocReg();
+                $out .= '  ' . $rbp . ' = inttoptr i64 ' . $rb . " to ptr\n";
+                $ep2 = $this->ssa->allocReg();
+                $out .= '  ' . $ep2 . ' = select i1 ' . $rIs . ', ptr ' . $rbp . ', ptr ' . $ep . "\n";
+                $ep = $ep2;
             }
             $out .= $close;
             $addr = $this->ssa->allocReg();

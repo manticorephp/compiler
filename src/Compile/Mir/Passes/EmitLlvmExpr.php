@@ -4049,12 +4049,13 @@ trait EmitLlvmExpr
             if ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN
                 || $ok === Type::KIND_UNION || $ok === Type::KIND_STRING
                 || $ok === Type::KIND_INT || $ok === Type::KIND_FLOAT
-                || $ok === Type::KIND_BOOL || $ok === Type::KIND_NULL) {
+                || $ok === Type::KIND_BOOL || $ok === Type::KIND_NULL
+                || $this->isEnumType($c->operand->type)) {
                 $out .= $this->boxToCell($c->operand->type);
                 $out .= $this->coerceToI64();
                 $v = $this->lastValue;
                 $this->rt->needsTagged = true;
-                $slot = $this->ssa->allocReg();
+                $slot =$this->ssa->allocReg();
                 $out .= '  ' . $slot . " = alloca ptr\n";
                 $out .= $this->cellTagIr($v);
                 $tag = $this->cellTagReg;

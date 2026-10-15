@@ -659,6 +659,44 @@ trait EmitLlvmCalls
     }
 
     /** `$closure(args)` → load captures from the struct, call __closure_N. */
+    /**
+     * The static methods an erased string-callable invoke can reach, as
+     * canonical `Class::method` names (declared case) mapped to true. Built from
+     * {@see Module::$callableStaticStrings}: a full `'C::m'` literal names one
+     * method; a `'C::'` prefix (the head of `'C::' . $m`) names every static
+     * method of C. A name no class declares, an instance method or a method
+     * without a body is dropped.
+     * @return array<string, bool>
+     */
+    private function staticStringArms(): array
+    {
+        if ($this->staticStringArmsDone) { return $this->staticStringArmsMemo; }
+        /** @var array<string, string> $byLower */
+        $byLower = [];
+        foreach ($this->classes as $cn => $_) { $byLower[\strtolower((string)$cn)] = (string)$cn; }
+        /** @var array<string, bool> $arms */
+        $arms = [];
+        foreach ($this->callableStaticStrings as $lit => $_) {
+            $lit = (string)$lit;
+            $sep = \strpos($lit, '::');
+            $cls = $byLower[\strtolower(\ltrim(\substr($lit, 0, $sep), '\\'))] ?? '';
+            if ($cls === '') { continue; }
+            $want = \substr($lit, $sep + 2);
+            for ($c = $cls; $c !== '' && isset($this->classes[$c]); $c = $this->classes[$c]->parent) {
+                foreach ($this->classes[$c]->methodNames as $mn => $__) {
+                    $mn = (string)$mn;
+                    if ($want !== '' && \strcasecmp($mn, $want) !== 0) { continue; }
+                    if (isset($arms[$cls . '::' . $mn]) || !$this->methodIsStatic($cls, $mn)
+                        || $this->staticMethodHasNoImpl($cls, $mn)) { continue; }
+                    $arms[$cls . '::' . $mn] = true;
+                }
+            }
+        }
+        $this->staticStringArmsMemo = $arms;
+        $this->staticStringArmsDone = true;
+        return $arms;
+    }
+
     /** `$f(args)` / call_user_func($f, args) with `$f` a runtime function-name
      *  string. strcmp the name against each arity-compatible FREE user function
      *  and reuse the normal Call path for the match, boxing the result to a
@@ -913,6 +951,46 @@ trait EmitLlvmCalls
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $nextL . ":\n";
             }
+        }
+        // `'Class::method'` strings the module spells (or a `'Class::'` prefix a
+        // runtime concat extends): a static method named by string. Its symbol
+        // carries a `__`, so no function arm above reaches it. php matches both
+        // halves case-insensitively and accepts a leading backslash.
+        $staticArms = $hasSpread ? [] : $this->staticStringArms();
+        if ($staticArms !== []) {
+            $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
+            $bs = $this->ssa->allocReg();
+            $out .= '  ' . $bs . ' = load i8, ptr ' . $keyP . "\n";
+            $isBs = $this->ssa->allocReg();
+            $out .= '  ' . $isBs . ' = icmp eq i8 ' . $bs . ", 92\n";
+            $keyTail = $this->ssa->allocReg();
+            $out .= '  ' . $keyTail . ' = getelementptr i8, ptr ' . $keyP . ", i64 1\n";
+            $keyS = $this->ssa->allocReg();
+            $out .= '  ' . $keyS . ' = select i1 ' . $isBs . ', ptr ' . $keyTail . ', ptr ' . $keyP . "\n";
+        }
+        foreach ($staticArms as $csName => $_) {
+            $csName = (string)$csName;
+            $sep = \strpos($csName, '::');
+            $ccls = \substr($csName, 0, $sep);
+            $cm = \substr($csName, $sep + 2);
+            $csSym = $this->resolveMethodClass($ccls, $cm) . '__' . $cm;
+            $csPt = $this->sigs->paramTypes[$csSym] ?? null;
+            if ($csPt === null || !$this->dynfArityFits($csSym, $argc) || $this->anyRefParam($csSym)
+                || !$this->dynArmTypesEmittable($csPt, $iv->args)) { continue; }
+            $csRt = $this->sigs->returnType[$csSym] ?? Type::cell();
+            $hitL = $this->ssa->allocLabel('dynf.shit');
+            $nextL = $this->ssa->allocLabel('dynf.snext');
+            $cmp = $this->ssa->allocReg();
+            $out .= '  ' . $cmp . ' = call i32 @strcasecmp(ptr ' . $keyS . ', ptr ' . $this->litStr($csName) . ")\n";
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+            $out .= $hitL . ":\n";
+            $out .= $this->emitNode(new \Compile\Mir\StaticCall_($ccls, $cm, $iv->args, $csRt));
+            $out .= $this->boxToCell($csRt);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $nextL . ":\n";
         }
         if ($dynfSyms !== []) {
             $out .= $hasSpread
@@ -1971,6 +2049,7 @@ trait EmitLlvmCalls
                     $out .= $this->emitRefValueSlot($a, $calleeParams[$capCnt + $pi] ?? null, -1, $pi);
                     $padDrops .= $this->lastRefSlotDrop;
                 }
+                $out .= $this->coerceToI64();
                 $argList .= ', i64 ' . $this->lastValue;
                 $argTypes .= ', i64';
                 $pi = $pi + 1;
@@ -2200,6 +2279,8 @@ trait EmitLlvmCalls
             if ($n->type->kind === Type::KIND_CELL) {
                 $out .= $this->boxInvokeResultIr();
                 $this->markCellOpaque($this->lastValue);
+            } elseif ($n->type->kind === Type::KIND_OBJ || $n->type->kind === Type::KIND_CLOSURE) {
+                $out .= $this->unboxNullObjResultIr();
             }
             return $out;
         }
@@ -2217,26 +2298,45 @@ trait EmitLlvmCalls
         if ($n->type->kind === Type::KIND_CELL) {
             $out .= $this->boxInvokeResultIr();
             $this->markCellOpaque($this->lastValue);
+        } elseif ($n->type->kind === Type::KIND_OBJ || $n->type->kind === Type::KIND_CLOSURE) {
+            $out .= $this->unboxNullObjResultIr();
         }
         return $out;
     }
 
     /**
      * The cell of a closure call's result (lastValue). Under the uniform ABI a
-     * scalar comes back already tagged and an array / object / closure RAW, so
-     * a raw word is a container — boxed by its allocator magic — or a null
-     * pointer, which is a `?Class` returning null, not the integer 0.
+     * scalar comes back already tagged (a float 0.0 is the word 0) and an array /
+     * object / closure RAW; a null object is returned as the tagged NULL cell by
+     * its producer ({@see EmitLlvmModule::emitReturn}), so a raw word is a
+     * container, boxed by its allocator magic, or the float 0.0 — never a null.
      */
     private function boxInvokeResultIr(): string
     {
         $out = $this->coerceToI64();
         $raw = $this->lastValue;
         $out .= $this->boxUnknownShallowIr();
+        // The probe reads a 0 word as the raw int 0; as a tagged result it is 0.0.
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = icmp eq i64 ' . $raw . ", 0\n";
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = select i1 ' . $z . ', i64 ' . (string)\Compile\MemoryAbi::CELL_NULL
-            . ', i64 ' . $this->lastValue . "\n";
+        $out .= '  ' . $r . ' = select i1 ' . $z . ', i64 0, i64 ' . $this->lastValue . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * A typed object result of a closure call: the producer's tagged NULL cell
+     * back to the raw null pointer a typed consumer reads.
+     */
+    private function unboxNullObjResultIr(): string
+    {
+        $out = $this->coerceToI64();
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = icmp eq i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = select i1 ' . $z . ', i64 0, i64 ' . $this->lastValue . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;

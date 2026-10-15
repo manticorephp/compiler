@@ -2719,6 +2719,24 @@ trait EmitLlvmModule
                 $out .= $this->rcRetainReg($this->lastValue, \Compile\Mir\Ownership::ERASED_ARR);
             }
         }
+        // An object rides RAW under the uniform closure ABI, and a raw 0 would read
+        // as the float 0.0 a cell-returning closure also hands back as word 0. A
+        // null object is therefore returned as the tagged NULL cell; a typed caller
+        // maps it back ({@see EmitLlvmCalls::emitInvoke}).
+        if ($this->frame->isClosure || $this->frame->isTrampoline) {
+            $ok = $v->type->kind === Type::KIND_OBJ || $v->type->kind === Type::KIND_CLOSURE
+                || ($this->frame->returnType !== null && ($this->frame->returnType->kind === Type::KIND_OBJ
+                    || $this->frame->returnType->kind === Type::KIND_CLOSURE));
+            if ($ok) {
+                $z = $this->ssa->allocReg();
+                $out .= '  ' . $z . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sel . ' = select i1 ' . $z . ', i64 ' . (string)\Compile\MemoryAbi::CELL_NULL
+                    . ', i64 ' . $this->lastValue . "\n";
+                $this->lastValue = $sel;
+                $this->lastValueType = 'i64';
+            }
+        }
         return $this->finishReturn($out, $this->lastValue, $this->retLeave($r, $ownMoved, $this->lastValue, $leave));
     }
 

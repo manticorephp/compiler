@@ -211,6 +211,9 @@ final class Module
     /** @var array<string, bool> method names `[$obj, 'name']` literals spell */
     public array $callableArrayMethods = [];
 
+    /** @var array<string, bool> `'Class::method'` string literals the module spells */
+    public array $callableStaticStrings = [];
+
     /** Method FunctionDef name ("Class__method") → backtrace frame display
      *  ("Class->method" / "Class::method"). Built at lowering (stable string
      *  ops); EmitLlvm stamps the correct name at a method's entry, because the
