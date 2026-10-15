@@ -628,6 +628,7 @@ trait LowerClasses
         $cd->methodMeta = $methodMeta;
         $cd->attributes = $this->attrNames($decl->attributes);
         $cd->isFinal = $decl->isFinal;
+        $cd->isReadonlyClass = $decl->isReadonly;
         $cd->isAbstract = $decl->isAbstract;
         // Narrow slots: a property declared as a `#[TypeDef(repr: 'u8')]` occupies
         // ONE byte, not a word. This is where `repr` stops being a validated label

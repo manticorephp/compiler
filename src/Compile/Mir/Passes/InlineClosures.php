@@ -82,6 +82,8 @@ final class InlineClosures implements Pass
     private int $fuseCounter = 0;
     /** Rewriting a closure body: operator overloading only, no inlining / fusion. */
     private bool $opOnly = false;
+    /** The node being rewritten is a whole statement (its value is unused). */
+    private bool $stmtPos = false;
     /** @var array<string,FunctionDef> every function by name (Ds method bodies to clone) */
     private array $fnByName = [];
     /** While a Ds method body is cloned: the local holding its callback. */
@@ -125,7 +127,11 @@ final class InlineClosures implements Pass
     private function rewriteBlock(Block $b): Block
     {
         $out = [];
-        foreach ($b->stmts as $s) { $out[] = $this->rewrite($s); }
+        foreach ($b->stmts as $s) {
+            $this->stmtPos = $s->kind === Node::KIND_INCDEC;
+            $out[] = $this->rewrite($s);
+            $this->stmtPos = false;
+        }
         $b->stmts = $out;
         return $b;
     }
@@ -185,6 +191,32 @@ final class InlineClosures implements Pass
         return null;
     }
 
+    /**
+     * `++$n` / `--$n` on an Overloadable local → `$n = $n->__operator('+', 1)`. A postfix
+     * form is accepted only as a whole statement (its old value would be unused); used as a
+     * value it would have to answer the OLD value, so it is refused rather than answering the new one.
+     */
+    private function tryIncDec(Node $n): ?Node
+    {
+        if (!$this->hasHook($n, '__operator')) { return null; }
+        if (!$n->prefix && !$this->stmtPos) {
+            throw new \RuntimeException(
+                'MIR.lower: postfix ' . $n->op . $n->op . ' on an Overloadable object is supported only as a statement; write ' . $n->op . $n->op . '$' . $n->name
+            );
+        }
+        $call = $this->opCall(
+            new LoadLocal($n->name, $n->type),
+            '__operator',
+            [
+                new \Compile\Mir\StringConst($n->op, Type::string_()),
+                new \Compile\Mir\IntConst(1, Type::int_()),
+                new \Compile\Mir\BoolConst(false, Type::bool_()),
+            ],
+            $n->type
+        );
+        return new \Compile\Mir\StoreLocal($n->name, $call, $n->type);
+    }
+
     private function arith(string $op, Node $l, Node $r, Type $type): ?Node
     {
         if ($this->hasHook($l, '__operator')) {
@@ -239,6 +271,11 @@ final class InlineClosures implements Pass
             if ($this->opOnly) { return $n; }
             $spliced = $this->tryInline($n);
             return $spliced ?? $n;
+        }
+
+        if ($n->kind === Node::KIND_INCDEC) {
+            $inc = $this->tryIncDec($n);
+            if ($inc !== null) { return $inc; }
         }
 
         // ── Leaves (no sub-nodes that can hold an invoke) ──
@@ -405,7 +442,11 @@ final class InlineClosures implements Pass
         if ($n->kind === Node::KIND_FOR) {
             if ($n->init !== null) { $n->init = $this->rewrite($n->init); }
             if ($n->cond !== null) { $n->cond = $this->rewrite($n->cond); }
-            if ($n->step !== null) { $n->step = $this->rewrite($n->step); }
+            if ($n->step !== null) {
+                $this->stmtPos = $n->step->kind === Node::KIND_INCDEC;
+                $n->step = $this->rewrite($n->step);
+                $this->stmtPos = false;
+            }
             $this->rewriteBlock($n->body);
             return $n;
         }

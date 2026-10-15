@@ -22,3 +22,12 @@ $c = new Number('1.5');
 $c += $b;
 $c *= 2;
 echo $c, "\n";
+$i = new Number('0.5');
+++$i;
+$i++;
+--$i;
+echo $i, "\n";
+for ($k = new Number(0); $k < 3; $k++) {
+    echo $k, ' ';
+}
+echo "\n";

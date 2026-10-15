@@ -1809,6 +1809,11 @@ trait InferNodes
             $node->type = $cur;
             return $cur;
         }
+        // An Overloadable object: `++$n` is `$n + 1` (rewritten in InlineClosures::tryIncDec).
+        if ($cur !== null && $this->operatorHookType($cur, $cur) !== null) {
+            $node->type = $cur;
+            return $cur;
+        }
         // `$x++` reads + writes an int local; pin the slot to int — and the
         // NODE: an earlier inference round may have stamped it `cell` (`$j = $i`
         // with `$i` a key not yet narrowed), and the emitter reads the node. A

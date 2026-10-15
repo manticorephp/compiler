@@ -207,6 +207,16 @@ namespace BcMath {
         /** @return array{0:string,1:int} normalized value, scale */
         private static function parse(string $fn, int $no, string $name, string $s): array
         {
+            // Fast path: the canonical `-?int(.frac)?` text bc* itself returns — no regex.
+            $body = $s !== '' && $s[0] === '-' ? \substr($s, 1) : $s;
+            $dot = \strpos($body, '.');
+            $ip = $dot === false ? $body : \substr($body, 0, $dot);
+            $fp = $dot === false ? '' : \substr($body, $dot + 1);
+            if ($ip !== '' && \ctype_digit($ip) && ($ip === '0' || $ip[0] !== '0')
+                && ($dot === false || ($fp !== '' && \ctype_digit($fp)))
+                && ($body === $s || \ltrim($ip . $fp, '0') !== '')) {
+                return [$s, \strlen($fp)];
+            }
             if (\preg_match('/^([+-]?)(\d*)(?:\.(\d*))?$/D', $s, $m) !== 1) {
                 throw new \ValueError('BcMath\Number::' . $fn . '(): Argument #' . $no . ' ($' . $name . ') is not well-formed');
             }
