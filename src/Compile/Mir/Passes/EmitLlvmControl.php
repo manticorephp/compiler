@@ -600,6 +600,16 @@ trait EmitLlvmControl
         return $out;
     }
 
+    /** Whether the loop's subject is statically only `Traversable`: Iterator or IteratorAggregate is a run-time fact. */
+    private function travSubjectNeedsRuntimeKind(\Compile\Mir\Foreach_ $fe): bool
+    {
+        $c = \ltrim($fe->array->type->class ?? '', '\\');
+        if ($c === '' || $c === 'Generator' || isset($this->classes[$c])) { return false; }
+        if ($c === 'Iterator' || $c === 'IteratorAggregate') { return false; }
+        if ($c !== 'Traversable' && !$this->classImplements($c, 'Traversable')) { return false; }
+        return !$this->classImplements($c, 'Iterator') && !$this->classImplements($c, 'IteratorAggregate');
+    }
+
     private function emitForeachObject(\Compile\Mir\Foreach_ $fe): string
     {
         $out = '';
@@ -612,6 +622,17 @@ trait EmitLlvmControl
             $ks = $this->ssa->allocReg();
             $this->locals->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
+        }
+        // A subject typed `Traversable` (or an interface that only extends it) is an Iterator, an
+        // IteratorAggregate or a Generator at run time: taken for an Iterator it had `rewind()` called
+        // on an aggregate, which wrote through another class's layout (heap corruption on glibc, an
+        // empty loop elsewhere). The erased loop asks the object which it is.
+        // (Not inside a generator: the erased loop keeps its state in allocas, which a resume does not
+        // restore; there the Iterator protocol is still assumed.)
+        if (!$this->gen->inGenerator && $this->travSubjectNeedsRuntimeKind($fe)) {
+            $out .= $this->emitNode($fe->array);
+            $out .= $this->coerceToI64();
+            return $out . $this->emitForeachErasedIterator($fe, $this->lastValue);
         }
         // Hold the iterator in a synthetic local; protocol calls load it from
         // there so the subject expression is evaluated exactly once. The slot
