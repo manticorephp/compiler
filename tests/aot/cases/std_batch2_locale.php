@@ -8,8 +8,8 @@ foreach ([0, 1] as $t) {
         echo "$t $f ", count($r), " ", md5(json_encode($r)), "\n";
     }
 }
-echo json_encode(get_html_translation_table(0, 3)), "\n";
-echo json_encode(array_slice(get_html_translation_table(1, 3), 0, 8)), "\n";
+echo json_encode(get_html_translation_table(HTML_SPECIALCHARS, 3)), "\n";
+echo json_encode(array_slice(get_html_translation_table(HTML_ENTITIES, 3), 0, 8)), "\n";
 $r = get_html_translation_table(1, 3, "ISO-8859-1");
 echo count($r), " ", md5(json_encode($r)), "\n";
 echo count(get_html_translation_table()), "\n";

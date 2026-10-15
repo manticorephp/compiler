@@ -5578,17 +5578,6 @@ trait EmitLlvmBuiltins
                 return $this->biFormatRuntime($args, $toStdout);
             }
         }
-        // php prints a non-finite float as NaN / INF / -INF (no width, sign or precision); C's
-        // snprintf says nan / inf. A float conversion is inlined only over an int or a finite
-        // literal; any other operand might be non-finite, so the runtime engine formats it.
-        for ($ci = 0; $ci < $argN && $ci + 1 < \count($args); $ci = $ci + 1) {
-            if ($convs[$ci] !== 'f') { continue; }
-            $an = $args[$ci + 1];
-            $finiteLit = $an->kind === Node::KIND_FLOAT_CONST && \is_finite($an->value);
-            if ($an->type->kind !== Type::KIND_INT && !$finiteLit) {
-                return $this->biFormatRuntime($args, $toStdout);
-            }
-        }
         // A positional `%n$` spec or fewer args than conversions needs the
         // runtime {@see \__mc_format} engine (arg reordering / a missing arg is
         // "" in PHP) — the inline path can do neither, and would crash on an
