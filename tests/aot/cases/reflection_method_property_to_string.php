@@ -6,7 +6,7 @@ final class Impl {
     public ?string $s = null;
     private readonly int $r;
     public array $list = [];
-    public function __construct(public int $promoted = 0) { $this->r = 1; }
+    public function __construct(int $promoted = 0) { $this->r = 1; }
     public function must(int $a, string ...$rest): void {}
     protected static function make(array $o = [], ?Impl $i = null, bool $f = false): int { return 1; }
     public function plain() {}
