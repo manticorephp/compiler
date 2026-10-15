@@ -550,6 +550,7 @@ trait InferCalls
             || $n === 'sin' || $n === 'cos' || $n === 'tan'
             || $n === 'asin' || $n === 'acos' || $n === 'atan' || $n === 'atan2'
             || $n === 'sinh' || $n === 'cosh' || $n === 'tanh'
+            || $n === 'log1p' || $n === 'expm1' || $n === 'asinh' || $n === 'acosh' || $n === 'atanh'
             || $n === 'exp' || $n === 'log' || $n === 'log10'
             || $n === 'hypot' || $n === 'pi' || $n === 'deg2rad' || $n === 'rad2deg'
             || $n === 'peek_f64') {
