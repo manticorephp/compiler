@@ -742,6 +742,24 @@ class ReflectionClass
         return $out;
     }
 
+    /**
+     * The declared defaults, `name => value`: static properties first (their current values, as php
+     * reads them), then instance properties. A typed property with no default has none and is left out.
+     * @return array<string, mixed>
+     */
+    public function getDefaultProperties(): array
+    {
+        $out = [];
+        $all = $this->getProperties();
+        foreach ($all as $p) {
+            if ($p->isStatic() && $p->hasDefaultValue()) { $out[$p->getName()] = $p->getDefaultValue(); }
+        }
+        foreach ($all as $p) {
+            if (!$p->isStatic() && $p->hasDefaultValue()) { $out[$p->getName()] = $p->getDefaultValue(); }
+        }
+        return $out;
+    }
+
     /** One static property's value; `$default` (when given) answers a missing one. */
     public function getStaticPropertyValue(string $name, mixed $default = null): mixed
     {
