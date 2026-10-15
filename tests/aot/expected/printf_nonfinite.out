@@ -1,0 +1,11 @@
+NaN INF -INF NaN INF NaN
+%+f => [NaN] [INF] [-INF]
+%8f| => [NaN|] [INF|] [-INF|]
+%-8f| => [NaN|] [INF|] [-INF|]
+%08f => [NaN] [INF] [-INF]
+%'x8f => [NaN] [INF] [-INF]
+%.2f => [NaN] [INF] [-INF]
+%+e => [NaN] [INF] [-INF]
+%5.1e => [NaN] [INF] [-INF]
+%G => [NaN] [INF] [-INF]
+inf INF INF -INF
