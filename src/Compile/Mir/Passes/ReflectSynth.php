@@ -117,10 +117,15 @@ final class ReflectSynth
      */
     public static function sourceFor(ClassDef $cls): string
     {
-        if ($cls->isStruct || $cls->isPreludeClass) { return ''; }
+        if ($cls->isStruct) { return ''; }
+        // A prelude class has no accessors, except the one property libraries reach by reflection:
+        // `Exception::$trace` / `Error::$trace` (symfony/polyfill-deepclone resets it on a prototype).
+        $throwable = $cls->isPreludeClass && ($cls->name === 'Exception' || $cls->name === 'Error');
+        if ($cls->isPreludeClass && !$throwable) { return ''; }
         $out = '';
         foreach ($cls->propertyMeta as $pn => $pm) {
             if ($pm->declaringClass !== '' && $pm->declaringClass !== $cls->name) { continue; }
+            if ($throwable && $pm->name !== 'trace') { continue; }
             $out .= self::accessorPair($cls->name, $pm, ($cls->propHooks[$pm->name]['set'] ?? '') !== '');
         }
         return $out;

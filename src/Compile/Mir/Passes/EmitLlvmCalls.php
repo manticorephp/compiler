@@ -1917,6 +1917,7 @@ trait EmitLlvmCalls
         $dynReboxSlots = [];
         $dynReboxTmps = [];
         $dynReboxBits = [];
+        $dynReboxUnbox = [];
         /** @var string[] $invReboxSlots */
         $invReboxSlots = [];
         /** @var string[] $invReboxTmps */
@@ -2070,6 +2071,7 @@ trait EmitLlvmCalls
                     $dynReboxSlots[] = $this->dynRefSlot;
                     $dynReboxTmps[] = $this->dynRefTmp;
                     $dynReboxBits[] = $this->dynRefBit;
+                    $dynReboxUnbox[] = $this->dynRefUnbox;
                 }
                 $pi = $pi + 1;
                 continue;
@@ -2170,7 +2172,7 @@ trait EmitLlvmCalls
         if ($btClosure) { $out .= $this->btPop(); }
         $out .= $this->faPop();
         foreach ($intArgBoxes as $ib) { $out .= $this->rcReleaseReg($ib, 'cell'); }
-        $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits);
+        $out .= $this->emitDynByRefRebox($dynReboxSlots, $dynReboxTmps, $dynReboxBits, $dynReboxUnbox);
         $out .= $this->emitByRefCellRebox($invReboxSlots, $invReboxTmps);
         $bi = 0;
         foreach ($invBoxTmps as $btmp) {
@@ -3173,6 +3175,7 @@ trait EmitLlvmCalls
         $this->dynRefSlot = '';
         $this->dynRefTmp = '';
         $this->dynRefBit = '';
+        $this->dynRefUnbox = false;
         $out = $this->emitNode($a);
         // The by-value alternative is the SAME word every other dynamic call hands
         // over: an object / closure / array arg is boxed too, or a closure whose
@@ -3269,6 +3272,47 @@ trait EmitLlvmCalls
             $this->lastValueType = 'i64';
             return $out;
         }
+        // A concrete cell-element array (`vec[cell]` / `assoc[*,cell]`) handed to a closure whose by-ref param is
+        // an UNTYPED cell: the callee reads and writes a cell slot, so it gets a scratch cell holding the array,
+        // and the call's tail unboxes whatever array it left there back into the typed slot. A callee that
+        // wrote a non-array fails there by name instead of leaving a scalar behind a typed slot.
+        $ae = $a->type->element;
+        if (($a->type->isVec() || $a->type->isAssoc()) && $ae !== null && $ae->kind === Type::KIND_CELL) {
+            $this->rt->needsTagged = true;
+            $sp0 = $this->ssa->allocReg();
+            $out .= '  ' . $sp0 . ' = inttoptr i64 ' . $addr . " to ptr\n";
+            $cur0 = $this->ssa->allocReg();
+            $out .= '  ' . $cur0 . ' = load i64, ptr ' . $sp0 . "\n";
+            $bp = $this->ssa->allocReg();
+            $out .= '  ' . $bp . ' = inttoptr i64 ' . $cur0 . " to ptr\n";
+            $bx = $this->ssa->allocReg();
+            $out .= '  ' . $bx . ' = call i64 @__manticore_box_array(ptr ' . $bp . ")\n";
+            $tmp = $this->ssa->allocReg();
+            $out .= '  ' . $tmp . " = alloca i64\n";
+            $out .= '  store i64 ' . $bx . ', ptr ' . $tmp . "\n";
+            $taddr = $this->ssa->allocReg();
+            $out .= '  ' . $taddr . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+            $out .= $this->dynByRefBit($maskReg, $pi);
+            $anyRef = $this->lastIsRef;
+            $isRaw = 'false';
+            if ($rawMask !== '') {
+                // A closure whose by-ref param is TYPED still reads a raw payload through the slot.
+                $out .= $this->dynByRefTypedGuard($rawMask, $pi, $a->type);
+                $out .= $this->dynByRefBit($rawMask, $pi);
+                $isRaw = $this->lastIsRef;
+            }
+            $refAddr = $this->ssa->allocReg();
+            $out .= '  ' . $refAddr . ' = select i1 ' . $isRaw . ', i64 ' . $addr . ', i64 ' . $taddr . "\n";
+            $out .= $this->dynByRefSelect($maskReg, $pi, $refAddr, $val);
+            $op = $this->lastValue;
+            $this->dynRefSlot = $addr;
+            $this->dynRefTmp = $tmp;
+            $this->dynRefBit = $anyRef;
+            $this->dynRefUnbox = true;
+            $this->lastValue = $op;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // A CONCRETE lvalue cannot receive what a dynamic callee writes: the
         // callee may replace the array wholesale — `$pre = ['stale']` handed to
         // `fn (&$out) => $out = [1, 2]` leaves ints in a slot still typed
@@ -3340,6 +3384,8 @@ trait EmitLlvmCalls
     private string $dynRefSlot = '';
     private string $dynRefTmp = '';
     private string $dynRefBit = '';
+    /** The scratch holds a CELL the post-call step unboxes into a concrete array slot ({@see emitDynByRefRebox}). */
+    private bool $dynRefUnbox = false;
     /** The `%isref` predicate {@see dynByRefSelect} just produced. */
     private string $lastIsRef = '';
 
@@ -3352,13 +3398,18 @@ trait EmitLlvmCalls
      * @param string[] $tmps
      * @param string[] $bits
      */
-    private function emitDynByRefRebox(array $slots, array $tmps, array $bits): string
+    private function emitDynByRefRebox(array $slots, array $tmps, array $bits, array $unbox = []): string
     {
         $out = '';
         $bi = 0;
         foreach ($tmps as $tmp) {
             $rv = $this->ssa->allocReg();
             $out .= '  ' . $rv . ' = load i64, ptr ' . $tmp . "\n";
+            if ($unbox[$bi] ?? false) {
+                $out .= $this->emitDynByRefUnbox($slots[$bi], $rv, $bits[$bi]);
+                $bi = $bi + 1;
+                continue;
+            }
             $this->lastValue = $rv;
             $this->lastValueType = 'i64';
             $out .= $this->boxToCell(Type::vec(Type::cell()));
@@ -3376,6 +3427,38 @@ trait EmitLlvmCalls
         return $out;
     }
 
+    /**
+     * The tail of the scratch-cell arm in {@see emitDynByRefArg}: when the closure took the scratch
+     * (`$bit`), what it left there must still be an ARRAY cell, and its payload becomes the typed slot's value.
+     */
+    private function emitDynByRefUnbox(string $slotAddr, string $cell, string $bit): string
+    {
+        $hd = $this->ssa->allocReg();
+        $out = '  ' . $hd . ' = and i64 ' . $cell . ', -281474976710656' . "\n";
+        $isArr = $this->ssa->allocReg();
+        $out .= '  ' . $isArr . ' = icmp eq i64 ' . $hd . ', ' . (string)\Compile\MemoryAbi::CELL_ARRAY_TAG_BITS . "\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = xor i1 ' . $isArr . ", true\n";
+        $trap = $this->ssa->allocReg();
+        $out .= '  ' . $trap . ' = and i1 ' . $bit . ', ' . $bad . "\n";
+        $trapL = $this->ssa->allocLabel('dynunbox.bad');
+        $okL = $this->ssa->allocLabel('dynunbox.ok');
+        $out .= '  br i1 ' . $trap . ', label %' . $trapL . ', label %' . $okL . "\n";
+        $out .= $trapL . ":\n";
+        $out .= $this->emitNamedFatal('PHP Fatal error:  a by-reference closure parameter replaced an array variable with a non-array value');
+        $out .= '  br label %' . $okL . "\n";
+        $out .= $okL . ":\n";
+        $pay = $this->ssa->allocReg();
+        $out .= '  ' . $pay . ' = and i64 ' . $cell . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+        $cur = $this->ssa->allocReg();
+        $out .= '  ' . $cur . ' = load i64, ptr ' . $sp . "\n";
+        $pick = $this->ssa->allocReg();
+        $out .= '  ' . $pick . ' = select i1 ' . $bit . ', i64 ' . $pay . ', i64 ' . $cur . "\n";
+        $out .= '  store i64 ' . $pick . ', ptr ' . $sp . "\n";
+        return $out;
+    }
     /** `(mask >> $pi) & 1 != 0` — leaves the predicate in {@see $lastIsRef}. */
     private function dynByRefBit(string $maskReg, int $pi): string
     {
