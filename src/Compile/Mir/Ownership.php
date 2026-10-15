@@ -797,7 +797,7 @@ final class Ownership
         // convention anyway.
         foreach ([
             'array_first', 'array_last', 'array_key_first', 'array_key_last',
-            'current', 'pos', 'key', 'reset', 'end', 'next', 'prev',
+            'current', 'pos', 'key', 'reset', 'end', 'next', 'prev', 'array_pop', 'array_shift',
         ] as $cn) {
             if ($fn === $cn) { return true; }
         }
@@ -827,7 +827,7 @@ final class Ownership
         $bare = $p === false ? $fn : \substr($fn, $p + 1);
         foreach ([
             'explode', 'str_split', 'preg_split', 'array_keys', 'array_values',
-            'range', 'array_fill', 'str_getcsv', 'get_object_vars',
+            'range', 'array_fill', 'str_getcsv', 'get_object_vars', 'array_pop', 'array_shift',
         ] as $n) {
             if ($n === $bare) { return true; }
         }
