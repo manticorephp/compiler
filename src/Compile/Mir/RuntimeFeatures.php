@@ -76,6 +76,7 @@ public bool $needsClosureRc = false;
     public bool $needsStrtoupper = false;
     public bool $needsIpow = false;
     public bool $needsAddslashes = false;
+    public bool $needsStrrev = false;
     public bool $needsJsonEscape = false;
     public bool $needsJsonEnc = false;
     public bool $needsJsonDec = false;

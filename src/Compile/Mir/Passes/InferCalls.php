@@ -560,7 +560,7 @@ trait InferCalls
             || $n === 'str_repeat' || $n === 'strtolower' || $n === 'strtoupper'
             || $n === 'sprintf' || $n === 'implode' || $n === 'join'
             || $n === '__mc_fmt_int' || $n === '__mc_fmt_float' || $n === '__mc_fmt_str'
-            || $n === 'addslashes' || $n === 'var_export' || $n === '__mc_json_escape'
+            || $n === 'addslashes' || $n === 'strrev' || $n === 'var_export' || $n === '__mc_json_escape'
             || $n === '__mir_str_replace_one'
             || $n === 'str_from_buffer' || $n === 'cstr_to_str'
             || $n === 'gettype' || $n === 'get_debug_type'

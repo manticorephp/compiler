@@ -1852,6 +1852,36 @@ final class RuntimeLibrary
         return $out;
     }
 
+    /** Runtime: byte-reversed copy of a string (strrev). Plain counted loop; LLVM vectorizes it. */
+    public function strrev(): string
+    {
+        $out  = "\ndefine ptr @__mir_strrev(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %slen = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %sz = add i64 %slen, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i2, %body]\n";
+        $out .= "  %done = icmp sge i64 %i, %slen\n";
+        $out .= "  br i1 %done, label %fin, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %j0 = sub i64 %slen, 1\n";
+        $out .= "  %j = sub i64 %j0, %i\n";
+        $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %j\n";
+        $out .= "  %c = load i8, ptr %sp\n";
+        $out .= "  %dp = getelementptr inbounds i8, ptr %buf, i64 %i\n";
+        $out .= "  store i8 %c, ptr %dp\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "fin:\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %slen\n";
+        $out .= "  store i8 0, ptr %np\n";
+        $out .= "  ret ptr %buf\n";
+        $out .= "}\n";
+        return $out;
+    }
+
     /** Runtime: backslash-escape `'` `"` `\` (NUL handling is moot for a
      * strlen-scanned C string). Worst case doubles the length. */
     public function addslashes(): string

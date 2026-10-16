@@ -516,6 +516,7 @@ trait EmitLlvmBuiltins
         if ($name === 'array_shift')                  { return $this->biArrayShift($c); }
         if ($name === 'array_unshift')                { return $this->biArrayUnshift($c); }
         if ($name === 'addslashes')                   { return $this->biAddslashes($args); }
+        if ($name === 'strrev' && \count($args) === 1) { return $this->biStrrev($args); }
         // ONE argument only. The builtin reads args[0] and nothing else, so
         // firing it on `__mc_json_escape($s, $flags)` would drop the flags
         // silently — a builtin shadowing its own bootstrap body with WEAKER
@@ -9091,6 +9092,20 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = phi ptr [' . $c2 . ', %' . $lSet . '], [' . $nl . ', %' . $lNull . "]\n";
         $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** @param Node[] $args  strrev($s) — byte-reversed copy. */
+    private function biStrrev(array $args): string
+    {
+        $this->rt->needsStrrev = true;
+        $out = $this->emitPtrArg($args[0]);
+        $a0 = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_strrev(ptr ' . $a0 . ")\n";
+        $out .= $this->freeStrTemp($args[0], $a0);
+        $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
     }
