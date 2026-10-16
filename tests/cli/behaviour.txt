@@ -1,5 +1,5 @@
 == version
-3287327004 17 rc=0
+matches COMPILER_VERSION rc=0
 == dump-ast
 4195982665 680 rc=0
 == dump-mir

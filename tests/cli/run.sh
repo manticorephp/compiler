@@ -37,8 +37,14 @@ doctor_case() { # label; PATH for the compiler is only $WORK/shim
 }
 shim() { rm -rf "$WORK/shim"; mkdir -p "$WORK/shim"; for t in "$@"; do case "$t" in clang14) printf '#!/bin/sh\necho "clang version 14.0.0"\n' > "$WORK/shim/clang";; clang17) printf '#!/bin/sh\necho "clang version 17.0.6"\n' > "$WORK/shim/clang";; pcre2-config) printf '#!/bin/sh\necho 10.42\n' > "$WORK/shim/pcre2-config";; pkg-config) printf '#!/bin/sh\necho 3.0.0\n' > "$WORK/shim/pkg-config";; cc) printf '#!/bin/sh\nexit 0\n' > "$WORK/shim/cc";; esac; done; chmod +x "$WORK/shim"/* 2>/dev/null || true; }
 
+version_case() { # derived from COMPILER_VERSION: a release needs no golden edit
+    local got rc; got="$("$MC" version 2>/dev/null)"; rc=$?
+    printf '== version\n'
+    if [ "$got" = "manticore $(cat "$ROOT/COMPILER_VERSION")" ]; then echo "matches COMPILER_VERSION rc=$rc"; else echo "MISMATCH '$got' rc=$rc"; fi
+}
+
 behaviour() {
-    sum "version"            "$MC" version
+    version_case
     sum "dump-ast"           "$MC" dump-ast "f.php"
     sum "dump-mir"           "$MC" dump-mir "f.php"
     sum "dump-sig"           "$MC" dump-sig "f.php"
