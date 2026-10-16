@@ -201,6 +201,9 @@ findings. `--backend=<mir|ast>` is still parsed but inert — MIR is the only ba
 (leave the generated `<output>.dbg.ll` / `.dbg.o` next to the target instead of staging
 them in `/tmp` and deleting them — pair with `-O0` to get a binary lldb can walk).
 
+⚠ The `dump-*` commands do **not** link the stdlib, so a call into it resolves as
+`unknown`. When that matters, read the final binary.
+
 ### Build progress
 
 `compile` and `build` report progress on **stderr only**; stdout is never touched.
@@ -255,9 +258,6 @@ done in 0.7s
 {"event":"done","ms":758,"rc":0}
 {"event":"timing","name":"clang -O2 -c whole module","ms":296}
 ```
-
-⚠ The `dump-*` commands do **not** link the stdlib, so a call into it resolves as
-`unknown`. When that matters, read the final binary.
 
 ## The PHP you get
 

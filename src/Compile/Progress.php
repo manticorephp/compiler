@@ -92,11 +92,9 @@ final class Progress
         self::$finished = self::$finished + 1;
         self::$names[] = $n;
         self::$times[] = $ms;
-        // pop the matching open stage (the top when the name was never begun)
-        $top = \count(self::$stack) - 1;
-        $at = $top;
+        // pop the matching open stage; a name that was never begun closes nothing
+        $at = \count(self::$stack) - 1;
         while ($at >= 0 && self::$stack[$at] !== $n) { $at = $at - 1; }
-        if ($at < 0) { $at = $top; }
         if ($at >= 0) {
             \array_splice(self::$stack, $at, 1);
             \array_splice(self::$starts, $at, 1);

@@ -1069,12 +1069,32 @@ function clang_run_counted(array $cmds, array $objs, int $doneBefore, int $total
         }
         $job = $job . $c . ' && : > ' . $objs[$i] . '.done';
     }
-    system('( ' . $job . ' ; wait ; : > ' . $all . ' ) &');
+    $pidFile = $objs[0] . '.pid';
+    sys_unlink($pidFile);
+    // Ctrl-C limit: a job started with `&` by a non-interactive sh ignores SIGINT, so
+    // interrupting the compiler leaves its clang jobs to finish on their own (and
+    // their stale markers are swept by the next run's start). No portable fix
+    // without setsid (absent on macOS).
+    system('( ' . $job . ' ; wait ; : > ' . $all . ' ) & echo $! > ' . $pidFile);
+    $pid = '';
+    $pidRaw = read_file($pidFile);
+    if ($pidRaw !== null) {
+        $pid = \trim($pidRaw);
+    }
     $last = -1;
     $finished = false;
+    $tick = 0;
     while (true) {
+        // every ~2 s: a subshell that died (SIGKILL, OOM) without writing the
+        // all-done flag must not keep us polling forever. Checked BEFORE the flag
+        // read, so a flag-less dead subshell really died.
+        $dead = false;
+        $tick = $tick + 1;
+        if ($pid !== '' && $tick % 20 === 0 && system('kill -0 ' . $pid . ' 2>/dev/null') !== 0) {
+            $dead = true;
+        }
         // read the all-done flag BEFORE counting: the count below is then final
-        $finished = \file_exists($all);
+        $finished = \file_exists($all) || $dead;
         $n = 0;
         foreach ($objs as $o) {
             if (\file_exists($o . '.done')) {
@@ -1094,6 +1114,7 @@ function clang_run_counted(array $cmds, array $objs, int $doneBefore, int $total
         sys_unlink($o . '.done');
     }
     sys_unlink($all);
+    sys_unlink($pidFile);
     return $last;
 }
 
