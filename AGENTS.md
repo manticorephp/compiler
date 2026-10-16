@@ -293,4 +293,9 @@ Corollaries:
   after adding a stdlib function, a builtin or a prelude class; never edit by hand.
 - `docs/design/*.md` — design notes; `design/memory-abi.md` is the stone tablet.
 - `docs/status/`, `docs/audit/`, `docs/superpowers/` — working notes, untracked.
-- `src/Manticore/Version.php` is bumped by hand per release; CI fails a tag that does not match.
+- The compiler version lives in `COMPILER_VERSION` (beside `BOOTSTRAP_VERSION`; between
+  releases it may read `N.N.N-dev`). `bin/build` regenerates `src/Manticore/Version.php`
+  from it — never edit that file. Release = edit `COMPILER_VERSION` (+ docs), run
+  `bin/build`, commit both. `tools/check_version.sh` (CI, release) fails on drift, a
+  malformed value, or a pin newer than the compiler; the release fails a tag that
+  does not match.
