@@ -516,11 +516,25 @@ trait LowerFns
         $this->closureCounter = $this->closureCounter + 1;
         $fnName = '__closure_' . (string)$id;
         $params = [];
+        // A by-value capture the body writes THROUGH (append, element store,
+        // array_pop($x), …) arrives borrowed: the environment keeps its own
+        // count, and a copy-on-write on the borrowed name would take it. The body
+        // works on a local of the same name instead, which owns its share.
+        $mutated = $isGenerator ? [] : \Compile\Mir\VecCopyOnAssign::mutatedLocalsAnyType($body);
+        $capCopies = [];
         foreach ($capNames as $cn) {
             $ptype = $cn === 'this' ? $thisType : Type::unknown();
+            $pname = $cn;
+            if ($cn !== 'this' && !($capByRef[$cn] ?? false) && isset($mutated[$cn])) {
+                $pname = '__cap_' . $cn;
+                $capCopies[] = new StoreLocal($cn, new LoadLocal($pname, Type::unknown()), Type::unknown());
+            }
             // A by-ref capture is passed (and unpacked) as a slot address —
             // mark the param byRef so the closure body derefs it (refLocals).
-            $params[] = new Param(name: $cn, type: $ptype, byRef: $capByRef[$cn] ?? false, variadic: false);
+            $params[] = new Param(name: $pname, type: $ptype, byRef: $capByRef[$cn] ?? false, variadic: false);
+        }
+        if ($capCopies !== []) {
+            $body = new Block(\array_merge($capCopies, $body->stmts), $body->type);
         }
         foreach ($declParams as $p) {
             $cp = new Param(
