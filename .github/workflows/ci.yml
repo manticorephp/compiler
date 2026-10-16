@@ -47,6 +47,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version:
+    name: version-source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: COMPILER_VERSION is consistent
+        run: bash tools/check_version.sh
+
   linux:
     name: linux-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native-runner' || '' }}
     runs-on: ${{ matrix.runner }}

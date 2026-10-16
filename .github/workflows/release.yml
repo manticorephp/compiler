@@ -87,12 +87,15 @@ jobs:
             echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Tag matches Version.php
+      - name: Version source is consistent
+        run: bash tools/check_version.sh
+
+      - name: Tag matches COMPILER_VERSION
         if: github.ref_type == 'tag'
         run: |
-          src="$(sed -n "s/.*const STRING = '\([^']*\)'.*/\1/p" src/Manticore/Version.php)"
-          if [ "${GITHUB_REF_NAME#v}" != "$src" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match Manticore\\Version::STRING ($src); bump src/Manticore/Version.php"
+          cv="$(cat COMPILER_VERSION)"
+          if [ "${GITHUB_REF_NAME#v}" != "$cv" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match COMPILER_VERSION ($cv); bump COMPILER_VERSION and run bin/build"
             exit 1
           fi
 
