@@ -480,6 +480,10 @@ trait EmitLlvmBuiltins
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
         if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
+        if ($name === '__mc_list_range' && \count($args) === 4) { return $this->biListRange($args); }
+        if ($name === '__mc_fast_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
+        if ($name === '__mc_fast_cat' && \count($args) === 1) { return $this->biFastCat($args); }
+        if ($name === '__mc_list_cat' && \count($args) === 1) { return $this->biListCat($args); }
         if ($name === '__mc_weak_arm' && $args === []) { return $this->biWeakArm(); }
         if (\strncmp($name, '__mc_nbuf_', 10) === 0) {
             $nbufSig = \Compile\Mir\RuntimeLibrary::nbufSig(\substr($name, 10));
@@ -3083,6 +3087,68 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $r . ' = call i64 @__mir_array_is_list(ptr ' . $this->lastValue . ")\n";
         return $this->finishI64($out, $r);
     }
+    /**
+     * `__mc_list_range($list, $from, $to, $reverse)` — a fresh list of the
+     * values at positions [from, to) of a LIST, optionally reversed: one memcpy
+     * in the runtime ({@see UnifiedArrayRuntime::emitListRange}) instead of a
+     * per-element append loop. The caller proved `array_is_list` and the
+     * bounds. Class B ({@see emitArrPtrArg}): the copy co-owns every word. The
+     * stdlib body of the same name is the bootstrap twin and never runs.
+     * @param Node[] $args
+     */
+    private function biListRange(array $args): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = $this->emitArrPtrArg($args[0]);
+        $arr = $this->lastValue;
+        $ints = [];
+        for ($k = 1; $k <= 3; $k++) {
+            $out .= $this->emitNode($args[$k]) . $this->coerceToI64();
+            $ints[] = $this->lastValue;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @__mir_array_list_range(ptr ' . $arr . ', i64 ' . $ints[0]
+              . ', i64 ' . $ints[1] . ', i64 ' . $ints[2] . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `__mc_fast_cat($arrays)` — may {@see biListCat} merge these? Every member
+     * a packed list, the non-empty ones agreeing on their element hint.
+     * @param Node[] $args
+     */
+    private function biFastCat(array $args): string
+    {
+        $out = $this->emitArrPtrArg($args[0]);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i1 @__mir_array_fastcat(ptr ' . $this->lastValue . ")\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+        return $this->finishI64($out, $z);
+    }
+
+    /**
+     * `__mc_list_cat($arrays)` — array_merge of lists: every member's values in
+     * one fresh list. Only after `__mc_fast_cat` said yes. Class B.
+     * @param Node[] $args
+     */
+    private function biListCat(array $args): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = $this->emitArrPtrArg($args[0]);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @__mir_array_list_cat(ptr ' . $this->lastValue . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     /**
      * `array_first` / `array_last` (PHP 8.5) and `array_key_first` /
      * `array_key_last`: the first/last VALUE (or KEY) of `$a` as a tagged cell,

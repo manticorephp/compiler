@@ -148,6 +148,9 @@ final class UnifiedArrayRuntime
         $this->emitArrayConform();
         $this->emitArrayConformInner();
         $this->emitArrayIsList();
+        $this->emitListRange();
+        $this->emitFastCat();
+        $this->emitListCat();
         $this->emitArrayReindexInplace();
         $this->emitElemUntagKind();
         $this->emitElemEnumOrdinal();
@@ -2409,12 +2412,19 @@ final class UnifiedArrayRuntime
         $done->retVoid();
     }
 
-    /** i1: the buffer's flags stamp an element shape — repr bits OR a hint. */
+    /**
+     * i1: the buffer's flags stamp an element shape that owns something — repr
+     * bits OR a hint other than the raw scalar ones (INT / FLOAT / BOOL words
+     * own nothing, so an int list is not walked on retain, release or COW).
+     */
     private function reprOrHintIr(Block $b, Value $flags): Value
     {
-        return $b->icmp('ne', $b->and_($flags,
-            Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK)),
-            Value::int(Type::i64(), 0));
+        $repr = $b->icmp('ne', $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)), Value::int(Type::i64(), 0));
+        $hint = $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $owning = $b->and_(
+            $b->icmp('ne', $hint, Value::int(Type::i64(), 0)),
+            $b->icmp('ult', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT)));
+        return $b->or_($repr, $owning);
     }
 
     /**
@@ -5527,6 +5537,257 @@ final class UnifiedArrayRuntime
         $next->br($head);
         $yes->ret(Value::int(Type::i64(), 1));
         $no->ret(Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * Co-own every element word of a freshly built PACKED list the way a value
+     * copy does ({@see emitCopy}): by the buffer's element hint when stamped,
+     * by its repr bits otherwise. The words were copied out of buffers that keep
+     * their own reference, so the new buffer must add one. Returns the block
+     * that continues after the adopt.
+     */
+    private function adoptFresh(FunctionDef $fn, Block $b, Value $dst, string $tag): Block
+    {
+        $byHint = $fn->block('af_hint_' . $tag);
+        $byRepr = $fn->block('af_repr_' . $tag);
+        $done = $fn->block('af_done_' . $tag);
+        $hint = $this->elemHint($b, $dst);
+        $scalar = $fn->block('af_scalar_' . $tag);
+        $b->brIf($b->icmp('ne', $hint, Value::int(Type::i64(), 0)), $byHint, $byRepr);
+        // A raw INT / FLOAT / BOOL list owns nothing: no walk.
+        $byHint->brIf($byHint->icmp('uge', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT)), $done, $scalar);
+        $scalar->call('__mir_array_adopt_cell', Type::void(), [$dst]);
+        $scalar->br($done);
+        $byRepr->call('__mir_array_adopt', Type::void(), [$dst]);
+        $byRepr->br($done);
+        return $done;
+    }
+
+    /**
+     * `__mir_array_list_range(arr, from, to, rev) -> ptr` — a fresh PACKED list
+     * of the values at positions [from, to) of a LIST (keys 0..n-1; the caller
+     * asked `array_is_list`), in order, or reversed when `rev != 0`. The
+     * source's ownership bits ride along and every word is adopted, so the
+     * result frees independently of the source. A packed forward range is one
+     * memcpy. `0 <= from <= to <= len` is the caller's contract.
+     */
+    private function emitListRange(): void
+    {
+        $fn = $this->module->func('__mir_array_list_range', Type::ptr());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $from = $fn->param(Type::i64(), 'from');
+        $to = $fn->param(Type::i64(), 'to');
+        $rev = $fn->param(Type::i64(), 'rev');
+        $e = $fn->block('entry');
+        $empty = $fn->block('lr_empty');
+        $go = $fn->block('lr_go');
+        $none = $fn->block('lr_none');
+        $some = $fn->block('lr_some');
+        $cp = $fn->block('lr_memcpy');
+        $init = $fn->block('lr_init');
+        $head = $fn->block('lr_head');
+        $body = $fn->block('lr_body');
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $empty, $go);
+        $empty->ret($empty->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]));
+
+        $n0 = $go->sub($to, $from);
+        $n = $go->select($go->icmp('slt', $n0, Value::int(Type::i64(), 0)), Value::int(Type::i64(), 0), $n0);
+        $go->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $dst = $go->call('__mir_array_alloc', Type::ptr(), [$n]);
+        $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $ishash = $go->icmp('ne', $this->hashedBit($go, $flags), Value::int(Type::i64(), 0));
+        $own = Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK);
+        $go->store($go->and_($flags, $own), $this->hdr($go, $dst, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $go->store($n, $this->hdr($go, $dst, MemoryAbi::ARRAY_LENGTH_OFFSET));
+        $go->store($n, $this->hdr($go, $dst, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $iSlot = $go->alloca(Type::i64(), 'lr_i');
+        $go->store(Value::int(Type::i64(), 0), $iSlot);
+        $go->brIf($go->icmp('eq', $n, Value::int(Type::i64(), 0)), $none, $some);
+        $none->ret($dst);
+
+        $fwdPacked = $some->and_(
+            $some->icmp('eq', $rev, Value::int(Type::i64(), 0)),
+            $some->icmp('eq', $ishash, Value::int(Type::i1(), 0)),
+        );
+        $some->brIf($fwdPacked, $cp, $init);
+
+        $srcp = $cp->gep(Type::i8(), $arr, [$cp->add(
+            $cp->mul($from, Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE))]);
+        $cp->call('memcpy', Type::ptr(), [
+            $this->packedSlot($cp, $dst, Value::int(Type::i64(), 0)), $srcp,
+            $cp->mul($n, Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE)),
+        ]);
+        $adopt = $this->adoptFresh($fn, $cp, $dst, 'a');
+        $adopt->ret($dst);
+
+        $stride = $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_SIZE), Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE));
+        $bias = $init->add(
+            $init->select($ishash, Value::int(Type::i64(), MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), Value::int(Type::i64(), 0)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_HEADER_SIZE),
+        );
+        $isRev = $init->icmp('ne', $rev, Value::int(Type::i64(), 0));
+        $init->br($head);
+
+        $i = $head->load(Type::i64(), $iSlot);
+        $adopt2 = $fn->block('lr_adopt2');
+        $head->brIf($head->icmp('sge', $i, $n), $adopt2, $body);
+        $srcIdx = $body->select($isRev,
+            $body->sub($body->sub($to, Value::int(Type::i64(), 1)), $i),
+            $body->add($from, $i));
+        $w = $body->load(Type::i64(), $body->gep(Type::i8(), $arr, [$body->add($bias, $body->mul($srcIdx, $stride))]));
+        $body->store($w, $this->packedSlot($body, $dst, $i));
+        $body->store($body->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $body->br($head);
+        $adopt3 = $this->adoptFresh($fn, $adopt2, $dst, 'b');
+        $adopt3->ret($dst);
+    }
+
+    /**
+     * `__mir_array_fastcat(outer) -> i1` — may `__mir_array_list_cat` merge
+     * these arrays? Every member (a raw pointer or a boxed array, the low 48
+     * bits either way) is a PACKED list, and the non-empty ones agree on their
+     * element hint and ownership repr, so the words can be copied verbatim.
+     */
+    private function emitFastCat(): void
+    {
+        $fn = $this->module->func('__mir_array_fastcat', Type::i1());
+        $outer = $fn->param(Type::ptr(), 'outer');
+        $e = $fn->block('entry');
+        $go = $fn->block('fc_go');
+        $head = $fn->block('fc_head');
+        $body = $fn->block('fc_body');
+        $mem = $fn->block('fc_mem');
+        $nonEmpty = $fn->block('fc_ne');
+        $first = $fn->block('fc_first');
+        $cmp = $fn->block('fc_cmp');
+        $next = $fn->block('fc_next');
+        $yes = $fn->block('fc_yes');
+        $no = $fn->block('fc_no');
+        $yes->ret(Value::int(Type::i1(), 1));
+        $no->ret(Value::int(Type::i1(), 0));
+
+        $e->brIf($e->icmp('eq', $outer, Value::null()), $yes, $go);
+        $len = $go->call('__mir_array_live_len', Type::i64(), [$outer]);
+        $oflags = $go->load(Type::i64(), $this->hdr($go, $outer, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $iSlot = $go->alloca(Type::i64(), 'fc_i');
+        $seenSlot = $go->alloca(Type::i64(), 'fc_seen');
+        $bitsSlot = $go->alloca(Type::i64(), 'fc_bits');
+        $go->store(Value::int(Type::i64(), 0), $iSlot);
+        $go->store(Value::int(Type::i64(), 0), $seenSlot);
+        $go->store(Value::int(Type::i64(), 0), $bitsSlot);
+        $go->brIf($go->icmp('ne', $this->hashedBit($go, $oflags), Value::int(Type::i64(), 0)), $no, $head);
+
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $yes, $body);
+        $w = $body->load(Type::i64(), $this->packedSlot($body, $outer, $i));
+        $p = $body->and_($w, Value::int(Type::i64(), 281474976710655));
+        $body->brIf($body->icmp('eq', $p, Value::int(Type::i64(), 0)), $next, $mem);
+        $pp = $mem->inttoptr($p, Type::ptr());
+        $pflags = $mem->load(Type::i64(), $this->hdr($mem, $pp, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $mem->brIf($mem->icmp('ne', $this->hashedBit($mem, $pflags), Value::int(Type::i64(), 0)), $no, $nonEmpty);
+        $plen = $nonEmpty->call('__mir_array_live_len', Type::i64(), [$pp]);
+        $nonEmpty->brIf($nonEmpty->icmp('eq', $plen, Value::int(Type::i64(), 0)), $next, $first);
+        $bits = $first->and_($pflags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $seen = $first->load(Type::i64(), $seenSlot);
+        $set = $fn->block('fc_set');
+        $first->brIf($first->icmp('eq', $seen, Value::int(Type::i64(), 0)), $set, $cmp);
+        $set->store($bits, $bitsSlot);
+        $set->store(Value::int(Type::i64(), 1), $seenSlot);
+        $set->br($next);
+        $cmp->brIf($cmp->icmp('eq', $cmp->load(Type::i64(), $bitsSlot), $bits), $next, $no);
+        $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+    }
+
+    /**
+     * `__mir_array_list_cat(outer) -> ptr` — the values of every member of
+     * `outer`, concatenated into one fresh PACKED list (array_merge of lists).
+     * Only valid after `__mir_array_fastcat(outer)` answered yes: one sizing
+     * pass, one memcpy per member, one adopt of the result.
+     */
+    private function emitListCat(): void
+    {
+        $fn = $this->module->func('__mir_array_list_cat', Type::ptr());
+        $outer = $fn->param(Type::ptr(), 'outer');
+        $e = $fn->block('entry');
+        $empty = $fn->block('lc_empty');
+        $go = $fn->block('lc_go');
+        $h1 = $fn->block('lc_h1');
+        $b1 = $fn->block('lc_b1');
+        $m1 = $fn->block('lc_m1');
+        $n1 = $fn->block('lc_n1');
+        $alloc = $fn->block('lc_alloc');
+        $h2 = $fn->block('lc_h2');
+        $b2 = $fn->block('lc_b2');
+        $m2 = $fn->block('lc_m2');
+        $n2 = $fn->block('lc_n2');
+        $fin = $fn->block('lc_fin');
+        $some = $fn->block('lc_some');
+
+        $e->brIf($e->icmp('eq', $outer, Value::null()), $empty, $go);
+        $empty->ret($empty->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]));
+
+        $len = $go->call('__mir_array_live_len', Type::i64(), [$outer]);
+        $iSlot = $go->alloca(Type::i64(), 'lc_i');
+        $totSlot = $go->alloca(Type::i64(), 'lc_tot');
+        $bitsSlot = $go->alloca(Type::i64(), 'lc_bits');
+        $offSlot = $go->alloca(Type::i64(), 'lc_off');
+        $go->store(Value::int(Type::i64(), 0), $iSlot);
+        $go->store(Value::int(Type::i64(), 0), $totSlot);
+        $go->store(Value::int(Type::i64(), 0), $bitsSlot);
+        $go->store(Value::int(Type::i64(), 0), $offSlot);
+        $go->br($h1);
+
+        $i = $h1->load(Type::i64(), $iSlot);
+        $h1->brIf($h1->icmp('sge', $i, $len), $alloc, $b1);
+        $p = $b1->and_($b1->load(Type::i64(), $this->packedSlot($b1, $outer, $i)), Value::int(Type::i64(), 281474976710655));
+        $b1->brIf($b1->icmp('eq', $p, Value::int(Type::i64(), 0)), $n1, $m1);
+        $pp = $m1->inttoptr($p, Type::ptr());
+        $plen = $m1->call('__mir_array_live_len', Type::i64(), [$pp]);
+        $tot = $m1->load(Type::i64(), $totSlot);
+        // The first non-empty member names the ownership bits of the result.
+        $pbits = $m1->and_(
+            $m1->load(Type::i64(), $this->hdr($m1, $pp, MemoryAbi::ARRAY_FLAGS_OFFSET)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $isFirst = $m1->and_(
+            $m1->icmp('eq', $tot, Value::int(Type::i64(), 0)),
+            $m1->icmp('sgt', $plen, Value::int(Type::i64(), 0)));
+        $m1->store($m1->select($isFirst, $pbits, $m1->load(Type::i64(), $bitsSlot)), $bitsSlot);
+        $m1->store($m1->add($tot, $plen), $totSlot);
+        $m1->br($n1);
+        $n1->store($n1->add($n1->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $n1->br($h1);
+
+        $total = $alloc->load(Type::i64(), $totSlot);
+        $dst = $alloc->call('__mir_array_alloc', Type::ptr(), [$total]);
+        $alloc->store($alloc->load(Type::i64(), $bitsSlot), $this->hdr($alloc, $dst, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $alloc->store($total, $this->hdr($alloc, $dst, MemoryAbi::ARRAY_LENGTH_OFFSET));
+        $alloc->store($total, $this->hdr($alloc, $dst, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $alloc->store(Value::int(Type::i64(), 0), $iSlot);
+        $alloc->brIf($alloc->icmp('eq', $total, Value::int(Type::i64(), 0)), $fin, $h2);
+        $fin->ret($dst);
+
+        $j = $h2->load(Type::i64(), $iSlot);
+        $h2->brIf($h2->icmp('sge', $j, $len), $some, $b2);
+        $q = $b2->and_($b2->load(Type::i64(), $this->packedSlot($b2, $outer, $j)), Value::int(Type::i64(), 281474976710655));
+        $b2->brIf($b2->icmp('eq', $q, Value::int(Type::i64(), 0)), $n2, $m2);
+        $qp = $m2->inttoptr($q, Type::ptr());
+        $qlen = $m2->load(Type::i64(), $qp);
+        $off = $m2->load(Type::i64(), $offSlot);
+        $m2->call('memcpy', Type::ptr(), [
+            $this->packedSlot($m2, $dst, $off),
+            $this->packedSlot($m2, $qp, Value::int(Type::i64(), 0)),
+            $m2->mul($qlen, Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE)),
+        ]);
+        $m2->store($m2->add($off, $qlen), $offSlot);
+        $m2->br($n2);
+        $n2->store($n2->add($n2->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
+        $n2->br($h2);
+
+        $done = $this->adoptFresh($fn, $some, $dst, 'c');
+        $done->ret($dst);
     }
     /**
      * `__mir_array_conform(arr, kind)` — make a buffer honour a CONCRETE static

@@ -445,6 +445,19 @@ trait InferCalls
         // the key variants carry the full int|string|null union.
         if ($n === 'array_is_list' && \count($args) === 1) { return Type::bool_(); }
         if ($n === '__mc_array_reindex' && \count($args) === 1) { return Type::void(); }
+        // List bulk-copy builtins (prelude/array_fns.php): the result is a fresh
+        // list of the source's own element type.
+        if ($n === '__mc_list_range' && \count($args) === 4) {
+            $at = $args[0]->type;
+            return $at->kind === Type::KIND_ARRAY && $at->element !== null ? Type::vec($at->element) : Type::vec(Type::cell());
+        }
+        if (($n === '__mc_fast_cat' || $n === '__mc_fast_list') && \count($args) === 1) { return Type::bool_(); }
+        if ($n === '__mc_list_cat' && \count($args) === 1) {
+            $at = $args[0]->type;
+            $in = $at->kind === Type::KIND_ARRAY ? $at->element : null;
+            return $in !== null && $in->kind === Type::KIND_ARRAY && $in->element !== null
+                ? Type::vec($in->element) : Type::vec(Type::cell());
+        }
         // prelude/weak.php: arm the free-path death hook; an address back to
         // the object it names, retained and boxed.
         if ($n === '__mc_weak_arm' && $args === []) { return Type::void(); }

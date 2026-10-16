@@ -168,6 +168,31 @@ function array_is_list(array $a): bool
 }
 
 /**
+ * Bootstrap twins of the bulk list builtins (`__mc_fast_list`, `__mc_fast_cat`,
+ * `__mc_list_range`, `__mc_list_cat`; see prelude/array_fns.php). A compiler
+ * that does not know them answers "not applicable", so the prelude takes its
+ * element-by-element path and the range / cat twins never run.
+ *
+ * @param mixed[] $a
+ */
+function __mc_fast_list(array $a): bool { return false; }
+
+/** @param mixed[] $a */
+function __mc_fast_cat(array $a): bool { return false; }
+
+/**
+ * @param mixed[] $a
+ * @return mixed[]
+ */
+function __mc_list_range(array $a, int $from, int $to, bool $rev): array { return []; }
+
+/**
+ * @param mixed[] $a
+ * @return mixed[]
+ */
+function __mc_list_cat(array $a): array { return []; }
+
+/**
  * The bootstrap twin of the `__mc_array_reindex` codegen builtin (the sort
  * family's renumbering of a non-list array); a compiler that knows the
  * builtin never calls it.

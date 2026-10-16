@@ -826,7 +826,7 @@ final class Ownership
         $bare = $p === false ? $fn : \substr($fn, $p + 1);
         foreach ([
             'explode', 'str_split', 'preg_split', 'array_keys', 'array_values',
-            'range', 'array_fill', 'str_getcsv',
+            'range', 'array_fill', 'str_getcsv', '__mc_list_range', '__mc_list_cat',
         ] as $n) {
             if ($n === $bare) { return true; }
         }

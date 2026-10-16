@@ -1,0 +1,87 @@
+int 0 fca5c5b958ea8efc39fbec1f07f30f34
+int 1 cefbae46c65bd081fea269af0558768a
+int 2 064061fbbe924e02df8e797f2146d44c
+int 7 75333ae92b4e70a022a2aa694a7ed806
+source intact
+int 8 5f52894fc7a2072261bfafae234c7eac
+source intact
+int 9 387b778ee367d1517f2449b72cb6ccdd
+source intact
+int 17 a731286e8555c61159a7750717352cca
+source intact
+int 1000 de85b660f2bbdedf3922d89420d0f1e6
+source intact
+str 0 97298d1bb5b38734008bc989f7026f4b
+str 1 cf996fddb1dd3fd10585afba6cdf8b53
+str 2 a906c2321733e5d9ae9c5c3ca0c704f4
+str 7 b9c1674f8bb338da776641e8e5118a39
+source intact
+str 8 cc8dd646ecf300db3c77d601c2a4bef1
+source intact
+str 9 143d208c8b960b41849fa4a15da403fa
+source intact
+str 17 f1d35d78ae28665add80392a79a3fff3
+source intact
+str 1000 b0c086a2979683581d087bde916e4623
+source intact
+float 0 7f4b226b983b5abf8103dc8f2f8564c1
+float 1 cfe2c302d201eac73ecbed371b87480e
+float 2 8184e250fdeb3c12a3953172b1b3eb90
+float 7 64ab17fe9ff7cc4c21e798216bd3df93
+source intact
+float 8 282b14315eb3187d3bf06bdfdae60a36
+source intact
+float 9 11e49a30c1968bff0fae79fcf4f9f79d
+source intact
+float 17 4af3885b7f9004fd3eaa4fdef75b4e22
+source intact
+float 1000 ddb3ee0c094764d2f10002c0e008d489
+source intact
+bool 0 ffc64b7b95641041295aa70b1e31d24e
+bool 1 c98a191458617e78688154894ff15c1f
+bool 2 8dc5f940dec788a0650ebf7dc9b64439
+bool 7 eeb0e521545e35b5f6629b4013b0dbae
+source intact
+bool 8 6132394b4e570683fac94d6dd33b8320
+source intact
+bool 9 ab271a2c3003664868e2059f95549c4b
+source intact
+bool 17 b5b54169b0a415541904a58ef103bf17
+source intact
+bool 1000 d3e3925479adbdbc8583c185e58bbdb1
+source intact
+arr 0 b298b5e8336eee68dc3c7147cf7db213
+arr 1 704d29d57e74b308319c0bc3957a3559
+arr 2 6eb846f02068a3bd5b5001802fe6b856
+arr 7 3af969ed20e3f580499f5951d3427813
+source intact
+arr 8 eaf4c7545309cb5018d17eb1c4c6eafc
+source intact
+arr 9 3ad18514e2b80d9976f58ffcfec1c98d
+source intact
+arr 17 93cc3ea0333cdec4066a8dfefa541ec2
+source intact
+arr 1000 576e25070ae33d68c04cf0ad47673e50
+source intact
+mixed 0 cb8e35286d665d35800fc52801b7011e
+mixed 1 afe01fa46135cd7ef1a88fed0cacf1a4
+mixed 2 88fd190e7c09dd56981a29088dd15260
+mixed 7 02e794abb3952b6ee0c255305b06ffed
+source intact
+mixed 8 c6d7b3e5dcab6a6a0d817bf09a1392a4
+source intact
+mixed 9 6555ab137de648b3bb48e45843d4b7a5
+source intact
+mixed 17 2cb667db48d91091bddc3fcb1ca1e649
+source intact
+mixed 1000 3ca7a16f68e52394f113e6524ec4ab8a
+source intact
+{"0":4,"b":3,"1":2,"a":1}{"9":4,"b":3,"5":2,"a":1}{"0":2,"b":3}{"5":2,"b":3}{"a":9,"0":2,"b":3,"1":4,"2":7}
+[50,40,30,10][30,40]{"2":30,"3":40}[10,30,40,50,10,30,40,50]
+[20,10][10,20][10,20,1]
+[][][1,2,3][][][2][1,2,3]
+[][][][1]{"x":2}
+2336
+11
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1
+[[1,2],[3,4]][[3,4,99],[1,2]]
