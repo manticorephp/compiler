@@ -774,6 +774,20 @@ function array_unique(array $arr, int $flags = 2): array
 {
     /** @var mixed[] $out */
     $out = [];
+    if ($flags === 2) {
+        // Linear: the string form of a value is its identity. The 's' prefix
+        // keeps every key a string ("1" would otherwise become the int key 1).
+        /** @var array<string,bool> $seen */
+        $seen = [];
+        foreach ($arr as $k => $v) {
+            $key = 's' . (string)$v;
+            if (isset($seen[$key])) { continue; }
+            $seen[$key] = true;
+            $out[$k] = $v;
+        }
+        return $out;
+    }
+
     foreach ($arr as $k => $v) {
         $dup = false;
         foreach ($out as $w) {
