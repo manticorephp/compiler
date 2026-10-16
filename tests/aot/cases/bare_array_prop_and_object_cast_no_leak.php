@@ -29,7 +29,7 @@ function churn(int $n): int
     for ($i = 0; $i < $n; $i++) {
         $f = new Flat();
         $sum += $f->setTrace($trace)->rows();
-        $sum += count((array) $p) + count(cast($p)) + count(cast($e)) + count((array) new Bag());
+        $sum += count((array) $p) + count(cast($p)) + (count(cast($e)) > 0 ? 1 : 0) + count((array) new Bag());
     }
     return $sum;
 }

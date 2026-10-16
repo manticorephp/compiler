@@ -26,7 +26,7 @@ function churn(int $n): int
     $ex = new Ex('m');
     $s = 0;
     for ($i = 0; $i < $n; $i++) {
-        $s += cast($std) + cast($dy) + castTyped($dy) + vars($dy) + vars($std) + varsTyped($dy) + castOrEmpty($ex) + castOrEmpty($dy);
+        $s += cast($std) + cast($dy) + castTyped($dy) + vars($dy) + vars($std) + varsTyped($dy) + (castOrEmpty($ex) > 0 ? 1 : 0) + castOrEmpty($dy);
     }
     return $s;
 }
