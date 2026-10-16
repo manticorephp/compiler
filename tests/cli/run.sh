@@ -136,6 +136,19 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
         cmp -s "$WORK/o_off" "$WORK/o_$m"; ck "compile stdout same ($m)" $?
         [ "$(./p0)" = "$(./p_$m)" ]; ck "binary output same ($m)" $?
     done
+    # split build: MANTICORE_SPLIT_JOBS and -j 0 are BOTH required for a split
+    { echo '<?php'; for i in $(seq 1 120); do echo "function g$i(int \$x): int { \$s = 0; for (\$k = 0; \$k < \$x; \$k++) { \$s += \$k * $i + strlen((string)\$k); } return \$s; }"; done; echo 'echo g1(10) + g120(5), "\n";'; } > sp.php
+    MANTICORE_SPLIT_JOBS=4 "$MC" compile sp.php -o sp_off -j 0 --progress=off >/dev/null 2>&1; ck "split off rc" $?
+    MANTICORE_SPLIT_JOBS=4 "$MC" compile sp.php -o sp_pl -j 0 --progress=plain >/dev/null 2>"$e"; ck "split plain rc" $?
+    grep -Eq '^      clang ([0-9]+)/\1$' "$e"; ck "split plain clang N/N tally" $?
+    MANTICORE_SPLIT_JOBS=4 "$MC" compile sp.php -o sp_js -j 0 --progress=json >/dev/null 2>"$e"; ck "split json rc" $?
+    grep '"label":"clang"' "$e" | sed 's/.*"done":\([0-9]*\),"total":\([0-9]*\).*/\1 \2/' \
+        | awk '{ if ($1 > $2) bad = 1; d = $1; t = $2; n++ } END { exit (bad || n == 0 || d != t) }'; ck "split json clang counter done==total" $?
+    [ "$(./sp_off)" = "$(./sp_pl)" ] && [ "$(./sp_off)" = "$(./sp_js)" ]; ck "split binary output same" $?
+    [ -z "$(ls -A | grep 'done$')" ]; ck "no stale .done markers" $?
+    # nested stage end must not blank the live line: EmitLlvm stays shown after its inner stage ended
+    "$MC" compile f.php -o pn --progress=live 2>&1 >/dev/null | cat -v | LC_ALL=C tr '\r' '\n' >"$e"
+    LC_ALL=C awk '/property scan/ { seen = 1 } seen && /EmitLlvm/ { ok = 1 } END { exit !ok }' "$e"; ck "live keeps outer stage after nested end" $?
 }
 
 helps() {

@@ -14,8 +14,10 @@ final class Progress
     private static bool $timings = false;
     private static int $t0 = 0;
     private static int $finished = 0;
-    private static string $running = '';
-    private static int $runStart = 0;
+    /** @var string[] open stages, innermost last */
+    private static array $stack = [];
+    /** @var int[] start time of each open stage */
+    private static array $starts = [];
     private static string $counter = '';
     private static bool $liveOpen = false;
     /** @var string[] */
@@ -35,7 +37,8 @@ final class Progress
         self::$mode = 'off';
         self::$timings = false;
         self::$finished = 0;
-        self::$running = '';
+        self::$stack = [];
+        self::$starts = [];
         self::$counter = '';
         self::$liveOpen = false;
         self::$names = [];
@@ -72,10 +75,11 @@ final class Progress
     public static function begin(string $name): void
     {
         if (self::$mode === 'off') { return; }
-        self::$running = \trim($name);
-        self::$runStart = Stats::now();
+        $n = \trim($name);
+        self::$stack[] = $n;
+        self::$starts[] = Stats::now();
         if (self::$mode === 'json') {
-            self::emit('{"event":"stage_start","name":"' . self::esc(self::$running) . '","t_ms":' . (string)self::totalMs() . '}');
+            self::emit('{"event":"stage_start","name":"' . self::esc($n) . '","t_ms":' . (string)self::totalMs() . '}');
         } elseif (self::$mode === 'live') {
             self::redraw();
         }
@@ -88,7 +92,15 @@ final class Progress
         self::$finished = self::$finished + 1;
         self::$names[] = $n;
         self::$times[] = $ms;
-        self::$running = '';
+        // pop the matching open stage (the top when the name was never begun)
+        $top = \count(self::$stack) - 1;
+        $at = $top;
+        while ($at >= 0 && self::$stack[$at] !== $n) { $at = $at - 1; }
+        if ($at < 0) { $at = $top; }
+        if ($at >= 0) {
+            \array_splice(self::$stack, $at, 1);
+            \array_splice(self::$starts, $at, 1);
+        }
         if (self::$mode === 'json') {
             $l = '{"event":"stage_end","name":"' . self::esc($n) . '","ms":' . (string)$ms;
             if ($fns >= 0) { $l = $l . ',"fns":' . (string)$fns; }
@@ -99,6 +111,7 @@ final class Progress
         } else {
             self::clear();
             self::$counter = '';
+            if (self::$stack !== []) { self::redraw(); }
         }
     }
 
@@ -173,9 +186,9 @@ final class Progress
     private static function redraw(): void
     {
         $now = Stats::now();
-        $body = self::$running;
-        if ($body === '') { $body = 'working'; }
-        else { $body = $body . '  ' . self::sec(\intdiv($now - self::$runStart, 1000000)); }
+        $top = \count(self::$stack) - 1;
+        if ($top < 0) { $body = 'working'; }
+        else { $body = self::$stack[$top] . '  ' . self::sec(\intdiv($now - self::$starts[$top], 1000000)); }
         $body = $body . '  (total ' . self::sec(self::totalMs()) . ')';
         if (self::$counter !== '') { $body = $body . ' · ' . self::$counter; }
         if (\strlen($body) > 77) {

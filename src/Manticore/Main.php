@@ -103,6 +103,13 @@ function sys_rename(string $from, string $to): int
     return 0;
 }
 
+// Poll interval of the progress-aware split assembly ({@see clang_run_counted}).
+#[Library('c'), Symbol('usleep'), CType('int')]
+function sys_usleep(#[CType('unsigned int')] int $usec): int
+{
+    return 0;
+}
+
 #[Library('c'), Symbol('fopen')]
 function fopen(string $path, string $mode): \Ffi\Ptr
 {
@@ -1034,6 +1041,62 @@ function auto_split_parts(int $irBytes): int
     return $parts;
 }
 
+/**
+ * Run `$cmds` concurrently like `( c1 & c2 ; wait )`, but without blocking the
+ * parent, so the clang n/N counter can follow the jobs. Each job drops
+ * `<obj>.done` when clang exits 0; a trailing `.all.done` says the subshell has
+ * waited for them all. Job stdout/stderr are NOT redirected: clang diagnostics
+ * stay visible exactly as in the blocking path (the marker plumbing writes
+ * nothing). Success is still decided by the caller from the objects, never
+ * from the markers; the markers are removed before returning.
+ *
+ * @param string[] $cmds one clang command per job
+ * @param string[] $objs the object each command writes (same index)
+ * @param int $doneBefore parts already finished (cache hits, earlier batches)
+ * @return int how many of the jobs finished OK
+ */
+function clang_run_counted(array $cmds, array $objs, int $doneBefore, int $total): int
+{
+    $all = $objs[0] . '.all.done';
+    foreach ($objs as $o) {
+        sys_unlink($o . '.done');
+    }
+    sys_unlink($all);
+    $job = '';
+    foreach ($cmds as $i => $c) {
+        if ($job !== '') {
+            $job = $job . ' & ';
+        }
+        $job = $job . $c . ' && : > ' . $objs[$i] . '.done';
+    }
+    system('( ' . $job . ' ; wait ; : > ' . $all . ' ) &');
+    $last = -1;
+    $finished = false;
+    while (true) {
+        // read the all-done flag BEFORE counting: the count below is then final
+        $finished = \file_exists($all);
+        $n = 0;
+        foreach ($objs as $o) {
+            if (\file_exists($o . '.done')) {
+                $n = $n + 1;
+            }
+        }
+        if ($n !== $last) {
+            $last = $n;
+            \Compile\Progress::counter('clang', $doneBefore + $n, $total);
+        }
+        if ($finished) {
+            break;
+        }
+        sys_usleep(100000);
+    }
+    foreach ($objs as $o) {
+        sys_unlink($o . '.done');
+    }
+    sys_unlink($all);
+    return $last;
+}
+
 function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit = false): array
 {
     $llPath = $base . ".ll";
@@ -1187,8 +1250,26 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
     // so an outer `wait` has nothing to wait for and returns at once — the
     // existence check below then ran before clang had written anything and
     // reported "part 0 failed to build" on a build that was merely still going.
-    if ($cmd !== '') {
+    if ($cmd !== '' && \Compile\Progress::active()) {
+        // Same commands, run through a non-blocking subshell so the parent can
+        // count finished parts. A part already on disk here is a cache hit.
+        /** @var string[] */
+        $jobCmds = [];
+        /** @var string[] */
+        $jobObjs = [];
+        foreach ($objs as $i => $pobj) {
+            if (\file_exists($pobj)) {
+                continue;
+            }
+            $jobCmds[] = "clang -O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags
+                . " -c -x ir " . $base . ".p" . (string)$i . ".ll -o " . $pobj . " -Wno-override-module";
+            $jobObjs[] = $pobj;
+        }
+        clang_run_counted($jobCmds, $jobObjs, $hits, \count($objs));
+    } elseif ($cmd !== '') {
         system("( " . $cmd . " ; wait )");
+    } elseif (\Compile\Progress::active()) {
+        \Compile\Progress::counter('clang', $hits, \count($objs));
     }
     \Compile\Stats::step(
         $stage,
@@ -1363,6 +1444,34 @@ function assemble_ir_file_split(
     // `wait` must be INSIDE the subshell: the background jobs are ITS children.
     $i = 0;
     $n = \count($cmds);
+    if (\Compile\Progress::active() && $n === 0) {
+        \Compile\Progress::counter('clang', $hits, \count($objs));
+    }
+    if (\Compile\Progress::active() && $n > 0) {
+        // Progress-aware twin of the loop below: same batches, same commands,
+        // but the parent polls the finished parts instead of blocking.
+        /** @var string[] */
+        $missObjs = [];
+        foreach ($objs as $o) {
+            if (!\file_exists($o)) {
+                $missObjs[] = $o;
+            }
+        }
+        $total = \count($objs);
+        $doneSoFar = $hits;
+        while ($i < $n) {
+            $bc = [];
+            $bo = [];
+            $k = 0;
+            while ($k < $batch && $i < $n) {
+                $bc[] = $cmds[$i];
+                $bo[] = $missObjs[$i];
+                $i = $i + 1;
+                $k = $k + 1;
+            }
+            $doneSoFar = $doneSoFar + clang_run_counted($bc, $bo, $doneSoFar, $total);
+        }
+    }
     while ($i < $n) {
         $cmd = '';
         $k = 0;
@@ -5342,7 +5451,7 @@ function compile_via_mir(array $sources, array $paths = []): ?string
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;
         $ir = $emit->emit($module);
-        \Compile\Stats::step('EmitLlvm', $statT, \count($module->functions), -1);
+        \Compile\Stats::step('EmitLlvm', $statT, -1, -1);
         $cgErrors = $emit->cellGuardErrors();
         if (\count($cgErrors) > 0) {
             foreach ($cgErrors as $ce) {
