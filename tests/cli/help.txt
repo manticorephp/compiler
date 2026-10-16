@@ -6,6 +6,7 @@ Usage: manticore <command> [options...]
 Commands:
   dump-llvm  Read PHP source from stdin, emit LLVM IR on stdout
   dump-ast  Parse PHP source and print the resulting AST
+  analyze  Static type analysis; report diagnostics, no codegen
   dump-mir  Parse PHP, lower to MIR, print the typed IR
   dump-llvm-mir  Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR
   split-ir  Split a staged .ll module into N part files (dev tool)
@@ -13,7 +14,6 @@ Commands:
   version  Print compiler version
   compile  Compile to a native binary (-o <out>); analyzes by default (--no-analyze skips, --analyze-strict gates on errors)
   build  Build all targets from a manticore.json manifest (libraries + applications)
-  analyze  Static type analysis; report diagnostics, no codegen
   help  Show this help text
 
 Run 'manticore <command> --help' for command options.
@@ -22,7 +22,27 @@ compile: unknown flag: --help (rc=64)
 == help build
 build: unknown flag: --help
 == help analyze
-unknown flag: --help
+analyze — Static type analysis; report diagnostics, no codegen
+
+Usage: manticore analyze [options] [paths…]
+
+Options:
+  -o <path>                   Output path (default a.out)
+  --memory <mode>             Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>            Codegen backend override
+  -O <level>                  Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                   dump-*: include the prelude in the dump
+  --effects                   dump-mir: show inferred effects
+  --emit-library              Emit a library object instead of an executable
+  --runtime                   With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps     Do not refuse a library that contains undefined-function traps
+  --keep-ir                   Keep the intermediate .ll files
+  -j <n>                      Parallel clang jobs; 0 = one per core
+  --deep                      Also run the compiler's MIR type passes (heavier)
+  --json                      Machine-readable output
+  --baseline <path>           Suppress findings listed in this baseline file
+  --generate-baseline <path>  Write a baseline file from current findings
+  --only <prefixes>           Keep only diagnostic codes starting with these prefixes (comma list); gates on any survivor
 == help dump-llvm
 dump-llvm — Read PHP source from stdin, emit LLVM IR on stdout
 

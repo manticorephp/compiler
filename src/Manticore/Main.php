@@ -3671,7 +3671,7 @@ function cmd_build(array $args): int
     // targets and stops (used by the cold seed to refresh stdlib.o without
     // re-linking the applications), `--apps-only` is its mirror. The shared
     // compile spec rides along so a manifest build accepts `-O0` / `--memory`
-    // like `compile` does — same shape cmd_analyze uses.
+    // like `compile` does — same shape `analyze` uses.
     //
     // The pair is what lets a self-host rebuild put the LIBRARIES on the far
     // side of the binary swap: one process cannot do it, because the libraries
@@ -6457,99 +6457,6 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array
     return \Analyze\Report::sortDiags($diags);
 }
 
-function cmd_analyze(array $args): int
-{
-    // `--deep` also runs the compiler's own MIR type passes (repr-soundness) via
-    // lower_module in analysis mode — heavier (it lowers the code), so opt-in.
-    // `--json` prints machine-readable output for editors / CI.
-    $spec = compile_arg_spec();
-    $spec["deep"] = \Cli\ArgParse::FLAG;
-    $spec["json"] = \Cli\ArgParse::FLAG;
-    $spec["baseline"] = \Cli\ArgParse::VALUE;
-    $spec["generate-baseline"] = \Cli\ArgParse::VALUE;
-    // `--only <prefix[,prefix…]>` keeps just the diagnostic codes that start
-    // with one of the prefixes, and gates on ANY survivor whatever its severity.
-    // One caller drives the shape: the self-host preflight
-    // (`analyze src --only undefined.,parse.error`), which asks the narrow
-    // question "can THIS compiler still build this source" and must not be
-    // drowned by the 177 style warnings a full run reports.
-    $spec["only"] = \Cli\ArgParse::VALUE;
-    $p = \Cli\ArgParse::parse($args, $spec);
-    if ($p->error !== null) {
-        dprint($p->error);
-        return 64;
-    }
-    if (!apply_compile_args($p)) {
-        return 64;
-    }
-    $deep = $p->flag("deep");
-    $json = $p->flag("json");
-    $baselinePath = $p->value("baseline", "");
-    $genBaseline = $p->value("generate-baseline", "");
-    $only = $p->value("only", "");
-
-    $files = resolve_source_files(CompileArgs::$files);
-    if ($files === null) {
-        return 66;
-    }
-    if (\count($files) === 0) {
-        return 66;
-    }
-
-    $diags = perform_analysis($files, CompileArgs::$files, $deep);
-
-    // Generate a baseline: snapshot every current finding and report nothing.
-    if ($genBaseline !== "") {
-        if (!write_file($genBaseline, \Analyze\Baseline::generate($diags))) {
-            dprint("analyze: could not write baseline to " . $genBaseline);
-            return 73;
-        }
-        dprint("analyze: wrote baseline (" . (string)\count($diags) . " entries) to " . $genBaseline);
-        return 0;
-    }
-    // Apply a baseline: drop known findings.
-    if ($baselinePath !== "") {
-        $bl = read_file($baselinePath);
-        if ($bl !== null) {
-            $diags = \Analyze\Baseline::filter($diags, $bl);
-        }
-    }
-
-    if ($only !== "") {
-        /** @var string[] $prefixes */
-        $prefixes = \explode(",", $only);
-        /** @var \Analyze\Diagnostic[] $kept */
-        $kept = [];
-        foreach ($diags as $d) {
-            foreach ($prefixes as $pre) {
-                if ($pre !== "" && \str_starts_with($d->code, $pre)) {
-                    $kept[] = $d;
-                    break;
-                }
-            }
-        }
-        $diags = $kept;
-    }
-
-    echo $json ? \Analyze\Report::json($diags) : \Analyze\Report::human($diags);
-    // Counters live on stderr while the report goes to stdout, so
-    // `analyze --deep` doubles as the whole-project instrumentation vehicle
-    // (no giant `dump-mir` text to build and throw away).
-    \Compile\Stats::dumpCounters();
-
-    // Under --only the selection IS the gate: a warning-severity undefined
-    // symbol still means this compiler cannot resolve the name.
-    if ($only !== "") {
-        return \count($diags) > 0 ? 1 : 0;
-    }
-    foreach ($diags as $d) {
-        if ($d->severity === \Analyze\Diagnostic::SEV_ERROR) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 function main_driver(): int
 {
     \Compile\Debug::initFromEnvironment();
@@ -6563,8 +6470,7 @@ function main_driver(): int
         ->run(fn(array $args) => cmd_build($args));
     $cli->add(new \Cli\Commands\DumpLlvmCommand());
     $cli->add(new \Cli\Commands\DumpAstCommand());
-    $cli->command('analyze', 'Static type analysis; report diagnostics, no codegen')
-        ->run(fn(array $args) => cmd_analyze($args));
+    $cli->add(new \Cli\Commands\AnalyzeCommand());
     $cli->add(new \Cli\Commands\DumpMirCommand());
     $cli->add(new \Cli\Commands\DumpLlvmMirCommand());
     $cli->add(new \Cli\Commands\SplitIrCommand());
