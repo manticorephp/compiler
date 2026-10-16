@@ -14,6 +14,7 @@ Commands:
   split-ir  Split a staged .ll module into N part files (dev tool)
   dump-sig  Parse PHP, print the module-interface .sig (exported symbol table)
   version  Print compiler version
+  upgrade  Update the installed compiler to the latest release (--check only reports)
   help  Show this help text
 
 Run 'manticore <command> --help' for command options.
@@ -172,3 +173,11 @@ Usage: manticore split-ir <module.ll> <parts> <outbase>
 version — Print compiler version
 
 Usage: manticore version
+== help upgrade
+upgrade — Update the installed compiler to the latest release (--check only reports)
+
+Usage: manticore upgrade [--check] [--version X]
+
+Options:
+  --check        Report installed and latest version; change nothing. Exit 1 if an update exists, 2 on error
+  --version <X>  Install this release instead of the latest

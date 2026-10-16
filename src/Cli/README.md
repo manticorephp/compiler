@@ -44,7 +44,7 @@ final class VersionCommand extends \Cli\Command
     public function name(): string { return 'version'; }
     public function summary(): string { return 'Print compiler version'; }
     public function usage(): string { return ''; }
-    public function run(\Cli\ParsedArgs $p): int { \Manticore\puts('manticore 0.14.0'); return 0; }
+    public function run(\Cli\ParsedArgs $p): int { \Manticore\puts('manticore ' . \Manticore\Version::STRING); return 0; }
 }
 
 $cli = new \Cli\Cli('manticore', 'PHP-to-native AOT compiler (self-hosted)');

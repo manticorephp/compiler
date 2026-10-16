@@ -45,6 +45,7 @@ behaviour() {
     run "compile bad --memory"     "$MC" compile "f.php" -o "x" --memory bogus
     run "split-ir no args"         "$MC" split-ir
     run "build missing manifest"   "$MC" build "nope.json"
+    run "upgrade in a dev tree (foreign)" "$MC" upgrade --check
     run "unknown command"          "$MC" frobnicate
     "$MC" compile "f.php" -o "prog" >/dev/null 2>&1
     if [ -x ./prog ]; then out="$(./prog 2>&1)"; else out="no binary"; fi
@@ -52,7 +53,7 @@ behaviour() {
 }
 
 helps() {
-    for c in "" compile build analyze dump-llvm dump-ast dump-mir dump-llvm-mir dump-sig split-ir version; do
+    for c in "" compile build analyze dump-llvm dump-ast dump-mir dump-llvm-mir dump-sig split-ir version upgrade; do
         printf '== help %s\n' "${c:-<root>}"
         if [ -z "$c" ]; then "$MC" help 2>&1; else "$MC" "$c" --help 2>&1; fi
     done

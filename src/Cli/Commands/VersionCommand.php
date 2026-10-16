@@ -15,7 +15,7 @@ final class VersionCommand extends Command
 
     public function run(ParsedArgs $args): int
     {
-        \Manticore\puts("manticore 0.14.0");
+        \Manticore\puts("manticore " . \Manticore\Version::STRING);
         return 0;
     }
 }

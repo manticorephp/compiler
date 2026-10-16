@@ -5688,6 +5688,7 @@ function main_driver(): int
     $cli->add(new \Cli\Commands\SplitIrCommand());
     $cli->add(new \Cli\Commands\DumpSigCommand());
     $cli->add(new \Cli\Commands\VersionCommand());
+    $cli->add(new \Cli\Commands\UpgradeCommand());
     return $cli->run(collect_argv());
 }
 
