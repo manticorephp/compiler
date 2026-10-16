@@ -471,8 +471,7 @@ function str_pad(string $s, int $len, string $pad = " ", int $type = 1): string
     $sl = \strlen($s);
     if ($sl >= $len || \strlen($pad) === 0) { return $s; }
     $need = $len - $sl;
-    $full = "";
-    while (\strlen($full) < $need) { $full = $full . $pad; }
+    $full = \str_repeat($pad, \intdiv($need, \strlen($pad)) + 1);
     if ($type === 0) { return \substr($full, 0, $need) . $s; }
     if ($type === 2) {
         $left = \intval($need / 2);
