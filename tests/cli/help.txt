@@ -16,6 +16,7 @@ Commands:
   version  Print compiler version
   upgrade  Update the installed compiler to the latest release (--check only reports)
   doctor  Check that this compiler and its toolchain work; exit 1 on a failure
+  completions  Print a shell completion script (bash, zsh or fish)
   help  Show this help text
 
 Run 'manticore <command> --help' for command options.
@@ -193,3 +194,7 @@ Usage: manticore doctor [--offline] [--no-smoke]
 Options:
   --offline   Skip the update check
   --no-smoke  Skip compiling and running a hello-world
+== help completions
+completions — Print a shell completion script (bash, zsh or fish)
+
+Usage: manticore completions <bash|zsh|fish>

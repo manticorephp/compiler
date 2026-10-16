@@ -38,6 +38,10 @@ rc=1 fail=1 warn=3
 rc=0 fail=0 warn=3
 == doctor: full toolchain
 rc=0 fail=0 warn=1
+== completions no shell
+rc=64
+== completions unknown shell
+rc=64
 == unknown command
 rc=0
 == compile+run

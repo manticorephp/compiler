@@ -62,6 +62,33 @@ Published Linux builds are made on **Debian 12** (glibc 2.36), which is also wha
 development and CI use: a release has to run on the distribution someone already
 has, and glibc is backwards compatible, not forwards.
 
+### Checking your install
+
+```bash
+manticore doctor               # clang, cc, bundled runtime files, host libraries, a hello-world smoke test, update check
+manticore doctor --offline     # skip the update check
+manticore doctor --no-smoke    # skip compiling and running the hello-world
+```
+
+Each line is `[ OK ]`, `[WARN]` or `[FAIL]`, with a hint for the last two. A FAIL means the
+compiler cannot work here (`clang` missing or older than 15, no `cc`, a missing runtime file,
+a failed smoke test); `doctor` then exits `1`. A WARN is advisory (a host library not found, an
+install not managed by `install.sh`, an update available or unreachable) and exits `0`.
+
+`manticore version --check` mirrors `upgrade --check`: installed vs latest, exit `0` current,
+`1` update available, `2` error.
+
+### Shell completions
+
+```bash
+manticore completions bash > ~/.local/share/bash-completion/completions/manticore
+manticore completions zsh  > ~/.zfunc/_manticore     # ~/.zfunc must be in fpath before compinit
+manticore completions fish > ~/.config/fish/completions/manticore.fish
+```
+
+The scripts are generated from the command and option declarations, so they match the
+installed compiler; regenerate them after an upgrade.
+
 ### Via Composer
 
 ```bash

@@ -2,7 +2,7 @@
 # CLI golden test. behaviour.txt = what commands DO (captured before the CLI
 # restructure; must not change). help.txt = generated usage text (review its diff).
 #   bash tests/cli/run.sh            compare
-#   bash tests/cli/run.sh --update   rewrite help.txt only
+#   bash tests/cli/run.sh --update   rewrite help.txt and the completions.* goldens
 #   bash tests/cli/run.sh --capture  rewrite behaviour.txt (baseline only; never after the restructure)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -58,6 +58,8 @@ behaviour() {
     shim clang14 cc; doctor_case "doctor: old clang"
     shim clang17 cc; doctor_case "doctor: no pcre2/pkg-config"
     shim clang17 cc pcre2-config pkg-config; doctor_case "doctor: full toolchain"
+    run "completions no shell"      "$MC" completions
+    run "completions unknown shell" "$MC" completions tcsh
     run "unknown command"          "$MC" frobnicate
     "$MC" compile "f.php" -o "prog" >/dev/null 2>&1
     if [ -x ./prog ]; then out="$(./prog 2>&1)"; else out="no binary"; fi
@@ -65,15 +67,28 @@ behaviour() {
 }
 
 helps() {
-    for c in "" compile build analyze dump-llvm dump-ast dump-mir dump-llvm-mir dump-sig split-ir version upgrade doctor; do
+    for c in "" compile build analyze dump-llvm dump-ast dump-mir dump-llvm-mir dump-sig split-ir version upgrade doctor completions; do
         printf '== help %s\n' "${c:-<root>}"
         if [ -z "$c" ]; then "$MC" help 2>&1; else "$MC" "$c" --help 2>&1; fi
     done
 }
 
+completions_check() {
+    local sh
+    for sh in bash zsh fish; do
+        "$MC" completions $sh > "$WORK/c.$sh" 2>/dev/null
+        diff -u "$HERE/completions.$sh" "$WORK/c.$sh" || fail=1
+    done
+    bash -n "$WORK/c.bash" || fail=1
+    if command -v zsh >/dev/null 2>&1; then zsh -n "$WORK/c.zsh" || fail=1; fi
+    if command -v fish >/dev/null 2>&1; then fish -n "$WORK/c.fish" || fail=1; fi
+}
+
 fail=0
 if [ "${1:-}" = "--update" ]; then
-    helps > "$HERE/help.txt"; echo "help.txt updated"; exit 0
+    helps > "$HERE/help.txt"
+    for sh in bash zsh fish; do "$MC" completions $sh > "$HERE/completions.$sh"; done
+    echo "help.txt + completions.* updated"; exit 0
 fi
 if [ "${1:-}" = "--capture" ]; then
     behaviour > "$HERE/behaviour.txt"; echo "behaviour.txt captured"; exit 0
@@ -84,4 +99,5 @@ if [ -f "$HERE/help.txt" ]; then
     helps > "$WORK/help.got"
     diff -u "$HERE/help.txt" "$WORK/help.got" || fail=1
 fi
+completions_check
 [ "$fail" = 0 ] && echo "=== cli golden: ok ===" || { echo "=== cli golden: FAILED ==="; exit 1; }

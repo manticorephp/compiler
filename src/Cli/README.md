@@ -11,7 +11,12 @@ options; `Cli` parses, generates help, and dispatches on `argv[1]`.
   - `run(array $argv): int` — dispatch `argv[1]` with the tail args
   - `runHelp(): int` — print the generated root help
   - `registry(): array<string, Command>` — the registered commands, read-only
+    (this is what `Cli\Completion` reads)
 - `Cli\Install` — install.sh layout (home, installer, owner guess) and the installed-vs-latest check shared by `upgrade` and `version --check`.
+- `Cli\Completion::{bash,zsh,fish}(Cli $cli): string` — completion scripts for `manticore completions <shell>`, rendered from
+  `registry()` and each command's `options()` (single-letter names `-x`, others `--name`; VALUE options take an
+  argument, files for placeholder `path`). Descriptions come from `summary()` / `Option::$help`, escaped per shell.
+  Output is deterministic (registry order); goldens: `tests/cli/completions.*`.
 - `Cli\Command` — abstract base, one subclass per command (`src/Cli/Commands/*Command.php`).
   - `name(): string`, `summary(): string` (one line, shown in root help)
   - `usage(): string` — text after `Usage: <prog> <name> ` (default `[options]`)
