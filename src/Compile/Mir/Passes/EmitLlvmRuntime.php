@@ -4366,16 +4366,24 @@ end:
             $out .= "  %total = mul i64 %slen, %n\n";
             $out .= "  %sz = add i64 %total, 1\n";
             $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
+            $out .= "  %empty = icmp eq i64 %total, 0\n";
+            $out .= "  br i1 %empty, label %fin, label %first\n";
+            $out .= "first:\n";
+            $out .= "  call ptr @memcpy(ptr %buf, ptr %s, i64 %slen)\n";
             $out .= "  br label %loop\n";
+            // Doubling: the filled prefix is copied onto its own end, so n
+            // repetitions cost log2(n) memcpy calls instead of n.
             $out .= "loop:\n";
-            $out .= "  %i = phi i64 [0, %entry], [%i2, %body]\n";
-            $out .= "  %done = icmp sge i64 %i, %n\n";
+            $out .= "  %f = phi i64 [%slen, %first], [%f2, %body]\n";
+            $out .= "  %done = icmp uge i64 %f, %total\n";
             $out .= "  br i1 %done, label %fin, label %body\n";
             $out .= "body:\n";
-            $out .= "  %off = mul i64 %i, %slen\n";
-            $out .= "  %dst = getelementptr inbounds i8, ptr %buf, i64 %off\n";
-            $out .= "  call ptr @memcpy(ptr %dst, ptr %s, i64 %slen)\n";
-            $out .= "  %i2 = add i64 %i, 1\n";
+            $out .= "  %rem = sub i64 %total, %f\n";
+            $out .= "  %lt = icmp ult i64 %f, %rem\n";
+            $out .= "  %chunk = select i1 %lt, i64 %f, i64 %rem\n";
+            $out .= "  %dst = getelementptr inbounds i8, ptr %buf, i64 %f\n";
+            $out .= "  call ptr @memcpy(ptr %dst, ptr %buf, i64 %chunk)\n";
+            $out .= "  %f2 = add i64 %f, %chunk\n";
             $out .= "  br label %loop\n";
             $out .= "fin:\n";
             $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %total\n";
