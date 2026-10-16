@@ -103,7 +103,7 @@ Reference point: compiling symfony-demo (79k functions, 1.1 GB of LLVM IR) takes
 - [ ] Cut front-end re-inference (~29 s on the compiler itself)
 - [ ] Bring the large-application peak under 2 GiB
 - [ ] Real incremental builds via separately compiled libraries (`.sig` interfaces)
-- [ ] Build progress output: stages, counters, timings ([#176](https://github.com/manticorephp/compiler/issues/176))
+- [x] Build progress output: stages, counters, timings ([#176](https://github.com/manticorephp/compiler/issues/176))
 
 Optimization policy: `-O2` for anything shipped; `-O1` without LTO for the edit–build loop.
 
@@ -138,7 +138,9 @@ Known semantic gaps in detail: [`gaps.md`](gaps.md).
 
 - [x] CI: Linux arm64/amd64 on Debian and Alpine, macOS arm64, weekly parity run against php
 - [x] Release tarballs and container images built from the pinned bootstrap
-- [ ] `manticore upgrade` ([#174](https://github.com/manticorephp/compiler/issues/174))
+- [x] `manticore upgrade` ([#174](https://github.com/manticorephp/compiler/issues/174))
+- [x] `manticore doctor`, `manticore completions`, `manticore version --check`
+- [x] One version source: `COMPILER_VERSION`, checked in CI and at release
 - [ ] Surface the ABI version in `manticore version`
 - [ ] Dependency fetching and a shared module cache (design exists, not built)
 - [ ] `dump-mir --after=<pass>`

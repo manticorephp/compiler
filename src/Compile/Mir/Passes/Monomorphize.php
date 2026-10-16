@@ -106,10 +106,11 @@ final class Monomorphize implements Pass
         $round = 0;
         while ($round < $maxRounds) {
             $round = $round + 1;
-            $roundT = \Compile\Stats::now();
+            $stage = '  mono round ' . (string)$round;
+            $roundT = \Compile\Stats::begin($stage);
             $before = \count($module->functions);
             $more = $this->runOnce($module);
-            \Compile\Stats::step('  mono round ' . (string)$round, $roundT,
+            \Compile\Stats::step($stage, $roundT,
                 \count($module->functions), -1);
             \Compile\Stats::bump('mono.rounds', 1);
             \Compile\Stats::bump('mono.fns_added', \count($module->functions) - $before);

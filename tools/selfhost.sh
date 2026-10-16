@@ -26,7 +26,7 @@ export MANTICORE_PRELUDE="$ROOT/prelude"
 
 # ⚠ DO NOT default MANTICORE_MEMORY here. It was set to `arena` on the belief that
 # it only tuned the compiler PROCESS — the comment said "this affects only the
-# compiler process below". It does not: {@see \Manticore\parse_compile_args} feeds
+# compiler process below". It does not: {@see \Manticore\apply_compile_args} feeds
 # it straight into CompileArgs::$memory, i.e. the EMITTED target's memory mode,
 # and `arena` means "process-wide bump pointer, refcount ops elided".
 #

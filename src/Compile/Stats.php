@@ -81,6 +81,7 @@ final class Stats
     {
         $ms = self::$rootT0 > 0
             ? \intdiv(self::now() - self::$rootT0, 1000000) : 0;
+        Progress::clear();
         \error_log('stats: ' . (string)$ms . 'ms  ' . $s);
     }
 
@@ -102,11 +103,26 @@ final class Stats
      */
     public static function step(string $name, int $startNs, int $fns, int $classes): void
     {
-        if (!self::reporting()) { return; }
         $ms = \intdiv(self::now() - $startNs, 1000000);
+        if (self::reporting()) {
+            self::stepLine($name, $ms, $fns, $classes);
+        }
+        Progress::end($name, $ms, $fns, $classes);
+    }
+
+    /** Start a stage: tells {@see Progress}, returns the clock reading to hand to {@see step}. */
+    public static function begin(string $name): int
+    {
+        Progress::begin($name);
+        return self::now();
+    }
+
+    private static function stepLine(string $name, int $ms, int $fns, int $classes): void
+    {
         $line = 'stats: ' . (string)self::elapsedMs() . 'ms +' . (string)$ms . 'ms  ' . $name;
         if ($fns >= 0) { $line = $line . '  fns=' . (string)$fns; }
         if ($classes >= 0) { $line = $line . ' cls=' . (string)$classes; }
+        Progress::clear();
         \error_log($line . self::rss());
     }
 
@@ -114,6 +130,7 @@ final class Stats
     public static function line(string $s): void
     {
         if (!self::reporting()) { return; }
+        Progress::clear();
         \error_log('stats: ' . (string)self::elapsedMs() . 'ms  ' . $s . self::rss());
     }
 
@@ -131,6 +148,7 @@ final class Stats
     {
         if (!self::$on) { return; }
         foreach (self::$counts as $k => $v) {
+            Progress::clear();
             \error_log('stats: counter ' . $k . ' = ' . (string)$v);
         }
     }

@@ -89,6 +89,27 @@ assembles its IR with `clang`, links with `cc`, and the binaries it emits link t
 host's pcre2, openssl, sqlite3 and curl. The image is the one artifact that brings
 all of that with it.
 
+### Upgrading
+
+```bash
+manticore upgrade                  # install the latest release
+manticore upgrade --check          # installed vs latest; exit 0 current, 1 update available, 2 error
+manticore upgrade --version 0.13.0 # a specific release (a downgrade is allowed)
+```
+
+`upgrade` runs the `share/install.sh` that ships in every release tarball, in strict
+mode. The new build is staged and smoke-tested, then swapped in with rollback; the
+previous binary stays as `bin/.manticore.prev`. The release checksum is mandatory: a
+mismatch or missing `SHA256SUMS` aborts and leaves the install untouched, and strict
+mode never falls back to a source build. A compiler not installed by `install.sh`
+(package manager, container image, a layout without `share/install.sh`) is refused with
+a message naming the likely owner — update it with that installer.
+
+Strict-mode exit codes of `install.sh` (set `MANTICORE_STRICT=1`): `2` release
+unreachable, `3` no published build for this platform, `4` checksum failure,
+`5` staging or smoke-test failure. Knobs: `MANTICORE_STRICT`, `MANTICORE_HOME`,
+`MANTICORE_VERSION`.
+
 Via Composer, which here is a delivery + build trigger rather than a runtime:
 
 ```bash
@@ -105,6 +126,33 @@ $MANTICORE_HOME/lib/manticore_stdlib.o(.sig)
 $MANTICORE_HOME/lib/prelude/*.php
 ```
 
+### Checking your install
+
+```bash
+manticore doctor               # clang, cc, bundled runtime files, host libraries, a hello-world smoke test, update check
+manticore doctor --offline     # skip the update check
+manticore doctor --no-smoke    # skip compiling and running the hello-world
+```
+
+Each line is `[ OK ]`, `[WARN]` or `[FAIL]`, with a hint for the last two. A FAIL means the
+compiler cannot work here (`clang` missing or older than 15, no `cc`, a missing runtime file,
+a failed smoke test); `doctor` then exits `1`. A WARN is advisory (a host library not found, an
+install not managed by `install.sh`, an update available or unreachable) and exits `0`.
+
+`manticore version --check` mirrors `upgrade --check`: installed vs latest, exit `0` current,
+`1` update available, `2` error.
+
+### Shell completions
+
+```bash
+manticore completions bash > ~/.local/share/bash-completion/completions/manticore
+manticore completions zsh  > ~/.zfunc/_manticore     # ~/.zfunc must be in fpath before compinit
+manticore completions fish > ~/.config/fish/completions/manticore.fish
+```
+
+The scripts are generated from the command and option declarations, so they match the
+installed compiler; regenerate them after an upgrade.
+
 ### From a checkout
 
 ```bash
@@ -114,6 +162,8 @@ bin/build --verify       # + fixpoint + suite gate
 ```
 
 ## Working with it
+
+Every command and option: [`docs/cli.md`](docs/cli.md).
 
 ```bash
 # one file
@@ -155,6 +205,28 @@ them in `/tmp` and deleting them — pair with `-O0` to get a binary lldb can wa
 
 ⚠ The `dump-*` commands do **not** link the stdlib, so a call into it resolves as
 `unknown`. When that matters, read the final binary.
+
+### Build progress
+
+Full reference: [`docs/cli.md`](docs/cli.md).
+
+`compile` and `build` report progress on **stderr only**; stdout is never touched.
+
+| Flag | Meaning |
+|---|---|
+| `--progress=auto\|live\|plain\|json\|off` | output mode (default `auto`) |
+| `--quiet` | no progress output at all (warnings and errors are still printed) |
+| `--timings` | after `done`, list the 15 slowest stages |
+| `--color=auto\|always\|never` | colour for the progress text (default `auto`) |
+
+`auto` picks `live` when stderr is a terminal, `plain` when it is not but `CI` is set to
+a non-empty value, and `off` otherwise — piped builds stay silent. `live` redraws one line
+(`● EmitLlvm  1.2s  (total 4.0s) · functions 512/1881`) and ends with `✓ done in 7.1s`.
+Counters: `files`, `functions` and, for a split build (`MANTICORE_SPLIT_JOBS` with `-j 0`),
+`clang` (parts compiled so far / total, cache hits included).
+
+Colour rules (`NO_COLOR`, `TERM=dumb`, `--color=always`), the `plain` line format and the
+`json` event table with examples are in [`docs/cli.md`](docs/cli.md#build-progress).
 
 ## The PHP you get
 

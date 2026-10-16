@@ -34,9 +34,60 @@ a first build starts from the pinned bootstrap release (`BOOTSTRAP_VERSION`). Kn
 download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC`
 (build a local checkout instead of cloning).
 
+### Upgrading
+
+```bash
+manticore upgrade                  # install the latest release
+manticore upgrade --check          # installed vs latest; exit 0 current, 1 update available, 2 error
+manticore upgrade --version 0.13.0 # a specific release (a downgrade is allowed)
+```
+
+`upgrade` runs the `share/install.sh` that ships in every release tarball, in strict
+mode. The new build is staged and smoke-tested, then swapped in with rollback; the
+previous binary stays as `bin/.manticore.prev`. The release checksum is mandatory: a
+mismatch or missing `SHA256SUMS` aborts and leaves the install untouched, and strict
+mode never falls back to a source build. A compiler not installed by `install.sh`
+(package manager, container image, a layout without `share/install.sh`) is refused with
+a message naming the likely owner — update it with that installer.
+
+Strict-mode exit codes of `install.sh` (set `MANTICORE_STRICT=1`): `2` release
+unreachable, `3` no published build for this platform, `4` checksum failure,
+`5` staging or smoke-test failure. Knobs: `MANTICORE_STRICT`, `MANTICORE_HOME`,
+`MANTICORE_VERSION`.
+
+Releases carry `share/install.sh` inside the tarball (next to `bin/` and `lib/`); that
+is the script `upgrade` runs, so it always matches the installed layout.
+
 Published Linux builds are made on **Debian 12** (glibc 2.36), which is also what
 development and CI use: a release has to run on the distribution someone already
 has, and glibc is backwards compatible, not forwards.
+
+### Checking your install
+
+```bash
+manticore doctor               # clang, cc, bundled runtime files, host libraries, a hello-world smoke test, update check
+manticore doctor --offline     # skip the update check
+manticore doctor --no-smoke    # skip compiling and running the hello-world
+```
+
+Each line is `[ OK ]`, `[WARN]` or `[FAIL]`, with a hint for the last two. A FAIL means the
+compiler cannot work here (`clang` missing or older than 15, no `cc`, a missing runtime file,
+a failed smoke test); `doctor` then exits `1`. A WARN is advisory (a host library not found, an
+install not managed by `install.sh`, an update available or unreachable) and exits `0`.
+
+`manticore version --check` mirrors `upgrade --check`: installed vs latest, exit `0` current,
+`1` update available, `2` error.
+
+### Shell completions
+
+```bash
+manticore completions bash > ~/.local/share/bash-completion/completions/manticore
+manticore completions zsh  > ~/.zfunc/_manticore     # ~/.zfunc must be in fpath before compinit
+manticore completions fish > ~/.config/fish/completions/manticore.fish
+```
+
+The scripts are generated from the command and option declarations, so they match the
+installed compiler; regenerate them after an upgrade.
 
 ### Via Composer
 

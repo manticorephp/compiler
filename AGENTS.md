@@ -149,8 +149,8 @@ PHP source → Lexer → Parser → AST
   → EmitLlvm (+ HoistAllocas, PruneIr) → LLVM IR → clang -c → cc → static binary
 ```
 
-The driver is `cmd_compile` in `src/Manticore/Main.php`; it calls `lower_module` (the
-passes) and `compile_via_mir` (EmitLlvm).
+The driver is `Cli\Commands\CompileCommand::run` in `src/Cli/Commands/CompileCommand.php`; it calls `lower_module` (the
+passes) and `compile_via_mir` (EmitLlvm), both in `src/Manticore/Main.php`.
 `InferTypes` re-runs after each pass that makes new types concrete. Full
 annotation of the passes: `src/Compile/README.md` and `docs/design/mir.md`.
 
@@ -169,6 +169,7 @@ annotation of the passes: `src/Compile/README.md` and `docs/design/mir.md`.
 | Prelude (PHP injected into every program) | `prelude/*.php` |
 | Static analyzer (`analyze`, compile-time warnings) | `src/Analyze/` |
 | CLI + driver, manifest build, stdlib resolution | `src/Manticore/Main.php`, `src/Cli/` |
+| CLI commands | `src/Cli/Commands/*Command.php` (one class per command, options declared on the class), `src/Cli/Cli.php` |
 | Test harness | `tests/aot/run.sh` |
 | Gates and tooling | `tools/` |
 
@@ -292,3 +293,9 @@ Corollaries:
   after adding a stdlib function, a builtin or a prelude class; never edit by hand.
 - `docs/design/*.md` — design notes; `design/memory-abi.md` is the stone tablet.
 - `docs/status/`, `docs/audit/`, `docs/superpowers/` — working notes, untracked.
+- The compiler version lives in `COMPILER_VERSION` (beside `BOOTSTRAP_VERSION`; between
+  releases it may read `N.N.N-dev`). `bin/build` regenerates `src/Manticore/Version.php`
+  from it — never edit that file. Release = edit `COMPILER_VERSION` (+ docs), run
+  `bin/build`, commit both. `tools/check_version.sh` (CI, release) fails on drift, a
+  malformed value, or a pin newer than the compiler; the release fails a tag that
+  does not match.

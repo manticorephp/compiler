@@ -1,0 +1,208 @@
+== help <root>
+manticore — PHP-to-native AOT compiler (self-hosted)
+
+Usage: manticore <command> [options...]
+
+Commands:
+  compile  Compile to a native binary (-o <out>); analyzes by default (--no-analyze skips, --analyze-strict gates on errors)
+  build  Build all targets from a manticore.json manifest (libraries + applications)
+  dump-llvm  Read PHP source from stdin, emit LLVM IR on stdout
+  dump-ast  Parse PHP source and print the resulting AST
+  analyze  Static type analysis; report diagnostics, no codegen
+  dump-mir  Parse PHP, lower to MIR, print the typed IR
+  dump-llvm-mir  Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR
+  split-ir  Split a staged .ll module into N part files (dev tool)
+  dump-sig  Parse PHP, print the module-interface .sig (exported symbol table)
+  version  Print compiler version
+  upgrade  Update the installed compiler to the latest release (--check only reports)
+  doctor  Check that this compiler and its toolchain work; exit 1 on a failure
+  completions  Print a shell completion script (bash, zsh or fish)
+  help  Show this help text
+
+Run 'manticore <command> --help' for command options.
+== help compile
+compile — Compile to a native binary (-o <out>); analyzes by default (--no-analyze skips, --analyze-strict gates on errors)
+
+Usage: manticore compile [options] <files…|manifest.json> -o <out>
+
+Options:
+  -o <path>                Output path (default a.out)
+  --memory <mode>          Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>         Codegen backend override
+  -O <level>               Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                dump-*: include the prelude in the dump
+  --effects                dump-mir: show inferred effects
+  --emit-library           Emit a library object instead of an executable
+  --runtime                With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
+  --keep-ir                Keep the intermediate .ll files
+  -j <n>                   Parallel clang jobs; 0 = one per core
+  --analyze                Run the analyzer (default)
+  --no-analyze             Skip the analyzer
+  --analyze-strict         Fail with rc 65 on analyzer errors
+  --progress <mode>        Progress output: auto|live|plain|json|off (default auto)
+  --quiet                  Silence progress and timings (diagnostics stay)
+  --timings                Print a per-stage time table at the end
+  --color <when>           Colour: auto|always|never (default auto)
+== help build
+build — Build all targets from a manticore.json manifest (libraries + applications)
+
+Usage: manticore build [options] <manticore.json>
+
+Options:
+  -o <path>                Output path (default a.out)
+  --memory <mode>          Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>         Codegen backend override
+  -O <level>               Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                dump-*: include the prelude in the dump
+  --effects                dump-mir: show inferred effects
+  --emit-library           Emit a library object instead of an executable
+  --runtime                With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
+  --keep-ir                Keep the intermediate .ll files
+  -j <n>                   Parallel clang jobs; 0 = one per core
+  --libs-only              Build library targets and stop (cold seed)
+  --apps-only              Build application targets only
+  --no-analyze             Accepted for compile parity; build does not run the analyzer
+  --progress <mode>        Progress output: auto|live|plain|json|off (default auto)
+  --quiet                  Silence progress and timings (diagnostics stay)
+  --timings                Print a per-stage time table at the end
+  --color <when>           Colour: auto|always|never (default auto)
+== help analyze
+analyze — Static type analysis; report diagnostics, no codegen
+
+Usage: manticore analyze [options] [paths…]
+
+Options:
+  -o <path>                   Output path (default a.out)
+  --memory <mode>             Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>            Codegen backend override
+  -O <level>                  Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                   dump-*: include the prelude in the dump
+  --effects                   dump-mir: show inferred effects
+  --emit-library              Emit a library object instead of an executable
+  --runtime                   With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps     Do not refuse a library that contains undefined-function traps
+  --keep-ir                   Keep the intermediate .ll files
+  -j <n>                      Parallel clang jobs; 0 = one per core
+  --deep                      Also run the compiler's MIR type passes (heavier)
+  --json                      Machine-readable output
+  --baseline <path>           Suppress findings listed in this baseline file
+  --generate-baseline <path>  Write a baseline file from current findings
+  --only <prefixes>           Keep only diagnostic codes starting with these prefixes (comma list); gates on any survivor
+== help dump-llvm
+dump-llvm — Read PHP source from stdin, emit LLVM IR on stdout
+
+Usage: manticore dump-llvm [options] [files…]
+
+Options:
+  -o <path>                Output path (default a.out)
+  --memory <mode>          Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>         Codegen backend override
+  -O <level>               Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                dump-*: include the prelude in the dump
+  --effects                dump-mir: show inferred effects
+  --emit-library           Emit a library object instead of an executable
+  --runtime                With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
+  --keep-ir                Keep the intermediate .ll files
+  -j <n>                   Parallel clang jobs; 0 = one per core
+== help dump-ast
+dump-ast — Parse PHP source and print the resulting AST
+
+Usage: manticore dump-ast [options] [files…]
+
+Options:
+  -o <path>                Output path (default a.out)
+  --memory <mode>          Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>         Codegen backend override
+  -O <level>               Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                dump-*: include the prelude in the dump
+  --effects                dump-mir: show inferred effects
+  --emit-library           Emit a library object instead of an executable
+  --runtime                With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
+  --keep-ir                Keep the intermediate .ll files
+  -j <n>                   Parallel clang jobs; 0 = one per core
+== help dump-mir
+dump-mir — Parse PHP, lower to MIR, print the typed IR
+
+Usage: manticore dump-mir [options] [files…]
+
+Options:
+  -o <path>                Output path (default a.out)
+  --memory <mode>          Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>         Codegen backend override
+  -O <level>               Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                dump-*: include the prelude in the dump
+  --effects                dump-mir: show inferred effects
+  --emit-library           Emit a library object instead of an executable
+  --runtime                With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
+  --keep-ir                Keep the intermediate .ll files
+  -j <n>                   Parallel clang jobs; 0 = one per core
+== help dump-llvm-mir
+dump-llvm-mir — Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR
+
+Usage: manticore dump-llvm-mir [options] [files…]
+
+Options:
+  -o <path>                Output path (default a.out)
+  --memory <mode>          Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>         Codegen backend override
+  -O <level>               Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                dump-*: include the prelude in the dump
+  --effects                dump-mir: show inferred effects
+  --emit-library           Emit a library object instead of an executable
+  --runtime                With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
+  --keep-ir                Keep the intermediate .ll files
+  -j <n>                   Parallel clang jobs; 0 = one per core
+== help dump-sig
+dump-sig — Parse PHP, print the module-interface .sig (exported symbol table)
+
+Usage: manticore dump-sig [options] [files…]
+
+Options:
+  -o <path>                Output path (default a.out)
+  --memory <mode>          Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)
+  --backend <name>         Codegen backend override
+  -O <level>               Optimisation level: 0|1|2|3|s|z (default 2)
+  --prelude                dump-*: include the prelude in the dump
+  --effects                dump-mir: show inferred effects
+  --emit-library           Emit a library object instead of an executable
+  --runtime                With --emit-library: this library is the bundled stdlib
+  --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
+  --keep-ir                Keep the intermediate .ll files
+  -j <n>                   Parallel clang jobs; 0 = one per core
+== help split-ir
+split-ir — Split a staged .ll module into N part files (dev tool)
+
+Usage: manticore split-ir <module.ll> <parts> <outbase>
+== help version
+version — Print compiler version
+
+Usage: manticore version [--check]
+
+Options:
+  --check  Report installed and latest version (same as upgrade --check); exit 1 if an update exists, 2 on error
+== help upgrade
+upgrade — Update the installed compiler to the latest release (--check only reports)
+
+Usage: manticore upgrade [--check] [--version X]
+
+Options:
+  --check        Report installed and latest version; change nothing. Exit 1 if an update exists, 2 on error
+  --version <X>  Install this release instead of the latest
+== help doctor
+doctor — Check that this compiler and its toolchain work; exit 1 on a failure
+
+Usage: manticore doctor [--offline] [--no-smoke]
+
+Options:
+  --offline   Skip the update check
+  --no-smoke  Skip compiling and running a hello-world
+== help completions
+completions — Print a shell completion script (bash, zsh or fish)
+
+Usage: manticore completions <bash|zsh|fish>

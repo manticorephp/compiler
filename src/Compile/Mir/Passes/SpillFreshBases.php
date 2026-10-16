@@ -177,7 +177,7 @@ final class SpillFreshBases
             }
         }
         $this->closureCaptures = $module->closureCaptures;
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('  escape summaries');
         $this->esc = \Compile\Mir\EscapeSummaries::fromModule($module);
         $this->nothrow = \Compile\Mir\NothrowSummary::fromModule($module);
         \Compile\Stats::step('  escape summaries', $statT, -1, -1);

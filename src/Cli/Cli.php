@@ -3,46 +3,100 @@
 namespace Cli;
 
 /**
- * Minimal Rust-clap-flavoured CLI registry. Owns a set of named
- * subcommands; each command carries a one-line description, a handler
- * closure that receives the post-command argv tail, and an optional
- * usage hint printed by `help`. Dispatch parses `argv[1]` to pick the
- * command, defaults to `help` when no command is given or the name is
- * unknown.
+ * Minimal Rust-clap-flavoured CLI registry. Commands are classes registered
+ * with {@see add()}; their declared options drive parsing and generated help.
+ * No command given, `help`, `--help`/`-h`, or an unknown command prints the
+ * root help.
  */
 final class Cli
 {
     /** @var array<string, Command> */
-    private array $commands = [];
+    private array $registry = [];
 
     public function __construct(
         public readonly string $name,
         public readonly string $description,
     ) {}
 
-    public function command(string $name, string $description): Command
+    public function add(Command $cmd): void
     {
-        $cmd = new Command($name, $description);
-        $this->commands[$name] = $cmd;
-        return $cmd;
+        $this->registry[$cmd->name()] = $cmd;
     }
 
     /**
-     * Walk the registered commands so callers (e.g. `help`) can
-     * enumerate them without poking private state. Returns the inner
-     * array directly — the caller's expected to read-only.
+     * The registered commands by name, read-only.
      *
      * @return array<string, Command>
      */
-    public function commands(): array
+    public function registry(): array
     {
-        return $this->commands;
+        return $this->registry;
+    }
+
+    /** @return array<string, string> */
+    private function specOf(Command $cmd): array
+    {
+        /** @var array<string, string> $spec */
+        $spec = [];
+        foreach ($cmd->options() as $o) {
+            $spec[$o->name] = $o->kind;
+        }
+        if (!isset($spec['help'])) {
+            $spec['help'] = ArgParse::FLAG;
+        }
+        if (!isset($spec['h'])) {
+            $spec['h'] = ArgParse::FLAG;
+        }
+        return $spec;
+    }
+
+    /** @param string[] $tail */
+    private function runCommand(Command $cmd, array $tail): int
+    {
+        $p = ArgParse::parse($tail, $this->specOf($cmd));
+        if ($p->error !== null) {
+            \Manticore\dprint($cmd->name() . ': ' . $p->error);
+            return 64;
+        }
+        // Detected on the PARSED result: `compile -o --help` makes --help a value.
+        if ($p->flag('help') || $p->flag('h')) {
+            return $this->runCommandHelp($cmd);
+        }
+        return $cmd->run($p);
+    }
+
+    private function runCommandHelp(Command $cmd): int
+    {
+        \Manticore\puts($cmd->name() . ' — ' . $cmd->summary());
+        \Manticore\puts('');
+        \Manticore\puts(\rtrim('Usage: ' . $this->name . ' ' . $cmd->name() . ' ' . $cmd->usage()));
+        $opts = $cmd->options();
+        if (\count($opts) > 0) {
+            \Manticore\puts('');
+            \Manticore\puts('Options:');
+            /** @var string[] $left */
+            $left = [];
+            $width = 0;
+            foreach ($opts as $o) {
+                $s = (\strlen($o->name) === 1 ? '-' : '--') . $o->name;
+                if ($o->kind === ArgParse::VALUE) {
+                    $s = $s . ' <' . ($o->placeholder !== '' ? $o->placeholder : 'value') . '>';
+                }
+                $left[] = $s;
+                if (\strlen($s) > $width) {
+                    $width = \strlen($s);
+                }
+            }
+            foreach ($opts as $i => $o) {
+                \Manticore\puts('  ' . \str_pad($left[$i], $width) . '  ' . $o->help);
+            }
+        }
+        return 0;
     }
 
     /**
-     * Run the command named by `argv[1]`. Returns the exit code from
-     * the handler, or 2 when the requested command is missing. Falls
-     * back to `help` when no command was provided.
+     * Run the command named by `argv[1]`. Returns its exit code. Falls back
+     * to `help` when no command was provided or the name is unknown.
      *
      * @param string[] $argv
      */
@@ -53,21 +107,22 @@ final class Cli
             return $this->runHelp();
         }
         $name = $argv[1];
-        if (!isset($this->commands[$name])) {
-            \Manticore\dprint("unknown command: " . $name);
+        if ($name === 'help' || $name === '--help' || $name === '-h') {
             return $this->runHelp();
         }
-        $cmd = $this->commands[$name];
+        if ($name === '--version') {
+            $name = 'version';
+        }
+        /** @var string[] $tail */
         $tail = [];
         for ($i = 2; $i < $argc; $i = $i + 1) {
             $tail[] = $argv[$i];
         }
-        $handler = $cmd->handler();
-        if ($handler === null) {
-            \Manticore\dprint("command not wired: " . $name);
-            return 70;
+        if (isset($this->registry[$name])) {
+            return $this->runCommand($this->registry[$name], $tail);
         }
-        return $handler($tail);
+        \Manticore\dprint("unknown command: " . $name);
+        return $this->runHelp();
     }
 
     public function runHelp(): int
@@ -77,9 +132,12 @@ final class Cli
         \Manticore\puts("Usage: " . $this->name . " <command> [options...]");
         \Manticore\puts("");
         \Manticore\puts("Commands:");
-        foreach ($this->commands as $name => $cmd) {
-            \Manticore\puts("  " . $name . "  " . $cmd->description);
+        foreach ($this->registry as $name => $cmd) {
+            \Manticore\puts("  " . $name . "  " . $cmd->summary());
         }
+        \Manticore\puts("  help  Show this help text");
+        \Manticore\puts("");
+        \Manticore\puts("Run '" . $this->name . " <command> --help' for command options.");
         return 0;
     }
 }

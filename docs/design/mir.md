@@ -119,7 +119,7 @@ Every pass implements `Pass` (`Pass.php`): `name()`, `requires()` (declared
 dependency pass names), `run(Module): Module`. Each stamps `markPassApplied`.
 `requires()` is declarative; the actual valid order is the fixed chain in
 `lower_module()` (`src/Manticore/Main.php`; `compile_via_mir` then runs `EmitLlvm`, and
-`cmd_compile` drives both). Run order:
+`CompileCommand` drives both). Run order:
 
 | # | Pass | File | What it does |
 |---|---|---|---|

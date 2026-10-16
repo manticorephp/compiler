@@ -35,6 +35,12 @@ function write(
     return 0;
 }
 
+#[Library('c'), Symbol('isatty'), CType('int')]
+function sys_isatty(#[CType('int')] int $fd): int
+{
+    return 0;
+}
+
 #[Library('c'), Symbol('read')]
 function read(
     #[CType('int')] int $fd,
@@ -93,6 +99,13 @@ function sys_unlink(string $path): int
 
 #[Library('c'), Symbol('rename'), CType('int')]
 function sys_rename(string $from, string $to): int
+{
+    return 0;
+}
+
+// Poll interval of the progress-aware split assembly ({@see clang_run_counted}).
+#[Library('c'), Symbol('usleep'), CType('int')]
+function sys_usleep(#[CType('unsigned int')] int $usec): int
 {
     return 0;
 }
@@ -225,6 +238,7 @@ function is_directory(string $path): bool
  */
 function dprint(string $s): void
 {
+    \Compile\Progress::clear();
     // error_log, NOT the libc `write` binding: the binding's body is EMPTY, so
     // every diagnostic vanished whenever the compiler ran under Zend (the old
     // cold seed, tools/compile_user_mir.php) and a real "compile failed: <reason>"
@@ -1027,6 +1041,83 @@ function auto_split_parts(int $irBytes): int
     return $parts;
 }
 
+/**
+ * Run `$cmds` concurrently like `( c1 & c2 ; wait )`, but without blocking the
+ * parent, so the clang n/N counter can follow the jobs. Each job drops
+ * `<obj>.done` when clang exits 0; a trailing `.all.done` says the subshell has
+ * waited for them all. Job stdout/stderr are NOT redirected: clang diagnostics
+ * stay visible exactly as in the blocking path (the marker plumbing writes
+ * nothing). Success is still decided by the caller from the objects, never
+ * from the markers; the markers are removed before returning.
+ *
+ * @param string[] $cmds one clang command per job
+ * @param string[] $objs the object each command writes (same index)
+ * @param int $doneBefore parts already finished (cache hits, earlier batches)
+ * @return int how many of the jobs finished OK
+ */
+function clang_run_counted(array $cmds, array $objs, int $doneBefore, int $total): int
+{
+    $all = $objs[0] . '.all.done';
+    foreach ($objs as $o) {
+        sys_unlink($o . '.done');
+    }
+    sys_unlink($all);
+    $job = '';
+    foreach ($cmds as $i => $c) {
+        if ($job !== '') {
+            $job = $job . ' & ';
+        }
+        $job = $job . $c . ' && : > ' . $objs[$i] . '.done';
+    }
+    $pidFile = $objs[0] . '.pid';
+    sys_unlink($pidFile);
+    // Ctrl-C limit: a job started with `&` by a non-interactive sh ignores SIGINT, so
+    // interrupting the compiler leaves its clang jobs to finish on their own (and
+    // their stale markers are swept by the next run's start). No portable fix
+    // without setsid (absent on macOS).
+    system('( ' . $job . ' ; wait ; : > ' . $all . ' ) & echo $! > ' . $pidFile);
+    $pid = '';
+    $pidRaw = read_file($pidFile);
+    if ($pidRaw !== null) {
+        $pid = \trim($pidRaw);
+    }
+    $last = -1;
+    $finished = false;
+    $tick = 0;
+    while (true) {
+        // every ~2 s: a subshell that died (SIGKILL, OOM) without writing the
+        // all-done flag must not keep us polling forever. Checked BEFORE the flag
+        // read, so a flag-less dead subshell really died.
+        $dead = false;
+        $tick = $tick + 1;
+        if ($pid !== '' && $tick % 20 === 0 && system('kill -0 ' . $pid . ' 2>/dev/null') !== 0) {
+            $dead = true;
+        }
+        // read the all-done flag BEFORE counting: the count below is then final
+        $finished = \file_exists($all) || $dead;
+        $n = 0;
+        foreach ($objs as $o) {
+            if (\file_exists($o . '.done')) {
+                $n = $n + 1;
+            }
+        }
+        if ($n !== $last) {
+            $last = $n;
+            \Compile\Progress::counter('clang', $doneBefore + $n, $total);
+        }
+        if ($finished) {
+            break;
+        }
+        sys_usleep(100000);
+    }
+    foreach ($objs as $o) {
+        sys_unlink($o . '.done');
+    }
+    sys_unlink($all);
+    sys_unlink($pidFile);
+    return $last;
+}
+
 function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit = false): array
 {
     $llPath = $base . ".ll";
@@ -1095,7 +1186,10 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
             \Compile\Stats::line('  obj cache: hit (whole module)');
             return [$objPath];
         }
+        $stage = '  clang -O' . clang_opt_level() . ' -c whole module';
+        $statT = \Compile\Stats::begin($stage);
         $rc = system("clang " . $flags . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
+        \Compile\Stats::step($stage, $statT, -1, -1);
         if ($rc !== 0) {
             dprint("assemble: clang -c failed (rc=" . (string)$rc . "); IR at " . $llPath);
             return [];
@@ -1105,14 +1199,15 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         }
         return [$objPath];
     }
-    $statT = \Compile\Stats::now();
+    $stage = '  split module (' . (string)$jobs . ' parts)';
+    $statT = \Compile\Stats::begin($stage);
     $splitter = new \Compile\Mir\SplitModule();
     // A cache over a load-balanced split hits nothing: one body growing moves
     // every part. Turn the cache on and the partition becomes hash-stable.
     $splitter->stable = obj_cache_enabled(true) || \getenv("MANTICORE_SPLIT_STABLE") === "1";
     $parts = $splitter->run($ir, $jobs);
     \Compile\Stats::step(
-        '  split module (' . (string)$jobs . ' parts)',
+        $stage,
         $statT,
         $splitter->sharedDefs,
         $splitter->internalDefs
@@ -1170,16 +1265,35 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         }
         \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
     }
-    $statT = \Compile\Stats::now();
+    $stage = '  clang -O' . clang_opt_level() . ' -c x' . (string)(\count($parts) - $hits);
+    $statT = \Compile\Stats::begin($stage);
     // `wait` must be INSIDE the subshell: the background jobs are ITS children,
     // so an outer `wait` has nothing to wait for and returns at once — the
     // existence check below then ran before clang had written anything and
     // reported "part 0 failed to build" on a build that was merely still going.
-    if ($cmd !== '') {
+    if ($cmd !== '' && \Compile\Progress::active()) {
+        // Same commands, run through a non-blocking subshell so the parent can
+        // count finished parts. A part already on disk here is a cache hit.
+        /** @var string[] */
+        $jobCmds = [];
+        /** @var string[] */
+        $jobObjs = [];
+        foreach ($objs as $i => $pobj) {
+            if (\file_exists($pobj)) {
+                continue;
+            }
+            $jobCmds[] = "clang -O" . clang_opt_level() . clang_tuning_flags() . " " . $cflags
+                . " -c -x ir " . $base . ".p" . (string)$i . ".ll -o " . $pobj . " -Wno-override-module";
+            $jobObjs[] = $pobj;
+        }
+        clang_run_counted($jobCmds, $jobObjs, $hits, \count($objs));
+    } elseif ($cmd !== '') {
         system("( " . $cmd . " ; wait )");
+    } elseif (\Compile\Progress::active()) {
+        \Compile\Progress::counter('clang', $hits, \count($objs));
     }
     \Compile\Stats::step(
-        '  clang -O' . clang_opt_level() . ' -c x' . (string)(\count($parts) - $hits),
+        $stage,
         $statT,
         -1,
         -1
@@ -1217,7 +1331,7 @@ function assemble_ir_file(
         dprint('assemble: staged split failed; falling back to the serial path');
     }
     \Compile\Stats::line('  assembly: staged large module, serial IR path (' . (string)$irBytes . ' bytes)');
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('  clang -O' . clang_opt_level() . ' -c staged IR');
     $flags = '-O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags;
     $key = obj_cache_enabled() ? obj_cache_key($llPath, $flags) : '';
     if ($key !== '' && obj_cache_get($key, $objPath)) {
@@ -1254,7 +1368,7 @@ function assemble_ir_file_split(
     int $irBytes,
     int $jobs
 ): array {
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('  split staged module');
     $splitter = new \Compile\Mir\SplitModule();
     $splitter->stable = obj_cache_enabled(true) || \getenv('MANTICORE_SPLIT_STABLE') === '1';
     $parts = $splitter->runFile($llPath, $jobs, $base);
@@ -1307,7 +1421,9 @@ function assemble_ir_file_split(
         \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
     }
     $cmds = \array_values($cmds);
-    $statT = \Compile\Stats::now();
+    $stage = '  clang -O' . clang_opt_level() . ' -c x' . (string)\count($cmds)
+        . ($lto === '' ? '' : ' (thinlto)');
+    $statT = \Compile\Stats::begin($stage);
     // ⚠ PARTS and CONCURRENCY are two different numbers, and conflating them is
     // what makes a big module unbuildable. clang's peak is roughly proportional
     // to the bytes it is handed — measured at ~15x the `.ll` on this module — so
@@ -1349,6 +1465,34 @@ function assemble_ir_file_split(
     // `wait` must be INSIDE the subshell: the background jobs are ITS children.
     $i = 0;
     $n = \count($cmds);
+    if (\Compile\Progress::active() && $n === 0) {
+        \Compile\Progress::counter('clang', $hits, \count($objs));
+    }
+    if (\Compile\Progress::active() && $n > 0) {
+        // Progress-aware twin of the loop below: same batches, same commands,
+        // but the parent polls the finished parts instead of blocking.
+        /** @var string[] */
+        $missObjs = [];
+        foreach ($objs as $o) {
+            if (!\file_exists($o)) {
+                $missObjs[] = $o;
+            }
+        }
+        $total = \count($objs);
+        $doneSoFar = $hits;
+        while ($i < $n) {
+            $bc = [];
+            $bo = [];
+            $k = 0;
+            while ($k < $batch && $i < $n) {
+                $bc[] = $cmds[$i];
+                $bo[] = $missObjs[$i];
+                $i = $i + 1;
+                $k = $k + 1;
+            }
+            $doneSoFar = $doneSoFar + clang_run_counted($bc, $bo, $doneSoFar, $total);
+        }
+    }
     while ($i < $n) {
         $cmd = '';
         $k = 0;
@@ -1363,8 +1507,7 @@ function assemble_ir_file_split(
         system('( ' . $cmd . ' ; wait )');
     }
     \Compile\Stats::step(
-        '  clang -O' . clang_opt_level() . ' -c x' . (string)\count($cmds)
-        . ($lto === '' ? '' : ' (thinlto)'),
+        $stage,
         $statT,
         -1,
         -1
@@ -2069,7 +2212,7 @@ final class CompileArgs
 
     /**
      * Set by {@see compile_via_mir} when at least one bundled-stdlib extern
-     * was injected into the module → cmd_compile links the prebuilt
+     * was injected into the module → CompileCommand links the prebuilt
      * `stdlib.o` at the cc step. Stays false for self-contained programs
      * (the compiler's own source defines the stdlib) so no duplicate symbols.
      */
@@ -2098,7 +2241,7 @@ final class CompileArgs
 
     /**
      * Bundled-stdlib signatures for declare-only extern injection, collected
-     * by {@see cmd_compile} (native path, where the libc file bindings work)
+     * by {@see \Cli\Commands\CompileCommand} (native path, where the libc file bindings work)
      * and consumed by {@see compile_via_mir}. NOT collected inside
      * compile_via_mir: that path also runs under the Zend bootstrap build
      * (`tools/compile_files_mir.php`), where `fopen` is a typed stub that
@@ -2165,39 +2308,9 @@ final class CompileArgs
 }
 
 /**
- * Walk argv tail, pulling out -o <path> into CompileArgs::$output
- * and positional args into CompileArgs::$files. Returns true on
- * success, false on any unknown flag.
- *
- * @param string[] $args
+ * Copy a parsed compile option set (-o, -O, --memory, --backend, ...) onto
+ * {@see CompileArgs}. Returns false (after a diagnostic) on a bad -O or --memory value.
  */
-/**
- * The compile/dump option spec, shared by every command that takes them:
- *   -o <out> · --memory=<rc|arena|hybrid> · --backend=<mir|ast> · -O<level>
- *   --prelude · --effects · --emit-library · --runtime · --keep-ir
- * All value forms (`-o out`, `-O2`, `--memory=rc`, `--memory rc`) are accepted;
- * positionals (files) may appear in any position.
- *
- * @return array<string, string>
- */
-function compile_arg_spec(): array
-{
-    return [
-        "o" => \Cli\ArgParse::VALUE,
-        "memory" => \Cli\ArgParse::VALUE,
-        "backend" => \Cli\ArgParse::VALUE,
-        "O" => \Cli\ArgParse::VALUE,
-        "prelude" => \Cli\ArgParse::FLAG,
-        "effects" => \Cli\ArgParse::FLAG,
-        "emit-library" => \Cli\ArgParse::FLAG,
-        "runtime" => \Cli\ArgParse::FLAG,
-        "allow-undefined-traps" => \Cli\ArgParse::FLAG,
-        "keep-ir" => \Cli\ArgParse::FLAG,
-        "j" => \Cli\ArgParse::VALUE,
-    ];
-}
-
-/** Apply a parsed compile option set onto {@see CompileArgs}. false on a bad value. */
 function apply_compile_args(\Cli\ParsedArgs $p): bool
 {
     $optLevel = $p->value("O", "2");
@@ -2248,16 +2361,6 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool
         }
     }
     return true;
-}
-
-function parse_compile_args(array $args): bool
-{
-    $p = \Cli\ArgParse::parse($args, compile_arg_spec());
-    if ($p->error !== null) {
-        dprint($p->error);
-        return false;
-    }
-    return apply_compile_args($p);
 }
 
 /**
@@ -2374,15 +2477,6 @@ function resolve_source_files(array $files): ?array
 }
 
 /**
- * Full compile-to-binary pipeline. Writes IR to a per-pid temp file,
- * shells out to clang for IR→object, then cc for object→executable.
- * Default output is `a.out` in the cwd (mirrors `cc` defaults).
- * Works the same on Linux and macOS because both ship clang+cc and
- * the IR is target-triple-agnostic at our current emit level.
- *
- * @param string[] $args
- */
-/**
  * Front-end entry: parse + lower + emit via the MIR pipeline. The sole
  * backend (the legacy AST Compiler was removed — MIR is self-hosting).
  *
@@ -2392,258 +2486,6 @@ function resolve_source_files(array $files): ?array
 function compile_with_backend(array $sources, array $paths = []): ?string
 {
     return compile_via_mir($sources, $paths);
-}
-
-function cmd_compile(array $args): int
-{
-    // The static analyzer runs by DEFAULT over the sources and prints its
-    // diagnostics to stderr — advisory, NEVER fatal (the build proceeds
-    // regardless). `--no-analyze` turns it off; `--analyze` is the (now default)
-    // explicit opt-in. Uses the fast AST engine, not the heavy `--deep` lowering.
-    $spec = compile_arg_spec();
-    $spec["analyze"] = \Cli\ArgParse::FLAG;
-    $spec["no-analyze"] = \Cli\ArgParse::FLAG;
-    $spec["analyze-strict"] = \Cli\ArgParse::FLAG;
-    $p = \Cli\ArgParse::parse($args, $spec);
-    if ($p->error !== null) {
-        dprint("compile: " . $p->error . " (rc=64)");
-        return 64;
-    }
-    if (!apply_compile_args($p)) {
-        dprint("compile: failed to parse args (rc=64)");
-        return 64;
-    }
-    $analyze = !$p->flag("no-analyze");
-    $strict = $p->flag("analyze-strict");
-    $output = CompileArgs::$output;
-
-    // Read once, as SourceFile[] (path + contents), so every downstream stage
-    // — the analyzer AND the front-end's `parse failed` diagnostics — can name
-    // the specific file that broke. Previously we ran resolve_sources() and
-    // resolve_source_files() back-to-back and lost the paths on the compile
-    // path, so a `bin/manticore compile manticore.json` (or one bad file inside
-    // a directory arg) printed `parse failed: expected ';' after expression`
-    // with no filename.
-    $afiles = resolve_source_files(CompileArgs::$files);
-    if ($afiles === null) {
-        dprint("compile: source resolution failed — no input read (rc=66)");
-        return 66;
-    }
-    if (\count($afiles) === 0) {
-        dprint("compile: source list is empty (rc=66)");
-        return 66;
-    }
-    /** @var string[] $sources */
-    $sources = [];
-    /** @var string[] $paths */
-    $paths = [];
-    foreach ($afiles as $sf) {
-        $sources[] = __mc_source_contents($sf);
-        $paths[] = __mc_source_path($sf);
-    }
-
-    if ($analyze) {
-        // Advisory by default: any failure inside the analyzer is swallowed so it
-        // can NEVER break a build. `--no-analyze` is the escape hatch. With
-        // `--analyze-strict`, error-severity findings instead FAIL the compile
-        // (rc=65, before codegen) — a lint gate for CI.
-        try {
-            if (\count($afiles) > 0) {
-                $adiags = perform_analysis($afiles, CompileArgs::$files, false);
-                if (\count($adiags) > 0) {
-                    \error_log("\n" . \Analyze\Report::human($adiags));
-                }
-                if ($strict) {
-                    $errs = 0;
-                    foreach ($adiags as $d) {
-                        if ($d->severity === \Analyze\Diagnostic::SEV_ERROR) {
-                            $errs = $errs + 1;
-                        }
-                    }
-                    if ($errs > 0) {
-                        dprint("compile: analysis found " . (string)$errs . " error(s) (--analyze-strict, rc=65)");
-                        return 65;
-                    }
-                }
-            }
-        } catch (\Throwable $e) {
-            dprint("analyze: skipped (internal error: " . $e->getMessage() . ")");
-        }
-    }
-    // Collect bundled-stdlib signatures here (native path: the libc file
-    // bindings resolve to real syscalls). compile_via_mir consumes them via
-    // the static. A library declares them too; only the stdlib itself
-    // (`--runtime`) does not.
-    $sigT = \Compile\Stats::now();
-    CompileArgs::$externDecls = [];
-    if (!import_stdlib_decls(CompileArgs::$emitLibrary, CompileArgs::$runtimeLibrary)) { return 65; }
-    \Compile\Stats::step('stdlib .sig -> extern decls', $sigT,
-        \count(CompileArgs::$externDecls), -1);
-    // NOTE: the bundled PHP stdlib is NOT prepended here. Merging the whole
-    // stdlib into every user program both bloats output and crashes the
-    // compiler on some stdlib+user combinations (the "stdlib as guest"
-    // hazard). The chosen design is a prebuilt stdlib.o linked at the cc step
-    // (see discover_stdlib_files / the link tail) — built once, in isolation.
-    $ir = compile_with_backend($sources, $paths);
-    if ($ir === null) {
-        dprint("compile: front-end (parse/typeck/IR) returned null (rc=65)");
-        return 65;
-    }
-    if (\strlen($ir) === 0) {
-        dprint("compile: front-end produced empty IR (rc=65)");
-        return 65;
-    }
-
-    // Staging path for the IR and the intermediate object — the same contract
-    // {@see build_target} uses: under --keep-ir they sit next to the target
-    // (stable, one per target, never swept from /tmp), otherwise a pid-derived
-    // /tmp base that is removed once the target links. Staged files are
-    // deliberately LEFT BEHIND on failure: they are the only record of what the
-    // compiler emitted for a build that did not finish, and every failure path
-    // below names the path it kept.
-    //
-    // ⚠ These used to leak unconditionally — `compile` wrote /tmp/manticore_<pid>.ll
-    // and never removed it, so every compile since the tool existed left its
-    // whole module behind. One dev machine had accumulated 56 970 files / 43 GB.
-    // `build_target` always cleaned up; only this path did not.
-    $keep = CompileArgs::$keepIr;
-    $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_" . (string)getpid());
-    $llPath = $base . ".ll";
-    $objPath = $base . ".o";
-
-    // Library build: assemble straight to the output .o, no link, and NEVER
-    // split — `stdlib.o` is one object by contract (its `.sig` describes it, and
-    // every consumer links exactly that file). The runtime preamble helpers are
-    // linkonce_odr so it coexists with a user program's preamble at link time.
-    if (CompileArgs::$emitLibrary) {
-        if (!write_file($llPath, with_frame_pointers($ir))) {
-            dprint("compile: cannot write " . $llPath . " (rc=73)");
-            return 73;
-        }
-        if ($keep) {
-            dprint("compile: kept IR " . $llPath);
-        }
-        $rcLib = system(
-            "clang -O" . clang_opt_level() . clang_tuning_flags() . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module"
-        );
-        if ($rcLib !== 0) {
-            dprint("compile: clang -c (library) failed (rc=" . (string)$rcLib . "); IR at " . $llPath);
-            return 75;
-        }
-        if (!$keep) {
-            system("rm -f " . $llPath);
-        }
-        return 0;
-    }
-
-    // clang understands `-x ir` for plain LLVM textual IR. cc on both
-    // Linux and macOS picks the system linker plus libc by default.
-    // `-ffunction-sections` puts each function in its own section so the
-    // link-time dead-strip below drops every unreferenced stdlib function
-    // (a hello-world no longer drags in all of Json/Libc/stdlib).
-    // Errors on stderr already, but surface our own rc too.
-    $objs = assemble_ir($ir, $base, "-ffunction-sections -fdata-sections");
-    if ($objs === []) {
-        return 75;
-    }
-    if ($keep) {
-        dprint("compile: kept IR " . $base . ".*.ll");
-    }
-    $objList = \implode(" ", $objs);
-    // Link the prebuilt stdlib.o only when the program imported a bundled
-    // stdlib function (str_starts_with / ctype_* / file_*). A self-contained
-    // program (e.g. the compiler's own source, which defines the stdlib)
-    // links without it — avoids duplicate symbols.
-    $linkExtra = "";
-    // Native libraries this module's own `#[Ffi\Library]` bindings named.
-    $libs = CompileArgs::$ffiLibs;
-    $weak = CompileArgs::$weakSyms;
-    if (CompileArgs::$linkStdlib) {
-        $stdlibObj = find_stdlib_object();
-        if ($stdlibObj !== "") {
-            $linkExtra = " " . $stdlibObj;
-        } else {
-            dprint("compile: program uses bundled stdlib but stdlib.o not found — link may fail");
-        }
-        // The bundled stdlib's own bindings — its preg_* wrappers reference
-        // libpcre2-8, its TLS transport libssl/libcrypto, its iconv_* wrappers
-        // libiconv (on Darwin; glibc has it inside libc), its scheduler
-        // signalfd — none of which this module names. They ride in the stdlib's
-        // `.sig`, since the wrapper that calls them is emitted over there.
-        // Dead-strip + --as-needed drop whichever the program never reaches.
-        foreach (
-            stdlib_sig_list(
-                "libs",
-                ["pcre2-8", "ssl", "crypto", "iconv"]
-            ) as $l
-        ) {
-            $libs[] = $l;
-        }
-        foreach (
-            stdlib_sig_list(
-                "weak",
-                [
-                    "__errno_location",
-                    "epoll_create1",
-                    "epoll_ctl",
-                    "epoll_wait",
-                    "signalfd",
-                ]
-            ) as $w
-        ) {
-            $weak[] = $w;
-        }
-    }
-    $libFlags = ffi_link_flags($libs);
-    if ($libFlags !== "") {
-        $linkExtra .= $libFlags;
-    }
-    // Dead-strip unreferenced functions at link time — the prebuilt stdlib.o
-    // is one object (linked wholesale), so without this a tiny program carries
-    // the entire stdlib (~75 KB hello-world). macOS ld64 strips at the
-    // symbol/atom level (`-dead_strip`); GNU/lld need section GC (`--gc-sections`,
-    // paired with the `-ffunction-sections` above). `-dead_strip_dylibs` /
-    // `--as-needed` drop a linked-but-unreferenced dylib (e.g. libpcre2 in a
-    // program that uses the stdlib but no preg_*).
-    //
-    // Every extern_weak the module emitted is a weak-undefined ld64 rejects
-    // unless `-U <sym>` permits it: errno's per-host accessor (__mc_errno
-    // declares BOTH __error and __errno_location, null-tests, and calls
-    // whichever is present), plus Io\Poll's epoll backend and the scheduler's
-    // signalfd, which bind Linux-only symbols `#[Ffi\Weak]`. Each binds to 0 on
-    // the host that lacks it and the guarded branch never calls it.
-    //
-    // The set is DERIVED — it used to be a hand-written list sitting beside the
-    // bindings it duplicated, free to drift the moment someone added a weak one.
-    // Demand-gating falls out of that: a program that pulls in no weak binding
-    // now gets no -U flags at all.
-    //
-    // GNU ld auto-binds weak-undefined to 0, so Linux needs none of this.
-    // -lm: libm is folded into libSystem on Darwin (auto-linked) but is a
-    // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
-    // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
-    // undefined reference without it. `--as-needed` drops it when unreferenced.
-    //
-    // `--as-needed` is POSITIONAL: it governs the libraries after it. Placed at
-    // the tail it covered -lm alone, so on Debian every library reached the
-    // binary, while Alpine's and Ubuntu's gcc switch it on at the head — two
-    // different links from one command. It leads the line now, on every Linux.
-    $gc = is_darwin()
-        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . weak_undef_flags($weak) . darwin_export_flags()
-        : " -Wl,--gc-sections -lm";
-    $gc = $gc . unwind_link_flags();
-    $asNeeded = is_darwin() ? "" : " -Wl,--as-needed";
-    $rc2 = system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
-    if ($rc2 !== 0) {
-        dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objList);
-        return 76;
-    }
-    // Linked: the staged IR and objects have no further use. Kept under
-    // --keep-ir, which is the escape hatch for reading what was emitted.
-    if (!$keep) {
-        system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll");
-    }
-    return 0;
 }
 
 /**
@@ -3351,7 +3193,7 @@ function collect_extern_decls_from_dir(string $dir, array $excludes): array
  * stdlib is the always-on runtime: its externs are injected (so any stdlib call
  * types + resolves) and `manticore_stdlib.o` is linked when actually used —
  * read from the INSTALLED lib/ via the argv0-relative finders, so a user
- * manifest gets the stdlib without listing it. Mirrors {@see cmd_compile}.
+ * manifest gets the stdlib without listing it. Mirrors {@see \Cli\Commands\CompileCommand}.
  *
  * @param string[] $sources
  * @param string[] $linkObjs
@@ -3366,6 +3208,7 @@ function build_compile_module(
     array $paths = []
 ): int {
     CompileArgs::$emitLibrary = $emitLibrary;
+    \Compile\Progress::counter('files', \count($sources), \count($sources));
     // Ensure the output directory exists — a fresh checkout has no `lib/` (it is
     // a build artifact), and clang/cc cannot create the parent on write. Covers
     // any manifest target dir, not just the stdlib's `lib/`.
@@ -3403,7 +3246,7 @@ function build_compile_module(
     /** @var string[] $undefTraps */
     $undefTraps = [];
     try {
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('EmitLlvm');
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
         $emit->emitFiberAsm = $emitLibrary && \basename($output) === "manticore_stdlib.o";
@@ -3602,13 +3445,13 @@ function build_compile_module(
     if ($libFlags !== "") {
         $linkExtra = $linkExtra . $libFlags;
     }
-    // Darwin's weak-undefined allowance, derived exactly as in cmd_compile.
+    // Darwin's weak-undefined allowance, derived exactly as in CompileCommand.
     // This path carried NO -U flags at all before, which is a divergence that
     // only stayed invisible because link_stubs.sh defines what ld would reject.
     if (is_darwin()) {
         $linkExtra = $linkExtra . weak_undef_flags($weak) . darwin_export_flags();
     }
-    // Drop what nothing reaches, as cmd_compile does. A split module pins its
+    // Drop what nothing reaches, as CompileCommand does. A split module pins its
     // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
     // them across parts, so without this the originals all stayed: the compiler
     // built in 8 parts came out 20.5 MB against 14.3 MB for one unit.
@@ -3623,7 +3466,7 @@ function build_compile_module(
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
     $stubs = find_link_stubs_script();
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('link');
     if ($stubs !== "") {
         $rc2 = system("bash " . $stubs . " " . $output . " " . $objList . $linkExtra);
     } else {
@@ -3668,565 +3511,6 @@ function find_link_stubs_script(): string
 }
 
 /**
- * `build [manticore.json]` — cargo-like manifest build. Builds every library
- * target (→ standalone `.o`), then every application target (→ executable,
- * auto-linking and importing the signatures of all library targets).
- *
- * The manifest is decoded with the native `json_decode`; values flow as
- * `mixed`, extracted into typed locals via `(string)` casts before use.
- *
- * @param string[] $args
- */
-function cmd_build(array $args): int
-{
-    // Parse: last positional = manifest path; `--libs-only` builds the library
-    // targets and stops (used by the cold seed to refresh stdlib.o without
-    // re-linking the applications), `--apps-only` is its mirror. The shared
-    // compile spec rides along so a manifest build accepts `-O0` / `--memory`
-    // like `compile` does — same shape cmd_analyze uses.
-    //
-    // The pair is what lets a self-host rebuild put the LIBRARIES on the far
-    // side of the binary swap: one process cannot do it, because the libraries
-    // are built by the compiler that is running, and the point is to build them
-    // with the compiler that was just produced ({@see bin/build}).
-    $spec = compile_arg_spec();
-    $spec["libs-only"] = \Cli\ArgParse::FLAG;
-    $spec["apps-only"] = \Cli\ArgParse::FLAG;
-    $spec["allow-undefined-traps"] = \Cli\ArgParse::FLAG;
-    $spec["keep-ir"] = \Cli\ArgParse::FLAG;
-    $spec["no-analyze"] = \Cli\ArgParse::FLAG;
-    $p = \Cli\ArgParse::parse($args, $spec);
-    if ($p->error !== null) {
-        dprint("build: " . $p->error);
-        return 64;
-    }
-    if (!apply_compile_args($p)) {
-        return 64;
-    }
-    // apply_compile_args fills $files from the positionals, and lower_module
-    // bakes $files[0] into $module->sourceFile — the text behind
-    // Throwable::getFile() and every "… in <file> on line N" diagnostic. A
-    // manifest path is not a source file, so clear it.
-    CompileArgs::$files = [];
-    $nPos = \count($p->positional);
-    $manifestPath = $nPos > 0 ? $p->positional[$nPos - 1] : "manticore.json";
-    $libsOnly = $p->flag("libs-only");
-    $appsOnly = $p->flag("apps-only");
-    if ($libsOnly && $appsOnly) {
-        dprint("build: --libs-only and --apps-only are mutually exclusive");
-        return 64;
-    }
-    CompileArgs::$allowUndefinedTraps = $p->flag("allow-undefined-traps");
-    CompileArgs::$keepIr = $p->flag("keep-ir");
-    $src = read_file($manifestPath);
-    if ($src === null) {
-        dprint("build: cannot read manifest: " . $manifestPath);
-        return 66;
-    }
-    $manifest = json_decode($src, true);
-    $libs = isset($manifest["libraries"]) ? $manifest["libraries"] : [];
-    $rc = build_manifest_libraries($libs, $appsOnly);
-    if ($rc !== 0) {
-        return $rc;
-    }
-    if ($libsOnly) {
-        return 0;
-    }
-    $apps = isset($manifest["applications"]) ? $manifest["applications"] : [];
-    foreach ($apps as $app) {
-        $name = (string)$app["name"];
-        $srcDir = (string)$app["src"];
-        $output = (string)$app["output"];
-        /** @var string[] $excludes */
-        $excludes = [];
-        foreach ($app["exclude"] as $e) {
-            $excludes[] = (string)$e;
-        }
-        // Explicit entry point: the file whose top-level code becomes the
-        // program's main(). Module files (everything else) contribute only
-        // their declarations, so the entry is excluded from the module scan
-        // and appended LAST — its top-level lowers into `__main` after every
-        // class/function is registered. Optional: with no `entry`, fall back
-        // to the find|sort order (a `zzz_*` driver sorts last by convention).
-        $entry = "";
-        if (isset($app["entry"])) {
-            $entry = (string)$app["entry"];
-        }
-        $moduleExcludes = $excludes;
-        if ($entry !== "") {
-            $moduleExcludes[] = $entry;
-        }
-        dprint("build: application '" . $name . "' (" . $srcDir . " -> " . $output . ")");
-        /** @var string[] $sources */
-        $sources = [];
-        /** @var string[] $paths */
-        $paths = [];
-        // A FILE is compiled once, however many autoload roots name it. Keyed by
-        // path rather than by directory because composer roots OVERLAP: symfony
-        // polyfills map psr-4 to the PACKAGE ROOT and then classmap a
-        // subdirectory of it (`"Symfony\\Polyfill\\Intl\\Icu\\": ""` plus
-        // `classmap: ["Resources/stubs"]`). The $covered set below compares
-        // directory STRINGS, so the nested entry is not equal to its parent and
-        // both were scanned — the stub's class was lowered twice and clang
-        // rejected the module with `invalid redefinition of function
-        // manticore_IntlDateFormatter____construct`. Not audit-only: any project
-        // whose autoload roots nest hits it.
-        /** @var array<string,bool> $seenPath */
-        $seenPath = [];
-        foreach (collect_php_source_files($srcDir, $moduleExcludes) as $sf) {
-            if (isset($seenPath[__mc_source_path($sf)])) {
-                continue;
-            }
-            $seenPath[__mc_source_path($sf)] = true;
-            $sources[] = __mc_source_contents($sf);
-            $paths[] = __mc_source_path($sf);
-        }
-        // Composer discovery. "composer": true builds the project the way Composer
-        // sees it — its own composer.json autoload (psr-4/psr-0 + classmap dirs)
-        // AND every installed vendor package from composer.lock (vendor/<name>/).
-        // The object form gives finer control: { "vendor": false } takes only the
-        // project's own autoload (e.g. while a dependency uses PHP the compiler
-        // does not yet support). Whole-program AOT unions these into the source
-        // set exactly like `src`; dirs already covered by `src` are skipped so a
-        // `"App\\": "src/"` map does not double-scan.
-        $composer = isset($app["composer"]) ? $app["composer"] : false;
-        $composerOn = ($composer === true) || \is_array($composer);
-        if ($composerOn) {
-            $withVendor = !(\is_array($composer) && isset($composer["vendor"]) && $composer["vendor"] === false);
-            $withVendorBootstrap = $withVendor || (\is_array(
-                        $composer
-                    ) && isset($composer["bootstrap"]) && $composer["bootstrap"] === true);
-            /** @var string[] $packageAllow */
-            $packageAllow = [];
-            if (\is_array($composer) && isset($composer["packages"]) && \is_array($composer["packages"])) {
-                foreach ($composer["packages"] as $packageName) {
-                    $packageAllow[] = (string)$packageName;
-                }
-            }
-            // Composer's own exclusions join the manifest's. Applied to the
-            // composer-discovered roots only: the manifest's `src` is the
-            // project's own code, where the author's `exclude` is the authority.
-            $moduleExcludes = \array_merge(
-                $moduleExcludes,
-                composer_classmap_excludes(".", $withVendor, $packageAllow),
-            );
-            /** @var array<string,bool> $covered */
-            $covered = [];
-            $covered[\rtrim($srcDir, "/")] = true;
-            // composer's BOOTSTRAP set. Everything else it autoloads is
-            // demand-driven, so a file there that declares nothing is not a
-            // compile unit at all ({@see __mc_source_may_declare}).
-            $bootFiles = composer_autoload_file_entries(".", $withVendorBootstrap, $packageAllow);
-            $skippedScripts = 0;
-            foreach (composer_source_dirs(".", $withVendor, $packageAllow) as $cdir) {
-                $nd = \rtrim($cdir, "/");
-                if (isset($covered[$nd])) {
-                    continue;
-                }
-                $covered[$nd] = true;
-                dprint("build: + composer autoload '" . $nd . "'");
-                foreach (collect_php_source_files($nd, $moduleExcludes) as $sf) {
-                    if (isset($seenPath[__mc_source_path($sf)])) {
-                        continue;
-                    }
-                    $seenPath[__mc_source_path($sf)] = true;
-                    $sfNorm = \rtrim(__mc_source_path($sf), "/");
-                    $isBoot = isset($bootFiles[$sfNorm]) || isset($bootFiles[$nd]);
-                    $sfContents = __mc_source_contents($sf);
-                    $sfMayDeclare = __mc_source_may_declare($sfContents);
-                    $sfPath = __mc_source_path($sf);
-                    // A pure data file is kept as an ordinary (non-demand) unit:
-                    // its only statement is the `return` a `require` reads.
-                    if (!$isBoot && !$sfMayDeclare && __mc_source_is_data_file($sfContents)) {
-                        $sources[] = $sfContents;
-                        $paths[] = $sfPath;
-                        continue;
-                    }
-                    if (!$isBoot && !$sfMayDeclare) {
-                        $skippedScripts = $skippedScripts + 1;
-                        dprint("build:   - script (declares nothing, never autoloaded): " . $sfPath);
-                        continue;
-                    }
-                    // Demand-loaded: keep its DECLARATIONS, drop its top-level
-                    // side effects ({@see CompileArgs::$demandLoadedPaths}). The
-                    // The conservative detector is intentional here: Composer
-                    // class files are the reachability boundary, and a false
-                    // negative would silently erase a valid class from the AOT module.
-                    if (!$isBoot) {
-                        CompileArgs::$demandLoadedPaths[$sfNorm] = true;
-                    }
-                    $sources[] = $sfContents;
-                    $paths[] = $sfPath;
-                }
-            }
-            if (!$withVendor && $withVendorBootstrap) {
-                foreach ($bootFiles as $bootPath => $_boot) {
-                    $bootNorm = str_starts_with($bootPath, "./") ? substr($bootPath, 2) : $bootPath;
-                    if (isset($seenPath[$bootNorm])) {
-                        continue;
-                    }
-                    $bootSrc = read_file($bootPath);
-                    if ($bootSrc === null) {
-                        continue;
-                    }
-                    $seenPath[$bootNorm] = true;
-                    $sources[] = $bootSrc;
-                    $paths[] = $bootNorm;
-                    dprint("build: + composer bootstrap \"" . $bootNorm . "\"");
-                }
-            }
-            if ($skippedScripts > 0) {
-                dprint(
-                    "build: skipped " . (string)$skippedScripts
-                    . " non-declaring script(s) under demand-loaded autoload roots"
-                );
-            }
-        }
-        // Extensions: opt-in native bindings. Each named extension adds its thin
-        // PHP glue (FFI bindings + wrappers, module-level decls → appended BEFORE
-        // the entry) to the module, and its native library to the link
-        // (`-l<lib>`). Declared under the manifest's top-level "extensions".
-        $extDefs = isset($manifest["extensions"]) ? $manifest["extensions"] : [];
-        $linkFlags = "";
-        foreach ($app["extensions"] as $extName) {
-            $en = (string)$extName;
-            if (!isset($extDefs[$en])) {
-                dprint("build: app '" . $name . "' wants unknown extension '" . $en . "'");
-                return 66;
-            }
-            $ext = $extDefs[$en];
-            $extSrc = (string)$ext["src"];
-            foreach (collect_php_source_files($extSrc, []) as $sf) {
-                $sources[] = __mc_source_contents($sf);
-                $paths[] = __mc_source_path($sf);
-            }
-            foreach ($ext["link"] as $lib) {
-                $linkFlags = $linkFlags . " -l" . (string)$lib;
-            }
-            dprint("build: + extension '" . $en . "' (" . $extSrc . ")");
-        }
-        if ($entry !== "") {
-            $entrySrc = read_file($entry);
-            if ($entrySrc === null) {
-                dprint("build: cannot read entry point: " . $entry);
-                return 66;
-            }
-            $sources[] = $entrySrc;
-            $paths[] = $entry;
-        }
-        if (\count($sources) === 0) {
-            dprint("build: no sources for application '" . $name . "'");
-            return 66;
-        }
-        // Library dependencies. A library marked "runtime": true (the bundled
-        // stdlib) is the ALWAYS-ON runtime: every app imports + links it by
-        // default, so the stdlib is transparently available with no manifest
-        // ceremony — `manticore build`/`compile` "just work". An app opts OUT
-        // with "stdlib": false (JSON; read via the (string) cast → "" for the
-        // self-host cell-bool) — the self-contained compiler does this because
-        // it already embeds src/Runtime and would otherwise double-define it.
-        // NON-runtime (user) libraries follow the `libraries` selection: omit ⇒
-        // all, [] ⇒ none, a named subset ⇒ just those. Crucially the stdlib is
-        // independent of that selection, so `libraries: ["mylib"]` never drops it.
-        // `runtime: true` libraries (the stdlib) are BUILT above but are not a
-        // user dependency here — they are the always-on runtime, injected +
-        // linked from the installed lib/ inside build_compile_module (so a USER
-        // manifest that never lists the stdlib still gets it). `stdlib: false`
-        // opts out (the self-contained compiler). NON-runtime libraries follow
-        // the `libraries` selection (omit ⇒ all, [] ⇒ none, names ⇒ subset),
-        // independent of the stdlib so `libraries: ["mylib"]` never drops it.
-        $skipStdlib = isset($app["stdlib"]) && (string)$app["stdlib"] === "";
-        $selectAll = !isset($app["libraries"]);
-        /** @var string[] $wanted */
-        $wanted = [];
-        if (!$selectAll) {
-            foreach ($app["libraries"] as $w) {
-                $wanted[] = (string)$w;
-            }
-        }
-        /** @var \Parser\Ast\FunctionDecl[] $externDecls */
-        $externDecls = [];
-        /** @var \Parser\Ast\ClassDecl[] $externClassDecls */
-        $externClassDecls = [];
-        /** @var array<string, \Compile\Mir\ExternClassMeta> $externClassMeta */
-        $externClassMeta = [];
-        /** @var array<string, \Parser\Ast\Expr> $externConstants */
-        $externConstants = [];
-        /** @var array<string, string> $classOrigin FQN → the library that exports it */
-        $classOrigin = [];
-        /** @var string[] $linkObjs */
-        $linkObjs = [];
-        foreach ($libs as $lib) {
-            $isRuntime = isset($lib["runtime"]) && (string)$lib["runtime"] === "1";
-            if ($isRuntime) {
-                continue;
-            }
-            $libName = (string)$lib["name"];
-            if (!$selectAll) {
-                $take = false;
-                foreach ($wanted as $w) {
-                    if ($w === $libName) {
-                        $take = true;
-                        break;
-                    }
-                }
-                if (!$take) {
-                    continue;
-                }
-            }
-            $libOut = (string)$lib["output"];
-            $sigJson = read_file($libOut . ".sig");
-            if ($sigJson !== null) {
-                $bad = Sig::validateImport($sigJson, $libOut . ".sig");
-                if ($bad !== "") {
-                    dprint($bad);
-                    return 65;
-                }
-                foreach (Sig::declsFromJson($sigJson) as $d) {
-                    $externDecls[] = $d;
-                }
-                foreach (Sig::classDeclsFromJson($sigJson) as $cdecl) {
-                    $externClassDecls[] = $cdecl;
-                }
-                foreach (Sig::classMetaFromJson($sigJson) as $mname => $meta) {
-                    // Two libraries exporting one FQN is not a merge — their
-                    // layouts are independent and only one `.o` can win the
-                    // symbol. Refuse rather than pick.
-                    if (isset($classOrigin[$mname])) {
-                        dprint(
-                            "manticore: class " . $mname . " is exported by both "
-                            . $classOrigin[$mname] . " and " . $libOut
-                        );
-                        return 65;
-                    }
-                    $classOrigin[$mname] = $libOut;
-                    $externClassMeta[$mname] = $meta;
-                }
-                foreach (Sig::constantsFromJson($sigJson) as $cn => $cv) {
-                    $externConstants[$cn] = $cv;
-                }
-            } else {
-                dprint("build: missing .sig for library output " . $libOut);
-            }
-            $linkObjs[] = $libOut;
-        }
-        CompileArgs::$externDecls = $externDecls;
-        CompileArgs::$externClassDecls = $externClassDecls;
-        CompileArgs::$externClassMeta = $externClassMeta;
-        CompileArgs::$externConstants = $externConstants;
-        if (build_cache_hit($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib)) {
-            dprint("build: cache hit application " . $name);
-            $rc = 0;
-        } else {
-            // lower_module releases raw source strings through the reference;
-            // retain the cache identity before that intentional mutation.
-            $cacheKey = build_cache_key($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib);
-            $rc = build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
-            if ($rc === 0) {
-                build_cache_store($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $cacheKey);
-            }
-        }
-        if ($rc !== 0) {
-            return $rc;
-        }
-    }
-    return 0;
-}
-
-function build_manifest_libraries(array $libs, bool $appsOnly): int
-{
-    foreach ($libs as $lib) {
-        // --apps-only skips BUILDING the libraries; the list itself is still
-        // needed below, where each non-runtime library's `.o`/`.sig` joins the
-        // application's link (they must already exist on disk).
-        if ($appsOnly) {
-            break;
-        }
-        $name = (string)$lib["name"];
-        $srcDir = (string)$lib["src"];
-        $output = (string)$lib["output"];
-        /** @var string[] $excludes */
-        $excludes = [];
-        foreach ($lib["exclude"] as $e) {
-            $excludes[] = (string)$e;
-        }
-        dprint("build: library '" . $name . "' (" . $srcDir . " -> " . $output . ")");
-        /** @var string[] $sources */
-        $sources = [];
-        /** @var string[] $paths */
-        $paths = [];
-        $libComposer = isset($lib["composer"]) ? $lib["composer"] : false;
-        $libComposerOn = ($libComposer === true) || \is_array($libComposer);
-        if ($libComposerOn) {
-            $withVendor = !(
-                \is_array($libComposer)
-                && isset($libComposer["vendor"])
-                && $libComposer["vendor"] === false
-            );
-            /** @var string[] $packageAllow */
-            $packageAllow = [];
-            if (\is_array($libComposer) && isset($libComposer["packages"]) && \is_array($libComposer["packages"])) {
-                foreach ($libComposer["packages"] as $packageName) {
-                    $packageAllow[] = (string)$packageName;
-                }
-            }
-            // Libraries can opt into the same Composer-resolved source set as
-            // applications. This is deliberately opt-in: the old `src` walk
-            // remains byte-for-byte the default for existing manifests.
-            $libExcludes = \array_merge(
-                $excludes,
-                composer_classmap_excludes(".", $withVendor, $packageAllow),
-            );
-            $bootFiles = composer_autoload_file_entries(".", $withVendor, $packageAllow);
-            /** @var array<string,bool> $seenPath */
-            $seenPath = [];
-            /** @var array<string,bool> $covered */
-            $covered = [];
-            foreach (composer_source_dirs(".", $withVendor, $packageAllow) as $cdir) {
-                $nd = \rtrim($cdir, "/");
-                if (isset($covered[$nd])) {
-                    continue;
-                }
-                $covered[$nd] = true;
-                foreach (collect_php_source_files($nd, $libExcludes) as $sf) {
-                    $sfNorm = \rtrim(__mc_source_path($sf), "/");
-                    if (\str_starts_with($sfNorm, "./")) {
-                        $sfNorm = \substr($sfNorm, 2);
-                    }
-                    if (isset($seenPath[$sfNorm])) {
-                        continue;
-                    }
-                    $seenPath[$sfNorm] = true;
-                    // Composer files are application bootstrap code, not a
-                    // library declaration unit. The application-side
-                    // `bootstrap:true` path adds them later.
-                    if (isset($bootFiles[$sfNorm])) {
-                        continue;
-                    }
-                    if (!__mc_library_source_may_declare(__mc_source_contents($sf))
-                        && !__mc_source_is_data_file(__mc_source_contents($sf))) {
-                        continue;
-                    }
-                    $sources[] = __mc_source_contents($sf);
-                    $paths[] = __mc_source_path($sf);
-                }
-            }
-        } else {
-            foreach (collect_php_source_files($srcDir, $excludes) as $sf) {
-                $sources[] = __mc_source_contents($sf);
-                $paths[] = __mc_source_path($sf);
-            }
-        }
-        if (\count($sources) === 0) {
-            dprint("build: no sources for library '" . $name . "'");
-            return 66;
-        }
-        CompileArgs::$externDecls = [];
-        CompileArgs::$externClassDecls = [];
-        CompileArgs::$externClassMeta = [];
-        CompileArgs::$externConstants = [];
-        CompileArgs::$exportTypes =
-            !(isset($lib["runtime"]) && (string)$lib["runtime"] === "1");
-        // Every library but the stdlib itself declares the stdlib's functions
-        // ({@see build_compile_module}).
-        $libStdlib = CompileArgs::$exportTypes;
-        if (build_cache_hit($sources, $paths, $output, true, [], "", $libStdlib)) {
-            dprint("build: cache hit library " . $name);
-            $rc = 0;
-        } else {
-            // Preserve the cache identity before lower_module releases source
-            // contents through its reference parameter.
-            $cacheKey = build_cache_key($sources, $paths, $output, true, [], "", $libStdlib);
-            $rc = build_compile_module($sources, $output, true, [], "", $libStdlib, $paths);
-            if ($rc === 0) { build_cache_store($sources, $paths, $output, true, [], "", $libStdlib, $cacheKey); }
-        }
-        CompileArgs::$exportTypes = true;
-        if ($rc !== 0) {
-            return $rc;
-        }
-    }
-    return 0;
-}
-
-/**
- * Dump LLVM IR to stdout — same front-end as `compile`, without the
- * clang/cc tail. Useful when debugging codegen output or piping into
- * `llvm-dis`, `opt`, etc. Honours the same file/stdin/manifest
- * resolution as `compile`.
- *
- * @param string[] $args
- */
-function cmd_dump_llvm(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    $ir = compile_with_backend($sources);
-    if ($ir === null) {
-        return 65;
-    }
-    puts($ir);
-    return 0;
-}
-
-function cmd_version(array $args): int
-{
-    puts("manticore 0.14.0");
-    return 0;
-}
-
-/**
- * Dump the parsed AST. Useful for validating the parser without
- * running codegen and for comparing AST diffs between releases.
- *
- * @param string[] $args
- */
-function cmd_dump_ast(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    if (\count($sources) === 0) {
-        return 66;
-    }
-    try {
-        $program = Parser::parseSource($sources[0]);
-    } catch (\Throwable $e) {
-        dprint("parse failed: " . $e->getMessage());
-        return 65;
-    }
-    puts(\Parser\Dump::program($program));
-    return 0;
-}
-
-/**
- * Dump the lowered MIR. Phase A scope: AST → MIR via
- * {@see \Compile\Mir\Passes\LowerFromAst}; later phases pipeline
- * more passes and accept `--after=<pass>` to dump intermediate
- * states.
- *
- * @param string[] $args
- */
-/**
- * Front-end for `--backend=mir`. Parse → MIR pipeline → LLVM IR.
- * Single source file only at this round (multi-file linkage is the
- * existing `compile_sources` path's job).
- */
-/**
- * Front-end for `--backend=mir`. Parse → MIR pipeline → LLVM IR.
- * Single source file at this round (multi-file linkage stays on
- * the existing `compile_sources` path until MIR grows class /
- * function symbol resolution across compilation units).
- */
-/**
  * Front-end for `--backend=mir`. Parse every source, merge their
  * top-level statements into one Program (module files first, entry
  * last — the order resolve_sources hands us), then run the
@@ -4238,7 +3522,7 @@ function cmd_dump_ast(array $args): int
 /**
  * Parse + run the full MIR pipeline (everything before EmitLlvm) over a
  * merged source list, returning the typed Module (or null on error). Shared
- * by compile_via_mir (→ LLVM IR) and cmd_dump_sig (→ .sig). Externs/typing
+ * by compile_via_mir (→ LLVM IR) and DumpSigCommand (→ .sig). Externs/typing
  * come from {@see CompileArgs::$externDecls}.
  *
  * `$paths` is optional but STRONGLY recommended: it names each source so a
@@ -4738,11 +4022,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // Compute all source-wide lexical metadata before releasing raw source
     // strings during the parse loop. lower_module receives a copy-on-write
     // source array, so clearing an element releases its bytes here without
-    // changing cmd_build's inputs or the build-cache key.
-    $statT = \Compile\Stats::now();
+    // changing the build command's inputs or the build-cache key.
+    $statT = \Compile\Stats::begin('prelude-demand (re-lex)');
     $demand = new \Compile\Mir\PreludeDemand($sources);
     \Compile\Stats::step('prelude-demand (re-lex)', $statT, -1, -1);
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('parse');
     $ownFns = [];
     $walkerRoots = [];
     $walkerDynamic = false;
@@ -4950,7 +4234,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // binding (a throwing stub under the Zend cold-seed), so guard: an
     // unreadable file provides nothing, and LowerFromAst falls back to its
     // embedded copy for the classes the bootstrap cannot live without.
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('prelude read (all files)');
     $arrayFnsSrc = prelude_src_or_empty("array_fns.php");
     $arrayFnsExtSrc = prelude_src_or_empty("array_fns_ext.php");
     $cliSrc = prelude_src_or_empty("cli.php");
@@ -5873,7 +5157,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->printRSrc = $printRSrc;
         // Bundled-stdlib signatures (declare-only externs) so user calls
         // (str_starts_with / ctype_* / file_*) resolve + type, with the body
-        // linked from stdlib.o. Collected by cmd_compile on the native path;
+        // linked from stdlib.o. Collected by CompileCommand on the native path;
         // empty during the Zend bootstrap build and for --emit-library.
         $lower->externDecls = CompileArgs::$externDecls;
         /** @var array<string, bool> $dlAbs */
@@ -5897,7 +5181,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if ($collect !== null) {
             $lower->attrCollectMode = true;
         }
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('LowerFromAst');
         $module = $lower->run($module);
         // Path → value-slot map for `require`/`include`. Set after lowering
         // because that is when the Module exists; the map itself was built at
@@ -5931,21 +5215,21 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $program = null;
         $lower = null;
         \Manticore\Allocator::release('after-lower');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('ConstFold');
         $fold = new \Compile\Mir\Passes\ConstFold();
         $module = $fold->run($module);
         \Compile\Stats::step('ConstFold', $statT, \count($module->functions), -1);
         // ConstFold keeps per-function work state; no result is needed after run.
         $fold = null;
         \Manticore\Allocator::release('after-constfold');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('DeadStore');
         $dse = new \Compile\Mir\Passes\DeadStore();
         $module = $dse->run($module);
         \Compile\Stats::step('DeadStore', $statT, \count($module->functions), -1);
         // DeadStore's used-local map is only needed during this pass.
         $dse = null;
         \Manticore\Allocator::release('after-deadstore');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InferTypes #1');
         $infer = new \Compile\Mir\Passes\InferTypes(null, $analysisContext);
         $module = $infer->run($module);
         \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
@@ -5957,7 +5241,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // receiver has no class before inference, and because InferTypes #2
         // below types the inits it plants. Must follow DeadStore — a store
         // inserted earlier would be a DSE candidate.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('VivifyRefArgs');
         $module = (new \Compile\Mir\Passes\VivifyRefArgs())->run($module);
         \Compile\Stats::step('VivifyRefArgs', $statT, \count($module->functions), -1);
         // A `$recv->m(...)` whose receiver lowering could not type gets the
@@ -5971,14 +5255,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // as cells across a boxing boundary). Erased-param helpers (whose return
         // Monomorphize re-shapes) are skipped → the full post-Mono NarrowReturns
         // handles them.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('NarrowReturns (concreteOnly)');
         $narrowConcrete = new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext, $worklistMode === 'on');
         $module = $narrowConcrete->run($module);
         \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
         // A narrowing pass that closed on a full inference leaves nothing for a
         // second one to move: the module is the one that run just typed.
         if (!$narrowConcrete->endedOnFullInfer) {
-            $statT = \Compile\Stats::now();
+            $statT = \Compile\Stats::begin('InferTypes #2');
             $infer2 = new \Compile\Mir\Passes\InferTypes(
                 ($analysisContext !== null && $worklistMode === 'on')
                     ? $analysisContext->scope() : null,
@@ -5995,7 +5279,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // fuse array_map/array_filter/array_reduce over a concrete array with a
         // literal closure into a native typed loop. Re-infer so the spliced /
         // fused expressions type from their (now concrete) operands.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InlineClosures');
         $inlineCl = new \Compile\Mir\Passes\InlineClosures();
         $module = $inlineCl->run($module);
         \Compile\Stats::step('InlineClosures', $statT, \count($module->functions), -1);
@@ -6004,13 +5288,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // `#[Overload]`: argument types are known by now, and the InferTypes run
         // below re-derives each retargeted call's type from its overload.
         $module = (new \Compile\Mir\Passes\ResolveOverloads())->run($module);
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InferTypes #3');
         $module = (new \Compile\Mir\Passes\InferTypes(null, $analysisContext))->run($module);
         \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
         // Specialize erased-array / polymorphic functions per call-site
         // argument shape (runs after InferTypes so call-arg types are known;
         // re-runs InferTypes internally when it specializes anything).
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('Monomorphize');
         $mono = new \Compile\Mir\Passes\Monomorphize($analysisContext);
         $module = $mono->run($module);
         \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
@@ -6020,7 +5304,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // str_replace (zero intermediate array/segment allocs). After Mono so
         // types + explode arg-counts are settled; before InferEffects so the
         // analysis sees the fused form.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('FuseSplitJoin');
         $module = (new \Compile\Mir\Passes\FuseSplitJoin())->run($module);
         \Compile\Stats::step('FuseSplitJoin', $statT, \count($module->functions), -1);
         // Compile-time type checker. ON by default (`MANTICORE_TYPECHECK=0`
@@ -6052,7 +5336,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $tcOn = $collect !== null || !\is_string($tcFlag)
             || ($tcFlag !== "" && $tcFlag !== "0");
         {
-            $statT = \Compile\Stats::now();
+            $statT = \Compile\Stats::begin('TypeCheck');
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $tc->reprOnly = !$tcOn;
             // A provable argument mismatch in a user program is a run-time
@@ -6083,7 +5367,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $tc = null;
         }
         \Manticore\Allocator::release('after-typecheck');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('NarrowReturns (full)');
         $narrow = new \Compile\Mir\Passes\NarrowReturns(false, $analysisContext, $worklistMode === 'on');
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
@@ -6101,7 +5385,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // `mixed` slot). Runs once types are final and before any memory pass —
         // a boxed cell downstream has already lost the marker. Throws; the catch
         // below turns it into a compile error.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('CheckTypeDefs');
         $checkTypeDefs = new \Compile\Mir\Passes\CheckTypeDefs();
         if ($collect !== null) {
             $checkTypeDefs->collectMode = true;
@@ -6122,7 +5406,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // Where the character is only ever compared to a one-char literal or
         // passed to ord(), read the byte instead. Before the memory passes, so rc
         // never sees the strings that are no longer created.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('ReflectAnalysis');
         $refl = new \Compile\Mir\Passes\ReflectAnalysis();
         $refl->run($module);
         \Compile\Stats::step('ReflectAnalysis', $statT, -1, \count($module->classes));
@@ -6151,39 +5435,39 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
         $refl = null;
         \Manticore\Allocator::release('after-reflect-analysis');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('DemoteCharLocals');
         $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
         \Compile\Stats::step('DemoteCharLocals', $statT, -1, -1);
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InferEffects');
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
         \Compile\Stats::step('InferEffects', $statT, -1, -1);
         $effects = null;
         \Manticore\Allocator::release('after-infer-effects');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InferAllocKind');
         $allocKind = new \Compile\Mir\Passes\InferAllocKind();
         $module = $allocKind->run($module);
         \Compile\Stats::step('InferAllocKind', $statT, -1, -1);
         $allocKind = null;
         \Manticore\Allocator::release('after-infer-alloc-kind');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('ApplyMemoryMode');
         $memMode = new \Compile\Mir\Passes\ApplyMemoryMode(CompileArgs::$memory);
         $module = $memMode->run($module);
         \Compile\Stats::step('ApplyMemoryMode', $statT, -1, -1);
         $memMode = null;
         \Manticore\Allocator::release('after-memory-mode');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('SpillFreshBases');
         $module = (new \Compile\Mir\Passes\SpillFreshBases())->run($module);
         \Compile\Stats::step('SpillFreshBases', $statT, -1, -1);
         if (CompileArgs::$stopBeforeMemoryOps) { return $module; }
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InsertMemoryOps');
         $module = (new \Compile\Mir\Passes\InsertMemoryOps())->run($module);
         \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('OwnershipFlow');
         $module = (new \Compile\Mir\Passes\OwnershipFlow())->run($module);
         \Compile\Stats::step('OwnershipFlow', $statT, -1, -1);
         \Manticore\Allocator::release('after-memory-ops');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('Verify');
         $verify = new \Compile\Mir\Passes\Verify();
         $module = $verify->run($module);
         \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
@@ -6238,9 +5522,11 @@ function compile_via_mir(array $sources, array $paths = []): ?string
         }
     }
     try {
+        $statT = \Compile\Stats::begin('EmitLlvm');
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;
         $ir = $emit->emit($module);
+        \Compile\Stats::step('EmitLlvm', $statT, -1, -1);
         $cgErrors = $emit->cellGuardErrors();
         if (\count($cgErrors) > 0) {
             foreach ($cgErrors as $ce) {
@@ -6281,57 +5567,6 @@ function compile_via_mir(array $sources, array $paths = []): ?string
         dprint("compile failed (emit): " . $e->getMessage() . " ({$e->getFile()}:{$e->getLine()})");
         return null;
     }
-}
-
-function cmd_dump_llvm_mir(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    if (\count($sources) === 0) {
-        return 66;
-    }
-    $ir = compile_via_mir($sources);
-    if ($ir === null) {
-        return 65;
-    }
-    puts($ir);
-    return 0;
-}
-
-/**
- * Emit the module-interface `.sig` (JSON) for a source set on stdout — the
- * exported public symbol table a dependent target imports. Same front-end as
- * compile; no codegen. Used standalone for inspection and by `build` to write
- * each library's `<output>.sig`.
- *
- * @param string[] $args
- */
-function cmd_dump_sig(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    if (\count($sources) === 0) {
-        return 66;
-    }
-    $module = lower_module($sources);
-    if ($module === null) {
-        return 65;
-    }
-    // Empty libs/weak: this command runs the front end only, and the link
-    // requirements are a property of what the EMITTER produced. Inspecting a
-    // module's signatures never links anything, so there is nothing to record.
-    puts(Sig::emitModule($module));
-    return 0;
 }
 
 /**
@@ -6639,198 +5874,23 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array
     return \Analyze\Report::sortDiags($diags);
 }
 
-function cmd_analyze(array $args): int
-{
-    // `--deep` also runs the compiler's own MIR type passes (repr-soundness) via
-    // lower_module in analysis mode — heavier (it lowers the code), so opt-in.
-    // `--json` prints machine-readable output for editors / CI.
-    $spec = compile_arg_spec();
-    $spec["deep"] = \Cli\ArgParse::FLAG;
-    $spec["json"] = \Cli\ArgParse::FLAG;
-    $spec["baseline"] = \Cli\ArgParse::VALUE;
-    $spec["generate-baseline"] = \Cli\ArgParse::VALUE;
-    // `--only <prefix[,prefix…]>` keeps just the diagnostic codes that start
-    // with one of the prefixes, and gates on ANY survivor whatever its severity.
-    // One caller drives the shape: the self-host preflight
-    // (`analyze src --only undefined.,parse.error`), which asks the narrow
-    // question "can THIS compiler still build this source" and must not be
-    // drowned by the 177 style warnings a full run reports.
-    $spec["only"] = \Cli\ArgParse::VALUE;
-    $p = \Cli\ArgParse::parse($args, $spec);
-    if ($p->error !== null) {
-        dprint($p->error);
-        return 64;
-    }
-    if (!apply_compile_args($p)) {
-        return 64;
-    }
-    $deep = $p->flag("deep");
-    $json = $p->flag("json");
-    $baselinePath = $p->value("baseline", "");
-    $genBaseline = $p->value("generate-baseline", "");
-    $only = $p->value("only", "");
-
-    $files = resolve_source_files(CompileArgs::$files);
-    if ($files === null) {
-        return 66;
-    }
-    if (\count($files) === 0) {
-        return 66;
-    }
-
-    $diags = perform_analysis($files, CompileArgs::$files, $deep);
-
-    // Generate a baseline: snapshot every current finding and report nothing.
-    if ($genBaseline !== "") {
-        if (!write_file($genBaseline, \Analyze\Baseline::generate($diags))) {
-            dprint("analyze: could not write baseline to " . $genBaseline);
-            return 73;
-        }
-        dprint("analyze: wrote baseline (" . (string)\count($diags) . " entries) to " . $genBaseline);
-        return 0;
-    }
-    // Apply a baseline: drop known findings.
-    if ($baselinePath !== "") {
-        $bl = read_file($baselinePath);
-        if ($bl !== null) {
-            $diags = \Analyze\Baseline::filter($diags, $bl);
-        }
-    }
-
-    if ($only !== "") {
-        /** @var string[] $prefixes */
-        $prefixes = \explode(",", $only);
-        /** @var \Analyze\Diagnostic[] $kept */
-        $kept = [];
-        foreach ($diags as $d) {
-            foreach ($prefixes as $pre) {
-                if ($pre !== "" && \str_starts_with($d->code, $pre)) {
-                    $kept[] = $d;
-                    break;
-                }
-            }
-        }
-        $diags = $kept;
-    }
-
-    echo $json ? \Analyze\Report::json($diags) : \Analyze\Report::human($diags);
-    // Counters live on stderr while the report goes to stdout, so
-    // `analyze --deep` doubles as the whole-project instrumentation vehicle
-    // (no giant `dump-mir` text to build and throw away).
-    \Compile\Stats::dumpCounters();
-
-    // Under --only the selection IS the gate: a warning-severity undefined
-    // symbol still means this compiler cannot resolve the name.
-    if ($only !== "") {
-        return \count($diags) > 0 ? 1 : 0;
-    }
-    foreach ($diags as $d) {
-        if ($d->severity === \Analyze\Diagnostic::SEV_ERROR) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-function cmd_dump_mir(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    if (\count($sources) === 0) {
-        return 66;
-    }
-    // Share the one pipeline `compile`/`dump-sig` run (lower_module) rather
-    // than a hand-copied subset. The old inlined list skipped InlineClosures,
-    // FuseSplitJoin, DemoteCharLocals, Verify and the pre-mono re-runs, and
-    // it built LowerFromAst with no prelude — so the dump was pre-optimization
-    // IR of a program with no Exception hierarchy, and could never match what
-    // a real compile lowers. It also parsed only $sources[0]; lower_module
-    // loops every file, so multi-file dump-mir now works too.
-    $module = lower_module($sources);
-    if ($module === null) {
-        return 65;
-    }
-    puts(\Compile\Mir\Dump::module($module, CompileArgs::$dumpPrelude, CompileArgs::$dumpEffects));
-    \Compile\Stats::dumpCounters();
-    return 0;
-}
-
-function cmd_split_ir(array $args): int
-{
-    if (\count($args) < 3) {
-        dprint('usage: split-ir <module.ll> <parts> <outbase>');
-        return 64;
-    }
-    $in = $args[0];
-    $parts = (int)$args[1];
-    $base = $args[2];
-    if (!\file_exists($in)) {
-        dprint('split-ir: no such file ' . $in);
-        return 66;
-    }
-    $t = \Compile\Stats::now();
-    $splitter = new \Compile\Mir\SplitModule();
-    $out = $splitter->runFile($in, $parts, $base);
-    if ($out === []) {
-        dprint('split-ir: split produced no parts');
-        return 65;
-    }
-    $total = 0;
-    foreach ($out as $i => $p) {
-        $sz = (int)\filesize($p);
-        $total = $total + $sz;
-        puts('  p' . (string)$i . '  ' . (string)\intdiv($sz, 1048576) . ' MB');
-    }
-    $src = (int)\filesize($in);
-    puts(
-        'split-ir: ' . (string)\count($out) . ' parts  shared=' . (string)$splitter->sharedDefs
-        . ' internal=' . (string)$splitter->internalDefs
-    );
-    puts(
-        'split-ir: module ' . (string)\intdiv($src, 1048576) . ' MB -> parts '
-        . (string)\intdiv($total, 1048576) . ' MB  (x'
-        . (string)(\round($total / ($src > 0 ? $src : 1), 3)) . ')'
-    );
-    \Compile\Stats::step('split-ir', $t, -1, -1);
-    return 0;
-}
-
 function main_driver(): int
 {
     \Compile\Debug::initFromEnvironment();
     $cli = new \Cli\Cli('manticore', 'PHP-to-native AOT compiler (self-hosted)');
-    $cli->command(
-        'compile',
-        'Compile to a native binary (-o <out>); analyzes by default (--no-analyze skips, --analyze-strict gates on errors)'
-    )
-        ->run(fn(array $args) => cmd_compile($args));
-    $cli->command('build', 'Build all targets from a manticore.json manifest (libraries + applications)')
-        ->run(fn(array $args) => cmd_build($args));
-    $cli->command('dump-llvm', 'Read PHP source from stdin, emit LLVM IR on stdout')
-        ->run(fn(array $args) => cmd_dump_llvm($args));
-    $cli->command('dump-ast', 'Parse PHP source and print the resulting AST')
-        ->run(fn(array $args) => cmd_dump_ast($args));
-    $cli->command('analyze', 'Static type analysis; report diagnostics, no codegen')
-        ->run(fn(array $args) => cmd_analyze($args));
-    $cli->command('dump-mir', 'Parse PHP, lower to MIR, print the typed IR')
-        ->run(fn(array $args) => cmd_dump_mir($args));
-    $cli->command('dump-llvm-mir', 'Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR')
-        ->run(fn(array $args) => cmd_dump_llvm_mir($args));
-    $cli->command('split-ir', 'Split a staged .ll module into N part files (dev tool)')
-        ->run(fn(array $args) => cmd_split_ir($args));
-    $cli->command('dump-sig', 'Parse PHP, print the module-interface .sig (exported symbol table)')
-        ->run(fn(array $args) => cmd_dump_sig($args));
-    $cli->command('version', 'Print compiler version')
-        ->run(fn(array $args) => cmd_version($args));
-    $cli->command('help', 'Show this help text')
-        ->run(function (array $args) use ($cli): int {
-            return $cli->runHelp();
-        });
+    $cli->add(new \Cli\Commands\CompileCommand());
+    $cli->add(new \Cli\Commands\BuildCommand());
+    $cli->add(new \Cli\Commands\DumpLlvmCommand());
+    $cli->add(new \Cli\Commands\DumpAstCommand());
+    $cli->add(new \Cli\Commands\AnalyzeCommand());
+    $cli->add(new \Cli\Commands\DumpMirCommand());
+    $cli->add(new \Cli\Commands\DumpLlvmMirCommand());
+    $cli->add(new \Cli\Commands\SplitIrCommand());
+    $cli->add(new \Cli\Commands\DumpSigCommand());
+    $cli->add(new \Cli\Commands\VersionCommand());
+    $cli->add(new \Cli\Commands\UpgradeCommand());
+    $cli->add(new \Cli\Commands\DoctorCommand());
+    $cli->add(new \Cli\Commands\CompletionsCommand($cli));
     return $cli->run(collect_argv());
 }
 

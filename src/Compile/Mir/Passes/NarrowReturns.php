@@ -104,7 +104,7 @@ final class NarrowReturns implements Pass
         $max = \count($module->functions) + 2;
         while ($iters < $max) {
             $iters = $iters + 1;
-            $roundT = \Compile\Stats::now();
+            $roundT = \Compile\Stats::begin('  narrow round ' . (string)$iters);
             $changed = false;
             $narrowed = 0;
             /** @var array<string, bool> $narrowedNames */
@@ -138,15 +138,17 @@ final class NarrowReturns implements Pass
             } else {
                 $sawFull = false;
                 if ($light !== null) {
-                    $inferT = \Compile\Stats::now();
+                    $stage = '  narrow light round ' . (string)$iters;
+                    $inferT = \Compile\Stats::begin($stage);
                     $light->reinferAfterNarrow($module, $narrowedNames);
                     $lastLight = true;
                     $this->endedOnFullInfer = false;
-                    \Compile\Stats::step('  narrow light round ' . (string)$iters, $inferT, -1, -1);
+                    \Compile\Stats::step($stage, $inferT, -1, -1);
                     continue;
                 }
             }
-            $inferT = \Compile\Stats::now();
+            $stage = '  narrow InferTypes round ' . (string)$iters;
+            $inferT = \Compile\Stats::begin($stage);
             // Report the closure this round WOULD infer over, whether or not the
             // scope is actually applied. Nothing measured this before, which is
             // why nobody noticed the targeted mode never engaged: a single method
@@ -234,7 +236,7 @@ final class NarrowReturns implements Pass
                 \Compile\Stats::line('  infer-diff: round ' . (string)$iters . ' — '
                     . (string)$moved . ' function(s) a FULL pass still moved');
             }
-            \Compile\Stats::step('  narrow InferTypes round ' . (string)$iters,
+            \Compile\Stats::step($stage,
                 $inferT, \count($module->functions), -1);
         }
         if ($iters >= $max) {

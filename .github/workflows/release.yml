@@ -87,6 +87,18 @@ jobs:
             echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Version source is consistent
+        run: bash tools/check_version.sh
+
+      - name: Tag matches COMPILER_VERSION
+        if: github.ref_type == 'tag'
+        run: |
+          cv="$(cat COMPILER_VERSION)"
+          if [ "${GITHUB_REF_NAME#v}" != "$cv" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match COMPILER_VERSION ($cv); bump COMPILER_VERSION and run bin/build"
+            exit 1
+          fi
+
       # The toolchain, not `runtime`: `runtime` reaches it through the `build`
       # stage, which bootstraps from inside `docker build`; gate.sh below does
       # the same from the pinned release with the logs in hand.
@@ -163,6 +175,8 @@ jobs:
           docker cp "$cid:/opt/manticore/lib" "dist/$name/lib"
           docker rm "$cid" > /dev/null
           cp README.md LICENSE "dist/$name/" 2>/dev/null || true
+          mkdir -p "dist/$name/share"
+          cp install.sh "dist/$name/share/install.sh"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -rf "dist/$name"
           ls -la dist/
@@ -222,6 +236,8 @@ jobs:
           cp bin/manticore "dist/$name/bin/manticore"
           cp -R lib "dist/$name/lib"
           cp README.md LICENSE "dist/$name/" 2>/dev/null || true
+          mkdir -p "dist/$name/share"
+          cp install.sh "dist/$name/share/install.sh"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -rf "dist/$name"
           ls -la dist/
