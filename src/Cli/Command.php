@@ -2,33 +2,24 @@
 
 namespace Cli;
 
-/**
- * One subcommand of the CLI. Owns a name, a one-line description, and
- * a handler closure. Fluent API mirrors clap: `command(...)->run(fn)`.
- */
-final class Command
+/** One subcommand: identity, declared options, and the body. Registered with {@see Cli::add()}. */
+abstract class Command
 {
-    /** @var \Closure(array<int, string>): int | null */
-    private ?\Closure $handler = null;
+    abstract public function name(): string;
 
-    public function __construct(
-        public readonly string $name,
-        public readonly string $description,
-    ) {}
+    abstract public function summary(): string;
 
-    /**
-     * Attach the handler closure. It receives the tail of argv after
-     * the command name and returns an exit code.
-     */
-    public function run(\Closure $handler): self
+    /** Positional part of the usage line. */
+    public function usage(): string
     {
-        $this->handler = $handler;
-        return $this;
+        return '[options]';
     }
 
-    /** @return \Closure(array<int, string>): int | null */
-    public function handler(): ?\Closure
+    /** @return Option[] */
+    public function options(): array
     {
-        return $this->handler;
+        return [];
     }
+
+    abstract public function run(ParsedArgs $args): int;
 }

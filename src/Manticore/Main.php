@@ -4171,12 +4171,6 @@ function cmd_dump_llvm(array $args): int
     return 0;
 }
 
-function cmd_version(array $args): int
-{
-    puts("manticore 0.14.0");
-    return 0;
-}
-
 /**
  * Dump the parsed AST. Useful for validating the parser without
  * running codegen and for comparing AST diffs between releases.
@@ -6771,8 +6765,7 @@ function main_driver(): int
         ->run(fn(array $args) => cmd_split_ir($args));
     $cli->command('dump-sig', 'Parse PHP, print the module-interface .sig (exported symbol table)')
         ->run(fn(array $args) => cmd_dump_sig($args));
-    $cli->command('version', 'Print compiler version')
-        ->run(fn(array $args) => cmd_version($args));
+    $cli->add(new \Cli\Commands\VersionCommand());
     $cli->command('help', 'Show this help text')
         ->run(function (array $args) use ($cli): int {
             return $cli->runHelp();

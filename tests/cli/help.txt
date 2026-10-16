@@ -1,0 +1,41 @@
+== help <root>
+manticore — PHP-to-native AOT compiler (self-hosted)
+
+Usage: manticore <command> [options...]
+
+Commands:
+  version  Print compiler version
+  compile  Compile to a native binary (-o <out>); analyzes by default (--no-analyze skips, --analyze-strict gates on errors)
+  build  Build all targets from a manticore.json manifest (libraries + applications)
+  dump-llvm  Read PHP source from stdin, emit LLVM IR on stdout
+  dump-ast  Parse PHP source and print the resulting AST
+  analyze  Static type analysis; report diagnostics, no codegen
+  dump-mir  Parse PHP, lower to MIR, print the typed IR
+  dump-llvm-mir  Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR
+  split-ir  Split a staged .ll module into N part files (dev tool)
+  dump-sig  Parse PHP, print the module-interface .sig (exported symbol table)
+  help  Show this help text
+
+Run 'manticore <command> --help' for command options.
+== help compile
+compile: unknown flag: --help (rc=64)
+== help build
+build: unknown flag: --help
+== help analyze
+unknown flag: --help
+== help dump-llvm
+unknown flag: --help
+== help dump-ast
+unknown flag: --help
+== help dump-mir
+unknown flag: --help
+== help dump-llvm-mir
+unknown flag: --help
+== help dump-sig
+unknown flag: --help
+== help split-ir
+usage: split-ir <module.ll> <parts> <outbase>
+== help version
+version — Print compiler version
+
+Usage: manticore version 
