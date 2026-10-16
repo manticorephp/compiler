@@ -2250,16 +2250,6 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool
     return true;
 }
 
-function parse_compile_args(array $args): bool
-{
-    $p = \Cli\ArgParse::parse($args, compile_arg_spec());
-    if ($p->error !== null) {
-        dprint($p->error);
-        return false;
-    }
-    return apply_compile_args($p);
-}
-
 /**
  * Resolve the source list for a `compile` / `dump-llvm` invocation:
  *
@@ -4147,67 +4137,6 @@ function build_manifest_libraries(array $libs, bool $appsOnly): int
 }
 
 /**
- * Dump LLVM IR to stdout — same front-end as `compile`, without the
- * clang/cc tail. Useful when debugging codegen output or piping into
- * `llvm-dis`, `opt`, etc. Honours the same file/stdin/manifest
- * resolution as `compile`.
- *
- * @param string[] $args
- */
-function cmd_dump_llvm(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    $ir = compile_with_backend($sources);
-    if ($ir === null) {
-        return 65;
-    }
-    puts($ir);
-    return 0;
-}
-
-/**
- * Dump the parsed AST. Useful for validating the parser without
- * running codegen and for comparing AST diffs between releases.
- *
- * @param string[] $args
- */
-function cmd_dump_ast(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    if (\count($sources) === 0) {
-        return 66;
-    }
-    try {
-        $program = Parser::parseSource($sources[0]);
-    } catch (\Throwable $e) {
-        dprint("parse failed: " . $e->getMessage());
-        return 65;
-    }
-    puts(\Parser\Dump::program($program));
-    return 0;
-}
-
-/**
- * Dump the lowered MIR. Phase A scope: AST → MIR via
- * {@see \Compile\Mir\Passes\LowerFromAst}; later phases pipeline
- * more passes and accept `--after=<pass>` to dump intermediate
- * states.
- *
- * @param string[] $args
- */
-/**
  * Front-end for `--backend=mir`. Parse → MIR pipeline → LLVM IR.
  * Single source file only at this round (multi-file linkage is the
  * existing `compile_sources` path's job).
@@ -4230,7 +4159,7 @@ function cmd_dump_ast(array $args): int
 /**
  * Parse + run the full MIR pipeline (everything before EmitLlvm) over a
  * merged source list, returning the typed Module (or null on error). Shared
- * by compile_via_mir (→ LLVM IR) and cmd_dump_sig (→ .sig). Externs/typing
+ * by compile_via_mir (→ LLVM IR) and DumpSigCommand (→ .sig). Externs/typing
  * come from {@see CompileArgs::$externDecls}.
  *
  * `$paths` is optional but STRONGLY recommended: it names each source so a
@@ -6223,57 +6152,6 @@ function compile_via_mir(array $sources, array $paths = []): ?string
     }
 }
 
-function cmd_dump_llvm_mir(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    if (\count($sources) === 0) {
-        return 66;
-    }
-    $ir = compile_via_mir($sources);
-    if ($ir === null) {
-        return 65;
-    }
-    puts($ir);
-    return 0;
-}
-
-/**
- * Emit the module-interface `.sig` (JSON) for a source set on stdout — the
- * exported public symbol table a dependent target imports. Same front-end as
- * compile; no codegen. Used standalone for inspection and by `build` to write
- * each library's `<output>.sig`.
- *
- * @param string[] $args
- */
-function cmd_dump_sig(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    if (\count($sources) === 0) {
-        return 66;
-    }
-    $module = lower_module($sources);
-    if ($module === null) {
-        return 65;
-    }
-    // Empty libs/weak: this command runs the front end only, and the link
-    // requirements are a property of what the EMITTER produced. Inspecting a
-    // module's signatures never links anything, so there is nothing to record.
-    puts(Sig::emitModule($module));
-    return 0;
-}
-
 /**
  * Static analysis: parse the source set, run the analyzer's rule battery, and
  * print `path:line:col: severity: message` diagnostics. Read-only — no lowering,
@@ -6672,74 +6550,6 @@ function cmd_analyze(array $args): int
     return 0;
 }
 
-function cmd_dump_mir(array $args): int
-{
-    if (!parse_compile_args($args)) {
-        return 64;
-    }
-    $sources = resolve_sources(CompileArgs::$files);
-    if ($sources === null) {
-        return 66;
-    }
-    if (\count($sources) === 0) {
-        return 66;
-    }
-    // Share the one pipeline `compile`/`dump-sig` run (lower_module) rather
-    // than a hand-copied subset. The old inlined list skipped InlineClosures,
-    // FuseSplitJoin, DemoteCharLocals, Verify and the pre-mono re-runs, and
-    // it built LowerFromAst with no prelude — so the dump was pre-optimization
-    // IR of a program with no Exception hierarchy, and could never match what
-    // a real compile lowers. It also parsed only $sources[0]; lower_module
-    // loops every file, so multi-file dump-mir now works too.
-    $module = lower_module($sources);
-    if ($module === null) {
-        return 65;
-    }
-    puts(\Compile\Mir\Dump::module($module, CompileArgs::$dumpPrelude, CompileArgs::$dumpEffects));
-    \Compile\Stats::dumpCounters();
-    return 0;
-}
-
-function cmd_split_ir(array $args): int
-{
-    if (\count($args) < 3) {
-        dprint('usage: split-ir <module.ll> <parts> <outbase>');
-        return 64;
-    }
-    $in = $args[0];
-    $parts = (int)$args[1];
-    $base = $args[2];
-    if (!\file_exists($in)) {
-        dprint('split-ir: no such file ' . $in);
-        return 66;
-    }
-    $t = \Compile\Stats::now();
-    $splitter = new \Compile\Mir\SplitModule();
-    $out = $splitter->runFile($in, $parts, $base);
-    if ($out === []) {
-        dprint('split-ir: split produced no parts');
-        return 65;
-    }
-    $total = 0;
-    foreach ($out as $i => $p) {
-        $sz = (int)\filesize($p);
-        $total = $total + $sz;
-        puts('  p' . (string)$i . '  ' . (string)\intdiv($sz, 1048576) . ' MB');
-    }
-    $src = (int)\filesize($in);
-    puts(
-        'split-ir: ' . (string)\count($out) . ' parts  shared=' . (string)$splitter->sharedDefs
-        . ' internal=' . (string)$splitter->internalDefs
-    );
-    puts(
-        'split-ir: module ' . (string)\intdiv($src, 1048576) . ' MB -> parts '
-        . (string)\intdiv($total, 1048576) . ' MB  (x'
-        . (string)(\round($total / ($src > 0 ? $src : 1), 3)) . ')'
-    );
-    \Compile\Stats::step('split-ir', $t, -1, -1);
-    return 0;
-}
-
 function main_driver(): int
 {
     \Compile\Debug::initFromEnvironment();
@@ -6751,20 +6561,14 @@ function main_driver(): int
         ->run(fn(array $args) => cmd_compile($args));
     $cli->command('build', 'Build all targets from a manticore.json manifest (libraries + applications)')
         ->run(fn(array $args) => cmd_build($args));
-    $cli->command('dump-llvm', 'Read PHP source from stdin, emit LLVM IR on stdout')
-        ->run(fn(array $args) => cmd_dump_llvm($args));
-    $cli->command('dump-ast', 'Parse PHP source and print the resulting AST')
-        ->run(fn(array $args) => cmd_dump_ast($args));
+    $cli->add(new \Cli\Commands\DumpLlvmCommand());
+    $cli->add(new \Cli\Commands\DumpAstCommand());
     $cli->command('analyze', 'Static type analysis; report diagnostics, no codegen')
         ->run(fn(array $args) => cmd_analyze($args));
-    $cli->command('dump-mir', 'Parse PHP, lower to MIR, print the typed IR')
-        ->run(fn(array $args) => cmd_dump_mir($args));
-    $cli->command('dump-llvm-mir', 'Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR')
-        ->run(fn(array $args) => cmd_dump_llvm_mir($args));
-    $cli->command('split-ir', 'Split a staged .ll module into N part files (dev tool)')
-        ->run(fn(array $args) => cmd_split_ir($args));
-    $cli->command('dump-sig', 'Parse PHP, print the module-interface .sig (exported symbol table)')
-        ->run(fn(array $args) => cmd_dump_sig($args));
+    $cli->add(new \Cli\Commands\DumpMirCommand());
+    $cli->add(new \Cli\Commands\DumpLlvmMirCommand());
+    $cli->add(new \Cli\Commands\SplitIrCommand());
+    $cli->add(new \Cli\Commands\DumpSigCommand());
     $cli->add(new \Cli\Commands\VersionCommand());
     $cli->command('help', 'Show this help text')
         ->run(function (array $args) use ($cli): int {

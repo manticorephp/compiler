@@ -75,7 +75,7 @@ final class Cli
     {
         \Manticore\puts($cmd->name() . ' — ' . $cmd->summary());
         \Manticore\puts('');
-        \Manticore\puts('Usage: ' . $this->name . ' ' . $cmd->name() . ' ' . $cmd->usage());
+        \Manticore\puts(\rtrim('Usage: ' . $this->name . ' ' . $cmd->name() . ' ' . $cmd->usage()));
         $opts = $cmd->options();
         if (\count($opts) > 0) {
             \Manticore\puts('');
