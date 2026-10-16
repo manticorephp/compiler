@@ -1429,6 +1429,9 @@ class ReflectionProperty
     public function setValue(?object $object, mixed $value): void
     {
         if ($this->setter === 0) {
+            if (($this->flags & 32) !== 0) {
+                throw new Error("Cannot modify readonly property " . $this->class . "::$" . $this->name);
+            }
             throw new ReflectionException("Cannot write property " . $this->name);
         }
         __mc_refl_prop_set($this->setter, $object, $value);

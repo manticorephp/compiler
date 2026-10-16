@@ -1,6 +1,5 @@
 <?php
 // ReflectionProperty::setValue() on a property of a prelude class (Exception::$message, ::$code) throws "Cannot write property"
-// issue: #289
 $e = new RuntimeException('before');
 $p = new ReflectionProperty('Exception', 'message');
 $p->setValue($e, 'after');
