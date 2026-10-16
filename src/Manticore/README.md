@@ -6,7 +6,7 @@ The compiler self-builds via `manticore build manticore.json` (a self-contained 
 
 ## CLI subcommands
 
-`main_driver()` wires `Cli\Cli` and registers:
+`main_driver()` builds a `Cli\Cli` and `add()`s one `Cli\Commands\*Command` class per command (see `src/Cli/Commands/`, and `src/Cli/README.md` for the contract). The commands:
 
 | Command | Purpose |
 |---------|---------|
@@ -38,7 +38,7 @@ Serialized public symbol table of a library, so a dependent app resolves and typ
 - `Sig::declsFromJson(string): FunctionDecl[]` — hydrates back into synthetic AST `FunctionDecl`s for the extern-injection path (`LowerFromAst::$externDecls`). Uses the real `json_decode`.
 - Types encoded as hint STRINGS that `LowerFromAst::lowerTypeHint` already decodes (`string`, `mixed`, `string[]`, `array<string,mixed>`, `\ClassName`, …). Defaults const-folded to `{k,v}` (int/str/bool/float/null).
 
-## CompileArgs flags (`parse_compile_args`)
+## CompileArgs flags (`apply_compile_args`, `Cli\Commands\CompileOptions`)
 
 Heterogeneous returns flatten to i64 in self-host today, so parsed args land in static props on `CompileArgs`:
 
@@ -49,7 +49,7 @@ Heterogeneous returns flatten to i64 in self-host today, so parsed args land in 
 - `--emit-library` → `$emitLibrary`: build a standalone stdlib `.o` (no `@main`, no stdlib link).
 - `--prelude` / `--effects` → `dump-mir` flags.
 - `compile`, `build` and `analyze` extend the shared spec: `--no-analyze` / `--analyze-strict` on the former two, `--deep` / `--json` / `--baseline` / `--generate-baseline` on the latter.
-- Unknown flag → false (rc 64).
+- Unknown flag → rc 64 (`<command>: <error>`), from `Cli\Cli` before the command runs.
 
 `$linkStdlib` (set when any bundled-stdlib extern was injected), `$externDecls` (collected by `CompileCommand` on the native path), and `$ffiLibs` / `$weakSyms` (captured off the emitter right after `emit()`) are internal carry-over fields, not CLI flags.
 

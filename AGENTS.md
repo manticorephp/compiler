@@ -169,6 +169,7 @@ annotation of the passes: `src/Compile/README.md` and `docs/design/mir.md`.
 | Prelude (PHP injected into every program) | `prelude/*.php` |
 | Static analyzer (`analyze`, compile-time warnings) | `src/Analyze/` |
 | CLI + driver, manifest build, stdlib resolution | `src/Manticore/Main.php`, `src/Cli/` |
+| CLI commands | `src/Cli/Commands/*Command.php` (one class per command, options declared on the class), `src/Cli/Cli.php` |
 | Test harness | `tests/aot/run.sh` |
 | Gates and tooling | `tools/` |
 

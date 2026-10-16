@@ -2165,13 +2165,9 @@ final class CompileArgs
 }
 
 /**
- * Walk argv tail, pulling out -o <path> into CompileArgs::$output
- * and positional args into CompileArgs::$files. Returns true on
- * success, false on any unknown flag.
- *
- * @param string[] $args
+ * Copy a parsed compile option set (-o, -O, --memory, --backend, ...) onto
+ * {@see CompileArgs}. Returns false (after a diagnostic) on a bad -O or --memory value.
  */
-/** Apply a parsed compile option set onto {@see CompileArgs}. false on a bad value. */
 function apply_compile_args(\Cli\ParsedArgs $p): bool
 {
     $optLevel = $p->value("O", "2");
@@ -5692,10 +5688,6 @@ function main_driver(): int
     $cli->add(new \Cli\Commands\SplitIrCommand());
     $cli->add(new \Cli\Commands\DumpSigCommand());
     $cli->add(new \Cli\Commands\VersionCommand());
-    $cli->command('help', 'Show this help text')
-        ->run(function (array $args) use ($cli): int {
-            return $cli->runHelp();
-        });
     return $cli->run(collect_argv());
 }
 

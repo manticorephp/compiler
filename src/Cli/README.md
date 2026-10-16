@@ -1,49 +1,53 @@
 # Cli
 
-Minimal clap-flavoured CLI router. Two classes, fluent builder, dispatch on `argv[1]`.
+Minimal clap-flavoured CLI framework. A command is a class that declares its
+options; `Cli` parses, generates help, and dispatches on `argv[1]`.
 
 ## Public surface
 
-- `Cli\Cli` — root registry. Holds program name, description, and named commands.
+- `Cli\Cli` — root registry.
   - `__construct(string $name, string $description)`
-  - `command(string $name, string $description): Command` — register subcommand
-  - `commands(): array<string, Command>` — enumerate registered commands
-  - `run(array $argv): int` — pick `argv[1]`, dispatch handler with tail args
-  - `runHelp(): int` — print usage block
-- `Cli\Command` — one subcommand entry.
-  - `__construct(string $name, string $description)`
-  - `run(\Closure $handler): self` — attach handler `fn(string[]): int`
-  - `handler(): ?\Closure`
-- `Cli\ArgParse` — the shared flag/value parser.
-  - `ArgParse::FLAG` / `ArgParse::VALUE` — the two spec entry kinds
-  - `ArgParse::parse(array $args, array $spec): ParsedArgs`
-  - Accepts every value form (`-o out`, `-O2`, `--memory=rc`, `--memory rc`);
-    positionals may appear in any position.
-- `Cli\ParsedArgs` — the parse result.
-  - `flag(string): bool`, `value(string, string $default): string`,
-    `has(string): bool`
-  - `$positional` (files), `$error` (null on success)
+  - `add(Command $cmd): void` — register a command (insertion order = help order)
+  - `run(array $argv): int` — dispatch `argv[1]` with the tail args
+  - `runHelp(): int` — print the generated root help
+- `Cli\Command` — abstract base, one subclass per command (`src/Cli/Commands/*Command.php`).
+  - `name(): string`, `summary(): string` (one line, shown in root help)
+  - `usage(): string` — text after `Usage: <prog> <name> ` (default `[options]`)
+  - `options(): Option[]` — (default none) declared options; drive parsing and `--help`
+  - `run(ParsedArgs $p): int` — the command body
+- `Cli\Option(name, kind, help, placeholder = '')` — `kind` is `ArgParse::FLAG` or `ArgParse::VALUE`;
+  one-letter names render `-x`, longer `--name`.
+- `Cli\ArgParse::parse(array $args, array $spec): ParsedArgs` — shared parser. Accepts every
+  value form (`-o out`, `-O2`, `--memory=rc`, `--memory rc`); positionals in any position.
+- `Cli\ParsedArgs` — `flag(string)`, `value(string, string $default)`, `has(string)`,
+  `$positional`, `$error` (null on success).
 
 ## Invariants
 
-- No command on argv → falls through to `help`. Unknown command → diag + help, returns help exit code.
-- Handler missing → return 70.
-- Handler receives only argv tail (everything after the command name).
-- Help output goes through `\Manticore\puts`; diagnostics through `\Manticore\dprint` (stderr).
-- Commands stored in insertion order (PHP array key order) — help prints them as registered.
+- Parse error → `<command>: <error>` on stderr, rc 64. An undeclared option is a parse error
+  (so `version --anything` exits 64).
+- Help is generated from `summary()` / `usage()` / `options()`; nothing is hand-written.
+- `--help` / `-h` are detected AFTER parsing, on the parsed result: `compile -o --help` makes
+  `--help` the value of `-o`, not a help request.
+- Root: no command, `help`, `--help`, `-h` print root help (rc 0). `help` is a built-in word,
+  listed as `help  Show this help text`. `--version` is an alias of `version`.
+- Unknown command → `unknown command: <x>` on stderr, then root help.
+- Help goes through `\Manticore\puts`; diagnostics through `\Manticore\dprint` (stderr).
+- A command receives only its own parsed options; shared sets live in
+  `Cli\Commands\CompileOptions::shared()` (`compile`, `build`, `dump-*`).
 
 ## Usage
 
 ```php
+final class VersionCommand extends \Cli\Command
+{
+    public function name(): string { return 'version'; }
+    public function summary(): string { return 'Print compiler version'; }
+    public function usage(): string { return ''; }
+    public function run(\Cli\ParsedArgs $p): int { \Manticore\puts('manticore 0.14.0'); return 0; }
+}
+
 $cli = new \Cli\Cli('manticore', 'PHP-to-native AOT compiler (self-hosted)');
-$cli->add(new \Cli\Commands\CompileCommand());
-$cli->command('help', 'Show help')
-    ->run(fn (array $args): int => $cli->runHelp());
+$cli->add(new VersionCommand());
 exit($cli->run($argv));
 ```
-
-`Cli` and `Command` are the routing layer; `ArgParse` / `ParsedArgs` are the
-parsing layer each handler opts into. A command builds its own spec — see
-`Cli\Commands\CompileOptions::shared()`, which `compile` and `build` extend with `--no-analyze` /
-`--analyze-strict` and `analyze` extends with `--deep` / `--json` /
-`--baseline` / `--generate-baseline`.

@@ -5,14 +5,11 @@ namespace Cli;
 /**
  * Minimal Rust-clap-flavoured CLI registry. Commands are classes registered
  * with {@see add()}; their declared options drive parsing and generated help.
- * The closure-based {@see LegacyCommand} registry stays until every command
- * is migrated. No command given, or an unknown one, prints `help`.
+ * No command given, `help`, `--help`/`-h`, or an unknown command prints the
+ * root help.
  */
 final class Cli
 {
-    /** @var array<string, LegacyCommand> */
-    private array $commands = [];
-
     /** @var array<string, Command> */
     private array $registry = [];
 
@@ -24,19 +21,6 @@ final class Cli
     public function add(Command $cmd): void
     {
         $this->registry[$cmd->name()] = $cmd;
-    }
-
-    public function command(string $name, string $description): LegacyCommand
-    {
-        $cmd = new LegacyCommand($name, $description);
-        $this->commands[$name] = $cmd;
-        return $cmd;
-    }
-
-    /** @return array<string, LegacyCommand> */
-    public function commands(): array
-    {
-        return $this->commands;
     }
 
     /** @return array<string, string> */
@@ -113,7 +97,7 @@ final class Cli
             return $this->runHelp();
         }
         $name = $argv[1];
-        if ($name === '--help' || $name === '-h') {
+        if ($name === 'help' || $name === '--help' || $name === '-h') {
             return $this->runHelp();
         }
         if ($name === '--version') {
@@ -127,16 +111,8 @@ final class Cli
         if (isset($this->registry[$name])) {
             return $this->runCommand($this->registry[$name], $tail);
         }
-        if (!isset($this->commands[$name])) {
-            \Manticore\dprint("unknown command: " . $name);
-            return $this->runHelp();
-        }
-        $handler = $this->commands[$name]->handler();
-        if ($handler === null) {
-            \Manticore\dprint("command not wired: " . $name);
-            return 70;
-        }
-        return $handler($tail);
+        \Manticore\dprint("unknown command: " . $name);
+        return $this->runHelp();
     }
 
     public function runHelp(): int
@@ -149,9 +125,7 @@ final class Cli
         foreach ($this->registry as $name => $cmd) {
             \Manticore\puts("  " . $name . "  " . $cmd->summary());
         }
-        foreach ($this->commands as $name => $cmd) {
-            \Manticore\puts("  " . $name . "  " . $cmd->description);
-        }
+        \Manticore\puts("  help  Show this help text");
         \Manticore\puts("");
         \Manticore\puts("Run '" . $this->name . " <command> --help' for command options.");
         return 0;
