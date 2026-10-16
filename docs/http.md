@@ -346,6 +346,13 @@ place the scheduler switches tasks. So is the output-buffer stack: without that
 swap, two concurrent handlers would share one `ob_*` stack and fiber A's `echo`
 would land in fiber B's body.
 
+`compat(true)` also makes the process a web SAPI: from `serve()` on,
+`PHP_SAPI` and `php_sapi_name()` answer `'cli-server'`, as `php -S` does, so a
+framework's "am I in a web request?" check (Symfony's error pages, VarDumper)
+takes the web path. Code that runs before `serve()`, and every program without
+a compat server, still sees `'cli'`. It is process-wide, not per request: a
+client running beside the server in the same process sees `'cli-server'` too.
+
 ### Request-bound state of your own
 
 ```php

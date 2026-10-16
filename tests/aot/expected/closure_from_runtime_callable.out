@@ -1,0 +1,14 @@
+bool(true)
+bool(true)
+string(5) "env:X"
+bool(true)
+string(3) "ABC"
+int(42)
+string(5) "env:W"
+string(5) "env:V"
+array(2) {
+  [0]=>
+  string(1) "A"
+  [1]=>
+  string(1) "B"
+}

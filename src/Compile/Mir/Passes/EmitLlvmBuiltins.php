@@ -311,6 +311,10 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_fiber_ctx_free')         { return $this->biFiberCtxFree($args); }
         if ($name === '__mir_fiber_main_ctx')         { return $this->biFiberMainCtx($args); }
         if ($name === 'count' || $name === 'sizeof')  { return $this->biCount($args); }
+        if ($name === 'array_key_exists') {
+            $ake = $this->biArrayKeyExists($args);
+            if ($ake !== null) { return $ake; }
+        }
         // NOT builtins — the two stdlib entries LowerExprs rewrites a moded
         // `count()` into. They are intercepted here only to answer a COUNTABLE
         // receiver, which php resolves through `->count()` for EVERY mode and
@@ -380,7 +384,7 @@ trait EmitLlvmBuiltins
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
         if ($name === '__mc_crc32b' && \count($args) === 1) { return $this->biCrc32b($args); }
         if (\count($args) === 1 && \str_starts_with($name, '__mc_') && $this->codecFn($name) !== '') { return $this->biCodec($args, $this->codecFn($name)); }
-        if ($name === '__mc_strtr_bytes' && \count($args) === 3) { return $this->biStrtrBytes($args); }
+        if ($name === 'strtr__bytes' && \count($args) === 3) { return $this->biStrtrBytes($args); }
         if ($name === '__float_bits')                 { return $this->biFloatBits($args); }
         if ($name === '__ugt')                        { return $this->biUgt($args); }
         if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
@@ -462,6 +466,8 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_attr_repeated')      { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_REPEATED_OFFSET, false, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_attr_err')           { return $this->emitReflParamField($args, \Compile\MemoryAbi::RMETA_ATTR_ERR_OFFSET, true, \Compile\MemoryAbi::RMETA_ATTR_SIZE); }
         if ($name === '__mc_refl_call0')              { return $this->biMcReflCall0($args); }
+        if ($name === '__mc_refl_doc_fn')             { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_DOC_FN_OFFSET, true); }
+        if ($name === '__mc_refl_file_fn')            { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_FILE_FN_OFFSET, true); }
         if ($name === '__mc_refl_consts_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_CONSTS_FN_OFFSET, true); }
         if ($name === '__mc_refl_ifaces_fn')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_IFACES_FN_OFFSET, true); }
         if ($name === '__mc_refl_row_rettype')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_RETTYPE_OFFSET, true); }
@@ -1003,7 +1009,16 @@ trait EmitLlvmBuiltins
         // owner but this site — `$fixed->offsetSet($i, new Token($t))` kept
         // every token of every file php-cs-fixer ever tokenized.
         if ($t->kind === Type::KIND_OBJ) {
-            if ($src === null || $this->isClosureValueType($t) || $this->freshRcArgFlavor($src) !== 'obj') { return ''; }
+            if ($src === null) { return ''; }
+            // A fresh closure env (a literal, a call's +1) boxes the same way:
+            // `set_error_handler(fn () => …)` kept one env per call.
+            if ($this->isClosureValueType($t)) {
+                if ($this->freshRcArgFlavor($src) !== 'closure') { return ''; }
+                $raw = $this->ssa->allocReg();
+                return '  ' . $raw . ' = and i64 ' . $cellReg . ", 281474976710655\n"
+                     . $this->rcReleaseReg($raw, 'closure');
+            }
+            if ($this->freshRcArgFlavor($src) !== 'obj') { return ''; }
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
             return '  call void @__mir_cell_drop(i64 ' . $cellReg . ")\n";
@@ -1186,7 +1201,8 @@ trait EmitLlvmBuiltins
             $this->markCellBoxed($this->lastValue);
             return $ret;
         }
-        if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION || $k === Type::KIND_CLOSURE) {
+        if ($k === Type::KIND_CLOSURE) { return $this->boxCallableSlotIr(); }
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_UNION) {
             // A union arm is a bare object pointer (all-object union) — box it as
             // an object cell so a tagged consumer (var_dump / a mixed param)
             // dispatches on the object tag and the class_id resolves the type.
@@ -1209,11 +1225,88 @@ trait EmitLlvmBuiltins
         // instead: an already-boxed word passes through, a raw container is
         // identified from its allocator magic, and anything else is left exactly
         // as it was, which is what the whole erased path does today.
-        if ($k === Type::KIND_UNKNOWN) { return $this->boxUnknownShallowIr(); }
+        if ($k === Type::KIND_UNKNOWN) {
+            // A bare `?array` param rides as a raw pointer: its null is the word 0, which the probe below
+            // would take for the INT 0 (`$a ??= $_SERVER['argv']` then never saw null).
+            if ($src !== null && $src->kind === Node::KIND_LOAD_LOCAL && isset($this->arrayHintedParams[$src->name])) {
+                $out = $this->coerceToI64();
+                $raw = $this->lastValue;
+                $out .= $this->boxUnknownShallowIr();
+                $boxed = $this->lastValue;
+                $nl = $this->ssa->allocReg();
+                $isz = $this->ssa->allocReg();
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $nl . " = call i64 @__manticore_box_null()\n";
+                $out .= '  ' . $isz . ' = icmp eq i64 ' . $raw . ", 0\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $isz . ', i64 ' . $nl . ', i64 ' . $boxed . "\n";
+                $ret = $this->finishI64($out, $sel);
+                // Same provenance as the probe it wraps: the owner retains what the probe boxed.
+                $this->markCellProbed($this->lastValue);
+                return $ret;
+            }
+            return $this->boxUnknownShallowIr();
+        }
         $helper = ($k === Type::KIND_BOOL) ? '__manticore_box_bool' : '__manticore_box_int';
         $out = $this->coerceToI64();
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $helper . '(i64 ' . $this->lastValue . ")\n";
+        $ret = $this->finishI64($out, $r);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
+    }
+
+    /**
+     * A `callable` slot's word as a cell. The slot holds a closure env — boxed
+     * as an object, as a literal's `obj<__closure_N>` is — but also a callable
+     * ARRAY raw (identified by its allocator magic) or a value already boxed:
+     * boxing every word as an object handed `[$obj, 'm']` to a `mixed` consumer
+     * as an object whose class descriptor was the array header.
+     */
+    private function boxCallableSlotIr(): string
+    {
+        $out = $this->coerceToI64();
+        $w = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $boxedL = $this->ssa->allocLabel('cbox.boxed');
+        $rawL = $this->ssa->allocLabel('cbox.raw');
+        $chkL = $this->ssa->allocLabel('cbox.chk');
+        $objL = $this->ssa->allocLabel('cbox.obj');
+        $arrL = $this->ssa->allocLabel('cbox.arr');
+        $endL = $this->ssa->allocLabel('cbox.end');
+        $isB = $this->ssa->allocReg();
+        $out .= '  ' . $isB . ' = icmp ugt i64 ' . $w . ", -4503599627370496\n";
+        $out .= '  br i1 ' . $isB . ', label %' . $boxedL . ', label %' . $rawL . "\n";
+        $out .= $boxedL . ":\n  store i64 " . $w . ', ptr ' . $res . "\n  br label %" . $endL . "\n";
+        $out .= $rawL . ":\n";
+        $out .= $this->plausiblePtrIr($w);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $chkL . ', label %' . $objL . "\n";
+        $out .= $chkL . ":\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $g = $this->ssa->allocReg();
+        $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $p . ", i64 -8\n";
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = load i64, ptr ' . $g . "\n";
+        $isArr = $this->magicMatchIr($m, [\Compile\MemoryAbi::ARRAY_TAG_MAGIC,
+            \Compile\MemoryAbi::ARRAY_TAG_ARENA, \Compile\MemoryAbi::ASSOC_TAG_MAGIC]);
+        $out .= $this->magicMatchOut;
+        $out .= '  br i1 ' . $isArr . ', label %' . $arrL . ', label %' . $objL . "\n";
+        $out .= $arrL . ":\n";
+        $ap = $this->ssa->allocReg();
+        $out .= '  ' . $ap . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $ab = $this->ssa->allocReg();
+        $out .= '  ' . $ab . ' = call i64 @__manticore_box_array(ptr ' . $ap . ")\n";
+        $out .= '  store i64 ' . $ab . ', ptr ' . $res . "\n  br label %" . $endL . "\n";
+        $out .= $objL . ":\n";
+        $op = $this->ssa->allocReg();
+        $out .= '  ' . $op . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $ob = $this->ssa->allocReg();
+        $out .= '  ' . $ob . ' = call i64 @__manticore_box_object(ptr ' . $op . ")\n";
+        $out .= '  store i64 ' . $ob . ', ptr ' . $res . "\n  br label %" . $endL . "\n";
+        $out .= $endL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $ret = $this->finishI64($out, $r);
         $this->markCellBoxed($this->lastValue);
         return $ret;
@@ -1537,9 +1630,12 @@ trait EmitLlvmBuiltins
         // Co-own exactly what the static arm would have: an rc-carrying element
         // kind takes its +1 through the tag (`__mir_cell_retain` is the mirror of
         // the `__mir_cell_drop` the rebuilt array's release runs per element);
-        // a scalar kind owns nothing on either arm.
-        if ($ek === Type::KIND_STRING || $ek === Type::KIND_OBJ || ($ek === Type::KIND_ARRAY && !$move)
-            || $ek === Type::KIND_CLOSURE) {
+        // a scalar kind owns nothing on either arm. Whatever the static arm
+        // retains, this one does too: an all-object UNION element (symfony's
+        // `VirtualStub|UninitializedStub` map) retained there and borrowed here,
+        // so the rebuilt array's release freed stubs a static cache still held.
+        if ($elemRetain !== '' || $ek === Type::KIND_STRING || $ek === Type::KIND_OBJ
+            || ($ek === Type::KIND_ARRAY && !$move) || $ek === Type::KIND_CLOSURE) {
             $this->rt->needsRc = true;
             $this->rt->needsStrRc = true;
             $out .= '  call void @__mir_cell_retain(i64 ' . $dynBoxed . ")\n";
@@ -2500,7 +2596,7 @@ trait EmitLlvmBuiltins
         $out .= $this->coerceToPtr();
         $pathP = $this->lastValue;
         $slots = $this->includeSlots;
-        if (\count($slots) === 0) {
+        if (\count($slots) === 0 && !isset($this->definedFns[$this->mangle('__mc_require_runtime')])) {
             $this->rt->needsTagged = true;
             $f = $this->ssa->allocReg();
             $out .= '  ' . $f . " = call i64 @__manticore_box_bool(i64 0)\n";
@@ -2582,6 +2678,7 @@ trait EmitLlvmBuiltins
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
+        $out .= $this->inclRuntimeFallback($pathP, $res);
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $loaded = $this->ssa->allocReg();
@@ -2593,6 +2690,22 @@ trait EmitLlvmBuiltins
         // three through one alloca, so it inherits the least-proven of them.
         // Marking it boxed would assert something not established here.
         return $this->finishI64($out, $loaded);
+    }
+
+    /**
+     * A path that is no compile unit: a file the program WROTE at run time
+     * (symfony's router cache, `require`d back). `__mc_require_runtime` reads it
+     * when it is pure data and answers false otherwise — php's answer for a
+     * missing file, and what this chain answered for every such path.
+     */
+    private function inclRuntimeFallback(string $pathP, string $res): string
+    {
+        if (!isset($this->definedFns[$this->mangle('__mc_require_runtime')])) { return ''; }
+        $pi = $this->ssa->allocReg();
+        $out = '  ' . $pi . ' = ptrtoint ptr ' . $pathP . " to i64\n";
+        $v = $this->ssa->allocReg();
+        $out .= '  ' . $v . ' = call i64 @manticore___mc_require_runtime(i64 ' . $pi . ")\n";
+        return $out . '  store i64 ' . $v . ', ptr ' . $res . "\n";
     }
 
     /**
@@ -2757,13 +2870,75 @@ trait EmitLlvmBuiltins
             && $this->ifaceMethodHolders('Countable', 'count') !== []) {
             $out = $this->emitNode($args[0]);
             $out .= $this->coerceToI64();
-            return $this->emitCountableOrArray($out, $this->lastValue, $args[0]);
+            return $this->emitCountableOrArray($out, $this->lastValue, $args[0], '', '', $this->freshRcArgFlavor($args[0]));
         }
+        $out = $this->emitArrOrEmptyArg($args[0]);
+        $out .= $this->arrayCountFromPtrIr($this->lastValue);
+        return $this->finishI64($out, $this->lastValue);
+    }
+
+    /**
+     * `array_key_exists($k, $a)` → one hash probe: `__mir_array_isset_int` /
+     * `_str` / `_cell`, which answer KEY presence (a NULL value counts) and fold
+     * a canonical decimal string onto its int key; a null / bool / float key
+     * takes php's key cast. An erased operand that holds no array answers
+     * false; an object operand or a key of any other kind is left to the
+     * stdlib body (null).
+     *
+     * @param Node[] $args
+     */
+    private function biArrayKeyExists(array $args): ?string
+    {
+        if (\count($args) !== 2) { return null; }
+        $kk = $args[0]->type->kind;
+        $ak = $args[1]->type->kind;
+        if ($ak !== Type::KIND_ARRAY && $ak !== Type::KIND_CELL && $ak !== Type::KIND_UNKNOWN) { return null; }
+        if ($kk === Type::KIND_INT) {
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToI64();
+            $key = $this->lastValue;
+            $out .= $this->emitArrOrEmptyArg($args[1]);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_int(ptr ' . $this->lastValue . ', i64 ' . $key . ")\n";
+            return $this->finishI64($out, $r);
+        }
+        if ($kk === Type::KIND_STRING) {
+            $out = $this->emitPtrArg($args[0]);
+            $key = $this->lastValue;
+            $out .= $this->emitArrOrEmptyArg($args[1]);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 @__mir_array_isset_str(ptr ' . $this->lastValue . ', ptr ' . $key . ", i64 0, i64 0)\n";
+            $out .= $this->freeStrTemp($args[0], $key);
+            return $this->finishI64($out, $r);
+        }
+        $scalar = $kk === Type::KIND_NULL || $kk === Type::KIND_BOOL || $kk === Type::KIND_FLOAT;
+        if ($kk !== Type::KIND_CELL && !$scalar) { return null; }
+        // A `mixed` key, or a null / bool / float one boxed to its cell:
+        // `__mir_array_isset_cell` applies php's key cast.
+        $this->rt->needsCellKey = true;
         $out = $this->emitNode($args[0]);
+        $fresh = !$scalar && $this->isFreshCellTemp($args[0]);
+        $out .= $scalar ? $this->boxToCell($args[0]->type) : $this->coerceToI64();
+        $key = $this->lastValue;
+        $out .= $this->emitArrOrEmptyArg($args[1]);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__mir_array_isset_cell(ptr ' . $this->lastValue . ', i64 ' . $key . ")\n";
+        if ($fresh) { $out .= $this->rcReleaseReg($key, 'cell'); }
+        return $this->finishI64($out, $r);
+    }
+
+    /**
+     * Emit an array operand of a builtin that only INSPECTS it, leaving the
+     * buffer pointer in lastValue (`ptr`). An erased operand not holding an
+     * array reads as the empty array. A fresh temp is registered for release.
+     */
+    private function emitArrOrEmptyArg(Node $a): string
+    {
+        $out = $this->emitNode($a);
         $arrPtrCellWord = $this->lastValue;
-        if ($args[0]->type->kind === Type::KIND_CELL) {
+        if ($a->type->kind === Type::KIND_CELL) {
             $out .= $this->cellToPtr();
-        } elseif ($args[0]->type->kind === Type::KIND_UNKNOWN) {
+        } elseif ($a->type->kind === Type::KIND_UNKNOWN) {
             // An ERASED operand is not known to be an array, and `inttoptr` of a
             // tagged word read its tag bits as a length — `count()` over a value
             // yielded by a generator behind an `iterable` answered garbage. Same
@@ -2780,17 +2955,14 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToPtr();
         }
         $arrPtr = $this->lastValue;
-        $out .= $this->arrayCountFromPtrIr($arrPtr);
-        $cnt = $this->lastValue;
         // A 'cell' release wants the TAGGED word; handing it the masked payload
         // makes `__mir_cell_drop` a no-op, so the release was emitted and freed
         // nothing ({@see emitArrPtrArg}, which had the same hole).
-        $cellWord = $args[0]->type->kind === Type::KIND_CELL ? $arrPtrCellWord : '';
-        // ★ A FRESH array temp dies here. `count()` answers an int, so nothing
-        // it returns can reference an element — the one array builtin where
-        // that needs no further proof. `count(explode($d, $s))` leaked the
-        // whole exploded vec on every call, 3.2 KB a call.
-        $af = $this->freshRcArgFlavor($args[0]);
+        $cellWord = $a->type->kind === Type::KIND_CELL ? $arrPtrCellWord : '';
+        // ★ A FRESH array temp dies after the builtin. Only for a builtin whose
+        // result cannot reference an element (`count`, `array_key_exists`).
+        // `count(explode($d, $s))` leaked the whole exploded vec on every call.
+        $af = $this->freshRcArgFlavor($a);
         $relReg = $arrPtr;
         // The same i64 invariant {@see emitArrPtrArg} keeps.
         if ($af === 'cell' && \str_starts_with($relReg, '%')) {
@@ -2804,7 +2976,9 @@ trait EmitLlvmBuiltins
             $this->arrArgTempRegs[] = $relReg;
             $this->arrArgTempFlavors[] = $af;
         }
-        return $this->finishI64($out, $cnt);
+        $this->lastValue = $arrPtr;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /**
@@ -2841,6 +3015,7 @@ trait EmitLlvmBuiltins
             return null;
         }
         $out = $this->emitNode($arg);
+        $af = $this->freshRcArgFlavor($arg);
         $out .= $this->boxToCell($arg->type, $arg);
         $cv = $this->lastValue;
         $modeReg = '';
@@ -2849,7 +3024,7 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToI64();
             $modeReg = $this->lastValue;
         }
-        return $this->emitCountableOrArray($out, $cv, $arg, $c->function, $modeReg);
+        return $this->emitCountableOrArray($out, $cv, $arg, $c->function, $modeReg, $af);
     }
 
     /**
@@ -2912,7 +3087,7 @@ trait EmitLlvmBuiltins
      * argument when it takes one.
      */
     private function emitCountableOrArray(string $out, string $cv, Node $arg,
-                                          string $walkerFn = '', string $modeReg = ''): string
+                                          string $walkerFn = '', string $modeReg = '', string $argFlavor = ''): string
     {
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -2963,6 +3138,8 @@ trait EmitLlvmBuiltins
         $out .= $endL . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
+        // A fresh operand (`count($bag->all())` over an erased `array` return) dies here.
+        if ($argFlavor !== '') { $out .= $this->rcReleaseReg($cv, $argFlavor); }
         return $this->finishI64($out, $r);
     }
 
@@ -4677,9 +4854,13 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $r . ' = load i64, ptr ' . $slot . "\n";
             return $this->finishI64($out, $r);
         }
+        // The answer folds from the static type, but the operand still RUNS:
+        // `is_string($t = $recv)` (a runtime callable array's receiver probe)
+        // lost its assignment, and the method call read `$t` unset.
+        $out = $a->kind === Node::KIND_LOAD_LOCAL ? '' : $this->emitNode($a);
         $this->lastValue = ($a->type->kind === $kind) ? '1' : '0';
         $this->lastValueType = 'i64';
-        return '';
+        return $out;
     }
 
     /**
@@ -5162,6 +5343,34 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
+    /**
+     * `strtr__bytes($s, $from, $to)` — the byte-map form of strtr in one native pass (the PHP body in
+     * Runtime/Stdlib/StringsExtra.php is the builder's fallback). A fresh +1 string; an input with
+     * nothing to translate comes back as itself, retained, so `HeaderBag`'s per-key lower-casing allocates nothing.
+     * @param Node[] $args
+     */
+    private function biStrtrBytes(array $args): string
+    {
+        $this->rt->needsStrtrBytes = true;
+        $this->rt->needsConcat = true;   // __mir_strlen + __mir_str_alloc
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $from = $this->lastValue;
+        $out .= $this->emitPtrArg($args[2]);
+        $to = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_strtr_bytes(ptr ' . $s . ', ptr ' . $from . ', ptr ' . $to . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $out .= $this->freeStrTemp($args[1], $from);
+        $out .= $this->freeStrTemp($args[2], $to);
+        $this->lastValue = $reg; $this->lastValueType = 'ptr';
+        return $out;
+    }
+
     /** `__mc_crc32b(string): int` — the reflected CRC-32 (php's crc32()) as a
      *  table-driven byte loop with no per-byte bounds or element checks
      *  ({@see EmitLlvmRuntime}); the PHP body in Runtime/Stdlib/Hash.php is the
@@ -5206,29 +5415,6 @@ trait EmitLlvmBuiltins
         }
         $out .= '  ' . $reg . ' = call ptr @' . $fn . '(ptr ' . $s . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
-        $this->lastValue = $reg;
-        $this->lastValueType = 'ptr';
-        return $out;
-    }
-
-    /** `__mc_strtr_bytes(string, string, string): string` — the byte-map strtr
-     *  ({@see RuntimeLibrary::strtrBytes}); the PHP body in Stdlib is the fallback.
-     *  @param Node[] $args */
-    private function biStrtrBytes(array $args): string
-    {
-        $this->rt->needsStrtrBytes = true;
-        $this->rt->needsConcat = true;   // __mir_strlen
-        $out = $this->emitPtrArg($args[0]);
-        $s = $this->lastValue;
-        $out .= $this->emitPtrArg($args[1]);
-        $f = $this->lastValue;
-        $out .= $this->emitPtrArg($args[2]);
-        $t = $this->lastValue;
-        $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_strtr_bytes(ptr ' . $s . ', ptr ' . $f . ', ptr ' . $t . ")\n";
-        $out .= $this->freeStrTemp($args[0], $s);
-        $out .= $this->freeStrTemp($args[1], $f);
-        $out .= $this->freeStrTemp($args[2], $t);
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
@@ -5437,7 +5623,7 @@ trait EmitLlvmBuiltins
     private function biExplode(array $args): string
     {
         $this->rt->needsStrExplode = true;
-        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $delim = $this->lastValue;
@@ -6120,8 +6306,7 @@ trait EmitLlvmBuiltins
             $out .= $this->coerceToPtr();
             $fmtI = $this->ssa->allocReg();
             $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
-            $out .= $this->emitNode($args[1]->operand);
-            $out .= $this->coerceToPtr();
+            $out .= $this->emitSpreadOperand($args[1]->operand);
             $arrI = $this->ssa->allocReg();
             $out .= '  ' . $arrI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
             return $this->formatCallAndFinish($out, $fmtI, $arrI, $toStdout, false);
@@ -6130,7 +6315,7 @@ trait EmitLlvmBuiltins
         $esz = \Compile\MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE;
         $count = \count($args) - 1;
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToStr($args[0]);
         $fmtI = $this->ssa->allocReg();
         $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
         // Pack args[1..] into a packed CELL array (mirrors emitArrayLitDirect).
@@ -7005,7 +7190,11 @@ trait EmitLlvmBuiltins
         // class, so the literal would be the empty string.
         if (!$erased && \count($cands) <= 1) {
             $out = $this->emitNode($args[0]);
-            $lit = $this->strLitId($this->pool->intern($this->displayClassName($cls)));
+            // The one candidate, not the static name: an INTERFACE (or a class
+            // the program never declares) with a single implementor is that
+            // implementor at run time, and get_class() answered `I`.
+            $exact = \count($cands) === 1 ? $cands[0] : $cls;
+            $lit = $this->strLitId($this->pool->intern($this->displayClassName($exact)));
             if ($nullName !== '') {
                 $out .= $this->coerceToI64();
                 $isN = $this->ssa->allocReg();
@@ -7846,6 +8035,9 @@ trait EmitLlvmBuiltins
                 $recv = $a->elements[0]->value;
                 $cls = $this->reflClassName($recv);
                 $m   = $this->reflLitStr($a->elements[1]->value);
+                // A method NAME known only at run time (`[$loader, $method]`,
+                // symfony's ObjectLoader) asks the runtime tables.
+                if ($m === '') { return $this->emitIsCallableDyn($a); }
                 $ok  = $cls !== '' && $m !== '' && $this->resolveMethodClass($cls, $m) !== '';
                 // ['C', 'm'] names a CLASS — no instance, so PHP 8 needs a static
                 // method. [$obj, 'm'] supplies one and stays existence-only.
@@ -7877,20 +8069,54 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $z . ' = zext i1 ' . $ne . " to i64\n";
             return $this->finishI64($out, $z);
         }
-        // A tagged cell that carries an object/closure (tag 8) is callable.
-        if ($k === Type::KIND_CELL) {
-            $this->rt->needsTagged = true;
-            $out = $this->emitNode($a);
-            $out .= $this->coerceToI64();
-            $out .= $this->cellTagIr($this->lastValue);
-            $eq = $this->ssa->allocReg();
-            $out .= '  ' . $eq . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
-            $z = $this->ssa->allocReg();
-            $out .= '  ' . $z . ' = zext i1 ' . $eq . " to i64\n";
-            return $this->finishI64($out, $z);
+        // An erased value or an array is decided at run time.
+        if ($k === Type::KIND_CELL || $a->type->isArray()) {
+            return $this->emitIsCallableDyn($a);
         }
         // int/float/bool/null/plain object/non-literal string/array → not callable.
         return $this->biConstBool($this->emitNode($a), false);
+    }
+
+    /**
+     * is_callable($v) of a value whose shape is known only at run time: a
+     * Closure, an object with __invoke, or a two-element `[$objOrClass,
+     * 'method']` whose method (or `__call` / `__callStatic`) exists. Evaluated
+     * as a condition over a scratch cell holding `$v`, through the same
+     * builtins user code reaches.
+     * ponytail: visibility-blind like the literal fold above, and a function
+     * NAME string still answers false (no runtime function registry here).
+     */
+    private function emitIsCallableDyn(Node $a): string
+    {
+        $out = $this->emitNode($a);
+        if ($a->type->kind !== Type::KIND_CELL) { $out .= $this->boxToCell($a->type); }
+        $out .= $this->coerceToI64();
+        $name = '__iscb' . \substr($this->ssa->allocReg(), 2);
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $this->locals->slots[$name] = $slot;
+        $cell = Type::cell();
+        $bool = Type::bool_();
+        $t = fn (): Node => new \Compile\Mir\LoadLocal($name, $cell);
+        $el = fn (int $i): Node => new \Compile\Mir\ArrayAccess_($t(), new \Compile\Mir\IntConst($i, Type::int_()), $cell);
+        $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
+        $and = fn (Node $x, Node $y): Node => new \Compile\Mir\Ternary($x, $y, new \Compile\Mir\BoolConst(false, $bool), $bool);
+        $or = fn (Node $x, Node $y): Node => new \Compile\Mir\Ternary($x, new \Compile\Mir\BoolConst(true, $bool), $y, $bool);
+        $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
+        $invokable = $or(new \Compile\Mir\Instanceof_($t(), 'Closure'),
+            $and($call('is_object', [$t()]), $call('method_exists', [$t(), $str('__invoke')])));
+        $pair = $and($call('is_array', [$t()]),
+            $and(new \Compile\Mir\Cmp(new \Compile\Mir\Call('count', [$t()], Type::int_()), new \Compile\Mir\IntConst(2, Type::int_()), '==='),
+            $and($call('array_key_exists', [new \Compile\Mir\IntConst(0, Type::int_()), $t()]),
+            $and($call('array_key_exists', [new \Compile\Mir\IntConst(1, Type::int_()), $t()]),
+            $and($call('is_string', [$el(1)]),
+            $or($and($call('is_object', [$el(0)]),
+                    $or($call('method_exists', [$el(0), $el(1)]), $call('method_exists', [$el(0), $str('__call')]))),
+                $and($call('is_string', [$el(0)]),
+                    $or($call('method_exists', [$el(0), $el(1)]), $call('method_exists', [$el(0), $str('__callStatic')])))))))));
+        $out .= $this->emitNode($or($invokable, $pair));
+        return $out . $this->coerceToI64();
     }
 
     /** method_exists($obj|'C', 'm') — walk the parent chain for the method. */
@@ -8006,6 +8232,41 @@ trait EmitLlvmBuiltins
         if ($this->subjectIsString($args[0])) {
             $out = $this->emitPtrArg($args[0], true);
             $clsP = $this->lastValue;
+        } elseif ($args[0]->type->kind === Type::KIND_CELL) {
+            // An erased subject is a class NAME or an object only at run time:
+            // get_class() of the name answered '' (`method_exists($cls, $m)`
+            // over a `mixed $cls` was always false).
+            $out = $this->emitNode($args[0]);
+            $out .= $this->coerceToI64();
+            $w = $this->lastValue;
+            $out .= $this->cellTagIr($w);
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+            $strL = $this->ssa->allocLabel('mex.str');
+            $objL = $this->ssa->allocLabel('mex.obj');
+            $joinL = $this->ssa->allocLabel('mex.join');
+            $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $objL . "\n";
+            $out .= $strL . ":\n";
+            $sm = $this->ssa->allocReg();
+            $out .= '  ' . $sm . ' = and i64 ' . $w . ", 281474976710655\n";
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = inttoptr i64 ' . $sm . " to ptr\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $objL . ":\n";
+            $sn = '__mex' . \substr($this->ssa->allocReg(), 2);
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . " = alloca i64\n";
+            $out .= '  store i64 ' . $w . ', ptr ' . $slot . "\n";
+            $this->locals->slots[$sn] = $slot;
+            $out .= $this->biGetClass([new \Compile\Mir\LoadLocal($sn, Type::cell())]);
+            $out .= $this->coerceToPtr();
+            $op = $this->lastValue;
+            $objEnd = $this->ssa->allocLabel('mex.objend');
+            $out .= '  br label %' . $objEnd . "\n" . $objEnd . ":\n";
+            $out .= '  br label %' . $joinL . "\n";
+            $out .= $joinL . ":\n";
+            $clsP = $this->ssa->allocReg();
+            $out .= '  ' . $clsP . ' = phi ptr [ ' . $sp . ', %' . $strL . ' ], [ ' . $op . ', %' . $objEnd . " ]\n";
         } else {
             $out = $this->biGetClass([$args[0]]);
             $clsP = $this->lastValue;
@@ -8203,7 +8464,7 @@ trait EmitLlvmBuiltins
         // the name is only known at runtime, so enumerate the module's classes and
         // match the runtime string against each, testing the operand's class_id
         // against that class's is-a id set (same idiom as emitNewDynObj).
-        if ($target === '' && $this->classArgIsRuntime($args[1])) {
+        if ($this->classArgIsObject($args[1]) || ($target === '' && $this->classArgIsRuntime($args[1]))) {
             return $this->biIsADynamic($args, $strict, $allowString === true);
         }
         $sub = $this->reflClassName($args[0]);
@@ -8304,6 +8565,15 @@ trait EmitLlvmBuiltins
         return !($c !== '' && ($this->isEnumClass($c) || $this->isClosureClass($c)));
     }
 
+    /** A target-class arg that is an OBJECT (`$x instanceof $obj`): php tests against the
+     *  object's runtime class. An enum case or a closure carries no class descriptor. */
+    private function classArgIsObject(Node $arg): bool
+    {
+        if ($arg->type->kind !== Type::KIND_OBJ) { return false; }
+        $c = $arg->type->class ?? '';
+        return !($c !== '' && ($this->isEnumClass($c) || $this->isClosureClass($c)));
+    }
+
     /** A target-class arg named by a runtime value (string / cell / unknown),
      *  not a compile-time class name. */
     private function classArgIsRuntime(Node $arg): bool
@@ -8364,8 +8634,17 @@ trait EmitLlvmBuiltins
         $obj = $this->lastValue;
         $out .= $this->emitNode($args[1]);
         $out .= $this->coerceToI64();
+        $tgtWord = $this->lastValue;
         $strP = $this->ssa->allocReg();
-        $out .= '  ' . $strP . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+        $tkind = $args[1]->type->kind;
+        if ($tkind === Type::KIND_CELL) {
+            // A boxed word is no address: a string payload is stripped, a
+            // scalar rendered. (An object cell takes the class-id arm below.)
+            $this->rt->needsCellToStrPtr = true;
+            $this->rt->needsTaggedToStr = true;
+        } else {
+            $out .= '  ' . $strP . ' = inttoptr i64 ' . $tgtWord . " to ptr\n";
+        }
 
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
@@ -8400,6 +8679,63 @@ trait EmitLlvmBuiltins
         // them in one symfony resolver, and clang's SLP vectorizer spent seconds
         // on each.
         $this->rt->needsIsaDyn = true;
+        // `$x instanceof $obj`: the target is the OBJECT's class, not a name.
+        $tk = $args[1]->type->kind;
+        $tgtI = $tgtWord;
+        $tobjL = '';
+        if ($tk === Type::KIND_OBJ || $tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN) {
+            $tobjL = $this->ssa->allocLabel('isa.tobj');
+            $tstrL = $this->ssa->allocLabel('isa.tstr');
+            if ($tk === Type::KIND_OBJ) {
+                $isObjT = $this->ssa->allocReg();
+                $out .= '  ' . $isObjT . ' = icmp ne i64 ' . $tgtI . ", 0\n";
+                $out .= '  br i1 ' . $isObjT . ', label %' . $tobjL . ', label %' . $doneL . "\n";
+                $out .= $tobjL . ":\n";
+                $tp = $this->ssa->allocReg();
+                $out .= '  ' . $tp . ' = inttoptr i64 ' . $tgtI . " to ptr\n";
+            } elseif ($tk === Type::KIND_UNKNOWN) {
+                // An ERASED target is a raw pointer: an object carries the rc tag
+                // at -8, a string does not.
+                $chkL = $this->ssa->allocLabel('isa.tchk');
+                $nzT = $this->ssa->allocReg();
+                $out .= '  ' . $nzT . ' = icmp ugt i64 ' . $tgtI . ", 65535\n";
+                $out .= '  br i1 ' . $nzT . ', label %' . $chkL . ', label %' . $tstrL . "\n";
+                $out .= $chkL . ":\n";
+                $tp = $this->ssa->allocReg();
+                $out .= '  ' . $tp . ' = inttoptr i64 ' . $tgtI . " to ptr\n";
+                $mpT = $this->ssa->allocReg();
+                $out .= '  ' . $mpT . ' = getelementptr inbounds i8, ptr ' . $tp . ", i64 -8\n";
+                $mvT = $this->ssa->allocReg();
+                $out .= '  ' . $mvT . ' = load i64, ptr ' . $mpT . "\n";
+                $isObjT = $this->ssa->allocReg();
+                $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $mvT . ', ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+                $out .= '  br i1 ' . $isObjT . ', label %' . $tobjL . ', label %' . $tstrL . "\n";
+                $out .= $tobjL . ":\n";
+            } else {
+                $out .= $this->cellTagIr($tgtI);
+                $isObjT = $this->ssa->allocReg();
+                $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $this->cellTagReg . ", 8\n";
+                $out .= '  br i1 ' . $isObjT . ', label %' . $tobjL . ', label %' . $tstrL . "\n";
+                $out .= $tobjL . ":\n";
+                $tpay = $this->ssa->allocReg();
+                $out .= '  ' . $tpay . ' = and i64 ' . $tgtI . ", 281474976710655\n";
+                $tp = $this->ssa->allocReg();
+                $out .= '  ' . $tp . ' = inttoptr i64 ' . $tpay . " to ptr\n";
+            }
+            $out .= $this->emitLoadClassId($tp);
+            $tcid = $this->classIdReg;
+            $thit = $this->ssa->allocReg();
+            $out .= '  ' . $thit . ' = call i64 @' . $this->mirHelperSym('__mir_isa_dyn_id') . '(i64 ' . $cid . ', i64 ' . $tcid
+                  . ', i64 ' . ($strict ? '1' : '0') . ")\n";
+            $out .= '  store i64 ' . $thit . ', ptr ' . $slot . "\n";
+            $out .= '  br label %' . $doneL . "\n";
+            if ($tk !== Type::KIND_OBJ) {
+                $out .= $tstrL . ":\n";
+                if ($tk === Type::KIND_CELL) {
+                    $out .= '  ' . $strP . ' = call ptr @__manticore_cell_to_strptr_s(i64 ' . $tgtWord . ")\n";
+                }
+            }
+        }
         $hit = $this->ssa->allocReg();
         $out .= '  ' . $hit . ' = call i64 @' . $this->mirHelperSym('__mir_isa_dyn') . '(i64 ' . $cid . ', ptr ' . $strP
               . ', i64 ' . ($strict ? '1' : '0') . ")\n";
@@ -8526,6 +8862,9 @@ trait EmitLlvmBuiltins
                 $un = $this->ssa->allocReg();
                 $out .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props
                       . ', ptr ' . $bagP . ")\n";
+                // `+` copied (and co-owned) the declared map: release it.
+                $this->rt->needsRc = true;
+                $out .= '  call void @__mir_array_release(ptr ' . $props . ")\n";
                 $out .= '  store ptr ' . $un . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $endL . ":\n";
@@ -8572,7 +8911,17 @@ trait EmitLlvmBuiltins
      * declared arm mints one, the bag arm co-owns), so the caller must not
      * retain it again.
      */
-    private function emitObjectVarsOfPtr(string $objPtr): string
+    /** php's `(array)` key for a property: "\0*\0name" protected, "\0Declarer\0name" private. */
+    private function mangledPropKey(\Compile\Mir\ClassDef $cd, string $pn): string
+    {
+        $pm = $cd->propertyMeta[$pn] ?? null;
+        if ($pm === null || $pm->visibility === 'public') { return $pn; }
+        if ($pm->visibility === 'protected') { return "\0*\0" . $pn; }
+        $decl = \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cd->name, '\\');
+        return "\0" . $decl . "\0" . $pn;
+    }
+
+    private function emitObjectVarsOfPtr(string $objPtr, bool $mangle = false): string
     {
         // ONE copy per module, CALLED — not spliced into every site. The walk is
         // a switch with one arm per class that declares properties, and each arm
@@ -8587,11 +8936,11 @@ trait EmitLlvmBuiltins
         // table ({@see EmitLlvm::linkonceRuntime} is for the preamble, whose
         // helpers carry no module-local information). `noinline` because -O2
         // would otherwise splice it straight back into the few callers.
-        $this->needsObjectVarsFn = true;
+        if ($mangle) { $this->needsObjectVarsMgFn = true; } else { $this->needsObjectVarsFn = true; }
         $r = $this->ssa->allocReg();
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
-        return '  ' . $r . ' = call ptr @' . $this->mirHelperSym('__mir_object_vars') . '(ptr ' . $objPtr . ")\n";
+        return '  ' . $r . ' = call ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . '(ptr ' . $objPtr . ")\n";
     }
 
     /**
@@ -8645,19 +8994,19 @@ trait EmitLlvmBuiltins
 
     /** The one shared body {@see emitObjectVarsOfPtr} calls. Emitted beside the
      *  function bodies (not the preamble) when a site asked for it. */
-    private function emitObjectVarsFn(): string
+    private function emitObjectVarsFn(bool $mangle = false): string
     {
-        $body = $this->emitObjectVarsInline('%gov.obj');
+        $body = $this->emitObjectVarsInline('%gov.obj', $mangle);
         // `optnone` on top: this walk is a REFLECTIVE fallback (an erased receiver),
         // cold by construction, and at 1.2 MB it was the single most expensive
         // function in the whole backend — 7.22 s of clang's 136.7 s of
         // per-function optimization (5.3%), measured with `-ftime-trace`.
         // Optimizing a cold dispatcher buys nothing at runtime.
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_object_vars') . "(ptr %gov.obj) noinline optnone {\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . "(ptr %gov.obj) noinline optnone {\n"
             . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 
-    private function emitObjectVarsInline(string $objPtr): string
+    private function emitObjectVarsInline(string $objPtr, bool $mangle = false): string
     {
         $this->rt->needsTagged = true;
         $out = '';
@@ -8684,7 +9033,7 @@ trait EmitLlvmBuiltins
             $lbl = $this->ssa->allocLabel('gov.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitDeclaredPropsArray($objPtr, $cname);
+            $bodies .= $this->emitDeclaredPropsArray($objPtr, $cname, false, false, $mangle);
             $props = $this->lastValue;
             // A class can have BOTH — `#[AllowDynamicProperties] class Q { public
             // int $a; }` with `$q->extra = 9`. Declared first, bag second, php's
@@ -8702,6 +9051,8 @@ trait EmitLlvmBuiltins
                 $un = $this->ssa->allocReg();
                 $bodies .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props
                          . ', ptr ' . $bagP . ")\n";
+                $this->rt->needsRc = true;
+                $bodies .= '  call void @__mir_array_release(ptr ' . $props . ")\n";
                 $props = $un;
             }
             $pi = $this->ssa->allocReg();
@@ -8946,7 +9297,7 @@ trait EmitLlvmBuiltins
      * its case SINGLETON, since two ordinals of different enums are the same
      * word.
      */
-    private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false, bool $forCompare = false): string
+    private function emitDeclaredPropsArray(string $objp, string $cls, bool $publicOnly = false, bool $forCompare = false, bool $mangle = false): string
     {
         $this->rt->needsTagged = true;
         $out = '';
@@ -9014,9 +9365,17 @@ trait EmitLlvmBuiltins
                 }
                 $next = $this->ssa->allocReg();
                 $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
-                      . $cur . ', ptr ' . $this->litStr($pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
+                      . $cur . ', ptr ' . $this->litStr($mangle ? $this->mangledPropKey($cd, $pn) : $pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
                 $cur = $next;
             }
+        }
+        // The map OWNS one count of every cell it holds (above): say so in its
+        // repr and hint, so a copy (`+`, a mutated closure param's prologue copy) co-owns
+        // them and a repr-mode release drops them. Unstamped, a copy shared the
+        // words uncounted and outlived the map's own drop of them.
+        if ($n > 0) {
+            $out .= $this->emitReprStamp($cur, \Compile\MemoryAbi::ARRAY_REPR_CELL);
+            $out .= $this->emitElemHintStamp($cur, \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
         }
         $this->lastValue = $cur;
         $this->lastValueType = 'ptr';
@@ -9055,6 +9414,22 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $boxed . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
             $this->propCellMode = 0;
             $this->lastValue = $boxed;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // A bare / nullable `array` hint erases the slot's type to UNKNOWN, and
+        // boxRawValue passes an unknown through as an already-boxed cell: the raw
+        // buffer pointer reached `(array)$o` / get_object_vars as a denormal
+        // float. The property READ boxes it the same way
+        // ({@see EmitLlvmObjects::emitFixedPropLoad}).
+        if (($cd->propertyArrayHinted[$pn] ?? false) && $pt->kind === Type::KIND_UNKNOWN) {
+            $this->rt->needsTagged = true;
+            $ap = $this->ssa->allocReg();
+            $out .= '  ' . $ap . ' = inttoptr i64 ' . $v . " to ptr\n";
+            $ab = $this->ssa->allocReg();
+            $out .= '  ' . $ab . ' = call i64 @__manticore_box_array(ptr ' . $ap . ")\n";
+            $this->propCellMode = 1;
+            $this->lastValue = $ab;
             $this->lastValueType = 'i64';
             return $out;
         }

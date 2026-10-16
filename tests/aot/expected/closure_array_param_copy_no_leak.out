@@ -1,0 +1,18 @@
+Array
+(
+    [t] => Array
+        (
+            [0] => a
+            [1] => b
+        )
+
+    [s] => q
+    [extra] => P
+)
+Array
+(
+    [y] => two
+    [tail] => tail
+)
+18
+flat

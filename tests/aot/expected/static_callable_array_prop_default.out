@@ -1,0 +1,9 @@
+cast:a:1
+inh:b
+cast:c:2
+cast:d:3
+cast:e:0
+callable
+cast:f:4
+cast:g:5
+cast:h:0,cast:i:0

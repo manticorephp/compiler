@@ -178,7 +178,7 @@ function get_defined_constants(bool $categorize = false): array
 function class_implements(object|string $objectOrClass, bool $autoload = true): array|false
 {
     $name = \is_object($objectOrClass) ? \get_class($objectOrClass) : $objectOrClass;
-    if (!\class_exists($name) && !\interface_exists($name)) { return false; }
+    if (!\class_exists($name) && !\interface_exists($name) && !\trait_exists($name)) { return false; }
     $names = (new \ReflectionClass($name))->getInterfaceNames();
     $out = [];
     foreach ($names as $iface) { $out[$iface] = $iface; }
@@ -228,7 +228,7 @@ function get_mangled_object_vars(object $object): array
 function class_parents(object|string $objectOrClass, bool $autoload = true): array|false
 {
     $name = \is_object($objectOrClass) ? \get_class($objectOrClass) : $objectOrClass;
-    if (!\class_exists($name)) { return false; }
+    if (!\class_exists($name) && !\interface_exists($name) && !\trait_exists($name)) { return false; }
     $out = [];
     $rc = new \ReflectionClass($name);
     $p = $rc->getParentClass();
@@ -276,8 +276,16 @@ function __mc_refl_attrs_of(int $base, int $n, ?string $filter, int $flags = 0):
 
 class ReflectionException extends Exception {}
 
+/** Reflection stand-in for the compiler-internal Closure type (no user-visible class record). */
+final class __MC_ClosureShape {}
+
 class ReflectionClass
 {
+    public const IS_IMPLICIT_ABSTRACT = 16;
+    public const IS_EXPLICIT_ABSTRACT = 64;
+    public const IS_FINAL = 32;
+    public const IS_READONLY = 65536;
+
     /** PHP exposes the class name as a public property, not just getName(). */
     public string $name = "";
 
@@ -296,17 +304,20 @@ class ReflectionClass
             // A leading `\` is not part of the name the compiler recorded.
             $n = __mc_refl_unqualify($objectOrClass);
             $h = __mc_refl_find($n);
+            if ($h === 0 && \strtolower($n) === 'closure') {
+                $h = __mc_refl_find('__MC_ClosureShape');
+            }
             if ($h === 0) {
                 throw new ReflectionException("Class \"" . $n . "\" does not exist");
             }
         } else {
-            $h = __mc_refl_of($objectOrClass);
+            $h = $objectOrClass instanceof \Closure ? __mc_refl_find('__MC_ClosureShape') : __mc_refl_of($objectOrClass);
             if ($h === 0) {
                 throw new ReflectionException("Class does not exist");
             }
         }
         $this->h = $h;
-        $this->name = __mc_refl_name($h);
+        $this->name = $h === __mc_refl_find('__MC_ClosureShape') ? 'Closure' : __mc_refl_name($h);
     }
 
     public function getName(): string
@@ -395,7 +406,7 @@ class ReflectionClass
         return new ReflectionClass(__mc_refl_name($p));
     }
 
-    /** Does this class extend `$name`, at any depth? */
+    /** Does this class extend, or implement, `$name` at any depth? (Not the class itself.) */
     public function isSubclassOf(string $name): bool
     {
         $want = __mc_refl_unqualify($name);
@@ -404,7 +415,8 @@ class ReflectionClass
             if (__mc_refl_name($p) === $want) { return true; }
             $p = __mc_refl_parent($p);
         }
-        return false;
+        if (__mc_refl_unqualify($this->name) === $want) { return false; }
+        return $this->implementsInterface($name);
     }
 
     /**
@@ -435,6 +447,36 @@ class ReflectionClass
             throw new ReflectionException("Cannot instantiate " . $this->name);
         }
         return $o;
+    }
+
+    /**
+     * PHP 8.4 lazy objects. A compiled program has none: every object is fully initialized, so the
+     * object itself is the "real instance" and nothing is uninitialized. Creating lazy objects
+     * (newLazyGhost / newLazyProxy / resetAsLazy*) is not supported.
+     */
+    public function isUninitializedLazyObject(object $object): bool
+    {
+        return false;
+    }
+
+    public function initializeLazyObject(object $object): object
+    {
+        return $object;
+    }
+
+    public function markLazyObjectAsInitialized(object $object): object
+    {
+        return $object;
+    }
+
+    public function newLazyGhost(callable $initializer, int $options = 0): object
+    {
+        throw new ReflectionException("Lazy objects are not supported");
+    }
+
+    public function newLazyProxy(callable $factory, int $options = 0): object
+    {
+        throw new ReflectionException("Lazy objects are not supported");
     }
 
     /**
@@ -474,14 +516,17 @@ class ReflectionClass
      * trait → inherited — what php's getMethods() reports).
      * @return ReflectionMethod[]
      */
-    public function getMethods(): array
+    public function getMethods(?int $filter = null): array
     {
         $n = __mc_refl_nmethods($this->h);
         $base = __mc_refl_methods_base($this->h);
         $out = [];
         $i = 0;
         while ($i < $n) {
-            $out[] = new ReflectionMethod($this->name, __mc_refl_row_name($base, $i));
+            $m = new ReflectionMethod($this->name, __mc_refl_row_name($base, $i));
+            if ($filter === null || ($m->getModifiers() & $filter) !== 0) {
+                $out[] = $m;
+            }
             $i = $i + 1;
         }
         return $out;
@@ -492,14 +537,17 @@ class ReflectionClass
      * order (inherited first, then own — what the metadata carries).
      * @return ReflectionProperty[]
      */
-    public function getProperties(): array
+    public function getProperties(?int $filter = null): array
     {
         $n = __mc_refl_nprops($this->h);
         $base = __mc_refl_props_base($this->h);
         $out = [];
         $i = 0;
         while ($i < $n) {
-            $out[] = new ReflectionProperty($this->name, __mc_refl_row_name($base, $i));
+            $p = new ReflectionProperty($this->name, __mc_refl_row_name($base, $i));
+            if ($filter === null || ($p->getModifiers() & $filter) !== 0) {
+                $out[] = $p;
+            }
             $i = $i + 1;
         }
         return $out;
@@ -536,6 +584,18 @@ class ReflectionClass
         $fn = __mc_refl_consts_fn($this->h);
         if ($fn === 0) { return []; }
         return __mc_refl_call0($fn);
+    }
+
+    /**
+     * The path of the file the class was declared in, as the compiler saw it, or
+     * false for a class with none (an internal one). Read from a synthesized
+     * factory so the rmeta row holds a pointer, not a string.
+     */
+    public function getFileName(): string|false
+    {
+        $fn = __mc_refl_file_fn($this->h);
+        if ($fn === 0) { return false; }
+        return (string)__mc_refl_call0($fn);
     }
 
     /** One constant's value, or false when there is no such constant. */
@@ -590,6 +650,190 @@ class ReflectionClass
         return false;
     }
 
+    /** Whether `$object` is an instance of this class (or of a subclass / implementer). */
+    public function isInstance(object $object): bool
+    {
+        return \is_a($object, $this->name);
+    }
+
+    /** A concrete class whose `__clone`, when it has one, is public. */
+    public function isCloneable(): bool
+    {
+        $f = __mc_refl_flags($this->h);
+        if (($f & (2 | 4 | 8 | 16)) !== 0) { return false; }
+        if ($this->hasMethod('__clone')) {
+            return (new ReflectionMethod($this->name, '__clone'))->isPublic();
+        }
+        return true;
+    }
+
+    public function isAnonymous(): bool
+    {
+        return \str_contains($this->name, '@anonymous') || \str_starts_with($this->name, '__anon_class_');
+    }
+
+    public function isTrait(): bool
+    {
+        return (__mc_refl_flags($this->h) & 16) !== 0;
+    }
+
+    /** php's modifier bitmask: IS_FINAL (32), IS_EXPLICIT_ABSTRACT (64). */
+    public function getModifiers(): int
+    {
+        $f = __mc_refl_flags($this->h);
+        $m = 0;
+        if (($f & 1) !== 0) { $m = $m | 32; }
+        if (($f & 2) !== 0) { $m = $m | 64; }
+        return $m;
+    }
+
+    /**
+     * Every interface the class implements, keyed by name.
+     * @return array<string, ReflectionClass>
+     */
+    public function getInterfaces(): array
+    {
+        $out = [];
+        foreach ($this->getInterfaceNames() as $n) {
+            $out[$n] = new ReflectionClass($n);
+        }
+        return $out;
+    }
+
+    /** A concrete class that can be iterated with `foreach`. */
+    public function isIterable(): bool
+    {
+        if (!$this->isInstantiable()) { return false; }
+        return $this->implementsInterface('Traversable')
+            || $this->implementsInterface('Iterator')
+            || $this->implementsInterface('IteratorAggregate');
+    }
+
+    public function isIterateable(): bool
+    {
+        return $this->isIterable();
+    }
+
+    /** No extension objects here: every class is reported as extension-less. */
+    public function getExtension(): ?object
+    {
+        return null;
+    }
+
+    public function getExtensionName(): string|false
+    {
+        return false;
+    }
+
+    /**
+     * The static properties (own first, then inherited) and their current values.
+     * @return array<string, mixed>
+     */
+    public function getStaticProperties(): array
+    {
+        $out = [];
+        $all = $this->getProperties();
+        foreach ($all as $p) {
+            if ($p->isStatic() && $p->class === $this->name) { $out[$p->getName()] = $p->getValue(); }
+        }
+        foreach ($all as $p) {
+            if ($p->isStatic() && $p->class !== $this->name) { $out[$p->getName()] = $p->getValue(); }
+        }
+        return $out;
+    }
+
+    /**
+     * The declared defaults, `name => value`: static properties first (their current values, as php
+     * reads them), then instance properties. A typed property with no default has none and is left out.
+     * @return array<string, mixed>
+     */
+    public function getDefaultProperties(): array
+    {
+        $out = [];
+        $all = $this->getProperties();
+        foreach ($all as $p) {
+            if ($p->isStatic() && $p->hasDefaultValue()) { $out[$p->getName()] = $p->getDefaultValue(); }
+        }
+        foreach ($all as $p) {
+            if (!$p->isStatic() && $p->hasDefaultValue()) { $out[$p->getName()] = $p->getDefaultValue(); }
+        }
+        return $out;
+    }
+
+    /** One static property's value; `$default` (when given) answers a missing one. */
+    public function getStaticPropertyValue(string $name, mixed $default = null): mixed
+    {
+        if ($this->hasProperty($name)) {
+            $p = $this->getProperty($name);
+            if ($p->isStatic()) { return $p->getValue(); }
+        }
+        if (\func_num_args() > 1) { return $default; }
+        throw new ReflectionException("Property " . $this->name . "::$" . $name . " does not exist");
+    }
+
+    public function setStaticPropertyValue(string $name, mixed $value): void
+    {
+        if ($this->hasProperty($name)) {
+            $p = $this->getProperty($name);
+            if ($p->isStatic()) { $p->setValue(null, $value); return; }
+        }
+        throw new ReflectionException("Class " . $this->name . " does not have a property named " . $name);
+    }
+
+    /**
+     * The docblock / start-line table the compiler synthesized for this class
+     * (`['c' => [doc, line], 'm' => [method => [doc, line]], 'p' => [prop => [doc]]]`),
+     * or [] when the program never asked for one. Internal.
+     * @return array<string, mixed>
+     */
+    public function __docInfo(): array
+    {
+        $fn = __mc_refl_doc_fn($this->h);
+        if ($fn === 0) { return []; }
+        return __mc_refl_call0($fn);
+    }
+
+    /**
+     * The traits the class uses directly, in declaration order.
+     * @return string[]
+     */
+    public function getTraitNames(): array
+    {
+        $i = $this->__docInfo();
+        return $i['u'] ?? [];
+    }
+
+    /**
+     * @return array<string, ReflectionClass>
+     */
+    public function getTraits(): array
+    {
+        $out = [];
+        foreach ($this->getTraitNames() as $n) {
+            $out[$n] = new ReflectionClass($n);
+        }
+        return $out;
+    }
+
+    public function isReadOnly(): bool
+    {
+        $i = $this->__docInfo();
+        return $i['r'] ?? false;
+    }
+
+    /** The raw `/** … *\/` block above the class, or false. */
+    public function getDocComment(): string|false
+    {
+        $i = $this->__docInfo();
+        return $i['c'][0] ?? false;
+    }
+
+    public function getStartLine(): int|false
+    {
+        $i = $this->__docInfo();
+        return $i['c'][1] ?? false;
+    }
+
     /** The rmeta address. Internal — the id of a class, for identity checks. */
     public function __handle(): int
     {
@@ -610,13 +854,50 @@ class ReflectionObject extends ReflectionClass
 }
 
 /**
+ * Common base of ReflectionFunction and ReflectionMethod (php's
+ * ReflectionFunctionAbstract). Abstract members are exactly the intersection
+ * both subclasses implement.
+ */
+abstract class ReflectionFunctionAbstract
+{
+    public string $name = "";
+
+    abstract public function getName(): string;
+    abstract public function getShortName(): string;
+    abstract public function getNamespaceName(): string;
+    abstract public function inNamespace(): bool;
+    abstract public function getParameters(): array;
+    abstract public function getNumberOfParameters(): int;
+    abstract public function getNumberOfRequiredParameters(): int;
+    abstract public function hasReturnType(): bool;
+    abstract public function getReturnType(): ReflectionType|null;
+    abstract public function getAttributes(?string $name = null, int $flags = 0): array;
+    abstract public function isInternal(): bool;
+    abstract public function isUserDefined(): bool;
+    abstract public function isVariadic(): bool;
+    abstract public function isDeprecated(): bool;
+    abstract public function returnsReference(): bool;
+    abstract public function hasTentativeReturnType(): bool;
+    abstract public function getTentativeReturnType(): ReflectionType|null;
+    abstract public function getExtension(): ?object;
+    abstract public function getExtensionName(): string|false;
+}
+
+/**
  * A method handle. Ф2: `invoke()` calls the method's uniform trampoline
  * indirectly. The `mixed ...$args` form packs a `vec[cell]` the trampoline
  * unboxes per parameter; `invokeArgs(array)` (an already-built array) waits on
  * call-site element boxing (Ф2b).
  */
-class ReflectionMethod
+class ReflectionMethod extends ReflectionFunctionAbstract
 {
+    public const IS_STATIC = 16;
+    public const IS_PUBLIC = 1;
+    public const IS_PROTECTED = 2;
+    public const IS_PRIVATE = 4;
+    public const IS_ABSTRACT = 64;
+    public const IS_FINAL = 32;
+
     public string $name = "";
     public string $class = "";
 
@@ -674,6 +955,31 @@ class ReflectionMethod
         return $out;
     }
 
+    /** php's dump of a method: its modifiers, parameters and return type. */
+    public function __toString(): string
+    {
+        $mods = '';
+        if ($this->isAbstract()) { $mods .= 'abstract '; }
+        if ($this->isFinal()) { $mods .= 'final '; }
+        if ($this->isStatic()) { $mods .= 'static '; }
+        $mods .= $this->isPublic() ? 'public' : ($this->isProtected() ? 'protected' : 'private');
+        $decl = $this->getDeclaringClass()->getName();
+        $info = '<user' . ($this->isConstructor() ? ', ctor' : '') . ($decl !== $this->class ? ', inherits ' . $decl : '') . '>';
+        $out = 'Method [ ' . $info . ' ' . $mods . ' method ' . $this->name . " ] {\n";
+        $file = $this->getFileName();
+        if ($file !== false && $file !== '') {
+            $out .= '  @@ ' . $file . ' ' . (string) $this->getStartLine() . ' - ' . (string) $this->getStartLine() . "\n";
+        }
+        $params = $this->getParameters();
+        if (\count($params) > 0) {
+            $out .= "\n  - Parameters [" . (string) \count($params) . "] {\n";
+            foreach ($params as $p) { $out .= '    ' . (string) $p . "\n"; }
+            $out .= "  }\n";
+        }
+        if ($this->hasReturnType()) { $out .= '  - Return [ ' . (string) $this->getReturnType() . " ]\n"; }
+        return $out . "}\n";
+    }
+
     public function getNumberOfParameters(): int
     {
         return __mc_refl_row_nparams($this->row);
@@ -711,12 +1017,6 @@ class ReflectionMethod
             throw new ReflectionException("Method " . $this->name . " is not invokable");
         }
         return __mc_refl_invoke($this->tramp, $object, $args);
-    }
-
-    /** A closure over the method; `$object` is the receiver (null for a static method). */
-    public function getClosure(?object $object = null): \Closure
-    {
-        return function (mixed ...$args) use ($object) { return $this->invoke($object, ...$args); };
     }
 
     private function flags(): int
@@ -804,6 +1104,139 @@ class ReflectionMethod
     }
 
     /**
+     * The `[doc, line]` entry of this method, found in the class it was reached
+     * through or the nearest ancestor that declares it.
+     * @return array<int, mixed>
+     */
+    private function docEntry(): array
+    {
+        $cls = $this->class;
+        $key = \strtolower($this->name);
+        while (true) {
+            $rc = new ReflectionClass($cls);
+            $i = $rc->__docInfo();
+            if (isset($i['m'][$key])) { return $i['m'][$key]; }
+            $p = $rc->getParentClass();
+            if ($p === false) { return []; }
+            $cls = $p->getName();
+        }
+    }
+
+    public function getDocComment(): string|false
+    {
+        $e = $this->docEntry();
+        return $e[0] ?? false;
+    }
+
+    public function getStartLine(): int|false
+    {
+        $e = $this->docEntry();
+        return $e[1] ?? false;
+    }
+
+    public function isConstructor(): bool
+    {
+        return \strtolower($this->name) === '__construct';
+    }
+
+    public function isDestructor(): bool
+    {
+        return \strtolower($this->name) === '__destruct';
+    }
+
+    /**
+     * Prototypes (the overridden ancestor or implemented interface method) are not resolved: a method row
+     * does not record where it was DECLARED (an inherited method reports the subclass) and an interface's
+     * methods are not reflectable, so no method reports a prototype.
+     */
+    public function hasPrototype(): bool
+    {
+        return false;
+    }
+
+    public function getPrototype(): ReflectionMethod
+    {
+        throw new ReflectionException("Method " . $this->class . "::" . $this->name . " does not have a prototype");
+    }
+
+    public function getShortName(): string
+    {
+        return $this->name;
+    }
+
+    public function getNamespaceName(): string
+    {
+        return '';
+    }
+
+    public function inNamespace(): bool
+    {
+        return false;
+    }
+
+    public function isInternal(): bool
+    {
+        return (new ReflectionClass($this->class))->isInternal();
+    }
+
+    public function isUserDefined(): bool
+    {
+        return !$this->isInternal();
+    }
+
+    public function isVariadic(): bool
+    {
+        foreach ($this->getParameters() as $p) {
+            if ($p->isVariadic()) { return true; }
+        }
+        return false;
+    }
+
+    public function returnsReference(): bool
+    {
+        return false;
+    }
+
+    public function hasTentativeReturnType(): bool
+    {
+        return false;
+    }
+
+    public function getTentativeReturnType(): ReflectionType|null
+    {
+        return null;
+    }
+
+    public function getExtension(): ?object
+    {
+        return null;
+    }
+
+    public function getExtensionName(): string|false
+    {
+        return false;
+    }
+
+    /** The file the method's class was declared in, or false for an internal one. */
+    public function getFileName(): string|false
+    {
+        return (new ReflectionClass($this->class))->getFileName();
+    }
+
+    /**
+     * A closure over the method: bound to `$object` for an instance method,
+     * unbound for a static one. Goes through invokeArgs, so a private method is
+     * reachable exactly as it is through invoke().
+     */
+    public function getClosure(?object $object = null): \Closure
+    {
+        $m = $this;
+        return function (mixed ...$args) use ($m, $object) {
+            return $m->invokeArgs($object, $args);
+        };
+    }
+
+    /**
      * The method's attributes, optionally filtered to `$name`.
      * @return ReflectionAttribute[]
      */
@@ -829,6 +1262,11 @@ class ReflectionProperty
     public const IS_PUBLIC = 1;
     public const IS_PROTECTED = 2;
     public const IS_PRIVATE = 4;
+    public const IS_ABSTRACT = 64;
+    public const IS_FINAL = 32;
+    public const IS_VIRTUAL = 512;
+    public const IS_PROTECTED_SET = 2048;
+    public const IS_PRIVATE_SET = 4096;
 
     public string $name = "";
     public string $class = "";
@@ -894,6 +1332,20 @@ class ReflectionProperty
     public function getName(): string
     {
         return $this->name;
+    }
+
+    /** php's dump of a property: modifiers, type, name and default. */
+    public function __toString(): string
+    {
+        $out = 'Property [ ' . ($this->isPublic() ? 'public' : ($this->isProtected() ? 'protected' : 'private'));
+        if ($this->isStatic()) { $out .= ' static'; }
+        if ($this->isReadonly()) { $out .= ' readonly'; }
+        if ($this->hasType()) { $out .= ' ' . (string) $this->getType(); }
+        $out .= ' $' . $this->name;
+        if ($this->hasDefaultValue() && !$this->isPromoted()) {
+            $out .= ' = ' . __mc_refl_param_default_text($this->getDefaultValue());
+        }
+        return $out . " ]\n";
     }
 
     public function hasType(): bool
@@ -983,6 +1435,19 @@ class ReflectionProperty
     }
 
     /**
+     * Set the property on `$object` WITHOUT running its set hook (php 8.4). The
+     * row's 4th accessor word, read through the setter builtin from `extra + 8`.
+     */
+    public function setRawValue(object $object, mixed $value): void
+    {
+        $raw = $this->extra === 0 ? 0 : __mc_refl_prop_setter($this->extra + 8);
+        if ($raw === 0) {
+            throw new ReflectionException("Cannot write property " . $this->name);
+        }
+        __mc_refl_prop_set($raw, $object, $value);
+    }
+
+    /**
      * The property's attributes, optionally filtered to `$name`.
      * @return ReflectionAttribute[]
      */
@@ -991,6 +1456,110 @@ class ReflectionProperty
         return __mc_refl_attrs_of(
             __mc_refl_row_attrs($this->row),
             __mc_refl_row_nattrs($this->row), $name, $flags);
+    }
+
+    /** A constructor-promoted property: the declaring class's `__construct` has a promoted parameter of this name. */
+    public function isPromoted(): bool
+    {
+        if (!(new ReflectionClass($this->class))->hasMethod('__construct')) { return false; }
+        foreach ((new ReflectionMethod($this->class, '__construct'))->getParameters() as $p) {
+            if ($p->getName() === $this->name) { return $p->isPromoted(); }
+        }
+        return false;
+    }
+
+    /** A default is written (`= expr`), or the property is untyped (implicitly null). A promoted one has none. */
+    public function hasDefaultValue(): bool
+    {
+        if ($this->isPromoted()) { return false; }
+        if (($this->flags & 128) !== 0) { return true; }
+        return !$this->hasType();
+    }
+
+    /**
+     * The declared default: read off an instance made without its constructor (a
+     * static property reads its current value). Null when there is none.
+     */
+    public function getDefaultValue(): mixed
+    {
+        if (!$this->hasDefaultValue()) { return null; }
+        if ($this->isStatic()) { return $this->getValue(null); }
+        $rc = new ReflectionClass($this->class);
+        if (!$rc->isInstantiable()) { return null; }
+        return $this->getValue($rc->newInstanceWithoutConstructor());
+    }
+
+    public function getDocComment(): string|false
+    {
+        $i = (new ReflectionClass($this->class))->__docInfo();
+        return $i['p'][$this->name][0] ?? false;
+    }
+
+    /** A declared property — a dynamic one has no row to reflect. */
+    public function isDefault(): bool
+    {
+        return true;
+    }
+
+    public function isDynamic(): bool
+    {
+        return false;
+    }
+
+    public function isAbstract(): bool
+    {
+        return false;
+    }
+
+    public function isFinal(): bool
+    {
+        return false;
+    }
+
+    /**
+     * PHP 8.4 asymmetric visibility and property hooks. `private(set)` / `protected(set)` is parsed but
+     * not recorded, and a hook is not exposed as a ReflectionMethod, so a property reports no set-only
+     * visibility, is never virtual and has no hooks.
+     */
+    public function isProtectedSet(): bool
+    {
+        return false;
+    }
+
+    public function isPrivateSet(): bool
+    {
+        return false;
+    }
+
+    public function isVirtual(): bool
+    {
+        return false;
+    }
+
+    /** @return array<string, ReflectionMethod> */
+    public function getHooks(): array
+    {
+        return [];
+    }
+
+    /** Lazy objects are not supported, so nothing is ever lazy. */
+    public function isLazy(object $object): bool
+    {
+        return false;
+    }
+
+    /** The key php uses for the property in an `(array)` cast: `\0Class\0name` / `\0*\0name` / `name`. */
+    public function getMangledName(): string
+    {
+        if ($this->isPrivate()) { return "\0" . $this->class . "\0" . $this->name; }
+        if ($this->isProtected()) { return "\0*\0" . $this->name; }
+        return $this->name;
+    }
+
+    /** No lazy initialization to skip: same as setRawValue. */
+    public function setRawValueWithoutLazyInitialization(object $object, mixed $value): void
+    {
+        $this->setRawValue($object, $value);
     }
 
     /** Manticore has no per-object uninitialized-slot tracking; typed slots
@@ -1006,6 +1575,26 @@ class ReflectionProperty
  * method's parameter table by index — the raw base address + position carried
  * as ints. Ф2d: the shape a DI container walks to autowire a constructor.
  */
+/** A parameter default as php's ReflectionParameter::__toString() prints it. */
+function __mc_refl_param_default_text(mixed $v): string
+{
+    if ($v === null) { return "NULL"; }
+    if ($v === true) { return "true"; }
+    if ($v === false) { return "false"; }
+    if (\is_int($v)) { return (string) $v; }
+    if (\is_float($v)) { return \var_export($v, true); }
+    if (\is_string($v)) { return "'" . $v . "'"; }
+    if (\is_array($v)) {
+        $parts = [];
+        $list = \array_is_list($v);
+        foreach ($v as $k => $x) {
+            $parts[] = ($list ? "" : (\is_int($k) ? (string) $k : "'" . $k . "'") . " => ") . __mc_refl_param_default_text($x);
+        }
+        return "[" . \implode(", ", $parts) . "]";
+    }
+    return "Object";
+}
+
 class ReflectionParameter
 {
     public string $name = "";
@@ -1034,6 +1623,30 @@ class ReflectionParameter
         return $this->name;
     }
 
+    /**
+     * php's textual form: `Parameter #1 [ <optional> ?Foo $name = NULL ]`. Symfony parses the tail after
+     * `$name = ` to learn whether a default is NULL. A default written as a constant expression
+     * (`PHP_INT_MAX`, `self::X`) is printed as its VALUE: the expression is not kept after evaluation.
+     */
+    public function __toString(): string
+    {
+        $out = "Parameter #" . (string) $this->getPosition() . " [ <" . ($this->isOptional() ? "optional" : "required") . "> ";
+        if ($this->hasType()) {
+            $out .= (string) $this->getType() . " ";
+        }
+        if ($this->isPassedByReference()) {
+            $out .= "&";
+        }
+        if ($this->isVariadic()) {
+            $out .= "...";
+        }
+        $out .= "$" . $this->name;
+        if ($this->isDefaultValueAvailable()) {
+            $out .= " = " . __mc_refl_param_default_text($this->getDefaultValue());
+        }
+        return $out . " ]";
+    }
+
     public function getPosition(): int
     {
         return $this->pos;
@@ -1054,7 +1667,7 @@ class ReflectionParameter
 
     public function isOptional(): bool
     {
-        return ($this->flags & 1) !== 0;
+        return ($this->flags & 1) !== 0 || $this->isVariadic();
     }
 
     public function isDefaultValueAvailable(): bool
@@ -1075,6 +1688,16 @@ class ReflectionParameter
     public function allowsNull(): bool
     {
         return ($this->flags & 2) !== 0;
+    }
+
+    public function isPassedByReference(): bool
+    {
+        return ($this->flags & 32) !== 0;
+    }
+
+    public function canBePassedByValue(): bool
+    {
+        return ($this->flags & 32) === 0;
     }
 
     /**
@@ -1210,10 +1833,22 @@ class ReflectionEnumUnitCase
 
     private mixed $case = null;
 
-    public function __construct(string $class, string $name, mixed $case)
+    /**
+     * `new ReflectionEnumUnitCase(Suit::class, 'Hearts')`; ReflectionEnum::getCases()
+     * passes the case singleton it already holds as `$case`.
+     */
+    public function __construct(object|string $class, string $name, mixed $case = null)
     {
-        $this->class = $class;
+        $this->class = (new ReflectionClass($class))->getName();
         $this->name = $name;
+        if ($case === null) {
+            foreach ((new ReflectionEnum($this->class))->getCases() as $c) {
+                if ($c->getName() === $name) { $case = $c->getValue(); break; }
+            }
+            if ($case === null) {
+                throw new ReflectionException("Constant " . $this->class . "::" . $name . " is not a case");
+            }
+        }
         $this->case = $case;
     }
 
@@ -1231,6 +1866,46 @@ class ReflectionEnumUnitCase
     public function getDeclaringClass(): ReflectionClass
     {
         return new ReflectionClass($this->class);
+    }
+
+    public function getEnum(): ReflectionEnum
+    {
+        return new ReflectionEnum($this->class);
+    }
+
+    public function isPublic(): bool
+    {
+        return true;
+    }
+
+    public function isPrivate(): bool
+    {
+        return false;
+    }
+
+    public function isProtected(): bool
+    {
+        return false;
+    }
+
+    public function isFinal(): bool
+    {
+        return false;
+    }
+
+    public function getModifiers(): int
+    {
+        return 1;
+    }
+
+    public function isEnumCase(): bool
+    {
+        return true;
+    }
+
+    public function isDeprecated(): bool
+    {
+        return false;
     }
 }
 
@@ -1419,7 +2094,13 @@ function __mc_refl_type_of(string $decl, bool $nullable): object
     }
     if ($cur !== "") { $parts[] = new ReflectionNamedType($cur, false); }
     if ($sep === "&") { return new ReflectionIntersectionType($parts); }
-    return new ReflectionUnionType($parts, $nullable);
+    // `T|null` is php's nullable named type `?T`; `A|B|null` keeps null out of the member list (it prints last).
+    $members = [];
+    foreach ($parts as $p) {
+        if (\strtolower($p->getName()) === "null") { $nullable = true; } else { $members[] = $p; }
+    }
+    if (\count($members) === 1) { return new ReflectionNamedType($members[0]->getName(), true); }
+    return new ReflectionUnionType($members, $nullable);
 }
 
 /**
@@ -1428,7 +2109,9 @@ function __mc_refl_type_of(string $decl, bool $nullable): object
  * reconstruct the argument array / a fresh instance — the arguments were lowered
  * as ordinary expressions, so arrays / enum cases / constants all come back.
  */
-class ReflectionAttribute
+interface Reflector extends Stringable {}
+
+class ReflectionAttribute implements Reflector
 {
     /** Match the filter by exact class name only — is-a matching is not
      *  implemented, so a filter naming a PARENT of the attribute class does not
@@ -1479,6 +2162,38 @@ class ReflectionAttribute
         return __mc_refl_call0($this->argsFn);
     }
 
+    /** php's `Attribute [ Name ] { - Arguments [n] { Argument #i [ ... ] } }`. */
+    public function __toString(): string
+    {
+        $args = $this->getArguments();
+        $out = "Attribute [ " . $this->name . " ]";
+        if (\count($args) === 0) { return $out . "\n"; }
+        $out .= " {\n  - Arguments [" . \count($args) . "] {\n";
+        $i = 0;
+        foreach ($args as $k => $v) {
+            $out .= "    Argument #" . $i . " [ " . (\is_string($k) ? $k . " = " : "") . self::fmtArg($v) . " ]\n";
+            $i = $i + 1;
+        }
+        return $out . "  }\n}\n";
+    }
+
+    private static function fmtArg(mixed $v): string
+    {
+        if ($v === null) { return "NULL"; }
+        if ($v === true) { return "true"; }
+        if ($v === false) { return "false"; }
+        if (\is_string($v)) { return "'" . $v . "'"; }
+        if (\is_array($v)) {
+            $parts = [];
+            $list = \array_is_list($v);
+            foreach ($v as $k => $e) {
+                $parts[] = ($list ? "" : (\is_string($k) ? "'" . $k . "' => " : $k . " => ")) . self::fmtArg($e);
+            }
+            return "[" . \implode(", ", $parts) . "]";
+        }
+        if (\is_object($v)) { return "Object"; }
+        return (string)$v;
+    }
     /** A fresh instance of the attribute class, its arguments applied. */
     public function newInstance(): object
     {
@@ -1503,7 +2218,7 @@ class ReflectionAttribute
  * function's uniform trampoline — the static-method invoke shape with the
  * receiver ignored.
  */
-class ReflectionFunction
+class ReflectionFunction extends ReflectionFunctionAbstract
 {
     public string $name = "";
 
@@ -1645,6 +2360,16 @@ class ReflectionFunction
         return __mc_refl_invoke($this->tramp, 0, $args);
     }
 
+    /**
+     * @return ReflectionAttribute[]
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array
+    {
+        return __mc_refl_attrs_of(
+            __mc_refl_row_attrs($this->row),
+            __mc_refl_row_nattrs($this->row), $name, $flags);
+    }
+
     public function getClosureThis(): ?object
     {
         if ($this->closure === null) { return null; }
@@ -1656,6 +2381,44 @@ class ReflectionFunction
     public function getClosureCalledClass(): ?object
     {
         return null;
+    }
+
+    public function isClosure(): bool
+    {
+        return $this->closure !== null;
+    }
+
+    public function isVariadic(): bool
+    {
+        foreach ($this->getParameters() as $p) {
+            if ($p->isVariadic()) { return true; }
+        }
+        return false;
+    }
+
+    public function returnsReference(): bool
+    {
+        return false;
+    }
+
+    public function hasTentativeReturnType(): bool
+    {
+        return false;
+    }
+
+    public function getTentativeReturnType(): ReflectionType|null
+    {
+        return null;
+    }
+
+    public function getExtension(): ?object
+    {
+        return null;
+    }
+
+    public function getExtensionName(): string|false
+    {
+        return false;
     }
 
     public function isAnonymous(): bool
@@ -1678,6 +2441,11 @@ class ReflectionFunction
  */
 class ReflectionClassConstant
 {
+    public const IS_PUBLIC = 1;
+    public const IS_PROTECTED = 2;
+    public const IS_PRIVATE = 4;
+    public const IS_FINAL = 32;
+
     public string $name = "";
     public string $class = "";
 
@@ -1705,9 +2473,33 @@ class ReflectionClassConstant
         return $consts[$this->name] ?? null;
     }
 
+    /**
+     * A class constant's attributes. The compiler keeps no attribute rows for constants yet (#244), so
+     * this answers none: right for a constant that carries none, which is what Symfony's
+     * ReflectionClassResource hashes through here.
+     * @return ReflectionAttribute[]
+     */
+    public function getAttributes(?string $name = null, int $flags = 0): array
+    {
+        return [];
+    }
+
     public function getDeclaringClass(): ReflectionClass
     {
         return new ReflectionClass($this->class);
+    }
+
+    /** True for an enum's case, false for an ordinary constant (of an enum too). */
+    public function isEnumCase(): bool
+    {
+        $rc = new ReflectionClass($this->class);
+        if (!$rc->isEnum()) { return false; }
+        return (new ReflectionEnum($this->class))->hasCase($this->name);
+    }
+
+    public function isDeprecated(): bool
+    {
+        return false;
     }
 
     public function isPublic(): bool
@@ -1734,4 +2526,30 @@ class ReflectionClassConstant
     {
         return 1;
     }
+}
+
+/**
+ * Identity of a PHP reference held by an array element. A compiled program does not expose element
+ * references as a separate identity, so no element is ever reported as a reference: the factory answers
+ * null (php's answer for a plain value) after php's own key check, and an instance cannot be built.
+ */
+final class ReflectionReference
+{
+    private function __construct() {}
+
+    /** @param mixed[] $array */
+    public static function fromArrayElement(array $array, int|string $key): ?ReflectionReference
+    {
+        if (!\array_key_exists($key, $array)) {
+            throw new ReflectionException("Array key not found");
+        }
+        return null;
+    }
+
+    public function getId(): string
+    {
+        throw new ReflectionException("Reference identity is not available");
+    }
+
+    private function __clone() {}
 }

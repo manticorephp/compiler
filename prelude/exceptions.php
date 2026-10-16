@@ -41,6 +41,8 @@ class Exception implements Throwable
     public string $file = "";
     /** @var string[] */ public array $traceNames = [];
     /** @var int[] */ public array $traceLines = [];
+    /** php keeps the frames here; ours live in traceNames/traceLines. Declared so reflection (symfony/polyfill-deepclone resets it on a prototype) finds it. */
+    private array $trace = [];
 
     public function __construct(string $message = "", int $code = 0, ?Throwable $previous = null)
     {
@@ -79,6 +81,8 @@ class Error implements Throwable
     public string $file = "";
     /** @var string[] */ public array $traceNames = [];
     /** @var int[] */ public array $traceLines = [];
+    /** php keeps the frames here; ours live in traceNames/traceLines. Declared so reflection (symfony/polyfill-deepclone resets it on a prototype) finds it. */
+    private array $trace = [];
 
     public function __construct(string $message = "", int $code = 0, ?Throwable $previous = null)
     {

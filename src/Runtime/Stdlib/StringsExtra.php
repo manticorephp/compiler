@@ -413,34 +413,34 @@ function strtr(string $string, array|string $from, ?string $to = null): string
 
 /**
  * The byte form: each byte of `$from` becomes the byte at the same index in
- * `$to`, up to the shorter of the two. Untouched runs are copied whole.
+ * `$to`, up to the shorter of the two; for a byte `$from` repeats, the LAST
+ * index wins. Untouched runs are skipped with one `strcspn` and copied whole,
+ * so a string with nothing to translate (the common case: a lower-case header
+ * name against an upper-case map) costs one scan and no allocation.
  */
 #[\Manticore\Attr\Overload('strtr')]
 function strtr__bytes(string $string, string $from, string $to): string
-{
-    return \__mc_strtr_bytes($string, $from, $to);
-}
-
-/** Native codegen builtin; this body is the bootstrap fallback. */
-function __mc_strtr_bytes(string $string, string $from, string $to): string
 {
     $m = \strlen($from);
     $mt = \strlen($to);
     if ($mt < $m) { $m = $mt; }
     if ($m === 0) { return $string; }
-    /** @var int[] $map */
-    $map = [];
-    for ($c = 0; $c < 256; $c = $c + 1) { $map[] = $c; }
-    for ($j = 0; $j < $m; $j = $j + 1) { $map[\ord($from[$j])] = \ord($to[$j]); }
+    if (\strlen($from) > $m) { $from = \substr($from, 0, $m); }
     $n = \strlen($string);
+    $i = \strcspn($string, $from);
+    if ($i >= $n) { return $string; }
     $out = '';
     $run = 0;
-    for ($i = 0; $i < $n; $i = $i + 1) {
+    while ($i < $n) {
         $b = \ord($string[$i]);
-        $r = $map[$b];
-        if ($r === $b) { continue; }
-        $out = $out . \substr($string, $run, $i - $run) . \chr($r);
-        $run = $i + 1;
+        $r = \ord($to[\strrpos($from, \chr($b))]);
+        if ($r !== $b) {
+            $out = $out . \substr($string, $run, $i - $run) . \chr($r);
+            $run = $i + 1;
+        }
+        $i = $i + 1;
+        if ($i >= $n) { break; }
+        $i = $i + \strcspn($string, $from, $i);
     }
     if ($run === 0) { return $string; }
     return $out . \substr($string, $run);

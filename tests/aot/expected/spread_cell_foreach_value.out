@@ -1,0 +1,25 @@
+static pk 1.0
+fn pk 1.0 m %s
+pair pk 1.0
+static qk 2.0
+fn qk 2.0 custom
+pair qk 2.0
+Array
+(
+    [p] => Array
+        (
+            [0] => pk
+            [1] => 1.0
+            [2] => m %s
+            [3] => p
+        )
+
+    [q] => Array
+        (
+            [0] => qk
+            [1] => 2.0
+            [2] => custom
+            [3] => q
+        )
+
+)

@@ -138,6 +138,13 @@ trait LowerExprs
             // gates that were already bare (func_get_args, sscanf, …) have
             // always made the same trade.
             $fnBare = $this->bareName($fn);
+            // `__mc_raw_prop_store($obj, 'prop', $v)` — ReflectSynth's set-hook-bypassing
+            // write (`ReflectionProperty::setRawValue`): the store itself, hook skipped.
+            if ($fnBare === '__mc_raw_prop_store' && \count($expr->args) === 3
+                && $expr->args[1]->kind === 'StringLiteral') {
+                $rv = $this->lowerExpr($expr->args[2]);
+                return new StoreProperty($this->lowerExpr($expr->args[0]), $this->stringLitValue($expr->args[1]), $rv, $rv->type, true);
+            }
             // `call_user_func($cb, ...$rest)` → invoke $cb with the rest args,
             // reusing the Invoke path (literal / FCC / const-callable dispatch).
             // `forward_static_call` is the same call; php additionally forwards the late-static-binding
@@ -271,6 +278,32 @@ trait LowerExprs
             // array names fall through to the stdlib). An undefined var is not
             // skipped (yields its null slot) — the common "compact vars you just
             // set" usage matches PHP.
+            // `extract($a, $flags, $prefix)` writes locals by RUNTIME name. The
+            // marker is expanded once the whole function is lowered and every
+            // name it can write is known ({@see ExtractScope}).
+            $exN = \count($expr->args);
+            if ($fnBare === 'extract' && $exN >= 1 && $exN <= 3) {
+                $plain = true;
+                foreach ($expr->args as $a) {
+                    if ($a->kind === 'NamedArg' || $a->kind === 'Spread') { $plain = false; }
+                }
+                if ($plain) {
+                    $this->sawExtract = true;
+                    $exArgs = [
+                        $this->lowerExpr($expr->args[0]),
+                        $exN >= 2 ? $this->lowerExpr($expr->args[1]) : new IntConst(0, Type::int_()),
+                        $exN >= 3 ? $this->lowerExpr($expr->args[2]) : new StringConst('', Type::string_()),
+                        new BoolConst($exN >= 3, Type::bool_()),
+                    ];
+                    return new Block([new Call(ExtractScope::SITE, $exArgs, Type::int_())], Type::int_());
+                }
+            }
+            // `include` inside a function of a file that is no compile unit (a
+            // template) runs it HERE, in this scope.
+            if ($fnBare === '__mc_require_value' && \count($expr->args) === 1 && !$this->lowerInMain) {
+                $inl = $this->lowerScopedInclude($expr->args[0]);
+                if ($inl !== null) { return $inl; }
+            }
             if ($fnBare === 'compact' && \count($expr->args) >= 1) {
                 $names = [];
                 $litOnly = true;
@@ -989,6 +1022,19 @@ trait LowerExprs
             $idx = $target->index === null
                 ? new NullConst(Type::null_())
                 : $this->foldNumericKey($this->lowerExpr($target->index));
+            // A right-hand side that runs code may write the very container this
+            // store loads (`self::$m[$k] = self::build($k)`, `$this->c[$k] ??= $this->mk($k)`):
+            // the load happens before the value is emitted, so the store would
+            // go through a buffer the callee already grew or replaced. php
+            // evaluates the value first and reads the container after it.
+            if ($this->runsCode($value) && !$this->dimRootIsLocal($target)) {
+                $name = '__lv_' . (string)$this->lvCounter;
+                $this->lvCounter = $this->lvCounter + 1;
+                $this->valueTemps[] = $name;
+                $tmp = new StoreLocal($name, $value, $value->type);
+                $store = new StoreElement($arr, $idx, new LoadLocal($name, Type::unknown()), $value->type);
+                return new Block([$tmp, $store], $value->type);
+            }
             return new StoreElement($arr, $idx, $value, $value->type);
         }
         if ($target->kind === 'PropertyAccess') {
@@ -1021,6 +1067,26 @@ trait LowerExprs
             . ' at ' . ($this->lowerSourceFile !== '' ? $this->lowerSourceFile : '<source>')
             . ':' . (string)$target->span->line
         );
+    }
+
+    /** The dim chain bottoms out in a plain local: no call can reach its buffer. */
+    private function dimRootIsLocal(\Parser\Ast\Expr $e): bool
+    {
+        while ($e->kind === 'ArrayAccess') { $e = $e->array; }
+        return $e->kind === 'Variable';
+    }
+
+    private function runsCode(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ) {
+            return true;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->runsCode($c)) { return true; }
+        }
+        return false;
     }
 
     private function buildBinop(string $op, Node $left, Node $right): Node
@@ -1077,5 +1143,207 @@ trait LowerExprs
             return $this->astIsPlainRead($e->object);
         }
         return false;
+    }
+
+    /**
+     * `include <path>` inside a function, where the path can name files that
+     * are no compile unit (templates: the build compiles declarations and data
+     * files, never a script). php runs such a file in the INCLUDER's scope —
+     * its variables are the function's, `$this` included — so each candidate
+     * is lowered right here as one arm of a chain on the resolved path:
+     *
+     *     $p = <path>; $r = realpath($p);
+     *     if ($r === '/abs/a.php') { <a's statements>; $v = 1; } elseif …
+     *     else { $v = __mc_require_value($p); }    // the eager model, as before
+     *
+     * The candidate set is the build-time view of the path: a constant path,
+     * or every file under the constant directory prefix of a concatenation
+     * (`__DIR__ . '/views/' . $name`); both arms of a ternary. Null when no
+     * candidate is inlinable, which keeps the site exactly as it was.
+     */
+    private function lowerScopedInclude(\Parser\Ast\Expr $path): ?Node
+    {
+        if ($path instanceof \Parser\Ast\Variable && \str_starts_with($path->name, '__mc_inc_p')) {
+            return null;
+        }
+        $files = [];
+        $this->scopedIncludeCandidates($path, $files);
+        $arms = [];
+        foreach ($files as $abs => $_f) {
+            if (isset($this->scopedIncludeStack[$abs])) { continue; }
+            $stmts = $this->scopedIncludeStmts($abs);
+            if ($stmts !== []) { $arms[$abs] = $stmts; }
+        }
+        if ($arms === []) { return null; }
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $sp = $path->span;
+        $p = '__mc_inc_p' . $id;
+        $r = '__mc_inc_r' . $id;
+        $v = '__mc_inc_v' . $id;
+        $one = \Parser\Ast\Stmt::expression(\Parser\Ast\Expr::assign(\Parser\Ast\Expr::variable($v, $sp),
+            \Parser\Ast\Expr::call('__mir_to_cell', [\Parser\Ast\Expr::int(1, $sp)], $sp), $sp), $sp);
+        $else = new \Parser\Ast\Block([\Parser\Ast\Stmt::expression(\Parser\Ast\Expr::assign(
+            \Parser\Ast\Expr::variable($v, $sp),
+            \Parser\Ast\Expr::call('__mc_require_value', [\Parser\Ast\Expr::variable($p, $sp)], $sp), $sp), $sp)]);
+        $first = null;
+        $firstBody = new \Parser\Ast\Block([]);
+        $elseifs = [];
+        $hasThis = $this->currentLowerClass !== '' && $this->currentLowerFnHasThis;
+        foreach ($arms as $abs => $stmts) {
+            $cond = \Parser\Ast\Expr::binary('===', \Parser\Ast\Expr::variable($r, $sp),
+                \Parser\Ast\Expr::string($abs, $sp), $sp);
+            $body = $stmts;
+            $body[] = $one;
+            // A template reading `$this` from a scope that has none: php
+            // throws when it gets there, and so does this arm.
+            if (!$hasThis && isset($this->scopedIncludeThis[$abs])) {
+                $body = [\Parser\Ast\Stmt::throw_(\Parser\Ast\Expr::new_('Error',
+                    [\Parser\Ast\Expr::string('Using $this when not in object context', $sp)], $sp), $sp)];
+            }
+            if ($first === null) {
+                $first = $cond;
+                $firstBody = new \Parser\Ast\Block($body);
+            } else {
+                $elseifs[] = new \Parser\Ast\ElseIfArm($cond, new \Parser\Ast\Block($body));
+            }
+        }
+        $out = [
+            $this->lowerStmt(\Parser\Ast\Stmt::expression(\Parser\Ast\Expr::assign(
+                \Parser\Ast\Expr::variable($p, $sp), $path, $sp), $sp)),
+            $this->lowerStmt(\Parser\Ast\Stmt::expression(\Parser\Ast\Expr::assign(
+                \Parser\Ast\Expr::variable($r, $sp),
+                \Parser\Ast\Expr::call('realpath', [\Parser\Ast\Expr::variable($p, $sp)], $sp), $sp), $sp)),
+        ];
+        foreach ($arms as $abs => $_s) { $this->scopedIncludeStack[$abs] = true; }
+        $out[] = $this->lowerStmt(\Parser\Ast\Stmt::if_($first, $firstBody, $elseifs, $else, $sp));
+        foreach ($arms as $abs => $_s) { unset($this->scopedIncludeStack[$abs]); }
+        $out[] = new LoadLocal($v, Type::cell());
+        return new Block($out, Type::cell());
+    }
+
+    /**
+     * The build-time candidates of an include path, by absolute path.
+     * @param array<string, bool> $out
+     */
+    private function scopedIncludeCandidates(\Parser\Ast\Expr $e, array &$out): void
+    {
+        if ($e instanceof \Parser\Ast\Ternary) {
+            $this->scopedIncludeCandidates($e->then ?? $e->condition, $out);
+            $this->scopedIncludeCandidates($e->else, $out);
+            return;
+        }
+        $full = $this->constIncludePath($e);
+        if ($full !== null) {
+            $real = \realpath($full);
+            if ($real !== false && \is_file($real)) { $out[$real] = true; }
+            return;
+        }
+        $prefix = $this->constIncludePrefix($e);
+        if ($prefix === null) { return; }
+        $slash = \strrpos($prefix, '/');
+        if ($slash === false || $slash === 0) { return; }
+        $dir = \substr($prefix, 0, $slash);
+        $found = [];
+        // ponytail: a directory of more than 64 files is not a template set;
+        // such a site keeps the eager model rather than inlining a tree.
+        if (!$this->scopedIncludeScan($dir, $prefix, $found, 0)) { return; }
+        foreach ($found as $f => $_b) {
+            $real = \realpath($f);
+            if ($real !== false) { $out[$real] = true; }
+        }
+    }
+
+    /** @param array<string, bool> $found */
+    private function scopedIncludeScan(string $dir, string $prefix, array &$found, int $depth): bool
+    {
+        if ($depth > 4 || !\is_dir($dir)) { return true; }
+        $ents = \scandir($dir);
+        if ($ents === false) { return true; }
+        foreach ($ents as $ent) {
+            if ($ent === '.' || $ent === '..') { continue; }
+            $p = $dir . '/' . $ent;
+            if (\is_dir($p)) {
+                if (!$this->scopedIncludeScan($p, $prefix, $found, $depth + 1)) { return false; }
+                continue;
+            }
+            if (!\str_starts_with($p, $prefix)) { continue; }
+            $found[$p] = true;
+            if (\count($found) > 64) { return false; }
+        }
+        return true;
+    }
+
+    /** An include path folded to a string at build time, or null. */
+    private function constIncludePath(\Parser\Ast\Expr $e): ?string
+    {
+        if ($e instanceof \Parser\Ast\StringLiteral) { return $e->value; }
+        if ($e instanceof \Parser\Ast\BinaryOp) {
+            if ($e->op !== '.') { return null; }
+            $l = $this->constIncludePath($e->left);
+            $r = $l === null ? null : $this->constIncludePath($e->right);
+            return $r === null ? null : $l . $r;
+        }
+        if ($e instanceof \Parser\Ast\CallExpr) {
+            $fn = \strtolower($e->function);
+            $bs = \strrpos($fn, '\\');
+            if ($bs !== false) { $fn = \substr($fn, $bs + 1); }
+            $n = \count($e->args);
+            if ($fn !== 'dirname' || $n < 1 || $n > 2) { return null; }
+            $a = $this->constIncludePath($e->args[0]);
+            if ($a === null) { return null; }
+            if ($n === 1) { return \dirname($a); }
+            $lv = $e->args[1];
+            return $lv instanceof \Parser\Ast\IntLiteral && $lv->value >= 1 ? \dirname($a, $lv->value) : null;
+        }
+        return null;
+    }
+
+    /** The constant leading part of a `.`-concatenated include path, or null. */
+    private function constIncludePrefix(\Parser\Ast\Expr $e): ?string
+    {
+        $full = $this->constIncludePath($e);
+        if ($full !== null) { return $full; }
+        if ($e instanceof \Parser\Ast\BinaryOp && $e->op === '.') {
+            $l = $this->constIncludePath($e->left);
+            if ($l === null) { return $this->constIncludePrefix($e->left); }
+            $r = $this->constIncludePrefix($e->right);
+            return $l . ($r ?? '');
+        }
+        return null;
+    }
+
+    /**
+     * The statements of an inlinable include target: a file that is no compile
+     * unit, parses, declares nothing and has no top-level `return` (whose value
+     * the chain does not carry). Empty when it is not inlinable.
+     * @return \Parser\Ast\Stmt[]
+     */
+    private function scopedIncludeStmts(string $abs): array
+    {
+        if (isset($this->scopedIncludeAst[$abs])) { return $this->scopedIncludeAst[$abs]; }
+        $this->scopedIncludeAst[$abs] = [];
+        // A DEMAND-LOADED unit keeps only its declarations; one that declares
+        // nothing (a template whose markup trips the build's literal `class `
+        // scan) contributes nothing there and is still a script to inline.
+        if (isset($this->compileUnitFiles[$abs]) && !isset($this->demandLoadedFiles[$abs])) { return []; }
+        $size = \filesize($abs);
+        if ($size === false || $size > 262144) { return []; }
+        $src = \file_get_contents($abs);
+        if ($src === false || $src === '') { return []; }
+        try {
+            $program = \Parser\Parser::parseSource($src, $abs, false);
+        } catch (\Throwable $e) {
+            return [];
+        }
+        /** @var \Parser\Ast\Stmt[] $stmts */
+        $stmts = $program->statements;
+        foreach ($stmts as $s) {
+            if (\Manticore\__mc_stmt_declares($s)) { return []; }
+        }
+        if (\Manticore\__mc_file_return_kind($stmts) > 0) { return []; }
+        $this->scopedIncludeAst[$abs] = $stmts;
+        if (\str_contains($src, '$this')) { $this->scopedIncludeThis[$abs] = true; }
+        return $stmts;
     }
 }

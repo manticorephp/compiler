@@ -82,7 +82,7 @@ function random_int(int $min, int $max): int
 
 /**
  * The whole engine in one function, because the state is one `static` slot and
- * a static local is this runtime's module global (the Apcu.php shape). Ops:
+ * a static local is this runtime's module global. Ops:
  *   `next`    — the next tempered 32-bit word, php's `php_mt_rand()`
  *   `srand`   — re-seed from $arg
  *   `mode`    — 0 = MT_RAND_MT19937 (correct), 1 = MT_RAND_PHP (the historic

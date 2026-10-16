@@ -1,0 +1,17 @@
+Attribute [ Z ] {
+  - Arguments [7] {
+    Argument #0 [ NULL ]
+    Argument #1 [ true ]
+    Argument #2 [ 1.5 ]
+    Argument #3 [ 'abcdefghijklmnopqrstuvwxyz' ]
+    Argument #4 [ [1, 2] ]
+    Argument #5 [ k = false ]
+    Argument #6 [ m = 's' ]
+  }
+}
+bool(true)
+bool(true)
+Attribute [ A ]
+bool(true)
+bool(true)
+16

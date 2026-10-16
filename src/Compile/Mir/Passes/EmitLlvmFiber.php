@@ -51,14 +51,16 @@ trait EmitLlvmFiber
     private function fiberRuntime(): string
     {
         $out  = "@__mir_current_fiber = linkonce_odr global ptr null\n";
-        // Per-context save area (64B): the 5 arena globals (head/cur/marks/sp/mcap)
-        // + the exception slot `@__mir_thrown` (bytes 40..55 unused). The bump
+        // Per-context save area (88B): the 5 arena globals (head/cur/marks/sp/mcap)
+        // + the exception slot `@__mir_thrown` @56, and the backtrace segment
+        // ({@see fiberBtSwitch}) at 40/48/64..87. The bump
         // arena+mark-stack is process-global, so a fiber suspending mid-scope
         // would desync main's ⇒ heap corruption. Each fiber runs on its OWN
         // arena; main's state lives here. Exceptions need no per-fiber state:
         // the unwinder walks the running stack only. {@see prelude/fiber.php}
         // brackets every jump with save/load.
-        $out .= "@__mir_fiber_main_ctx = linkonce_odr global [64 x i8] zeroinitializer\n";
+        $out .= "@__mir_fiber_main_ctx = linkonce_odr global [" . (string)self::FIBER_CTX_SIZE . " x i8] zeroinitializer\n";
+        if ($this->rt->needsBacktrace) { $out .= $this->fiberBtSwitch(); }
         // Fiber-stack free-list: mmap'd stacks (guard page already set) returned by
         // a destroyed fiber are POOLED here instead of munmap'd, so a new fiber
         // reuses one — no mmap+mprotect+munmap churn per fiber (~3µs).
@@ -631,6 +633,11 @@ trait EmitLlvmFiber
         $out .= '  ' . $mp . ' = getelementptr inbounds i8, ptr ' . $cp . ", i64 16\n";
         $out .= '  ' . $m . ' = load ptr, ptr ' . $mp . "\n";
         $out .= '  call void @free(ptr ' . $m . ")\n";
+        $bp = $this->ssa->allocReg();
+        $out .= '  ' . $bp . ' = getelementptr inbounds i8, ptr ' . $cp . ", i64 80\n";
+        $b = $this->ssa->allocReg();
+        $out .= '  ' . $b . ' = load ptr, ptr ' . $bp . "\n";
+        $out .= '  call void @free(ptr ' . $b . ")\n";
         $out .= '  call void @free(ptr ' . $cp . ")\n";
         $out .= '  br label %' . $done . "\n";
         $out .= $done . ":\n";
@@ -639,8 +646,12 @@ trait EmitLlvmFiber
         return $out;
     }
 
+    /** Bytes of one context save area: {@see FIBER_CTX_GLOBALS} + the backtrace
+     *  segment of {@see fiberBtSwitch}. */
+    private const FIBER_CTX_SIZE = 88;
+
     /** The saved globals, in ctx order: 5 arena + the exception slot. ptr | i64.
-     *  Bytes 40..55 are unused (they held the sjlj try-slot stack). */
+     *  Bytes 40..55 and 64..87 belong to {@see fiberBtSwitch}. */
     private const FIBER_CTX_GLOBALS = [
         ['@__mir_arena_head', 'ptr', 0],
         ['@__mir_arena_cur', 'ptr', 8],
@@ -661,7 +672,7 @@ trait EmitLlvmFiber
         // was stored into, so the SIGSEGV landed nowhere near the allocation that
         // failed. 0 comes back instead, and Fiber::start() raises FiberError —
         // the same contract the stack has.
-        $out = '  ' . $p . ' = call ptr @calloc(i64 64, i64 1)' . "\n";
+        $out = '  ' . $p . ' = call ptr @calloc(i64 ' . (string)self::FIBER_CTX_SIZE . ', i64 1)' . "\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = ptrtoint ptr ' . $p . ' to i64' . "\n";
         $this->lastValue = $r;
@@ -704,6 +715,9 @@ trait EmitLlvmFiber
             $out .= '  ' . $v . ' = load ' . $ty . ', ptr ' . $slot . "\n";
             $out .= '  store ' . $ty . ' ' . $v . ', ptr ' . $sym . "\n";
         }
+        if ($this->rt->needsBacktrace) {
+            $out .= '  call void @__mir_fiber_bt_switch(ptr ' . $cp . ")\n";
+        }
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
@@ -734,5 +748,105 @@ trait EmitLlvmFiber
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
+    }
+    /**
+     * `__mir_fiber_bt_switch(ctx)` — called by every ctx load: keeps the
+     * process-global backtrace ring (`@__mir_bt_*`) a true call stack across
+     * fiber switches. php shows a fiber's frames ON TOP of its current
+     * resumer's, so each context owns the SEGMENT of the ring above the depth
+     * it was entered at:
+     *
+     *   - loading the RESUMER of the running context (`@__mir_bt_fctx`, null =
+     *     main) is a suspend / finish: the running context's segment is parked
+     *     in its own buffer and the depth drops back to where it was entered;
+     *   - loading any other context is a resume: it records the resumer and
+     *     the entry depth, and its parked segment goes back on top.
+     *
+     * Without it a suspended fiber's frames stayed in the ring and a finished
+     * one's never-returning `__mcRun` frame was never popped: every fiber a
+     * server ran deepened every later trace, up to the 4096-frame ring.
+     *
+     * ctx layout: entry depth @40, resumer ctx @48, segment depth @64,
+     * frames parked @72 (≤ depth: frames past the ring are counted, not
+     * stored), park buffer @80 (names, then lines).
+     */
+    private function fiberBtSwitch(): string
+    {
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
+        return "@__mir_bt_fctx = linkonce_odr global ptr null\n"
+            . "define void @__mir_fiber_bt_switch(ptr %y) {\n"
+            . "entry:\n"
+            . "  %c0 = load ptr, ptr @__mir_bt_fctx\n"
+            . "  %cn = icmp eq ptr %c0, null\n"
+            . "  %c = select i1 %cn, ptr @__mir_fiber_main_ctx, ptr %c0\n"
+            . "  %same = icmp eq ptr %c, %y\n"
+            . "  br i1 %same, label %done, label %chk\n"
+            . "chk:\n"
+            . "  %cpp = getelementptr i8, ptr %c, i64 48\n"
+            . "  %cpar = load ptr, ptr %cpp\n"
+            . "  %ispop = icmp eq ptr %cpar, %y\n"
+            . "  %d = load i64, ptr @__mir_bt_depth\n"
+            . "  br i1 %ispop, label %pop, label %push\n"
+            . "pop:\n"
+            . "  %cbp = getelementptr i8, ptr %c, i64 40\n"
+            . "  %base = load i64, ptr %cbp\n"
+            . "  %n = sub i64 %d, %base\n"
+            . "  %dcap = icmp slt i64 %d, 4096\n"
+            . "  %dc = select i1 %dcap, i64 %d, i64 4096\n"
+            . "  %s0 = sub i64 %dc, %base\n"
+            . "  %spos = icmp sgt i64 %s0, 0\n"
+            . "  %s = select i1 %spos, i64 %s0, i64 0\n"
+            . "  %cnp = getelementptr i8, ptr %c, i64 64\n"
+            . "  store i64 %n, ptr %cnp\n"
+            . "  %csp = getelementptr i8, ptr %c, i64 72\n"
+            . "  store i64 %s, ptr %csp\n"
+            . "  store i64 %base, ptr @__mir_bt_depth\n"
+            . "  store ptr %y, ptr @__mir_bt_fctx\n"
+            . "  br i1 %spos, label %park, label %done\n"
+            . "park:\n"
+            . "  %bytes = mul i64 %s, 8\n"
+            . "  %bytes2 = mul i64 %s, 16\n"
+            . "  %cbufp = getelementptr i8, ptr %c, i64 80\n"
+            . "  %cbuf0 = load ptr, ptr %cbufp\n"
+            . "  %cbuf = call ptr @realloc(ptr %cbuf0, i64 %bytes2)\n"
+            . "  store ptr %cbuf, ptr %cbufp\n"
+            . "  %nsrc = getelementptr [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %base\n"
+            . "  %lsrc = getelementptr [4096 x i64], ptr @__mir_bt_line, i64 0, i64 %base\n"
+            . "  %ldst = getelementptr i8, ptr %cbuf, i64 %bytes\n"
+            . "  %m1 = call ptr @memcpy(ptr %cbuf, ptr %nsrc, i64 %bytes)\n"
+            . "  %m2 = call ptr @memcpy(ptr %ldst, ptr %lsrc, i64 %bytes)\n"
+            . "  br label %done\n"
+            . "push:\n"
+            . "  %ypp = getelementptr i8, ptr %y, i64 48\n"
+            . "  store ptr %c, ptr %ypp\n"
+            . "  %ybp = getelementptr i8, ptr %y, i64 40\n"
+            . "  store i64 %d, ptr %ybp\n"
+            . "  %ynp = getelementptr i8, ptr %y, i64 64\n"
+            . "  %yn = load i64, ptr %ynp\n"
+            . "  %ysp = getelementptr i8, ptr %y, i64 72\n"
+            . "  %ys = load i64, ptr %ysp\n"
+            . "  %d2 = add i64 %d, %yn\n"
+            . "  store i64 %d2, ptr @__mir_bt_depth\n"
+            . "  store ptr %y, ptr @__mir_bt_fctx\n"
+            . "  %room0 = sub i64 4096, %d\n"
+            . "  %rlt = icmp slt i64 %ys, %room0\n"
+            . "  %t0 = select i1 %rlt, i64 %ys, i64 %room0\n"
+            . "  %tpos = icmp sgt i64 %t0, 0\n"
+            . "  br i1 %tpos, label %unpark, label %done\n"
+            . "unpark:\n"
+            . "  %tb = mul i64 %t0, 8\n"
+            . "  %ysb = mul i64 %ys, 8\n"
+            . "  %ybufp = getelementptr i8, ptr %y, i64 80\n"
+            . "  %ybuf = load ptr, ptr %ybufp\n"
+            . "  %ylsrc = getelementptr i8, ptr %ybuf, i64 %ysb\n"
+            . "  %ndst = getelementptr [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %d\n"
+            . "  %ldst2 = getelementptr [4096 x i64], ptr @__mir_bt_line, i64 0, i64 %d\n"
+            . "  %m3 = call ptr @memcpy(ptr %ndst, ptr %ybuf, i64 %tb)\n"
+            . "  %m4 = call ptr @memcpy(ptr %ldst2, ptr %ylsrc, i64 %tb)\n"
+            . "  br label %done\n"
+            . "done:\n"
+            . "  ret void\n"
+            . "}\n";
     }
 }

@@ -1,0 +1,4 @@
+xxh128 b3d6f3ff54882a8b09f96ef196fc8811 b3d6f3ff54882a8b09f96ef196fc8811
+crc32b c2b5e578 c2b5e578
+sha256 ad8b0a2eae9a5b0b11046b89371fd33e8bf883fbbb4a2a5e7dd211e83dbedaef ad8b0a2eae9a5b0b11046b89371fd33e8bf883fbbb4a2a5e7dd211e83dbedaef
+hash_init(): Argument #1 ($algo) must be a valid hashing algorithm

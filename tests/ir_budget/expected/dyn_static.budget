@@ -1,0 +1,3 @@
+# ceiling for tests/aot/cases/dyn_static_call_many_arms.php — regenerate with tests/ir_budget/run.sh --bless
+max_bytes=815735
+max_defs=332

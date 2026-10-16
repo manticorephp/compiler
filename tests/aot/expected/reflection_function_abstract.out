@@ -1,0 +1,13 @@
+ReflectionMethod true
+ReflectionMethod true
+ReflectionFunction true
+ReflectionFunction true
+ReflectionClass false
+m 2 1 int 0 nu
+__construct 1 0 - 0 nu
+App\plain 2 1 ?string 0 vu
+} 1 1 int 0 nu
+__construct 1
+m 2
+m 2
+App\plain 2

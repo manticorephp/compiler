@@ -2,6 +2,7 @@
 
 namespace Compile\Mir\Passes;
 
+use Compile\Mir\AllocationKind;
 use Compile\Mir\Block;
 use Compile\Mir\CondOwn;
 use Compile\Mir\LoadLocal;
@@ -72,7 +73,11 @@ final class SpillFreshBases
 
     private int $counter = 0;
 
-    /** @var array<string, bool> functions whose result is not a +1 (FFI) */
+    /** Loops enclosing the node being visited; an Arena stamp inside one is
+     *  reclaimed by that loop's reset (ApplyMemoryMode demoted every other). */
+    private int $loopDepth = 0;
+
+    /** @var array<string, bool> functions whose result is not a +1 (FFI, by-ref) */
     private array $notOwned = [];
 
     /** @var array<string, \Compile\Mir\ClassDef> */
@@ -80,6 +85,9 @@ final class SpillFreshBases
 
     /** @var array<string, bool> classes whose instances are not rc-managed */
     private array $notRc = [];
+
+    /** @var array<string, bool> classes that define a `__destruct`, or have a descendant that does */
+    private array $dtorCls = [];
 
     /** @var array<string, array<int, bool>> fn name → per-param by-ref mask */
     private array $refMasks = [];
@@ -157,6 +165,17 @@ final class SpillFreshBases
         }
         foreach ($module->enums as $name => $unused) { $this->notRc[$name] = true; }
         foreach ($module->typeDefs as $name => $unused) { $this->notRc[$name] = true; }
+        $this->dtorCls = [];
+        foreach ($module->classes as $name => $cd) {
+            if (!isset($cd->methodNames['__destruct'])) { continue; }
+            $c = $name;
+            $guard = 0;
+            while ($c !== '' && isset($module->classes[$c]) && $guard < 256) {
+                $this->markDtorClass($c);
+                $c = $module->classes[$c]->parent;
+                $guard = $guard + 1;
+            }
+        }
         $this->closureCaptures = $module->closureCaptures;
         $statT = \Compile\Stats::now();
         $this->esc = \Compile\Mir\EscapeSummaries::fromModule($module);
@@ -570,6 +589,19 @@ final class SpillFreshBases
     private function visit(Node $n): void
     {
         $k = $n->kind;
+        if ($k === Node::KIND_WHILE || $k === Node::KIND_DOWHILE
+            || $k === Node::KIND_FOR || $k === Node::KIND_FOREACH) {
+            $this->loopDepth = $this->loopDepth + 1;
+            $this->visitNode($n);
+            $this->loopDepth = $this->loopDepth - 1;
+            return;
+        }
+        $this->visitNode($n);
+    }
+
+    private function visitNode(Node $n): void
+    {
+        $k = $n->kind;
         if ($k === Node::KIND_IF) {
             $i = $this->asIf($n);
             $mark = \count($this->pending);
@@ -606,7 +638,11 @@ final class SpillFreshBases
         }
         if ($k === Node::KIND_FOR) {
             $fo = $this->asFor($n);
-            if ($fo->init !== null) { $this->visit($fo->init); }
+            if ($fo->init !== null) {
+                $this->loopDepth = $this->loopDepth - 1;
+                $this->visit($fo->init);
+                $this->loopDepth = $this->loopDepth + 1;
+            }
             $made = [];
             $cond = $fo->cond;
             if ($cond !== null) {
@@ -621,7 +657,9 @@ final class SpillFreshBases
         }
         if ($k === Node::KIND_FOREACH) {
             $fe = $this->asForeach($n);
+            $this->loopDepth = $this->loopDepth - 1;
             $this->visit($fe->array);
+            $this->loopDepth = $this->loopDepth + 1;
             if (!$fe->byRef) {
                 $held = $this->heldKeys($fe->array);
                 if ($held !== [] && $this->esc->bodyMeets($fe->body, $held)) {
@@ -689,7 +727,8 @@ final class SpillFreshBases
      * gets an owner: a temporary has no name, so no cleanup pad drops it, and
      * the call that throws (or a later argument that does) leaked it. The
      * hidden local is `unset` after the statement like any other spill.
-     * Objects keep their temporary — a destructor must run where php runs it.
+     * An object whose class (and every subclass) has no destructor is spilled too;
+     * one with a destructor keeps its temporary — it must run where php runs it.
      */
     private function spillFreshArgs(Node $n): void
     {
@@ -702,20 +741,46 @@ final class SpillFreshBases
         $byRef = [];
         foreach ($this->refArgIndexes($n) as $ri) { $byRef[$ri] = true; }
         $shift = ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_INVOKE) ? 1 : 0;
+        // Closure::bind / ->bindTo / ->call store the new `$this` in the copy WITHOUT a count when
+        // the source env has no retain function (issue #262): an object spilled here would be freed
+        // under the bound closure at the end of the statement.
+        $rebind = ($k === Node::KIND_STATIC_CALL && \strtolower(\ltrim($this->asStaticCall($n)->class, '\\')) === 'closure')
+            || ($k === Node::KIND_METHOD_CALL && ($this->asMethodCall($n)->method === 'bindTo' || $this->asMethodCall($n)->method === 'call'));
         $cnt = \count($args);
         for ($i = 0; $i < $cnt; $i = $i + 1) {
             $a = $args[$i];
             if (isset($byRef[$i]) || isset($this->pinned[\spl_object_id($a)])) { continue; }
+            if ($this->loopDepth > 0 && $a->allocKind === AllocationKind::ARENA) { continue; }
             $t = $a->type->kind;
             $closure = $t === Type::KIND_CLOSURE || ($t === Type::KIND_OBJ && ($a->type->class ?? '') === 'Closure');
-            if ($t !== Type::KIND_STRING && $t !== Type::KIND_ARRAY && !$closure) { continue; }
+            $plainObj = !$rebind && $t === Type::KIND_OBJ && !$closure && $this->destructorFreeObj($a->type);
+            if ($t !== Type::KIND_STRING && $t !== Type::KIND_ARRAY && !$closure && !$plainObj) { continue; }
             // A nested array's release helper exists only to the depth the runtime emits.
             if ($t === Type::KIND_ARRAY && ($a->type->element === null || $a->type->element->kind === Type::KIND_ARRAY)) { continue; }
             $ak = $a->kind;
-            if ($ak !== Node::KIND_ARRAY_LIT && $ak !== Node::KIND_CONCAT && $ak !== Node::KIND_CLOSURE
+            if ($ak !== Node::KIND_ARRAY_LIT && $ak !== Node::KIND_CONCAT && $ak !== Node::KIND_CLOSURE && $ak !== Node::KIND_NEW_OBJ
                 && !$this->isFreshValue($a)) { continue; }
             $this->setOperand($n, $i + $shift, $this->spill($a));
         }
+    }
+
+    /** `$c` and every interface it implements, transitively, may hold an instance that runs a destructor. */
+    private function markDtorClass(string $c): void
+    {
+        if (isset($this->dtorCls[$c])) { return; }
+        $this->dtorCls[$c] = true;
+        if (!isset($this->classDefs[$c])) { return; }
+        $cd = $this->classDefs[$c];
+        foreach ($cd->interfaces as $i) { $this->markDtorClass(\ltrim((string)$i, '\\')); }
+        if ($cd->parent !== '') { $this->markDtorClass($cd->parent); }
+    }
+
+    /** An rc-managed class (or interface) none of whose instances runs a destructor: its temporary may live to the statement's end. */
+    private function destructorFreeObj(Type $t): bool
+    {
+        $cls = $t->class ?? '';
+        return $cls !== '' && !isset($this->notRc[$cls]) && !isset($this->dtorCls[$cls])
+            && !\str_starts_with($cls, '__closure_');
     }
 
     private function rewriteRead(Node $n): void
@@ -1108,14 +1173,14 @@ final class SpillFreshBases
         }
     }
 
-    /** `is_object(mk())` / `is_null(mk())`: the emitter gives the fresh object back right after the test. */
+    /** `is_object(mk())` / `is_null(mk())` / `gettype(mk())`: the emitter gives the fresh object back right after the test. */
     private function emitterReleasesObjArg(string $fn, Node $arg): bool
     {
         $p = \strrpos($fn, chr(92));
         $bare = $p === false ? $fn : \substr($fn, $p + 1);
         $k = $arg->type->kind;
         return ($bare === 'is_object' && ($k === Type::KIND_OBJ || $k === Type::KIND_CELL))
-            || ($bare === 'is_null' && $k === Type::KIND_OBJ);
+            || (($bare === 'is_null' || $bare === 'gettype' || $bare === 'get_debug_type') && $k === Type::KIND_OBJ);
     }
 
     private function isTypePredicate(string $fn): bool
@@ -1125,7 +1190,7 @@ final class SpillFreshBases
         foreach ([
             'is_null', 'is_object', 'is_array', 'is_string', 'is_int', 'is_integer', 'is_long',
             'is_float', 'is_double', 'is_bool', 'is_scalar', 'is_numeric', 'is_iterable',
-            'is_countable', 'is_callable', 'is_resource', 'boolval',
+            'is_countable', 'is_callable', 'is_resource', 'boolval', 'gettype', 'get_debug_type',
         ] as $name) {
             if ($name === $bare) { return true; }
         }
@@ -1134,7 +1199,8 @@ final class SpillFreshBases
 
     /**
      * {@see consume} for one side of a comparison against `$other`. A string a
-     * cast MINTS (`(string)$int`, always on the heap) is the emitter's to free
+     * cast MINTS (`(string)$int`, on the heap unless ApplyMemoryMode stamped it
+     * Arena, which the loop's reset reclaims and a local must not hold) is the emitter's to free
      * when both sides are strings; against a cell or an erased value the compare
      * runs through the tagged table, which frees nothing — `(string)$i == $key`
      * over an `int|string` key kept the buffer. A local owns it there. A concat
@@ -1145,7 +1211,8 @@ final class SpillFreshBases
     {
         $ok = $other->type->kind;
         if ($v->type->kind === Type::KIND_STRING && ($ok === Type::KIND_CELL || $ok === Type::KIND_UNKNOWN)) {
-            if ($v->kind === Node::KIND_CAST && $this->asCast($v)->operand->type->kind !== Type::KIND_STRING) {
+            if ($v->kind === Node::KIND_CAST && !($this->loopDepth > 0 && $v->allocKind === AllocationKind::ARENA)
+                && $this->asCast($v)->operand->type->kind !== Type::KIND_STRING) {
                 return $this->spill($v);
             }
         }
@@ -1273,13 +1340,13 @@ final class SpillFreshBases
         }
         $k = $b->kind;
         if ($k === Node::KIND_CALL) { return !isset($this->notOwned[\ltrim($this->asCall($b)->function, '\\')]); }
-        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL) { return true; }
+        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) { return true; }
         if ($k === Node::KIND_ARRAY_ACCESS) {
             $aa = $this->asArrayAccess($b);
             return !$aa->probe && \Compile\Mir\Ownership::userOffsetGetBase($aa->array->type, $this->classDefs);
         }
         if ($t->kind !== Type::KIND_OBJ) { return false; }
-        return $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
+        return $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
     }
 
     // Typed reads — a base-typed `$n` resolves fields by OFFSET under

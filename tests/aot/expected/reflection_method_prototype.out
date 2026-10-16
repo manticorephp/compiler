@@ -1,0 +1,4 @@
+Dog::fetch false
+Dog::secret false
+Animal::__construct false
+Method Dog::fetch does not have a prototype

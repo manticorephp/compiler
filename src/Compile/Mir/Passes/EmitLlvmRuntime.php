@@ -1461,7 +1461,7 @@ trait EmitLlvmRuntime
         $out .= "  br i1 %hasd, label %dropit, label %dofree\n";
         $out .= "dropit:\n";
         $out .= "  %df = inttoptr i64 %dv to ptr\n";
-        $out .= "  call void %df(ptr %p)\n";
+        $out .= "  call void %df(ptr %p, i64 4)\n";
         $out .= "  br label %dofree\n";
         $out .= "dofree:\n";
         // Clear the magic first: a stale pointer released twice then bails at
@@ -1996,6 +1996,7 @@ trait EmitLlvmRuntime
             if ($pm->allowsNull())      { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_ALLOWS_NULL; }
             if ($pm->variadic)          { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_VARIADIC; }
             if ($pm->promoted !== '')   { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_PROMOTED; }
+            if ($pm->byRef)             { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_BYREF; }
             if ($pm->typeHint !== '') {
                 $f = $f | \Compile\MemoryAbi::RMETA_PARAM_HAS_TYPE;
                 $tsym = '@.rmeta.pmt.' . $id . '.' . (string)$mi . '.' . (string)$pi;
@@ -2073,15 +2074,19 @@ trait EmitLlvmRuntime
             if ($typeFld !== 'null' || $getFld !== 'ptr null' || $setFld !== 'ptr null') {
                 $exSym = '@.rmeta.px.' . $id . '.' . (string)$i;
                 $tf = $typeFld === 'null' ? 'ptr null' : $typeFld;
-                $defs .= $exSym . ' = linkonce_odr constant { ptr, ptr, ptr } { '
-                       . $tf . ', ' . $getFld . ', ' . $setFld . " }\n";
+                // The 4th word: the set-hook-bypassing setter of a hooked property, else the plain one.
+                $rawSym = \Compile\Mir\Passes\ReflectSynth::propRawSetter($decl, $pm->name);
+                $rawFld = isset($this->sigs->paramTypes[$rawSym]) ? 'ptr @manticore_' . $this->mangle($rawSym) : $setFld;
+                $defs .= $exSym . ' = linkonce_odr constant { ptr, ptr, ptr, ptr } { '
+                       . $tf . ', ' . $getFld . ', ' . $setFld . ', ' . $rawFld . " }\n";
                 $extra = $exSym;
             }
             $ap = $this->attrTableFor($pm->attributes, $decl, 'p', $pm->name, '@.rmeta.pattr.' . $id . '.' . (string)$i);
             $defs .= $ap[0];
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
-                $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly),
+                $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly)
+                    | ($pm->hasDefault ? \Compile\MemoryAbi::RMETA_MEM_HAS_DEFAULT : 0),
                 'null', 0, 0, $extra,
                 $ap[1], $ap[2]);
             $i = $i + 1;
@@ -2283,10 +2288,12 @@ trait EmitLlvmRuntime
             $out .= "  br label %skip\nskip:\n  ret void\n}\n";
             $fnRegCtors[] = '@__mc_reflfn_reg_' . $id;
         }
-        // Closures: no name registry (a closure has no name); the lookup key is
-        // the code pointer at env slot 0. One `{fn, row}` pair per closure the
-        // program literally spells, scanned linearly by `__mc_refl_clo_find`.
-        $cloEntries = [];
+        // Closures: no name registry (a closure has no name). A reflected closure
+        // carries its row in two prefix words ahead of its entry point
+        // ({@see EmitLlvmCalls::closureMetaPrefix}); `__mc_refl_clo_find` reads
+        // them off the code pointer at env slot 0, answering 0 for a closure
+        // without. Not a table keyed by address: a split build gives every part
+        // its own copy of an internal closure, so the address is no identity.
         foreach ($this->reflClosureMeta as $fn => $mm) {
             $id = $this->mangle($fn);
             $nameSym = '@.fnmeta.name.' . $id;
@@ -2300,28 +2307,13 @@ trait EmitLlvmRuntime
                 $this->methodArity($mm), \count($mm->params), $pp[1],
                 0, 'null', $this->strSymBytes($rsym));
             $out .= '@__mc_fnmeta_' . $id . ' = linkonce_odr constant ' . $row . "\n";
-            $cloEntries[] = '{ ptr, ptr } { ptr @manticore_' . $id . ', ptr @__mc_fnmeta_' . $id . ' }';
-        }
-        $nclo = \count($cloEntries);
-        if ($nclo > 0) {
-            $out .= '@__mc_refl_clo_tab = linkonce_odr constant [' . (string)$nclo . ' x { ptr, ptr }] ['
-                  . \implode(', ', $cloEntries) . "]\n";
         }
         $out .= "define i64 @__mc_refl_clo_find(i64 %fp) {\nentry:\n";
-        if ($nclo === 0) {
-            $out .= "  ret i64 0\n}\n";
-        } else {
-            $out .= "  br label %loop\n";
-            $out .= "loop:\n  %i = phi i64 [ 0, %entry ], [ %in, %cont ]\n";
-            $out .= '  %end = icmp eq i64 %i, ' . (string)$nclo . "\n  br i1 %end, label %miss, label %body\n";
-            $out .= "body:\n  %ep = getelementptr { ptr, ptr }, ptr @__mc_refl_clo_tab, i64 %i, i32 0\n";
-            $out .= "  %ev = load ptr, ptr %ep\n  %ei = ptrtoint ptr %ev to i64\n";
-            $out .= "  %eq = icmp eq i64 %ei, %fp\n  br i1 %eq, label %hit, label %cont\n";
-            $out .= "hit:\n  %rp = getelementptr { ptr, ptr }, ptr @__mc_refl_clo_tab, i64 %i, i32 1\n";
-            $out .= "  %rv = load ptr, ptr %rp\n  %r = ptrtoint ptr %rv to i64\n  ret i64 %r\n";
-            $out .= "cont:\n  %in = add i64 %i, 1\n  br label %loop\n";
-            $out .= "miss:\n  ret i64 0\n}\n";
-        }
+        $out .= "  %ta = sub i64 %fp, 40\n  %tp = inttoptr i64 %ta to ptr\n  %t = load i64, ptr %tp\n";
+        $out .= '  %ok = icmp eq i64 %t, ' . (string)self::CLOSURE_ROW_MAGIC . "\n";
+        $out .= "  br i1 %ok, label %hit, label %miss\n";
+        $out .= "hit:\n  %ra = sub i64 %fp, 32\n  %rp = inttoptr i64 %ra to ptr\n  %d = load i64, ptr %rp\n  %r = add i64 %fp, %d\n  ret i64 %r\n";
+        $out .= "miss:\n  ret i64 0\n}\n";
         $noff = (string)\Compile\MemoryAbi::RMETA_ROW_NAME_OFFSET;
         $out .= "@__mc_refl_fn_head = linkonce_odr global ptr null\n";
         $out .= "define i64 @__mc_refl_fn_find(ptr %name) {\nentry:\n";
@@ -2539,6 +2531,9 @@ trait EmitLlvmRuntime
                     $pIr .= '  ' . $bv . ' = load ptr, ptr ' . $bg . "\n";
                     $pIr .= '  ' . $un . ' = call ptr @__mir_array_union(ptr '
                           . $pRes . ', ptr ' . $bv . ")\n";
+                    // `+` COPIES its left side, co-owning its REPR_CELL elements: the
+                    // declared map is dead now.
+                    $pIr .= '  call void @__mir_array_release(ptr ' . $pRes . ")\n";
                     $pRes = $un;
                 }
                 $sym = \Compile\Mir\RuntimeLibrary::propsFnSymbol((int)$id);
@@ -2582,6 +2577,7 @@ trait EmitLlvmRuntime
                     $cIr .= '  ' . $cbv . ' = load ptr, ptr ' . $cbg . "\n";
                     $cIr .= '  ' . $cun . ' = call ptr @__mir_array_union(ptr '
                           . $cRes . ', ptr ' . $cbv . ")\n";
+                    $cIr .= '  call void @__mir_array_release(ptr ' . $cRes . ")\n";
                     $cRes = $cun;
                 }
                 $csym = \Compile\Mir\RuntimeLibrary::cmpViewFnSymbol((int)$id);
@@ -2665,10 +2661,20 @@ trait EmitLlvmRuntime
             if (isset($this->sigs->paramTypes[$ifacesFn])) {
                 $ifacesFnFld = 'ptr @manticore_' . $this->mangle($ifacesFn);
             }
+            $fileFnFld = 'ptr null';
+            $fileFn = \Compile\Mir\Passes\ReflectSynth::fileFn($cls->name);
+            if (isset($this->sigs->paramTypes[$fileFn])) {
+                $fileFnFld = 'ptr @manticore_' . $this->mangle($fileFn);
+            }
+            $docFnFld = 'ptr null';
+            $docFn = \Compile\Mir\Passes\ReflectSynth::docFn($cls->name);
+            if (isset($this->sigs->paramTypes[$docFn])) {
+                $docFnFld = 'ptr @manticore_' . $this->mangle($docFn);
+            }
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
                 $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
-                $constsFnFld, $ifacesFnFld);
+                $constsFnFld, $ifacesFnFld, $fileFnFld, $docFnFld);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
                 $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld, $visitFld);
@@ -3136,6 +3142,104 @@ end:
         return \strtr($ir, $r);
     }
 
+    /**
+     * A Closure-typed property is a TRANSPARENT edge of the object holding it:
+     * `Request -> Closure -> Request` is a cycle the object-only walk could not
+     * see. When the env's only reference is that property (rc == 1) its
+     * captured objects are the holder's children, walked through the env's own
+     * drop fn ({@see EmitLlvmCalls::closureRcFn} modes 0..3). An env shared with
+     * anyone else is left alone — its count is not the holder's to subtract.
+     * `__cc_closure_free` is the white-node release: the env's non-object
+     * captures go back, the captured objects were reclaimed by the walk, and
+     * the env itself is freed; a shared env takes the ordinary release.
+     */
+    private function ccClosureIr(): string
+    {
+        $magic = (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC;
+        $mask = (string)\Compile\MemoryAbi::CLOSURE_MAGIC_MASK;
+        $mOff = (string)\Compile\MemoryAbi::STRING_HASH_OFFSET;
+        $dOff = (string)\Compile\MemoryAbi::CLOSURE_DROP_OFFSET;
+        $hdr = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
+        $sole = "  %pi = ptrtoint ptr %p to i64\n"
+            . "  %lo = icmp ult i64 %v, 65536\n"
+            . '  %hi = icmp ugt i64 %v, ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . "  %bad = or i1 %lo, %hi\n"
+            . "  br i1 %bad, label %none, label %hdr\n"
+            . "hdr:\n"
+            . '  %mp = getelementptr inbounds i8, ptr %p, i64 ' . $mOff . "\n"
+            . "  %m = load i64, ptr %mp\n"
+            . '  %mm = and i64 %m, ' . $mask . "\n"
+            . '  %ism = icmp eq i64 %mm, ' . $magic . "\n"
+            . "  br i1 %ism, label %rcb, label %none\n"
+            . "rcb:\n"
+            . "  %rp = getelementptr inbounds i8, ptr %p, i64 -8\n"
+            . "  %c = load i64, ptr %rp\n"
+            . "  %one = icmp eq i64 %c, 1\n"
+            . "  br i1 %one, label %solec, label %none\n";
+        $out = "define void @__cc_closure_walk(i64 %v, i64 %a) {\nentry:\n"
+            . "  %p = inttoptr i64 %v to ptr\n" . $sole
+            . "solec:\n"
+            . '  %dp = getelementptr inbounds i8, ptr %p, i64 ' . $dOff . "\n"
+            . "  %dv = load i64, ptr %dp\n"
+            . "  %hasd = icmp ne i64 %dv, 0\n"
+            . "  br i1 %hasd, label %dropit, label %none\n"
+            . "dropit:\n"
+            . "  %df = inttoptr i64 %dv to ptr\n"
+            . "  call void %df(ptr %p, i64 %a)\n"
+            . "  br label %none\n"
+            . "none:\n  ret void\n}\n";
+        $out .= "define void @__cc_closure_free(i64 %v) {\nentry:\n"
+            . "  %p = inttoptr i64 %v to ptr\n"
+            . "  %nul = icmp eq i64 %v, 0\n"
+            . "  br i1 %nul, label %done, label %chk\n"
+            . "chk:\n"
+            . str_replace('label %none', 'label %shared', $sole)
+            . "solec:\n"
+            . '  %dp = getelementptr inbounds i8, ptr %p, i64 ' . $dOff . "\n"
+            . "  %dv = load i64, ptr %dp\n"
+            . "  %hasd = icmp ne i64 %dv, 0\n"
+            . "  br i1 %hasd, label %dropit, label %dofree\n"
+            . "dropit:\n"
+            . "  %df = inttoptr i64 %dv to ptr\n"
+            . "  call void %df(ptr %p, i64 -1)\n"
+            . "  br label %dofree\n"
+            . "dofree:\n"
+            . "  store i64 0, ptr %mp\n"
+            . '  %base = getelementptr inbounds i8, ptr %p, i64 -' . $hdr . "\n"
+            . "  call void @free(ptr %base)\n"
+            . "  br label %done\n"
+            . "shared:\n"
+            . "  call void @__mir_closure_release(ptr %p)\n"
+            . "  br label %done\n"
+            . "done:\n  ret void\n}\n";
+        // A `Closure|X|null` slot is a CELL holding the env as an object-tagged
+        // word; the env is told apart from an object by its header magic.
+        $cellEnv = "  %tg = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
+            . '  %sh = lshr i64 %v, ' . (string)\Compile\MemoryAbi::CELL_TAG_SHIFT . "\n"
+            . '  %nib = and i64 %sh, ' . (string)\Compile\MemoryAbi::CELL_TAG_MASK . "\n"
+            . '  %isobj = icmp eq i64 %nib, ' . (string)\Compile\MemoryAbi::CELL_TAG_OBJ . "\n"
+            . "  %okt = and i1 %tg, %isobj\n"
+            . '  %pl = and i64 %v, ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . '  %big = icmp ugt i64 %pl, ' . (string)\Compile\MemoryAbi::CELL_OBJ_MIN_PAYLOAD . "\n"
+            . "  %okp = and i1 %okt, %big\n"
+            . "  br i1 %okp, label %hdr, label %done\n"
+            . "hdr:\n"
+            . "  %p = inttoptr i64 %pl to ptr\n"
+            . '  %mp = getelementptr inbounds i8, ptr %p, i64 ' . $mOff . "\n"
+            . "  %m = load i64, ptr %mp\n"
+            . '  %mm = and i64 %m, ' . $mask . "\n"
+            . '  %ism = icmp eq i64 %mm, ' . $magic . "\n"
+            . "  br i1 %ism, label %clo, label %done\n"
+            . "clo:\n";
+        $out .= "define void @__cc_cellclo_walk(i64 %v, i64 %a) {\nentry:\n" . $cellEnv
+            . "  call void @__cc_closure_walk(i64 %pl, i64 %a)\n  br label %done\n"
+            . "done:\n  ret void\n}\n";
+        $out .= "define void @__cc_cellclo_free(i64 %v) {\nentry:\n" . $cellEnv
+            . "  call void @__cc_closure_free(i64 %pl)\n  br label %done\n"
+            . "done:\n  ret void\n}\n";
+        return $out;
+    }
+
     private function ccRuntime(): string
     {
         $rcMask   = (string)\Compile\MemoryAbi::RC_MASK;
@@ -3387,6 +3491,22 @@ end:
                 }
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
+                if ($this->isClosureValueType($pt)) {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__cc_closure_walk(i64 %v' . $s . ', i64 %a)' . "\n";
+                    $k = $k + 1;
+                    continue;
+                }
+                if ($this->discardReleaseFlavor($pt) === 'cell') {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__cc_cellclo_walk(i64 %v' . $s . ', i64 %a)' . "\n";
+                    $k = $k + 1;
+                    continue;
+                }
                 if ($this->discardReleaseFlavor($pt) !== 'obj') { continue; }
                 $s = (string)$k;
                 $off = (string)$cls->propertyOffset($pn);
@@ -3435,6 +3555,7 @@ end:
                   . (string)(\strlen($raw2) + 2) . ' x i8] c"' . $raw2 . '\0A\00", align 1' . "\n";
         }
         $out .= $defs;
+        $out .= $this->ccClosureIr();
         $out .= "define void @__manticore_cc_children(ptr %s, i64 %a) {\nentry:\n";
         if ($cases === '') {
             $out .= "  ret void\n}\n";
@@ -3483,7 +3604,23 @@ end:
                 $pt = $cls->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 $flavor = $this->classDropFlavor($cls, $pn, $pt);
+                if ($flavor === 'cell') {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__cc_cellclo_free(i64 %v' . $s . ")\n";
+                    $k = $k + 1;
+                    continue;
+                }
                 if ($flavor === '' || $flavor === 'obj') { continue; }
+                if ($flavor === 'closure') {
+                    $s = (string)$k;
+                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
+                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
+                    $body .= '  call void @__cc_closure_free(i64 %v' . $s . ")\n";
+                    $k = $k + 1;
+                    continue;
+                }
                 $rel = $this->dropHelperFor($flavor);
                 if ($rel === '') { continue; }
                 $s = (string)$k;
@@ -3728,6 +3865,10 @@ end:
         $out .= "  %isdd = icmp eq i64 %col, " . (string)\Compile\MemoryAbi::COLOR_DEAD . "\n";
         $out .= "  br i1 %isdd, label %mrshell, label %mrlive\n";
         $out .= "mrshell:\n";
+        // A freed shell is a freed object: counting it keeps the adaptive threshold at its default.
+        $out .= "  %shfr = load i64, ptr @__manticore_cc_freed\n";
+        $out .= "  %shfr1 = add i64 %shfr, 1\n";
+        $out .= "  store i64 %shfr1, ptr @__manticore_cc_freed\n";
         $out .= "  %shbase = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->poolFreeCall('%shbase');
         $out .= "  br label %mrn\n";
@@ -3744,6 +3885,9 @@ end:
         $out .= "  %mralive = icmp sgt i64 %mrv2, 0\n";
         $out .= "  br i1 %mralive, label %mrn, label %mrfree2\n";
         $out .= "mrfree2:\n";
+        $out .= "  %mf0 = load i64, ptr @__manticore_cc_freed\n";
+        $out .= "  %mf1 = add i64 %mf0, 1\n";
+        $out .= "  store i64 %mf1, ptr @__manticore_cc_freed\n";
         $out .= "  %fbase = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
         $out .= $this->poolFreeCall('%fbase');
@@ -4401,7 +4545,6 @@ end:
         if ($this->rt->needsStrrev) { $out .= $this->lib->strrev(); }
         if ($this->rt->needsAddslashes) { $out .= $this->lib->addslashes(); }
         if ($this->rt->needsCodec) { $out .= $this->lib->codec(); }
-        if ($this->rt->needsStrtrBytes) { $out .= $this->lib->strtrBytes(); }
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
@@ -4490,6 +4633,7 @@ end:
             $out .= "  ret i64 -3940649673949184\n";
             $out .= "}\n";
         }
+        if ($this->rt->needsStrtrBytes) { $out .= $this->lib->strtrBytes(); }
         if ($this->rt->needsStrcspn) {
             // strcspn($s, $chars, $off, $len): bytes from $off before the first
             // byte that IS in $chars (the whole span if none is). Binary-safe —
@@ -4782,7 +4926,12 @@ end:
             $out .= "cloop:\n";
             $out .= "  %cpos = load i64, ptr %posp\n";
             $out .= "  %chs = getelementptr inbounds i8, ptr %subj, i64 %cpos\n";
-            $out .= "  %chit = call ptr @strstr(ptr %chs, ptr %delim)\n";
+            // Binary-safe: a NUL-bearing subject or delimiter (explode("\\0", …)) must be found by
+            // length, not by C-string scan — strstr read an "\\0" delimiter as empty and the loop never ended.
+            $out .= "  %crem0 = sub i64 %slen, %cpos\n";
+            $out .= "  %cremn = icmp slt i64 %crem0, 0\n";
+            $out .= "  %crem = select i1 %cremn, i64 0, i64 %crem0\n";
+            $out .= "  %chit = call ptr @memmem(ptr %chs, i64 %crem, ptr %delim, i64 %dlen)\n";
             $out .= "  %cmiss = icmp eq ptr %chit, null\n";
             $out .= "  br i1 %cmiss, label %cdone, label %cnext\n";
             $out .= "cnext:\n";
@@ -4819,7 +4968,10 @@ end:
             $out .= "search:\n";
             $out .= "  %pos = load i64, ptr %posp\n";
             $out .= "  %hstart = getelementptr inbounds i8, ptr %subj, i64 %pos\n";
-            $out .= "  %hit = call ptr @strstr(ptr %hstart, ptr %delim)\n";
+            $out .= "  %rem0 = sub i64 %slen, %pos\n";
+            $out .= "  %remn = icmp slt i64 %rem0, 0\n";
+            $out .= "  %rem = select i1 %remn, i64 0, i64 %rem0\n";
+            $out .= "  %hit = call ptr @memmem(ptr %hstart, i64 %rem, ptr %delim, i64 %dlen)\n";
             $out .= "  %miss = icmp eq ptr %hit, null\n";
             $out .= "  br i1 %miss, label %tail, label %emit\n";
             $out .= "emit:\n";

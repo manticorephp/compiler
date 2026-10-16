@@ -1,0 +1,20 @@
+ssssssssssss2 mmmmmmmmmmmm2 tttttttttttt2
+array(1) {
+  [0]=>
+  int(1)
+}
+array(1) {
+  [0]=>
+  float(2.5)
+}
+array(1) {
+  [0]=>
+  bool(true)
+}
+array(0) {
+}
+array(1) {
+  [0]=>
+  string(3) "str"
+}
+flat

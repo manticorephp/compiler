@@ -256,6 +256,12 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
         }
         $matches[$i] = \__mir_to_cell($val);
     }
+    // `(*MARK:name)` / `(*:name)`: php reports the last one passed under 'MARK'
+    // — symfony's CompiledUrlMatcher picks the matched route by it.
+    $mark = \Runtime\Pcre\getMark($md);
+    if ($mark !== 0) {
+        $matches['MARK'] = \__mir_to_cell(\cstr_to_str(\int_to_ptr($mark)));
+    }
     \__preg_md($code, $md);
     return 1;
 }
@@ -724,6 +730,8 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
     if ($code === 0) { return $subject; }
     $len = \strlen($subject);
     $md = \__preg_md($code, 0);
+    // A named group reaches the callback under its name too, as in preg_match.
+    $names = \__preg_name_map($code);
     $out = "";
     $pos = 0;
     while ($pos <= $len) {
@@ -739,7 +747,7 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
             $e = $m[2 + $i * 2];
             $groups[] = $s < 0 ? "" : \substr($subject, $s, $e - $s);
         }
-        $arg = \__preg_cells($groups);
+        $arg = \__preg_row_named(\__preg_cells($groups), $names);
         $out .= \substr($subject, $pos, $ms - $pos);
         $out .= $callback($arg);
         $count = $count + 1;

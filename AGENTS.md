@@ -237,8 +237,8 @@ Corollaries:
 - **A checked-out binary is not its branch.** After switching branches, rebuild
   before drawing conclusions; a stale `.o` fakes a PASS and a stale binary fakes a
   FAIL.
-- **Int overflow wraps** (no value-range analysis yet); `extract()` is
-  unimplemented; static properties are external-linkage globals. Full gap list:
+- **Int overflow wraps** (no value-range analysis yet); static properties are
+  external-linkage globals. Full gap list:
   `docs/ROADMAP.md`.
 
 ## Code style

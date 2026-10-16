@@ -329,7 +329,7 @@ trait InferCalls
             || $n === '__mc_refl_row_flags'
             || $n === '__mc_refl_attr_args' || $n === '__mc_refl_attr_new'
             || $n === '__mc_refl_attr_target' || $n === '__mc_refl_attr_repeated'
-            || $n === '__mc_refl_consts_fn' || $n === '__mc_refl_ifaces_fn'
+            || $n === '__mc_refl_consts_fn' || $n === '__mc_refl_ifaces_fn' || $n === '__mc_refl_file_fn' || $n === '__mc_refl_doc_fn'
             || $n === '__mc_refl_fn_find' || $n === '__mc_refl_clo_find' || $n === '__mc_refl_row_tramp'
             || $n === '__mc_refl_param_flags'
             || $n === '__mc_refl_param_nattrs' || $n === '__mc_refl_param_attrs'
@@ -355,7 +355,7 @@ trait InferCalls
 
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
-            || $n === 'printf' || $n === 'spl_object_id'
+            || $n === 'printf' || $n === 'spl_object_id' || $n === 'gc_collect_cycles'
             || $n === 'strcspn' || $n === '__mc_crc32b'
             || $n === '__mc_b64_ok'
             || $n === '__float_bits' || $n === '__ryu_msp'
@@ -569,7 +569,7 @@ trait InferCalls
             || $n === 'sprintf' || $n === 'implode' || $n === 'join'
             || $n === '__mc_fmt_int' || $n === '__mc_fmt_float' || $n === '__mc_fmt_str'
             || $n === 'addslashes' || $n === 'strrev' || $n === 'var_export' || $n === '__mc_json_escape'
-            || $n === '__mc_strtr_bytes' || $n === '__mc_b64_enc' || $n === '__mc_b64_dec' || $n === '__mc_bin2hex' || $n === '__mc_hex2bin'
+            || $n === '__mc_b64_enc' || $n === '__mc_b64_dec' || $n === '__mc_bin2hex' || $n === '__mc_hex2bin'
             || $n === '__mir_str_replace_one'
             || $n === 'str_from_buffer' || $n === 'cstr_to_str'
             || $n === 'gettype' || $n === 'get_debug_type'
@@ -1063,21 +1063,45 @@ trait InferCalls
         }
         if (\count($bodies) < 2) { return null; }
         $first = null;
+        $acc = null;
+        $shapeDiffers = false;
         $numeric = true;
         $differ = false;
         foreach ($bodies as $b) {
             $t = $this->sigs[$b . '__' . $method] ?? null;
             if ($t === null) { continue; }
             if ($t->kind !== Type::KIND_INT && $t->kind !== Type::KIND_FLOAT) { $numeric = false; }
-            if ($first === null) { $first = $t; continue; }
+            if ($first === null) { $first = $t; $acc = $t; continue; }
+            if ($t->kind === Type::KIND_ARRAY && $acc !== null && $acc->kind === Type::KIND_ARRAY) {
+                if ($this->elemReprShape($t) !== $this->elemReprShape($first)) { $shapeDiffers = true; }
+                $acc = $acc->unionWith($t);
+            }
             // Only a different KIND changes how the word is read. Bodies that agree
             // on it (arrays of different elements, objects of different classes)
             // share the representation; boxing them into a cell cost every call a
             // box and leaked it — the compiler compiling itself grew 1.3 GB → 8 GB.
             if ($t->kind !== $first->kind) { $differ = true; }
         }
-        if (!$differ) { return null; }
+        if (!$differ) {
+            // Arrays of different ELEMENT shapes share a representation but not a
+            // view: the call must read the join, not whichever body came first.
+            // The join's element is ERASED: unionWith takes an unrefined element
+            // for a bottom, so a bare-`array` body's `vec[unknown]` let the other
+            // body's `vec[obj]` win and its strings were read as objects.
+            return $shapeDiffers && $acc !== null ? $acc->withElement(Type::unknown()) : null;
+        }
         return $numeric ? Type::numericCell() : Type::cell();
+    }
+
+    /** How an array's elements are laid out, ignoring which class an object is: two arrays that differ here are read differently. */
+    private function elemReprShape(Type $t): string
+    {
+        $e = $t->element;
+        if ($e === null) { return '?'; }
+        $k = $e->kind;
+        if ($k === Type::KIND_ARRAY) { return 'arr(' . $this->elemReprShape($e) . ')'; }
+        if ($k === Type::KIND_UNKNOWN) { return Type::KIND_CELL; }
+        return $k;
     }
 
     /**

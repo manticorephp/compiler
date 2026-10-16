@@ -1,0 +1,10 @@
+/a@h
+/b@localhost
+/c@x
+Ctx
+log: direct
+NULL
+/e@y
+/f@localhost
+a-b-c
+Error: Call to undefined method Ctx::nope()

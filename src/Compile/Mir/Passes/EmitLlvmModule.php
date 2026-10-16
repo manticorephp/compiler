@@ -268,15 +268,13 @@ trait EmitLlvmModule
         $mxMthRows = '';
         $mxCount = 0;
         if ($this->rt->needsMethodExists) {
+            /** @var string[][] $mxPairs */
+            $mxPairs = [];
             foreach ($this->classes as $cd) {
                 $disp = $this->displayClassName($cd->name);
-                foreach ($this->reflAllMethods($cd->name) as $m) {
-                    if ($mxCount > 0) { $mxClsRows .= ', '; $mxMthRows .= ', '; }
-                    $mxClsRows .= 'ptr ' . $this->litStr($disp);
-                    $mxMthRows .= 'ptr ' . $this->litStr($m);
-                    $mxCount = $mxCount + 1;
-                }
+                foreach ($this->reflAllMethods($cd->name) as $m) { $mxPairs[] = [$disp, (string)$m]; }
             }
+            $mxCount = $this->memberRowsSorted($mxPairs, true, $mxClsRows, $mxMthRows);
         }
         // The (class, ancestor) pairs `is_a` needs when BOTH names are runtime
         // strings. One row per is-a edge INCLUDING the class itself, so the
@@ -285,16 +283,16 @@ trait EmitLlvmModule
         $isaAncRows = '';
         $isaCount = 0;
         if ($this->rt->needsClassIsa) {
+            /** @var string[][] $isaPairs */
+            $isaPairs = [];
             foreach ($this->classes as $cd) {
                 $sub = $this->displayClassName($cd->name);
                 foreach ($this->classes as $cd2) {
                     if (!$this->classIsA($cd->name, $cd2->name)) { continue; }
-                    if ($isaCount > 0) { $isaSubRows .= ', '; $isaAncRows .= ', '; }
-                    $isaSubRows .= 'ptr ' . $this->litStr($sub);
-                    $isaAncRows .= 'ptr ' . $this->litStr($this->displayClassName($cd2->name));
-                    $isaCount = $isaCount + 1;
+                    $isaPairs[] = [$sub, $this->displayClassName($cd2->name)];
                 }
             }
+            $isaCount = $this->memberRowsSorted($isaPairs, true, $isaSubRows, $isaAncRows);
         }
         // The (name → is-a ids) table of a runtime-named instanceof, same
         // interning deadline. Every class, interface and enum is a possible
@@ -335,15 +333,13 @@ trait EmitLlvmModule
         $pxPrpRows = '';
         $pxCount = 0;
         if ($this->rt->needsPropExists) {
+            /** @var string[][] $pxPairs */
+            $pxPairs = [];
             foreach ($this->classes as $cd) {
                 $disp = $this->displayClassName($cd->name);
-                foreach ($this->reflAllProps($cd->name) as $p) {
-                    if ($pxCount > 0) { $pxClsRows .= ', '; $pxPrpRows .= ', '; }
-                    $pxClsRows .= 'ptr ' . $this->litStr($disp);
-                    $pxPrpRows .= 'ptr ' . $this->litStr($p);
-                    $pxCount = $pxCount + 1;
-                }
+                foreach ($this->reflAllProps($cd->name) as $p) { $pxPairs[] = [$disp, (string)$p]; }
             }
+            $pxCount = $this->memberRowsSorted($pxPairs, false, $pxClsRows, $pxPrpRows);
         }
         // Emit each interned string constant as a headered @.str.N. A staged
         // module writes them afterwards in bounded chunks, avoiding a second
@@ -981,7 +977,11 @@ trait EmitLlvmModule
         $this->writtenNamesFn = $fn->name;
         $this->wnFnBody = $fn->body;
         $this->wnFnParams = [];
-        foreach ($fn->params as $wp) { $this->wnFnParams[$wp->name] = true; }
+        $this->byRefParamNames = [];
+        foreach ($fn->params as $wp) {
+            $this->wnFnParams[$wp->name] = true;
+            if ($wp->byRef) { $this->byRefParamNames[$wp->name] = true; }
+        }
         $this->arrayKeyLocalsFn = '';
         if ($this->arrayHintedParams !== []) { $this->collectWrittenNames($fn->body); }
         $this->collectMutatedVecs($fn->body);
@@ -1091,7 +1091,8 @@ trait EmitLlvmModule
             // per-module counters (`__closure_N`); without internal linkage a
             // user object and the prebuilt stdlib.o (whose ctype arrow-fns are
             // also `__closure_N`) collide at link time.
-            $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . $this->personalityClause() . " {\nentry:\n";
+            $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')'
+                . $this->closureMetaPrefix($fn->name, $capCnt) . $this->personalityClause() . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -1113,6 +1114,10 @@ trait EmitLlvmModule
                 $cv = $this->ssa->allocReg();
                 $bodySink->write('  ' . $cv . ' = load i64, ptr ' . $gep . "\n");
                 $bodySink->write('  store i64 ' . $cv . ', ptr ' . $slot . "\n");
+                if (\Compile\Mir\VecCopyOnAssign::paramCopiedOnEntry($fn, $fn->params[$pi], true)) {
+                    $bodySink->write($this->arrayHintedEntryMask($fn->params[$pi], $slot));
+                    $bodySink->write($this->paramEntryCopyIr($fn->params[$pi], $slot));
+                }
             }
             for ($pi = $capCnt; $pi < \count($fn->params); $pi = $pi + 1) {
                 $pp = $fn->params[$pi];
@@ -1224,9 +1229,12 @@ trait EmitLlvmModule
         $this->locals->byRefCaptured = [];
         $this->locals->collectByRefCaptured($fn->body);
         foreach ($this->locals->byRefCaptured as $bname => $_) {
-            if (isset($paramNames[$bname])) { continue; }
             if (!isset($this->locals->slots[$bname])) { continue; }
             if (isset($this->locals->refLocals[$bname])) { continue; }
+            if (isset($paramNames[$bname])) {
+                $bodySink->write($this->boxByRefCapturedParamIr($fn, $bname));
+                continue;
+            }
             $bodySink->write($this->newOwnedBoxIr($bname, '0'));
         }
         // One i1 per global-backed name this function unsets: `unset($static)`
@@ -1398,9 +1406,78 @@ trait EmitLlvmModule
         $out .= "  ret i64 1\n";
         $out .= "miss:\n";
         $out .= "  ret i64 0\n}\n";
+        // The same relation keyed by the target's class ID: `$x instanceof $obj`.
+        $out .= 'define i64 @' . $this->mirHelperSym('__mir_isa_dyn_id') . "(i64 %cid, i64 %tcid, i64 %strict) {\n";
+        $out .= "entry:\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i1, %next]\n";
+        $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+        $out .= "  br i1 %done, label %miss, label %body\n";
+        $out .= "body:\n";
+        $out .= '  %op = getelementptr inbounds [' . (string)$ln . " x i64], ptr @__mir_isd_own, i64 0, i64 %i\n";
+        $out .= "  %own = load i64, ptr %op\n";
+        $out .= "  %eq = icmp eq i64 %own, %tcid\n";
+        $out .= "  br i1 %eq, label %found, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "found:\n";
+        $out .= "  %isown = icmp eq i64 %cid, %tcid\n";
+        $out .= "  %strictb = icmp ne i64 %strict, 0\n";
+        $out .= "  %refuse = and i1 %isown, %strictb\n";
+        $out .= "  br i1 %refuse, label %miss, label %range\n";
+        $out .= "range:\n";
+        $out .= '  %lop = getelementptr inbounds [' . (string)($n + 1) . " x i64], ptr @__mir_isd_off, i64 0, i64 %i\n";
+        $out .= "  %lo = load i64, ptr %lop\n";
+        $out .= "  %ip1 = add i64 %i, 1\n";
+        $out .= '  %hip = getelementptr inbounds [' . (string)($n + 1) . " x i64], ptr @__mir_isd_off, i64 0, i64 %ip1\n";
+        $out .= "  %hi = load i64, ptr %hip\n";
+        $out .= "  br label %idloop\n";
+        $out .= "idloop:\n";
+        $out .= "  %j = phi i64 [%lo, %range], [%j1, %idnext]\n";
+        $out .= "  %jdone = icmp sge i64 %j, %hi\n";
+        $out .= "  br i1 %jdone, label %miss, label %idbody\n";
+        $out .= "idbody:\n";
+        $out .= '  %ipp = getelementptr inbounds [' . (string)$lm . " x i64], ptr @__mir_isd_ids, i64 0, i64 %j\n";
+        $out .= "  %id = load i64, ptr %ipp\n";
+        $out .= "  %ideq = icmp eq i64 %id, %cid\n";
+        $out .= "  br i1 %ideq, label %hit, label %idnext\n";
+        $out .= "idnext:\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  br label %idloop\n";
+        $out .= "hit:\n";
+        $out .= "  ret i64 1\n";
+        $out .= "miss:\n";
+        $out .= "  ret i64 0\n}\n";
         $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
         $this->rt->needsStrcmp = true;
         return $out;
+    }
+
+    /**
+     * Intern `[class, member]` pairs as parallel `ptr` row lists, SORTED the way {@see memberExistsTable}
+     * searches: by the class name lower-cased, then by the member (lower-cased when `$foldMember`).
+     * Returns the row count.
+     *
+     * @param string[][] $pairs
+     */
+    private function memberRowsSorted(array $pairs, bool $foldMember, string &$clsRows, string &$memRows): int
+    {
+        $keyed = [];
+        foreach ($pairs as $i => $p) {
+            $keyed[] = [\strtolower($p[0]) . "\0" . ($foldMember ? \strtolower($p[1]) : $p[1]), $i];
+        }
+        \usort($keyed, fn (array $x, array $y): int => \strcmp($x[0], $y[0]));
+        $n = 0;
+        foreach ($keyed as $k) {
+            $p = $pairs[$k[1]];
+            if ($n > 0) { $clsRows .= ', '; $memRows .= ', '; }
+            $clsRows .= 'ptr ' . $this->litStr($p[0]);
+            $memRows .= 'ptr ' . $this->litStr($p[1]);
+            $n = $n + 1;
+        }
+        return $n;
     }
 
     private function memberExistsTable(string $prefix, string $fn, string $clsRows,
@@ -1419,27 +1496,46 @@ trait EmitLlvmModule
         $out .= "  %mnull = icmp eq ptr %m, null\n";
         $out .= "  %anynull = or i1 %cnull, %mnull\n";
         $out .= "  br i1 %anynull, label %miss, label %loop\n";
+        // The rows are sorted by (class lower-cased, member — lower-cased when `$cmp` folds
+        // case): a BINARY search, not a scan. Walking every (class, method) row with
+        // `strcasecmp` cost php-cs-fixer 4% and Symfony's `is_callable([$obj, $m])` ~9% of a request.
         $out .= "loop:\n";
-        $out .= "  %i = phi i64 [0, %entry], [%i1, %next]\n";
-        $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+        $out .= "  %lo = phi i64 [0, %entry], [%lo2, %next]\n";
+        $out .= "  %hi = phi i64 [" . (string)$n . ", %entry], [%hi2, %next]\n";
+        $out .= "  %done = icmp sge i64 %lo, %hi\n";
         $out .= "  br i1 %done, label %miss, label %body\n";
         $out .= "body:\n";
+        $out .= "  %sum = add i64 %lo, %hi\n";
+        $out .= "  %mid = lshr i64 %sum, 1\n";
         $out .= '  %cp = getelementptr inbounds [' . (string)$len
-              . ' x ptr], ptr ' . $cls . ", i64 0, i64 %i\n";
+              . ' x ptr], ptr ' . $cls . ", i64 0, i64 %mid\n";
         $out .= "  %ccand = load ptr, ptr %cp\n";
         // The CLASS name is case-insensitive in php whichever member is asked about.
         $out .= "  %cc = call i32 @strcasecmp(ptr %cls, ptr %ccand)\n";
         $out .= "  %ceq = icmp eq i32 %cc, 0\n";
-        $out .= "  br i1 %ceq, label %mtest, label %next\n";
+        $out .= "  br i1 %ceq, label %mtest, label %cdir\n";
+        $out .= "cdir:\n";
+        $out .= "  %clt = icmp slt i32 %cc, 0\n";
+        $out .= "  %mid1 = add i64 %mid, 1\n";
+        $out .= "  %hiC = select i1 %clt, i64 %mid, i64 %hi\n";
+        $out .= "  %loC = select i1 %clt, i64 %lo, i64 %mid1\n";
+        $out .= "  br label %next\n";
         $out .= "mtest:\n";
         $out .= '  %mp = getelementptr inbounds [' . (string)$len
-              . ' x ptr], ptr ' . $mem . ", i64 0, i64 %i\n";
+              . ' x ptr], ptr ' . $mem . ", i64 0, i64 %mid\n";
         $out .= "  %mcand = load ptr, ptr %mp\n";
         $out .= '  %mc = call i32 @' . $cmp . "(ptr %m, ptr %mcand)\n";
         $out .= "  %meq = icmp eq i32 %mc, 0\n";
-        $out .= "  br i1 %meq, label %hit, label %next\n";
+        $out .= "  br i1 %meq, label %hit, label %mdir\n";
+        $out .= "mdir:\n";
+        $out .= "  %mlt = icmp slt i32 %mc, 0\n";
+        $out .= "  %mid2 = add i64 %mid, 1\n";
+        $out .= "  %hiM = select i1 %mlt, i64 %mid, i64 %hi\n";
+        $out .= "  %loM = select i1 %mlt, i64 %lo, i64 %mid2\n";
+        $out .= "  br label %next\n";
         $out .= "next:\n";
-        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %lo2 = phi i64 [%loC, %cdir], [%loM, %mdir]\n";
+        $out .= "  %hi2 = phi i64 [%hiC, %cdir], [%hiM, %mdir]\n";
         $out .= "  br label %loop\n";
         $out .= "hit:\n";
         $out .= "  ret i64 1\n";
@@ -1602,6 +1698,32 @@ trait EmitLlvmModule
         $out .= $this->newOwnedBoxIr($name, $cv);
         $this->locals->refParamTypes[$name] = Type::cell();
         return $out;
+    }
+
+    /**
+     * A BY-VALUE parameter a closure captures by reference (`function f(array
+     * $a) { return function () use (&$a) {…}; }`) gets the heap box a local
+     * gets: the closure outlives the frame, and capturing the stack slot's
+     * address handed it dead memory (symfony LazyString::fromCallable's
+     * `use (&$callback, &$arguments)` read a garbage pack). The box holds the
+     * incoming word in the param's own representation, with a count of its own
+     * (the argument stays the caller's). A by-ref parameter — a closure's own
+     * by-ref capture included — already holds an address and is left alone.
+     */
+    private function boxByRefCapturedParamIr(\Compile\Mir\FunctionDef $fn, string $name): string
+    {
+        foreach ($fn->params as $p) {
+            if ($p->name !== $name) { continue; }
+            if ($p->byRef) { return ''; }
+            $v = $this->ssa->allocReg();
+            $out = '  ' . $v . ' = load i64, ptr ' . $this->locals->slots[$name] . "\n";
+            // The ARRIVING word's flavor: a slot InferScans retypes to a cell re-boxes it
+            // by an entry store, which takes this count over.
+            $flavor = $this->boxValueFlavor($p->type);
+            if ($flavor !== '') { $out .= $this->rcRetainReg($v, $flavor); }
+            return $out . $this->newOwnedBoxIr($name, $v);
+        }
+        return '';
     }
 
     /** @param array<string, bool> $paramNames @param array<string, Type> $paramTypes */
@@ -2719,8 +2841,13 @@ trait EmitLlvmModule
         $out = '';
         $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load i64, ptr ' . $slot . "\n";
+        // A param promoted to a cell ({@see arrayHintedEntryMask} skips it) still ARRIVES tagged — a NULL cell
+        // for an omitted `?array` — and copying that word dereferenced the tag. Strip it: the identity on a raw
+        // pointer, 0 for a null, and the box-back planted at body entry re-tags the copy.
+        $mk = $this->ssa->allocReg();
+        $out .= '  ' . $mk . ' = and i64 ' . $ld . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
         $lp = $this->ssa->allocReg();
-        $out .= '  ' . $lp . ' = inttoptr i64 ' . $ld . " to ptr\n";
+        $out .= '  ' . $lp . ' = inttoptr i64 ' . $mk . " to ptr\n";
         $cp = $this->ssa->allocReg();
         if (($et = $p->type->element) !== null && $et->kind === Type::KIND_CELL) {
             // vec[cell] / assoc[*,cell]: elements are all NaN-boxed, so

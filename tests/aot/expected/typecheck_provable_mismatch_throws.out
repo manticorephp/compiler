@@ -1,0 +1,4 @@
+skipped
+3 items
+Route::write(): Argument #1 ($data) must be of type array, string given
+Derived::__construct(): Argument #1 ($allow) must be of type array, int given

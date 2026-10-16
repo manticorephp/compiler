@@ -1,0 +1,10 @@
+session: true
+pcre: true
+json: true
+mbstring: true
+ctype: true
+tokenizer: true
+standard: true
+core: true
+guard: session
+absent: false

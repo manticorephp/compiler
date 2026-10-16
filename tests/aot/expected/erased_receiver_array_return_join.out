@@ -1,0 +1,9 @@
+array(1) {
+  [0]=>
+  string(6) "string"
+}
+string(3) "GET"
+array(1) {
+  [0]=>
+  string(6) "object"
+}
