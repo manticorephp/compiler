@@ -225,43 +225,8 @@ a non-empty value, and `off` otherwise — piped builds stay silent. `live` redr
 Counters: `files`, `functions` and, for a split build (`MANTICORE_SPLIT_JOBS` with `-j 0`),
 `clang` (parts compiled so far / total, cache hits included).
 
-Colour is on only if every rule passes, first match wins: `--color=never` → off;
-`NO_COLOR` set and non-empty → off; `TERM=dumb` → off; `--color=always` → on; otherwise
-on exactly when stderr is a terminal. `json` is never coloured; `plain` is coloured only
-with `--color=always`.
-
-`plain`: one line per finished stage (`[n]`, name, seconds), a bare `label n/n` line when a
-counter completes, and a final `done in …` (`failed after …` on error):
-
-```
-      files 1/1
-[ 1] stdlib .sig -> extern decls  0.0s
-[ 2] prelude-demand (re-lex)  0.0s
-[ 3] parse  0.0s
-      functions 1880/1880
-[37] EmitLlvm  0.0s
-[38] clang -O2 -c whole module  0.2s
-[39] link  0.0s
-done in 0.7s
-```
-
-`json`: one object per line.
-
-| `event` | Fields |
-|---|---|
-| `stage_start` | `name`, `t_ms` (since start) |
-| `stage_end` | `name`, `ms`; `fns`, `classes` only when known |
-| `counter` | `label`, `done`, `total` |
-| `done` | `ms`, `rc` |
-| `timing` | `name`, `ms` (only with `--timings`, after `done`) |
-
-```
-{"event":"stage_start","name":"stdlib .sig -> extern decls","t_ms":121}
-{"event":"stage_end","name":"stdlib .sig -> extern decls","ms":6,"fns":1814}
-{"event":"counter","label":"functions","done":256,"total":1880}
-{"event":"done","ms":758,"rc":0}
-{"event":"timing","name":"clang -O2 -c whole module","ms":296}
-```
+Colour rules (`NO_COLOR`, `TERM=dumb`, `--color=always`), the `plain` line format and the
+`json` event table with examples are in [`docs/cli.md`](docs/cli.md#build-progress).
 
 ## The PHP you get
 
