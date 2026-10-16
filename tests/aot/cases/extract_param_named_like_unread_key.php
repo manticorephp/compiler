@@ -11,3 +11,10 @@ for ($i = 0; $i < 2000; $i++) {
 $keep = ['items' => ['a'], 'c' => 'later'];
 for ($i = 0; $i < 3; $i++) { r($keep); }
 echo $sum, ' ', json_encode($keep), "\n";
+
+// `return extract(...)` expands to a block holding an `if`; its arms must start from the same state.
+function cnt(array $a): int { return extract($a, EXTR_PREFIX_ALL, 's'); }
+$tot = 0;
+for ($i = 0; $i < 2000; $i++) { $tot += cnt([1, 2, 'x' => 3]); }
+$mixed = [1, 2, 'x' => 3];
+echo $tot, ' ', cnt($mixed), ' ', json_encode($mixed), "\n";

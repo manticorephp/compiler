@@ -909,6 +909,9 @@ final class Forward
         if ($n instanceof Ternary) { return $this->ternary($n, $s); }
         if ($n instanceof NullCoalesce_) { return $this->coalesce($n, $s); }
         if ($n instanceof Match_) { return $this->matchExpr($n, $s); }
+        // An `if` inside an expression (`return extract(…)` expands to a block holding one) branches:
+        // walking its arms in sequence handed the then-arm's state to the else-arm.
+        if ($n instanceof If_) { return $this->ifStmt($n, $s); }
         foreach (Walk::children($n) as $c) {
             $r = $this->expr($c, $s);
             if (self::isDead($r)) { return $r; }
