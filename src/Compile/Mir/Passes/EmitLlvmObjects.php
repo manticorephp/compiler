@@ -6847,6 +6847,13 @@ trait EmitLlvmObjects
     private function emitClosureRebind(Node $fnNode, Node $objNode): string
     {
         $out = $this->emitNode($fnNode);
+        if ($fnNode->type->kind === Type::KIND_CELL || $fnNode->type->kind === Type::KIND_UNKNOWN) {
+            $out .= $this->coerceToI64();
+            $um = $this->ssa->allocReg();
+            $out .= '  ' . $um . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+            $this->lastValue = $um;
+            $this->lastValueType = 'i64';
+        }
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
         // Env size from the static closure type. A receiver with no literal
@@ -8562,8 +8569,18 @@ trait EmitLlvmObjects
         $recvCls = $recvType->kind === Type::KIND_OBJ ? $recvType->class : '';
         $isClosureRecv = $recvType->kind === Type::KIND_CLOSURE
             || ($recvCls !== '' && $this->isClosureClass($recvCls));
-        if ($isClosureRecv && $mc->method === 'bindTo' && \count($mc->args) >= 1) {
-            return $this->emitClosureRebind($mc->object, $mc->args[0]);
+        // An ERASED receiver (a closure read back out of a static-prop array
+        // element, `self::$h['k'] ??= static fn…`) answers `bindTo` too: no class
+        // declares the name, and routing it through `__call` dispatched a closure
+        // into an unrelated class's `__call`.
+        $erasedRecv = ($recvType->kind === Type::KIND_CELL || $recvType->kind === Type::KIND_UNKNOWN)
+            && !$this->anyClassDeclares($mc->method);
+        if (($isClosureRecv || $erasedRecv) && $mc->method === 'bindTo' && \count($mc->args) >= 1) {
+            $out = $this->emitClosureRebind($mc->object, $mc->args[0]);
+            if ($erasedRecv && ($n->type->kind === Type::KIND_CELL || $n->type->kind === Type::KIND_UNKNOWN)) {
+                $out .= $this->boxToCell(Type::closure());
+            }
+            return $out;
         }
         if ($isClosureRecv && $mc->method === 'call' && \count($mc->args) >= 1) {
             $out = $this->emitClosureRebind($mc->object, $mc->args[0]);
