@@ -43,6 +43,10 @@ final class __McUnSt
  */
 function unserialize(string $data, array $options = []): mixed
 {
+    // Scalars and arrays of them parse natively; anything else (objects, r:/R:,
+    // enums, malformed input) leaves the flag clear and takes the PHP parser.
+    $fast = __mc_unser_native($data);
+    if (__mc_unser_ok() === 1) { return $fast; }
     $st = new __McUnSt();
     $st->s = $data;
     if (array_key_exists('allowed_classes', $options)) {
@@ -169,7 +173,11 @@ function __mc_unser_val(\__McUnSt $st): mixed
     }
     if ($t === 'i:') {
         $st->p = $st->p + 2;
-        $i = (int)__mc_un_upto($st, ';');
+        $raw = __mc_un_upto($st, ';');
+        // php's grammar is [+-]?[0-9]+ — a bare "i:;" is an error, not 0.
+        $sg = (strlen($raw) > 0 && ($raw[0] === '-' || $raw[0] === '+')) ? 1 : 0;
+        if ($st->ok && !ctype_digit(substr($raw, $sg))) { $st->ok = false; return null; }
+        $i = (int)$raw;
         $st->vars[$slot] = $i;
         return $i;
     }

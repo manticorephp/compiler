@@ -4403,6 +4403,7 @@ end:
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
         if ($this->rt->needsSerEnc) { $out .= $this->lib->serEnc(); }
+        if ($this->rt->needsUnserDec) { $out .= $this->lib->unserDec(); }
         if ($this->rt->needsJsonEnc || $this->rt->needsJsonDec) { $out .= $this->lib->jsonUtf8(); }
         if ($this->rt->needsJsonEnc || $this->rt->needsJsonSer) { $out .= $this->lib->jsonSer(); }
         if ($this->rt->needsJsonDec) {

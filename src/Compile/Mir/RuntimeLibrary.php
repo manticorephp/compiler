@@ -4063,6 +4063,527 @@ entry:
     }
 
     /**
+     * Native `unserialize()` for the common shapes — the mirror of {@see serEnc}.
+     * `@__mir_us_decf(ptr s)` parses `N;` `b:` `i:` `d:` `s:` and `a:` (int / string
+     * keys, any nesting up to 256 deep) straight into CELL arrays, with a STRICT
+     * grammar: the first byte it does not own (`O:` `C:` `E:` `r:` `R:` `S:`, a
+     * malformed or overlong number, a short string, a count the input cannot
+     * hold) makes it free what it built and clear `@__mir_us_ok`, and the caller
+     * re-parses in PHP, which keeps every error, object and back-reference
+     * behaviour. Trailing bytes after the value are ignored, as in php.
+     */
+    public function unserDec(): string
+    {
+        $M = '281474976710655';
+        $cellRepr = (string)(\Compile\MemoryAbi::ARRAY_REPR_CELL | \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL);
+        $notRepr  = (string)(~(\Compile\MemoryAbi::ARRAY_REPR_MASK | \Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $flagsOff = (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET;
+        $out  = "\n@__mir_us_ok = linkonce_odr global i64 0\n";
+        $out .= "@.ukw.inf = private unnamed_addr constant [5 x i8] c\"INF;\\00\", align 1\n";
+        $out .= "@.ukw.ninf = private unnamed_addr constant [6 x i8] c\"-INF;\\00\", align 1\n";
+        $out .= "@.ukw.nan = private unnamed_addr constant [5 x i8] c\"NAN;\\00\", align 1\n";
+
+        // [-]digits (1..18, so no overflow) at s[p]; stores the value, answers the
+        // position after the digits, or -1.
+        $out .= '
+define i64 @__mir_us_int(ptr %s, i64 %p, i64 %allowneg, ptr %out) {
+entry:
+  %b0p = getelementptr inbounds i8, ptr %s, i64 %p
+  %b0 = load i8, ptr %b0p
+  %ism = icmp eq i8 %b0, 45
+  %an = icmp ne i64 %allowneg, 0
+  %neg = and i1 %ism, %an
+  %p1 = add i64 %p, 1
+  %q = select i1 %neg, i64 %p1, i64 %p
+  br label %lp
+lp:
+  %i = phi i64 [ %q, %entry ], [ %i1, %step ]
+  %acc = phi i64 [ 0, %entry ], [ %acc1, %step ]
+  %bp = getelementptr inbounds i8, ptr %s, i64 %i
+  %b = load i8, ptr %bp
+  %bz = zext i8 %b to i64
+  %d = sub i64 %bz, 48
+  %isd = icmp ult i64 %d, 10
+  br i1 %isd, label %step, label %end
+step:
+  %a10 = mul i64 %acc, 10
+  %acc1 = add i64 %a10, %d
+  %i1 = add i64 %i, 1
+  %cnt = sub i64 %i1, %q
+  %long = icmp ugt i64 %cnt, 18
+  br i1 %long, label %fail, label %lp
+end:
+  %nd = sub i64 %i, %q
+  %none = icmp eq i64 %nd, 0
+  br i1 %none, label %fail, label %ok
+ok:
+  %nv = sub i64 0, %acc
+  %v = select i1 %neg, i64 %nv, i64 %acc
+  store i64 %v, ptr %out
+  ret i64 %i
+fail:
+  ret i64 -1
+}
+
+; canonical decimal int string ("0", "-5", no leading zeros) -> 1 and *out; 0 not an int
+; key; -1 a canonical-looking one past 18 digits (php decides int vs string by range:
+; the caller defers to the PHP parser).
+define i64 @__mir_us_ikey(ptr %k, i64 %len, ptr %out) {
+entry:
+  %ok0 = icmp sgt i64 %len, 0
+  br i1 %ok0, label %go, label %no
+go:
+  %c0 = load i8, ptr %k
+  %neg = icmp eq i8 %c0, 45
+  %i0 = select i1 %neg, i64 1, i64 0
+  %nd = sub i64 %len, %i0
+  %dok = icmp sgt i64 %nd, 0
+  br i1 %dok, label %first, label %no
+first:
+  %fp = getelementptr inbounds i8, ptr %k, i64 %i0
+  %f = load i8, ptr %fp
+  %isz = icmp eq i8 %f, 48
+  br i1 %isz, label %zero, label %nzero
+zero:
+  %one = icmp eq i64 %nd, 1
+  %nn = xor i1 %neg, true
+  %zok = and i1 %one, %nn
+  br i1 %zok, label %zret, label %no
+zret:
+  store i64 0, ptr %out
+  ret i64 1
+nzero:
+  %f0 = zext i8 %f to i64
+  %fd = sub i64 %f0, 49
+  %fok = icmp ult i64 %fd, 9
+  br i1 %fok, label %sz, label %no
+sz:
+  %big = icmp ugt i64 %nd, 18
+  br i1 %big, label %amb, label %lp
+amb:
+  ret i64 -1
+lp:
+  %i = phi i64 [ %i0, %sz ], [ %i1, %step ]
+  %acc = phi i64 [ 0, %sz ], [ %acc1, %step ]
+  %done = icmp sge i64 %i, %len
+  br i1 %done, label %fin, label %body
+body:
+  %bp = getelementptr inbounds i8, ptr %k, i64 %i
+  %b = load i8, ptr %bp
+  %bz = zext i8 %b to i64
+  %d = sub i64 %bz, 48
+  %isd = icmp ult i64 %d, 10
+  br i1 %isd, label %step, label %no
+step:
+  %a10 = mul i64 %acc, 10
+  %acc1 = add i64 %a10, %d
+  %i1 = add i64 %i, 1
+  br label %lp
+fin:
+  %nv = sub i64 0, %acc
+  %v = select i1 %neg, i64 %nv, i64 %acc
+  store i64 %v, ptr %out
+  ret i64 1
+no:
+  ret i64 0
+}
+';
+
+        // One value at *pp. Failure: *pp = -1 and the null cell.
+        $out .= "\ndefine i64 @__mir_us_val(ptr %s, i64 %n, ptr %pp, i64 %depth) {\n";
+        $out .= "entry:\n";
+        $out .= "  %iv = alloca i64\n  %sv = alloca i64\n  %acv = alloca i64\n  %dend = alloca ptr\n  %kv = alloca i64\n  %klv = alloca i64\n";
+        $out .= "  %p = load i64, ptr %pp\n";
+        $out .= "  %p2 = add i64 %p, 2\n";
+        $out .= "  %room = icmp sle i64 %p2, %n\n";
+        $out .= "  br i1 %room, label %disp, label %fail\n";
+        $out .= "fail:\n";
+        $out .= "  store i64 -1, ptr %pp\n";
+        $out .= "  %fnull = call i64 @__manticore_box_null()\n";
+        $out .= "  ret i64 %fnull\n";
+        $out .= "disp:\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %p\n";
+        $out .= "  %c = load i8, ptr %cp\n";
+        $out .= "  %c1p = getelementptr inbounds i8, ptr %s, i64 %p2\n";
+        $out .= "  %pc1 = getelementptr inbounds i8, ptr %cp, i64 1\n";
+        $out .= "  %c1 = load i8, ptr %pc1\n";
+        $out .= "  switch i8 %c, label %fail [ i8 78, label %tn  i8 98, label %tb  i8 105, label %ti  i8 100, label %td  i8 115, label %ts  i8 97, label %ta ]\n";
+        // N;
+        $out .= "tn:\n";
+        $out .= "  %nok = icmp eq i8 %c1, 59\n";
+        $out .= "  br i1 %nok, label %tnok, label %fail\n";
+        $out .= "tnok:\n";
+        $out .= "  store i64 %p2, ptr %pp\n";
+        $out .= "  %nres = call i64 @__manticore_box_null()\n";
+        $out .= "  ret i64 %nres\n";
+        // b:0; b:1;
+        $out .= "tb:\n";
+        $out .= "  %p4 = add i64 %p, 4\n";
+        $out .= "  %broom = icmp sle i64 %p4, %n\n";
+        $out .= "  %bcol = icmp eq i8 %c1, 58\n";
+        $out .= "  %bok0 = and i1 %broom, %bcol\n";
+        $out .= "  br i1 %bok0, label %tb2, label %fail\n";
+        $out .= "tb2:\n";
+        $out .= "  %bvp = getelementptr inbounds i8, ptr %cp, i64 2\n";
+        $out .= "  %bv = load i8, ptr %bvp\n";
+        $out .= "  %btp = getelementptr inbounds i8, ptr %cp, i64 3\n";
+        $out .= "  %bt = load i8, ptr %btp\n";
+        $out .= "  %bz = zext i8 %bv to i64\n";
+        $out .= "  %bd = sub i64 %bz, 48\n";
+        $out .= "  %bdok = icmp ult i64 %bd, 2\n";
+        $out .= "  %btok = icmp eq i8 %bt, 59\n";
+        $out .= "  %bok = and i1 %bdok, %btok\n";
+        $out .= "  br i1 %bok, label %tbok, label %fail\n";
+        $out .= "tbok:\n";
+        $out .= "  store i64 %p4, ptr %pp\n";
+        $out .= "  %bres = call i64 @__manticore_box_bool(i64 %bd)\n";
+        $out .= "  ret i64 %bres\n";
+        // i:N;
+        $out .= "ti:\n";
+        $out .= "  %icol = icmp eq i8 %c1, 58\n";
+        $out .= "  br i1 %icol, label %ti2, label %fail\n";
+        $out .= "ti2:\n";
+        $out .= "  %iq = call i64 @__mir_us_int(ptr %s, i64 %p2, i64 1, ptr %iv)\n";
+        $out .= "  %ifail = icmp slt i64 %iq, 0\n";
+        $out .= "  br i1 %ifail, label %fail, label %ti3\n";
+        $out .= "ti3:\n";
+        $out .= "  %itp = getelementptr inbounds i8, ptr %s, i64 %iq\n";
+        $out .= "  %it = load i8, ptr %itp\n";
+        $out .= "  %itok = icmp eq i8 %it, 59\n";
+        $out .= "  br i1 %itok, label %tiok, label %fail\n";
+        $out .= "tiok:\n";
+        $out .= "  %iq1 = add i64 %iq, 1\n";
+        $out .= "  store i64 %iq1, ptr %pp\n";
+        $out .= "  %ival = load i64, ptr %iv\n";
+        $out .= "  %ires = call i64 @__manticore_box_int(i64 %ival)\n";
+        $out .= "  ret i64 %ires\n";
+        // d:...;
+        $out .= "td:\n";
+        $out .= "  %dcol = icmp eq i8 %c1, 58\n";
+        $out .= "  br i1 %dcol, label %td2, label %fail\n";
+        $out .= "td2:\n";
+        $out .= "  %dsp = getelementptr inbounds i8, ptr %s, i64 %p2\n";
+        $out .= "  %dfirst = load i8, ptr %dsp\n";
+        $out .= "  %dfz = zext i8 %dfirst to i64\n";
+        $out .= "  %dfd = sub i64 %dfz, 48\n";
+        $out .= "  %dfdig = icmp ult i64 %dfd, 10\n";
+        $out .= "  %dfmin = icmp eq i8 %dfirst, 45\n";
+        $out .= "  %dfdot = icmp eq i8 %dfirst, 46\n";
+        $out .= "  %dfn = icmp eq i8 %dfirst, 78\n";
+        $out .= "  %dfi = icmp eq i8 %dfirst, 73\n";
+        $out .= "  %dfnum0 = or i1 %dfdig, %dfdot\n";
+        $out .= "  %dfnum = or i1 %dfnum0, %dfmin\n";
+        $out .= "  br i1 %dfn, label %tdnan, label %tdi\n";
+        $out .= "tdnan:\n";
+        $out .= "  %pn6 = add i64 %p2, 4\n";
+        $out .= "  %nroom = icmp sle i64 %pn6, %n\n";
+        $out .= "  br i1 %nroom, label %tdnan2, label %fail\n";
+        $out .= "tdnan2:\n";
+        $out .= "  %nm = call i32 @memcmp(ptr %dsp, ptr @.ukw.nan, i64 4)\n";
+        $out .= "  %nmok = icmp eq i32 %nm, 0\n";
+        $out .= "  br i1 %nmok, label %tdnanok, label %fail\n";
+        $out .= "tdnanok:\n";
+        $out .= "  store i64 %pn6, ptr %pp\n";
+        $out .= "  ret i64 9221120237041090560\n";
+        $out .= "tdi:\n";
+        $out .= "  br i1 %dfi, label %tdinf, label %tdminf\n";
+        $out .= "tdinf:\n";
+        $out .= "  %pi5 = add i64 %p2, 4\n";
+        $out .= "  %iroom = icmp sle i64 %pi5, %n\n";
+        $out .= "  br i1 %iroom, label %tdinf2, label %fail\n";
+        $out .= "tdinf2:\n";
+        $out .= "  %im = call i32 @memcmp(ptr %dsp, ptr @.ukw.inf, i64 4)\n";
+        $out .= "  %imok = icmp eq i32 %im, 0\n";
+        $out .= "  br i1 %imok, label %tdinfok, label %fail\n";
+        $out .= "tdinfok:\n";
+        $out .= "  store i64 %pi5, ptr %pp\n";
+        $out .= "  ret i64 9218868437227405312\n";
+        // "-INF;" vs a negative number: the byte after '-' decides.
+        $out .= "tdminf:\n";
+        $out .= "  %mnb = getelementptr inbounds i8, ptr %dsp, i64 1\n";
+        $out .= "  %mnc = load i8, ptr %mnb\n";
+        $out .= "  %mnI = icmp eq i8 %mnc, 73\n";
+        $out .= "  %isminf = and i1 %dfmin, %mnI\n";
+        $out .= "  br i1 %isminf, label %tdninf, label %tdnum\n";
+        $out .= "tdninf:\n";
+        $out .= "  %pni5 = add i64 %p2, 5\n";
+        $out .= "  %niroom = icmp sle i64 %pni5, %n\n";
+        $out .= "  br i1 %niroom, label %tdninf2, label %fail\n";
+        $out .= "tdninf2:\n";
+        $out .= "  %nim = call i32 @memcmp(ptr %dsp, ptr @.ukw.ninf, i64 5)\n";
+        $out .= "  %nimok = icmp eq i32 %nim, 0\n";
+        $out .= "  br i1 %nimok, label %tdninfok, label %fail\n";
+        $out .= "tdninfok:\n";
+        $out .= "  store i64 %pni5, ptr %pp\n";
+        $out .= "  ret i64 -4503599627370496\n";
+        $out .= "tdnum:\n";
+        $out .= "  br i1 %dfnum, label %tdnum2, label %fail\n";
+        $out .= "tdnum2:\n";
+        $out .= "  %dv = call double @__mir_php_strtod(ptr %dsp, ptr %dend)\n";
+        $out .= "  %dep = load ptr, ptr %dend\n";
+        $out .= "  %dei = ptrtoint ptr %dep to i64\n";
+        $out .= "  %dsi = ptrtoint ptr %dsp to i64\n";
+        $out .= "  %dlen = sub i64 %dei, %dsi\n";
+        $out .= "  %dnz = icmp sgt i64 %dlen, 0\n";
+        $out .= "  %dtb = load i8, ptr %dep\n";
+        $out .= "  %dts = icmp eq i8 %dtb, 59\n";
+        $out .= "  %dgood = and i1 %dnz, %dts\n";
+        $out .= "  br i1 %dgood, label %tdok, label %fail\n";
+        $out .= "tdok:\n";
+        $out .= "  %dpos0 = add i64 %p2, %dlen\n";
+        $out .= "  %dpos = add i64 %dpos0, 1\n";
+        $out .= "  store i64 %dpos, ptr %pp\n";
+        $out .= "  %dres = call i64 @__manticore_box_float(double %dv)\n";
+        $out .= "  ret i64 %dres\n";
+        // s:LEN:"...";
+        $out .= "ts:\n";
+        $out .= "  %scol = icmp eq i8 %c1, 58\n";
+        $out .= "  br i1 %scol, label %ts2, label %fail\n";
+        $out .= "ts2:\n";
+        $out .= "  %sq = call i64 @__mir_us_int(ptr %s, i64 %p2, i64 0, ptr %sv)\n";
+        $out .= "  %sfail = icmp slt i64 %sq, 0\n";
+        $out .= "  br i1 %sfail, label %fail, label %ts3\n";
+        $out .= "ts3:\n";
+        $out .= "  %slen = load i64, ptr %sv\n";
+        $out .= "  %sstart = add i64 %sq, 2\n";
+        $out .= "  %send = add i64 %sstart, %slen\n";
+        $out .= "  %send2 = add i64 %send, 2\n";
+        $out .= "  %sroom = icmp sle i64 %send2, %n\n";
+        $out .= "  br i1 %sroom, label %ts4, label %fail\n";
+        $out .= "ts4:\n";
+        $out .= "  %sc0p = getelementptr inbounds i8, ptr %s, i64 %sq\n";
+        $out .= "  %sc0 = load i8, ptr %sc0p\n";
+        $out .= "  %sq1 = add i64 %sq, 1\n";
+        $out .= "  %sc1p = getelementptr inbounds i8, ptr %s, i64 %sq1\n";
+        $out .= "  %sc1 = load i8, ptr %sc1p\n";
+        $out .= "  %sepp = getelementptr inbounds i8, ptr %s, i64 %send\n";
+        $out .= "  %sep = load i8, ptr %sepp\n";
+        $out .= "  %send1 = add i64 %send, 1\n";
+        $out .= "  %setp = getelementptr inbounds i8, ptr %s, i64 %send1\n";
+        $out .= "  %set = load i8, ptr %setp\n";
+        $out .= "  %sa = icmp eq i8 %sc0, 58\n";
+        $out .= "  %sb = icmp eq i8 %sc1, 34\n";
+        $out .= "  %sc = icmp eq i8 %sep, 34\n";
+        $out .= "  %sd = icmp eq i8 %set, 59\n";
+        $out .= "  %sab = and i1 %sa, %sb\n";
+        $out .= "  %scd = and i1 %sc, %sd\n";
+        $out .= "  %sall = and i1 %sab, %scd\n";
+        $out .= "  br i1 %sall, label %tsok, label %fail\n";
+        $out .= "tsok:\n";
+        $out .= "  %sbp = getelementptr inbounds i8, ptr %s, i64 %sstart\n";
+        $out .= "  %sstr = call ptr @__mir_str_new(ptr %sbp, i64 %slen)\n";
+        $out .= "  store i64 %send2, ptr %pp\n";
+        $out .= "  %sres = call i64 @__manticore_box_ptr(ptr %sstr)\n";
+        $out .= "  ret i64 %sres\n";
+        // a:N:{ k v ... }
+        $out .= "ta:\n";
+        $out .= "  %acol = icmp eq i8 %c1, 58\n";
+        $out .= "  %adok = icmp slt i64 %depth, 256\n";
+        $out .= "  %aok0 = and i1 %acol, %adok\n";
+        $out .= "  br i1 %aok0, label %ta2, label %fail\n";
+        $out .= "ta2:\n";
+        $out .= "  %acq = call i64 @__mir_us_int(ptr %s, i64 %p2, i64 0, ptr %acv)\n";
+        $out .= "  %acfail = icmp slt i64 %acq, 0\n";
+        $out .= "  br i1 %acfail, label %fail, label %ta3\n";
+        $out .= "ta3:\n";
+        $out .= "  %abody = add i64 %acq, 2\n";
+        $out .= "  %ainb = icmp sle i64 %abody, %n\n";
+        $out .= "  br i1 %ainb, label %ta3b, label %fail\n";
+        $out .= "ta3b:\n";
+        $out .= "  %acnt = load i64, ptr %acv\n";
+        $out .= "  %ah0p = getelementptr inbounds i8, ptr %s, i64 %acq\n";
+        $out .= "  %ah0 = load i8, ptr %ah0p\n";
+        $out .= "  %acq1 = add i64 %acq, 1\n";
+        $out .= "  %ah1p = getelementptr inbounds i8, ptr %s, i64 %acq1\n";
+        $out .= "  %ah1 = load i8, ptr %ah1p\n";
+        $out .= "  %ah0ok = icmp eq i8 %ah0, 58\n";
+        $out .= "  %ah1ok = icmp eq i8 %ah1, 123\n";
+        $out .= "  %ahok = and i1 %ah0ok, %ah1ok\n";
+        $out .= "  %aleft = sub i64 %n, %abody\n";
+        $out .= "  %afit = icmp ule i64 %acnt, %aleft\n";   // every pair is >= 8 bytes
+        $out .= "  %aok1 = and i1 %ahok, %afit\n";
+        $out .= "  br i1 %aok1, label %tago, label %fail\n";
+        $out .= "tago:\n";
+        $out .= "  %acap0 = icmp eq i64 %acnt, 0\n";
+        $out .= "  %acap = select i1 %acap0, i64 1, i64 %acnt\n";
+        $out .= "  %a0 = call ptr @__mir_array_alloc(i64 %acap)\n";
+        $out .= "  store i64 %abody, ptr %pp\n";
+        $out .= "  %depth1 = add i64 %depth, 1\n";
+        $out .= "  br label %aloop\n";
+        $out .= "aloop:\n";
+        $out .= "  %ai = phi i64 [ 0, %tago ], [ %ai1, %anext ]\n";
+        $out .= "  %acur = phi ptr [ %a0, %tago ], [ %anew, %anext ]\n";
+        $out .= "  %adone = icmp uge i64 %ai, %acnt\n";
+        $out .= "  br i1 %adone, label %aclose, label %akey\n";
+        // key
+        $out .= "akey:\n";
+        $out .= "  %kp = load i64, ptr %pp\n";
+        $out .= "  %kp2 = add i64 %kp, 2\n";
+        $out .= "  %kroom = icmp sle i64 %kp2, %n\n";
+        $out .= "  br i1 %kroom, label %akey2, label %afail\n";
+        $out .= "akey2:\n";
+        $out .= "  %kc0p = getelementptr inbounds i8, ptr %s, i64 %kp\n";
+        $out .= "  %kc0 = load i8, ptr %kc0p\n";
+        $out .= "  %kc1p = getelementptr inbounds i8, ptr %s, i64 %kp2\n";
+        $out .= "  %kcp1 = getelementptr inbounds i8, ptr %kc0p, i64 1\n";
+        $out .= "  %kc1 = load i8, ptr %kcp1\n";
+        $out .= "  %kcol = icmp eq i8 %kc1, 58\n";
+        $out .= "  %kisi = icmp eq i8 %kc0, 105\n";
+        $out .= "  %kiss = icmp eq i8 %kc0, 115\n";
+        $out .= "  br i1 %kcol, label %akey3, label %afail\n";
+        $out .= "akey3:\n";
+        $out .= "  br i1 %kisi, label %akint, label %akchk\n";
+        $out .= "akchk:\n";
+        $out .= "  br i1 %kiss, label %aksvar, label %afail\n";
+        // int key  i:N;
+        $out .= "akint:\n";
+        $out .= "  %kiq = call i64 @__mir_us_int(ptr %s, i64 %kp2, i64 1, ptr %kv)\n";
+        $out .= "  %kifail = icmp slt i64 %kiq, 0\n";
+        $out .= "  br i1 %kifail, label %afail, label %akint2\n";
+        $out .= "akint2:\n";
+        $out .= "  %kitp = getelementptr inbounds i8, ptr %s, i64 %kiq\n";
+        $out .= "  %kit = load i8, ptr %kitp\n";
+        $out .= "  %kitok = icmp eq i8 %kit, 59\n";
+        $out .= "  br i1 %kitok, label %akintok, label %afail\n";
+        $out .= "akintok:\n";
+        $out .= "  %kiq1 = add i64 %kiq, 1\n";
+        $out .= "  store i64 %kiq1, ptr %pp\n";
+        $out .= "  %kival = load i64, ptr %kv\n";
+        $out .= "  br label %aval\n";
+        // string key  s:LEN:"...";
+        $out .= "aksvar:\n";
+        $out .= "  %ksq = call i64 @__mir_us_int(ptr %s, i64 %kp2, i64 0, ptr %klv)\n";
+        $out .= "  %ksfail = icmp slt i64 %ksq, 0\n";
+        $out .= "  br i1 %ksfail, label %afail, label %aks2\n";
+        $out .= "aks2:\n";
+        $out .= "  %kslen = load i64, ptr %klv\n";
+        $out .= "  %ksstart = add i64 %ksq, 2\n";
+        $out .= "  %ksend = add i64 %ksstart, %kslen\n";
+        $out .= "  %ksend2 = add i64 %ksend, 2\n";
+        $out .= "  %ksroom = icmp sle i64 %ksend2, %n\n";
+        $out .= "  br i1 %ksroom, label %aks3, label %afail\n";
+        $out .= "aks3:\n";
+        $out .= "  %ksc0p = getelementptr inbounds i8, ptr %s, i64 %ksq\n";
+        $out .= "  %ksc0 = load i8, ptr %ksc0p\n";
+        $out .= "  %ksq1 = add i64 %ksq, 1\n";
+        $out .= "  %ksc1p = getelementptr inbounds i8, ptr %s, i64 %ksq1\n";
+        $out .= "  %ksc1 = load i8, ptr %ksc1p\n";
+        $out .= "  %ksepp = getelementptr inbounds i8, ptr %s, i64 %ksend\n";
+        $out .= "  %ksep = load i8, ptr %ksepp\n";
+        $out .= "  %ksend1 = add i64 %ksend, 1\n";
+        $out .= "  %kset1 = getelementptr inbounds i8, ptr %s, i64 %ksend1\n";
+        $out .= "  %kset = load i8, ptr %kset1\n";
+        $out .= "  %ksa = icmp eq i8 %ksc0, 58\n";
+        $out .= "  %ksb = icmp eq i8 %ksc1, 34\n";
+        $out .= "  %ksc = icmp eq i8 %ksep, 34\n";
+        $out .= "  %ksd = icmp eq i8 %kset, 59\n";
+        $out .= "  %ksab = and i1 %ksa, %ksb\n";
+        $out .= "  %kscd = and i1 %ksc, %ksd\n";
+        $out .= "  %ksall = and i1 %ksab, %kscd\n";
+        $out .= "  br i1 %ksall, label %aks4, label %afail\n";
+        $out .= "aks4:\n";
+        $out .= "  %ksbp = getelementptr inbounds i8, ptr %s, i64 %ksstart\n";
+        $out .= "  store i64 %ksend2, ptr %pp\n";
+        $out .= "  %kik = call i64 @__mir_us_ikey(ptr %ksbp, i64 %kslen, ptr %kv)\n";
+        $out .= "  switch i64 %kik, label %aksstr [ i64 1, label %aksint  i64 -1, label %afail ]\n";
+        $out .= "aksint:\n";
+        $out .= "  %ksival = load i64, ptr %kv\n";
+        $out .= "  br label %aval\n";
+        $out .= "aksstr:\n";
+        $out .= "  %kstr = call ptr @__mir_str_new(ptr %ksbp, i64 %kslen)\n";
+        $out .= "  br label %aval\n";
+        // value
+        $out .= "aval:\n";
+        $out .= "  %kind = phi i64 [ 0, %akintok ], [ 0, %aksint ], [ 1, %aksstr ]\n";
+        $out .= "  %kint = phi i64 [ %kival, %akintok ], [ %ksival, %aksint ], [ 0, %aksstr ]\n";
+        $out .= "  %kstrp = phi ptr [ null, %akintok ], [ null, %aksint ], [ %kstr, %aksstr ]\n";
+        $out .= "  %val = call i64 @__mir_us_val(ptr %s, i64 %n, ptr %pp, i64 %depth1)\n";
+        $out .= "  %vp = load i64, ptr %pp\n";
+        $out .= "  %vfail = icmp slt i64 %vp, 0\n";
+        $out .= "  br i1 %vfail, label %avfail, label %astore\n";
+        $out .= "avfail:\n";
+        $out .= "  %iskstr = icmp ne i64 %kind, 0\n";
+        $out .= "  br i1 %iskstr, label %avfree, label %afail\n";
+        $out .= "avfree:\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %kstrp)\n";
+        $out .= "  br label %afail\n";
+        $out .= "astore:\n";
+        $out .= "  %isstr = icmp ne i64 %kind, 0\n";
+        $out .= "  br i1 %isstr, label %asets, label %aseti\n";
+        $out .= "asets:\n";
+        $out .= "  %nxs = call ptr @__mir_array_set_str(ptr %acur, ptr %kstrp, i64 %val, i64 0, i64 0)\n";
+        $out .= "  call void @__mir_rc_release_str(ptr %kstrp)\n";
+        $out .= "  br label %anext\n";
+        $out .= "aseti:\n";
+        $out .= "  %ahash = call i64 @__mir_array_is_hashed(ptr %acur)\n";
+        $out .= "  %apacked = icmp eq i64 %ahash, 0\n";
+        $out .= "  %alenv = load i64, ptr %acur\n";
+        $out .= "  %aseq = icmp eq i64 %alenv, %kint\n";
+        $out .= "  %aapp = and i1 %apacked, %aseq\n";
+        $out .= "  br i1 %aapp, label %aappend, label %asetint\n";
+        $out .= "aappend:\n";
+        $out .= "  %nxa = call ptr @__mir_array_append(ptr %acur, i64 %val)\n";
+        $out .= "  br label %anext\n";
+        $out .= "asetint:\n";
+        $out .= "  %nxi = call ptr @__mir_array_set_int(ptr %acur, i64 %kint, i64 %val)\n";
+        $out .= "  br label %anext\n";
+        $out .= "anext:\n";
+        $out .= "  %anew = phi ptr [ %nxs, %asets ], [ %nxa, %aappend ], [ %nxi, %asetint ]\n";
+        $out .= "  %ai1 = add i64 %ai, 1\n";
+        $out .= "  br label %aloop\n";
+        // close }
+        $out .= "aclose:\n";
+        $out .= "  %cpos = load i64, ptr %pp\n";
+        $out .= "  %croom = icmp slt i64 %cpos, %n\n";
+        $out .= "  br i1 %croom, label %aclose2, label %afail\n";
+        $out .= "aclose2:\n";
+        $out .= "  %cbp = getelementptr inbounds i8, ptr %s, i64 %cpos\n";
+        $out .= "  %cb = load i8, ptr %cbp\n";
+        $out .= "  %cbok = icmp eq i8 %cb, 125\n";
+        $out .= "  br i1 %cbok, label %afin, label %afail\n";
+        $out .= "afin:\n";
+        $out .= "  %cpos1 = add i64 %cpos, 1\n";
+        $out .= "  store i64 %cpos1, ptr %pp\n";
+        $out .= "  %ffp = getelementptr inbounds i8, ptr %acur, i64 $flagsOff\n";
+        $out .= "  %ffv = load i64, ptr %ffp\n";
+        $out .= "  %ffc = and i64 %ffv, $notRepr\n";
+        $out .= "  %ffs = or i64 %ffc, $cellRepr\n";
+        $out .= "  store i64 %ffs, ptr %ffp\n";
+        $out .= "  %abx = call i64 @__manticore_box_array(ptr %acur)\n";
+        $out .= "  ret i64 %abx\n";
+        // a half-built array: stamp it so the drop releases its cells, then free.
+        // %acur here is the phi from aloop; reaching afail from before aloop is impossible.
+        $out .= "afail:\n";
+        $out .= "  %fcur = bitcast ptr %acur to ptr\n";
+        $out .= "  %xfp = getelementptr inbounds i8, ptr %fcur, i64 $flagsOff\n";
+        $out .= "  %xfv = load i64, ptr %xfp\n";
+        $out .= "  %xfc = and i64 %xfv, $notRepr\n";
+        $out .= "  %xfs = or i64 %xfc, $cellRepr\n";
+        $out .= "  store i64 %xfs, ptr %xfp\n";
+        $out .= "  %xbx = call i64 @__manticore_box_array(ptr %fcur)\n";
+        $out .= "  call void @__mir_cell_drop(i64 %xbx)\n";
+        $out .= "  br label %fail\n";
+        $out .= "}\n";
+
+        $out .= '
+define i64 @__mir_us_decf(ptr %s) {
+entry:
+  %lp = getelementptr inbounds i8, ptr %s, i64 -16
+  %n = load i64, ptr %lp
+  %pp = alloca i64
+  store i64 0, ptr %pp
+  %r = call i64 @__mir_us_val(ptr %s, i64 %n, ptr %pp, i64 0)
+  %p = load i64, ptr %pp
+  %ok = icmp sge i64 %p, 0
+  %okz = zext i1 %ok to i64
+  store i64 %okz, ptr @__mir_us_ok
+  ret i64 %r
+}
+';
+        return $out;
+    }
+
+    /**
      * The `strtod` declaration every module that converts a string to a float
      * carries, together with `@__mir_php_strtod(ptr s, ptr end)`: strtod with
      * php's reading. libc's also reads hex (`0x1A` → 26), `inf`/`infinity`

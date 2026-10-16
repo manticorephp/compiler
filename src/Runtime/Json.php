@@ -106,6 +106,20 @@ function __mc_ser_native(mixed $value): string {
 }
 
 /**
+ * unserialize() of null / bool / int / float / string and arrays of them, as one
+ * native pass; the value is meaningful only when {@see __mc_unser_ok} answers 1
+ * right after. Codegen builtins over {@see \Compile\Mir\RuntimeLibrary::unserDec};
+ * these bodies are the bootstrap twins (always "not parsed").
+ */
+function __mc_unser_native(string $data): mixed {
+    return null;
+}
+
+function __mc_unser_ok(): int {
+    return 0;
+}
+
+/**
  * JSON_NUMERIC_CHECK's reading of a string: the int or float it is numeric as
  * (php's is_numeric_string — surrounding whitespace allowed, no hex), or null
  * when it stays a string, which includes a value that overflows to INF. Called
