@@ -76,8 +76,11 @@ public bool $needsClosureRc = false;
     public bool $needsStrtoupper = false;
     public bool $needsIpow = false;
     public bool $needsAddslashes = false;
+    public bool $needsStrrev = false;
     public bool $needsJsonEscape = false;
     public bool $needsJsonEnc = false;
+    public bool $needsSerEnc = false;
+    public bool $needsUnserDec = false;
     public bool $needsJsonDec = false;
     public bool $needsRyu = false;
     public bool $needsStrReplaceOne = false;
@@ -120,6 +123,7 @@ public bool $needsClosureRc = false;
     public bool $needsStrcspn = false;
     public bool $needsStrtrBytes = false;
     public bool $needsCrc32 = false;
+    public bool $needsCodec = false;
     public bool $needsStrExplode = false;
 
     /**

@@ -1,0 +1,110 @@
+null 2 N;
+  rt true
+true 4 b:1;
+  rt true
+false 4 b:0;
+  rt true
+int0 4 i:0;
+  rt true
+neg 5 i:-5;
+  rt true
+max 22 i:9223372036854775807;
+  rt true
+min 23 i:-9223372036854775808;
+  rt true
+big 19 i:1125899906842624;
+  rt true
+f0.1 6 d:0.1;
+  rt true
+f-0 5 d:-0;
+  rt true
+f0 4 d:0;
+  rt true
+f1 4 d:1;
+  rt true
+f1e100 11 d:1.0E+100;
+  rt true
+f1e-10 10 d:1.5E-10;
+  rt true
+f1e15 19 d:1000000000000000;
+  rt true
+f123456 18 d:123456789012345;
+  rt true
+f0.30000000000000004 22 d:0.30000000000000004;
+  rt true
+inf 6 d:INF;
+  rt true
+-inf 7 d:-INF;
+  rt true
+d:NAN;
+empty str 7 s:0:"";
+  rt true
+str 12 s:5:"hello";
+  rt true
+quotes 13 s:6:"a"b';c";
+  rt true
+nul 10 s:3:"a\0b";
+  rt true
+multibyte 25 s:17:"héllo wörld ✓";
+  rt true
+empty arr 6 a:0:{}
+  rt true
+list 30 a:3:{i:0;i:1;i:1;i:2;i:2;i:3;}
+  rt true
+strs 45 a:3:{i:0;s:1:"a";i:1;s:2:"bb";i:2;s:3:"ccc";}
+  rt true
+assoc 72 a:5:{s:1:"x";i:1;s:1:"y";s:3:"two";s:1:"z";d:3.5;s:1:"n";N;s:1:"t";b:1;}
+  rt true
+intlike 60 a:4:{i:5;s:1:"a";s:2:"05";s:1:"b";i:-3;s:1:"c";i:7;s:1:"d";}
+  rt true
+nested 92 a:3:{i:0;a:2:{i:0;i:1;i:1;i:2;}i:1;a:1:{s:1:"k";a:3:{i:0;b:1;i:1;N;i:2;s:1:"v";}}i:2;a:0:{}}
+  rt true
+sparse 43 a:3:{i:3;s:1:"a";i:1;s:1:"b";i:10;s:1:"c";}
+  rt true
+deleted 30 a:3:{i:0;i:1;i:2;i:3;i:3;i:4;}
+  rt true
+6ad1820e7e2b5f6b93b05734a2681985
+ac822efbc32988c9f47cfe070640395d
+73df61f9101a0f73e69b5e0300a0e697
+O:1:"P":3:{s:1:"a";i:1;s:1:"b";s:1:"x";s:4:"next";O:1:"P":3:{s:1:"a";i:1;s:1:"b";s:1:"x";s:4:"next";N;}}
+a:3:{i:0;i:1;i:1;O:1:"P":3:{s:1:"a";i:1;s:1:"b";s:1:"x";s:4:"next";O:1:"P":3:{s:1:"a";i:1;s:1:"b";s:1:"x";s:4:"next";N;}}i:2;s:1:"z";}
+a:1:{s:1:"k";a:1:{s:4:"deep";O:1:"P":3:{s:1:"a";i:1;s:1:"b";s:1:"x";s:4:"next";O:1:"P":3:{s:1:"a";i:1;s:1:"b";s:1:"x";s:4:"next";N;}}}}
+E:3:"E:A";
+a:2:{i:0;E:3:"E:A";i:1;i:1;}
+a:2:{i:0;O:1:"P":3:{s:1:"a";i:1;s:1:"b";s:1:"x";s:4:"next";N;}i:1;r:2;}
+P 1
+false
+false
+false
+false
+false
+false
+false
+false
+false
+d:INF; => d:INF;
+d:-INF; => d:-INF;
+d:NAN; => NAN
+d:-0; => d:-0;
+d:1.5e3; => d:1500;
+d:.5; => d:0.5;
+d:7; => d:7;
+i:-0; => i:0;
+i:007; => i:7;
+i:+5; => i:5;
+a:2:{i:0;i:1;i:0;i:2;} => a:1:{i:0;i:2;}
+a:2:{s:1:"5";i:1;s:2:"05";i:2;} => a:2:{i:5;i:1;s:2:"05";i:2;}
+a:1:{s:19:"1000000000000000000";i:1;} => a:1:{i:1000000000000000000;i:1;}
+a:1:{s:19:"9223372036854775808";i:1;} => a:1:{s:19:"9223372036854775808";i:1;}
+a:2:{i:5;N;i:0;N;} => a:2:{i:5;N;i:0;N;}
+i:5;trailing => i:5;
+a:0:{}x => a:0:{}
+a:1:{i:0;a:1:{i:0;a:1:{i:0;s:0:"";}}} => a:1:{i:0;a:1:{i:0;a:1:{i:0;s:0:"";}}}
+b:1; => b:1;
+N; => N;
+s:0:""; => s:0:"";
+a:3:{i:0;i:1;} => b:0;
+a:99999999999:{} => b:0;
+s:4:"abc"; => b:0;
+a:1:{d:1;i:1;} => b:0;
+3004

@@ -260,6 +260,7 @@ function sort(array &$arr, int $flags = 0): bool
     }
     $n = count($arr);
     if ($n < 2) { return true; }
+    if (\__mc_sort_native($arr)) { return true; }
     $tmp = [];
     for ($i = 0; $i < $n; $i = $i + 1) { $tmp[] = $arr[$i]; }
     $width = 1;
@@ -523,7 +524,9 @@ function arsort(array &$arr, int $flags = 0): bool
  */
 function array_merge(array ...$arrays): array
 {
+    // Lists of one element kind concatenate by memcpy.
     $out = [];
+    if (\__mc_fast_cat($arrays)) { \__mc_list_cat_into($out, $arrays); return $out; }
     foreach ($arrays as $arr) {
         foreach ($arr as $k => $v) {
             if (\is_int($k)) {
@@ -548,8 +551,9 @@ function array_reverse(array $a, bool $preserve_keys = false): array
 {
     // php: STRING keys are ALWAYS kept; INT keys are re-indexed unless
     // $preserve_keys. The old body used array_values and dropped every key.
-    $keys = \array_keys($a);
     $out = [];
+    if (!$preserve_keys && \__mc_fast_list($a)) { \__mc_list_range_into($out, $a, 0, \count($a), true); return $out; }
+    $keys = \array_keys($a);
     $i = \count($keys) - 1;
     while ($i >= 0) {
         $k = $keys[$i];
@@ -579,6 +583,11 @@ function array_slice(array $arr, int $offset, ?int $length = null, bool $preserv
         $end = min($count, $offset + $length);
     }
     $out = [];
+    if (\__mc_fast_list($arr) && (!$preserve_keys || $offset === 0)) {
+        $to = (int)$end;
+        if ($to > $offset) { \__mc_list_range_into($out, $arr, $offset, $to, false); }
+        return $out;
+    }
     $i = 0;
     foreach ($arr as $k => $v) {
         if ($i >= $end) { break; }
@@ -774,6 +783,20 @@ function array_unique(array $arr, int $flags = 2): array
 {
     /** @var mixed[] $out */
     $out = [];
+    if ($flags === 2) {
+        // Linear: the string form of a value is its identity. The 's' prefix
+        // keeps every key a string ("1" would otherwise become the int key 1).
+        /** @var array<string,bool> $seen */
+        $seen = [];
+        foreach ($arr as $k => $v) {
+            $key = 's' . (string)$v;
+            if (isset($seen[$key])) { continue; }
+            $seen[$key] = true;
+            $out[$k] = $v;
+        }
+        return $out;
+    }
+
     foreach ($arr as $k => $v) {
         $dup = false;
         foreach ($out as $w) {

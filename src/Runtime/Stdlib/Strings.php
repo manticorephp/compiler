@@ -68,33 +68,74 @@ function __mask_has_byte(string $mask, int $b): bool
     return false;
 }
 
-function ltrim(string $s, string $mask = " \t\n\r\0\x0B"): string
+/**
+ * Internal: 256-byte membership table for a trim mask, php_charmask semantics
+ * (`a..z` is a range when its end byte >= its start byte).
+ */
+function __trim_table(string $mask): string
+{
+    $t = \str_repeat("\0", 256);
+    $m = \strlen($mask);
+    for ($k = 0; $k < $m; $k = $k + 1) {
+        $c = \ord($mask[$k]);
+        if ($k + 3 < $m && \ord($mask[$k + 1]) === 46 && \ord($mask[$k + 2]) === 46 && \ord($mask[$k + 3]) >= $c) {
+            $e = \ord($mask[$k + 3]);
+            for (; $c <= $e; $c = $c + 1) { $t[$c] = "\1"; }
+            $k = $k + 3;
+        } else {
+            $t[$c] = "\1";
+        }
+    }
+    return $t;
+}
+
+/** Internal: trim `$s`; bit 1 of `$mode` strips the left, bit 2 the right. */
+function __trim_impl(string $s, string $mask, int $mode): string
 {
     $len = \strlen($s);
     $i = 0;
-    while ($i < $len) {
-        if (!__mask_has_byte($mask, \ord($s[$i]))) { break; }
-        $i = $i + 1;
+    $j = $len;
+    if ($mask === " \t\n\r\0\x0B") {
+        if (($mode & 1) !== 0) {
+            while ($i < $j) {
+                $c = \ord($s[$i]);
+                if ($c !== 32 && $c !== 10 && $c !== 13 && $c !== 9 && $c !== 11 && $c !== 0) { break; }
+                $i = $i + 1;
+            }
+        }
+        if (($mode & 2) !== 0) {
+            while ($j > $i) {
+                $c = \ord($s[$j - 1]);
+                if ($c !== 32 && $c !== 10 && $c !== 13 && $c !== 9 && $c !== 11 && $c !== 0) { break; }
+                $j = $j - 1;
+            }
+        }
+    } else {
+        $t = __trim_table($mask);
+        if (($mode & 1) !== 0) {
+            while ($i < $j && \ord($t[\ord($s[$i])]) === 1) { $i = $i + 1; }
+        }
+        if (($mode & 2) !== 0) {
+            while ($j > $i && \ord($t[\ord($s[$j - 1])]) === 1) { $j = $j - 1; }
+        }
     }
-    if ($i === 0) { return $s; }
-    return \substr($s, $i, $len - $i);
+    if ($i === 0 && $j === $len) { return $s; }
+    return \substr($s, $i, $j - $i);
+}
+
+function ltrim(string $s, string $mask = " \t\n\r\0\x0B"): string
+{
+    return __trim_impl($s, $mask, 1);
 }
 
 function rtrim(string $s, string $mask = " \t\n\r\0\x0B"): string
 {
-    $len = \strlen($s);
-    $i = $len;
-    while ($i > 0) {
-        if (!__mask_has_byte($mask, \ord($s[$i - 1]))) { break; }
-        $i = $i - 1;
-    }
-    if ($i === $len) { return $s; }
-    return \substr($s, 0, $i);
+    return __trim_impl($s, $mask, 2);
 }
 
 function trim(string $s, string $mask = " \t\n\r\0\x0B"): string
 {
-    return rtrim(ltrim($s, $mask), $mask);
+    return __trim_impl($s, $mask, 3);
 }
 
 /**
@@ -295,14 +336,17 @@ function lcfirst(string $s): string
 function ucwords(string $s, string $delimiters = " \t\r\n\x0C\x0B"): string
 {
     $n = \strlen($s);
-    $out = "";
+    $o = $s;
     $cap = true;
+    $t = \str_repeat("\0", 256);
+    $m = \strlen($delimiters);
+    for ($k = 0; $k < $m; $k = $k + 1) { $t[\ord($delimiters[$k])] = "\1"; }
     for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = \substr($s, $i, 1);
-        if ($cap) { $out = $out . \strtoupper($c); } else { $out = $out . $c; }
-        $cap = \strpos($delimiters, $c) !== false;
+        $c = \ord($s[$i]);
+        if ($cap && $c >= 97 && $c <= 122) { $o[$i] = \chr($c - 32); }
+        $cap = \ord($t[$c]) === 1;
     }
-    return $out;
+    return $o;
 }
 
 /** Count non-overlapping occurrences of `$needle` in `$haystack` (PHP
@@ -469,10 +513,15 @@ function strrev(string $s): string
 function str_pad(string $s, int $len, string $pad = " ", int $type = 1): string
 {
     $sl = \strlen($s);
-    if ($sl >= $len || \strlen($pad) === 0) { return $s; }
+    if ($sl >= $len) { return $s; }
+    if (\strlen($pad) === 0) {
+        throw new \ValueError('str_pad(): Argument #3 ($pad_string) must not be empty');
+    }
+    if ($type < 0 || $type > 2) {
+        throw new \ValueError('str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH');
+    }
     $need = $len - $sl;
-    $full = "";
-    while (\strlen($full) < $need) { $full = $full . $pad; }
+    $full = \str_repeat($pad, \intdiv($need, \strlen($pad)) + 1);
     if ($type === 0) { return \substr($full, 0, $need) . $s; }
     if ($type === 2) {
         $left = \intval($need / 2);
@@ -536,25 +585,23 @@ function nl2br(string $s, bool $is_xhtml = true): string
     $br = $is_xhtml ? "<br />" : "<br>";
     $n = \strlen($s);
     $out = "";
+    $start = 0;
     $i = 0;
     while ($i < $n) {
-        $c = \substr($s, $i, 1);
-        if ($c === "\r" || $c === "\n") {
-            $nx = ($i + 1 < $n) ? \substr($s, $i + 1, 1) : "";
-            // A two-char sequence (\r\n or \n\r) stays together after the tag.
-            if (($c === "\r" && $nx === "\n") || ($c === "\n" && $nx === "\r")) {
-                $out = $out . $br . $c . $nx;
-                $i = $i + 2;
-                continue;
-            }
-            $out = $out . $br . $c;
-            $i = $i + 1;
-            continue;
+        $c = \ord($s[$i]);
+        if ($c !== 10 && $c !== 13) { $i = $i + 1; continue; }
+        $j = $i + 1;
+        // A two-char sequence (\r\n or \n\r) stays together after the tag.
+        if ($j < $n) {
+            $d = \ord($s[$j]);
+            if (($d === 10 || $d === 13) && $d !== $c) { $j = $j + 1; }
         }
-        $out = $out . $c;
-        $i = $i + 1;
+        $out = $out . \substr($s, $start, $i - $start) . $br . \substr($s, $i, $j - $i);
+        $i = $j;
+        $start = $j;
     }
-    return $out;
+    if ($start === 0) { return $s; }
+    return $out . \substr($s, $start, $n - $start);
 }
 
 /** Words in `$s` (PHP `str_word_count`). A word is a maximal run of alphabetic

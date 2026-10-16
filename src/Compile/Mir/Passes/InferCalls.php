@@ -357,6 +357,7 @@ trait InferCalls
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id' || $n === 'gc_collect_cycles'
             || $n === 'strcspn' || $n === '__mc_crc32b'
+            || $n === '__mc_b64_ok'
             || $n === '__float_bits' || $n === '__ryu_msp'
             || $n === 'peek_i64' || $n === 'peek_i32' || $n === 'peek_i16'
             || $n === 'peek_i8'
@@ -445,6 +446,13 @@ trait InferCalls
         // the key variants carry the full int|string|null union.
         if ($n === 'array_is_list' && \count($args) === 1) { return Type::bool_(); }
         if ($n === '__mc_array_reindex' && \count($args) === 1) { return Type::void(); }
+        // List bulk-copy builtins (prelude/array_fns.php): in place on their first
+        // argument.
+        if (($n === '__mc_list_range_into' && \count($args) === 5) || ($n === '__mc_list_cat_into' && \count($args) === 2)) { return Type::void(); }
+        if ($n === 'range' && InlineClosures::rangeIntShape($args)) { return Type::vec(Type::int_()); }
+        if ($n === '__mc_sort_native' && \count($args) === 1) { return Type::bool_(); }
+        if ($n === '__mc_int_seq' && \count($args) === 3) { return Type::vec(Type::int_()); }
+        if (($n === '__mc_fast_cat' || $n === '__mc_fast_list') && \count($args) === 1) { return Type::bool_(); }
         // prelude/weak.php: arm the free-path death hook; an address back to
         // the object it names, retained and boxed.
         if ($n === '__mc_weak_arm' && $args === []) { return Type::void(); }
@@ -560,7 +568,8 @@ trait InferCalls
             || $n === 'str_repeat' || $n === 'strtolower' || $n === 'strtoupper'
             || $n === 'sprintf' || $n === 'implode' || $n === 'join'
             || $n === '__mc_fmt_int' || $n === '__mc_fmt_float' || $n === '__mc_fmt_str'
-            || $n === 'addslashes' || $n === 'var_export' || $n === '__mc_json_escape'
+            || $n === 'addslashes' || $n === 'strrev' || $n === 'var_export' || $n === '__mc_json_escape'
+            || $n === '__mc_b64_enc' || $n === '__mc_b64_dec' || $n === '__mc_bin2hex' || $n === '__mc_hex2bin'
             || $n === '__mir_str_replace_one'
             || $n === 'str_from_buffer' || $n === 'cstr_to_str'
             || $n === 'gettype' || $n === 'get_debug_type'

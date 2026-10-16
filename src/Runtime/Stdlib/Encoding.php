@@ -5,7 +5,8 @@
 
 // ── base64 ─────────────────────────────────────────────────────────────
 
-function base64_encode(string $data): string
+/** Native codegen builtin; this body is the bootstrap fallback. */
+function __mc_b64_enc(string $data): string
 {
     $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
     $out = '';
@@ -26,6 +27,24 @@ function base64_encode(string $data): string
     return $out;
 }
 
+/** Native codegen builtin; this body is the bootstrap fallback (php strict rules). */
+function __mc_b64_ok(string $data): int
+{
+    $n = \strlen($data);
+    $cnt = 0;
+    $pad = 0;
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $c = \ord($data[$i]);
+        if ($c === 61) { $pad = $pad + 1; continue; }
+        if ($c === 32 || $c === 9 || $c === 10 || $c === 13) { continue; }
+        if (\__mc_b64val($c) < 0 || $pad > 0) { return 0; }
+        $cnt = $cnt + 1;
+    }
+    if (($cnt & 3) === 1) { return 0; }
+    if ($pad > 0 && ($pad > 2 || (($cnt + $pad) & 3) !== 0)) { return 0; }
+    return 1;
+}
+
 /** The value 0..63 of a base64 char, or -1 if not in the alphabet. */
 function __mc_b64val(int $c): int
 {
@@ -37,31 +56,34 @@ function __mc_b64val(int $c): int
     return -1;
 }
 
+function base64_encode(string $data): string
+{
+    return \__mc_b64_enc($data);
+}
+
 /**
- * base64_decode. In loose mode (default) non-alphabet bytes are skipped; in
- * strict mode any invalid byte returns false. Padding `=` ends the stream.
+ * base64_decode. Loose mode (default) skips every non-alphabet byte and `=`; strict
+ * mode applies php's rules ({@see __mc_b64_ok}).
  */
 function base64_decode(string $data, bool $strict = false): string|false
+{
+    if ($strict && \__mc_b64_ok($data) === 0) {
+        return false;
+    }
+    return \__mc_b64_dec($data);
+}
+
+/** Native codegen builtin; this body is the bootstrap fallback (loose decode). */
+function __mc_b64_dec(string $data): string
 {
     $out = '';
     $n = \strlen($data);
     $acc = 0;
     $bits = 0;
     for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = \ord($data[$i]);
-        if ($c === 61) {   // '=' padding — stop
-            break;
-        }
-        $v = \__mc_b64val($c);
-        if ($v < 0) {
-            // whitespace is tolerated in both modes; other junk fails in strict
-            if ($c === 32 || $c === 9 || $c === 10 || $c === 13 || $c === 11 || $c === 12) {
-                continue;
-            }
-            if ($strict) { return false; }
-            continue;
-        }
-        $acc = ($acc << 6) | $v;
+        $v = \__mc_b64val(\ord($data[$i]));
+        if ($v < 0) { continue; }
+        $acc = (($acc << 6) | $v) & 0xFFFF;
         $bits = $bits + 6;
         if ($bits >= 8) {
             $bits = $bits - 8;

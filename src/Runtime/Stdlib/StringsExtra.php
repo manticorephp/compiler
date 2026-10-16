@@ -308,6 +308,12 @@ function quotemeta(string $string): string
 /** Lowercase-hex encoding of each byte (PHP `bin2hex`). */
 function bin2hex(string $string): string
 {
+    return \__mc_bin2hex($string);
+}
+
+/** Native codegen builtin; this body is the bootstrap fallback. */
+function __mc_bin2hex(string $string): string
+{
     $d = "0123456789abcdef";
     $n = \strlen($string);
     $out = "";
@@ -320,6 +326,19 @@ function bin2hex(string $string): string
 
 /** Decode a hex string back to bytes (PHP `hex2bin`). */
 function hex2bin(string $string): string
+{
+    $n = \strlen($string);
+    if (($n & 1) === 1) {
+        throw new \ValueError('hex2bin(): Hexadecimal input string must have an even length');
+    }
+    if (\strspn($string, '0123456789abcdefABCDEF') !== $n) {
+        throw new \ValueError('hex2bin(): Input string must be hexadecimal string');
+    }
+    return \__mc_hex2bin($string);
+}
+
+/** Native codegen builtin; this body is the bootstrap fallback. */
+function __mc_hex2bin(string $string): string
 {
     $n = \strlen($string);
     $out = "";
@@ -429,7 +448,7 @@ function strtr__bytes(string $string, string $from, string $to): string
 
 /**
  * The pairs form: at each position the LONGEST matching key wins, and replaced
- * text is never searched again. An empty key is skipped (php warns and skips).
+ * text is never searched again. An empty key is a ValueError (php warns and skips).
  * Keys are bucketed by first byte, each bucket longest-first; the pairs are
  * copied into two vecs so a numeric-string key (which php stores as an int)
  * never reaches a string-keyed map.
@@ -443,7 +462,9 @@ function strtr__pairs(string $string, array $replace_pairs): string
     $vals = [];
     foreach ($replace_pairs as $k => $v) {
         $key = (string)$k;
-        if ($key === '') { continue; }
+        if ($key === '') {
+            throw new \ValueError('strtr(): Argument #2 ($from) must not contain an empty string key');
+        }
         $keys[] = $key;
         $vals[] = (string)$v;
     }
@@ -464,7 +485,11 @@ function strtr__pairs(string $string, array $replace_pairs): string
     $out = '';
     $run = 0;
     $i = 0;
+    $firsts = '';
+    for ($p = 0; $p < $np; $p = $p + 1) { $firsts = $firsts . $keys[$p][0]; }
     while ($i < $n) {
+        $i = $i + \strcspn($string, $firsts, $i);
+        if ($i >= $n) { break; }
         $hit = -1;
         $cands = $buckets[\ord($string[$i])] ?? null;
         if ($cands !== null) {
