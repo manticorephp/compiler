@@ -24,7 +24,10 @@
 #   $MANTICORE_HOME/lib/prelude/*.php
 #
 # Env knobs: MANTICORE_HOME, MANTICORE_REPO, MANTICORE_REF, MANTICORE_SRC,
-#           MANTICORE_VERSION (a specific release), MANTICORE_FROM_SOURCE=1.
+#           MANTICORE_VERSION (a specific release), MANTICORE_FROM_SOURCE=1,
+#           MANTICORE_STRICT=1 (upgrade: a miss is fatal, exit 2 net / 3 no build /
+#           4 checksum / 5 stage), MANTICORE_API_BASE, MANTICORE_RELEASE_BASE.
+# Flags: --check prints latest=<ver> and platform=<os>-<arch>, installs nothing.
 
 set -euo pipefail
 
@@ -36,6 +39,19 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+STRICT="${MANTICORE_STRICT:-0}"
+API_BASE="${MANTICORE_API_BASE:-https://api.github.com/repos/manticorephp/compiler/releases}"
+DL_BASE="${MANTICORE_RELEASE_BASE:-https://github.com/manticorephp/compiler/releases}"
+EX_NET=2; EX_NOBUILD=3; EX_SUM=4; EX_STAGE=5
+SELF="${BASH_SOURCE[0]:-$0}"
+CHECK=0
+for _a in "$@"; do if [ "$_a" = "--check" ]; then CHECK=1; fi; done
+
+die_code() { printf '\033[1;31merror:\033[0m %s\n' "$2" >&2; exit "$1"; }
+# Strict (upgrade): a miss is fatal with its own exit code. Otherwise warn and
+# let the caller fall back to a source build, as before.
+miss() { if [ "$STRICT" = 1 ]; then die_code "$1" "$2"; fi; warn "$2"; }
 
 # ---- 1. platform ----------------------------------------------------------
 OS="$(uname -s)"; ARCH="$(uname -m)"
@@ -74,63 +90,106 @@ fetch() {
     fi
 }
 
+resolve_version() { # $1 = scratch dir; sets VER
+    VER="${MANTICORE_VERSION:-}"; VER="${VER#v}"
+    if [ -z "$VER" ]; then
+        fetch "$API_BASE/latest" "$1/latest.json" || return 1
+        VER="$(sed -n 's/.*"tag_name"[^"]*"v\{0,1\}\([^"]*\)".*/\1/p' "$1/latest.json" | head -1)"
+    fi
+    [ -n "$VER" ]
+}
+
+smoke_compile() { # $1 compiler, $2 scratch dir
+    printf '<?php echo "manticore-ok\\n";' > "$2/.smoke.php"
+    if "$1" compile "$2/.smoke.php" -o "$2/.smoke" >/dev/null 2>&1 \
+            && [ "$("$2/.smoke" 2>/dev/null)" = "manticore-ok" ]; then
+        rm -f "$2/.smoke.php" "$2/.smoke"; return 0
+    fi
+    rm -f "$2/.smoke.php" "$2/.smoke"; return 1
+}
+
+# Staged swap: everything is already verified and smoke-tested in $1 (inside
+# $PREFIX, so each mv is a same-filesystem rename). rm+mv, never cp over the binary.
+# Runs under `if`/`||`, where errexit is off: every step that matters returns 1.
+swap_in() {
+    local stage="$1"
+    mkdir -p "$PREFIX/bin" "$PREFIX/share" || return 1
+    rm -f "$PREFIX/bin/.manticore.prev"
+    if [ -e "$PREFIX/bin/manticore" ]; then mv "$PREFIX/bin/manticore" "$PREFIX/bin/.manticore.prev" || return 1; fi
+    rm -rf "$PREFIX/lib.old"
+    if [ -d "$PREFIX/lib" ]; then mv "$PREFIX/lib" "$PREFIX/lib.old" || return 1; fi
+    mv "$stage/bin/manticore" "$PREFIX/bin/manticore" || return 1
+    mv "$stage/lib" "$PREFIX/lib" || return 1
+    if [ -f "$stage/share/install.sh" ]; then
+        cp "$stage/share/install.sh" "$PREFIX/share/install.sh.new" && mv "$PREFIX/share/install.sh.new" "$PREFIX/share/install.sh" || return 1
+    fi
+    mv "$stage/share/.installed-by" "$PREFIX/share/.installed-by" || return 1
+    rm -rf "$stage"
+    return 0
+}
+rollback() {
+    if [ ! -e "$PREFIX/bin/.manticore.prev" ] && [ ! -d "$PREFIX/lib.old" ]; then return 0; fi
+    warn "rolling back to the previous install"
+    if [ -d "$PREFIX/lib.old" ]; then rm -rf "$PREFIX/lib"; mv "$PREFIX/lib.old" "$PREFIX/lib"; fi
+    if [ -e "$PREFIX/bin/.manticore.prev" ]; then rm -f "$PREFIX/bin/manticore"; mv "$PREFIX/bin/.manticore.prev" "$PREFIX/bin/manticore"; fi
+    return 0
+}
+
+if [ "$CHECK" = 1 ]; then
+    _t="$(mktemp -d)"
+    resolve_version "$_t" || { rm -rf "$_t"; die_code $EX_NET "cannot resolve the latest release (is github reachable?)"; }
+    rm -rf "$_t"
+    echo "latest=$VER"; echo "platform=${REL_OS:-?}-${REL_ARCH:-?}"; exit 0
+fi
+
 try_prebuilt() {
     [ "${MANTICORE_FROM_SOURCE:-0}" = 0 ] || return 1
     [ -z "${MANTICORE_SRC:-}" ] || return 1
     [ "$REF" = main ] || return 1
-    [ -n "$REL_OS" ] && [ -n "$REL_ARCH" ] || return 1
-    have curl || have wget || return 1
-
-    local api="https://api.github.com/repos/manticorephp/compiler/releases"
-    local dl="https://github.com/manticorephp/compiler/releases"
-    local tmp ver base name
+    if [ -z "$REL_OS" ] || [ -z "$REL_ARCH" ]; then miss $EX_NOBUILD "no published build for $OS/$ARCH"; return 1; fi
+    if ! have curl && ! have wget; then miss $EX_NET "neither curl nor wget found"; return 1; fi
+    local tmp name base want got sum stage rel_ver
     tmp="$(mktemp -d)"
-
-    ver="${MANTICORE_VERSION:-}"
-    if [ -z "$ver" ]; then
-        fetch "$api/latest" "$tmp/latest.json" || { rm -rf "$tmp"; return 1; }
-        ver="$(sed -n 's/.*"tag_name"[^"]*"v\{0,1\}\([^"]*\)".*/\1/p' "$tmp/latest.json" | head -1)"
-    fi
-    [ -n "$ver" ] || { rm -rf "$tmp"; return 1; }
-
-    base="$dl/download/v$ver"
-    name="manticore-$ver-$REL_OS-$REL_ARCH"
-    log "published build $ver ($REL_OS/$REL_ARCH) — downloading (MANTICORE_FROM_SOURCE=1 to build instead)"
-    fetch "$base/$name.tar.gz" "$tmp/$name.tar.gz" || { rm -rf "$tmp"; return 1; }
-
-    # An unverified download is still better than no install, but say which it was.
-    if fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
-        local want got sum
-        sum=""
-        have sha256sum && sum="sha256sum"
-        [ -n "$sum" ] || { have shasum && sum="shasum -a 256"; }
-        if [ -n "$sum" ]; then
-            want="$(sed -n "s|^\([0-9a-f]\{64\}\)[ *]*\./\{0,1\}$name\.tar\.gz\$|\1|p" "$tmp/SHA256SUMS" | head -1)"
-            got="$($sum "$tmp/$name.tar.gz" | cut -d' ' -f1)"
-            if [ -n "$want" ] && [ "$want" != "$got" ]; then
-                warn "checksum mismatch for $name.tar.gz — building from source instead"
-                rm -rf "$tmp"; return 1
-            fi
-        else
-            warn "no sha256sum/shasum here — the download is unverified"
-        fi
+    if ! resolve_version "$tmp"; then rm -rf "$tmp"; miss $EX_NET "cannot resolve the release version (is github reachable?)"; return 1; fi
+    rel_ver="$VER"
+    base="$DL_BASE/download/v$rel_ver"
+    name="manticore-$rel_ver-$REL_OS-$REL_ARCH"
+    log "published build $rel_ver ($REL_OS/$REL_ARCH) — downloading (MANTICORE_FROM_SOURCE=1 to build instead)"
+    if ! fetch "$base/$name.tar.gz" "$tmp/$name.tar.gz"; then
+        rm -rf "$tmp"; miss $EX_NOBUILD "no published build $name (or the download failed)"; return 1
     fi
 
-    tar -xzf "$tmp/$name.tar.gz" -C "$tmp" || { rm -rf "$tmp"; return 1; }
-    [ -x "$tmp/$name/bin/manticore" ] || { rm -rf "$tmp"; return 1; }
+    sum=""
+    have sha256sum && sum="sha256sum"
+    [ -n "$sum" ] || { have shasum && sum="shasum -a 256"; }
+    if [ -z "$sum" ]; then
+        if [ "$STRICT" = 1 ]; then rm -rf "$tmp"; die_code $EX_SUM "no sha256sum/shasum here — cannot verify the download"; fi
+        warn "no sha256sum/shasum here — the download is unverified"
+    elif fetch "$base/SHA256SUMS" "$tmp/SHA256SUMS" 2>/dev/null; then
+        want="$(sed -n "s|^\([0-9a-f]\{64\}\)[ *]*\./\{0,1\}$name\.tar\.gz\$|\1|p" "$tmp/SHA256SUMS" | head -1)"
+        got="$($sum "$tmp/$name.tar.gz" | cut -d' ' -f1)"
+        if [ -z "$want" ] && [ "$STRICT" = 1 ]; then rm -rf "$tmp"; die_code $EX_SUM "SHA256SUMS has no entry for $name.tar.gz"; fi
+        if [ -n "$want" ] && [ "$want" != "$got" ]; then rm -rf "$tmp"; miss $EX_SUM "checksum mismatch for $name.tar.gz"; return 1; fi
+    elif [ "$STRICT" = 1 ]; then
+        rm -rf "$tmp"; die_code $EX_SUM "cannot fetch SHA256SUMS — refusing an unverified download"
+    fi
 
+    if ! tar -xzf "$tmp/$name.tar.gz" -C "$tmp" || [ ! -x "$tmp/$name/bin/manticore" ]; then
+        rm -rf "$tmp"; miss $EX_STAGE "the tarball is not a Manticore build"; return 1
+    fi
+    stage="$PREFIX/.staging.$$"
+    rm -rf "$stage"; mkdir -p "$stage/share"
+    cp -R "$tmp/$name/bin" "$tmp/$name/lib" "$stage/"
+    if [ -f "$tmp/$name/share/install.sh" ]; then cp "$tmp/$name/share/install.sh" "$stage/share/install.sh"
+    elif [ -f "$SELF" ]; then cp "$SELF" "$stage/share/install.sh"; fi
+    printf 'install.sh %s\n' "$rel_ver" > "$stage/share/.installed-by"
+    if [ "$OS" = Darwin ]; then xattr -d com.apple.quarantine "$stage/bin/manticore" 2>/dev/null || true; fi
+    if ! smoke_compile "$stage/bin/manticore" "$stage"; then
+        rm -rf "$tmp" "$stage"; miss $EX_STAGE "the downloaded compiler failed its smoke test; the installed one is untouched"; return 1
+    fi
     log "installing into $PREFIX"
-    mkdir -p "$PREFIX/bin" "$PREFIX/lib"
-    rm -rf "$PREFIX/lib/prelude"
-    # macOS refuses to overwrite a RUNNING or signed binary in place (SIGKILL);
-    # removing first is the difference between an upgrade and a dead install.
-    rm -f "$PREFIX/bin/manticore"
-    cp "$tmp/$name/bin/manticore" "$PREFIX/bin/manticore"
-    cp -R "$tmp/$name/lib/." "$PREFIX/lib/"
-    if [ "$OS" = Darwin ]; then
-        # Downloaded and unsigned: without this Gatekeeper answers with a dialog
-        # about an unverified developer, which names nothing that would fix it.
-        xattr -d com.apple.quarantine "$PREFIX/bin/manticore" 2>/dev/null || true
+    if ! swap_in "$stage"; then
+        rollback; rm -rf "$tmp" "$stage"; miss $EX_STAGE "the swap failed; the previous install was restored"; return 1
     fi
     rm -rf "$tmp"
     return 0
@@ -228,18 +287,18 @@ cp "$SRC"/lib/manticore_stdlib.o.sig "$PREFIX/lib/" 2>/dev/null || true
 # prelude: published from source unconditionally (idempotent), so the installed
 # layout never depends on what the build left under lib/prelude.
 cp "$SRC"/prelude/*.php "$PREFIX/lib/prelude/"
+mkdir -p "$PREFIX/share"; cp "$SRC/install.sh" "$PREFIX/share/install.sh"; printf 'install.sh source\n' > "$PREFIX/share/.installed-by"
+# ponytail: source builds copy in place, not staged; stage them like the prebuilt path if upgrade ever builds from source
 
 fi   # end of the from-source path
 
 # ---- 6. verify ------------------------------------------------------------
 ver="$("$PREFIX/bin/manticore" version 2>/dev/null || true)"
-printf '<?php echo "manticore-ok\\n";' > "$PREFIX/.smoke.php"
-if "$PREFIX/bin/manticore" compile "$PREFIX/.smoke.php" -o "$PREFIX/.smoke" >/dev/null 2>&1 \
-        && [ "$("$PREFIX/.smoke" 2>/dev/null)" = "manticore-ok" ]; then
-    rm -f "$PREFIX/.smoke.php" "$PREFIX/.smoke"
+if smoke_compile "$PREFIX/bin/manticore" "$PREFIX"; then
+    rm -rf "$PREFIX/lib.old"
     log "installed and smoke-tested: $ver"
 else
-    rm -f "$PREFIX/.smoke.php" "$PREFIX/.smoke"
+    rollback
     die "the installed compiler failed to compile+run a hello world"
 fi
 
