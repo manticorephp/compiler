@@ -92,6 +92,39 @@ undefined.,parse.error`, about 2 s) catches unknown names and syntax. The build 
 for "undefined-function traps", and the new binary must compile and run hello world. The error
 names both the installed version and the pin.
 
+## Versions: BOOTSTRAP_VERSION vs COMPILER_VERSION
+
+Two one-line files at the repo root, two different questions.
+
+| File | Means | Read by |
+|---|---|---|
+| `BOOTSTRAP_VERSION` | the release that **builds** this tree (stage0) | `bin/build`, `tools/fetch_bootstrap.sh`, `gate.sh`, Dockerfiles, `install.sh`, CI |
+| `COMPILER_VERSION` | the version of the tree **being built**, i.e. what `manticore version` prints | `bin/build`, `tools/check_version.sh`, the release workflow |
+
+`COMPILER_VERSION` is `X.Y.Z`, or `X.Y.Z-suffix` between releases (`0.15.0-dev`). The compiled
+binary cannot read a repo file, so `bin/build` generates `src/Manticore/Version.php` from it on
+every run and rewrites that file only when its content changes. The generated file is committed;
+never edit it. `bin/build` refuses a `COMPILER_VERSION` that is not one line of that shape.
+
+`tools/check_version.sh` (CI job `version-source`, and the release workflow) fails when:
+
+- either file is not `X.Y.Z[-suffix]`;
+- `src/Manticore/Version.php` differs from `COMPILER_VERSION` (run `bin/build`);
+- `BOOTSTRAP_VERSION` is newer than `COMPILER_VERSION`; a `-suffix` sorts before the same plain
+  version.
+
+On a tag build the release workflow also fails when the tag (without `v`) differs from
+`COMPILER_VERSION`.
+
+Cutting release N:
+
+1. Edit `COMPILER_VERSION` to `N` (drop `-dev`) and the version prose in the docs.
+2. Run `bin/build`; it regenerates `Version.php`.
+3. Commit both, tag `vN`, push the tag.
+
+The pin is raised separately and only when `src/` needs a newer compiler (two-step rule above);
+a release does not move it.
+
 ## Why not keep the Zend seed as well
 
 It was kept briefly as an opt-in after #112 and then removed (#114). As long as it existed, `src/`
@@ -113,8 +146,8 @@ and a few Zend-hosted dev tools (`tools/compile_user_mir.php`), and those keep w
 
 ## Files
 
-- `BOOTSTRAP_VERSION`, `tools/fetch_bootstrap.sh`
+- `BOOTSTRAP_VERSION`, `COMPILER_VERSION`, `tools/fetch_bootstrap.sh`, `tools/check_version.sh`
 - `bin/build`: the stage0 fetch, the second generation, and the gap diagnosis.
 - `tools/docker/gate.sh`: `restore_bootstrap` and the source loop.
-- `.github/workflows/ci.yml`: the `bootstrap-from-pin` job.
-- `.github/workflows/release.yml`: the release builds from the pin.
+- `.github/workflows/ci.yml`: the `bootstrap-from-pin` and `version-source` jobs.
+- `.github/workflows/release.yml`: the release builds from the pin and checks the tag against `COMPILER_VERSION`.

@@ -163,6 +163,8 @@ bin/build --verify       # + fixpoint + suite gate
 
 ## Working with it
 
+Every command and option: [`docs/cli.md`](docs/cli.md).
+
 ```bash
 # one file
 manticore compile path/to/app.php -o app && ./app
@@ -205,6 +207,8 @@ them in `/tmp` and deleting them — pair with `-O0` to get a binary lldb can wa
 `unknown`. When that matters, read the final binary.
 
 ### Build progress
+
+Full reference: [`docs/cli.md`](docs/cli.md).
 
 `compile` and `build` report progress on **stderr only**; stdout is never touched.
 
