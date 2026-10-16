@@ -79,25 +79,33 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     [ "$bad" = 0 ]; ck "plain line format" $?
     for s in parse LowerFromAst Verify; do grep -Eq "^\[ *[0-9]+\] $s( |  )" "$e"; ck "plain stage $s" $?; done
     "$MC" compile f.php -o pj --progress=json >/dev/null 2>"$e"; ck "json rc" $?
-    bad="$(grep -Evc '^\{"event":"(stage_end|counter|done|timing)".*\}$' "$e")"
+    bad="$(grep -Evc '^\{"event":"(stage_start|stage_end|counter|done|timing)".*\}$' "$e")"
     [ "$bad" = 0 ]; ck "json line format" $?
     [ "$(grep -c '"event":"done"' "$e")" = 1 ]; ck "json done once" $?
-    ! grep -q "$(printf '\033')" "$e"; ck "json no ESC" $?
+    [ -s "$e" ] && ! grep -q "$(printf '\033')" "$e"; ck "json no ESC" $?
     "$MC" compile f.php -o pq --progress=off >/dev/null 2>"$e"; [ ! -s "$e" ]; ck "off silent" $?
     "$MC" compile f.php -o pq --quiet >/dev/null 2>"$e"; [ ! -s "$e" ]; ck "quiet silent" $?
     "$MC" compile f.php -o pq --quiet --progress=plain >/dev/null 2>"$e"; [ ! -s "$e" ]; ck "quiet+plain silent" $?
     env -u CI "$MC" compile f.php -o pa --progress=auto >/dev/null 2>"$e"; [ ! -s "$e" ]; ck "auto piped silent" $?
     CI=1 "$MC" compile f.php -o pa --progress=auto >/dev/null 2>"$e"; grep -Eq '^done in ' "$e"; ck "auto+CI plain" $?
-    "$MC" compile f.php -o x --progress=bogus >/dev/null 2>&1; [ $? = 64 ]; ck "bogus progress rc 64" $?
-    "$MC" compile f.php -o x --color=bogus >/dev/null 2>&1; [ $? = 64 ]; ck "bogus color rc 64" $?
+    local rc
+    "$MC" compile f.php -o x --progress=bogus >/dev/null 2>"$e"; rc=$?; [ $rc = 64 ] && grep -qxF "compile: unknown --progress value 'bogus' (expected auto|live|plain|json|off)" "$e"; ck "bogus progress rc 64 + text" $?
+    "$MC" compile f.php -o x --color=bogus >/dev/null 2>"$e"; rc=$?; [ $rc = 64 ] && grep -qxF "compile: unknown --color value 'bogus' (expected auto|always|never)" "$e"; ck "bogus color rc 64 + text" $?
+    "$MC" build nope.json --progress=bogus >/dev/null 2>"$e"; rc=$?; [ $rc = 64 ] && grep -qxF "build: unknown --progress value 'bogus' (expected auto|live|plain|json|off)" "$e"; ck "build bogus progress rc 64 + text" $?
     local esc; esc="$(printf '\033[')"
-    "$MC" compile f.php -o pc --progress=plain --color=always >/dev/null 2>"$e"; grep -qF "$esc" "$e"; ck "always has ESC[" $?
-    NO_COLOR=1 "$MC" compile f.php -o pc --progress=plain --color=always >/dev/null 2>"$e"; ! grep -qF "$esc" "$e"; ck "NO_COLOR beats always" $?
-    TERM=dumb "$MC" compile f.php -o pc --progress=plain --color=always >/dev/null 2>"$e"; ! grep -qF "$esc" "$e"; ck "TERM=dumb beats always" $?
-    "$MC" compile f.php -o pc --progress=plain --color=never >/dev/null 2>"$e"; ! grep -qF "$esc" "$e"; ck "never no ESC" $?
-    "$MC" compile f.php -o pc --progress=json --color=always >/dev/null 2>"$e"; ! grep -qF "$esc" "$e"; ck "json+always no ESC" $?
+    colour() { # label, expect (yes|no), then env/args: stderr must be non-empty, rc 0, ESC[ present iff expect=yes
+        local label="$1" want="$2" rc2 has; shift 2
+        "$@" >/dev/null 2>"$e"; rc2=$?
+        grep -qF "$esc" "$e" && has=yes || has=no
+        [ $rc2 = 0 ] && [ -s "$e" ] && [ "$has" = "$want" ]; ck "$label" $?
+    }
+    colour "always has ESC[" yes "$MC" compile f.php -o pc --progress=plain --color=always
+    colour "NO_COLOR beats always" no env NO_COLOR=1 "$MC" compile f.php -o pc --progress=plain --color=always
+    colour "TERM=dumb beats always" no env TERM=dumb "$MC" compile f.php -o pc --progress=plain --color=always
+    colour "never no ESC" no "$MC" compile f.php -o pc --progress=plain --color=never
+    colour "json+always no ESC" no "$MC" compile f.php -o pc --progress=json --color=always
     "$MC" compile f.php -o pt --progress=plain --timings >/dev/null 2>"$e"; grep -q '^timings (longest first):' "$e"; ck "timings table" $?
-    local m o1 o2
+    local m
     "$MC" compile f.php -o p0 --progress=off >"$WORK/o_off" 2>/dev/null
     for m in plain json; do
         "$MC" compile f.php -o "p_$m" --progress=$m >"$WORK/o_$m" 2>/dev/null
