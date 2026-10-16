@@ -28,12 +28,24 @@ function in_array(mixed $needle, array $haystack, bool $strict = false): bool
     // values as cells, so `==`/`===` dispatch by tag — correct for a
     // heterogeneous (null/int/string/…) haystack, not just strings (the old
     // `strcmp((string)$v, …)` faulted on a non-string cell value).
-    foreach ($haystack as $v) {
-        if ($strict) {
+    if ($strict) {
+        foreach ($haystack as $v) {
             if ($v === $needle) { return true; }
-        } else {
-            if ($v == $needle) { return true; }
         }
+        return false;
+    }
+    // Loose against a non-numeric string: string elements compare by bytes (the
+    // numeric probe of `==` is the cost); other element types keep `==`.
+    if (\is_string($needle) && !\is_numeric($needle)) {
+        foreach ($haystack as $v) {
+            if (\is_string($v)) {
+                if ($v === $needle) { return true; }
+            } elseif ($v == $needle) { return true; }
+        }
+        return false;
+    }
+    foreach ($haystack as $v) {
+        if ($v == $needle) { return true; }
     }
     return false;
 }
@@ -54,12 +66,22 @@ function in_array(mixed $needle, array $haystack, bool $strict = false): bool
  */
 function array_search(mixed $needle, array $haystack, bool $strict = false): int|string|false
 {
-    foreach ($haystack as $k => $v) {
-        if ($strict) {
+    if ($strict) {
+        foreach ($haystack as $k => $v) {
             if ($v === $needle) { return $k; }
-        } else {
-            if ($v == $needle) { return $k; }
         }
+        return false;
+    }
+    if (\is_string($needle) && !\is_numeric($needle)) {
+        foreach ($haystack as $k => $v) {
+            if (\is_string($v)) {
+                if ($v === $needle) { return $k; }
+            } elseif ($v == $needle) { return $k; }
+        }
+        return false;
+    }
+    foreach ($haystack as $k => $v) {
+        if ($v == $needle) { return $k; }
     }
     return false;
 }
@@ -146,6 +168,46 @@ function array_is_list(array $a): bool
 }
 
 /**
+ * Bootstrap twins of the bulk list builtins (`__mc_fast_list`, `__mc_fast_cat`,
+ * `__mc_list_range_into`, `__mc_list_cat_into`; see prelude/array_fns.php). A compiler
+ * that does not know them answers "not applicable", so the prelude takes its
+ * element-by-element path and the range / cat twins never run.
+ *
+ * @param mixed[] $a
+ */
+function __mc_fast_list(array $a): bool { return false; }
+
+/**
+ * Bootstrap twin of the `__mc_int_seq` builtin: `$n` ints from `$from` by `$step`.
+ *
+ * @return int[]
+ */
+function __mc_int_seq(int $from, int $step, int $n): array
+{
+    $out = [];
+    for ($i = 0; $i < $n; $i = $i + 1) { $out[] = $from + $i * $step; }
+    return $out;
+}
+
+/** @param mixed[] $a */
+function __mc_sort_native(array &$a): bool { return false; }
+
+/** @param mixed[] $a */
+function __mc_fast_cat(array $a): bool { return false; }
+
+/**
+ * @param mixed[] $out
+ * @param mixed[] $a
+ */
+function __mc_list_range_into(array &$out, array $a, int $from, int $to, bool $rev): void {}
+
+/**
+ * @param mixed[] $out
+ * @param mixed[] $a
+ */
+function __mc_list_cat_into(array &$out, array $a): void {}
+
+/**
  * The bootstrap twin of the `__mc_array_reindex` codegen builtin (the sort
  * family's renumbering of a non-list array); a compiler that knows the
  * builtin never calls it.
@@ -206,8 +268,12 @@ function range(int|float|string $start, int|float|string $end, int|float $step =
     if (!$isFloat) {
         $out = [];
         $s = (int)$fstep;
-        $a = (int)$fs;
-        $b = (int)$fe;
+        $a = \is_int($start) ? (int)$start : (int)$fs;
+        $b = \is_int($end) ? (int)$end : (int)$fe;
+        $span = $a <= $b ? $b - $a : $a - $b;
+        if ($span >= 0 && $span < 4611686018427387904) {
+            return __mc_int_seq($a, $a <= $b ? $s : -$s, intdiv($span, $s) + 1);
+        }
         if ($a <= $b) {
             for ($i = $a; $i <= $b; $i = $i + $s) { $out[] = $i; }
         } else {

@@ -482,6 +482,13 @@ trait EmitLlvmBuiltins
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
         if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
+        if ($name === '__mc_list_range_into' && \count($args) === 5) { return $this->biListRangeInto($args); }
+        if ($name === 'range' && InlineClosures::rangeIntShape($args)) { return $this->biRangeInt($args); }
+        if ($name === '__mc_sort_native' && \count($args) === 1) { return $this->biSortNative($args); }
+        if ($name === '__mc_int_seq' && \count($args) === 3) { return $this->biIntSeq($args); }
+        if ($name === '__mc_fast_list' && \count($args) === 1) { return $this->biFastList($args); }
+        if ($name === '__mc_fast_cat' && \count($args) === 1) { return $this->biFastCat($args); }
+        if ($name === '__mc_list_cat_into' && \count($args) === 2) { return $this->biListCatInto($args); }
         if ($name === '__mc_weak_arm' && $args === []) { return $this->biWeakArm(); }
         if (\strncmp($name, '__mc_nbuf_', 10) === 0) {
             $nbufSig = \Compile\Mir\RuntimeLibrary::nbufSig(\substr($name, 10));
@@ -3085,6 +3092,189 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__mir_array_is_list(ptr ' . $this->lastValue . ")\n";
         return $this->finishI64($out, $r);
+    }
+    /**
+     * The element hint a list of `$t`'s elements carries at run time, for the
+     * bulk-copy predicates; -1 (never equal to a stamped hint) when the static
+     * element has no raw hint or is a nested array, -2 for "any self-describing
+     * hint" (a cell channel).
+     */
+    private function bulkHint(?Type $t): int
+    {
+        $el = $t !== null && $t->kind === Type::KIND_ARRAY ? $t->element : null;
+        // An element read through a cell / unknown channel is decoded by the
+        // buffer's own hint, so any hinted non-array buffer will do (-2).
+        if ($el !== null && ($el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN)) { return -2; }
+        $h = $this->elementHintCodeForType($el);
+        if ($h === null || $h === \Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR) { return -1; }
+        return $h;
+    }
+
+    /**
+     * `__mc_list_range_into($out, $list, $from, $to, $reverse)` — replace the
+     * local `$out` with a fresh list of the values at positions [from, to) of
+     * `$list`, optionally reversed: one memcpy in the runtime ({@see
+     * UnifiedArrayRuntime::emitListRange}) instead of a per-element append loop.
+     * In place on `$out` so the calling body keeps ONE local of ONE type (an
+     * assigned builtin result widened it). The caller proved `__mc_fast_list`
+     * and the bounds. The stdlib body of the same name is the bootstrap twin.
+     * @param Node[] $args
+     */
+    private function biListRangeInto(array $args): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = $this->emitArrPtrArg($args[1]);
+        $arr = $this->lastValue;
+        $ints = [];
+        for ($k = 2; $k <= 4; $k++) {
+            $out .= $this->emitNode($args[$k]) . $this->coerceToI64();
+            $ints[] = $this->lastValue;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @__mir_array_list_range(ptr ' . $arr . ', i64 ' . $ints[0]
+              . ', i64 ' . $ints[1] . ', i64 ' . $ints[2] . ")\n";
+        $out .= $this->vecWriteBack($args[0], $r, $args[0]->type->kind === Type::KIND_CELL);
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+    /**
+     * Integer `range`: `|b - a| / step + 1` ints from `a` toward `b`
+     * ({@see UnifiedArrayRuntime::emitIntSeq}). A span php could not hold as an
+     * array throws ValueError, as php does.
+     * @param Node[] $args
+     */
+    private function biRangeInt(array $args): string
+    {
+        $step = \count($args) === 3 ? \abs((int)Node::literalInt($args[2])) : 1;
+        $out = $this->emitNode($args[0]) . $this->coerceToI64();
+        $a = $this->lastValue;
+        $out .= $this->emitNode($args[1]) . $this->coerceToI64();
+        $b = $this->lastValue;
+        $up = $this->ssa->allocReg();
+        $out .= '  ' . $up . ' = icmp sle i64 ' . $a . ', ' . $b . "\n";
+        $d1 = $this->ssa->allocReg();
+        $d2 = $this->ssa->allocReg();
+        $span = $this->ssa->allocReg();
+        $out .= '  ' . $d1 . ' = sub i64 ' . $b . ', ' . $a . "\n";
+        $out .= '  ' . $d2 . ' = sub i64 ' . $a . ', ' . $b . "\n";
+        $out .= '  ' . $span . ' = select i1 ' . $up . ', i64 ' . $d1 . ', i64 ' . $d2 . "\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp ugt i64 ' . $span . ", 4294967295\n";
+        $out .= $this->emitThrowIf($bad, 'ValueError', 'The supplied range exceeds the maximum array size', 'range');
+        $q = $this->ssa->allocReg();
+        $n = $this->ssa->allocReg();
+        $out .= '  ' . $q . ' = udiv i64 ' . $span . ', ' . (string)$step . "\n";
+        $out .= '  ' . $n . ' = add i64 ' . $q . ", 1\n";
+        $st = $this->ssa->allocReg();
+        $out .= '  ' . $st . ' = select i1 ' . $up . ', i64 ' . (string)$step . ', i64 ' . (string)(-$step) . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @__mir_array_int_seq(i64 ' . $a . ', i64 ' . $st . ', i64 ' . $n . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `__mc_sort_native($arr)` — sort a by-ref list of raw ints or strings in
+     * place ({@see UnifiedArrayRuntime::emitSortWords}); false (nothing sorted)
+     * for any other shape. Separates a shared buffer first and writes the clone
+     * back, like {@see biArrayReindex}. The stdlib body is the bootstrap twin
+     * and answers false.
+     * @param Node[] $args
+     */
+    private function biSortNative(array $args): string
+    {
+        $arrNode = $args[0];
+        $arrT = $arrNode->type;
+        $out = $this->emitArrPtrArg($arrNode);
+        $p = $this->lastValue;
+        if ($arrNode->kind === Node::KIND_LOAD_LOCAL
+            || $arrNode->kind === Node::KIND_PROPERTY_ACCESS
+            || $arrNode->kind === Node::KIND_STATIC_PROP) {
+            $cow = $this->ssa->allocReg();
+            $out .= '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrT, $arrNode) . '(ptr ' . $p . ")\n";
+            $out .= $this->vecWriteBack($arrNode, $cow, $arrT->kind === Type::KIND_CELL);
+            $p = $cow;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i1 @__mir_array_sort_words(ptr ' . $p . ")\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+        return $this->finishI64($out, $z);
+    }
+
+    /**
+     * `__mc_int_seq($from, $step, $n)` — `$n` ints `$from + i * $step` in a fresh
+     * INT-stamped list ({@see UnifiedArrayRuntime::emitIntSeq}). The stdlib body
+     * of the same name is the bootstrap twin.
+     * @param Node[] $args
+     */
+    private function biIntSeq(array $args): string
+    {
+        $out = '';
+        $v = [];
+        foreach ($args as $a) {
+            $out .= $this->emitNode($a) . $this->coerceToI64();
+            $v[] = $this->lastValue;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @__mir_array_int_seq(i64 ' . $v[0] . ', i64 ' . $v[1] . ', i64 ' . $v[2] . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `__mc_fast_list($a)` — a list the bulk copies may take ({@see UnifiedArrayRuntime::emitFastList}).
+     * @param Node[] $args
+     */
+    private function biFastList(array $args): string
+    {
+        $out = $this->emitArrPtrArg($args[0]);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i1 @__mir_array_fastlist(ptr ' . $this->lastValue . ', i64 ' . (string)$this->bulkHint($args[0]->type) . ")\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+        return $this->finishI64($out, $z);
+    }
+
+    /**
+     * `__mc_fast_cat($arrays)` — may {@see biListCat} merge these? Every member
+     * a packed list, the non-empty ones agreeing on their element hint.
+     * @param Node[] $args
+     */
+    private function biFastCat(array $args): string
+    {
+        $out = $this->emitArrPtrArg($args[0]);
+        $inner = $args[0]->type->kind === Type::KIND_ARRAY ? $args[0]->type->element : null;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i1 @__mir_array_fastcat(ptr ' . $this->lastValue . ', i64 ' . (string)$this->bulkHint($inner) . ")\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+        return $this->finishI64($out, $z);
+    }
+
+    /**
+     * `__mc_list_cat_into($out, $arrays)` — array_merge of lists: replace the
+     * local `$out` with every member's values in one fresh list. Only after
+     * `__mc_fast_cat` said yes.
+     * @param Node[] $args
+     */
+    private function biListCatInto(array $args): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = $this->emitArrPtrArg($args[1]);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @__mir_array_list_cat(ptr ' . $this->lastValue . ")\n";
+        $out .= $this->vecWriteBack($args[0], $r, $args[0]->type->kind === Type::KIND_CELL);
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
     }
     /**
      * `array_first` / `array_last` (PHP 8.5) and `array_key_first` /
