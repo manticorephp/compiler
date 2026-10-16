@@ -174,7 +174,18 @@ namespace Manticore\Ds {
             __mc_nbuf_copy($this->__mcbuf, $dstAt, $src->__mcbuf, $srcAt, $count);
         }
 
-        /** First position >= `$from` holding `$value`, or -1. */
+        /**
+         * Replaces each element with `$f($element, $index)`, in place. The result
+         * is stored like `$a[$i] = $v`, so a value that does not fit throws and
+         * leaves the elements before it replaced. The size is re-read every step.
+         */
+        public function apply(callable $f): void
+        {
+            for ($k = 0; $k < __mc_nbuf_len($this->__mcbuf); $k++) {
+                $this->fillRaw($this->coerce($f($this->load($k), $k)), $k, $k + 1);
+            }
+        }
+
         /** Element-wise equality with the same class of array. */
         abstract protected function sameRaw(TypedArray $other): bool;
 
@@ -186,6 +197,7 @@ namespace Manticore\Ds {
                 && $this->sameRaw($other);
         }
 
+        /** First position >= `$from` holding `$value`, or -1. */
         public function indexOf(mixed $value, int $from = 0): int
         {
             try {

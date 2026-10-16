@@ -57,6 +57,7 @@ There is no typed string array.
 | `indexOf($value, int $from = 0): int` | first position holding `$value`, or `-1` |
 | `sum()` | sum of the elements — `int` for the integer arrays (wraps past the int range), `float` for the float arrays, the number of set bits for `BitArray` |
 | `min()`, `max()` | smallest / largest element of an integer or float array; `ValueError("<Class>::min(): array must contain at least one element")` when empty |
+| `apply(callable $f): void` | replace each element with `$f($element, $index)` in place; the result is stored like `$a[$i] = $v` (a value that does not fit throws) |
 | `equals(TypedArray $other): bool` | same class, same length, equal elements (a `NAN` equals nothing) |
 | `$a[$i]`, `$a[$i] = $v`, `isset($a[$i])`, `unset($a[$i])` | element access |
 | `foreach ($a as $i => $v)` | by value, in order |
