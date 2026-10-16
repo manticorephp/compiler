@@ -16,6 +16,28 @@
 namespace Manticore\Ds {
 
     /**
+     * `apply()` of every concrete array. A trait, not a base-class method: the
+     * element accesses are inline only when the receiver's static class is the
+     * final one, and a value of the element's own static type (hence the
+     * `is_*` split) is stored without a call.
+     */
+    trait TypedApply
+    {
+        public function apply(callable $f): void
+        {
+            $a = $this;
+            $n = $a->count();
+            for ($k = 0; $k < $n; $k++) {
+                $v = $f($a[$k], $k);
+                if (\is_int($v)) { $a[$k] = $v; }
+                elseif (\is_float($v)) { $a[$k] = $v; }
+                elseif (\is_bool($v)) { $a[$k] = $v; }
+                else { $a->offsetSet($k, $v); }
+            }
+        }
+    }
+
+    /**
      * `T` is the type an element is read as: the scalar itself, or a
      * `#[TypeDef]` class over it (`UInt16Array<TokenKind>`).
      *
@@ -174,7 +196,15 @@ namespace Manticore\Ds {
             __mc_nbuf_copy($this->__mcbuf, $dstAt, $src->__mcbuf, $srcAt, $count);
         }
 
-        /** First position >= `$from` holding `$value`, or -1. */
+        /**
+         * Replaces each element with `$f($element, $index)`, in place. The result
+         * is stored like `$a[$i] = $v`, so a value that does not fit throws and
+         * leaves the elements before it replaced. The size is read once: a
+         * callback that shrinks the array makes the next access throw
+         * `OutOfBoundsException`. Implemented by {@see TypedApply}.
+         */
+        abstract public function apply(callable $f): void;
+
         /** Element-wise equality with the same class of array. */
         abstract protected function sameRaw(TypedArray $other): bool;
 
@@ -186,6 +216,7 @@ namespace Manticore\Ds {
                 && $this->sameRaw($other);
         }
 
+        /** First position >= `$from` holding `$value`, or -1. */
         public function indexOf(mixed $value, int $from = 0): int
         {
             try {
@@ -458,6 +489,7 @@ namespace Manticore\Ds {
     /** @template T = int @extends IntTypedArray<T> */
     final class Int8Array extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 1; }
         protected function rangeMin(): int { return -128; }
         protected function rangeMax(): int { return 127; }
@@ -466,6 +498,7 @@ namespace Manticore\Ds {
     /** @template T = int @extends IntTypedArray<T> */
     final class Int16Array extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 2; }
         protected function rangeMin(): int { return -32768; }
         protected function rangeMax(): int { return 32767; }
@@ -474,6 +507,7 @@ namespace Manticore\Ds {
     /** @template T = int @extends IntTypedArray<T> */
     final class Int32Array extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 3; }
         protected function rangeMin(): int { return -2147483648; }
         protected function rangeMax(): int { return 2147483647; }
@@ -482,6 +516,7 @@ namespace Manticore\Ds {
     /** @template T = int @extends IntTypedArray<T> */
     final class Int64Array extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 4; }
         protected function rangeMin(): int { return \PHP_INT_MIN; }
         protected function rangeMax(): int { return \PHP_INT_MAX; }
@@ -490,6 +525,7 @@ namespace Manticore\Ds {
     /** @template T = int @extends IntTypedArray<T> */
     final class UInt8Array extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 5; }
         protected function rangeMin(): int { return 0; }
         protected function rangeMax(): int { return 255; }
@@ -498,6 +534,7 @@ namespace Manticore\Ds {
     /** @template T = int @extends IntTypedArray<T> */
     final class UInt16Array extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 6; }
         protected function rangeMin(): int { return 0; }
         protected function rangeMax(): int { return 65535; }
@@ -516,6 +553,7 @@ namespace Manticore\Ds {
      */
     final class UInt64Array extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 12; }
         protected function rangeMin(): int { return \PHP_INT_MIN; }
         protected function rangeMax(): int { return \PHP_INT_MAX; }
@@ -615,6 +653,7 @@ namespace Manticore\Ds {
      */
     final class ByteBuffer extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 5; }
         protected function rangeMin(): int { return 0; }
         protected function rangeMax(): int { return 255; }
@@ -734,6 +773,7 @@ namespace Manticore\Ds {
     /** @template T = int @extends IntTypedArray<T> */
     final class UInt32Array extends IntTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 7; }
         protected function rangeMin(): int { return 0; }
         protected function rangeMax(): int { return 4294967295; }
@@ -747,12 +787,14 @@ namespace Manticore\Ds {
      */
     final class Float32Array extends FloatTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 8; }
     }
 
     /** @template T = float @extends FloatTypedArray<T> */
     final class Float64Array extends FloatTypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 9; }
     }
 
@@ -763,6 +805,7 @@ namespace Manticore\Ds {
      */
     final class BitArray extends TypedArray
     {
+        use TypedApply;
         protected function kind(): int { return 10; }
 
         public function offsetGet(mixed $offset): bool

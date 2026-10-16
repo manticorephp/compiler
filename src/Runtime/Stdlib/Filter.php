@@ -103,13 +103,16 @@ function __mc_filter_int(string $v, int $flags, array $o): ?int
             return null;
         }
     } else {
-        if (\preg_match('/^([+-]?)(0|[1-9][0-9]*)$/', $s, $m) !== 1) { return null; }
-        if ($m[2] === '0') {
+        // `[+-]?(0|[1-9][0-9]*)` by hand: a regex per integer cost more than the parse.
+        $sg = $s[0];
+        $dg = $s;
+        if ($sg === '+' || $sg === '-') { $dg = \substr($s, 1); } else { $sg = ''; }
+        if ($dg === '' || !\ctype_digit($dg) || ($dg[0] === '0' && \strlen($dg) > 1)) { return null; }
+        if ($dg === '0') {
             $r = 0;
         } else {
-            $neg = $m[1] === '-';
+            $neg = $sg === '-';
             $lim = $neg ? '9223372036854775808' : '9223372036854775807';
-            $dg = $m[2];
             if (\strlen($dg) > 19 || (\strlen($dg) === 19 && \strcmp($dg, $lim) > 0)) { return null; }
             $r = $neg ? (\strlen($dg) === 19 && $dg === $lim ? \PHP_INT_MIN : -(int)$dg) : (int)$dg;
         }

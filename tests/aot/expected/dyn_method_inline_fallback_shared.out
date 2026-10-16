@@ -1,0 +1,16 @@
+dispatch ev
+Array
+(
+    [0] => a
+    [1] => x
+)
+Array
+(
+    [0] => a
+    [1] => y
+)
+3
+RealD
+2020
+Error: Call to private method RealD::secret() from global scope
+Error: Call to undefined method RealD::nope()

@@ -1,0 +1,27 @@
+get: 'T0.get h0 k 7'
+get: 'T0.get h0 k 9'
+set: 3
+set: 6
+ping: 'pong0 h0'
+boom: RuntimeException: boom0 h0 x
+many: 'm0 h0 1.5 true null0'
+many: 'm0 h0 2 false s2'
+nope: Error: Call to undefined method T0::nope()
+get: 'T5.get h5 k 7'
+get: 'T5.get h5 k 9'
+set: 8
+set: 11
+ping: 'pong5 h5'
+boom: RuntimeException: boom5 h5 x
+many: 'm5 h5 1.5 true null0'
+many: 'm5 h5 2 false s2'
+nope: Error: Call to undefined method T5::nope()
+get: 'T19.get h19 k 7'
+get: 'T19.get h19 k 9'
+set: 22
+set: 25
+ping: 'pong19 h19'
+boom: RuntimeException: boom19 h19 x
+many: 'm19 h19 1.5 true null0'
+many: 'm19 h19 2 false s2'
+nope: Error: Call to undefined method T19::nope()

@@ -1,0 +1,4 @@
+x %env(foo)% y
+x [bar] y
+nothing
+foo,bar

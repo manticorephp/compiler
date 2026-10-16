@@ -33,6 +33,8 @@ final class Module
      *  the compile-time `interface_exists` fold). */
     public array $interfaceNames = [];
 
+    /** @var array<string, string[]> class → the traits it uses directly (reflection: getTraits) */
+    public array $classTraitNames = [];
     /** @var array<string, array<string, MethodMeta>> interface → its own declared
      *  methods, for reflection (an interface has no ClassDef). */
     public array $interfaceMethods = [];

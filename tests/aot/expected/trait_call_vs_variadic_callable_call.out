@@ -1,0 +1,2 @@
+a [["setLogger",["ref:logger"]]]
+b [["setFoo",["ref:l"]],["setBar",["ref:q"]]]

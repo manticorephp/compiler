@@ -1,0 +1,43 @@
+Method [ <user, ctor> public method __construct ] {
+
+  - Parameters [1] {
+    Parameter #0 [ <optional> int $promoted = 0 ]
+  }
+}
+--
+Method [ <user> public method must ] {
+
+  - Parameters [2] {
+    Parameter #0 [ <required> int $a ]
+    Parameter #1 [ <optional> string ...$rest ]
+  }
+  - Return [ void ]
+}
+--
+Method [ <user> static protected method make ] {
+
+  - Parameters [3] {
+    Parameter #0 [ <optional> array $o = [] ]
+    Parameter #1 [ <optional> ?Impl $i = NULL ]
+    Parameter #2 [ <optional> bool $f = false ]
+  }
+  - Return [ int ]
+}
+--
+Method [ <user> public method plain ] {
+}
+--
+Method [ <user> final public method refs ] {
+
+  - Parameters [2] {
+    Parameter #0 [ <required> array &$out ]
+    Parameter #1 [ <optional> string $key = 'k' ]
+  }
+  - Return [ ?string ]
+}
+--
+Property [ public $x = 1 ]
+Property [ protected static int $count = 2 ]
+Property [ public ?string $s = NULL ]
+Property [ private readonly int $r ]
+Property [ public array $list = [] ]

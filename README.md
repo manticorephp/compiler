@@ -421,6 +421,10 @@ manticore build
 Its manifest uses `"composer": true`, so Composer autoload roots and installed packages
 are compiled as source; the generated binary does not load `vendor/autoload.php` at runtime.
 
+[`symfony-app/`](examples/symfony-app/) goes further: a Symfony framework application (routing,
+dependency injection, HTTP kernel) served from one native binary. Its README lists what differs
+from a stock skeleton and how to build it.
+
 ## How it is built
 
 ```

@@ -1,0 +1,19 @@
+{
+    "applications": [
+        {
+            "name": "symfony-app",
+            "src": "src",
+            "entry": "public/index.php",
+            "output": "bin/app",
+            "composer": true,
+            "extensions": [
+                "compat"
+            ]
+        }
+    ],
+    "extensions": {
+        "compat": {
+            "src": "compat"
+        }
+    }
+}

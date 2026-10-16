@@ -520,7 +520,12 @@ trait LowerFns
             $ptype = $cn === 'this' ? $thisType : Type::unknown();
             // A by-ref capture is passed (and unpacked) as a slot address —
             // mark the param byRef so the closure body derefs it (refLocals).
-            $params[] = new Param(name: $cn, type: $ptype, byRef: $capByRef[$cn] ?? false, variadic: false);
+            $capP = new Param(name: $cn, type: $ptype, byRef: $capByRef[$cn] ?? false, variadic: false);
+            // A by-value capture of an array param is the env's word: the prologue copies it (php re-copies per call) when the body stores into it. The erased type says nothing, the enclosing hint does.
+            if (!$capP->byRef && $this->enclosingArrayName($cn)) {
+                $capP->arrayHinted = true;
+            }
+            $params[] = $capP;
         }
         foreach ($declParams as $p) {
             $cp = new Param(
@@ -772,7 +777,12 @@ trait LowerFns
                 return $this->lowerFcc($nm);
             }
             $cc = $this->coerceCallableArg(Type::closure(), $calleeAst);
-            return $cc !== null ? $cc : $this->lowerExpr($calleeAst);
+            if ($cc !== null) { return $cc; }
+            // A runtime callable VALUE becomes a real Closure, as php's `$c(...)` does
+            // ({@see LowerFromAst::closureFromSource}); passing the value through left an
+            // invokable object or an array where a Closure was promised.
+            $this->needsClosureFrom = true;
+            return new \Compile\Mir\Call('__mc_closure_from', [$this->lowerExpr($calleeAst)], Type::closure());
         }
         if ($ck === 'StringLiteral') {
             return $this->lowerStringCallable($this->strLitValue($calleeAst), $expr->args);
@@ -1121,7 +1131,11 @@ trait LowerFns
         }
         // Variadic last param: pack trailing positional args into a vec.
         $np = \count($params);
-        // A `...$arr` ahead of the variadic covers fixed params AND the pack, a
+        if ($np > 0 && $this->paramVariadic($params[$np - 1])) {
+            $spreadFill = $this->spreadAheadOfPack($params, $astArgs, $selfClass);
+            if ($spreadFill !== null) { return $spreadFill; }
+        }
+        // Any other `...$arr` ahead of the variadic covers fixed params AND the pack, a
         // run-time split the emitter makes against the signature
         // ({@see EmitLlvmCalls::emitSpreadFill}); an eager empty pack here became a
         // stray extra argument.
@@ -1223,6 +1237,49 @@ trait LowerFns
         }
         return $out;
     }
+
+    /**
+     * `f(...$arr)` where the spread starts AHEAD of f's variadic: the array feeds
+     * the fixed params from its position on (each element, or the param's default
+     * past the end) and the pack is its tail —
+     * `f($t[0] ?? default, …, ...array_slice($t, k))` with `$t` the array,
+     * evaluated once. Treating the spread as the first fixed argument read the
+     * array's first element as the PACK (`count($parts)` answered garbage). null
+     * when no spread precedes the pack.
+     *
+     * @param \Parser\Ast\Param[] $params
+     * @param \Parser\Ast\Expr[]  $astArgs
+     * @return Node[]|null
+     */
+    private function spreadAheadOfPack(array $params, array $astArgs, string $selfClass): ?array
+    {
+        $vidx = \count($params) - 1;
+        $si = -1;
+        foreach ($astArgs as $i => $a) {
+            if ($a->kind === 'Spread') { $si = (int)$i; break; }
+        }
+        if ($si < 0 || $si >= $vidx || $si !== \count($astArgs) - 1) { return null; }
+        $spread = $astArgs[$si];
+        $span = $spread->span;
+        $tmp = \Parser\Ast\Expr::variable('__sprpk' . (string)$this->destrCounter, $span);
+        $this->destrCounter = $this->destrCounter + 1;
+        $out = [];
+        for ($j = 0; $j < $si; $j = $j + 1) { $out[] = $this->lowerArgForParam($params[$j], $astArgs[$j]); }
+        for ($j = $si; $j < $vidx; $j = $j + 1) {
+            $src = $j === $si ? \Parser\Ast\Expr::assign($tmp, $this->spreadValueOf($spread), $span) : $tmp;
+            $idx = \Parser\Ast\Expr::int($j - $si, $span);
+            $out[] = new \Compile\Mir\Ternary(
+                $this->lowerExpr(\Parser\Ast\Expr::call('array_key_exists', [$idx, $src], $span)),
+                $this->lowerExpr(\Parser\Ast\Expr::arrayAccess($tmp, $idx, $span)),
+                $this->lowerOmittedParam($params[$j], $selfClass, $params, $astArgs),
+                Type::unknown());
+        }
+        $tail = \Parser\Ast\Expr::call('array_slice', [$tmp, \Parser\Ast\Expr::int($vidx - $si, $span)], $span);
+        $out[] = new ArrayLit([new ArrayElement_(null, $this->lowerExpr(new \Parser\Ast\Spread($tail, $span)))], Type::unknown());
+        return $out;
+    }
+
+    private function spreadValueOf(\Parser\Ast\Spread $s): \Parser\Ast\Expr { return $s->value; }
 
     /**
      * The value an OMITTED parameter's slot gets: its default expression, or a

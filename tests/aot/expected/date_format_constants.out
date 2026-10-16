@@ -1,0 +1,14 @@
+Y-m-d\TH:i:sP | 1971-01-01T00:00:00+00:00
+l, d-M-Y H:i:s T | Friday, 01-Jan-1971 00:00:00 UTC
+Y-m-d\TH:i:sO | 1971-01-01T00:00:00+0000
+X-m-d\TH:i:sP | +1971-01-01T00:00:00+00:00
+D, d M y H:i:s O | Fri, 01 Jan 71 00:00:00 +0000
+l, d-M-y H:i:s T | Friday, 01-Jan-71 00:00:00 UTC
+D, d M y H:i:s O | Fri, 01 Jan 71 00:00:00 +0000
+D, d M Y H:i:s O | Fri, 01 Jan 1971 00:00:00 +0000
+D, d M Y H:i:s O | Fri, 01 Jan 1971 00:00:00 +0000
+Y-m-d\TH:i:sP | 1971-01-01T00:00:00+00:00
+Y-m-d\TH:i:s.vP | 1971-01-01T00:00:00.000+00:00
+D, d M Y H:i:s O | Fri, 01 Jan 1971 00:00:00 +0000
+Y-m-d\TH:i:sP | 1971-01-01T00:00:00+00:00
+bool(true)

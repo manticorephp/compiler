@@ -72,6 +72,9 @@ rm -f "$VERSION_PHP"
 # argv0-relative prelude lookup can't reach repo/prelude. Point it at the
 # canonical dir, as tools/selfhost.sh does for the same reason.
 export MANTICORE_PRELUDE="$ROOT/prelude"
+# The compiler compiling itself keeps a statically-provable argument mismatch a
+# build error; a user program gets a run-time TypeError at the site instead.
+export MANTICORE_TYPECHECK_STRICT=1
 
 # The cellguard flags are per-compile diagnostics. MANTICORE_CELL_ASSERT BAKES
 # __mir_assert_cell calls into whatever it compiles (a flag's default is baked

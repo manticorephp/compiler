@@ -459,15 +459,27 @@ function __mc_host_is_darwin(): bool
 /**
  * php_sapi_name() — the interface between the interpreter and the host.
  *
- * A compiled manticore binary IS the command-line program, so this is 'cli' by
- * construction. ⚠ It must keep answering exactly what the `PHP_SAPI` constant
- * folds to ({@see \Compile\Mir\Passes\LowerPrelude}) — code branches on the two
- * interchangeably, and a build where they disagreed would take one path while
- * reporting the other.
+ * A compiled binary is the command-line program, so this is 'cli' — until an
+ * `Http\Server` in compat mode starts serving, and then 'cli-server' for the
+ * rest of the process, as `php -S` reports. The `PHP_SAPI` constant lowers to
+ * this call ({@see \Compile\Mir\Passes\LowerPrelude}), so the two never disagree.
  */
 function php_sapi_name(): string
 {
-    return 'cli';
+    return \__mc_sapi_server(0) === 1 ? 'cli-server' : 'cli';
+}
+
+/**
+ * The process's SAPI bit. A scalar `static`, so it lives in the stdlib .o and
+ * the prelude's server flips it. $op: 0 reads, 1 marks the process a server.
+ */
+function __mc_sapi_server(int $op): int
+{
+    static $on = 0;
+    if ($op === 1) {
+        $on = 1;
+    }
+    return $on;
 }
 
 /** The Zend Engine version of the php this build tracks (PHP_VERSION 8.5.11). */

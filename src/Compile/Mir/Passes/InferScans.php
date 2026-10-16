@@ -246,11 +246,20 @@ trait InferScans
                     // a `name → Param[]` map would erase it through the assoc.
                     foreach ($module->functions as $cfn) {
                         if ($cfn->name === $ctorName) {
+                            // Only a param the ctor stores AS IS (`$this->p = $p`,
+                            // what promotion lowers to) reveals the property's
+                            // type; a same-named param the ctor merely reads gave
+                            // HeaderBag::$headers its ctor arg's assoc[string,
+                            // string] while set() stored arrays into it, and the
+                            // element drop then leaked every inner array.
+                            /** @var array<string,bool> $stored */
+                            $stored = [];
+                            $this->ctorStoredParams($cfn->body, $stored);
                             // The ctor's first param is the implicit `$this`;
                             // call args align with the rest, so drop it.
                             foreach ($cfn->params as $param) {
                                 if ($param->name === 'this') { continue; }
-                                $pnames[] = $param->name;
+                                $pnames[] = isset($stored[$param->name]) ? $param->name : '';
                             }
                         }
                     }
@@ -300,6 +309,24 @@ trait InferScans
             }
         }
         foreach (Walk::children($n) as $c) { $this->scanCtorPropNode($c, $module); }
+    }
+
+    /**
+     * The names `p` of every `$this->p = $p` in a constructor body.
+     * @param array<string,bool> $out
+     */
+    private function ctorStoredParams(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $sp = $n;
+            $obj = $sp->object;
+            $val = $sp->value;
+            if ($obj->kind === Node::KIND_LOAD_LOCAL && $obj->name === 'this'
+                && $val->kind === Node::KIND_LOAD_LOCAL && $val->name === $sp->property) {
+                $out[$sp->property] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->ctorStoredParams($c, $out); }
     }
 
     /**
@@ -789,6 +816,10 @@ trait InferScans
         // Pass 2: params whose elements are used as strings.
         $this->strParamsFound = [];
         $this->detectStringElemUse($fn->body, $cand);
+        // The body's own element writes must agree with the guess: symfony's
+        // `AbstractString::wrap` reads `(string)` elements AND stores `new static(…)`
+        // and nested arrays back into them, which a vec[string] cannot hold.
+        $this->dropRefutedElemGuesses($fn->body);
         foreach ($this->strParamsFound as $pname => $unused) {
             $idx = $cand[$pname];
             // Fetch the Param object to a local before mutating its (mutable)
@@ -803,6 +834,22 @@ trait InferScans
             $param->elemGuessed = true;
             $this->localTypes[$pname] = $vt;
         }
+    }
+
+    /** Drop a string-element guess for a param the body stores a non-string element into. */
+    private function dropRefutedElemGuesses(Node $n): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT) {
+            $se = $n;
+            $base = $se->array;
+            $val = $se->value;
+            if ($base->kind === Node::KIND_LOAD_LOCAL && isset($this->strParamsFound[$base->name])) {
+                $strCast = false;
+                if ($val->kind === Node::KIND_CAST) { $vc = $val; $strCast = $vc->target === 'string'; }
+                if (!$strCast && !$this->isStringOperand($val)) { unset($this->strParamsFound[$base->name]); }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->dropRefutedElemGuesses($c); }
     }
 
     /**
@@ -1981,6 +2028,56 @@ trait InferScans
         return $changed;
     }
 
+    /**
+     * A local whose INNER arrays receive a nested store of a kind they have no
+     * representation for — `$tokens[$i][4] = true` into a `string[]` token
+     * (symfony's RouteCompiler under the `utf8` option): the bool landed raw in
+     * a string buffer and the next reader dereferenced it. The outer element
+     * becomes a cell, so each inner array is reached through its own tag and
+     * the store converts it. Records into `forcedCellElemLocals` like
+     * {@see scanUnshiftElemWiden}; true when it found something new.
+     */
+    private function scanNestedElemStoreWiden(Module $module): bool
+    {
+        $changed = false;
+        $this->lastInferenceChangedFunctions = [];
+        foreach ($module->functions as $fn) {
+            if ($fn->isPrelude && !\str_contains($fn->name, '$mono$')) { continue; }
+            if ($fn->isExtern) { continue; }
+            $found = [];
+            $this->scanNestedForeignStores($fn->body, $found);
+            if ($found === []) { continue; }
+            $skip = [];
+            foreach ($fn->params as $prm) { $skip[$prm->name] = true; }
+            $lits = [];
+            $this->scanArrayLitLocals($fn->body, $lits);
+            foreach ($found as $name => $unused) {
+                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
+                if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
+                $this->forcedCellElemLocals[$fn->name][$name] = true;
+                $this->lastInferenceChangedFunctions[$fn->name] = true;
+                $changed = true;
+            }
+        }
+        return $changed;
+    }
+
+    /** Locals `$x` with a `$x[…][…] = v` whose `v` kind differs from the inner array's concrete element. @param array<string,bool> $out */
+    private function scanNestedForeignStores(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_ELEMENT && $n->array->kind === Node::KIND_ARRAY_ACCESS
+            && $n->array->array->kind === Node::KIND_LOAD_LOCAL) {
+            $inner = $n->array->type;
+            $ek = $inner->isArray() && $inner->element !== null ? $inner->element->kind : Type::KIND_UNKNOWN;
+            $vk = $n->value->type->kind;
+            if ($ek !== Type::KIND_UNKNOWN && $ek !== Type::KIND_CELL
+                && $vk !== Type::KIND_UNKNOWN && $vk !== Type::KIND_CELL && $vk !== $ek) {
+                $out[$n->array->array->name] = true;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanNestedForeignStores($c, $out); }
+    }
+
     /** Value classes prepended into each local by `array_unshift`, plus the
      *  container's own current element class. @param array<string, array<string,bool>> $out */
     private function scanUnshiftClasses(Node $n, array &$out): void
@@ -2216,12 +2313,13 @@ trait InferScans
         return $added;
     }
 
-    /** A by-value, non-variadic param of `$fn` whose declared type is concrete. */
+    /** A by-value param of `$fn` whose declared type is concrete — a variadic pack
+     *  included: it arrives as the raw vec the caller packed. */
     private function paramArrivesRaw(FunctionDef $fn, string $name): bool
     {
         foreach ($fn->params as $p) {
             if ($p->name !== $name) { continue; }
-            if ($p->byRef || $p->variadic) { return false; }
+            if ($p->byRef) { return false; }
             $k = $p->type->kind;
             return $k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN;
         }
@@ -3012,6 +3110,7 @@ trait InferScans
             $props = [];
             $statics = [];
             $this->scanRefCellArgNode($fn->body, $names, $elems, $props, $statics);
+            $this->scanMixedRefPointerLocals($fn->body, $fn->body, $names);
             foreach ($names as $local => $unused) {
                 if (!isset($this->byRefCaptureCellLocals[$fn->name][$local])) {
                     $this->byRefCaptureCellLocals[$fn->name][$local] = true;
@@ -3231,6 +3330,56 @@ trait InferScans
         foreach (Walk::children($n) as $c) {
             $this->scanRefCellArgNode($c, $names, $elems, $props, $statics);
         }
+    }
+
+    /**
+     * A local handed BY REF to an object/string param (`?Tg &$o`) that the same
+     * function also gives ANOTHER pointer kind — `foreach (['a'] as $k)` then
+     * `$k = null; parse($p, $k)`. One slot cannot hold both representations, and
+     * the flow-narrowed `null` at the call site hides the string slot from
+     * {@see refArgSlotSink}: the callee wrote an object into a string slot.
+     *
+     * @param array<string,bool> $names
+     */
+    private function scanMixedRefPointerLocals(Node $body, Node $n, array &$names): void
+    {
+        $offset = 0;
+        $fname = $this->refCalleeOf($n, $offset);
+        $callee = $fname !== '' ? ($this->fnByName[$fname] ?? null) : null;
+        if ($callee !== null) {
+            foreach ($this->refCallArgs($n) as $i => $a) {
+                $p = $callee->params[$offset + $i] ?? null;
+                if ($p === null || !$p->byRef) { continue; }
+                $pk = $p->type->kind;
+                if ($pk !== Type::KIND_OBJ && $pk !== Type::KIND_STRING) { continue; }
+                $an = '';
+                if ($a->kind === Node::KIND_LOAD_LOCAL) { $an = $a->name; }
+                elseif ($a->kind === Node::KIND_REF_ADDR) { $an = $a->target; }
+                if ($an === '' || isset($names[$an])) { continue; }
+                if ($this->localHoldsOtherPointer($body, $an, $pk)) { $names[$an] = true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) {
+            $this->scanMixedRefPointerLocals($body, $c, $names);
+        }
+    }
+
+    /** Is `$name` stored (or foreach-bound) as a pointer kind other than `$pk`? */
+    private function localHoldsOtherPointer(Node $n, string $name, string $pk): bool
+    {
+        $k = '';
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) {
+            $k = $n->value->type->kind;
+        } elseif ($n->kind === Node::KIND_FOREACH && $n->valueVar === $name && !$n->byRef) {
+            $k = $n->array->type->element->kind ?? '';
+        }
+        if ($k === Type::KIND_OBJ || $k === Type::KIND_STRING || $k === Type::KIND_ARRAY) {
+            if ($k !== $pk) { return true; }
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->localHoldsOtherPointer($c, $name, $pk)) { return true; }
+        }
+        return false;
     }
 
     /**

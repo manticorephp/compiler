@@ -1,0 +1,13 @@
+Array
+(
+    [k.dir] => x
+    [m] => Array
+        (
+            [F] => Array
+                (
+                    [n] => v
+                )
+
+        )
+
+)

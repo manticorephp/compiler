@@ -37,8 +37,7 @@ echo $offsets[0] + $offsets[1];      // 16
 All are `final` and extend `Manticore\Ds\TypedArray`, which implements
 `ArrayAccess`, `Countable`, `IteratorAggregate` and `JsonSerializable`.
 
-There is no `UInt64Array` (PHP has no unsigned 64-bit int) and no typed string
-array.
+There is no typed string array.
 
 ## API
 
@@ -58,6 +57,7 @@ array.
 | `indexOf($value, int $from = 0): int` | first position holding `$value`, or `-1` |
 | `sum()` | sum of the elements — `int` for the integer arrays (wraps past the int range), `float` for the float arrays, the number of set bits for `BitArray` |
 | `min()`, `max()` | smallest / largest element of an integer or float array; `ValueError("<Class>::min(): array must contain at least one element")` when empty |
+| `apply(callable $f): void` | replace each element with `$f($element, $index)` in place; the result is stored like `$a[$i] = $v` (a value that does not fit throws); the size is read once, so a callback that shrinks the array makes the next access throw `OutOfBoundsException` |
 | `equals(TypedArray $other): bool` | same class, same length, equal elements (a `NAN` equals nothing) |
 | `$a[$i]`, `$a[$i] = $v`, `isset($a[$i])`, `unset($a[$i])` | element access |
 | `foreach ($a as $i => $v)` | by value, in order |
@@ -386,8 +386,10 @@ registry, so a cycle through one is not collected under Zend.
 
 ## Current limits
 
-- The inline path needs a receiver held in a local variable, an `int` index
+- The inline path needs a receiver held in a local variable, a property of a
+  local, or a static property, an `int` index
   built from locals / constants / `+` `-`, and (for a store) a value of the
   element's own type with no call in it. Anything else is an ordinary
   `offsetGet` / `offsetSet` call — correct, slower.
-- No per-type value layout yet: values are stored as 8-byte cells.
+- A `#[TypeDef]` binding covers the scalar reprs only; enum-backed ints and
+  packed structs as elements are not supported yet.

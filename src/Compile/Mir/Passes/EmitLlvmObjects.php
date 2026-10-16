@@ -260,7 +260,7 @@ trait EmitLlvmObjects
         $spreadElem = null;
         foreach ($n->args as $a) {
             if ($a->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitSpreadPackPtr($a->operand);
+                $out .= $this->emitSpreadOperand($a->operand);
                 $spreadArr = $this->lastValue;
                 $spreadElem = $a->operand->type->element ?? null;
                 continue;
@@ -348,6 +348,13 @@ trait EmitLlvmObjects
                 $shape->srcArgc, $shape->boxResult, '', null,
             );
             $out .= 'define linkonce_odr i64 @' . $sym . '(' . $params . ") noinline {\nentry:\n"
+                  . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        }
+        foreach ($this->newDynRestNeeded as $sym => [$srcArgc, $boxResult]) {
+            $this->rt->needsStrcmp = true;
+            $body = $this->newDynChainIr('%ndy.n', [], [], [], $srcArgc, $boxResult,
+                '%ndy.s', Type::cell(), $this->newDynTable()[2]);
+            $out .= 'define linkonce_odr i64 @' . $sym . "(ptr %ndy.n, ptr %ndy.s) noinline {\nentry:\n"
                   . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
         }
         return $out;
@@ -573,9 +580,15 @@ trait EmitLlvmObjects
         }
         $out .= '  br label %' . $endL . "\n";
         $out .= $chainL . ":\n";
-        $out .= $this->newDynChainIr($namePtr, [], [], [], $n->srcArgc, $boxResult,
-                                     $argsP, Type::cell(), $inTable);
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        // The classes the table does not serve (every prelude class: Reflection,
+        // Intl, PDO, Ds…) depend on nothing of the site but argc and boxing:
+        // one chain per pair, called — spliced, each site carried all its arms.
+        $rest = $this->mirHelperSym('__mir_newdyn_rest_' . \str_replace('-', 'm', (string)$n->srcArgc)
+            . ($boxResult ? '_b' : '_r'));
+        $this->newDynRestNeeded[$rest] = [$n->srcArgc, $boxResult];
+        $rr = $this->ssa->allocReg();
+        $out .= '  ' . $rr . ' = call i64 @' . $rest . '(ptr ' . $namePtr . ', ptr ' . $argsP . ")\n";
+        $out .= '  store i64 ' . $rr . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         if ($fresh) {
@@ -714,7 +727,7 @@ trait EmitLlvmObjects
                 // node emitted no value and the ctor read whatever lastValue
                 // still held, so `new R(...['C'])` constructed from garbage.
                 if ($a->kind === Node::KIND_SPREAD) {
-                    $out .= $this->emitSpreadPackPtr($a->operand);
+                    $out .= $this->emitSpreadOperand($a->operand);
                     [$sir, $sregs] = $this->emitSpreadFill(
                         $this->lastValue, $ai + 1, $ptypes, $tmask,
                         $a->operand->type->element ?? null, $ctorClass . '____construct');
@@ -744,7 +757,8 @@ trait EmitLlvmObjects
                 } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                     $out .= $this->emitByRefArg($a);
                 } elseif ($mask[$ai + 1] ?? false) {
-                    $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai, $ahmask[$ai + 1] ?? false);
+                    $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $n->srcArgc, $ai, $ahmask[$ai + 1] ?? false,
+                        $ctorClass . '____construct', $ai + 1);
                     $refSlotDrops .= $this->lastRefSlotDrop;
                 } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {
                     // Tagged (mixed/union) ctor param: NaN-box the arg by its
@@ -1438,6 +1452,10 @@ trait EmitLlvmObjects
      * With 3 130 classes that is how one Doctrine function reached 101 MB of IR.
      * Every arm is a function of the SLOT and the NAME, never of the call site,
      * so there is exactly one correct body per property in the module.
+     *
+     * @param \Compile\Mir\ClassDef[] $fixed
+     * @param array<string,\Compile\Mir\EnumDef> $enumArms
+     * @param array<string,string> $magic class name → declaring class (a bare `array` would erase its key channel)
      */
     private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag): string
     {
@@ -2063,7 +2081,7 @@ trait EmitLlvmObjects
         // every subtype holds the slot, and the class_id default is what keeps
         // a store into one that does not off a foreign offset.
         if ($within === '' && \count($fixed) === 1 && !$hasBag && $magic === []) {
-            $out .= $this->emitCellSlotStore($objPtr, $fixed[0], $prop, $cellVal);
+            $out .= $this->emitCellSlotStoreDropping($objPtr, $fixed[0], $prop, $cellVal, true, true);
             $this->lastValue = $cellVal;
             $this->lastValueType = 'i64';
             return $out;
@@ -2073,10 +2091,40 @@ trait EmitLlvmObjects
         // dispatch on class_id — through the shared writer, as reads already do
         // ({@see cellPropertyReadHelper}): the switch spliced into every site put
         // 11k DOMNode/SimpleXMLElement __set arms into php-cs-fixer.
-        $out .= '  call void ' . $this->cellPropertyWriteHelper($prop, $within)
+        $out .= '  call void ' . $this->cellPropertyWriteHelper($prop, $within, true, true)
               . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
         $this->lastValue = $cellVal;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * {@see emitCellSlotStore} that gives the OLD slot value back after the new one is in:
+     * a raw rc slot by its flavor (`$dropRaw`, the by-ref write-back's rule), a boxed CELL slot
+     * by tag (`$dropBoxed`; it owns what it holds). A slot a `&` promoted is not dropped:
+     * its word is a REF cell, not the value.
+     */
+    private function emitCellSlotStoreDropping(string $obj, ClassDef $cd, string $prop, string $cellVal, bool $dropRaw, bool $dropBoxed): string
+    {
+        $oldSlot = '';
+        $oldFlavor = '';
+        $spt = $cd->propertyTypes[$prop] ?? null;
+        if ($spt !== null && $cd->propertyWidth($prop) === 8) {
+            if ($this->cellPropBoxed($spt, $cd->name, $prop)) {
+                if ($dropBoxed && !isset($this->refCellPropNames[$prop])) { $oldFlavor = 'cell'; }
+            } elseif ($dropRaw && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))) {
+                $oldFlavor = $this->discardReleaseFlavor($spt);
+            }
+        }
+        $out = '';
+        if ($oldFlavor !== '') {
+            $og = $this->ssa->allocReg();
+            $oldSlot = $this->ssa->allocReg();
+            $out .= '  ' . $og . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+            $out .= '  ' . $oldSlot . ' = load i64, ptr ' . $og . "\n";
+        }
+        $out .= $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
+        if ($oldSlot !== '') { $out .= $this->rcReleaseReg($oldSlot, $oldFlavor); }
         return $out;
     }
 
@@ -2219,20 +2267,30 @@ trait EmitLlvmObjects
 
     /** Emit a property set-hook call: `<hookSym>($this, $value)`. The
      *  assignment expression yields the assigned value. */
-    private function emitHookSet(Node $objNode, string $hookSym, Node $valueNode): string
+    private function emitHookSet(Node $objNode, string $hookSym, Node $valueNode, string $property): string
     {
         $out = $this->emitNode($objNode);
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
         $out .= $this->emitNode($valueNode);
-        // The hook takes `$value` as its declared type; a cell value (a reflective write) is unboxed to it.
-        $hpt = $this->sigs->paramTypes[$hookSym][1] ?? null;
-        $vk = $valueNode->type->kind;
-        if ($hpt !== null && $vk === Type::KIND_CELL
-            && ($hpt->kind === Type::KIND_STRING || $hpt->kind === Type::KIND_INT
+        // The hook takes `$value` in its declared type (else the property's), so a CELL
+        // value (a `mixed` parameter, what ReflectionProperty::setValue passes) is
+        // unboxed exactly as a plain store into the slot would.
+        if ($valueNode->type->kind === Type::KIND_CELL) {
+            $hpt = $this->sigs->paramTypes[$hookSym][1] ?? null;
+            $pcls = $objNode->type->class ?? '';
+            $propType = ($pcls !== '' && isset($this->classes[$pcls]))
+                ? ($this->classes[$pcls]->propertyTypes[$property] ?? null)
+                : null;
+            if ($hpt !== null && ($hpt->kind === Type::KIND_STRING || $hpt->kind === Type::KIND_INT
                 || $hpt->kind === Type::KIND_FLOAT || $hpt->kind === Type::KIND_BOOL)) {
-            $out .= $this->coerceToI64();
-            $out .= $this->unboxCellToType($hpt);
+                $out .= $this->coerceToI64();
+                $out .= $this->unboxCellToType($hpt);
+            } elseif ($this->slotIsArrayHinted($objNode, $property, $propType)) {
+                $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+            } elseif ($propType !== null) {
+                $out .= $this->unboxCellToType($propType);
+            }
         }
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
@@ -2734,7 +2792,7 @@ trait EmitLlvmObjects
             && isset($this->classes[$hcls]->propHooks[$n->property])) {
             $hk = $this->classes[$hcls]->propHooks[$n->property];
             if ($hk['set'] !== '' && !$this->insideOwnHook($hk)) {
-                return $this->emitHookSet($n->object, $hk['set'], $n->value);
+                return $this->emitHookSet($n->object, $hk['set'], $n->value, $n->property);
             }
         }
         // Dynamic property on a bag class → set the boxed value in the
@@ -3258,7 +3316,7 @@ trait EmitLlvmObjects
         // reference to a cell slot (`public static mixed $x`) wrote a raw word
         // into a self-describing slot and the next tag-decoding read saw a
         // denormal. The address was never the hard part.
-        $this->locals->refParamTypes[$n->target] = $n->lvalue->type;
+        $this->locals->refParamTypes[$n->target] = $n->erased ? Type::unknown() : $n->lvalue->type;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
@@ -3616,11 +3674,11 @@ trait EmitLlvmObjects
      * everything that depends only on the class and the name: each holder's slot
      * store, the `__set` arms, and the bag default.
      */
-    private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false): string
+    private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false, bool $dropBoxed = false): string
     {
         $key = '__mc_prop_write_' . $this->mangle($prop)
              . ($within === '' ? '' : '__in_' . $this->mangle($within))
-             . ($dropOld ? '__drop' : '');
+             . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '');
         $sym = '@manticore_' . $key;
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
@@ -3660,22 +3718,7 @@ trait EmitLlvmObjects
             // element array is cellified into a fresh copy, so the seed never
             // aliased the slot) must give the slot's OLD buffer back: the raw
             // overwrite below would strand it, and every element it holds.
-            $oldSlot = '';
-            $oldFlavor = '';
-            $spt = $cd->propertyTypes[$prop] ?? null;
-            if ($dropOld && $spt !== null && !$this->cellPropBoxed($spt, $cd->name, $prop)
-                && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))
-                && $cd->propertyWidth($prop) === 8) {
-                $oldFlavor = $this->discardReleaseFlavor($spt);
-                if ($oldFlavor !== '') {
-                    $og = $this->ssa->allocReg();
-                    $oldSlot = $this->ssa->allocReg();
-                    $bodies .= '  ' . $og . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
-                    $bodies .= '  ' . $oldSlot . ' = load i64, ptr ' . $og . "\n";
-                }
-            }
-            $bodies .= $this->emitCellSlotStore($obj, $cd, $prop, $cellVal);
-            if ($oldSlot !== '') { $bodies .= $this->rcReleaseReg($oldSlot, $oldFlavor); }
+            $bodies .= $this->emitCellSlotStoreDropping($obj, $cd, $prop, $cellVal, $dropOld, $dropBoxed);
             $bodies .= '  br label %' . $end . "\n";
         }
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {
@@ -3906,10 +3949,14 @@ trait EmitLlvmObjects
      * candidate name has even one possible by-ref/variadic implementation, the
      * erased receiver cannot route that name through `...$a` safely; keep the
      * entire site on the original inline dispatcher instead.
+     * A private / protected method counts only when the site's own scope can
+     * reach it ({@see DynProp_::$scope}); from anywhere else the shared helper
+     * refuses it as php does, so a program full of non-public methods of
+     * unrelated classes no longer sends every one of those names inline.
      * @param array<string, Type> $methods
      * @return array<string, true>
      */
-    private function dynamicMethodUnsupportedNames(array $methods): array
+    private function dynamicMethodUnsupportedNames(array $methods, string $scope): array
     {
         $out = [];
         foreach ($methods as $mn => $_) {
@@ -3921,8 +3968,13 @@ trait EmitLlvmObjects
                 }
                 $mm = $this->asMethodMeta($cd->methodMeta[$mn]);
                 if ($mm->visibility !== 'public') {
-                    $out[$mn] = true;
-                    break;
+                    if ($scope === \Compile\Mir\DynProp_::ANY_SCOPE
+                        || ($scope !== '' && ($cd->name === $scope
+                            || $this->classIsA($cd->name, $scope) || $this->classIsA($scope, $cd->name)))) {
+                        $out[$mn] = true;
+                        break;
+                    }
+                    continue;
                 }
                 foreach ($mm->params as $pm) {
                     $p = $this->asParamMeta($pm);
@@ -4005,6 +4057,9 @@ trait EmitLlvmObjects
     /** @var array<string, bool> name/argc => does any candidate take a by-ref param */
     private array $dynRefParamMemo = [];
 
+    /** @var array<string, string> inline-fallback shape key => helper symbol, or "" when not served */
+    private array $dynInlSyms = [];
+
     private function dynMethodHasRefParam(array $methods, int $argc): bool
     {
         foreach ($methods as $m => $_ignored) {
@@ -4081,6 +4136,11 @@ trait EmitLlvmObjects
      * synthesized fixed-arity trampoline. Missing metadata fails closed to the
      * existing inline dispatcher. */
     private function asSpreadNode(Node $node): \Compile\Mir\Spread_
+    {
+        return $node;
+    }
+
+    private function asTernary(Node $node): \Compile\Mir\Ternary
     {
         return $node;
     }
@@ -4336,17 +4396,41 @@ trait EmitLlvmObjects
     }
 
     /**
-     * Extract the old erased spread dispatcher into a reusable helper. This is
-     * intentionally separate from the table ABI: a table miss must retain the
-     * complete by-ref/variadic/undefined-method semantics of the inline path,
-     * but repeating that path inside every generator resume function is the
-     * source of the fat-IR blowup.
+     * The inline-only fallback of a table dispatch ({@see emitDynMethodDispatch})
+     * as ONE helper per shape, `i64 (i64 recv, ptr name, ptr args)`. On that
+     * path every arm reads its arguments out of the packed array, so the body
+     * depends only on the receiver's static type, the scope, the name set and
+     * the argument shape — and every site agreeing on those spliced the same
+     * chain: one arm per method of every table-less class (the prelude's
+     * Reflection, Intl, PDO, Ds…), 1 381 arms in each `__call` forwarder
+     * symfony has. '' when the shape is not served (a union with a non-object
+     * atom); the caller keeps the inline chain.
+     *
+     * @param array<string, Type> $methods
      */
-    private function dynamicMethodSpreadFallbackHelper(array $methods, int $line): string
+    private function dynamicMethodSpreadFallbackHelper(\Compile\Mir\DynProp_ $dp, array $methods, int $fixedN, Type $resT): string
     {
-        $key = 'spread|' . \implode('|', \array_keys($methods));
-        $sym = '@manticore_dyn_spread_' . $this->mangle($key);
-        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $rt = $dp->object->type;
+        $rk = $rt->kind;
+        if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN && $rk !== Type::KIND_OBJ
+            && $rk !== Type::KIND_UNION) { return ''; }
+        $recvKey = $rt->class ?? '';
+        // An object union spells its atoms: symfony's RedisTrait::pipeline()
+        // calls `$redis->{$command}(...$args)` on `\Redis|\RedisCluster|…` at
+        // four sites, each splicing ~1 000 arms.
+        if ($rk === Type::KIND_UNION) {
+            foreach ($rt->atoms as $at) {
+                if ($at->kind !== Type::KIND_OBJ || ($at->class ?? '') === '') { return ''; }
+                $recvKey .= $at->class . '|';
+            }
+        }
+        // No scope in the key: the scope already chose the name set, and the
+        // arms themselves never consult it ({@see emitDynMethodInlineFallback}).
+        $key = 'inl|' . $rk . ':' . $recvKey . '|' . (string)$fixedN . '|' . $resT->kind;
+        foreach ($methods as $m => $mt) { $key .= '|' . (string)$m . ':' . $mt->kind . ':' . ($mt->class ?? ''); }
+        if (isset($this->dynInlSyms[$key])) { return $this->dynInlSyms[$key]; }
+        $sym = '@' . $this->mirHelperSym('__mir_dyninl_' . (string)\count($this->dynInlSyms));
+        $this->dynInlSyms[$key] = $sym;
 
         $oldSsa = $this->ssa;
         $oldLocals = $this->locals;
@@ -4391,24 +4475,39 @@ trait EmitLlvmObjects
         $body = 'define internal i64 ' . $sym . "(i64 %obj, ptr %name, ptr %args) {\nentry:\n";
         $body .= '  ' . $objSlot . " = alloca i64\n  store i64 %obj, ptr " . $objSlot . "\n";
         $body .= '  ' . $nameSlot . " = alloca i64\n";
-        $body .= '  %nameI = ptrtoint ptr %name to i64\n  store i64 %nameI, ptr ' . $nameSlot . "\n";
+        $body .= "  %nameI = ptrtoint ptr %name to i64\n  store i64 %nameI, ptr " . $nameSlot . "\n";
         $body .= '  ' . $argsSlot . " = alloca i64\n";
-        $body .= '  %argsI = ptrtoint ptr %args to i64\n  store i64 %argsI, ptr ' . $argsSlot . "\n";
+        $body .= "  %argsI = ptrtoint ptr %args to i64\n  store i64 %argsI, ptr " . $argsSlot . "\n";
 
-        $recv = new \Compile\Mir\LoadLocal('__mc_dyn_obj', Type::unknown());
+        $recv = new \Compile\Mir\LoadLocal('__mc_dyn_obj', $rt);
         $name = new \Compile\Mir\LoadLocal('__mc_dyn_name', Type::string_());
-        $args = new \Compile\Mir\LoadLocal('__mc_dyn_args', Type::vec(Type::cell()));
-        $dp = new \Compile\Mir\DynProp_($recv, $name, Type::cell());
-        $spread = new \Compile\Mir\Spread_($args, Type::cell());
-        $iv = new \Compile\Mir\Invoke_($dp, [$spread], Type::cell());
+        $vecT = Type::vec(Type::cell());
+        $hdp = new \Compile\Mir\DynProp_($recv, $name, $dp->type);
+        $hdp->scope = $dp->scope;
+        $hdp->line = $dp->line;
+        $armArgs = [];
+        if ($fixedN < 0) {
+            $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT), Type::cell());
+        } else {
+            for ($i = 0; $i < $fixedN; $i++) {
+                $armArgs[] = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT),
+                    new \Compile\Mir\IntConst($i, Type::int_()), Type::cell());
+            }
+        }
+        $iv = new \Compile\Mir\Invoke_($hdp, $armArgs, $resT);
         // Call the old inline implementation directly. Re-entering
         // emitDynMethodCall here would re-run candidate inference against the
         // synthetic nodes and can observe the helper's temporary LocalSlots as
         // if they were a real source call.
-        $body .= $this->emitDynMethodInlineFallback($dp, $iv, $methods);
+        $body .= $this->emitDynMethodInlineFallback($hdp, $iv, $methods);
+        $body .= $this->coerceToI64();
         $result = $this->lastValue;
         $body .= '  ret i64 ' . $result . "\n}\n\n";
-        $this->dynamicMethodHelpers[$key] = $body;
+        if ($this->irIsClosed($body)) {
+            $this->dynamicMethodHelpers[$key] = $body;
+        } else {
+            $this->dynInlSyms[$key] = '';
+        }
 
         $this->ssa = $oldSsa;
         $this->locals = $oldLocals;
@@ -4428,7 +4527,7 @@ trait EmitLlvmObjects
         $this->cellProv = $oldCellProv;
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
-        return $sym;
+        return $this->dynInlSyms[$key];
     }
 
     /** Some operand of the dynamic call is not a local yet, and every such one
@@ -4449,14 +4548,30 @@ trait EmitLlvmObjects
         return $need;
     }
 
-    /** A value that can be computed once and held in a slot without owning
-     *  anything: an int literal, or a plain property / subscript chain rooted
-     *  at a local. */
+    /** A value that can be computed once and held in a slot: an int literal, a
+     *  plain property / subscript chain rooted at a local, a call, a `new`, an assignment, or a concat (a dynamic name). A call's
+     *  +1 result is no more owned here than in the per-arm inline path, which
+     *  evaluates it in the one arm that runs and releases nothing either; what
+     *  hoisting changes is that a site with a fresh receiver or argument takes
+     *  the shared name chain instead of splicing one arm per candidate class. */
     private function dynHoistableRead(Node $n): bool
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_INT_CONST
             || $n->kind === Node::KIND_STRING_CONST) {
             return true;
+        }
+        if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
+            || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_INVOKE
+            || $n->kind === Node::KIND_CONCAT || $n->kind === Node::KIND_NEW_OBJ
+            || $n->kind === Node::KIND_STORE_LOCAL || $n->kind === Node::KIND_ARRAY_LIT) {
+            return true;
+        }
+        if ($n->kind === Node::KIND_TERNARY) {
+            // `->{$c ? 'a' : 'b'}()`: a name picked between plain operands.
+            $t = $this->asTernary($n);
+            return $t->then !== null
+                && ($t->then->kind === Node::KIND_STRING_CONST || $t->then->kind === Node::KIND_LOAD_LOCAL)
+                && ($t->else_->kind === Node::KIND_STRING_CONST || $t->else_->kind === Node::KIND_LOAD_LOCAL);
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
         if ($n->kind === Node::KIND_ARRAY_ACCESS) { return $this->dynHoistableElem($n); }
@@ -4475,54 +4590,76 @@ trait EmitLlvmObjects
     }
 
     /** Evaluate `$n` once into a fresh slot and answer a LoadLocal of it —
-     *  a local or a string literal is already that. */
-    private function dynHoistOperand(Node $n, string &$out): Node
+     *  a local or a string literal is already that. An ARGUMENT that is a fresh
+     *  +1 temp ({@see freshRcArgFlavor}) is recorded in `$owned` (slot => flavor)
+     *  for the caller to give back after the call, as an inline argument would be. */
+    private function dynHoistOperand(Node $n, string &$out, array &$owned, bool $isArg): Node
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STRING_CONST) { return $n; }
         $out .= $this->emitNode($n);
         $out .= $this->coerceToI64();
+        $flavor = $n->kind === Node::KIND_ARRAY_LIT ? $this->mergedTempFlavor($n)
+            : ($isArg ? $this->freshRcArgFlavor($n) : '');
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca i64\n";
         $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        if ($flavor !== '') { $owned[$slot] = $flavor; }
         $name = '__mc_dynh_' . \substr($slot, 1);
         $this->locals->slots[$name] = $slot;
         return new \Compile\Mir\LoadLocal($name, $n->type);
     }
 
-    /** Emit a `...$pack` operand to a raw array pointer: an erased (cell) pack carries tag bits. */
-    private function emitSpreadPackPtr(Node $operand): string
+    /**
+     * Rewrite `(f1, .., fn, ...$s)` to `(...[f1, .., fn, ...$s])` for a dynamic
+     * method site that the packed-array ABI can serve. The literal is evaluated
+     * after the receiver and the name, before any dispatch — php's order. Any
+     * shape the packed path would not take is left alone.
+     */
+    private function packLeadingSpreadArgs(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): \Compile\Mir\Invoke_
     {
-        $out = $this->emitNode($operand);
-        $k = $operand->type->kind;
-        if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
-            $out .= $this->coerceToI64();
-            $m = $this->ssa->allocReg();
-            $out .= '  ' . $m . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
-            $this->lastValue = $m;
-            $this->lastValueType = 'i64';
+        $n = \count($iv->args);
+        if ($n < 2 || $this->dynamicMethodAbiDisabled || !$this->dynamicMethodMeta) { return $iv; }
+        if ($iv->args[$n - 1]->kind !== Node::KIND_SPREAD) { return $iv; }
+        for ($i = 0; $i < $n - 1; $i++) {
+            if ($iv->args[$i]->kind === Node::KIND_SPREAD) { return $iv; }
         }
-        return $out . $this->coerceToPtr();
+        $candidates = $this->dynMethodCandidates($dp->object->type, -1);
+        if ($candidates === null || \count($candidates) < 16) { return $iv; }
+        $elems = [];
+        foreach ($iv->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+        $lit = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
+        $lit->line = $iv->line;
+        $sp = new \Compile\Mir\Spread_($lit, $lit->type);
+        $iv2 = new \Compile\Mir\Invoke_($dp, [$sp], $iv->type);
+        $iv2->line = $iv->line;
+        return $iv2;
     }
 
     private function emitDynMethodCall(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): string
     {
+        // `$o->$m($a, ...$rest)`: the packed-array ABI below takes ONE spread, so
+        // a leading fixed argument sent the site down the per-candidate inline
+        // chain (236 K IR lines for symfony's RedisClusterNodeProxy::__call).
+        // `[$a, ...$rest]` IS that one array — build it once, here.
+        $iv = $this->packLeadingSpreadArgs($dp, $iv);
         // Every shared path below wants its operands as LOCALS, because the
         // inline fallback re-emits them per arm. A plain READ — a property or
-        // subscript chain off a local — is evaluated ONCE into a slot here, so
-        // `$this->dispatcher->{$m}(...$args)` takes the table instead of a
-        // 3 069-arm chain spliced into the site. Fresh values (a call's result)
-        // are left alone: a slot would own a +1 nobody releases.
+        // subscript chain off a local, or a call — is evaluated ONCE into a slot
+        // here, so `$this->dispatcher->{$m}(...$args)` takes the table instead
+        // of a 3 069-arm chain spliced into the site.
         if ($this->dynOperandsNeedHoist($dp, $iv)) {
             $out = '';
-            $recvL = $this->dynHoistOperand($dp->object, $out);
-            $nameL = $this->dynHoistOperand($dp->name, $out);
+            /** @var array<string, string> $owned */
+            $owned = [];
+            $recvL = $this->dynHoistOperand($dp->object, $out, $owned, false);
+            $nameL = $this->dynHoistOperand($dp->name, $out, $owned, false);
             $args = [];
             foreach ($iv->args as $a) {
                 if ($a->kind === Node::KIND_SPREAD) {
                     $sp = $this->asSpreadNode($a);
-                    $args[] = new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out), $a->type);
+                    $args[] = new \Compile\Mir\Spread_($this->dynHoistOperand($sp->operand, $out, $owned, false), $a->type);
                 } else {
-                    $args[] = $this->dynHoistOperand($a, $out);
+                    $args[] = $this->dynHoistOperand($a, $out, $owned, true);
                 }
             }
             $dp2 = new \Compile\Mir\DynProp_($recvL, $nameL, $dp->type);
@@ -4530,7 +4667,17 @@ trait EmitLlvmObjects
             $dp2->scope = $dp->scope;
             $iv2 = new \Compile\Mir\Invoke_($dp2, $args, $iv->type);
             $iv2->line = $iv->line;
-            return $out . $this->emitDynMethodCall($dp2, $iv2);
+            $out .= $this->emitDynMethodCall($dp2, $iv2);
+            $resReg = $this->lastValue;
+            $resTy = $this->lastValueType;
+            foreach ($owned as $slot => $flavor) {
+                $v = $this->ssa->allocReg();
+                $out .= '  ' . $v . ' = load i64, ptr ' . $slot . "\n";
+                $out .= $this->rcReleaseReg($v, $flavor);
+            }
+            $this->lastValue = $resReg;
+            $this->lastValueType = $resTy;
+            return $out;
         }
         $recv = $dp->object;
         $nameNode = $dp->name;
@@ -4602,7 +4749,10 @@ trait EmitLlvmObjects
                 || $recv->type->kind === Type::KIND_UNION)
             && \count($clean) >= 16;
         if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
+            $argKinds = '';
+            foreach ($iv->args as $a) { $argKinds .= ($argKinds === '' ? '' : ',') . $a->kind; }
             \error_log('DYNM ' . ($canExtract ? 'yes' : 'no')
+                . ' ' . $this->frame->name . ' name=' . $nameNode->kind . ' argKinds=' . $argKinds
                 . ': args=' . (string)$argc
                 . ' argsOk=' . ($argsOk ? '1' : '0')
                 . ' reEmitSafe=' . ($reEmitSafe ? '1' : '0')
@@ -4768,7 +4918,7 @@ trait EmitLlvmObjects
                 // implementation in this site accepts an unpacked by-value array.
                 // This site-local gate removes the old module-wide veto while
                 // preserving the exact inline path for any by-ref/variadic name.
-                $unsafeNames = $this->dynamicMethodUnsupportedNames($methods);
+                $unsafeNames = $this->dynamicMethodUnsupportedNames($methods, $dp->scope);
                 if (\Compile\Stats::$on) {
                     \Compile\Stats::bump('dynamic.fallback.site_count', 1);
                     \Compile\Stats::bump('dynamic.fallback.site_candidates', \count($methods));
@@ -5018,7 +5168,9 @@ trait EmitLlvmObjects
             $pack = $op;
         }
         $needsNodes = false;
-        $inline = $this->dynInlineOnlyNames($methods, $needsNodes);
+        /** @var array<string, bool> $nodeNames */
+        $nodeNames = [];
+        $inline = $this->dynInlineOnlyNames($methods, $needsNodes, $nodeNames);
         // A by-ref / variadic arm binds the caller's own argument EXPRESSIONS, so
         // those must be safe to emit a second time. Every other arm (a prelude
         // class's by-value method) reads the arguments back out of the packed
@@ -5069,7 +5221,43 @@ trait EmitLlvmObjects
         $inlL = $this->ssa->allocLabel('dynd.inline');
         $out .= '  br i1 ' . $hit . ', label %' . $endL . ', label %' . $inlL . "\n";
         $out .= $inlL . ":\n";
-        if ($inline !== []) {
+        // The names whose every holder reads its arguments from the pack go to
+        // a shared helper; only a by-ref / variadic name keeps an inline arm
+        // over the caller's own argument nodes, ahead of the helper call.
+        /** @var array<string, Type> $packNames */
+        $packNames = [];
+        foreach ($inline as $m => $mt) {
+            if (!isset($nodeNames[(string)$m])) { $packNames[(string)$m] = $mt; }
+        }
+        $inlSym = $packNames !== []
+            ? $this->dynamicMethodSpreadFallbackHelper($dp, $packNames, $pack !== null ? -1 : \count($fixedArgs), $iv->type)
+            : '';
+        if ($inlSym !== '') {
+            foreach ($inline as $m => $retT) {
+                if (isset($packNames[(string)$m])) { continue; }
+                $hitL = $this->ssa->allocLabel('dynm.hit');
+                $nextL = $this->ssa->allocLabel('dynm.next');
+                $cmp = $this->ssa->allocReg();
+                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr((string)$m) . ")\n";
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+                $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
+                $out .= $hitL . ":\n";
+                $out .= $this->emitMethodCall(new \Compile\Mir\MethodCall_($recv, (string)$m, $iv->args, $retT));
+                $out .= $this->boxToCell($retT);
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+            }
+            // The receiver is a pure read here ({@see dynPureRead} above): read
+            // again in its own representation, which the helper's local is typed as.
+            $out .= $this->emitNode($recv);
+            $out .= $this->coerceToI64();
+            $fr = $this->ssa->allocReg();
+            $out .= '  ' . $fr . ' = call i64 ' . $inlSym . '(i64 ' . $this->lastValue . ', ptr ' . $keyP
+                  . ', ptr ' . $argsP . ")\n";
+            $out .= '  store i64 ' . $fr . ', ptr ' . $res . "\n";
+        } elseif ($inline !== []) {
             $ivArms = $iv;
             if (!$needsNodes) {
                 $argsName = '__dynd_args' . \substr($this->ssa->allocReg(), 2);
@@ -5118,7 +5306,7 @@ trait EmitLlvmObjects
      * @param array<string, Type> $methods
      * @return array<string, Type>
      */
-    private function dynInlineOnlyNames(array $methods, bool &$needsNodes): array
+    private function dynInlineOnlyNames(array $methods, bool &$needsNodes, array &$nodeNames): array
     {
         $out = [];
         $needsNodes = false;
@@ -5146,7 +5334,7 @@ trait EmitLlvmObjects
                 // user class inherits it (Exception::__toString in every user
                 // exception) — by-value all the same.
                 $declPrelude = $this->classes[$decl]->isPreludeClass;
-                if (!$sigOk || ($inTable && !$declPrelude)) { $needsNodes = true; }
+                if (!$sigOk || ($inTable && !$declPrelude)) { $needsNodes = true; $nodeNames[(string)$m] = true; }
             }
         }
         return $out;
@@ -5473,13 +5661,15 @@ trait EmitLlvmObjects
         return $cd->display();
     }
 
+    /**
+     * `$obj::class` is `get_class($obj)`: an erased or polymorphic operand has no
+     * single static class, so the name comes off the object's class_id exactly as
+     * {@see biGetClass} reads it. Reading only the static type gave the empty
+     * string for every `object` / `mixed` / `object|string` operand.
+     */
     private function emitClassName(ClassName_ $n): string
     {
-        $cls = $this->displayClassName($n->operand->type->class ?? '');
-        $id = $this->pool->intern($cls);
-        $this->lastValue = $this->strLitId($id);
-        $this->lastValueType = 'ptr';
-        return '';
+        return $this->biGetClass([$n->operand]);
     }
 
     private function emitIsset(Isset_ $n): string
@@ -6469,6 +6659,18 @@ trait EmitLlvmObjects
         // Once unboxed the payload IS raw, so the retain is chosen from the
         // declared type instead of the cell's null (which retains nothing).
         $out .= $this->rcRetainByType($n->value, $val, $dcT, 5);
+        // An already-boxed value into a CELL slot: the slot drops the old word by
+        // tag below, so a borrowed one (a `mixed` param) takes its count by tag
+        // too — rcRetainByType bails on a cell. `Hook::install(fn …)` stored a
+        // closure its caller then released.
+        $vk = $n->value->type->kind;
+        if (($dk === Type::KIND_CELL || $dk === Type::KIND_UNKNOWN) && $box && ($vk === Type::KIND_CELL || $vk === Type::KIND_UNKNOWN)) {
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+            $out .= $this->retainCellPayload($n->value);
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+        }
         if ($box) {
             $out .= $this->boxForViewSlot($vt, $n->value);
             $val = $this->lastValue;
@@ -6938,7 +7140,7 @@ trait EmitLlvmObjects
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
             if ($a->kind === Node::KIND_SPREAD) {
-                $out .= $this->emitSpreadPackPtr($a->operand);
+                $out .= $this->emitSpreadOperand($a->operand);
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
@@ -6976,7 +7178,8 @@ trait EmitLlvmObjects
                 $out .= $this->emitByRefArg($a);
                 $argList .= 'i64 ' . $this->lastValue;
             } elseif ($mask[$ai] ?? false) {
-                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $n->srcArgc, $ai, $ahmask[$ai] ?? false);
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai] ?? null, $n->srcArgc, $ai, $ahmask[$ai] ?? false,
+                    $cls . '__' . $n->method, $ai);
                 $argList .= 'i64 ' . $this->lastValue;
                 $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
@@ -7805,8 +8008,19 @@ trait EmitLlvmObjects
     private function holderTakesArgs(string $holder, string $method, int $argc): bool
     {
         $key = $holder . '__' . $method;
-        if (\count($this->sigs->paramTypes[$key] ?? []) >= $argc) { return true; }
-        foreach ($this->sigs->variadicParams[$key] ?? [] as $v) {
+        $n = \count($this->sigs->paramTypes[$key] ?? []);
+        $vmask = $this->sigs->variadicParams[$key] ?? [];
+        // …and that the call does not leave a REQUIRED one out: the site pads an
+        // omitted param from this holder's signature, and a required one pads as
+        // an unconditional ArgumentCountError. CachePoolPass::getNamespace($seed,
+        // $id), the first holder of the name, threw for every erased
+        // `$bundle->getNamespace()`.
+        $pdefs = $this->sigs->paramDefaults[$key] ?? [];
+        for ($i = $argc; $i < $n; $i++) {
+            if (($pdefs[$i] ?? null) === null && !($vmask[$i] ?? false)) { return false; }
+        }
+        if ($n >= $argc) { return true; }
+        foreach ($vmask as $v) {
             if ($v) { return true; }
         }
         return false;
@@ -8614,7 +8828,7 @@ trait EmitLlvmObjects
                 // fallback's signature — `$o->__construct(...['C'])` took some
                 // unrelated class's `= 0` for its second param. Each arm (and
                 // the single-target path) expands it against its own params.
-                $out .= $this->emitSpreadPackPtr($a->operand);
+                $out .= $this->emitSpreadOperand($a->operand);
                 $this->spreadTail = [$this->lastValue, $ai + 1, $a->operand->type->element ?? null];
                 $ai = \count($ptypes) - 1;
                 continue;
@@ -8653,7 +8867,8 @@ trait EmitLlvmObjects
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
             } elseif ($mask[$ai + 1] ?? false) {
-                $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai, $ahmask[$ai + 1] ?? false);
+                $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai, $ahmask[$ai + 1] ?? false,
+                    $fallback . '__' . $mc->method, $ai + 1);
                 $argList .= ', i64 ' . $this->lastValue;
                 $refSlotDrops .= $this->lastRefSlotDrop;
             } elseif (($tmask[$ai + 1] ?? false) && $a->type->kind !== Type::KIND_CELL) {

@@ -1,0 +1,29 @@
+withDefault: promoted=false has=true default=5
+nullable: promoted=false has=true default=NULL
+typedNoDefault: promoted=false has=false default=-
+untyped: promoted=false has=true default=NULL
+list: promoted=false has=true default=array (  0 => 1,  1 => 2,)
+level: promoted=false has=true default=\Level::High
+shared: promoted=false has=true default=7
+promoted: promoted=true has=false default=-
+tag: promoted=true has=false default=-
+array(2) {
+  [0]=>
+  string(6) "Counts"
+  [1]=>
+  string(5) "Names"
+}
+array(2) {
+  [0]=>
+  string(6) "Counts"
+  [1]=>
+  string(5) "Names"
+}
+bool(true)
+bool(true)
+array(0) {
+}
+array(0) {
+}
+bool(true)
+bool(false)

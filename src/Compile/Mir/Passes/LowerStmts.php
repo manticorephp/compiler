@@ -239,9 +239,9 @@ trait LowerStmts
     private function hoistAssign(\Parser\Ast\Assign $e): ?\Parser\Ast\Expr
     {
         $t = $this->hoistLvChain($e->target);
+        $v = $this->hoistLvValue($e->target, $e->value);
         // A yield value is only available after the resume: evaluate it before the
         // store's base, whose SSA values do not survive the resume switch.
-        $v = $e->value;
         if ($v->kind === 'Yield' && $e->target->kind !== 'Variable') { $v = $this->lvTemp($v); }
         // php reads a plain-variable dim LATE (at the store, after the value):
         // `$a[$i] = $i++` keys on the NEW $i. Evaluate a value that writes
@@ -257,8 +257,33 @@ trait LowerStmts
     private function hoistCompound(\Parser\Ast\CompoundAssign $e): ?\Parser\Ast\Expr
     {
         $t = $this->hoistLvChain($e->target);
-        if ($t === $e->target) { return null; }
-        return new \Parser\Ast\CompoundAssign($e->op, $t, $e->value, $e->span);
+        $v = $this->hoistLvValue($e->target, $e->value);
+        if ($t === $e->target && $v === $e->value) { return null; }
+        return new \Parser\Ast\CompoundAssign($e->op, $t, $v, $e->span);
+    }
+
+    /**
+     * `$k[X] = $k[Y] = v`: the outer store would load the container BEFORE the
+     * inner store ran, and the inner store may promote / grow / separate that
+     * buffer. php evaluates the dims, then the right-hand side, then the
+     * dim-write — so a right-hand side that itself writes is evaluated into a
+     * temp first and the store reads the container after it.
+     */
+    private function hoistLvValue(\Parser\Ast\Expr $target, \Parser\Ast\Expr $v): \Parser\Ast\Expr
+    {
+        $k = $v->kind;
+        // A chain `$m[a] = $m[b] = $m[c] = v` nests: the same rule, one level in.
+        if ($k === 'Assign') {
+            $it = $this->hoistLvChain($v->target);
+            $iv = $this->hoistLvValue($v->target, $v->value);
+            if ($it !== $v->target || $iv !== $v->value) {
+                $v = new \Parser\Ast\Assign($it, $iv, $v->span);
+            }
+        }
+        $tk = $target->kind;
+        if ($tk !== 'ArrayAccess' && $tk !== 'PropertyAccess' && $tk !== 'DynProp') { return $v; }
+        if ($k !== 'Assign' && $k !== 'CompoundAssign' && $k !== 'IncDec') { return $v; }
+        return $this->lvTemp($v);
     }
 
     private function hoistIncDec(\Parser\Ast\IncDec $e): ?\Parser\Ast\Expr
@@ -387,6 +412,15 @@ trait LowerStmts
 
     /** A dim / receiver whose evaluation has no effect and whose value cannot
      *  change inside the statement's own chain. */
+    private function storesLocal(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) { return true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->storesLocal($c, $name)) { return true; }
+        }
+        return false;
+    }
+
     private function lvPure(\Parser\Ast\Expr $e): bool
     {
         $k = $e->kind;
@@ -400,7 +434,11 @@ trait LowerStmts
             $se = $this->discardedIncDec($stmt->expr);
             $hoisted = $this->hoistLvalueStmt($se);
             if ($hoisted !== null) { return $hoisted; }
+            $outerValueTemps = $this->valueTemps;
+            $this->valueTemps = [];
             $lowered = $this->lowerExpr($se);
+            $valueTemps = $this->valueTemps;
+            $this->valueTemps = $outerValueTemps;
             // `(void) f();` — the cast lowered away, so mark the call itself so
             // the #[\NoDiscard] check stays quiet for it.
             if ($this->isVoidCastExpr($stmt->expr)) { $this->markVoidCast($lowered); }
@@ -420,6 +458,17 @@ trait LowerStmts
                     // slot as it. {@see LowerReify}
                     $this->reifiedNew($lowered);
                 }
+            }
+            if ($valueTemps !== []) {
+                // php destroys the stored value's temporary at the end of the statement.
+                $loads = [];
+                // A speculative lowering of a closure body can leave a name behind
+                // whose store never reached the tree: unset only what is defined here.
+                foreach ($valueTemps as $t) {
+                    if ($this->storesLocal($lowered, $t)) { $loads[] = new LoadLocal($t, Type::unknown()); }
+                }
+                if ($loads === []) { return $lowered; }
+                return new Block([$lowered, new Unset_($loads, Type::void())], Type::void());
             }
             return $lowered;
         }
@@ -631,8 +680,75 @@ trait LowerStmts
             foreach ($body->stmts as $s) { $stmts[] = $s; }
             $body = new Block($stmts, Type::void());
         }
+        if ($stmt->valueByRef) {
+            $bound = $this->foreachBindingCapturedRef($array, $stmt->expr, $keyVar, $valueVar, $body);
+            if ($bound !== null) { return $bound; }
+        }
+        // `foreach ($config as $name => $config)`: php iterates the array the
+        // variable held when the loop began, and the binding overwrites only the
+        // variable. Iterating the slot itself read each bound VALUE back as the
+        // subject (symfony routing's ContentLoaderTrait counted keys 0, 1, …).
+        if (!$stmt->valueByRef && $stmt->expr->kind === 'Variable') {
+            $sn = $this->varName($stmt->expr);
+            if ($sn === $valueVar || $sn === $keyVar) {
+                $tmp = '__fe_snap_' . (string)$this->destrCounter;
+                $this->destrCounter = $this->destrCounter + 1;
+                return new Block([
+                    new StoreLocal($tmp, $array, Type::void()),
+                    new Foreach_(new LoadLocal($tmp, Type::unknown()), $keyVar, $valueVar, false, $body),
+                ], Type::void());
+            }
+        }
         return $this->hoistForeachSubject(
             new Foreach_($array, $keyVar, $valueVar, $stmt->valueByRef, $body));
+    }
+
+    /**
+     * `foreach ($xs as $k => &$v)` whose `$v` a closure in the body captures BY
+     * REFERENCE: each iteration binds `$v = &$xs[$k]`, as php does.
+     *
+     * A by-ref loop variable is otherwise a COPY written back into the element
+     * at the step. A closure capturing `&$v` captured that one copy's box, so
+     * every closure of the loop shared it and saw the last element (symfony's
+     * EventDispatcher::optimizeListeners wraps each lazy listener this way, and
+     * every wrapper called the last listener), and the write-back stored the
+     * box ADDRESS into the element. The element reference ({@see RefAddr_}) is
+     * a box of its own per element, so the loop iterates under a dummy value
+     * name and {@see Foreach_::$bindRef} drops the write-back.
+     *
+     * A subject that is not a variable, property or element is bound to a local
+     * first: php's by-ref loop over a temporary walks a copy of it too.
+     * ponytail: a property / element subject is re-evaluated for the binding;
+     * an index with side effects would run twice.
+     */
+    private function foreachBindingCapturedRef(Node $array, \Parser\Ast\Expr $subject, ?string $keyVar, string $valueVar, Block $body): ?Node
+    {
+        $ls = new \Compile\Mir\LocalSlots();
+        $ls->collectByRefCaptured($body);
+        if (!isset($ls->byRefCaptured[$valueVar])) { return null; }
+        $n = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $pre = [];
+        $sk = $subject->kind;
+        if ($sk === 'Variable') {
+            $base = new LoadLocal($this->varName($subject), Type::unknown());
+        } elseif ($sk === 'PropertyAccess' || $sk === 'ArrayAccess') {
+            $base = $this->lowerExpr($subject);
+        } else {
+            $tmp = '__fe_rb_' . $n;
+            $pre[] = new StoreLocal($tmp, $array, Type::void());
+            $array = new LoadLocal($tmp, Type::unknown());
+            $base = new LoadLocal($tmp, Type::unknown());
+        }
+        $kv = $keyVar ?? '__fe_rk_' . $n;
+        $lv = new ArrayAccess_($base, new LoadLocal($kv, Type::unknown()), Type::unknown());
+        $stmts = [new RefAddr_($valueVar, $lv, $lv->type)];
+        foreach ($body->stmts as $s) { $stmts[] = $s; }
+        $fe = new Foreach_($array, $kv, '__fe_rv_' . $n, true, new Block($stmts, Type::void()));
+        $fe->bindRef = true;
+        if ($pre === []) { return $fe; }
+        $pre[] = $fe;
+        return new Block($pre, Type::void());
     }
 
     /**

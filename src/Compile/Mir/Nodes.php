@@ -1011,6 +1011,10 @@ final class RefBind_ extends Node
  *  it (the refLocals mechanism), aliasing the property / element. */
 final class RefAddr_ extends Node
 {
+    /** The local is typed ERASED, whatever the slot's own type: a computed
+     *  property name (`&$this->$p`) binds one local to slots of several types. */
+    public bool $erased = false;
+
     public function __construct(public string $target, public Node $lvalue, Type $type)
     {
         parent::__construct(Node::KIND_REF_ADDR, $type);
@@ -1280,6 +1284,9 @@ final class Cast extends Node
         parent::__construct(Node::KIND_CAST, $type);
     }
 
+    /** A `string` cast of a cell keeps NULL as NULL (a `?string` param's null), not "". */
+    public bool $keepNull = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitCast($this);
@@ -1463,13 +1470,23 @@ final class Foreach_ extends Node
      *  generator's resume drops on its way out of the frame.
      * @var array<string, MemoryOp_> */
     public array $ownLive = [];
+    /** The body binds the real loop variable by reference itself (`$v = &$xs[$k]`,
+     *  {@see Passes\LowerStmts::foreachBindingCapturedRef}); `$valueVar` is a dummy
+     *  and the by-ref step must not write it back into the element. */
+    public bool $bindRef = false;
 
     /** Set by InferTypes: the subject is a SplFixedArray bound to a class
      *  (`@extends SplFixedArray<Token>`) whose loop the emitter runs over the
      *  native buffer, binding each element as that class's pointer
      *  ({@see Passes\EmitLlvmHmap::emitForeachDs}); {@see $iterValueType} is the class.
-     *  Not copied by {@see NodeClone}: InferTypes sets it on every run. Declared LAST. */
+     *  Not copied by {@see NodeClone}: InferTypes sets it on every run. */
     public bool $fixedBuf = false;
+
+    /** Object-iterator path: the type `key()` of {@see $iterClass} answers — a
+     *  +1 like {@see $iterValueType}'s, so the key variable owns it
+     *  ({@see Passes\OwnershipFlow::scanForeach}). Set by InferTypes on every
+     *  run, not copied by {@see NodeClone}. Declared LAST. */
+    public ?Type $iterKeyType = null;
 
     public function accept(EmitVisitor $v): string
     {

@@ -37,6 +37,14 @@ final class TypeCheck
     /** @var string[] findings that do not stop the build */
     public array $warnings = [];
 
+    /**
+     * Turn a statically-provable array-ness argument mismatch into a RUN-TIME
+     * `TypeError` at the call site instead of a build error. Set by the driver
+     * for a user program; `analyze` (collect mode) leaves it off, so the
+     * compiler's own tree still reports every such site as an error.
+     */
+    public bool $demoteArgMismatch = false;
+
     /** A warning {@see shapeConflict} found while answering, taken by its caller. */
     private string $shapeWarn = '';
 
@@ -52,8 +60,22 @@ final class TypeCheck
      */
     public bool $reprOnly = false;
 
+    /**
+     * Run ONLY the weak-mode `__toString` cast of an object bound to a `string`
+     * param (set together with {@see $reprOnly}). The driver runs it again after
+     * NarrowReturns: that pass sharpens a foreach variable over a call result from
+     * erased to `obj`, after the full check already looked at the argument.
+     */
+    public bool $castOnly = false;
+
     /** @var array<string, \Compile\Mir\Param[]> fn / `Class__method` name → params */
     private array $paramsByFn = [];
+
+    /** @var array<string, bool> reified bodies: their params are a docblock CLAIM, the cell stays a cell */
+    private array $claimFns = [];
+
+    /** @var array<string, bool> FFI-bound callees: their `string` param takes a raw address, never a rendered object */
+    private array $ffiFns = [];
 
     /** @var array<string, Type> fn name → declared return type */
     private array $returnTypes = [];
@@ -62,6 +84,8 @@ final class TypeCheck
     {
         foreach ($module->functions as $fn) {
             $this->paramsByFn[$fn->name] = $fn->params;
+            if ($fn->ffiSymbol !== null) { $this->ffiFns[$fn->name] = true; }
+            if ($fn->claimOrigin !== '') { $this->claimFns[$fn->name] = true; }
             $this->returnTypes[$fn->name] = $module->declaredReturnTypes[$fn->name] ?? $fn->returnType;
         }
         foreach ($module->functions as $fn) {
@@ -84,18 +108,18 @@ final class TypeCheck
         }
         if ($n->kind === Node::KIND_CALL) {
             $this->nullArgsToScalar($n->function, $n, 0);
-            $this->checkArgs($n->function, $n->function, $n->args, $inFn, 0);
+            $this->checkArgs($n->function, $n->function, $n->args, $inFn, 0, $n);
         } elseif ($n->kind === Node::KIND_NEW_OBJ) {
             $this->nullArgsToScalar($n->class . '____construct', $n, 1);
-            $this->checkArgs($n->class . '____construct', 'new ' . $n->class, $n->args, $inFn, 1);
+            $this->checkArgs($n->class . '____construct', 'new ' . $n->class, $n->args, $inFn, 1, $n);
         } elseif ($n->kind === Node::KIND_STATIC_CALL) {
             $this->nullArgsToScalar($n->class . '__' . $n->method, $n, 0);
-            $this->checkArgs($n->class . '__' . $n->method, $n->class . '::' . $n->method, $n->args, $inFn, 0);
+            $this->checkArgs($n->class . '__' . $n->method, $n->class . '::' . $n->method, $n->args, $inFn, 0, $n);
         } elseif ($n->kind === Node::KIND_METHOD_CALL) {
             $cls = $n->object->type->class ?? '';
             if ($cls !== '') {
                 $this->nullArgsToScalar($cls . '__' . $n->method, $n, 1);
-                $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1);
+                $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1, $n);
             }
         }
         $this->checkShapeNode($n, $inFn);
@@ -172,6 +196,44 @@ final class TypeCheck
     }
 
     /**
+     * Codegen builtins have no declared signature, so the string cast {@see checkArgs} inserts for a
+     * `string` parameter never reached them: `strlen($stringable)` counted the object's bytes and
+     * `strtoupper($stringable)` upper-cased its pointer. These take their text through `__toString`
+     * in php; an object bound to one of their string positions is rendered here. Positions only —
+     * `get_class`, `spl_object_id`, `method_exists`, `__mc_refl_of` take the object itself.
+     *
+     * @var array<string, int[]>
+     */
+    private const STRING_ARG_BUILTINS = [
+        'strlen' => [0], 'strtolower' => [0], 'strtoupper' => [0], 'ucfirst' => [0], 'lcfirst' => [0],
+        'ucwords' => [0], 'trim' => [0], 'ltrim' => [0], 'rtrim' => [0], 'chop' => [0], 'strrev' => [0],
+        'str_repeat' => [0], 'substr' => [0], 'nl2br' => [0], 'addslashes' => [0], 'md5' => [0],
+        'sha1' => [0], 'crc32' => [0], 'bin2hex' => [0], 'base64_encode' => [0], 'urlencode' => [0],
+        'rawurlencode' => [0], 'htmlspecialchars' => [0], 'htmlentities' => [0], 'strip_tags' => [0],
+        'wordwrap' => [0], 'str_word_count' => [0], 'ctype_alpha' => [0], 'is_numeric' => [],
+        'strpos' => [0, 1], 'stripos' => [0, 1], 'strrpos' => [0, 1], 'strripos' => [0, 1],
+        'strstr' => [0, 1], 'stristr' => [0, 1], 'strrchr' => [0, 1], 'str_contains' => [0, 1],
+        'str_starts_with' => [0, 1], 'str_ends_with' => [0, 1], 'strcmp' => [0, 1], 'strcasecmp' => [0, 1],
+        'strncmp' => [0, 1], 'strncasecmp' => [0, 1], 'strnatcmp' => [0, 1], 'strnatcasecmp' => [0, 1],
+        'substr_count' => [0, 1], 'strspn' => [0, 1], 'strcspn' => [0, 1], 'similar_text' => [0, 1],
+        'levenshtein' => [0, 1], 'str_pad' => [0, 2], 'explode' => [0, 1],
+    ];
+
+    private function renderStringableBuiltinArgs(string $fnName, Node $site): void
+    {
+        $key = \strtolower(\ltrim($fnName, '\\'));
+        $pos = self::STRING_ARG_BUILTINS[$key] ?? null;
+        if ($pos === null || isset($this->ffiFns[$fnName])) { return; }
+        foreach ($pos as $ai) {
+            if (!isset($site->args[$ai])) { continue; }
+            $arg = $site->args[$ai];
+            if ($arg->kind === Node::KIND_SPREAD || $arg->type->kind !== Type::KIND_OBJ) { continue; }
+            $cast = new \Compile\Mir\Cast('string', $arg, Type::string_());
+            $cast->line = $arg->line;
+            $site->args[$ai] = $cast;
+        }
+    }
+    /**
      * @param Node[] $args
      *
      * Map each positional arg to its declared param. An implicit leading
@@ -179,10 +241,10 @@ final class TypeCheck
      * arg/param indices line up. An unresolved callee (builtin, dynamic,
      * inherited method on a parent class) is skipped — no callee, no check.
      */
-    private function checkArgs(string $fnName, string $label, array $args, string $inFn, int $recv): void
+    private function checkArgs(string $fnName, string $label, array $args, string $inFn, int $recv, Node $site): void
     {
         $params = $this->paramsByFn[$fnName] ?? null;
-        if ($params === null) { return; }
+        if ($params === null) { $this->renderStringableBuiltinArgs($fnName, $site); return; }
         // A Monomorphize clone is named `first$mono$p0_vec_cell`; the message names the source function.
         $m = \strpos($label, '$mono$');
         if ($m !== false) { $label = \substr($label, 0, $m); }
@@ -203,7 +265,27 @@ final class TypeCheck
             if (!isset($params[$pi])) { break; }
             $p = $params[$pi];
             if ($p->variadic) { break; }
-            if (!$this->reprOnly && $this->incompatible($arg->type, $p->type)) {
+            // Coercive mode: an object bound to a `string` param is rendered by its
+            // `__toString`, a scalar by its text. Left alone, the callee read the
+            // object POINTER, or the raw int (`$this->escape(404)`), as string bytes.
+            $ak = $arg->type->kind;
+            if ($p->type->kind === Type::KIND_STRING && !$p->byRef
+                && ($ak === Type::KIND_OBJ || $ak === Type::KIND_CELL || $ak === Type::KIND_INT
+                    || $ak === Type::KIND_FLOAT || $ak === Type::KIND_BOOL)
+                && !isset($this->ffiFns[$fnName]) && !isset($this->claimFns[$fnName])
+                && $site->args[$ai] === $arg) {
+                $cast = new \Compile\Mir\Cast('string', $arg, Type::string_());
+                $cast->keepNull = $arg->type->kind === Type::KIND_CELL;
+                $cast->line = $arg->line;
+                $site->args[$ai] = $cast;
+                continue;
+            }
+            if ($this->castOnly) { continue; }
+            if (!$this->reprOnly &&$this->incompatible($this->provenType($arg), $p->type)) {
+                if ($this->demoteArgMismatch) {
+                    $this->demoteToTypeError($site, $arg, $p, $label, $ai, $inFn);
+                    return;
+                }
                 $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
                     . $label . '() — ' . $arg->type->toString()
                     . ' given, ' . $p->type->toString() . ' expected';
@@ -223,6 +305,48 @@ final class TypeCheck
             }
             $this->takeShapeWarn($arg, $inFn . '(): argument ' . (string)($ai + 1) . ' to ' . $label . '() — ');
         }
+    }
+
+    /**
+     * php checks an argument against the callee's parameter type when the call
+     * is MADE, so a mismatch in code that never runs (an inherited `new static`
+     * cloned per subclass, a branch behind a feature guard) is not an error
+     * until it runs, and then it is a `TypeError`. The call's LAST argument
+     * becomes `true ? throw new TypeError(…) : <arg>`: the earlier arguments are
+     * evaluated first, as php does, then the throw. Keeps a warning at build time.
+     */
+    private function demoteToTypeError(Node $site, Node $arg, \Compile\Mir\Param $p, string $label, int $ai, string $inFn): void
+    {
+        $callee = \str_replace('->', '::', $label);
+        if (\str_starts_with($callee, 'new ')) { $callee = \substr($callee, 4) . '::__construct'; }
+        $msg = $callee . '(): Argument #' . (string)($ai + 1) . ' ($' . $p->name . ') must be of type '
+            . $this->phpTypeName($p->type) . ', ' . $this->phpTypeName($this->provenType($arg)) . ' given';
+        $line = $arg->line;
+        $str = new \Compile\Mir\StringConst($msg, Type::string_());
+        $zero = new \Compile\Mir\IntConst(0, Type::int_());
+        $none = new \Compile\Mir\NullConst(Type::null_());
+        $err = new NewObj('TypeError', [$str, $zero, $none], Type::obj('TypeError'));
+        $throw = new \Compile\Mir\Throw_($err, Type::void());
+        $args = $site->args;
+        $last = \count($args) - 1;
+        $orig = $args[$last];
+        $guard = new \Compile\Mir\Ternary(new \Compile\Mir\BoolConst(true, Type::bool_()), $throw, $orig, $orig->type);
+        $args[$last] = $guard;
+        $site->args = $args;
+        foreach ([$str, $zero, $none, $err, $throw, $guard] as $made) { $made->line = $line; }
+        $this->warnings[] = ($arg->line > 0 ? 'line ' . (string)$arg->line . ': warning: ' : 'warning: ') . $inFn . '(): ' . $msg . ' — throws TypeError if reached';
+    }
+
+    private function phpTypeName(Type $t): string
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_ARRAY) { return 'array'; }
+        if ($k === Type::KIND_INT) { return 'int'; }
+        if ($k === Type::KIND_FLOAT) { return 'float'; }
+        if ($k === Type::KIND_STRING) { return 'string'; }
+        if ($k === Type::KIND_BOOL) { return 'bool'; }
+        if ($k === Type::KIND_OBJ && $t->class !== null) { return $t->class; }
+        return 'mixed';
     }
 
     /**
@@ -307,12 +431,32 @@ final class TypeCheck
     private function checkReturnNodes(Node $n, Type $rt, string $fnName): void
     {
         if ($n->kind === Node::KIND_RETURN) {
-            if ($n->value !== null && $this->incompatible($n->value->type, $rt)) {
+            if ($n->value !== null && $this->incompatible($this->provenType($n->value), $rt)) {
                 $this->errors[] = $this->at($n) . $fnName . '(): return ' . $n->value->type->toString()
                     . ' incompatible with declared ' . $rt->toString();
             }
         }
         foreach (Walk::children($n) as $c) { $this->checkReturnNodes($c, $rt, $fnName); }
+    }
+
+    /**
+     * The type of `$n` as far as it is a PROOF. A method call on an erased
+     * (`cell` / `unknown`) receiver is typed by {@see InferCalls}: when the
+     * classes declaring the method agree, the call is given that return type so
+     * the caller reads the result at the right width. With ONE declarer that is
+     * a dispatch hint, not evidence about the receiver — `$cell->getMessages()`
+     * is a `Generator` because some unrelated class declares a generator
+     * `getMessages()`, while the receiver is a class of an uninstalled package.
+     * Checking the hint against a declared `array` return made an unreachable
+     * path a build error.
+     */
+    private function provenType(Node $n): Type
+    {
+        if ($n->kind === Node::KIND_METHOD_CALL && $n instanceof MethodCall_) {
+            $rk = $n->object->type->kind;
+            if ($rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN) { return Type::unknown(); }
+        }
+        return $n->type;
     }
 
     /**
@@ -345,7 +489,7 @@ final class TypeCheck
         // A Monomorphize clone shares its generic's docblock shapes and body;
         // the generic stays in the module and its nodes keep their source
         // lines, so the clone would only repeat every finding without one.
-        if (\str_contains($inFn, '$mono$')) { return; }
+        if ($this->castOnly || \str_contains($inFn, '$mono$')) { return; }
         if ($n->kind === Node::KIND_RETURN && $n->value !== null) {
             $rt = $this->returnTypes[$inFn] ?? null;
             if ($rt !== null && $rt->hasShape()) {

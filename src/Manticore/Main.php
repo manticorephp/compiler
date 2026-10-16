@@ -3455,7 +3455,9 @@ function build_compile_module(
     // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
     // them across parts, so without this the originals all stayed: the compiler
     // built in 8 parts came out 20.5 MB against 14.3 MB for one unit.
-    $linkExtra = $linkExtra . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections");
+    // -lm as cmd_compile does: libm is separate on glibc/musl, and a manifest application that calls
+    // floor/fmod/pow/... (Symfony's) fails to link without it. Darwin folds libm into libSystem.
+    $linkExtra = $linkExtra . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections -lm");
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
@@ -3759,24 +3761,48 @@ function __mc_source_is_data_file(string $src): bool
     } catch (Throwable $e) {
         return false;
     }
-    $stmts = $program->statements;
-    if (\count($stmts) !== 1) {
-        return false;
+    $ret = null;
+    foreach ($program->statements as $s) {
+        if ($s instanceof \Parser\Ast\ReturnStmt && $ret === null) {
+            $ret = $s;
+        } elseif ($s->kind !== 'Namespace' && $s->kind !== 'UseDecl') {
+            return false;
+        }
     }
-    $s = $stmts[0];
-    if ($s->kind !== 'Return' || !($s instanceof \Parser\Ast\ReturnStmt)) {
+    return $ret !== null && __mc_stmt_is_pure_return($ret);
+}
+
+/** A top-level `return <pure expr>`: evaluating it at startup is unobservable. */
+function __mc_stmt_is_pure_return(\Parser\Ast\Stmt $s): bool
+{
+    if (!($s instanceof \Parser\Ast\ReturnStmt)) {
         return false;
     }
     $v = __mc_as_return($s)->value;
-    return $v instanceof \Parser\Ast\Expr && __mc_expr_is_literal($v);
+    return $v instanceof \Parser\Ast\Expr && __mc_expr_is_pure($v);
 }
 
-function __mc_expr_is_literal(\Parser\Ast\Expr $e): bool
+/**
+ * Evaluating `$e` has no side effect: literals, arrays of pure, `.`/arith of
+ * pure, constants, `X::class` / `X::CONST`, magic constants, and closure /
+ * arrow-fn literals WITHOUT a `use` clause (creating one is unobservable; a
+ * `use ($x)` captures a variable, so it is not pure).
+ */
+function __mc_expr_is_pure(\Parser\Ast\Expr $e): bool
 {
     $k = $e->kind;
     if ($k === 'StringLiteral' || $k === 'IntLiteral' || $k === 'FloatLiteral'
-        || $k === 'BoolLiteral' || $k === 'NullLiteral') {
+        || $k === 'BoolLiteral' || $k === 'NullLiteral' || $k === 'Identifier'
+        || $k === 'MagicConstant' || $k === 'StaticAccess' || $k === 'ArrowFn') {
         return true;
+    }
+    if ($e instanceof \Parser\Ast\Closure) {
+        return \count($e->uses) === 0;
+    }
+    if ($e instanceof \Parser\Ast\BinaryOp) {
+        $op = $e->op;
+        return ($op === '.' || $op === '+' || $op === '-' || $op === '*')
+            && __mc_expr_is_pure($e->left) && __mc_expr_is_pure($e->right);
     }
     if ($k !== 'ArrayLit' || !($e instanceof \Parser\Ast\ArrayLit)) {
         return false;
@@ -3786,10 +3812,10 @@ function __mc_expr_is_literal(\Parser\Ast\Expr $e): bool
             return false;
         }
         $key = $el->key;
-        if ($key instanceof \Parser\Ast\Expr && !__mc_expr_is_literal($key)) {
+        if ($key instanceof \Parser\Ast\Expr && !__mc_expr_is_pure($key)) {
             return false;
         }
-        if (!__mc_expr_is_literal($el->value)) {
+        if (!__mc_expr_is_pure($el->value)) {
             return false;
         }
     }
@@ -4026,7 +4052,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // declarations are in the module. They must not disable the precise
         // walker reachability pass: Symfony’s generated tier roots contain many
         // such guards, while the genuinely open cases use a runtime name.
+        // `$cls::make()` / `$cls::$m()` runs a static method of a class named at run time,
+        // whose `new static` instantiates a class no literal names.
         if (preg_match("/\\bnew\\s+\\$/", $source)
+            || preg_match("/\\$[A-Za-z_][A-Za-z0-9_]*::\\$?[A-Za-z_][A-Za-z0-9_]*\\s*\\(/", $source)
             || preg_match("/\\bunserialize\\s*\\(/", $source)
             || preg_match("/ReflectionClass|class_alias/", $source)
             || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
@@ -4086,7 +4115,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if (!$isEntry && $srcPath !== '' && isset(CompileArgs::$demandLoadedPaths[$srcPath])) {
             $kept = [];
             foreach ($topStmts as $s) {
-                if (__mc_stmt_declares($s)) {
+                if (__mc_stmt_declares($s) || __mc_stmt_is_pure_return($s)) {
                     $kept[] = $s;
                 }
             }
@@ -4327,7 +4356,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
     // not the stdlib .o, so injecting the file cannot double-define anything.
-    $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc));
+    // A spread ahead of a variadic lowers to `array_slice` ({@see \Compile\Mir\Passes\LowerFns::spreadAheadOfPack}).
+    $useArrayFns = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($arrayFnsSrc))
+        || $demand->usesEllipsis();
     // The EXTENDED array functions are a SEPARATE gate on purpose: array_fns is
     // injected into the compiler's own build (src/ calls array_map/sort), and a
     // prelude is injected WHOLE — so a miscompile in any function sharing that
@@ -4589,6 +4620,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // stableClassId with them, for no runtime benefit.
     // SensitiveParameterValue is exempt — it is a plain value class a program can
     // construct without reflecting on anything.
+    $useReflDocs = $demand->mentionsAny(['getDocComment', 'getStartLine', 'getTraits', 'getTraitNames', 'isReadOnly']);
     $useAttributes = ($useReflection
             && $demand->mentionsAny([
                 'Attribute',
@@ -5066,6 +5098,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->includeArrayClasses = $useArrayClasses;
         $lower->includeClassUses = $useClassUses;
         $lower->includeReflection = $useReflection;
+        $lower->includeDocFactories = $useReflection && $useReflDocs;
         $lower->includeAttributes = $useAttributes;
         $lower->includeDateTime = $useDateTime;
         $lower->includeArrayFns = $useArrayFns;
@@ -5133,6 +5166,16 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $dlAbs[__mc_abs_source_path((string)$dlPath)] = true;
         }
         $lower->demandLoadedFiles = $dlAbs;
+        /** @var array<string, bool> $unitAbs */
+        $unitAbs = [];
+        foreach ($includeSlots as $unitPath => $_slot) {
+            $unitAbs[(string)$unitPath] = true;
+        }
+        $entryAbs = __mc_abs_source_path(isset($paths[$lastIdx]) ? $paths[$lastIdx] : '');
+        if ($entryAbs !== '') {
+            $unitAbs[$entryAbs] = true;
+        }
+        $lower->compileUnitFiles = $unitAbs;
         // Reserved-attribute errors (#[Override] with no parent, a bad target, a
         // repeat) abort the build by default; analysis collects them instead.
         if ($collect !== null) {
@@ -5296,6 +5339,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $statT = \Compile\Stats::begin('TypeCheck');
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $tc->reprOnly = !$tcOn;
+            // A provable argument mismatch in a user program is a run-time
+            // TypeError at the site, as in php; bin/build (the tree compiling
+            // itself) sets MANTICORE_TYPECHECK_STRICT and keeps it a build error.
+            $tc->demoteArgMismatch = $collect === null && \getenv("MANTICORE_TYPECHECK_STRICT") !== "1";
             $module = $tc->run($module);
             \Compile\Stats::step('TypeCheck', $statT, \count($module->functions), -1);
             foreach ($tc->warnings as $tw) {
@@ -5325,6 +5372,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
         $narrow = null;
+        // NarrowReturns sharpened erased call results to objects: a string param they
+        // reach needs its `__toString` cast, which the first check could not see.
+        $tcCast = new \Compile\Mir\Passes\TypeCheck();
+        $tcCast->reprOnly = true;
+        $tcCast->castOnly = true;
+        $module = $tcCast->run($module);
+        $tcCast = null;
         \Manticore\Allocator::release('after-narrow');
         // The `#[TypeDef]` soundness gate: an erased value must never reach a
         // site that would observe it AS AN OBJECT (`===`, instanceof, var_dump, a

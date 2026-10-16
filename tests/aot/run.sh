@@ -138,8 +138,12 @@ run_one() {
         src="$CASES/$name"
     fi
     local crc=0
+    # A case that declares `@split` is built as a 4-part split module: a fn pointer
+    # compared across parts (internal closures are copied per part) only breaks there.
+    local splitenv=(env)
+    if grep -rqs '@split' "$src"; then splitenv=(env MANTICORE_SPLIT_JOBS=4); fi
     mc_limit "$COMPILE_TIMEOUT" \
-        "$MANTICORE" compile $BACKEND_ARGS -O"$OPT" "$src" -o "$bin" > "$stderr_log" 2>&1 || crc=$?
+        "${splitenv[@]}" "$MANTICORE" compile $BACKEND_ARGS -O"$OPT" "$src" -o "$bin" > "$stderr_log" 2>&1 || crc=$?
     if [[ $crc -ne 0 ]]; then
         if [[ $crc -eq 124 ]]; then
             printf 'FAIL %s  (compile TIMEOUT >%ss)\n' "$name" "$COMPILE_TIMEOUT"

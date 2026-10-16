@@ -1057,7 +1057,13 @@ trait InferNodes
         // An inline `/** @var T $x */` on the binding is authoritative: seed the
         // slot with the declared type (retyping an array-literal init to match
         // its shape) so later element reads resolve. Wins over the heuristics.
-        if ($node->declaredType !== null) {
+        // …except an ARRAY claim over a value that is `mixed` by its own type:
+        // nothing makes it one, and a docblock is not checked by php.
+        // `/** @var RouteCollection[] $imported */ $imported = $this->import(…)
+        // ?: []` holds a single collection, which the next line wraps after
+        // `!\is_array($imported)` — folded to false, and no route loaded.
+        if ($node->declaredType !== null
+            && !($node->declaredType->isArray() && $valueType->kind === Type::KIND_CELL)) {
             $dt = $node->declaredType;
             if ($node->value->kind === Node::KIND_ARRAY_LIT && $dt->isArray()) {
                 $node->value->type = $dt;
@@ -1201,7 +1207,7 @@ trait InferNodes
     private function inferRefAddr(\Compile\Mir\RefAddr_ $node): Type
     {
         $t = $this->inferNode($node->lvalue);
-        $this->localTypes[$node->target] = $t;
+        $this->localTypes[$node->target] = $node->erased ? Type::unknown() : $t;
         return Type::void();
     }
 
@@ -1610,15 +1616,17 @@ trait InferNodes
         $saved = $this->localTypes;
         // Flow-typing: narrow a local inside the then-branch from the guard.
         $this->narrowFromCond($node->cond);
+        $narrowed = $this->localTypes;
         $this->inferNode($node->then);
         $thenLocals = $this->localTypes;
+        $thenSlots = $this->unnarrowedSlots($thenLocals, $narrowed, $saved);
         // A branch that DIVERGES (ends in return/throw) never reaches the merge,
         // so its narrowed locals must not flow past the `if` — else a guard like
         // `if ($v instanceof C) { ...; return; }` leaves `$v` mistyped (non-cell)
         // for the fall-through, and a later cell op reads it raw → crash.
         $thenDiv = $this->blockDiverges($node->then);
         if ($node->else === null) {
-            $this->planMergeShadow($node, $thenLocals, $saved);
+            $this->planMergeShadow($node, $thenSlots, $saved);
             if ($thenDiv) {
                 // `if (NEG) return/throw;` — the fall-through is the NEGATION of
                 // the guard, so narrow as if the un-negated form held below
@@ -1626,7 +1634,11 @@ trait InferNodes
                 $this->localTypes = $saved;
                 $this->narrowFromNegatedCond($node->cond);
             } else {
-                $this->localTypes = $this->mergeLocals($saved, $thenLocals);
+                // A guard narrows the READ, not the slot: past the merge an
+                // unstored local is what it entered as ({@see unnarrowedSlots}).
+                // Joined narrowed, `obj<Throwable>` ∪ `obj<I>` typed a raw
+                // object pointer `cell` and get_debug_type() answered "float".
+                $this->localTypes = $this->mergeLocals($saved, $thenSlots);
             }
             return Type::void();
         }
@@ -1637,13 +1649,13 @@ trait InferNodes
         /** @var array<string,Type> $agreed */
         $agreed = [];
         if (!$thenDiv && !$elseDiv) {
-            $agreed = $this->unplantAgreedBoxBacks($node->then, $node->else);
+            $agreed = $this->unplantAgreedBoxBacks($node->then, $node->else, $thenSlots);
         }
-        $this->planMergeShadow($node, $thenLocals, $elseLocals);
+        $this->planMergeShadow($node, $thenSlots, $elseLocals);
         if ($thenDiv && !$elseDiv)      { $this->localTypes = $elseLocals; }
         elseif ($elseDiv && !$thenDiv)  { $this->localTypes = $thenLocals; }
         else {
-            $this->localTypes = $this->mergeLocals($thenLocals, $elseLocals);
+            $this->localTypes = $this->mergeLocals($thenSlots, $elseLocals);
             // The slot leaves both arms raw now, whatever another merge of the
             // same name decided: `cellMergeLocals` is per NAME, not per merge.
             foreach ($agreed as $name => $t) {
@@ -2075,6 +2087,7 @@ trait InferNodes
                 $keyT = Type::cell();
             }
             $node->iterValueType = $node->iterClass !== '' ? $elem : null;
+            $node->iterKeyType = $node->iterClass !== '' ? $keyT : null;
         }
         // A GENERATOR yields keys of any type — `yield "a" => 1` beside an
         // auto-incrementing int — so the key rides a tagged cell, boxed at the

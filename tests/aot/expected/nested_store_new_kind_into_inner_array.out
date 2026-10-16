@@ -1,0 +1,3 @@
+{"tokens":[["variable",".","[^\/]++","_format",true],["variable","\/","\\d+","code",true],["text","\/_error"]]}
+{"tokens":[["variable",".","[^\/]++","_format",true],["variable","\/","\\d+","code",true,true],["text","\/_error"]]}
+[["a","b",true]]

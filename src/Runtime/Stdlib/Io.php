@@ -892,13 +892,24 @@ function stream_wrapper_restore(string $protocol): bool
 {
     return \in_array($protocol, \stream_get_wrappers(), true);
 }
-/** Whether $stream is a LOCAL stream (a file/memory resource), not a network one. */
-function stream_is_local(\Resource $stream): bool
+/**
+ * Whether $stream is a LOCAL stream (a file/memory resource), not a network one.
+ * php also takes a path or a URL: no scheme is a plain file, and only the network
+ * wrappers (http, https, ftp, ftps) are remote.
+ */
+function stream_is_local(mixed $stream): bool
 {
-    $k = $stream->kind;
-    return $k === \Resource::KIND_FILE || $k === \Resource::KIND_DIR
-        || $k === \Resource::KIND_MEMFILE || $k === \Resource::KIND_MEMORY
-        || $k === \Resource::KIND_OUTPUT;
+    if ($stream instanceof \Resource) {
+        $k = $stream->kind;
+        return $k === \Resource::KIND_FILE || $k === \Resource::KIND_DIR
+            || $k === \Resource::KIND_MEMFILE || $k === \Resource::KIND_MEMORY
+            || $k === \Resource::KIND_OUTPUT;
+    }
+    $s = (string)$stream;
+    $p = \strpos($s, '://');
+    if ($p === false) { return true; }
+    $scheme = \strtolower(\substr($s, 0, $p));
+    return $scheme !== 'http' && $scheme !== 'https' && $scheme !== 'ftp' && $scheme !== 'ftps';
 }
 
 /** Whether $stream supports flock() — only a FILE-backed stream does. */
@@ -1480,17 +1491,21 @@ function fopen(string $filename, string $mode)
     if ($scheme === 'php') {
         // php://memory and php://temp are both an in-memory read-write file here
         // (php://temp spills to disk past 2 MB; we keep it in memory — behaviour is
-        // identical up to that size). ⚠ php://stdin/out/err are NOT handled here:
-        // a stdlib fn that mentions STDIN/STDOUT/STDERR makes the compiler's own
-        // src/ emit the __mir_std* builtin (host_os() in the emitter → libc stub
-        // under the Zend seed), which kills the cold bootstrap — see __mc_std_res.
+        // identical up to that size).
         $lower = \strtolower($filename);
         if ($lower === 'php://memory' || \strpos($lower, 'php://temp') === 0) {
             return new \Resource(\Resource::KIND_MEMFILE, 'stream', 0);
         }
-        // php://output CAN be handled here, unlike its stdin/out/err neighbours:
-        // it has no FILE* to resolve, so naming it costs the cold bootstrap
-        // nothing. This is the path a RUNTIME-computed name takes — LowerPrelude
+        // A RUNTIME-computed std stream name answers what the literal folds to
+        // (LowerPrelude::stdStreamResource): the cached STDIN/STDOUT/STDERR. It
+        // returned false, and a docblock-typed `@var resource` slot then held a
+        // bool — VarDumper's `static::$defaultOutput = 'php://stdout'` crashed
+        // every CliDumper. The stdlib could not name the std streams while the
+        // compiler had a Zend seed; it has none.
+        if ($lower === 'php://stdout') { return \STDOUT; }
+        if ($lower === 'php://stderr') { return \STDERR; }
+        if ($lower === 'php://stdin') { return \STDIN; }
+        // php://output: the path a RUNTIME-computed name takes — LowerPrelude
         // folds only a literal, so `$n = 'php://output'; fopen($n, 'w')` would
         // otherwise fall through to the `return false` below.
         if ($lower === 'php://output') {

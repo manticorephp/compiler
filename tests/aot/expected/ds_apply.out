@@ -1,0 +1,10 @@
+10,21,32,43
+0.25,0.5
+0,1,0
+4
+Value 200 is out of range for Int8Array (-128..127)
+100,20
+TypeError
+0
+OutOfBoundsException
+2 2

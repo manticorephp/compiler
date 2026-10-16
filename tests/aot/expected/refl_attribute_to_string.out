@@ -1,0 +1,7 @@
+Attribute [ Tag ] {
+  - Arguments [2] {
+    Argument #0 [ 'x' ]
+    Argument #1 [ n = 3 ]
+  }
+}
+Attribute [ Tag ]

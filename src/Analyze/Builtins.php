@@ -120,7 +120,7 @@ final class Builtins
             '__mc_refl_slot', '__mc_refl_member', '__mc_refl_parent', '__mc_refl_flags',
             '__mc_json_escape', '__mir_str_replace_one', '__mir_float_repr', 'strncmp', 'strcmp',
             '__mc_errno', '__mc_fmt_int', '__mc_fmt_float', '__mc_fmt_str',
-            'isset', 'empty', 'unset', 'list', 'compact', 'define', 'defined',
+            'isset', 'empty', 'unset', 'list', 'compact', 'extract', 'define', 'defined',
             'get_called_class', 'get_included_files', 'get_required_files',
             'constant', 'function_exists', 'call_user_func', 'call_user_func_array',
             // Array-pointer family — emitBuiltin handles these inline, so they
@@ -131,7 +131,7 @@ final class Builtins
             '__mc_refl_attr_args', '__mc_refl_attr_err', '__mc_refl_attr_name',
             '__mc_refl_attr_new', '__mc_refl_attr_repeated', '__mc_refl_attr_target',
             '__mc_refl_call0', '__mc_refl_call1', '__mc_refl_class_attrs',
-            '__mc_refl_class_nattrs', '__mc_refl_consts_fn', '__mc_refl_ctor',
+            '__mc_refl_class_nattrs', '__mc_refl_consts_fn', '__mc_refl_file_fn', '__mc_refl_doc_fn', '__mc_refl_ctor',
             '__mc_refl_clo_find', '__mc_refl_clo_this', '__mc_refl_fn_find', '__mc_refl_ifaces_fn', '__mc_refl_invoke',
             '__mc_refl_methods_base', '__mc_refl_mrow', '__mc_refl_nmethods',
             '__mc_refl_nprops', '__mc_refl_param_flags', '__mc_refl_param_name',

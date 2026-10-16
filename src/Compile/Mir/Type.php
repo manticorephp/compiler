@@ -444,6 +444,14 @@ final class Type
         return isset($this->nullableFields[self::shapeKey($k)]);
     }
 
+    /** The same array repr with its per-field shape dropped: what a slot may claim
+     *  when the shape describes ONE value stored into it, not every value. */
+    public function withoutShape(): self
+    {
+        if ($this->fields === null) { return $this; }
+        return self::arrayOf($this->element, $this->key, null);
+    }
+
     /** The same array with another element — the shape rides along. */
     public function withElement(self $el): self
     {

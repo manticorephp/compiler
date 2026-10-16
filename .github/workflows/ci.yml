@@ -23,6 +23,8 @@ name: ci
 # The cost of getting this wrong is asymmetric: a skipped run over a doc edit
 # saves ~20 runner-minutes, while a skipped run over a build script means the
 # next person to touch code inherits someone else's untested change.
+# examples/symfony-* are standalone Composer apps (nothing in tests/ or tools/ builds them); examples/http and
+# examples/async ARE inputs of tests/ir_budget, so they stay out of this list.
 # Only on push: a PR is NOT filtered. The suite rows and bootstrap-from-pin are
 # REQUIRED status checks on main (ruleset "Protected branches"), and a required
 # check a skipped workflow never reports leaves the PR unmergeable for ever.
@@ -32,6 +34,7 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+      - 'examples/symfony-*/**'
       - 'LICENSE'
       - '.gitignore'
       - '.gitattributes'

@@ -1,0 +1,3 @@
+{"a":{"q":1,"enabled":true},"form":{"csrf":{"x":2}}}
+{"a":{"q":1,"enabled":true},"form":{"csrf":{"x":2,"enabled":false}}}
+{"csrf_protection":{"x":1,"enabled":true},"validation":{"enabled":true}}

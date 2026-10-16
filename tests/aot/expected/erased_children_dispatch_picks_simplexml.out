@@ -1,0 +1,6 @@
+framework
+ form*
+  csrf
+   enabled
+   token
+1

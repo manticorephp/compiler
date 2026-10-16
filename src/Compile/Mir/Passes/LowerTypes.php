@@ -1279,9 +1279,9 @@ trait LowerTypes
      * bound (`of X`), else `mixed`. Class templates live in the class
      * docblock, which never reaches here through these tags.
      */
-    private function docTagType(?string $doc, string $tag, string $varName): ?string
+    private function docTagType(?string $doc, string $tag, string $varName, bool $unnamedOnly = false): ?string
     {
-        $t = $this->docTagTypeRaw($doc, $tag, $varName);
+        $t = $this->docTagTypeRaw($doc, $tag, $varName, $unnamedOnly);
         if ($t === null || $doc === null) { return $t; }
         if ($tag !== '@param' && $tag !== '@param-out' && $tag !== '@return') { return $t; }
         if (!\str_contains($doc, '@template')) { return $t; }
@@ -1295,7 +1295,7 @@ trait LowerTypes
         return $t;
     }
 
-    private function docTagTypeRaw(?string $doc, string $tag, string $varName): ?string
+    private function docTagTypeRaw(?string $doc, string $tag, string $varName, bool $unnamedOnly = false): ?string
     {
         if ($doc === null) { return null; }
         $n = \strlen($doc);
@@ -1358,11 +1358,16 @@ trait LowerTypes
             if (\str_contains($type, "\n")) {
                 $type = (string)\preg_replace('/\r?\n[ \t]*\*?[ \t]*/', ' ', $type);
             }
-            if ($varName === '') { return $type; }
+            if ($varName === '' && !$unnamedOnly) { return $type; }
             while ($j < $n) {
                 $c = \substr($doc, $j, 1);
                 if ($c !== ' ' && $c !== "\t") { break; }
                 $j = $j + 1;
+            }
+            if ($varName === '') {
+                // `$unnamedOnly`: a tag that names a variable belongs to THAT variable.
+                if ($j < $n && \substr($doc, $j, 1) === '$') { $i = $j; continue; }
+                return $type;
             }
             $want = '$' . $varName;
             $wl = \strlen($want);

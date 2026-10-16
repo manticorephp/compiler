@@ -85,7 +85,12 @@ function __mc_filter_call(string $fn, int $argNo, mixed $value, int $filter, mix
     if (($flags & 134217728) !== 0 && ($flags & 268435456) !== 0) {
         throw new \ValueError($fn . '(): Argument #' . $argNo . ' ($options) cannot use both FILTER_NULL_ON_FAILURE and FILTER_THROW_ON_FAILURE');
     }
-    if (($flags & 16777216) === 0 && ($flags & 67108864) === 0) { $flags |= 33554432; }
+    if (($flags & 16777216) === 0 && ($flags & 67108864) === 0) {
+        $flags |= 33554432;
+        // FILTER_VALIDATE_INT of a value that already is an int, with no range options: itself.
+        // (`ParameterBag::getInt` asks this for every request.)
+        if ($filter === 257 && \is_int($value) && $opts === null) { return $value; }
+    }
     if (!__mc_filter_known($filter) && $filter !== 1024) {
         throw new \ValueError($fn . '(): Unknown filter with ID ' . $filter);
     }
