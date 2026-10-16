@@ -534,6 +534,9 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_json_escape' && \count($args) === 1) { return $this->biJsonEscape($args); }
         if ($name === '__mc_json_ser' && \count($args) === 1) { return $this->biJsonSer($args); }
         if ($name === '__mc_json_encode_native' && \count($args) === 3) { return $this->biJsonEncodeNative($args); }
+        if ($name === '__mc_ser_native' && \count($args) === 1) { return $this->biSerNative($args); }
+        if ($name === '__mc_unser_native' && \count($args) === 1) { return $this->biUnserNative($args); }
+        if ($name === '__mc_unser_ok' && \count($args) === 0) { return $this->biUnserOk(); }
         if ($name === 'json_encode' && $this->jsonInline($args, 3, false)) { return $this->biJsonEncode($args); }
         if ($name === 'json_decode' && $this->jsonInline($args, 4, true)
             && $this->jsonDepthOk($args, 2)) { return $this->biJsonDecode($args); }
@@ -9607,6 +9610,69 @@ trait EmitLlvmBuiltins
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * `__mc_ser_native($value)` — serialize() of the common shapes through the
+     * native single-buffer writer ({@see \Compile\Mir\RuntimeLibrary::serEnc}).
+     * The answer is "" for a value it does not own (object, reference, enum);
+     * the PHP body in the stdlib always answers "" and is the bootstrap twin.
+     * @param Node[] $args
+     */
+    private function biSerNative(array $args): string
+    {
+        $this->jsonEncNeeds();
+        $this->rt->needsSerEnc = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type);
+        $cell = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_ser_encf(i64 ' . $cell . ")\n";
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** The runtime the native unserializer links. */
+    private function unserNeeds(): void
+    {
+        $this->rt->needsUnserDec = true;
+        $this->rt->needsStrRc = true;     // __mir_rc_release_str on a key temp
+        $this->rt->needsConcat = true;    // __mir_str_new
+        $this->rt->needsTagged = true;    // the box_* helpers
+        $this->rt->needsRc = true;        // __mir_cell_drop of a half-built array
+        $this->libcExtra['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl();
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+    }
+
+    /**
+     * `__mc_unser_native($data)` — unserialize() of scalars and arrays of them
+     * ({@see \Compile\Mir\RuntimeLibrary::unserDec}). The cell is meaningful only
+     * when `__mc_unser_ok()` answers 1 right after; otherwise the input holds
+     * something the fast parser does not own and the caller runs the PHP parser.
+     * The stdlib bodies (null / 0) are the bootstrap twins. @param Node[] $args
+     */
+    private function biUnserNative(array $args): string
+    {
+        $this->unserNeeds();
+        $out = $this->emitPtrArg($args[0]);
+        $sp = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_us_decf(ptr ' . $sp . ")\n";
+        $out .= $this->freeStrTemp($args[0], $sp);
+        $this->markCellBoxed($reg);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** `__mc_unser_ok()` — 1 when the last `__mc_unser_native` parsed its input. */
+    private function biUnserOk(): string
+    {
+        $this->unserNeeds();
+        $reg = $this->ssa->allocReg();
+        return $this->finishI64('  ' . $reg . " = load i64, ptr @__mir_us_ok\n", $reg);
     }
 
     /** The runtime the native decoder links. */
