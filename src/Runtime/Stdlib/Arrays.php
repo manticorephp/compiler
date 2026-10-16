@@ -28,12 +28,24 @@ function in_array(mixed $needle, array $haystack, bool $strict = false): bool
     // values as cells, so `==`/`===` dispatch by tag — correct for a
     // heterogeneous (null/int/string/…) haystack, not just strings (the old
     // `strcmp((string)$v, …)` faulted on a non-string cell value).
-    foreach ($haystack as $v) {
-        if ($strict) {
+    if ($strict) {
+        foreach ($haystack as $v) {
             if ($v === $needle) { return true; }
-        } else {
-            if ($v == $needle) { return true; }
         }
+        return false;
+    }
+    // Loose against a non-numeric string: string elements compare by bytes (the
+    // numeric probe of `==` is the cost); other element types keep `==`.
+    if (\is_string($needle) && !\is_numeric($needle)) {
+        foreach ($haystack as $v) {
+            if (\is_string($v)) {
+                if ($v === $needle) { return true; }
+            } elseif ($v == $needle) { return true; }
+        }
+        return false;
+    }
+    foreach ($haystack as $v) {
+        if ($v == $needle) { return true; }
     }
     return false;
 }
@@ -54,12 +66,22 @@ function in_array(mixed $needle, array $haystack, bool $strict = false): bool
  */
 function array_search(mixed $needle, array $haystack, bool $strict = false): int|string|false
 {
-    foreach ($haystack as $k => $v) {
-        if ($strict) {
+    if ($strict) {
+        foreach ($haystack as $k => $v) {
             if ($v === $needle) { return $k; }
-        } else {
-            if ($v == $needle) { return $k; }
         }
+        return false;
+    }
+    if (\is_string($needle) && !\is_numeric($needle)) {
+        foreach ($haystack as $k => $v) {
+            if (\is_string($v)) {
+                if ($v === $needle) { return $k; }
+            } elseif ($v == $needle) { return $k; }
+        }
+        return false;
+    }
+    foreach ($haystack as $k => $v) {
+        if ($v == $needle) { return $k; }
     }
     return false;
 }

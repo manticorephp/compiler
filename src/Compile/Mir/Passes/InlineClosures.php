@@ -962,6 +962,23 @@ final class InlineClosures implements Pass
         $loop = new Foreach_(new LoadLocal('__mc_a', $haystack->type), $keyVar, '__mc_v', false, new Block([$if], Type::void()));
         $miss = new \Compile\Mir\BoolConst(false, Type::bool_());
         $body = new Block([$loop, new Return_($miss, Type::void())], Type::void());
+        // Loose string-in-strings: `==` is numeric only when BOTH sides are
+        // numeric strings, so a non-numeric needle (tested once) scans with the
+        // byte-compare `===`; the per-element numeric probe is the slow part.
+        $elemT = $haystack->type->element ?? null;
+        if (!$strict && $needle->type->kind === Type::KIND_STRING
+            && $elemT !== null && $elemT->kind === Type::KIND_STRING) {
+            $st = $elemT;
+            $mk = function (string $op) use ($isInArray, $haystack, $needle, $st) {
+                $c = new \Compile\Mir\Cmp(new LoadLocal('__mc_v', $st), new LoadLocal('__mc_n', $needle->type), $op);
+                $h = $isInArray ? new \Compile\Mir\BoolConst(true, Type::bool_()) : new LoadLocal('__mc_k', Type::unknown());
+                $i = new If_($c, new Block([new Return_($h, Type::void())], Type::void()), null);
+                return new Foreach_(new LoadLocal('__mc_a', $haystack->type), $isInArray ? null : '__mc_k', '__mc_v', false, new Block([$i], Type::void()));
+            };
+            $num = new Call('is_numeric', [new LoadLocal('__mc_n', $needle->type)], Type::bool_());
+            $sel = new If_($num, new Block([$mk('==')], Type::void()), new Block([$mk('===')], Type::void()));
+            $body = new Block([$sel, new Return_($miss, Type::void())], Type::void());
+        }
         // array_search returns key|false (mixed) → a tagged cell so emitReturn
         // boxes each return and a caller dispatches by tag (`=== false`, echo,
         // use-as-key). in_array is a plain bool.
