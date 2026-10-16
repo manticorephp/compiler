@@ -28,7 +28,7 @@ Manifest decoded with native `json_decode` (values flow as `mixed`, extracted vi
 - **libraries** — `{name, src, output, exclude}`. Compiled with `--emit-library` to a standalone `<output>.o` (no `@main`, no stdlib link) plus a sidecar `<output>.sig` written via `Sig::emitModule`.
 - **applications** — `{name, src, output, entry, exclude}`. Module files (everything in `src` except `entry` + `exclude`) contribute declarations only; `entry` is appended LAST so its top-level lowers into `__main` after every class/function registers. With no `entry`, falls back to find|sort order (a `zzz_*` file sorts last by convention). Each app auto-depends on every library: imports each `<output>.sig` (declare-only externs, incl. namespaced/FFI bindings) and links each `<output>.o`.
 
-Pipeline (`lower_module`, driven by `cmd_compile`): `LowerFromAst` → `NarrowScalarGuards` → `ConstFold` → `DeadStore` → `InferTypes` → `VivifyRefArgs` → `ResolveMethodFcc` → `NarrowReturns`(pre-mono) → `InferTypes` → `InlineClosures` → `ResolveOverloads` → `InferTypes` → `Monomorphize` → `FuseSplitJoin` → `TypeCheck` → `NarrowReturns` → `CheckTypeDefs` → `ReflectAnalysis` → `DemoteCharLocals` → `InferEffects` → `InferAllocKind` → `ApplyMemoryMode` → `SpillFreshBases` → `InsertMemoryOps` → `OwnershipFlow` → `Verify`, then `EmitLlvm`. Full annotation: `src/Compile/README.md`.
+Pipeline (`lower_module`, driven by `CompileCommand`): `LowerFromAst` → `NarrowScalarGuards` → `ConstFold` → `DeadStore` → `InferTypes` → `VivifyRefArgs` → `ResolveMethodFcc` → `NarrowReturns`(pre-mono) → `InferTypes` → `InlineClosures` → `ResolveOverloads` → `InferTypes` → `Monomorphize` → `FuseSplitJoin` → `TypeCheck` → `NarrowReturns` → `CheckTypeDefs` → `ReflectAnalysis` → `DemoteCharLocals` → `InferEffects` → `InferAllocKind` → `ApplyMemoryMode` → `SpillFreshBases` → `InsertMemoryOps` → `OwnershipFlow` → `Verify`, then `EmitLlvm`. Full annotation: `src/Compile/README.md`.
 
 ## `.sig` module interface (`Sig.php`)
 
@@ -51,14 +51,14 @@ Heterogeneous returns flatten to i64 in self-host today, so parsed args land in 
 - `compile`, `build` and `analyze` extend the shared spec: `--no-analyze` / `--analyze-strict` on the former two, `--deep` / `--json` / `--baseline` / `--generate-baseline` on the latter.
 - Unknown flag → false (rc 64).
 
-`$linkStdlib` (set when any bundled-stdlib extern was injected), `$externDecls` (collected by `cmd_compile` on the native path), and `$ffiLibs` / `$weakSyms` (captured off the emitter right after `emit()`) are internal carry-over fields, not CLI flags.
+`$linkStdlib` (set when any bundled-stdlib extern was injected), `$externDecls` (collected by `CompileCommand` on the native path), and `$ffiLibs` / `$weakSyms` (captured off the emitter right after `emit()`) are internal carry-over fields, not CLI flags.
 
 ## FFI link requirements
 
 `#[Ffi\Library]` and `#[Ffi\Weak]` are collected per emitted wrapper into `EmitLlvm::$ffiLibs` / `$weakSyms`, captured into `CompileArgs`, then resolved at the `cc` step:
 
 - `ffi_link_flags($libs, $already)` — `'c'` skipped (implicit); `ssl`/`crypto` and `pcre2-8` go through the existing `openssl_link_flags()` / `pcre2_link_flags()` probes; anything else through `generic_link_flags()` (`pkg-config`, `<name>-config`, `-l<name>`). `$already` carries the manifest's `extensions[].link` string so both sources dedupe by `-l<name>`.
-- `weak_undef_flags($syms)` — Darwin's `-Wl,-U,_<sym>` allowance, derived rather than hand-listed. Applied on **both** link paths (`cmd_compile` and `build_compile_module`; the latter previously had none).
+- `weak_undef_flags($syms)` — Darwin's `-Wl,-U,_<sym>` allowance, derived rather than hand-listed. Applied on **both** link paths (`CompileCommand` and `build_compile_module`; the latter previously had none).
 - A library's `.sig` carries `libs` / `weak` (additive keys, no schema bump). Linking is whole-program while a wrapper is emitted once, in the module owning the source, so a dependent that never names the library still links it. `stdlib_sig_list()` reads them with a **load-bearing** fallback: a `.sig` predating these keys is exactly the state during the first rebuild after the change, and the fallback reproduces the old unconditional set.
 
 ## Stdlib bundling

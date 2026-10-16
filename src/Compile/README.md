@@ -71,7 +71,7 @@ by `SpillFreshBases` and the emitter).
 ## Pipeline
 
 Sequenced by `lower_module()` / `compile_via_mir()` in
-`src/Manticore/Main.php` (driven by `cmd_compile`). Each pass takes a `Module`, returns a
+`src/Manticore/Main.php` (driven by `CompileCommand`). Each pass takes a `Module`, returns a
 `Module`, and stamps `passesApplied`:
 
 ```

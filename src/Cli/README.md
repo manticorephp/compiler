@@ -36,8 +36,7 @@ Minimal clap-flavoured CLI router. Two classes, fluent builder, dispatch on `arg
 
 ```php
 $cli = new \Cli\Cli('manticore', 'PHP-to-native AOT compiler (self-hosted)');
-$cli->command('compile', 'Compile to native binary')
-    ->run(fn (array $args): int => cmd_compile($args));
+$cli->add(new \Cli\Commands\CompileCommand());
 $cli->command('help', 'Show help')
     ->run(fn (array $args): int => $cli->runHelp());
 exit($cli->run($argv));
@@ -45,6 +44,6 @@ exit($cli->run($argv));
 
 `Cli` and `Command` are the routing layer; `ArgParse` / `ParsedArgs` are the
 parsing layer each handler opts into. A command builds its own spec — see
-`Manticore\compile_arg_spec()`, which `compile` and `build` extend with `--no-analyze` /
+`Cli\Commands\CompileOptions::shared()`, which `compile` and `build` extend with `--no-analyze` /
 `--analyze-strict` and `analyze` extends with `--deep` / `--json` /
 `--baseline` / `--generate-baseline`.

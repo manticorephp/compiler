@@ -5,7 +5,7 @@ namespace Cli\Commands;
 use Cli\ArgParse;
 use Cli\Option;
 
-/** The option set every front-end command shares (was `compile_arg_spec()` in Main.php). */
+/** The option set every front-end command shares. */
 final class CompileOptions
 {
     /** @return Option[] */

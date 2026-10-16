@@ -2069,7 +2069,7 @@ final class CompileArgs
 
     /**
      * Set by {@see compile_via_mir} when at least one bundled-stdlib extern
-     * was injected into the module → cmd_compile links the prebuilt
+     * was injected into the module → CompileCommand links the prebuilt
      * `stdlib.o` at the cc step. Stays false for self-contained programs
      * (the compiler's own source defines the stdlib) so no duplicate symbols.
      */
@@ -2098,7 +2098,7 @@ final class CompileArgs
 
     /**
      * Bundled-stdlib signatures for declare-only extern injection, collected
-     * by {@see cmd_compile} (native path, where the libc file bindings work)
+     * by {@see \Cli\Commands\CompileCommand} (native path, where the libc file bindings work)
      * and consumed by {@see compile_via_mir}. NOT collected inside
      * compile_via_mir: that path also runs under the Zend bootstrap build
      * (`tools/compile_files_mir.php`), where `fopen` is a typed stub that
@@ -2171,32 +2171,6 @@ final class CompileArgs
  *
  * @param string[] $args
  */
-/**
- * The compile/dump option spec, shared by every command that takes them:
- *   -o <out> · --memory=<rc|arena|hybrid> · --backend=<mir|ast> · -O<level>
- *   --prelude · --effects · --emit-library · --runtime · --keep-ir
- * All value forms (`-o out`, `-O2`, `--memory=rc`, `--memory rc`) are accepted;
- * positionals (files) may appear in any position.
- *
- * @return array<string, string>
- */
-function compile_arg_spec(): array
-{
-    return [
-        "o" => \Cli\ArgParse::VALUE,
-        "memory" => \Cli\ArgParse::VALUE,
-        "backend" => \Cli\ArgParse::VALUE,
-        "O" => \Cli\ArgParse::VALUE,
-        "prelude" => \Cli\ArgParse::FLAG,
-        "effects" => \Cli\ArgParse::FLAG,
-        "emit-library" => \Cli\ArgParse::FLAG,
-        "runtime" => \Cli\ArgParse::FLAG,
-        "allow-undefined-traps" => \Cli\ArgParse::FLAG,
-        "keep-ir" => \Cli\ArgParse::FLAG,
-        "j" => \Cli\ArgParse::VALUE,
-    ];
-}
-
 /** Apply a parsed compile option set onto {@see CompileArgs}. false on a bad value. */
 function apply_compile_args(\Cli\ParsedArgs $p): bool
 {
@@ -2364,15 +2338,6 @@ function resolve_source_files(array $files): ?array
 }
 
 /**
- * Full compile-to-binary pipeline. Writes IR to a per-pid temp file,
- * shells out to clang for IR→object, then cc for object→executable.
- * Default output is `a.out` in the cwd (mirrors `cc` defaults).
- * Works the same on Linux and macOS because both ship clang+cc and
- * the IR is target-triple-agnostic at our current emit level.
- *
- * @param string[] $args
- */
-/**
  * Front-end entry: parse + lower + emit via the MIR pipeline. The sole
  * backend (the legacy AST Compiler was removed — MIR is self-hosting).
  *
@@ -2382,258 +2347,6 @@ function resolve_source_files(array $files): ?array
 function compile_with_backend(array $sources, array $paths = []): ?string
 {
     return compile_via_mir($sources, $paths);
-}
-
-function cmd_compile(array $args): int
-{
-    // The static analyzer runs by DEFAULT over the sources and prints its
-    // diagnostics to stderr — advisory, NEVER fatal (the build proceeds
-    // regardless). `--no-analyze` turns it off; `--analyze` is the (now default)
-    // explicit opt-in. Uses the fast AST engine, not the heavy `--deep` lowering.
-    $spec = compile_arg_spec();
-    $spec["analyze"] = \Cli\ArgParse::FLAG;
-    $spec["no-analyze"] = \Cli\ArgParse::FLAG;
-    $spec["analyze-strict"] = \Cli\ArgParse::FLAG;
-    $p = \Cli\ArgParse::parse($args, $spec);
-    if ($p->error !== null) {
-        dprint("compile: " . $p->error . " (rc=64)");
-        return 64;
-    }
-    if (!apply_compile_args($p)) {
-        dprint("compile: failed to parse args (rc=64)");
-        return 64;
-    }
-    $analyze = !$p->flag("no-analyze");
-    $strict = $p->flag("analyze-strict");
-    $output = CompileArgs::$output;
-
-    // Read once, as SourceFile[] (path + contents), so every downstream stage
-    // — the analyzer AND the front-end's `parse failed` diagnostics — can name
-    // the specific file that broke. Previously we ran resolve_sources() and
-    // resolve_source_files() back-to-back and lost the paths on the compile
-    // path, so a `bin/manticore compile manticore.json` (or one bad file inside
-    // a directory arg) printed `parse failed: expected ';' after expression`
-    // with no filename.
-    $afiles = resolve_source_files(CompileArgs::$files);
-    if ($afiles === null) {
-        dprint("compile: source resolution failed — no input read (rc=66)");
-        return 66;
-    }
-    if (\count($afiles) === 0) {
-        dprint("compile: source list is empty (rc=66)");
-        return 66;
-    }
-    /** @var string[] $sources */
-    $sources = [];
-    /** @var string[] $paths */
-    $paths = [];
-    foreach ($afiles as $sf) {
-        $sources[] = __mc_source_contents($sf);
-        $paths[] = __mc_source_path($sf);
-    }
-
-    if ($analyze) {
-        // Advisory by default: any failure inside the analyzer is swallowed so it
-        // can NEVER break a build. `--no-analyze` is the escape hatch. With
-        // `--analyze-strict`, error-severity findings instead FAIL the compile
-        // (rc=65, before codegen) — a lint gate for CI.
-        try {
-            if (\count($afiles) > 0) {
-                $adiags = perform_analysis($afiles, CompileArgs::$files, false);
-                if (\count($adiags) > 0) {
-                    \error_log("\n" . \Analyze\Report::human($adiags));
-                }
-                if ($strict) {
-                    $errs = 0;
-                    foreach ($adiags as $d) {
-                        if ($d->severity === \Analyze\Diagnostic::SEV_ERROR) {
-                            $errs = $errs + 1;
-                        }
-                    }
-                    if ($errs > 0) {
-                        dprint("compile: analysis found " . (string)$errs . " error(s) (--analyze-strict, rc=65)");
-                        return 65;
-                    }
-                }
-            }
-        } catch (\Throwable $e) {
-            dprint("analyze: skipped (internal error: " . $e->getMessage() . ")");
-        }
-    }
-    // Collect bundled-stdlib signatures here (native path: the libc file
-    // bindings resolve to real syscalls). compile_via_mir consumes them via
-    // the static. A library declares them too; only the stdlib itself
-    // (`--runtime`) does not.
-    $sigT = \Compile\Stats::now();
-    CompileArgs::$externDecls = [];
-    if (!import_stdlib_decls(CompileArgs::$emitLibrary, CompileArgs::$runtimeLibrary)) { return 65; }
-    \Compile\Stats::step('stdlib .sig -> extern decls', $sigT,
-        \count(CompileArgs::$externDecls), -1);
-    // NOTE: the bundled PHP stdlib is NOT prepended here. Merging the whole
-    // stdlib into every user program both bloats output and crashes the
-    // compiler on some stdlib+user combinations (the "stdlib as guest"
-    // hazard). The chosen design is a prebuilt stdlib.o linked at the cc step
-    // (see discover_stdlib_files / the link tail) — built once, in isolation.
-    $ir = compile_with_backend($sources, $paths);
-    if ($ir === null) {
-        dprint("compile: front-end (parse/typeck/IR) returned null (rc=65)");
-        return 65;
-    }
-    if (\strlen($ir) === 0) {
-        dprint("compile: front-end produced empty IR (rc=65)");
-        return 65;
-    }
-
-    // Staging path for the IR and the intermediate object — the same contract
-    // {@see build_target} uses: under --keep-ir they sit next to the target
-    // (stable, one per target, never swept from /tmp), otherwise a pid-derived
-    // /tmp base that is removed once the target links. Staged files are
-    // deliberately LEFT BEHIND on failure: they are the only record of what the
-    // compiler emitted for a build that did not finish, and every failure path
-    // below names the path it kept.
-    //
-    // ⚠ These used to leak unconditionally — `compile` wrote /tmp/manticore_<pid>.ll
-    // and never removed it, so every compile since the tool existed left its
-    // whole module behind. One dev machine had accumulated 56 970 files / 43 GB.
-    // `build_target` always cleaned up; only this path did not.
-    $keep = CompileArgs::$keepIr;
-    $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_" . (string)getpid());
-    $llPath = $base . ".ll";
-    $objPath = $base . ".o";
-
-    // Library build: assemble straight to the output .o, no link, and NEVER
-    // split — `stdlib.o` is one object by contract (its `.sig` describes it, and
-    // every consumer links exactly that file). The runtime preamble helpers are
-    // linkonce_odr so it coexists with a user program's preamble at link time.
-    if (CompileArgs::$emitLibrary) {
-        if (!write_file($llPath, with_frame_pointers($ir))) {
-            dprint("compile: cannot write " . $llPath . " (rc=73)");
-            return 73;
-        }
-        if ($keep) {
-            dprint("compile: kept IR " . $llPath);
-        }
-        $rcLib = system(
-            "clang -O" . clang_opt_level() . clang_tuning_flags() . " -c -x ir " . $llPath . " -o " . $output . " -Wno-override-module"
-        );
-        if ($rcLib !== 0) {
-            dprint("compile: clang -c (library) failed (rc=" . (string)$rcLib . "); IR at " . $llPath);
-            return 75;
-        }
-        if (!$keep) {
-            system("rm -f " . $llPath);
-        }
-        return 0;
-    }
-
-    // clang understands `-x ir` for plain LLVM textual IR. cc on both
-    // Linux and macOS picks the system linker plus libc by default.
-    // `-ffunction-sections` puts each function in its own section so the
-    // link-time dead-strip below drops every unreferenced stdlib function
-    // (a hello-world no longer drags in all of Json/Libc/stdlib).
-    // Errors on stderr already, but surface our own rc too.
-    $objs = assemble_ir($ir, $base, "-ffunction-sections -fdata-sections");
-    if ($objs === []) {
-        return 75;
-    }
-    if ($keep) {
-        dprint("compile: kept IR " . $base . ".*.ll");
-    }
-    $objList = \implode(" ", $objs);
-    // Link the prebuilt stdlib.o only when the program imported a bundled
-    // stdlib function (str_starts_with / ctype_* / file_*). A self-contained
-    // program (e.g. the compiler's own source, which defines the stdlib)
-    // links without it — avoids duplicate symbols.
-    $linkExtra = "";
-    // Native libraries this module's own `#[Ffi\Library]` bindings named.
-    $libs = CompileArgs::$ffiLibs;
-    $weak = CompileArgs::$weakSyms;
-    if (CompileArgs::$linkStdlib) {
-        $stdlibObj = find_stdlib_object();
-        if ($stdlibObj !== "") {
-            $linkExtra = " " . $stdlibObj;
-        } else {
-            dprint("compile: program uses bundled stdlib but stdlib.o not found — link may fail");
-        }
-        // The bundled stdlib's own bindings — its preg_* wrappers reference
-        // libpcre2-8, its TLS transport libssl/libcrypto, its iconv_* wrappers
-        // libiconv (on Darwin; glibc has it inside libc), its scheduler
-        // signalfd — none of which this module names. They ride in the stdlib's
-        // `.sig`, since the wrapper that calls them is emitted over there.
-        // Dead-strip + --as-needed drop whichever the program never reaches.
-        foreach (
-            stdlib_sig_list(
-                "libs",
-                ["pcre2-8", "ssl", "crypto", "iconv"]
-            ) as $l
-        ) {
-            $libs[] = $l;
-        }
-        foreach (
-            stdlib_sig_list(
-                "weak",
-                [
-                    "__errno_location",
-                    "epoll_create1",
-                    "epoll_ctl",
-                    "epoll_wait",
-                    "signalfd",
-                ]
-            ) as $w
-        ) {
-            $weak[] = $w;
-        }
-    }
-    $libFlags = ffi_link_flags($libs);
-    if ($libFlags !== "") {
-        $linkExtra .= $libFlags;
-    }
-    // Dead-strip unreferenced functions at link time — the prebuilt stdlib.o
-    // is one object (linked wholesale), so without this a tiny program carries
-    // the entire stdlib (~75 KB hello-world). macOS ld64 strips at the
-    // symbol/atom level (`-dead_strip`); GNU/lld need section GC (`--gc-sections`,
-    // paired with the `-ffunction-sections` above). `-dead_strip_dylibs` /
-    // `--as-needed` drop a linked-but-unreferenced dylib (e.g. libpcre2 in a
-    // program that uses the stdlib but no preg_*).
-    //
-    // Every extern_weak the module emitted is a weak-undefined ld64 rejects
-    // unless `-U <sym>` permits it: errno's per-host accessor (__mc_errno
-    // declares BOTH __error and __errno_location, null-tests, and calls
-    // whichever is present), plus Io\Poll's epoll backend and the scheduler's
-    // signalfd, which bind Linux-only symbols `#[Ffi\Weak]`. Each binds to 0 on
-    // the host that lacks it and the guarded branch never calls it.
-    //
-    // The set is DERIVED — it used to be a hand-written list sitting beside the
-    // bindings it duplicated, free to drift the moment someone added a weak one.
-    // Demand-gating falls out of that: a program that pulls in no weak binding
-    // now gets no -U flags at all.
-    //
-    // GNU ld auto-binds weak-undefined to 0, so Linux needs none of this.
-    // -lm: libm is folded into libSystem on Darwin (auto-linked) but is a
-    // separate archive on glibc/musl — a program calling tanh/sinh/pow/fmod
-    // (non-intrinsic libm fns the compiler lowers to plain calls) links with an
-    // undefined reference without it. `--as-needed` drops it when unreferenced.
-    //
-    // `--as-needed` is POSITIONAL: it governs the libraries after it. Placed at
-    // the tail it covered -lm alone, so on Debian every library reached the
-    // binary, while Alpine's and Ubuntu's gcc switch it on at the head — two
-    // different links from one command. It leads the line now, on every Linux.
-    $gc = is_darwin()
-        ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . weak_undef_flags($weak) . darwin_export_flags()
-        : " -Wl,--gc-sections -lm";
-    $gc = $gc . unwind_link_flags();
-    $asNeeded = is_darwin() ? "" : " -Wl,--as-needed";
-    $rc2 = system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
-    if ($rc2 !== 0) {
-        dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objList);
-        return 76;
-    }
-    // Linked: the staged IR and objects have no further use. Kept under
-    // --keep-ir, which is the escape hatch for reading what was emitted.
-    if (!$keep) {
-        system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll");
-    }
-    return 0;
 }
 
 /**
@@ -3341,7 +3054,7 @@ function collect_extern_decls_from_dir(string $dir, array $excludes): array
  * stdlib is the always-on runtime: its externs are injected (so any stdlib call
  * types + resolves) and `manticore_stdlib.o` is linked when actually used —
  * read from the INSTALLED lib/ via the argv0-relative finders, so a user
- * manifest gets the stdlib without listing it. Mirrors {@see cmd_compile}.
+ * manifest gets the stdlib without listing it. Mirrors {@see \Cli\Commands\CompileCommand}.
  *
  * @param string[] $sources
  * @param string[] $linkObjs
@@ -3592,13 +3305,13 @@ function build_compile_module(
     if ($libFlags !== "") {
         $linkExtra = $linkExtra . $libFlags;
     }
-    // Darwin's weak-undefined allowance, derived exactly as in cmd_compile.
+    // Darwin's weak-undefined allowance, derived exactly as in CompileCommand.
     // This path carried NO -U flags at all before, which is a divergence that
     // only stayed invisible because link_stubs.sh defines what ld would reject.
     if (is_darwin()) {
         $linkExtra = $linkExtra . weak_undef_flags($weak) . darwin_export_flags();
     }
-    // Drop what nothing reaches, as cmd_compile does. A split module pins its
+    // Drop what nothing reaches, as CompileCommand does. A split module pins its
     // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
     // them across parts, so without this the originals all stayed: the compiler
     // built in 8 parts came out 20.5 MB against 14.3 MB for one unit.
@@ -3655,17 +3368,6 @@ function find_link_stubs_script(): string
     return "";
 }
 
-/**
- * Front-end for `--backend=mir`. Parse → MIR pipeline → LLVM IR.
- * Single source file only at this round (multi-file linkage is the
- * existing `compile_sources` path's job).
- */
-/**
- * Front-end for `--backend=mir`. Parse → MIR pipeline → LLVM IR.
- * Single source file at this round (multi-file linkage stays on
- * the existing `compile_sources` path until MIR grows class /
- * function symbol resolution across compilation units).
- */
 /**
  * Front-end for `--backend=mir`. Parse every source, merge their
  * top-level statements into one Program (module files first, entry
@@ -5282,7 +4984,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->printRSrc = $printRSrc;
         // Bundled-stdlib signatures (declare-only externs) so user calls
         // (str_starts_with / ctype_* / file_*) resolve + type, with the body
-        // linked from stdlib.o. Collected by cmd_compile on the native path;
+        // linked from stdlib.o. Collected by CompileCommand on the native path;
         // empty during the Zend bootstrap build and for --emit-library.
         $lower->externDecls = CompileArgs::$externDecls;
         /** @var array<string, bool> $dlAbs */
@@ -5980,11 +5682,7 @@ function main_driver(): int
 {
     \Compile\Debug::initFromEnvironment();
     $cli = new \Cli\Cli('manticore', 'PHP-to-native AOT compiler (self-hosted)');
-    $cli->command(
-        'compile',
-        'Compile to a native binary (-o <out>); analyzes by default (--no-analyze skips, --analyze-strict gates on errors)'
-    )
-        ->run(fn(array $args) => cmd_compile($args));
+    $cli->add(new \Cli\Commands\CompileCommand());
     $cli->add(new \Cli\Commands\BuildCommand());
     $cli->add(new \Cli\Commands\DumpLlvmCommand());
     $cli->add(new \Cli\Commands\DumpAstCommand());
