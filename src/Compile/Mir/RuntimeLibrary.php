@@ -1882,13 +1882,13 @@ final class RuntimeLibrary
         return $out;
     }
 
-    /** Runtime: backslash-escape `'` `"` `\` (NUL handling is moot for a
-     * strlen-scanned C string). Worst case doubles the length. */
+    /** Runtime: backslash-escape `'` `"` `\` and NUL (as `\0`), like Zend. Binary
+     * safe: the length comes from the string header. Worst case doubles it. */
     public function addslashes(): string
     {
         $out  = "\ndefine ptr @__mir_addslashes(ptr %s) {\n";
         $out .= "entry:\n";
-        $out .= "  %slen = call i64 @strlen(ptr %s)\n";
+        $out .= "  %slen = call i64 @__mir_strlen(ptr %s)\n";
         $out .= "  %cap0 = mul i64 %slen, 2\n";
         $out .= "  %cap = add i64 %cap0, 1\n";
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap)\n";
@@ -1904,15 +1904,18 @@ final class RuntimeLibrary
         $out .= "  %isq = icmp eq i8 %c, 39\n";
         $out .= "  %isdq = icmp eq i8 %c, 34\n";
         $out .= "  %isbs = icmp eq i8 %c, 92\n";
+        $out .= "  %isnul = icmp eq i8 %c, 0\n";
         $out .= "  %q1 = or i1 %isq, %isdq\n";
-        $out .= "  %spec = or i1 %q1, %isbs\n";
+        $out .= "  %q2 = or i1 %q1, %isbs\n";
+        $out .= "  %spec = or i1 %q2, %isnul\n";
         $out .= "  br i1 %spec, label %esc, label %plain\n";
         $out .= "esc:\n";
         $out .= "  %dp = getelementptr inbounds i8, ptr %buf, i64 %j\n";
         $out .= "  store i8 92, ptr %dp\n";
         $out .= "  %j1 = add i64 %j, 1\n";
         $out .= "  %dp2 = getelementptr inbounds i8, ptr %buf, i64 %j1\n";
-        $out .= "  store i8 %c, ptr %dp2\n";
+        $out .= "  %ec = select i1 %isnul, i8 48, i8 %c\n";
+        $out .= "  store i8 %ec, ptr %dp2\n";
         $out .= "  %je = add i64 %j1, 1\n";
         $out .= "  br label %cont\n";
         $out .= "plain:\n";
