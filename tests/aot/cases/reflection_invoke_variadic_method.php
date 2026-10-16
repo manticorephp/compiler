@@ -1,6 +1,5 @@
 <?php
 // ReflectionMethod::invoke and getClosure throw "not invokable" for a method with a variadic or by-reference parameter.
-// issue: #171
 class Sum
 {
     public function add(int $x, int ...$more): int { return $x + array_sum($more); }

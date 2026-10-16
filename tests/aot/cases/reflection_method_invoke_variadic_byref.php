@@ -1,6 +1,5 @@
 <?php
 // ReflectionMethod::invokeArgs cannot bind a by-reference parameter through a [&$a] element.
-// issue: #171
 class Sum
 {
     public function push(array &$into, int $v): void { $into[] = $v; }

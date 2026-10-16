@@ -1,7 +1,5 @@
 <?php
 // (string) ReflectionAttribute throws "could not be converted to string"; php renders an Attribute [ ... ] block.
-// issue: #245
-
 #[Attribute]
 class Tag { public function __construct(public string $v = '', public int $n = 0) {} }
 
