@@ -5,11 +5,11 @@
 == dump-mir
 1366939965 533 rc=0
 == dump-sig
-1914961456 324 rc=0
+1364139325 324 rc=0
 == dump-llvm-mir
-1464278533 571474 rc=0
+1098914434 622710 rc=0
 == dump-llvm
-1464278533 571474 rc=0
+1098914434 622710 rc=0
 == analyze json
 71434490 3 rc=0
 == dump-ast bogus flag
