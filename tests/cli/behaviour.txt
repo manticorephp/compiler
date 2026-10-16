@@ -7,9 +7,9 @@
 == dump-sig
 1364139325 324 rc=0
 == dump-llvm-mir
-1098914434 622710 rc=0
+225323761 623031 rc=0
 == dump-llvm
-1098914434 622710 rc=0
+225323761 623031 rc=0
 == analyze json
 71434490 3 rc=0
 == dump-ast bogus flag
