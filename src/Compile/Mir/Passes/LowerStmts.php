@@ -286,13 +286,6 @@ trait LowerStmts
         return $this->lvTemp($v);
     }
 
-    /** A discarded `$t->p++` is `++$t->p`: no old value to keep. */
-    private function discardedIncDec(\Parser\Ast\Expr $e): \Parser\Ast\Expr
-    {
-        if (!($e instanceof \Parser\Ast\IncDec) || $e->prefix || $e->operand->kind === 'Variable') { return $e; }
-        return new \Parser\Ast\IncDec($e->op, true, $e->operand, $e->span);
-    }
-
     private function hoistIncDec(\Parser\Ast\IncDec $e): ?\Parser\Ast\Expr
     {
         $t = $this->hoistLvChain($e->operand);

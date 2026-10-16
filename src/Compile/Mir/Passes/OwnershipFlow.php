@@ -364,9 +364,11 @@ final class OwnershipFlow implements Pass
             if ($rk === 0) { continue; }
             $cls = $this->keyClass[$rk];
             // An untyped param the body binds to ONE class (a capture's reads)
-            // arrives holding that class; a bare `array` param an array.
+            // arrives holding that class; a bare `array` param an array — also when a merge box-back
+            // re-tags it a cell (`extract($c)` over a param named `c`): the else edge boxes the CALLER's
+            // array without a count, and an Empty start made the join Own, so the exit dropped it.
             if (isset($this->erasedParams[$p->name])
-                ? (!\str_starts_with($cls, 'arr') && $cls !== Ownership::ERASED_ARR)
+                ? (!\str_starts_with($cls, 'arr') && $cls !== Ownership::ERASED_ARR && $cls !== 'cell')
                 : !$this->singleClass($p->name, $rk)) { continue; }
             $entry[$p->name] = OwnLattice::borrow($rk);
         }

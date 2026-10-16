@@ -1227,7 +1227,10 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $nl . " = call i64 @__manticore_box_null()\n";
                 $out .= '  ' . $isz . ' = icmp eq i64 ' . $raw . ", 0\n";
                 $out .= '  ' . $sel . ' = select i1 ' . $isz . ', i64 ' . $nl . ', i64 ' . $boxed . "\n";
-                return $this->finishI64($out, $sel);
+                $ret = $this->finishI64($out, $sel);
+                // Same provenance as the probe it wraps: the owner retains what the probe boxed.
+                $this->markCellProbed($this->lastValue);
+                return $ret;
             }
             return $this->boxUnknownShallowIr();
         }
