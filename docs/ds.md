@@ -37,8 +37,7 @@ echo $offsets[0] + $offsets[1];      // 16
 All are `final` and extend `Manticore\Ds\TypedArray`, which implements
 `ArrayAccess`, `Countable`, `IteratorAggregate` and `JsonSerializable`.
 
-There is no `UInt64Array` (PHP has no unsigned 64-bit int) and no typed string
-array.
+There is no typed string array.
 
 ## API
 
@@ -386,8 +385,10 @@ registry, so a cycle through one is not collected under Zend.
 
 ## Current limits
 
-- The inline path needs a receiver held in a local variable, an `int` index
+- The inline path needs a receiver held in a local variable, a property of a
+  local, or a static property, an `int` index
   built from locals / constants / `+` `-`, and (for a store) a value of the
   element's own type with no call in it. Anything else is an ordinary
   `offsetGet` / `offsetSet` call — correct, slower.
-- No per-type value layout yet: values are stored as 8-byte cells.
+- A `#[TypeDef]` binding covers the scalar reprs only; enum-backed ints and
+  packed structs as elements are not supported yet.
