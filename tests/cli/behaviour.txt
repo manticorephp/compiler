@@ -29,4 +29,4 @@ rc=66
 == unknown command
 rc=0
 == compile+run
-tests/cli/run.sh: line 49: prog: command not found
+5

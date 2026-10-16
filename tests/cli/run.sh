@@ -25,7 +25,8 @@ run() { # label, then the command: exit code only
 sum() { # label, then the command: checksum of stdout + rc
     local label="$1"; shift
     local s rc
-    s="$("$@" 2>/dev/null | cksum)"; rc="${PIPESTATUS[0]}"
+    "$@" >"$WORK/o" 2>/dev/null; rc=$?
+    s="$(cksum <"$WORK/o")"
     printf '== %s\n%s rc=%s\n' "$label" "$s" "$rc"
 }
 
@@ -46,7 +47,8 @@ behaviour() {
     run "build missing manifest"   "$MC" build "nope.json"
     run "unknown command"          "$MC" frobnicate
     "$MC" compile "f.php" -o "prog" >/dev/null 2>&1
-    printf '== compile+run\n%s\n' "$("prog" 2>&1)"
+    if [ -x ./prog ]; then out="$(./prog 2>&1)"; else out="no binary"; fi
+    printf '== compile+run\n%s\n' "$out"
 }
 
 helps() {
