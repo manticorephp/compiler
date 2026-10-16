@@ -50,7 +50,7 @@
 #                    reproduces here — is printed and lands in the summary, but
 #                    does not fail the job, because a bug can be platform-specific
 #                    and a red row also withholds the published seed. `strict`
-#                    makes an XPASS fail the gate (the weekly gate.yml asks for it).
+#                    makes an XPASS fail the gate (run locally with `--gate`).
 #
 # Exit 0 only if every stage it ran passed.
 set -uo pipefail

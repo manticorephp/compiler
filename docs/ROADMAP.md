@@ -136,7 +136,7 @@ Known semantic gaps in detail: [`gaps.md`](gaps.md).
 
 ## 6. Tooling, platforms and releases
 
-- [x] CI: Linux arm64/amd64 on Debian and Alpine, macOS arm64, weekly parity run against php
+- [x] CI: Linux arm64/amd64 on Debian and Alpine, macOS arm64 (php parity comes from the php-generated expected outputs of every AOT case; `tools/difftest.sh` is a manual staleness check)
 - [x] Release tarballs and container images built from the pinned bootstrap
 - [x] `manticore upgrade` ([#174](https://github.com/manticorephp/compiler/issues/174))
 - [x] `manticore doctor`, `manticore completions`, `manticore version --check`

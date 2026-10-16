@@ -129,8 +129,8 @@ prints its opt level.
 `tools/docker/gate.sh` is now the ONE definition of a Linux gate — `tools/docker/run_tests.sh`
 and both workflows call it, so a CI green and a local green mean the same thing.
 `.github/workflows/ci.yml` runs the suite on every push and PR — linux arm64/amd64 on Debian
-and Alpine plus macOS arm64, and `bootstrap-from-pin`, all REQUIRED checks; `gate.yml` runs
-the heavy gate (difftest, fixpoint) weekly; `release.yml` publishes from the pin. (Originally
+and Alpine plus macOS arm64, and `bootstrap-from-pin`, all REQUIRED checks; there is no scheduled heavy gate (`tools/difftest.sh` and the fixpoint run by hand);
+`release.yml` publishes from the pin. (Originally
 this item was written when CI was parked on `workflow_dispatch` and had never run; that is
 no longer true.) The original motivation, kept for the record: a nightly
 `tools/docker/run_tests.sh --gate` on arm64 **and** amd64 plus `tests/aot` + `difftest` on
