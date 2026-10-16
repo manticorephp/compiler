@@ -6,4 +6,5 @@ Value 200 is out of range for Int8Array (-128..127)
 100,20
 TypeError
 0
+OutOfBoundsException
 2 2

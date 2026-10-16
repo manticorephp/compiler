@@ -37,5 +37,9 @@ echo count($e), "\n";
 
 $g = Int32Array::fromArray([1, 2, 3, 4]);
 $seen = 0;
-$g->apply(function (int $v) use ($g, &$seen) { $seen++; if ($seen === 1) { $g->pop(); $g->pop(); } return $v; });
+try {
+    $g->apply(function (int $v) use ($g, &$seen) { $seen++; if ($seen === 1) { $g->pop(); $g->pop(); } return $v; });
+} catch (OutOfBoundsException $x) {
+    echo get_class($x), "\n";
+}
 echo $seen, ' ', count($g), "\n";

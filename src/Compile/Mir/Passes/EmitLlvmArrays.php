@@ -549,7 +549,8 @@ trait EmitLlvmArrays
         if ($k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST || $k === Node::KIND_BOOL_CONST
             || \Compile\Mir\NbufInline::pureReceiver($n)) { return true; }
         if ($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL
-            || $k === Node::KIND_NEG || $k === Node::KIND_ARRAY_ACCESS) {
+            || $k === Node::KIND_NEG || $k === Node::KIND_BITOP || $k === Node::KIND_BITNOT
+            || $k === Node::KIND_ARRAY_ACCESS) {
             foreach (\Compile\Mir\Walk::children($n) as $c) {
                 if (!$this->nbufPureExpr($c)) { return false; }
             }
