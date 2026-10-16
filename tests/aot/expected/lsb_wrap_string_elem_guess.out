@@ -1,0 +1,15 @@
+0=BStr:a
+1:
+  0=BStr:b
+  1:
+    0=BStr:c
+x=BStr:y
+0=UStr:A
+1:
+  0=UStr:B
+  1:
+    0=UStr:C
+X=UStr:Y
+0=BStr:p
+q:
+  0=BStr:r

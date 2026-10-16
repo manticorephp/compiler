@@ -43,6 +43,12 @@ final class PreludeDemand
     /** Any `...`: a spread (or a variadic — the gate over-approximates). */
     private bool $ellipsis = false;
 
+    /** Any `...` — spread or variadic. */
+    public function usesEllipsis(): bool
+    {
+        return $this->ellipsis;
+    }
+
     /** A `...` spread could meet a Traversable operand: the program has both an
      *  ellipsis and a generator or an iterator name. */
     public function maySpreadTraversable(): bool

@@ -1541,8 +1541,6 @@ final class UnifiedArrayRuntime
         $sv = $sset->call('__mir_array_value_at', Type::i64(), [$b, $bi]);
         $sset = $this->emitRetainForOwner($fn, $sset, $sv, $b, $flavor, 'us');
         $sv = $this->unionBoxB($sset, $sv, $hb, $boxSlot);
-        // The key string gains a second owner (the result's entry).
-        $sset->call('__mir_rc_retain_str', Type::void(), [$skp]);
         $snew = $sset->call('__mir_array_set_str', Type::ptr(),
             [$sset->load(Type::ptr(), $resSlot), $skp, $sv,
              Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
@@ -4620,8 +4618,6 @@ final class UnifiedArrayRuntime
         $kind = $isStr->load(Type::i64(), $this->entryAddr($isStr, $src, $iv, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $isStr->brIf($isStr->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $doStr, $doInt);
         $key = $doStr->load(Type::ptr(), $this->entryAddr($doStr, $src, $iv, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        // The key string gains a second owner (the destination's entry).
-        $doStr->call('__mir_rc_retain_str', Type::void(), [$key]);
         $d1 = $doStr->load(Type::ptr(), $dSlot);
         $ns = $doStr->call('__mir_array_set_str', Type::ptr(),
             [$d1, $key, $val, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
@@ -5994,7 +5990,6 @@ final class UnifiedArrayRuntime
         // SCALAR: `['scalar' => $v]`, a CELL buffer (the word is already a cell).
         $one = $scalar->call('__mir_array_alloc', Type::ptr(), [Value::int(Type::i64(), 0)]);
         $scalar->store(Value::int(Type::i64(), 0), $one);
-        $scalar->call('__mir_rc_retain_str', Type::void(), [$key]);
         $bag = $scalar->call('__mir_array_set_str', Type::ptr(),
             [$one, $key, $v, Value::int(Type::i64(), 0), Value::int(Type::i64(), 0)]);
         $fp = $this->hdr($scalar, $bag, MemoryAbi::ARRAY_FLAGS_OFFSET);

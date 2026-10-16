@@ -1,0 +1,14 @@
+5
+suspended 5
+fiber 7 7
+fiber 7 7
+fiber 7 7
+finished 5
+after churn 5
+inner 9
+outer 7
+main 5
+inner again 10
+outer again 8
+main end 5
+4 5

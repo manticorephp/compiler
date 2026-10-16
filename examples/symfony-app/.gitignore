@@ -1,0 +1,5 @@
+/vendor/
+/var/
+/bin/
+/.env.local
+/.env.*.local

@@ -1,0 +1,13 @@
+resolve env:local
+reset
+early env:local
+body env:dev
+resolve env:dev
+reset
+late env:dev
+a x1
+b
+run x
+a x
+b
+end

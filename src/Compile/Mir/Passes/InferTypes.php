@@ -1103,6 +1103,20 @@ final class InferTypes implements Pass
             );
             $guard = $guard + 1;
         }
+        // …and through a NESTED store: `$t[] = ['a', 'b']; $t[0][2] = true;`
+        // writes a bool into an inner `string[]` ({@see scanNestedElemStoreWiden}).
+        $guard = 0;
+        while ($guard < 4 && $this->scanNestedElemStoreWiden($module)) {
+            $this->inferFunctionsForScope(
+                $module, 'nested_elem', $this->lastInferenceChangedFunctions,
+            );
+            // A callee the call-site scans pinned to the pre-widening element
+            // (`array_reverse($t)`) is re-observed against the widened local.
+            if ($this->scanCallSiteArrayElems($module)) {
+                $this->inferFunctionsForScope($module, 'nested_elem_callsite_array');
+            }
+            $guard = $guard + 1;
+        }
         // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
         // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
         // MIXED array: left alone, the callee is narrowed to the caller's
@@ -1387,7 +1401,7 @@ final class InferTypes implements Pass
                 if (!$ok) {
                     $unusable[$key] = true;
                 } elseif (!isset($observed[$key])) {
-                    $observed[$key] = $vt;
+                    $observed[$key] = $vt->withoutShape();
                 } elseif (!$this->sameElemShape($observed[$key], $vt)) {
                     $unusable[$key] = true;
                 }
@@ -1423,6 +1437,29 @@ final class InferTypes implements Pass
      */
     private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$unusable): void
     {
+        // A WHOLE-property store of an array is evidence about the elements
+        // too: `$this->d = [$id, 'x']; $this->d[] = $int;` holds strings AND an
+        // int, and only the appends were counted — the slot became vec[int] and
+        // every string read back as a raw pointer. A store whose element type is
+        // unknown says nothing usable (the empty literal excepted: it holds none).
+        if ($n->kind === Node::KIND_STORE_PROPERTY && $n->value->type->isArray()) {
+            $owner = $this->propElemStoreOwner($n->object, $cls);
+            if ($owner !== '') {
+                $key = $owner . '::' . $n->property;
+                $et = $n->value->type->element;
+                $emptyLit = $n->value instanceof \Compile\Mir\ArrayLit && \count($n->value->elements) === 0;
+                if ($emptyLit) {
+                    // holds nothing
+                } elseif ($et === null || !$this->isBoxablePropElem($et)) {
+                    $unusable[$key] = true;
+                } elseif (!isset($observed[$key])) {
+                    $observed[$key] = $et;
+                } elseif ($observed[$key]->kind !== Type::KIND_CELL
+                    && !$this->sameElemShape($observed[$key], $et)) {
+                    $observed[$key] = Type::cell();
+                }
+            }
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS) {
@@ -2320,6 +2357,29 @@ final class InferTypes implements Pass
     }
 
     /**
+     * The types the SLOTS hold at the end of a then-arm: a guard narrows a local
+     * in the arm (`$x instanceof C` → `obj<C>`) without touching its slot, so a
+     * local the arm never stored keeps the representation it entered with — the
+     * one an else-arm store must agree with at the merge.
+     * @param array<string,Type> $thenLocals @param array<string,Type> $narrowed @param array<string,Type> $saved
+     * @return array<string,Type>
+     */
+    private function unnarrowedSlots(array $thenLocals, array $narrowed, array $saved): array
+    {
+        $out = [];
+        foreach ($thenLocals as $name => $t) {
+            $slot = $t;
+            if (isset($narrowed[$name]) && isset($saved[$name])
+                && $t->exactString() === $narrowed[$name]->exactString()
+                && $t->exactString() !== $saved[$name]->exactString()) {
+                $slot = $saved[$name];
+            }
+            $out[$name] = $slot;
+        }
+        return $out;
+    }
+
+    /**
      * The inverse of {@see planMergeShadow}, for a promotion a LATER run no
      * longer needs. The plant is sticky (`declaredType`), but the arm types it
      * was planted on are not: `$t = tables(); $lh = $t[0];` beside `$lh =
@@ -2337,9 +2397,10 @@ final class InferTypes implements Pass
      * leaves a diverging if/else alone, and types each name answered here with
      * the union of its two arms: the slot leaves both raw.
      *
+     * @param array<string,Type> $thenSlots {@see unnarrowedSlots}
      * @return array<string,Type> name => its merged type past the if/else
      */
-    private function unplantAgreedBoxBacks(Block $then, Block $else): array
+    private function unplantAgreedBoxBacks(Block $then, Block $else, array $thenSlots): array
     {
         $out = [];
         $names = self::trailingBoxBackNames($then);
@@ -2355,6 +2416,9 @@ final class InferTypes implements Pass
             $tT = self::boxBackValueType($then->stmts[$ti]);
             $oT = self::boxBackValueType($else->stmts[$ei]);
             if ($tT->kind !== $oT->kind || $this->joinDisagrees($tT, $oT)) { continue; }
+            // The box-back reads the arm's NARROWED type; the slot it boxes holds
+            // the representation the arm entered with.
+            if (isset($thenSlots[$name]) && $this->joinDisagrees($thenSlots[$name], $oT)) { continue; }
             $then->stmts = self::withoutStmt($then->stmts, $ti);
             $else->stmts = self::withoutStmt($else->stmts, $ei);
             $out[$name] = $this->unionTypes($tT, $oT);
@@ -3175,6 +3239,9 @@ final class InferTypes implements Pass
                 && $this->unionTypes($a, $b)->kind === Type::KIND_CELL;
         }
         if ($a->kind === $b->kind) { return false; }
+        // A closure value and a closure literal's `obj<__closure_N>` handle are
+        // one env pointer.
+        if (\Compile\Mir\Ownership::isClosureValueType($a) && \Compile\Mir\Ownership::isClosureValueType($b)) { return false; }
         // An ERASED value (a bare-`array` result, an unknown receiver's return)
         // beside a scalar, a string, an object or a cell shares no raw word with
         // it either — the join typed `unknown` read a string as an array. The
@@ -3284,11 +3351,13 @@ final class InferTypes implements Pass
     }
 
     /** A kind a cell carries by its tag: a scalar, a string, an array, an
-     *  object. Two different ones in one slot share no raw word, and their
+     *  object or a closure ({@see EmitLlvmBuiltins::boxToCell} boxes it as an
+     *  object). Two different ones in one slot share no raw word, and their
      *  union is `unknown` — a type with no representation. */
     private function cellCarries(Type $t): bool
     {
-        return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ;
+        return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ
+            || $t->kind === Type::KIND_CLOSURE;
     }
 
     /** @param Node[] $stmts  Ends in return/throw: never reaches the join after it. */
@@ -3612,7 +3681,8 @@ final class InferTypes implements Pass
             }
             if ($sig === null) { return null; }
             if ($found === null) { $found = $sig; }
-            elseif ($found->kind !== $sig->kind) { return Type::cell(); }
+            elseif ($found->kind !== $sig->kind
+                || ($found->kind === Type::KIND_OBJ && $found->class !== $sig->class)) { return Type::cell(); }
         }
         return $found;
     }
@@ -3626,13 +3696,25 @@ final class InferTypes implements Pass
     {
         /** @var Type $found */
         $found = null;
+        $first = null;
+        $shapeDiffers = false;
         foreach ($this->declarersOf($method) as $cn) {
             $sig = $this->sigs[$cn . '__' . $method] ?? null;
             if ($sig === null) { continue; }
-            if ($found === null) { $found = $sig; }
-            elseif ($found->kind !== $sig->kind) { return Type::cell(); }
+            if ($found === null) { $found = $sig; $first = $sig; }
+            elseif ($found->kind !== $sig->kind
+                || ($found->kind === Type::KIND_OBJ && $found->class !== $sig->class)) { return Type::cell(); }
+            // Arrays of different ELEMENT shapes share a word, not a view: the
+            // first declarer's `string[]` read `ReflectionClass::getMethods()`'s
+            // objects as strings, and symfony Route::getMethods()'s strings as
+            // objects ({@see virtualReturnJoin} joins the same way).
+            elseif ($sig->kind === Type::KIND_ARRAY && $first !== null
+                && $this->elemReprShape($sig) !== $this->elemReprShape($first)) {
+                $shapeDiffers = true;
+                $found = $found->unionWith($sig);
+            }
         }
-        return $found;
+        return $shapeDiffers ? $found->withElement(Type::unknown()) : $found;
     }
 
     /**

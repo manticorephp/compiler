@@ -109,7 +109,7 @@ final class NodeClone
         if ($k === Node::KIND_NEG)    { $x = self::asNeg($n);    return new Neg(self::node($x->operand), $n->type); }
         if ($k === Node::KIND_NOT)    { $x = self::asNot($n);    return new Not_(self::node($x->operand)); }
         if ($k === Node::KIND_BITNOT) { $x = self::asBitNot($n); return new BitNot_(self::node($x->operand), $n->type); }
-        if ($k === Node::KIND_CAST)   { $x = self::asCast($n);   return new Cast($x->target, self::node($x->operand), $n->type); }
+        if ($k === Node::KIND_CAST)   { $x = self::asCast($n);   $cc = new Cast($x->target, self::node($x->operand), $n->type); $cc->keepNull = $x->keepNull; return $cc; }
         if ($k === Node::KIND_CLASS_NAME) { $x = self::asClassName($n); return new ClassName_(self::node($x->operand), $n->type); }
         if ($k === Node::KIND_INSTANCEOF) { $x = self::asInstanceof($n); return new Instanceof_(self::node($x->operand), $x->class); }
 
@@ -140,7 +140,7 @@ final class NodeClone
         if ($k === Node::KIND_SPREAD) { $x = self::asSpread($n); return new Spread_(self::node($x->operand), $n->type); }
         if ($k === Node::KIND_THROW)  { $x = self::asThrow($n);  return new Throw_(self::node($x->value), $n->type); }
         if ($k === Node::KIND_REF_BIND) { $x = self::asRefBind($n); return new RefBind_($x->target, self::node($x->call), $n->type); }
-        if ($k === Node::KIND_REF_ADDR) { $x = self::asRefAddr($n); return new RefAddr_($x->target, self::node($x->lvalue), $n->type); }
+        if ($k === Node::KIND_REF_ADDR) { $x = self::asRefAddr($n); $c = new RefAddr_($x->target, self::node($x->lvalue), $n->type); $c->erased = $x->erased; return $c; }
         if ($k === Node::KIND_REF_CELL) { $x = self::asRefCell($n); return new RefCell_(self::node($x->refSource), $n->type); }
         if ($k === Node::KIND_STORE_STATIC_PROP) { $x = self::asStoreStaticProp($n); return new StoreStaticProp_($x->global, self::node($x->value), $n->type, $x->declared); }
         if ($k === Node::KIND_ISSET)  { $x = self::asIsset($n);  return new Isset_(self::nodes($x->targets), $n->type); }
@@ -221,7 +221,9 @@ final class NodeClone
         }
         if ($k === Node::KIND_FOREACH) {
             $x = self::asForeach($n);
-            return new Foreach_(self::node($x->array), $x->keyVar, $x->valueVar, $x->byRef, self::asBlock(self::node($x->body)));
+            $fc = new Foreach_(self::node($x->array), $x->keyVar, $x->valueVar, $x->byRef, self::asBlock(self::node($x->body)));
+            $fc->bindRef = $x->bindRef;
+            return $fc;
         }
         if ($k === Node::KIND_SWITCH) {
             $x = self::asSwitch($n);

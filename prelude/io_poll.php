@@ -417,6 +417,9 @@ namespace Io\Poll {
                 $i = $i + 1;
             }
             $rc = \__mc_iopoll_poll($buf, $n, $timeout);
+            // EINTR (4 on Linux and Darwin): a signal — or a debugger attaching —
+            // interrupted the wait. No fd is ready; the caller's loop waits again.
+            if ($rc < 0 && \__mc_errno() === 4) { $rc = 0; }
             if ($rc < 0) {
                 \Runtime\Libc\free($buf);
                 throw new FailedPollWaitException("poll() failed");
@@ -452,6 +455,9 @@ namespace Io\Poll {
 
             $buf = \Runtime\Libc\calloc($max, $this->epStride);
             $rc = \__mc_iopoll_epoll_wait($this->reactorFd, $buf, $max, $timeout);
+            // EINTR (4 on Linux and Darwin): a signal — or a debugger attaching —
+            // interrupted the wait. No fd is ready; the caller's loop waits again.
+            if ($rc < 0 && \__mc_errno() === 4) { $rc = 0; }
             if ($rc < 0) {
                 \Runtime\Libc\free($buf);
                 throw new FailedPollWaitException("epoll_wait() failed");
@@ -494,6 +500,9 @@ namespace Io\Poll {
                 \poke_i64($tp, 8, $timeoutMicroseconds * 1000);
             }
             $rc = \__mc_iopoll_kevent($this->reactorFd, \int_to_ptr(0), 0, $buf, $max, $tp);
+            // EINTR (4 on Linux and Darwin): a signal — or a debugger attaching —
+            // interrupted the wait. No fd is ready; the caller's loop waits again.
+            if ($rc < 0 && \__mc_errno() === 4) { $rc = 0; }
             if ($timeoutSeconds !== null) { \Runtime\Libc\free($tp); }
             if ($rc < 0) {
                 \Runtime\Libc\free($buf);

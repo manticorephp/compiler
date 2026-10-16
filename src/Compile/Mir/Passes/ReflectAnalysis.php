@@ -55,6 +55,8 @@ final class ReflectAnalysis
 
     public function run(Module $module): void
     {
+        // The stand-in ReflectionClass uses for the compiler-internal Closure type.
+        $this->names['__MC_ClosureShape'] = true;
         foreach ($module->functions as $fn) {
             // A prelude body is the reflection implementation itself; its
             // `__mc_refl_find($name)` is a parameter by construction and would
@@ -202,6 +204,27 @@ final class ReflectAnalysis
                 if (isset($this->names[$p])) { break; }
                 $this->names[$p] = true;
                 $p = $module->classes[$p]->parent;
+            }
+        }
+        // `getInterfaces()` builds a ReflectionClass for each interface BY NAME,
+        // so a reflected class drags its interfaces in, and the ones they extend.
+        // An interface has no ClassDef, only a name (and its ancestors in
+        // Module::$interfaceAncestors), which is all its registry entry needs.
+        foreach ($module->classes as $name => $cd) {
+            if (!isset($this->names[$name])) { continue; }
+            foreach ($cd->interfaces as $iface) {
+                $iface = \ltrim($iface, '\\');
+                $this->names[$iface] = true;
+                foreach ($module->interfaceAncestors[$iface] ?? [] as $anc) {
+                    $this->names[\ltrim($anc, '\\')] = true;
+                }
+            }
+        }
+        // `getTraits()` likewise builds a ReflectionClass per trait by name.
+        foreach ($module->classes as $name => $cd) {
+            if (!isset($this->names[$name])) { continue; }
+            foreach ($module->classTraitNames[$name] ?? [] as $tn) {
+                $this->names[$tn] = true;
             }
         }
         if (!$this->descendants) { return; }

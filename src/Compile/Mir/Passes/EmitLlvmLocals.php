@@ -120,6 +120,17 @@ trait EmitLlvmLocals
         return $this->localSlotAlloca($slot) . '  store i64 0, ptr ' . $slot . "\n";
     }
 
+    private function preallocateRefAddr(\Compile\Mir\RefAddr_ $n): string
+    {
+        $out = '';
+        if (!isset($this->locals->globalBacked[$n->target]) && !isset($this->locals->slots[$n->target])) {
+            $slot = $this->ssa->allocReg();
+            $this->locals->slots[$n->target] = $slot;
+            $out .= $this->localVarSlot($slot);
+        }
+        return $out . $this->preallocateLocals($n->lvalue);
+    }
+
     private function preallocateLocals(Node $n): string
     {
         $k = $n->kind;
@@ -349,6 +360,15 @@ trait EmitLlvmLocals
             $out = '';
             foreach ($n->args as $a) { $out .= $this->preallocateLocals($a); }
             return $out;
+        }
+        // `$r = &$a[$k]` binds `$r` like an assignment does: its slot belongs to
+        // the frame from entry. Without one the prologue skipped `$r` — no element
+        // box co-owned by the frame ({@see emitElemRefBoxSlots}), no heap box for
+        // a by-ref capture — so the binding fell back to the element's ADDRESS
+        // inside the buffer, and a closure capturing `&$r` kept that address past
+        // the array's death and read freed memory.
+        if ($k === Node::KIND_REF_ADDR) {
+            return $this->preallocateRefAddr($n);
         }
         // Every kind NOT special-cased above recurses over its children
         // generically, so the walk is exhaustive by construction. It was a
@@ -1277,7 +1297,9 @@ trait EmitLlvmLocals
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
-            $out .= $this->refParamOverwriteIr($sl->name, $p, $val);
+            $sv = $sl->value;
+            $out .= $this->refParamOverwriteIr($sl->name, $p, $val,
+                $sv instanceof \Compile\Mir\LoadLocal && $sv->name === $sl->name);
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         } else {
             // Release-before-overwrite, where OwnershipFlow owns the old value.
@@ -1315,15 +1337,19 @@ trait EmitLlvmLocals
      * its argument to; an erased `array` names no flavor and keeps the leak. A
      * closure's by-ref parameter is cell-typed by the ABI, not by what it points
      * at (an array element of any representation), so it is left alone; so is a
-     * name rebound by `=&`, and a store of the word the slot already holds.
+     * name rebound by `=&`, and `$a = $a` (`$selfLoad`: the value read the slot
+     * itself and took no count, so the same word must not be given back).
      */
-    private function refParamOverwriteIr(string $name, string $slotPtr, string $val): string
+    private function refParamOverwriteIr(string $name, string $slotPtr, string $val, bool $selfLoad = false): string
     {
-        if ($this->frame->isClosure || $this->frame->isTrampoline) { return ''; }
+        if ($this->frame->isTrampoline) { return ''; }
         $pt = $this->locals->refParamTypes[$name] ?? null;
         if ($pt === null || isset($this->locals->aliasLocals[$name])
             || isset($this->locals->ownedBoxes[$name])) { return ''; }
         $flavor = $this->discardReleaseFlavor($pt);
+        // A closure's by-ref parameter is cell-typed by the ABI: the caller hands
+        // over cell storage that owns its value. Only that cell flavor is known.
+        if ($this->frame->isClosure && ($flavor !== 'cell' || isset($this->locals->captureRefs[$name]))) { return ''; }
         if ($flavor === '') {
             // The one refusal the design keeps: an erased parameter names no
             // representation for the old word, so it is left to leak.
@@ -1336,6 +1362,12 @@ trait EmitLlvmLocals
         }
         $old = $this->ssa->allocReg();
         $out = '  ' . $old . ' = load i64, ptr ' . $slotPtr . "\n";
+        if (!$selfLoad) {
+            // The stored value took its own count before this point, so the old
+            // one goes back even when it is the same word (`$n = $a; $a = $n`):
+            // skipped, that store leaked the whole array once per call.
+            return $out . $this->rcReleaseReg($old, $flavor);
+        }
         $diff = $this->ssa->allocReg();
         $out .= '  ' . $diff . ' = icmp ne i64 ' . $old . ', ' . $val . "\n";
         $relL = $this->ssa->allocLabel('refp.ow');
@@ -1605,6 +1637,10 @@ trait EmitLlvmLocals
         return $out === null ? null : $pre . $out;
     }
 
+    /** The caller's slot of the ERASED array base the last element address was taken from
+     *  ({@see byRefAddrOfRaw}); its elements ride the buffer's hint, not a cell. */
+    private string $refElemBase = '';
+
     /**
      * The address of a dynamic property `$o->p` of a bag class (stdClass): the
      * bag's element slot, vivified as an array element is. null when the
@@ -1631,6 +1667,7 @@ trait EmitLlvmLocals
 
     private function byRefAddrOfRaw(Node $a): ?string
     {
+        $this->refElemBase = '';
         if ($a->kind === Node::KIND_LOAD_LOCAL) {
             $name = $a->name;
             // A GLOBAL-BACKED local — `global $x`, and every SUPERGLOBAL, which
@@ -1736,6 +1773,7 @@ trait EmitLlvmLocals
             $this->containerCloseIr = '';
             if ($out === null) { return null; }
             $slotPtr = $this->lastValue;
+            $baseSlot = $slotPtr;
             // A `$GLOBALS`-viewed global cell holds the buffer BOXED
             // ({@see boxForViewSlot}); `__mir_array_ref_slot` reads and writes
             // a raw pointer, so it works on a scratch word that is unboxed
@@ -1745,6 +1783,23 @@ trait EmitLlvmLocals
                 && isset($this->locals->globalBacked[$aa->array->name])
                 && $this->isGlobalsViewName($aa->array->name)
                 ? $slotPtr : '';
+            // An ERASED / cell base holds its array BOXED (a json_decode result):
+            // the ref-slot helper wants the raw pointer, so it works on a scratch
+            // word the payload is masked into. An erased local gets it back RAW
+            // (what every other write to one leaves there), a cell local re-boxed.
+            $baseK = $aa->array->type->kind;
+            $erasedCell = $viewCell === '' && $aa->array->kind === Node::KIND_LOAD_LOCAL
+                && ($baseK === Type::KIND_UNKNOWN || $baseK === Type::KIND_CELL) ? $slotPtr : '';
+            if ($erasedCell !== '') {
+                $w = $this->ssa->allocReg();
+                $out .= '  ' . $w . ' = load i64, ptr ' . $erasedCell . "\n";
+                $rawW = $this->ssa->allocReg();
+                $out .= '  ' . $rawW . ' = and i64 ' . $w . ", 281474976710655\n";
+                $scr = $this->ssa->allocReg();
+                $out .= '  ' . $scr . " = alloca i64\n";
+                $out .= '  store i64 ' . $rawW . ', ptr ' . $scr . "\n";
+                $slotPtr = $scr;
+            }
             if ($viewCell !== '') {
                 $this->rt->needsTagged = true;
                 $w = $this->ssa->allocReg();
@@ -1792,6 +1847,22 @@ trait EmitLlvmLocals
                 $nb = $this->ssa->allocReg();
                 $out .= '  ' . $nb . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
                 $out .= '  store i64 ' . $nb . ', ptr ' . $viewCell . "\n";
+            }
+            if ($erasedCell !== '') {
+                $nw = $this->ssa->allocReg();
+                $out .= '  ' . $nw . ' = load i64, ptr ' . $slotPtr . "\n";
+                if ($baseK === Type::KIND_CELL) {
+                    $np = $this->ssa->allocReg();
+                    $out .= '  ' . $np . ' = inttoptr i64 ' . $nw . " to ptr\n";
+                    $nw = $this->ssa->allocReg();
+                    $out .= '  ' . $nw . ' = call i64 @__manticore_box_array(ptr ' . $np . ")\n";
+                }
+                $out .= '  store i64 ' . $nw . ', ptr ' . $erasedCell . "\n";
+            }
+            // A CELL-typed element of a local base is encoded by the buffer's hint
+            // (an erased `array` may hold a typed one): the by-ref call decodes it.
+            if ($aa->array->kind === Node::KIND_LOAD_LOCAL && $a->type->kind === Type::KIND_CELL) {
+                $this->refElemBase = $baseSlot;
             }
             // A cell element that is already a REF cell (`$r = &$a[$k]` earlier):
             // the storage is its box, so answer the box's value address. The slot

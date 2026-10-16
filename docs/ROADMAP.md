@@ -45,6 +45,7 @@ Third-party code is the quality bar. Each target has a runnable exit criterion.
 | Target | Status | Done when |
 |---|---|---|
 | symfony/console app (`examples/symfony-console`) | [x] builds and runs | output matches php on its command set |
+| Symfony framework app (`examples/symfony-app`) | [x] builds and serves | routes answer 200/404 like php; cold `var/` first request included |
 | php-cs-fixer (`@PSR12`, `@Symfony`) | [~] runs natively with a parallel worker pool; `@Symfony` output matches php | whole rule corpus matches php; speed competitive with native fixers |
 | symfony-demo (full framework, ~79k functions) | [~] builds and runs to completion | no missing-function traps; pages answer like php |
 | HTTP server benchmark workload | [~] 64k req/s on one process, 124k on eight workers | competitive with established PHP servers |
@@ -128,7 +129,8 @@ Compute-heavy code already runs 2–50× faster than php 8.5; associative arrays
 - [ ] References that agree with their target's representation
 - [ ] Integer overflow promoting to float (needs value-range analysis)
 - [ ] Visibility enforcement (`__get` on inaccessible members, `(array)` key mangling)
-- [ ] `extract()`, `settype()`, `goto` into loops, `ReflectionEnum`
+- [x] `extract()` (+ an `include` inside a function runs the template in its scope)
+- [ ] `settype()`, `goto` into loops, `ReflectionEnum`
 
 Known semantic gaps in detail: [`gaps.md`](gaps.md).
 

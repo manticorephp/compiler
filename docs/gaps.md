@@ -29,8 +29,12 @@ consistent across the `global $x` / top-level / `$GLOBALS` views since `globals_
 properties `"0"`/`"1"` (`{"0":10,"1":20}` vs `[10,20]`) — the cast would have to rebuild a vec
 as a string-keyed assoc; `tests/aot/cases/object_cast_bag_repr.php` names it.
 
-`['a'] === ['a']` compares pointers rather than contents, and `extract()` is unimplemented
-(dynamic symbol-table writes the typed frame does not model). `compact()` works.
+`['a'] === ['a']` compares pointers rather than contents. `extract()` writes the locals the
+function names (templates it includes count): a key no code of the function names is counted
+and dropped, `EXTR_REFS` throws, and a local holding NULL reads as undefined to `EXTR_SKIP` /
+`EXTR_IF_EXISTS`. An `include` inside a function of a file that is no compile unit (a template)
+runs it in the function's scope; the candidates are the constant path, or the files under the
+constant directory prefix of the path (at most 64). `compact()` works.
 
 ### Ownership redesign — what PR #15 leaves open (2026-10-06)
 

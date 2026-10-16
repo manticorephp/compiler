@@ -600,6 +600,16 @@ trait EmitLlvmControl
         return $out;
     }
 
+    /** Whether the loop's subject is statically only `Traversable`: Iterator or IteratorAggregate is a run-time fact. */
+    private function travSubjectNeedsRuntimeKind(\Compile\Mir\Foreach_ $fe): bool
+    {
+        $c = \ltrim($fe->array->type->class ?? '', '\\');
+        if ($c === '' || $c === 'Generator' || isset($this->classes[$c])) { return false; }
+        if ($c === 'Iterator' || $c === 'IteratorAggregate') { return false; }
+        if ($c !== 'Traversable' && !$this->classImplements($c, 'Traversable')) { return false; }
+        return !$this->classImplements($c, 'Iterator') && !$this->classImplements($c, 'IteratorAggregate');
+    }
+
     private function emitForeachObject(\Compile\Mir\Foreach_ $fe): string
     {
         $out = '';
@@ -612,6 +622,17 @@ trait EmitLlvmControl
             $ks = $this->ssa->allocReg();
             $this->locals->slots[$fe->keyVar] = $ks;
             $out .= '  ' . $ks . " = alloca i64\n";
+        }
+        // A subject typed `Traversable` (or an interface that only extends it) is an Iterator, an
+        // IteratorAggregate or a Generator at run time: taken for an Iterator it had `rewind()` called
+        // on an aggregate, which wrote through another class's layout (heap corruption on glibc, an
+        // empty loop elsewhere). The erased loop asks the object which it is.
+        // (Not inside a generator: the erased loop keeps its state in allocas, which a resume does not
+        // restore; there the Iterator protocol is still assumed.)
+        if (!$this->gen->inGenerator && $this->travSubjectNeedsRuntimeKind($fe)) {
+            $out .= $this->emitNode($fe->array);
+            $out .= $this->coerceToI64();
+            return $out . $this->emitForeachErasedIterator($fe, $this->lastValue);
         }
         // Hold the iterator in a synthetic local; protocol calls load it from
         // there so the subject expression is evaluated exactly once. The slot
@@ -693,7 +714,7 @@ trait EmitLlvmControl
         $el = $at->element;
         if (!$fe->ownCoOwn && ($el === null || $el->kind === Type::KIND_UNKNOWN
             || $el->kind === Type::KIND_CELL || $this->own->flavorOf($el) > 0)) { return ''; }
-        if ($fe->keyVar !== null && !$at->isVec()) { return ''; }
+        if ($fe->keyVar !== null && !$at->isVec() && !$this->litKeysAreConstants($fe->array)) { return ''; }
         // A literal holds one reference on each array element (a fresh one
         // transferred, a borrowed one retained); `vecbuf` is the ARGUMENT
         // answer, where the call gives those back. Here nobody else does: the
@@ -706,18 +727,21 @@ trait EmitLlvmControl
     }
 
     /**
-     * The pairwise release of a {@see foreachBodyMutatesBase} snapshot, or ''
-     * when no flavor is known (the copy then stays a bounded leak rather than
-     * dropping refs it may not hold). An erased / cell base and a cell element
-     * walk by the buffer's hint, as the copy's adopt does.
+     * A literal whose every key is written out as a constant: the key the loop
+     * hands out is a static string or an int, which outlives the array, so the
+     * loop may release it. Refused, `foreach (['a' => [..]] as $k => $v)` leaked
+     * the literal on every pass.
      */
-    private function snapshotReleaseFlavor(Type $at, string $baseKind): string
+    private function litKeysAreConstants(Node $n): bool
     {
-        if ($baseKind === Type::KIND_CELL || $baseKind === Type::KIND_UNKNOWN) { return 'veccellown'; }
-        if (!$at->isArray()) { return ''; }
-        $el = $at->element;
-        if ($el === null || $el->kind === Type::KIND_CELL || $el->kind === Type::KIND_UNKNOWN) { return 'veccellown'; }
-        return $this->discardReleaseFlavor($at);
+        if (!($n instanceof \Compile\Mir\ArrayLit)) { return false; }
+        foreach ($n->elements as $el) {
+            $k = $el->key;
+            if ($k === null || ($k->kind !== Node::KIND_STRING_CONST && $k->kind !== Node::KIND_INT_CONST)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private function releaseAggIterSlot(string $iterSlot, bool $dyn, string $flag = '', string $flavor = ''): string
@@ -895,6 +919,9 @@ trait EmitLlvmControl
         if ($k === Node::KIND_CAST && $arm->type->kind === Type::KIND_STRING) {
             return $this->isFreshStringTemp($arm);
         }
+        // `(array)$obj` builds a fresh map (Caster::castObject's
+        // `$o instanceof \Closure ? [] : (array) $o`): retained again, it leaked whole.
+        if ($arm instanceof \Compile\Mir\Cast && \Compile\Mir\Ownership::castArrayMints($arm)) { return true; }
         return $this->condOwnsResult($arm);
     }
 
@@ -1649,9 +1676,7 @@ trait EmitLlvmControl
         // SNAPSHOT of a by-value foreach, so the deletions do not disturb the
         // walk. That is not free here: an unset on a packed buffer promotes it
         // to the hashed layout, which RELOCATES, and the loop would keep
-        // walking the freed base. Copy up front for this shape only; the copy
-        // is a bounded leak (conservative direction — never free a buffer the
-        // body may still hand out).
+        // walking the freed base. Copy up front for this shape only.
         $snapSlot = '';
         $snapFlavor = '';
         if ($this->foreachBodyMutatesBase($fe)) {
@@ -1659,15 +1684,17 @@ trait EmitLlvmControl
             $out .= '  ' . $snap . ' = call ptr @__mir_array_copy(ptr ' . $arr . ")\n";
             $arr = $snap;
             // The copy is a VALUE copy that owns its element refs: the loop gives
-            // it back at its end and on every jump out, pairwise like its adopt.
-            $snapFlavor = $this->snapshotReleaseFlavor($fe->array->type, $bk);
-            if ($snapFlavor !== '') {
-                $snapSlot = $this->ssa->allocReg();
-                $out .= '  ' . $snapSlot . " = alloca i64\n";
-                $sw = $this->ssa->allocReg();
-                $out .= '  ' . $sw . ' = ptrtoint ptr ' . $snap . " to i64\n";
-                $out .= '  store i64 ' . $sw . ', ptr ' . $snapSlot . "\n";
-            }
+            // it back at its end and on every jump out. `__mir_array_copy` adopts
+            // by the buffer's hint, else by its repr bits, so only the plain
+            // release mirrors it. A static flavor (`_ownel_cell`) dropped every
+            // element of an unstamped buffer the copy had adopted none of:
+            // `foreach ((array) $obj …)` with a write freed the object's arrays.
+            $snapFlavor = 'vec';
+            $snapSlot = $this->ssa->allocReg();
+            $out .= '  ' . $snapSlot . " = alloca i64\n";
+            $sw = $this->ssa->allocReg();
+            $out .= '  ' . $sw . ' = ptrtoint ptr ' . $snap . " to i64\n";
+            $out .= '  store i64 ' . $sw . ', ptr ' . $snapSlot . "\n";
         }
         // Empty vec/assoc literals lower to a null ptr; reading the length
         // word from null faults. Redirect a null base to a shared zero word
@@ -1953,19 +1980,21 @@ trait EmitLlvmControl
             // therefore the next one to visit.
             $out .= '  br i1 ' . $has . ', label %' . $wbL . ', label %' . $condLabel . "\n";
             $out .= $wbL . ":\n";
-            $out .= $this->foreachElemAddrUnified($na2, $pos);
-            $wv = $this->ssa->allocReg();
-            $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
-            $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $na2, $wv, $fe->array->type->element);
-            $wb = $this->lastValue;
-            $out .= $this->foreachRefTargetAddr($this->feAddr, $fe->array->type);
-            $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
+            if (!$fe->bindRef) {
+                $out .= $this->foreachElemAddrUnified($na2, $pos);
+                $wv = $this->ssa->allocReg();
+                $out .= '  ' . $wv . ' = load i64, ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+                $out .= $this->foreachWriteBackEncode($feFlagUsed ? $feFlag : '', $na2, $wv, $fe->array->type->element);
+                $wb = $this->lastValue;
+                $out .= $this->foreachRefTargetAddr($this->feAddr, $fe->array->type);
+                $out .= '  store i64 ' . $wb . ', ptr ' . $this->feAddr . "\n";
+            }
             $np = $this->ssa->allocReg();
             $out .= '  ' . $np . ' = add i64 ' . $pos . ", 1\n";
             $out .= '  store i64 ' . $np . ', ptr ' . $iSlot . "\n";
             $out .= '  br label %' . $condLabel . "\n";
         } else {
-            if ($fe->byRef) {
+            if ($fe->byRef && !$fe->bindRef) {
                 $out .= $this->foreachElemAddrUnified($arr, $si);
                 $wAddr = $this->feAddr;
                 $wv = $this->ssa->allocReg();
@@ -2202,6 +2231,19 @@ trait EmitLlvmControl
         $out .= '  ' . $addr . ' = load i64, ptr ' . $slot . "\n";
         $p = $this->ssa->allocReg();
         $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
+        // A box this frame owns holds a value it owns, and its scope-exit
+        // release drops it ({@see ownedBoxReleaseIr}): the element / key the
+        // loop binds is a BORROW of the buffer, so the box takes its own +1 and
+        // gives back the previous iteration's — the pair `$v = …` takes in
+        // emitStoreLocal's ref arm. Storing the borrow bare dropped the last
+        // element at return: `foreach ($a as $k => $v) { … $a[$k] = &$v; }` freed
+        // what the caller's array still held.
+        $flavor = isset($this->locals->ownedBoxes[$name]) && !isset($this->frame->ownLocals[$name])
+            ? $this->ownedBoxFlavor($name) : '';
+        if ($flavor !== '') {
+            $out .= $this->rcRetainReg($val, $flavor);
+            $out .= $this->ownedBoxOverwriteIr($name, $addr);
+        }
         $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         return $out;
     }
@@ -2314,12 +2356,34 @@ trait EmitLlvmControl
         $defaultTarget = $defaultAi >= 0 ? ($base . '_b' . (string)$defaultAi) : $endLabel;
         $firstTarget = $nv > 0 ? ($base . '_t0') : $defaultTarget;
 
-        // Dispatch — chained equality tests over the value arms.
-        $out .= '  br label %' . $firstTarget . "\n";
+        // An int subject over int-literal arms is one LLVM `switch` — a line per
+        // arm and a binary search, not a 3-line compare chain walked in order
+        // (the class-id dispatchers carry thousands of arms). The first of two
+        // equal literals wins, as in the chain.
+        $litOnly = $subjK === Type::KIND_INT && $nv >= 4;
+        foreach ($arms as $arm) {
+            if ($arm->value !== null && !($arm->value instanceof \Compile\Mir\IntConst)) { $litOnly = false; }
+        }
+        if ($litOnly) {
+            $out .= '  switch i64 ' . $subj . ', label %' . $defaultTarget . " [\n";
+            $seen = [];
+            $ai = 0;
+            foreach ($arms as $arm) {
+                if ($arm->value instanceof \Compile\Mir\IntConst && !isset($seen[$arm->value->value])) {
+                    $seen[$arm->value->value] = true;
+                    $out .= '    i64 ' . (string)$arm->value->value . ', label %' . $base . '_b' . (string)$ai . "\n";
+                }
+                $ai = $ai + 1;
+            }
+            $out .= "  ]\n";
+            $nv = 0;
+        } else {
+            $out .= '  br label %' . $firstTarget . "\n";
+        }
         $ai = 0;
         $vi = 0;
         foreach ($arms as $arm) {
-            if ($arm->value !== null) {
+            if ($arm->value !== null && !$litOnly) {
                 $out .= $base . '_t' . (string)$vi . ":\n";
                 $out .= $this->emitNode($arm->value);
                 $vk = $arm->value->type->kind;

@@ -1,0 +1,17 @@
+c1x,c1y,c2x,c2y,c3x,c3y
+c1x,c1y,c2x,c2y
+c1x,c1y
+c1x,c1y,c2x,c2y,c3x,c3y
+c1x,c1y,c2x,c2y
+c1x,c1y
+c1x,c1y,c2x,c2y,c3x,c3y
+c1x,c1y,c2x,c2y
+c1x,c1y
+stub c1y
+stub c1y
+dtor stub c1x
+dtor stub c1y
+dtor stub c2x
+dtor stub c2y
+dtor stub c3x
+dtor stub c3y

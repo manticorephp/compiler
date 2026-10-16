@@ -310,6 +310,9 @@ final class EmitLlvm implements EmitVisitor
 
     /** Compiler-owned lightweight method tables for erased dynamic calls. */
     private bool $dynamicMethodMeta = false;
+    /** @var array<string, array<int, bool>> fn name => by-ref param index a closure captures by reference */
+    private array $escapingRefParams = [];
+
     /** @var array<string, bool> {@see Module::$callableArrayMethods} */
     private array $callableArrayMethods = [];
 
@@ -688,6 +691,7 @@ final class EmitLlvm implements EmitVisitor
         $this->magicPropertyHoldersCache = [];
         $this->propertyReadHelpers = [];
         $this->dynamicMethodHelpers = [];
+        $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;
         $this->reflectNames = $module->reflectNames;
         $this->reflectAll = $module->reflectAll;
@@ -792,6 +796,7 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
             $this->sigs->returnType[$fn->name] = $fn->returnType;
             $this->sigs->usesFuncArgs[$fn->name] = $fn->usesFuncArgs;
+            $this->recordEscapingRefParams($fn);
             // One callee that asks arms the channel for the whole module: the
             // push is per-call-site, but the global and its take helper are
             // emitted once, here, before any body is.
@@ -805,6 +810,7 @@ final class EmitLlvm implements EmitVisitor
             // asm + @__mir_current_fiber (mirrors the needsExceptions pre-scan).
             if ($fn->name === '__mc_fiber_run') { $this->rt->needsFibers = true; }
         }
+        $this->propagateEscapingRefParams($module);
         $this->armFccShims($module->functions);
         // Pre-scan for `$gen->throw($e)`: a yield resume point must check for
         // an injected exception. Must be known BEFORE emitting any generator
@@ -836,11 +842,13 @@ final class EmitLlvm implements EmitVisitor
         $this->cellPropArrayBase = [];
         $this->refCellPropNames = [];
         $this->needsObjectVarsFn = false;
+        $this->needsObjectVarsMgFn = false;
         $this->needsGetClassFn = false;
         $this->needsBagOfFn = false;
         $this->needsBoxUnknownFn = false;
         $this->eidxNeeded = [];
         $this->newDynNeeded = [];
+        $this->newDynRestNeeded = [];
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
@@ -850,6 +858,7 @@ final class EmitLlvm implements EmitVisitor
         $this->vdExtraBodies = '';
         $this->cloneErasedSym = '';
         $this->dynmSyms = [];
+        $this->dynInlSyms = [];
         $this->dynmExtraBodies = '';
         $this->scmpSyms = [];
         $this->scmpExtraBodies = '';
@@ -1163,6 +1172,7 @@ final class EmitLlvm implements EmitVisitor
         $extraBodies .= $this->emitNewDynFns();
         $extraBodies .= $this->emitErasedIndexFns();
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
+        if ($this->needsObjectVarsMgFn) { $extraBodies .= $this->emitObjectVarsFn(true); }
         if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         if ($this->needsBoxUnknownFn) { $extraBodies .= $this->emitBoxUnknownFn(); }
@@ -2005,6 +2015,8 @@ final class EmitLlvm implements EmitVisitor
     /** A site asked for `get_object_vars`' class-table walk, so the module needs
      *  the one shared body ({@see EmitLlvmBuiltins::emitObjectVarsFn}). */
     private bool $needsObjectVarsFn = false;
+    /** Same walk, keys mangled for the `(array)` cast. */
+    private bool $needsObjectVarsMgFn = false;
 
     /** A site asked for the erased `get_class()` body. */
     private bool $needsGetClassFn = false;
@@ -2030,6 +2042,10 @@ final class EmitLlvm implements EmitVisitor
      *  chain each ({@see EmitLlvmObjects::emitNewDynFns}). */
     /** @var array<string, \Compile\Mir\NewDynShape> */
     private array $newDynNeeded = [];
+
+    /** {@see EmitLlvmObjects::emitNewDynByTable}'s shared rest chains: symbol → [srcArgc, boxResult]. */
+    /** @var array<string, array{0: int, 1: bool}> */
+    private array $newDynRestNeeded = [];
 
     /**
      * Erased-interface dispatchers this module needs
@@ -2795,12 +2811,13 @@ final class EmitLlvm implements EmitVisitor
         $this->rt->needsStrtod = true;
         $out = $this->emitNode($left);
         $out .= $this->boxToCell($left->type);
-        $out .= $this->cellArithGuard($left, $left, $right, $op);
+        if ($op !== 'add') { $out .= $this->cellArithGuard($left, $left, $right, $op); }
         $l = $this->lastValue;
         $out .= $this->emitNode($right);
         $out .= $this->boxToCell($right->type);
-        $out .= $this->cellArithGuard($right, $left, $right, $op);
+        if ($op !== 'add') { $out .= $this->cellArithGuard($right, $left, $right, $op); }
         $r = $this->lastValue;
+        if ($op === 'add') { $out .= $this->cellAddGuard($left, $right, $l, $r); }
         $reg = $this->ssa->allocReg();
         if ($op === 'add' || $op === 'sub') {
             $out .= $this->taggedIntStepInline($op, $l, $r, $reg);
@@ -3441,6 +3458,15 @@ final class EmitLlvm implements EmitVisitor
         // brings its own, a borrow is retained by rcRetainByType's closure arm).
         if ($this->isClosureValueType($pt)) { return 'closure'; }
         $flavor = $this->discardReleaseFlavor($pt);
+        // A bare `array` slot whose element erased to `unknown` is still an array,
+        // and owns it: every overwrite gives the old buffer back through the
+        // repr-dispatching `__mir_array_release`. With no flavor the drop body
+        // skipped the slot and leaked the last value whole — FlattenException's
+        // `private array $trace`, ~5 KB a Symfony error page.
+        if ($flavor === '' && $pt->kind === Type::KIND_UNKNOWN
+            && ($cls->propertyArrayHinted[$prop] ?? false)) {
+            $flavor = 'vec';
+        }
         if (!\Compile\Debug::$rcPropDrop) { return $flavor; }
         if ($this->moduleIsLibrary || $cls->isExternClass || $cls->isPreludeClass) { return $flavor; }
         // A BARE `array` slot names no element type, so it gets no element-aware
@@ -3813,6 +3839,35 @@ final class EmitLlvm implements EmitVisitor
      */
     private function emitToStringCall(string $tsClass, string $staticClass = ''): string
     {
+        return $this->emitToStringDispatch($tsClass, $this->toStringCandidates($staticClass, $tsClass));
+    }
+
+    /**
+     * `__toString` of an object union (`obj<Ref>|obj<TRef>`, a match over two
+     * `new`s): every atom's candidates, dispatched like {@see emitToStringCall}.
+     * '' when an atom is not an object whose class answers `__toString`.
+     */
+    private function emitUnionToString(Type $t): string
+    {
+        $cands = [];
+        $first = '';
+        foreach ($t->atoms as $at) {
+            $cls = $at->kind === Type::KIND_OBJ ? ($at->class ?? '') : '';
+            if ($cls === '') { return ''; }
+            $ts = $this->resolveMethodClass($cls, '__toString');
+            if ($ts === '') { return ''; }
+            if ($first === '') { $first = $ts; }
+            foreach ($this->toStringCandidates($cls, $ts) as $c) {
+                if (!\in_array($c, $cands, true)) { $cands[] = $c; }
+            }
+        }
+        if ($first === '') { return ''; }
+        return $this->emitToStringDispatch($first, $cands);
+    }
+
+    /** @param string[] $cands */
+    private function emitToStringDispatch(string $tsClass, array $cands): string
+    {
         $out = $this->coerceToI64();
         $obj = $this->lastValue;
         // VIRTUAL, when the static type has descendants that answer differently.
@@ -3822,8 +3877,9 @@ final class EmitLlvm implements EmitVisitor
         // ReflectionType hierarchy is the witness: every subclass returned the
         // base's empty string. Reuses the ordinary method dispatch, so the two
         // cannot drift.
-        $cands = $this->toStringCandidates($staticClass, $tsClass);
-        if (\count($cands) > 1) {
+        $bodies = [];
+        foreach ($cands as $c) { $bodies[$this->resolveMethodClass($c, '__toString')] = true; }
+        if (\count($bodies) > 1) {
             $targets = [];
             foreach ($cands as $c) {
                 $targets[$c] = $this->resolveMethodClass($c, '__toString') . '____toString';
@@ -4121,6 +4177,134 @@ final class EmitLlvm implements EmitVisitor
      * empty channel has a defined meaning (fall back to the declared arity)
      * and a stale one does not.
      */
+    /**
+     * The by-ref params of `$fn` a closure in its body captures BY REFERENCE —
+     * {@see emitRefValueSlot} backs an omitted default for one with a heap box.
+     */
+    private function recordEscapingRefParams(\Compile\Mir\FunctionDef $fn): void
+    {
+        $any = false;
+        foreach ($fn->params as $p) { if ($p->byRef) { $any = true; } }
+        if (!$any || !$this->bodyHasClosure($fn->body)) { return; }
+        /** @var array<string, bool> $names */
+        $names = [];
+        $this->byRefCaptureNames($fn->body, $names);
+        $i = 0;
+        foreach ($fn->params as $p) {
+            if ($p->byRef && isset($names[$p->name])) { $this->escapingRefParams[$fn->name][$i] = true; }
+            $i = $i + 1;
+        }
+    }
+
+    /**
+     * A by-ref param handed on BY REF to a param that escapes escapes too:
+     * symfony's `get()` → `doGet($id, $b, &$inline = null)` → `createService(…,
+     * $inline)` → `doResolveServices(…, $inline)`, whose generator captures it.
+     * The omitted default is backed where `doGet` is called, so that is the frame
+     * whose slot must be a box. Fixpoint over the module's direct calls.
+     */
+    private function propagateEscapingRefParams(Module $module): void
+    {
+        if ($this->escapingRefParams === []) { return; }
+        $changed = true;
+        $guard = 0;
+        while ($changed && $guard < 16) {
+            $changed = false;
+            $guard = $guard + 1;
+            foreach ($module->functions as $fn) {
+                /** @var array<string, int> $refIdx */
+                $refIdx = [];
+                $i = 0;
+                foreach ($fn->params as $p) {
+                    if ($p->byRef && !isset($this->escapingRefParams[$fn->name][$i])) { $refIdx[$p->name] = $i; }
+                    $i = $i + 1;
+                }
+                if ($refIdx === []) { continue; }
+                /** @var array<string, bool> $hit */
+                $hit = [];
+                $this->escapingRefArgs($fn->body, $refIdx, $hit);
+                foreach ($hit as $name => $_) {
+                    $this->escapingRefParams[$fn->name][$refIdx[$name]] = true;
+                    $changed = true;
+                }
+            }
+        }
+    }
+
+    /**
+     * Which of `$refIdx`'s locals `$n` passes as a bare variable to an escaping
+     * by-ref param of a directly resolvable callee.
+     * @param array<string, int> $refIdx @param array<string, bool> $hit
+     */
+    private function escapingRefArgs(Node $n, array $refIdx, array &$hit): void
+    {
+        $key = '';
+        $off = 0;
+        $args = [];
+        if ($n->kind === Node::KIND_CALL) {
+            $key = $this->escCallKey($n);
+            $args = $this->escArgs;
+        } elseif ($n->kind === Node::KIND_STATIC_CALL) {
+            $key = $this->escStaticKey($n);
+            $args = $this->escArgs;
+        } elseif ($n->kind === Node::KIND_METHOD_CALL) {
+            $key = $this->escMethodKey($n);
+            $args = $this->escArgs;
+            $off = 1;
+        }
+        if ($key !== '' && isset($this->escapingRefParams[$key])) {
+            foreach ($args as $ai => $a) {
+                if ($a->kind === Node::KIND_LOAD_LOCAL && isset($refIdx[$a->name])
+                    && ($this->escapingRefParams[$key][(int)$ai + $off] ?? false)) {
+                    $hit[$a->name] = true;
+                }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->escapingRefArgs($c, $refIdx, $hit); }
+    }
+
+    /** @var Node[] the args of the call the last esc*Key read */
+    private array $escArgs = [];
+
+    private function escCallKey(\Compile\Mir\Call $c): string { $this->escArgs = $c->args; return $c->function; }
+
+    private function escStaticKey(\Compile\Mir\StaticCall_ $c): string
+    {
+        $this->escArgs = $c->args;
+        $cls = $this->resolveMethodClass($c->class, $c->method);
+        return ($cls !== '' ? $cls : $c->class) . '__' . $c->method;
+    }
+
+    private function escMethodKey(\Compile\Mir\MethodCall_ $c): string
+    {
+        $this->escArgs = $c->args;
+        $rc = $c->object->type->class ?? '';
+        $cls = $rc !== '' ? $this->resolveMethodClass($rc, $c->method) : '';
+        return $cls !== '' ? $cls . '__' . $c->method : '';
+    }
+
+    private function bodyHasClosure(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_CLOSURE) { return true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { if ($this->bodyHasClosure($c)) { return true; } }
+        return false;
+    }
+
+    /** @param array<string, bool> $out */
+    private function byRefCaptureNames(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_CLOSURE) {
+            $cl = $n;
+            $i = 0;
+            foreach ($cl->captures as $c) {
+                if (($cl->captureByRef[$i] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) { $out[$c->name] = true; }
+                $i = $i + 1;
+            }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->byRefCaptureNames($c, $out); }
+    }
+
     private function faPop(): string
     {
         if (!$this->rt->needsFuncArgs) { return ''; }

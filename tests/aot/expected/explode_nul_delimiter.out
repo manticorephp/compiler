@@ -1,0 +1,9 @@
+Class "Foo" not found.
+Class "plain" not found.
+["a","b","c"]
+["a","b\u0000c"]
+["a","b"]
+[""]
+["a","c","d"]
+["x","y","","z"]
+["","",""]

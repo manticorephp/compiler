@@ -3912,6 +3912,9 @@ final class Server
     public function serve(callable $handler): void
     {
         $this->handler = $handler;
+        if ($this->compat) {
+            \__mc_sapi_server(1);
+        }
         if (\Async\Context::currentScope() !== null) {
             $this->loop();
             return;

@@ -1,0 +1,6 @@
+closure 0
+c N\Configurator false false -
+env string true false 'dev'
+n int true true NULL
+void
+run prod

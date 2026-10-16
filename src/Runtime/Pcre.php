@@ -29,6 +29,10 @@ function ovectorPtr(int $matchData): Ptr {}
 #[Library('pcre2-8'), Symbol('pcre2_get_ovector_count_8')]
 function ovectorCount(int $matchData): int {}
 
+/** `PCRE2_SPTR pcre2_get_mark(pcre2_match_data *)` — the last `(*MARK:name)` / `(*:name)` passed, or NULL. */
+#[Library('pcre2-8'), Symbol('pcre2_get_mark_8')]
+function getMark(int $matchData): int {}
+
 #[Library('pcre2-8'), Symbol('pcre2_match_data_free_8')]
 function matchDataFree(int $matchData): void {}
 

@@ -1,0 +1,24 @@
+Parameter #0 [ <required> int $a ]
+  default is NULL: false
+Parameter #1 [ <optional> ?N\K $b = NULL ]
+  default is NULL: true
+Parameter #2 [ <optional> string|int $c = 'x' ]
+  default is NULL: false
+Parameter #3 [ <optional> array $d = [] ]
+  default is NULL: false
+Parameter #4 [ <optional> $e = [1, 2] ]
+  default is NULL: false
+Parameter #5 [ <optional> float $f = 1.5 ]
+  default is NULL: false
+Parameter #6 [ <optional> bool $g = true ]
+  default is NULL: false
+Parameter #7 [ <optional> ...$rest ]
+  default is NULL: false
+Parameter #0 [ <required> &$r ]
+  default is NULL: false
+Parameter #1 [ <required> N\K $k ]
+  default is NULL: false
+Parameter #2 [ <optional> $s = 'text' ]
+  default is NULL: false
+Parameter #3 [ <optional> ?int $n = NULL ]
+  default is NULL: true

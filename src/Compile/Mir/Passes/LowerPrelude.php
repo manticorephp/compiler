@@ -371,7 +371,7 @@ trait LowerPrelude
         $soft = "function __mir_obj_to_str_soft(mixed \$v): ?string {\n" . $head;
         $arm = 0;
         $helperByOwner = [];
-        foreach ($this->walkableClassesDerivedFirst() as $cname) {
+        foreach ($this->walkableClassesDerivedFirst(true) as $cname) {
             $owner = $this->methodOwnerClass($cname, "__toString");
             if ($owner === "") { continue; }
             if (isset($helperByOwner[$owner])) {
@@ -584,7 +584,8 @@ trait LowerPrelude
         return $p !== false && isset($this->walkerReachableClasses[\substr($cname, $p + 1)]);
     }
 
-    private function walkableClassesDerivedFirst(): array
+    /** @param bool $all every class, not only the ones a walker reaches (a `__toString` arm must not depend on reachability) */
+    private function walkableClassesDerivedFirst(bool $all = false): array
     {
         $names = [];
         $depths = [];
@@ -592,7 +593,7 @@ trait LowerPrelude
             if ($cname === "stdClass") { continue; }
             if ($cd->isStruct) { continue; }
             if ($this->isTypeDef($cname)) { continue; }
-            if ($this->walkerReachabilityKnown) {
+            if ($this->walkerReachabilityKnown && !$all) {
                 // A prelude class is born inside a builtin (date_create(),
                 // IntlTimeZone::createTimeZone()), where no user `new` names it;
                 // without an arm the bag walk reads a declared object as a bag.
@@ -747,6 +748,7 @@ trait LowerPrelude
         foreach ($groups as $g => $members) {
             $helper = '__mc_ser_object_group_' . (string)$g;
             $body .= "function " . $helper . "(mixed \$v, __McSerSt \$st): string {\n";
+            $labels = '';
             foreach ($members as $cname) {
                 $cd = $this->classTable[$cname];
                 $props = $cd->propertyNames;
@@ -782,8 +784,9 @@ trait LowerPrelude
                     $body .= "        return \"" . $this->dqBody($head . (string)count($props) . ':{') . "\"\n"
                         . $entries . "          . '}';\n      }\n";
                 }
-                $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$st);\n";
+                $labels .= "    case " . (string)$cd->classId . ":\n";
             }
+            $dispatch .= $labels . "      return " . $helper . "(\$v, \$st);\n";
             $body .= "  return '';\n}\n";
         }
         $dispatch .= "  }\n"
@@ -1280,6 +1283,9 @@ trait LowerPrelude
         if ($name === 'STDIN')  { return $this->stdStreamNode(0); }
         if ($name === 'STDOUT') { return $this->stdStreamNode(1); }
         if ($name === 'STDERR') { return $this->stdStreamNode(2); }
+        // A runtime read, not a fold: a compat Http\Server flips the process to
+        // 'cli-server' once it serves (php_sapi_name() in the stdlib).
+        if ($name === 'PHP_SAPI') { return new Call('php_sapi_name', [], Type::string_()); }
 
         return $this->preludeConstInt($name);
     }
@@ -1490,8 +1496,11 @@ trait LowerPrelude
             'SORT_DESC' => 3, 'SORT_ASC' => 4, 'SORT_LOCALE_STRING' => 5,
             'SORT_NATURAL' => 6, 'SORT_FLAG_CASE' => 8,
             // count / array_filter
-            'COUNT_NORMAL' => 0, 'COUNT_RECURSIVE' => 1,
+            'COUNT_NORMAL' => 0, 'COUNT_RECURSIVE' => 1, 'CASE_LOWER' => 0, 'CASE_UPPER' => 1,
             'ARRAY_FILTER_USE_KEY' => 2, 'ARRAY_FILTER_USE_BOTH' => 1,
+            'EXTR_OVERWRITE' => 0, 'EXTR_SKIP' => 1, 'EXTR_PREFIX_SAME' => 2, 'EXTR_PREFIX_ALL' => 3,
+            'EXTR_PREFIX_INVALID' => 4, 'EXTR_PREFIX_IF_EXISTS' => 5, 'EXTR_IF_EXISTS' => 6,
+            'EXTR_REFS' => 256,
             // round modes
             'PHP_ROUND_HALF_UP' => 1, 'PHP_ROUND_HALF_DOWN' => 2,
             'PHP_ROUND_HALF_EVEN' => 3, 'PHP_ROUND_HALF_ODD' => 4,
@@ -1683,8 +1692,15 @@ trait LowerPrelude
             'PASSWORD_DEFAULT' => '2y', 'PASSWORD_BCRYPT' => '2y', 'PASSWORD_ARGON2I' => 'argon2i',
             'PASSWORD_ARGON2ID' => 'argon2id', 'PASSWORD_ARGON2_PROVIDER' => 'standard',
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
-            'PHP_VERSION' => '8.5.11', 'PHP_SAPI' => 'cli', 'PHP_EXTRA_VERSION' => '',
+            'PHP_VERSION' => '8.5.11', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
+            'DATE_ATOM' => 'Y-m-d\\TH:i:sP', 'DATE_COOKIE' => 'l, d-M-Y H:i:s T',
+            'DATE_ISO8601' => 'Y-m-d\\TH:i:sO', 'DATE_ISO8601_EXPANDED' => 'X-m-d\\TH:i:sP',
+            'DATE_RFC822' => 'D, d M y H:i:s O', 'DATE_RFC850' => 'l, d-M-y H:i:s T',
+            'DATE_RFC1036' => 'D, d M y H:i:s O', 'DATE_RFC1123' => 'D, d M Y H:i:s O',
+            'DATE_RFC7231' => 'D, d M Y H:i:s \\G\\M\\T', 'DATE_RFC2822' => 'D, d M Y H:i:s O',
+            'DATE_RFC3339' => 'Y-m-d\\TH:i:sP', 'DATE_RFC3339_EXTENDED' => 'Y-m-d\\TH:i:s.vP',
+            'DATE_RSS' => 'D, d M Y H:i:s O', 'DATE_W3C' => 'Y-m-d\\TH:i:sP',
             // No PHP interpreter beside a compiled binary — the PhpExecutableFinder
             // path is unreachable in a manticore build. Empty keeps references
             // compiling; a program that actually spawns `php` would need a real value.

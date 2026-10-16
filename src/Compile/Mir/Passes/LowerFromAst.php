@@ -299,6 +299,14 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentLowerParamHints = [];
 
+    /**
+     * Names the closure being lowered captures BY VALUE out of an enclosing
+     * bare-`array` param (or such a capture itself): their erased type says
+     * nothing, so a nested closure reads its array-ness from here.
+     * @var array<string, bool>
+     */
+    private array $currentArrayCaps = [];
+
     /** BY-REF parameter names of the body being lowered: such a name is already
      *  defined — it IS the caller's variable — so a `#[RefOut]` argument init
      *  must not overwrite it ({@see collectRefOutInits}).
@@ -311,6 +319,12 @@ final class LowerFromAst implements Pass
     private bool $sawDynFnExists = false;
     /** A `get_defined_functions()` call was lowered ({@see definedFunctionsSource}). */
     private bool $sawGetDefinedFns = false;
+    /** @var array<string, bool> lowercased method names any `[$x, 'name']` literal spells, static receiver included */
+    private array $callableNamesAnyRecv = [];
+    /** A `$c::$m(…)` site was lowered: the dispatcher needs every static method of a user class. */
+    private bool $dynStaticAnyMethod = false;
+    /** A `Closure::fromCallable` of a runtime value was lowered ({@see closureFromSource}). */
+    private bool $needsClosureFrom = false;
     /** @var array<string, bool> functions the PROGRAM declares (lowercased) —
      *  get_defined_functions()['user']. */
     private array $userFnNames = [];
@@ -523,6 +537,9 @@ final class LowerFromAst implements Pass
      *  which classes carry metadata: that is ReflectAnalysis's job, because
      *  PreludeDemand cannot see a name hidden in a string literal. */
     public bool $includeReflection = false;
+
+    /** The program asks a reflector for a doc comment or a start line, so every class gets its `__mc_cdoc_` factory. */
+    public bool $includeDocFactories = false;
     /** Reflection prelude source, read by Main from `prelude/reflection.php`. */
     public string $reflectionSrc = '';
     /** Inject PHP's reserved attribute classes (Attribute / Deprecated / Override
@@ -588,6 +605,28 @@ final class LowerFromAst implements Pass
     /** @var array<string, bool> absolute paths of the DEMAND-LOADED source files (composer
      *  psr-4 / classmap), set by the driver — {@see dropShadowedBuiltinTypes} */
     public array $demandLoadedFiles = [];
+
+    /** @var array<string, bool> absolute paths of every COMPILE UNIT, set by the
+     *  driver. An `include` inside a function of a file NOT in this set is
+     *  inlined at the site, in the includer's scope ({@see lowerScopedInclude}). */
+    public array $compileUnitFiles = [];
+
+    /** @var array<string, \Parser\Ast\Stmt[]> parsed inlinable include targets
+     *  by absolute path; an uninlinable one maps to an empty list. */
+    private array $scopedIncludeAst = [];
+
+    /** @var array<string, bool> inlinable include targets that read `$this`. */
+    private array $scopedIncludeThis = [];
+
+    /** @var array<string, bool> include targets being inlined right now (cycle guard). */
+    private array $scopedIncludeStack = [];
+
+    /** True while lowering `__main`'s own statements: a top-level include keeps
+     *  the eager model there. */
+    private bool $lowerInMain = false;
+
+    /** An `extract()` site was lowered: {@see ExtractScope::expand} runs at the end. */
+    private bool $sawExtract = false;
 
     /** True once at least one stdlib extern was injected → driver links stdlib.o. */
     public bool $externInjected = false;
@@ -687,6 +726,8 @@ final class LowerFromAst implements Pass
 
     /** @var string[] the temp names of the lvalue being hoisted */
     private array $lvTemps = [];
+    /** @var string[] value temps of the expression statement being lowered ({@see storeToTarget}) */
+    private array $valueTemps = [];
 
     /** @var array<string, \Parser\Ast\FunctionDecl> fn name → decl (defaults / named args) */
     private array $fnDecls = [];
@@ -1234,6 +1275,16 @@ final class LowerFromAst implements Pass
                 $this->fnDecls[$decl->name] = $decl;
                 $this->pendingSynthFns[] = $decl;
             }
+            foreach ($this->synthFileFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $this->pendingSynthFns[] = $decl;
+            }
+            if ($this->includeDocFactories) {
+                foreach ($this->synthDocFactories($module) as $decl) {
+                    $this->fnDecls[$decl->name] = $decl;
+                    $this->pendingSynthFns[] = $decl;
+                }
+            }
         }
 
         // Pre-pass: capture every function's params so call sites can
@@ -1242,12 +1293,7 @@ final class LowerFromAst implements Pass
             if ($stmt->kind === 'Function') {
                 $fqn = $stmt->decl->name;
                 $this->fnDecls[$fqn] = $stmt->decl;
-                $pos = \strrpos($fqn, '\\');
-                if ($pos !== false) {
-                    $bare = \substr($fqn, $pos + 1);
-                    $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare])
-                        ? '' : $fqn;
-                }
+                $this->noteSourceFnAlias($fqn);
             }
         }
 
@@ -1430,7 +1476,9 @@ final class LowerFromAst implements Pass
             // suppress a top-level out-argument's init.
             $this->currentRefParamNames = [];
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
+            $this->lowerInMain = true;
             $mainStmts[] = $this->lowerStmt($stmt);
+            $this->lowerInMain = false;
             if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
             $lowerMainCount = $lowerMainCount + 1;
         }
@@ -1562,6 +1610,18 @@ final class LowerFromAst implements Pass
         }
         foreach ($module->functions as $cfn) { $this->collectCallableArrayMethods($cfn->body, $module); }
         foreach ($module->functions as $cfn) { $this->collectCallableStaticStrings($cfn->body, $module); }
+        // A static-prop default (VarDumper's `$defaultCasters` map of
+        // `['C', 'm']`) is a callable-array literal no function body spells.
+        foreach ($module->globalDefaults as $gd) { $this->collectCallableArrayMethods($gd, $module); }
+        $this->synthStaticCallable($module);
+        if ($this->needsClosureFrom) {
+            $prog = \Parser\Parser::parseSource("<?php\n" . $this->closureFromSource($module));
+            foreach ($prog->statements as $cfs) {
+                if ($cfs->kind !== 'Function') { continue; }
+                $this->fnDecls[$cfs->decl->name] = $cfs->decl;
+                $module->addFunction($this->lowerFunction($cfs->decl));
+            }
+        }
         $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
@@ -1618,7 +1678,13 @@ final class LowerFromAst implements Pass
                     \Compile\Stats::bump('dynamic.fallback.global_safe', \count($safeDynamicMethodNames));
                     \Compile\Stats::bump('dynamic.fallback.synthesized', 1);
                 }
-                $fallbackSrc = \Compile\Mir\Passes\TrampolineSynth::spreadFallbackSource($safeDynamicMethodNames);
+                /** @var array<string, string[]> $tableless */
+                $tableless = [];
+                foreach ($module->classes as $cd) {
+                    if (!$cd->isStruct && !$cd->isPreludeClass) { continue; }
+                    $tableless[$cd->name] = \array_map('strval', \array_keys($cd->methodNames));
+                }
+                $fallbackSrc = \Compile\Mir\Passes\TrampolineSynth::spreadFallbackSource($safeDynamicMethodNames, $tableless);
                 $fallbackProg = \Parser\Parser::parseSource("<?php\n" . $fallbackSrc);
                 foreach ($fallbackProg->statements as $fstmt) {
                     if ($fstmt->kind !== 'Function') { continue; }
@@ -1666,6 +1732,9 @@ final class LowerFromAst implements Pass
             $odecl = $this->fnDecls[$fd->name] ?? null;
             if ($odecl !== null) { $fd->overloadOf = $this->overloadTarget($this->fnDeclAttrs($odecl)); }
         }
+        if ($this->sawExtract) {
+            ExtractScope::expand($module);
+        }
         $module->markPassApplied(self::NAME);
         return $module;
     }
@@ -1681,12 +1750,46 @@ final class LowerFromAst implements Pass
             $e0 = $node->elements[0];
             $e1 = $node->elements[1];
             if ($e0->key === null && $e1->key === null
-                && $e1->value instanceof \Compile\Mir\StringConst
-                && $e0->value->kind !== Node::KIND_STRING_CONST) {
-                $module->callableArrayMethods[$e1->value->value] = true;
+                && $e1->value instanceof \Compile\Mir\StringConst) {
+                $this->callableNamesAnyRecv[\strtolower($e1->value->value)] = true;
+                if ($e0->value->kind !== Node::KIND_STRING_CONST) {
+                    $module->callableArrayMethods[$e1->value->value] = true;
+                }
             }
         }
         foreach (Walk::children($node) as $child) { $this->collectCallableArrayMethods($child, $module); }
+    }
+
+    /**
+     * `__mc_static_callable` ({@see TrampolineSynth::staticCallableSource}): one arm
+     * per public, by-value static method whose name a callable-array literal spells.
+     */
+    private function synthStaticCallable(Module $module): void
+    {
+        if ($this->callableNamesAnyRecv === [] && !$this->dynStaticAnyMethod) { return; }
+        /** @var array<int, array{0: string, 1: string, 2: bool}> $arms */
+        $arms = [];
+        foreach ($module->classes as $cd) {
+            foreach ($cd->methodMeta as $mn => $mm) {
+                if (!$mm->isStatic || $mm->isAbstract) { continue; }
+                // `$c::$m()` runs inside a class too (`self::$method()` reaches a private one).
+                $any = $this->dynStaticAnyMethod && !$cd->isPreludeClass;
+                if (!$any && ($mm->visibility !== 'public'
+                    || !isset($this->callableNamesAnyRecv[\strtolower((string)$mn)]))) { continue; }
+                $byRef = false;
+                foreach ($mm->params as $p) { if ($p->byRef) { $byRef = true; } }
+                if ($byRef) { continue; }
+                $arms[] =[$cd->name, (string)$mn, \strtolower($mm->returnType) === 'void'];
+            }
+        }
+        if (isset($this->callableNamesAnyRecv['fromcallable'])) { $arms[] = ['Closure', 'fromCallable', false]; }
+        if ($arms === []) { return; }
+        $prog = \Parser\Parser::parseSource("<?php\n" . TrampolineSynth::staticCallableSource($arms));
+        foreach ($prog->statements as $s) {
+            if ($s->kind !== 'Function') { continue; }
+            $this->fnDecls[$s->decl->name] = $s->decl;
+            $module->addFunction($this->lowerFunction($s->decl));
+        }
     }
 
     /**
@@ -2242,6 +2345,97 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * One `__mc_cdoc_<C>(): mixed` per class: `['c' => [doc, line], 'm' => [lower-cased
+     * method => [doc, line]], 'p' => [property => [doc]]]`, `doc` being the raw
+     * docblock or false. What `getDocComment()` / `getStartLine()` read.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthDocFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            $decl = $this->classDecls[$cd->name];
+            $sp = new \Parser\Ast\Span(0, 0);
+            $methods = [];
+            foreach ($decl->methods as $md) {
+                $methods[] = new \Parser\Ast\ArrayElement(
+                    \Parser\Ast\Expr::string(\strtolower($md->name), $sp),
+                    $this->docEntry($md->docComment, $md->span->line, $sp));
+            }
+            $props = [];
+            foreach ($decl->properties as $pd) {
+                $props[] = new \Parser\Ast\ArrayElement(
+                    \Parser\Ast\Expr::string($pd->name, $sp),
+                    $this->docEntry($pd->docComment, $pd->span->line, $sp));
+            }
+            $traitElems = [];
+            $traitNames = [];
+            foreach ($decl->uses as $tn) {
+                $tn = \ltrim($tn, '\\');
+                $traitElems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($tn, $sp));
+                $traitNames[] = $tn;
+            }
+            $module->classTraitNames[$cd->name] = $traitNames;
+            $elems = [
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('u', $sp),
+                    \Parser\Ast\Expr::arrayLit($traitElems, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('r', $sp),
+                    \Parser\Ast\Expr::bool($decl->isReadonly, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('c', $sp),
+                    $this->docEntry($decl->docComment, $decl->span->line, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('m', $sp),
+                    \Parser\Ast\Expr::arrayLit($methods, $sp)),
+                new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string('p', $sp),
+                    \Parser\Ast\Expr::arrayLit($props, $sp)),
+            ];
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::docFn($cd->name), [], 'mixed', $body, $sp);
+        }
+        return $out;
+    }
+
+    /** `[doc-or-false, line]` as an array literal. */
+    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp): \Parser\Ast\Expr
+    {
+        $docExpr = $doc === null ? \Parser\Ast\Expr::bool(false, $sp) : \Parser\Ast\Expr::string($doc, $sp);
+        return \Parser\Ast\Expr::arrayLit([
+            new \Parser\Ast\ArrayElement(null, $docExpr),
+            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($line, $sp)),
+        ], $sp);
+    }
+
+    /**
+     * One `__mc_cfile_<C>(): string` per class declared in a file, returning that
+     * file's path — what `ReflectionClass::getFileName()` reports. A class whose
+     * span carries no file (the prelude blob, stdin) gets none.
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthFileFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if (!isset($this->classDecls[$cd->name])) { continue; }
+            $file = $this->classDecls[$cd->name]->span->file;
+            if ($file === '') { continue; }
+            $sp = new \Parser\Ast\Span(0, 0);
+            $body = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::string($file, $sp), $sp),
+            ]);
+            $out[] = new \Parser\Ast\FunctionDecl(
+                \Compile\Mir\Passes\ReflectSynth::fileFn($cd->name), [], 'string', $body, $sp);
+        }
+        return $out;
+    }
+
+    /**
      * Ф5 — one `__mc_consts_<C>(): array` per class that has any constant,
      * returning `['NAME' => \C::NAME, …]`. Referencing each constant by its
      * qualified name reuses the existing const resolution (a `self::` or
@@ -2424,6 +2618,37 @@ final class LowerFromAst implements Pass
         return \substr($fqn, 0, $pos);
     }
 
+    /** @var array<int, \Parser\Ast\ClassDecl> adaptation (spl_object_id) → the declaration whose `use` block wrote it */
+    private array $adaptScope = [];
+
+    /**
+     * Every `as` / `insteadof` adaptation that applies to a declaration: its own,
+     * then those written inside the traits it uses, transitively. php flattens
+     * `class C { use B; }` with `trait B { use A { foo as doFoo; } }` so that C
+     * has `doFoo`; reading only the class's own block dropped it (symfony's
+     * MicroKernelTrait). {@see $adaptScope} remembers which declaration's `use`
+     * block holds each, because `foo` there names a method of A, not of B.
+     *
+     * @return \Parser\Ast\TraitAdaptation[]
+     */
+    private function effectiveAdaptations(\Parser\Ast\ClassDecl $decl): array
+    {
+        $out = [];
+        foreach ($decl->traitAdaptations as $a) {
+            $this->adaptScope[\spl_object_id($a)] = $decl;
+            $out[] = $a;
+        }
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
+            $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->traitAdaptations as $a) {
+                $this->adaptScope[\spl_object_id($a)] = $td;
+                $out[] = $a;
+            }
+        }
+        return $out;
+    }
+
     /**
      * `insteadof` losers as a flat set keyed `<trait>::<method>` (a flat map,
      * NOT a nested array). `as` aliases are read off the TraitAdaptation objects
@@ -2435,7 +2660,7 @@ final class LowerFromAst implements Pass
     private function traitExclusions(\Parser\Ast\ClassDecl $decl): array
     {
         $excluded = [];
-        foreach ($decl->traitAdaptations as $a) {
+        foreach ($this->effectiveAdaptations($decl) as $a) {
             if ($a->kind !== 'insteadof') { continue; }
             foreach ($a->exclude as $ex) {
                 $excluded[\ltrim($ex, '\\') . '::' . $a->method] = true;
@@ -3101,6 +3326,21 @@ final class LowerFromAst implements Pass
     private function yieldFrom(\Parser\Ast\YieldExpr $y): bool { return $y->from; }
 
     /**
+     * Register the bare-name alias of a namespaced function declared in source.
+     * A name the compiler emits inline (`getenv`, `strlen`, …) is never aliased:
+     * a lone `Ns\getenv` declaration would otherwise capture every global and
+     * cross-namespace `getenv()` call, which php resolves to the builtin.
+     */
+    private function noteSourceFnAlias(string $fqn): void
+    {
+        $pos = \strrpos($fqn, '\\');
+        if ($pos === false) { return; }
+        $bare = \substr($fqn, $pos + 1);
+        if ($this->isCodegenBuiltin($bare) || $this->isEmitterInlineName(\strtolower($bare))) { return; }
+        $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare]) ? '' : $fqn;
+    }
+
+    /**
      * Resolve a called function name. PHP resolves an unqualified call in
      * a namespace to the namespaced function if one exists, else falls back
      * to the global function / builtin. We keep the name when it's a known
@@ -3216,7 +3456,13 @@ final class LowerFromAst implements Pass
     {
         $capNames = [];
         $capByRef = [];
-        foreach ($expr->uses as $u) { $capNames[] = $u->name; $capByRef[$u->name] = $u->byRef; }
+        $myArrayCaps = [];
+        foreach ($expr->uses as $u) {
+            $capNames[] = $u->name; $capByRef[$u->name] = $u->byRef;
+            if (!$u->byRef && $this->enclosingArrayName($u->name)) { $myArrayCaps[$u->name] = true; }
+        }
+        $savedArrayCaps = $this->currentArrayCaps;
+        $this->currentArrayCaps = $myArrayCaps;
         // Isolate the generator flag: a yield inside this closure marks the
         // closure, not the enclosing function.
         $savedSawYield = $this->sawYield;
@@ -3226,6 +3472,7 @@ final class LowerFromAst implements Pass
         // enclosing function. Restored after, because the enclosing body keeps
         // lowering once this expression is done.
         $savedParams = $this->currentLowerParams;
+        $savedParamHints = $this->currentLowerParamHints;
         $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
@@ -3242,9 +3489,19 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentLowerParamHints = $savedParamHints;
+        $this->currentArrayCaps = $savedArrayCaps;
         $this->currentRefParamNames = $savedRefParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
             (bool)($expr->returnsByRef ?? false), $clUsesFa, null, false, $expr->isStatic);
+    }
+
+    /** Whether `$name`, read in the scope being lowered, is a bare-`array` param or a capture of one. */
+    private function enclosingArrayName(string $name): bool
+    {
+        $i = \array_search($name, $this->currentLowerParams, true);
+        if ($i !== false) { return $this->isBareArrayHint($this->currentLowerParamHints[$i] ?? ''); }
+        return isset($this->currentArrayCaps[$name]);
     }
 
     private function lowerArrowFn(\Parser\Ast\ArrowFn $expr): Node
@@ -3262,6 +3519,7 @@ final class LowerFromAst implements Pass
         }
         // Its own parameter scope, like a full closure — see lowerClosure.
         $savedParams = $this->currentLowerParams;
+        $savedParamHints = $this->currentLowerParamHints;
         $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
@@ -3285,6 +3543,7 @@ final class LowerFromAst implements Pass
         }
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
+        $this->currentLowerParamHints = $savedParamHints;
         $this->currentRefParamNames = $savedRefParams;
         // An arrow fn has no captures list — that argument stays at its default.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,
@@ -3643,9 +3902,21 @@ final class LowerFromAst implements Pass
         $methE = $this->elemValue($arr->elements[1]);
         if ($methE->kind !== 'StringLiteral') { return null; }
         $m = $this->strLitValue($methE);
+        $cls = $this->callableClassOf($recvE);
+        // A receiver known only at run time is an object OR a class-name string
+        // (`[self::$subscriber, 'm']()`): a string takes the `$cls::m()` dispatch.
+        if ($cls === null && !($recvE->kind === 'Variable' && $this->variableName($recvE) === 'this')) {
+            $span = $arr->span;
+            $tmp = '__dyncb' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $probe = \Parser\Ast\Expr::call('is_string',
+                [\Parser\Ast\Expr::assign(\Parser\Ast\Expr::variable($tmp, $span), $recvE, $span)], $span);
+            $viaClass = new \Parser\Ast\DynamicStaticCall(\Parser\Ast\Expr::variable($tmp, $span), $m, $astArgs, $span);
+            $viaObject = \Parser\Ast\Expr::methodCall(\Parser\Ast\Expr::variable($tmp, $span), $m, $astArgs, false, $span);
+            return $this->lowerExpr(\Parser\Ast\Expr::ternary($probe, $viaClass, $viaObject, $span));
+        }
         $args = [];
         foreach ($astArgs as $a) { $args[] = $this->lowerExpr($a); }
-        $cls = $this->callableClassOf($recvE);
         if ($cls !== null) {
             return new StaticCall_($cls, $m, $args, Type::unknown(), $cls);
         }
@@ -4025,6 +4296,10 @@ final class LowerFromAst implements Pass
      */
     private function lowerRefAssign(\Parser\Ast\RefAssign $expr): Node
     {
+        if ($expr->target->kind === 'Variable' && $expr->source->kind === 'DynProp') {
+            $dp = $this->dynPropBase($expr->source);
+            if ($dp !== null) { return $this->lowerDynPropRef($dp, $expr); }
+        }
         if ($expr->target->kind === 'Variable' && $expr->source->kind === 'Variable') {
             return new RefAlias_($expr->target->name, $expr->source->name, Type::void());
         }
@@ -4094,6 +4369,10 @@ final class LowerFromAst implements Pass
         // deep index chain comes along for free — there is no new store node.
         $dyn = $this->dynStaticPropBase($expr->target);
         if ($dyn !== null) { return $this->lowerDynStaticStore($dyn, $expr); }
+        if ($expr->target->kind === 'ArrayAccess') {
+            $dp = $this->dynPropBase($expr->target);
+            if ($dp !== null) { return $this->lowerDynPropStore($dp, $expr); }
+        }
         if ($expr->target->kind === 'ArrayLit' && $this->destructureHasRef($expr->target)) {
             return $this->lowerRefDestructure($expr->target, $expr->value);
         }
@@ -4115,6 +4394,135 @@ final class LowerFromAst implements Pass
     }
 
     private function arrayAccessBase(\Parser\Ast\ArrayAccess $a): \Parser\Ast\Expr { return $a->array; }
+
+    private function asDynProp(\Parser\Ast\Expr $e): \Parser\Ast\DynProp
+    {
+        /** @var \Parser\Ast\DynProp $e */
+        return $e;
+    }
+
+    private function asVariable(\Parser\Ast\Expr $e): \Parser\Ast\Variable
+    {
+        /** @var \Parser\Ast\Variable $e */
+        return $e;
+    }
+
+    /**
+     * The `$this->$name` a target / source bottoms out at (walking index
+     * expressions), or null. Only `$this` of a known class with a plain variable
+     * name qualifies: its declared properties are the closed candidate set the
+     * runtime name can select, and the name may be re-read by the fallback arm.
+     */
+    private function dynPropBase(\Parser\Ast\Expr $t): ?\Parser\Ast\DynProp
+    {
+        $cur = $t;
+        while ($cur->kind === 'ArrayAccess') { $cur = $this->arrayAccessBase($this->asArrayAccess($cur)); }
+        if ($cur->kind !== 'DynProp') { return null; }
+        $d = $this->asDynProp($cur);
+        if ($d->nullsafe || $d->object->kind !== 'Variable' || $d->name->kind !== 'Variable') { return null; }
+        if ($this->varName($this->asVariable($d->object)) !== 'this') { return null; }
+        if (!isset($this->classTable[$this->currentLowerClass])) { return null; }
+        return $d;
+    }
+
+    /**
+     * Declared instance properties of the current class.
+     *
+     * @return string[]
+     */
+    private function dynPropCandidates(bool $arraysOnly): array
+    {
+        $cd = $this->classTable[$this->currentLowerClass];
+        $out = [];
+        foreach ($cd->propertyNames as $nm) {
+            if ($arraysOnly && !($cd->propertyArrayHinted[$nm] ?? false)) { continue; }
+            $out[] = $nm;
+        }
+        return $out;
+    }
+
+    /** `$target` with its `$this->$name` base replaced by the concrete `$this->prop`. */
+    private function substDynPropBase(\Parser\Ast\Expr $target, string $prop): \Parser\Ast\Expr
+    {
+        if ($target->kind === 'DynProp') {
+            return new \Parser\Ast\PropertyAccess($this->asDynProp($target)->object, $prop, false, $target->span);
+        }
+        $aa = $this->asArrayAccess($target);
+        $base = $this->substDynPropBase($this->arrayAccessBase($aa), $prop);
+        return \Parser\Ast\Expr::arrayAccess($base, $this->arrayAccessIndex($aa), $target->span);
+    }
+
+    /**
+     * `$this->$name[...] = v`: an element write needs the property SLOT, which the
+     * dynamic read / write helpers do not hand out — the write landed in a copy.
+     * Evaluate name and value once, then store through the concrete slot; a name
+     * matching no declared property takes the lowering the site had before.
+     */
+    private function lowerDynPropStore(\Parser\Ast\DynProp $dyn, \Parser\Ast\Assign $expr): Node
+    {
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $nameTmp = '__dynp_n' . $id;
+        $valTmp = '__dynp_v' . $id;
+        $valNode = $this->lowerExpr($expr->value);
+        $stmts = [
+            new StoreLocal($nameTmp, $this->lowerExpr($this->dynPropName($dyn)), Type::string_()),
+            new StoreLocal($valTmp, $valNode, $valNode->type),
+        ];
+        $names = $this->dynPropCandidates(false);
+        $chain = new Block([$this->storeToTarget($expr->target, new LoadLocal($valTmp, $valNode->type))], Type::void());
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $nm = $names[$i];
+            $tgt = $this->substDynPropBase($expr->target, $nm);
+            $arm = new Block([$this->storeToTarget($tgt, new LoadLocal($valTmp, $valNode->type))], Type::void());
+            $chain = new Block([new If_(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($nm, Type::string_()), '==='),
+                $arm,
+                $chain,
+            )], Type::void());
+        }
+        $stmts[] = $chain;
+        return new Block($stmts, Type::void());
+    }
+
+    private function erasedRefAddr(string $target, Node $lv): RefAddr_
+    {
+        $r = new RefAddr_($target, $lv, Type::unknown());
+        $r->erased = true;
+        return $r;
+    }
+
+    /**
+     * `$r = &$this->$name`: `$r` must alias the property slot, which only a
+     * concrete property has. Dispatch over the array-typed properties (one
+     * representation, so one type for `$r`); any other name throws — a value copy would lose every write through `$r`.
+     */
+    private function lowerDynPropRef(\Parser\Ast\DynProp $dyn, \Parser\Ast\RefAssign $expr): Node
+    {
+        $nameTmp = '__dynp_n' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $stmts = [new StoreLocal($nameTmp, $this->lowerExpr($this->dynPropName($dyn)), Type::string_())];
+        $names = $this->dynPropCandidates(true);
+        $chain = new Block([new Call(
+            '__mir_throw_error',
+            [new Concat(
+                new StringConst('Cannot take a reference to dynamic property ', Type::string_()),
+                new LoadLocal($nameTmp, Type::string_()),
+            )],
+            Type::cell(),
+        )], Type::void());
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $nm = $names[$i];
+            $lv = $this->lowerExpr($this->substDynPropBase($expr->source, $nm));
+            $chain = new Block([new If_(
+                new Cmp(new LoadLocal($nameTmp, Type::string_()), new StringConst($nm, Type::string_()), '==='),
+                new Block([$this->erasedRefAddr($this->varName($this->asVariable($expr->target)), $lv)], Type::void()),
+                $chain,
+            )], Type::void());
+        }
+        $stmts[] = $chain;
+        return new Block($stmts, Type::void());
+    }
 
     private function asDynStaticProp(\Parser\Ast\Expr $e): \Parser\Ast\DynamicStaticProp
     {
@@ -4769,11 +5177,7 @@ final class LowerFromAst implements Pass
         if ($s->kind === 'Function') {
             $fqn = $s->decl->name;
             $this->fnDecls[$fqn] = $s->decl;
-            $pos = \strrpos($fqn, '\\');
-            if ($pos !== false) {
-                $bare = \substr($fqn, $pos + 1);
-                $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare]) ? '' : $fqn;
-            }
+            $this->noteSourceFnAlias($fqn);
             return;
         }
         if ($s->kind !== 'Class') { return; }
@@ -5081,7 +5485,7 @@ final class LowerFromAst implements Pass
     /**
      * The extensions a compiled binary genuinely carries. `pcre` is linked
      * (pcre2), `json` / `ctype` / `mbstring` are built in, `openssl` rides the TLS
-     * stack, `intl` links ICU on use. Everything else — pcntl, dom — is absent,
+     * stack, `intl` links ICU on use, `session` is the prelude's session_* family. Everything else — pcntl, dom — is absent,
      * and a program that asks gets the honest answer rather than a link-time
      * surprise.
      */
@@ -5090,6 +5494,7 @@ final class LowerFromAst implements Pass
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
             || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl'
+            || $ext === 'session'
             || $ext === 'bcmath';
     }
 
@@ -5670,14 +6075,28 @@ final class LowerFromAst implements Pass
             $recv,
             $span,
         );
+        $tmp = '__dynrc' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
         $chain = \Parser\Ast\Expr::null($span);
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
-            $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $cond = \Parser\Ast\Expr::binary('===', $this->dynArmName($nameExpr, $tmp, $i, $span), new \Parser\Ast\StringLiteral($cname, $span), $span);
             $then = \Parser\Ast\Expr::staticAccess($cname, $nm, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
         return $this->lowerExpr($chain);
+    }
+
+    /**
+     * The class-name operand of arm `$i` of a `$cls::member` chain: the first
+     * arm evaluates `$nameExpr` into the hidden local `$tmp`, every other arm
+     * reads it. Re-lowering the expression per arm gave each of the N arms its
+     * own temporaries, and every call's unwind pad dropped all of them — O(N^2).
+     */
+    private function dynArmName(\Parser\Ast\Expr $nameExpr, string $tmp, int $i, \Parser\Ast\Span $span): \Parser\Ast\Expr
+    {
+        $v = \Parser\Ast\Expr::variable($tmp, $span);
+        return $i === 0 ? \Parser\Ast\Expr::assign($v, $nameExpr, $span) : $v;
     }
 
     /**
@@ -5696,44 +6115,79 @@ final class LowerFromAst implements Pass
         $method = $e->method;
         $args = $e->args;
         $span = $e->span;
-        // `$c::$m(args)`: the method name is a variable too, so every STATIC method of a
-        // user class is a candidate arm, selected on (class, method) at run time.
-        $methodVar = \strncmp($method, '$', 1) === 0 ? \substr($method, 1) : '';
-        $names = [];
-        $pairs = [];
-        foreach ($this->classTable as $cname => $cd) {
-            if ($this->isTypeDef($cname)) { continue; }
-            if ($methodVar !== '') {
-                if ($cd->isPreludeClass) { continue; }
-                foreach ($cd->methodMeta as $mn => $mm) {
-                    if ($mm->isStatic && !$mm->isAbstract) { $pairs[] = [$cname, (string)$mn]; }
-                }
-                continue;
-            }
-            if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
-        }
         $nameExpr = \Parser\Ast\Expr::ternary(
             \Parser\Ast\Expr::call('is_object', [$recv], $span),
             \Parser\Ast\Expr::call('get_class', [$recv], $span),
             $recv,
             $span,
         );
-        $chain = \Parser\Ast\Expr::null($span);
-        for ($i = \count($pairs) - 1; $i >= 0; $i = $i - 1) {
-            $cond = \Parser\Ast\Expr::binary('&&',
-                \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($pairs[$i][0], $span), $span),
-                \Parser\Ast\Expr::binary('===', \Parser\Ast\Expr::variable($methodVar, $span), new \Parser\Ast\StringLiteral($pairs[$i][1], $span), $span),
-                $span);
-            $then = \Parser\Ast\Expr::staticCall($pairs[$i][0], $pairs[$i][1], $args, $span);
-            $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
+        // `$c::$m(args)` / `$c::$m(...)`: class AND method are runtime values — the
+        // static callable `[$c, $m]`, run through the one module-wide dispatcher
+        // `__mc_static_callable` ({@see synthStaticCallable}). An arm per (class,
+        // method) at every site was 1.4M IR lines per site in symfony.
+        if (\strncmp($method, '$', 1) === 0) {
+            $this->dynStaticAnyMethod = true;
+            $callable = \Parser\Ast\Expr::arrayLit([
+                new \Parser\Ast\ArrayElement(null, $nameExpr),
+                new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::variable(\substr($method, 1), $span)),
+            ], $span);
+            return $this->lowerExpr(\Parser\Ast\Expr::invoke($callable, $args, $span));
         }
+        $names = [];
+        foreach ($this->classTable as $cname => $cd) {
+            if ($this->isTypeDef($cname)) { continue; }
+            if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
+        }
+        $tmp = '__dynrc' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $chain = \Parser\Ast\Expr::null($span);
         for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
             $cname = $names[$i];
-            $cond = \Parser\Ast\Expr::binary('===', $nameExpr, new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $cond = \Parser\Ast\Expr::binary('===', $this->dynArmName($nameExpr, $tmp, $i, $span), new \Parser\Ast\StringLiteral($cname, $span), $span);
             $then = \Parser\Ast\Expr::staticCall($cname, $method, $args, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
         return $this->lowerExpr($chain);
+    }
+
+    /**
+     * `__mc_closure_from($c)`: `$c` itself when it is a Closure, else a Closure
+     * forwarding to it. FIXED-arity optional params, because a variadic closure
+     * reached through an erased invoke gets its arguments positionally (the first
+     * one as the pack); a param the call omits keeps a sentinel default, and the
+     * trailing sentinels are cut before forwarding.
+     * ponytail: 8 forwarded arguments at most; a by-ref parameter of the target
+     * binds a copy.
+     */
+    private function closureFromSource(Module $module): string
+    {
+        // An invokable OBJECT becomes its own `__invoke(...)` closure — the one
+        // php builds, whose parameters reflection reads (symfony's ControllerEvent
+        // reflects `$controller(...)` to resolve the controller's arguments).
+        $arms = '';
+        foreach ($module->classes as $cd) {
+            if ($cd->isAbstract || !isset($cd->methodMeta['__invoke'])) { continue; }
+            $mm = $cd->methodMeta['__invoke'];
+            if ($mm->isStatic || $mm->visibility !== 'public') { continue; }
+            $arms .= '  if ($c instanceof \\' . \ltrim($cd->name, '\\') . ") { return \$c->__invoke(...); }\n";
+        }
+        $s = "'\\0__mc_fromcallable_omitted'";
+        $params = [];
+        $elems = [];
+        for ($i = 0; $i < 8; $i = $i + 1) {
+            $params[] = '$__fa' . (string)$i . ' = ' . $s;
+            $elems[] = '$__fa' . (string)$i;
+        }
+        return "function __mc_closure_from(mixed \$c): \\Closure {\n"
+            . "  if (\$c instanceof \\Closure) { return \$c; }\n"
+            . $arms
+            . '  return static function (' . \implode(', ', $params) . ") use (\$c) {\n"
+            . '    $__a = [' . \implode(', ', $elems) . "];\n"
+            . "    \$__n = 8;\n"
+            . "    while (\$__n > 0 && \$__a[\$__n - 1] === " . $s . ") { \$__n = \$__n - 1; }\n"
+            . "    \$__b = [];\n"
+            . "    for (\$__i = 0; \$__i < \$__n; \$__i = \$__i + 1) { \$__b[] = \$__a[\$__i]; }\n"
+            . "    return \$c(...\$__b);\n  };\n}\n";
     }
 
     /** {@see \Compile\Mir\ClassDef::stableId} */
@@ -5968,9 +6422,14 @@ final class LowerFromAst implements Pass
         if ($h !== null) { return $h; }
         $read = $this->lowerExpr($expr->target);
         $value = $this->lowerExpr($expr->value);
-        // `$t ??= v` → `$t = $t ?? v`.
+        // `$t ??= v` → `$t ?? ($t = v)`: php writes only when `$t` is null or
+        // unset. Writing back what was read separated the containers on every
+        // hit, and a nested `$this->p[$a][$b] ??= v` separated the inner array
+        // for the store BEFORE its read co-owned the outer one — the write-back
+        // then copied the outer with the stale inner pointer (UAF in symfony's
+        // DefinitionErrorExceptionPass).
         if ($expr->op === '??=') {
-            return $this->storeToTarget($expr->target, new NullCoalesce_($this->markProbe($read), $value, Type::unknown()));
+            return new NullCoalesce_($this->markProbe($read), $this->storeToTarget($expr->target, $value), Type::unknown());
         }
         $base = \substr($expr->op, 0, \strlen($expr->op) - 1); // strip '='
         return $this->storeToTarget($expr->target, $this->buildBinop($base, $read, $value));
@@ -5983,24 +6442,18 @@ final class LowerFromAst implements Pass
         $op = $expr->op === '++' ? '+' : '-';
         if ($operand->kind !== 'Variable') {
             // `$this->p++` / `$a[$k]++` — no plain-local slot. Desugar to
-            // `target = target ± 1` (a compound assign). In statement context
-            // (the common case, e.g. an Iterator's `next()`) this is exact; a
-            // postfix used as an expression value answers the OLD one, via a temp
-            // (a statement postfix is lowered as a prefix: lowerStmtInner).
             $h = $this->hoistLvalueExpr($expr);
             if ($h !== null) { return $h; }
+            // `target = target ± 1` (a compound assign). A postfix used as a
+            // value (statement context is rewritten to prefix by the caller)
+            // saves the OLD value in a temp and answers it.
             $read = $this->lowerExpr($operand);
-            $one = new IntConst(1, Type::int_());
-            if ($expr->prefix) {
-                return $this->storeToTarget($operand, $this->buildBinop($op, $read, $one));
-            }
-            $tmp = '__lv_' . (string)$this->lvCounter;
+            $store = $this->storeToTarget($operand, $this->buildBinop($op, $read, new IntConst(1, Type::int_())));
+            if ($expr->prefix) { return $store; }
+            $old = $this->lowerExpr($operand);
+            $tmp = '__pi_' . (string)$this->lvCounter;
             $this->lvCounter = $this->lvCounter + 1;
-            return new Block([
-                new StoreLocal($tmp, $read, Type::unknown()),
-                $this->storeToTarget($operand, $this->buildBinop($op, new LoadLocal($tmp, Type::unknown()), $one)),
-                new LoadLocal($tmp, Type::unknown()),
-            ], Type::unknown());
+            return new Block([new StoreLocal($tmp, $old, $old->type), $store, new LoadLocal($tmp, $old->type)], $old->type);
         }
         return new IncDec($operand->name, $op, $expr->prefix, Type::int_());
     }
@@ -6311,7 +6764,12 @@ final class LowerFromAst implements Pass
             return $this->variadicMethodParamsCache[$method];
         }
         $found = null;
-        foreach ($this->classDecls as $cd) {
+        // Trait bodies count too: a trait's `call()` reaches every user class by
+        // `use`, so a non-variadic one disagrees with an unrelated variadic
+        // `call()` (symfony ErrorHandler::call(callable, ...)) and must defer.
+        $decls = \array_values($this->classDecls);
+        foreach ($this->traitTable as $td) { $decls[] = $td; }
+        foreach ($decls as $cd) {
             foreach ($this->classDeclMethods($cd) as $m) {
                 if ($this->methodDeclName($m) !== $method) { continue; }
                 $mp = $this->methodDeclParams($m);
@@ -6609,6 +7067,19 @@ final class LowerFromAst implements Pass
         return $mc;
     }
 
+    /** `$child` is `$anc` or extends it (the parent chain of declared classes). */
+    private function lowerClassIsA(string $child, string $anc): bool
+    {
+        $c = $child;
+        for ($depth = 0; $c !== '' && $depth < 64; $depth = $depth + 1) {
+            if (\strcasecmp($c, $anc) === 0) { return true; }
+            $cd = $this->classTable[$c] ?? null;
+            if ($cd === null) { return false; }
+            $c = (string)($cd->parent ?? '');
+        }
+        return false;
+    }
+
     private function lowerStaticCall(\Parser\Ast\StaticCall $expr): Node
     {
         $class = $expr->class;
@@ -6640,34 +7111,13 @@ final class LowerFromAst implements Pass
             && \count($expr->args) === 1) {
             $conv = $this->coerceCallableArg(Type::closure(), $expr->args[0]);
             if ($conv !== null) { return $conv; }
-            $v = $this->lowerExpr($expr->args[0]);
-            $vc = $v->type->class ?? '';
-            if ($v->type->kind === Type::KIND_OBJ && isset($this->module->closureCaptures[$vc])) {
-                return $v;
-            }
-            // A callable known only at run time (a string name, an array, an invokable): the
-            // caller treats the result as a closure, so wrap it in one that invokes it.
-            $tmp = '__fc_' . (string)$this->destrCounter;
-            $this->destrCounter = $this->destrCounter + 1;
-            $sp = $expr->span;
-            // Fixed optional params + func_num_args(): a variadic closure is not packed when it is
-            // invoked through an erased `Closure` slot.
-            $params = [];
-            for ($pi = 0; $pi < 8; $pi = $pi + 1) {
-                $params[] = new \Parser\Ast\Param('a' . (string)$pi, null, \Parser\Ast\Expr::null($sp), false, false, '', false, [], $sp);
-            }
-            $body = null;
-            for ($k = 8; $k >= 0; $k = $k - 1) {
-                $cargs = [];
-                for ($pi = 0; $pi < $k; $pi = $pi + 1) { $cargs[] = \Parser\Ast\Expr::variable('a' . (string)$pi, $sp); }
-                $callK = \Parser\Ast\Expr::invoke(\Parser\Ast\Expr::variable($tmp, $sp), $cargs, $sp);
-                $body = $body === null ? $callK : \Parser\Ast\Expr::ternary(
-                    \Parser\Ast\Expr::binary('===', \Parser\Ast\Expr::call('func_num_args', [], $sp), \Parser\Ast\Expr::int($k, $sp), $sp),
-                    $callK, $body, $sp);
-            }
-            $wrap = \Parser\Ast\Expr::arrowFn(true, $params, null, $body, $sp);
-            $this->pendingCallInits[] = new StoreLocal($tmp, $v, $v->type);
-            return $this->lowerExpr($wrap);
+            // A RUNTIME callable (an array or a name in an erased slot) passed
+            // through stayed an array: `instanceof \Closure` and is_callable of a
+            // protected `[$this, 'm']` answered false outside its class (symfony
+            // LazyString over `container.getenv`). `__mc_closure_from` wraps it
+            // unless it already is one ({@see closureFromSource}).
+            $this->needsClosureFrom = true;
+            return new \Compile\Mir\Call('__mc_closure_from', [$this->lowerExpr($expr->args[0])], Type::closure());
         }
         // First-class callable `C::m(...)` → a 0-capture closure forwarding to
         // the static method (scope preserved for late static binding).
@@ -6716,7 +7166,12 @@ final class LowerFromAst implements Pass
         // DatePoint (php declares it; our DateTimeImmutable does not) stopped
         // tier 2 with `dangling local $this`. Three lines reproduce it —
         // `class B { static function f() { return static::nope(); } }`.
-        if ($isSelfish && $this->currentLowerFnHasThis
+        // An instance method of the current class or an ANCESTOR named outright
+        // (`AbstractDumper::__construct(…)` inside HtmlDumper, skipping
+        // CliDumper's) is an instance call too: php hands it `$this`.
+        $namesOwnLine = !$isSelfish && $this->currentLowerClass !== ''
+            && $this->lowerClassIsA($this->currentLowerClass, \ltrim($class, '\\'));
+        if (($isSelfish || $namesOwnLine) && $this->currentLowerFnHasThis
             && !$this->methodIsStatic($class, $expr->method)) {
             $args[] = new LoadLocal('this', Type::obj($this->currentLowerClass));
         }
