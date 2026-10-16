@@ -63,7 +63,7 @@ final class AnalyzeCommand extends Command
                 return 73;
             }
             \Manticore\dprint("analyze: wrote baseline (" . (string)\count($diags) . " entries) to " . $genBaseline);
-        return 0;
+            return 0;
         }
         // Apply a baseline: drop known findings.
         if ($baselinePath !== "") {
