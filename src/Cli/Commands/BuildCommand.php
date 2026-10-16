@@ -38,7 +38,7 @@ final class BuildCommand extends Command
         return \array_merge(CompileOptions::shared(), [
             new Option('libs-only', \Cli\ArgParse::FLAG, 'Build library targets and stop (cold seed)'),
             new Option('apps-only', \Cli\ArgParse::FLAG, 'Build application targets only'),
-            new Option('no-analyze', \Cli\ArgParse::FLAG, 'Skip the analyzer'),
+            new Option('no-analyze', \Cli\ArgParse::FLAG, 'Accepted for compile parity; build does not run the analyzer'),
         ]);
     }
 

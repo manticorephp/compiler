@@ -149,8 +149,8 @@ PHP source → Lexer → Parser → AST
   → EmitLlvm (+ HoistAllocas, PruneIr) → LLVM IR → clang -c → cc → static binary
 ```
 
-The driver is `cmd_compile` in `src/Manticore/Main.php`; it calls `lower_module` (the
-passes) and `compile_via_mir` (EmitLlvm).
+The driver is `Cli\Commands\CompileCommand::run` in `src/Cli/Commands/CompileCommand.php`; it calls `lower_module` (the
+passes) and `compile_via_mir` (EmitLlvm), both in `src/Manticore/Main.php`.
 `InferTypes` re-runs after each pass that makes new types concrete. Full
 annotation of the passes: `src/Compile/README.md` and `docs/design/mir.md`.
 

@@ -56,7 +56,7 @@ Options:
   -j <n>                   Parallel clang jobs; 0 = one per core
   --libs-only              Build library targets and stop (cold seed)
   --apps-only              Build application targets only
-  --no-analyze             Skip the analyzer
+  --no-analyze             Accepted for compile parity; build does not run the analyzer
 == help analyze
 analyze — Static type analysis; report diagnostics, no codegen
 

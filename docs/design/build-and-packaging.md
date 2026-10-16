@@ -57,11 +57,11 @@ scripts stop hand-rolling clang/stub/link steps.
   `build manticore.json` to produce the shipped native compiler **and** the
   stdlib library. The manifest declares the stdlib as a library target
   (`src/Runtime → lib/manticore_stdlib.{o,sig}`); the self-contained compiler
-  app opts out of linking it via `"libraries": []`. `cmd_build` gained per-app
+  app opts out of linking it via `"libraries": []`. `BuildCommand` gained per-app
   library selection + `--libs-only`. The bespoke find-glob + `[5/5]` step is
   gone; the manifest is the single build definition, shared by `bin/compile`
   and `bin/build`.
-- **Why `cmd_build` can't itself run under Zend (so the seed stays a separate
+- **Why `BuildCommand` can't itself run under Zend (so the seed stays a separate
   Zend stage):** `read_file` fills a `calloc` buffer via `fread`, and Zend
   strings are immutable; the fopen chain returns `\Ffi\Ptr` (an int-address
   wrapper), not a PHP resource. The Zend bootstrap of the *first* binary is
@@ -143,7 +143,7 @@ cleanly (no two-object path left).
 **Status:** the mechanism works (proof: the `zlib` extension binding `crc32`,
 gated by `tools/ext_smoke.sh` — which builds it twice, once through the manifest
 and once through the attribute alone). `extensions[]` declares
-`{ src, link, static }`; an app opts in via `"extensions": [...]`; `cmd_build`
+`{ src, link, static }`; an app opts in via `"extensions": [...]`; `BuildCommand`
 compiles the glue into the app module.
 
 The link flag itself comes from the binding's **`#[Ffi\Library]`** — resolved
