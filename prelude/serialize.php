@@ -31,6 +31,10 @@ final class __McSerSt
 
 function serialize(mixed $value): string
 {
+    // Scalars and arrays of them: one native pass. "" = something else in there
+    // (object, reference, enum), which needs the walker's var-hash numbering.
+    $fast = __mc_ser_native($value);
+    if ($fast !== '') { return $fast; }
     $st = new __McSerSt();
     return __mc_ser_val($value, $st);
 }

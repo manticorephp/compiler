@@ -3792,6 +3792,277 @@ entry:
     }
 
     /**
+     * Native `serialize()` for the common shapes: null, bool, int, float, string
+     * and arrays of those, written into ONE growing buffer (the json encoder's
+     * reserve/cursor helpers). `@__mir_ser_encf(cell)` answers the string, or an
+     * EMPTY one when the value holds anything else (object, reference, enum,
+     * closure) — a serialization is never empty, so the caller falls back to the
+     * PHP walker, which owns the var-hash numbering `r:`/`R:` need.
+     */
+    public function serEnc(): string
+    {
+        $M = '281474976710655';
+        $T = '-4503599627370496';
+        $H = (string) \Compile\MemoryAbi::ARRAY_HEADER_SIZE;
+        $ES = (string) \Compile\MemoryAbi::ARRAY_ENTRY_SIZE;
+        $KIND_STR = (string) \Compile\MemoryAbi::ARRAY_KIND_STRING;
+        $KEY_OFF = (string) \Compile\MemoryAbi::ARRAY_ENTRY_KEY_OFFSET;
+        $VAL_OFF = (string) \Compile\MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET;
+        $out  = "\n@.skw.true = private unnamed_addr constant [5 x i8] c\"b:1;\\00\", align 1\n";
+        $out .= "@.skw.false = private unnamed_addr constant [5 x i8] c\"b:0;\\00\", align 1\n";
+        $out .= "@.skw.null = private unnamed_addr constant [3 x i8] c\"N;\\00\", align 1\n";
+        $out .= "@.skw.nan = private unnamed_addr constant [7 x i8] c\"d:NAN;\\00\", align 1\n";
+        $out .= "@.skw.inf = private unnamed_addr constant [7 x i8] c\"d:INF;\\00\", align 1\n";
+        $out .= "@.skw.ninf = private unnamed_addr constant [8 x i8] c\"d:-INF;\\00\", align 1\n";
+        $out .= "@.skw.zero = private unnamed_addr constant [5 x i8] c\"d:0;\\00\", align 1\n";
+        $out .= "@.skw.nzero = private unnamed_addr constant [6 x i8] c\"d:-0;\\00\", align 1\n";
+        $out .= "@.skw.dpre = private unnamed_addr constant [3 x i8] c\"d:\\00\", align 1\n";
+
+        // `<pre>:<decimal v><term>` — `i:5;`, and `a:3:` / `s:12:` heads.
+        $out .= '
+define void @__mir_ser_num(ptr %slotp, ptr %lp, i64 %pre, i64 %v, i64 %term) {
+entry:
+  %n = call i64 @__mir_int_len(i64 %v)
+  %rsv = add i64 %n, 4
+  %buf = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 %rsv)
+  %len = load i64, ptr %lp
+  %p0 = getelementptr inbounds i8, ptr %buf, i64 %len
+  %pb = trunc i64 %pre to i8
+  store i8 %pb, ptr %p0
+  %p1 = getelementptr inbounds i8, ptr %p0, i64 1
+  store i8 58, ptr %p1
+  %o = add i64 %len, 2
+  call void @__mir_int_fmt(ptr %buf, i64 %o, i64 %v)
+  %e = add i64 %o, %n
+  %p2 = getelementptr inbounds i8, ptr %buf, i64 %e
+  %tb = trunc i64 %term to i8
+  store i8 %tb, ptr %p2
+  %nl = add i64 %e, 1
+  store i64 %nl, ptr %lp
+  ret void
+}
+
+; s:<len>:"<bytes>";
+define void @__mir_ser_str(ptr %slotp, ptr %lp, ptr %s) {
+entry:
+  %lenp = getelementptr inbounds i8, ptr %s, i64 -16
+  %n = load i64, ptr %lenp
+  %dl = call i64 @__mir_int_len(i64 %n)
+  %t0 = add i64 %n, %dl
+  %rsv = add i64 %t0, 6
+  %buf = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 %rsv)
+  %len = load i64, ptr %lp
+  %p0 = getelementptr inbounds i8, ptr %buf, i64 %len
+  store i8 115, ptr %p0
+  %p1 = getelementptr inbounds i8, ptr %p0, i64 1
+  store i8 58, ptr %p1
+  %o = add i64 %len, 2
+  call void @__mir_int_fmt(ptr %buf, i64 %o, i64 %n)
+  %o1 = add i64 %o, %dl
+  %p2 = getelementptr inbounds i8, ptr %buf, i64 %o1
+  store i8 58, ptr %p2
+  %p3 = getelementptr inbounds i8, ptr %p2, i64 1
+  store i8 34, ptr %p3
+  %o2 = add i64 %o1, 2
+  %dst = getelementptr inbounds i8, ptr %buf, i64 %o2
+  call void @__mir_json_cpy(ptr %dst, ptr %s, i64 %n)
+  %o3 = add i64 %o2, %n
+  %p4 = getelementptr inbounds i8, ptr %buf, i64 %o3
+  store i8 34, ptr %p4
+  %p5 = getelementptr inbounds i8, ptr %p4, i64 1
+  store i8 59, ptr %p5
+  %nl = add i64 %o3, 2
+  store i64 %nl, ptr %lp
+  ret void
+}
+
+; d:<shortest repr>; — the json double writer, E for e; INF / NAN / +-0 spelled here.
+define void @__mir_ser_dbl(ptr %slotp, ptr %lp, i64 %cell) {
+entry:
+  %ab = and i64 %cell, 9223372036854775807
+  %isz = icmp eq i64 %ab, 0
+  br i1 %isz, label %zero, label %nz
+zero:
+  %zneg = icmp slt i64 %cell, 0
+  %zp = select i1 %zneg, ptr @.skw.nzero, ptr @.skw.zero
+  %zn = select i1 %zneg, i64 5, i64 4
+  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr %zp, i64 %zn)
+  ret void
+nz:
+  %eb = and i64 %cell, 9218868437227405312
+  %spec = icmp eq i64 %eb, 9218868437227405312
+  br i1 %spec, label %special, label %fin
+special:
+  %mant = and i64 %cell, 4503599627370495
+  %isnan = icmp ne i64 %mant, 0
+  br i1 %isnan, label %nan, label %inf
+nan:
+  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr @.skw.nan, i64 6)
+  ret void
+inf:
+  %ineg = icmp slt i64 %cell, 0
+  %ip = select i1 %ineg, ptr @.skw.ninf, ptr @.skw.inf
+  %in = select i1 %ineg, i64 7, i64 6
+  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr %ip, i64 %in)
+  ret void
+fin:
+  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr @.skw.dpre, i64 2)
+  %s0 = load i64, ptr %lp
+  call void @__mir_json_double(ptr %slotp, ptr %lp, i64 %cell)
+  %e0 = load i64, ptr %lp
+  %buf = load ptr, ptr %slotp
+  br label %up
+up:
+  %i = phi i64 [ %s0, %fin ], [ %i1, %upn ]
+  %done = icmp uge i64 %i, %e0
+  br i1 %done, label %end, label %upb
+upb:
+  %bp = getelementptr inbounds i8, ptr %buf, i64 %i
+  %c = load i8, ptr %bp
+  %ise = icmp eq i8 %c, 101
+  br i1 %ise, label %fix, label %upn
+fix:
+  store i8 69, ptr %bp
+  br label %upn
+upn:
+  %i1 = add i64 %i, 1
+  br label %up
+end:
+  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 59)
+  ret void
+}
+';
+
+        // One value. 1 = written, 0 = a shape the fast path does not own.
+        $out .= "\ndefine i64 @__mir_ser_app(ptr %slotp, ptr %lp, i64 %cell) {\n";
+        $out .= "entry:\n";
+        $out .= "  %tagged = icmp ugt i64 %cell, $T\n";
+        $out .= "  br i1 %tagged, label %istag, label %isfloat\n";
+        $out .= "isfloat:\n";
+        $out .= "  call void @__mir_ser_dbl(ptr %slotp, ptr %lp, i64 %cell)\n";
+        $out .= "  ret i64 1\n";
+        $out .= "istag:\n";
+        $out .= "  %sh = lshr i64 %cell, 48\n";
+        $out .= "  %nib = and i64 %sh, 15\n";
+        $out .= "  %isint1 = icmp eq i64 %nib, 1\n";
+        $out .= "  %isint5 = icmp eq i64 %nib, 5\n";
+        $out .= "  %isint = or i1 %isint1, %isint5\n";
+        $out .= "  br i1 %isint, label %tint, label %t2\n";
+        $out .= "tint:\n";
+        $out .= "  %iv = call i64 @__manticore_unbox_int(i64 %cell)\n";
+        $out .= "  call void @__mir_ser_num(ptr %slotp, ptr %lp, i64 105, i64 %iv, i64 59)\n";
+        $out .= "  ret i64 1\n";
+        $out .= "t2:\n";
+        $out .= "  %isbool = icmp eq i64 %nib, 2\n";
+        $out .= "  br i1 %isbool, label %tbool, label %t3\n";
+        $out .= "tbool:\n";
+        $out .= "  %b = and i64 %cell, 1\n";
+        $out .= "  %istrue = icmp ne i64 %b, 0\n";
+        $out .= "  %bp = select i1 %istrue, ptr @.skw.true, ptr @.skw.false\n";
+        $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr %bp, i64 4)\n";
+        $out .= "  ret i64 1\n";
+        $out .= "t3:\n";
+        $out .= "  %isnull = icmp eq i64 %nib, 3\n";
+        $out .= "  br i1 %isnull, label %tnull, label %t4\n";
+        $out .= "tnull:\n";
+        $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr @.skw.null, i64 2)\n";
+        $out .= "  ret i64 1\n";
+        $out .= "t4:\n";
+        $out .= "  %isstr = icmp eq i64 %nib, 4\n";
+        $out .= "  br i1 %isstr, label %tstr, label %t7\n";
+        $out .= "tstr:\n";
+        $out .= "  %spp = and i64 %cell, $M\n";
+        $out .= "  %sptr = inttoptr i64 %spp to ptr\n";
+        $out .= "  call void @__mir_ser_str(ptr %slotp, ptr %lp, ptr %sptr)\n";
+        $out .= "  ret i64 1\n";
+        $out .= "t7:\n";
+        $out .= "  %isarr = icmp eq i64 %nib, 7\n";
+        $out .= "  br i1 %isarr, label %tarr, label %bail\n";
+        $out .= "bail:\n";
+        $out .= "  ret i64 0\n";
+        $out .= "tarr:\n";
+        $out .= "  %arr0 = and i64 %cell, $M\n";
+        $out .= "  %arr = inttoptr i64 %arr0 to ptr\n";
+        $out .= "  %alen = call i64 @__mir_array_live_len(ptr %arr)\n";
+        $out .= "  %hfp = getelementptr inbounds i8, ptr %arr, i64 " . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $out .= "  %hfl = load i64, ptr %hfp\n";
+        $out .= "  %hint = and i64 %hfl, " . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
+        $out .= "  %hashed = call i64 @__mir_array_is_hashed(ptr %arr)\n";
+        $out .= "  %ishash = icmp ne i64 %hashed, 0\n";
+        $out .= "  %est = shl i64 %alen, 4\n";
+        $out .= "  %rbuf = call ptr @__mir_json_reserve(ptr %slotp, ptr %lp, i64 %est)\n";
+        $out .= "  call void @__mir_ser_num(ptr %slotp, ptr %lp, i64 97, i64 %alen, i64 58)\n";
+        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 123)\n";
+        $out .= "  br label %lloop\n";
+        $out .= "lloop:\n";
+        $out .= "  %i = phi i64 [0, %tarr], [%i2, %next]\n";
+        $out .= "  %fin = icmp sge i64 %i, %alen\n";
+        $out .= "  br i1 %fin, label %close, label %ent\n";
+        $out .= "ent:\n";
+        $out .= "  br i1 %ishash, label %eh, label %ep\n";
+        $out .= "ep:\n";
+        $out .= "  call void @__mir_ser_num(ptr %slotp, ptr %lp, i64 105, i64 %i, i64 59)\n";
+        $out .= "  %po0 = shl i64 %i, 3\n";
+        $out .= "  %po = add i64 %po0, $H\n";
+        $out .= "  %pvp = getelementptr inbounds i8, ptr %arr, i64 %po\n";
+        $out .= "  %pv0 = load i64, ptr %pvp\n";
+        $out .= "  br label %val\n";
+        $out .= "eh:\n";
+        $out .= "  %e0 = mul i64 %i, $ES\n";
+        $out .= "  %e1 = add i64 %e0, $H\n";
+        $out .= "  %kp = getelementptr inbounds i8, ptr %arr, i64 %e1\n";
+        $out .= "  %kind = load i64, ptr %kp\n";
+        $out .= "  %e2 = add i64 %e1, $KEY_OFF\n";
+        $out .= "  %kyp = getelementptr inbounds i8, ptr %arr, i64 %e2\n";
+        $out .= "  %kw = load i64, ptr %kyp\n";
+        $out .= "  %e3 = add i64 %e1, $VAL_OFF\n";
+        $out .= "  %hvp = getelementptr inbounds i8, ptr %arr, i64 %e3\n";
+        $out .= "  %hv0 = load i64, ptr %hvp\n";
+        $out .= "  %iss = icmp eq i64 %kind, $KIND_STR\n";
+        $out .= "  br i1 %iss, label %ks, label %ki\n";
+        $out .= "ks:\n";
+        $out .= "  %ksp = inttoptr i64 %kw to ptr\n";
+        $out .= "  call void @__mir_ser_str(ptr %slotp, ptr %lp, ptr %ksp)\n";
+        $out .= "  br label %val\n";
+        $out .= "ki:\n";
+        $out .= "  call void @__mir_ser_num(ptr %slotp, ptr %lp, i64 105, i64 %kw, i64 59)\n";
+        $out .= "  br label %val\n";
+        $out .= "val:\n";
+        $out .= "  %v0 = phi i64 [%pv0, %ep], [%hv0, %ks], [%hv0, %ki]\n";
+        $out .= "  %v = call i64 @__mir_box_by_repr(i64 %v0, i64 %hint)\n";
+        $out .= "  %ok = call i64 @__mir_ser_app(ptr %slotp, ptr %lp, i64 %v)\n";
+        $out .= "  %good = icmp ne i64 %ok, 0\n";
+        $out .= "  br i1 %good, label %next, label %bail\n";
+        $out .= "next:\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  br label %lloop\n";
+        $out .= "close:\n";
+        $out .= "  call void @__mir_json_putc(ptr %slotp, ptr %lp, i64 125)\n";
+        $out .= "  ret i64 1\n}\n";
+
+        $out .= '
+define ptr @__mir_ser_encf(i64 %cell) {
+entry:
+  %buf0 = call ptr @__mir_str_alloc(i64 64)
+  %slot = alloca ptr
+  store ptr %buf0, ptr %slot
+  %lcur = alloca i64
+  store i64 0, ptr %lcur
+  %ok = call i64 @__mir_ser_app(ptr %slot, ptr %lcur, i64 %cell)
+  %r = load ptr, ptr %slot
+  %good = icmp ne i64 %ok, 0
+  %l0 = load i64, ptr %lcur
+  %flen = select i1 %good, i64 %l0, i64 0
+  %fnul = getelementptr inbounds i8, ptr %r, i64 %flen
+  store i8 0, ptr %fnul
+  call void @__mir_str_set_len(ptr %r, i64 %flen)
+  ret ptr %r
+}
+';
+        return $out;
+    }
+
+    /**
      * The `strtod` declaration every module that converts a string to a float
      * carries, together with `@__mir_php_strtod(ptr s, ptr end)`: strtod with
      * php's reading. libc's also reads hex (`0x1A` → 26), `inf`/`infinity`

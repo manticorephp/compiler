@@ -524,6 +524,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_json_escape' && \count($args) === 1) { return $this->biJsonEscape($args); }
         if ($name === '__mc_json_ser' && \count($args) === 1) { return $this->biJsonSer($args); }
         if ($name === '__mc_json_encode_native' && \count($args) === 3) { return $this->biJsonEncodeNative($args); }
+        if ($name === '__mc_ser_native' && \count($args) === 1) { return $this->biSerNative($args); }
         if ($name === 'json_encode' && $this->jsonInline($args, 3, false)) { return $this->biJsonEncode($args); }
         if ($name === 'json_decode' && $this->jsonInline($args, 4, true)
             && $this->jsonDepthOk($args, 2)) { return $this->biJsonDecode($args); }
@@ -9340,6 +9341,28 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call ptr @__mir_json_encf(i64 ' . $cell . ', i64 ' . $flags
               . ', i64 ' . $depth . ")\n";
+        $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `__mc_ser_native($value)` — serialize() of the common shapes through the
+     * native single-buffer writer ({@see \Compile\Mir\RuntimeLibrary::serEnc}).
+     * The answer is "" for a value it does not own (object, reference, enum);
+     * the PHP body in the stdlib always answers "" and is the bootstrap twin.
+     * @param Node[] $args
+     */
+    private function biSerNative(array $args): string
+    {
+        $this->jsonEncNeeds();
+        $this->rt->needsSerEnc = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type);
+        $cell = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_ser_encf(i64 ' . $cell . ")\n";
         $out .= $this->cellBoxTempDrop($args[0]->type, $cell, $args[0]);
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';

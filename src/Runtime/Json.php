@@ -96,6 +96,16 @@ function __mc_json_encode_native(mixed $value, int $flags, int $depth): string {
 }
 
 /**
+ * serialize() of null / bool / int / float / string and arrays of those, as one
+ * native pass; "" for anything else (the caller then walks in PHP). A codegen
+ * builtin over {@see \Compile\Mir\RuntimeLibrary::serEnc}; this body is the
+ * bootstrap twin for a compiler that does not know the builtin.
+ */
+function __mc_ser_native(mixed $value): string {
+    return '';
+}
+
+/**
  * JSON_NUMERIC_CHECK's reading of a string: the int or float it is numeric as
  * (php's is_numeric_string — surrounding whitespace allowed, no hex), or null
  * when it stays a string, which includes a value that overflows to INF. Called
