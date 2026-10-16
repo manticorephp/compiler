@@ -15,6 +15,7 @@ Commands:
   dump-sig  Parse PHP, print the module-interface .sig (exported symbol table)
   version  Print compiler version
   upgrade  Update the installed compiler to the latest release (--check only reports)
+  doctor  Check that this compiler and its toolchain work; exit 1 on a failure
   help  Show this help text
 
 Run 'manticore <command> --help' for command options.
@@ -184,3 +185,11 @@ Usage: manticore upgrade [--check] [--version X]
 Options:
   --check        Report installed and latest version; change nothing. Exit 1 if an update exists, 2 on error
   --version <X>  Install this release instead of the latest
+== help doctor
+doctor — Check that this compiler and its toolchain work; exit 1 on a failure
+
+Usage: manticore doctor [--offline] [--no-smoke]
+
+Options:
+  --offline   Skip the update check
+  --no-smoke  Skip compiling and running a hello-world

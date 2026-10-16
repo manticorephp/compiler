@@ -30,6 +30,13 @@ sum() { # label, then the command: checksum of stdout + rc
     printf '== %s\n%s rc=%s\n' "$label" "$s" "$rc"
 }
 
+doctor_case() { # label; PATH for the compiler is only $WORK/shim
+    local label="$1" out rc
+    out="$(PATH="$WORK/shim" "$MC" doctor --offline --no-smoke 2>&1)"; rc=$?
+    printf '== %s\nrc=%s fail=%s warn=%s\n' "$label" "$rc" "$(printf '%s\n' "$out" | grep -c '^\[FAIL\]')" "$(printf '%s\n' "$out" | grep -c '^\[WARN\]')"
+}
+shim() { rm -rf "$WORK/shim"; mkdir -p "$WORK/shim"; for t in "$@"; do case "$t" in clang14) printf '#!/bin/sh\necho "clang version 14.0.0"\n' > "$WORK/shim/clang";; clang17) printf '#!/bin/sh\necho "clang version 17.0.6"\n' > "$WORK/shim/clang";; pcre2-config) printf '#!/bin/sh\necho 10.42\n' > "$WORK/shim/pcre2-config";; pkg-config) printf '#!/bin/sh\necho 3.0.0\n' > "$WORK/shim/pkg-config";; cc) printf '#!/bin/sh\nexit 0\n' > "$WORK/shim/cc";; esac; done; chmod +x "$WORK/shim"/* 2>/dev/null || true; }
+
 behaviour() {
     sum "version"            "$MC" version
     sum "dump-ast"           "$MC" dump-ast "f.php"
@@ -47,6 +54,10 @@ behaviour() {
     run "build missing manifest"   "$MC" build "nope.json"
     run "upgrade in a dev tree (foreign)" "$MC" upgrade --check
     run "version --check in a dev tree (foreign)" "$MC" version --check
+    shim; doctor_case "doctor: empty toolchain"
+    shim clang14 cc; doctor_case "doctor: old clang"
+    shim clang17 cc; doctor_case "doctor: no pcre2/pkg-config"
+    shim clang17 cc pcre2-config pkg-config; doctor_case "doctor: full toolchain"
     run "unknown command"          "$MC" frobnicate
     "$MC" compile "f.php" -o "prog" >/dev/null 2>&1
     if [ -x ./prog ]; then out="$(./prog 2>&1)"; else out="no binary"; fi
@@ -54,7 +65,7 @@ behaviour() {
 }
 
 helps() {
-    for c in "" compile build analyze dump-llvm dump-ast dump-mir dump-llvm-mir dump-sig split-ir version upgrade; do
+    for c in "" compile build analyze dump-llvm dump-ast dump-mir dump-llvm-mir dump-sig split-ir version upgrade doctor; do
         printf '== help %s\n' "${c:-<root>}"
         if [ -z "$c" ]; then "$MC" help 2>&1; else "$MC" "$c" --help 2>&1; fi
     done

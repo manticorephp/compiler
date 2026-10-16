@@ -5689,6 +5689,7 @@ function main_driver(): int
     $cli->add(new \Cli\Commands\DumpSigCommand());
     $cli->add(new \Cli\Commands\VersionCommand());
     $cli->add(new \Cli\Commands\UpgradeCommand());
+    $cli->add(new \Cli\Commands\DoctorCommand());
     return $cli->run(collect_argv());
 }
 

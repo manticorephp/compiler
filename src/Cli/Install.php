@@ -61,6 +61,9 @@ final class Install
     /** Asks the installed install.sh for the target version; '' (after a message unless $quiet) on failure. */
     public static function latest(string $who, string $versionArg, bool $quiet = false): string
     {
+        if (self::installer() === '') {
+            return '';
+        }
         $out = \shell_exec(self::env($versionArg) . ' bash ' . \escapeshellarg(self::installer()) . ' --check 2>&1');
         $text = \is_string($out) ? $out : '';
         if (\preg_match('/^latest=(\S+)\s*$/m', $text, $m) === 1) {

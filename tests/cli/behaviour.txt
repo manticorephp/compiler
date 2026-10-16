@@ -30,6 +30,14 @@ rc=66
 rc=2
 == version --check in a dev tree (foreign)
 rc=2
+== doctor: empty toolchain
+rc=1 fail=2 warn=3
+== doctor: old clang
+rc=1 fail=1 warn=3
+== doctor: no pcre2/pkg-config
+rc=0 fail=0 warn=3
+== doctor: full toolchain
+rc=0 fail=0 warn=1
 == unknown command
 rc=0
 == compile+run
