@@ -1,0 +1,7 @@
+C::t z = "a"
+C::t q = null
+I::f a = 5
+MyEx::__construct message = ""
+MyEx::__construct code = 0
+MyEx::__construct previous = null
+AO::__construct array = []
