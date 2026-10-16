@@ -169,7 +169,7 @@ function array_is_list(array $a): bool
 
 /**
  * Bootstrap twins of the bulk list builtins (`__mc_fast_list`, `__mc_fast_cat`,
- * `__mc_list_range`, `__mc_list_cat`; see prelude/array_fns.php). A compiler
+ * `__mc_list_range_into`, `__mc_list_cat_into`; see prelude/array_fns.php). A compiler
  * that does not know them answers "not applicable", so the prelude takes its
  * element-by-element path and the range / cat twins never run.
  *
@@ -196,16 +196,16 @@ function __mc_sort_native(array &$a): bool { return false; }
 function __mc_fast_cat(array $a): bool { return false; }
 
 /**
+ * @param mixed[] $out
  * @param mixed[] $a
- * @return mixed[]
  */
-function __mc_list_range(array $a, int $from, int $to, bool $rev): array { return []; }
+function __mc_list_range_into(array &$out, array $a, int $from, int $to, bool $rev): void {}
 
 /**
+ * @param mixed[] $out
  * @param mixed[] $a
- * @return mixed[]
  */
-function __mc_list_cat(array $a): array { return []; }
+function __mc_list_cat_into(array &$out, array $a): void {}
 
 /**
  * The bootstrap twin of the `__mc_array_reindex` codegen builtin (the sort

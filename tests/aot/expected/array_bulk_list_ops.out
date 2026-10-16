@@ -85,3 +85,6 @@ source intact
 11
 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1
 [[1,2],[3,4]][[3,4,99],[1,2]]
+4 132
+0
+[[3,2,1],[2,3],[1,2,3,1,2,3]][["b","a"],["b"],["a","b","a","b"]][[2.5,null,"b",1],["b",null,2.5],[1,"b",null,2.5,1,"b",null,2.5]]

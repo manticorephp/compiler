@@ -525,8 +525,8 @@ function arsort(array &$arr, int $flags = 0): bool
 function array_merge(array ...$arrays): array
 {
     // Lists of one element kind concatenate by memcpy.
-    if (\__mc_fast_cat($arrays)) { return \__mc_list_cat($arrays); }
     $out = [];
+    if (\__mc_fast_cat($arrays)) { \__mc_list_cat_into($out, $arrays); return $out; }
     foreach ($arrays as $arr) {
         foreach ($arr as $k => $v) {
             if (\is_int($k)) {
@@ -551,9 +551,9 @@ function array_reverse(array $a, bool $preserve_keys = false): array
 {
     // php: STRING keys are ALWAYS kept; INT keys are re-indexed unless
     // $preserve_keys. The old body used array_values and dropped every key.
-    if (!$preserve_keys && \__mc_fast_list($a)) { return \__mc_list_range($a, 0, \count($a), true); }
-    $keys = \array_keys($a);
     $out = [];
+    if (!$preserve_keys && \__mc_fast_list($a)) { \__mc_list_range_into($out, $a, 0, \count($a), true); return $out; }
+    $keys = \array_keys($a);
     $i = \count($keys) - 1;
     while ($i >= 0) {
         $k = $keys[$i];
@@ -582,12 +582,12 @@ function array_slice(array $arr, int $offset, ?int $length = null, bool $preserv
     } else {
         $end = min($count, $offset + $length);
     }
+    $out = [];
     if (\__mc_fast_list($arr) && (!$preserve_keys || $offset === 0)) {
         $to = (int)$end;
-        if ($to <= $offset) { return []; }
-        return \__mc_list_range($arr, $offset, $to, false);
+        if ($to > $offset) { \__mc_list_range_into($out, $arr, $offset, $to, false); }
+        return $out;
     }
-    $out = [];
     $i = 0;
     foreach ($arr as $k => $v) {
         if ($i >= $end) { break; }

@@ -57,3 +57,17 @@ echo $rs[0], ' ', $rs[1], "\n";
 $nest = [[1, 2], [3, 4]];
 $rn = array_reverse($nest); $rn[0][] = 99;
 echo show($nest), show($rn), "\n";
+// closure lists are owned by their repr bits: the result frees its closures
+class Live { public static int $n = 0; function __construct(public int $v) { self::$n++; } function __destruct() { self::$n--; } function hook(): \Closure { return function () { return $this->v; }; } }
+function cl(): array { $a = []; for ($i = 0; $i < 4; $i++) { $a[] = (new Live($i))->hook(); } return $a; }
+function closures(): void {
+    $a = cl(); $s = array_slice($a, 1, 2); $r = array_reverse($a); $m = array_merge($a, $s);
+    unset($a);
+    echo Live::$n, ' ', $s[0](), $r[0](), $m[5](), "\n";
+    unset($s, $r, $m);
+    echo Live::$n, "\n";
+}
+closures();
+// arrays reaching the copies through an untyped channel
+function untyped($x) { return [array_reverse($x), array_slice($x, 1), array_merge($x, $x)]; }
+echo json_encode(untyped([1, 2, 3])), json_encode(untyped(["a", "b"])), json_encode(untyped([1, "b", null, 2.5])), "\n";

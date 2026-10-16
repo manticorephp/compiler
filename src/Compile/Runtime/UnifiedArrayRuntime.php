@@ -149,6 +149,7 @@ final class UnifiedArrayRuntime
         $this->emitArrayConformInner();
         $this->emitArrayIsList();
         $this->emitListRange();
+        $this->emitFastList();
         $this->emitFastCat();
         $this->emitListCat();
         $this->emitIntSeq();
@@ -5647,6 +5648,50 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * i1: does an element hint `$h` satisfy the caller's `$want`? An exact
+     * match, or (-2) any hint that describes its elements and is not a nested
+     * array — what a cell / unknown static channel decodes.
+     */
+    private function hintFits(Block $b, Value $h, Value $want): Value
+    {
+        $exact = $b->icmp('eq', $h, $want);
+        $any = $b->and_(
+            $b->icmp('eq', $want, Value::int(Type::i64(), -2)),
+            $b->and_(
+                $b->icmp('ne', $h, Value::int(Type::i64(), 0)),
+                $b->icmp('ne', $h, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_ARR))));
+        return $b->or_($exact, $any);
+    }
+    /**
+     * `__mir_array_fastlist(arr, want) -> i1` — may `__mir_array_list_range`
+     * copy this array? It is a list, and either empty or stamped with exactly
+     * the element hint `want` the caller's static type implies (-1: none). A
+     * buffer the static type does not describe (a closure list owned by its
+     * repr bits, a cell buffer under a raw type) stays on the element loop.
+     */
+    private function emitFastList(): void
+    {
+        $fn = $this->module->func('__mir_array_fastlist', Type::i1());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $want = $fn->param(Type::i64(), 'want');
+        $e = $fn->block('entry');
+        $chk = $fn->block('fl_chk');
+        $hintChk = $fn->block('fl_hint');
+        $no = $fn->block('fl_no');
+        $yes = $fn->block('fl_yes');
+        $yes->ret(Value::int(Type::i1(), 1));
+        $no->ret(Value::int(Type::i1(), 0));
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $yes, $chk);
+        $isList = $chk->call('__mir_array_is_list', Type::i64(), [$arr]);
+        $len = $chk->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $chk->brIf($chk->icmp('ne', $isList, Value::int(Type::i64(), 0)), $hintChk, $no);
+        $h = $this->elemHint($hintChk, $arr);
+        $ok = $hintChk->or_(
+            $hintChk->icmp('eq', $len, Value::int(Type::i64(), 0)),
+            $this->hintFits($hintChk, $h, $want));
+        $hintChk->brIf($ok, $yes, $no);
+    }
+    /**
      * `__mir_array_fastcat(outer) -> i1` — may `__mir_array_list_cat` merge
      * these arrays? Every member (a raw pointer or a boxed array, the low 48
      * bits either way) is a PACKED list, and the non-empty ones agree on their
@@ -5656,6 +5701,7 @@ final class UnifiedArrayRuntime
     {
         $fn = $this->module->func('__mir_array_fastcat', Type::i1());
         $outer = $fn->param(Type::ptr(), 'outer');
+        $want = $fn->param(Type::i64(), 'want');
         $e = $fn->block('entry');
         $go = $fn->block('fc_go');
         $head = $fn->block('fc_head');
@@ -5694,7 +5740,12 @@ final class UnifiedArrayRuntime
         $bits = $first->and_($pflags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK | MemoryAbi::ARRAY_ELEM_HINT_MASK));
         $seen = $first->load(Type::i64(), $seenSlot);
         $set = $fn->block('fc_set');
-        $first->brIf($first->icmp('eq', $seen, Value::int(Type::i64(), 0)), $set, $cmp);
+        // A member the static type does not describe (repr-only closures, a
+        // cell buffer under a raw type) stays on the element loop, as in fastlist.
+        $reprOnly = $first->xor_($this->hintFits($first, $first->and_($pflags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK)), $want), Value::int(Type::i1(), 1));
+        $gate = $fn->block('fc_gate');
+        $first->brIf($reprOnly, $no, $gate);
+        $gate->brIf($gate->icmp('eq', $seen, Value::int(Type::i64(), 0)), $set, $cmp);
         $set->store($bits, $bitsSlot);
         $set->store(Value::int(Type::i64(), 1), $seenSlot);
         $set->br($next);
