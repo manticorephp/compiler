@@ -1269,8 +1269,9 @@ trait LowerClasses
                 $found = $this->findClassConst($tn, $name);
                 if ($found !== null) { return $found; }
             }
-            if ($decl->extends !== []) {
-                $found = $this->findClassConst(\ltrim($decl->extends[0], '\\'), $name);
+            // Every parent: an interface may extend several (`R extends U, V`).
+            foreach ($decl->extends as $parentName) {
+                $found = $this->findClassConst(\ltrim($parentName, '\\'), $name);
                 if ($found !== null) { return $found; }
             }
             // Implemented interfaces (and extended interfaces, via `implements`
