@@ -49,7 +49,8 @@ final class Progress
         $mode = $progress;
         if ($mode === 'auto') {
             $ci = \getenv('CI');
-            if ($tty) { $mode = 'live'; }
+            if (Stats::reporting()) { $mode = (\is_string($ci) && $ci !== '' || $tty) ? 'plain' : 'off'; }
+            elseif ($tty) { $mode = 'live'; }
             elseif (\is_string($ci) && $ci !== '') { $mode = 'plain'; }
             else { $mode = 'off'; }
         }
@@ -92,15 +93,22 @@ final class Progress
         self::$finished = self::$finished + 1;
         self::$names[] = $n;
         self::$times[] = $ms;
-        // pop the matching open stage; a name that was never begun closes nothing
+        // pop the matching open stage (innermost first); a name that was never begun closes nothing.
+        // A step may extend its begin name with a result (`narrow round 1` -> `narrow round 1 (narrowed 2)`):
+        // the begin name followed by a space matches too, and json pairs on the begin name.
         $at = \count(self::$stack) - 1;
-        while ($at >= 0 && self::$stack[$at] !== $n) { $at = $at - 1; }
+        $key = $n;
+        while ($at >= 0) {
+            $b = self::$stack[$at];
+            if ($b === $n || (\strlen($n) > \strlen($b) && \substr($n, 0, \strlen($b)) === $b && $n[\strlen($b)] === ' ')) { $key = $b; break; }
+            $at = $at - 1;
+        }
         if ($at >= 0) {
             \array_splice(self::$stack, $at, 1);
             \array_splice(self::$starts, $at, 1);
         }
         if (self::$mode === 'json') {
-            $l = '{"event":"stage_end","name":"' . self::esc($n) . '","ms":' . (string)$ms;
+            $l = '{"event":"stage_end","name":"' . self::esc($key) . '","ms":' . (string)$ms;
             if ($fns >= 0) { $l = $l . ',"fns":' . (string)$fns; }
             if ($classes >= 0) { $l = $l . ',"classes":' . (string)$classes; }
             self::emit($l . '}');

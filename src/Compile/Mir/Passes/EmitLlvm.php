@@ -1261,6 +1261,7 @@ final class EmitLlvm implements EmitVisitor
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {
+            $statT = \Compile\Stats::begin('  hoist allocas (streamed)');
             if (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
                 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
                 throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);

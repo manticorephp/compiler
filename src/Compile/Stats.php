@@ -81,6 +81,7 @@ final class Stats
     {
         $ms = self::$rootT0 > 0
             ? \intdiv(self::now() - self::$rootT0, 1000000) : 0;
+        Progress::clear();
         \error_log('stats: ' . (string)$ms . 'ms  ' . $s);
     }
 
@@ -121,6 +122,7 @@ final class Stats
         $line = 'stats: ' . (string)self::elapsedMs() . 'ms +' . (string)$ms . 'ms  ' . $name;
         if ($fns >= 0) { $line = $line . '  fns=' . (string)$fns; }
         if ($classes >= 0) { $line = $line . ' cls=' . (string)$classes; }
+        Progress::clear();
         \error_log($line . self::rss());
     }
 
@@ -128,6 +130,7 @@ final class Stats
     public static function line(string $s): void
     {
         if (!self::reporting()) { return; }
+        Progress::clear();
         \error_log('stats: ' . (string)self::elapsedMs() . 'ms  ' . $s . self::rss());
     }
 
@@ -145,6 +148,7 @@ final class Stats
     {
         if (!self::$on) { return; }
         foreach (self::$counts as $k => $v) {
+            Progress::clear();
             \error_log('stats: counter ' . $k . ' = ' . (string)$v);
         }
     }

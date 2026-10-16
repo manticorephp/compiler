@@ -158,7 +158,24 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     splitck "split json clang counters (build)" "$e"
     [ "$(./sp_off)" = "$(./mf/bin/d)" ]; ck "split build binary output same" $?
     [ -z "$(find . -name '*.done' -o -name '*.pid')" ]; ck "no stale .done/.pid markers" $?
+    pairck() { # label, stderr file: every stage_start name has exactly one stage_end of the same name, and vice versa
+        sed -n 's/.*"event":"stage_start","name":"\(.*\)","t_ms.*/\1/p' "$2" | sort >"$WORK/ps"
+        sed -n 's/.*"event":"stage_end","name":"\(.*\)","ms.*/\1/p' "$2" | sort >"$WORK/pend"
+        [ -s "$WORK/ps" ] && cmp -s "$WORK/ps" "$WORK/pend"; ck "$1" $?
+    }
+    MANTICORE_SPLIT_JOBS=4 "$MC" compile sp.php -o sp_js2 -j 0 --progress=json >/dev/null 2>"$e"; pairck "json stage pairing (split compile)" "$e"
+    ( cd mf && MANTICORE_SPLIT_JOBS=4 "$MC" build --progress=json >/dev/null 2>"$e" ); pairck "json stage pairing (build)" "$e"
     unset MANTICORE_OBJ_CACHE MANTICORE_OBJ_CACHE_DIR
+    "$MC" compile f.php -o pq --progress=json >/dev/null 2>"$e"; pairck "json stage pairing (plain compile)" "$e"
+    # after link ends the live line must not fall back to a stale outer stage
+    "$MC" compile f.php -o pk --progress=live 2>&1 >/dev/null | LC_ALL=C tr '\r' '\n' | LC_ALL=C sed 's/\x1b\[2K//g' | grep -v '^$' | cat -v >"$e"
+    LC_ALL=C awk '/done in/ { bad = (prev ~ /narrow round/) } { prev = $0 } END { exit bad }' "$e"; ck "live: no stale stage before done" $?
+    ! grep -q 'M-^WM-^O narrow round' "$e"; ck "live: no narrow round line" $?
+    # stats lines start at column 0 under a forced live line; auto + stats falls back to plain
+    MANTICORE_STATS=1 "$MC" compile f.php -o ps --progress=live 2>&1 >/dev/null | cat -v >"$e"
+    grep -q 'stats:' "$e" && ! grep -q 'M-^WM-^O.*stats:' "$e"; ck "live+stats: stats line not glued to live line" $?
+    CI=1 MANTICORE_STATS=1 "$MC" compile f.php -o pa --progress=auto 2>&1 >/dev/null | cat -v >"$e"
+    grep -Eq '^\[ *[0-9]+\] parse' "$e" && ! grep -q '\^M' "$e"; ck "auto+stats+CI is plain" $?
     # nested stage end must not blank the live line: the first line drawn after `property scan` ends shows the outer EmitLlvm
     "$MC" compile f.php -o pn --progress=live 2>&1 >/dev/null | LC_ALL=C tr '\r' '\n' | cat -v >"$e"
     LC_ALL=C awk '/property scan/ { seen = 1; next } seen && /M-\^WM-\^O/ { ok = /EmitLlvm/; exit } END { exit !ok }' "$e"; ck "live shows outer stage right after nested end" $?

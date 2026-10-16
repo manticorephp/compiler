@@ -300,7 +300,7 @@ if ($mode === 'phase') {
         }
         $prev = $at;
     }
-    echo "after the last recorded pass (" . $prev . "ms) — clang/link\n";
+    echo "after the last recorded stats line (" . $prev . "ms) — the tail of the build (final clang/link steps report their own stats: lines when present)\n";
     exit(0);
 }
 
