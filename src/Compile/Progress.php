@@ -175,8 +175,8 @@ final class Progress
         $now = Stats::now();
         $body = self::$running;
         if ($body === '') { $body = 'working'; }
-        $body = $body . '  ' . self::sec(\intdiv($now - self::$runStart, 1000000))
-            . '  (total ' . self::sec(self::totalMs()) . ')';
+        else { $body = $body . '  ' . self::sec(\intdiv($now - self::$runStart, 1000000)); }
+        $body = $body . '  (total ' . self::sec(self::totalMs()) . ')';
         if (self::$counter !== '') { $body = $body . ' · ' . self::$counter; }
         if (\strlen($body) > 77) {
             // never cut inside a UTF-8 sequence: back up over continuation bytes (0x80-0xBF)

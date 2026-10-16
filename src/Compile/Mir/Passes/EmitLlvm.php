@@ -872,7 +872,7 @@ final class EmitLlvm implements EmitVisitor
         $this->cloneClassUnknown = false;
         $this->moduleIsLibrary = $module->isLibraryModule;
         $this->grantBagsForDynamicStores($module);
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('  property scan');
         foreach ($module->functions as $fn) {
             $this->scanCellPropStores($fn->body);
             $this->collectRefCellPropNames($fn->body);
@@ -926,6 +926,7 @@ final class EmitLlvm implements EmitVisitor
         // already copied the signature facts into $this->sigs, and no code below
         // this loop reads $module->functions again.
         $functionKeys = \array_keys($module->functions);
+        $functionTotal = \count($functionKeys);
         foreach ($functionKeys as $functionKey) {
             $fn = $module->functions[$functionKey];
             $emitIndex = $emitIndex + 1;
@@ -1150,7 +1151,11 @@ final class EmitLlvm implements EmitVisitor
             if (!$this->emitLibrary) {
                 unset($module->functions[$functionKey], $fn);
             }
+            if (($emitIndex & 255) === 0) {
+                \Compile\Progress::counter('functions', $emitIndex, $functionTotal);
+            }
         }
+        \Compile\Progress::counter('functions', $emitIndex, $functionTotal);
         unset($functionKeys);
         $this->rootSnapshot('post-function-emission', $module, true, $bodyBytes);
         // One `__mc_drop` per capturing closure literal seen above — it releases
@@ -1244,7 +1249,7 @@ final class EmitLlvm implements EmitVisitor
         // same preamble. Only the preamble block is rewritten; user / stdlib
         // PHP functions stay external (unique) and `@main` lives in the
         // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('  emit preamble');
         $preamble = $this->linkonceRuntime($this->emitPreamble());
         // The preamble mints lazy helpers too (a per-class `__mir_props_*` body
         // cellifying an array property), after both drains above ran. Drained
@@ -1276,7 +1281,7 @@ final class EmitLlvm implements EmitVisitor
             $pruneMode = \getenv('MANTICORE_PRUNE_IR');
             if (!$this->emitLibrary && $pruneMode !== 'off'
                 && \Compile\Mir\PruneIr::shouldRunFile($stagedBytes)) {
-                $statT = \Compile\Stats::now();
+                $statT = \Compile\Stats::begin('  prune staged IR');
                 $prune = new \Compile\Mir\PruneIr();
                 $prunedPath = $this->streamIrPath . '.pruned';
                 if (!$prune->runFile($this->streamIrPath, $prunedPath)) {
@@ -1314,7 +1319,7 @@ final class EmitLlvm implements EmitVisitor
         // not released until the function returns. -O2 hides this (mem2reg
         // promotes the slots); -O0 — which tools/selfhost.sh uses — does not,
         // and a hot loop dies on the guard page. {@see \Compile\Mir\HoistAllocas}
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('  hoist allocas');
         $hoist = new \Compile\Mir\HoistAllocas();
         $ir = $hoist->run($ir);
         \Compile\Stats::step('  hoist allocas', $statT, $hoist->moved, -1);
@@ -1332,7 +1337,7 @@ final class EmitLlvm implements EmitVisitor
         // the linkonce_odr coalescing contract is written against.
         $pruneMode = \getenv('MANTICORE_PRUNE_IR');
         if (!$this->emitLibrary && $pruneMode !== 'off') {
-            $statT = \Compile\Stats::now();
+            $statT = \Compile\Stats::begin('  prune IR');
             $prune = new \Compile\Mir\PruneIr();
             $ir = $prune->run($ir);
             \Compile\Stats::step('  prune IR', $statT, $prune->kept, $prune->dropped);

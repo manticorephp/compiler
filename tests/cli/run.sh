@@ -105,6 +105,30 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     colour "never no ESC" no "$MC" compile f.php -o pc --progress=plain --color=never
     colour "json+always no ESC" no "$MC" compile f.php -o pc --progress=json --color=always
     "$MC" compile f.php -o pt --progress=plain --timings >/dev/null 2>"$e"; grep -q '^timings (longest first):' "$e"; ck "timings table" $?
+    for s in parse EmitLlvm link; do grep -Eq "^\[ *[0-9]+\] $s( |  )" "$e"; ck "plain stage $s (single-file)" $?; done
+    "$MC" compile f.php -o pj --progress=json >/dev/null 2>"$e"
+    grep -v '"event":"counter"' "$e" | head -n1 | grep -q '"event":"stage_start"'; ck "json first non-counter line stage_start" $?
+    tail -n1 "$e" | grep -q '"event":"done"'; ck "json last line done" $?
+    awk -F'"t_ms":' '/"event":"stage_start"/ { t = $2 + 0; if (t < p) bad = 1; p = t } END { exit bad }' "$e"; ck "json stage_start t_ms non-decreasing" $?
+    for s in parse LowerFromAst EmitLlvm link Verify; do
+        [ "$(grep -c "\"event\":\"stage_start\",\"name\":\"$s\"" "$e")" = "$(grep -c "\"event\":\"stage_end\",\"name\":\"$s\"" "$e")" ] \
+            && grep -q "\"event\":\"stage_start\",\"name\":\"$s\"" "$e"; ck "json start/end paired: $s" $?
+        awk -v n="\"name\":\"$s\"" '/"event":"stage_start"/ && index($0, n) { s++ } /"event":"stage_end"/ && index($0, n) { if (s == 0) bad = 1 } END { exit bad }' "$e"; ck "json start before end: $s" $?
+    done
+    local lab
+    for lab in files functions; do
+        grep -q "\"event\":\"counter\",\"label\":\"$lab\"" "$e"; ck "json counter $lab present" $?
+        grep "\"label\":\"$lab\"" "$e" | sed 's/.*"done":\([0-9]*\),"total":\([0-9]*\).*/\1 \2/' \
+            | awk '{ if ($1 > $2) bad = 1; d = $1; t = $2 } END { exit (bad || d != t) }'; ck "json counter $lab done<=total, final done==total" $?
+    done
+    "$MC" compile f.php -o pl --progress=live 2>&1 >/dev/null | cat -v >"$e"
+    LC_ALL=C grep -qF '^M' "$e"; ck "live has CR" $?
+    LC_ALL=C grep -qF '^[[2K' "$e"; ck "live has ESC[2K" $?
+    LC_ALL=C grep -qF 'M-^WM-^O parse' "$e"; ck "live shows running stage" $?
+    tail -n1 "$e" | LC_ALL=C grep -q 'done in'; ck "live ends with done in" $?
+    "$MC" compile f.php -o pl --progress=live --color=always 2>&1 >/dev/null | cat -v >"$e"
+    LC_ALL=C grep -qF '^[[36m' "$e"; ck "live colour cyan" $?
+    LC_ALL=C grep -qF '^[[32m' "$e"; ck "live colour green" $?
     local m
     "$MC" compile f.php -o p0 --progress=off >"$WORK/o_off" 2>/dev/null
     for m in plain json; do

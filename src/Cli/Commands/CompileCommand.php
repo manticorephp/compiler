@@ -77,6 +77,7 @@ final class CompileCommand extends Command
             $sources[] = \Manticore\__mc_source_contents($sf);
             $paths[] = \Manticore\__mc_source_path($sf);
         }
+        \Compile\Progress::counter('files', \count($afiles), \count($afiles));
 
         if ($analyze) {
             // Advisory by default: any failure inside the analyzer is swallowed so it
@@ -111,7 +112,7 @@ final class CompileCommand extends Command
         // bindings resolve to real syscalls). compile_via_mir consumes them via
         // the static. A library declares them too; only the stdlib itself
         // (`--runtime`) does not.
-        $sigT = \Compile\Stats::now();
+        $sigT = \Compile\Stats::begin('stdlib .sig -> extern decls');
         \Manticore\CompileArgs::$externDecls = [];
         if (!\Manticore\import_stdlib_decls(\Manticore\CompileArgs::$emitLibrary, \Manticore\CompileArgs::$runtimeLibrary)) { return 65; }
         \Compile\Stats::step('stdlib .sig -> extern decls', $sigT,
@@ -270,7 +271,9 @@ final class CompileCommand extends Command
             : " -Wl,--gc-sections -lm";
         $gc = $gc . \Manticore\unwind_link_flags();
         $asNeeded = \Manticore\is_darwin() ? "" : " -Wl,--as-needed";
+        $linkT = \Compile\Stats::begin('link');
         $rc2 = \Manticore\system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
+        \Compile\Stats::step('link', $linkT, -1, -1);
         if ($rc2 !== 0) {
             \Manticore\dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objList);
             return 76;

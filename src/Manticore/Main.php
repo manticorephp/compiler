@@ -1102,7 +1102,10 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
             \Compile\Stats::line('  obj cache: hit (whole module)');
             return [$objPath];
         }
+        $stage = '  clang -O' . clang_opt_level() . ' -c whole module';
+        $statT = \Compile\Stats::begin($stage);
         $rc = system("clang " . $flags . " -c -x ir " . $llPath . " -o " . $objPath . " -Wno-override-module");
+        \Compile\Stats::step($stage, $statT, -1, -1);
         if ($rc !== 0) {
             dprint("assemble: clang -c failed (rc=" . (string)$rc . "); IR at " . $llPath);
             return [];
@@ -1112,14 +1115,15 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         }
         return [$objPath];
     }
-    $statT = \Compile\Stats::now();
+    $stage = '  split module (' . (string)$jobs . ' parts)';
+    $statT = \Compile\Stats::begin($stage);
     $splitter = new \Compile\Mir\SplitModule();
     // A cache over a load-balanced split hits nothing: one body growing moves
     // every part. Turn the cache on and the partition becomes hash-stable.
     $splitter->stable = obj_cache_enabled(true) || \getenv("MANTICORE_SPLIT_STABLE") === "1";
     $parts = $splitter->run($ir, $jobs);
     \Compile\Stats::step(
-        '  split module (' . (string)$jobs . ' parts)',
+        $stage,
         $statT,
         $splitter->sharedDefs,
         $splitter->internalDefs
@@ -1177,7 +1181,8 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         }
         \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
     }
-    $statT = \Compile\Stats::now();
+    $stage = '  clang -O' . clang_opt_level() . ' -c x' . (string)(\count($parts) - $hits);
+    $statT = \Compile\Stats::begin($stage);
     // `wait` must be INSIDE the subshell: the background jobs are ITS children,
     // so an outer `wait` has nothing to wait for and returns at once — the
     // existence check below then ran before clang had written anything and
@@ -1186,7 +1191,7 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         system("( " . $cmd . " ; wait )");
     }
     \Compile\Stats::step(
-        '  clang -O' . clang_opt_level() . ' -c x' . (string)(\count($parts) - $hits),
+        $stage,
         $statT,
         -1,
         -1
@@ -1224,7 +1229,7 @@ function assemble_ir_file(
         dprint('assemble: staged split failed; falling back to the serial path');
     }
     \Compile\Stats::line('  assembly: staged large module, serial IR path (' . (string)$irBytes . ' bytes)');
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('  clang -O' . clang_opt_level() . ' -c staged IR');
     $flags = '-O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags;
     $key = obj_cache_enabled() ? obj_cache_key($llPath, $flags) : '';
     if ($key !== '' && obj_cache_get($key, $objPath)) {
@@ -1261,7 +1266,7 @@ function assemble_ir_file_split(
     int $irBytes,
     int $jobs
 ): array {
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('  split staged module');
     $splitter = new \Compile\Mir\SplitModule();
     $splitter->stable = obj_cache_enabled(true) || \getenv('MANTICORE_SPLIT_STABLE') === '1';
     $parts = $splitter->runFile($llPath, $jobs, $base);
@@ -1314,7 +1319,9 @@ function assemble_ir_file_split(
         \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
     }
     $cmds = \array_values($cmds);
-    $statT = \Compile\Stats::now();
+    $stage = '  clang -O' . clang_opt_level() . ' -c x' . (string)\count($cmds)
+        . ($lto === '' ? '' : ' (thinlto)');
+    $statT = \Compile\Stats::begin($stage);
     // ⚠ PARTS and CONCURRENCY are two different numbers, and conflating them is
     // what makes a big module unbuildable. clang's peak is roughly proportional
     // to the bytes it is handed — measured at ~15x the `.ll` on this module — so
@@ -1370,8 +1377,7 @@ function assemble_ir_file_split(
         system('( ' . $cmd . ' ; wait )');
     }
     \Compile\Stats::step(
-        '  clang -O' . clang_opt_level() . ' -c x' . (string)\count($cmds)
-        . ($lto === '' ? '' : ' (thinlto)'),
+        $stage,
         $statT,
         -1,
         -1
@@ -3072,6 +3078,7 @@ function build_compile_module(
     array $paths = []
 ): int {
     CompileArgs::$emitLibrary = $emitLibrary;
+    \Compile\Progress::counter('files', \count($sources), \count($sources));
     // Ensure the output directory exists — a fresh checkout has no `lib/` (it is
     // a build artifact), and clang/cc cannot create the parent on write. Covers
     // any manifest target dir, not just the stdlib's `lib/`.
@@ -3109,7 +3116,7 @@ function build_compile_module(
     /** @var string[] $undefTraps */
     $undefTraps = [];
     try {
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('EmitLlvm');
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
         $emit->emitFiberAsm = $emitLibrary && \basename($output) === "manticore_stdlib.o";
@@ -3327,7 +3334,7 @@ function build_compile_module(
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
     $stubs = find_link_stubs_script();
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('link');
     if ($stubs !== "") {
         $rc2 = system("bash " . $stubs . " " . $output . " " . $objList . $linkExtra);
     } else {
@@ -3860,10 +3867,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // strings during the parse loop. lower_module receives a copy-on-write
     // source array, so clearing an element releases its bytes here without
     // changing the build command's inputs or the build-cache key.
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('prelude-demand (re-lex)');
     $demand = new \Compile\Mir\PreludeDemand($sources);
     \Compile\Stats::step('prelude-demand (re-lex)', $statT, -1, -1);
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('parse');
     $ownFns = [];
     $walkerRoots = [];
     $walkerDynamic = false;
@@ -4068,7 +4075,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // binding (a throwing stub under the Zend cold-seed), so guard: an
     // unreadable file provides nothing, and LowerFromAst falls back to its
     // embedded copy for the classes the bootstrap cannot live without.
-    $statT = \Compile\Stats::now();
+    $statT = \Compile\Stats::begin('prelude read (all files)');
     $arrayFnsSrc = prelude_src_or_empty("array_fns.php");
     $arrayFnsExtSrc = prelude_src_or_empty("array_fns_ext.php");
     $cliSrc = prelude_src_or_empty("cli.php");
@@ -5001,7 +5008,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if ($collect !== null) {
             $lower->attrCollectMode = true;
         }
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('LowerFromAst');
         $module = $lower->run($module);
         // Path → value-slot map for `require`/`include`. Set after lowering
         // because that is when the Module exists; the map itself was built at
@@ -5035,21 +5042,21 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $program = null;
         $lower = null;
         \Manticore\Allocator::release('after-lower');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('ConstFold');
         $fold = new \Compile\Mir\Passes\ConstFold();
         $module = $fold->run($module);
         \Compile\Stats::step('ConstFold', $statT, \count($module->functions), -1);
         // ConstFold keeps per-function work state; no result is needed after run.
         $fold = null;
         \Manticore\Allocator::release('after-constfold');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('DeadStore');
         $dse = new \Compile\Mir\Passes\DeadStore();
         $module = $dse->run($module);
         \Compile\Stats::step('DeadStore', $statT, \count($module->functions), -1);
         // DeadStore's used-local map is only needed during this pass.
         $dse = null;
         \Manticore\Allocator::release('after-deadstore');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InferTypes #1');
         $infer = new \Compile\Mir\Passes\InferTypes(null, $analysisContext);
         $module = $infer->run($module);
         \Compile\Stats::step('InferTypes #1', $statT, \count($module->functions), -1);
@@ -5061,7 +5068,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // receiver has no class before inference, and because InferTypes #2
         // below types the inits it plants. Must follow DeadStore — a store
         // inserted earlier would be a DSE candidate.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('VivifyRefArgs');
         $module = (new \Compile\Mir\Passes\VivifyRefArgs())->run($module);
         \Compile\Stats::step('VivifyRefArgs', $statT, \count($module->functions), -1);
         // A `$recv->m(...)` whose receiver lowering could not type gets the
@@ -5075,14 +5082,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // as cells across a boxing boundary). Erased-param helpers (whose return
         // Monomorphize re-shapes) are skipped → the full post-Mono NarrowReturns
         // handles them.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('NarrowReturns (concreteOnly)');
         $narrowConcrete = new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext, $worklistMode === 'on');
         $module = $narrowConcrete->run($module);
         \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
         // A narrowing pass that closed on a full inference leaves nothing for a
         // second one to move: the module is the one that run just typed.
         if (!$narrowConcrete->endedOnFullInfer) {
-            $statT = \Compile\Stats::now();
+            $statT = \Compile\Stats::begin('InferTypes #2');
             $infer2 = new \Compile\Mir\Passes\InferTypes(
                 ($analysisContext !== null && $worklistMode === 'on')
                     ? $analysisContext->scope() : null,
@@ -5099,7 +5106,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // fuse array_map/array_filter/array_reduce over a concrete array with a
         // literal closure into a native typed loop. Re-infer so the spliced /
         // fused expressions type from their (now concrete) operands.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InlineClosures');
         $inlineCl = new \Compile\Mir\Passes\InlineClosures();
         $module = $inlineCl->run($module);
         \Compile\Stats::step('InlineClosures', $statT, \count($module->functions), -1);
@@ -5108,13 +5115,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // `#[Overload]`: argument types are known by now, and the InferTypes run
         // below re-derives each retargeted call's type from its overload.
         $module = (new \Compile\Mir\Passes\ResolveOverloads())->run($module);
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InferTypes #3');
         $module = (new \Compile\Mir\Passes\InferTypes(null, $analysisContext))->run($module);
         \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
         // Specialize erased-array / polymorphic functions per call-site
         // argument shape (runs after InferTypes so call-arg types are known;
         // re-runs InferTypes internally when it specializes anything).
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('Monomorphize');
         $mono = new \Compile\Mir\Passes\Monomorphize($analysisContext);
         $module = $mono->run($module);
         \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
@@ -5124,7 +5131,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // str_replace (zero intermediate array/segment allocs). After Mono so
         // types + explode arg-counts are settled; before InferEffects so the
         // analysis sees the fused form.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('FuseSplitJoin');
         $module = (new \Compile\Mir\Passes\FuseSplitJoin())->run($module);
         \Compile\Stats::step('FuseSplitJoin', $statT, \count($module->functions), -1);
         // Compile-time type checker. ON by default (`MANTICORE_TYPECHECK=0`
@@ -5156,7 +5163,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $tcOn = $collect !== null || !\is_string($tcFlag)
             || ($tcFlag !== "" && $tcFlag !== "0");
         {
-            $statT = \Compile\Stats::now();
+            $statT = \Compile\Stats::begin('TypeCheck');
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $tc->reprOnly = !$tcOn;
             $module = $tc->run($module);
@@ -5183,7 +5190,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $tc = null;
         }
         \Manticore\Allocator::release('after-typecheck');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('NarrowReturns (full)');
         $narrow = new \Compile\Mir\Passes\NarrowReturns(false, $analysisContext, $worklistMode === 'on');
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
@@ -5194,7 +5201,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // `mixed` slot). Runs once types are final and before any memory pass —
         // a boxed cell downstream has already lost the marker. Throws; the catch
         // below turns it into a compile error.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('CheckTypeDefs');
         $checkTypeDefs = new \Compile\Mir\Passes\CheckTypeDefs();
         if ($collect !== null) {
             $checkTypeDefs->collectMode = true;
@@ -5215,7 +5222,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // Where the character is only ever compared to a one-char literal or
         // passed to ord(), read the byte instead. Before the memory passes, so rc
         // never sees the strings that are no longer created.
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('ReflectAnalysis');
         $refl = new \Compile\Mir\Passes\ReflectAnalysis();
         $refl->run($module);
         \Compile\Stats::step('ReflectAnalysis', $statT, -1, \count($module->classes));
@@ -5244,39 +5251,39 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
         $refl = null;
         \Manticore\Allocator::release('after-reflect-analysis');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('DemoteCharLocals');
         $module = (new \Compile\Mir\Passes\DemoteCharLocals())->run($module);
         \Compile\Stats::step('DemoteCharLocals', $statT, -1, -1);
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InferEffects');
         $effects = new \Compile\Mir\Passes\InferEffects();
         $module = $effects->run($module);
         \Compile\Stats::step('InferEffects', $statT, -1, -1);
         $effects = null;
         \Manticore\Allocator::release('after-infer-effects');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InferAllocKind');
         $allocKind = new \Compile\Mir\Passes\InferAllocKind();
         $module = $allocKind->run($module);
         \Compile\Stats::step('InferAllocKind', $statT, -1, -1);
         $allocKind = null;
         \Manticore\Allocator::release('after-infer-alloc-kind');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('ApplyMemoryMode');
         $memMode = new \Compile\Mir\Passes\ApplyMemoryMode(CompileArgs::$memory);
         $module = $memMode->run($module);
         \Compile\Stats::step('ApplyMemoryMode', $statT, -1, -1);
         $memMode = null;
         \Manticore\Allocator::release('after-memory-mode');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('SpillFreshBases');
         $module = (new \Compile\Mir\Passes\SpillFreshBases())->run($module);
         \Compile\Stats::step('SpillFreshBases', $statT, -1, -1);
         if (CompileArgs::$stopBeforeMemoryOps) { return $module; }
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('InsertMemoryOps');
         $module = (new \Compile\Mir\Passes\InsertMemoryOps())->run($module);
         \Compile\Stats::step('InsertMemoryOps', $statT, -1, -1);
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('OwnershipFlow');
         $module = (new \Compile\Mir\Passes\OwnershipFlow())->run($module);
         \Compile\Stats::step('OwnershipFlow', $statT, -1, -1);
         \Manticore\Allocator::release('after-memory-ops');
-        $statT = \Compile\Stats::now();
+        $statT = \Compile\Stats::begin('Verify');
         $verify = new \Compile\Mir\Passes\Verify();
         $module = $verify->run($module);
         \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
@@ -5331,9 +5338,11 @@ function compile_via_mir(array $sources, array $paths = []): ?string
         }
     }
     try {
+        $statT = \Compile\Stats::begin('EmitLlvm');
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;
         $ir = $emit->emit($module);
+        \Compile\Stats::step('EmitLlvm', $statT, \count($module->functions), -1);
         $cgErrors = $emit->cellGuardErrors();
         if (\count($cgErrors) > 0) {
             foreach ($cgErrors as $ce) {

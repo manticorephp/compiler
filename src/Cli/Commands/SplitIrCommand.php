@@ -30,7 +30,7 @@ final class SplitIrCommand extends Command
             \Manticore\dprint('split-ir: no such file ' . $in);
             return 66;
         }
-        $t = \Compile\Stats::now();
+        $t = \Compile\Stats::begin('split-ir');
         $splitter = new \Compile\Mir\SplitModule();
         $out = $splitter->runFile($in, $parts, $base);
         if ($out === []) {
