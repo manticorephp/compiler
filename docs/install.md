@@ -43,7 +43,7 @@ manticore upgrade --version 0.13.0 # a specific release (a downgrade is allowed)
 ```
 
 `upgrade` runs the `share/install.sh` that ships in every release tarball, in strict
-mode. The new build is staged and smoke-tested, then swapped in atomically; the
+mode. The new build is staged and smoke-tested, then swapped in with rollback; the
 previous binary stays as `bin/.manticore.prev`. The release checksum is mandatory: a
 mismatch or missing `SHA256SUMS` aborts and leaves the install untouched, and strict
 mode never falls back to a source build. A compiler not installed by `install.sh`

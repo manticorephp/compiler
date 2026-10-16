@@ -73,7 +73,7 @@ final class UpgradeCommand extends Command
     {
         $out = \shell_exec($env . ' bash ' . \escapeshellarg($installer) . ' --check 2>&1');
         $text = \is_string($out) ? $out : '';
-        if (\preg_match('/^latest=(\S+)$/m', $text, $m) === 1) {
+        if (\preg_match('/^latest=(\S+)\s*$/m', $text, $m) === 1) {
             return $m[1];
         }
         \Manticore\dprint('upgrade: cannot determine the latest release' . ($text !== '' ? ': ' . \trim($text) : ''));

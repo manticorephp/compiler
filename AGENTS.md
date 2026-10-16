@@ -293,3 +293,4 @@ Corollaries:
   after adding a stdlib function, a builtin or a prelude class; never edit by hand.
 - `docs/design/*.md` — design notes; `design/memory-abi.md` is the stone tablet.
 - `docs/status/`, `docs/audit/`, `docs/superpowers/` — working notes, untracked.
+- `src/Manticore/Version.php` is bumped by hand per release; CI fails a tag that does not match.

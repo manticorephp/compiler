@@ -226,7 +226,7 @@ The compiler is written in PHP and compiles itself. The bootstrap compiler is a
 bin/build           # no bin/manticore yet: fetch the pinned release, build the tree
                     # with it, then rebuild once with the result.
                     # Otherwise: the existing bin/manticore builds the manifest
-                    # to a temp path, smoke-tests it, then atomically swaps in
+                    # to a temp path, smoke-tests it, then swaps in with rollback
 bin/build --verify  # rebuild, then run the fixpoint + suite gate
 ```
 

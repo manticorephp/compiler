@@ -77,27 +77,6 @@ local checkout instead of cloning). Building from source is the same self-hostin
 loop it always was: an existing `manticore` rebuilds the new version *with itself*,
 and a first build starts from the pinned bootstrap release (`BOOTSTRAP_VERSION`) — no php.
 
-### Upgrading
-
-```bash
-manticore upgrade                  # install the latest release
-manticore upgrade --check          # installed vs latest; exit 0 current, 1 update available, 2 error
-manticore upgrade --version 0.13.0 # a specific release (a downgrade is allowed)
-```
-
-`upgrade` runs the `share/install.sh` that ships in every release tarball, in strict
-mode. The new build is staged and smoke-tested, then swapped in atomically; the
-previous binary stays as `bin/.manticore.prev`. The release checksum is mandatory: a
-mismatch or missing `SHA256SUMS` aborts and leaves the install untouched, and strict
-mode never falls back to a source build. A compiler not installed by `install.sh`
-(package manager, container image, a layout without `share/install.sh`) is refused with
-a message naming the likely owner — update it with that installer.
-
-Strict-mode exit codes of `install.sh` (set `MANTICORE_STRICT=1`): `2` release
-unreachable, `3` no published build for this platform, `4` checksum failure,
-`5` staging or smoke-test failure. Knobs: `MANTICORE_STRICT`, `MANTICORE_HOME`,
-`MANTICORE_VERSION`.
-
 In a container, with the toolchain already in it:
 
 ```bash
@@ -109,6 +88,27 @@ A tarball carries the compiler and its stdlib, not a toolchain: `manticore`
 assembles its IR with `clang`, links with `cc`, and the binaries it emits link the
 host's pcre2, openssl, sqlite3 and curl. The image is the one artifact that brings
 all of that with it.
+
+### Upgrading
+
+```bash
+manticore upgrade                  # install the latest release
+manticore upgrade --check          # installed vs latest; exit 0 current, 1 update available, 2 error
+manticore upgrade --version 0.13.0 # a specific release (a downgrade is allowed)
+```
+
+`upgrade` runs the `share/install.sh` that ships in every release tarball, in strict
+mode. The new build is staged and smoke-tested, then swapped in with rollback; the
+previous binary stays as `bin/.manticore.prev`. The release checksum is mandatory: a
+mismatch or missing `SHA256SUMS` aborts and leaves the install untouched, and strict
+mode never falls back to a source build. A compiler not installed by `install.sh`
+(package manager, container image, a layout without `share/install.sh`) is refused with
+a message naming the likely owner — update it with that installer.
+
+Strict-mode exit codes of `install.sh` (set `MANTICORE_STRICT=1`): `2` release
+unreachable, `3` no published build for this platform, `4` checksum failure,
+`5` staging or smoke-test failure. Knobs: `MANTICORE_STRICT`, `MANTICORE_HOME`,
+`MANTICORE_VERSION`.
 
 Via Composer, which here is a delivery + build trigger rather than a runtime:
 

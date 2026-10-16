@@ -87,6 +87,15 @@ jobs:
             echo "publish=${{ inputs.publish }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Tag matches Version.php
+        if: github.ref_type == 'tag'
+        run: |
+          src="$(sed -n "s/.*const STRING = '\([^']*\)'.*/\1/p" src/Manticore/Version.php)"
+          if [ "${GITHUB_REF_NAME#v}" != "$src" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Manticore\\Version::STRING ($src); bump src/Manticore/Version.php"
+            exit 1
+          fi
+
       # The toolchain, not `runtime`: `runtime` reaches it through the `build`
       # stage, which bootstraps from inside `docker build`; gate.sh below does
       # the same from the pinned release with the logs in hand.

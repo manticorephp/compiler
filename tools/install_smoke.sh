@@ -188,6 +188,21 @@ mk_release "$INSTALLED"; fresh_prefix; with_share; rc=0; out="$(UPG --version "$
 case "$out" in *already*) m=0;; *) m=1;; esac
 if [ "$rc" = 0 ] && [ "$m" = 0 ] && [ ! -e "$WORK/home/bin/.manticore.prev" ] && [ -f "$WORK/home/lib/OLD_MARKER" ]; then ok "upgrade --version = installed: already, untouched (rc $rc)" 0; else ok "upgrade --version = installed: already, untouched (rc $rc: $out)" 1; fi
 
+mk_release "$INSTALLED"; fresh_prefix; with_share; rc=0; out="$(UPG --version "v$INSTALLED" 2>/dev/null)" || rc=$?
+case "$out" in *already*) m=0;; *) m=1;; esac
+if [ "$rc" = 0 ] && [ "$m" = 0 ] && [ ! -e "$WORK/home/bin/.manticore.prev" ] && [ -f "$WORK/home/lib/OLD_MARKER" ]; then ok "upgrade --version vX = installed: already, untouched (rc $rc)" 0; else ok "upgrade --version vX = installed: already, untouched (rc $rc: $out)" 1; fi
+
+mk_release 0.0.1; fresh_prefix; with_share; rc=0; out="$(UPG --version 0.0.1 2>"$WORK/err")" || rc=$?
+case "$out" in *downgrading*) m=0;; *) m=1;; esac
+if [ "$rc" = 0 ] && [ "$m" = 0 ] && [ -e "$WORK/home/bin/.manticore.prev" ] && cmp -s "$WORK/home/bin/manticore" "$MC" \
+    && [ ! -e "$WORK/home/lib/OLD_MARKER" ] \
+    && "$WORK/home/bin/manticore" compile "$WORK/up.php" -o "$WORK/up" >/dev/null 2>&1 && [ "$("$WORK/up")" = hi ]; then
+    ok "upgrade --version older: downgrading, swapped, still compiles (rc $rc)" 0; else ok "upgrade --version older: downgrading, swapped, still compiles (rc $rc: $out)" 1; fi
+
+# I1: swap_in fails at mkdir (share is a FILE) -> a stale .manticore.prev must not replace the live binary.
+mk_release 9.9.9; fresh_prefix; echo file > "$WORK/home/share"; echo STALE > "$WORK/home/bin/.manticore.prev"; rc=0; MANTICORE_STRICT=1 $INSTALL >"$WORK/inst.log" 2>&1 || rc=$?
+if [ "$rc" != 0 ] && cmp -s "$WORK/home/bin/manticore" "$MC" && [ "$(cat "$WORK/home/bin/.manticore.prev")" = STALE ]; then ok "swap_in failure: stale .manticore.prev not restored over live binary (rc $rc)" 0; else ok "swap_in failure: stale .manticore.prev not restored over live binary (rc $rc)" 1; fi
+
 mk_release 9.9.9 corrupt; fresh_prefix; with_share; rc=0; UPG >"$WORK/inst.log" 2>&1 || rc=$?
 if [ "$rc" = 4 ] && [ -f "$WORK/home/lib/OLD_MARKER" ] && [ ! -e "$WORK/home/bin/.manticore.prev" ]; then ok "upgrade checksum mismatch: rc 4, untouched (rc $rc)" 0; else ok "upgrade checksum mismatch: rc 4, untouched (rc $rc)" 1; fi
 

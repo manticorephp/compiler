@@ -111,14 +111,21 @@ smoke_compile() { # $1 compiler, $2 scratch dir
 # Staged swap: everything is already verified and smoke-tested in $1 (inside
 # $PREFIX, so each mv is a same-filesystem rename). rm+mv, never cp over the binary.
 # Runs under `if`/`||`, where errexit is off: every step that matters returns 1.
+# SWAPPED=1 once swap_in changes live state: rollback restores only a swap THIS run made,
+# never a .manticore.prev left by an earlier upgrade.
+SWAPPED=0
 swap_in() {
     local stage="$1"
     mkdir -p "$PREFIX/bin" "$PREFIX/share" || return 1
-    rm -rf "$PREFIX/lib.old"
-    rm -f "$PREFIX/bin/.manticore.prev"
+    # A stale .manticore.prev/lib.old may hold the only recoverable copy after an
+    # interrupted swap: clean them only when a live binary exists.
+    if [ -e "$PREFIX/bin/manticore" ]; then
+        rm -rf "$PREFIX/lib.old"
+        rm -f "$PREFIX/bin/.manticore.prev"
+    fi
+    SWAPPED=1
     if [ -e "$PREFIX/bin/manticore" ]; then mv "$PREFIX/bin/manticore" "$PREFIX/bin/.manticore.prev" || return 1; fi
-    rm -rf "$PREFIX/lib.old"
-    if [ -d "$PREFIX/lib" ]; then mv "$PREFIX/lib" "$PREFIX/lib.old" || return 1; fi
+    if [ -d "$PREFIX/lib" ]; then rm -rf "$PREFIX/lib.old"; mv "$PREFIX/lib" "$PREFIX/lib.old" || return 1; fi
     mv "$stage/bin/manticore" "$PREFIX/bin/manticore" || return 1
     mv "$stage/lib" "$PREFIX/lib" || return 1
     if [ -f "$stage/share/install.sh" ]; then
@@ -129,6 +136,7 @@ swap_in() {
     return 0
 }
 rollback() {
+    if [ "$SWAPPED" != 1 ]; then return 0; fi
     if [ ! -e "$PREFIX/bin/.manticore.prev" ] && [ ! -d "$PREFIX/lib.old" ]; then return 0; fi
     warn "rolling back to the previous install"
     if [ -d "$PREFIX/lib.old" ]; then rm -rf "$PREFIX/lib"; mv "$PREFIX/lib.old" "$PREFIX/lib"; fi
@@ -180,8 +188,9 @@ try_prebuilt() {
         rm -rf "$tmp"; miss $EX_STAGE "the tarball is not a Manticore build"; return 1
     fi
     stage="$PREFIX/.staging.$$"
-    rm -rf "$stage"; mkdir -p "$stage/share"
-    cp -R "$tmp/$name/bin" "$tmp/$name/lib" "$stage/"
+    rm -rf "$stage"
+    { mkdir -p "$stage/share" && cp -R "$tmp/$name/bin" "$tmp/$name/lib" "$stage/"; } \
+        || { rm -rf "$tmp" "$stage"; miss $EX_STAGE "cannot stage into $PREFIX"; return 1; }
     if [ -f "$tmp/$name/share/install.sh" ]; then cp "$tmp/$name/share/install.sh" "$stage/share/install.sh"
     elif [ -n "$SELF" ] && [ -f "$SELF" ]; then cp "$SELF" "$stage/share/install.sh"; fi
     printf 'install.sh %s\n' "$rel_ver" > "$stage/share/.installed-by"
@@ -283,6 +292,7 @@ fi
 # ---- 5. install -----------------------------------------------------------
 log "installing into $PREFIX"
 mkdir -p "$PREFIX/bin" "$PREFIX/lib/prelude"
+rm -f "$PREFIX/bin/manticore"   # rm then cp: never overwrite a signed/running binary in place
 cp "$SRC/bin/manticore" "$PREFIX/bin/manticore"
 cp "$SRC"/lib/manticore_stdlib.o "$PREFIX/lib/"
 cp "$SRC"/lib/manticore_stdlib.o.sig "$PREFIX/lib/" 2>/dev/null || true
