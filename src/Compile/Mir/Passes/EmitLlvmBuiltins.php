@@ -482,6 +482,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
         if ($name === '__mc_list_range' && \count($args) === 4) { return $this->biListRange($args); }
         if ($name === 'range' && InlineClosures::rangeIntShape($args)) { return $this->biRangeInt($args); }
+        if ($name === '__mc_sort_native' && \count($args) === 1) { return $this->biSortNative($args); }
         if ($name === '__mc_int_seq' && \count($args) === 3) { return $this->biIntSeq($args); }
         if ($name === '__mc_fast_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_fast_cat' && \count($args) === 1) { return $this->biFastCat($args); }
@@ -3153,6 +3154,35 @@ trait EmitLlvmBuiltins
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * `__mc_sort_native($arr)` — sort a by-ref list of raw ints or strings in
+     * place ({@see UnifiedArrayRuntime::emitSortWords}); false (nothing sorted)
+     * for any other shape. Separates a shared buffer first and writes the clone
+     * back, like {@see biArrayReindex}. The stdlib body is the bootstrap twin
+     * and answers false.
+     * @param Node[] $args
+     */
+    private function biSortNative(array $args): string
+    {
+        $arrNode = $args[0];
+        $arrT = $arrNode->type;
+        $out = $this->emitArrPtrArg($arrNode);
+        $p = $this->lastValue;
+        if ($arrNode->kind === Node::KIND_LOAD_LOCAL
+            || $arrNode->kind === Node::KIND_PROPERTY_ACCESS
+            || $arrNode->kind === Node::KIND_STATIC_PROP) {
+            $cow = $this->ssa->allocReg();
+            $out .= '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrT, $arrNode) . '(ptr ' . $p . ")\n";
+            $out .= $this->vecWriteBack($arrNode, $cow, $arrT->kind === Type::KIND_CELL);
+            $p = $cow;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i1 @__mir_array_sort_words(ptr ' . $p . ")\n";
+        $z = $this->ssa->allocReg();
+        $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
+        return $this->finishI64($out, $z);
     }
 
     /**

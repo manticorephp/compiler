@@ -152,6 +152,7 @@ final class UnifiedArrayRuntime
         $this->emitFastCat();
         $this->emitListCat();
         $this->emitIntSeq();
+        $this->emitSortWords();
         $this->emitArrayReindexInplace();
         $this->emitElemUntagKind();
         $this->emitElemEnumOrdinal();
@@ -5820,6 +5821,190 @@ final class UnifiedArrayRuntime
         $body->store($body->add($i, Value::int(Type::i64(), 1)), $iSlot);
         $body->br($head);
         $done->ret($dst);
+    }
+
+    /**
+     * `__mir_array_sort_words(arr) -> i1` — stable ascending sort, in place, of
+     * a PACKED list of raw INT or raw STRING elements (php's default flag).
+     * Returns 0, touching nothing, for any other shape (hashed, other hint, a
+     * null string element) so the caller falls back to its generic merge sort.
+     * Bottom-up merge sort over the element words with one scratch buffer; a
+     * string pair compares through `__mir_str_cmp`, the same comparison the
+     * generic body emits for `<=`. Words only move: no counts change.
+     * The buffer must be exclusively owned (the caller separated it).
+     */
+    private function emitSortWords(): void
+    {
+        $this->module->declare('malloc', Type::ptr(), [Type::i64()]);
+        $this->module->declare('free', Type::void(), [Type::ptr()]);
+        $fn = $this->module->func('__mir_array_sort_words', Type::i1());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $yes = $fn->block('sw_yes');
+        $no = $fn->block('sw_no');
+        $go = $fn->block('sw_go');
+        $kind = $fn->block('sw_kind');
+        $small = $fn->block('sw_small');
+        $scanH = $fn->block('sw_scan_head');
+        $scanB = $fn->block('sw_scan_body');
+        $setup = $fn->block('sw_setup');
+        $wHead = $fn->block('sw_whead');
+        $wBody = $fn->block('sw_wbody');
+        $iHead = $fn->block('sw_ihead');
+        $iBody = $fn->block('sw_ibody');
+        $mHead = $fn->block('sw_mhead');
+        $mBody = $fn->block('sw_mbody');
+        $cInt = $fn->block('sw_cint');
+        $cStr = $fn->block('sw_cstr');
+        $cDone = $fn->block('sw_cdone');
+        $takeL = $fn->block('sw_takel');
+        $takeR = $fn->block('sw_taker');
+        $mNext = $fn->block('sw_mnext');
+        $tailL = $fn->block('sw_taill');
+        $tailLB = $fn->block('sw_taillb');
+        $tailR = $fn->block('sw_tailr');
+        $tailRB = $fn->block('sw_tailrb');
+        $iNext = $fn->block('sw_inext');
+        $wNext = $fn->block('sw_wnext');
+        $fin = $fn->block('sw_fin');
+        $copyBack = $fn->block('sw_copyback');
+        $done = $fn->block('sw_done');
+        $yes->ret(Value::int(Type::i1(), 1));
+        $no->ret(Value::int(Type::i1(), 0));
+
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $yes, $go);
+        $len = $go->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $hint = $go->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $isInt = $go->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT));
+        $isStr = $go->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_STR));
+        // A cell list qualifies when every word is a STRING cell (checked below).
+        $isCell = $go->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $okShape = $go->and_(
+            $go->icmp('eq', $this->hashedBit($go, $flags), Value::int(Type::i64(), 0)),
+            $go->or_($isInt, $go->or_($isStr, $isCell)));
+        $iSlot = $go->alloca(Type::i64(), 'sw_i');
+        $wSlot = $go->alloca(Type::i64(), 'sw_w');
+        $lSlot = $go->alloca(Type::i64(), 'sw_l');
+        $rSlot = $go->alloca(Type::i64(), 'sw_r');
+        $kSlot = $go->alloca(Type::i64(), 'sw_k');
+        $midSlot = $go->alloca(Type::i64(), 'sw_mid');
+        $hiSlot = $go->alloca(Type::i64(), 'sw_hi');
+        $srcSlot = $go->alloca(Type::ptr(), 'sw_src');
+        $dstSlot = $go->alloca(Type::ptr(), 'sw_dst');
+        $takeSlot = $go->alloca(Type::i64(), 'sw_take');
+        $go->brIf($okShape, $kind, $no);
+        $kind->brIf($kind->icmp('slt', $len, Value::int(Type::i64(), 2)), $yes, $small);
+        // A string list must hold no null word (php orders null below "").
+        $small->store(Value::int(Type::i64(), 0), $iSlot);
+        $small->brIf($small->or_($isStr, $isCell), $scanH, $setup);
+        $si = $scanH->load(Type::i64(), $iSlot);
+        $scanH->brIf($scanH->icmp('sge', $si, $len), $setup, $scanB);
+        $sw = $scanB->load(Type::i64(), $this->packedSlot($scanB, $arr, $si));
+        $scanB->store($scanB->add($si, Value::int(Type::i64(), 1)), $iSlot);
+        $notStrCell = $scanB->icmp('ne', $scanB->lshr($sw, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 65524));
+        $bad = $scanB->select($isCell, $notStrCell, $scanB->icmp('eq', $sw, Value::int(Type::i64(), 0)));
+        $scanB->brIf($bad, $no, $scanH);
+
+        $data = $this->packedSlot($setup, $arr, Value::int(Type::i64(), 0));
+        $tmp = $setup->call('malloc', Type::ptr(), [$setup->mul($len, Value::int(Type::i64(), 8))]);
+        $setup->store($data, $srcSlot);
+        $setup->store($tmp, $dstSlot);
+        $setup->store(Value::int(Type::i64(), 1), $wSlot);
+        $setup->br($wHead);
+
+        $w = $wHead->load(Type::i64(), $wSlot);
+        $wHead->brIf($wHead->icmp('sge', $w, $len), $fin, $wBody);
+        $wBody->store(Value::int(Type::i64(), 0), $iSlot);
+        $wBody->br($iHead);
+
+        $i = $iHead->load(Type::i64(), $iSlot);
+        $w2 = $iHead->load(Type::i64(), $wSlot);
+        $iHead->brIf($iHead->icmp('sge', $i, $len), $wNext, $iBody);
+        $mid0 = $iBody->add($i, $w2);
+        $mid = $iBody->select($iBody->icmp('sgt', $mid0, $len), $len, $mid0);
+        $hi0 = $iBody->add($i, $iBody->mul($w2, Value::int(Type::i64(), 2)));
+        $hi = $iBody->select($iBody->icmp('sgt', $hi0, $len), $len, $hi0);
+        $iBody->store($mid, $midSlot);
+        $iBody->store($hi, $hiSlot);
+        $iBody->store($i, $lSlot);
+        $iBody->store($mid, $rSlot);
+        $iBody->store($i, $kSlot);
+        $iBody->br($mHead);
+
+        $l = $mHead->load(Type::i64(), $lSlot);
+        $r = $mHead->load(Type::i64(), $rSlot);
+        $midV = $mHead->load(Type::i64(), $midSlot);
+        $hiV = $mHead->load(Type::i64(), $hiSlot);
+        $both = $mHead->and_($mHead->icmp('slt', $l, $midV), $mHead->icmp('slt', $r, $hiV));
+        $mHead->brIf($both, $mBody, $tailL);
+        $src = $mBody->load(Type::ptr(), $srcSlot);
+        $lw = $mBody->load(Type::i64(), $mBody->gep(Type::i8(), $src, [$mBody->mul($l, Value::int(Type::i64(), 8))]));
+        $rw = $mBody->load(Type::i64(), $mBody->gep(Type::i8(), $src, [$mBody->mul($r, Value::int(Type::i64(), 8))]));
+        $mBody->brIf($isInt, $cInt, $cStr);
+        $cInt->store($cInt->zext($cInt->icmp('sle', $lw, $rw), Type::i64()), $takeSlot);
+        $cInt->br($cDone);
+        $pm = Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK);
+        $c = $cStr->call('__mir_str_cmp', Type::i64(), [$cStr->inttoptr($cStr->and_($lw, $pm), Type::ptr()), $cStr->inttoptr($cStr->and_($rw, $pm), Type::ptr())]);
+        $cStr->store($cStr->zext($cStr->icmp('sle', $c, Value::int(Type::i64(), 0)), Type::i64()), $takeSlot);
+        $cStr->br($cDone);
+        $cDone->brIf($cDone->icmp('ne', $cDone->load(Type::i64(), $takeSlot), Value::int(Type::i64(), 0)), $takeL, $takeR);
+
+        $dst = $takeL->load(Type::ptr(), $dstSlot);
+        $k = $takeL->load(Type::i64(), $kSlot);
+        $takeL->store($lw, $takeL->gep(Type::i8(), $dst, [$takeL->mul($k, Value::int(Type::i64(), 8))]));
+        $takeL->store($takeL->add($l, Value::int(Type::i64(), 1)), $lSlot);
+        $takeL->br($mNext);
+        $dst2 = $takeR->load(Type::ptr(), $dstSlot);
+        $k2 = $takeR->load(Type::i64(), $kSlot);
+        $takeR->store($rw, $takeR->gep(Type::i8(), $dst2, [$takeR->mul($k2, Value::int(Type::i64(), 8))]));
+        $takeR->store($takeR->add($r, Value::int(Type::i64(), 1)), $rSlot);
+        $takeR->br($mNext);
+        $mNext->store($mNext->add($mNext->load(Type::i64(), $kSlot), Value::int(Type::i64(), 1)), $kSlot);
+        $mNext->br($mHead);
+
+        // Tails: the rest of the left run, then the rest of the right run.
+        $tl = $tailL->load(Type::i64(), $lSlot);
+        $tailL->brIf($tailL->icmp('slt', $tl, $tailL->load(Type::i64(), $midSlot)), $tailLB, $tailR);
+        $tsrc = $tailLB->load(Type::ptr(), $srcSlot);
+        $tdst = $tailLB->load(Type::ptr(), $dstSlot);
+        $tl2 = $tailLB->load(Type::i64(), $lSlot);
+        $tk = $tailLB->load(Type::i64(), $kSlot);
+        $tailLB->store(
+            $tailLB->load(Type::i64(), $tailLB->gep(Type::i8(), $tsrc, [$tailLB->mul($tl2, Value::int(Type::i64(), 8))])),
+            $tailLB->gep(Type::i8(), $tdst, [$tailLB->mul($tk, Value::int(Type::i64(), 8))]));
+        $tailLB->store($tailLB->add($tl2, Value::int(Type::i64(), 1)), $lSlot);
+        $tailLB->store($tailLB->add($tk, Value::int(Type::i64(), 1)), $kSlot);
+        $tailLB->br($tailL);
+        $tr = $tailR->load(Type::i64(), $rSlot);
+        $tailR->brIf($tailR->icmp('slt', $tr, $tailR->load(Type::i64(), $hiSlot)), $tailRB, $iNext);
+        $rsrc = $tailRB->load(Type::ptr(), $srcSlot);
+        $rdst = $tailRB->load(Type::ptr(), $dstSlot);
+        $tr2 = $tailRB->load(Type::i64(), $rSlot);
+        $rk = $tailRB->load(Type::i64(), $kSlot);
+        $tailRB->store(
+            $tailRB->load(Type::i64(), $tailRB->gep(Type::i8(), $rsrc, [$tailRB->mul($tr2, Value::int(Type::i64(), 8))])),
+            $tailRB->gep(Type::i8(), $rdst, [$tailRB->mul($rk, Value::int(Type::i64(), 8))]));
+        $tailRB->store($tailRB->add($tr2, Value::int(Type::i64(), 1)), $rSlot);
+        $tailRB->store($tailRB->add($rk, Value::int(Type::i64(), 1)), $kSlot);
+        $tailRB->br($tailR);
+
+        $iNext->store($iNext->add($iNext->load(Type::i64(), $iSlot), $iNext->mul($iNext->load(Type::i64(), $wSlot), Value::int(Type::i64(), 2))), $iSlot);
+        $iNext->br($iHead);
+        // Next pass: the runs just written become the source.
+        $a = $wNext->load(Type::ptr(), $srcSlot);
+        $b = $wNext->load(Type::ptr(), $dstSlot);
+        $wNext->store($b, $srcSlot);
+        $wNext->store($a, $dstSlot);
+        $wNext->store($wNext->mul($wNext->load(Type::i64(), $wSlot), Value::int(Type::i64(), 2)), $wSlot);
+        $wNext->br($wHead);
+
+        $fs = $fin->load(Type::ptr(), $srcSlot);
+        $fin->brIf($fin->icmp('eq', $fs, $data), $done, $copyBack);
+        $copyBack->call('memcpy', Type::ptr(), [$data, $fs, $copyBack->mul($len, Value::int(Type::i64(), 8))]);
+        $copyBack->br($done);
+        $done->call('free', Type::void(), [$tmp]);
+        $done->ret(Value::int(Type::i1(), 1));
     }
     /**
      * `__mir_array_conform(arr, kind)` — make a buffer honour a CONCRETE static

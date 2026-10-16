@@ -260,6 +260,7 @@ function sort(array &$arr, int $flags = 0): bool
     }
     $n = count($arr);
     if ($n < 2) { return true; }
+    if (\__mc_sort_native($arr)) { return true; }
     $tmp = [];
     for ($i = 0; $i < $n; $i = $i + 1) { $tmp[] = $arr[$i]; }
     $width = 1;

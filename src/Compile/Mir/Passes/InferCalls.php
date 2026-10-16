@@ -452,6 +452,7 @@ trait InferCalls
             return $at->kind === Type::KIND_ARRAY && $at->element !== null ? Type::vec($at->element) : Type::vec(Type::cell());
         }
         if ($n === 'range' && InlineClosures::rangeIntShape($args)) { return Type::vec(Type::int_()); }
+        if ($n === '__mc_sort_native' && \count($args) === 1) { return Type::bool_(); }
         if ($n === '__mc_int_seq' && \count($args) === 3) { return Type::vec(Type::int_()); }
         if (($n === '__mc_fast_cat' || $n === '__mc_fast_list') && \count($args) === 1) { return Type::bool_(); }
         if ($n === '__mc_list_cat' && \count($args) === 1) {

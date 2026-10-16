@@ -190,6 +190,9 @@ function __mc_int_seq(int $from, int $step, int $n): array
 }
 
 /** @param mixed[] $a */
+function __mc_sort_native(array &$a): bool { return false; }
+
+/** @param mixed[] $a */
 function __mc_fast_cat(array $a): bool { return false; }
 
 /**
