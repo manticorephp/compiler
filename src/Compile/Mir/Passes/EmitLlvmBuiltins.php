@@ -379,6 +379,7 @@ trait EmitLlvmBuiltins
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
         if ($name === '__mc_crc32b' && \count($args) === 1) { return $this->biCrc32b($args); }
+        if (\count($args) === 1 && \str_starts_with($name, '__mc_') && $this->codecFn($name) !== '') { return $this->biCodec($args, $this->codecFn($name)); }
         if ($name === '__float_bits')                 { return $this->biFloatBits($args); }
         if ($name === '__ugt')                        { return $this->biUgt($args); }
         if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
@@ -4980,6 +4981,39 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $reg . ' = call i64 @__mir_crc32b(ptr ' . $s . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
         return $this->finishI64($out, $reg);
+    }
+
+    /** The `__mir_*` helper behind a `__mc_*` codec builtin, '' when `$name` is not one. */
+    private function codecFn(string $name): string
+    {
+        if ($name === '__mc_b64_enc') { return '__mir_b64_enc'; }
+        if ($name === '__mc_b64_dec') { return '__mir_b64_dec'; }
+        if ($name === '__mc_b64_ok') { return '__mir_b64_ok'; }
+        if ($name === '__mc_bin2hex') { return '__mir_bin2hex'; }
+        if ($name === '__mc_hex2bin') { return '__mir_hex2bin'; }
+        return '';
+    }
+
+    /** `__mc_b64_enc` / `__mc_b64_dec` / `__mc_b64_ok` / `__mc_bin2hex` / `__mc_hex2bin`
+     *  (string): whole-buffer codecs ({@see RuntimeLibrary::codec}); the PHP bodies
+     *  in Runtime/Stdlib are the bootstrap fallback. @param Node[] $args */
+    private function biCodec(array $args, string $fn): string
+    {
+        $this->rt->needsCodec = true;
+        $this->rt->needsConcat = true;   // __mir_strlen
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        if ($fn === '__mir_b64_ok') {
+            $out .= '  ' . $reg . ' = call i64 @' . $fn . '(ptr ' . $s . ")\n";
+            $out .= $this->freeStrTemp($args[0], $s);
+            return $this->finishI64($out, $reg);
+        }
+        $out .= '  ' . $reg . ' = call ptr @' . $fn . '(ptr ' . $s . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /** `__float_bits(float): int` — the IEEE-754 bit pattern of a double as an

@@ -308,6 +308,12 @@ function quotemeta(string $string): string
 /** Lowercase-hex encoding of each byte (PHP `bin2hex`). */
 function bin2hex(string $string): string
 {
+    return \__mc_bin2hex($string);
+}
+
+/** Native codegen builtin; this body is the bootstrap fallback. */
+function __mc_bin2hex(string $string): string
+{
     $d = "0123456789abcdef";
     $n = \strlen($string);
     $out = "";
@@ -320,6 +326,12 @@ function bin2hex(string $string): string
 
 /** Decode a hex string back to bytes (PHP `hex2bin`). */
 function hex2bin(string $string): string
+{
+    return \__mc_hex2bin($string);
+}
+
+/** Native codegen builtin; this body is the bootstrap fallback. */
+function __mc_hex2bin(string $string): string
 {
     $n = \strlen($string);
     $out = "";

@@ -4399,6 +4399,7 @@ end:
         if ($this->rt->needsStrtolower) { $out .= $this->lib->caseConv('__mir_strtolower', 65, 90, 32); }
         if ($this->rt->needsStrtoupper) { $out .= $this->lib->caseConv('__mir_strtoupper', 97, 122, -32); }
         if ($this->rt->needsAddslashes) { $out .= $this->lib->addslashes(); }
+        if ($this->rt->needsCodec) { $out .= $this->lib->codec(); }
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
