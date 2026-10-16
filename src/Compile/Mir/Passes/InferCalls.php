@@ -562,7 +562,7 @@ trait InferCalls
             || $n === 'sprintf' || $n === 'implode' || $n === 'join'
             || $n === '__mc_fmt_int' || $n === '__mc_fmt_float' || $n === '__mc_fmt_str'
             || $n === 'addslashes' || $n === 'var_export' || $n === '__mc_json_escape'
-            || $n === '__mc_b64_enc' || $n === '__mc_b64_dec' || $n === '__mc_bin2hex' || $n === '__mc_hex2bin'
+            || $n === '__mc_strtr_bytes' || $n === '__mc_b64_enc' || $n === '__mc_b64_dec' || $n === '__mc_bin2hex' || $n === '__mc_hex2bin'
             || $n === '__mir_str_replace_one'
             || $n === 'str_from_buffer' || $n === 'cstr_to_str'
             || $n === 'gettype' || $n === 'get_debug_type'

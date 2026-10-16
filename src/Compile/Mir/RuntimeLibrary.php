@@ -7486,4 +7486,65 @@ done:
         $out .= "}\n";
         return $out;
     }
+
+    /** Runtime: `strtr($s, $from, $to)` byte form — a 256-entry map on the stack,
+     *  one allocation, one lookup per byte. Later duplicates in `$from` win. */
+    public function strtrBytes(): string
+    {
+        $out  = "\ndefine ptr @__mir_strtr_bytes(ptr %s, ptr %f, ptr %t) {\n";
+        $out .= "entry:\n";
+        $out .= "  %map = alloca [256 x i8], align 1\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %fl = call i64 @__mir_strlen(ptr %f)\n";
+        $out .= "  %tl = call i64 @__mir_strlen(ptr %t)\n";
+        $out .= "  %lt = icmp ult i64 %fl, %tl\n";
+        $out .= "  %m = select i1 %lt, i64 %fl, i64 %tl\n";
+        $out .= "  br label %init\n";
+        $out .= "init:\n";
+        $out .= "  %a = phi i64 [0, %entry], [%a2, %init]\n";
+        $out .= "  %ab = trunc i64 %a to i8\n";
+        $out .= "  %ap = getelementptr inbounds i8, ptr %map, i64 %a\n";
+        $out .= "  store i8 %ab, ptr %ap\n";
+        $out .= "  %a2 = add i64 %a, 1\n";
+        $out .= "  %ad = icmp eq i64 %a2, 256\n";
+        $out .= "  br i1 %ad, label %pairs, label %init\n";
+        $out .= "pairs:\n";
+        $out .= "  %j = phi i64 [0, %init], [%j2, %pbody]\n";
+        $out .= "  %pm = icmp ult i64 %j, %m\n";
+        $out .= "  br i1 %pm, label %pbody, label %pre\n";
+        $out .= "pbody:\n";
+        $out .= "  %fp = getelementptr inbounds i8, ptr %f, i64 %j\n";
+        $out .= "  %fc = load i8, ptr %fp\n";
+        $out .= "  %tp = getelementptr inbounds i8, ptr %t, i64 %j\n";
+        $out .= "  %tc = load i8, ptr %tp\n";
+        $out .= "  %fz = zext i8 %fc to i64\n";
+        $out .= "  %mp = getelementptr inbounds i8, ptr %map, i64 %fz\n";
+        $out .= "  store i8 %tc, ptr %mp\n";
+        $out .= "  %j2 = add i64 %j, 1\n";
+        $out .= "  br label %pairs\n";
+        $out .= "pre:\n";
+        $out .= "  %sz = add i64 %n, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %pre], [%i2, %body]\n";
+        $out .= "  %more = icmp ult i64 %i, %n\n";
+        $out .= "  br i1 %more, label %body, label %fin\n";
+        $out .= "body:\n";
+        $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %c = load i8, ptr %sp\n";
+        $out .= "  %cz = zext i8 %c to i64\n";
+        $out .= "  %lp = getelementptr inbounds i8, ptr %map, i64 %cz\n";
+        $out .= "  %r = load i8, ptr %lp\n";
+        $out .= "  %dp = getelementptr inbounds i8, ptr %buf, i64 %i\n";
+        $out .= "  store i8 %r, ptr %dp\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "fin:\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %n\n";
+        $out .= "  store i8 0, ptr %np\n";
+        $out .= "  ret ptr %buf\n";
+        $out .= "}\n";
+        return $out;
+    }
 }

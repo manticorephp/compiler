@@ -380,6 +380,7 @@ trait EmitLlvmBuiltins
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
         if ($name === '__mc_crc32b' && \count($args) === 1) { return $this->biCrc32b($args); }
         if (\count($args) === 1 && \str_starts_with($name, '__mc_') && $this->codecFn($name) !== '') { return $this->biCodec($args, $this->codecFn($name)); }
+        if ($name === '__mc_strtr_bytes' && \count($args) === 3) { return $this->biStrtrBytes($args); }
         if ($name === '__float_bits')                 { return $this->biFloatBits($args); }
         if ($name === '__ugt')                        { return $this->biUgt($args); }
         if ($name === '__ryu_msp')                    { return $this->biRyuMsp($args); }
@@ -5011,6 +5012,29 @@ trait EmitLlvmBuiltins
         }
         $out .= '  ' . $reg . ' = call ptr @' . $fn . '(ptr ' . $s . ")\n";
         $out .= $this->freeStrTemp($args[0], $s);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** `__mc_strtr_bytes(string, string, string): string` — the byte-map strtr
+     *  ({@see RuntimeLibrary::strtrBytes}); the PHP body in Stdlib is the fallback.
+     *  @param Node[] $args */
+    private function biStrtrBytes(array $args): string
+    {
+        $this->rt->needsStrtrBytes = true;
+        $this->rt->needsConcat = true;   // __mir_strlen
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $f = $this->lastValue;
+        $out .= $this->emitPtrArg($args[2]);
+        $t = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @__mir_strtr_bytes(ptr ' . $s . ', ptr ' . $f . ', ptr ' . $t . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $out .= $this->freeStrTemp($args[1], $f);
+        $out .= $this->freeStrTemp($args[2], $t);
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;

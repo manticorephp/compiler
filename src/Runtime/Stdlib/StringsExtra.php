@@ -411,6 +411,12 @@ function strtr(string $string, array|string $from, ?string $to = null): string
 #[\Manticore\Attr\Overload('strtr')]
 function strtr__bytes(string $string, string $from, string $to): string
 {
+    return \__mc_strtr_bytes($string, $from, $to);
+}
+
+/** Native codegen builtin; this body is the bootstrap fallback. */
+function __mc_strtr_bytes(string $string, string $from, string $to): string
+{
     $m = \strlen($from);
     $mt = \strlen($to);
     if ($mt < $m) { $m = $mt; }
@@ -470,7 +476,11 @@ function strtr__pairs(string $string, array $replace_pairs): string
     $out = '';
     $run = 0;
     $i = 0;
+    $firsts = '';
+    for ($p = 0; $p < $np; $p = $p + 1) { $firsts = $firsts . $keys[$p][0]; }
     while ($i < $n) {
+        $i = $i + \strcspn($string, $firsts, $i);
+        if ($i >= $n) { break; }
         $hit = -1;
         $cands = $buckets[\ord($string[$i])] ?? null;
         if ($cands !== null) {
