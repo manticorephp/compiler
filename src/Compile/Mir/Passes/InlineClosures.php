@@ -898,6 +898,24 @@ final class InlineClosures implements Pass
     }
 
     /**
+     * `range($a, $b[, $step])` over two INT operands and a literal non-zero int
+     * step (or none): the integer shape, answered without the stdlib's cell
+     * round trip. Anything else stays on the stdlib `range`.
+     * @param Node[] $args
+     */
+    public static function rangeIntShape(array $args): bool
+    {
+        $n = \count($args);
+        if ($n < 2 || $n > 3) { return false; }
+        if ($args[0]->type->kind !== Type::KIND_INT || $args[1]->type->kind !== Type::KIND_INT) { return false; }
+        if ($n === 3) {
+            $s = Node::literalInt($args[2]);
+            return $s !== null && $s !== 0 && $s > -1000000000000 && $s < 1000000000000;
+        }
+        return true;
+    }
+
+    /**
      * Which native element scan answers `in_array($needle, $elem[], <literal strict>)`,
      * or '' when none does. Both sides must be the SAME scalar kind: `str`
      * (strict only — a loose string compare is numeric when both look numeric),

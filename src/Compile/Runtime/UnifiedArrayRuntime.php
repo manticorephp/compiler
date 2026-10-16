@@ -151,6 +151,7 @@ final class UnifiedArrayRuntime
         $this->emitListRange();
         $this->emitFastCat();
         $this->emitListCat();
+        $this->emitIntSeq();
         $this->emitArrayReindexInplace();
         $this->emitElemUntagKind();
         $this->emitElemEnumOrdinal();
@@ -5787,6 +5788,37 @@ final class UnifiedArrayRuntime
         $n2->br($h2);
 
         $done = $this->adoptFresh($fn, $some, $dst, 'c');
+        $done->ret($dst);
+    }
+
+    /**
+     * `__mir_array_int_seq(from, step, n) -> ptr` — a fresh PACKED list of
+     * `n` raw ints `from, from+step, …` stamped INT (range()'s integer shape:
+     * one counted store loop instead of `n` appends).
+     */
+    private function emitIntSeq(): void
+    {
+        $fn = $this->module->func('__mir_array_int_seq', Type::ptr());
+        $from = $fn->param(Type::i64(), 'from');
+        $step = $fn->param(Type::i64(), 'step');
+        $n = $fn->param(Type::i64(), 'n');
+        $e = $fn->block('entry');
+        $head = $fn->block('is_head');
+        $body = $fn->block('is_body');
+        $done = $fn->block('is_done');
+        $cnt = $e->select($e->icmp('slt', $n, Value::int(Type::i64(), 0)), Value::int(Type::i64(), 0), $n);
+        $dst = $e->call('__mir_array_alloc', Type::ptr(), [$cnt]);
+        $e->store(Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_INT), $this->hdr($e, $dst, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $e->store($cnt, $this->hdr($e, $dst, MemoryAbi::ARRAY_LENGTH_OFFSET));
+        $e->store($cnt, $this->hdr($e, $dst, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $iSlot = $e->alloca(Type::i64(), 'is_i');
+        $e->store(Value::int(Type::i64(), 0), $iSlot);
+        $e->br($head);
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $cnt), $done, $body);
+        $body->store($body->add($from, $body->mul($i, $step)), $this->packedSlot($body, $dst, $i));
+        $body->store($body->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $body->br($head);
         $done->ret($dst);
     }
     /**

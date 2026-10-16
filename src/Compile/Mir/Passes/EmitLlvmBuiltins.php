@@ -481,6 +481,8 @@ trait EmitLlvmBuiltins
         if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_array_reindex' && \count($args) === 1) { return $this->biArrayReindex($args); }
         if ($name === '__mc_list_range' && \count($args) === 4) { return $this->biListRange($args); }
+        if ($name === 'range' && InlineClosures::rangeIntShape($args)) { return $this->biRangeInt($args); }
+        if ($name === '__mc_int_seq' && \count($args) === 3) { return $this->biIntSeq($args); }
         if ($name === '__mc_fast_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
         if ($name === '__mc_fast_cat' && \count($args) === 1) { return $this->biFastCat($args); }
         if ($name === '__mc_list_cat' && \count($args) === 1) { return $this->biListCat($args); }
@@ -3111,6 +3113,64 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call ptr @__mir_array_list_range(ptr ' . $arr . ', i64 ' . $ints[0]
               . ', i64 ' . $ints[1] . ', i64 ' . $ints[2] . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * Integer `range`: `|b - a| / step + 1` ints from `a` toward `b`
+     * ({@see UnifiedArrayRuntime::emitIntSeq}). A span php could not hold as an
+     * array throws ValueError, as php does.
+     * @param Node[] $args
+     */
+    private function biRangeInt(array $args): string
+    {
+        $step = \count($args) === 3 ? \abs((int)Node::literalInt($args[2])) : 1;
+        $out = $this->emitNode($args[0]) . $this->coerceToI64();
+        $a = $this->lastValue;
+        $out .= $this->emitNode($args[1]) . $this->coerceToI64();
+        $b = $this->lastValue;
+        $up = $this->ssa->allocReg();
+        $out .= '  ' . $up . ' = icmp sle i64 ' . $a . ', ' . $b . "\n";
+        $d1 = $this->ssa->allocReg();
+        $d2 = $this->ssa->allocReg();
+        $span = $this->ssa->allocReg();
+        $out .= '  ' . $d1 . ' = sub i64 ' . $b . ', ' . $a . "\n";
+        $out .= '  ' . $d2 . ' = sub i64 ' . $a . ', ' . $b . "\n";
+        $out .= '  ' . $span . ' = select i1 ' . $up . ', i64 ' . $d1 . ', i64 ' . $d2 . "\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp ugt i64 ' . $span . ", 4294967295\n";
+        $out .= $this->emitThrowIf($bad, 'ValueError', 'The supplied range exceeds the maximum array size', 'range');
+        $q = $this->ssa->allocReg();
+        $n = $this->ssa->allocReg();
+        $out .= '  ' . $q . ' = udiv i64 ' . $span . ', ' . (string)$step . "\n";
+        $out .= '  ' . $n . ' = add i64 ' . $q . ", 1\n";
+        $st = $this->ssa->allocReg();
+        $out .= '  ' . $st . ' = select i1 ' . $up . ', i64 ' . (string)$step . ', i64 ' . (string)(-$step) . "\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @__mir_array_int_seq(i64 ' . $a . ', i64 ' . $st . ', i64 ' . $n . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
+     * `__mc_int_seq($from, $step, $n)` — `$n` ints `$from + i * $step` in a fresh
+     * INT-stamped list ({@see UnifiedArrayRuntime::emitIntSeq}). The stdlib body
+     * of the same name is the bootstrap twin.
+     * @param Node[] $args
+     */
+    private function biIntSeq(array $args): string
+    {
+        $out = '';
+        $v = [];
+        foreach ($args as $a) {
+            $out .= $this->emitNode($a) . $this->coerceToI64();
+            $v[] = $this->lastValue;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call ptr @__mir_array_int_seq(i64 ' . $v[0] . ', i64 ' . $v[1] . ', i64 ' . $v[2] . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'ptr';
         return $out;

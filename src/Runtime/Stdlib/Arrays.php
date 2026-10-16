@@ -177,6 +177,18 @@ function array_is_list(array $a): bool
  */
 function __mc_fast_list(array $a): bool { return false; }
 
+/**
+ * Bootstrap twin of the `__mc_int_seq` builtin: `$n` ints from `$from` by `$step`.
+ *
+ * @return int[]
+ */
+function __mc_int_seq(int $from, int $step, int $n): array
+{
+    $out = [];
+    for ($i = 0; $i < $n; $i = $i + 1) { $out[] = $from + $i * $step; }
+    return $out;
+}
+
 /** @param mixed[] $a */
 function __mc_fast_cat(array $a): bool { return false; }
 
@@ -253,8 +265,12 @@ function range(int|float|string $start, int|float|string $end, int|float $step =
     if (!$isFloat) {
         $out = [];
         $s = (int)$fstep;
-        $a = (int)$fs;
-        $b = (int)$fe;
+        $a = \is_int($start) ? (int)$start : (int)$fs;
+        $b = \is_int($end) ? (int)$end : (int)$fe;
+        $span = $a <= $b ? $b - $a : $a - $b;
+        if ($span >= 0 && $span < 4611686018427387904) {
+            return __mc_int_seq($a, $a <= $b ? $s : -$s, intdiv($span, $s) + 1);
+        }
         if ($a <= $b) {
             for ($i = $a; $i <= $b; $i = $i + $s) { $out[] = $i; }
         } else {
