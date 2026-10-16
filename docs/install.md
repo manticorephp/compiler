@@ -34,6 +34,30 @@ a first build starts from the pinned bootstrap release (`BOOTSTRAP_VERSION`). Kn
 download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC`
 (build a local checkout instead of cloning).
 
+### Upgrading
+
+```bash
+manticore upgrade                  # install the latest release
+manticore upgrade --check          # installed vs latest; exit 0 current, 1 update available, 2 error
+manticore upgrade --version 0.13.0 # a specific release (a downgrade is allowed)
+```
+
+`upgrade` runs the `share/install.sh` that ships in every release tarball, in strict
+mode. The new build is staged and smoke-tested, then swapped in atomically; the
+previous binary stays as `bin/.manticore.prev`. The release checksum is mandatory: a
+mismatch or missing `SHA256SUMS` aborts and leaves the install untouched, and strict
+mode never falls back to a source build. A compiler not installed by `install.sh`
+(package manager, container image, a layout without `share/install.sh`) is refused with
+a message naming the likely owner — update it with that installer.
+
+Strict-mode exit codes of `install.sh` (set `MANTICORE_STRICT=1`): `2` release
+unreachable, `3` no published build for this platform, `4` checksum failure,
+`5` staging or smoke-test failure. Knobs: `MANTICORE_STRICT`, `MANTICORE_HOME`,
+`MANTICORE_VERSION`.
+
+Releases carry `share/install.sh` inside the tarball (next to `bin/` and `lib/`); that
+is the script `upgrade` runs, so it always matches the installed layout.
+
 Published Linux builds are made on **Debian 12** (glibc 2.36), which is also what
 development and CI use: a release has to run on the distribution someone already
 has, and glibc is backwards compatible, not forwards.
