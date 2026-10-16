@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# CLI golden test. behaviour.txt = what commands DO (captured before the CLI
-# restructure; must not change). help.txt = generated usage text (review its diff).
+# CLI golden test. behaviour.txt = what commands DO; help.txt = generated usage text
+# (review its diff). INVARIANT: no codegen-dependent value (checksum, size, IR text)
+# may appear in behaviour.txt -- compiler output is checked structurally by shape()
+# and only "ok rc=0 markers=..." is recorded, so a codegen/stdlib change never edits it.
 #   bash tests/cli/run.sh            compare
 #   bash tests/cli/run.sh --update   rewrite help.txt and the completions.* goldens
-#   bash tests/cli/run.sh --capture  rewrite behaviour.txt (baseline only; never after the restructure)
+#   bash tests/cli/run.sh --capture  rewrite behaviour.txt (CLI-behaviour changes only)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MC="${MC:-$ROOT/bin/manticore}"
@@ -22,12 +24,15 @@ run() { # label, then the command: exit code only
     "$@" >/dev/null 2>&1; rc=$?
     printf '== %s\nrc=%s\n' "$label" "$rc"
 }
-sum() { # label, then the command: checksum of stdout + rc
-    local label="$1"; shift
-    local s rc
+shape() { # label, first-line prefix, fixed-string markers, then the command: rc 0 + non-empty stdout + first line + markers
+    local label="$1" first="$2" markers="$3" rc bad="" m; shift 3
     "$@" >"$WORK/o" 2>/dev/null; rc=$?
-    s="$(cksum <"$WORK/o")"
-    printf '== %s\n%s rc=%s\n' "$label" "$s" "$rc"
+    [ $rc = 0 ] || bad="rc=$rc"
+    [ -s "$WORK/o" ] || bad="$bad empty"
+    case "$(head -n1 "$WORK/o")" in "$first"*) ;; *) bad="$bad first-line";; esac
+    for m in $markers; do grep -qF -- "$m" "$WORK/o" || bad="$bad missing:$m"; done
+    printf '== %s\n' "$label"
+    if [ -z "$bad" ]; then echo "ok rc=0 first='$first' markers='$markers'"; else echo "BAD:$bad"; fi
 }
 
 doctor_case() { # label; PATH for the compiler is only $WORK/shim
@@ -37,14 +42,20 @@ doctor_case() { # label; PATH for the compiler is only $WORK/shim
 }
 shim() { rm -rf "$WORK/shim"; mkdir -p "$WORK/shim"; for t in "$@"; do case "$t" in clang14) printf '#!/bin/sh\necho "clang version 14.0.0"\n' > "$WORK/shim/clang";; clang17) printf '#!/bin/sh\necho "clang version 17.0.6"\n' > "$WORK/shim/clang";; pcre2-config) printf '#!/bin/sh\necho 10.42\n' > "$WORK/shim/pcre2-config";; pkg-config) printf '#!/bin/sh\necho 3.0.0\n' > "$WORK/shim/pkg-config";; cc) printf '#!/bin/sh\nexit 0\n' > "$WORK/shim/cc";; esac; done; chmod +x "$WORK/shim"/* 2>/dev/null || true; }
 
+version_case() { # derived from COMPILER_VERSION: a release needs no golden edit
+    local got rc; got="$("$MC" version 2>/dev/null)"; rc=$?
+    printf '== version\n'
+    if [ "$got" = "manticore $(cat "$ROOT/COMPILER_VERSION")" ]; then echo "matches COMPILER_VERSION rc=$rc"; else echo "MISMATCH '$got' rc=$rc"; fi
+}
+
 behaviour() {
-    sum "version"            "$MC" version
-    sum "dump-ast"           "$MC" dump-ast "f.php"
-    sum "dump-mir"           "$MC" dump-mir "f.php"
-    sum "dump-sig"           "$MC" dump-sig "f.php"
-    sum "dump-llvm-mir"      "$MC" dump-llvm-mir "f.php"
-    sum "dump-llvm"          "$MC" dump-llvm "f.php"
-    sum "analyze json"       "$MC" analyze --json "f.php"
+    version_case
+    shape "dump-ast"      "Program"    "FunctionDecl"          "$MC" dump-ast "f.php"
+    shape "dump-mir"      "; passes:"  "add("                  "$MC" dump-mir "f.php"
+    shape "dump-sig"      "{\"schema\":" "\"functions\":["    "$MC" dump-sig "f.php"
+    shape "dump-llvm-mir" "; ModuleID" "source_filename define" "$MC" dump-llvm-mir "f.php"
+    shape "dump-llvm"     "; ModuleID" "source_filename define" "$MC" dump-llvm "f.php"
+    shape "analyze json"  "["          "]"                     "$MC" analyze --json "f.php"
     run "dump-ast bogus flag"      "$MC" dump-ast --bogus "f.php"
     run "dump-ast missing file"    "$MC" dump-ast "nope.php"
     run "dump-ast with compile-only flag" "$MC" dump-ast --analyze "f.php"

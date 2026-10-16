@@ -135,7 +135,8 @@ trait LowerFns
             $fp->cellArg = isset($cellArgNames[$p->name]) || $this->paramHasCellArgAttr($p);
             $params[] = $fp;
         }
-        $this->currentLowerClass = '';
+        // A synthesized parameter-default factory lowers in its declaring class's scope.
+        $this->currentLowerClass = $this->synthFnScope[$decl->name] ?? '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
         // FFI: `#[Symbol('cSym')]` makes this a thin extern forward — the

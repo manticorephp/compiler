@@ -67,7 +67,7 @@ the toolchain above, tells you what is missing, then installs under `$MANTICORE_
 curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 export PATH="$HOME/.manticore/bin:$PATH"
 
-manticore version        # manticore 0.14.0
+manticore version        # manticore 0.15.0
 ```
 
 Re-running the installer **upgrades in place**. Knobs: `MANTICORE_HOME`,
@@ -479,8 +479,8 @@ published `main` compiler and then to the pinned release (`BOOTSTRAP_VERSION`);
 there is no Zend seed. The `bootstrap-from-pin` job checks on every push that the
 tree still builds from the pin alone. Required checks: `linux-arm64`,
 `linux-amd64`, `linux-alpine-arm64`, `linux-alpine-amd64`, `macos-arm64` and
-`bootstrap-from-pin`. `gate.yml` adds difftest weekly, and the fixpoint only when
-asked for.
+`bootstrap-from-pin`. `difftest` and the fixpoint are not run in CI: every AOT case already
+carries a php-generated expected output, so run `bash tools/difftest.sh` by hand when php is upgraded.
 
 `selfhost_fixpoint.sh` asserts gen2 IR == gen3 IR, runs the suite through the
 self-built compiler, and rebuilds repeatedly to catch build-to-build layout roulette.

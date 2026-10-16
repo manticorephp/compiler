@@ -1,0 +1,5 @@
+8
+10
+Error: Call to undefined method Closure::nosuch()
+Error: Call to a member function foo() on null
+magic:anything

@@ -384,6 +384,9 @@ final class LowerFromAst implements Pass
      *  @var \Parser\Ast\FunctionDecl[] */
     private array $pendingSynthFns = [];
 
+    /** @var array<string, string> synthesized factory name => class whose scope its body lowers in */
+    private array $synthFnScope = [];
+
     /**
      * Static-property registry keyed by "Class::prop". String-keyed
      * assoc lookups round-trip in self-host; reading back `string[]`
@@ -1261,6 +1264,10 @@ final class LowerFromAst implements Pass
             // The declaration still has to be registered NOW: the params pre-pass
             // right below reads `$this->fnDecls`.
             foreach ($this->synthAttrFactories($module) as $decl) {
+                $this->fnDecls[$decl->name] = $decl;
+                $this->pendingSynthFns[] = $decl;
+            }
+            foreach ($this->synthParamDefaultFactories($module) as $decl) {
                 $this->fnDecls[$decl->name] = $decl;
                 $this->pendingSynthFns[] = $decl;
             }
@@ -2256,27 +2263,6 @@ final class LowerFromAst implements Pass
                         $this->attrFactoriesFor($cd->name, 'a', $m->name . '_' . (string)$pi,
                                                 $p->attributes, $out);
                     }
-                    // …and the parameter's DEFAULT, as its own nullary factory.
-                    // `mixed`, not the declared hint: the only caller is the
-                    // indirect `__mc_refl_call0`, which is CELL-typed, and a
-                    // concrete return hands it a raw word with no tag — the same
-                    // lesson the attribute `new` factory above records.
-                    if ($p->default !== null) {
-                        // Boxed for the same reason the attribute factories are:
-                        // `__mc_refl_call0` reads a CELL, and a bare `int 7`
-                        // returned raw came back as `3.5E-323` — the integer
-                        // decoded as a double. Declaring the factory `mixed` is
-                        // NOT enough on its own; the box has to be explicit.
-                        $dbody = new \Parser\Ast\Block([
-                            \Parser\Ast\Stmt::return_(
-                                \Parser\Ast\Expr::call('__mir_to_cell', [$p->default],
-                                                       $p->default->span),
-                                $p->default->span),
-                        ]);
-                        $out[] = new \Parser\Ast\FunctionDecl(
-                            \Compile\Mir\Passes\ReflectSynth::paramDefaultFn($cd->name, $m->name, $pi),
-                            [], 'mixed', $dbody, $p->default->span);
-                    }
                 }
             }
             foreach ($decl->properties as $prop) {
@@ -2284,6 +2270,82 @@ final class LowerFromAst implements Pass
             }
         }
         return $out;
+    }
+
+    /**
+     * One nullary `__mc_pdef_*` factory per defaulted parameter of every method
+     * reflection reports as DECLARED on a class: its own, a trait's mixed in
+     * (php reports those on the USING class), a trait alias, an interface's,
+     * and a prelude class's. Keyed exactly as
+     * {@see Passes\EmitLlvmRuntime::rmetaParamTable} asks —
+     * `ReflectSynth::paramDefaultFn(declaringClass, method, pos)` — and
+     * lowered in that class's scope (`self::X` / `new self` resolve there).
+     *
+     * @return \Parser\Ast\FunctionDecl[]
+     */
+    private function synthParamDefaultFactories(Module $module): array
+    {
+        $out = [];
+        foreach ($module->classes as $cd) {
+            if ($cd->isStruct) { continue; }
+            $decl = $this->classDecls[$cd->name] ?? null;
+            if ($decl === null) { continue; }
+            $seen = [];
+            foreach ($decl->methods as $m) {
+                $seen[$m->name] = true;
+                $this->paramDefaultFactoriesFor($cd->name, $m->name, $m, $out);
+            }
+            if ($cd->isPreludeClass) { continue; }
+            $excluded = $this->traitExclusions($decl);
+            foreach ($this->usedTraitsFlat($decl) as $traitName) {
+                $tn = \ltrim($traitName, '\\');
+                $td = $this->traitTable[$tn] ?? null;
+                if ($td === null) { continue; }
+                foreach ($td->methods as $tm) {
+                    if (isset($seen[$tm->name]) || isset($excluded[$tn . '::' . $tm->name])) { continue; }
+                    $seen[$tm->name] = true;
+                    $this->paramDefaultFactoriesFor($cd->name, $tm->name, $tm, $out);
+                }
+            }
+            foreach ($this->effectiveAdaptations($decl) as $a) {
+                if ($a->kind !== 'as' || $a->alias === '' || isset($seen[$a->alias])) { continue; }
+                $src = $this->traitAliasSource($this->adaptScope[\spl_object_id($a)] ?? $decl, $a);
+                if ($src === null) { continue; }
+                $seen[$a->alias] = true;
+                $this->paramDefaultFactoriesFor($cd->name, $a->alias, $src, $out);
+            }
+        }
+        foreach ($module->interfaceNames as $iname => $_) {
+            $idecl = $this->classDecls[$iname] ?? null;
+            if ($idecl === null) { continue; }
+            foreach ($idecl->methods as $m) {
+                $this->paramDefaultFactoriesFor($idecl->name, $m->name, $m, $out);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * @param \Parser\Ast\FunctionDecl[] $out appended to, by reference
+     */
+    private function paramDefaultFactoriesFor(string $class, string $method, \Parser\Ast\MethodDecl $m, array &$out): void
+    {
+        $pi = -1;
+        foreach ($m->params as $p) {
+            $pi = $pi + 1;
+            if ($p->default === null) { continue; }
+            // `mixed` + an explicit box: `__mc_refl_call0` is CELL-typed, and a
+            // concrete return hands it a raw word with no tag (a bare `int 7`
+            // came back as `3.5E-323`).
+            $dbody = new \Parser\Ast\Block([
+                \Parser\Ast\Stmt::return_(
+                    \Parser\Ast\Expr::call('__mir_to_cell', [$p->default], $p->default->span),
+                    $p->default->span),
+            ]);
+            $fn = \Compile\Mir\Passes\ReflectSynth::paramDefaultFn($class, $method, $pi);
+            $this->synthFnScope[$fn] = $class;
+            $out[] = new \Parser\Ast\FunctionDecl($fn, [], 'mixed', $dbody, $p->default->span);
+        }
     }
 
     /**

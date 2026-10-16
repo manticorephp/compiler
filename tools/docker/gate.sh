@@ -50,7 +50,7 @@
 #                    reproduces here — is printed and lands in the summary, but
 #                    does not fail the job, because a bug can be platform-specific
 #                    and a red row also withholds the published seed. `strict`
-#                    makes an XPASS fail the gate (the weekly gate.yml asks for it).
+#                    makes an XPASS fail the gate (run locally with `--gate`).
 #
 # Exit 0 only if every stage it ran passed.
 set -uo pipefail
@@ -347,6 +347,14 @@ bash tools/librefpack_smoke.sh > "$MC_LOGDIR/librefpack.log" 2>&1
 refpack_rc=$?
 tail -5 "$MC_LOGDIR/librefpack.log"
 
+# The CLI surface (wiring, options, exit codes, help, progress formats). Its
+# golden holds no codegen-dependent value, so it only goes red on a CLI change.
+echo
+echo "=== tests/cli/run.sh (CLI golden) ==="
+bash tests/cli/run.sh > "$MC_LOGDIR/cli.log" 2>&1
+cli_rc=$?
+tail -5 "$MC_LOGDIR/cli.log"
+
 echo
 suite_rc=0
 if [ "$MC_SUITE" != "1" ]; then
@@ -411,8 +419,8 @@ fi
 
 if [ "$MC_DIFFTEST" != "1" ] && [ "$MC_FIXPOINT" != "1" ]; then
     echo
-    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc known-bugs=[$XFAIL_LABEL] ==="
-    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$xfail_rc" = "0" ] || exit 1
+    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc cli=$cli_rc known-bugs=[$XFAIL_LABEL] ==="
+    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$xfail_rc" = "0" ] || exit 1
     exit 0
 fi
 
@@ -437,6 +445,6 @@ if [ "$MC_FIXPOINT" = "1" ]; then
 fi
 
 echo
-echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc difftest=$diff_rc fixpoint=$fix_rc known-bugs=[$XFAIL_LABEL] ==="
-[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$xfail_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
+echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc cli=$cli_rc difftest=$diff_rc fixpoint=$fix_rc known-bugs=[$XFAIL_LABEL] ==="
+[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$xfail_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
 exit 0
