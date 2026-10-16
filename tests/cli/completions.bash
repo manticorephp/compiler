@@ -18,10 +18,10 @@ _manticore() {
         compile)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|-j|--progress|--color) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --analyze --no-analyze --analyze-strict" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --analyze --no-analyze --analyze-strict --progress --quiet --timings --color" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -29,10 +29,10 @@ _manticore() {
         build)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|-j|--progress|--color) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --libs-only --apps-only --no-analyze" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --libs-only --apps-only --no-analyze --progress --quiet --timings --color" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi

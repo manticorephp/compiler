@@ -50,6 +50,8 @@ behaviour() {
     run "dump-ast with compile-only flag" "$MC" dump-ast --analyze "f.php"
     run "compile bad -O"           "$MC" compile "f.php" -o "x" -O9
     run "compile bad --memory"     "$MC" compile "f.php" -o "x" --memory bogus
+    run "compile bad --progress"   "$MC" compile "f.php" -o "x" --progress=bogus
+    run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir
     run "build missing manifest"   "$MC" build "nope.json"
     run "upgrade in a dev tree (foreign)" "$MC" upgrade --check
@@ -64,6 +66,44 @@ behaviour() {
     "$MC" compile "f.php" -o "prog" >/dev/null 2>&1
     if [ -x ./prog ]; then out="$(./prog 2>&1)"; else out="no binary"; fi
     printf '== compile+run\n%s\n' "$out"
+}
+
+progress_check() { # --progress/--quiet/--timings/--color behaviour; failures print and set fail=1
+    local e="$WORK/pe" bad
+    ck() { # label, condition-exit-code
+        if [ "$2" != 0 ]; then echo "progress FAIL: $1"; fail=1; fi
+    }
+    "$MC" compile f.php -o pp --progress=plain >"$WORK/po" 2>"$e"; ck "plain rc" $?
+    [ ! -s "$WORK/po" ]; ck "plain stdout empty" $?
+    bad="$(grep -Evc '^\[ *[0-9]+\] .+  [0-9]+\.[0-9]s$|^done in [0-9]+\.[0-9]s$|^      .+ [0-9]+/[0-9]+$' "$e")"
+    [ "$bad" = 0 ]; ck "plain line format" $?
+    for s in parse LowerFromAst Verify; do grep -Eq "^\[ *[0-9]+\] $s( |  )" "$e"; ck "plain stage $s" $?; done
+    "$MC" compile f.php -o pj --progress=json >/dev/null 2>"$e"; ck "json rc" $?
+    bad="$(grep -Evc '^\{"event":"(stage_end|counter|done|timing)".*\}$' "$e")"
+    [ "$bad" = 0 ]; ck "json line format" $?
+    [ "$(grep -c '"event":"done"' "$e")" = 1 ]; ck "json done once" $?
+    ! grep -q "$(printf '\033')" "$e"; ck "json no ESC" $?
+    "$MC" compile f.php -o pq --progress=off >/dev/null 2>"$e"; [ ! -s "$e" ]; ck "off silent" $?
+    "$MC" compile f.php -o pq --quiet >/dev/null 2>"$e"; [ ! -s "$e" ]; ck "quiet silent" $?
+    "$MC" compile f.php -o pq --quiet --progress=plain >/dev/null 2>"$e"; [ ! -s "$e" ]; ck "quiet+plain silent" $?
+    env -u CI "$MC" compile f.php -o pa --progress=auto >/dev/null 2>"$e"; [ ! -s "$e" ]; ck "auto piped silent" $?
+    CI=1 "$MC" compile f.php -o pa --progress=auto >/dev/null 2>"$e"; grep -Eq '^done in ' "$e"; ck "auto+CI plain" $?
+    "$MC" compile f.php -o x --progress=bogus >/dev/null 2>&1; [ $? = 64 ]; ck "bogus progress rc 64" $?
+    "$MC" compile f.php -o x --color=bogus >/dev/null 2>&1; [ $? = 64 ]; ck "bogus color rc 64" $?
+    local esc; esc="$(printf '\033[')"
+    "$MC" compile f.php -o pc --progress=plain --color=always >/dev/null 2>"$e"; grep -qF "$esc" "$e"; ck "always has ESC[" $?
+    NO_COLOR=1 "$MC" compile f.php -o pc --progress=plain --color=always >/dev/null 2>"$e"; ! grep -qF "$esc" "$e"; ck "NO_COLOR beats always" $?
+    TERM=dumb "$MC" compile f.php -o pc --progress=plain --color=always >/dev/null 2>"$e"; ! grep -qF "$esc" "$e"; ck "TERM=dumb beats always" $?
+    "$MC" compile f.php -o pc --progress=plain --color=never >/dev/null 2>"$e"; ! grep -qF "$esc" "$e"; ck "never no ESC" $?
+    "$MC" compile f.php -o pc --progress=json --color=always >/dev/null 2>"$e"; ! grep -qF "$esc" "$e"; ck "json+always no ESC" $?
+    "$MC" compile f.php -o pt --progress=plain --timings >/dev/null 2>"$e"; grep -q '^timings (longest first):' "$e"; ck "timings table" $?
+    local m o1 o2
+    "$MC" compile f.php -o p0 --progress=off >"$WORK/o_off" 2>/dev/null
+    for m in plain json; do
+        "$MC" compile f.php -o "p_$m" --progress=$m >"$WORK/o_$m" 2>/dev/null
+        cmp -s "$WORK/o_off" "$WORK/o_$m"; ck "compile stdout same ($m)" $?
+        [ "$(./p0)" = "$(./p_$m)" ]; ck "binary output same ($m)" $?
+    done
 }
 
 helps() {
@@ -99,5 +139,6 @@ if [ -f "$HERE/help.txt" ]; then
     helps > "$WORK/help.got"
     diff -u "$HERE/help.txt" "$WORK/help.got" || fail=1
 fi
+progress_check
 completions_check
 [ "$fail" = 0 ] && echo "=== cli golden: ok ===" || { echo "=== cli golden: FAILED ==="; exit 1; }

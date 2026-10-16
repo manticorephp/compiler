@@ -44,6 +44,10 @@ _manticore() {
         '--analyze[Run the analyzer (default)]' \
         '--no-analyze[Skip the analyzer]' \
         '--analyze-strict[Fail with rc 65 on analyzer errors]' \
+        '--progress=[Progress output: auto|live|plain|json|off (default auto)]:mode:' \
+        '--quiet[Silence progress and timings (diagnostics stay)]' \
+        '--timings[Print a per-stage time table at the end]' \
+        '--color=[Colour: auto|always|never (default auto)]:when:' \
         '*:file:_files'
       ;;
     build)
@@ -63,6 +67,10 @@ _manticore() {
         '--libs-only[Build library targets and stop (cold seed)]' \
         '--apps-only[Build application targets only]' \
         '--no-analyze[Accepted for compile parity; build does not run the analyzer]' \
+        '--progress=[Progress output: auto|live|plain|json|off (default auto)]:mode:' \
+        '--quiet[Silence progress and timings (diagnostics stay)]' \
+        '--timings[Print a per-stage time table at the end]' \
+        '--color=[Colour: auto|always|never (default auto)]:when:' \
         '*:file:_files'
       ;;
     dump-llvm)

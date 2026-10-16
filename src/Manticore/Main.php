@@ -35,6 +35,12 @@ function write(
     return 0;
 }
 
+#[Library('c'), Symbol('isatty'), CType('int')]
+function sys_isatty(#[CType('int')] int $fd): int
+{
+    return 0;
+}
+
 #[Library('c'), Symbol('read')]
 function read(
     #[CType('int')] int $fd,
@@ -225,6 +231,7 @@ function is_directory(string $path): bool
  */
 function dprint(string $s): void
 {
+    \Compile\Progress::clear();
     // error_log, NOT the libc `write` binding: the binding's body is EMPTY, so
     // every diagnostic vanished whenever the compiler ran under Zend (the old
     // cold seed, tools/compile_user_mir.php) and a real "compile failed: <reason>"

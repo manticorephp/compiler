@@ -39,10 +39,22 @@ final class BuildCommand extends Command
             new Option('libs-only', \Cli\ArgParse::FLAG, 'Build library targets and stop (cold seed)'),
             new Option('apps-only', \Cli\ArgParse::FLAG, 'Build application targets only'),
             new Option('no-analyze', \Cli\ArgParse::FLAG, 'Accepted for compile parity; build does not run the analyzer'),
-        ]);
+        ], ProgressOptions::all());
     }
 
     public function run(ParsedArgs $args): int
+    {
+        $err = \Compile\Progress::configure($args->value('progress', 'auto'), $args->flag('quiet'), $args->flag('timings'), $args->value('color', 'auto'));
+        if ($err !== '') {
+            \Manticore\dprint('build: ' . $err);
+            return 64;
+        }
+        $rc = $this->execute($args);
+        \Compile\Progress::finish($rc);
+        return $rc;
+    }
+
+    private function execute(ParsedArgs $args): int
     {
         if (!\Manticore\apply_compile_args($args)) {
             return 64;

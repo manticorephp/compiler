@@ -28,10 +28,22 @@ final class CompileCommand extends Command
             new Option('analyze', \Cli\ArgParse::FLAG, 'Run the analyzer (default)'),
             new Option('no-analyze', \Cli\ArgParse::FLAG, 'Skip the analyzer'),
             new Option('analyze-strict', \Cli\ArgParse::FLAG, 'Fail with rc 65 on analyzer errors'),
-        ]);
+        ], ProgressOptions::all());
     }
 
     public function run(ParsedArgs $args): int
+    {
+        $err = \Compile\Progress::configure($args->value('progress', 'auto'), $args->flag('quiet'), $args->flag('timings'), $args->value('color', 'auto'));
+        if ($err !== '') {
+            \Manticore\dprint('compile: ' . $err);
+            return 64;
+        }
+        $rc = $this->execute($args);
+        \Compile\Progress::finish($rc);
+        return $rc;
+    }
+
+    private function execute(ParsedArgs $args): int
     {
         if (!\Manticore\apply_compile_args($args)) {
             \Manticore\dprint("compile: failed to parse args (rc=64)");
@@ -75,6 +87,7 @@ final class CompileCommand extends Command
                 if (\count($afiles) > 0) {
                     $adiags = \Manticore\perform_analysis($afiles, \Manticore\CompileArgs::$files, false);
                     if (\count($adiags) > 0) {
+                        \Compile\Progress::clear();
                         \error_log("\n" . \Analyze\Report::human($adiags));
                     }
                     if ($strict) {

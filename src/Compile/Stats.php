@@ -102,8 +102,22 @@ final class Stats
      */
     public static function step(string $name, int $startNs, int $fns, int $classes): void
     {
-        if (!self::reporting()) { return; }
         $ms = \intdiv(self::now() - $startNs, 1000000);
+        if (self::reporting()) {
+            self::stepLine($name, $ms, $fns, $classes);
+        }
+        Progress::end($name, $ms, $fns, $classes);
+    }
+
+    /** Start a stage: tells {@see Progress}, returns the clock reading to hand to {@see step}. */
+    public static function begin(string $name): int
+    {
+        Progress::begin($name);
+        return self::now();
+    }
+
+    private static function stepLine(string $name, int $ms, int $fns, int $classes): void
+    {
         $line = 'stats: ' . (string)self::elapsedMs() . 'ms +' . (string)$ms . 'ms  ' . $name;
         if ($fns >= 0) { $line = $line . '  fns=' . (string)$fns; }
         if ($classes >= 0) { $line = $line . ' cls=' . (string)$classes; }

@@ -22,6 +22,10 @@ rc=64
 rc=64
 == compile bad --memory
 rc=64
+== compile bad --progress
+rc=64
+== compile bad --color
+rc=64
 == split-ir no args
 rc=64
 == build missing manifest
