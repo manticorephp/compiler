@@ -10,6 +10,8 @@ options; `Cli` parses, generates help, and dispatches on `argv[1]`.
   - `add(Command $cmd): void` — register a command (insertion order = help order)
   - `run(array $argv): int` — dispatch `argv[1]` with the tail args
   - `runHelp(): int` — print the generated root help
+  - `registry(): array<string, Command>` — the registered commands, read-only
+- `Cli\Install` — install.sh layout (home, installer, owner guess) and the installed-vs-latest check shared by `upgrade` and `version --check`.
 - `Cli\Command` — abstract base, one subclass per command (`src/Cli/Commands/*Command.php`).
   - `name(): string`, `summary(): string` (one line, shown in root help)
   - `usage(): string` — text after `Usage: <prog> <name> ` (default `[options]`)

@@ -46,6 +46,7 @@ behaviour() {
     run "split-ir no args"         "$MC" split-ir
     run "build missing manifest"   "$MC" build "nope.json"
     run "upgrade in a dev tree (foreign)" "$MC" upgrade --check
+    run "version --check in a dev tree (foreign)" "$MC" version --check
     run "unknown command"          "$MC" frobnicate
     "$MC" compile "f.php" -o "prog" >/dev/null 2>&1
     if [ -x ./prog ]; then out="$(./prog 2>&1)"; else out="no binary"; fi

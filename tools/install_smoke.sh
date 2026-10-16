@@ -209,6 +209,22 @@ if [ "$rc" = 4 ] && [ -f "$WORK/home/lib/OLD_MARKER" ] && [ ! -e "$WORK/home/bin
 mk_release 9.9.9; fresh_prefix; rc=0; UPG >"$WORK/inst.log" 2>"$WORK/err" || rc=$?
 if [ "$rc" = 2 ] && grep -q "not installed by install.sh" "$WORK/err" && untouched; then ok "upgrade foreign install: rc 2, untouched (rc $rc)" 0; else ok "upgrade foreign install: rc 2, untouched (rc $rc)" 1; fi
 
+# version --check (same engine as upgrade --check)
+VCK() { env $(mock_env) MANTICORE_FROM_SOURCE=0 "$WORK/home/bin/manticore" version --check "$@"; }
+mk_release 9.9.9; fresh_prefix; with_share; rc=0; out="$(VCK 2>/dev/null)" || rc=$?
+case "$out" in *"latest 9.9.9"*) m=0;; *) m=1;; esac
+if [ "$rc" = 1 ] && [ "$m" = 0 ]; then ok "version --check: update available, rc 1 (rc $rc)" 0; else ok "version --check: update available, rc 1 (rc $rc: $out)" 1; fi
+
+mk_release "$INSTALLED"; fresh_prefix; with_share; rc=0; out="$(VCK 2>/dev/null)" || rc=$?
+case "$out" in *"up to date"*) m=0;; *) m=1;; esac
+if [ "$rc" = 0 ] && [ "$m" = 0 ]; then ok "version --check: up to date, rc 0 (rc $rc)" 0; else ok "version --check: up to date, rc 0 (rc $rc: $out)" 1; fi
+
+fresh_prefix; with_share; rc=0; env MANTICORE_API_BASE="file://$WORK/nowhere" "$WORK/home/bin/manticore" version --check >/dev/null 2>&1 || rc=$?
+if [ "$rc" = 2 ]; then ok "version --check unreachable: rc 2 (rc $rc)" 0; else ok "version --check unreachable: rc 2 (rc $rc)" 1; fi
+
+mk_release 9.9.9; fresh_prefix; rc=0; VCK >/dev/null 2>"$WORK/err" || rc=$?
+if [ "$rc" = 2 ] && grep -q "not installed by install.sh" "$WORK/err"; then ok "version --check foreign install: rc 2 (rc $rc)" 0; else ok "version --check foreign install: rc 2 (rc $rc)" 1; fi
+
 rm -rf "$MOCK" "$WORK/home" "$WORK/inst.log"
 
 [ "$fail" = "0" ] || { echo "=== install_smoke: FAILED ==="; exit 1; }

@@ -172,7 +172,10 @@ Usage: manticore split-ir <module.ll> <parts> <outbase>
 == help version
 version — Print compiler version
 
-Usage: manticore version
+Usage: manticore version [--check]
+
+Options:
+  --check  Report installed and latest version (same as upgrade --check); exit 1 if an update exists, 2 on error
 == help upgrade
 upgrade — Update the installed compiler to the latest release (--check only reports)
 

@@ -23,6 +23,16 @@ final class Cli
         $this->registry[$cmd->name()] = $cmd;
     }
 
+    /**
+     * The registered commands by name, read-only.
+     *
+     * @return array<string, Command>
+     */
+    public function registry(): array
+    {
+        return $this->registry;
+    }
+
     /** @return array<string, string> */
     private function specOf(Command $cmd): array
     {
