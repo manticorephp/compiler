@@ -469,7 +469,13 @@ function strrev(string $s): string
 function str_pad(string $s, int $len, string $pad = " ", int $type = 1): string
 {
     $sl = \strlen($s);
-    if ($sl >= $len || \strlen($pad) === 0) { return $s; }
+    if ($sl >= $len) { return $s; }
+    if (\strlen($pad) === 0) {
+        throw new \ValueError('str_pad(): Argument #3 ($pad_string) must not be empty');
+    }
+    if ($type < 0 || $type > 2) {
+        throw new \ValueError('str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH');
+    }
     $need = $len - $sl;
     $full = \str_repeat($pad, \intdiv($need, \strlen($pad)) + 1);
     if ($type === 0) { return \substr($full, 0, $need) . $s; }
