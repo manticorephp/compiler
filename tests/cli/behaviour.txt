@@ -1,0 +1,32 @@
+== version
+3287327004 17 rc=0
+== dump-ast
+4195982665 680 rc=0
+== dump-mir
+1366939965 533 rc=0
+== dump-sig
+1914961456 324 rc=0
+== dump-llvm-mir
+1464278533 571474 rc=0
+== dump-llvm
+1464278533 571474 rc=0
+== analyze json
+71434490 3 rc=0
+== dump-ast bogus flag
+rc=64
+== dump-ast missing file
+rc=66
+== dump-ast with compile-only flag
+rc=64
+== compile bad -O
+rc=64
+== compile bad --memory
+rc=64
+== split-ir no args
+rc=64
+== build missing manifest
+rc=66
+== unknown command
+rc=0
+== compile+run
+tests/cli/run.sh: line 49: prog: command not found
