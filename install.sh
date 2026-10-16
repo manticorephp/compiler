@@ -44,7 +44,7 @@ STRICT="${MANTICORE_STRICT:-0}"
 API_BASE="${MANTICORE_API_BASE:-https://api.github.com/repos/manticorephp/compiler/releases}"
 DL_BASE="${MANTICORE_RELEASE_BASE:-https://github.com/manticorephp/compiler/releases}"
 EX_NET=2; EX_NOBUILD=3; EX_SUM=4; EX_STAGE=5
-SELF="${BASH_SOURCE[0]:-$0}"
+SELF="${BASH_SOURCE[0]:-}"
 CHECK=0
 for _a in "$@"; do if [ "$_a" = "--check" ]; then CHECK=1; fi; done
 
@@ -114,6 +114,7 @@ smoke_compile() { # $1 compiler, $2 scratch dir
 swap_in() {
     local stage="$1"
     mkdir -p "$PREFIX/bin" "$PREFIX/share" || return 1
+    rm -rf "$PREFIX/lib.old"
     rm -f "$PREFIX/bin/.manticore.prev"
     if [ -e "$PREFIX/bin/manticore" ]; then mv "$PREFIX/bin/manticore" "$PREFIX/bin/.manticore.prev" || return 1; fi
     rm -rf "$PREFIX/lib.old"
@@ -143,9 +144,10 @@ if [ "$CHECK" = 1 ]; then
 fi
 
 try_prebuilt() {
-    [ "${MANTICORE_FROM_SOURCE:-0}" = 0 ] || return 1
-    [ -z "${MANTICORE_SRC:-}" ] || return 1
-    [ "$REF" = main ] || return 1
+    if [ "${MANTICORE_FROM_SOURCE:-0}" != 0 ] || [ -n "${MANTICORE_SRC:-}" ] || [ "$REF" != main ]; then
+        if [ "$STRICT" = 1 ]; then die_code $EX_NOBUILD "strict mode needs a published build; unset MANTICORE_FROM_SOURCE/MANTICORE_SRC/MANTICORE_REF"; fi
+        return 1
+    fi
     if [ -z "$REL_OS" ] || [ -z "$REL_ARCH" ]; then miss $EX_NOBUILD "no published build for $OS/$ARCH"; return 1; fi
     if ! have curl && ! have wget; then miss $EX_NET "neither curl nor wget found"; return 1; fi
     local tmp name base want got sum stage rel_ver
@@ -181,7 +183,7 @@ try_prebuilt() {
     rm -rf "$stage"; mkdir -p "$stage/share"
     cp -R "$tmp/$name/bin" "$tmp/$name/lib" "$stage/"
     if [ -f "$tmp/$name/share/install.sh" ]; then cp "$tmp/$name/share/install.sh" "$stage/share/install.sh"
-    elif [ -f "$SELF" ]; then cp "$SELF" "$stage/share/install.sh"; fi
+    elif [ -n "$SELF" ] && [ -f "$SELF" ]; then cp "$SELF" "$stage/share/install.sh"; fi
     printf 'install.sh %s\n' "$rel_ver" > "$stage/share/.installed-by"
     if [ "$OS" = Darwin ]; then xattr -d com.apple.quarantine "$stage/bin/manticore" 2>/dev/null || true; fi
     if ! smoke_compile "$stage/bin/manticore" "$stage"; then
@@ -298,7 +300,9 @@ if smoke_compile "$PREFIX/bin/manticore" "$PREFIX"; then
     rm -rf "$PREFIX/lib.old"
     log "installed and smoke-tested: $ver"
 else
-    rollback
+    # Only undo a swap THIS run made; a source build leaves no staged state to restore.
+    if [ "$PREBUILT" = 1 ]; then rollback; fi
+    if [ "$STRICT" = 1 ]; then die_code $EX_STAGE "the installed compiler failed to compile+run a hello world"; fi
     die "the installed compiler failed to compile+run a hello world"
 fi
 

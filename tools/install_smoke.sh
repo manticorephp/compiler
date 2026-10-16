@@ -102,7 +102,13 @@ mk_release() { # version [corrupt|noentry]
     name="manticore-$ver-$os-$arch"
     d="$MOCK/dl/download/v$ver"
     rm -rf "$d/stage"; mkdir -p "$d/stage/$name/bin" "$d/stage/$name/share" "$MOCK/api"
-    cp "$MC" "$d/stage/$name/bin/manticore"
+    case "${2:-}" in
+        badbin) printf '#!/bin/sh\nexit 1\n' > "$d/stage/$name/bin/manticore"; chmod +x "$d/stage/$name/bin/manticore";;
+        nobin) ;;
+        failfinal) # passes the staged smoke, fails once installed
+            printf '#!/bin/sh\ncase "$0" in *.staging.*) [ "$1" = compile ] && printf "#!/bin/sh\\necho manticore-ok\\n" > "$4" && chmod +x "$4";; *) exit 1;; esac\nexit 0\n' > "$d/stage/$name/bin/manticore"; chmod +x "$d/stage/$name/bin/manticore";;
+        *) cp "$MC" "$d/stage/$name/bin/manticore";;
+    esac
     cp -a "$ROOT/lib" "$d/stage/$name/lib"
     cp "$ROOT/install.sh" "$d/stage/$name/share/install.sh"
     tar -C "$d/stage" -czf "$d/$name.tar.gz" "$name"
@@ -118,7 +124,7 @@ INSTALL="env $(mock_env) MANTICORE_FROM_SOURCE=0 MANTICORE_HOME=$WORK/home bash 
 ok() { # name, condition-exit-status
     if [ "$2" = 0 ]; then echo "PASS $1"; else echo "FAIL $1"; fail=1; fi
 }
-untouched() { [ -f "$WORK/home/lib/OLD_MARKER" ] && cmp -s "$WORK/home/bin/manticore" "$MC" \
+untouched() { [ -f "$WORK/home/lib/OLD_MARKER" ] && [ ! -e "$WORK/home/lib.old" ] && cmp -s "$WORK/home/bin/manticore" "$MC" \
     && [ ! -e "$WORK/home/bin/.manticore.prev" ] && ! ls -d "$WORK/home"/.staging.* >/dev/null 2>&1; }
 
 mk_release 9.9.9
@@ -140,6 +146,13 @@ if [ "$rc" = 4 ] && untouched; then ok "strict SHA256SUMS without entry: rc 4, t
 
 fresh_prefix; rc=0; MANTICORE_VERSION=1.2.3 MANTICORE_STRICT=1 $INSTALL >"$WORK/inst.log" 2>&1 || rc=$?
 if [ "$rc" = 3 ] && untouched; then ok "strict no build for version: rc 3, tree untouched (rc $rc)" 0; else ok "strict no build for version: rc 3, tree untouched (rc $rc)" 1; fi
+
+for v in badbin nobin failfinal; do
+    mk_release 9.9.9 $v; fresh_prefix; rc=0; MANTICORE_STRICT=1 $INSTALL >"$WORK/inst.log" 2>&1 || rc=$?
+    if [ "$rc" = 5 ] && untouched; then ok "strict $v: rc 5, tree untouched (rc $rc)" 0; else ok "strict $v: rc 5, tree untouched (rc $rc)" 1; fi
+done
+rc=0; MANTICORE_SRC="$WORK/nosrc" MANTICORE_STRICT=1 $INSTALL >"$WORK/inst.log" 2>&1 || rc=$?
+if [ "$rc" = 3 ]; then ok "strict + MANTICORE_SRC: rc 3 (rc $rc)" 0; else ok "strict + MANTICORE_SRC: rc 3 (rc $rc)" 1; fi
 
 mk_release 9.9.9; rm -rf "$WORK/home"; mkdir -p "$WORK/home"; rc=0; MANTICORE_STRICT=1 $INSTALL >"$WORK/inst.log" 2>&1 || rc=$?
 if [ "$rc" = 0 ] && [ "$("$WORK/home/bin/manticore" version 2>/dev/null | head -c 9)" = "manticore" ]; then ok "strict first install into empty prefix (rc $rc)" 0; else ok "strict first install into empty prefix (rc $rc)" 1; fi
