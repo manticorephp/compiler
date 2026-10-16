@@ -1,17 +1,17 @@
 == version
 matches COMPILER_VERSION rc=0
 == dump-ast
-4195982665 680 rc=0
+ok rc=0 first='Program' markers='FunctionDecl'
 == dump-mir
-1366939965 533 rc=0
+ok rc=0 first='; passes:' markers='add('
 == dump-sig
-1364139325 324 rc=0
+ok rc=0 first='{"schema":' markers='"functions":['
 == dump-llvm-mir
-225323761 623031 rc=0
+ok rc=0 first='; ModuleID' markers='source_filename define'
 == dump-llvm
-225323761 623031 rc=0
+ok rc=0 first='; ModuleID' markers='source_filename define'
 == analyze json
-71434490 3 rc=0
+ok rc=0 first='[' markers=']'
 == dump-ast bogus flag
 rc=64
 == dump-ast missing file
