@@ -120,6 +120,8 @@ public bool $needsClosureRc = false;
     public bool $needsElemUntag = false;
     public bool $needsStrcspn = false;
     public bool $needsCrc32 = false;
+    public bool $needsCodec = false;
+    public bool $needsStrtrBytes = false;
     public bool $needsStrExplode = false;
 
     /**
