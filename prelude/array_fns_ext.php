@@ -498,6 +498,7 @@ function array_merge_recursive(array $arr, array ...$others): array
                 // side becomes the one-element list php's `(array)` cast makes,
                 // which is what turns two scalars into ['x','y'].
                 $cur = $out[$k];
+                if (!\is_array($cur) && !\is_array($v)) { $out[$k] = [$cur, $v]; continue; }
                 /** @var array<array-key, mixed> $left */
                 $left = [];
                 if (\is_array($cur)) {
