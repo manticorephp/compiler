@@ -1,0 +1,83 @@
+0 0 d41d8cd98f00b204e9800998ecf8427e rt st
+1 4 4ceb8bac827f1f1bc9aabdedc5d5e238 rt st
+2 4 1ec5999c5872b0781fcbe48677eb458a rt st
+3 4 60a01bc9d2b4f62a4709bac8c5eb0e0a rt st
+4 8 5a03e4463e456a94be53c569ca5b2be9 rt st
+5 8 30c6f0f91b9de250bd82907877ae170c rt st
+6 8 ab1112152f74e7b4d0adc7992a04be84 rt st
+7 12 c1ad2a0662f9a8ac804f6d8473537e0b rt st
+8 12 d7af2183eeb1644ee876eb3115f2b16a rt st
+9 12 152422bbb5a89484230e54956f4327f0 rt st
+10 16 aa6d7c3537888a31b5e73c6e7e3f72a6 rt st
+11 16 aa26a9491c390c40f2de8d80591ccd0c rt st
+12 16 f03d326f21bb348d7006ad00ff931274 rt st
+13 20 317636e1c47bf4f9d66977c6f4019040 rt st
+14 20 e5a650cacebe40abaf3ca67897414db7 rt st
+15 20 39e26debac39d3297795e8fbff389033 rt st
+16 24 a2ac95c74ce481d80c644db18e86a094 rt st
+17 24 fd01b2a41f761be47b228ec15e0284ef rt st
+18 24 083c06a7ece2d8dba1a86322e81a91d8 rt st
+19 28 4134a2de791bbbf0e98b3c70198d14f1 rt st
+20 28 05a10f470fca4b360006263d0f2a6b28 rt st
+21 28 db8f14d29a1cd9c0d96304074fca02a0 rt st
+22 32 07efbd3d93b8881b481aaf180ee09f2d rt st
+23 32 0ca900461072030aae79ea1bc5e32cb1 rt st
+24 32 2e84e5439a22b9d32d224aa6a366158b rt st
+25 36 86289cd12c9b272bc96c470f925f21fc rt st
+31 44 d95c3c7d39bc1f25c425868755ad995c rt st
+32 44 05bb8d6ce4a94b33f055fbb70c975da7 rt st
+33 44 0cb5f69c00372cbf13031499ac4a70f5 rt st
+47 64 d350796b9ab9aba4b0c1d853c97a2403 rt st
+48 64 f64f819a5a69badd1808a18fa27ec194 rt st
+49 68 c1f4441388881b57b9e8562201758ad2 rt st
+63 84 1135659ce6d44f9e30ce26d298c6875c rt st
+64 88 ae4f5961e8c3134c252726e8e638645b rt st
+65 88 96047d99d7552500effd57bf8b466049 rt st
+100 136 58f47dd4ba33f5cc3146899e7cf20782 rt st
+255 340 1b6f241ba8823de972a0d59d6a25a2b5 rt st
+256 344 212ed6a04b510404a5946e8e7e934468 rt st
+1000 1336 757dd519da772911c1cbd1bf8c2d4a38 rt st
+4097 5464 9bf94fa18d7cba42b39ae35ad99e100c rt st
+100000 133336 0940e7b3784d866b5b398595df1b793c rt st
+ 
+Zg== 66
+Zm8= 666f
+Zm9v 666f6f
+Zm9vYg== 666f6f62
+Zm9vYmE= 666f6f6261
+Zm9vYmFy 666f6f626172
+AA== 00
+AAAA 000000
+//// ffffff
+/w== ff
+TWFu 4d616e
+TWFuTWFu 4d616e4d616e
+TWFuTWFuTQ== 4d616e4d616e4d
+TWFuTWFuTWE= 4d616e4d616e4d61
+TWFuTWFuTWFu 4d616e4d616e4d616e
+"Zm9v" "foo" "foo"
+"Zm9vYg==" "foob" "foob"
+"Zm9vYg=" "foob" false
+"Zm9vYg" "foob" "foob"
+"Zm9v YmFy" "foobar" "foobar"
+"Zm9v\nYmFy\r\n" "foobar" "foobar"
+"Zm9v!YmFy" "foobar" false
+"Z" "" false
+"Zg" "f" "f"
+"Zg=" "f" false
+"Zg==" "f" "f"
+"Zg===" "f" false
+"====" "" false
+"=Zg==" "f" false
+"Zg==Zg==" "f\u0006`" false
+"Zm9v=YmFy" "foobar" false
+"Zm\u00009v" "foo" false
+"Zm9vYmFyZm9vYmFy" "foobarfoobar" "foobarfoobar"
+"-_-_" "" false
+"+\/+\/"  
+"" "" ""
+" " "" ""
+"A" "" false
+"AA" "\u0000" "\u0000"
+"AAA" "\u0000\u0000" "\u0000\u0000"
+"AAAA" "\u0000\u0000\u0000" "\u0000\u0000\u0000"
