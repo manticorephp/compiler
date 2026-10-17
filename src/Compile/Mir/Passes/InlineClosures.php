@@ -335,7 +335,7 @@ final class InlineClosures implements Pass
             $n->args = $args;
             $op = $this->tryOperator($n);
             if ($op !== null) { return $op; }
-            if ($this->opOnly) { return $n; }
+            if ($this->opOnly && $n->function !== 'in_array' && $n->function !== 'array_search') { return $n; }
             $fused = $this->tryFuseArrayFn($n);
             return $fused ?? $n;
         }
@@ -968,6 +968,12 @@ final class InlineClosures implements Pass
             && self::nativeScanShape($needle->type, $haystack->type->element ?? null, $strict) !== '') {
             return null;
         }
+        // array_search of the same shapes: one native scan, key cell or false.
+        if (!$isInArray && $literal
+            && self::nativeScanShape($needle->type, $haystack->type->element ?? null, true) !== ''
+            && ($strict || $needle->type->kind !== Type::KIND_STRING)) {
+            return new Call('__mc_search', [$needle, $haystack], Type::cell());
+        }
         $op = $strict ? '===' : '==';
         $u = Type::unknown();
         // `if ($v <op> $needle) return <hit>;` inside `foreach ($h as $k => $v)`.
@@ -994,7 +1000,13 @@ final class InlineClosures implements Pass
                 return new Foreach_(new LoadLocal('__mc_a', $haystack->type), $isInArray ? null : '__mc_k', '__mc_v', false, new Block([$i], Type::void()));
             };
             $num = new Call('is_numeric', [new LoadLocal('__mc_n', $needle->type)], Type::bool_());
-            $sel = new If_($num, new Block([$mk('==')], Type::void()), new Block([$mk('===')], Type::void()));
+            // Non-numeric needle: `==` is byte equality, the native strict scan.
+            $nl = new LoadLocal('__mc_n', $needle->type);
+            $al = new LoadLocal('__mc_a', $haystack->type);
+            $scan = $isInArray
+                ? new Call('in_array', [$nl, $al, new \Compile\Mir\BoolConst(true, Type::bool_())], Type::bool_())
+                : new Call('__mc_search', [$nl, $al], Type::cell());
+            $sel = new If_($num, new Block([$mk('==')], Type::void()), new Block([new Return_($scan, Type::void())], Type::void()));
             $body = new Block([$sel, new Return_($miss, Type::void())], Type::void());
         }
         // array_search returns key|false (mixed) → a tagged cell so emitReturn

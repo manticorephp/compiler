@@ -451,6 +451,8 @@ trait InferCalls
         if (($n === '__mc_list_range_into' && \count($args) === 5) || ($n === '__mc_list_cat_into' && \count($args) === 2)) { return Type::void(); }
         if ($n === 'range' && InlineClosures::rangeIntShape($args)) { return Type::vec(Type::int_()); }
         if ($n === '__mc_sort_native' && \count($args) === 1) { return Type::bool_(); }
+        if ($n === '__mc_search' && \count($args) === 2) { return Type::cell(); }
+        if ($n === '__mc_sort_assoc' && \count($args) === 3) { return Type::bool_(); }
         if ($n === '__mc_int_seq' && \count($args) === 3) { return Type::vec(Type::int_()); }
         if (($n === '__mc_fast_cat' || $n === '__mc_fast_list') && \count($args) === 1) { return Type::bool_(); }
         // prelude/weak.php: arm the free-path death hook; an address back to

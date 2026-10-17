@@ -601,7 +601,7 @@ final class EscapeSummaries
             'array_key_exists', 'array_key_first', 'array_key_last',
             'sort', 'rsort', 'ksort', 'krsort', 'asort', 'arsort',
             '__str_byte_at', '__mc_ser_val', '__mir_var_export',
-            '__mc_list_range_into', '__mc_list_cat_into', '__mc_fast_list', '__mc_fast_cat', '__mc_sort_native', '__mc_int_seq',
+            '__mc_list_range_into', '__mc_list_cat_into', '__mc_fast_list', '__mc_fast_cat', '__mc_sort_native', '__mc_sort_assoc', '__mc_int_seq', '__mc_search',
         ] as $n) {
             if ($n === $bare) { return true; }
         }

@@ -405,6 +405,11 @@ trait EmitLlvmBuiltins
             if ($shape === 'str') { return $this->biInArrayStr($args); }
             if ($shape !== '') { return $this->biInArrayWord($args, $shape); }
         }
+        if ($name === '__mc_search' && \count($args) === 2
+            && $args[1]->type->kind === Type::KIND_ARRAY
+            && InlineClosures::nativeScanShape($args[0]->type, $args[1]->type->element ?? null, true) !== '') {
+            return $this->biSearch($args);
+        }
         if ($name === 'sprintf')                      { return $this->biSprintf($args, false); }
         if ($name === 'printf')                       { return $this->biSprintf($args, true); }
         if ($name === '__mc_fmt_int')                 { return $this->biFmt1($args, 'i'); }
@@ -491,6 +496,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_list_range_into' && \count($args) === 5) { return $this->biListRangeInto($args); }
         if ($name === 'range' && InlineClosures::rangeIntShape($args)) { return $this->biRangeInt($args); }
         if ($name === '__mc_sort_native' && \count($args) === 1) { return $this->biSortNative($args); }
+        if ($name === '__mc_sort_assoc' && \count($args) === 3) { return $this->biSortNative($args); }
         if ($name === '__mc_int_seq' && \count($args) === 3) { return $this->biIntSeq($args); }
         if ($name === '__mc_fast_list' && \count($args) === 1) { return $this->biFastList($args); }
         if ($name === '__mc_fast_cat' && \count($args) === 1) { return $this->biFastCat($args); }
@@ -3380,7 +3386,20 @@ trait EmitLlvmBuiltins
             $p = $cow;
         }
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i1 @__mir_array_sort_words(ptr ' . $p . ")\n";
+        if (\count($args) === 3) {
+            // __mc_sort_assoc($arr, byValue, reverse): the mode word is bit 0 | bit 1.
+            $out .= $this->emitNode($args[1]) . $this->coerceToI64();
+            $bv = $this->lastValue;
+            $out .= $this->emitNode($args[2]) . $this->coerceToI64();
+            $rv = $this->lastValue;
+            $rs = $this->ssa->allocReg();
+            $out .= '  ' . $rs . ' = shl i64 ' . $rv . ", 1\n";
+            $md = $this->ssa->allocReg();
+            $out .= '  ' . $md . ' = or i64 ' . $bv . ', ' . $rs . "\n";
+            $out .= '  ' . $r . ' = call i1 @__mir_array_sort_assoc(ptr ' . $p . ', i64 ' . $md . ")\n";
+        } else {
+            $out .= '  ' . $r . ' = call i1 @__mir_array_sort_words(ptr ' . $p . ")\n";
+        }
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
         return $this->finishI64($out, $z);
@@ -5716,6 +5735,74 @@ trait EmitLlvmBuiltins
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
         return $this->finishI64($out, $z);
+    }
+
+    /**
+     * `__mc_search($needle, $arr)` — strict `array_search` of a string / int /
+     * float / bool over an array of the same kind: the position the native scan
+     * finds ({@see UnifiedArrayRuntime::emitInArrayStr} with `$pos`), turned into
+     * the key cell, or `false`. Only emitted for a shape `nativeScanShape` covers.
+     *
+     * @param Node[] $args
+     */
+    private function biSearch(array $args): string
+    {
+        $shape = InlineClosures::nativeScanShape($args[0]->type, $args[1]->type->element ?? null, true);
+        $this->rt->needsTagged = true;
+        $this->rt->needsCellKey = true;
+        if ($shape === 'str') {
+            $this->rt->needsConcat = true;
+            $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+            $out = $this->emitPtrArg($args[0]);
+            $needle = $this->lastValue;
+            $out .= $this->emitArrPtrArg($args[1]);
+            $arr = $this->lastValue;
+            $nw = $this->ssa->allocReg();
+            $out .= '  ' . $nw . ' = ptrtoint ptr ' . $needle . " to i64\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = call i64 @__mir_array_find_str(ptr ' . $arr . ', i64 ' . $nw . ")\n";
+            $out .= $this->freeStrTemp($args[0], $needle);
+        } else {
+            $out = $this->emitNode($args[0]);
+            if ($shape === 'float') {
+                $out .= $this->coerceTo('double');
+                $w = $this->ssa->allocReg();
+                $out .= '  ' . $w . ' = bitcast double ' . $this->lastValue . " to i64\n";
+            } else {
+                $out .= $this->coerceToI64();
+                $w = $this->lastValue;
+            }
+            $out .= $this->emitArrPtrArg($args[1]);
+            $arr = $this->lastValue;
+            $hint = $this->elementHintCodeForType($args[0]->type);
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = call i64 @__mir_array_find_word(ptr ' . $arr . ', i64 ' . $w
+                  . ', i64 ' . (string)$hint . ', i64 ' . ($shape === 'float' ? '1' : '0') . ")\n";
+        }
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $nf = $this->ssa->allocLabel('as.nf');
+        $hit = $this->ssa->allocLabel('as.hit');
+        $done = $this->ssa->allocLabel('as.done');
+        $neg = $this->ssa->allocReg();
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $p . ", 0\n";
+        $out .= '  br i1 ' . $neg . ', label %' . $nf . ', label %' . $hit . "\n";
+        $out .= $nf . ":\n";
+        $bf = $this->ssa->allocReg();
+        $out .= '  ' . $bf . " = call i64 @__manticore_box_bool(i64 0)\n";
+        $out .= '  store i64 ' . $bf . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $hit . ":\n";
+        $k = $this->ssa->allocReg();
+        $out .= '  ' . $k . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $p . ")\n";
+        $out .= $this->cellEndpointRetain($k);
+        $out .= '  store i64 ' . $k . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->markCellBoxed($r);
+        return $this->finishI64($out, $r);
     }
 
     /** @param Node[] $args  implode($sep, $vec) / join. */
