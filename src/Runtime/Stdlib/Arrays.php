@@ -429,49 +429,8 @@ function array_fill__int(int $start, int $count, int $value): array
 // the user program like the SPL classes), where call-site element inference
 // types the param and the in-module closure ABI matches. Follow-up.
 
-/**
- * Return the values of a single column `$column_key` from a list of rows,
- * optionally re-keyed by each row's `$index_key` (PHP `array_column`). A null
- * `$column_key` yields whole rows (re-keyed). Rows lacking the column are
- * skipped.
- *
- * OBJECT rows work too, the way php's do: `get_object_vars()` on the row, then
- * the same key read. That needed the erased-receiver walk to answer for an ENUM
- * CASE — `array_column(Enum::cases(), 'value')` is the shape symfony's
- * `TypeInfo\TypeIdentifier::values()` uses — which it now does.
- *
- * `#[CellArg]` makes the CALL SITE box the elements. A stdlib fn is compiled
- * ONCE, so its `array` param carries a fixed element repr; without the
- * attribute a `vec[obj<Enum>]` argument arrives with RAW slots that the cell
- * reads decode as tagged words (`is_object()` answered 1 of 2 cases).
- *
- * The declared key is `int|string` — a CELL key, the tag-dispatched channel —
- * because php's rows may be string-keyed. It only survives into a dependent
- * module because {@see \Manticore\Sig::encodeType} now writes it.
- *
- * @param array<int|string, mixed> $array
- */
-function array_column(#[\Manticore\Attr\CellArg] array $array, int|string|null $column_key, int|string|null $index_key = null): array
-{
-    $out = [];
-    foreach ($array as $rawRow) {
-        // A SEPARATE local, not a reassigned `$rawRow`: one name written with
-        // two types gets ONE rc release flavor (first write wins).
-        $row = \is_object($rawRow) ? \get_object_vars($rawRow) : $rawRow;
-        if ($column_key === null) {
-            $val = $row;
-        } else {
-            if (!isset($row[$column_key])) { continue; }
-            $val = $row[$column_key];
-        }
-        if ($index_key !== null && isset($row[$index_key])) {
-            $out[$row[$index_key]] = $val;
-        } else {
-            $out[] = $val;
-        }
-    }
-    return $out;
-}
+// `array_column` lives in prelude/array_fns.php: compiled with the program it types
+// its rows, where a stdlib body had every call site rebuild the whole input as cells.
 
 /**
  * The `array_keys($arr, $search_value, $strict)` form — the keys whose value

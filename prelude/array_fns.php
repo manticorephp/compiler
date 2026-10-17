@@ -960,3 +960,51 @@ function uksort(array &$arr, callable $cmp): bool
     $arr = $new;
     return true;
 }
+
+/**
+ * `array_column(rows, column [, index])` — the values of one column of a list
+ * of rows, optionally keyed by another column. PRELUDE: compiled with the
+ * program, the rows keep their static type (a stdlib body needed a boxed copy of
+ * the whole input per call). OBJECT rows work through `get_object_vars()` in a
+ * branch of their own, so the common array-row path never meets a union row
+ * type. A row without the column is skipped; a column holding null is kept.
+ */
+function array_column(array $array, int|string|null $column_key, int|string|null $index_key = null): array
+{
+    $out = [];
+    foreach ($array as $rawRow) {
+        if (!\is_array($rawRow)) {
+            $vars = \__mc_object_vars($rawRow);
+            if ($column_key === null) {
+                $oval = $vars;
+            } else {
+                $oval = $vars[$column_key] ?? null;
+                if ($oval === null && !\array_key_exists($column_key, $vars)) { continue; }
+            }
+            if ($index_key !== null && isset($vars[$index_key])) {
+                $out[$vars[$index_key]] = $oval;
+            } else {
+                $out[] = $oval;
+            }
+            continue;
+        }
+        if ($column_key === null) {
+            $val = $rawRow;
+        } else {
+            $val = $rawRow[$column_key] ?? null;
+            if ($val === null && !\array_key_exists($column_key, $rawRow)) { continue; }
+        }
+        if ($index_key !== null && isset($rawRow[$index_key])) {
+            $out[$rawRow[$index_key]] = $val;
+        } else {
+            $out[] = $val;
+        }
+    }
+    return $out;
+}
+
+/** get_object_vars() through an erased receiver: an enum case has no static property walk. */
+function __mc_object_vars(mixed $o): array
+{
+    return \get_object_vars($o);
+}
