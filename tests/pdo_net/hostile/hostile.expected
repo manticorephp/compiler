@@ -1,0 +1,21 @@
+huge: 08006 invalid message length
+fast
+no fd leak
+short: 08006 invalid message length
+fast
+no fd leak
+authok_after_sasl: 08006 SCRAM exchange incomplete: server did not prove its identity
+fast
+no fd leak
+sasl_final_unsolicited: 08006 unexpected SCRAM message
+fast
+no fd leak
+truncated_datarow: 08006 protocol error: truncated message
+fast
+no fd leak
+truncated_rowdesc: 08006 protocol error: truncated message
+fast
+no fd leak
+copy_in: HY000 COPY is not supported
+fast
+no fd leak

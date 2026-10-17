@@ -46,8 +46,8 @@ if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
             act+=$("$WORK/hostile" $m "$(cat "$WORK/port")" 2>&1)$'\n'
             kill $sp 2>/dev/null; wait $sp 2>/dev/null
         done
-        if [ "$act" = "$(cat $H/hostile.out)"$'\n' ]; then echo "PASS pgsql_hostile"; pass=$((pass+1))
-        else echo "FAIL pgsql_hostile"; diff <(echo "$act") $H/hostile.out | head -n 20; fail=$((fail+1)); fi
+        if [ "$act" = "$(cat $H/hostile.expected)"$'\n' ]; then echo "PASS pgsql_hostile"; pass=$((pass+1))
+        else echo "FAIL pgsql_hostile"; diff <(echo "$act") $H/hostile.expected | head -n 20; fail=$((fail+1)); fi
     fi
 fi
 echo "pass=$pass fail=$fail skip=$skip"

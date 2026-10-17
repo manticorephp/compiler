@@ -1,6 +1,6 @@
 <?php
 // Compiled natively; usage: client <mode> <port>. Prints a stable summary of the failure.
-// No php oracle (the fake server targets our driver's checks): expected output is hand-written in hostile.out.
+// No php oracle (the fake server targets our driver's checks): expected output is hand-written in hostile.expected.
 $mode = $argv[1];
 $dsn = 'pgsql:host=127.0.0.1;port=' . $argv[2] . ';dbname=d';
 $fds = fn () => count(scandir('/dev/fd'));
