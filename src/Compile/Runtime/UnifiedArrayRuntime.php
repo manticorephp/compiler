@@ -165,6 +165,8 @@ final class UnifiedArrayRuntime
         $this->emitCloDrop();
         $this->emitTakeCell('__mir_array_pop_cell', '__mir_array_pop');
         $this->emitTakeCell('__mir_array_shift_cell', '__mir_array_shift');
+        $this->emitShiftMv();
+        $this->emitShiftMvCell();
         $this->emitUnshift();
         $this->emitUnshiftAll();
         $this->emitImplode();
@@ -1261,7 +1263,9 @@ final class UnifiedArrayRuntime
         // bucket index ((h32 << 32) | entry_index + 1 per slot) is valid for it verbatim:
         // duplicate it instead of leaving the copy to rebuild on its first lookup.
         $srcNb = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
-        $srcBk = $go->load(Type::ptr(), $this->hdr($go, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        // A PACKED source has no index: that word is its head gap.
+        $srcBk = $go->select($this->isPackedIr($go, $flags), Value::null(),
+            $go->load(Type::ptr(), $this->hdr($go, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET)));
         $hasIdx = $fn->block('copy_idx');
         $done = $fn->block('copy_done');
         $go->brIf($go->icmp('ne', $srcBk, Value::null()), $hasIdx, $done);
@@ -1765,6 +1769,28 @@ final class UnifiedArrayRuntime
     private function poolFree(Block $b, Value $ptr): void
     {
         $b->call(Debug::$pool ? '__mir_pool_free' : 'free', Type::void(), [$ptr]);
+    }
+
+    /** True when `$flags` is a PACKED buffer's — the one mode with a head gap. */
+    private function isPackedIr(Block $b, Value $flags): Value
+    {
+        return $b->icmp('eq', $this->hashedBit($b, $flags), Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * The malloc block of a heap array: `ptr-8`, less the head gap a shifted
+     * PACKED buffer carries in front of its tag ({@see
+     * MemoryAbi::ARRAY_HEAD_GAP_OFFSET}). Every free of an array buffer takes
+     * this, never a bare `ptr-8`.
+     */
+    private function blockBase(Block $b, Value $arr): Value
+    {
+        $flags = $b->load(Type::i64(), $this->hdr($b, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $gap = $b->load(Type::i64(), $this->hdr($b, $arr, MemoryAbi::ARRAY_HEAD_GAP_OFFSET));
+        $g = $b->select($this->isPackedIr($b, $flags), $gap, Value::int(Type::i64(), 0));
+        $off = $b->sub(Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET),
+            $b->mul($g, Value::int(Type::i64(), MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE)));
+        return $b->gep(Type::i8(), $arr, [$off]);
     }
 
     /** Emit one optional allocator telemetry counter increment. */
@@ -2832,16 +2858,19 @@ final class UnifiedArrayRuntime
             $freeb = $reclaim;
         }
 
-        // Free the hashed bucket side-array if present (PACKED has null here).
-        $bptr = $freeb->load(Type::ptr(), $this->hdr($freeb, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET));
+        // Free the hashed bucket side-array if present. A PACKED buffer has none:
+        // the same word is its head gap there.
+        $bflags = $freeb->load(Type::i64(), $this->hdr($freeb, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $bptr = $freeb->select($this->isPackedIr($freeb, $bflags), Value::null(),
+            $freeb->load(Type::ptr(), $this->hdr($freeb, $arr, MemoryAbi::ARRAY_BUCKETS_PTR_OFFSET)));
         $hasBuckets = $fn->block('has_buckets');
         $doFree = $fn->block('do_free');
         $freeb->brIf($freeb->icmp('ne', $bptr, Value::null()), $hasBuckets, $doFree);
         $this->poolFree($hasBuckets, $bptr);
         $this->profCounter($hasBuckets, 29);
         $hasBuckets->br($doFree);
-        // Free the tagged base (ptr-8), not the data ptr.
-        $base = $doFree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+        // Free the block (ptr-8 less the head gap), not the data ptr.
+        $base = $this->blockBase($doFree, $arr);
         $this->profCounter($doFree, 26);
         if (Debug::$arrRcTrace) {
             // DEATH — the only point a heap buffer is actually reclaimed.
@@ -3150,14 +3179,14 @@ final class UnifiedArrayRuntime
             $dofree = $fn->block('promote_dofree');
             $dtag = $done->load(Type::i64(), $this->hdr($done, $arr, MemoryAbi::RC_TAG_OFFSET));
             $done->brIf($done->icmp('eq', $dtag, Value::int(Type::i64(), MemoryAbi::ARRAY_TAG_ARENA)), $skip, $dofree);
-            $base = $dofree->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+            $base = $this->blockBase($dofree, $arr);
             $this->profCounter($dofree, 26);
             $this->poolFree($dofree, $base);
             $dofree->br($skip);
             $skip->ret($nu);
             return;
         }
-        $base = $done->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::RC_TAG_OFFSET)]);
+        $base = $this->blockBase($done, $arr);
         // `array_reclaim`: the packed buffer is freed HERE, not by a release —
         // uncounted, every sparse-key write read as one leaked array.
         $this->profCounter($done, 26);
@@ -5165,6 +5194,82 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_array_shift_mv(arr, outp) -> i64` — `__mir_array_shift` that may
+     * MOVE the array: the buffer the caller must store back lands in `*outp`.
+     *
+     * A uniquely owned heap PACKED buffer drops element 0 by writing its header
+     * and tag one slot further on ({@see MemoryAbi::ARRAY_HEAD_GAP_OFFSET}), so
+     * a drain loop is O(1) per shift instead of a memmove of the tail. Every
+     * other buffer (hashed: its int keys renumber; arena; shared; empty) takes
+     * the in-place shift and comes back unmoved.
+     */
+    private function emitShiftMv(): void
+    {
+        $i64 = Type::i64();
+        $fn = $this->module->func('__mir_array_shift_mv', $i64);
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $outp = $fn->param(Type::ptr(), 'outp');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $slide = $fn->block('slide');
+        $old = $fn->block('old');
+        $e->store($arr, $outp);
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $old, $chk);
+        $tag = $chk->load($i64, $this->hdr($chk, $arr, MemoryAbi::RC_TAG_OFFSET));
+        $flags = $chk->load($i64, $this->hdr($chk, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $rc = $chk->load($i64, $this->hdr($chk, $arr, MemoryAbi::ARRAY_RC_OFFSET));
+        $len = $chk->load($i64, $arr);
+        $ok = $chk->and_(
+            $chk->and_($chk->icmp('eq', $tag, Value::int($i64, MemoryAbi::ARRAY_TAG_MAGIC)), $this->isPackedIr($chk, $flags)),
+            $chk->and_($chk->icmp('eq', $rc, Value::int($i64, 1)), $chk->icmp('sgt', $len, Value::int($i64, 0))),
+        );
+        $chk->brIf($ok, $slide, $old);
+        $old->ret($old->call('__mir_array_shift', $i64, [$arr]));
+
+        // Every old word is read before the first store: the new header
+        // overlaps the old one shifted by a slot, and its gap word lands on
+        // element 0.
+        $first = $slide->load($i64, $this->packedSlot($slide, $arr, Value::int($i64, 0)));
+        $cap = $slide->load($i64, $this->hdr($slide, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $gap = $slide->load($i64, $this->hdr($slide, $arr, MemoryAbi::ARRAY_HEAD_GAP_OFFSET));
+        $nl = $slide->sub($len, Value::int($i64, 1));
+        $np = $this->hdr($slide, $arr, MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE);
+        $slide->store(Value::int($i64, MemoryAbi::ARRAY_TAG_MAGIC), $arr);
+        $slide->store($nl, $np);
+        $slide->store($slide->sub($cap, Value::int($i64, 1)), $this->hdr($slide, $np, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $slide->store($nl, $this->hdr($slide, $np, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $slide->store($rc, $this->hdr($slide, $np, MemoryAbi::ARRAY_RC_OFFSET));
+        // php rewinds the internal pointer.
+        $slide->store($slide->and_($flags, Value::int($i64, ~MemoryAbi::ARRAY_PTR_FIELD_MASK)),
+            $this->hdr($slide, $np, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $slide->store(Value::int($i64, 0), $this->hdr($slide, $np, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+        $slide->store($slide->add($gap, Value::int($i64, 1)), $this->hdr($slide, $np, MemoryAbi::ARRAY_HEAD_GAP_OFFSET));
+        $slide->store($np, $outp);
+        $slide->ret($first);
+    }
+
+    /** `__mir_array_shift_mv_cell(arr, outp) -> i64` — {@see emitShiftMv}, answering a cell ({@see emitTakeCell}). */
+    private function emitShiftMvCell(): void
+    {
+        $fn = $this->module->func('__mir_array_shift_mv_cell', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $outp = $fn->param(Type::ptr(), 'outp');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $go = $fn->block('go');
+        $z = $fn->block('z');
+        $e->store($arr, $outp);
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $z, $chk);
+        $len = $chk->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $chk->brIf($chk->icmp('sle', $len, Value::int(Type::i64(), 0)), $z, $go);
+        $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $repr = $go->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK));
+        $v = $go->call('__mir_array_shift_mv', Type::i64(), [$arr, $outp]);
+        $go->ret($go->call('__mir_box_by_repr', Type::i64(), [$v, $repr]));
+        $z->ret(Value::int(Type::i64(), self::CELL_NULL));
+    }
+
+    /**
      * `__mir_array_shift_cell(arr) -> i64` / `__mir_array_pop_cell(arr)` — the
      * same removal, but the result is a self-describing CELL.
      *
@@ -6931,12 +7036,77 @@ final class UnifiedArrayRuntime
      */
     private function emitUnshift(): void
     {
+        $i64 = Type::i64();
         $fn = $this->module->func('__mir_array_unshift', Type::ptr());
         $arr = $fn->param(Type::ptr(), 'arr');
         $val = $fn->param(Type::i64(), 'val');
-        $b = $fn->block('entry');
-        if (Debug::$emptyArraySingleton) { $arr = $b->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
-        $b->call('__mir_array_index_drop', Type::void(), [$arr]);
+        $e = $fn->block('entry');
+        if (Debug::$emptyArraySingleton) { $arr = $e->call('__mir_array_deimmortal', Type::ptr(), [$arr]); }
+        $e->call('__mir_array_index_drop', Type::void(), [$arr]);
+        // A uniquely owned heap PACKED buffer prepends into its head gap
+        // ({@see MemoryAbi::ARRAY_HEAD_GAP_OFFSET}): the header moves back one
+        // slot, O(1). Without a gap it is regrown WITH one — front slack of its
+        // own length, back slack of half — so a run of prepends (or prepends
+        // mixed with appends) pays one O(n) move per O(n) calls.
+        $tag = $e->load($i64, $this->hdr($e, $arr, MemoryAbi::RC_TAG_OFFSET));
+        $flags = $e->load($i64, $this->hdr($e, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $rc = $e->load($i64, $this->hdr($e, $arr, MemoryAbi::ARRAY_RC_OFFSET));
+        $ulen = $e->load($i64, $arr);
+        $own = $e->and_(
+            $e->and_($e->icmp('eq', $tag, Value::int($i64, MemoryAbi::ARRAY_TAG_MAGIC)), $this->isPackedIr($e, $flags)),
+            $e->icmp('eq', $rc, Value::int($i64, 1)),
+        );
+        $gchk = $fn->block('gap_chk');
+        $slide = $fn->block('slide');
+        $regrow = $fn->block('regrow');
+        $b = $fn->block('plain');
+        $e->brIf($own, $gchk, $b);
+        $ucap = $gchk->load($i64, $this->hdr($gchk, $arr, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $gap = $gchk->load($i64, $this->hdr($gchk, $arr, MemoryAbi::ARRAY_HEAD_GAP_OFFSET));
+        $gchk->brIf($gchk->icmp('sgt', $gap, Value::int($i64, 0)), $slide, $regrow);
+
+        // Every old word is read (above) before the first store: the new header
+        // overlaps the old one, and the new element 0 lands on the old gap word.
+        $nl = $slide->add($ulen, Value::int($i64, 1));
+        $np = $this->hdr($slide, $arr, -MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE);
+        $slide->store(Value::int($i64, MemoryAbi::ARRAY_TAG_MAGIC), $this->hdr($slide, $np, MemoryAbi::RC_TAG_OFFSET));
+        $slide->store($nl, $np);
+        $slide->store($slide->add($ucap, Value::int($i64, 1)), $this->hdr($slide, $np, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $slide->store($nl, $this->hdr($slide, $np, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $slide->store($rc, $this->hdr($slide, $np, MemoryAbi::ARRAY_RC_OFFSET));
+        $slide->store($flags, $this->hdr($slide, $np, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $slide->store(Value::int($i64, 0), $this->hdr($slide, $np, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+        $slide->store($slide->sub($gap, Value::int($i64, 1)), $this->hdr($slide, $np, MemoryAbi::ARRAY_HEAD_GAP_OFFSET));
+        $slide->store($val, $this->hdr($slide, $np, MemoryAbi::ARRAY_HEADER_SIZE));
+        $slide->ret($np);
+
+        // Regrow (gap 0, so the realloc keeps the block start): block =
+        // tag + g gap slots + header + cap slots, g = len + 4,
+        // cap = (len+1) * 3/2 + 4. The data moves first — its new home is
+        // past the new header, its old one under it.
+        $g = $regrow->add($ulen, Value::int($i64, 4));
+        $rl = $regrow->add($ulen, Value::int($i64, 1));
+        $rcap = $regrow->add($regrow->add($rl, $regrow->lshr($rl, Value::int($i64, 1))), Value::int($i64, 4));
+        $esz = Value::int($i64, MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE);
+        $rbytes = $regrow->add($regrow->mul($regrow->add($g, $rcap), $esz), Value::int($i64, MemoryAbi::ARRAY_HEADER_SIZE));
+        $rp = $regrow->call('__mir_realloc_tagged', Type::ptr(), [$arr, $rbytes]);
+        $rnp = $regrow->gep(Type::i8(), $rp, [$regrow->mul($g, $esz)]);
+        $regrow->call('memmove', Type::ptr(), [
+            $this->hdr($regrow, $rnp, MemoryAbi::ARRAY_HEADER_SIZE + MemoryAbi::ARRAY_PACKED_ELEMENT_SIZE),
+            $this->hdr($regrow, $rp, MemoryAbi::ARRAY_HEADER_SIZE),
+            $regrow->mul($ulen, $esz),
+        ]);
+        $regrow->store(Value::int($i64, MemoryAbi::ARRAY_TAG_MAGIC), $this->hdr($regrow, $rnp, MemoryAbi::RC_TAG_OFFSET));
+        $regrow->store($rl, $rnp);
+        $regrow->store($rcap, $this->hdr($regrow, $rnp, MemoryAbi::ARRAY_CAPACITY_OFFSET));
+        $regrow->store($rl, $this->hdr($regrow, $rnp, MemoryAbi::ARRAY_NEXT_INT_OFFSET));
+        $regrow->store($rc, $this->hdr($regrow, $rnp, MemoryAbi::ARRAY_RC_OFFSET));
+        $regrow->store($flags, $this->hdr($regrow, $rnp, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $regrow->store(Value::int($i64, 0), $this->hdr($regrow, $rnp, MemoryAbi::ARRAY_NBUCKETS_OFFSET));
+        $regrow->store($g, $this->hdr($regrow, $rnp, MemoryAbi::ARRAY_HEAD_GAP_OFFSET));
+        $regrow->store($val, $this->hdr($regrow, $rnp, MemoryAbi::ARRAY_HEADER_SIZE));
+        $regrow->ret($rnp);
+
         $len = $b->load(Type::i64(), $arr);
         $newlen = $b->add($len, Value::int(Type::i64(), 1));
         $bytes = $b->add(

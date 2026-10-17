@@ -7505,7 +7505,7 @@ trait EmitLlvmBuiltins
      * still pointed at. COW only copies when the buffer is actually shared, so
      * a uniquely-owned worklist (the self-host source's usage) is unaffected.
      */
-    private function mutArrayCow(Node $arrNode, string $arr): string
+    private function mutArrayCow(Node $arrNode, string $arr, bool $writeBack = true): string
     {
         $k = $arrNode->kind;
         if ($k !== Node::KIND_LOAD_LOCAL && $k !== Node::KIND_PROPERTY_ACCESS
@@ -7517,27 +7517,61 @@ trait EmitLlvmBuiltins
         $cow = $this->ssa->allocReg();
         $out = '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrNode->type, $arrNode)
              . '(ptr ' . $arr . ")\n";
-        $out .= $this->vecWriteBack($arrNode, $cow, $arrNode->type->kind === Type::KIND_CELL);
+        if ($writeBack) {
+            $out .= $this->vecWriteBack($arrNode, $cow, $arrNode->type->kind === Type::KIND_CELL);
+        }
         $this->lastValue = $cow;
         $this->lastValueType = 'ptr';
         return $out;
     }
 
     /**
-     * `array_shift($v)` — return element 0, slide the tail down one slot
-     * (memmove, no-op on 0 bytes), decrement length in place. No realloc.
+     * `array_shift($v)` — return element 0.
+     *
+     * Into a slot {@see vecWriteBack} can store to, `__mir_array_shift_mv`
+     * drops element 0 of a uniquely owned packed buffer by moving the HEADER
+     * one slot on (O(1), the array pointer changes — {@see
+     * MemoryAbi::ARRAY_HEAD_GAP_OFFSET}) and the moved buffer is written back,
+     * the way a relocating unshift is. Any other base keeps the in-place
+     * `__mir_array_shift` (memmove of the tail, pointer unchanged): a moved
+     * buffer nobody stores back would leave its holder on the old header.
      */
     private function biArrayShift(Call $c): string
     {
         $this->libcExtra['memmove'] = 'declare ptr @memmove(ptr, ptr, i64)';
-        $out = $this->emitNode($c->args[0]);
-        $out .= $this->arrayArgToPtr($c->args[0]);
+        $arrNode = $c->args[0];
+        $out = $this->emitNode($arrNode);
+        $out .= $this->arrayArgToPtr($arrNode);
         $arr = $this->lastValue;
-        $out .= $this->mutArrayCow($c->args[0], $arr);
+        if (!$this->canVecWriteBack($arrNode)) {
+            $out .= $this->mutArrayCow($arrNode, $arr);
+            $arr = $this->lastValue;
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = call i64 @' . $this->takeSymbol($c, 'shift') . '(ptr ' . $arr . ")\n";
+            return $out . $this->finishElem($c, $v);
+        }
+        $out .= $this->mutArrayCow($arrNode, $arr, false);
         $arr = $this->lastValue;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca ptr\n";
         $v = $this->ssa->allocReg();
-        $out .= '  ' . $v . ' = call i64 @' . $this->takeSymbol($c, 'shift') . '(ptr ' . $arr . ")\n";
+        $out .= '  ' . $v . ' = call i64 @' . $this->takeSymbol($c, 'shift_mv') . '(ptr ' . $arr
+              . ', ptr ' . $slot . ")\n";
+        $np = $this->ssa->allocReg();
+        $out .= '  ' . $np . ' = load ptr, ptr ' . $slot . "\n";
+        $out .= $this->vecWriteBack($arrNode, $np, $arrNode->type->kind === Type::KIND_CELL);
         return $out . $this->finishElem($c, $v);
+    }
+
+    /** Whether {@see vecWriteBack} stores into a slot for this base, rather than dropping the buffer. */
+    private function canVecWriteBack(Node $arrNode): bool
+    {
+        $k = $arrNode->kind;
+        if ($k === Node::KIND_LOAD_LOCAL) {
+            return isset($this->locals->globalBacked[$arrNode->name])
+                || isset($this->locals->slots[$arrNode->name]);
+        }
+        return $k === Node::KIND_PROPERTY_ACCESS || $k === Node::KIND_STATIC_PROP;
     }
 
     /**
