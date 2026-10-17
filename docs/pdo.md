@@ -117,7 +117,7 @@ behave as `ORI_NEXT`). Throwing was stricter than the oracle.
 ## `mysql:` (prelude/pdo_mysql.php)
 
 The client/server protocol over a plain socket, no libmysqlclient. Text protocol with emulated
-(client-side) prepares, as pdo_mysql defaults to; typed like mysqlnd (ints and floats native,
+(client-side) prepares, as pdo_mysql defaults to (`ATTR_EMULATE_PREPARES=false` selects the binary protocol, below); typed like mysqlnd (ints and floats native,
 DECIMAL / DATE / YEAR / strings as text, BIT as an integer, an UNSIGNED BIGINT above `PHP_INT_MAX` as a
 string). Connection options by number: `1004` FOUND_ROWS, `1002` INIT_COMMAND, `1012`
 MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
@@ -173,10 +173,46 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
   NUL inside TLS instead of the RSA exchange. Hostile servers: bytes buffered after the handshake packet, or arriving between the
   SSLRequest and the TLS handshake, end the attempt (plaintext injected before TLS must never be read as part of the session).
   The new constants are the same ids under `Pdo\Mysql::ATTR_*`; the old names are what the tests use (`PDO::MYSQL_ATTR_*` is deprecated in 8.5).
-- Gaps: unix sockets, compression, native
-  prepares (`ATTR_EMULATE_PREPARES=false` throws), a few charset names (`charset=` knows utf8mb4, utf8,
+- Gaps: unix sockets, compression, `COM_STMT_SEND_LONG_DATA`, a few charset names (`charset=` knows utf8mb4, utf8,
   latin1, ascii, binary, latin2, cp1250, cp1251, koi8r/u, greek, hebrew), AUTO_INCREMENT ids above
   `PHP_INT_MAX`.
+
+### Native prepared statements (`ATTR_EMULATE_PREPARES=false`)
+
+Set in the constructor options or with `setAttribute()` (read at each `prepare()`, so the two kinds can be mixed on one
+connection). `prepare()` then sends `COM_STMT_PREPARE`: a syntax error, an unknown table or column (1064 / 1146 / 1054) and
+the `max_prepared_stmt_count` limit (1461) are raised by `prepare()`, not by `execute()` (emulated statements fail at
+`execute()`). `execute()` sends `COM_STMT_EXECUTE` with typed parameters and reads binary rows; the statement is released with
+`COM_STMT_CLOSE` exactly once when the statement object goes away (or immediately when the connection is busy: queued, sent
+ahead of the next command), and a close on a dead connection is a no-op. Everything below was measured against php 8.5.
+
+- Placeholders: `?` and `:name` (rewritten to `?` for the server, the order kept). A repeated `:name` is refused with
+  `SQLSTATE[HY093]: Invalid parameter number` at `execute()` (pdo_mysql cannot bind it natively), as is any count mismatch
+  (too few, too many, extra `execute([..])` values: the refused parameter is not kept, the earlier ones stay bound) and a
+  statement without placeholders given values. `?` mixed with `:name` is refused at `prepare()`.
+- Parameter types: NULL / `PARAM_NULL` is NULL; `PARAM_STR` (and every `execute([..])` value) sends a string (`true` is `"1"`,
+  `false` `""`); `PARAM_INT` / `PARAM_BOOL` / `PARAM_LOB` keep the value's own type: int / bool -> LONGLONG (`PARAM_BOOL` folds an
+  int to 0/1), float -> DOUBLE, string -> VAR_STRING, a stream -> its contents. `select ?` therefore hands back an int for
+  `bindValue(1, 5, PARAM_INT)` and a string for `execute([5])`.
+- Large values: a value travels inline in the execute packet (split at 16 MB like any packet); `COM_STMT_SEND_LONG_DATA` is not
+  used, and neither does pdo_mysql. A value above the server's `max_allowed_packet` is answered by the server (it closes the
+  connection: `2006`), not pre-checked.
+- Result typing (mysqlnd, binary protocol): TINY / SHORT / INT24 / LONG / LONGLONG -> int (UNSIGNED BIGINT above `PHP_INT_MAX`
+  stays a string), DOUBLE -> float exactly, FLOAT -> the double of its `%.Nf` text (fixed decimals) or of 6 significant digits
+  (`0.1f` is `0.1`), BIT -> int (a 64-bit value with the top bit set: string), YEAR / DECIMAL / JSON / ENUM / SET / strings / blobs
+  -> string, DATE / DATETIME / TIMESTAMP / TIME -> `YYYY-MM-DD[ HH:MM:SS[.ffffff]]` with as many fraction digits as the column's
+  decimals, zero dates as zeros, a negative TIME with its sign and the days folded into the hours.
+- Differences from the emulated mode that are php's own: `columnCount()` is 0 until `execute()`; the closing OK of a `CALL`
+  is one more `nextRowset()` step that still reports the previous result's columns; `rowCount()` after a failed `execute()` is the
+  previous statement's; re-executing without draining a `CALL` is allowed, `getColumnMeta()` reads the execute-time definitions.
+- Not reproduced: error 2014 for a second statement started while another one's `CALL` results are pending (results are always
+  fully buffered here); a placeholder count the server sees differently from the scanner (`1210 Incorrect arguments to
+  mysqld_stmt_execute`) is raised locally before anything is sent.
+- Hostile servers: the PREPARE_OK length (exactly 12), the column count (4096) and the parameter count (65535) are capped before
+  anything is read; parameter / column definition counts must match the announcement and be followed by their EOF; every binary
+  row is bounds-checked (`$l > $len - $o`, never `$o + $l > $len`), the NULL bitmap must fit, DATETIME length must be 0/4/7/11 and
+  TIME length 0/8/12, a length-encoded string above 2^31 or with the top bit set is refused, trailing bytes are refused. Each ends the
+  connection with `[2027] Malformed packet`, closing the socket once.
 
 ## `pgsql:` TLS (prelude/pdo_pgsql.php)
 

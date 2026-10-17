@@ -4,16 +4,17 @@
  * pdo_mysql — the MySQL driver behind PDO, speaking the client/server protocol
  * over a plain socket (no libmysqlclient). Implements the {@see __McPdoDrv} seam.
  *
- * Text protocol with client-side (emulated) prepares, as pdo_mysql does by default.
+ * Text protocol with client-side (emulated) prepares, as pdo_mysql does by default;
+ * ATTR_EMULATE_PREPARES=false switches a statement to the binary protocol
+ * (COM_STMT_PREPARE / EXECUTE / CLOSE) with typed rows.
  * The classic EOF packets are used throughout: CLIENT_DEPRECATE_EOF is not
  * requested, so there is one result framing to validate, not two.
  *
  * Parsing is ord()/substr() on purpose (no pack()/unpack()): the binary prelude
  * is gated on the PROGRAM calling it, and the row loop is the hot path.
  *
- * Deliberate gaps: TLS (`MYSQL_ATTR_SSL_*` is refused up front, never silently
- * downgraded), unix
- * sockets, native (binary protocol) prepares, compression.
+ * Deliberate gaps: unix sockets, compression, COM_STMT_SEND_LONG_DATA (a value
+ * travels inline, as pdo_mysql sends it).
  */
 
 /** One ERR packet. */
@@ -46,12 +47,24 @@ final class __McPdoMyResult
     /** @var array<int,array<int,?string>> */
     public array $rows = [];
     public bool $isSet = false;
+    /** Rows are binary-protocol cells (see parseBinRow), not text. */
+    public bool $bin = false;
     public int $affected = 0;
     public int $insertId = 0;
     public int $status = 0;
     public int $warnings = 0;
     public ?__McPdoMyErr $err = null;
     public ?__McPdoMyResult $next = null;
+}
+
+/** The reply to COM_STMT_PREPARE: statement id and the counts the server announced. */
+final class __McPdoMyPrep
+{
+    public int $id = 0;
+    public int $cols = 0;
+    public int $params = 0;
+    public int $warnings = 0;
+    public ?__McPdoMyErr $err = null;
 }
 
 final class __McPdoMyWire
@@ -76,6 +89,8 @@ final class __McPdoMyWire
     /** Largest row: a text value is at most 1 GiB (max_allowed_packet's ceiling). */
     private const ROW_CAP = 1073741824;
     private const MAX_COLUMNS = 4096;
+    /** The protocol's own limit: the parameter count is a 16-bit field. */
+    private const MAX_PARAMS = 65535;
 
     public bool $dead = false;
     public string $serverVersion = '';
@@ -89,6 +104,8 @@ final class __McPdoMyWire
     /** libmysql's prefix is absent; php prints `SQLSTATE[HY000] [2002] ...` for every connect failure. */
     private bool $connecting = true;
     private bool $closed = false;
+    /** @var array<int,int> statement ids whose COM_STMT_CLOSE has not been sent yet (the command has no reply, so it only needs a free wire) */
+    private array $owed = [];
     /** One request/response cycle owns the wire; a second fiber on the same connection waits (see enter()). */
     private bool $busy = false;
     /** A command was sent and its last result packet has not arrived: the stream is mid-protocol. */
@@ -175,6 +192,28 @@ final class __McPdoMyWire
         $s = '';
         for ($i = 0; $i < $n; $i++) { $s .= \chr(($v >> (8 * $i)) & 255); }
         return $s;
+    }
+
+    /** IEEE 754 binary64 as 8 little-endian bytes (the inverse of f64). */
+    public static function putF64(float $v): string
+    {
+        if ($v !== $v) { return "\0\0\0\0\0\0\xf8\x7f"; }
+        $neg = $v < 0.0 || ($v === 0.0 && \fdiv(1.0, $v) < 0.0);
+        $a = $neg ? -$v : $v;
+        $sign = $neg ? 0x80000000 : 0;
+        if ($a > 1.7976931348623157e308) { return self::putLe(0, 4) . self::putLe(0x7FF00000 | $sign, 4); }
+        if ($a === 0.0) { return self::putLe(0, 4) . self::putLe($sign, 4); }
+        $e = 0;
+        while ($a >= 2.0) { $a *= 0.5; $e++; }
+        while ($a < 1.0) { $a *= 2.0; $e--; }
+        if ($e >= -1022) {
+            $m = (int) (($a - 1.0) * 4503599627370496.0);
+            $be = $e + 1023;
+        } else {
+            $m = (int) ($a * (2.0 ** ($e + 1074)));
+            $be = 0;
+        }
+        return self::putLe($m & 0xFFFFFFFF, 4) . self::putLe(($be << 20) | ($m >> 32) | $sign, 4);
     }
 
     /** Length-encoded integer. */
@@ -716,8 +755,127 @@ final class __McPdoMyWire
         return $row;
     }
 
+    /**
+     * A binary-protocol row (COM_STMT_EXECUTE): 0x00, a NULL bitmap with a 2-bit offset, then the non-NULL values in
+     * their wire form. Integers and floats stay as their raw little-endian bytes (decoded by columnValue); YEAR, DATE,
+     * DATETIME, TIMESTAMP and TIME are formatted here (mysqlnd: `YYYY-MM-DD HH:MM:SS[.ffffff]`, fraction digits = the
+     * column's decimals); everything else is a length-encoded string. Every size is checked against the packet before it
+     * is read, and a length byte outside what the protocol defines ends the connection.
+     *
+     * @return array<int,?string>
+     */
+    private function parseBinRow(string $b, __McPdoMyResult $r): array
+    {
+        $nc = \count($r->types);
+        $bl = \strlen($b);
+        $nb = ($nc + 9) >> 3;
+        if ($bl < 1 + $nb) { throw $this->malformed('binary row: NULL bitmap'); }
+        if (\ord($b[0]) !== 0) { throw $this->malformed('binary row header'); }
+        $o = 1 + $nb;
+        /** @var array<int,?string> */
+        $row = [];
+        for ($i = 0; $i < $nc; $i++) {
+            $bit = $i + 2;
+            if (((\ord($b[1 + ($bit >> 3)]) >> ($bit & 7)) & 1) !== 0) { $row[] = null; continue; }
+            $t = $r->types[$i];
+            $sz = 0;
+            if ($t === 1) { $sz = 1; }
+            elseif ($t === 2 || $t === 13) { $sz = 2; }
+            elseif ($t === 3 || $t === 9 || $t === 4) { $sz = 4; }
+            elseif ($t === 8 || $t === 5) { $sz = 8; }
+            if ($sz > 0) {
+                if ($sz > $bl - $o) { throw $this->malformed('binary row overruns packet'); }
+                $v = \substr($b, $o, $sz);
+                $o += $sz;
+                // YEAR: mysqlnd hands the number over as text
+                $row[] = $t === 13 ? \str_pad((string) self::le16($v, 0), 4, '0', \STR_PAD_LEFT) : $v;
+                continue;
+            }
+            if ($t === 6) { $row[] = null; continue; }
+            if ($t === 7 || $t === 10 || $t === 12 || $t === 11) {
+                if ($o >= $bl) { throw $this->malformed('binary row overruns packet'); }
+                $n = \ord($b[$o]);
+                $o++;
+                if ($t === 11 ? ($n !== 0 && $n !== 8 && $n !== 12) : ($n !== 0 && $n !== 4 && $n !== 7 && $n !== 11)) {
+                    throw $this->malformed('binary row: date/time length ' . (string) $n);
+                }
+                if ($n > $bl - $o) { throw $this->malformed('binary row overruns packet'); }
+                $row[] = $t === 11 ? self::fmtTime($b, $o, $n, $r->decs[$i]) : self::fmtDate($b, $o, $n, $t === 10, $r->decs[$i]);
+                $o += $n;
+                continue;
+            }
+            $l = self::lenencAt($b, $o);
+            if ($l < 0) { throw $this->malformed('binary row length'); }
+            $o += self::lenencSize($b, $o);
+            if ($l > $bl - $o) { throw $this->malformed('binary row value overruns packet'); }
+            $row[] = \substr($b, $o, $l);
+            $o += $l;
+        }
+        if ($o !== $bl) { throw $this->malformed('binary row has trailing bytes'); }
+        return $row;
+    }
+
+    /** `.ffffff` cut to the column's decimals (mysqlnd: 1..6 digits, none otherwise). */
+    private static function fmtFrac(int $micro, int $dec): string
+    {
+        if ($dec < 1 || $dec > 6) { return ''; }
+        $d = $micro;
+        for ($k = 6; $k > $dec; $k--) { $d = \intdiv($d, 10); }
+        return '.' . \str_pad((string) $d, $dec, '0', \STR_PAD_LEFT);
+    }
+
+    private static function pad2(int $v): string { return $v < 10 ? '0' . (string) $v : (string) $v; }
+
+    /** DATE / DATETIME / TIMESTAMP value of $n bytes (0, 4, 7 or 11) at $o; length 0 is the zero date. */
+    private static function fmtDate(string $b, int $o, int $n, bool $dateOnly, int $dec): string
+    {
+        $y = $n >= 4 ? self::le16($b, $o) : 0;
+        $s = \str_pad((string) $y, 4, '0', \STR_PAD_LEFT) . '-' . self::pad2($n >= 4 ? \ord($b[$o + 2]) : 0) . '-' . self::pad2($n >= 4 ? \ord($b[$o + 3]) : 0);
+        if ($dateOnly) { return $s; }
+        $s .= ' ' . self::pad2($n >= 7 ? \ord($b[$o + 4]) : 0) . ':' . self::pad2($n >= 7 ? \ord($b[$o + 5]) : 0) . ':' . self::pad2($n >= 7 ? \ord($b[$o + 6]) : 0);
+        return $s . self::fmtFrac($n >= 11 ? self::le32($b, $o + 7) : 0, $dec);
+    }
+
+    /** TIME of $n bytes (0, 8 or 12): sign, days, h, m, s[, micro]; days fold into the hours. */
+    private static function fmtTime(string $b, int $o, int $n, int $dec): string
+    {
+        $neg = $n >= 8 && \ord($b[$o]) !== 0;
+        $h = $n >= 8 ? self::le32($b, $o + 1) * 24 + \ord($b[$o + 5]) : 0;
+        $s = ($neg ? '-' : '') . self::pad2($h) . ':' . self::pad2($n >= 8 ? \ord($b[$o + 6]) : 0) . ':' . self::pad2($n >= 8 ? \ord($b[$o + 7]) : 0);
+        return $s . self::fmtFrac($n >= 12 ? self::le32($b, $o + 8) : 0, $dec);
+    }
+
+    /** IEEE 754 binary64 from 8 little-endian bytes (no unpack(): see the file header). */
+    public static function f64(string $b): float
+    {
+        $lo = self::le32($b, 0);
+        $hi = self::le32($b, 4);
+        $e = ($hi >> 20) & 0x7FF;
+        $m = (($hi & 0xFFFFF) << 32) | $lo;
+        $neg = ($hi & 0x80000000) !== 0;
+        if ($e === 2047) { return $m === 0 ? ($neg ? -\INF : \INF) : \NAN; }
+        $v = $e === 0 ? (float) $m * (2.0 ** -1074) : (float) ((1 << 52) | $m) * (2.0 ** ($e - 1075));
+        return $neg ? -$v : $v;
+    }
+
+    /**
+     * binary32 as mysqlnd reads it: a FLOAT column with fixed decimals prints `%.Nf`, otherwise php_gcvt with
+     * FLT_DIG = 6 significant digits, and that text is parsed back to a double (so 0.1f is 0.1, not 0.10000000149).
+     */
+    public static function f32(string $b, int $dec): float
+    {
+        $x = self::le32($b, 0);
+        $e = ($x >> 23) & 0xFF;
+        $m = $x & 0x7FFFFF;
+        $neg = ($x & 0x80000000) !== 0;
+        if ($e === 255) { return $m === 0 ? ($neg ? -\INF : \INF) : \NAN; }
+        $v = $e === 0 ? (float) $m * (2.0 ** -149) : (float) ((1 << 23) | $m) * (2.0 ** ($e - 150));
+        if ($neg) { $v = -$v; }
+        return (float) ($dec < 31 ? \sprintf('%.' . (string) $dec . 'f', $v) : \sprintf('%.5e', $v));
+    }
+
     /** One result (OK, ERR or a result set) of the response to a command. */
-    private function readResult(): __McPdoMyResult
+    private function readResult(bool $bin = false): __McPdoMyResult
     {
         $r = new __McPdoMyResult();
         $p = $this->packet(self::CTRL_CAP);
@@ -743,6 +901,7 @@ final class __McPdoMyWire
         $e = $this->packet(self::CTRL_CAP);
         if (\strlen($e) < 5 || \strlen($e) >= 9 || \ord($e[0]) !== 0xFE) { throw $this->malformed('missing EOF after column definitions'); }
         $r->isSet = true;
+        $r->bin = $bin;
         while (true) {
             $p = $this->packet(self::ROW_CAP);
             $bl = \strlen($p);
@@ -761,7 +920,7 @@ final class __McPdoMyWire
                 $r->rows = [];
                 return $r;
             }
-            $r->rows[] = $this->parseRow($p, $nc);
+            $r->rows[] = $bin ? $this->parseBinRow($p, $r) : $this->parseRow($p, $nc);
         }
     }
 
@@ -773,9 +932,23 @@ final class __McPdoMyWire
      */
     public function query(string $sql): __McPdoMyResult
     {
+        return $this->cycle("\x03" . $sql, false);
+    }
+
+    /**
+     * COM_STMT_EXECUTE of statement $id; $params is everything after the iteration count (NULL bitmap, bound flag, types,
+     * values), empty for a statement without parameters. Same chain and same failure contract as query(), with binary rows.
+     */
+    public function execute(int $id, string $params): __McPdoMyResult
+    {
+        return $this->cycle("\x17" . self::putLe($id, 4) . "\0" . self::putLe(1, 4) . $params, true);
+    }
+
+    private function cycle(string $cmd, bool $bin): __McPdoMyResult
+    {
         $this->enter();
         try {
-            return $this->queryRun($sql);
+            return $this->queryRun($cmd, $bin);
         } catch (\Throwable $t) {
             // a cancel/timeout/protocol failure inside a cycle leaves half a response on the wire: nobody may reuse it
             if ($this->inflight) { $this->closeSock(); }
@@ -809,20 +982,21 @@ final class __McPdoMyWire
         $this->busy = true;
     }
 
-    private function queryRun(string $sql): __McPdoMyResult
+    private function queryRun(string $cmd, bool $bin): __McPdoMyResult
     {
         if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+        $this->drainOwed();
         $this->inflight = true;
         $this->insertId = 0;
         $this->seq = 0;
-        $this->sendPacket("\x03" . $sql);
+        $this->sendPacket($cmd);
         $this->awaiting = true;
         $this->respStart = true;
         $first = null;
         $last = null;
         $n = 0;
         while (true) {
-            $r = $this->readResult();
+            $r = $this->readResult($bin);
             if ($first === null) { $first = $r; } else { $last->next = $r; }
             $last = $r;
             if (!$r->isSet && $r->err === null) { $this->insertId = $r->insertId; }
@@ -832,6 +1006,82 @@ final class __McPdoMyWire
         }
         $this->inflight = false;
         return $first;
+    }
+
+    /**
+     * COM_STMT_PREPARE. The parameter and column definitions that follow PREPARE_OK are validated and dropped: the result
+     * set's own definitions arrive again with every execute, and those are the ones a row is decoded against. A server ERR
+     * lands in ->err (the stream is in sync); a protocol failure poisons the connection and throws.
+     */
+    public function prepare(string $sql): __McPdoMyPrep
+    {
+        $this->enter();
+        try {
+            if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $this->drainOwed();
+            $this->inflight = true;
+            $this->insertId = 0;
+            $this->seq = 0;
+            $this->sendPacket("\x16" . $sql);
+            $this->awaiting = true;
+            $this->respStart = true;
+            $p = $this->packet(self::CTRL_CAP);
+            $q = new __McPdoMyPrep();
+            if (\strlen($p) < 1) { throw $this->malformed('empty response'); }
+            if (\ord($p[0]) === 0xFF) {
+                $q->err = $this->parseErr($p);
+                $this->inflight = false;
+                return $q;
+            }
+            if (\ord($p[0]) !== 0 || \strlen($p) !== 12) { throw $this->malformed('PREPARE_OK'); }
+            $q->id = self::le32($p, 1);
+            $q->cols = self::le16($p, 5);
+            $q->params = self::le16($p, 7);
+            $q->warnings = self::le16($p, 10);
+            if ($q->cols > self::MAX_COLUMNS || $q->params > self::MAX_PARAMS) { throw $this->malformed('PREPARE_OK counts'); }
+            foreach ([$q->params, $q->cols] as $cnt) {
+                if ($cnt === 0) { continue; }
+                for ($i = 0; $i < $cnt; $i++) { $this->parseCol($this->packet(self::CTRL_CAP), new __McPdoMyResult()); }
+                $e = $this->packet(self::CTRL_CAP);
+                if (\strlen($e) < 5 || \strlen($e) >= 9 || \ord($e[0]) !== 0xFE) { throw $this->malformed('missing EOF after definitions'); }
+            }
+            $this->inflight = false;
+            return $q;
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->inflight = false;
+            $this->busy = false;
+        }
+    }
+
+    /**
+     * COM_STMT_CLOSE has no reply, so it needs only a free wire: sent now when nobody holds it, else owed and sent
+     * ahead of the next command. Closing on a dead connection is a no-op (the server dropped the statement with it).
+     */
+    public function closeStmt(int $id): void
+    {
+        if ($this->dead) { return; }
+        $this->owed[] = $id;
+        if ($this->busy) { return; }
+        $this->busy = true;
+        try {
+            $this->drainOwed();
+        } catch (\Throwable $t) {
+            // the write failed: closeSock() already ran, nothing is left to close
+        } finally {
+            $this->busy = false;
+        }
+    }
+
+    private function drainOwed(): void
+    {
+        while (\count($this->owed) > 0) {
+            $id = \array_pop($this->owed);
+            $this->seq = 0;
+            $this->sendPacket("\x19" . self::putLe($id, 4));
+        }
     }
 
     /**
@@ -876,7 +1126,7 @@ final class __McPdoMyWire
 final class __McPdoMy implements __McPdoDrv
 {
     public __McPdoMyWire $wire;
-    /** ATTR_EMULATE_PREPARES: pdo_mysql's default is on; native prepares arrive with the binary protocol. */
+    /** ATTR_EMULATE_PREPARES: pdo_mysql's default is on; off prepares each statement on the server (binary protocol). */
     public bool $emulate = true;
     /** ATTR_AUTOCOMMIT as the program last set it (the server starts in autocommit mode). */
     public bool $autocommit = true;
@@ -894,10 +1144,9 @@ final class __McPdoMy implements __McPdoDrv
 
     public function prepare(string $sql): __McPdoDrvStmt
     {
-        if (!$this->emulate) {
-            throw __McPdo::fail('HY000', 0, false, 'native prepared statements are not supported yet (ATTR_EMULATE_PREPARES=false)', true);
-        }
-        return new __McPdoMyStmt($this, $sql);
+        $s = new __McPdoMyStmt($this, $sql, !$this->emulate);
+        $s->open();
+        return $s;
     }
 
     public static function errFrom(__McPdoMyErr $e): PDOException
@@ -1010,10 +1259,13 @@ final class __McPdoMy implements __McPdoDrv
 }
 
 /**
- * One PDOStatement over emulated prepares: execute() splices the quoted values
+ * One PDOStatement. Emulated (the default): execute() splices the quoted values
  * into the SQL at the byte offsets the scanner recorded and sends one COM_QUERY
- * with the whole result buffered. A repeated `:name` is one slot per occurrence,
- * bound by its distinct name.
+ * with the whole result buffered; a repeated `:name` is one slot per occurrence,
+ * bound by its distinct name. Native (ATTR_EMULATE_PREPARES=false): the statement
+ * lives on the server (COM_STMT_PREPARE at prepare(), COM_STMT_EXECUTE with typed
+ * parameters at execute(), COM_STMT_CLOSE when the object goes away), `:name`
+ * is rewritten to `?`, and a repeated name is refused as pdo_mysql does.
  */
 final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
 {
@@ -1032,10 +1284,28 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     private ?__McPdoMyResult $res = null;
     private int $idx = -1;
     private int $nDistinct = 0;
+    private bool $native = false;
+    /** The server holds a prepared statement for this object and COM_STMT_CLOSE has not been sent. */
+    private bool $prepared = false;
+    private int $stmtId = 0;
+    /** Placeholders the SERVER counted in the rewritten text. */
+    private int $serverParams = 0;
+    /** A `:name` occurs twice: pdo_mysql cannot bind that natively, execute() refuses it. */
+    private bool $repeated = false;
+    private string $nsql = '';
+    /** @var array<int,int> per slot: 0 unbound, 1 NULL, 2 integer, 3 double, 4 string */
+    private array $pk = [];
+    /** @var array<int,int> */
+    private array $pi = [];
+    /** @var array<int,string> the string, or the 8 bytes of a double */
+    private array $ps = [];
+    /** What rowCount() answers while no result is current (after a failed execute php still reports the previous one). */
+    private int $lastRows = 0;
 
-    public function __construct(__McPdoMy $db, string $sql)
+    public function __construct(__McPdoMy $db, string $sql, bool $native = false)
     {
         $this->db = $db;
+        $this->native = $native;
         $sc = __McPdoSql::scan($sql, 'mysql');
         $this->sql = $sc->sql;
         $this->names = $sc->names;
@@ -1045,7 +1315,111 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         foreach ($this->names as $n) {
             if ($n === '?') { $this->nDistinct++; }
             elseif (!isset($seen[$n])) { $seen[$n] = true; $this->nDistinct++; }
+            else { $this->repeated = true; }
         }
+        $this->nsql = $this->sql;
+        if ($native && \count($this->names) > 0) {
+            $q = '';
+            $o = 0;
+            foreach ($this->names as $i => $n) {
+                $p = $this->pos[$i];
+                $q .= \substr($this->sql, $o, $p - $o) . '?';
+                $o = $p + \strlen($n);
+            }
+            $this->nsql = $q . \substr($this->sql, $o);
+        }
+    }
+
+    /** Native statements are prepared on the server here, so a syntax error is raised by prepare() as in php. */
+    public function open(): void
+    {
+        if (!$this->native) { return; }
+        $p = $this->db->wire->prepare($this->nsql);
+        if ($p->err !== null) { throw __McPdoMy::errFrom($p->err); }
+        $this->stmtId = $p->id;
+        $this->serverParams = $p->params;
+        $this->prepared = true;
+    }
+
+    public function __destruct() { $this->close(); }
+
+    private static function badParam(): PDOException
+    {
+        return __McPdo::fail('HY093', 0, false, '', false);
+    }
+
+    private function bindNative(int $idx, mixed $value, int $type): void
+    {
+        if ($idx < 1 || $idx > \count($this->names)) { throw self::badParam(); }
+        $s = $idx - 1;
+        $t = $type & 7;
+        // pdo core and pdo_mysql (measured): NULL and PARAM_NULL are NULL; PARAM_STR makes a string of any scalar
+        // (true is "1", false ""); otherwise the value keeps its own type: bool/int -> LONGLONG (PARAM_BOOL folds an int
+        // to 0/1), float -> DOUBLE, string and stream contents -> VAR_STRING
+        if ($value === null || $t === PDO::PARAM_NULL) { $this->pk[$s] = 1; return; }
+        // ⚠ the scalar tests come first: is_resource() on a denormal float crashes (#331)
+        if ($t !== PDO::PARAM_STR) {
+            if (\is_bool($value)) { $this->pk[$s] = 2; $this->pi[$s] = $value ? 1 : 0; return; }
+            if (\is_int($value)) { $this->pk[$s] = 2; $this->pi[$s] = $t === PDO::PARAM_BOOL ? ($value !== 0 ? 1 : 0) : $value; return; }
+            if (\is_float($value)) { $this->pk[$s] = 3; $this->ps[$s] = __McPdoMyWire::putF64($value); return; }
+        } elseif (\is_float($value) || \is_int($value)) {
+            $this->pk[$s] = 4;
+            $this->ps[$s] = (string) $value;
+            return;
+        }
+        $this->pk[$s] = 4;
+        if (\is_bool($value)) { $this->ps[$s] = $value ? '1' : ''; }
+        elseif (\is_resource($value)) { $this->ps[$s] = (string) \stream_get_contents($value); }
+        else { $this->ps[$s] = (string) $value; }
+    }
+
+    /** COM_STMT_EXECUTE tail: NULL bitmap, new-params-bound flag, a type per slot, then the non-NULL values. */
+    private function encodeParams(): string
+    {
+        $n = \count($this->names);
+        if ($n === 0) { return ''; }
+        $bm = '';
+        for ($i = 0; $i < $n; $i += 8) {
+            $b = 0;
+            for ($j = 0; $j < 8 && $i + $j < $n; $j++) {
+                if ($this->pk[$i + $j] === 1) { $b |= 1 << $j; }
+            }
+            $bm .= \chr($b);
+        }
+        $ty = '';
+        $va = '';
+        for ($i = 0; $i < $n; $i++) {
+            $k = $this->pk[$i];
+            if ($k === 1) { $ty .= "\x06\0"; }
+            elseif ($k === 2) { $ty .= "\x08\0"; $va .= __McPdoMyWire::putLe($this->pi[$i], 8); }
+            elseif ($k === 3) { $ty .= "\x05\0"; $va .= $this->ps[$i]; }
+            else { $ty .= "\xfd\0"; $va .= __McPdoMyWire::lenencInt(\strlen($this->ps[$i])) . $this->ps[$i]; }
+        }
+        return $bm . "\x01" . $ty . $va;
+    }
+
+    private function executeNative(): void
+    {
+        $n = \count($this->names);
+        $ok = !$this->repeated;
+        for ($i = 0; $i < $n && $ok; $i++) {
+            if (!isset($this->pk[$i])) { $ok = false; }
+        }
+        $payload = $ok ? $this->encodeParams() : '';
+        $this->pk = [];
+        $this->pi = [];
+        $this->ps = [];
+        // php (measured): a count mismatch is its own bare HY093, raised before anything is sent
+        if (!$ok) { throw self::badParam(); }
+        if ($this->serverParams !== $n) {
+            throw __McPdo::fail('HY000', 1210, true, 'Incorrect arguments to mysqld_stmt_execute', true);
+        }
+        $this->lastRows = $this->rowCount();
+        $this->res = null;
+        $this->idx = -1;
+        $r = $this->db->wire->execute($this->stmtId, $payload);
+        if ($r->err !== null) { throw __McPdoMy::errFrom($r->err); }
+        $this->res = $r;
     }
 
     public function paramCount(): int { return $this->nDistinct; }
@@ -1068,6 +1442,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
      */
     public function bind(int $idx, mixed $value, int $type): void
     {
+        if ($this->native) { $this->bindNative($idx, $value, $type); return; }
         if ($idx < 1 || $idx > \count($this->names)) {
             $this->over = true;
             return;
@@ -1099,6 +1474,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
 
     public function execute(): void
     {
+        if ($this->native) { $this->executeNative(); return; }
         $n = \count($this->names);
         $ok = !$this->over;
         for ($i = 0; $i < $n && $ok; $i++) {
@@ -1146,6 +1522,15 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         if ($n->err !== null) {
             $this->res = null;
             throw __McPdoMy::errFrom($n->err);
+        }
+        if ($this->native && !$n->isSet && $this->res->isSet) {
+            // mysqlnd (measured): the closing OK of a CALL still reports the previous result set's columns
+            $n->names = $this->res->names;
+            $n->tables = $this->res->tables;
+            $n->types = $this->res->types;
+            $n->flags = $this->res->flags;
+            $n->lens = $this->res->lens;
+            $n->decs = $this->res->decs;
         }
         $this->res = $n;
         $this->idx = -1;
@@ -1233,6 +1618,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         $v = $this->res->rows[$this->idx][$i];
         if ($v === null) { return null; }
         $t = $this->res->types[$i];
+        if ($this->res->bin) { return $this->binValue($v, $t, $this->res->flags[$i], $this->res->decs[$i]); }
         if ($t === 253 || $t === 254 || $t === 252 || $t === 246) { return $v; }
         if ($t === 3 || $t === 8 || $t === 1 || $t === 2 || $t === 9) {
             $neg = $v !== '' && $v[0] === '-';
@@ -1265,6 +1651,43 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         return $v;
     }
 
+    /**
+     * mysqlnd's binary typing: the integer widths are int (an UNSIGNED BIGINT above PHP_INT_MAX stays a string), FLOAT and
+     * DOUBLE float, BIT the big-endian integer; every other cell is already its final text (see parseBinRow).
+     */
+    private function binValue(string $v, int $t, int $flags, int $dec): mixed
+    {
+        $uns = ($flags & 32) !== 0;
+        if ($t === 1) {
+            $x = \ord($v);
+            return !$uns && $x >= 128 ? $x - 256 : $x;
+        }
+        if ($t === 2) {
+            $x = __McPdoMyWire::le16($v, 0);
+            return !$uns && $x >= 32768 ? $x - 65536 : $x;
+        }
+        if ($t === 3 || $t === 9) {
+            $x = __McPdoMyWire::le32($v, 0);
+            return !$uns && $x >= 2147483648 ? $x - 4294967296 : $x;
+        }
+        if ($t === 8) {
+            $hi = __McPdoMyWire::le32($v, 4);
+            if ($uns && $hi >= 2147483648) { return self::dec(\strrev($v)); }
+            return __McPdoMyWire::le32($v, 0) | ($hi << 32);
+        }
+        if ($t === 5) { return __McPdoMyWire::f64($v); }
+        if ($t === 4) { return __McPdoMyWire::f32($v, $dec); }
+        if ($t === 16) {
+            $n = \strlen($v);
+            if ($n < 1 || $n > 8) { throw self::badValue('bit'); }
+            if ($n === 8 && \ord($v[0]) >= 128) { return self::dec($v); }
+            $x = 0;
+            for ($k = 0; $k < $n; $k++) { $x = ($x << 8) | \ord($v[$k]); }
+            return $x;
+        }
+        return $v;
+    }
+
     private static function dec(string $b): string { return __McPdoMyWire::beToDec($b); }
 
     private static function badValue(string $what): PDOException
@@ -1275,7 +1698,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     /** SELECT: the rows buffered; anything else: the rows it changed. */
     public function rowCount(): int
     {
-        if ($this->res === null) { return 0; }
+        if ($this->res === null) { return $this->native ? $this->lastRows : 0; }
         return $this->res->isSet ? \count($this->res->rows) : $this->res->affected;
     }
 
@@ -1287,7 +1710,15 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         }
     }
 
-    public function close(): void { $this->res = null; }
+    /** The statement object is going away: the server's copy is released exactly once. */
+    public function close(): void
+    {
+        $this->res = null;
+        if ($this->prepared) {
+            $this->prepared = false;
+            $this->db->wire->closeStmt($this->stmtId);
+        }
+    }
 
     public function errorInfo(): array { return __McPdo::triple('', 0, false, '', false); }
 }

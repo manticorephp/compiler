@@ -1060,7 +1060,13 @@ class PDOStatement implements IteratorAggregate
         }
         try {
             foreach ($this->bound as $i => $v) {
-                $this->drv->bind($i, $v, $this->boundType[$i]);
+                try {
+                    $this->drv->bind($i, $v, $this->boundType[$i]);
+                } catch (PDOException $e) {
+                    // php registers a parameter before it validates it: the refused one is not kept, the others stay bound
+                    unset($this->bound[$i], $this->boundType[$i]);
+                    throw $e;
+                }
             }
             $this->drv->execute();
         } catch (PDOException $e) {
