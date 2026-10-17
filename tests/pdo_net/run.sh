@@ -1,0 +1,36 @@
+#!/bin/bash
+# pdo_net: byte parity of compiled PDO network drivers against php, on live servers.
+#   tests/pdo_net/run.sh [-k substr]
+# Cases named pgsql_* / mysql_* use PDO_PG_DSN / PDO_MY_DSN; SKIP when the server is unreachable.
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+FILTER=""
+[ "${1:-}" = "-k" ] && FILTER="$2"
+export PDO_PG_DSN="${PDO_PG_DSN-pgsql:host=127.0.0.1;port=54320;dbname=d}"
+export PDO_MY_DSN="${PDO_MY_DSN-mysql:host=127.0.0.1;port=33060;dbname=d}"
+WORK="$ROOT/tests/pdo_net/.work"
+mkdir -p "$WORK"
+trap 'rm -rf "$WORK"' EXIT
+
+reachable() { # dsn
+    local h p
+    h=$(sed -n 's/.*host=\([^;]*\).*/\1/p' <<<"$1"); p=$(sed -n 's/.*port=\([^;]*\).*/\1/p' <<<"$1")
+    [ -n "$h" ] && [ -n "$p" ] && (exec 3<>"/dev/tcp/$h/$p") 2>/dev/null
+}
+
+pass=0; fail=0; skip=0
+for f in tests/pdo_net/cases/*.php; do
+    n=$(basename "$f" .php)
+    [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
+    case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) dsn=x ;; esac
+    if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n"; skip=$((skip+1)); continue; fi
+    exp=$(php -d xdebug.mode=off "$f" 2>&1)
+    if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
+        echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); continue
+    fi
+    act=$("$WORK/$n" 2>&1)
+    if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1))
+    else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
+done
+echo "pass=$pass fail=$fail skip=$skip"
+[ "$fail" = 0 ]

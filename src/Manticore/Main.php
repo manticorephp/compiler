@@ -4340,6 +4340,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // driver seam over libsqlite3 and is what puts -lsqlite3 on the link line.
     $pdoSrc = prelude_src_or_empty("pdo.php");
     $pdoSqliteSrc = prelude_src_or_empty("pdo_sqlite.php");
+    $pdoSqlSrc = prelude_src_or_empty("pdo_sql.php");
+    $pdoPgsqlSrc = prelude_src_or_empty("pdo_pgsql.php");
+    $pdoMysqlSrc = prelude_src_or_empty("pdo_mysql.php");
 
     // ext/tokenizer, deliberately TWO files. tokenizer.php names nothing Zend
     // owns, so it stays require-able under `php` itself and tools/tokenizer_diff.php
@@ -4808,7 +4811,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // time can tell which driver `new PDO($dsn)` will open. One driver exists,
     // so loading it with the facade is honest. When a second driver lands, this
     // splits the same way curl_multi does — on the driver's own class names.
-    $usePdoSqlite = $usePdo;
+    $usePdoSqlite = $usePdo;  // gates all driver preludes (sqlite, sql, pgsql, mysql) together
     // PDO::ERRMODE_WARNING routes through trigger_error, which lives in
     // errors.php — and the demand gate cannot see a call made from the prelude
     // itself, only one made from user code.
@@ -5040,8 +5043,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         dprint("compile failed: prelude: cannot read curl_multi.php");
         return null;
     }
-    if ($usePdo && ($pdoSrc === "" || $pdoSqliteSrc === "")) {
-        dprint("compile failed: prelude: cannot read pdo.php / pdo_sqlite.php");
+    if ($usePdo && ($pdoSrc === "" || $pdoSqliteSrc === "" || $pdoSqlSrc === "" || $pdoPgsqlSrc === "" || $pdoMysqlSrc === "")) {
+        dprint("compile failed: prelude: cannot read pdo.php / pdo_sqlite.php / pdo_sql.php / pdo_pgsql.php / pdo_mysql.php");
         return null;
     }
     if ($useTokenizer && ($tokenizerSrc === "" || $tokenizerApiSrc === "")) {
@@ -5139,6 +5142,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->curlMultiSrc = $useCurlMulti ? $curlMultiSrc : "";
         $lower->pdoSrc = $usePdo ? $pdoSrc : "";
         $lower->pdoSqliteSrc = $usePdoSqlite ? $pdoSqliteSrc : "";
+        $lower->pdoSqlSrc = $usePdoSqlite ? $pdoSqlSrc : "";
+        $lower->pdoPgsqlSrc = $usePdoSqlite ? $pdoPgsqlSrc : "";
+        $lower->pdoMysqlSrc = $usePdoSqlite ? $pdoMysqlSrc : "";
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
@@ -5676,6 +5682,9 @@ function analyze_prelude_files(): array
         // it declares the driver classes pdo.php's seam is satisfied by.
         "pdo.php",
         "pdo_sqlite.php",
+        "pdo_sql.php",
+        "pdo_pgsql.php",
+        "pdo_mysql.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

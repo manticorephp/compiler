@@ -433,11 +433,15 @@ class PDO
          * The driver registry is a `match` and not a lookup table on purpose:
          * every driver is LINKED IN at compile time, and the analyzer runs
          * closed-world, so a name it cannot resolve is a compile error rather
-         * than a runtime surprise. Adding mysql means adding one arm here and
+         * than a runtime surprise. Adding a driver means adding one arm here and
          * splitting the prelude gate in Main.php the same way.
          */
         if ($scheme === 'sqlite') {
             $this->drv = __mc_pdo_sqlite_open($rest, $options === null ? [] : $options);
+        } elseif ($scheme === 'pgsql') {
+            $this->drv = __mc_pdo_pgsql_open($rest, $options === null ? [] : $options, $username, $password);
+        } elseif ($scheme === 'mysql') {
+            $this->drv = __mc_pdo_mysql_open($rest, $options === null ? [] : $options, $username, $password);
         } else {
             // php reports an unknown scheme with no SQLSTATE and no driver code,
             // and its message carries no SQLSTATE prefix either.
@@ -463,7 +467,7 @@ class PDO
     /** Every driver this binary was linked against. */
     public static function getAvailableDrivers(): array
     {
-        return ['sqlite'];
+        return ['mysql', 'pgsql', 'sqlite'];
     }
 
     public function prepare(string $query, array $options = []): PDOStatement|false
