@@ -112,3 +112,40 @@ no fd leak
 stall_mid: HY000 7 timeout expired
 fast
 no fd leak
+ssl_n: 08006 7 server does not support SSL, but SSL was required
+fast
+no fd leak
+ssl_e: 08006 7 server sent an error response during SSL exchange
+fast
+no fd leak
+ssl_byte: 08006 7 received invalid response to SSL negotiation: X
+fast
+no fd leak
+ssl_eof: 08006 7 server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+fast
+no fd leak
+ssl_extra: 08006 7 received unencrypted data after SSL response
+fast
+no fd leak
+ssl_late: 08006 7 SSL error: wrong version number
+This may indicate that the server does not support any SSL protocol version between TLSv1.2 and TLSv1.3.
+fast
+no fd leak
+ssl_garbage: 08006 7 SSL error: wrong version number
+This may indicate that the server does not support any SSL protocol version between TLSv1.2 and TLSv1.3.
+fast
+no fd leak
+ssl_silent: 08006 7 timeout expired
+fast
+no fd leak
+ssl_close: 08006 7 server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+SSL SYSCALL error: EOF detected
+fast
+no fd leak
+ssl_drip: 08006 7 timeout expired
+fast
+no fd leak

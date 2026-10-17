@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the pdo_net test servers (idempotent): mc-pg :54320, mc-my :33060, mc-my-native :33062 (users nu/npw, ne/''), user u / pw pw / db d.
+# Start the pdo_net test servers (idempotent): mc-pg :54320, mc-pg-ssl :54323 (TLS, certs in tests/pdo_net/.certs), mc-my :33060, mc-my-native :33062 (users nu/npw, ne/''), user u / pw pw / db d.
 set -eu
 start() { # name, run-args...
     local n="$1"; shift
@@ -16,11 +16,26 @@ wait_for() {
     echo "$n not ready" >&2; exit 1
 }
 start mc-pg -p 127.0.0.1:54320:5432 -e POSTGRES_USER=u -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=d postgres:16-alpine
+# TLS postgres: certs generated on the host into .certs (gitignored, removed by down.sh), copied into the container at create time.
+# hba: `u` and `cu` only over TLS (cu authenticates by client certificate), plaintext from outside is rejected.
+CERTS="$(cd "$(dirname "$0")" && pwd)/.certs"
+bash "$(dirname "$0")/mkcerts.sh" "$CERTS"
+if ! docker inspect mc-pg-ssl >/dev/null 2>&1; then
+    docker create --name mc-pg-ssl -p 127.0.0.1:54323:5432 -e POSTGRES_USER=u -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=d --entrypoint sh postgres:16-alpine -c '
+        mkdir -p /tls && cp /certsrc/ca.pem /certsrc/server.crt /certsrc/server.key /tls/ && chown -R postgres:postgres /tls && chmod 600 /tls/server.key
+        printf "local all all trust\nhostssl all u all scram-sha-256\nhostssl d cu all cert\nhostnossl all all all reject\nhost all all all reject\n" > /tls/pg_hba.conf
+        chown postgres:postgres /tls/pg_hba.conf
+        exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key -c ssl_ca_file=/tls/ca.pem -c hba_file=/tls/pg_hba.conf' >/dev/null
+    docker cp "$CERTS" mc-pg-ssl:/certsrc
+fi
+start mc-pg-ssl
 start mc-my -p 127.0.0.1:33060:3306 -e MYSQL_USER=u -e MYSQL_PASSWORD=pw -e MYSQL_DATABASE=d -e MYSQL_ROOT_PASSWORD=pw mysql:8.4
 # mysql 8.4 ships mysql_native_password OFF: a second server with it on, for the native-password and auth-switch cases
 start mc-my-native -p 127.0.0.1:33062:3306 -e MYSQL_DATABASE=d -e MYSQL_ROOT_PASSWORD=pw mysql:8.4 --mysql-native-password=ON
 # TCP logins: the init-time temporary servers listen on the unix socket only
 wait_for mc-pg 60 docker exec -e PGPASSWORD=pw mc-pg psql -h 127.0.0.1 -U u d -c 'select 1'
+wait_for mc-pg-ssl 60 docker exec mc-pg-ssl psql -U u d -c "select 1"
+docker exec mc-pg-ssl psql -U u d -c "create user cu" 2>/dev/null || true
 wait_for mc-my 120 docker exec mc-my mysql -h 127.0.0.1 -uu -ppw d -e 'select 1'
 wait_for mc-my-native 120 docker exec mc-my-native mysql -h 127.0.0.1 -uroot -ppw d -e 'select 1'
 docker exec mc-my-native mysql -h 127.0.0.1 -uroot -ppw -e "create user if not exists 'nu'@'%' identified with mysql_native_password by 'npw'; create user if not exists 'ne'@'%' identified with mysql_native_password by ''; grant all on d.* to 'nu'@'%'; grant all on d.* to 'ne'@'%'"

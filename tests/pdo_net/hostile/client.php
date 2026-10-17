@@ -3,7 +3,7 @@
 // No php oracle (the fake server targets our driver's checks): expected output is hand-written in hostile.expected.
 $mode = $argv[1];
 $my = ($argv[3] ?? '') === 'mysql';
-$dsn = ($my ? 'mysql' : 'pgsql') . ':host=127.0.0.1;port=' . $argv[2] . ';dbname=d';
+$dsn = ($my ? 'mysql' : 'pgsql') . ':host=127.0.0.1;port=' . $argv[2] . ';dbname=d' . ($my ? '' : (str_starts_with($mode, 'ssl_') ? ';sslmode=require' : ';sslmode=disable'));
 $fds = fn () => count(scandir('/dev/fd'));
 // the first socket lazily opens the runtime's poller fd, which stays for the process: warm it up first
 $w = stream_socket_server('tcp://127.0.0.1:0');
@@ -13,7 +13,8 @@ $before = $fds();
 $t = microtime(true);
 try {
     // idle_slow: ATTR_TIMEOUT unset (the default must not bound a statement that is still running); *_explicit / stall_mid: set to 1
-    $opts = $mode === 'idle_slow' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid'], true) ? 1 : 3];
+    $opts = $mode === 'idle_slow' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid', 'ssl_silent', 'ssl_drip'], true) ? 1 : 3];
+    if ($my && str_starts_with($mode, 'ssl_')) { $opts += [1008 => '/nonexistent', 1013 => false]; }   // MYSQL_ATTR_SSL_CA, MYSQL_ATTR_SSL_VERIFY_SERVER_CERT: TLS wanted, nothing verified
     $db = new PDO($dsn, 'u', 'pw', $opts);
     if ($my) {
         $q = $db->query('select 1');   // not chained (#299)

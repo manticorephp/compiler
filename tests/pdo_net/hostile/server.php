@@ -9,6 +9,29 @@ rename($portFile . '.tmp', $portFile);
 $c = stream_socket_accept($srv, 10);
 $rd = function (int $n) use ($c): string { $b = ''; while (strlen($b) < $n) { $x = fread($c, $n - strlen($b)); if ($x === '' || $x === false) { return $b; } $b .= $x; } return $b; };
 $msg = fn (string $t, string $body): string => $t . pack('N', strlen($body) + 4) . $body;
+if (str_starts_with($mode, 'ssl_')) {
+    // SSLRequest first; the mode picks the answer. The client uses sslmode=require.
+    $rd(8);
+    if ($mode === 'ssl_n') { fwrite($c, 'N'); }
+    elseif ($mode === 'ssl_e') { fwrite($c, $msg('E', "SFATAL\0VFATAL\0C0A000\0Mno ssl for you\0\0")); }
+    elseif ($mode === 'ssl_byte') { fwrite($c, 'X'); }
+    elseif ($mode === 'ssl_eof') { fclose($c); exit; }
+    elseif ($mode === 'ssl_extra') { fwrite($c, 'S' . $msg('R', pack('N', 0))); }         // plaintext in the SAME segment as the 'S': CVE-2021-23222
+    elseif ($mode === 'ssl_late') { fwrite($c, 'S'); usleep(150000); fwrite($c, $msg('R', pack('N', 0))); }   // ... or right after it
+    elseif ($mode === 'ssl_garbage') { fwrite($c, 'S'); usleep(200000); fwrite($c, "HTTP/1.1 400 Bad Request\r\n\r\n"); }
+    elseif ($mode === 'ssl_silent') { fwrite($c, 'S'); }
+    elseif ($mode === 'ssl_close') { fwrite($c, 'S'); usleep(200000); fclose($c); exit; }
+    elseif ($mode === 'ssl_drip') {
+        fwrite($c, 'S');
+        usleep(200000);
+        fwrite($c, "\x16\x03\x03\x01\x00");
+        for ($i = 0; $i < 30; $i++) { usleep(400000); if (@fwrite($c, 'x') === false) { break; } }
+    }
+    $end = microtime(true) + 6;
+    stream_set_timeout($c, 1);
+    while (microtime(true) < $end) { $x = fread($c, 1024); if ($x === '' && feof($c)) { break; } }
+    exit;
+}
 $len = unpack('N', $rd(4))[1];
 $rd($len - 4);                                  // startup packet
 $z = $msg('Z', 'I');

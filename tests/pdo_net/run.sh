@@ -12,6 +12,11 @@ export PDO_MY_NATIVE_DSN="${PDO_MY_NATIVE_DSN-mysql:host=127.0.0.1;port=33062;db
 WORK="$ROOT/tests/pdo_net/.work"
 mkdir -p "$WORK"
 trap 'rm -rf "$WORK"' EXIT
+# TLS material: pg's comes from up.sh (.certs); mysql's CA is the one mc-my generated for itself, copied out per run
+export PDO_SSL_DIR="$ROOT/tests/pdo_net/.certs"
+if command -v docker >/dev/null 2>&1 && [ "$(docker inspect -f '{{.State.Running}}' mc-my 2>/dev/null)" = true ]; then
+    docker cp mc-my:/var/lib/mysql/ca.pem "$WORK/my_ca.pem" >/dev/null 2>&1 && export PDO_MY_SSL_CA="$WORK/my_ca.pem"
+fi
 
 reachable() { # dsn
     local h p
@@ -52,7 +57,7 @@ if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out big_slow oid_miss over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus idle_slow idle_explicit stall_mid; do
+        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out big_slow oid_miss over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus idle_slow idle_explicit stall_mid ssl_n ssl_e ssl_byte ssl_eof ssl_extra ssl_late ssl_garbage ssl_silent ssl_close ssl_drip; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" >/dev/null 2>&1 &
             sp=$!
@@ -70,7 +75,7 @@ if [[ -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ]]; then
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL mysql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max row_huge_len row_neg_len coldef_huge_len auth_0105 auth_repeat03 auth_double04 auth_nonpem auth_badkey auth_bigkey idle_slow idle_explicit stall_mid; do
+        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max row_huge_len row_neg_len coldef_huge_len auth_0105 auth_repeat03 auth_double04 auth_nonpem auth_badkey auth_bigkey idle_slow idle_explicit stall_mid ssl_nocap ssl_extra ssl_garbage ssl_silent ssl_close ssl_drip; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" mysql >/dev/null 2>&1 &
             sp=$!

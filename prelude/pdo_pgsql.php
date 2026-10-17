@@ -113,8 +113,17 @@ final class __McPdoPgWire
     private string $nonce = '';
     private string $serverSig = '';
 
-    public function __construct(string $host, int $port, float $timeout)
+    public function __construct(string $host, int $port, float $timeout, string $hostaddr = '')
     {
+        if ($hostaddr !== '') {
+            // libpq connects to the address and names only it in its messages; $host is what the certificate is checked against
+            if (\strpos($hostaddr, ':') === false && \ip2long($hostaddr) === false) {
+                $gai = \PHP_OS_FAMILY === 'Darwin'
+                    ? 'nodename nor servname provided, or not known' : 'Name or service not known';
+                throw __McPdo::connectFail('08006', 7, 'could not parse network address "' . $hostaddr . '": ' . $gai);
+            }
+            $host = $hostaddr;
+        }
         $ip = $host;
         if (\strpos($host, ':') === false && \ip2long($host) === false) {
             $ip = \gethostbyname($host);
@@ -148,6 +157,67 @@ final class __McPdoPgWire
         if ($t <= 0.0) { $t = 86400.0; }
         $sec = (int) $t;
         \stream_set_timeout($this->s, $sec, (int) (($t - $sec) * 1000000));
+    }
+
+    /** The SSLRequest was answered 'S' and the handshake finished: nothing is sent in the clear from here on. */
+    public bool $tls = false;
+    /** A failure that must not be retried on another connection (an injected plaintext byte). */
+    public bool $noRetry = false;
+    /** The attempt got as far as an established TCP connection (libpq retries allow/prefer only from there). */
+    public bool $reached = false;
+
+    /**
+     * SSLRequest, then exactly ONE reply byte. true = TLS is up; false = the server declined and plaintext is acceptable.
+     * Bytes after that byte, buffered or already arriving, are an injection (CVE-2021-23222) and end the attempt.
+     */
+    /** @param array<string,string> $p the DSN options */
+    public function negotiateTls(array $p, string $mode, string $host, bool $mustTls): bool
+    {
+        $this->sendRaw(self::be32(8) . self::be32(80877103));
+        $this->fill(1);
+        $b = $this->buf[$this->pos];
+        $this->pos++;
+        if ($b === 'N') {
+            if ($mustTls) { throw $this->startFail('server does not support SSL, but SSL was required'); }
+            return false;
+        }
+        if ($b === 'E') { throw $this->startFail('server sent an error response during SSL exchange'); }
+        if ($b !== 'S') { throw $this->startFail('received invalid response to SSL negotiation: ' . $b); }
+        if (\strlen($this->buf) > $this->pos || __McPdoTls::pendingPlain($this->s)) {
+            $this->noRetry = true;
+            throw $this->startFail('received unencrypted data after SSL response');
+        }
+        // libpq looks at its certificate files only once the server agreed to TLS
+        $err = '';
+        $o = __mc_pdo_pgsql_tls_opts($p, $mode, $host, $err);
+        if ($err !== '') { throw $this->startFail($err); }
+        $r = __McPdoTls::start($this->s, $o, $this->timeout > 0.0 ? 2.0 * $this->timeout : 0.0);
+        if ($r->stage !== '') { throw $this->startFail($this->tlsText($r, $o)); }
+        $this->tls = true;
+        return true;
+    }
+
+    private function tlsText(__McPdoTlsRes $r, __McPdoTlsOpts $o): string
+    {
+        $s = $r->stage;
+        if ($s === 'cert') { return 'could not read certificate file "' . $o->cert . '": ' . $r->reason; }
+        if ($s === 'key') { return 'could not load private key file "' . ($o->key !== '' ? $o->key : $o->cert) . '": ' . $r->reason; }
+        if ($s === 'root') { return 'could not read root certificate file "' . ($o->caFile !== '' ? $o->caFile : $o->caDir) . '": ' . $r->reason; }
+        if ($s === 'crl') { return 'could not read certificate revocation list file "' . $o->crl . '": ' . $r->reason; }
+        if ($s === 'timeout') { return 'timeout expired'; }
+        if ($s === 'name') {
+            return 'server certificate for "' . $r->certName . '"'
+                . ($r->others > 0 ? ' (and ' . (string) $r->others . ($r->others === 1 ? ' other name)' : ' other names)') : '')
+                . ' does not match host name "' . $o->host . '"';
+        }
+        if ($r->reason === '') {
+            return "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\nSSL SYSCALL error: EOF detected";
+        }
+        $m = 'SSL error: ' . $r->reason;
+        if ($r->reason === 'wrong version number' || $r->reason === 'unsupported protocol') {
+            $m .= "\nThis may indicate that the server does not support any SSL protocol version between TLSv1.2 and TLSv1.3.";
+        }
+        return $m;
     }
 
     /** @param array<string,string> $params extra startup parameters */
@@ -1260,30 +1330,119 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
     public function __destruct() { $this->close(); }
 }
 
+/** libpq's rule for a key file: not readable by group/world (0600), or by group only when root owns it (0640). */
+function __mc_pdo_pgsql_key_perms_ok(string $path): bool
+{
+    $perms = \fileperms($path);
+    if ($perms === false) { return true; }
+    $bad = $perms & 0077;
+    if ($bad === 0) { return true; }
+    return \fileowner($path) === 0 && ($perms & 0027) === 0;
+}
+
+/**
+ * The TLS side of one connect attempt, from the DSN, as libpq's initialize_SSL decides it. Returns the options, or the
+ * failure text (libpq's wording) in $err when a file the mode needs is missing or unusable.
+ */
+function __mc_pdo_pgsql_tls_opts(array $p, string $mode, string $host, string &$err): __McPdoTlsOpts
+{
+    $o = new __McPdoTlsOpts();
+    $o->host = $host;
+    $home = \getenv('HOME');
+    $dir = ($home === false || $home === '') ? '' : $home . '/.postgresql/';
+    $o->sni = !isset($p['sslsni']) || $p['sslsni'] !== '0';
+    $o->verifyName = $mode === 'verify-full';
+    $cert = isset($p['sslcert']) && $p['sslcert'] !== '' ? $p['sslcert'] : ($dir === '' ? '' : $dir . 'postgresql.crt');
+    if ($cert !== '' && \is_file($cert)) {
+        $key = isset($p['sslkey']) && $p['sslkey'] !== '' ? $p['sslkey'] : ($dir === '' ? '' : $dir . 'postgresql.key');
+        $o->cert = $cert;
+        $o->key = $key;
+        // libpq reads the certificate first, so a broken certificate is reported ahead of a missing or loose key
+        if (!\is_file($key)) {
+            $err = 'certificate present, but not private key file "' . $key . '"';
+            return $o;
+        }
+        if (!__mc_pdo_pgsql_key_perms_ok($key)) {
+            $err = 'private key file "' . $key . '" has group or world access; file must have permissions u=rw (0600) or less if owned by the current user, or permissions u=rw,g=r (0640) or less if owned by root';
+            return $o;
+        }
+    }
+    $root = isset($p['sslrootcert']) && $p['sslrootcert'] !== '' ? $p['sslrootcert'] : ($dir === '' ? '' : $dir . 'root.crt');
+    if ($root === 'system') {
+        $o->systemRoots = true;
+        $o->verifyChain = true;
+    } elseif ($root !== '' && \file_exists($root)) {
+        $o->caFile = $root;
+        $o->verifyChain = true;
+    } elseif ($mode === 'verify-ca' || $mode === 'verify-full') {
+        $err = 'root certificate file "' . $root . "\" does not exist\nEither provide the file, use the system's trusted roots with sslrootcert=system, or change sslmode to disable server certificate verification.";
+        return $o;
+    }
+    $crl = isset($p['sslcrl']) && $p['sslcrl'] !== '' ? $p['sslcrl'] : ($dir === '' ? '' : $dir . 'root.crl');
+    if ($o->verifyChain && $crl !== '' && \is_file($crl)) { $o->crl = $crl; }
+    return $o;
+}
+
 function __mc_pdo_pgsql_open(string $rest, array $options, ?string $user, ?string $pw): __McPdoDrv
 {
     $p = __McPdo::parseParams($rest);
     $host = isset($p['host']) && $p['host'] !== '' ? $p['host'] : 'localhost';
+    $hostaddr = isset($p['hostaddr']) ? $p['hostaddr'] : '';
     $port = isset($p['port']) ? (int) $p['port'] : 5432;
     // ⚠ php (measured): a user= / password= in the DSN beats the constructor argument.
     if (isset($p['user'])) { $user = $p['user']; }
     if ($user === null) { $user = (string) (\getenv('USER') ?: 'postgres'); }
     if (isset($p['password'])) { $pw = $p['password']; }
     $db = isset($p['dbname']) ? $p['dbname'] : $user;
-    $ssl = isset($p['sslmode']) ? $p['sslmode'] : 'prefer';
-    if ($ssl === 'require' || $ssl === 'verify-ca' || $ssl === 'verify-full') {
-        throw __McPdo::connectFail('08006', 7, 'sslmode=' . $ssl . ' is not supported yet');
-    }
     $timeout = isset($options[PDO::ATTR_TIMEOUT]) ? (float) $options[PDO::ATTR_TIMEOUT] : 30.0;
 
-    $wire = new __McPdoPgWire($host, $port, $timeout);
-    $wire->explicitTimeout = isset($options[PDO::ATTR_TIMEOUT]);
-    try {
-        $wire->startup($user, $db, []);
-        $wire->auth($user, $pw);
-    } catch (\Throwable $e) {
-        $wire->close();
-        throw $e;
+    // libpq validates the connection options before it opens a socket
+    foreach ($p as $k => $unused) {
+        if (\strncmp($k, 'ssl', 3) === 0 && !\in_array($k, ['sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'sslcrl', 'sslcrldir', 'sslsni', 'sslcompression', 'sslpassword'], true)) {
+            throw __McPdo::connectFail('08006', 7, 'invalid connection option "' . $k . '"');
+        }
     }
-    return new __McPdoPg($wire);
+    $root = isset($p['sslrootcert']) ? $p['sslrootcert'] : '';
+    $mode = isset($p['sslmode']) ? $p['sslmode'] : ($root === 'system' ? 'verify-full' : 'prefer');
+    if ($mode === '' && isset($p['sslmode'])) {
+        // php hands libpq "sslmode= <next option>": the empty value swallows the next token, which is what libpq then complains about
+        $at = \strpos($rest, 'sslmode=');
+        $next = $at === false ? false : \strpos($rest, ';', $at);
+        $tail = $next === false ? '' : \trim(\substr($rest, $next + 1));
+        $z = \strpos($tail, ';');
+        $mode = $tail === '' ? 'connect_timeout=' . (string) (int) $timeout : ($z === false ? $tail : \substr($tail, 0, $z));
+    }
+    if (!\in_array($mode, ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'], true)) {
+        throw __McPdo::connectFail('08006', 7, 'invalid sslmode value: "' . $mode . '"');
+    }
+    if ($root === 'system' && $mode !== 'verify-full' && $mode !== 'disable') {
+        throw __McPdo::connectFail('08006', 7, 'weak sslmode "' . $mode . '" may not be used with sslrootcert=system (use "verify-full")');
+    }
+    // libpq's attempt order: allow tries plaintext first, prefer TLS first; either retries the other way on any failure
+    $tries = $mode === 'disable' ? [false] : ($mode === 'allow' ? [false, true] : ($mode === 'prefer' ? [true, false] : [true]));
+    $n = \count($tries);
+    $prior = '';
+    for ($i = 0; $i < $n; $i++) {
+        $wire = null;
+        try {
+            $wire = new __McPdoPgWire($host, $port, $timeout, $hostaddr);
+            $wire->reached = true;
+            $wire->explicitTimeout = isset($options[PDO::ATTR_TIMEOUT]);
+            if ($tries[$i]) {
+                $wire->negotiateTls($p, $mode, $host, $mode !== 'prefer');
+            }
+            $wire->startup($user, $db, []);
+            $wire->auth($user, $pw);
+            return new __McPdoPg($wire);
+        } catch (\Throwable $e) {
+            if ($wire !== null) { $wire->close(); }
+            $final = $i === $n - 1 || $wire === null || $wire->noRetry || !($e instanceof PDOException);
+            if ($final) {
+                if ($prior !== '' && $e instanceof PDOException) { throw __McPdo::connectFail($e->sqlstate, $e->driverCode, $prior . $e->driverMsg); }
+                throw $e;
+            }
+            if ($e instanceof PDOException) { $prior .= $e->driverMsg . "\n"; }
+        }
+    }
+    throw __McPdo::connectFail('08006', 7, 'unreachable');
 }

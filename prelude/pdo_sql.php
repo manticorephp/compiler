@@ -194,3 +194,278 @@ final class __McPdoSql
         return -1;
     }
 }
+
+// ── TLS for the socket drivers ──────────────────────────────────────────────
+//
+// The stdlib's stream_socket_enable_crypto() knows no CA file, client certificate, cipher list or CRL, and
+// reports no reason on failure, so the drivers drive OpenSSL themselves over the same fd and then turn the
+// resource into a KIND_TLS stream (fread/fwrite/fclose already speak SSL_read/SSL_write/SSL_free for that kind).
+// Only symbols src/Runtime/Openssl.php does not bind are declared here (one signature per C symbol).
+
+#[\Ffi\Library('ssl'), \Ffi\Symbol('SSL_CTX_load_verify_file'), \Ffi\CType('int')]
+function __mc_pdotls_load_file(int $ctx, string $file): int {}
+
+#[\Ffi\Library('ssl'), \Ffi\Symbol('SSL_CTX_load_verify_dir'), \Ffi\CType('int')]
+function __mc_pdotls_load_dir(int $ctx, string $dir): int {}
+
+#[\Ffi\Library('ssl'), \Ffi\Symbol('SSL_CTX_set_cipher_list'), \Ffi\CType('int')]
+function __mc_pdotls_ciphers(int $ctx, string $list): int {}
+
+#[\Ffi\Library('ssl'), \Ffi\Symbol('SSL_CTX_get_cert_store')]
+function __mc_pdotls_store(int $ctx): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('X509_STORE_load_file'), \Ffi\CType('int')]
+function __mc_pdotls_store_load(int $store, string $file): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('X509_STORE_set_flags'), \Ffi\CType('int')]
+function __mc_pdotls_store_flags(int $store, #[\Ffi\CType('long')] int $flags): int {}
+
+#[\Ffi\Library('ssl'), \Ffi\Symbol('SSL_get1_peer_certificate')]
+function __mc_pdotls_peer(int $ssl): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('X509_check_host'), \Ffi\CType('int')]
+function __mc_pdotls_check_host(int $x, string $name, #[\Ffi\CType('size_t')] int $len,
+                                #[\Ffi\CType('int')] int $flags, \Ffi\Ptr $peername): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('X509_check_ip_asc'), \Ffi\CType('int')]
+function __mc_pdotls_check_ip(int $x, string $ip, #[\Ffi\CType('int')] int $flags): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('X509_free')]
+function __mc_pdotls_x509_free(int $x): void {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('X509_get_ext_d2i')]
+function __mc_pdotls_ext(int $x, #[\Ffi\CType('int')] int $nid, \Ffi\Ptr $crit, \Ffi\Ptr $idx): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('OPENSSL_sk_num'), \Ffi\CType('int')]
+function __mc_pdotls_sk_num(int $sk): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('OPENSSL_sk_value')]
+function __mc_pdotls_sk_value(int $sk, #[\Ffi\CType('int')] int $i): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('GENERAL_NAMES_free')]
+function __mc_pdotls_names_free(int $sk): void {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('ASN1_STRING_get0_data')]
+function __mc_pdotls_asn1_data(int $s): \Ffi\Ptr {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('ASN1_STRING_length'), \Ffi\CType('int')]
+function __mc_pdotls_asn1_len(int $s): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('X509_get_subject_name')]
+function __mc_pdotls_subject(int $x): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('X509_NAME_get_text_by_NID'), \Ffi\CType('int')]
+function __mc_pdotls_name_text(int $name, #[\Ffi\CType('int')] int $nid, \Ffi\Ptr $buf, #[\Ffi\CType('int')] int $len): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('ERR_get_error')]
+function __mc_pdotls_err(): int {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('ERR_reason_error_string')]
+function __mc_pdotls_err_str(int $code): \Ffi\Ptr {}
+
+#[\Ffi\Library('crypto'), \Ffi\Symbol('ERR_clear_error')]
+function __mc_pdotls_err_clear(): void {}
+
+/** What the driver wants from the TLS layer. A class: its fields differ in type (an array would lose them). */
+final class __McPdoTlsOpts
+{
+    /** The name (or IP) the certificate is checked against and sent as SNI. */
+    public string $host = '';
+    /** SSL_VERIFY_PEER: a chain that does not lead to a trusted root fails the handshake. */
+    public bool $verifyChain = false;
+    /** The leaf certificate must match $host. */
+    public bool $verifyName = false;
+    public string $caFile = '';
+    public string $caDir = '';
+    /** Trust the host's default store (sslrootcert=system, or php's default when verifying with no CA given). */
+    public bool $systemRoots = false;
+    public string $crl = '';
+    public string $cert = '';
+    /** '' = the key is in $cert's file. */
+    public string $key = '';
+    public string $ciphers = '';
+    public bool $sni = true;
+}
+
+/** Outcome of {@see __McPdoTls::start}. `stage` names the step that failed; '' = success. */
+final class __McPdoTlsRes
+{
+    public string $stage = '';
+    /** OpenSSL's reason string for the failing step ('' = none queued: the peer simply went away). */
+    public string $reason = '';
+    /** stage 'name': the certificate's first name and how many more it carries. */
+    public string $certName = '';
+    public int $others = 0;
+}
+
+final class __McPdoTls
+{
+    private static function reason(): string
+    {
+        $code = __mc_pdotls_err();
+        if ($code === 0) { return ''; }
+        $p = __mc_pdotls_err_str($code);
+        return \ptr_to_int($p) === 0 ? '' : \cstr_to_str($p);
+    }
+
+    private static function fail(__McPdoTlsRes $r, string $stage): __McPdoTlsRes
+    {
+        $r->stage = $stage;
+        $r->reason = self::reason();
+        __mc_pdotls_err_clear();
+        return $r;
+    }
+
+    public static function isIp(string $h): bool
+    {
+        return \strpos($h, ':') !== false || \ip2long($h) !== false;
+    }
+
+    /**
+     * Unread plaintext on a socket that is about to start TLS: bytes in the stream buffer, or arriving on the wire.
+     * A TLS server says nothing until it hears the ClientHello, so anything here was injected (CVE-2021-23222:
+     * plaintext that would otherwise be parsed as if it came from the TLS session).
+     */
+    public static function pendingPlain(\Resource $sock): bool
+    {
+        return \strlen($sock->rbuf) - $sock->rpos > 0 || \__mc_poll_readable($sock->addr, 0) > 0;
+    }
+
+    /** Client handshake over the already connected plain socket; on success $sock is a KIND_TLS stream. */
+    public static function start(\Resource $sock, __McPdoTlsOpts $o, float $budget): __McPdoTlsRes
+    {
+        $res = new __McPdoTlsRes();
+        __mc_pdotls_err_clear();
+        $ctx = \Runtime\Openssl\ctxNew(\Runtime\Openssl\clientMethod());
+        if ($ctx === 0) { return self::fail($res, 'init'); }
+        if ($o->ciphers !== '' && __mc_pdotls_ciphers($ctx, $o->ciphers) !== 1) {
+            \Runtime\Openssl\ctxFree($ctx);
+            return self::fail($res, 'cipher');
+        }
+        if ($o->cert !== '') {
+            if (\Runtime\Openssl\ctxUseCertChainFile($ctx, $o->cert) !== 1) {
+                \Runtime\Openssl\ctxFree($ctx);
+                return self::fail($res, 'cert');
+            }
+            // 1 = SSL_FILETYPE_PEM; with the certificate loaded, OpenSSL also checks that the key belongs to it
+            if (\Runtime\Openssl\ctxUsePrivateKeyFile($ctx, $o->key !== '' ? $o->key : $o->cert, 1) !== 1) {
+                \Runtime\Openssl\ctxFree($ctx);
+                return self::fail($res, 'key');
+            }
+        }
+        if ($o->caFile !== '' && __mc_pdotls_load_file($ctx, $o->caFile) !== 1) {
+            \Runtime\Openssl\ctxFree($ctx);
+            return self::fail($res, 'root');
+        }
+        if ($o->caDir !== '' && __mc_pdotls_load_dir($ctx, $o->caDir) !== 1) {
+            \Runtime\Openssl\ctxFree($ctx);
+            return self::fail($res, 'root');
+        }
+        if ($o->systemRoots) { \Runtime\Openssl\ctxSetDefaultVerifyPaths($ctx); }
+        if ($o->crl !== '') {
+            $store = __mc_pdotls_store($ctx);
+            // X509_V_FLAG_CRL_CHECK 0x4 | X509_V_FLAG_CRL_CHECK_ALL 0x8, as libpq
+            if ($store === 0 || __mc_pdotls_store_load($store, $o->crl) !== 1 || __mc_pdotls_store_flags($store, 12) !== 1) {
+                \Runtime\Openssl\ctxFree($ctx);
+                return self::fail($res, 'crl');
+            }
+        }
+        \Runtime\Openssl\ctxSetVerify($ctx, $o->verifyChain ? 1 : 0, \int_to_ptr(0));
+        $ssl = \Runtime\Openssl\sslNew($ctx);
+        \Runtime\Openssl\ctxFree($ctx);   // SSL_new holds its own reference
+        if ($ssl === 0) { return self::fail($res, 'init'); }
+        if ($o->sni && $o->host !== '' && !self::isIp($o->host)) {
+            \Runtime\Openssl\ctrl($ssl, 55, 0, $o->host);   // SSL_CTRL_SET_TLSEXT_HOSTNAME
+        }
+        if (\Runtime\Openssl\setFd($ssl, $sock->addr) !== 1) {
+            \Runtime\Openssl\sslFree($ssl);
+            return self::fail($res, 'init');
+        }
+        $rc = self::drive($sock, $ssl, $budget);
+        if ($rc !== 1) {
+            $err = \Runtime\Openssl\getError($ssl, $rc);
+            $r = self::fail($res, $err === 2 || $err === 3 ? 'timeout' : 'connect');
+            \Runtime\Openssl\sslFree($ssl);
+            return $r;
+        }
+        if ($o->verifyName && !self::nameMatches($ssl, $o->host, $res)) {
+            \Runtime\Openssl\sslFree($ssl);
+            $res->stage = 'name';
+            return $res;
+        }
+        $sock->kind = \Resource::KIND_TLS;
+        $sock->type = 'stream';
+        $sock->ssl = $ssl;
+        return $res;
+    }
+
+    /** SSL_connect to completion within $budget seconds; the fiber parks under a scheduler, the thread polls without one. */
+    private static function drive(\Resource $sock, int $ssl, float $budget): int
+    {
+        if (\Runtime\AsyncHook::active()) { return \__mc_tls_drive_connect($sock, $ssl, $budget); }
+        $deadline = \__mc_monotonic_f() + ($budget > 0.0 ? $budget : 60.0);
+        \stream_set_blocking($sock, false);
+        $rc = \Runtime\Openssl\connect($ssl);
+        while ($rc !== 1) {
+            $err = \Runtime\Openssl\getError($ssl, $rc);
+            if ($err !== 2 && $err !== 3) { break; }
+            $left = $deadline - \__mc_monotonic_f();
+            if ($left <= 0.0) { break; }
+            $ms = (int) ($left * 1000.0) + 1;
+            if ($err === 2) {
+                \__mc_poll_readable($sock->addr, $ms);
+            } else {
+                $r = [];
+                $w = [$sock];
+                $x = [];
+                \stream_select($r, $w, $x, 0, $ms * 1000);
+            }
+            $rc = \Runtime\Openssl\connect($ssl);
+        }
+        \stream_set_blocking($sock, true);
+        return $rc;
+    }
+
+    /** The peer certificate must carry $host (a DNS name or an IP); on a mismatch $res gets its first name and the count of the others. */
+    private static function nameMatches(int $ssl, string $host, __McPdoTlsRes $res): bool
+    {
+        $x = __mc_pdotls_peer($ssl);
+        if ($x === 0) { return false; }
+        $ok = self::isIp($host)
+            ? __mc_pdotls_check_ip($x, $host, 0) === 1
+            : __mc_pdotls_check_host($x, $host, \strlen($host), 0, \int_to_ptr(0)) === 1;
+        if (!$ok) {
+            $names = [];
+            // 85 = NID_subject_alt_name; GENERAL_NAME is {int type; union {ASN1_STRING *} d} (d at offset 8 on LP64)
+            $sk = __mc_pdotls_ext($x, 85, \int_to_ptr(0), \int_to_ptr(0));
+            if ($sk !== 0) {
+                $n = __mc_pdotls_sk_num($sk);
+                for ($i = 0; $i < $n; $i++) {
+                    $gn = __mc_pdotls_sk_value($sk, $i);
+                    $type = \peek_i32(\int_to_ptr($gn), 0);
+                    if ($type !== 2 && $type !== 7) { continue; }   // GEN_DNS, GEN_IPADD
+                    $s = \peek_i64(\int_to_ptr($gn), 8);
+                    $len = __mc_pdotls_asn1_len($s);
+                    $raw = $len > 0 && $len <= 255 ? \str_from_buffer(__mc_pdotls_asn1_data($s), $len) : '';
+                    if ($type === 7 && $len === 4) { $raw = (string) \ord($raw[0]) . '.' . (string) \ord($raw[1]) . '.' . (string) \ord($raw[2]) . '.' . (string) \ord($raw[3]); }
+                    elseif ($type === 7) { $inet = \inet_ntop($raw); $raw = $inet === false ? '' : $inet; }
+                    $names[] = $raw;
+                }
+                __mc_pdotls_names_free($sk);
+            }
+            if ($names === []) {
+                $buf = \Runtime\Libc\calloc(256, 1);
+                if ($buf !== null) {
+                    if (__mc_pdotls_name_text(__mc_pdotls_subject($x), 13, $buf, 256) > 0) { $names[] = \cstr_to_str($buf); }   // NID_commonName
+                    \Runtime\Libc\free($buf);
+                }
+            }
+            if ($names !== []) {
+                $res->certName = $names[0];
+                $res->others = \count($names) - 1;
+            }
+        }
+        __mc_pdotls_x509_free($x);
+        return $ok;
+    }
+}

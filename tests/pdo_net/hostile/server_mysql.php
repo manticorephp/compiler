@@ -20,9 +20,9 @@ $rs = function (int $seq, int $type, array $vals, int $flags = 0) use ($pkt, $co
     foreach ($vals as $v) { $o .= $pkt($seq++, $v === null ? "\xfb" : $ls($v)); }
     return $o . $eof($seq);
 };
-$hs = function (string $plugin = 'mysql_native_password', int $alen = 21, int $proto = 10) use ($pkt): string {
+$hs = function (string $plugin = 'mysql_native_password', int $alen = 21, int $proto = 10, int $caps = 0xA20D) use ($pkt): string {
     $scr = str_repeat('a', 20);
-    return $pkt(0, chr($proto) . "8.4.0-fake\0" . pack('V', 7) . substr($scr, 0, 8) . "\0" . pack('v', 0xA20D) . chr(255) . pack('v', 2) . pack('v', 0x002E)
+    return $pkt(0, chr($proto) . "8.4.0-fake\0" . pack('V', 7) . substr($scr, 0, 8) . "\0" . pack('v', $caps) . chr(255) . pack('v', 2) . pack('v', 0x002E)
         . chr($alen) . str_repeat("\0", 10) . substr($scr, 8) . "\0" . $plugin . "\0");
 };
 $quit = function () use ($c) { $end = microtime(true) + 6; stream_set_timeout($c, 1); while (microtime(true) < $end) { $x = fread($c, 1024); if ($x === '' && feof($c)) { break; } } exit; };
@@ -39,6 +39,20 @@ if ($mode === 'drip') {
     fwrite($c, "\x64\x00\x00\x00");
     for ($i = 0; $i < 20; $i++) { usleep(400000); if (@fwrite($c, 'x') === false) { break; } }
     $quit();
+}
+// ── TLS modes: the client wants TLS. ssl_nocap: the server has no CLIENT_SSL; the rest advertise it (0x800) ──
+if ($mode === 'ssl_nocap') { fwrite($c, $hs()); $quit(); }
+if (str_starts_with($mode, 'ssl_')) {
+    $sslHs = $hs('mysql_native_password', 21, 10, 0xA20D | 0x800);
+    // plaintext in the SAME segment as the handshake: the client must refuse to start TLS over it
+    if ($mode === 'ssl_extra') { fwrite($c, $sslHs . $ok(2)); $quit(); }
+    fwrite($c, $sslHs);
+    [$s, $p] = $recv();                                       // the 32-byte SSLRequest, sequence 1
+    if ($s !== 1 || strlen($p) !== 32) { fwrite($c, $err(2, 1043, '08S01', 'Bad handshake')); $quit(); }
+    if ($mode === 'ssl_garbage') { usleep(200000); fwrite($c, "HTTP/1.1 400 Bad Request\r\n\r\n"); }
+    elseif ($mode === 'ssl_close') { usleep(200000); fclose($c); exit; }
+    elseif ($mode === 'ssl_drip') { usleep(200000); fwrite($c, "\x16\x03\x03\x01\x00"); for ($i = 0; $i < 30; $i++) { usleep(400000); if (@fwrite($c, 'x') === false) { break; } } }
+    $quit();                                                  // ssl_silent: nothing more
 }
 fwrite($c, $hs(str_starts_with($mode, 'auth_') ? 'caching_sha2_password' : 'mysql_native_password'));
 $recv();                                                  // HandshakeResponse41
