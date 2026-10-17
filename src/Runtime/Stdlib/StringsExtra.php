@@ -183,10 +183,15 @@ function __mir_similar_text(string $string1, string $string2): int
     $max = 0;
     $pa = 0;
     $pb = 0;
-    for ($i = 0; $i < $la; $i = $i + 1) {
-        for ($j = 0; $j < $lb; $j = $j + 1) {
-            $k = 0;
-            while ($i + $k < $la && $j + $k < $lb && $string1[$i + $k] === $string2[$j + $k]) {
+    for ($i = 0; $i < $la - $max; $i = $i + 1) {
+        $c = \ord($string1[$i]);
+        $room = $la - $i;
+        for ($j = 0; $j < $lb - $max; $j = $j + 1) {
+            if (\ord($string2[$j]) !== $c) { continue; }
+            $lim = $lb - $j;
+            if ($room < $lim) { $lim = $room; }
+            $k = 1;
+            while ($k < $lim && \ord($string1[$i + $k]) === \ord($string2[$j + $k])) {
                 $k = $k + 1;
             }
             if ($k > $max) { $max = $k; $pa = $i; $pb = $j; }
@@ -207,24 +212,27 @@ function levenshtein(string $string1, string $string2): int
     $lb = \strlen($string2);
     if ($la === 0) { return $lb; }
     if ($lb === 0) { return $la; }
-    $prev = [];
-    for ($j = 0; $j <= $lb; $j = $j + 1) { $prev[$j] = $j; }
+    // One DP row, updated in place; $diag carries the cell up-left of $j.
+    $row = [];
+    $bs = [];
+    for ($j = 0; $j <= $lb; $j = $j + 1) { $row[$j] = $j; }
+    for ($j = 0; $j < $lb; $j = $j + 1) { $bs[$j] = \ord($string2[$j]); }
     for ($i = 1; $i <= $la; $i = $i + 1) {
-        $cur = [];
-        $cur[0] = $i;
+        $c = \ord($string1[$i - 1]);
+        $diag = $row[0];
+        $left = $i;
+        $row[0] = $i;
         for ($j = 1; $j <= $lb; $j = $j + 1) {
-            $cost = $string1[$i - 1] === $string2[$j - 1] ? 0 : 1;
-            $del = $prev[$j] + 1;
-            $ins = $cur[$j - 1] + 1;
-            $sub = $prev[$j - 1] + $cost;
-            $m = $del;
-            if ($ins < $m) { $m = $ins; }
-            if ($sub < $m) { $m = $sub; }
-            $cur[$j] = $m;
+            $up = $row[$j];
+            $m = $diag + ($bs[$j - 1] === $c ? 0 : 1);
+            if ($up + 1 < $m) { $m = $up + 1; }
+            if ($left + 1 < $m) { $m = $left + 1; }
+            $row[$j] = $m;
+            $left = $m;
+            $diag = $up;
         }
-        $prev = $cur;
     }
-    return $prev[$lb];
+    return $row[$lb];
 }
 
 /** Case-insensitive {@see strrpos}. */
@@ -900,70 +908,125 @@ function substr_compare(string $haystack, string $needle, int $offset, ?int $len
     return $la - $lb;
 }
 
-/** php's version ordering rank for one canonicalised part. */
-function __mc_version_order(string $part): int
-{
-    if ($part === "dev") { return 0; }
-    if ($part === "alpha" || $part === "a") { return 1; }
-    if ($part === "beta" || $part === "b") { return 2; }
-    if ($part === "RC" || $part === "rc") { return 3; }
-    if ($part === "#") { return 4; }
-    if ($part === "pl" || $part === "p") { return 6; }
-    if ($part !== "" && \ctype_digit($part)) { return 5; }
-    return -1;                                   // any other string sorts first
-}
-
 /**
- * php's version canonicaliser: insert `.` around every run-boundary between
- * digits and non-digits, and treat `-`, `_`, `+` as `.`.
- * @return string[]
+ * php's canonicalize_version: every `-`, `_`, `+` and other non-alphanumeric
+ * byte becomes a single `.`, and a `.` is inserted at each digit/non-digit
+ * boundary. The first byte is copied as it is.
  */
-function __mc_version_parts(string $v): array
+function __mc_version_canon(string $v): string
 {
-    $s = "";
     $n = \strlen($v);
-    $i = 0;
-    while ($i < $n) {
-        $c = $v[$i];
-        if ($c === "-" || $c === "_" || $c === "+") {
-            $s = $s . ".";
-        } elseif ($c === ".") {
-            $s = $s . ".";
+    if ($n === 0) { return ""; }
+    // Plain dotted numbers ("1.2.3") are already canonical.
+    if (\strspn($v, "0123456789.") === $n && $v[$n - 1] !== "." && $v[0] !== "." && !\str_contains($v, "..")) { return $v; }
+    $lp = \ord($v[0]);
+    $out = $v[0];
+    $lqDot = $lp === 46;
+    $lpDig = $lp >= 48 && $lp <= 57;
+    $lpNdig = !$lpDig && $lp !== 46;
+    for ($i = 1; $i < $n; $i = $i + 1) {
+        $c = \ord($v[$i]);
+        $dig = $c >= 48 && $c <= 57;
+        if ($c === 45 || $c === 95 || $c === 43) {
+            if (!$lqDot) { $out = $out . "."; $lqDot = true; }
+        } elseif (($lpNdig && $dig) || ($lpDig && !$dig && $c !== 46)) {
+            if (!$lqDot) { $out = $out . "."; }
+            $out = $out . $v[$i];
+            $lqDot = false;
+        } elseif (!$dig && !(($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122))) {
+            if (!$lqDot) { $out = $out . "."; $lqDot = true; }
         } else {
-            if ($i > 0) {
-                $p = $v[$i - 1];
-                $pd = \ctype_digit($p);
-                $cd = \ctype_digit($c);
-                if ($p !== "." && $p !== "-" && $p !== "_" && $p !== "+" && $pd !== $cd) {
-                    $s = $s . ".";
-                }
-            }
-            $s = $s . $c;
+            $out = $out . $v[$i];
+            $lqDot = false;
         }
-        $i = $i + 1;
+        $lp = $c;
+        $lpDig = $dig;
+        $lpNdig = !$dig && $c !== 46;
     }
-    $raw = \explode(".", $s);
-    $out = [];
-    foreach ($raw as $p) {
-        if ($p !== "") { $out[] = $p; }
-    }
+    // A trailing separator is no part at all in php's ordering ("1." == "1").
+    if ($lqDot && \strlen($out) > 1) { $out = \substr($out, 0, -1); }
     return $out;
 }
 
-/** -1 / 0 / 1 for two canonicalised version parts. */
-function __mc_version_cmp_part(string $a, string $b): int
+/** Rank of a special version form: the first table entry that is a PREFIX of the part at `$p`, else -1. */
+function __mc_version_rank(string $c, int $p): int
 {
-    $oa = __mc_version_order($a);
-    $ob = __mc_version_order($b);
-    if ($oa !== $ob) { return $oa < $ob ? -1 : 1; }
-    if ($oa === 5) {
-        $ia = (int)$a;
-        $ib = (int)$b;
-        if ($ia === $ib) { return 0; }
-        return $ia < $ib ? -1 : 1;
+    $b = \ord($c[$p]);
+    if ($b === 100) { return \substr_compare($c, "dev", $p, 3) === 0 ? 0 : -1; }
+    if ($b === 97) { return 1; }
+    if ($b === 98) { return 2; }
+    if ($b === 82) { return \substr_compare($c, "RC", $p, 2) === 0 ? 3 : -1; }
+    if ($b === 114) { return \substr_compare($c, "rc", $p, 2) === 0 ? 3 : -1; }
+    if ($b === 35) { return 4; }
+    if ($b === 112) { return 5; }
+    return -1;
+}
+
+/** php_version_compare over two already-canonical strings. */
+function __mc_version_cmp(string $c1, string $c2): int
+{
+    $l1 = \strlen($c1);
+    $l2 = \strlen($c2);
+    if ($l1 === 0 || $l2 === 0) {
+        if ($l1 === 0 && $l2 === 0) { return 0; }
+        return $l1 > 0 ? 1 : -1;
     }
-    if ($a === $b) { return 0; }
-    return $a < $b ? -1 : 1;
+    $p1 = 0;
+    $p2 = 0;
+    $n1 = 0;
+    $n2 = 0;
+    $cmp = 0;
+    while ($p1 < $l1 && $p2 < $l2 && $n1 >= 0 && $n2 >= 0) {
+        $f = \strpos($c1, ".", $p1);
+        $n1 = $f === false ? -1 : $f;
+        $f = \strpos($c2, ".", $p2);
+        $n2 = $f === false ? -1 : $f;
+        $b1 = \ord($c1[$p1]);
+        $b2 = \ord($c2[$p2]);
+        $d1 = $b1 >= 48 && $b1 <= 57;
+        $d2 = $b2 >= 48 && $b2 <= 57;
+        if ($d1 && $d2) {
+            $e1 = $n1 < 0 ? $l1 : $n1;
+            $e2 = $n2 < 0 ? $l2 : $n2;
+            if ($e1 - $p1 <= 18 && $e2 - $p2 <= 18) {
+                $x1 = 0;
+                for ($q = $p1; $q < $e1; $q = $q + 1) { $x1 = $x1 * 10 + \ord($c1[$q]) - 48; }
+                $x2 = 0;
+                for ($q = $p2; $q < $e2; $q = $q + 1) { $x2 = $x2 * 10 + \ord($c2[$q]) - 48; }
+                $cmp = $x1 < $x2 ? -1 : ($x1 > $x2 ? 1 : 0);
+                if ($cmp !== 0) { break; }
+                if ($n1 >= 0) { $p1 = $n1 + 1; }
+                if ($n2 >= 0) { $p2 = $n2 + 1; }
+                continue;
+            }
+            // strtol: leading zeros dropped, saturating at PHP_INT_MAX.
+            $s1 = \ltrim(\substr($c1, $p1, $e1 - $p1), "0");
+            $s2 = \ltrim(\substr($c2, $p2, $e2 - $p2), "0");
+            if (\strlen($s1) > 19 || (\strlen($s1) === 19 && \strcmp($s1, "9223372036854775807") > 0)) { $s1 = "9223372036854775807"; }
+            if (\strlen($s2) > 19 || (\strlen($s2) === 19 && \strcmp($s2, "9223372036854775807") > 0)) { $s2 = "9223372036854775807"; }
+            $k = \strlen($s1) - \strlen($s2);
+            if ($k === 0) { $k = \strcmp($s1, $s2); }
+            $cmp = $k < 0 ? -1 : ($k > 0 ? 1 : 0);
+        } else {
+            $r1 = $d1 ? 4 : ($b1 === 46 ? -1 : \__mc_version_rank($c1, $p1));
+            $r2 = $d2 ? 4 : ($b2 === 46 ? -1 : \__mc_version_rank($c2, $p2));
+            $cmp = $r1 < $r2 ? -1 : ($r1 > $r2 ? 1 : 0);
+        }
+        if ($cmp !== 0) { break; }
+        if ($n1 >= 0) { $p1 = $n1 + 1; }
+        if ($n2 >= 0) { $p2 = $n2 + 1; }
+    }
+    if ($cmp === 0) {
+        if ($n1 >= 0) {
+            if ($p1 < $l1 && \ord($c1[$p1]) >= 48 && \ord($c1[$p1]) <= 57) { return 1; }
+            return \__mc_version_cmp(\substr($c1, $p1), "#N");
+        }
+        if ($n2 >= 0) {
+            if ($p2 < $l2 && \ord($c2[$p2]) >= 48 && \ord($c2[$p2]) <= 57) { return -1; }
+            return \__mc_version_cmp("#N", \substr($c2, $p2));
+        }
+    }
+    return $cmp;
 }
 
 /**
@@ -972,30 +1035,15 @@ function __mc_version_cmp_part(string $a, string $b): int
  */
 function version_compare(string $version1, string $version2, ?string $operator = null): mixed
 {
-    $a = __mc_version_parts($version1);
-    $b = __mc_version_parts($version2);
-    $na = \count($a);
-    $nb = \count($b);
-    $n = $na > $nb ? $na : $nb;
-    $r = 0;
-    $i = 0;
-    while ($i < $n) {
-        // A missing part compares as "#" — php's neutral filler, which ranks
-        // above dev/alpha/beta/RC and below a number.
-        $pa = $i < $na ? $a[$i] : "#";
-        $pb = $i < $nb ? $b[$i] : "#";
-        $c = __mc_version_cmp_part($pa, $pb);
-        if ($c !== 0) { $r = $c; break; }
-        $i = $i + 1;
-    }
+    $r = \__mc_version_cmp(\__mc_version_canon($version1), \__mc_version_canon($version2));
     if ($operator === null) { return $r; }
     if ($operator === "<" || $operator === "lt") { return $r < 0; }
     if ($operator === "<=" || $operator === "le") { return $r <= 0; }
     if ($operator === ">" || $operator === "gt") { return $r > 0; }
     if ($operator === ">=" || $operator === "ge") { return $r >= 0; }
-    if ($operator === "==" || $operator === "eq") { return $r === 0; }
-    if ($operator === "!=" || $operator === "ne" || $operator === "<>") { return $r !== 0; }
-    return null;
+    if ($operator === "==" || $operator === "=" || $operator === "eq") { return $r === 0; }
+    if ($operator === "!=" || $operator === "<>" || $operator === "ne") { return $r !== 0; }
+    throw new \ValueError('version_compare(): Argument #3 ($operator) must be a valid comparison operator');
 }
 
 /**

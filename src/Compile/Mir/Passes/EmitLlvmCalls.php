@@ -782,6 +782,7 @@ trait EmitLlvmCalls
                 // just unboxed by the callee's own parameter coercion.
                 $clean[$cname] = $crt;
             }
+
             if (\count($clean) >= self::DYNF_TABLE_MIN) {
                 foreach ($clean as $cname => $crt) {
                     $tsym = $this->dynfThunk($cname, $argc, $crt);
@@ -928,21 +929,43 @@ trait EmitLlvmCalls
         // ordinary call, which the builtin emitter answers inline. Fixed arity
         // only (a spread would need the pack filled against their params).
         if (!$hasSpread) {
+            // One binary search over the sorted twin names yields a small id; the
+            // arms then compare ints (LLVM folds the chain into a switch) instead
+            // of a strcmp per twin.
+            $twinIds = [];
+            $twinNames = [];
             foreach ($this->builtinTwinTot as $bname => $btot) {
                 if (isset($this->sigs->returnType[$bname])) { continue; }
                 $breq = $this->builtinTwinReq[$bname] ?? $btot;
                 if ($argc < $breq || $argc > $btot) { continue; }
-                $bh = \strtolower($this->builtinTwinRet[$bname] ?? '');
-                $brt = match ($bh) {
-                    'bool' => Type::bool_(), 'int' => Type::int_(), 'float' => Type::float_(),
-                    'string' => Type::string_(), default => Type::cell(),
-                };
+                $twinNames[] = $bname;
+            }
+            \sort($twinNames, SORT_STRING);
+            $twinId = '0';
+            if ($twinNames !== []) {
+                $this->dynfExtraBodies .= $this->dynfBsearchFn();
+                $rows = [];
+                foreach ($twinNames as $ti => $bname) {
+                    $twinIds[$bname] = $ti + 1;
+                    $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($bname) . ', ptr inttoptr (i64 ' . (string)($ti + 1) . ' to ptr) }';
+                }
+                $tsym = '@.dynf.twin.' . $this->mirHelperSym((string)\count($this->dynfTables));
+                $this->dynfTables['twin' . (string)\count($this->dynfTables)] = [$tsym, \count($rows)];
+                $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)\count($rows)
+                    . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n\n";
+                $idp = $this->ssa->allocReg();
+                $out .= '  ' . $idp . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP . ', ptr ' . $tsym
+                      . ', i64 ' . (string)\count($rows) . ")\n";
+                $twinId = $this->ssa->allocReg();
+                $out .= '  ' . $twinId . ' = ptrtoint ptr ' . $idp . " to i64\n";
+            }
+            foreach ($twinNames as $bname) {
+                $btot = $this->builtinTwinTot[$bname];
+                $brt = $this->twinRetType($bname);
                 $hitL = $this->ssa->allocLabel('dynf.bhit');
                 $nextL = $this->ssa->allocLabel('dynf.bnext');
-                $cmp = $this->ssa->allocReg();
-                $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($bname) . ")\n";
                 $eq = $this->ssa->allocReg();
-                $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+                $out .= '  ' . $eq . ' = icmp eq i64 ' . $twinId . ', ' . (string)$twinIds[$bname] . "\n";
                 $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
                 $out .= $hitL . ":\n";
                 $out .= $this->emitNode(new \Compile\Mir\Call($bname, $iv->args, $brt));
@@ -1144,7 +1167,8 @@ trait EmitLlvmCalls
      */
     private function emitDynfTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms): string
     {
-        $this->dynfExtraBodies .= $this->dynfLookupFn();
+        $this->dynfExtraBodies .= $this->dynfBsearchFn();
+        \ksort($syms, SORT_STRING);
         $pair = $this->dynfTable($syms);
         $out = '';
         $argRegs = [];
@@ -1157,7 +1181,7 @@ trait EmitLlvmCalls
             $argRegs[] = $this->lastValue;
         }
         $fn = $this->ssa->allocReg();
-        $out .= '  ' . $fn . ' = call ptr @__mc_dynf_lookup(ptr ' . $keyP
+        $out .= '  ' . $fn . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP
               . ', ptr ' . $pair[0] . ', i64 ' . (string)$pair[1] . ")\n";
         $hit = $this->ssa->allocReg();
         $out .= '  ' . $hit . ' = icmp ne ptr ' . $fn . ", null\n";
@@ -1172,6 +1196,14 @@ trait EmitLlvmCalls
         $out .= '  ' . $r . ' = call i64 ' . $fn . '(' . $argList . ")\n";
         $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
         return $out;
+    }
+
+    private function twinRetType(string $bname): Type
+    {
+        return match (\strtolower($this->builtinTwinRet[$bname] ?? '')) {
+            'bool' => Type::bool_(), 'int' => Type::int_(), 'float' => Type::float_(),
+            'string' => Type::string_(), default => Type::cell(),
+        };
     }
 
     /** Below this many table-eligible candidates the chain is the smaller IR:
@@ -1211,6 +1243,43 @@ trait EmitLlvmCalls
         $out .= "  %i1 = add i64 %i, 1\n";
         $out .= "  %done = icmp eq i64 %i1, %cnt\n";
         $out .= "  br i1 %done, label %miss, label %loop\n";
+        $out .= "miss:\n  ret ptr null\n}\n\n";
+        return $out;
+    }
+
+    /** Binary search over rows sorted by strcmp order; a miss answers null. */
+    private function dynfBsearchFn(): string
+    {
+        if ($this->dynfBsearchEmitted) { return ''; }
+        $this->dynfBsearchEmitted = true;
+        $this->rt->needsStrcmp = true;
+        $out = "define linkonce_odr ptr @__mc_dynf_bsearch(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %lo = phi i64 [ 0, %entry ], [ %lo2, %cont ]\n";
+        $out .= "  %hi = phi i64 [ %cnt, %entry ], [ %hi2, %cont ]\n";
+        $out .= "  %more = icmp ult i64 %lo, %hi\n";
+        $out .= "  br i1 %more, label %probe, label %miss\n";
+        $out .= "probe:\n";
+        $out .= "  %span = sub i64 %hi, %lo\n";
+        $out .= "  %half = lshr i64 %span, 1\n";
+        $out .= "  %mid = add i64 %lo, %half\n";
+        $out .= "  %off = mul i64 %mid, 16\n";
+        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
+        $out .= "  %np = load ptr, ptr %row\n";
+        $out .= "  %cmp = call i32 @strcmp(ptr %name, ptr %np)\n";
+        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "cont:\n";
+        $out .= "  %lt = icmp slt i32 %cmp, 0\n";
+        $out .= "  %mid1 = add i64 %mid, 1\n";
+        $out .= "  %lo2 = select i1 %lt, i64 %lo, i64 %mid1\n";
+        $out .= "  %hi2 = select i1 %lt, i64 %mid, i64 %hi\n";
+        $out .= "  br label %loop\n";
+        $out .= "hit:\n";
+        $out .= "  %fp = getelementptr i8, ptr %row, i64 8\n";
+        $out .= "  %fv = load ptr, ptr %fp\n";
+        $out .= "  ret ptr %fv\n";
         $out .= "miss:\n  ret ptr null\n}\n\n";
         return $out;
     }

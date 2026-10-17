@@ -255,6 +255,11 @@ function __mc_tz(int $op, int $a, int $b, string $name = ''): int
     static $ttDst = [];
     static $ttAbbr = [];
     static $px = [];
+    // Last transition interval resolved by the search below: [wLo, wHi) in zone wZ has type wTy.
+    static $wZ = -1;
+    static $wLo = 0;
+    static $wHi = 0;
+    static $wTy = 0;
 
     if ($op === 0) {
         if (isset($byName[$name])) {
@@ -495,6 +500,9 @@ function __mc_tz(int $op, int $a, int $b, string $name = ''): int
     }
 
     if ($op === 8 || $op === 10) {
+        if ($wZ === $a && $b >= $wLo && $b < $wHi) {
+            return $op === 10 ? $ttOff[$zTtBase[$a] + $wTy] : $wTy;
+        }
         $n = $zTrN[$a];
         $base = $zTrBase[$a];
         $pxb = $zPxBase[$a];
@@ -525,6 +533,12 @@ function __mc_tz(int $op, int $a, int $b, string $name = ''): int
                 }
             }
             $ty = $trTy[$base + $lo];
+            if ($lo + 1 < $n) {
+                $wZ = $a;
+                $wLo = $trAt[$base + $lo];
+                $wHi = $trAt[$base + $lo + 1];
+                $wTy = $ty;
+            }
         }
         if ($op === 10) {
             return $ttOff[$zTtBase[$a] + $ty];
@@ -533,14 +547,18 @@ function __mc_tz(int $op, int $a, int $b, string $name = ''): int
     }
 
     if ($op === 9) {
+        // No transitions and no POSIX rule (UTC, fixed zones): one type, nothing to resolve.
+        if ($zTrN[$a] === 0 && $px[$zPxBase[$a]] === 0) {
+            return \__mc_tz(8, $a, $b);
+        }
         // Local wall clock -> type. A candidate type t is consistent when
         // resolving (local - gmtoff(t)) as UTC lands back on t.
         $t1 = \__mc_tz(8, $a, $b - \__mc_tz(10, $a, $b));
         $c1 = $b - $ttOff[$zTtBase[$a] + $t1];
-        $ok1 = \__mc_tz(8, $a, $c1) === $t1;
         $t2 = \__mc_tz(8, $a, $c1);
+        $ok1 = $t2 === $t1;
         $c2 = $b - $ttOff[$zTtBase[$a] + $t2];
-        $ok2 = \__mc_tz(8, $a, $c2) === $t2;
+        $ok2 = ($c2 === $c1 ? $t2 : \__mc_tz(8, $a, $c2)) === $t2;
         if ($ok1 && $ok2 && $t1 !== $t2) {
             // Ambiguous (fall-back fold): PHP takes the FIRST occurrence,
             // i.e. the one still on DST.
@@ -571,30 +589,43 @@ function __mc_tz(int $op, int $a, int $b, string $name = ''): int
 /** POSIX-footer type for a UTC instant past the last recorded transition. */
 function __mc_tz_posixtype(int $zid, int $ts): int
 {
-    $has = \__mc_tz(7, $zid, 0);
-    $stdIdx = \__mc_tz(7, $zid, 3);
-    if ($has < 2) {
-        return $stdIdx;
-    }
-    $dstIdx = \__mc_tz(7, $zid, 4);
-    $stdOff = \__mc_tz(7, $zid, 1);
-    $dstOff = \__mc_tz(7, $zid, 2);
-    $p = \__mc_civil_from_days(\__mc_fdiv($ts, 86400));
-    $y = \__mc_civ_y($p);
-    $start = \__mc_tz_ruleutc($y, \__mc_tz(7, $zid, 5), \__mc_tz(7, $zid, 6), \__mc_tz(7, $zid, 7),
-        \__mc_tz(7, $zid, 8), \__mc_tz(7, $zid, 9), $stdOff);
-    $end = \__mc_tz_ruleutc($y, \__mc_tz(7, $zid, 10), \__mc_tz(7, $zid, 11), \__mc_tz(7, $zid, 12),
-        \__mc_tz(7, $zid, 13), \__mc_tz(7, $zid, 14), $dstOff);
-    if ($start <= $end) {
-        // Northern hemisphere: DST is the interval inside the year.
-        if ($ts >= $start && $ts < $end) {
-            return $dstIdx;
+    // One-entry cache: the rule instants of the last (zone, year) asked about.
+    static $cz = -1;
+    static $cy = 0;
+    static $cHas = 0;
+    static $cStd = 0;
+    static $cDst = 0;
+    static $cStart = 0;
+    static $cEnd = 0;
+    $y = \__mc_civ_y(\__mc_civil_from_days(\__mc_fdiv($ts, 86400)));
+    if ($cz !== $zid || $cy !== $y) {
+        $cHas = \__mc_tz(7, $zid, 0);
+        $cStd = \__mc_tz(7, $zid, 3);
+        $cDst = \__mc_tz(7, $zid, 4);
+        if ($cHas >= 2) {
+            $stdOff = \__mc_tz(7, $zid, 1);
+            $dstOff = \__mc_tz(7, $zid, 2);
+            $cStart = \__mc_tz_ruleutc($y, \__mc_tz(7, $zid, 5), \__mc_tz(7, $zid, 6), \__mc_tz(7, $zid, 7),
+                \__mc_tz(7, $zid, 8), \__mc_tz(7, $zid, 9), $stdOff);
+            $cEnd = \__mc_tz_ruleutc($y, \__mc_tz(7, $zid, 10), \__mc_tz(7, $zid, 11), \__mc_tz(7, $zid, 12),
+                \__mc_tz(7, $zid, 13), \__mc_tz(7, $zid, 14), $dstOff);
         }
-        return $stdIdx;
+        $cz = $zid;
+        $cy = $y;
+    }
+    if ($cHas < 2) {
+        return $cStd;
+    }
+    if ($cStart <= $cEnd) {
+        // Northern hemisphere: DST is the interval inside the year.
+        if ($ts >= $cStart && $ts < $cEnd) {
+            return $cDst;
+        }
+        return $cStd;
     }
     // Southern hemisphere: DST wraps the new year.
-    if ($ts >= $start || $ts < $end) {
-        return $dstIdx;
+    if ($ts >= $cStart || $ts < $cEnd) {
+        return $cDst;
     }
-    return $stdIdx;
+    return $cStd;
 }
