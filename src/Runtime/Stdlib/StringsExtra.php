@@ -204,35 +204,37 @@ function __mir_similar_text(string $string1, string $string2): int
     return $sum;
 }
 
-/** Levenshtein edit distance between `$string1` and `$string2` (insertions,
- *  deletions and substitutions each cost 1). */
-function levenshtein(string $string1, string $string2): int
+/** Levenshtein edit distance between `$string1` and `$string2`, each insertion, replacement and
+ *  deletion priced by its cost. One DP row in a malloc'd int64 buffer, updated in place
+ *  (`$diag` carries the cell up-left of `$j`): raw loads and stores, no array. */
+function levenshtein(string $string1, string $string2, int $insertion_cost = 1, int $replacement_cost = 1, int $deletion_cost = 1): int
 {
     $la = \strlen($string1);
     $lb = \strlen($string2);
-    if ($la === 0) { return $lb; }
-    if ($lb === 0) { return $la; }
-    // One DP row, updated in place; $diag carries the cell up-left of $j.
-    $row = [];
-    $bs = [];
-    for ($j = 0; $j <= $lb; $j = $j + 1) { $row[$j] = $j; }
-    for ($j = 0; $j < $lb; $j = $j + 1) { $bs[$j] = \ord($string2[$j]); }
-    for ($i = 1; $i <= $la; $i = $i + 1) {
-        $c = \ord($string1[$i - 1]);
-        $diag = $row[0];
-        $left = $i;
-        $row[0] = $i;
+    if ($la === 0) { return $lb * $insertion_cost; }
+    if ($lb === 0) { return $la * $deletion_cost; }
+    $row = \Runtime\Libc\malloc(($lb + 1) * 8);
+    for ($j = 0; $j <= $lb; $j = $j + 1) { \poke_i64($row, $j * 8, $j * $insertion_cost); }
+    for ($i = 0; $i < $la; $i = $i + 1) {
+        $c = \ord($string1[$i]);
+        $diag = \peek_i64($row, 0);
+        $left = $diag + $deletion_cost;
+        \poke_i64($row, 0, $left);
         for ($j = 1; $j <= $lb; $j = $j + 1) {
-            $up = $row[$j];
-            $m = $diag + ($bs[$j - 1] === $c ? 0 : 1);
-            if ($up + 1 < $m) { $m = $up + 1; }
-            if ($left + 1 < $m) { $m = $left + 1; }
-            $row[$j] = $m;
+            $up = \peek_i64($row, $j * 8);
+            $m = $diag + (\ord($string2[$j - 1]) === $c ? 0 : $replacement_cost);
+            $d = $up + $deletion_cost;
+            if ($d < $m) { $m = $d; }
+            $d = $left + $insertion_cost;
+            if ($d < $m) { $m = $d; }
+            \poke_i64($row, $j * 8, $m);
             $left = $m;
             $diag = $up;
         }
     }
-    return $row[$lb];
+    $r = \peek_i64($row, $lb * 8);
+    \Runtime\Libc\free($row);
+    return $r;
 }
 
 /** Case-insensitive {@see strrpos}. */
