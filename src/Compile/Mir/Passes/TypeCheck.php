@@ -280,6 +280,17 @@ final class TypeCheck
                 $site->args[$ai] = $cast;
                 continue;
             }
+            // Coercive mode: a float bound to an `int` param is converted at the
+            // call (an integral float is the int, a fractional one truncates).
+            // Left alone, the callee read the double's IEEE bits as the int.
+            if ($p->type->kind === Type::KIND_INT && !$p->byRef && $ak === Type::KIND_FLOAT
+                && !isset($this->ffiFns[$fnName]) && !isset($this->claimFns[$fnName])
+                && $site->args[$ai] === $arg) {
+                $cast = new \Compile\Mir\Cast('int', $arg, Type::int_());
+                $cast->line = $arg->line;
+                $site->args[$ai] = $cast;
+                continue;
+            }
             if ($this->castOnly) { continue; }
             if (!$this->reprOnly &&$this->incompatible($this->provenType($arg), $p->type)) {
                 if ($this->demoteArgMismatch) {
