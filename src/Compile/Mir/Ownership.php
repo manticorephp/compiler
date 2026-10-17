@@ -1688,6 +1688,8 @@ final class Ownership
             if ($k === Node::KIND_CALL) {
                 $c = self::asCall($n);
                 $sym = $c->function;
+                // A builtin that keeps no argument (`array_pop($objs)`) is proven.
+                if (EscapeSummaries::keepsNoArg($sym)) { return []; }
                 $args = $c->args;
             } elseif ($k === Node::KIND_METHOD_CALL) {
                 $mc = self::asMethodCall($n);

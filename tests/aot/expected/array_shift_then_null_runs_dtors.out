@@ -1,0 +1,7 @@
+~a ~b end
+~b ~a end
+~a mid ~b end
+~a mid ~b ~c 
+mid ~a m2 ~b ~c end
+
+~o0 ~o1 mid ~u ~o2 ~o3 ~o4 ~o5 end
