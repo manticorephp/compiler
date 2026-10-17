@@ -38,11 +38,19 @@ final class __McPdoPgResult
     public array $cols = [];
     /** @var array<int,int> */
     public array $oids = [];
+    /** @var array<int,int> source table OID per column, 0 when it is not a plain column */
+    public array $tbls = [];
+    /** @var array<int,int> pg_type.typlen per column */
+    public array $lens = [];
+    /** @var array<int,int> atttypmod per column */
+    public array $mods = [];
     /** @var array<int,array<int,?string>> */
     public array $rows = [];
     public string $tag = '';
     public int $affected = 0;
     public ?__McPdoPgErr $err = null;
+    /** The extended protocol's ParseComplete arrived (the named statement exists server-side). */
+    public bool $parsed = false;
 }
 
 final class __McPdoPgWire
@@ -58,6 +66,8 @@ final class __McPdoPgWire
     /** SASL progress: 0 none, 1 initial response sent, 2 client-final sent, 3 server signature verified. */
     private int $sasl = 0;
     private bool $authOk = false;
+    /** Close+Sync round trips sent whose ReadyForQuery has not been read yet. */
+    private int $owed = 0;
     /** @var resource */
     private $s;
     private string $buf = '';
@@ -115,8 +125,12 @@ final class __McPdoPgWire
 
     public function send(string $type, string $body): void
     {
+        $this->sendRaw($type . self::be32(\strlen($body) + 4) . $body);
+    }
+
+    private function sendRaw(string $m): void
+    {
         if ($this->dead) { throw $this->ioFail('connection is closed'); }
-        $m = $type . self::be32(\strlen($body) + 4) . $body;
         while ($m !== '') {
             $w = \fwrite($this->s, $m);
             if ($w === false || $w === 0) {
@@ -183,6 +197,16 @@ final class __McPdoPgWire
     private static function be32(int $n): string
     {
         return \chr(($n >> 24) & 255) . \chr(($n >> 16) & 255) . \chr(($n >> 8) & 255) . \chr($n & 255);
+    }
+
+    private static function be16(int $n): string
+    {
+        return \chr(($n >> 8) & 255) . \chr($n & 255);
+    }
+
+    private static function frame(string $t, string $body): string
+    {
+        return $t . self::be32(\strlen($body) + 4) . $body;
     }
 
     private static function i32(string $b, int $o): int
@@ -317,50 +341,92 @@ final class __McPdoPgWire
         }
     }
 
+    private function truncated(): PDOException
+    {
+        return $this->ioFail('protocol error: truncated message');
+    }
+
+    /** A RowDescription body into $res (columns, type OIDs, source tables, sizes, modifiers). */
+    private function rowDesc(string $b, __McPdoPgResult $res): void
+    {
+        $res->cols = [];
+        $res->oids = [];
+        $res->tbls = [];
+        $res->lens = [];
+        $res->mods = [];
+        $res->rows = [];
+        $bl = \strlen($b);
+        if ($bl < 2) { throw $this->truncated(); }
+        $n = (\ord($b[0]) << 8) | \ord($b[1]);
+        $o = 2;
+        for ($i = 0; $i < $n; $i++) {
+            $z = \strpos($b, "\0", $o);
+            if ($z === false || $z + 19 > $bl) { throw $this->truncated(); }
+            $res->cols[] = \substr($b, $o, $z - $o);
+            $res->tbls[] = self::i32($b, $z + 1);
+            $res->oids[] = self::i32($b, $z + 7);
+            $l = (\ord($b[$z + 11]) << 8) | \ord($b[$z + 12]);
+            $res->lens[] = $l >= 32768 ? $l - 65536 : $l;
+            $m = self::i32($b, $z + 13);
+            $res->mods[] = $m >= 2147483648 ? $m - 4294967296 : $m;
+            $o = $z + 19;
+        }
+        if ($o !== $bl) { throw $this->truncated(); }
+    }
+
+    /**
+     * A DataRow body. Every length is checked against the body: a hostile
+     * server must not be able to make substr() read (or us allocate) past it.
+     *
+     * @return array<int,?string>
+     */
+    private function dataRow(string $b, int $ncols): array
+    {
+        $bl = \strlen($b);
+        if ($bl < 2) { throw $this->truncated(); }
+        $n = (\ord($b[0]) << 8) | \ord($b[1]);
+        if ($n !== $ncols) { throw $this->truncated(); }
+        $o = 2;
+        /** @var array<int,?string> */
+        $row = [];
+        for ($i = 0; $i < $n; $i++) {
+            if ($o + 4 > $bl) { throw $this->truncated(); }
+            $l = (\ord($b[$o]) << 24) | (\ord($b[$o + 1]) << 16) | (\ord($b[$o + 2]) << 8) | \ord($b[$o + 3]);
+            $o += 4;
+            if ($l === 0xFFFFFFFF) { $row[] = null; continue; }
+            if ($o + $l > $bl) { throw $this->truncated(); }
+            $row[] = \substr($b, $o, $l);
+            $o += $l;
+        }
+        if ($o !== $bl) { throw $this->truncated(); }
+        return $row;
+    }
+
+    /** A CommandComplete body: `INSERT 0 3`, `UPDATE 2`, `SELECT 5`, `DELETE 0`, `MERGE 1`, `COPY 4`, `CREATE TABLE`. */
+    private function cmdTag(string $b, __McPdoPgResult $res): void
+    {
+        $bl = \strlen($b);
+        if ($bl < 1 || $b[$bl - 1] !== "\0") { throw $this->truncated(); }
+        $res->tag = \substr($b, 0, $bl - 1);
+        $sp = \strrpos($res->tag, ' ');
+        $res->affected = $sp === false ? 0 : (int) \substr($res->tag, $sp + 1);
+    }
+
     /** Runs one query string over the simple protocol. Never throws on a server error. */
     public function simple(string $sql): __McPdoPgResult
     {
+        $this->settle();
         $this->send('Q', $sql . "\0");
         $res = new __McPdoPgResult();
         $seenT = false;
         $copy = false;
-        $trunc = 'protocol error: truncated message';
         while (true) {
             [$t, $b] = $this->msg();
             if ($t === 'D') {
-                $bl = \strlen($b);
-                if ($bl < 2) { throw $this->ioFail($trunc); }
-                $n = (\ord($b[0]) << 8) | \ord($b[1]);
-                if ($n !== \count($res->cols)) { throw $this->ioFail($trunc); }
-                $o = 2;
-                /** @var array<int,?string> */
-                $row = [];
-                for ($i = 0; $i < $n; $i++) {
-                    if ($o + 4 > $bl) { throw $this->ioFail($trunc); }
-                    $l = (\ord($b[$o]) << 24) | (\ord($b[$o + 1]) << 16) | (\ord($b[$o + 2]) << 8) | \ord($b[$o + 3]);
-                    $o += 4;
-                    if ($l === 0xFFFFFFFF) { $row[] = null; continue; }
-                    if ($o + $l > $bl) { throw $this->ioFail($trunc); }
-                    $row[] = \substr($b, $o, $l);
-                    $o += $l;
-                }
-                $res->rows[] = $row;
+                $res->rows[] = $this->dataRow($b, \count($res->cols));
             } elseif ($t === 'T') {
-                $res->cols = [];
-                $res->oids = [];
-                $res->rows = [];
+                $this->rowDesc($b, $res);
                 $seenT = true;
-                $bl = \strlen($b);
-                if ($bl < 2) { throw $this->ioFail($trunc); }
-                $n = (\ord($b[0]) << 8) | \ord($b[1]);
-                $o = 2;
-                for ($i = 0; $i < $n; $i++) {
-                    $z = \strpos($b, "\0", $o);
-                    if ($z === false || $z + 19 > $bl) { throw $this->ioFail($trunc); }
-                    $res->cols[] = \substr($b, $o, $z - $o);
-                    $res->oids[] = self::i32($b, $z + 7);
-                    $o = $z + 19;
-                }
             } elseif ($t === 'C') {
                 if (!$seenT) {
                     $res->cols = [];
@@ -368,9 +434,7 @@ final class __McPdoPgWire
                     $res->rows = [];
                 }
                 $seenT = false;
-                $res->tag = \substr($b, 0, \strlen($b) - 1);
-                $sp = \strrpos($res->tag, ' ');
-                $res->affected = $sp === false ? 0 : (int) \substr($res->tag, $sp + 1);
+                $this->cmdTag($b, $res);
             } elseif ($t === 'E') {
                 if ($res->err === null) { $res->err = $this->parseErr($b, $sql); }
             } elseif ($t === 'S') {
@@ -382,10 +446,117 @@ final class __McPdoPgWire
             } elseif ($t === 'H') {
                 $copy = true;
             } elseif ($t === 'Z') {
-                if (\strlen($b) < 1) { throw $this->ioFail($trunc); }
+                if (\strlen($b) < 1) { throw $this->truncated(); }
                 $this->status = $b[0];
                 if ($copy) { throw __McPdo::fail('HY000', 7, true, 'COPY is not supported', true); }
                 return $res;
+            }
+        }
+    }
+
+    /**
+     * One extended-protocol round trip: [Parse + Describe(S)] Bind Execute Sync,
+     * all in one write. Text results; a parameter is text unless $bin[i] says
+     * binary. Never throws on a server error — the error lands in $res->err
+     * after the stream is drained to ReadyForQuery, so the connection stays usable.
+     * A ParameterDescription is validated and otherwise ignored: the server
+     * itself rejects a Bind whose count disagrees (php relies on the same).
+     * When !$parse, $res already holds the statement's row description.
+     *
+     * @param array<int,?string> $params
+     * @param array<int,bool> $bin
+     */
+    public function extended(string $name, string $sql, bool $parse, array $params, array $bin, __McPdoPgResult $res): void
+    {
+        $this->settle();
+        $np = \count($params);
+        if ($np > 65535) { throw __McPdo::fail('HY000', 0, false, 'too many parameters', true); }
+        $m = '';
+        if ($parse) {
+            $m .= self::frame('P', $name . "\0" . $sql . "\0\0\0");
+            $m .= self::frame('D', 'S' . $name . "\0");
+        }
+        $anyBin = false;
+        foreach ($bin as $f) { if ($f) { $anyBin = true; } }
+        $b = "\0" . $name . "\0";
+        if ($anyBin) {
+            $b .= self::be16($np);
+            for ($i = 0; $i < $np; $i++) { $b .= self::be16(($bin[$i] ?? false) ? 1 : 0); }
+        } else {
+            $b .= "\0\0";
+        }
+        $b .= self::be16($np);
+        for ($i = 0; $i < $np; $i++) {
+            $v = $params[$i] ?? null;
+            $b .= $v === null ? "\xff\xff\xff\xff" : self::be32(\strlen($v)) . $v;
+        }
+        $m .= self::frame('B', $b . "\0\0");
+        $m .= self::frame('E', "\0\0\0\0\0");
+        $m .= self::frame('S', '');
+        $this->sendRaw($m);
+
+        $copy = false;
+        while (true) {
+            [$t, $b] = $this->msg();
+            if ($t === 'D') {
+                $res->rows[] = $this->dataRow($b, \count($res->cols));
+            } elseif ($t === '1') {
+                if ($b !== '') { throw $this->truncated(); }
+                $res->parsed = true;
+            } elseif ($t === '2') {
+                if ($b !== '') { throw $this->truncated(); }
+            } elseif ($t === 't') {
+                $bl = \strlen($b);
+                if ($bl < 2 || $bl !== 2 + 4 * ((\ord($b[0]) << 8) | \ord($b[1]))) { throw $this->truncated(); }
+            } elseif ($t === 'T') {
+                $this->rowDesc($b, $res);
+            } elseif ($t === 'n') {
+                if ($b !== '') { throw $this->truncated(); }
+                $res->cols = [];
+                $res->oids = [];
+                $res->tbls = [];
+                $res->lens = [];
+                $res->mods = [];
+            } elseif ($t === 'C') {
+                $this->cmdTag($b, $res);
+            } elseif ($t === 'E') {
+                if ($res->err === null) { $res->err = $this->parseErr($b, $sql); }
+            } elseif ($t === 'S') {
+                $this->paramStatus($b);
+            } elseif ($t === 'G') {
+                $copy = true;
+                $this->send('f', "COPY is not supported\0");
+            } elseif ($t === 'H') {
+                $copy = true;
+            } elseif ($t === 'Z') {
+                if (\strlen($b) < 1) { throw $this->truncated(); }
+                $this->status = $b[0];
+                if ($copy) { throw __McPdo::fail('HY000', 7, true, 'COPY is not supported', true); }
+                return;
+            }
+        }
+    }
+
+    /**
+     * Close(S) + Sync, fire and forget: a statement going out of scope must not
+     * wait on the network. The ReadyForQuery is read before the next request.
+     */
+    public function closeStmt(string $name): void
+    {
+        if ($this->dead) { return; }
+        $this->sendRaw(self::frame('C', 'S' . $name . "\0") . self::frame('S', ''));
+        $this->owed++;
+    }
+
+    /** Reads the answers of earlier closeStmt() calls. */
+    private function settle(): void
+    {
+        while ($this->owed > 0) {
+            [$t, $b] = $this->msg();
+            if ($t === 'Z') {
+                if (\strlen($b) < 1) { throw $this->truncated(); }
+                $this->status = $b[0];
+                $this->owed--;
             }
         }
     }
@@ -470,6 +641,11 @@ final class __McPdoPgWire
 final class __McPdoPg implements __McPdoDrv
 {
     public __McPdoPgWire $wire;
+    private int $stmtN = 0;
+    /** @var array<int,string> pg_type.typname by OID, as php's getColumnMeta() looks it up */
+    private array $typs = [];
+    /** @var array<int,string> pg_class.relname by OID */
+    private array $rels = [];
 
     public function __construct(__McPdoPgWire $wire)
     {
@@ -481,6 +657,29 @@ final class __McPdoPg implements __McPdoDrv
     public function prepare(string $sql): __McPdoDrvStmt
     {
         return new __McPdoPgStmt($this, $sql);
+    }
+
+    /** php's `pdo_stmt_%08x`; the number is visible in the server's own error texts. */
+    public function nextStmtName(): string
+    {
+        $this->stmtN++;
+        return 'pdo_stmt_' . \str_pad(\dechex($this->stmtN), 8, '0', \STR_PAD_LEFT);
+    }
+
+    public function typName(int $oid): string
+    {
+        if (!isset($this->typs[$oid])) {
+            $this->typs[$oid] = $this->run('select typname from pg_type where oid = ' . (string) $oid)->rows[0][0] ?? '';
+        }
+        return $this->typs[$oid];
+    }
+
+    public function relName(int $oid): string
+    {
+        if (!isset($this->rels[$oid])) {
+            $this->rels[$oid] = $this->run('select relname from pg_class where oid = ' . (string) $oid)->rows[0][0] ?? '';
+        }
+        return $this->rels[$oid];
     }
 
     /** Runs $sql, throwing the server's error as php's PDOException. */
@@ -506,7 +705,13 @@ final class __McPdoPg implements __McPdoDrv
 
     public function lastInsertId(?string $name): string
     {
-        $r = $this->run($name === null ? 'SELECT LASTVAL()' : 'SELECT CURRVAL(' . $this->quote($name, PDO::PARAM_STR) . ')');
+        if ($name === null) {
+            $r = $this->run('SELECT LASTVAL()');
+        } else {
+            $r = new __McPdoPgResult();
+            $this->wire->extended('', 'SELECT CURRVAL($1)', true, [$name], [], $r);
+            if ($r->err !== null) { throw __McPdo::fail($r->err->code, 7, true, $r->err->text, true); }
+        }
         $v = $r->rows[0][0] ?? null;
         return $v === null ? '' : $v;
     }
@@ -539,41 +744,117 @@ final class __McPdoPg implements __McPdoDrv
 }
 
 /**
- * A statement over the simple protocol: whole result buffered at execute().
- * Parameterless only — Task 4 puts the extended protocol behind prepare() for
- * statements with placeholders and keeps this class for the rest.
+ * One PDOStatement over the extended protocol. Like php, the server-side
+ * statement (`pdo_stmt_%08x`, a per-connection counter taken at prepare()) is
+ * created by the FIRST execute(), so a syntax error surfaces there, not at
+ * prepare(). Every execute() is one Bind/Execute/Sync round trip with the whole
+ * result buffered; a second execute() reuses the prepared name.
  */
 final class __McPdoPgStmt implements __McPdoDrvStmt
 {
     private __McPdoPg $db;
+    private string $name;
     private string $sql;
-    private int $nparams = 0;
+    /** @var array<int,string> one entry per `$n` slot: `?` or `:name` */
+    private array $names = [];
+    private bool $prepared = false;
+    /** @var array<int,?string> by 1-based slot; reset by every execute() (the facade rebinds them all) */
+    private array $vals = [];
+    /** @var array<int,bool> */
+    private array $bin = [];
+    private int $maxBound = 0;
     private ?__McPdoPgResult $res = null;
     private int $idx = -1;
 
     public function __construct(__McPdoPg $db, string $sql)
     {
         $this->db = $db;
-        $sc = __McPdoSql::scan($sql, 'pgsql');
+        $sc = __McPdoSql::rewritePg($sql);
         $this->sql = $sc->sql;
-        $this->nparams = \count($sc->names);
+        $this->names = $sc->names;
+        $this->name = $db->nextStmtName();
     }
 
-    public function paramCount(): int { return $this->nparams; }
-    public function paramIndex(string $name): int { return 0; }
+    public function paramCount(): int { return \count($this->names); }
 
+    /** An unknown name is php core's HY093 carrying the name, not a silent false. */
+    public function paramIndex(string $name): int
+    {
+        foreach ($this->names as $i => $n) {
+            if ($n === $name) { return $i + 1; }
+        }
+        if (\ctype_digit(\substr($name, 1))) { return 0; }
+        throw __McPdo::fail('HY093', 0, false, $name, true);
+    }
+
+    /**
+     * php's pdo_pgsql parameter conversion (measured): NULL and PARAM_NULL send
+     * NULL; a LOB or a stream goes in binary, whole; PARAM_BOOL turns a bool or
+     * an int into t/f; everything else is its string form, cut at the first NUL
+     * (the text format is a C string); PARAM_INT with a bool is 1/0.
+     */
     public function bind(int $idx, mixed $value, int $type): void
     {
-        throw new PDOException('pgsql prepared statements with parameters are not implemented');
+        if ($idx < 1 || $idx > \count($this->names)) {
+            throw __McPdo::fail('HY093', 0, false, 'parameter was not defined', true);
+        }
+        if ($idx > $this->maxBound) { $this->maxBound = $idx; }
+        $this->bin[$idx] = false;
+        if ($value === null || $type === PDO::PARAM_NULL) {
+            $this->vals[$idx] = null;
+            return;
+        }
+        if (\is_resource($value)) {
+            $this->vals[$idx] = (string) \stream_get_contents($value);
+            $this->bin[$idx] = true;
+            return;
+        }
+        if ($type === PDO::PARAM_LOB) {
+            $this->vals[$idx] = (string) $value;
+            $this->bin[$idx] = true;
+            return;
+        }
+        if (\is_bool($value)) {
+            $s = $type === PDO::PARAM_BOOL ? ($value ? 't' : 'f') : ($type === PDO::PARAM_INT ? ($value ? '1' : '0') : ($value ? '1' : ''));
+        } elseif (\is_int($value) && $type === PDO::PARAM_BOOL) {
+            $s = $value !== 0 ? 't' : 'f';
+        } else {
+            $s = (string) $value;
+        }
+        $z = \strpos($s, "\0");
+        $this->vals[$idx] = $z === false ? $s : \substr($s, 0, $z);
     }
 
     public function execute(): void
     {
-        if ($this->nparams > 0) {
-            throw new PDOException('pgsql prepared statements with parameters are not implemented');
+        /** @var array<int,?string> */
+        $params = [];
+        /** @var array<int,bool> */
+        $bin = [];
+        for ($i = 1; $i <= $this->maxBound; $i++) {
+            $params[] = $this->vals[$i] ?? null;
+            $bin[] = $this->bin[$i] ?? false;
         }
-        $this->res = $this->db->run($this->sql);
+        $this->vals = [];
+        $this->bin = [];
+        $this->maxBound = 0;
+
+        $r = new __McPdoPgResult();
+        $prev = $this->res;
+        if ($this->prepared && $prev !== null) {
+            $r->cols = $prev->cols;
+            $r->oids = $prev->oids;
+            $r->tbls = $prev->tbls;
+            $r->lens = $prev->lens;
+            $r->mods = $prev->mods;
+        }
+        $this->db->wire->extended($this->name, $this->sql, !$this->prepared, $params, $bin, $r);
+        if ($r->parsed) { $this->prepared = true; }
+        $this->res = $r;
         $this->idx = -1;
+        if ($r->err !== null) {
+            throw __McPdo::fail($r->err->code, 7, true, $r->err->text, true);
+        }
     }
 
     public function step(): bool
@@ -587,22 +868,63 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
     public function columnCount(): int { return $this->res === null ? 0 : \count($this->res->cols); }
     public function columnName(int $i): string { return $this->res === null ? '' : $this->res->cols[$i]; }
 
+    /**
+     * php's key order: `pgsql:oid`, `pgsql:table_oid`, `table` (only for a plain
+     * table column), `native_type` (pg_type.typname), `pdo_type`, `name`, `len`
+     * (typlen), `precision` (atttypmod, raw).
+     *
+     * @return array<string,mixed>
+     */
     public function columnMeta(int $i): array
     {
+        if ($this->res === null) { return []; }
+        $oid = $this->res->oids[$i];
+        $tbl = $this->res->tbls[$i];
         /** @var array<string,mixed> */
-        $m = ['name' => $this->columnName($i), 'len' => -1, 'precision' => 0, 'pdo_type' => PDO::PARAM_STR];
+        $m = ['pgsql:oid' => $oid, 'pgsql:table_oid' => $tbl];
+        if ($tbl > 0) { $m['table'] = $this->db->relName($tbl); }
+        $m['native_type'] = $this->db->typName($oid);
+        $m['pdo_type'] = $oid === 16 ? PDO::PARAM_BOOL
+            : (($oid === 20 || $oid === 21 || $oid === 23) ? PDO::PARAM_INT
+            : (($oid === 17 || $oid === 26) ? PDO::PARAM_LOB : PDO::PARAM_STR));
+        $m['name'] = $this->res->cols[$i];
+        $m['len'] = $this->res->lens[$i];
+        $m['precision'] = $this->res->mods[$i];
         return $m;
     }
 
-    /** php's pdo_pgsql typing: bool, int2/4/8 and oid come back native, the rest as text. */
+    /**
+     * php's pdo_pgsql typing: bool, int2/4/8 and oid native, float4/8 as float
+     * (`NaN` / `Infinity` spelled the way the server prints them), bytea as a
+     * stream, everything else — numeric, dates, json, uuid — as the text.
+     * ponytail: bytea assumes bytea_output=hex (the server default).
+     */
     public function columnValue(int $i): mixed
     {
         if ($this->res === null) { return null; }
         $v = $this->res->rows[$this->idx][$i];
         if ($v === null) { return null; }
         $o = $this->res->oids[$i];
+        if ($o === 25 || $o === 1043) { return $v; }
+        if ($o === 23 || $o === 20 || $o === 21 || $o === 26) { return (int) $v; }
         if ($o === 16) { return $v === 't'; }
-        if ($o === 20 || $o === 21 || $o === 23 || $o === 26) { return (int) $v; }
+        if ($o === 701 || $o === 700) {
+            if ($v === 'NaN') { return \NAN; }
+            if ($v === 'Infinity') { return \INF; }
+            if ($v === '-Infinity') { return -\INF; }
+            return (float) $v;
+        }
+        if ($o === 17) {
+            $raw = $v;
+            if (\substr($v, 0, 2) === '\\x') {
+                $raw = \hex2bin(\substr($v, 2));
+                if ($raw === false) { throw __McPdo::fail('08006', 7, true, 'protocol error: invalid bytea', true); }
+            }
+            $f = \fopen('php://memory', 'w+');
+            \fwrite($f, $raw);
+            \rewind($f);
+            return $f;
+        }
         return $v;
     }
 
@@ -613,9 +935,18 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
         if ($this->res !== null) { $this->idx = \count($this->res->rows); }
     }
 
-    public function close(): void { $this->res = null; }
+    public function close(): void
+    {
+        if ($this->prepared) {
+            $this->prepared = false;
+            try { $this->db->wire->closeStmt($this->name); } catch (PDOException $e) {}
+        }
+        $this->res = null;
+    }
 
     public function errorInfo(): array { return __McPdo::triple('', 0, false, '', false); }
+
+    public function __destruct() { $this->close(); }
 }
 
 function __mc_pdo_pgsql_open(string $rest, array $options, ?string $user, ?string $pw): __McPdoDrv
