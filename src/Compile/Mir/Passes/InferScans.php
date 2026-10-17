@@ -826,7 +826,9 @@ trait InferScans
             // `type` — `$fn->params[$idx]->type = …` is an indirect write
             // through the readonly `$params` array property and is rejected.
             $param = $fn->params[$idx];
-            $vt = Type::vec(Type::string_());
+            // The KEY stays erased: a bare `array` may arrive keyed by strings or by a
+            // mix, and a guess typed `vec` would read a string key as an int.
+            $vt = Type::assoc(Type::cell(), Type::string_());
             $param->type = $vt;
             // Mark it a GUESS: read from BODY USAGE, not from a hint, a doc form
             // or a call site. Call sites that later disagree with each other
