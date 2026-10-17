@@ -991,7 +991,20 @@ function __mc_version_canon(string $v): string
     $n = \strlen($v);
     if ($n === 0) { return ""; }
     // Plain dotted numbers ("1.2.3") are already canonical.
-    if (\strspn($v, "0123456789.") === $n && $v[$n - 1] !== "." && $v[0] !== "." && !\str_contains($v, "..")) { return $v; }
+    $plain = \ord($v[0]) !== 46 && \ord($v[$n - 1]) !== 46;
+    $prevDot = false;
+    for ($i = 0; $plain && $i < $n; $i = $i + 1) {
+        $c = \ord($v[$i]);
+        if ($c === 46) {
+            if ($prevDot) { $plain = false; }
+            $prevDot = true;
+        } elseif ($c >= 48 && $c <= 57) {
+            $prevDot = false;
+        } else {
+            $plain = false;
+        }
+    }
+    if ($plain) { return $v; }
     $lp = \ord($v[0]);
     $out = $v[0];
     $lqDot = $lp === 46;
@@ -1001,15 +1014,15 @@ function __mc_version_canon(string $v): string
         $c = \ord($v[$i]);
         $dig = $c >= 48 && $c <= 57;
         if ($c === 45 || $c === 95 || $c === 43) {
-            if (!$lqDot) { $out = $out . "."; $lqDot = true; }
+            if (!$lqDot) { $out .= "."; $lqDot = true; }
         } elseif (($lpNdig && $dig) || ($lpDig && !$dig && $c !== 46)) {
-            if (!$lqDot) { $out = $out . "."; }
-            $out = $out . $v[$i];
+            if (!$lqDot) { $out .= "."; }
+            $out .= $v[$i];
             $lqDot = false;
         } elseif (!$dig && !(($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122))) {
-            if (!$lqDot) { $out = $out . "."; $lqDot = true; }
+            if (!$lqDot) { $out .= "."; $lqDot = true; }
         } else {
-            $out = $out . $v[$i];
+            $out .= $v[$i];
             $lqDot = false;
         }
         $lp = $c;
@@ -1051,9 +1064,9 @@ function __mc_version_cmp(string $c1, string $c2): int
     $cmp = 0;
     while ($p1 < $l1 && $p2 < $l2 && $n1 >= 0 && $n2 >= 0) {
         $f = \strpos($c1, ".", $p1);
-        $n1 = $f === false ? -1 : $f;
+        if ($f === false) { $n1 = -1; } else { $n1 = (int)$f; }
         $f = \strpos($c2, ".", $p2);
-        $n2 = $f === false ? -1 : $f;
+        if ($f === false) { $n2 = -1; } else { $n2 = (int)$f; }
         $b1 = \ord($c1[$p1]);
         $b2 = \ord($c2[$p2]);
         $d1 = $b1 >= 48 && $b1 <= 57;
