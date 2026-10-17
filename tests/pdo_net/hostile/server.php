@@ -22,6 +22,26 @@ elseif ($mode === 'drip') {
     for ($i = 0; $i < 20; $i++) { usleep(400000); if (@fwrite($c, 'x') === false) { break; } }
 } elseif ($mode === 'ignore_flood') {
     for ($i = 0; $i < 5000; $i++) { if (@fwrite($c, $msg('N', "x\0")) === false) { break; } }
+} elseif ($mode === 'big_slow') {
+    // one ~8 MB DataRow streamed over ~3.6 s: far above the 64 KiB/s floor, but longer than 2 x ATTR_TIMEOUT
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    $val = str_repeat('x', 8000000);
+    $d = $msg('D', pack('n', 1) . pack('N', strlen($val)) . $val);
+    fwrite($c, $msg('T', $col));
+    foreach (str_split($d, 100000) as $ch) { fwrite($c, $ch); usleep(45000); }
+    fwrite($c, $msg('C', "SELECT 1\0") . $z);
+} elseif ($mode === 'oid_miss') {
+    // the first typname lookup finds nothing, the second finds a row: a miss must not be cached
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', pack('n', 1) . "a\0" . pack('NnNnNn', 0, 0, 100000, -1 & 0xffff, 0xffffffff, 0)) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 1) . 'x') . $msg('C', "SELECT 1\0") . $z);
+    $n = 0;
+    while (true) {
+        $t = $rd(1); if ($t === '') { break; }
+        $l = unpack('N', $rd(4))[1]; $rd($l - 4);
+        if ($t === 'Q') { $n++; fwrite($c, $msg('T', $col) . ($n === 1 ? '' : $msg('D', pack('n', 1) . pack('N', 5) . "seen$n")) . $msg('C', "SELECT " . ($n === 1 ? 0 : 1) . "\0") . $z); }
+    }
 } elseif ($mode === 'oid_flood') {
     fwrite($c, $msg('R', pack('N', 0)) . $z);
     $batch();

@@ -11,8 +11,19 @@ fclose($wc); fclose($w);
 $before = $fds();
 $t = microtime(true);
 try {
-    $db = new PDO($dsn, 'u', 'pw', [PDO::ATTR_TIMEOUT => $mode === 'drip' ? 1 : 3]);
-    if ($mode === 'oid_flood') {
+    $db = new PDO($dsn, 'u', 'pw', [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow'], true) ? 1 : 3]);
+    if ($mode === 'big_slow') {
+        $q = $db->query('select 1');   // not chained (#299)
+        $rows = $q->fetchAll(PDO::FETCH_NUM);
+        $q = null;
+        echo $mode, ': ok ', strlen($rows[0][0]), ' ', microtime(true) - $t > 2.0 ? 'longer than 2 x timeout' : 'TOO FAST', "\n";
+    } elseif ($mode === 'oid_miss') {
+        $p = $db->prepare('select 1');
+        $p->execute();
+        $a = $p->getColumnMeta(0)['native_type'];
+        $b = $p->getColumnMeta(0)['native_type'];
+        echo $mode, ': ', json_encode($a), ' ', json_encode($b), "\n";
+    } elseif ($mode === 'oid_flood') {
         $p = $db->prepare('select 1');
         $p->execute();
         $first = $p->getColumnMeta(0)['native_type'];
@@ -29,7 +40,7 @@ try {
     } else {
         $db->query('select 1')->fetchAll();
     }
-    if (!in_array($mode, ['bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood'], true)) { echo "$mode: NO ERROR\n"; }
+    if (!in_array($mode, ['bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss'], true)) { echo "$mode: NO ERROR\n"; }
 } catch (PDOException $e) {
     $m = (string) $e->errorInfo[2];
     $i = strpos($m, 'failed: ');
@@ -39,5 +50,5 @@ try {
     if (in_array($mode, ['paramdesc_mismatch', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
 }
 $e = null; $p = null; $s = null; $db = null;
-echo microtime(true) - $t < 3.0 ? "fast\n" : "SLOW\n";
+echo microtime(true) - $t < ($mode === 'big_slow' ? 10.0 : 3.0) ? "fast\n" : "SLOW\n";
 echo $fds() === $before ? "no fd leak\n" : "FD LEAK\n";

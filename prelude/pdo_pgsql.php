@@ -187,8 +187,9 @@ final class __McPdoPgWire
             $this->buf = \substr($this->buf, $this->pos);
             $this->pos = 0;
         }
-        // one message gets 2 x the read timeout in total: each fread() is bounded, a 1-byte drip is not
-        $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout : 0.0;
+        // one message gets 2 x the read timeout plus a 64 KiB/s floor of sustained progress: each fread() is bounded,
+        // a 1-byte drip is not, and a big row on a slow link still arrives
+        $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
         while (\strlen($this->buf) < $n) {
             $c = \fread($this->s, 65536);
             if ($c === false || $c === '') {

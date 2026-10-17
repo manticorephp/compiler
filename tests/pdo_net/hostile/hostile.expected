@@ -37,6 +37,12 @@ ext_copy_out: HY000 3
 reuse: ok
 fast
 no fd leak
+big_slow: ok 8000000 longer than 2 x timeout
+fast
+no fd leak
+oid_miss: "" "seen2"
+fast
+no fd leak
 over_cap: 08006 7 invalid message length
 fast
 no fd leak
