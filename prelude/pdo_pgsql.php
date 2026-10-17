@@ -74,6 +74,16 @@ final class __McPdoPgWire
     public string $where = '';
     private bool $connecting = true;
     private bool $closed = false;
+    /** One request/response cycle owns the wire; a second fiber on the same connection waits (see enter()). */
+    private bool $busy = false;
+    /** A request was sent (or owed answers are being read) and its ReadyForQuery has not arrived: the stream is mid-protocol. */
+    private bool $inflight = false;
+    private float $timeout = 30.0;
+    private string $addr = '';
+    /** BackendKeyData's secret: with the pid it authorises a CancelRequest. */
+    private string $secret = '';
+    /** @var array<int,string> statement names whose Close arrived while the wire was busy */
+    private array $deferred = [];
     /** SASL progress: 0 none, 1 initial response sent, 2 client-final sent, 3 server signature verified. */
     private int $sasl = 0;
     private bool $authOk = false;
@@ -109,11 +119,13 @@ final class __McPdoPgWire
                 . "\n\tIs the server running on that host and accepting TCP/IP connections?");
         }
         $this->s = $s;
+        $this->addr = 'tcp://' . (\strpos($host, ':') === false ? $host : '[' . $host . ']') . ':' . (string) $port;
         $this->setTimeout($timeout);
     }
 
     public function setTimeout(float $t): void
     {
+        $this->timeout = $t;
         $sec = (int) $t;
         \stream_set_timeout($this->s, $sec, (int) (($t - $sec) * 1000000));
     }
@@ -190,6 +202,10 @@ final class __McPdoPgWire
     /** Marks the connection dead and releases the fd (once). */
     private function closeSock(): void
     {
+        // a request abandoned mid-flight (cancel, timeout) would keep running server-side: ask the server to stop it
+        if (!$this->closed && $this->inflight && !$this->connecting && $this->pid > 0 && $this->secret !== '') {
+            $this->cancelRequest();
+        }
         $this->dead = true;
         // PQtransactionStatus() of a lost connection: PQTRANS_UNKNOWN, which php reads as "in a transaction"
         $this->status = 'U';
@@ -197,6 +213,33 @@ final class __McPdoPgWire
         if ($this->closed) { return; }
         $this->closed = true;
         \fclose($this->s);
+    }
+
+    /** Best effort, on a throwaway connection as libpq's PQcancel: 16 bytes, no reply; any failure is ignored. */
+    private function cancelRequest(): void
+    {
+        // a cancelled task re-raises at every park, and the connect parks: hold the cancellation back for this flush.
+        // Named by string, not spelled, so a synchronous PDO program does not pull the scheduler in (see \Runtime\AsyncHook).
+        if (\Runtime\AsyncHook::active() && \function_exists('Async\\shield')) {
+            $shield = 'Async\\shield';
+            $shield(function (): void { $this->sendCancel(); });
+            return;
+        }
+        $this->sendCancel();
+    }
+
+    private function sendCancel(): void
+    {
+        try {
+            $en = 0;
+            $es = '';
+            $c = \stream_socket_client($this->addr, $en, $es, 2.0);
+            if ($c !== false) {
+                \fwrite($c, self::be32(8 + \strlen($this->secret) + 4) . self::be32(80877102) . self::be32($this->pid) . $this->secret);
+                \fclose($c);
+            }
+        } catch (\Throwable $t) {
+        }
     }
 
     private function ioFail(string $m): PDOException
@@ -288,7 +331,7 @@ final class __McPdoPgWire
             if ($t === 'E') { throw $this->startFail($this->parseErr($b, '')->text); }
             if ($t === 'S') { $this->paramStatus($b); continue; }
             if ($t === 'K') {
-                if (\strlen($b) >= 4) { $this->pid = self::i32($b, 0); }
+                if (\strlen($b) >= 4) { $this->pid = self::i32($b, 0); $this->secret = \substr($b, 4); }
                 continue;
             }
             if ($t === 'Z') {
@@ -442,6 +485,42 @@ final class __McPdoPgWire
     /** Runs one query string over the simple protocol. Never throws on a server error. */
     public function simple(string $sql): __McPdoPgResult
     {
+        $this->enter();
+        try {
+            return $this->simpleRun($sql);
+        } catch (\Throwable $t) {
+            // a cancel/timeout/protocol failure inside a cycle leaves half a response on the wire: nobody may reuse it
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->inflight = false;
+            $this->busy = false;
+        }
+    }
+
+    /**
+     * Takes the wire for one cycle. Two fibers sharing a connection must not interleave packets.
+     * ponytail: polling park (1 ms sleeper) bounded by ATTR_TIMEOUT, not a wait-queue; Async\Pool (Task 11) is the upgrade.
+     * Without a scheduler a second entry is a re-entrancy bug, not contention.
+     */
+    private function enter(): void
+    {
+        if ($this->busy) {
+            if (!\Runtime\AsyncHook::active()) { throw __McPdo::fail('HY000', 0, false, 'connection busy', true); }
+            $sleeper = \Runtime\AsyncHook::sleeper();
+            $deadline = \__mc_monotonic_f() + $this->timeout;
+            while ($this->busy && !$this->dead) {
+                if (\__mc_monotonic_f() >= $deadline) {
+                    throw __McPdo::fail('HY000', 0, false, 'timeout expired waiting for the connection', true);
+                }
+                $sleeper(0.001);
+            }
+        }
+        $this->busy = true;
+    }
+
+    private function simpleRun(string $sql): __McPdoPgResult
+    {
         $this->settle();
         $this->send('Q', $sql . "\0");
         $res = new __McPdoPgResult();
@@ -475,6 +554,7 @@ final class __McPdoPgWire
             } elseif ($t === 'Z') {
                 if (\strlen($b) < 1) { throw $this->truncated(); }
                 $this->status = $b[0];
+                $this->inflight = false;
                 // php (measured): HY000, code = PGRES_COPY_IN 4 / PGRES_COPY_OUT 3, empty message; real COPY is later work
                 if ($copy > 0) { throw __McPdo::fail('HY000', $copy, true, '', true); }
                 return $res;
@@ -496,9 +576,27 @@ final class __McPdoPgWire
      */
     public function extended(string $name, string $sql, bool $parse, array $params, array $bin, __McPdoPgResult $res): void
     {
-        $this->settle();
         $np = \count($params);
         if ($np > 65535) { throw __McPdo::fail('HY000', 0, false, 'too many parameters', true); }
+        $this->enter();
+        try {
+            $this->extendedRun($name, $sql, $parse, $params, $bin, $res, $np);
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->inflight = false;
+            $this->busy = false;
+        }
+    }
+
+    /**
+     * @param array<int,?string> $params
+     * @param array<int,bool> $bin
+     */
+    private function extendedRun(string $name, string $sql, bool $parse, array $params, array $bin, __McPdoPgResult $res, int $np): void
+    {
+        $this->settle();
         $m = '';
         if ($parse) {
             $m .= self::frame('P', $name . "\0" . $sql . "\0\0\0");
@@ -561,6 +659,7 @@ final class __McPdoPgWire
             } elseif ($t === 'Z') {
                 if (\strlen($b) < 1) { throw $this->truncated(); }
                 $this->status = $b[0];
+                $this->inflight = false;
                 // php (measured): HY000, code = PGRES_COPY_IN 4 / PGRES_COPY_OUT 3, empty message; real COPY is later work
                 if ($copy > 0) { throw __McPdo::fail('HY000', $copy, true, '', true); }
                 return;
@@ -575,14 +674,29 @@ final class __McPdoPgWire
     public function closeStmt(string $name): void
     {
         if ($this->dead) { return; }
-        $this->sendRaw(self::frame('C', 'S' . $name . "\0") . self::frame('S', ''));
-        $this->owed++;
+        if ($this->busy) { $this->deferred[] = $name; return; }
+        $this->busy = true;
+        try {
+            $this->sendRaw(self::frame('C', 'S' . $name . "\0") . self::frame('S', ''));
+            $this->owed++;
+        } catch (\Throwable $t) {
+            $this->closeSock();
+            throw $t;
+        } finally {
+            $this->busy = false;
+        }
     }
 
     /** Reads the answers of earlier closeStmt() calls. */
     private function settle(): void
     {
         if ($this->dead) { throw $this->ioFail('no connection to the server'); }
+        $this->inflight = true;
+        foreach ($this->deferred as $n) {
+            $this->sendRaw(self::frame('C', 'S' . $n . "\0") . self::frame('S', ''));
+            $this->owed++;
+        }
+        $this->deferred = [];
         $this->pendErr = '';
         while ($this->owed > 0) {
             [$t, $b] = $this->msg();
@@ -664,7 +778,7 @@ final class __McPdoPgWire
 
     public function close(): void
     {
-        if (!$this->dead) {
+        if (!$this->dead && !$this->busy) {
             try { $this->send('X', ''); } catch (PDOException $e) {}
         }
         $this->closeSock();

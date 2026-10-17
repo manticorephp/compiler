@@ -422,6 +422,8 @@ XX002 Index corrupted
 
     public static function sqlstateText(string $state): string
     {
+        // the state may come off the wire: only a well-formed one is looked up
+        if (\strlen($state) !== 5 || \strspn($state, '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ') !== 5) { return '<<Unknown error>>'; }
         $i = \strpos(self::SQLSTATES, "\n" . $state . ' ');
         if ($i === false) { return '<<Unknown error>>'; }
         $s = $i + 2 + \strlen($state);
@@ -763,11 +765,14 @@ class PDO
     {
         // php names query() in the warning, not the prepare()/execute() it is made of
         $this->label = 'PDO::query';
-        $st = $this->prepare($query);
-        if ($st === false) { $this->label = ''; return false; }
-        if ($fetchMode !== null) { $st->setFetchMode($fetchMode, ...$fetchModeArgs); }
-        $ok = $st->execute();
-        $this->label = '';
+        try {
+            $st = $this->prepare($query);
+            if ($st === false) { return false; }
+            if ($fetchMode !== null) { $st->setFetchMode($fetchMode, ...$fetchModeArgs); }
+            $ok = $st->execute();
+        } finally {
+            $this->label = '';
+        }
         if ($ok === false) { return false; }
         return $st;
     }

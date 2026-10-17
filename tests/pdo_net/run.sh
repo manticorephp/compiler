@@ -24,7 +24,8 @@ for f in tests/pdo_net/cases/*.php; do
     [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
     case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
     if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n"; skip=$((skip+1)); continue; fi
-    exp=$(php -d xdebug.mode=off "$f" 2>&1)
+    # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
+    if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); fi
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
         echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); continue
     fi

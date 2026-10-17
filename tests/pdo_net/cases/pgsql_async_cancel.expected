@@ -1,0 +1,3 @@
+same pdo: PDOException
+fresh: 7
+leaked active: 0

@@ -4,6 +4,15 @@ function pdo(int $mode): PDO { return new PDO((string) getenv('PDO_PG_DSN'), get
 function t(string $label, callable $f): void {
     try { $r = var_export($f(), true); echo $label, ': ', $r, "\n"; } catch (PDOException $e) { echo $label, ': PDOException ', $e->getMessage(), ' ', json_encode($e->errorInfo), "\n"; }
 }
+/** Waits (bounded) until the terminated backend is really gone, so the next call sees a dead socket. */
+function gone(PDO $k, int $pid): void {
+    for ($i = 0; $i < 150; $i++) {
+        $st = $k->query("select count(*) from pg_stat_activity where pid = $pid");
+        $n = (int) $st->fetchColumn();
+        if ($n === 0) { return; }
+        usleep(20000);
+    }
+}
 foreach ([PDO::ERRMODE_SILENT, PDO::ERRMODE_WARNING, PDO::ERRMODE_EXCEPTION] as $mode) {
     echo "== errmode $mode\n";
     $db = pdo($mode);
@@ -15,7 +24,7 @@ foreach ([PDO::ERRMODE_SILENT, PDO::ERRMODE_WARNING, PDO::ERRMODE_EXCEPTION] as 
     $st->execute();
     $st->fetchAll();
     $k->exec("select pg_terminate_backend($pid)");
-    usleep(300000);
+    gone($k, $pid);
     t('exec', fn () => $db->exec('select 1'));
     t('errorInfo', fn () => $db->errorInfo());
     t('errorCode', fn () => $db->errorCode());
@@ -44,7 +53,7 @@ $pid = (int) $ps->fetchColumn();
 $ps = null;
 $db->beginTransaction();
 $k->exec("select pg_terminate_backend($pid)");
-usleep(300000);
+gone($k, $pid);
 t('exec', fn () => $db->exec('select 1'));
 t('inTransaction', fn () => $db->inTransaction());
 t('rollBack', fn () => $db->rollBack());
@@ -55,6 +64,6 @@ $pid = (int) $ps->fetchColumn();
 $ps = null;
 $s = $db->query('select g from generate_series(1,3) g');
 $k->exec("select pg_terminate_backend($pid)");
-usleep(300000);
+gone($k, $pid);
 t('fetchAll', fn () => $s->fetchAll(PDO::FETCH_COLUMN));
 t('next query', fn () => $db->exec('select 1'));

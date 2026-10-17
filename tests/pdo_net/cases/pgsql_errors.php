@@ -45,3 +45,10 @@ foreach (['00000', '01000', '0A000', '22001', '22003', '22007', '22008', '22P02'
     try { $db->exec("do 'begin raise exception using errcode = ''$c''; end' language plpgsql"); echo "$c ok\n"; }
     catch (PDOException $e) { echo $c, ' ', preg_replace('/: 7 ERROR.*$/s', '', $e->getMessage()), "\n"; }
 }
+// a query() that threw must not leave its name behind: the next warning names its own method
+$db = pdo(PDO::ERRMODE_EXCEPTION);
+try { $db->query('selec 1'); } catch (PDOException $e) { echo "threw\n"; }
+$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_WARNING);
+$db->exec('selec 2');
+$ps = $db->prepare('selec 3');
+$ps->execute();
