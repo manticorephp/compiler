@@ -519,6 +519,12 @@ trait InferCalls
         // popped value echoes / flavours correctly.
         if ($n === 'array_pop' || $n === 'array_shift') {
             if (\count($args) >= 1 && $args[0]->type->element !== null) {
+                // An int/float/bool slot has no NULL: an empty array answers php's NULL
+                // only as a self-describing cell ({@see EmitLlvmBuiltins::takeSymbol}).
+                $ek = $args[0]->type->element->kind;
+                if ($ek === Type::KIND_INT || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL) {
+                    return Type::cell();
+                }
                 return $args[0]->type->element;
             }
             // A CELL container (a `mixed` slot holding an array, e.g.
