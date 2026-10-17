@@ -37,6 +37,18 @@ ext_copy_out: HY000 3
 reuse: ok
 fast
 no fd leak
+over_cap: 08006 7 invalid message length
+fast
+no fd leak
+drip: 08006 7 timeout expired
+fast
+no fd leak
+ignore_flood: 08006 7 protocol error: too many startup messages
+fast
+no fd leak
+oid_flood: bounded
+fast
+no fd leak
 bytea_odd: HY000 - invalid bytea value from server
 reuse: ok
 fast

@@ -29,3 +29,8 @@ foreach ([
 ] as $q) {
     try { $db->exec($q); } catch (PDOException $e) { echo json_encode($e->getMessage()), "\n"; }
 }
+// libpq sends a C string: the statement ends at the first NUL
+var_dump($db->exec("select 1\0 + 2"));
+$st = $db->prepare("select 5\0 + 2");
+$st->execute();
+var_dump($st->fetchColumn());

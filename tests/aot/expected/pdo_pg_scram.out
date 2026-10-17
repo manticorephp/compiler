@@ -4,6 +4,7 @@ client ok
 server ok
 nonce mismatch rejected
 iteration above bound: 08006 clean
+iteration at the old limit: 08006 clean
 iteration zero: 08006 clean
 iteration not digits: 08006 clean
 iteration negative: 08006 clean

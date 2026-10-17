@@ -15,7 +15,7 @@ trap 'rm -rf "$WORK"' EXIT
 reachable() { # dsn
     local h p
     h=$(sed -n 's/.*host=\([^;]*\).*/\1/p' <<<"$1"); p=$(sed -n 's/.*port=\([^;]*\).*/\1/p' <<<"$1")
-    [ -n "$h" ] && [ -n "$p" ] && (exec 3<>"/dev/tcp/$h/$p") 2>/dev/null
+    [ -n "$h" ] && [ -n "$p" ] && (exec 3<>"/dev/tcp/$h/$p"; exec 3>&-) 2>/dev/null
 }
 
 pass=0; fail=0; skip=0
@@ -25,6 +25,7 @@ for f in tests/pdo_net/cases/*.php; do
     case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
     if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n"; skip=$((skip+1)); continue; fi
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
+    if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
     if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); fi
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
         echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); continue
@@ -39,11 +40,11 @@ if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus; do
+        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" >/dev/null 2>&1 &
             sp=$!
-            for _ in $(seq 1 50); do [ -s "$WORK/port" ] && break; sleep 0.1; done
+            for _ in $(seq 1 100); do [ -s "$WORK/port" ] && break; kill -0 $sp 2>/dev/null || break; sleep 0.1; done
             act+=$("$WORK/hostile" $m "$(cat "$WORK/port")" 2>&1)$'\n'
             kill $sp 2>/dev/null; wait $sp 2>/dev/null
         done

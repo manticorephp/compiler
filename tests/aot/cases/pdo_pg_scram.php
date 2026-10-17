@@ -12,7 +12,8 @@ try {
 }
 // Hostile server-first messages: each must be refused with SQLSTATE 08006, never hang or crash.
 $bad = [
-    'iteration above bound' => 'r=rOprNGfwEbeRWgbNEkqOxx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=16777217',
+    'iteration above bound' => 'r=rOprNGfwEbeRWgbNEkqOxx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=1048577',
+    'iteration at the old limit' => 'r=rOprNGfwEbeRWgbNEkqOxx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=16777216',
     'iteration zero' => 'r=rOprNGfwEbeRWgbNEkqOxx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=0',
     'iteration not digits' => 'r=rOprNGfwEbeRWgbNEkqOxx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096abc',
     'iteration negative' => 'r=rOprNGfwEbeRWgbNEkqOxx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=-5',

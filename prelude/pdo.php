@@ -674,7 +674,8 @@ class PDO
 
     public int $errmode = 2;
     /** Method name that overrides the caller's in a warning (query() runs prepare+execute). */
-    public string $label = '';
+    /** The method a warning names while query() runs prepare()+execute(); private so the public surface stays php's. */
+    private string $label = '';
     public int $case = 0;
     public int $oracleNulls = 0;
     public bool $stringify = false;
@@ -719,8 +720,7 @@ class PDO
             $this->drv = __mc_pdo_sqlite_open($rest, $options === null ? [] : $options);
         } elseif ($scheme === 'pgsql') {
             $this->drv = __mc_pdo_pgsql_open($rest, $options === null ? [] : $options, $username, $password);
-        } elseif ($scheme === 'mysql') {
-            $this->drv = __mc_pdo_mysql_open($rest, $options === null ? [] : $options, $username, $password);
+        // ponytail: the 'mysql' arm (-> __mc_pdo_mysql_open) returns with the driver in Task 8; until then it is an unknown scheme
         } else {
             // php reports an unknown scheme with no SQLSTATE and no driver code,
             // and its message carries no SQLSTATE prefix either.
@@ -746,7 +746,7 @@ class PDO
     /** Every driver this binary was linked against. */
     public static function getAvailableDrivers(): array
     {
-        return ['mysql', 'pgsql', 'sqlite'];
+        return ['pgsql', 'sqlite'];
     }
 
     public function prepare(string $query, array $options = []): PDOStatement|false
@@ -945,8 +945,8 @@ class PDO
         $this->errState = 'IM001';
         $this->errCode = 0;
         $this->errHasCode = false;
-        $this->errMsg = $msg;
-        $this->errHasMsg = true;
+        $this->errMsg = '';
+        $this->errHasMsg = false;
         __McPdo::raise($this->errmode === PDO::ERRMODE_SILENT ? PDO::ERRMODE_WARNING : $this->errmode, 'IM001', 0, false, $msg, true, $fn);
         return false;
     }
@@ -1212,13 +1212,15 @@ class PDOStatement implements IteratorAggregate
 
     public function setAttribute(int $attribute, mixed $value): bool
     {
+        // php (measured): sqlite answers a plain false in every error mode; pgsql raises IM001
+        if ($this->db !== null && $this->db->drv->name() === 'sqlite') { return false; }
         $this->unsupported('This driver doesn\'t support setting attributes', 'PDOStatement::setAttribute');
         return false;
     }
 
     public function getAttribute(int $name): mixed
     {
-        return $this->unsupported('This driver doesn\'t support getting attributes', 'PDOStatement::getAttribute');
+        return $this->unsupported('driver doesn\'t support getting that attribute', 'PDOStatement::getAttribute');
     }
 
     public function debugDumpParams(): void
@@ -1281,8 +1283,8 @@ class PDOStatement implements IteratorAggregate
         $this->errState = 'IM001';
         $this->errCode = 0;
         $this->errHasCode = false;
-        $this->errMsg = $msg;
-        $this->errHasMsg = true;
+        $this->errMsg = '';
+        $this->errHasMsg = false;
         __McPdo::raise($this->errmode() === PDO::ERRMODE_SILENT ? PDO::ERRMODE_WARNING : $this->errmode(), 'IM001', 0, false, $msg, true, $fn);
         return false;
     }

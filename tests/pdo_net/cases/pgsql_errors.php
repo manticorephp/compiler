@@ -6,7 +6,7 @@ function pdo(int $mode): PDO { return new PDO(dsn(), getenv('PDO_USER') ?: 'u', 
 $qs = [
     "insert into t values (1,'y',null)", 'select * from nope', 'selec 1', "insert into t values (null,'y',null)",
     "insert into t values (2,'bad',null)", "insert into t values (3,'y',99)", 'select nocol from t', "select 'x'::int",
-    'select 1/0', 'drop table nope', 'select 99999999999::int4', 'select nofun()', 'create table t(a int)',
+    'select 1/0', 'drop table nope', 'select 99999999999::int4', 'select nofun()', 'create temp table t(a int)',
     "set transaction_isolation to 'bogus'", 'create extension nope', "select 'a' ~ '('", 'select * from t where a = any(1)',
     'create database d', 'fetch from nocur', 'execute nostmt', "do 'begin raise exception ''boom''; end' language plpgsql",
     "do 'begin raise exception using errcode = ''40001''; end' language plpgsql",

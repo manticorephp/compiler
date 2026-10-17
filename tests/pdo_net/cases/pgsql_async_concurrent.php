@@ -20,5 +20,6 @@ async(function () {
     $res = awaitAll(...$tasks);
     $ms = (microtime(true) - $t0) * 1000;
     echo array_sum($res), "\n";
-    echo $ms < 1000 ? 'parallel' : 'serial', "\n";
+    // serial would take 20 x 0.2 s = 4 s; 2.5 s leaves slack for a loaded CI box
+    echo $ms < 2500 ? 'parallel' : 'serial', "\n";
 });

@@ -16,7 +16,7 @@
 final class __McPdoPgErr
 {
     public string $sev = 'ERROR';
-    public string $code = '08006';
+    public string $code = 'HY000';
     public string $msg = '';
     public string $detail = '';
     public string $hint = '';
@@ -51,6 +51,15 @@ final class __McPdoPgResult
     public ?__McPdoPgErr $err = null;
     /** The extended protocol's ParseComplete arrived (the named statement exists server-side). */
     public bool $parsed = false;
+
+    public function resetCols(): void
+    {
+        $this->cols = [];
+        $this->oids = [];
+        $this->tbls = [];
+        $this->lens = [];
+        $this->mods = [];
+    }
 }
 
 final class __McPdoPgWire
@@ -80,6 +89,10 @@ final class __McPdoPgWire
     private bool $inflight = false;
     private float $timeout = 30.0;
     private string $addr = '';
+    /** The peer hung up or a write failed: it is gone, so a CancelRequest would be pointless. */
+    private bool $peerGone = false;
+    /** Connect + authentication budget (monotonic seconds, 0 = none); a drip-feeding server cannot outlast it. */
+    private float $authDeadline = 0.0;
     /** BackendKeyData's secret: with the pid it authorises a CancelRequest. */
     private string $secret = '';
     /** @var array<int,string> statement names whose Close arrived while the wire was busy */
@@ -121,11 +134,14 @@ final class __McPdoPgWire
         $this->s = $s;
         $this->addr = 'tcp://' . (\strpos($host, ':') === false ? $host : '[' . $host . ']') . ':' . (string) $port;
         $this->setTimeout($timeout);
+        $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
     }
 
     public function setTimeout(float $t): void
     {
         $this->timeout = $t;
+        // php: 0 = unlimited; a zero stream timeout would instead fail every read at once
+        if ($t <= 0.0) { $t = 86400.0; }
         $sec = (int) $t;
         \stream_set_timeout($this->s, $sec, (int) (($t - $sec) * 1000000));
     }
@@ -148,7 +164,7 @@ final class __McPdoPgWire
 
     public function send(string $type, string $body): void
     {
-        $this->sendRaw($type . self::be32(\strlen($body) + 4) . $body);
+        $this->sendRaw(self::frame($type, $body));
     }
 
     private function sendRaw(string $m): void
@@ -157,6 +173,7 @@ final class __McPdoPgWire
         while ($m !== '') {
             $w = \fwrite($this->s, $m);
             if ($w === false || $w === 0) {
+                $this->peerGone = true;
                 throw $this->ioFail("could not send data to server");
             }
             $m = $w >= \strlen($m) ? '' : \substr($m, $w);
@@ -170,14 +187,24 @@ final class __McPdoPgWire
             $this->buf = \substr($this->buf, $this->pos);
             $this->pos = 0;
         }
+        // one message gets 2 x the read timeout in total: each fread() is bounded, a 1-byte drip is not
+        $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout : 0.0;
         while (\strlen($this->buf) < $n) {
             $c = \fread($this->s, 65536);
             if ($c === false || $c === '') {
-                throw $this->ioFail(\feof($this->s)
+                $eof = \feof($this->s);
+                if ($eof) { $this->peerGone = true; }
+                throw $this->ioFail($eof
                     ? "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request."
                     : 'timeout expired');
             }
             $this->buf .= $c;
+            if (\strlen($this->buf) < $n) {
+                $now = \__mc_monotonic_f();
+                if (($dl > 0.0 && $now >= $dl) || ($this->connecting && $this->authDeadline > 0.0 && $now >= $this->authDeadline)) {
+                    throw $this->ioFail('timeout expired');
+                }
+            }
         }
     }
 
@@ -189,7 +216,8 @@ final class __McPdoPgWire
         $t = $this->buf[$p];
         $len = (\ord($this->buf[$p + 1]) << 24) | (\ord($this->buf[$p + 2]) << 16)
             | (\ord($this->buf[$p + 3]) << 8) | \ord($this->buf[$p + 4]);
-        if ($len < 4 || $len > 1073741824) { throw $this->ioFail('invalid message length'); }
+        // only a DataRow may be big (a row of large values); nothing else a server sends needs more than 64 MiB
+        if ($len < 4 || $len > ($t === 'D' ? 1073741824 : 67108864)) { throw $this->ioFail('invalid message length'); }
         if (\strlen($this->buf) - $p < 1 + $len) {
             $this->fill(1 + $len);
             $p = 0;
@@ -203,7 +231,7 @@ final class __McPdoPgWire
     private function closeSock(): void
     {
         // a request abandoned mid-flight (cancel, timeout) would keep running server-side: ask the server to stop it
-        if (!$this->closed && $this->inflight && !$this->connecting && $this->pid > 0 && $this->secret !== '') {
+        if (!$this->closed && $this->inflight && !$this->connecting && !$this->peerGone && $this->pid > 0 && $this->secret !== '') {
             $this->cancelRequest();
         }
         $this->dead = true;
@@ -304,7 +332,7 @@ final class __McPdoPgWire
             $iter = $iter * 10 + $d;
         }
         // ⚠ upper bound: a hostile server must not be able to pin the CPU with i=2^31
-        if ($iter < 1 || $iter > 16777216) { throw __McPdo::connectFail('08006', 7, 'invalid SCRAM iteration count'); }
+        if ($iter < 1 || $iter > 1048576) { throw __McPdo::connectFail('08006', 7, 'invalid SCRAM iteration count'); }
         $salt = \base64_decode($s, true);
         if ($salt === false || $salt === '') { throw __McPdo::connectFail('08006', 7, 'invalid SCRAM salt'); }
         $salted = \hash_pbkdf2('sha256', $pw, $salt, $iter, 32, true);
@@ -326,12 +354,16 @@ final class __McPdoPgWire
     /** Runs the authentication exchange up to the first ReadyForQuery. */
     public function auth(string $user, ?string $pw): void
     {
+        $steps = 0;
         while (true) {
+            // ponytail: 1000 is far beyond any real startup (a dozen ParameterStatus); the cap only stops a flood of ignorable messages
+            if (++$steps > 1000) { throw $this->startFail('protocol error: too many startup messages'); }
+            if ($this->authDeadline > 0.0 && \__mc_monotonic_f() >= $this->authDeadline) { throw $this->startFail('timeout expired'); }
             [$t, $b] = $this->msg();
             if ($t === 'E') { throw $this->startFail($this->parseErr($b, '')->text); }
             if ($t === 'S') { $this->paramStatus($b); continue; }
             if ($t === 'K') {
-                if (\strlen($b) >= 4) { $this->pid = self::i32($b, 0); $this->secret = \substr($b, 4); }
+                if (\strlen($b) >= 4) { $this->pid = self::i32($b, 0); $this->secret = \strlen($b) <= 4 + 256 ? \substr($b, 4) : ''; }
                 continue;
             }
             if ($t === 'Z') {
@@ -419,11 +451,7 @@ final class __McPdoPgWire
     /** A RowDescription body into $res (columns, type OIDs, source tables, sizes, modifiers). */
     private function rowDesc(string $b, __McPdoPgResult $res): void
     {
-        $res->cols = [];
-        $res->oids = [];
-        $res->tbls = [];
-        $res->lens = [];
-        $res->mods = [];
+        $res->resetCols();
         $res->rows = [];
         $bl = \strlen($b);
         if ($bl < 2) { throw $this->truncated(); }
@@ -508,9 +536,11 @@ final class __McPdoPgWire
         if ($this->busy) {
             if (!\Runtime\AsyncHook::active()) { throw __McPdo::fail('HY000', 0, false, 'connection busy', true); }
             $sleeper = \Runtime\AsyncHook::sleeper();
-            $deadline = \__mc_monotonic_f() + $this->timeout;
+            if ($sleeper === null) { throw __McPdo::fail('HY000', 0, false, 'connection busy', true); }
+            // php: a timeout of 0 is unlimited
+            $deadline = $this->timeout > 0.0 ? \__mc_monotonic_f() + $this->timeout : 0.0;
             while ($this->busy && !$this->dead) {
-                if (\__mc_monotonic_f() >= $deadline) {
+                if ($deadline > 0.0 && \__mc_monotonic_f() >= $deadline) {
                     throw __McPdo::fail('HY000', 0, false, 'timeout expired waiting for the connection', true);
                 }
                 $sleeper(0.001);
@@ -521,6 +551,9 @@ final class __McPdoPgWire
 
     private function simpleRun(string $sql): __McPdoPgResult
     {
+        // libpq sends a C string: php runs everything up to the first NUL
+        $nul = \strpos($sql, "\0");
+        if ($nul !== false) { $sql = \substr($sql, 0, $nul); }
         $this->settle();
         $this->send('Q', $sql . "\0");
         $res = new __McPdoPgResult();
@@ -535,8 +568,7 @@ final class __McPdoPgWire
                 $seenT = true;
             } elseif ($t === 'C') {
                 if (!$seenT) {
-                    $res->cols = [];
-                    $res->oids = [];
+                    $res->resetCols();
                     $res->rows = [];
                 }
                 $seenT = false;
@@ -555,6 +587,7 @@ final class __McPdoPgWire
                 if (\strlen($b) < 1) { throw $this->truncated(); }
                 $this->status = $b[0];
                 $this->inflight = false;
+                $this->pendErr = '';
                 // php (measured): HY000, code = PGRES_COPY_IN 4 / PGRES_COPY_OUT 3, empty message; real COPY is later work
                 if ($copy > 0) { throw __McPdo::fail('HY000', $copy, true, '', true); }
                 return $res;
@@ -596,6 +629,8 @@ final class __McPdoPgWire
      */
     private function extendedRun(string $name, string $sql, bool $parse, array $params, array $bin, __McPdoPgResult $res, int $np): void
     {
+        $nul = \strpos($sql, "\0");
+        if ($nul !== false) { $sql = \substr($sql, 0, $nul); }
         $this->settle();
         $m = '';
         if ($parse) {
@@ -638,11 +673,7 @@ final class __McPdoPgWire
                 $this->rowDesc($b, $res);
             } elseif ($t === 'n') {
                 if ($b !== '') { throw $this->truncated(); }
-                $res->cols = [];
-                $res->oids = [];
-                $res->tbls = [];
-                $res->lens = [];
-                $res->mods = [];
+                $res->resetCols();
             } elseif ($t === 'C') {
                 $this->cmdTag($b, $res);
             } elseif ($t === 'E') {
@@ -660,6 +691,7 @@ final class __McPdoPgWire
                 if (\strlen($b) < 1) { throw $this->truncated(); }
                 $this->status = $b[0];
                 $this->inflight = false;
+                $this->pendErr = '';
                 // php (measured): HY000, code = PGRES_COPY_IN 4 / PGRES_COPY_OUT 3, empty message; real COPY is later work
                 if ($copy > 0) { throw __McPdo::fail('HY000', $copy, true, '', true); }
                 return;
@@ -679,6 +711,11 @@ final class __McPdoPgWire
         try {
             $this->sendRaw(self::frame('C', 'S' . $name . "\0") . self::frame('S', ''));
             $this->owed++;
+            if ($this->owed > 1000) {
+                $this->inflight = true;
+                $this->drainOwed();
+                $this->inflight = false;
+            }
         } catch (\Throwable $t) {
             $this->closeSock();
             throw $t;
@@ -698,6 +735,11 @@ final class __McPdoPgWire
         }
         $this->deferred = [];
         $this->pendErr = '';
+        $this->drainOwed();
+    }
+
+    private function drainOwed(): void
+    {
         while ($this->owed > 0) {
             [$t, $b] = $this->msg();
             if ($t === 'Z') {
@@ -778,6 +820,8 @@ final class __McPdoPgWire
 
     public function close(): void
     {
+        // the session ending frees its statements: nothing to flush
+        $this->deferred = [];
         if (!$this->dead && !$this->busy) {
             try { $this->send('X', ''); } catch (PDOException $e) {}
         }
@@ -819,18 +863,25 @@ final class __McPdoPg implements __McPdoDrv
 
     public function typName(int $oid): string
     {
-        if (!isset($this->typs[$oid])) {
-            $this->typs[$oid] = $this->run('select typname from pg_type where oid = ' . (string) $oid)->rows[0][0] ?? '';
+        if (isset($this->typs[$oid])) { return $this->typs[$oid]; }
+        $n = $this->run('select typname from pg_type where oid = ' . (string) $oid)->rows[0][0] ?? '';
+        // OIDs come off the wire: bound the cache, and never keep a miss
+        if ($n !== '') {
+            if (\count($this->typs) >= 4096) { $this->typs = []; }
+            $this->typs[$oid] = $n;
         }
-        return $this->typs[$oid];
+        return $n;
     }
 
     public function relName(int $oid): string
     {
-        if (!isset($this->rels[$oid])) {
-            $this->rels[$oid] = $this->run('select relname from pg_class where oid = ' . (string) $oid)->rows[0][0] ?? '';
+        if (isset($this->rels[$oid])) { return $this->rels[$oid]; }
+        $n = $this->run('select relname from pg_class where oid = ' . (string) $oid)->rows[0][0] ?? '';
+        if ($n !== '') {
+            if (\count($this->rels) >= 4096) { $this->rels = []; }
+            $this->rels[$oid] = $n;
         }
-        return $this->rels[$oid];
+        return $n;
     }
 
     /** Runs $sql, throwing the server's error as php's PDOException. */
@@ -876,7 +927,7 @@ final class __McPdoPg implements __McPdoDrv
      */
     public function quote(string $s, int $type): string|false
     {
-        if ($type === PDO::PARAM_LOB) { return "'\\x" . \bin2hex($s) . "'"; }
+        if ($type === PDO::PARAM_LOB) { return ($this->wire->stdStrings ? "'\\x" : "'\\\\x") . \bin2hex($s) . "'"; }
         $z = \strpos($s, "\0");
         if ($z !== false) { $s = \substr($s, 0, $z); }
         if ($this->wire->clientEnc === 'UTF8' && \preg_match('//u', $s) !== 1) { return false; }
@@ -1027,7 +1078,14 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
             $r->lens = $prev->lens;
             $r->mods = $prev->mods;
         }
-        $this->db->wire->extended($this->name, $this->sql, !$this->prepared || $this->unnamed, $params, $bin, $r);
+        try {
+            $this->db->wire->extended($this->name, $this->sql, !$this->prepared || $this->unnamed, $params, $bin, $r);
+        } catch (\Throwable $t) {
+            // no stale rows of the previous run behind a failed one
+            $this->res = null;
+            $this->idx = -1;
+            throw $t;
+        }
         if ($r->parsed) { $this->prepared = true; }
         $this->res = $r;
         $this->idx = -1;
@@ -1196,7 +1254,7 @@ function __mc_pdo_pgsql_open(string $rest, array $options, ?string $user, ?strin
     try {
         $wire->startup($user, $db, []);
         $wire->auth($user, $pw);
-    } catch (PDOException $e) {
+    } catch (\Throwable $e) {
         $wire->close();
         throw $e;
     }

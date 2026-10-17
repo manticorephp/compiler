@@ -11,8 +11,14 @@ fclose($wc); fclose($w);
 $before = $fds();
 $t = microtime(true);
 try {
-    $db = new PDO($dsn, 'u', 'pw', [PDO::ATTR_TIMEOUT => 3]);
-    if (in_array($mode, ['paramdesc_truncated', 'paramdesc_mismatch', 'datarow_overrun'], true)) {
+    $db = new PDO($dsn, 'u', 'pw', [PDO::ATTR_TIMEOUT => $mode === 'drip' ? 1 : 3]);
+    if ($mode === 'oid_flood') {
+        $p = $db->prepare('select 1');
+        $p->execute();
+        $first = $p->getColumnMeta(0)['native_type'];
+        for ($i = 1; $i < 5000; $i++) { $p->getColumnMeta($i); }
+        echo $mode, ': ', $p->getColumnMeta(0)['native_type'] === $first ? 'unbounded' : 'bounded', "\n";
+    } elseif (in_array($mode, ['paramdesc_truncated', 'paramdesc_mismatch', 'datarow_overrun'], true)) {
         $p = $db->prepare('select ?::text as a');   // not chained: #299 leaks a chained union-typed temporary
         $p->execute(['x']);
     } elseif (in_array($mode, ['bytea_odd', 'bytea_nonhex', 'bytea_escape', 'bytea_escape_bad', 'int_garbage', 'int_max', 'int_min', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus', 'float_plus'], true)) {
@@ -23,7 +29,7 @@ try {
     } else {
         $db->query('select 1')->fetchAll();
     }
-    if (!in_array($mode, ['bytea_escape', 'int_max', 'int_min', 'float_plus'], true)) { echo "$mode: NO ERROR\n"; }
+    if (!in_array($mode, ['bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood'], true)) { echo "$mode: NO ERROR\n"; }
 } catch (PDOException $e) {
     $m = (string) $e->errorInfo[2];
     $i = strpos($m, 'failed: ');

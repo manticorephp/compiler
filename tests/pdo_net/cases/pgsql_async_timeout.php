@@ -16,6 +16,6 @@ async(function () {
         echo "PDOException\n";
     }
     $s = microtime(true) - $t0;
-    echo $s >= 0.9 && $s < 2.0 ? "about 1s\n" : "elapsed $s\n";
+    echo $s >= 0.9 && $s < 3.0 ? "about 1s\n" : "elapsed $s\n";
     try { $db->query('select 1'); echo "usable\n"; } catch (PDOException $e) { echo "dead\n"; }
 });

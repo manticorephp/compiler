@@ -1,0 +1,55 @@
+== 0
+set 0: false ["00000",null,null]
+set 2: true ["00000",null,null]
+set 9999: false ["00000",null,null]
+set 1: false ["00000",null,null]
+get 0: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+get 1: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+get 2: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+get 9999: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+get 7: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+nextRowset: WARN: PDOStatement::nextRowset(): SQLSTATE[IM001]: Driver does not support this function: driver does not support multiple rowsets
+false ["IM001",null,null]
+st set: false
+st get: WARN: PDOStatement::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver doesn't support getting that attribute
+false
+== 1
+set 0: false ["00000",null,null]
+set 2: true ["00000",null,null]
+set 9999: false ["00000",null,null]
+set 1: false ["00000",null,null]
+get 0: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+get 1: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+get 2: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+get 9999: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+get 7: WARN: PDO::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+false ["IM001",null,null]
+nextRowset: WARN: PDOStatement::nextRowset(): SQLSTATE[IM001]: Driver does not support this function: driver does not support multiple rowsets
+false ["IM001",null,null]
+st set: false
+st get: WARN: PDOStatement::getAttribute(): SQLSTATE[IM001]: Driver does not support this function: driver doesn't support getting that attribute
+false
+== 2
+set 0: false ["00000",null,null]
+set 2: true ["00000",null,null]
+set 9999: false ["00000",null,null]
+set 1: false ["00000",null,null]
+get 0: get 0 EX SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+get 1: get 1 EX SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+get 2: get 2 EX SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+get 9999: get 9999 EX SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+get 7: get 7 EX SQLSTATE[IM001]: Driver does not support this function: driver does not support that attribute
+nextRowset: EX SQLSTATE[IM001]: Driver does not support this function: driver does not support multiple rowsets
+st set: false
+st get: EX SQLSTATE[IM001]: Driver does not support this function: driver doesn't support getting that attribute
+threw
+WARN: PDO::exec(): SQLSTATE[HY000]: General error: 1 near "selec": syntax error

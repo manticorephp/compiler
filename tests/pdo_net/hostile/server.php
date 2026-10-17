@@ -15,7 +15,27 @@ $z = $msg('Z', 'I');
 $batch = function () use ($rd): void { while (true) { $t = $rd(1); if ($t === '') { return; } $l = unpack('N', $rd(4))[1]; $rd($l - 4); if ($t === 'Q' || $t === 'S') { return; } } };
 $col = pack('n', 1) . "a\0" . pack('NnNnNn', 0, 0, 25, -1 & 0xffff, 0xffffffff, 0);
 if ($mode === 'huge') { fwrite($c, 'R' . pack('N', 0x7fffffff)); }
-elseif ($mode === 'short') { fwrite($c, 'R' . pack('N', 2)); }
+elseif ($mode === 'over_cap') { fwrite($c, 'R' . pack('N', 100 * 1024 * 1024)); }
+elseif ($mode === 'drip') {
+    // a length-100 message fed one byte per 0.4 s: every read succeeds, the message never completes
+    fwrite($c, 'R' . pack('N', 100));
+    for ($i = 0; $i < 20; $i++) { usleep(400000); if (@fwrite($c, 'x') === false) { break; } }
+} elseif ($mode === 'ignore_flood') {
+    for ($i = 0; $i < 5000; $i++) { if (@fwrite($c, $msg('N', "x\0")) === false) { break; } }
+} elseif ($mode === 'oid_flood') {
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    $cols = pack('n', 5000); $vals = pack('n', 5000);
+    for ($i = 0; $i < 5000; $i++) { $cols .= "a\0" . pack('NnNnNn', 0, 0, 100000 + $i, -1 & 0xffff, 0xffffffff, 0); $vals .= pack('N', 1) . 'x'; }
+    fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $cols) . $msg('2', '') . $msg('D', $vals) . $msg('C', "SELECT 1\0") . $z);
+    // every typname lookup is a simple Q; the answer changes per query, so a re-lookup of a cached OID is detectable
+    $n = 0;
+    while (true) {
+        $t = $rd(1); if ($t === '') { break; }
+        $l = unpack('N', $rd(4))[1]; $rd($l - 4);
+        if ($t === 'Q') { $n++; fwrite($c, $msg('T', $col) . $msg('D', pack('n', 1) . pack('N', strlen("t$n")) . "t$n") . $msg('C', "SELECT 1\0") . $z); }
+    }
+} elseif ($mode === 'short') { fwrite($c, 'R' . pack('N', 2)); }
 elseif ($mode === 'authok_after_sasl') {
     fwrite($c, $msg('R', pack('N', 10) . "SCRAM-SHA-256\0\0"));
     $t = $rd(1); $l = unpack('N', $rd(4))[1]; $rd($l - 4);   // SASLInitialResponse
