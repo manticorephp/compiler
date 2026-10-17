@@ -162,10 +162,15 @@ function __mir_similar_text(string $string1, string $string2): int
     $max = 0;
     $pa = 0;
     $pb = 0;
-    for ($i = 0; $i < $la; $i = $i + 1) {
-        for ($j = 0; $j < $lb; $j = $j + 1) {
-            $k = 0;
-            while ($i + $k < $la && $j + $k < $lb && $string1[$i + $k] === $string2[$j + $k]) {
+    for ($i = 0; $i < $la - $max; $i = $i + 1) {
+        $c = \ord($string1[$i]);
+        $room = $la - $i;
+        for ($j = 0; $j < $lb - $max; $j = $j + 1) {
+            if (\ord($string2[$j]) !== $c) { continue; }
+            $lim = $lb - $j;
+            if ($room < $lim) { $lim = $room; }
+            $k = 1;
+            while ($k < $lim && \ord($string1[$i + $k]) === \ord($string2[$j + $k])) {
                 $k = $k + 1;
             }
             if ($k > $max) { $max = $k; $pa = $i; $pb = $j; }
@@ -186,24 +191,27 @@ function levenshtein(string $string1, string $string2): int
     $lb = \strlen($string2);
     if ($la === 0) { return $lb; }
     if ($lb === 0) { return $la; }
-    $prev = [];
-    for ($j = 0; $j <= $lb; $j = $j + 1) { $prev[$j] = $j; }
+    // One DP row, updated in place; $diag carries the cell up-left of $j.
+    $row = [];
+    $bs = [];
+    for ($j = 0; $j <= $lb; $j = $j + 1) { $row[$j] = $j; }
+    for ($j = 0; $j < $lb; $j = $j + 1) { $bs[$j] = \ord($string2[$j]); }
     for ($i = 1; $i <= $la; $i = $i + 1) {
-        $cur = [];
-        $cur[0] = $i;
+        $c = \ord($string1[$i - 1]);
+        $diag = $row[0];
+        $left = $i;
+        $row[0] = $i;
         for ($j = 1; $j <= $lb; $j = $j + 1) {
-            $cost = $string1[$i - 1] === $string2[$j - 1] ? 0 : 1;
-            $del = $prev[$j] + 1;
-            $ins = $cur[$j - 1] + 1;
-            $sub = $prev[$j - 1] + $cost;
-            $m = $del;
-            if ($ins < $m) { $m = $ins; }
-            if ($sub < $m) { $m = $sub; }
-            $cur[$j] = $m;
+            $up = $row[$j];
+            $m = $diag + ($bs[$j - 1] === $c ? 0 : 1);
+            if ($up + 1 < $m) { $m = $up + 1; }
+            if ($left + 1 < $m) { $m = $left + 1; }
+            $row[$j] = $m;
+            $left = $m;
+            $diag = $up;
         }
-        $prev = $cur;
     }
-    return $prev[$lb];
+    return $row[$lb];
 }
 
 /** Case-insensitive {@see strrpos}. */
