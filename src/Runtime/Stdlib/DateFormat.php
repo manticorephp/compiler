@@ -112,8 +112,9 @@ function __mc_date_fmt(string $fmt, int $ts, int $us, int $zid, string $zname, i
         $abbr = 'GMT';
     } elseif ($ztype === 3) {
         $off = \__mc_tz_offset($zid, $ts);
-        $isdst = \__mc_tz_isdst($zid, $ts);
-        $abbr = \__mc_tz_abbr($zid, $ts);
+        // isdst/abbr are resolved at 'I'/'T': most formats never ask.
+        $isdst = 0;
+        $abbr = '';
     } else {
         $off = $zoff;
         $isdst = 0;
@@ -137,8 +138,8 @@ function __mc_date_fmt(string $fmt, int $ts, int $us, int $zid, string $zname, i
     $out = '';
     $n = \strlen($fmt);
     for ($i = 0; $i < $n; $i++) {
-        $c = $fmt[$i];
-        if ($c === '\\') {
+        $c = \ord($fmt[$i]);
+        if ($c === 92) {
             // Escape: emit the next byte verbatim. Must happen here, in the
             // scanner, or an escaped specifier is indistinguishable from a real
             // one by the time a replace pass runs.
@@ -148,62 +149,62 @@ function __mc_date_fmt(string $fmt, int $ts, int $us, int $zid, string $zname, i
             }
             continue;
         }
-        if ($c === 'd') { $out = $out . \__mc_d2($d); continue; }
-        if ($c === 'j') { $out = $out . $d; continue; }
-        if ($c === 'D') { $out = $out . \substr(\__mc_dayname($w), 0, 3); continue; }
-        if ($c === 'l') { $out = $out . \__mc_dayname($w); continue; }
-        if ($c === 'N') { $out = $out . ($w === 0 ? 7 : $w); continue; }
-        if ($c === 'w') { $out = $out . $w; continue; }
-        if ($c === 'S') { $out = $out . \__mc_ordsuffix($d); continue; }
-        if ($c === 'z') { $out = $out . (\__mc_doy($y, $mo, $d) - 1); continue; }
-        if ($c === 'W') { $out = $out . \__mc_d2(\__mc_iso_w(\__mc_iso_week($y, $mo, $d))); continue; }
-        if ($c === 'o') { $out = $out . \__mc_iso_y(\__mc_iso_week($y, $mo, $d)); continue; }
-        if ($c === 'F') { $out = $out . \__mc_monthname($mo); continue; }
-        if ($c === 'M') { $out = $out . \substr(\__mc_monthname($mo), 0, 3); continue; }
-        if ($c === 'm') { $out = $out . \__mc_d2($mo); continue; }
-        if ($c === 'n') { $out = $out . $mo; continue; }
-        if ($c === 't') { $out = $out . \__mc_days_in_month($y, $mo); continue; }
-        if ($c === 'L') { $out = $out . (\__mc_is_leap($y) ? '1' : '0'); continue; }
-        if ($c === 'Y') { $out = $out . $y; continue; }
-        if ($c === 'y') { $out = $out . \__mc_d2(\__mc_fmod($y, 100)); continue; }
-        if ($c === 'X') { $out = $out . ($y >= 0 ? '+' : '-') . \__mc_d4($y < 0 ? -$y : $y); continue; }
-        if ($c === 'x') { $out = $out . (($y > 9999 || $y < 0) ? (($y >= 0 ? '+' : '-') . \__mc_d4($y < 0 ? -$y : $y)) : \__mc_d4($y)); continue; }
-        if ($c === 'a') { $out = $out . ($h < 12 ? 'am' : 'pm'); continue; }
-        if ($c === 'A') { $out = $out . ($h < 12 ? 'AM' : 'PM'); continue; }
-        if ($c === 'g') { $out = $out . ($h % 12 === 0 ? 12 : $h % 12); continue; }
-        if ($c === 'G') { $out = $out . $h; continue; }
-        if ($c === 'h') { $out = $out . \__mc_d2($h % 12 === 0 ? 12 : $h % 12); continue; }
-        if ($c === 'H') { $out = $out . \__mc_d2($h); continue; }
-        if ($c === 'i') { $out = $out . \__mc_d2($mi); continue; }
-        if ($c === 's') { $out = $out . \__mc_d2($s); continue; }
-        if ($c === 'u') { $out = $out . \str_pad((string)$us, 6, '0', \STR_PAD_LEFT); continue; }
-        if ($c === 'v') { $out = $out . \str_pad((string)\intdiv($us, 1000), 3, '0', \STR_PAD_LEFT); continue; }
-        if ($c === 'B') {
+        if ($c === 100) { $out = $out . \__mc_d2($d); continue; }
+        if ($c === 106) { $out = $out . $d; continue; }
+        if ($c === 68) { $out = $out . \substr(\__mc_dayname($w), 0, 3); continue; }
+        if ($c === 108) { $out = $out . \__mc_dayname($w); continue; }
+        if ($c === 78) { $out = $out . ($w === 0 ? 7 : $w); continue; }
+        if ($c === 119) { $out = $out . $w; continue; }
+        if ($c === 83) { $out = $out . \__mc_ordsuffix($d); continue; }
+        if ($c === 122) { $out = $out . (\__mc_doy($y, $mo, $d) - 1); continue; }
+        if ($c === 87) { $out = $out . \__mc_d2(\__mc_iso_w(\__mc_iso_week($y, $mo, $d))); continue; }
+        if ($c === 111) { $out = $out . \__mc_iso_y(\__mc_iso_week($y, $mo, $d)); continue; }
+        if ($c === 70) { $out = $out . \__mc_monthname($mo); continue; }
+        if ($c === 77) { $out = $out . \substr(\__mc_monthname($mo), 0, 3); continue; }
+        if ($c === 109) { $out = $out . \__mc_d2($mo); continue; }
+        if ($c === 110) { $out = $out . $mo; continue; }
+        if ($c === 116) { $out = $out . \__mc_days_in_month($y, $mo); continue; }
+        if ($c === 76) { $out = $out . (\__mc_is_leap($y) ? '1' : '0'); continue; }
+        if ($c === 89) { $out = $out . \__mc_d4($y); continue; }
+        if ($c === 121) { $out = $out . \__mc_d2(\__mc_fmod($y, 100)); continue; }
+        if ($c === 88) { $out = $out . ($y >= 0 ? '+' : '-') . \__mc_d4($y < 0 ? -$y : $y); continue; }
+        if ($c === 120) { $out = $out . (($y > 9999 || $y < 0) ? (($y >= 0 ? '+' : '-') . \__mc_d4($y < 0 ? -$y : $y)) : \__mc_d4($y)); continue; }
+        if ($c === 97) { $out = $out . ($h < 12 ? 'am' : 'pm'); continue; }
+        if ($c === 65) { $out = $out . ($h < 12 ? 'AM' : 'PM'); continue; }
+        if ($c === 103) { $out = $out . ($h % 12 === 0 ? 12 : $h % 12); continue; }
+        if ($c === 71) { $out = $out . $h; continue; }
+        if ($c === 104) { $out = $out . \__mc_d2($h % 12 === 0 ? 12 : $h % 12); continue; }
+        if ($c === 72) { $out = $out . \__mc_d2($h); continue; }
+        if ($c === 105) { $out = $out . \__mc_d2($mi); continue; }
+        if ($c === 115) { $out = $out . \__mc_d2($s); continue; }
+        if ($c === 117) { $out = $out . \str_pad((string)$us, 6, '0', \STR_PAD_LEFT); continue; }
+        if ($c === 118) { $out = $out . \str_pad((string)\intdiv($us, 1000), 3, '0', \STR_PAD_LEFT); continue; }
+        if ($c === 66) {
             // Swatch internet time: always Biel Mean Time (UTC+1), never local.
             $bmt = \__mc_fmod($ts + 3600, 86400);
             $out = $out . \str_pad((string)\intdiv($bmt * 10, 864), 3, '0', \STR_PAD_LEFT);
             continue;
         }
-        if ($c === 'e') { $out = $out . ($ztype === 1 ? \__mc_offstr($off, ':', false) : $zname); continue; }
-        if ($c === 'I') { $out = $out . $isdst; continue; }
-        if ($c === 'T') { $out = $out . $abbr; continue; }
-        if ($c === 'O') { $out = $out . \__mc_offstr($off, '', false); continue; }
-        if ($c === 'P') { $out = $out . \__mc_offstr($off, ':', false); continue; }
-        if ($c === 'p') { $out = $out . \__mc_offstr($off, ':', true); continue; }
-        if ($c === 'Z') { $out = $out . $off; continue; }
-        if ($c === 'U') { $out = $out . $ts; continue; }
-        if ($c === 'c') {
+        if ($c === 101) { $out = $out . ($ztype === 1 ? \__mc_offstr($off, ':', false) : $zname); continue; }
+        if ($c === 73) { $out = $out . ($ztype === 3 ? \__mc_tz_isdst($zid, $ts) : $isdst); continue; }
+        if ($c === 84) { $out = $out . ($ztype === 3 ? \__mc_tz_abbr($zid, $ts) : $abbr); continue; }
+        if ($c === 79) { $out = $out . \__mc_offstr($off, '', false); continue; }
+        if ($c === 80) { $out = $out . \__mc_offstr($off, ':', false); continue; }
+        if ($c === 112) { $out = $out . \__mc_offstr($off, ':', true); continue; }
+        if ($c === 90) { $out = $out . $off; continue; }
+        if ($c === 85) { $out = $out . $ts; continue; }
+        if ($c === 99) {
             $out = $out . \__mc_d4($y) . '-' . \__mc_d2($mo) . '-' . \__mc_d2($d) . 'T'
                 . \__mc_d2($h) . ':' . \__mc_d2($mi) . ':' . \__mc_d2($s) . \__mc_offstr($off, ':', false);
             continue;
         }
-        if ($c === 'r') {
+        if ($c === 114) {
             $out = $out . \substr(\__mc_dayname($w), 0, 3) . ', ' . \__mc_d2($d) . ' '
-                . \substr(\__mc_monthname($mo), 0, 3) . ' ' . $y . ' '
+                . \substr(\__mc_monthname($mo), 0, 3) . ' ' . \__mc_d4($y) . ' '
                 . \__mc_d2($h) . ':' . \__mc_d2($mi) . ':' . \__mc_d2($s) . ' ' . \__mc_offstr($off, '', false);
             continue;
         }
-        $out = $out . $c;
+        $out = $out . $fmt[$i];
     }
     return $out;
 }
