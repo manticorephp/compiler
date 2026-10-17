@@ -4545,6 +4545,7 @@ end:
         if ($this->rt->needsStrrev) { $out .= $this->lib->strrev(); }
         if ($this->rt->needsAddslashes) { $out .= $this->lib->addslashes(); }
         if ($this->rt->needsCodec) { $out .= $this->lib->codec(); }
+        if ($this->rt->needsUrlCodec) { $out .= $this->lib->urlCodec(); }
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }

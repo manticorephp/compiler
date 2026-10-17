@@ -550,6 +550,7 @@ trait EmitLlvmBuiltins
             && \in_array(Node::literalInt($args[2] ?? null) ?? 0, [0, 1048576], true)
             && (!isset($args[2]) || Node::literalInt($args[2]) !== null)) { return $this->biJsonValidate($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
+        if (($name === '__mc_url_encode' || $name === '__mc_url_decode') && \count($args) === 2) { return $this->biUrlCodec($args, $name === '__mc_url_encode' ? '__mir_url_enc' : '__mir_url_dec'); }
         if ($name === 'substr_count' && $this->substrCountPlain($args)) { return $this->biSubstrCount($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
         if ($name === 'putenv')                       { return $this->biPutenv($args); }
@@ -10225,6 +10226,27 @@ trait EmitLlvmBuiltins
         $out .= $this->freeStrTemp($args[0], $se);
         $out .= $this->freeStrTemp($args[1], $rp);
         $out .= $this->freeStrTemp($args[2], $sj);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** `__mc_url_encode($s, $raw)` / `__mc_url_decode($s, $raw)`: whole-buffer
+     *  percent codecs ({@see RuntimeLibrary::urlCodec}); the PHP bodies in
+     *  Runtime/Stdlib/Encoding.php are the bootstrap fallback. @param Node[] $args */
+    private function biUrlCodec(array $args, string $fn): string
+    {
+        $this->rt->needsUrlCodec = true;
+        $this->rt->needsConcat = true;   // __mir_strlen
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $raw = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @' . $fn . '(ptr ' . $s . ', i64 ' . $raw . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
