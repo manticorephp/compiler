@@ -51,7 +51,7 @@ elseif ($mode === 'authok_after_sasl') {
         fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '')
             . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z);
     }
-} elseif (in_array($mode, ['ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape', 'bytea_escape_bad', 'int_garbage'], true)) {
+} elseif (in_array($mode, ['ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape', 'bytea_escape_bad', 'int_garbage', 'int_max', 'int_min', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus', 'float_plus'], true)) {
     fwrite($c, $msg('R', pack('N', 0)) . $z);
     $batch();                                               // Parse Describe Bind Execute Sync
     $typed = fn (int $oid) => pack('n', 1) . "a\0" . pack('NnNnNn', 0, 0, $oid, -1 & 0xffff, 0xffffffff, 0);
@@ -76,8 +76,12 @@ elseif ($mode === 'authok_after_sasl') {
         $batch();
         fwrite($c, $ok2());
     } else {
-        $val = ['bytea_odd' => '\xabc', 'bytea_nonhex' => '\xzz', 'bytea_escape' => 'a\000b\\\\c', 'bytea_escape_bad' => 'a\9'][$mode];
-        fwrite($c, $head . $msg('T', $typed(17)) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', strlen($val)) . $val) . $msg('C', "SELECT 1\0") . $z);
+        $spec = ['bytea_odd' => [17, '\xabc'], 'bytea_nonhex' => [17, '\xzz'], 'bytea_escape' => [17, 'a\000b\\\\c'], 'bytea_escape_bad' => [17, 'a\9'],
+            'int_max' => [20, '9223372036854775807'], 'int_min' => [20, '-9223372036854775808'],
+            'int_overflow' => [20, '9223372036854775808'], 'int_underflow' => [20, '-9223372036854775809'],
+            'float_lead' => [701, ' 5'], 'float_trail' => [701, '5 '], 'float_minus' => [701, '-'], 'float_plus' => [701, '+5']][$mode];
+        [$oid, $val] = $spec;
+        fwrite($c, $head . $msg('T', $typed($oid)) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', strlen($val)) . $val) . $msg('C', "SELECT 1\0") . $z);
         $batch();
         fwrite($c, $ok2());
     }

@@ -10,23 +10,23 @@ no fd leak
 sasl_final_unsolicited: 08006 7 unexpected SCRAM message
 fast
 no fd leak
-truncated_datarow: 08006 7 protocol error: truncated message
+truncated_datarow: HY000 7 protocol error: truncated message
 fast
 no fd leak
-truncated_rowdesc: 08006 7 protocol error: truncated message
+truncated_rowdesc: HY000 7 protocol error: truncated message
 fast
 no fd leak
 copy_in: HY000 4 
 fast
 no fd leak
-paramdesc_truncated: 08006 7 protocol error: truncated message
+paramdesc_truncated: HY000 7 protocol error: truncated message
 fast
 no fd leak
 paramdesc_mismatch: 08P01 7 ERROR:  bind message supplies 1 parameters, but prepared statement "pdo_stmt_00000001" requires 2
 reuse: ok
 fast
 no fd leak
-datarow_overrun: 08006 7 protocol error: truncated message
+datarow_overrun: HY000 7 protocol error: truncated message
 fast
 no fd leak
 ext_copy_in: HY000 4 
@@ -42,15 +42,46 @@ reuse: ok
 fast
 no fd leak
 bytea_nonhex: HY000 - invalid bytea value from server
+reuse: ok
 fast
 no fd leak
 bytea_escape: ok 6100625c63
 fast
 no fd leak
 bytea_escape_bad: HY000 - invalid bytea value from server
+reuse: ok
 fast
 no fd leak
 int_garbage: HY000 - invalid integer value from server
 reuse: ok
+fast
+no fd leak
+int_max: ok 9223372036854775807
+fast
+no fd leak
+int_min: ok -9223372036854775808
+fast
+no fd leak
+int_overflow: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+int_underflow: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+float_lead: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_trail: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_minus: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_plus: ok 5
 fast
 no fd leak

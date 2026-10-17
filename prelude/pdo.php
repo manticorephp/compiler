@@ -86,7 +86,7 @@ interface __McPdoDrv
     public function inTransaction(): bool;
 
     public function lastInsertId(?string $name): string;
-    public function quote(string $s, int $type): string;
+    public function quote(string $s, int $type): string|false;
 
     /** @return array<int,mixed> [SQLSTATE, code, message] */
     public function errorInfo(): array;
@@ -146,30 +146,286 @@ interface __McPdoDrvStmt
  */
 final class __McPdo
 {
-    /** php's `pdo_sqlstate_state_to_description` table, trimmed to what we emit. */
+    /**
+     * php's `pdo_sqlstate_state_to_description` table (all 266 rows, measured through
+     * a live server), one `CODE description` per line. An unlisted state is php's
+     * `<<Unknown error>>`.
+     */
+    private const SQLSTATES = '
+00000 No error
+01000 Warning
+01001 Cursor operation conflict
+01002 Disconnect error
+01003 NULL value eliminated in set function
+01004 String data, right truncated
+01006 Privilege not revoked
+01007 Privilege not granted
+01008 Implicit zero bit padding
+0100C Dynamic result sets returned
+01P01 Deprecated feature
+01S00 Invalid connection string attribute
+01S01 Error in row
+01S02 Option value changed
+01S06 Attempt to fetch before the result set returned the first rowset
+01S07 Fractional truncation
+01S08 Error saving File DSN
+01S09 Invalid keyword
+02000 No data
+02001 No additional dynamic result sets returned
+03000 Sql statement not yet complete
+07002 COUNT field incorrect
+07005 Prepared statement not a cursor-specification
+07006 Restricted data type attribute violation
+07009 Invalid descriptor index
+07S01 Invalid use of default parameter
+08000 Connection exception
+08001 Client unable to establish connection
+08002 Connection name in use
+08003 Connection does not exist
+08004 Server rejected the connection
+08006 Connection failure
+08007 Connection failure during transaction
+08S01 Communication link failure
+09000 Triggered action exception
+0A000 Feature not supported
+0B000 Invalid transaction initiation
+0F000 Locator exception
+0F001 Invalid locator specification
+0L000 Invalid grantor
+0LP01 Invalid grant operation
+0P000 Invalid role specification
+21000 Cardinality violation
+21S01 Insert value list does not match column list
+21S02 Degree of derived table does not match column list
+22000 Data exception
+22001 String data, right truncated
+22002 Indicator variable required but not supplied
+22003 Numeric value out of range
+22004 Null value not allowed
+22005 Error in assignment
+22007 Invalid datetime format
+22008 Datetime field overflow
+22009 Invalid time zone displacement value
+2200B Escape character conflict
+2200C Invalid use of escape character
+2200D Invalid escape octet
+2200F Zero length character string
+2200G Most specific type mismatch
+22010 Invalid indicator parameter value
+22011 Substring error
+22012 Division by zero
+22015 Interval field overflow
+22018 Invalid character value for cast specification
+22019 Invalid escape character
+2201B Invalid regular expression
+2201E Invalid argument for logarithm
+2201F Invalid argument for power function
+2201G Invalid argument for width bucket function
+22020 Invalid limit value
+22021 Character not in repertoire
+22022 Indicator overflow
+22023 Invalid parameter value
+22024 Unterminated c string
+22025 Invalid escape sequence
+22026 String data, length mismatch
+22027 Trim error
+2202E Array subscript error
+22P01 Floating point exception
+22P02 Invalid text representation
+22P03 Invalid binary representation
+22P04 Bad copy file format
+22P05 Untranslatable character
+23000 Integrity constraint violation
+23001 Restrict violation
+23502 Not null violation
+23503 Foreign key violation
+23505 Unique violation
+23514 Check violation
+24000 Invalid cursor state
+25000 Invalid transaction state
+25001 Active sql transaction
+25002 Branch transaction already active
+25003 Inappropriate access mode for branch transaction
+25004 Inappropriate isolation level for branch transaction
+25005 No active sql transaction for branch transaction
+25006 Read only sql transaction
+25007 Schema and data statement mixing not supported
+25008 Held cursor requires same isolation level
+25P01 No active sql transaction
+25P02 In failed sql transaction
+25S01 Transaction state
+25S02 Transaction is still active
+25S03 Transaction is rolled back
+26000 Invalid sql statement name
+27000 Triggered data change violation
+28000 Invalid authorization specification
+2B000 Dependent privilege descriptors still exist
+2BP01 Dependent objects still exist
+2D000 Invalid transaction termination
+2F000 Sql routine exception
+2F002 Modifying sql data not permitted
+2F003 Prohibited sql statement attempted
+2F004 Reading sql data not permitted
+2F005 Function executed no return statement
+34000 Invalid cursor name
+38000 External routine exception
+38001 Containing sql not permitted
+38002 Modifying sql data not permitted
+38003 Prohibited sql statement attempted
+38004 Reading sql data not permitted
+39000 External routine invocation exception
+39001 Invalid sqlstate returned
+39004 Null value not allowed
+39P01 Trigger protocol violated
+39P02 Srf protocol violated
+3B000 Savepoint exception
+3B001 Invalid savepoint specification
+3C000 Duplicate cursor name
+3D000 Invalid catalog name
+3F000 Invalid schema name
+40000 Transaction rollback
+40001 Serialization failure
+40002 Transaction integrity constraint violation
+40003 Statement completion unknown
+40P01 Deadlock detected
+42000 Syntax error or access violation
+42501 Insufficient privilege
+42601 Syntax error
+42602 Invalid name
+42611 Invalid column definition
+42622 Name too long
+42701 Duplicate column
+42702 Ambiguous column
+42703 Undefined column
+42704 Undefined object
+42710 Duplicate object
+42712 Duplicate alias
+42723 Duplicate function
+42725 Ambiguous function
+42803 Grouping error
+42804 Datatype mismatch
+42809 Wrong object type
+42830 Invalid foreign key
+42846 Cannot coerce
+42883 Undefined function
+42939 Reserved name
+42P01 Undefined table
+42P02 Undefined parameter
+42P03 Duplicate cursor
+42P04 Duplicate database
+42P05 Duplicate prepared statement
+42P06 Duplicate schema
+42P07 Duplicate table
+42P08 Ambiguous parameter
+42P09 Ambiguous alias
+42P10 Invalid column reference
+42P11 Invalid cursor definition
+42P12 Invalid database definition
+42P13 Invalid function definition
+42P14 Invalid prepared statement definition
+42P15 Invalid schema definition
+42P16 Invalid table definition
+42P17 Invalid object definition
+42P18 Indeterminate datatype
+42S01 Base table or view already exists
+42S02 Base table or view not found
+42S11 Index already exists
+42S12 Index not found
+42S21 Column already exists
+42S22 Column not found
+44000 WITH CHECK OPTION violation
+53000 Insufficient resources
+53100 Disk full
+53200 Out of memory
+53300 Too many connections
+54000 Program limit exceeded
+54001 Statement too complex
+54011 Too many columns
+54023 Too many arguments
+55000 Object not in prerequisite state
+55006 Object in use
+55P02 Cant change runtime param
+55P03 Lock not available
+57000 Operator intervention
+57014 Query canceled
+57P01 Admin shutdown
+57P02 Crash shutdown
+57P03 Cannot connect now
+58030 Io error
+58P01 Undefined file
+58P02 Duplicate file
+F0000 Config file error
+F0001 Lock file exists
+HY000 General error
+HY001 Memory allocation error
+HY003 Invalid application buffer type
+HY004 Invalid SQL data type
+HY007 Associated statement is not prepared
+HY008 Operation canceled
+HY009 Invalid use of null pointer
+HY010 Function sequence error
+HY011 Attribute cannot be set now
+HY012 Invalid transaction operation code
+HY013 Memory management error
+HY014 Limit on the number of handles exceeded
+HY015 No cursor name available
+HY016 Cannot modify an implementation row descriptor
+HY017 Invalid use of an automatically allocated descriptor handle
+HY018 Server declined cancel request
+HY019 Non-character and non-binary data sent in pieces
+HY020 Attempt to concatenate a null value
+HY021 Inconsistent descriptor information
+HY024 Invalid attribute value
+HY090 Invalid string or buffer length
+HY091 Invalid descriptor field identifier
+HY092 Invalid attribute/option identifier
+HY093 Invalid parameter number
+HY095 Function type out of range
+HY096 Invalid information type
+HY097 Column type out of range
+HY098 Scope type out of range
+HY099 Nullable type out of range
+HY100 Uniqueness option type out of range
+HY101 Accuracy option type out of range
+HY103 Invalid retrieval code
+HY104 Invalid precision or scale value
+HY105 Invalid parameter type
+HY106 Fetch type out of range
+HY107 Row value out of range
+HY109 Invalid cursor position
+HY110 Invalid driver completion
+HY111 Invalid bookmark value
+HYC00 Optional feature not implemented
+HYT00 Timeout expired
+HYT01 Connection timeout expired
+IM001 Driver does not support this function
+IM002 Data source name not found and no default driver specified
+IM003 Specified driver could not be loaded
+IM004 Driver\'s SQLAllocHandle on SQL_HANDLE_ENV failed
+IM005 Driver\'s SQLAllocHandle on SQL_HANDLE_DBC failed
+IM006 Driver\'s SQLSetConnectAttr failed
+IM007 No data source or driver specified; dialog prohibited
+IM008 Dialog failed
+IM009 Unable to load translation DLL
+IM010 Data source name too long
+IM011 Driver name too long
+IM012 DRIVER keyword syntax error
+IM013 Trace file error
+IM014 Invalid name of File DSN
+IM015 Corrupt file data source
+P0000 Plpgsql error
+P0001 Raise exception
+XX000 Internal error
+XX001 Data corrupted
+XX002 Index corrupted
+';
+
     public static function sqlstateText(string $state): string
     {
-        if ($state === '00000') { return 'No error'; }
-        if ($state === '23000') { return 'Integrity constraint violation'; }
-        if ($state === '22007') { return 'Invalid datetime format'; }
-        if ($state === '26000') { return 'Invalid SQL statement name'; }
-        if ($state === '28000') { return 'Invalid authorization specification'; }
-        if ($state === '42000') { return 'Syntax error or access violation'; }
-        if ($state === 'HY093') { return 'Invalid parameter number'; }
-        // pdo_pgsql's server states (the rest of its table lands with the error mapping).
-        if ($state === '08P01') { return '<<Unknown error>>'; }
-        if ($state === '22012') { return 'Division by zero'; }
-        if ($state === '22021') { return 'Character not in repertoire'; }
-        if ($state === '22P02') { return 'Invalid text representation'; }
-        if ($state === '23502') { return 'Not null violation'; }
-        if ($state === '23503') { return 'Foreign key violation'; }
-        if ($state === '23505') { return 'Unique violation'; }
-        if ($state === '42601') { return 'Syntax error'; }
-        if ($state === '42703') { return 'Undefined column'; }
-        if ($state === '42P01') { return 'Undefined table'; }
-        if ($state === '42809') { return 'Wrong object type'; }
-        if ($state === 'IM001') { return 'Driver does not support this function'; }
-        return 'General error';
+        $i = \strpos(self::SQLSTATES, "\n" . $state . ' ');
+        if ($i === false) { return '<<Unknown error>>'; }
+        $s = $i + 2 + \strlen($state);
+        return \substr(self::SQLSTATES, $s, \strpos(self::SQLSTATES, "\n", $s) - $s);
     }
 
     /**
@@ -241,13 +497,13 @@ final class __McPdo
      * Zend-shaped rather than becoming an exception.
      */
     public static function raise(int $errmode, string $state, int $code, bool $hasCode,
-                                 string $msg, bool $hasMsg): void
+                                 string $msg, bool $hasMsg, string $fn = 'PDO::errorInfo'): void
     {
         if ($errmode === PDO::ERRMODE_EXCEPTION) {
             throw self::fail($state, $code, $hasCode, $msg, $hasMsg);
         }
         if ($errmode === PDO::ERRMODE_WARNING) {
-            \trigger_error('PDO::errorInfo(): '
+            \trigger_error($fn . '(): '
                 . self::message($state, $code, $hasCode, $msg, $hasMsg), \E_USER_WARNING);
         }
     }
@@ -398,6 +654,12 @@ class PDO
      * the sqlite driver ever reads them, because a `.sig` for constants does not
      * exist there either.
      */
+    public const PGSQL_ATTR_DISABLE_PREPARES = 1000;
+    public const PGSQL_TRANSACTION_IDLE = 0;
+    public const PGSQL_TRANSACTION_ACTIVE = 1;
+    public const PGSQL_TRANSACTION_INTRANS = 2;
+    public const PGSQL_TRANSACTION_INERROR = 3;
+    public const PGSQL_TRANSACTION_UNKNOWN = 4;
     public const SQLITE_ATTR_OPEN_FLAGS = 1000;
     public const SQLITE_ATTR_READONLY_STATEMENT = 1001;
     public const SQLITE_ATTR_EXTENDED_RESULT_CODES = 1002;
@@ -409,6 +671,8 @@ class PDO
     public ?__McPdoDrv $drv = null;
 
     public int $errmode = 2;
+    /** Method name that overrides the caller's in a warning (query() runs prepare+execute). */
+    public string $label = '';
     public int $case = 0;
     public int $oracleNulls = 0;
     public bool $stringify = false;
@@ -488,7 +752,7 @@ class PDO
         try {
             $ds = $this->drv->prepare($query);
         } catch (PDOException $e) {
-            $this->note($e);
+            $this->note($e, 'PDO::prepare');
             return false;
         }
         $this->clearErr();
@@ -497,10 +761,14 @@ class PDO
 
     public function query(string $query, ?int $fetchMode = null, mixed ...$fetchModeArgs): PDOStatement|false
     {
+        // php names query() in the warning, not the prepare()/execute() it is made of
+        $this->label = 'PDO::query';
         $st = $this->prepare($query);
-        if ($st === false) { return false; }
+        if ($st === false) { $this->label = ''; return false; }
         if ($fetchMode !== null) { $st->setFetchMode($fetchMode, ...$fetchModeArgs); }
-        if ($st->execute() === false) { return false; }
+        $ok = $st->execute();
+        $this->label = '';
+        if ($ok === false) { return false; }
         return $st;
     }
 
@@ -509,7 +777,7 @@ class PDO
         try {
             $n = $this->drv->exec($statement);
         } catch (PDOException $e) {
-            return $this->note($e);
+            return $this->note($e, 'PDO::exec');
         }
         $this->clearErr();
         return $n;
@@ -520,7 +788,7 @@ class PDO
         if ($this->drv->inTransaction()) {
             throw new PDOException('There is already an active transaction', 0);
         }
-        return $this->run('begin');
+        return $this->run('begin', 'PDO::beginTransaction');
     }
 
     public function commit(): bool
@@ -528,7 +796,7 @@ class PDO
         if (!$this->drv->inTransaction()) {
             throw new PDOException('There is no active transaction', 0);
         }
-        return $this->run('commit');
+        return $this->run('commit', 'PDO::commit');
     }
 
     public function rollBack(): bool
@@ -536,7 +804,7 @@ class PDO
         if (!$this->drv->inTransaction()) {
             throw new PDOException('There is no active transaction', 0);
         }
-        return $this->run('rollback');
+        return $this->run('rollback', 'PDO::rollBack');
     }
 
     public function inTransaction(): bool
@@ -546,7 +814,11 @@ class PDO
 
     public function lastInsertId(?string $name = null): mixed
     {
-        return $this->drv->lastInsertId($name);
+        try {
+            return $this->drv->lastInsertId($name);
+        } catch (PDOException $e) {
+            return $this->note($e, 'PDO::lastInsertId');
+        }
     }
 
     public function quote(string $string, int $type = 2): mixed
@@ -554,7 +826,7 @@ class PDO
         try {
             return $this->drv->quote($string, $type);
         } catch (PDOException $e) {
-            return $this->note($e);
+            return $this->note($e, 'PDO::quote');
         }
     }
 
@@ -571,6 +843,7 @@ class PDO
 
     public function setAttribute(int $attribute, mixed $value): bool
     {
+        $this->clearErr();
         if ($attribute === PDO::ATTR_ERRMODE) { $this->errmode = (int) $value; return true; }
         if ($attribute === PDO::ATTR_CASE) { $this->case = (int) $value; return true; }
         if ($attribute === PDO::ATTR_ORACLE_NULLS) { $this->oracleNulls = (int) $value; return true; }
@@ -580,7 +853,7 @@ class PDO
         if ($attribute === PDO::ATTR_PERSISTENT) { $this->persistent = (bool) $value; return true; }
         // Consumed by the driver's open(); accepted so it can ride the options
         // array without then being reported as unsupported.
-        if ($attribute === PDO::SQLITE_ATTR_OPEN_FLAGS) { return true; }
+        if ($attribute === PDO::SQLITE_ATTR_OPEN_FLAGS && $this->drv->name() === 'sqlite') { return true; }
         if ($attribute === PDO::ATTR_STATEMENT_CLASS) {
             if (\is_array($value)) {
                 $this->stmtClassName = (string) $value[0];
@@ -592,12 +865,13 @@ class PDO
             }
             return true;
         }
-        if ($this->drv->setAttr($attribute, $value)) { return true; }
-        return $this->unsupported('driver does not support that attribute');
+        // php (measured, sqlite and pgsql): a refused set is a plain false, no error recorded
+        return $this->drv->setAttr($attribute, $value);
     }
 
     public function getAttribute(int $attribute): mixed
     {
+        $this->clearErr();
         if ($attribute === PDO::ATTR_ERRMODE) { return $this->errmode; }
         if ($attribute === PDO::ATTR_CASE) { return $this->case; }
         if ($attribute === PDO::ATTR_ORACLE_NULLS) { return $this->oracleNulls; }
@@ -610,18 +884,18 @@ class PDO
         if ($attribute === PDO::ATTR_DRIVER_NAME) { return $this->drv->name(); }
         $v = $this->drv->getAttr($attribute);
         if ($v !== null) { return $v; }
-        return $this->unsupported('driver does not support that attribute');
+        return $this->unsupported('driver does not support that attribute', 'PDO::getAttribute');
     }
 
     /** Shared body of begin/commit/rollback, so all three report identically. */
-    private function run(string $what): bool
+    private function run(string $what, string $fn): bool
     {
         try {
             if ($what === 'begin') { $this->drv->begin(); }
             elseif ($what === 'commit') { $this->drv->commit(); }
             else { $this->drv->rollback(); }
         } catch (PDOException $e) {
-            $this->note($e);
+            $this->note($e, $fn);
             return false;
         }
         $this->clearErr();
@@ -640,7 +914,7 @@ class PDO
     }
 
     /** Record a driver failure, then let the error mode decide what happens. */
-    public function note(PDOException $e): mixed
+    public function note(PDOException $e, string $fn = 'PDO::errorInfo'): mixed
     {
         /*
          * A PDOException with no SQLSTATE did not come from a driver operation —
@@ -655,19 +929,20 @@ class PDO
         $this->errMsg = $e->driverMsg;
         $this->errHasMsg = $e->hasDriverMsg;
         __McPdo::raise($this->errmode, $e->sqlstate, $e->driverCode, $e->hasDriverCode,
-                       $e->driverMsg, $e->hasDriverMsg);
+                       $e->driverMsg, $e->hasDriverMsg, $this->label !== '' ? $this->label : $fn);
         return false;
     }
 
-    /** php's IM001: the driver was asked for something it does not have. */
-    private function unsupported(string $msg): mixed
+    /** php's IM001: the driver was asked for something it does not have. php raises it as an implementation
+     *  error, which warns even under ERRMODE_SILENT (measured). */
+    private function unsupported(string $msg, string $fn): mixed
     {
         $this->errState = 'IM001';
         $this->errCode = 0;
         $this->errHasCode = false;
         $this->errMsg = $msg;
         $this->errHasMsg = true;
-        __McPdo::raise($this->errmode, 'IM001', 0, false, $msg, true);
+        __McPdo::raise($this->errmode === PDO::ERRMODE_SILENT ? PDO::ERRMODE_WARNING : $this->errmode, 'IM001', 0, false, $msg, true, $fn);
         return false;
     }
 
@@ -745,7 +1020,7 @@ class PDOStatement implements IteratorAggregate
             }
             $this->drv->execute();
         } catch (PDOException $e) {
-            return $this->fail($e);
+            return $this->fail($e, 'PDOStatement::execute');
         }
         $this->clearErr();
         $this->executed = true;
@@ -915,7 +1190,7 @@ class PDOStatement implements IteratorAggregate
     /** sqlite has no second result set; php refuses rather than answering false. */
     public function nextRowset(): bool
     {
-        $this->unsupported('driver does not support multiple rowsets');
+        $this->unsupported('driver does not support multiple rowsets', 'PDOStatement::nextRowset');
         return false;
     }
 
@@ -932,13 +1207,13 @@ class PDOStatement implements IteratorAggregate
 
     public function setAttribute(int $attribute, mixed $value): bool
     {
-        $this->unsupported('This driver doesn\'t support setting attributes');
+        $this->unsupported('This driver doesn\'t support setting attributes', 'PDOStatement::setAttribute');
         return false;
     }
 
     public function getAttribute(int $name): mixed
     {
-        return $this->unsupported('This driver doesn\'t support getting attributes');
+        return $this->unsupported('This driver doesn\'t support getting attributes', 'PDOStatement::getAttribute');
     }
 
     public function debugDumpParams(): void
@@ -983,27 +1258,27 @@ class PDOStatement implements IteratorAggregate
     }
 
     /** A statement failure is also the CONNECTION's last error, as in php. */
-    private function fail(PDOException $e): bool
+    private function fail(PDOException $e, string $fn): bool
     {
         $this->errState = $e->sqlstate;
         $this->errCode = $e->driverCode;
         $this->errHasCode = $e->hasDriverCode;
         $this->errMsg = $e->driverMsg;
         $this->errHasMsg = $e->hasDriverMsg;
-        if ($this->db !== null) { $this->db->note($e); return false; }
+        if ($this->db !== null) { $this->db->note($e, $fn); return false; }
         __McPdo::raise(PDO::ERRMODE_EXCEPTION, $e->sqlstate, $e->driverCode,
-                       $e->hasDriverCode, $e->driverMsg, $e->hasDriverMsg);
+                       $e->hasDriverCode, $e->driverMsg, $e->hasDriverMsg, $fn);
         return false;
     }
 
-    private function unsupported(string $msg): mixed
+    private function unsupported(string $msg, string $fn): mixed
     {
         $this->errState = 'IM001';
         $this->errCode = 0;
         $this->errHasCode = false;
         $this->errMsg = $msg;
         $this->errHasMsg = true;
-        __McPdo::raise($this->errmode(), 'IM001', 0, false, $msg, true);
+        __McPdo::raise($this->errmode() === PDO::ERRMODE_SILENT ? PDO::ERRMODE_WARNING : $this->errmode(), 'IM001', 0, false, $msg, true, $fn);
         return false;
     }
 

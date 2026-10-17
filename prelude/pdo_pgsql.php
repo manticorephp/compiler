@@ -59,6 +59,17 @@ final class __McPdoPgWire
     /** ReadyForQuery status: I idle, T in a transaction, E failed transaction. */
     public string $status = 'I';
     public string $serverVersion = '';
+    /** BackendKeyData's process id; 0 once the connection is gone, as libpq's PQbackendPID(). */
+    public int $pid = 0;
+    /** ParameterStatus values ATTR_SERVER_INFO reports. */
+    public string $clientEnc = '';
+    public string $isSuper = '';
+    public string $sessAuth = '';
+    public string $dateStyle = '';
+    /** standard_conforming_strings: with it off a backslash in a quoted literal is an escape. */
+    public bool $stdStrings = true;
+    /** The server's own error of the request in flight: libpq shows it ahead of "server closed the connection". */
+    private string $pendErr = '';
     /** libpq's prefix for every failure while connecting. */
     public string $where = '';
     private bool $connecting = true;
@@ -130,7 +141,7 @@ final class __McPdoPgWire
 
     private function sendRaw(string $m): void
     {
-        if ($this->dead) { throw $this->ioFail('connection is closed'); }
+        if ($this->dead) { throw $this->ioFail('no connection to the server'); }
         while ($m !== '') {
             $w = \fwrite($this->s, $m);
             if ($w === false || $w === 0) {
@@ -180,6 +191,9 @@ final class __McPdoPgWire
     private function closeSock(): void
     {
         $this->dead = true;
+        // PQtransactionStatus() of a lost connection: PQTRANS_UNKNOWN, which php reads as "in a transaction"
+        $this->status = 'U';
+        $this->pid = 0;
         if ($this->closed) { return; }
         $this->closed = true;
         \fclose($this->s);
@@ -188,9 +202,10 @@ final class __McPdoPgWire
     private function ioFail(string $m): PDOException
     {
         $this->closeSock();
-        return $this->connecting
-            ? __McPdo::connectFail('08006', 7, $this->where . $m)
-            : __McPdo::fail('08006', 7, true, $m, true);
+        if ($this->connecting) { return __McPdo::connectFail('08006', 7, $this->where . $m); }
+        // libpq hands php a result with NO SQLSTATE for a lost connection, so php reports HY000 (measured)
+        if ($this->pendErr !== '') { $m = $this->pendErr . "\n" . $m; $this->pendErr = ''; }
+        return __McPdo::fail('HY000', 7, true, $m, true);
     }
 
     /** pack('N') without pack(): the binary prelude is gated on the PROGRAM calling it. */
@@ -272,6 +287,10 @@ final class __McPdoPgWire
             [$t, $b] = $this->msg();
             if ($t === 'E') { throw $this->startFail($this->parseErr($b, '')->text); }
             if ($t === 'S') { $this->paramStatus($b); continue; }
+            if ($t === 'K') {
+                if (\strlen($b) >= 4) { $this->pid = self::i32($b, 0); }
+                continue;
+            }
             if ($t === 'Z') {
                 if (!$this->authOk || \strlen($b) < 1) { throw $this->startFail('server did not complete authentication'); }
                 $this->status = $b[0];
@@ -336,9 +355,17 @@ final class __McPdoPgWire
     private function paramStatus(string $b): void
     {
         $z = \strpos($b, "\0");
-        if ($z !== false && \substr($b, 0, $z) === 'server_version') {
-            $this->serverVersion = \substr($b, $z + 1, \strlen($b) - $z - 2);
-        }
+        if ($z === false) { return; }
+        $e = \strpos($b, "\0", $z + 1);
+        if ($e === false) { return; }
+        $k = \substr($b, 0, $z);
+        $v = \substr($b, $z + 1, $e - $z - 1);
+        if ($k === 'server_version') { $this->serverVersion = $v; }
+        elseif ($k === 'client_encoding') { $this->clientEnc = $v; }
+        elseif ($k === 'is_superuser') { $this->isSuper = $v; }
+        elseif ($k === 'session_authorization') { $this->sessAuth = $v; }
+        elseif ($k === 'DateStyle') { $this->dateStyle = $v; }
+        elseif ($k === 'standard_conforming_strings') { $this->stdStrings = $v !== 'off'; }
     }
 
     private function truncated(): PDOException
@@ -436,7 +463,7 @@ final class __McPdoPgWire
                 $seenT = false;
                 $this->cmdTag($b, $res);
             } elseif ($t === 'E') {
-                if ($res->err === null) { $res->err = $this->parseErr($b, $sql); }
+                if ($res->err === null) { $res->err = $this->parseErr($b, $sql); $this->pendErr = $res->err->text; }
             } elseif ($t === 'S') {
                 $this->paramStatus($b);
             } elseif ($t === 'G') {
@@ -521,7 +548,7 @@ final class __McPdoPgWire
             } elseif ($t === 'C') {
                 $this->cmdTag($b, $res);
             } elseif ($t === 'E') {
-                if ($res->err === null) { $res->err = $this->parseErr($b, $sql); }
+                if ($res->err === null) { $res->err = $this->parseErr($b, $sql); $this->pendErr = $res->err->text; }
             } elseif ($t === 'S') {
                 $this->paramStatus($b);
             } elseif ($t === 'G') {
@@ -555,6 +582,8 @@ final class __McPdoPgWire
     /** Reads the answers of earlier closeStmt() calls. */
     private function settle(): void
     {
+        if ($this->dead) { throw $this->ioFail('no connection to the server'); }
+        $this->pendErr = '';
         while ($this->owed > 0) {
             [$t, $b] = $this->msg();
             if ($t === 'Z') {
@@ -646,6 +675,10 @@ final class __McPdoPg implements __McPdoDrv
 {
     public __McPdoPgWire $wire;
     private int $stmtN = 0;
+    /** PGSQL_ATTR_DISABLE_PREPARES: every execute() is one unnamed Parse/Bind/Execute, nothing stays server-side. */
+    public bool $disablePrepares = false;
+    /** ATTR_EMULATE_PREPARES is stored for getAttribute() and otherwise ignored: statements are always server-side. */
+    private bool $emulate = false;
     /** @var array<int,string> pg_type.typname by OID, as php's getColumnMeta() looks it up */
     private array $typs = [];
     /** @var array<int,string> pg_class.relname by OID */
@@ -720,8 +753,20 @@ final class __McPdoPg implements __McPdoDrv
         return $v === null ? '' : $v;
     }
 
-    public function quote(string $s, int $type): string
+    /**
+     * libpq's PQescapeStringConn as php calls it: cut at the first NUL, quotes doubled,
+     * backslashes doubled only while standard_conforming_strings is off — and never an
+     * E prefix. A string that is not valid in a UTF8 session makes libpq fail and php
+     * answer false with no error. PARAM_LOB is a bytea hex literal.
+     * ponytail: only UTF8 is validated; other multibyte client encodings pass through.
+     */
+    public function quote(string $s, int $type): string|false
     {
+        if ($type === PDO::PARAM_LOB) { return "'\\x" . \bin2hex($s) . "'"; }
+        $z = \strpos($s, "\0");
+        if ($z !== false) { $s = \substr($s, 0, $z); }
+        if ($this->wire->clientEnc === 'UTF8' && \preg_match('//u', $s) !== 1) { return false; }
+        if (!$this->wire->stdStrings) { $s = \str_replace('\\', '\\\\', $s); }
         return "'" . \str_replace("'", "''", $s) . "'";
     }
 
@@ -729,16 +774,28 @@ final class __McPdoPg implements __McPdoDrv
 
     public function setAttr(int $attr, mixed $value): bool
     {
-        if ($attr === PDO::ATTR_TIMEOUT) {
-            $this->wire->setTimeout((float) $value);
-            return true;
-        }
+        // php (measured): ATTR_TIMEOUT is a connect-time option only; set afterwards it is a silent false
+        if ($attr === PDO::PGSQL_ATTR_DISABLE_PREPARES) { $this->disablePrepares = (bool) $value; return true; }
+        if ($attr === PDO::ATTR_EMULATE_PREPARES) { $this->emulate = (bool) $value; return true; }
+        if ($attr === PDO::ATTR_PREFETCH) { return true; }
         return false;
     }
 
     public function getAttr(int $attr): mixed
     {
         if ($attr === PDO::ATTR_SERVER_VERSION) { return $this->wire->serverVersion; }
+        // no libpq to ask: the wire protocol version this driver speaks
+        if ($attr === PDO::ATTR_CLIENT_VERSION) { return 'manticore-pgwire 3.0'; }
+        if ($attr === PDO::ATTR_CONNECTION_STATUS) {
+            return $this->wire->dead ? 'Bad connection.' : 'Connection OK; waiting to send.';
+        }
+        if ($attr === PDO::ATTR_SERVER_INFO) {
+            $w = $this->wire;
+            return 'PID: ' . (string) $w->pid . '; Client Encoding: ' . $w->clientEnc . '; Is Superuser: ' . $w->isSuper
+                . '; Session Authorization: ' . $w->sessAuth . '; Date Style: ' . $w->dateStyle;
+        }
+        if ($attr === PDO::PGSQL_ATTR_DISABLE_PREPARES) { return $this->disablePrepares; }
+        if ($attr === PDO::ATTR_EMULATE_PREPARES) { return $this->emulate; }
         return null;
     }
 
@@ -762,6 +819,8 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
     /** @var array<int,string> one entry per `$n` slot: `?` or `:name` */
     private array $names = [];
     private bool $prepared = false;
+    /** Taken from PGSQL_ATTR_DISABLE_PREPARES at prepare(): the unnamed statement is re-parsed by every execute(). */
+    private bool $unnamed = false;
     /** @var array<int,?string> by 1-based slot; reset by every execute() (the facade rebinds them all) */
     private array $vals = [];
     /** @var array<int,bool> */
@@ -776,7 +835,8 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
         $sc = __McPdoSql::rewritePg($sql);
         $this->sql = $sc->sql;
         $this->names = $sc->names;
-        $this->name = $db->nextStmtName();
+        $this->unnamed = $db->disablePrepares;
+        $this->name = $this->unnamed ? '' : $db->nextStmtName();
     }
 
     public function paramCount(): int { return \count($this->names); }
@@ -846,14 +906,14 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
 
         $r = new __McPdoPgResult();
         $prev = $this->res;
-        if ($this->prepared && $prev !== null) {
+        if ($this->prepared && !$this->unnamed && $prev !== null) {
             $r->cols = $prev->cols;
             $r->oids = $prev->oids;
             $r->tbls = $prev->tbls;
             $r->lens = $prev->lens;
             $r->mods = $prev->mods;
         }
-        $this->db->wire->extended($this->name, $this->sql, !$this->prepared, $params, $bin, $r);
+        $this->db->wire->extended($this->name, $this->sql, !$this->prepared || $this->unnamed, $params, $bin, $r);
         if ($r->parsed) { $this->prepared = true; }
         $this->res = $r;
         $this->idx = -1;
@@ -913,7 +973,10 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
         if ($o === 25 || $o === 1043) { return $v; }
         if ($o === 23 || $o === 20 || $o === 21 || $o === 26) {
             $d = $v !== '' && $v[0] === '-' ? \substr($v, 1) : $v;
-            if (\strlen($d) > 19 || !\ctype_digit($d)) { throw self::badValue('integer'); }
+            $n = \strlen($d);
+            if ($n > 19 || !\ctype_digit($d)) { throw self::badValue('integer'); }
+            // 19 digits can still overflow: (int) would saturate silently
+            if ($n === 19 && \strcmp($d, $d === $v ? '9223372036854775807' : '9223372036854775808') > 0) { throw self::badValue('integer'); }
             return (int) $v;
         }
         if ($o === 16) { return $v === 't'; }
@@ -921,7 +984,8 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
             if ($v === 'NaN') { return \NAN; }
             if ($v === 'Infinity') { return \INF; }
             if ($v === '-Infinity') { return -\INF; }
-            if (!\is_numeric($v)) { throw self::badValue('float'); }
+            // is_numeric() also takes surrounding whitespace, which no server prints
+            if (!\is_numeric($v) || \ctype_space($v[0]) || \ctype_space($v[\strlen($v) - 1])) { throw self::badValue('float'); }
             return (float) $v;
         }
         if ($o === 17) {
@@ -986,7 +1050,7 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
 
     public function close(): void
     {
-        if ($this->prepared) {
+        if ($this->prepared && !$this->unnamed) {
             $this->prepared = false;
             try { $this->db->wire->closeStmt($this->name); } catch (PDOException $e) {}
         }
