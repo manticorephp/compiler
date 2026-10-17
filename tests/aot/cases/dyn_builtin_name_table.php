@@ -14,7 +14,7 @@ $f = 'str_repeat'; var_dump($f('ab', 3));
 $f = 'max'; var_dump($f(3, 9));
 $f = 'trim'; var_dump($f('xxhixx', 'x'));
 function loop() { $c = 0; $f = "strlen";
-for ($i = 0; $i < 1000; $i++) { $c += $f('abc'); }
+for ($i = 0; $i < 1000; $i++) { $f("abc"); $c++; }
 return $c; }
 echo loop(), "\n";
 echo call_user_func('abs', -3), call_user_func('strtoupper', 'x'), "\n";
