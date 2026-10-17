@@ -19,3 +19,13 @@ no fd leak
 copy_in: HY000 COPY is not supported
 fast
 no fd leak
+paramdesc_truncated: 08006 protocol error: truncated message
+fast
+no fd leak
+paramdesc_mismatch: 08P01 ERROR:  bind message supplies 1 parameters, but prepared statement "pdo_stmt_00000001" requires 2
+reuse: ok
+fast
+no fd leak
+datarow_overrun: 08006 protocol error: truncated message
+fast
+no fd leak
