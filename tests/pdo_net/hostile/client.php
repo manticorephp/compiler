@@ -3,7 +3,7 @@
 // No php oracle (the fake server targets our driver's checks): expected output is hand-written in hostile.expected.
 $mode = $argv[1];
 $my = ($argv[3] ?? '') === 'mysql';
-$dsn = ($my ? 'mysql' : 'pgsql') . ':host=127.0.0.1;port=' . $argv[2] . ';dbname=d' . ($my ? '' : (str_starts_with($mode, 'ssl_') ? ';sslmode=require' : ';sslmode=disable'));
+$dsn = ($my ? 'mysql' : 'pgsql') . ':host=127.0.0.1;port=' . $argv[2] . ';dbname=d' . ($my ? '' : (str_starts_with($mode, 'ssl_') ? ';sslmode=require' . ($mode === 'ssl_tls12' ? ';ssl_min_protocol_version=TLSv1.3' : '') : ';sslmode=disable'));
 $fds = fn () => count(scandir('/dev/fd'));
 // the first socket lazily opens the runtime's poller fd, which stays for the process: warm it up first
 $w = stream_socket_server('tcp://127.0.0.1:0');

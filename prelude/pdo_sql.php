@@ -208,6 +208,10 @@ function __mc_pdotls_load_file(int $ctx, string $file): int {}
 #[\Ffi\Library('ssl'), \Ffi\Symbol('SSL_CTX_load_verify_dir'), \Ffi\CType('int')]
 function __mc_pdotls_load_dir(int $ctx, string $dir): int {}
 
+// SSL_CTX_set_{min,max}_proto_version are macros over SSL_CTX_ctrl (SSL_CTRL_SET_MIN_PROTO_VERSION 123, _MAX_ 124)
+#[\Ffi\Library('ssl'), \Ffi\Symbol('SSL_CTX_ctrl')]
+function __mc_pdotls_ctx_ctrl(int $ctx, #[\Ffi\CType('int')] int $cmd, #[\Ffi\CType('long')] int $larg, \Ffi\Ptr $parg): int {}
+
 #[\Ffi\Library('ssl'), \Ffi\Symbol('SSL_CTX_set_cipher_list'), \Ffi\CType('int')]
 function __mc_pdotls_ciphers(int $ctx, string $list): int {}
 
@@ -285,6 +289,12 @@ final class __McPdoTlsOpts
     public string $key = '';
     public string $ciphers = '';
     public bool $sni = true;
+    /** Protocol floor / ceiling (TLS1_2_VERSION = 0x0303 ...); 0 = the library default for the ceiling. */
+    public int $minVersion = 0x0303;
+    public int $maxVersion = 0;
+    /** pgsql: the names libpq prints in its protocol-version hint. */
+    public string $minName = 'TLSv1.2';
+    public string $maxName = 'TLSv1.3';
 }
 
 /** Outcome of {@see __McPdoTls::start}. `stage` names the step that failed; '' = success. */
@@ -338,6 +348,10 @@ final class __McPdoTls
         __mc_pdotls_err_clear();
         $ctx = \Runtime\Openssl\ctxNew(\Runtime\Openssl\clientMethod());
         if ($ctx === 0) { return self::fail($res, 'init'); }
+        if (__mc_pdotls_ctx_ctrl($ctx, 123, $o->minVersion, \int_to_ptr(0)) !== 1 || ($o->maxVersion !== 0 && __mc_pdotls_ctx_ctrl($ctx, 124, $o->maxVersion, \int_to_ptr(0)) !== 1)) {
+            \Runtime\Openssl\ctxFree($ctx);
+            return self::fail($res, 'init');
+        }
         if ($o->ciphers !== '' && __mc_pdotls_ciphers($ctx, $o->ciphers) !== 1) {
             \Runtime\Openssl\ctxFree($ctx);
             return self::fail($res, 'cipher');
@@ -381,7 +395,14 @@ final class __McPdoTls
             \Runtime\Openssl\sslFree($ssl);
             return self::fail($res, 'init');
         }
-        $rc = self::drive($sock, $ssl, $budget);
+        // a cancellation raised while the handshake is parked must not leak the SSL object
+        try {
+            $rc = self::drive($sock, $ssl, $budget);
+        } catch (\Throwable $t) {
+            \Runtime\Openssl\sslFree($ssl);
+            __mc_pdotls_err_clear();
+            throw $t;
+        }
         if ($rc !== 1) {
             $err = \Runtime\Openssl\getError($ssl, $rc);
             $r = self::fail($res, $err === 2 || $err === 3 ? 'timeout' : 'connect');
@@ -396,6 +417,7 @@ final class __McPdoTls
         $sock->kind = \Resource::KIND_TLS;
         $sock->type = 'stream';
         $sock->ssl = $ssl;
+        __mc_pdotls_err_clear();
         return $res;
     }
 

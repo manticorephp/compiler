@@ -7,12 +7,15 @@ cd "$ROOT"
 FILTER=""
 [ "${1:-}" = "-k" ] && FILTER="$2"
 export PDO_PG_DSN="${PDO_PG_DSN-pgsql:host=127.0.0.1;port=54320;dbname=d}"
+export PDO_PG_SSL_DSN="${PDO_PG_SSL_DSN-pgsql:host=127.0.0.1;port=54323;dbname=d}"
 export PDO_MY_DSN="${PDO_MY_DSN-mysql:host=127.0.0.1;port=33060;dbname=d}"
 export PDO_MY_NATIVE_DSN="${PDO_MY_NATIVE_DSN-mysql:host=127.0.0.1;port=33062;dbname=d}"
 WORK="$ROOT/tests/pdo_net/.work"
 mkdir -p "$WORK"
 trap 'rm -rf "$WORK"' EXIT
 # TLS material: pg's comes from up.sh (.certs); mysql's CA is the one mc-my generated for itself, copied out per run
+# the hostile TLS server (ssl_tls12) needs a certificate of its own: hermetic, generated per run
+bash "$ROOT/tests/pdo_net/mkcerts.sh" "$WORK/tls" && export MC_TLS_DIR="$WORK/tls"
 export PDO_SSL_DIR="$ROOT/tests/pdo_net/.certs"
 if command -v docker >/dev/null 2>&1 && [ "$(docker inspect -f '{{.State.Running}}' mc-my 2>/dev/null)" = true ]; then
     docker cp mc-my:/var/lib/mysql/ca.pem "$WORK/my_ca.pem" >/dev/null 2>&1 && export PDO_MY_SSL_CA="$WORK/my_ca.pem"
@@ -57,7 +60,7 @@ if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out big_slow oid_miss over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus idle_slow idle_explicit stall_mid ssl_n ssl_e ssl_byte ssl_eof ssl_extra ssl_late ssl_garbage ssl_silent ssl_close ssl_drip; do
+        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out big_slow oid_miss over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus idle_slow idle_explicit stall_mid ssl_n ssl_e ssl_byte ssl_eof ssl_extra ssl_late ssl_garbage ssl_silent ssl_close ssl_drip ssl_tls12; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" >/dev/null 2>&1 &
             sp=$!

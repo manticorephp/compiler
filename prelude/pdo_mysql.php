@@ -863,10 +863,13 @@ final class __McPdoMyWire
 
     public function close(): void
     {
-        if (!$this->dead && !$this->busy && !$this->connecting) {
-            try { $this->seq = 0; $this->sendPacket("\x01"); } catch (PDOException $e) {}
+        try {
+            if (!$this->dead && !$this->busy && !$this->connecting) {
+                try { $this->seq = 0; $this->sendPacket("\x01"); } catch (PDOException $e) {}
+            }
+        } finally {
+            $this->closeSock();
         }
-        $this->closeSock();
     }
 }
 

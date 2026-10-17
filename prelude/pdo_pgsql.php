@@ -217,8 +217,8 @@ final class __McPdoPgWire
             return "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.\nSSL SYSCALL error: EOF detected";
         }
         $m = 'SSL error: ' . $r->reason;
-        if ($r->reason === 'wrong version number' || $r->reason === 'unsupported protocol') {
-            $m .= "\nThis may indicate that the server does not support any SSL protocol version between TLSv1.2 and TLSv1.3.";
+        if (\in_array($r->reason, ['wrong version number', 'unsupported protocol', 'tlsv1 alert protocol version', 'version too low', 'no protocols available'], true)) {
+            $m .= "\nThis may indicate that the server does not support any SSL protocol version between " . $o->minName . ' and ' . $o->maxName . '.';
         }
         return $m;
     }
@@ -915,10 +915,14 @@ final class __McPdoPgWire
     {
         // the session ending frees its statements: nothing to flush
         $this->deferred = [];
-        if (!$this->dead && !$this->busy) {
-            try { $this->send('X', ''); } catch (PDOException $e) {}
+        // a cancellation can be raised by the Terminate write: the socket is released regardless
+        try {
+            if (!$this->dead && !$this->busy && !$this->connecting) {
+                try { $this->send('X', ''); } catch (PDOException $e) {}
+            }
+        } finally {
+            $this->closeSock();
         }
-        $this->closeSock();
     }
 }
 
@@ -1354,6 +1358,16 @@ function __mc_pdo_pgsql_tls_opts(array $p, string $mode, string $host, string &$
     $home = \getenv('HOME');
     $dir = ($home === false || $home === '') ? '' : $home . '/.postgresql/';
     $o->sni = !isset($p['sslsni']) || $p['sslsni'] !== '0';
+    // libpq: ssl_min_protocol_version defaults to TLSv1.2, ssl_max_protocol_version to the newest
+    $names = ['TLSv1' => 0x0301, 'TLSv1.1' => 0x0302, 'TLSv1.2' => 0x0303, 'TLSv1.3' => 0x0304];
+    $o->minName = isset($p['ssl_min_protocol_version']) ? $p['ssl_min_protocol_version'] : 'TLSv1.2';
+    $o->maxName = isset($p['ssl_max_protocol_version']) ? $p['ssl_max_protocol_version'] : 'TLSv1.3';
+    foreach (['ssl_min_protocol_version' => $o->minName, 'ssl_max_protocol_version' => $o->maxName] as $k => $v) {
+        if (!isset($names[$v])) { $err = 'invalid "' . $k . '" value: "' . $v . '"'; return $o; }
+    }
+    $o->minVersion = $names[$o->minName];
+    $o->maxVersion = isset($p['ssl_max_protocol_version']) ? $names[$o->maxName] : 0;
+    if ($o->maxVersion !== 0 && $o->maxVersion < $o->minVersion) { $err = 'invalid SSL protocol version range'; return $o; }
     $o->verifyName = $mode === 'verify-full';
     $cert = isset($p['sslcert']) && $p['sslcert'] !== '' ? $p['sslcert'] : ($dir === '' ? '' : $dir . 'postgresql.crt');
     if ($cert !== '' && \is_file($cert)) {
@@ -1401,7 +1415,7 @@ function __mc_pdo_pgsql_open(string $rest, array $options, ?string $user, ?strin
 
     // libpq validates the connection options before it opens a socket
     foreach ($p as $k => $unused) {
-        if (\strncmp($k, 'ssl', 3) === 0 && !\in_array($k, ['sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'sslcrl', 'sslcrldir', 'sslsni', 'sslcompression', 'sslpassword'], true)) {
+        if (\strncmp($k, 'ssl', 3) === 0 && !\in_array($k, ['sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'sslcrl', 'sslcrldir', 'sslsni', 'sslcompression', 'sslpassword', 'ssl_min_protocol_version', 'ssl_max_protocol_version'], true)) {
             throw __McPdo::connectFail('08006', 7, 'invalid connection option "' . $k . '"');
         }
     }
@@ -1421,6 +1435,10 @@ function __mc_pdo_pgsql_open(string $rest, array $options, ?string $user, ?strin
     if ($root === 'system' && $mode !== 'verify-full' && $mode !== 'disable') {
         throw __McPdo::connectFail('08006', 7, 'weak sslmode "' . $mode . '" may not be used with sslrootcert=system (use "verify-full")');
     }
+    // like the mode, the protocol range is validated before any socket is opened
+    $probe = '';
+    __mc_pdo_pgsql_tls_opts($p, 'require', $host, $probe);
+    if ($probe !== '' && (\strncmp($probe, 'invalid', 7) === 0)) { throw __McPdo::connectFail('08006', 7, $probe); }
     // libpq's attempt order: allow tries plaintext first, prefer TLS first; either retries the other way on any failure
     $tries = $mode === 'disable' ? [false] : ($mode === 'allow' ? [false, true] : ($mode === 'prefer' ? [true, false] : [true]));
     $n = \count($tries);

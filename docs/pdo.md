@@ -201,6 +201,11 @@ address while `host` is what the certificate is checked against.
   others). Defaults are `~/.postgresql/{postgresql.crt,postgresql.key,root.crt,root.crl}`. A client certificate whose file is missing is
   skipped; its key file must exist and not be group/world readable (libpq's wording). `sslcrl` that exists enables CRL checking of
   the whole chain; a missing one is ignored.
+- Protocol range: `ssl_min_protocol_version` (default `TLSv1.2`) and `ssl_max_protocol_version` as libpq (`invalid "ssl_min_protocol_version" value: "x"`,
+  `invalid SSL protocol version range`); the hint names the configured range. mysql uses the same TLS 1.2 floor (mysqlnd has no option;
+  the local OpenSSL cannot offer TLS 1.1, so the floor is tested with a TLS-1.2-capped server against a 1.3-only client).
+- Cancelling a fiber parked in the handshake frees the SSL object and the socket (`pgsql_async_tls_cancel`); the stdlib's own handshake still
+  leaks in that case (#328, which also lists the ssl.* context options `stream_socket_enable_crypto` ignores).
 - Failures read `SSL error: <OpenSSL reason>` (plus libpq's protocol-version hint) or the libpq texts above; a silent peer is
   `timeout expired` within `ATTR_TIMEOUT`.
 - Deviations: PG* environment variables are not read (`PGSSLMODE` ...); the key-file permission check runs before the certificate is

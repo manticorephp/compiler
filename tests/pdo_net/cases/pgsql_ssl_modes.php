@@ -51,3 +51,17 @@ $try('client key does not match', "$cc;sslcert=$dir/ca.pem;sslkey=$dir/client.ke
 $try('cert without key', "$cc;sslcert=$dir/client.crt", 'cu', null);
 $try('sslsni / sslcompression', "$tls;sslmode=require;sslsni=0;sslcompression=1");
 $try('unknown option', "$tls;sslbogus=1");
+// protocol range (libpq's ssl_min_protocol_version defaults to TLSv1.2)
+$ver = function (string $label, string $extra) use ($tls) {
+    try {
+        $db = new PDO("$tls;sslmode=require;$extra", 'u', 'pw');
+        echo $label, ': ', $db->query('select version from pg_stat_ssl where pid = pg_backend_pid()')->fetchColumn(), "\n";
+    } catch (PDOException $e) { echo $label, ': ', json_encode($e->getMessage()), "\n"; }
+};
+$ver('min 1.2', 'ssl_min_protocol_version=TLSv1.2');
+$ver('min 1.3', 'ssl_min_protocol_version=TLSv1.3');
+$ver('max 1.2', 'ssl_max_protocol_version=TLSv1.2');
+$ver('min 1.1', 'ssl_min_protocol_version=TLSv1.1');
+$ver('bogus min', 'ssl_min_protocol_version=bogus');
+$ver('bogus max', 'ssl_max_protocol_version=TLSv9');
+$ver('empty range', 'ssl_min_protocol_version=TLSv1.3;ssl_max_protocol_version=TLSv1.2');
