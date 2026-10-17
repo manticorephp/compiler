@@ -645,19 +645,27 @@ function str_word_count(string $s, int $format = 0): int|array
     $words = [];
     /** @var int[] $starts */
     $starts = [];
-    $cur = "";
     $st = 0;
     $inWord = false;
+    $count = 0;
     for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = \substr($s, $i, 1);
-        $isAlpha = ($c >= "a" && $c <= "z") || ($c >= "A" && $c <= "Z");
-        $isInner = $isAlpha || $c === "'" || $c === "-";
+        $c = \ord($s[$i]);
+        $l = $c | 32;
+        $isAlpha = $l >= 97 && $l <= 122;
+        $isInner = $isAlpha || $c === 39 || $c === 45;
         // A run STARTS on an alphabetic char; `'`/`-` only continue an open run.
-        if ($isAlpha && !$inWord) { $cur = $c; $st = $i; $inWord = true; }
-        elseif ($inWord && $isInner) { $cur = $cur . $c; }
-        elseif (!$isInner && $inWord) { $words[] = $cur; $starts[] = $st; $inWord = false; }
+        if ($isAlpha && !$inWord) { $st = $i; $inWord = true; }
+        elseif (!$isInner && $inWord) {
+            $count = $count + 1;
+            if ($format !== 0) { $words[] = \substr($s, $st, $i - $st); $starts[] = $st; }
+            $inWord = false;
+        }
     }
-    if ($inWord) { $words[] = $cur; $starts[] = $st; }
+    if ($inWord) {
+        $count = $count + 1;
+        if ($format !== 0) { $words[] = \substr($s, $st, $n - $st); $starts[] = $st; }
+    }
+    if ($format === 0) { return $count; }
     if ($format === 1) { return $words; }
     if ($format === 2) {
         /** @var array<int,string> $byPos */

@@ -1,0 +1,10 @@
+0 [] []
+1 ["a"] ["a"]
+2 ["ab","cd"] {"0":"ab","3":"cd"}
+2 ["it's","well-known"] {"0":"it's","5":"well-known"}
+3 ["x","y","z"] {"0":"x","2":"y","4":"z"}
+3 ["lead","and","trail"] {"2":"lead","7":"and","11":"trail"}
+1 ["Zz"] ["Zz"]
+1 ["don't--stop"] ["don't--stop"]
+33 ["word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word","word"] {"0":"word","5":"word","10":"word","15":"word","20":"word","25":"word","30":"word","35":"word","40":"word","45":"word","50":"word","55":"word","60":"word","65":"word","70":"word","75":"word","80":"word","85":"word","90":"word","95":"word","100":"word","105":"word","110":"word","115":"word","120":"word","125":"word","130":"word","135":"word","140":"word","145":"word","150":"word","155":"word","160":"word"}
+27000
