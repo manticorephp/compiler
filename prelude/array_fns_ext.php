@@ -346,6 +346,36 @@ function array_walk_recursive(array &$arr, callable $cb, mixed $extra = null): b
  */
 function array_splice(array &$input, int $offset, ?int $length = null, mixed $replacement = []): array
 {
+    if (\__mc_fast_list($input)) {
+        // A packed list: head / removed / tail are bulk copies, one merge rebuilds it.
+        $fN = count($input);
+        $fStart = $offset;
+        if ($fStart < 0) { $fStart = $fN + $fStart; }
+        if ($fStart < 0) { $fStart = 0; }
+        if ($fStart > $fN) { $fStart = $fN; }
+        $fLen = $fN - $fStart;
+        if ($length !== null) {
+            $fLen = $length;
+            if ($fLen < 0) { $fLen = $fN - $fStart + $fLen; }
+        }
+        if ($fLen < 0) { $fLen = 0; }
+        $fEnd = $fStart + $fLen;
+        if ($fEnd > $fN) { $fEnd = $fN; }
+        $fastRemoved = [];
+        if ($fEnd > $fStart) { \__mc_list_range_into($fastRemoved, $input, (int)$fStart, (int)$fEnd, false); }
+        $fastHead = [];
+        if ($fStart > 0) { \__mc_list_range_into($fastHead, $input, 0, (int)$fStart, false); }
+        $fastTail = [];
+        if ($fEnd < $fN) { \__mc_list_range_into($fastTail, $input, (int)$fEnd, $fN, false); }
+        $fastMid = [];
+        if (is_array($replacement)) {
+            foreach ($replacement as $fRv) { $fastMid[] = $fRv; }
+        } else {
+            $fastMid[] = $replacement;
+        }
+        $input = array_merge($fastHead, $fastMid, $fastTail);
+        return $fastRemoved;
+    }
     $keys = array_keys($input);
     $n = count($keys);
     $start = $offset;
