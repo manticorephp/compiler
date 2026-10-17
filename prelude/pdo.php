@@ -967,8 +967,10 @@ class PDO
         $this->errHasCode = $e->hasDriverCode;
         $this->errMsg = $e->driverMsg;
         $this->errHasMsg = $e->hasDriverMsg;
-        // HY093 is php core's implementation error: like IM001 it warns even under ERRMODE_SILENT (measured)
-        $mode = $this->errmode === PDO::ERRMODE_SILENT && $e->sqlstate === 'HY093' && !$e->hasDriverCode ? PDO::ERRMODE_WARNING : $this->errmode;
+        // with emulated prepares (mysql) HY093 comes from php core's parameter parser, an implementation error: like IM001 it
+        // warns even under ERRMODE_SILENT (measured). pdo_pgsql's own HY093 follows the error mode.
+        $mode = $this->errmode === PDO::ERRMODE_SILENT && $e->sqlstate === 'HY093' && !$e->hasDriverCode
+            && $this->drv !== null && $this->drv->name() === 'mysql' ? PDO::ERRMODE_WARNING : $this->errmode;
         __McPdo::raise($mode, $e->sqlstate, $e->driverCode, $e->hasDriverCode,
                        $e->driverMsg, $e->hasDriverMsg, $this->label !== '' ? $this->label : $fn);
         return false;
