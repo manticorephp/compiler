@@ -27,10 +27,13 @@ for f in tests/pdo_net/cases/*.php; do
     if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n"; skip=$((skip+1)); continue; fi
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
     if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
+    pre="${f%.php}.pre"   # optional hook: server state a case needs before EACH run (php and native)
+    [ -x "$pre" ] && "$pre"
     if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); fi
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
         echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); continue
     fi
+    [ -x "$pre" ] && "$pre"
     act=$("$WORK/$n" 2>&1)
     if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1))
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi

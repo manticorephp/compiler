@@ -12,8 +12,7 @@
  * is gated on the PROGRAM calling it, and the row loop is the hot path.
  *
  * Deliberate gaps: TLS (`MYSQL_ATTR_SSL_*` is refused up front, never silently
- * downgraded), caching_sha2_password FULL authentication over a plain socket
- * (needs openssl_public_encrypt, which the PDO prelude cannot reach), unix
+ * downgraded), unix
  * sockets, native (binary protocol) prepares, compression.
  */
 
@@ -528,21 +527,9 @@ final class __McPdoMyWire
      * caching_sha2_password perform_full_authentication over a plain socket: ask for
      * the server's RSA key and send the password RSA-OAEP encrypted. Cleartext over
      * TLS arrives with the TLS phase.
-     *
-     * ⚠ openssl_public_encrypt is a prelude function gated on the USER program calling an openssl_* function, and the PDO
-     * prelude cannot pull it in (that gate lives in src/). It is called by NAME so that a program which does link it works,
-     * and one that does not gets a clear refusal instead of an undefined-function trap.
      */
     private function fullAuth(string $pw, string $scramble): void
     {
-        $f = 'openssl_public_encrypt';
-        if (!\function_exists($f)) {
-            $this->closeSock();
-            throw __McPdo::connectFail('HY000', 2059,
-                "Authentication plugin 'caching_sha2_password' cannot be loaded: full authentication over an unencrypted"
-                . ' connection needs RSA, which this program does not link (call an openssl_* function, or log in once'
-                . ' with a client that can, or use mysql_native_password)');
-        }
         $this->sendPacket("\x02");
         $k = $this->packet(self::CTRL_CAP);
         if (\strlen($k) < 27 || \ord($k[0]) !== 1 || \strncmp(\substr($k, 1), '-----BEGIN PUBLIC KEY-----', 26) !== 0) {
@@ -550,7 +537,7 @@ final class __McPdoMyWire
         }
         $enc = '';
         // 4 = OPENSSL_PKCS1_OAEP_PADDING
-        if (!$f(self::rsaPlain($pw, $scramble), $enc, \substr($k, 1), 4) || $enc === '') {
+        if (!\openssl_public_encrypt(self::rsaPlain($pw, $scramble), $enc, \substr($k, 1), 4) || $enc === '') {
             $this->closeSock();
             throw __McPdo::connectFail('HY000', 2059, 'caching_sha2_password: could not encrypt the password with the server public key');
         }

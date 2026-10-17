@@ -1,0 +1,3 @@
+#!/bin/bash
+# empties the auth cache so the next login of u/pw is a caching_sha2 FULL authentication
+docker exec mc-my mysql -h 127.0.0.1 -uroot -ppw -e "flush privileges" 2>/dev/null

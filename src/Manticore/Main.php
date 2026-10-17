@@ -4836,7 +4836,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // definedFunctions gate: adding a function to prelude/openssl_x509.php
     // enrols it automatically. The class arm matters because a program can take
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.
-    $useOpenssl = $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
+    // pdo_mysql's caching_sha2_password full authentication RSA-encrypts the password from the prelude, which the
+    // demand gate cannot see: any PDO program carries the openssl prelude (OpenSSL itself is linked into every binary).
+    $useOpenssl = $usePdo || $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
         || $demand->mentionsAny(['OpenSSLAsymmetricKey', 'OpenSSLCertificate', 'OpenSSLCertificateSigningRequest']);
     // ext/intl over the host ICU: gated on its functions and its classes, so a
     // program that uses neither never links libicu.

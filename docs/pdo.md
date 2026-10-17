@@ -122,8 +122,8 @@ string). Connection options by number: `1004` FOUND_ROWS, `1002` INIT_COMMAND, `
 MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
 
 - Authentication: `mysql_native_password`, `caching_sha2_password` (fast path; full authentication
-  over a plain socket RSA-encrypts the password through `openssl_public_encrypt`, which exists only
-  when the PROGRAM calls an `openssl_*` function — otherwise a clear `[2059]` error names the gap),
+  over a plain socket RSA-encrypts the password through `openssl_public_encrypt`; every PDO program carries
+  the openssl prelude for that),
   auth switch between the two. `sha256_password`, `mysql_clear_password`, ed25519: `[2059]`.
 - php reads no `user=` / `password=` DSN key for mysql (unlike pgsql): the constructor arguments rule.
 - `exec()` of several statements answers the FIRST statement's count and runs all of them; `query()`
