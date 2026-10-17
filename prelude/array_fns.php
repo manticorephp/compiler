@@ -75,11 +75,16 @@ function array_flip(array $a): array
  */
 function str_split(string $s, int $length = 1): array
 {
-    if ($length < 1) { $length = 1; }
+    if ($length < 1) { throw new \ValueError('str_split(): Argument #2 ($length) must be greater than 0'); }
     $out = [];
     $n = \strlen($s);
-    if ($n === 0) { $out[] = ""; return $out; }
+    if ($n === 0) { return $out; }
     $i = 0;
+    if ($length === 1) {
+        // an index read answers a cached one-byte string; substr() allocates
+        while ($i < $n) { $out[] = $s[$i]; $i = $i + 1; }
+        return $out;
+    }
     while ($i < $n) {
         $out[] = \substr($s, $i, $length);
         $i = $i + $length;
