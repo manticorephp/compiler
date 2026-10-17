@@ -653,8 +653,11 @@ function html_entity_decode(string $string, int $flags = 3, string $encoding = "
     $i = 0;
     while ($i < $n) {
         if ($string[$i] !== "&") {
-            $out = $out . $string[$i];
-            $i = $i + 1;
+            // the whole run up to the next `&` in one append
+            $amp = \strpos($string, "&", $i);
+            if ($amp === false) { $amp = $n; }
+            $out = $out . \substr($string, $i, $amp - $i);
+            $i = $amp;
             continue;
         }
         $semi = \strpos($string, ";", $i);
@@ -717,11 +720,11 @@ function strip_tags(string $string, string $allowed_tags = ""): string
     $n = \strlen($string);
     $i = 0;
     while ($i < $n) {
-        $c = $string[$i];
-        if ($c !== "<") {
-            $out = $out . $c;
-            $i = $i + 1;
-            continue;
+        $run = \strcspn($string, "<", $i);
+        if ($run > 0) {
+            $out = $out . \substr($string, $i, $run);
+            $i = $i + $run;
+            if ($i >= $n) { break; }
         }
         // A comment runs to `-->`.
         if (\substr($string, $i, 4) === "<!--") {
@@ -729,19 +732,13 @@ function strip_tags(string $string, string $allowed_tags = ""): string
             $i = $end === false ? $n : $end + 3;
             continue;
         }
-        // Scan to the closing `>`, skipping quoted regions.
+        // Scan to the closing `>`, jumping between quotes and `>`.
         $j = $i + 1;
-        $quote = "";
         while ($j < $n) {
-            $d = $string[$j];
-            if ($quote !== "") {
-                if ($d === $quote) { $quote = ""; }
-            } elseif ($d === "\"" || $d === "'") {
-                $quote = $d;
-            } elseif ($d === ">") {
-                break;
-            }
-            $j = $j + 1;
+            $j = $j + \strcspn($string, "\"'>", $j);
+            if ($j >= $n || $string[$j] === ">") { break; }
+            $q = \strpos($string, $string[$j], $j + 1);
+            $j = $q === false ? $n : $q + 1;
         }
         if ($j >= $n) {
             // Unterminated tag: php drops the rest.
