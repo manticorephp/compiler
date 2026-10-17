@@ -411,6 +411,8 @@ final class EmitLlvm implements EmitVisitor
     private array $callableShims = [];
     /** @var array<string, string> */
     private array $builtinTwinRet = [];
+    /** @var array<string, bool> */
+    private array $builtinTwinRef = [];
 
     /** Names a dynamic `function_exists()` answers true for ({@see Module::$knownFnNames}).
      *  @var string[] */
@@ -729,6 +731,7 @@ final class EmitLlvm implements EmitVisitor
         $this->includeSlots = $module->includeSlots;
         $this->builtinTwinReq = $module->builtinTwinReq;
         $this->builtinTwinRet = $module->builtinTwinRet;
+        $this->builtinTwinRef = $module->builtinTwinRef;
         // Only a twin the program NAMES in a string literal can be the target of
         // a call by name. Arming every one at every dynamic site inlined builtins
         // the program never uses — `gc_collect_cycles` pulled the cycle
@@ -874,6 +877,7 @@ final class EmitLlvm implements EmitVisitor
         $this->newDynTableCache = null;
         $this->classlessCandidatesMemo = [];
         $this->dynfLookupEmitted = false;
+        $this->dynfBsearchEmitted = false;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
@@ -2165,6 +2169,7 @@ final class EmitLlvm implements EmitVisitor
 
     /** The module already carries one copy of `__mc_dynf_lookup`. */
     private bool $dynfLookupEmitted = false;
+    private bool $dynfBsearchEmitted = false;
 
     /** A `require`/`include` site asked for the include-slot chain, so the module
      *  needs the one shared body ({@see EmitLlvmBuiltins::emitInclResolveFn}). */

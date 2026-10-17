@@ -307,6 +307,8 @@ final class Module
     public array $builtinTwinTot = [];
     /** @var array<string, string> the declared return HINT */
     public array $builtinTwinRet = [];
+    /** @var array<string, bool> twins with a by-reference parameter */
+    public array $builtinTwinRef = [];
 
     /** Register a global cell once (idempotent by name). $isPrelude →
      *  linkonce_odr; $isExtern → a declaration, defined in a dependency's `.o`. */
