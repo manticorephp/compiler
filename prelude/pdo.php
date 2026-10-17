@@ -98,6 +98,13 @@ interface __McPdoDrv
     public function close(): void;
 }
 
+/** Optional: a statement whose driver can hold several results (mysql). */
+interface __McPdoDrvMulti
+{
+    /** Moves to the next result of a multi-statement query; false when there is none. Throws if that statement failed. */
+    public function nextRowset(): bool;
+}
+
 /**
  * One prepared statement.
  *
@@ -662,6 +669,22 @@ class PDO
     public const PGSQL_TRANSACTION_INTRANS = 2;
     public const PGSQL_TRANSACTION_INERROR = 3;
     public const PGSQL_TRANSACTION_UNKNOWN = 4;
+    public const MYSQL_ATTR_USE_BUFFERED_QUERY = 1000;
+    public const MYSQL_ATTR_LOCAL_INFILE = 1001;
+    public const MYSQL_ATTR_INIT_COMMAND = 1002;
+    public const MYSQL_ATTR_COMPRESS = 1003;
+    public const MYSQL_ATTR_DIRECT_QUERY = 20;
+    public const MYSQL_ATTR_FOUND_ROWS = 1004;
+    public const MYSQL_ATTR_IGNORE_SPACE = 1005;
+    public const MYSQL_ATTR_SSL_KEY = 1006;
+    public const MYSQL_ATTR_SSL_CERT = 1007;
+    public const MYSQL_ATTR_SSL_CA = 1008;
+    public const MYSQL_ATTR_SSL_CAPATH = 1009;
+    public const MYSQL_ATTR_SSL_CIPHER = 1010;
+    public const MYSQL_ATTR_SERVER_PUBLIC_KEY = 1011;
+    public const MYSQL_ATTR_MULTI_STATEMENTS = 1012;
+    public const MYSQL_ATTR_SSL_VERIFY_SERVER_CERT = 1013;
+    public const MYSQL_ATTR_LOCAL_INFILE_DIRECTORY = 1014;
     public const SQLITE_ATTR_OPEN_FLAGS = 1000;
     public const SQLITE_ATTR_READONLY_STATEMENT = 1001;
     public const SQLITE_ATTR_EXTENDED_RESULT_CODES = 1002;
@@ -720,7 +743,8 @@ class PDO
             $this->drv = __mc_pdo_sqlite_open($rest, $options === null ? [] : $options);
         } elseif ($scheme === 'pgsql') {
             $this->drv = __mc_pdo_pgsql_open($rest, $options === null ? [] : $options, $username, $password);
-        // ponytail: the 'mysql' arm (-> __mc_pdo_mysql_open) returns with the driver in Task 8; until then it is an unknown scheme
+        } elseif ($scheme === 'mysql') {
+            $this->drv = __mc_pdo_mysql_open($rest, $options === null ? [] : $options, $username, $password);
         } else {
             // php reports an unknown scheme with no SQLSTATE and no driver code,
             // and its message carries no SQLSTATE prefix either.
@@ -746,7 +770,7 @@ class PDO
     /** Every driver this binary was linked against. */
     public static function getAvailableDrivers(): array
     {
-        return ['pgsql', 'sqlite'];
+        return ['mysql', 'pgsql', 'sqlite'];
     }
 
     public function prepare(string $query, array $options = []): PDOStatement|false
@@ -1195,6 +1219,17 @@ class PDOStatement implements IteratorAggregate
     /** sqlite has no second result set; php refuses rather than answering false. */
     public function nextRowset(): bool
     {
+        $d = $this->drv;
+        if ($d instanceof __McPdoDrvMulti) {
+            try {
+                if (!$d->nextRowset()) { return false; }
+            } catch (PDOException $e) {
+                return $this->fail($e, 'PDOStatement::nextRowset');
+            }
+            $this->pending = true;
+            $this->done = false;
+            return true;
+        }
         $this->unsupported('driver does not support multiple rowsets', 'PDOStatement::nextRowset');
         return false;
     }

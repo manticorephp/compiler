@@ -113,12 +113,34 @@ ignored, exactly as pdo_sqlite does — a sqlite statement is forward-only and p
 next row whatever is asked for (measured: `ORI_PRIOR` / `FIRST` / `LAST` / `ABS` / `REL` all
 behave as `ORI_NEXT`). Throwing was stricter than the oracle.
 
+## `mysql:` (prelude/pdo_mysql.php)
+
+The client/server protocol over a plain socket, no libmysqlclient. Text protocol with emulated
+(client-side) prepares, as pdo_mysql defaults to; typed like mysqlnd (ints and floats native,
+DECIMAL / DATE / YEAR / strings as text, BIT as an integer, an UNSIGNED BIGINT above `PHP_INT_MAX` as a
+string). Connection options by number: `1004` FOUND_ROWS, `1002` INIT_COMMAND, `1012`
+MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
+
+- Authentication: `mysql_native_password`, `caching_sha2_password` (fast path; full authentication
+  over a plain socket RSA-encrypts the password through `openssl_public_encrypt`, which exists only
+  when the PROGRAM calls an `openssl_*` function — otherwise a clear `[2059]` error names the gap),
+  auth switch between the two. `sha256_password`, `mysql_clear_password`, ed25519: `[2059]`.
+- php reads no `user=` / `password=` DSN key for mysql (unlike pgsql): the constructor arguments rule.
+- `exec()` of several statements answers the FIRST statement's count and runs all of them; `query()`
+  of several keeps every result for `nextRowset()` (the one driver where it is not IM001). A SELECT
+  through `exec()` is consumed here; php leaves its result pending and fails the next command with 2014.
+- `NO_BACKSLASH_ESCAPES` is read off the server status flag of each OK/EOF packet, so `quote()` follows
+  a mid-session `SET sql_mode`; invalid UTF-8 is escaped byte by byte, never `false` (mysqlnd).
+- `errorInfo` of a core-raised HY093 is `[state, null, message]`; php has `[state, 0]`.
+- Gaps: TLS (`MYSQL_ATTR_SSL_*` is refused, never downgraded), unix sockets, compression, native
+  prepares (`ATTR_EMULATE_PREPARES=false` throws), a few charset names (`charset=` knows utf8mb4, utf8,
+  latin1, ascii, binary, latin2, cp1250, cp1251, koi8r/u, greek, hebrew), AUTO_INCREMENT ids above
+  `PHP_INT_MAX`.
 ## Limitations
 
 `PDO::FETCH_BOUND` and `bindColumn()` throw — both need a stored by-reference binding, the same
 missing primitive `bindParam()` documents above. `nextRowset()` reports IM001, as php's sqlite
-driver does. Only the `sqlite:` driver exists today; `mysql:` and `pgsql:` DSNs are not
-implemented.
+driver does. `nextRowset()` works on the `mysql:` driver.
 
 ## Regression notes: default fetch mode and variadic calls
 

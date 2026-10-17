@@ -1,13 +1,14 @@
 #!/bin/bash
 # pdo_net: byte parity of compiled PDO network drivers against php, on live servers.
 #   tests/pdo_net/run.sh [-k substr]
-# Cases named pgsql_* / mysql_* use PDO_PG_DSN / PDO_MY_DSN; SKIP when the server is unreachable.
+# Cases named pgsql_* / mysql_* use PDO_PG_DSN / PDO_MY_DSN (mysql_native* : PDO_MY_NATIVE_DSN); SKIP when the server is unreachable.
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 FILTER=""
 [ "${1:-}" = "-k" ] && FILTER="$2"
 export PDO_PG_DSN="${PDO_PG_DSN-pgsql:host=127.0.0.1;port=54320;dbname=d}"
 export PDO_MY_DSN="${PDO_MY_DSN-mysql:host=127.0.0.1;port=33060;dbname=d}"
+export PDO_MY_NATIVE_DSN="${PDO_MY_NATIVE_DSN-mysql:host=127.0.0.1;port=33062;dbname=d}"
 WORK="$ROOT/tests/pdo_net/.work"
 mkdir -p "$WORK"
 trap 'rm -rf "$WORK"' EXIT
@@ -22,7 +23,7 @@ pass=0; fail=0; skip=0
 for f in tests/pdo_net/cases/*.php; do
     n=$(basename "$f" .php)
     [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
-    case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
+    case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_native*) dsn="$PDO_MY_NATIVE_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
     if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n"; skip=$((skip+1)); continue; fi
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
     if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
@@ -50,6 +51,24 @@ if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
         done
         if [ "$act" = "$(cat $H/hostile.expected)"$'\n' ]; then echo "PASS pgsql_hostile"; pass=$((pass+1))
         else echo "FAIL pgsql_hostile"; diff <(echo "$act") $H/hostile.expected | head -n 20; fail=$((fail+1)); fi
+    fi
+fi
+# The same fake-server harness speaking the MySQL protocol (server_mysql.php), one mode per connection.
+if [[ -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ]]; then
+    H=tests/pdo_net/hostile
+    bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL mysql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
+    if [ -x "$WORK/hostile" ]; then
+        act=""
+        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max; do
+            rm -f "$WORK/port"
+            php -d xdebug.mode=off $H/server.php $m "$WORK/port" mysql >/dev/null 2>&1 &
+            sp=$!
+            for _ in $(seq 1 100); do [ -s "$WORK/port" ] && break; kill -0 $sp 2>/dev/null || break; sleep 0.1; done
+            act+=$("$WORK/hostile" $m "$(cat "$WORK/port")" mysql 2>&1)$'\n'
+            kill $sp 2>/dev/null; wait $sp 2>/dev/null
+        done
+        if [ "$act" = "$(cat $H/hostile_mysql.expected)"$'\n' ]; then echo "PASS mysql_hostile"; pass=$((pass+1))
+        else echo "FAIL mysql_hostile"; diff <(echo "$act") $H/hostile_mysql.expected | head -n 20; fail=$((fail+1)); fi
     fi
 fi
 echo "pass=$pass fail=$fail skip=$skip"
