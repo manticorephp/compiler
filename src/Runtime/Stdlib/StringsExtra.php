@@ -13,6 +13,9 @@
  *  this body is the callable-string path and the bootstrap fallback. */
 function stripos(string $haystack, string $needle, int $offset = 0): int|false
 {
+    if ($offset > \strlen($haystack) || $offset < -\strlen($haystack)) {
+        throw new \ValueError('stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)');
+    }
     return \strpos(\strtolower($haystack), \strtolower($needle), $offset);
 }
 
@@ -238,6 +241,9 @@ function levenshtein(string $string1, string $string2): int
 /** Case-insensitive {@see strrpos}. */
 function strripos(string $haystack, string $needle, int $offset = 0): int|false
 {
+    if ($offset > \strlen($haystack) || $offset < -\strlen($haystack)) {
+        throw new \ValueError('strripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)');
+    }
     return \strrpos(\strtolower($haystack), \strtolower($needle), $offset);
 }
 

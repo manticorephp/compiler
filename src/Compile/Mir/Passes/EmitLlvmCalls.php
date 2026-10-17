@@ -857,7 +857,7 @@ trait EmitLlvmCalls
             $hitL = $this->ssa->allocLabel('dynf.hit');
             $nextL = $this->ssa->allocLabel('dynf.next');
             $cmp = $this->ssa->allocReg();
-            $out .= '  ' . $cmp . ' = call i32 @strcasecmp(ptr ' . $keyP . ', ptr ' . $this->litStr($fname) . ")\n";
+            $out .= '  ' . $cmp . ' = call i32 @strcasecmp(ptr ' . $keyP . ', ptr ' . $this->litStr($this->dynfPublicName($fname)) . ")\n";
             $eq = $this->ssa->allocReg();
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
@@ -1203,7 +1203,6 @@ trait EmitLlvmCalls
     private function emitDynfTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, string $missL): string
     {
         $this->dynfExtraBodies .= $this->dynfBsearchFn();
-        \uksort($syms, fn(string $a, string $b): int => \strcmp(\strtolower($a), \strtolower($b)));
         $pair = $this->dynfTable($syms);
         $out = '';
         $argRegs = [];
@@ -1385,6 +1384,13 @@ trait EmitLlvmCalls
             $this->locals->slots[$lname] = $slot;
             $callArgs[] = new LoadLocal($lname, $cellT);
         }
+        if ($this->cellPackVariadic($fname)) {
+            $vi = \count($this->sigs->paramTypes[$fname]) - 1;
+            $elems = [];
+            for ($i = $vi; $i < $argc; $i = $i + 1) { $elems[] = new ArrayElement_(null, $callArgs[$i]); }
+            $callArgs = \array_slice($callArgs, 0, $vi);
+            $callArgs[] = new ArrayLit($elems, Type::unknown());
+        }
         $body .= $this->emitNode(new Call($fname, $callArgs, $rt));
         $body .= $this->boxToCell($rt);
         $ret = $this->lastValue;
@@ -1418,6 +1424,8 @@ trait EmitLlvmCalls
      */
     private function dynfTable(array $clean): array
     {
+        // The runtime lookup is a binary search: rows ordered by the spelling a caller types.
+        \uksort($clean, fn(string $a, string $b): int => \strcmp(\strtolower($this->dynfPublicName($a)), \strtolower($this->dynfPublicName($b))));
         $key = '';
         foreach ($clean as $fname => $sym) { $key .= $fname . '=' . $sym . '|'; }
         if (isset($this->dynfTables[$key])) { return $this->dynfTables[$key]; }
@@ -1426,7 +1434,7 @@ trait EmitLlvmCalls
             // A caller may hand a bare helper symbol or one that already carries
             // its '@' — the method side's per-name helpers come pre-qualified.
             $fp = $sym[0] === '@' ? $sym : '@' . $sym;
-            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($fname) . ', ptr ' . $fp . ' }';
+            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($this->dynfPublicName($fname)) . ', ptr ' . $fp . ' }';
         }
         $n = \count($rows);
         $tsym = '@.dynf.rows.' . $this->mirHelperSym((string)\count($this->dynfTables));
@@ -3201,9 +3209,32 @@ trait EmitLlvmCalls
      * Monomorphize clone: `ksort$mono$p0_vec_cell` is no name php can spell, the
      * name `ksort` reaches the original, and every clone was one more inline arm.
      */
+    /**
+     * A builtin with no PHP-visible twin of its own is made callable by name through
+     * `mctwin_<name>` (src/Runtime/Stdlib/BuiltinTwins.php). The twin is a distinct symbol, so a
+     * direct call keeps the inline builtin and its inferred type, and only a call by runtime
+     * name matches the public spelling.
+     */
+    private function dynfPublicName(string $fname): string
+    {
+        return \str_starts_with($fname, 'mctwin_') ? \substr($fname, 7) : $fname;
+    }
+
     private function dynfNameable(string $fname): bool
     {
         return \strpos($fname, '__') === false && !\str_contains($fname, '$mono$');
+    }
+
+    /** Whether `$fname` ends in a variadic whose pack is an untyped / `mixed` array. */
+    private function cellPackVariadic(string $fname): bool
+    {
+        $ptypes = $this->sigs->paramTypes[$fname] ?? [];
+        $tot = \count($ptypes);
+        if ($tot === 0 || !($this->sigs->variadicParams[$fname][$tot - 1] ?? false)) { return false; }
+        // The twins' `mixed ...$values` reads back from the .sig as a pack of arrays; every one is a cell pack.
+        if (\str_starts_with($fname, 'mctwin_')) { return true; }
+        $el = $ptypes[$tot - 1]->element;
+        return $el === null || $el->kind === Type::KIND_UNKNOWN || $el->kind === Type::KIND_CELL;
     }
 
     /** Does a call with `$argc` arguments fit `$fname`'s required..total range? */
@@ -3212,9 +3243,12 @@ trait EmitLlvmCalls
         $ptypes = $this->sigs->paramTypes[$fname] ?? [];
         $pdefs = $this->sigs->paramDefaults[$fname] ?? [];
         $tot = \count($ptypes);
-        if ($argc > $tot) { return false; }
+        $vars = $this->sigs->variadicParams[$fname] ?? [];
+        // A trailing variadic over a cell pack takes any surplus and may be empty: the thunk packs it.
+        $tailVar = $this->cellPackVariadic($fname);
+        if ($argc > $tot && !$tailVar) { return false; }
         for ($pi = $argc; $pi < $tot; $pi = $pi + 1) {
-            if (($pdefs[$pi] ?? null) === null) { return false; }
+            if (($pdefs[$pi] ?? null) === null && !($vars[$pi] ?? false)) { return false; }
         }
         return true;
     }

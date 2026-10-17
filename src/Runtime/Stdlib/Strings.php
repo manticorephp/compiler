@@ -149,6 +149,9 @@ function trim(string $s, string $mask = " \t\n\r\0\x0B"): string
  */
 function strrpos(string $haystack, string $needle, int $offset = 0): int|false
 {
+    if ($offset > \strlen($haystack) || $offset < -\strlen($haystack)) {
+        throw new \ValueError('strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)');
+    }
     $hLen = \strlen($haystack);
     $nLen = \strlen($needle);
     // PHP 8 allows an empty needle: it matches at the end of the haystack,
@@ -183,6 +186,9 @@ function strrpos(string $haystack, string $needle, int $offset = 0): int|false
  */
 function strpos(string $haystack, string $needle, int $offset = 0): int|false
 {
+    if ($offset > \strlen($haystack) || $offset < -\strlen($haystack)) {
+        throw new \ValueError('strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)');
+    }
     // Self-host robustness: the `?string` → `string` coerce sometimes
     // hands us a null ptr that the strict-equal guards upstream
     // miss. Belt-and-braces — treat null haystack/needle as "no

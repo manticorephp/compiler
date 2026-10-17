@@ -5317,6 +5317,18 @@ trait EmitLlvmBuiltins
             $out .= $this->emitNode($args[2]);
             $out .= $this->coerceIntArg($args[2]);
             $off = $this->lastValue;
+            $hl = $this->ssa->allocReg();
+            $out .= '  ' . $hl . ' = call i64 @__mir_strlen(ptr ' . $h . ")\n";
+            $nh = $this->ssa->allocReg();
+            $out .= '  ' . $nh . ' = sub i64 0, ' . $hl . "\n";
+            $b1 = $this->ssa->allocReg();
+            $out .= '  ' . $b1 . ' = icmp sgt i64 ' . $off . ', ' . $hl . "\n";
+            $b2 = $this->ssa->allocReg();
+            $out .= '  ' . $b2 . ' = icmp slt i64 ' . $off . ', ' . $nh . "\n";
+            $bad = $this->ssa->allocReg();
+            $out .= '  ' . $bad . ' = or i1 ' . $b1 . ', ' . $b2 . "\n";
+            $fn = $ci ? 'stripos' : 'strpos';
+            $out .= $this->emitThrowIf($bad, 'ValueError', $fn . '(): Argument #3 ($offset) must be contained in argument #1 ($haystack)', $fn);
         }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @' . ($ci ? '__mir_stripos' : '__mir_strpos') . '(ptr ' . $h . ', ptr ' . $n
