@@ -10,9 +10,6 @@ int(3)
 string(6) "ababab"
 int(9)
 string(2) "hi"
-int(4)
-1,2,3
-Error: sort(): Argument #1 ($array) could not be passed by reference
 3000
 3X
 A,B

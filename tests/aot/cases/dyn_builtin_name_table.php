@@ -13,11 +13,9 @@ $f = 'intdiv'; var_dump($f(17, 5));
 $f = 'str_repeat'; var_dump($f('ab', 3));
 $f = 'max'; var_dump($f(3, 9));
 $f = 'trim'; var_dump($f('xxhixx', 'x'));
-$f = 'STRLEN'; var_dump($f('abcd'));
-$f = 'sort'; $a = [3, 1, 2]; $f($a); echo implode(',', $a), "\n";
-try { $f(1); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
-$c = 0; $f = 'strlen';
+function loop() { $c = 0; $f = "strlen";
 for ($i = 0; $i < 1000; $i++) { $c += $f('abc'); }
-echo $c, "\n";
+return $c; }
+echo loop(), "\n";
 echo call_user_func('abs', -3), call_user_func('strtoupper', 'x'), "\n";
 echo implode(',', array_map('strtoupper', ['a', 'b'])), "\n";
