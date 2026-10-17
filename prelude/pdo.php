@@ -156,6 +156,15 @@ final class __McPdo
         if ($state === '28000') { return 'Invalid authorization specification'; }
         if ($state === '42000') { return 'Syntax error or access violation'; }
         if ($state === 'HY093') { return 'Invalid parameter number'; }
+        // pdo_pgsql's server states (the rest of its table lands with the error mapping).
+        if ($state === '22012') { return 'Division by zero'; }
+        if ($state === '22P02') { return 'Invalid text representation'; }
+        if ($state === '23502') { return 'Not null violation'; }
+        if ($state === '23503') { return 'Foreign key violation'; }
+        if ($state === '23505') { return 'Unique violation'; }
+        if ($state === '42601') { return 'Syntax error'; }
+        if ($state === '42703') { return 'Undefined column'; }
+        if ($state === '42P01') { return 'Undefined table'; }
         if ($state === 'IM001') { return 'Driver does not support this function'; }
         return 'General error';
     }
