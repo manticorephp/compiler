@@ -32,5 +32,23 @@ for f in tests/pdo_net/cases/*.php; do
     if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1))
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
 done
+# Hostile-server cases: a fake server (Zend php) per mode, the compiled client, hand-written expectations.
+if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
+    H=tests/pdo_net/hostile
+    bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
+    if [ -x "$WORK/hostile" ]; then
+        act=""
+        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in; do
+            rm -f "$WORK/port"
+            php -d xdebug.mode=off $H/server.php $m "$WORK/port" >/dev/null 2>&1 &
+            sp=$!
+            for _ in $(seq 1 50); do [ -s "$WORK/port" ] && break; sleep 0.1; done
+            act+=$("$WORK/hostile" $m "$(cat "$WORK/port")" 2>&1)$'\n'
+            kill $sp 2>/dev/null; wait $sp 2>/dev/null
+        done
+        if [ "$act" = "$(cat $H/hostile.out)"$'\n' ]; then echo "PASS pgsql_hostile"; pass=$((pass+1))
+        else echo "FAIL pgsql_hostile"; diff <(echo "$act") $H/hostile.out | head -n 20; fail=$((fail+1)); fi
+    fi
+fi
 echo "pass=$pass fail=$fail skip=$skip"
 [ "$fail" = 0 ]

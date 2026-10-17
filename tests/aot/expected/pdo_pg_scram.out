@@ -3,3 +3,13 @@ c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ut
 client ok
 server ok
 nonce mismatch rejected
+iteration above bound: 08006 clean
+iteration zero: 08006 clean
+iteration not digits: 08006 clean
+iteration negative: 08006 clean
+missing s: 08006 clean
+missing i: 08006 clean
+missing r: 08006 clean
+nonce not prefixed: 08006 clean
+nonce not extended: 08006 clean
+salt not base64: 08006 clean

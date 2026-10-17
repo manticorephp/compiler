@@ -54,6 +54,10 @@ final class __McPdoPgWire
     /** libpq's prefix for every failure while connecting. */
     public string $where = '';
     private bool $connecting = true;
+    private bool $closed = false;
+    /** SASL progress: 0 none, 1 initial response sent, 2 client-final sent, 3 server signature verified. */
+    private int $sasl = 0;
+    private bool $authOk = false;
     /** @var resource */
     private $s;
     private string $buf = '';
@@ -96,8 +100,16 @@ final class __McPdoPgWire
     /** @param array<string,string> $params extra startup parameters */
     public function startup(string $user, string $db, array $params): void
     {
+        if (\strpos($user, "\0") !== false || \strpos($db, "\0") !== false) {
+            throw $this->startFail('invalid NUL byte in user or database name');
+        }
         $p = "user\0" . $user . "\0database\0" . $db . "\0";
-        foreach ($params as $k => $v) { $p .= $k . "\0" . $v . "\0"; }
+        foreach ($params as $k => $v) {
+            if (\strpos($k, "\0") !== false || \strpos($v, "\0") !== false) {
+                throw $this->startFail('invalid NUL byte in connection parameter');
+            }
+            $p .= $k . "\0" . $v . "\0";
+        }
         $this->send('', self::be32(196608) . $p . "\0");
     }
 
@@ -140,6 +152,7 @@ final class __McPdoPgWire
         $t = $this->buf[$p];
         $len = (\ord($this->buf[$p + 1]) << 24) | (\ord($this->buf[$p + 2]) << 16)
             | (\ord($this->buf[$p + 3]) << 8) | \ord($this->buf[$p + 4]);
+        if ($len < 4 || $len > 1073741824) { throw $this->ioFail('invalid message length'); }
         if (\strlen($this->buf) - $p < 1 + $len) {
             $this->fill(1 + $len);
             $p = 0;
@@ -149,9 +162,18 @@ final class __McPdoPgWire
         return [$t, $body];
     }
 
-    private function ioFail(string $m): PDOException
+    /** Marks the connection dead and releases the fd (once). */
+    private function closeSock(): void
     {
         $this->dead = true;
+        if ($this->closed) { return; }
+        $this->closed = true;
+        \fclose($this->s);
+    }
+
+    private function ioFail(string $m): PDOException
+    {
+        $this->closeSock();
         return $this->connecting
             ? __McPdo::connectFail('08006', 7, $this->where . $m)
             : __McPdo::fail('08006', 7, true, $m, true);
@@ -179,18 +201,31 @@ final class __McPdoPgWire
     {
         $r = '';
         $s = '';
-        $iter = 0;
+        $is = '';
         foreach (\explode(',', $serverFirst) as $p) {
             if (\strlen($p) < 2 || $p[1] !== '=') { continue; }
             if ($p[0] === 'r') { $r = \substr($p, 2); }
             elseif ($p[0] === 's') { $s = \substr($p, 2); }
-            elseif ($p[0] === 'i') { $iter = (int) \substr($p, 2); }
+            elseif ($p[0] === 'i') { $is = \substr($p, 2); }
         }
-        if (\strlen($r) <= \strlen($clientNonce) || \substr($r, 0, \strlen($clientNonce)) !== $clientNonce
-            || $s === '' || $iter < 1) {
-            throw __McPdo::connectFail('08006', 7, 'invalid SCRAM server-first-message');
+        if ($r === '') { throw __McPdo::connectFail('08006', 7, 'SCRAM server-first-message has no nonce (r=)'); }
+        if ($s === '') { throw __McPdo::connectFail('08006', 7, 'SCRAM server-first-message has no salt (s=)'); }
+        if ($is === '') { throw __McPdo::connectFail('08006', 7, 'SCRAM server-first-message has no iteration count (i=)'); }
+        if (\strlen($r) <= \strlen($clientNonce) || \substr($r, 0, \strlen($clientNonce)) !== $clientNonce) {
+            throw __McPdo::connectFail('08006', 7, 'SCRAM server nonce does not extend the client nonce');
         }
-        $salted = \hash_pbkdf2('sha256', $pw, \base64_decode($s), $iter, 32, true);
+        $iter = 0;
+        $ni = \strlen($is);
+        for ($k = 0; $k < $ni; $k++) {
+            $d = \ord($is[$k]) - 48;
+            if ($d < 0 || $d > 9 || $k >= 9) { throw __McPdo::connectFail('08006', 7, 'invalid SCRAM iteration count'); }
+            $iter = $iter * 10 + $d;
+        }
+        // ⚠ upper bound: a hostile server must not be able to pin the CPU with i=2^31
+        if ($iter < 1 || $iter > 16777216) { throw __McPdo::connectFail('08006', 7, 'invalid SCRAM iteration count'); }
+        $salt = \base64_decode($s, true);
+        if ($salt === false || $salt === '') { throw __McPdo::connectFail('08006', 7, 'invalid SCRAM salt'); }
+        $salted = \hash_pbkdf2('sha256', $pw, $salt, $iter, 32, true);
         $ck = \hash_hmac('sha256', 'Client Key', $salted, true);
         $withoutProof = 'c=biws,r=' . $r;
         $authMsg = 'n=' . $user . ',r=' . $clientNonce . ',' . $serverFirst . ',' . $withoutProof;
@@ -202,7 +237,7 @@ final class __McPdoPgWire
 
     private function startFail(string $text): PDOException
     {
-        $this->dead = true;
+        $this->closeSock();
         return __McPdo::connectFail('08006', 7, $this->where . $text);
     }
 
@@ -214,15 +249,30 @@ final class __McPdoPgWire
             if ($t === 'E') { throw $this->startFail($this->parseErr($b, '')->text); }
             if ($t === 'S') { $this->paramStatus($b); continue; }
             if ($t === 'Z') {
+                if (!$this->authOk || \strlen($b) < 1) { throw $this->startFail('server did not complete authentication'); }
                 $this->status = $b[0];
                 $this->connecting = false;
                 return;
             }
             if ($t !== 'R') { continue; }
+            if (\strlen($b) < 4) { throw $this->startFail('protocol error: truncated message'); }
             $code = self::i32($b, 0);
-            if ($code === 0) { continue; }
+            if ($code === 0) {
+                // ⚠ AuthenticationOk straight after a SASL exchange the server never proved is a downgrade
+                if ($this->sasl !== 0 && $this->sasl !== 3) {
+                    throw $this->startFail('SCRAM exchange incomplete: server did not prove its identity');
+                }
+                $this->authOk = true;
+                continue;
+            }
+            if ($this->sasl !== 0 && $code !== 11 && $code !== 12) {
+                throw $this->startFail('unexpected authentication request during SCRAM exchange');
+            }
             if ($code === 3 || $code === 5 || $code === 10) {
                 if ($pw === null) { throw $this->startFail('fe_sendauth: no password supplied'); }
+            }
+            if (($code === 3 || $code === 5) && \strpos($pw, "\0") !== false) {
+                throw $this->startFail('password contains a NUL byte');
             }
             if ($code === 3) {
                 $this->send('p', $pw . "\0");
@@ -232,17 +282,27 @@ final class __McPdoPgWire
                 if (\strpos($b, "SCRAM-SHA-256\0") === false) {
                     throw $this->startFail("none of the server's SASL authentication mechanisms are supported");
                 }
+                $this->sasl = 1;
                 $this->nonce = \base64_encode(\random_bytes(18));
                 $init = 'n,,n=,r=' . $this->nonce;
                 $this->send('p', "SCRAM-SHA-256\0" . self::be32(\strlen($init)) . $init);
             } elseif ($code === 11) {
-                [$final, $this->serverSig] = self::scram($pw === null ? '' : $pw, $this->nonce, \substr($b, 4), '');
+                if ($this->sasl !== 1) { throw $this->startFail('unexpected SCRAM message'); }
+                try {
+                    [$final, $this->serverSig] = self::scram($pw === null ? '' : $pw, $this->nonce, \substr($b, 4), '');
+                } catch (PDOException $e) {
+                    $this->closeSock();
+                    throw $e;
+                }
+                $this->sasl = 2;
                 $this->send('p', $final);
             } elseif ($code === 12) {
+                if ($this->sasl !== 2) { throw $this->startFail('unexpected SCRAM message'); }
                 $v = \substr($b, 4);
                 if (\substr($v, 0, 2) !== 'v=' || !\hash_equals($this->serverSig, \substr($v, 2))) {
                     throw $this->startFail('SCRAM-SHA-256 server signature mismatch');
                 }
+                $this->sasl = 3;
             } else {
                 throw $this->startFail('authentication method ' . (string) $code . ' not supported');
             }
@@ -263,17 +323,24 @@ final class __McPdoPgWire
         $this->send('Q', $sql . "\0");
         $res = new __McPdoPgResult();
         $seenT = false;
+        $copy = false;
+        $trunc = 'protocol error: truncated message';
         while (true) {
             [$t, $b] = $this->msg();
             if ($t === 'D') {
+                $bl = \strlen($b);
+                if ($bl < 2) { throw $this->ioFail($trunc); }
                 $n = (\ord($b[0]) << 8) | \ord($b[1]);
+                if ($n !== \count($res->cols)) { throw $this->ioFail($trunc); }
                 $o = 2;
                 /** @var array<int,?string> */
                 $row = [];
                 for ($i = 0; $i < $n; $i++) {
+                    if ($o + 4 > $bl) { throw $this->ioFail($trunc); }
                     $l = (\ord($b[$o]) << 24) | (\ord($b[$o + 1]) << 16) | (\ord($b[$o + 2]) << 8) | \ord($b[$o + 3]);
                     $o += 4;
                     if ($l === 0xFFFFFFFF) { $row[] = null; continue; }
+                    if ($o + $l > $bl) { throw $this->ioFail($trunc); }
                     $row[] = \substr($b, $o, $l);
                     $o += $l;
                 }
@@ -283,10 +350,13 @@ final class __McPdoPgWire
                 $res->oids = [];
                 $res->rows = [];
                 $seenT = true;
+                $bl = \strlen($b);
+                if ($bl < 2) { throw $this->ioFail($trunc); }
                 $n = (\ord($b[0]) << 8) | \ord($b[1]);
                 $o = 2;
                 for ($i = 0; $i < $n; $i++) {
                     $z = \strpos($b, "\0", $o);
+                    if ($z === false || $z + 19 > $bl) { throw $this->ioFail($trunc); }
                     $res->cols[] = \substr($b, $o, $z - $o);
                     $res->oids[] = self::i32($b, $z + 7);
                     $o = $z + 19;
@@ -305,8 +375,16 @@ final class __McPdoPgWire
                 if ($res->err === null) { $res->err = $this->parseErr($b, $sql); }
             } elseif ($t === 'S') {
                 $this->paramStatus($b);
+            } elseif ($t === 'G') {
+                // COPY FROM STDIN: refuse it, the server answers with an error and ReadyForQuery
+                $copy = true;
+                $this->send('f', "COPY is not supported\0");
+            } elseif ($t === 'H') {
+                $copy = true;
             } elseif ($t === 'Z') {
+                if (\strlen($b) < 1) { throw $this->ioFail($trunc); }
                 $this->status = $b[0];
+                if ($copy) { throw __McPdo::fail('HY000', 7, true, 'COPY is not supported', true); }
                 return $res;
             }
         }
@@ -382,10 +460,10 @@ final class __McPdoPgWire
 
     public function close(): void
     {
-        if ($this->dead) { return; }
-        $this->dead = true;
-        try { $this->send('X', ''); } catch (PDOException $e) {}
-        \fclose($this->s);
+        if (!$this->dead) {
+            try { $this->send('X', ''); } catch (PDOException $e) {}
+        }
+        $this->closeSock();
     }
 }
 
@@ -557,7 +635,12 @@ function __mc_pdo_pgsql_open(string $rest, array $options, ?string $user, ?strin
     $timeout = isset($options[PDO::ATTR_TIMEOUT]) ? (float) $options[PDO::ATTR_TIMEOUT] : 30.0;
 
     $wire = new __McPdoPgWire($host, $port, $timeout);
-    $wire->startup($user, $db, []);
-    $wire->auth($user, $pw);
+    try {
+        $wire->startup($user, $db, []);
+        $wire->auth($user, $pw);
+    } catch (PDOException $e) {
+        $wire->close();
+        throw $e;
+    }
     return new __McPdoPg($wire);
 }
