@@ -11,12 +11,29 @@ $wc = stream_socket_client('tcp://' . stream_socket_get_name($w, false));
 fclose($wc); fclose($w);
 $before = $fds();
 $t = microtime(true);
+$np = false;
 try {
     // idle_slow: ATTR_TIMEOUT unset (the default must not bound a statement that is still running); *_explicit / stall_mid: set to 1
-    $opts = $mode === 'idle_slow' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid', 'ssl_silent', 'ssl_drip'], true) ? 1 : 3];
+    $opts = $mode === 'idle_slow' || $mode === 'np_idle_slow' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid', 'np_idle_explicit', 'np_stall_mid', 'ssl_silent', 'ssl_drip'], true) ? 1 : 3];
     if ($my && str_starts_with($mode, 'ssl_')) { $opts += [1008 => '/nonexistent', 1013 => false]; }   // MYSQL_ATTR_SSL_CA, MYSQL_ATTR_SSL_VERIFY_SERVER_CERT: TLS wanted, nothing verified
+    $np = $my && str_starts_with($mode, 'np_');
+    if ($np) { $opts += [PDO::ATTR_EMULATE_PREPARES => false]; }
     $db = new PDO($dsn, 'u', 'pw', $opts);
-    if ($my) {
+    if ($np) {
+        // binary protocol: prepare + execute + fetch, then (np_close_once) release the statement and ask the server how many closes it saw
+        $p = $db->prepare('select ?');
+        $p->execute(['x']);
+        $r = $p->fetch(PDO::FETCH_NUM);
+        echo $mode, ': ok ', var_export($r[0], true), "\n";
+        if ($mode === 'np_idle_slow') { echo $mode, ': ', microtime(true) - $t > 5.0 ? 'waited' : 'TOO FAST', "\n"; }
+        if ($mode === 'np_close_once') {
+            $p = null;
+            $db->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
+            $q = $db->query('select 1');
+            echo $mode, ': closes seen ', $q->fetchColumn(), "\n";
+            $q = null;
+        }
+    } elseif ($my) {
         $q = $db->query('select 1');   // not chained (#299)
         $r = $q->fetch(PDO::FETCH_NUM);
         $q = null;
@@ -60,18 +77,23 @@ try {
     } else {
         $db->query('select 1')->fetchAll();
     }
-    if (!in_array($mode, ['bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow'], true)) { echo "$mode: NO ERROR\n"; }
+    if (!in_array($mode, ['np_ok', 'np_close_once', 'np_idle_slow', 'np_float_odd', 'np_nan', 'bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow'], true)) { echo "$mode: NO ERROR\n"; }
 } catch (PDOException $e) {
     $m = (string) $e->errorInfo[2];
     $i = strpos($m, 'failed: ');
     echo $mode, ': ', $e->errorInfo[0], ' ', $e->errorInfo[1] ?? '-', ' ', $i === false ? $m : substr($m, $i + 8), "\n";
     // a server-side error leaves the connection usable; a protocol error closes it
     // (a named statement, not a chained temporary: #299 leaks the temporary and with it the connection)
+    if ($np && in_array($mode, ['np_err_prepare', 'np_err_exec'], true)) {
+        $p2 = $mode === 'np_err_exec' ? $p : $db->prepare('select ?');
+        $p2->execute(['y']);
+        echo 'reuse: ', $p2->fetchColumn(), "\n";
+    }
     if ($my && in_array($mode, ['int_garbage', 'int_empty', 'int_overflow', 'int_underflow', 'uint_over', 'float_lead', 'float_trail', 'float_minus', 'float_plus', 'bit_long', 'err_mid_rows'], true)) {
         $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null;
     }
     if (!$my && in_array($mode, ['paramdesc_mismatch', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
 }
-$e = null; $p = null; $s = null; $q = null; $db = null;
-echo microtime(true) - $t < ($mode === 'big_slow' || $mode === 'idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' ? 5.0 : 3.0)) ? "fast\n" : "SLOW\n";
+$e = null; $p = null; $p2 = null; $s = null; $q = null; $db = null;
+echo microtime(true) - $t < ($mode === 'big_slow' || $mode === 'idle_slow' || $mode === 'np_idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' || $mode === 'np_idle_explicit' || $mode === 'np_stall_mid' ? 5.0 : 3.0)) ? "fast\n" : "SLOW\n";
 echo $fds() === $before ? "no fd leak\n" : "FD LEAK\n";

@@ -191,3 +191,106 @@ no fd leak
 ssl_drip: HY000 2002 Cannot connect to MySQL using SSL
 fast
 no fd leak
+np_ok: ok 'okay'
+fast
+no fd leak
+np_close_once: ok 'okay'
+np_close_once: closes seen 1
+fast
+no fd leak
+np_cols_absurd: HY000 2027 Malformed packet (PREPARE_OK counts)
+fast
+no fd leak
+np_params_absurd: HY000 2027 Malformed packet (length-encoded string)
+fast
+no fd leak
+np_trunc_ok: HY000 2027 Malformed packet (PREPARE_OK)
+fast
+no fd leak
+np_prep_long: HY000 2027 Malformed packet (PREPARE_OK)
+fast
+no fd leak
+np_params_fewer: HY000 2027 Malformed packet (length-encoded string)
+fast
+no fd leak
+np_params_more: HY000 2027 Malformed packet (missing EOF after definitions)
+fast
+no fd leak
+np_cols_more: HY000 2027 Malformed packet (missing EOF after definitions)
+fast
+no fd leak
+np_params_mismatch: HY000 1210 Incorrect arguments to mysqld_stmt_execute
+fast
+no fd leak
+np_err_prepare: 42000 1064 You have an error in your SQL syntax
+reuse: okay
+fast
+no fd leak
+np_err_exec: 23000 1062 Duplicate entry '1' for key 'PRIMARY'
+reuse: okay
+fast
+no fd leak
+np_row_overrun: HY000 2027 Malformed packet (binary row value overruns packet)
+fast
+no fd leak
+np_bitmap_short: HY000 2027 Malformed packet (binary row: NULL bitmap)
+fast
+no fd leak
+np_dt_len: HY000 2027 Malformed packet (binary row: date/time length 5)
+fast
+no fd leak
+np_time_len: HY000 2027 Malformed packet (binary row: date/time length 9)
+fast
+no fd leak
+np_time_len3: HY000 2027 Malformed packet (binary row: date/time length 3)
+fast
+no fd leak
+np_dt_overrun: HY000 2027 Malformed packet (binary row overruns packet)
+fast
+no fd leak
+np_huge_lenenc: HY000 2027 Malformed packet (binary row length)
+fast
+no fd leak
+np_neg_lenenc: HY000 2027 Malformed packet (binary row length)
+fast
+no fd leak
+np_int_short: HY000 2027 Malformed packet (binary row overruns packet)
+fast
+no fd leak
+np_trailing: HY000 2027 Malformed packet (binary row has trailing bytes)
+fast
+no fd leak
+np_hdr: HY000 2027 Malformed packet (binary row header)
+fast
+no fd leak
+np_unexpected: HY000 2027 Malformed packet (column count)
+fast
+no fd leak
+np_badseq: HY000 2027 Malformed packet (packets out of order)
+fast
+no fd leak
+np_colcount_absurd: HY000 2027 Malformed packet (column count)
+fast
+no fd leak
+np_no_eof: HY000 2027 Malformed packet (missing EOF after column definitions)
+fast
+no fd leak
+np_float_odd: HY000 2027 Malformed packet (binary row has trailing bytes)
+fast
+no fd leak
+np_nan: ok NAN
+fast
+no fd leak
+np_year_short: HY000 2027 Malformed packet (binary row overruns packet)
+fast
+no fd leak
+np_idle_slow: ok 'okay'
+np_idle_slow: waited
+fast
+no fd leak
+np_idle_explicit: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+np_stall_mid: HY000 2006 MySQL server has gone away
+fast
+no fd leak

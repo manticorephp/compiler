@@ -1,0 +1,3 @@
+#!/bin/bash
+# the limit is a GLOBAL variable the test user may not set: do it as root, and restore it in the .post hook
+docker exec mc-my mysql -uroot -ppw -e 'set global max_prepared_stmt_count = 5' >/dev/null 2>&1

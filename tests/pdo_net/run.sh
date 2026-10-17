@@ -1,7 +1,7 @@
 #!/bin/bash
 # pdo_net: byte parity of compiled PDO network drivers against php, on live servers.
 #   tests/pdo_net/run.sh [-k substr]
-# Cases named pgsql_* / mysql_* use PDO_PG_DSN / PDO_MY_DSN (mysql_native* : PDO_MY_NATIVE_DSN); SKIP when the server is unreachable.
+# Cases named pgsql_* / mysql_* use PDO_PG_DSN / PDO_MY_DSN (mysql_native : PDO_MY_NATIVE_DSN); SKIP when the server is unreachable.
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 FILTER=""
@@ -31,7 +31,7 @@ pass=0; fail=0; skip=0
 for f in tests/pdo_net/cases/*.php; do
     n=$(basename "$f" .php)
     [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
-    case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_native*) dsn="$PDO_MY_NATIVE_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
+    case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_native) dsn="$PDO_MY_NATIVE_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
     if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n (server unreachable)"; skip=$((skip+1)); continue; fi
     # a sibling <case>.needs lists further host:port servers the case talks to (one per line)
     down=""
@@ -40,13 +40,16 @@ for f in tests/pdo_net/cases/*.php; do
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
     if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
     pre="${f%.php}.pre"   # optional hook: server state a case needs before EACH run (php and native)
+    post="${f%.php}.post" # optional hook: undoes it after EACH run (also a global the test user cannot restore itself)
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); fi
+    [ -x "$post" ] && "$post"
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
         echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); continue
     fi
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     act=$("$WORK/$n" 2>&1)
+    [ -x "$post" ] && "$post"
     # both sides printing the same refusal is a vacuous pass: only a case marked `# expects-connect-failure` may show one
     if ! grep -q "expects-connect-failure" "$f" && grep -Eq "\[200[23]\]|Connection refused|could not connect|Connection to server" <<<"$exp$act"; then
         echo "FAIL $n (unexpected connection failure in the output, server probed reachable)"; fail=$((fail+1)); continue
@@ -78,7 +81,7 @@ if [[ -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ]]; then
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL mysql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max row_huge_len row_neg_len coldef_huge_len auth_0105 auth_repeat03 auth_double04 auth_nonpem auth_badkey auth_bigkey idle_slow idle_explicit stall_mid ssl_nocap ssl_extra ssl_garbage ssl_silent ssl_close ssl_drip; do
+        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max row_huge_len row_neg_len coldef_huge_len auth_0105 auth_repeat03 auth_double04 auth_nonpem auth_badkey auth_bigkey idle_slow idle_explicit stall_mid ssl_nocap ssl_extra ssl_garbage ssl_silent ssl_close ssl_drip np_ok np_close_once np_cols_absurd np_params_absurd np_trunc_ok np_prep_long np_params_fewer np_params_more np_cols_more np_params_mismatch np_err_prepare np_err_exec np_row_overrun np_bitmap_short np_dt_len np_time_len np_time_len3 np_dt_overrun np_huge_lenenc np_neg_lenenc np_int_short np_trailing np_hdr np_unexpected np_badseq np_colcount_absurd np_no_eof np_float_odd np_nan np_year_short np_idle_slow np_idle_explicit np_stall_mid; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" mysql >/dev/null 2>&1 &
             sp=$!

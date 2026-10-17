@@ -82,9 +82,60 @@ fwrite($c, $ok(2));
 
 // ── command-phase modes: every query is answered as the mode says; the client's NEXT query is a healthy `select 1` ──
 $n = 0;
+$closes = 0; $preps = 0; $execs = 0;
+$prepOk = fn (int $seq, int $id, int $cols, int $params): string => $pkt($seq, "\x00" . pack('V', $id) . pack('v', $cols) . pack('v', $params) . "\x00" . pack('v', 0));
+$binRs = fn (int $type, string $row): string => $pkt(1, "\x01") . $pkt(2, $coldef('a', $type)) . $eof(3) . $pkt(4, $row) . $eof(5);
 while (true) {
     [$s, $p] = $recv();
     if ($s < 0 || $p === '' || $p[0] === "\x01") { break; }
+    // ── binary-protocol modes (np_*): the client prepares `select ?` with ATTR_EMULATE_PREPARES=false ──
+    if (str_starts_with($mode, 'np_')) {
+        if ($p[0] === "\x19") { $closes++; continue; }
+        if ($p[0] === "\x03") { fwrite($c, $rs(1, 253, [(string) $closes])); continue; }
+        if ($p[0] === "\x16") {
+            $preps++;
+            if ($mode === 'np_err_prepare' && $preps === 1) { fwrite($c, $err(1, 1064, '42000', 'You have an error in your SQL syntax')); continue; }
+            $ok = $prepOk(1, 1, 1, 1) . $pkt(2, $coldef('?')) . $eof(3) . $pkt(4, $coldef('a')) . $eof(5);
+            if ($mode === 'np_cols_absurd') { $ok = $prepOk(1, 1, 60000, 1); }
+            elseif ($mode === 'np_params_absurd') { $ok = $prepOk(1, 1, 0, 65535) . $pkt(2, $coldef('?')) . $eof(3); }
+            elseif ($mode === 'np_trunc_ok') { $ok = $pkt(1, "\x00\x01\x00\x00\x00\x00"); }
+            elseif ($mode === 'np_params_fewer') { $ok = $prepOk(1, 1, 1, 2) . $pkt(2, $coldef('?')) . $eof(3); }
+            elseif ($mode === 'np_params_more') { $ok = $prepOk(1, 1, 1, 1) . $pkt(2, $coldef('?')) . $pkt(3, $coldef('?')) . $eof(4); }
+            elseif ($mode === 'np_cols_more') { $ok = $prepOk(1, 1, 1, 1) . $pkt(2, $coldef('?')) . $eof(3) . $pkt(4, $coldef('a')) . $pkt(5, $coldef('b')) . $eof(6); }
+            elseif ($mode === 'np_prep_long') { $ok = $pkt(1, "\x00\x01\x00\x00\x00\x01\x00\x01\x00\x00\x00\x00\xff"); }
+            elseif ($mode === 'np_params_mismatch') { $ok = $prepOk(1, 1, 1, 2) . $pkt(2, $coldef('?')) . $pkt(3, $coldef('?')) . $eof(4) . $pkt(5, $coldef('a')) . $eof(6); }
+            fwrite($c, $ok);
+            continue;
+        }
+        if ($p[0] === "\x17") {
+            $execs++;
+            if ($mode === 'np_err_exec' && $execs === 1) { fwrite($c, $err(1, 1062, '23000', "Duplicate entry '1' for key 'PRIMARY'")); continue; }
+            if ($mode === 'np_idle_slow' || $mode === 'np_idle_explicit') { sleep($mode === 'np_idle_slow' ? 6 : 9); fwrite($c, $binRs(253, "\x00\x00" . $ls('okay'))); continue; }
+            if ($mode === 'np_stall_mid') { fwrite($c, substr($pkt(1, str_repeat('x', 100)), 0, 14)); sleep(9); continue; }
+            if ($mode === 'np_row_overrun') { fwrite($c, $binRs(253, "\x00\x00\xfc\xe8\x03abc")); }
+            elseif ($mode === 'np_bitmap_short') { fwrite($c, $binRs(253, "\x00")); }
+            elseif ($mode === 'np_dt_len') { fwrite($c, $binRs(12, "\x00\x00\x05abcde")); }
+            elseif ($mode === 'np_time_len') { fwrite($c, $binRs(11, "\x00\x00\x09abcdefghi")); }
+            elseif ($mode === 'np_time_len3') { fwrite($c, $binRs(11, "\x00\x00\x03abc")); }
+            elseif ($mode === 'np_dt_overrun') { fwrite($c, $binRs(12, "\x00\x00\x0babc")); }
+            elseif ($mode === 'np_huge_lenenc') { fwrite($c, $binRs(253, "\x00\x00\xfe" . pack('P', 1 << 62))); }
+            elseif ($mode === 'np_neg_lenenc') { fwrite($c, $binRs(253, "\x00\x00\xfe" . str_repeat("\xff", 8))); }
+            elseif ($mode === 'np_int_short') { fwrite($c, $binRs(8, "\x00\x00abc")); }
+            elseif ($mode === 'np_trailing') { fwrite($c, $binRs(253, "\x00\x00" . $ls('ok') . 'junk')); }
+            elseif ($mode === 'np_hdr') { fwrite($c, $binRs(253, "\x01\x00" . $ls('ok'))); }
+            elseif ($mode === 'np_unexpected') { fwrite($c, $pkt(1, "\xfe")); }
+            elseif ($mode === 'np_badseq') { fwrite($c, $pkt(5, "\x01") . $pkt(6, $coldef('a', 253)) . $eof(7)); }
+            elseif ($mode === 'np_colcount_absurd') { fwrite($c, $pkt(1, "\xfd\x40\x42\x0f")); }
+            elseif ($mode === 'np_no_eof') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a', 253)) . $pkt(3, "\x00\x00" . $ls('ok'))); }
+            elseif ($mode === 'np_float_odd') { fwrite($c, $binRs(5, "\x00\x00" . pack('e', 0.1) . 'x')); }
+            elseif ($mode === 'np_nan') { fwrite($c, $binRs(5, "\x00\x00\x00\x00\x00\x00\x00\x00\xf8\x7f")); }
+            elseif ($mode === 'np_year_short') { fwrite($c, $binRs(13, "\x00\x00\x07")); }
+            else { fwrite($c, $binRs(253, "\x00\x00" . $ls('okay'))); }
+            continue;
+        }
+        fwrite($c, $ok(1));
+        continue;
+    }
     if ($p[0] !== "\x03") { fwrite($c, $ok(1)); continue; }
     $n++;
     if ($n > 1) { fwrite($c, $rs(1, 253, ['ok'])); continue; }
