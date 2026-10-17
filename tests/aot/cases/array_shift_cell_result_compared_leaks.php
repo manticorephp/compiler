@@ -1,6 +1,5 @@
 <?php
-// array_shift of a mixed list whose result is only compared with === null leaks the shifted element
-// issue: #314
+// array_shift of a mixed list whose result is only compared with === null leaks the shifted element @serial: a memory measurement.
 function f(int $n): int
 {
     $q = [];
