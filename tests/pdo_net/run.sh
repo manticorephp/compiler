@@ -22,7 +22,7 @@ pass=0; fail=0; skip=0
 for f in tests/pdo_net/cases/*.php; do
     n=$(basename "$f" .php)
     [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
-    case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) dsn=x ;; esac
+    case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
     if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n"; skip=$((skip+1)); continue; fi
     exp=$(php -d xdebug.mode=off "$f" 2>&1)
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
