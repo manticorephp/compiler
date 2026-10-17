@@ -197,6 +197,21 @@ function __mc_int_seq(int $from, int $step, int $n): array
 function __mc_sort_native(array &$a): bool { return false; }
 
 /** @param mixed[] $a */
+function __mc_sort_assoc(array &$a, int $byValue, int $reverse): bool { return false; }
+
+/**
+ * Bootstrap twin of the `__mc_search` builtin: strict `array_search`.
+ * @param mixed[] $a
+ */
+function __mc_search(mixed $n, array $a): mixed
+{
+    foreach ($a as $k => $v) {
+        if ($v === $n) { return $k; }
+    }
+    return false;
+}
+
+/** @param mixed[] $a */
 function __mc_fast_cat(array $a): bool { return false; }
 
 /**

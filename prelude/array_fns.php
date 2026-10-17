@@ -347,6 +347,7 @@ function ksort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uksort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
     }
+    if (\__mc_sort_assoc($arr, 0, 0)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -386,6 +387,7 @@ function krsort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uksort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
     }
+    if (\__mc_sort_assoc($arr, 0, 1)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -433,6 +435,7 @@ function asort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uasort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
     }
+    if (\__mc_sort_assoc($arr, 1, 0)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -474,6 +477,7 @@ function arsort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uasort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
     }
+    if (\__mc_sort_assoc($arr, 1, 1)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -773,6 +777,35 @@ function array_unique(array $arr, int $flags = 2): array
     /** @var mixed[] $out */
     $out = [];
     if ($flags === 2) {
+        // All ints / all strings: the value is its own set key (a canonical int string
+        // becomes the int key, which is the same identity), no prefix concat per element.
+        $allInt = true;
+        $allStr = true;
+        foreach ($arr as $v) {
+            if (!\is_int($v)) { $allInt = false; }
+            if (!\is_string($v)) { $allStr = false; }
+            if (!$allInt && !$allStr) { break; }
+        }
+        if ($allInt) {
+            /** @var array<int,bool> $seenInt */
+            $seenInt = [];
+            foreach ($arr as $k => $v) {
+                if (isset($seenInt[$v])) { continue; }
+                $seenInt[$v] = true;
+                $out[$k] = $v;
+            }
+            return $out;
+        }
+        if ($allStr) {
+            /** @var array<string,bool> $seenStr */
+            $seenStr = [];
+            foreach ($arr as $k => $v) {
+                if (isset($seenStr[$v])) { continue; }
+                $seenStr[$v] = true;
+                $out[$k] = $v;
+            }
+            return $out;
+        }
         // Linear: the string form of a value is its identity. The 's' prefix
         // keeps every key a string ("1" would otherwise become the int key 1).
         /** @var array<string,bool> $seen */

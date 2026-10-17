@@ -115,9 +115,13 @@ function __mc_url_unreserved(int $c, bool $raw): bool
 
 function __mc_url_encode(string $s, bool $raw): string
 {
-    $out = '';
     $n = \strlen($s);
-    for ($i = 0; $i < $n; $i = $i + 1) {
+    // Nothing to escape (the common case): hand the input back, no copy.
+    $i = 0;
+    while ($i < $n && \__mc_url_unreserved(\ord($s[$i]), $raw)) { $i = $i + 1; }
+    if ($i === $n) { return $s; }
+    $out = \substr($s, 0, $i);
+    for (; $i < $n; $i = $i + 1) {
         $c = \ord($s[$i]);
         if (\__mc_url_unreserved($c, $raw)) {
             $out = $out . $s[$i];
@@ -144,6 +148,8 @@ function __mc_unhex(int $c): int
 
 function __mc_url_decode(string $s, bool $raw): string
 {
+    // Nothing to decode (the common case): hand the input back, no copy.
+    if (\strpos($s, '%') === false && ($raw || \strpos($s, '+') === false)) { return $s; }
     $out = '';
     $n = \strlen($s);
     $i = 0;
@@ -417,6 +423,7 @@ function __mc_parse_str_assign(array &$arr, string $rawKey, string $val): void
     // `tags%5B0%5D` nests exactly like `tags[0]`. Decoding per-segment instead
     // would leave the encoded form as one flat key.
     $key = \urldecode($rawKey);
+    if ($key === '') { return; }   // php skips a pair with an empty name
     $bpos = \strpos($key, '[');
     if ($bpos === false) {
         $arr[$key] = $val;
@@ -523,18 +530,16 @@ function __mc_nested_assign(array &$node, array $segs, int $idx, string $val): v
  */
 function http_build_query(#[\Manticore\Attr\CellArg] array $data, string $numeric_prefix = '', string $arg_separator = '&'): string
 {
-    $sep = $arg_separator === '' ? '&' : $arg_separator;
-    /** @var string[] $parts */
-    $parts = [];
-    \__mc_build_query($data, '', $numeric_prefix, $parts);
-    return \implode($sep, $parts);
+    $sep = $arg_separator;
+    $out = '';
+    \__mc_build_query($data, '', $numeric_prefix, $out, $sep);
+    return $out;
 }
 
 /**
  * @param array<mixed,mixed> $data
- * @param string[]            $parts
  */
-function __mc_build_query(#[\Manticore\Attr\CellArg] array $data, string $prefix, string $numPrefix, array &$parts): void
+function __mc_build_query(#[\Manticore\Attr\CellArg] array $data, string $prefix, string $numPrefix, string &$out, string $sep): void
 {
     foreach ($data as $k => $v) {
         // php DROPS null entries entirely (they are not emitted as `k=`).
@@ -545,9 +550,12 @@ function __mc_build_query(#[\Manticore\Attr\CellArg] array $data, string $prefix
         }
         $name = $prefix === '' ? \urlencode($key) : $prefix . '%5B' . \urlencode($key) . '%5D';
         if (\is_array($v)) {
-            \__mc_build_query($v, $name, '', $parts);
+            \__mc_build_query($v, $name, '', $out, $sep);
         } else {
-            $parts[] = $name . '=' . \urlencode(\__mc_scalar_str($v));
+            if ($out !== '') { $out .= $sep; }
+            $out .= $name;
+            $out .= '=';
+            $out .= \urlencode(\__mc_scalar_str($v));
         }
     }
 }
