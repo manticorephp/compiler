@@ -317,6 +317,19 @@ function __mc_strtotime_core(string $str, int $base, int $zid, int $publish): in
         if ($guard > 400) {
             return \__mc_dt_fail();
         }
+        $m = [];
+        // Whole-string "YYYY-MM-DD[ HH:MM[:SS]]": the by far most common input,
+        // taken in one match instead of the date, separator and time probes below.
+        if ($pos === 0 && \preg_match('/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ t]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\z/', $s, $m) === 1) {
+            $y = (int)$m[1]; $mo = (int)$m[2]; $d = (int)$m[3];
+            $haveDate = 1; $matched = 1;
+            if (isset($m[4]) && $m[4] !== '') {
+                $h = (int)$m[4]; $mi = (int)$m[5];
+                $sec = (isset($m[6]) && $m[6] !== '') ? (int)$m[6] : 0;
+                $haveTime = 1;
+            }
+            break;
+        }
         $rest = \substr($s, $pos);
         $m = [];
 
