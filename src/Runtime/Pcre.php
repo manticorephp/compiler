@@ -56,3 +56,16 @@ function codeFree(int $code): void {}
  */
 #[Library('pcre2-8'), Symbol('pcre2_pattern_info_8'), \Ffi\CType('int')]
 function patternInfo(int $code, int $what, Ptr $where): int {}
+
+/** `int pcre2_jit_compile(pcre2_code *, uint32_t options)`: 0 on success; any failure leaves the interpreter. */
+#[Library('pcre2-8'), Symbol('pcre2_jit_compile_8'), \Ffi\CType('int')]
+function jitCompile(int $code, int $options): int {}
+
+#[Library('pcre2-8'), Symbol('pcre2_jit_stack_create_8')]
+function jitStackCreate(int $startsize, int $maxsize, int $gcontext): int {}
+
+#[Library('pcre2-8'), Symbol('pcre2_match_context_create_8')]
+function matchContextCreate(int $gcontext): int {}
+
+#[Library('pcre2-8'), Symbol('pcre2_jit_stack_assign_8')]
+function jitStackAssign(int $mcontext, int $callback, int $stack): void {}

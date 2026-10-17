@@ -8591,6 +8591,7 @@ done:
         $out .= "@__mir_hex_alpha = private unnamed_addr constant [16 x i8] c\"0123456789abcdef\"\n";
 
         // base64_encode
+        $out .= "declare i64 @llvm.bswap.i64(i64)\n";
         $out .= "define ptr @__mir_b64_enc(ptr %s) {\n";
         $out .= "entry:\n";
         $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
@@ -8602,9 +8603,45 @@ done:
         $out .= "  %olen = shl i64 %blocks, 2\n";
         $out .= "  %sz = add i64 %olen, 1\n";
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
-        $out .= "  br label %loop\n";
+        // Two blocks per step: one unaligned 8-byte load (byte-swapped so the first
+        // byte is on top) yields 6 input bytes = 2 blocks = 4 twelve-bit lookups.
+        // Needs 8 readable bytes, so the pair loop stops 8 short of the end and the
+        // block loop below finishes the rest.
+        $out .= "  %ge8 = icmp uge i64 %n, 8\n";
+        $out .= "  %nm8 = sub i64 %n, 8\n";
+        $out .= "  %kp0 = udiv i64 %nm8, 6\n";
+        $out .= "  %kp1 = add i64 %kp0, 1\n";
+        $out .= "  %kp = select i1 %ge8, i64 %kp1, i64 0\n";
+        $out .= "  %pk = shl i64 %kp, 1\n";
+        $out .= "  br label %ploop\n";
+        $out .= "ploop:\n";
+        $out .= "  %pj = phi i64 [0, %entry], [%pj2, %pbody]\n";
+        $out .= "  %pmore = icmp ult i64 %pj, %kp\n";
+        $out .= "  br i1 %pmore, label %pbody, label %loop\n";
+        $out .= "pbody:\n";
+        $out .= "  %pin = mul i64 %pj, 6\n";
+        $out .= "  %pout = shl i64 %pj, 3\n";
+        $out .= "  %pip = getelementptr inbounds i8, ptr %s, i64 %pin\n";
+        $out .= "  %pw = load i64, ptr %pip, align 1\n";
+        $out .= "  %pb = call i64 @llvm.bswap.i64(i64 %pw)\n";
+        $out .= "  %pa = lshr i64 %pb, 40\n";
+        $out .= "  %pc0 = lshr i64 %pb, 16\n";
+        $out .= "  %pc = and i64 %pc0, 16777215\n";
+        $out .= "  %pa1 = lshr i64 %pa, 12\n";
+        $out .= "  %pa2 = and i64 %pa, 4095\n";
+        $out .= "  %pc1 = lshr i64 %pc, 12\n";
+        $out .= "  %pc2 = and i64 %pc, 4095\n";
+        foreach ([['a1', 0], ['a2', 2], ['c1', 4], ['c2', 6]] as [$r, $off]) {
+            $out .= '  %pt' . $r . ' = getelementptr inbounds [4096 x i16], ptr @__mir_b64_t12, i64 0, i64 %p' . $r . "\n";
+            $out .= '  %pv' . $r . ' = load i16, ptr %pt' . $r . "\n";
+            $out .= '  %po' . $r . ' = add i64 %pout, ' . $off . "\n";
+            $out .= '  %pd' . $r . ' = getelementptr inbounds i8, ptr %buf, i64 %po' . $r . "\n";
+            $out .= '  store i16 %pv' . $r . ', ptr %pd' . $r . ", align 1\n";
+        }
+        $out .= "  %pj2 = add i64 %pj, 1\n";
+        $out .= "  br label %ploop\n";
         $out .= "loop:\n";
-        $out .= "  %k = phi i64 [0, %entry], [%k2, %body]\n";
+        $out .= "  %k = phi i64 [%pk, %ploop], [%k2, %body]\n";
         $out .= "  %more = icmp ult i64 %k, %q\n";
         $out .= "  br i1 %more, label %body, label %tail\n";
         $out .= "body:\n";

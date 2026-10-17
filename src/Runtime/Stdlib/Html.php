@@ -273,6 +273,13 @@ function __mc_html_entities_enc(): array
     ];
 }
 
+/** The decode table, built on first use and kept: it is ~250 entries. */
+final class __McHtmlTables
+{
+    /** @var array<string, string> */
+    public static array $dec = [];
+}
+
 /** @return array<string,string> entity NAME => UTF-8 char */
 function __mc_html_entities_dec(): array
 {
@@ -647,32 +654,53 @@ function __mc_utf8_chr(int $cp): string
  */
 function html_entity_decode(string $string, int $flags = 3, string $encoding = "UTF-8"): string
 {
-    $tab = __mc_html_entities_dec();
-    $out = "";
     $n = \strlen($string);
+    $amp = \strpos($string, "&");
+    if ($amp === false) { return $string; }
+    $tab = __McHtmlTables::$dec;
+    if ($tab === []) {
+        $tab = __mc_html_entities_dec();
+        __McHtmlTables::$dec = $tab;
+    }
+    $out = "";
     $i = 0;
-    while ($i < $n) {
-        if ($string[$i] !== "&") {
-            // the whole run up to the next `&` in one append
-            $amp = \strpos($string, "&", $i);
-            if ($amp === false) { $amp = $n; }
-            $out = $out . \substr($string, $i, $amp - $i);
-            $i = $amp;
-            continue;
+    $a = (int)$amp;
+    while (true) {
+        // the whole run up to the next `&` in one append
+        if ($a > $i) { $out .= \substr($string, $i, $a - $i); }
+        $i = $a;
+        // The three entities that dominate real text, matched on bytes: no name copy, no table probe.
+        if ($i + 3 < $n) {
+            $c1 = \ord($string[$i + 1]);
+            if (($c1 === 108 || $c1 === 103) && \ord($string[$i + 2]) === 116 && \ord($string[$i + 3]) === 59) {
+                $out .= $c1 === 108 ? "<" : ">";
+                $i = $i + 4;
+                $amp = \strpos($string, "&", $i);
+                if ($amp === false) { if ($i < $n) { $out .= \substr($string, $i); } return $out; }
+                $a = (int)$amp;
+                continue;
+            }
+            if ($c1 === 97 && $i + 4 < $n && \ord($string[$i + 2]) === 109 && \ord($string[$i + 3]) === 112 && \ord($string[$i + 4]) === 59) {
+                $out .= "&";
+                $i = $i + 5;
+                $amp = \strpos($string, "&", $i);
+                if ($amp === false) { if ($i < $n) { $out .= \substr($string, $i); } return $out; }
+                $a = (int)$amp;
+                continue;
+            }
         }
-        $semi = \strpos($string, ";", $i);
-        if ($semi === false || $semi - $i > 32) {
-            $out = $out . "&";
-            $i = $i + 1;
-            continue;
+        // No `;` ahead: nothing after this point can be an entity.
+        $semi = \strpos($string, ";", $i + 1);
+        if ($semi === false) {
+            $out .= \substr($string, $i);
+            return $out;
         }
-        $name = \substr($string, $i + 1, $semi - $i - 1);
+        $s = (int)$semi;
+        $name = $s - $i > 32 || $s === $i + 1 ? "" : \substr($string, $i + 1, $s - $i - 1);
         if ($name === "") {
-            $out = $out . "&";
+            $out .= "&";
             $i = $i + 1;
-            continue;
-        }
-        if ($name[0] === "#") {
+        } elseif ($name[0] === "#") {
             $digits = \substr($name, 1);
             $cp = -1;
             if ($digits !== "" && ($digits[0] === "x" || $digits[0] === "X")) {
@@ -682,29 +710,40 @@ function html_entity_decode(string $string, int $flags = 3, string $encoding = "
                 $cp = (int)$digits;
             }
             if ($cp < 0 || $cp > 0x10FFFF) {
-                $out = $out . "&";
+                $out .= "&";
                 $i = $i + 1;
-                continue;
+            } elseif (($cp === 34 && ($flags & 2) === 0) || ($cp === 39 && ($flags & 1) === 0)) {
+                // The quote flags gate the quote characters here too.
+                $out .= "&" . $name . ";";
+                $i = $s + 1;
+            } else {
+                $out .= __mc_utf8_chr($cp);
+                $i = $s + 1;
             }
-            // The quote flags gate the quote characters here too.
-            if ($cp === 34 && ($flags & 2) === 0) { $out = $out . "&" . $name . ";"; $i = $semi + 1; continue; }
-            if ($cp === 39 && ($flags & 1) === 0) { $out = $out . "&" . $name . ";"; $i = $semi + 1; continue; }
-            $out = $out . __mc_utf8_chr($cp);
-            $i = $semi + 1;
-            continue;
+        } elseif ($name === "quot" && ($flags & 2) === 0) {
+            $out .= "&quot;";
+            $i = $s + 1;
+        } elseif ($name === "apos" && ($flags & 48) !== 0) {
+            // HTML 4.01 has no &apos;; XML 1.0, XHTML and HTML5 do
+            $out .= ($flags & 1) === 0 ? "&apos;" : "'";
+            $i = $s + 1;
+        } else {
+            $rep = $tab[$name] ?? "";
+            if ($rep !== "") {
+                $out .= $rep;
+                $i = $s + 1;
+            } else {
+                $out .= "&";
+                $i = $i + 1;
+            }
         }
-        if ($name === "quot" && ($flags & 2) === 0) { $out = $out . "&quot;"; $i = $semi + 1; continue; }
-        if ($name === "apos" && ($flags & 1) === 0) { $out = $out . "&apos;"; $i = $semi + 1; continue; }
-        if ($name === "apos") { $out = $out . "'"; $i = $semi + 1; continue; }
-        if (isset($tab[$name])) {
-            $out = $out . $tab[$name];
-            $i = $semi + 1;
-            continue;
+        $amp = \strpos($string, "&", $i);
+        if ($amp === false) {
+            if ($i < $n) { $out .= \substr($string, $i); }
+            return $out;
         }
-        $out = $out . "&";
-        $i = $i + 1;
+        $a = (int)$amp;
     }
-    return $out;
 }
 
 /**
@@ -722,23 +761,23 @@ function strip_tags(string $string, string $allowed_tags = ""): string
     while ($i < $n) {
         $run = \strcspn($string, "<", $i);
         if ($run > 0) {
-            $out = $out . \substr($string, $i, $run);
+            $out .= \substr($string, $i, $run);
             $i = $i + $run;
             if ($i >= $n) { break; }
         }
         // A comment runs to `-->`.
-        if (\substr($string, $i, 4) === "<!--") {
+        if ($i + 3 < $n && \ord($string[$i + 1]) === 33 && \ord($string[$i + 2]) === 45 && \ord($string[$i + 3]) === 45) {
             $end = \strpos($string, "-->", $i + 4);
-            $i = $end === false ? $n : $end + 3;
+            $i = $end === false ? $n : (int)$end + 3;
             continue;
         }
         // Scan to the closing `>`, jumping between quotes and `>`.
         $j = $i + 1;
         while ($j < $n) {
             $j = $j + \strcspn($string, "\"'>", $j);
-            if ($j >= $n || $string[$j] === ">") { break; }
+            if ($j >= $n || \ord($string[$j]) === 62) { break; }
             $q = \strpos($string, $string[$j], $j + 1);
-            $j = $q === false ? $n : $q + 1;
+            $j = $q === false ? $n : (int)$q + 1;
         }
         if ($j >= $n) {
             // Unterminated tag: php drops the rest.
@@ -753,7 +792,7 @@ function strip_tags(string $string, string $allowed_tags = ""): string
             // with a sentinel, and a sentinel test here is one more place to get
             // the polarity wrong.
             if ($name !== "" && \str_contains($allowed, "<" . $name . ">")) {
-                $out = $out . \substr($string, $i, $j - $i + 1);
+                $out .= \substr($string, $i, $j - $i + 1);
             }
         }
         $i = $j + 1;

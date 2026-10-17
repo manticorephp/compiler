@@ -1,0 +1,30 @@
+||||
+a=1|a=1|a=1|a=1|a=1
+a=1&b=x+y&c=%C3%BC%26%3D%2B|a=1&b=x+y&c=%C3%BC%26%3D%2B|a=1;b=x+y;c=%C3%BC%26%3D%2B|a=1&amp;b=x+y&amp;c=%C3%BC%26%3D%2B|a=1&b=x%20y&c=%C3%BC%26%3D%2B
+0=1&1=2&2=3|p_0=1&p_1=2&p_2=3|0=1;1=2;2=3|0=1&amp;1=2&amp;2=3|0=1&1=2&2=3
+a%5B0%5D=1&a%5B1%5D=2&a%5B2%5D=3|a%5B0%5D=1&a%5B1%5D=2&a%5B2%5D=3|a%5B0%5D=1;a%5B1%5D=2;a%5B2%5D=3|a%5B0%5D=1&amp;a%5B1%5D=2&amp;a%5B2%5D=3|a%5B0%5D=1&a%5B1%5D=2&a%5B2%5D=3
+a%5Bb%5D%5Bc%5D=d|a%5Bb%5D%5Bc%5D=d|a%5Bb%5D%5Bc%5D=d|a%5Bb%5D%5Bc%5D=d|a%5Bb%5D%5Bc%5D=d
+x=1|x=1|x=1|x=1|x=1
+t=1&f=0&z=0&e=|t=1&f=0&z=0&e=|t=1;f=0;z=0;e=|t=1&amp;f=0&amp;z=0&amp;e=|t=1&f=0&z=0&e=
+fl=1.5&neg=-3&big=12345678901234|fl=1.5&neg=-3&big=12345678901234|fl=1.5;neg=-3;big=12345678901234|fl=1.5&amp;neg=-3&amp;big=12345678901234|fl=1.5&neg=-3&big=12345678901234
+a+b=c+d&e%2Ff=g%7Eh&k%5B%5D=v|a+b=c+d&e%2Ff=g%7Eh&k%5B%5D=v|a+b=c+d;e%2Ff=g%7Eh;k%5B%5D=v|a+b=c+d&amp;e%2Ff=g%7Eh&amp;k%5B%5D=v|a%20b=c%20d&e%2Ff=g~h&k%5B%5D=v
+5=five&k=v|p_5=five&k=v|5=five;k=v|5=five&amp;k=v|5=five&k=v
+a%00b=c%FFd|a%00b=c%FFd|a%00b=c%FFd|a%00b=c%FFd|a%00b=c%FFd
+b=1|b=1|b=1|b=1|b=1
+list%5B0%5D%5Bx%5D=1&list%5B1%5D%5Bx%5D=2|list%5B0%5D%5Bx%5D=1&list%5B1%5D%5Bx%5D=2|list%5B0%5D%5Bx%5D=1;list%5B1%5D%5Bx%5D=2|list%5B0%5D%5Bx%5D=1&amp;list%5B1%5D%5Bx%5D=2|list%5B0%5D%5Bx%5D=1&list%5B1%5D%5Bx%5D=2
+x%5Bz%5D=w|x%5Bz%5D=w|x%5Bz%5D=w|x%5Bz%5D=w|x%5Bz%5D=w
+0 0 d41d8cd98f00b204e9800998ecf8427e
+1 6 36403639d6da91aa125617cce72d2946
+2 11 dfb749f8ae913b1f4facfb01c1642077
+3 16 1e3e3c034b947a6f95a907b2a0c71457
+7 40 5337a775adae7dbc8deb806918893226
+8 45 f2e021616dffe4ca33e144b40d939618
+9 50 65485186eb7bd26c65f05380db876915
+15 94 1725663e2dc8fa12c6c55e4d2aa88aca
+16 103 3246966a9f613817eb9181ead01c960d
+17 110 d2b8883e882b360d1c80331a6d4f3104
+63 462 6bdfc2b9f33774921bc160f9453ec096
+64 471 bc5217a0f8f2cffe40039a95bcc797c2
+65 478 5d38b49c090049810c895dad1575a2be
+20000 251113 83e96db7d8ac4193e71f8fa5b62503b6
+a=xa=y

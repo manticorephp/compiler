@@ -207,35 +207,37 @@ function __mir_similar_text(string $string1, string $string2): int
     return $sum;
 }
 
-/** Levenshtein edit distance between `$string1` and `$string2` (insertions,
- *  deletions and substitutions each cost 1). */
-function levenshtein(string $string1, string $string2): int
+/** Levenshtein edit distance between `$string1` and `$string2`, each insertion, replacement and
+ *  deletion priced by its cost. One DP row in a malloc'd int64 buffer, updated in place
+ *  (`$diag` carries the cell up-left of `$j`): raw loads and stores, no array. */
+function levenshtein(string $string1, string $string2, int $insertion_cost = 1, int $replacement_cost = 1, int $deletion_cost = 1): int
 {
     $la = \strlen($string1);
     $lb = \strlen($string2);
-    if ($la === 0) { return $lb; }
-    if ($lb === 0) { return $la; }
-    // One DP row, updated in place; $diag carries the cell up-left of $j.
-    $row = [];
-    $bs = [];
-    for ($j = 0; $j <= $lb; $j = $j + 1) { $row[$j] = $j; }
-    for ($j = 0; $j < $lb; $j = $j + 1) { $bs[$j] = \ord($string2[$j]); }
-    for ($i = 1; $i <= $la; $i = $i + 1) {
-        $c = \ord($string1[$i - 1]);
-        $diag = $row[0];
-        $left = $i;
-        $row[0] = $i;
+    if ($la === 0) { return $lb * $insertion_cost; }
+    if ($lb === 0) { return $la * $deletion_cost; }
+    $row = \Runtime\Libc\malloc(($lb + 1) * 8);
+    for ($j = 0; $j <= $lb; $j = $j + 1) { \poke_i64($row, $j * 8, $j * $insertion_cost); }
+    for ($i = 0; $i < $la; $i = $i + 1) {
+        $c = \ord($string1[$i]);
+        $diag = \peek_i64($row, 0);
+        $left = $diag + $deletion_cost;
+        \poke_i64($row, 0, $left);
         for ($j = 1; $j <= $lb; $j = $j + 1) {
-            $up = $row[$j];
-            $m = $diag + ($bs[$j - 1] === $c ? 0 : 1);
-            if ($up + 1 < $m) { $m = $up + 1; }
-            if ($left + 1 < $m) { $m = $left + 1; }
-            $row[$j] = $m;
+            $up = \peek_i64($row, $j * 8);
+            $m = $diag + (\ord($string2[$j - 1]) === $c ? 0 : $replacement_cost);
+            $d = $up + $deletion_cost;
+            if ($d < $m) { $m = $d; }
+            $d = $left + $insertion_cost;
+            if ($d < $m) { $m = $d; }
+            \poke_i64($row, $j * 8, $m);
             $left = $m;
             $diag = $up;
         }
     }
-    return $row[$lb];
+    $r = \peek_i64($row, $lb * 8);
+    \Runtime\Libc\free($row);
+    return $r;
 }
 
 /** Case-insensitive {@see strrpos}. */
@@ -511,21 +513,55 @@ function strtr__pairs(string $string, array $replace_pairs): string
     }
     $np = \count($keys);
     if ($np === 0) { return $string; }
+    $n = \strlen($string);
+    /** @var int[] $klen */
+    $klen = [];
+    for ($p = 0; $p < $np; $p = $p + 1) { $klen[] = \strlen($keys[$p]); }
+    $out = '';
+    $run = 0;
+    $i = 0;
+    if ($np <= 8) {
+        // Few keys: each one's next occurrence comes from strpos (a native
+        // search), re-found only once the cursor has passed it. The earliest
+        // occurrence wins, the longest key on a tie.
+        /** @var int[] $nextAt */
+        $nextAt = [];
+        for ($p = 0; $p < $np; $p = $p + 1) { $nextAt[] = -1; }
+        while (true) {
+            $best = -1;
+            $bestAt = $n + 1;
+            for ($p = 0; $p < $np; $p = $p + 1) {
+                $at = $nextAt[$p];
+                if ($at < $i) {
+                    $f = \strpos($string, $keys[$p], $i);
+                    if ($f === false) { $at = $n + 1; } else { $at = (int)$f; }
+                    $nextAt[$p] = $at;
+                }
+                if ($at < $bestAt || ($at === $bestAt && $best >= 0 && $klen[$p] > $klen[$best])) {
+                    $best = $p;
+                    $bestAt = $at;
+                }
+            }
+            if ($best < 0) { break; }
+            $out .= \substr($string, $run, $bestAt - $run);
+            $out .= $vals[$best];
+            $i = $bestAt + $klen[$best];
+            $run = $i;
+        }
+        if ($run === 0) { return $string; }
+        return $out . \substr($string, $run);
+    }
     /** @var array<int, int[]> $buckets first byte → pair indices, longest key first */
     $buckets = [];
     for ($p = 0; $p < $np; $p = $p + 1) {
         $b = \ord($keys[$p][0]);
         $list = $buckets[$b] ?? [];
-        $len = \strlen($keys[$p]);
+        $len = $klen[$p];
         $at = \count($list);
-        while ($at > 0 && \strlen($keys[$list[$at - 1]]) < $len) { $at = $at - 1; }
+        while ($at > 0 && $klen[$list[$at - 1]] < $len) { $at = $at - 1; }
         \array_splice($list, $at, 0, [$p]);
         $buckets[$b] = $list;
     }
-    $n = \strlen($string);
-    $out = '';
-    $run = 0;
-    $i = 0;
     $firsts = '';
     for ($p = 0; $p < $np; $p = $p + 1) { $firsts = $firsts . $keys[$p][0]; }
     while ($i < $n) {
@@ -535,13 +571,18 @@ function strtr__pairs(string $string, array $replace_pairs): string
         $cands = $buckets[\ord($string[$i])] ?? null;
         if ($cands !== null) {
             foreach ($cands as $p) {
+                $kl = $klen[$p];
+                if ($kl > $n - $i) { continue; }
                 $key = $keys[$p];
-                if (\substr_compare($string, $key, $i, \strlen($key)) === 0) { $hit = $p; break; }
+                $j = 1;
+                while ($j < $kl && \ord($string[$i + $j]) === \ord($key[$j])) { $j = $j + 1; }
+                if ($j === $kl) { $hit = $p; break; }
             }
         }
         if ($hit < 0) { $i = $i + 1; continue; }
-        $out = $out . \substr($string, $run, $i - $run) . $vals[$hit];
-        $i = $i + \strlen($keys[$hit]);
+        $out .= \substr($string, $run, $i - $run);
+        $out .= $vals[$hit];
+        $i = $i + $klen[$hit];
         $run = $i;
     }
     if ($run === 0) { return $string; }
@@ -883,31 +924,63 @@ function stripcslashes(string $string): string
  */
 function substr_compare(string $haystack, string $needle, int $offset, ?int $length = null, bool $case_insensitive = false): int
 {
+    if ($length !== null) {
+        return \substr_compare__len($haystack, $needle, $offset, $length, $case_insensitive);
+    }
     $hl = \strlen($haystack);
+    $offset = \__mc_substr_cmp_offset($hl, $offset);
+    $rest = $hl - $offset;
+    $nl = \strlen($needle);
+    return \__mc_substr_cmp($haystack, $needle, $offset, $rest > $nl ? $rest : $nl, $case_insensitive);
+}
+
+/** The form with an explicit length: no nullable parameter to unbox per call. */
+#[\Manticore\Attr\Overload('substr_compare')]
+function substr_compare__len(string $haystack, string $needle, int $offset, int $length, bool $case_insensitive = false): int
+{
+    if ($length <= 0) {
+        if ($length === 0) { return 0; }
+        throw new \ValueError('substr_compare(): Argument #4 ($length) must be greater than or equal to 0');
+    }
+    $offset = \__mc_substr_cmp_offset(\strlen($haystack), $offset);
+    return \__mc_substr_cmp($haystack, $needle, $offset, $length, $case_insensitive);
+}
+
+function __mc_substr_cmp_offset(int $hl, int $offset): int
+{
     if ($offset < 0) {
         $offset = $hl + $offset;
         if ($offset < 0) { $offset = 0; }
     }
-    if ($offset > $hl) { return 1; }
-    $nl = \strlen($needle);
-    $rest = $hl - $offset;
-    $len = $length === null ? ($rest > $nl ? $rest : $nl) : $length;
-    if ($len < 0) { $len = 0; }
-    $a = \substr($haystack, $offset, $len);
-    $b = \substr($needle, 0, $len);
-    if ($case_insensitive) {
-        $a = \strtolower($a);
-        $b = \strtolower($b);
+    if ($offset > $hl) {
+        throw new \ValueError('substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($main_str)');
     }
-    // php returns the strcmp DIFFERENCE, not a normalised -1/1: symfony
-    // compares against 0, but the oracle prints the real value.
-    $la = \strlen($a);
-    $lb = \strlen($b);
+    return $offset;
+}
+
+/** Compares in place (no substr copies); php returns the strcmp DIFFERENCE, which symfony tests against 0. */
+function __mc_substr_cmp(string $haystack, string $needle, int $offset, int $len, bool $case_insensitive): int
+{
+    $rest = \strlen($haystack) - $offset;
+    $nl = \strlen($needle);
+    $la = $rest < $len ? $rest : $len;
+    $lb = $nl < $len ? $nl : $len;
     $m = $la < $lb ? $la : $lb;
     $i = 0;
+    if ($case_insensitive) {
+        while ($i < $m) {
+            $da = \ord($haystack[$offset + $i]);
+            $db = \ord($needle[$i]);
+            if ($da >= 65 && $da <= 90) { $da = $da + 32; }
+            if ($db >= 65 && $db <= 90) { $db = $db + 32; }
+            if ($da !== $db) { return $da - $db; }
+            $i = $i + 1;
+        }
+        return $la - $lb;
+    }
     while ($i < $m) {
-        $da = \ord($a[$i]);
-        $db = \ord($b[$i]);
+        $da = \ord($haystack[$offset + $i]);
+        $db = \ord($needle[$i]);
         if ($da !== $db) { return $da - $db; }
         $i = $i + 1;
     }
@@ -924,7 +997,20 @@ function __mc_version_canon(string $v): string
     $n = \strlen($v);
     if ($n === 0) { return ""; }
     // Plain dotted numbers ("1.2.3") are already canonical.
-    if (\strspn($v, "0123456789.") === $n && $v[$n - 1] !== "." && $v[0] !== "." && !\str_contains($v, "..")) { return $v; }
+    $plain = \ord($v[0]) !== 46 && \ord($v[$n - 1]) !== 46;
+    $prevDot = false;
+    for ($i = 0; $plain && $i < $n; $i = $i + 1) {
+        $c = \ord($v[$i]);
+        if ($c === 46) {
+            if ($prevDot) { $plain = false; }
+            $prevDot = true;
+        } elseif ($c >= 48 && $c <= 57) {
+            $prevDot = false;
+        } else {
+            $plain = false;
+        }
+    }
+    if ($plain) { return $v; }
     $lp = \ord($v[0]);
     $out = $v[0];
     $lqDot = $lp === 46;
@@ -934,15 +1020,15 @@ function __mc_version_canon(string $v): string
         $c = \ord($v[$i]);
         $dig = $c >= 48 && $c <= 57;
         if ($c === 45 || $c === 95 || $c === 43) {
-            if (!$lqDot) { $out = $out . "."; $lqDot = true; }
+            if (!$lqDot) { $out .= "."; $lqDot = true; }
         } elseif (($lpNdig && $dig) || ($lpDig && !$dig && $c !== 46)) {
-            if (!$lqDot) { $out = $out . "."; }
-            $out = $out . $v[$i];
+            if (!$lqDot) { $out .= "."; }
+            $out .= $v[$i];
             $lqDot = false;
         } elseif (!$dig && !(($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122))) {
-            if (!$lqDot) { $out = $out . "."; $lqDot = true; }
+            if (!$lqDot) { $out .= "."; $lqDot = true; }
         } else {
-            $out = $out . $v[$i];
+            $out .= $v[$i];
             $lqDot = false;
         }
         $lp = $c;
@@ -984,9 +1070,9 @@ function __mc_version_cmp(string $c1, string $c2): int
     $cmp = 0;
     while ($p1 < $l1 && $p2 < $l2 && $n1 >= 0 && $n2 >= 0) {
         $f = \strpos($c1, ".", $p1);
-        $n1 = $f === false ? -1 : $f;
+        if ($f === false) { $n1 = -1; } else { $n1 = (int)$f; }
         $f = \strpos($c2, ".", $p2);
-        $n2 = $f === false ? -1 : $f;
+        if ($f === false) { $n2 = -1; } else { $n2 = (int)$f; }
         $b1 = \ord($c1[$p1]);
         $b2 = \ord($c2[$p2]);
         $d1 = $b1 >= 48 && $b1 <= 57;

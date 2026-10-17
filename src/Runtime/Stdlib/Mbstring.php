@@ -539,7 +539,7 @@ function mb_str_split(string $string, int $length = 1, ?string $encoding = null)
             $b = \ord($string[$i]);
             $l = $b < 0xC2 ? 1 : ($b < 0xE0 ? 2 : ($b < 0xF0 ? 3 : ($b < 0xF5 ? 4 : 1)));
             if ($i + $l > $n) { $l = $n - $i; }
-            $out[] = \substr($string, $i, $l);
+            if ($l === 1) { $out[] = $string[$i]; } else { $out[] = \substr($string, $i, $l); }
             $i = $i + $l;
         }
         return $out;
