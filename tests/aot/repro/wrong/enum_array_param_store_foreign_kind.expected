@@ -1,0 +1,8 @@
+array(3) {
+  [0]=>
+  enum(E::A)
+  [1]=>
+  enum(E::B)
+  [2]=>
+  string(1) "x"
+}
