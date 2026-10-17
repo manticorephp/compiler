@@ -1,0 +1,139 @@
+huge: HY000 2027 Malformed packet (packet too large)
+fast
+no fd leak
+badseq: HY000 2027 Malformed packet (packets out of order)
+fast
+no fd leak
+short_scramble: HY000 2027 Malformed packet (scramble shorter than 20 bytes)
+fast
+no fd leak
+proto9: HY000 2027 Malformed packet (protocol version 9)
+fast
+no fd leak
+unsolicited_plugin: HY000 2059 Authentication plugin 'foo_plugin' cannot be loaded
+fast
+no fd leak
+err_handshake: HY000 1040 Too many connections
+fast
+no fd leak
+drip: HY000 2006 MySQL server has gone away (timeout expired)
+fast
+no fd leak
+switch_unknown: HY000 2059 Authentication plugin 'sha256_password' cannot be loaded
+fast
+no fd leak
+switch_short: HY000 2027 Malformed packet (scramble shorter than 20 bytes)
+fast
+no fd leak
+switch_old: HY000 2059 Authentication plugin 'mysql_old_password' cannot be loaded
+fast
+no fd leak
+switch_loop: HY000 2027 Malformed packet (too many authentication switches)
+fast
+no fd leak
+more_data_native: HY000 2027 Malformed packet (unexpected authentication packet)
+fast
+no fd leak
+eof_in_auth: HY000 2013 Lost connection to MySQL server during query
+fast
+no fd leak
+trunc_coldef: HY000 2027 Malformed packet (string overruns packet)
+fast
+no fd leak
+trunc_coldef_fixed: HY000 2027 Malformed packet (column definition)
+fast
+no fd leak
+row_overrun: HY000 2027 Malformed packet (row value overruns packet)
+fast
+no fd leak
+row_trailing: HY000 2027 Malformed packet (row has trailing bytes)
+fast
+no fd leak
+row_short: HY000 2027 Malformed packet (row has too few columns)
+fast
+no fd leak
+colcount_absurd: HY000 2027 Malformed packet (column count)
+fast
+no fd leak
+colcount_zero_len: HY000 2027 Malformed packet (column count)
+fast
+no fd leak
+no_eof: HY000 2027 Malformed packet (missing EOF after column definitions)
+fast
+no fd leak
+local_infile: HY000 2027 Malformed packet (unsolicited LOCAL INFILE request)
+fast
+no fd leak
+empty_pkt: HY000 2027 Malformed packet (empty response)
+fast
+no fd leak
+trunc_stream: HY000 2013 Lost connection to MySQL server during query
+fast
+no fd leak
+over_cap_query: HY000 2027 Malformed packet (packet too large)
+fast
+no fd leak
+err_mid_rows: 70100 1317 Query execution was interrupted
+reuse: ok
+fast
+no fd leak
+bad_seq_query: HY000 2027 Malformed packet (packets out of order)
+fast
+no fd leak
+more_forever: HY000 2013 Lost connection to MySQL server during query
+fast
+no fd leak
+big_slow: ok 8000000 longer than 2 x timeout
+fast
+no fd leak
+int_garbage: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+int_empty: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+int_max: ok 9223372036854775807
+fast
+no fd leak
+int_min: ok -9223372036854775808
+fast
+no fd leak
+int_overflow: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+int_underflow: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+uint_max: ok "18446744073709551615"
+fast
+no fd leak
+uint_over: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+float_lead: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_trail: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_minus: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_plus: ok 5
+fast
+no fd leak
+bit_long: HY000 - invalid bit value from server
+reuse: ok
+fast
+no fd leak
+bit_max: ok "18446744073709551615"
+fast
+no fd leak

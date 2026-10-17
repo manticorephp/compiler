@@ -1,7 +1,8 @@
 <?php
-// Fake hostile Postgres server (Zend php). usage: server.php <mode> <portfile>
+// Fake hostile Postgres server (Zend php). usage: server.php <mode> <portfile> [mysql]  (a third argument `mysql` serves server_mysql.php)
 // Serves ONE connection, then waits until the client hangs up (or 6 s).
 [, $mode, $portFile] = $argv;
+if (($argv[3] ?? '') === 'mysql') { require __DIR__ . '/server_mysql.php'; exit; }
 $srv = stream_socket_server('tcp://127.0.0.1:0', $en, $es);
 file_put_contents($portFile . '.tmp', (string) parse_url('tcp://' . stream_socket_get_name($srv, false), PHP_URL_PORT));
 rename($portFile . '.tmp', $portFile);
