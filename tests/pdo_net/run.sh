@@ -16,7 +16,7 @@ trap 'rm -rf "$WORK"' EXIT
 reachable() { # dsn
     local h p
     h=$(sed -n 's/.*host=\([^;]*\).*/\1/p' <<<"$1"); p=$(sed -n 's/.*port=\([^;]*\).*/\1/p' <<<"$1")
-    [ -n "$h" ] && [ -n "$p" ] && (exec 3<>"/dev/tcp/$h/$p"; exec 3>&-) 2>/dev/null
+    [ -n "$h" ] && [ -n "$p" ] && (exec 3<>"/dev/tcp/$h/$p") 2>/dev/null   # no second command: under bash 3.2 a failed redirect does not abort a subshell
 }
 
 pass=0; fail=0; skip=0
@@ -24,7 +24,11 @@ for f in tests/pdo_net/cases/*.php; do
     n=$(basename "$f" .php)
     [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
     case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_native*) dsn="$PDO_MY_NATIVE_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
-    if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n"; skip=$((skip+1)); continue; fi
+    if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n (server unreachable)"; skip=$((skip+1)); continue; fi
+    # a sibling <case>.needs lists further host:port servers the case talks to (one per line)
+    down=""
+    if [ -f "${f%.php}.needs" ]; then while read -r hp; do [ -n "$hp" ] && ! reachable "host=${hp%%:*};port=${hp##*:}" && down="$hp"; done < "${f%.php}.needs"; fi
+    if [ -n "$down" ]; then echo "SKIP $n ($down unreachable)"; skip=$((skip+1)); continue; fi
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
     if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
     pre="${f%.php}.pre"   # optional hook: server state a case needs before EACH run (php and native)
@@ -35,6 +39,10 @@ for f in tests/pdo_net/cases/*.php; do
     fi
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     act=$("$WORK/$n" 2>&1)
+    # both sides printing the same refusal is a vacuous pass: only a case marked `# expects-connect-failure` may show one
+    if ! grep -q "expects-connect-failure" "$f" && grep -Eq "\[200[23]\]|Connection refused|could not connect|Connection to server" <<<"$exp$act"; then
+        echo "FAIL $n (unexpected connection failure in the output, server probed reachable)"; fail=$((fail+1)); continue
+    fi
     if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1))
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
 done

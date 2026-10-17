@@ -1,4 +1,5 @@
 <?php
+// expects-connect-failure: this case exercises connect errors, so a refusal in its output is legitimate
 set_error_handler(function ($n, $s) { if (!(error_reporting() & $n)) { return false; } echo "WARN: $s\n"; return true; });
 function dsn(): string { return (string) getenv('PDO_MY_DSN'); }
 function pdo(int $mode): PDO { return new PDO(dsn(), getenv('PDO_USER') ?: 'u', getenv('PDO_PASS') ?: 'pw', [PDO::ATTR_ERRMODE => $mode]); }

@@ -1,4 +1,5 @@
 <?php
+// expects-connect-failure: this case exercises connect errors, so a refusal in its output is legitimate
 $base = getenv('PDO_PG_DSN');
 $try = function (string $dsn, ?string $u, ?string $p) {
     try { new PDO($dsn, $u, $p); echo "ok\n"; }

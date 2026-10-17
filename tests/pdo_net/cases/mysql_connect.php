@@ -1,4 +1,5 @@
 <?php
+// expects-connect-failure: this case exercises connect errors, so a refusal in its output is legitimate
 // A server that does not know a user/password pair asks caching_sha2_password clients for RSA full authentication before
 // it answers 1045. The driver reaches openssl_public_encrypt only when the PROGRAM links an openssl_* function (see
 // __McPdoMyWire::fullAuth), so this never-taken call is what makes the bad-credential cases below byte-identical to php.
