@@ -165,6 +165,8 @@ final class __McPdoPgWire
     public bool $noRetry = false;
     /** The attempt got as far as an established TCP connection (libpq retries allow/prefer only from there). */
     public bool $reached = false;
+    /** The server answered 'N' and the attempt went on in plaintext: another plaintext attempt would be the same one. */
+    public bool $declined = false;
 
     /**
      * SSLRequest, then exactly ONE reply byte. true = TLS is up; false = the server declined and plaintext is acceptable.
@@ -179,6 +181,7 @@ final class __McPdoPgWire
         $this->pos++;
         if ($b === 'N') {
             if ($mustTls) { throw $this->startFail('server does not support SSL, but SSL was required'); }
+            $this->declined = true;
             return false;
         }
         if ($b === 'E') { throw $this->startFail('server sent an error response during SSL exchange'); }
@@ -1436,7 +1439,7 @@ function __mc_pdo_pgsql_open(string $rest, array $options, ?string $user, ?strin
             return new __McPdoPg($wire);
         } catch (\Throwable $e) {
             if ($wire !== null) { $wire->close(); }
-            $final = $i === $n - 1 || $wire === null || $wire->noRetry || !($e instanceof PDOException);
+            $final = $i === $n - 1 || $wire === null || $wire->noRetry || $wire->declined || !($e instanceof PDOException);
             if ($final) {
                 if ($prior !== '' && $e instanceof PDOException) { throw __McPdo::connectFail($e->sqlstate, $e->driverCode, $prior . $e->driverMsg); }
                 throw $e;

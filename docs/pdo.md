@@ -199,7 +199,7 @@ address while `host` is what the certificate is checked against.
   `verify-full` also matches the host (DNS or IP SAN, CN only without SAN; `server certificate for "a" (and N other names)
   does not match host name "b"`). `sslrootcert=system` uses the host store and is `verify-full` by default (`weak sslmode ...` for the
   others). Defaults are `~/.postgresql/{postgresql.crt,postgresql.key,root.crt,root.crl}`. A client certificate whose file is missing is
-  skipped; its key must be missing-free and not group/world readable (libpq's wording). `sslcrl` that exists enables CRL checking of
+  skipped; its key file must exist and not be group/world readable (libpq's wording). `sslcrl` that exists enables CRL checking of
   the whole chain; a missing one is ignored.
 - Failures read `SSL error: <OpenSSL reason>` (plus libpq's protocol-version hint) or the libpq texts above; a silent peer is
   `timeout expired` within `ATTR_TIMEOUT`.
