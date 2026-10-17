@@ -1,2 +1,61 @@
 3
 4
+35
+35
+int(4)
+float(4.5)
+float(2.5)
+int(0)
+int(5)
+int(9)
+string(1) "b"
+float(1.5)
+int(2)
+int(2)
+int(2)
+string(1) "a"
+int(2)
+string(4) "ello"
+string(3) "ell"
+string(2) "lo"
+string(0) ""
+string(5) "3,1,2"
+string(3) "312"
+string(1) "a"
+string(5) "3+1+2"
+string(7) "003.1|x"
+string(5) "plain"
+int(12)
+int(7)
+int(255)
+int(0)
+int(1024)
+float(0.5)
+float(8)
+float(3)
+float(1.23)
+float(-1)
+float(7)
+float(16)
+float(8)
+float(16)
+float(2.7386127875258306)
+float(4)
+string(2) "bc"
+int(8)
+float(1.4142135623730951)
+float(2.5)
+int(1)
+int(3)
+float(3.5)
+int(3)
+int(9)
+float(2.6)
+string(3) "312"
+string(6) "42|x|7"
+int(9)
+string(2) "cd"
+int(2)
+string(4) "a:0:"
+string(5) "b:1:1"
+string(11) "c:3:1/x/2.5"
