@@ -1228,8 +1228,18 @@ trait EmitLlvmLocals
                 // ({@see UnifiedArrayRuntime::emitCellOwnAlias}). The slot
                 // stores what comes back — a fresh boxed clone, or the same
                 // word now co-owned.
-                $owned = $this->ssa->allocReg();
-                $out .= '  ' . $owned . ' = call i64 @__mir_cell_own_alias(i64 ' . $aliasV . ")\n";
+                // A property slot COUNTS what it holds (every store into it
+                // retains), so a property read has no borrowed-source worry
+                // and a plain co-owner is enough. Cloning here made every
+                // `$this->mixedArr[$i]` O(n): the hidden `__fb_N` spill of the
+                // held read copied the whole array to read one element.
+                if ($v->kind === Node::KIND_PROPERTY_ACCESS) {
+                    $owned = $aliasV;
+                    $out .= '  call void @__mir_cell_retain(i64 ' . $aliasV . ")\n";
+                } else {
+                    $owned = $this->ssa->allocReg();
+                    $out .= '  ' . $owned . ' = call i64 @__mir_cell_own_alias(i64 ' . $aliasV . ")\n";
+                }
                 // A pass-through for the guard: the helper returns the same
                 // cell or a boxed clone of its payload, never a raw word.
                 $this->propagateCellProvenance($aliasV, $owned);
