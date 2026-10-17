@@ -690,40 +690,38 @@ function array_fill_keys(array $keys, mixed $value): array
 /**
  * `array_diff(arr, ...others)` — elements of `$arr` whose (string) value is in
  * none of the other arrays, keys preserved (PHP compares values as strings).
+ * One hash set over the others: O(n + m), not O(n * m).
  */
 function array_diff(array $arr, array ...$others): array
 {
+    /** @var array<string,bool> $seen */
+    $seen = [];
+    foreach ($others as $o) {
+        foreach ($o as $w) { $seen['s' . $w] = true; }
+    }
     $out = [];
     foreach ($arr as $k => $v) {
-        $found = false;
-        foreach ($others as $o) {
-            foreach ($o as $w) {
-                if ($w == $v) { $found = true; break; }
-            }
-            if ($found) { break; }
-        }
-        if (!$found) { $out[$k] = $v; }
+        if (!isset($seen['s' . $v])) { $out[$k] = $v; }
     }
     return $out;
 }
 
 /**
  * `array_intersect(arr, ...others)` — elements of `$arr` whose (string) value is
- * present in EVERY other array, keys preserved.
+ * present in EVERY other array, keys preserved. One pass per other array.
  */
 function array_intersect(array $arr, array ...$others): array
 {
-    $out = [];
-    foreach ($arr as $k => $v) {
-        $inAll = true;
-        foreach ($others as $o) {
-            $inThis = false;
-            foreach ($o as $w) {
-                if ($w == $v) { $inThis = true; break; }
-            }
-            if (!$inThis) { $inAll = false; break; }
+    $out = $arr;
+    foreach ($others as $o) {
+        /** @var array<string,bool> $seen */
+        $seen = [];
+        foreach ($o as $w) { $seen['s' . $w] = true; }
+        $next = [];
+        foreach ($out as $k => $v) {
+            if (isset($seen['s' . $v])) { $next[$k] = $v; }
         }
-        if ($inAll) { $out[$k] = $v; }
+        $out = $next;
     }
     return $out;
 }
@@ -736,13 +734,9 @@ function array_diff_key(array $arr, array ...$others): array
 {
     $out = [];
     foreach ($arr as $k => $v) {
-        $ks = (string)$k;
         $found = false;
         foreach ($others as $o) {
-            foreach ($o as $ok => $_) {
-                if ((string)$ok === $ks) { $found = true; break; }
-            }
-            if ($found) { break; }
+            if (array_key_exists($k, $o)) { $found = true; break; }
         }
         if (!$found) { $out[$k] = $v; }
     }
@@ -757,14 +751,9 @@ function array_intersect_key(array $arr, array ...$others): array
 {
     $out = [];
     foreach ($arr as $k => $v) {
-        $ks = (string)$k;
         $inAll = true;
         foreach ($others as $o) {
-            $inThis = false;
-            foreach ($o as $ok => $_) {
-                if ((string)$ok === $ks) { $inThis = true; break; }
-            }
-            if (!$inThis) { $inAll = false; break; }
+            if (!array_key_exists($k, $o)) { $inAll = false; break; }
         }
         if ($inAll) { $out[$k] = $v; }
     }
