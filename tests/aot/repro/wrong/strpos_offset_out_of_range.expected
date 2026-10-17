@@ -1,0 +1,2 @@
+strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
+stripos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
