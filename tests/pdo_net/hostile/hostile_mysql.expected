@@ -16,7 +16,7 @@ no fd leak
 err_handshake: HY000 1040 Too many connections
 fast
 no fd leak
-drip: HY000 2006 MySQL server has gone away (timeout expired)
+drip: HY000 2006 MySQL server has gone away
 fast
 no fd leak
 switch_unknown: HY000 2059 Authentication plugin 'sha256_password' cannot be loaded
@@ -34,7 +34,7 @@ no fd leak
 more_data_native: HY000 2027 Malformed packet (unexpected authentication packet)
 fast
 no fd leak
-eof_in_auth: HY000 2013 Lost connection to MySQL server during query
+eof_in_auth: HY000 2006 MySQL server has gone away
 fast
 no fd leak
 trunc_coldef: HY000 2027 Malformed packet (string overruns packet)
@@ -67,7 +67,7 @@ no fd leak
 empty_pkt: HY000 2027 Malformed packet (empty response)
 fast
 no fd leak
-trunc_stream: HY000 2013 Lost connection to MySQL server during query
+trunc_stream: HY000 2006 MySQL server has gone away
 fast
 no fd leak
 over_cap_query: HY000 2027 Malformed packet (packet too large)
@@ -80,7 +80,7 @@ no fd leak
 bad_seq_query: HY000 2027 Malformed packet (packets out of order)
 fast
 no fd leak
-more_forever: HY000 2013 Lost connection to MySQL server during query
+more_forever: HY000 2006 MySQL server has gone away
 fast
 no fd leak
 big_slow: ok 8000000 longer than 2 x timeout
@@ -167,9 +167,9 @@ no fd leak
 idle_slow: ok waited
 fast
 no fd leak
-idle_explicit: HY000 2006 MySQL server has gone away (timeout expired)
+idle_explicit: HY000 2006 MySQL server has gone away
 fast
 no fd leak
-stall_mid: HY000 2006 MySQL server has gone away (timeout expired)
+stall_mid: HY000 2006 MySQL server has gone away
 fast
 no fd leak

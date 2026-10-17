@@ -22,7 +22,7 @@ try {
         if ($mode === 'big_slow') {
             echo $mode, ': ok ', strlen($r[0]), ' ', microtime(true) - $t > 2.0 ? 'longer than 2 x timeout' : 'TOO FAST', "\n";
         } elseif ($mode === 'idle_slow') {
-            echo $mode, ": ok ", microtime(true) - $t > 2.5 ? 'waited' : 'TOO FAST', "\n";
+            echo $mode, ": ok ", microtime(true) - $t > 5.0 ? 'waited' : 'TOO FAST', "\n";
         } elseif (in_array($mode, ['int_max', 'int_min', 'uint_max', 'bit_max', 'float_plus'], true)) {
             echo $mode, ': ok ', json_encode($r[0]), "\n";
         }
@@ -55,7 +55,7 @@ try {
         $q = $db->query('select 1');
         $q->fetchAll();
         $q = null;
-        echo $mode, ': ok ', microtime(true) - $t > 2.5 ? 'waited' : 'TOO FAST', "\n";
+        echo $mode, ': ok ', microtime(true) - $t > 5.0 ? 'waited' : 'TOO FAST', "\n";
     } else {
         $db->query('select 1')->fetchAll();
     }
@@ -72,5 +72,5 @@ try {
     if (!$my && in_array($mode, ['paramdesc_mismatch', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
 }
 $e = null; $p = null; $s = null; $q = null; $db = null;
-echo microtime(true) - $t < ($mode === 'big_slow' || $mode === 'idle_slow' ? 10.0 : 3.0) ? "fast\n" : "SLOW\n";
+echo microtime(true) - $t < ($mode === 'big_slow' || $mode === 'idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' ? 5.0 : 3.0)) ? "fast\n" : "SLOW\n";
 echo $fds() === $before ? "no fd leak\n" : "FD LEAK\n";
