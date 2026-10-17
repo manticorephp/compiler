@@ -1,0 +1,1 @@
+SQLSTATE[HY000]: General error: PDO::FETCH_KEY_PAIR fetch mode requires the result set to contain exactly 2 columns. ["HY000",0]

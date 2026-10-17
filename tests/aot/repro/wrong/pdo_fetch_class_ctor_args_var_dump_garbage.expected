@@ -1,0 +1,11 @@
+array(1) {
+  [0]=>
+  object(Row)#3 (3) {
+    ["a"]=>
+    int(1)
+    ["b"]=>
+    string(1) "x"
+    ["tag"]=>
+    string(1) "T"
+  }
+}
