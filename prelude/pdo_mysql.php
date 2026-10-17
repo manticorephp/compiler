@@ -102,6 +102,8 @@ final class __McPdoMyWire
     /** Connect + authentication budget (monotonic seconds, 0 = none); a drip-feeding server cannot outlast it. */
     private float $authDeadline = 0.0;
     private int $seq = 0;
+    /** The command was sent and no packet of its response has been read yet. */
+    private bool $respStart = false;
     private int $srvCaps = 0;
     private string $scramble = '';
     private string $plugin = '';
@@ -286,8 +288,8 @@ final class __McPdoMyWire
                 $eof = \feof($this->s);
                 if ($eof) { $this->peerGone = true; }
                 if (!$eof && $idle) { continue; }
-                throw $this->ioFail($eof ? 2013 : 2006, $eof
-                    ? 'Lost connection to MySQL server during query' : 'MySQL server has gone away (timeout expired)');
+                // mysqlnd (measured): EOF, a reset and a read timeout all read as 2006, never 2013
+                throw $this->ioFail(2006, 'MySQL server has gone away');
             }
             $this->buf .= $c;
             $this->awaiting = false;
@@ -298,7 +300,7 @@ final class __McPdoMyWire
             if (\strlen($this->buf) < $n) {
                 $now = \__mc_monotonic_f();
                 if (($dl > 0.0 && $now >= $dl) || ($this->connecting && $this->authDeadline > 0.0 && $now >= $this->authDeadline)) {
-                    throw $this->ioFail(2006, 'MySQL server has gone away (timeout expired)');
+                    throw $this->ioFail(2006, 'MySQL server has gone away');
                 }
             }
         }
@@ -316,7 +318,18 @@ final class __McPdoMyWire
             if (\strlen($this->buf) - $this->pos < 4) { $this->fill(4); }
             $p = $this->pos;
             $len = \ord($this->buf[$p]) | (\ord($this->buf[$p + 1]) << 8) | (\ord($this->buf[$p + 2]) << 16);
-            if (\ord($this->buf[$p + 3]) !== $this->seq) { throw $this->malformed('packets out of order'); }
+            if (\ord($this->buf[$p + 3]) !== $this->seq) {
+                // the server's own ERR (wait_timeout, shutdown) written while the connection idled carries the sequence of
+                // the PREVIOUS exchange; it is the answer to the next command, as in mysqlnd (measured: 4031)
+                $ok = false;
+                if ($this->respStart && $len > 0) {
+                    if (\strlen($this->buf) - $p < 5) { $this->fill(5); $p = $this->pos; }
+                    $ok = \ord($this->buf[$p + 4]) === 0xFF;
+                    if ($ok) { $this->seq = \ord($this->buf[$p + 3]); }
+                }
+                if (!$ok) { throw $this->malformed('packets out of order'); }
+            }
+            $this->respStart = false;
             $this->seq = ($this->seq + 1) & 255;
             if (\strlen($out) + $len > $cap) { throw $this->malformed('packet too large'); }
             if (\strlen($this->buf) - $p < 4 + $len) {
@@ -494,7 +507,7 @@ final class __McPdoMyWire
             // ponytail: 16 is far beyond any real exchange (switch, more-data, full-auth); the cap only stops a ping-pong
             if (++$steps > 16) { throw $this->malformed('too many authentication packets'); }
             if ($this->authDeadline > 0.0 && \__mc_monotonic_f() >= $this->authDeadline) {
-                throw $this->ioFail(2006, 'MySQL server has gone away (timeout expired)');
+                throw $this->ioFail(2006, 'MySQL server has gone away');
             }
             $p = $this->packet(self::CTRL_CAP);
             if (\strlen($p) < 1) { throw $this->malformed('empty authentication packet'); }
@@ -769,6 +782,7 @@ final class __McPdoMyWire
         $this->seq = 0;
         $this->sendPacket("\x03" . $sql);
         $this->awaiting = true;
+        $this->respStart = true;
         $first = null;
         $last = null;
         $n = 0;
@@ -785,6 +799,33 @@ final class __McPdoMyWire
         return $first;
     }
 
+    /**
+     * COM_STATISTICS: one packet holding the status text (no OK header), or an ERR.
+     * The same cycle discipline as query().
+     */
+    public function statistics(): string
+    {
+        $this->enter();
+        try {
+            if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $this->inflight = true;
+            $this->seq = 0;
+            $this->sendPacket("\x09");
+            $this->awaiting = true;
+            $this->respStart = true;
+            $p = $this->packet(self::CTRL_CAP);
+            $this->inflight = false;
+            if ($p !== '' && \ord($p[0]) === 0xFF) { throw __McPdoMy::errFrom($this->parseErr($p)); }
+            return $p;
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->inflight = false;
+            $this->busy = false;
+        }
+    }
+
     public function close(): void
     {
         if (!$this->dead && !$this->busy && !$this->connecting) {
@@ -799,6 +840,12 @@ final class __McPdoMy implements __McPdoDrv
     public __McPdoMyWire $wire;
     /** ATTR_EMULATE_PREPARES: pdo_mysql's default is on; native prepares arrive with the binary protocol. */
     public bool $emulate = true;
+    /** ATTR_AUTOCOMMIT as the program last set it (the server starts in autocommit mode). */
+    public bool $autocommit = true;
+    /** ATTR_FETCH_TABLE_NAMES: stored and read back; column names are not prefixed yet. */
+    public bool $fetchTables = false;
+    /** ATTR_DEFAULT_STR_PARAM = PARAM_STR_NATL. */
+    public bool $natl = false;
 
     public function __construct(__McPdoMyWire $wire)
     {
@@ -857,7 +904,11 @@ final class __McPdoMy implements __McPdoDrv
         $q = ($this->wire->status & 512) !== 0
             ? \str_replace("'", "''", $s)
             : \strtr($s, ["\0" => '\0', "\n" => '\n', "\r" => '\r', '\\' => '\\\\', "'" => "\\'", '"' => '\\"', "\x1a" => '\Z']);
-        return (($type & 7) === PDO::PARAM_LOB ? "_binary'" : "'") . $q . "'";
+        if (($type & 7) === PDO::PARAM_LOB) { return "_binary'" . $q . "'"; }
+        // mysql_handle_quoter: NATL (or the default-string attribute) means N'..', an explicit CHAR flag cancels it
+        $n = $this->natl || ($type & PDO::PARAM_STR_NATL) === PDO::PARAM_STR_NATL;
+        if (($type & PDO::PARAM_STR_CHAR) === PDO::PARAM_STR_CHAR) { $n = false; }
+        return ($n ? "N'" : "'") . $q . "'";
     }
 
     public function errorInfo(): array { return __McPdo::triple('', 0, false, '', false); }
@@ -865,6 +916,15 @@ final class __McPdoMy implements __McPdoDrv
     public function setAttr(int $attr, mixed $value): bool
     {
         if ($attr === PDO::ATTR_EMULATE_PREPARES) { $this->emulate = (bool) $value; return true; }
+        if ($attr === PDO::ATTR_AUTOCOMMIT) {
+            if (!\is_bool($value) && !\is_int($value)) {
+                throw new TypeError('Attribute value must be of type bool for selected attribute, ' . \get_debug_type($value) . ' given');
+            }
+            $on = (bool) $value;
+            $this->run($on ? 'SET autocommit=1' : 'SET autocommit=0');
+            $this->autocommit = $on;
+            return true;
+        }
         // php: ATTR_TIMEOUT is connect-time only. Here a program that sets it also bounds the idle wait for a response (superset)
         if ($attr === PDO::ATTR_TIMEOUT) {
             $this->wire->setTimeout((float) $value);
@@ -872,11 +932,16 @@ final class __McPdoMy implements __McPdoDrv
             // php (measured): the call answers false and reads back as unsupported; the effect above is the superset
             return false;
         }
-        // connect-time options (consumed by open()) and always-buffered results: accepted so they can ride the options array
-        if ($attr === PDO::MYSQL_ATTR_USE_BUFFERED_QUERY || $attr === PDO::MYSQL_ATTR_FOUND_ROWS
-            || $attr === PDO::MYSQL_ATTR_MULTI_STATEMENTS || $attr === PDO::MYSQL_ATTR_INIT_COMMAND
-            || $attr === PDO::MYSQL_ATTR_IGNORE_SPACE || $attr === PDO::MYSQL_ATTR_LOCAL_INFILE
-            || $attr === PDO::MYSQL_ATTR_DIRECT_QUERY || $attr === PDO::ATTR_PREFETCH) { return true; }
+        // results are always buffered; unbuffered cursors arrive with the async phase
+        if ($attr === PDO::MYSQL_ATTR_USE_BUFFERED_QUERY) {
+            if (!(bool) $value) { throw __McPdo::fail('HY000', 0, false, 'unbuffered queries are not supported yet', true); }
+            return true;
+        }
+        if ($attr === PDO::ATTR_FETCH_TABLE_NAMES) { $this->fetchTables = (bool) $value; return true; }
+        // assume_national_character_set_strings: only the NATL type switches it on
+        if ($attr === PDO::ATTR_DEFAULT_STR_PARAM) { $this->natl = (int) $value === PDO::PARAM_STR_NATL; return true; }
+        // connect-time options (FOUND_ROWS, MULTI_STATEMENTS, INIT_COMMAND, IGNORE_SPACE, LOCAL_INFILE, COMPRESS, SSL_*, ATTR_PREFETCH)
+        // are read by open(); once connected php answers false, and so does this
         return false;
     }
 
@@ -891,7 +956,13 @@ final class __McPdoMy implements __McPdoDrv
         if ($attr === PDO::ATTR_CLIENT_VERSION) { return 'manticore-mysqlwire 4.1'; }
         if ($attr === PDO::ATTR_CONNECTION_STATUS) { return $this->wire->host . ' via TCP/IP'; }
         if ($attr === PDO::ATTR_EMULATE_PREPARES) { return $this->emulate; }
+        if ($attr === PDO::ATTR_AUTOCOMMIT) { return $this->autocommit; }
+        if ($attr === PDO::ATTR_SERVER_INFO) { return $this->wire->statistics(); }
         if ($attr === PDO::MYSQL_ATTR_USE_BUFFERED_QUERY) { return true; }
+        if ($attr === PDO::ATTR_FETCH_TABLE_NAMES) { return $this->fetchTables; }
+        if ($attr === PDO::ATTR_DEFAULT_STR_PARAM) { return $this->natl ? PDO::PARAM_STR_NATL : PDO::PARAM_STR_CHAR; }
+        // LOCAL INFILE is refused at connect (see open()), so the option can only read back as off
+        if ($attr === PDO::MYSQL_ATTR_LOCAL_INFILE) { return false; }
         return null;
     }
 
@@ -1200,11 +1271,17 @@ function __mc_pdo_mysql_open(string $rest, array $options, ?string $user, ?strin
     $charset = isset($p['charset']) ? $p['charset'] : 'utf8mb4';
     // TLS arrives in its own phase: refused up front, never silently downgraded
     foreach ([1006, 1007, 1008, 1009, 1010, 1011, 1013] as $k) {
-        if (isset($options[$k])) { throw __McPdo::connectFail('HY000', 2026, 'SSL connection options are not supported yet'); }
+        if (isset($options[$k])) { throw __McPdo::connectFail('HY000', 2026, 'TLS is not supported yet (MYSQL_ATTR_SSL_* options)'); }
     }
     $timeout = isset($options[PDO::ATTR_TIMEOUT]) ? (float) $options[PDO::ATTR_TIMEOUT] : 30.0;
     $multi = !isset($options[PDO::MYSQL_ATTR_MULTI_STATEMENTS]) || (bool) $options[PDO::MYSQL_ATTR_MULTI_STATEMENTS];
 
+    if (isset($options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY]) && !(bool) $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY]) {
+        throw __McPdo::connectFail('HY000', 2000, 'unbuffered queries are not supported yet');
+    }
+    if (isset($options[PDO::MYSQL_ATTR_COMPRESS]) && (bool) $options[PDO::MYSQL_ATTR_COMPRESS]) {
+        throw __McPdo::connectFail('HY000', 2000, 'compression is not supported');
+    }
     // the driver cannot serve a LOAD DATA LOCAL INFILE request (CLIENT_LOCAL_FILES is never set): refuse up front
     $li = isset($options[PDO::MYSQL_ATTR_LOCAL_INFILE]) ? $options[PDO::MYSQL_ATTR_LOCAL_INFILE] : false;
     if ($li) { throw __McPdo::connectFail('HY000', 2000, 'LOCAL INFILE is not supported'); }

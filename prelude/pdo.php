@@ -755,7 +755,8 @@ class PDO
 
         if ($options !== null) {
             foreach ($options as $k => $v) {
-                if (\is_int($k)) { $this->setAttribute($k, $v); }
+                if ($k === PDO::ATTR_PERSISTENT) { $this->persistent = (bool) $v; }
+                elseif (\is_int($k)) { $this->setAttribute($k, $v); }
             }
         }
     }
@@ -879,7 +880,8 @@ class PDO
         if ($attribute === PDO::ATTR_STRINGIFY_FETCHES) { $this->stringify = (bool) $value; return true; }
         if ($attribute === PDO::ATTR_DEFAULT_FETCH_MODE) { $this->defaultFetch = (int) $value; return true; }
         // Accepted and ignored: one process, no connection pool to keep.
-        if ($attribute === PDO::ATTR_PERSISTENT) { $this->persistent = (bool) $value; return true; }
+        // php (measured, mysql pgsql sqlite): answered false once connected; only the constructor option is kept
+        if ($attribute === PDO::ATTR_PERSISTENT) { return false; }
         // Consumed by the driver's open(); accepted so it can ride the options
         // array without then being reported as unsupported.
         if ($attribute === PDO::SQLITE_ATTR_OPEN_FLAGS && $this->drv->name() === 'sqlite') { return true; }
@@ -895,7 +897,12 @@ class PDO
             return true;
         }
         // php (measured, sqlite and pgsql): a refused set is a plain false, no error recorded
-        return $this->drv->setAttr($attribute, $value);
+        try {
+            return $this->drv->setAttr($attribute, $value);
+        } catch (PDOException $e) {
+            $this->note($e, 'PDO::setAttribute');
+            return false;
+        }
     }
 
     public function getAttribute(int $attribute): mixed
@@ -911,7 +918,11 @@ class PDO
             return [$this->stmtClassName, $this->stmtClassArgs];
         }
         if ($attribute === PDO::ATTR_DRIVER_NAME) { return $this->drv->name(); }
-        $v = $this->drv->getAttr($attribute);
+        try {
+            $v = $this->drv->getAttr($attribute);
+        } catch (PDOException $e) {
+            return $this->note($e, 'PDO::getAttribute');
+        }
         if ($v !== null) { return $v; }
         return $this->unsupported('driver does not support that attribute', 'PDO::getAttribute');
     }
@@ -927,7 +938,6 @@ class PDO
             $this->note($e, $fn);
             return false;
         }
-        $this->clearErr();
         return true;
     }
 
@@ -957,7 +967,9 @@ class PDO
         $this->errHasCode = $e->hasDriverCode;
         $this->errMsg = $e->driverMsg;
         $this->errHasMsg = $e->hasDriverMsg;
-        __McPdo::raise($this->errmode, $e->sqlstate, $e->driverCode, $e->hasDriverCode,
+        // HY093 is php core's implementation error: like IM001 it warns even under ERRMODE_SILENT (measured)
+        $mode = $this->errmode === PDO::ERRMODE_SILENT && $e->sqlstate === 'HY093' && !$e->hasDriverCode ? PDO::ERRMODE_WARNING : $this->errmode;
+        __McPdo::raise($mode, $e->sqlstate, $e->driverCode, $e->hasDriverCode,
                        $e->driverMsg, $e->hasDriverMsg, $this->label !== '' ? $this->label : $fn);
         return false;
     }

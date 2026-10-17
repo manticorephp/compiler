@@ -99,7 +99,8 @@ throw would longjmp past sqlite's own half-updated frames, which `docs/ffi.md` f
   rather than refused, because throwing would break every Doctrine-shaped caller outright.
 - **`bindColumn()` / `PDO::FETCH_BOUND` throw**, for the same missing primitive — but there the
   write-back *is* the whole feature, so there is no half of it worth approximating.
-- **`ATTR_PERSISTENT` is accepted and ignored.** One process, no pool.
+- **`ATTR_PERSISTENT` is accepted and ignored.** One process, no pool. The constructor option is kept for
+  `getAttribute()`; `setAttribute()` answers `false` afterwards (php, all drivers).
 - **`getAvailableDrivers()` returns what this binary linked** — `['sqlite']` — where php lists
   every driver its build has.
 
@@ -139,6 +140,30 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
   program set `ATTR_TIMEOUT` itself (constructor options or `setAttribute`), which then also bounds that wait (superset
   behaviour). Async cancellation / scope deadlines are the idiomatic way to bound a statement.
 - `MYSQL_ATTR_LOCAL_INFILE=true` throws at connect (`LOCAL INFILE is not supported`).
+- Errors: an ERR packet becomes `SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry ...`
+  (state from the packet's `#` marker, descriptions from the shared 266-row table, unlisted states read
+  `<<Unknown error>>`), `errorInfo = [state, errno, message]`, `getCode()` = the errno (php: the SQLSTATE string, see the
+  divergence above). A connect failure is always `SQLSTATE[HY000] [errno] text`, whatever the server state (php). The
+  dead-connection family is php's `2006 MySQL server has gone away` for EOF, reset AND read timeout alike (mysqlnd never
+  says 2013); the first command after the server dropped an idle connection (`wait_timeout`) reads the server's own
+  `4031` ERR, whose sequence number is the previous exchange's. Every later call fails at once, nothing hangs, the socket
+  is closed once.
+- Transactions follow the server: `inTransaction()` is `SERVER_STATUS_IN_TRANS` of the latest OK/EOF packet, so implicit
+  commits (real DDL; temporary-table DDL does not commit), `START TRANSACTION` issued through `exec()` and
+  `autocommit=0` are all seen, and a connection killed inside a transaction still answers `true`. `begin`/`commit`/
+  `rollBack` do not touch `errorInfo` on success (php). `ATTR_AUTOCOMMIT` runs `SET autocommit=0|1` (a non-bool value is
+  php's `TypeError`).
+- Attributes: `ATTR_SERVER_INFO` is `COM_STATISTICS` (`Uptime: .. Threads: ..`); `ATTR_CLIENT_VERSION` is
+  `manticore-mysqlwire 4.1` (php: `mysqlnd 8.x`); `ATTR_CONNECTION_STATUS` is `<host> via TCP/IP` (`localhost` is TCP here,
+  php would use the unix socket); `ATTR_FETCH_TABLE_NAMES` is stored and read back but column names are not prefixed;
+  `ATTR_DEFAULT_STR_PARAM = PARAM_STR_NATL` makes `quote()` and bound strings `N'..'`. Once connected, the connect-time
+  options (`1004`, `1012`, `1002`, `1005`, `ATTR_PREFETCH`) answer `false` on `setAttribute()`, as php; `ATTR_PERSISTENT`
+  is kept from the constructor and `false` afterwards; `ATTR_TIMEOUT` answers `false` yet takes effect (see Timeouts).
+- Refused loudly (php accepts them): `MYSQL_ATTR_USE_BUFFERED_QUERY=false` (`unbuffered queries are not supported yet`, at
+  connect and at `setAttribute`), `MYSQL_ATTR_COMPRESS=true` (`compression is not supported`), `MYSQL_ATTR_SSL_*`
+  (`TLS is not supported yet`). `exec()` of a statement that returns rows consumes the result (php leaves it pending and
+  fails the next command with 2014 / 'pending result sets').
+- A deadlock (1213) cannot be provoked by two connections inside one thread; the tests raise it with `SIGNAL`.
 - Gaps: TLS (`MYSQL_ATTR_SSL_*` is refused, never downgraded), unix sockets, compression, native
   prepares (`ATTR_EMULATE_PREPARES=false` throws), a few charset names (`charset=` knows utf8mb4, utf8,
   latin1, ascii, binary, latin2, cp1250, cp1251, koi8r/u, greek, hebrew), AUTO_INCREMENT ids above
