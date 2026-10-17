@@ -5900,6 +5900,7 @@ final class UnifiedArrayRuntime
         $small = $fn->block('sw_small');
         $scanH = $fn->block('sw_scan_head');
         $scanB = $fn->block('sw_scan_body');
+        $scanNum = $fn->block('sw_scan_num');
         $setup = $fn->block('sw_setup');
         $wHead = $fn->block('sw_whead');
         $wBody = $fn->block('sw_wbody');
@@ -5957,7 +5958,26 @@ final class UnifiedArrayRuntime
         $scanB->store($scanB->add($si, Value::int(Type::i64(), 1)), $iSlot);
         $notStrCell = $scanB->icmp('ne', $scanB->lshr($sw, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 65524));
         $bad = $scanB->select($isCell, $notStrCell, $scanB->icmp('eq', $sw, Value::int(Type::i64(), 0)));
-        $scanB->brIf($bad, $no, $scanH);
+        $scanB->brIf($bad, $no, $scanNum);
+        // php compares two numeric strings as numbers, not bytes: a string whose
+        // first byte can start a number (digit, whitespace, sign, dot) leaves the
+        // byte merge to the generic path.
+        $sstr = $scanNum->inttoptr($scanNum->select($isCell, $scanNum->and_($sw, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), $sw), Type::ptr());
+        $ch = $scanNum->zext($scanNum->load(Type::i8(), $sstr), Type::i64());
+        $numLike = $scanNum->or_(
+            $scanNum->icmp('ult', $scanNum->sub($ch, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 10)),
+            $scanNum->or_(
+                $scanNum->icmp('ult', $scanNum->sub($ch, Value::int(Type::i64(), 9)), Value::int(Type::i64(), 5)),
+                $scanNum->or_(
+                    $scanNum->icmp('eq', $ch, Value::int(Type::i64(), 32)),
+                    $scanNum->or_(
+                        $scanNum->icmp('eq', $ch, Value::int(Type::i64(), 43)),
+                        $scanNum->or_($scanNum->icmp('eq', $ch, Value::int(Type::i64(), 45)), $scanNum->icmp('eq', $ch, Value::int(Type::i64(), 46))),
+                    ),
+                ),
+            ),
+        );
+        $scanNum->brIf($numLike, $no, $scanH);
 
         $data = $this->packedSlot($setup, $arr, Value::int(Type::i64(), 0));
         $tmp = $setup->call('malloc', Type::ptr(), [$setup->mul($len, Value::int(Type::i64(), 8))]);

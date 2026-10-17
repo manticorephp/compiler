@@ -1912,6 +1912,25 @@ trait EmitLlvmExpr
         $out .= "  %eq = fcmp oeq double %da, %db\n  ret i1 %eq\n";
         $out .= "yes:\n  ret i1 true\n";
         $out .= "no:\n  ret i1 false\n}\n";
+
+        // __mir_str_loose_cmp(a,b) -> i64 (-1/0/1) — PHP `<=>` on two strings:
+        // both NUMERIC compare as numbers, anything else byte-wise.
+        $out .= "\ndefine i64 @__mir_str_loose_cmp(ptr %a, ptr %b) {\nentry:\n";
+        $out .= "  %an = call i1 @__mir_is_numeric_str(ptr %a)\n";
+        $out .= "  br i1 %an, label %chkb, label %bytes\n";
+        $out .= "chkb:\n";
+        $out .= "  %bn = call i1 @__mir_is_numeric_str(ptr %b)\n";
+        $out .= "  br i1 %bn, label %num, label %bytes\n";
+        $out .= "num:\n";
+        $out .= "  %da = call double @__mir_php_strtod(ptr %a, ptr null)\n";
+        $out .= "  %db = call double @__mir_php_strtod(ptr %b, ptr null)\n";
+        $out .= "  %lt = fcmp olt double %da, %db\n";
+        $out .= "  %gt = fcmp ogt double %da, %db\n";
+        $out .= "  %ltz = sext i1 %lt to i64\n";
+        $out .= "  %gtz = zext i1 %gt to i64\n";
+        $out .= "  %r = add i64 %ltz, %gtz\n  ret i64 %r\n";
+        $out .= "bytes:\n";
+        $out .= "  %c = call i64 @__mir_str_cmp(ptr %a, ptr %b)\n  ret i64 %c\n}\n";
         return $out;
     }
 
@@ -5946,7 +5965,15 @@ trait EmitLlvmExpr
                 return \implode('', $chunks);
             }
             $call = $this->ssa->allocReg();
-            $chunks[] = '  ' . $call . ' = call i64 @__mir_str_cmp(ptr ' . $lp . ', ptr ' . $rp . ")\n";
+            // Two statically-known strings order NUMERICALLY when both are
+            // numeric ("10" > "9"), else by bytes — as `==` already does.
+            $cmpFn = '@__mir_str_cmp';
+            if ($lk === Type::KIND_STRING && $rk === Type::KIND_STRING) {
+                $cmpFn = '@__mir_str_loose_cmp';
+                $this->rt->needsTaggedEq = true;
+                $this->rt->needsStrtod = true;
+            }
+            $chunks[] = '  ' . $call . ' = call i64 ' . $cmpFn . '(ptr ' . $lp . ', ptr ' . $rp . ")\n";
             $cmpReg = $this->ssa->allocReg();
             $chunks[] = '  ' . $cmpReg . ' = icmp ' . $this->cmpPredicate($c->op) . ' i64 ' . $call . ", 0\n";
             // Ordering consumes its operands exactly as equality does.
