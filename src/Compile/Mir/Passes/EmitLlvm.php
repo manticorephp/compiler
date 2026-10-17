@@ -878,6 +878,10 @@ final class EmitLlvm implements EmitVisitor
         $this->classlessCandidatesMemo = [];
         $this->dynfLookupEmitted = false;
         $this->dynfBsearchEmitted = false;
+        $this->dynfIcmpEmitted = false;
+        $this->dynfZeroEmitted = false;
+        $this->dynfCacheSeq = 0;
+        $this->dynfIdTab = null;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
@@ -2170,6 +2174,11 @@ final class EmitLlvm implements EmitVisitor
     /** The module already carries one copy of `__mc_dynf_lookup`. */
     private bool $dynfLookupEmitted = false;
     private bool $dynfBsearchEmitted = false;
+    private bool $dynfIcmpEmitted = false;
+    private bool $dynfZeroEmitted = false;
+    private int $dynfCacheSeq = 0;
+    /** @var array{0:string,1:int,2:array<string,int>}|null */
+    private ?array $dynfIdTab = null;
 
     /** A `require`/`include` site asked for the include-slot chain, so the module
      *  needs the one shared body ({@see EmitLlvmBuiltins::emitInclResolveFn}). */

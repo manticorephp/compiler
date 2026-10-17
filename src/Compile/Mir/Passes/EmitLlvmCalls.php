@@ -826,6 +826,30 @@ trait EmitLlvmCalls
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynf.end');
+        // One cached name resolution per call; every arm then compares ints.
+        $keyRaw = $keyP;
+        // A leading backslash names the same function (`'\strlen'`).
+        $bs0 = $this->ssa->allocReg();
+        $out .= '  ' . $bs0 . ' = load i8, ptr ' . $keyP . "\n";
+        $isBs0 = $this->ssa->allocReg();
+        $out .= '  ' . $isBs0 . ' = icmp eq i8 ' . $bs0 . ", 92\n";
+        $tail0 = $this->ssa->allocReg();
+        $out .= '  ' . $tail0 . ' = getelementptr i8, ptr ' . $keyP . ", i64 1\n";
+        $keyP = $this->ssa->allocReg();
+        $out .= '  ' . $keyP . ' = select i1 ' . $isBs0 . ', ptr ' . $tail0 . ', ptr ' . $keyRaw . "\n";
+        $idTab = $this->dynfIdTable();
+        $idMap = $idTab[2];
+        $out .= $this->dynfCachedRow($keyP, $idTab[0], $idTab[1], $rowReg);
+        $idp = $this->ssa->allocReg();
+        $nameId = $this->ssa->allocReg();
+        $hasRow = $this->ssa->allocReg();
+        $out .= '  ' . $hasRow . ' = icmp ne ptr ' . $rowReg . ", null\n";
+        $rowIdAddr = $this->ssa->allocReg();
+        $out .= '  ' . $rowIdAddr . ' = getelementptr i8, ptr ' . $rowReg . ", i64 8\n";
+        $rowSafe = $this->ssa->allocReg();
+        $out .= '  ' . $rowSafe . ' = select i1 ' . $hasRow . ', ptr ' . $rowIdAddr . ', ptr ' . $this->dynfZeroSym() . "\n";
+        $out .= '  ' . $idp . ' = load ptr, ptr ' . $rowSafe . "\n";
+        $out .= '  ' . $nameId . ' = ptrtoint ptr ' . $idp . " to i64\n";
         foreach ($this->sigs->returnType as $fname => $rt) {
             if (!$this->dynfNameable($fname)) { continue; }
             if (isset($dynfSyms[$fname])) { continue; }
@@ -856,10 +880,8 @@ trait EmitLlvmCalls
             }
             $hitL = $this->ssa->allocLabel('dynf.hit');
             $nextL = $this->ssa->allocLabel('dynf.next');
-            $cmp = $this->ssa->allocReg();
-            $out .= '  ' . $cmp . ' = call i32 @strcasecmp(ptr ' . $keyP . ', ptr ' . $this->litStr($this->dynfPublicName($fname)) . ")\n";
             $eq = $this->ssa->allocReg();
-            $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $nameId . ', ' . (string)$idMap[\strtolower($this->dynfPublicName($fname))] . "\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
             if ($hasSpread && $this->anyRefParam($fname)) {
@@ -930,10 +952,6 @@ trait EmitLlvmCalls
         // ordinary call, which the builtin emitter answers inline. Fixed arity
         // only (a spread would need the pack filled against their params).
         if (!$hasSpread) {
-            // One binary search over the sorted twin names yields a small id; the
-            // arms then compare ints (LLVM folds the chain into a switch) instead
-            // of a strcmp per twin.
-            $twinIds = [];
             $twinNames = [];
             foreach ($this->builtinTwinTot as $bname => $btot) {
                 if (isset($this->sigs->returnType[$bname])) { continue; }
@@ -941,25 +959,9 @@ trait EmitLlvmCalls
                 if ($argc < $breq || $argc > $btot) { continue; }
                 $twinNames[] = $bname;
             }
-            \usort($twinNames, fn(string $a, string $b): int => \strcmp(\strtolower($a), \strtolower($b)));
-            $twinId = '0';
-            if ($twinNames !== []) {
-                $this->dynfExtraBodies .= $this->dynfBsearchFn();
-                $rows = [];
-                foreach ($twinNames as $ti => $bname) {
-                    $twinIds[$bname] = $ti + 1;
-                    $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($bname) . ', ptr inttoptr (i64 ' . (string)($ti + 1) . ' to ptr) }';
-                }
-                $tsym = '@.dynf.twin.' . $this->mirHelperSym((string)\count($this->dynfTables));
-                $this->dynfTables['twin' . (string)\count($this->dynfTables)] = [$tsym, \count($rows)];
-                $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)\count($rows)
-                    . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n\n";
-                $idp = $this->ssa->allocReg();
-                $out .= '  ' . $idp . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP . ', ptr ' . $tsym
-                      . ', i64 ' . (string)\count($rows) . ")\n";
-                $twinId = $this->ssa->allocReg();
-                $out .= '  ' . $twinId . ' = ptrtoint ptr ' . $idp . " to i64\n";
-            }
+            $twinIds = [];
+            foreach ($twinNames as $bname) { $twinIds[$bname] = $idMap[\strtolower($bname)]; }
+            $twinId = $nameId;
             foreach ($twinNames as $bname) {
                 $btot = $this->builtinTwinTot[$bname];
                 $brt = $this->twinRetType($bname);
@@ -1214,14 +1216,16 @@ trait EmitLlvmCalls
             $out .= $this->boxToCell($a->type, $a);
             $argRegs[] = $this->lastValue;
         }
-        $fn = $this->ssa->allocReg();
-        $out .= '  ' . $fn . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP
-              . ', ptr ' . $pair[0] . ', i64 ' . (string)$pair[1] . ")\n";
+        $out .= $this->dynfCachedRow($keyP, $pair[0], $pair[1], $trow);
         $hit = $this->ssa->allocReg();
-        $out .= '  ' . $hit . ' = icmp ne ptr ' . $fn . ", null\n";
+        $out .= '  ' . $hit . ' = icmp ne ptr ' . $trow . ", null\n";
         $callL = $this->ssa->allocLabel('dynf.tab');
         $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $missL . "\n";
         $out .= $callL . ":\n";
+        $fp = $this->ssa->allocReg();
+        $out .= '  ' . $fp . ' = getelementptr i8, ptr ' . $trow . ", i64 8\n";
+        $fn = $this->ssa->allocReg();
+        $out .= '  ' . $fn . ' = load ptr, ptr ' . $fp . "\n";
         $argList = '';
         foreach ($argRegs as $i => $r) {
             $argList .= ($i > 0 ? ', ' : '') . 'i64 ' . $r;
@@ -1258,7 +1262,7 @@ trait EmitLlvmCalls
         if ($this->dynfLookupEmitted) { return ''; }
         $this->dynfLookupEmitted = true;
         $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
-        $out = "define linkonce_odr ptr @__mc_dynf_lookup(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
+        $out = $this->dynfIcmpFn() . "define linkonce_odr ptr @__mc_dynf_lookup(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
         $out .= "  %z = icmp eq i64 %cnt, 0\n";
         $out .= "  br i1 %z, label %miss, label %loop\n";
         $out .= "loop:\n";
@@ -1266,7 +1270,7 @@ trait EmitLlvmCalls
         $out .= "  %off = mul i64 %i, 16\n";
         $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
         $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %cmp = call i32 @strcasecmp(ptr %np, ptr %name)\n";
+        $out .= "  %cmp = call i32 @__mc_dynf_icmp(ptr %np, ptr %name)\n";
         $out .= "  %eq = icmp eq i32 %cmp, 0\n";
         $out .= "  br i1 %eq, label %hit, label %next\n";
         $out .= "hit:\n";
@@ -1281,13 +1285,109 @@ trait EmitLlvmCalls
         return $out;
     }
 
+    /** Name table over every nameable function and builtin twin: [rows symbol, count, lowercase name => id]. Ids are 1-based sorted positions. */
+    private function dynfIdTable(): array
+    {
+        if ($this->dynfIdTab !== null) { return $this->dynfIdTab; }
+        $names = [];
+        foreach ($this->sigs->returnType as $fname => $_) {
+            if ($this->dynfNameable($fname)) { $names[\strtolower($this->dynfPublicName($fname))] = $this->dynfPublicName($fname); }
+        }
+        foreach ($this->builtinTwinTot as $bname => $_) { $names[\strtolower($bname)] = $bname; }
+        \ksort($names, SORT_STRING);
+        $this->dynfExtraBodies .= $this->dynfBsearchFn();
+        $ids = [];
+        $rows = [];
+        $i = 0;
+        foreach ($names as $lc => $pub) {
+            $i = $i + 1;
+            $ids[$lc] = $i;
+            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($pub) . ', ptr inttoptr (i64 ' . (string)$i . ' to ptr) }';
+        }
+        $tsym = '@.dynf.ids.' . $this->mirHelperSym('0');
+        $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)\count($rows) . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n\n";
+        $this->dynfIdTab = [$tsym, \count($rows), $ids];
+        return $this->dynfIdTab;
+    }
+
+    private function dynfZeroSym(): string
+    {
+        $sym = '@.dynf.zero.' . $this->mirHelperSym('0');
+        if (!$this->dynfZeroEmitted) {
+            $this->dynfZeroEmitted = true;
+            $this->dynfExtraBodies .= $sym . " = linkonce_odr constant [2 x ptr] zeroinitializer\n\n";
+        }
+        return $sym;
+    }
+
+    /**
+     * Per-call-site inline cache over a sorted `{ name, value }` row table:
+     * the row of the last name resolved here, re-validated against its NAME
+     * (content, not pointer: a freed string's address may be reused). Sets
+     * $rowReg to the row pointer, null on a miss (misses are not cached).
+     * The cache global is `internal`: never shared across call sites or modules.
+     */
+    private function dynfCachedRow(string $keyP, string $tsym, int $count, ?string &$rowReg): string
+    {
+        $this->dynfExtraBodies .= $this->dynfBsearchFn() . $this->dynfIcmpFn();
+        $cg = '@.dynf.rc.' . $this->mirHelperSym((string)$this->dynfCacheSeq);
+        $this->dynfCacheSeq = $this->dynfCacheSeq + 1;
+        $this->dynfExtraBodies .= $cg . " = internal global ptr null\n\n";
+        $crow = $this->ssa->allocReg();
+        $out = '  ' . $crow . ' = load ptr, ptr ' . $cg . "\n";
+        $has = $this->ssa->allocReg();
+        $out .= '  ' . $has . ' = icmp ne ptr ' . $crow . ", null\n";
+        $headL = $this->ssa->allocLabel('dynf.chead');
+        $chkL = $this->ssa->allocLabel('dynf.cchk');
+        $slowL = $this->ssa->allocLabel('dynf.cslow');
+        $joinL = $this->ssa->allocLabel('dynf.cjoin');
+        $out .= '  br label %' . $headL . "\n" . $headL . ":\n";
+        $out .= '  br i1 ' . $has . ', label %' . $chkL . ', label %' . $slowL . "\n";
+        $out .= $chkL . ":\n";
+        $cnp = $this->ssa->allocReg();
+        $out .= '  ' . $cnp . ' = load ptr, ptr ' . $crow . "\n";
+        $ccmp = $this->ssa->allocReg();
+        $out .= '  ' . $ccmp . ' = call i32 @__mc_dynf_icmp(ptr ' . $keyP . ', ptr ' . $cnp . ")\n";
+        $ceq = $this->ssa->allocReg();
+        $out .= '  ' . $ceq . ' = icmp eq i32 ' . $ccmp . ", 0\n";
+        $out .= '  br i1 ' . $ceq . ', label %' . $joinL . ', label %' . $slowL . "\n";
+        $out .= $slowL . ":\n";
+        $srow = $this->ssa->allocReg();
+        $out .= '  ' . $srow . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP . ', ptr ' . $tsym . ', i64 ' . (string)$count . ")\n";
+        $out .= '  store ptr ' . $srow . ', ptr ' . $cg . "\n";
+        $out .= '  br label %' . $joinL . "\n" . $joinL . ":\n";
+        $rowReg = $this->ssa->allocReg();
+        $out .= '  ' . $rowReg . ' = phi ptr [ ' . $crow . ', %' . $chkL . ' ], [ ' . $srow . ', %' . $slowL . " ]\n";
+        return $out;
+    }
+
+    /** ASCII case-insensitive strcmp (lowercase order, matching the table sort); cheaper than libc strcasecmp, which is locale-aware. */
+    private function dynfIcmpFn(): string
+    {
+        if ($this->dynfIcmpEmitted) { return ''; }
+        $this->dynfIcmpEmitted = true;
+        $out = "define linkonce_odr i32 @__mc_dynf_icmp(ptr %a, ptr %b) {\nentry:\n  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
+        $out .= "  %pa = getelementptr i8, ptr %a, i64 %i\n  %pb = getelementptr i8, ptr %b, i64 %i\n";
+        $out .= "  %ca = load i8, ptr %pa\n  %cb = load i8, ptr %pb\n";
+        $out .= "  %ua = sub i8 %ca, 65\n  %ia = icmp ult i8 %ua, 26\n  %oa = or i8 %ca, 32\n  %la = select i1 %ia, i8 %oa, i8 %ca\n";
+        $out .= "  %ub = sub i8 %cb, 65\n  %ib = icmp ult i8 %ub, 26\n  %ob = or i8 %cb, 32\n  %lb = select i1 %ib, i8 %ob, i8 %cb\n";
+        $out .= "  %ne = icmp ne i8 %la, %lb\n  br i1 %ne, label %diff, label %same\n";
+        $out .= "same:\n  %z = icmp eq i8 %la, 0\n  br i1 %z, label %eq, label %next\n";
+        $out .= "next:\n  %i1 = add i64 %i, 1\n  br label %loop\n";
+        $out .= "eq:\n  ret i32 0\n";
+        $out .= "diff:\n  %wa = zext i8 %la to i32\n  %wb = zext i8 %lb to i32\n  %d = sub i32 %wa, %wb\n  ret i32 %d\n}\n\n";
+        return $out;
+    }
+
     /** Binary search over rows sorted by lowercased-strcmp order, probed with strcasecmp (php function names are case-insensitive); a miss answers null. */
     private function dynfBsearchFn(): string
     {
         if ($this->dynfBsearchEmitted) { return ''; }
         $this->dynfBsearchEmitted = true;
         $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
-        $out = "define linkonce_odr ptr @__mc_dynf_bsearch(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
+        $out = $this->dynfIcmpFn() . "define linkonce_odr ptr @__mc_dynf_bsearch(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
         $out .= "  br label %loop\n";
         $out .= "loop:\n";
         $out .= "  %lo = phi i64 [ 0, %entry ], [ %lo2, %cont ]\n";
@@ -1301,7 +1401,7 @@ trait EmitLlvmCalls
         $out .= "  %off = mul i64 %mid, 16\n";
         $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
         $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %cmp = call i32 @strcasecmp(ptr %name, ptr %np)\n";
+        $out .= "  %cmp = call i32 @__mc_dynf_icmp(ptr %name, ptr %np)\n";
         $out .= "  %eq = icmp eq i32 %cmp, 0\n";
         $out .= "  br i1 %eq, label %hit, label %cont\n";
         $out .= "cont:\n";
@@ -1311,9 +1411,7 @@ trait EmitLlvmCalls
         $out .= "  %hi2 = select i1 %lt, i64 %mid, i64 %hi\n";
         $out .= "  br label %loop\n";
         $out .= "hit:\n";
-        $out .= "  %fp = getelementptr i8, ptr %row, i64 8\n";
-        $out .= "  %fv = load ptr, ptr %fp\n";
-        $out .= "  ret ptr %fv\n";
+        $out .= "  ret ptr %row\n";
         $out .= "miss:\n  ret ptr null\n}\n\n";
         return $out;
     }
