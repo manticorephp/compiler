@@ -5062,12 +5062,22 @@ bad4:
         $out .= "  %stoolong = icmp ugt i64 %slen, %jlen\n";
         $out .= "  %nomatchposs = or i1 %semp, %stoolong\n";
         $out .= "  br i1 %nomatchposs, label %copy, label %prep\n";
+        // Output can only grow when the replacement is longer: otherwise the
+        // subject length already bounds it and the counting pass is skipped.
         $out .= "prep:\n";
-        $out .= "  br label %cloop\n";
+        $out .= "  %jcap = add i64 %jlen, 1\n";
+        $out .= "  %grow = icmp ugt i64 %rlen, %slen\n";
+        $out .= "  br i1 %grow, label %gchk, label %alloc\n";
+        $out .= "gchk:\n";
+        $out .= "  %gone = icmp eq i64 %slen, 1\n";
+        $out .= "  br i1 %gone, label %cone, label %cloop\n";
+        $out .= "cone:\n";
+        $out .= "  %cc = call i64 @__mir_substr_count(ptr %sj, ptr %se)\n";
+        $out .= "  br label %sized\n";
         // ── Pass 1: count matches (bounded memmem/memchr: binary-safe) ──
         $out .= "cloop:\n";
-        $out .= "  %cpos = phi i64 [0, %prep], [%cpos2, %chit]\n";
-        $out .= "  %ccnt = phi i64 [0, %prep], [%ccnt1, %chit]\n";
+        $out .= "  %cpos = phi i64 [0, %gchk], [%cpos2, %chit]\n";
+        $out .= "  %ccnt = phi i64 [0, %gchk], [%ccnt1, %chit]\n";
         $out .= "  %cfrom = getelementptr inbounds i8, ptr %sj, i64 %cpos\n";
         $out .= "  %crem = sub i64 %jlen, %cpos\n";
         $out .= "  %cf = call ptr @__mir_memfind(ptr %cfrom, i64 %crem, ptr %se, i64 %slen)\n";
@@ -5082,17 +5092,21 @@ bad4:
         $out .= "  br label %cloop\n";
         // outlen = jlen + count*rlen - count*slen ; alloc outlen+1
         $out .= "sized:\n";
-        $out .= "  %crep = mul i64 %ccnt, %rlen\n";
-        $out .= "  %csea = mul i64 %ccnt, %slen\n";
+        $out .= "  %cn = phi i64 [%ccnt, %cloop], [%cc, %cone]\n";
+        $out .= "  %crep = mul i64 %cn, %rlen\n";
+        $out .= "  %csea = mul i64 %cn, %slen\n";
         $out .= "  %o1 = add i64 %jlen, %crep\n";
         $out .= "  %outlen = sub i64 %o1, %csea\n";
         $out .= "  %ocap = add i64 %outlen, 1\n";
-        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %ocap)\n";
+        $out .= "  br label %alloc\n";
+        $out .= "alloc:\n";
+        $out .= "  %cap = phi i64 [%jcap, %prep], [%ocap, %sized]\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap)\n";
         // ── Pass 2: fill ──
         $out .= "  br label %floop\n";
         $out .= "floop:\n";
-        $out .= "  %src = phi i64 [0, %sized], [%src2, %fhit]\n";
-        $out .= "  %dst = phi i64 [0, %sized], [%dst2, %fhit]\n";
+        $out .= "  %src = phi i64 [0, %alloc], [%src2, %fhit]\n";
+        $out .= "  %dst = phi i64 [0, %alloc], [%dst2, %fhit]\n";
         $out .= "  %ffrom = getelementptr inbounds i8, ptr %sj, i64 %src\n";
         $out .= "  %frem = sub i64 %jlen, %src\n";
         $out .= "  %ff = call ptr @__mir_memfind(ptr %ffrom, i64 %frem, ptr %se, i64 %slen)\n";

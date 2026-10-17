@@ -264,15 +264,27 @@ function str_replace__str(array|string $search, array|string $replace, string $s
             $one = $needles[$i];
             $i = $i + 1;
             if ($one === '') { continue; }
-            $count = $count + \substr_count($out, $one);
+            $d = \strlen($rep) - \strlen($one);
+            $before = \strlen($out);
+            // equal lengths leave no trace in the size: count first
+            $hits = $d === 0 ? \substr_count($out, $one) : 0;
             $out = __mir_str_replace_one($one, $rep, $out);
+            if ($d !== 0) { $hits = \intdiv(\strlen($out) - $before, $d); }
+            $count = $count + $hits;
         }
         return $out;
     }
     $needle = (string)$search;
     if ($needle === '') { return $subject; }
-    $count = \substr_count($subject, $needle);
-    return __mir_str_replace_one($needle, (string)$replace, $subject);
+    $rep = (string)$replace;
+    $d = \strlen($rep) - \strlen($needle);
+    if ($d === 0) {
+        $count = \substr_count($subject, $needle);
+        return __mir_str_replace_one($needle, $rep, $subject);
+    }
+    $out = __mir_str_replace_one($needle, $rep, $subject);
+    $count = \intdiv(\strlen($out) - \strlen($subject), $d);
+    return $out;
 }
 
 /**
