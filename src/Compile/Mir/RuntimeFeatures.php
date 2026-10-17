@@ -86,6 +86,8 @@ public bool $needsClosureRc = false;
     public bool $needsStrReplaceOne = false;
     /** `__mir_memfind` + `__mir_substr_count` (memchr/memmem, binary-safe). */
     public bool $needsStrFind = false;
+    /** `__mir_memcasefind` + `__mir_stripos` + `__mir_str_ireplace_one`. */
+    public bool $needsStrCase = false;
     /** `__mir_url_enc` / `__mir_url_dec` (urlencode family). */
     public bool $needsUrlCodec = false;
     public bool $needsCliArgv = false;

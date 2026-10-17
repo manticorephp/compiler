@@ -8,7 +8,9 @@
  * erases across the stdlib boundary and which live in the prelude.
  */
 
-/** Case-insensitive {@see strpos}. Returns the offset or false. */
+/** Case-insensitive {@see strpos}. Returns the offset or false. A direct call is the
+ *  `__mir_stripos` codegen builtin (scans from the offset, no lowercased copy);
+ *  this body is the callable-string path and the bootstrap fallback. */
 function stripos(string $haystack, string $needle, int $offset = 0): int|false
 {
     return \strpos(\strtolower($haystack), \strtolower($needle), $offset);
@@ -73,12 +75,9 @@ function str_ireplace__str(array|string $search, array|string $replace, string $
     return __mir_str_ireplace_one((string)$search, (string)$replace, $subject, $count);
 }
 
-/** Single case-insensitive search/replace pair; `$hits` receives the number of
- *  replacements it made. */
-function __mir_str_ireplace_one(string $search, string $replace, string $subject,
-                                int &$hits): string
+/** Native codegen builtin (`__mir_str_ireplace_one`); this body is the bootstrap fallback. */
+function __mc_str_ireplace_one(string $search, string $replace, string $subject): string
 {
-    $hits = 0;
     if ($search === '') { return $subject; }
     $ls = \strtolower($subject);
     $ln = \strtolower($search);
@@ -91,8 +90,30 @@ function __mir_str_ireplace_one(string $search, string $replace, string $subject
         $h = (int)$hit;
         $out = $out . \substr($subject, $pos, $h - $pos) . $replace;
         $pos = $h + $sl;
-        $hits = $hits + 1;
     }
+    return $out;
+}
+
+/** Single case-insensitive search/replace pair; `$hits` receives the number of
+ *  replacements it made (from the length delta, or a stripos walk when the
+ *  replacement is as long as the search). */
+function __mir_str_ireplace_one(string $search, string $replace, string $subject,
+                                int &$hits): string
+{
+    $hits = 0;
+    if ($search === '') { return $subject; }
+    $d = \strlen($replace) - \strlen($search);
+    if ($d === 0) {
+        $sl = \strlen($search);
+        $pos = \stripos($subject, $search, 0);
+        while ($pos !== false) {
+            $hits = $hits + 1;
+            $pos = \stripos($subject, $search, $pos + $sl);
+        }
+        return \__mc_str_ireplace_one($search, $replace, $subject);
+    }
+    $out = \__mc_str_ireplace_one($search, $replace, $subject);
+    $hits = \intdiv(\strlen($out) - \strlen($subject), $d);
     return $out;
 }
 

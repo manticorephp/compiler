@@ -381,6 +381,8 @@ trait EmitLlvmBuiltins
         if ($name === 'strtolower')                   { return $this->biCaseConv($args, '__mir_strtolower'); }
         if ($name === 'strtoupper')                   { return $this->biCaseConv($args, '__mir_strtoupper'); }
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
+        if ($name === 'stripos' && \count($args) >= 2) { return $this->biStrpos($args, true); }
+        if ($name === '__mc_str_ireplace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args, true); }
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
         if ($name === '__mc_crc32b' && \count($args) === 1) { return $this->biCrc32b($args); }
         if (\count($args) === 1 && \str_starts_with($name, '__mc_') && $this->codecFn($name) !== '') { return $this->biCodec($args, $this->codecFn($name)); }
@@ -5275,9 +5277,9 @@ trait EmitLlvmBuiltins
     }
 
     /** @param Node[] $args */
-    private function biStrpos(array $args): string
+    private function biStrpos(array $args, bool $ci = false): string
     {
-        $this->rt->needsStrpos = true;
+        if ($ci) { $this->rt->needsStrCase = true; $this->rt->needsStrFind = true; $this->libcExtra['llvm.cttz.i16'] = 'declare i16 @llvm.cttz.i16(i16, i1)'; } else { $this->rt->needsStrpos = true; }
         // Binary-safe: header lengths (needsConcat pulls __mir_strlen) plus a
         // memchr/memcmp scan. NOT strlen/strstr — a NUL in either argument made
         // the search silently wrong.
@@ -5298,7 +5300,7 @@ trait EmitLlvmBuiltins
             $off = $this->lastValue;
         }
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call i64 @__mir_strpos(ptr ' . $h . ', ptr ' . $n
+        $out .= '  ' . $reg . ' = call i64 @' . ($ci ? '__mir_stripos' : '__mir_strpos') . '(ptr ' . $h . ', ptr ' . $n
               . ', i64 ' . $off . ")\n";
         // __mir_strpos tags on every `ret` (hit, hitoff, miss —
         // EmitLlvmRuntime.php's emitted body has no untagged path).
@@ -10207,9 +10209,10 @@ trait EmitLlvmBuiltins
      * chunk straight subject→out (no per-chunk `substr` malloc, unlike the PHP
      * worker). @param Node[] $args
      */
-    private function biStrReplaceOne(array $args): string
+    private function biStrReplaceOne(array $args, bool $ci = false): string
     {
-        $this->rt->needsStrReplaceOne = true;
+        if ($ci) { $this->rt->needsStrCase = true; $this->rt->needsStrFind = true; $this->libcExtra['llvm.cttz.i16'] = 'declare i16 @llvm.cttz.i16(i16, i1)'; } else { $this->rt->needsStrReplaceOne = true; }
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
         $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
@@ -10222,7 +10225,7 @@ trait EmitLlvmBuiltins
         $out .= $this->emitPtrArg($args[2]);
         $sj = $this->lastValue;
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_str_replace_one(ptr ' . $se
+        $out .= '  ' . $reg . ' = call ptr @' . ($ci ? '__mir_str_ireplace_one' : '__mir_str_replace_one') . '(ptr ' . $se
               . ', ptr ' . $rp . ', ptr ' . $sj . ")\n";
         $out .= $this->freeStrTemp($args[0], $se);
         $out .= $this->freeStrTemp($args[1], $rp);

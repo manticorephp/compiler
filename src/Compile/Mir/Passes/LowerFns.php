@@ -449,7 +449,7 @@ trait LowerFns
             || $n === '__mir_argc' || $n === '__mir_argv_at' || $n === '__mir_to_cell'
             || $n === '__mir_env_count' || $n === '__mir_env_at'
             || $n === '__mir_clock_ns' || $n === '__mc_pool_start'
-            || $n === 'strtolower' || $n === 'strtoupper' || $n === 'strpos'
+            || $n === 'strtolower' || $n === 'strtoupper' || $n === 'strpos' || $n === 'stripos'
             || $n === 'implode' || $n === 'join'
             || $n === 'sprintf' || $n === 'printf'
             || $n === 'exit' || $n === 'die' || $n === 'error_log'

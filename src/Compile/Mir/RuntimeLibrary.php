@@ -5086,6 +5086,148 @@ bad4:
         $out .= "}\n";
         return $out;
     }
+    /**
+     * Runtime: ASCII case-insensitive search. `@__mir_memcasefind(h, hl, n, nl)` is
+     * the first match of a non-empty needle in the bounded haystack (null when
+     * absent); `@__mir_stripos(h, n, off)` is php's `stripos` over it, scanning from
+     * the offset only (no lowercased copy of the haystack), answering the same
+     * NaN-boxed `int|false` as `@__mir_strpos`. Bytes >= 0x80 never fold.
+     */
+    public function strCaseFind(): string
+    {
+        $lower = function (string $dst, string $src): string {
+            return "  %{$dst}d = sub i8 {$src}, 65\n"
+                 . "  %{$dst}u = icmp ult i8 %{$dst}d, 26\n"
+                 . "  %{$dst}a = select i1 %{$dst}u, i8 32, i8 0\n"
+                 . "  %{$dst} = add i8 {$src}, %{$dst}a\n";
+        };
+        // does needle[1..nl) match p[1..nl) ignoring ASCII case
+        $out  = "\ndefine i1 @__mir_cieq(ptr %p, ptr %n, i64 %nl) {\n";
+        $out .= "entry:\n";
+        $out .= "  br label %cmp\n";
+        $out .= "cmp:\n";
+        $out .= "  %j = phi i64 [1, %entry], [%j1, %cstep]\n";
+        $out .= "  %jdone = icmp uge i64 %j, %nl\n";
+        $out .= "  br i1 %jdone, label %yes, label %cstep\n";
+        $out .= "cstep:\n";
+        $out .= "  %hp = getelementptr inbounds i8, ptr %p, i64 %j\n";
+        $out .= "  %hb = load i8, ptr %hp\n";
+        $out .= $lower('hw', '%hb');
+        $out .= "  %np = getelementptr inbounds i8, ptr %n, i64 %j\n";
+        $out .= "  %nb = load i8, ptr %np\n";
+        $out .= $lower('nw', '%nb');
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  %same = icmp eq i8 %hw, %nw\n";
+        $out .= "  br i1 %same, label %cmp, label %no\n";
+        $out .= "yes:\n";
+        $out .= "  ret i1 true\n";
+        $out .= "no:\n";
+        $out .= "  ret i1 false\n";
+        $out .= "}\n";
+
+        // 16 start positions per step: (byte | 0x20) == first letter, or byte == first
+        // non-letter; a candidate is confirmed byte-wise by @__mir_cieq
+        $out .= "\ndefine ptr @__mir_memcasefind(ptr %h, i64 %hl, ptr %n, i64 %nl) {\n";
+        $out .= "entry:\n";
+        $out .= "  %short = icmp ult i64 %hl, %nl\n";
+        $out .= "  br i1 %short, label %none, label %start\n";
+        $out .= "start:\n";
+        $out .= "  %n0 = load i8, ptr %n\n";
+        $out .= $lower('c0', '%n0');
+        $out .= "  %cd = sub i8 %c0, 97\n";
+        $out .= "  %isl = icmp ult i8 %cd, 26\n";
+        $out .= "  %orm = select i1 %isl, i8 32, i8 0\n";
+        $out .= "  %lastp = sub i64 %hl, %nl\n";
+        $out .= "  %limit = add i64 %lastp, 1\n";
+        $out .= "  %ov0 = insertelement <16 x i8> poison, i8 %orm, i64 0\n";
+        $out .= "  %ov = shufflevector <16 x i8> %ov0, <16 x i8> poison, <16 x i32> zeroinitializer\n";
+        $out .= "  %cv0 = insertelement <16 x i8> poison, i8 %c0, i64 0\n";
+        $out .= "  %cv = shufflevector <16 x i8> %cv0, <16 x i8> poison, <16 x i32> zeroinitializer\n";
+        $out .= "  br label %vloop\n";
+        $out .= "vloop:\n";
+        $out .= "  %i = phi i64 [0, %start], [%i16, %vadv], [%ires, %vres]\n";
+        $out .= "  %i16 = add i64 %i, 16\n";
+        $out .= "  %room = icmp ule i64 %i16, %limit\n";
+        $out .= "  br i1 %room, label %vload, label %tloop\n";
+        $out .= "vload:\n";
+        $out .= "  %vp = getelementptr inbounds i8, ptr %h, i64 %i\n";
+        $out .= "  %v = load <16 x i8>, ptr %vp, align 1\n";
+        $out .= "  %w = or <16 x i8> %v, %ov\n";
+        $out .= "  %m = icmp eq <16 x i8> %w, %cv\n";
+        $out .= "  %mask = bitcast <16 x i1> %m to i16\n";
+        $out .= "  %nz = icmp ne i16 %mask, 0\n";
+        $out .= "  br i1 %nz, label %vhit, label %vadv\n";
+        $out .= "vadv:\n";
+        $out .= "  br label %vloop\n";
+        $out .= "vhit:\n";
+        $out .= "  %tz = call i16 @llvm.cttz.i16(i16 %mask, i1 true)\n";
+        $out .= "  %tz64 = zext i16 %tz to i64\n";
+        $out .= "  %idx = add i64 %i, %tz64\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %h, i64 %idx\n";
+        $out .= "  %ok = call i1 @__mir_cieq(ptr %cp, ptr %n, i64 %nl)\n";
+        $out .= "  br i1 %ok, label %hit, label %vres\n";
+        $out .= "vres:\n";
+        $out .= "  %ires = add i64 %idx, 1\n";
+        $out .= "  br label %vloop\n";
+        $out .= "hit:\n";
+        $out .= "  %hitp = phi ptr [%cp, %vhit], [%tp, %tchk]\n";
+        $out .= "  ret ptr %hitp\n";
+        $out .= "tloop:\n";
+        $out .= "  %ti = phi i64 [%i, %vloop], [%ti1, %tnext]\n";
+        $out .= "  %tmore = icmp ult i64 %ti, %limit\n";
+        $out .= "  br i1 %tmore, label %tbody, label %none\n";
+        $out .= "tbody:\n";
+        $out .= "  %tp = getelementptr inbounds i8, ptr %h, i64 %ti\n";
+        $out .= "  %tb = load i8, ptr %tp\n";
+        $out .= "  %tw = or i8 %tb, %orm\n";
+        $out .= "  %teq = icmp eq i8 %tw, %c0\n";
+        $out .= "  br i1 %teq, label %tchk, label %tnext\n";
+        $out .= "tchk:\n";
+        $out .= "  %tok = call i1 @__mir_cieq(ptr %tp, ptr %n, i64 %nl)\n";
+        $out .= "  br i1 %tok, label %hit, label %tnext\n";
+        $out .= "tnext:\n";
+        $out .= "  %ti1 = add i64 %ti, 1\n";
+        $out .= "  br label %tloop\n";
+        $out .= "none:\n";
+        $out .= "  ret ptr null\n";
+        $out .= "}\n";
+        $out .= "\ndefine i64 @__mir_stripos(ptr %h, ptr %n, i64 %off) {\n";
+        $out .= "entry:\n";
+        $out .= "  %hlen = call i64 @__mir_strlen(ptr %h)\n";
+        $out .= "  %nlen = call i64 @__mir_strlen(ptr %n)\n";
+        $out .= "  %isneg = icmp slt i64 %off, 0\n";
+        $out .= "  %fromend = add i64 %hlen, %off\n";
+        $out .= "  %off1 = select i1 %isneg, i64 %fromend, i64 %off\n";
+        $out .= "  %neg2 = icmp slt i64 %off1, 0\n";
+        $out .= "  %off2 = select i1 %neg2, i64 0, i64 %off1\n";
+        $out .= "  %toobig = icmp sgt i64 %off2, %hlen\n";
+        $out .= "  br i1 %toobig, label %miss, label %chk0\n";
+        $out .= "chk0:\n";
+        $out .= "  %isempty = icmp eq i64 %nlen, 0\n";
+        $out .= "  br i1 %isempty, label %hitoff, label %scan\n";
+        $out .= "scan:\n";
+        $out .= "  %hc = getelementptr inbounds i8, ptr %h, i64 %off2\n";
+        $out .= "  %rem = sub i64 %hlen, %off2\n";
+        $out .= "  %f = call ptr @__mir_memcasefind(ptr %hc, i64 %rem, ptr %n, i64 %nlen)\n";
+        $out .= "  %isnull = icmp eq ptr %f, null\n";
+        $out .= "  br i1 %isnull, label %miss, label %hit\n";
+        $out .= "hit:\n";
+        $out .= "  %hi = ptrtoint ptr %h to i64\n";
+        $out .= "  %fi = ptrtoint ptr %f to i64\n";
+        $out .= "  %idx = sub i64 %fi, %hi\n";
+        $out .= "  %dm = and i64 %idx, 281474976710655\n";
+        $out .= "  %db = or i64 %dm, -4222124650659840\n";
+        $out .= "  ret i64 %db\n";
+        $out .= "hitoff:\n";
+        $out .= "  %om = and i64 %off2, 281474976710655\n";
+        $out .= "  %ob = or i64 %om, -4222124650659840\n";
+        $out .= "  ret i64 %ob\n";
+        $out .= "miss:\n";
+        $out .= "  ret i64 -3940649673949184\n";
+        $out .= "}\n";
+        return $out;
+    }
+
     /** Runtime: `@__mir_memfind(h, hlen, n, nlen)` — first occurrence of the
      * non-empty needle in the bounded haystack, null when absent (memchr for a
      * single byte, memmem otherwise: binary-safe, never stops at a NUL); and
@@ -5219,13 +5361,14 @@ bad4:
     /** Runtime: replace every non-overlapping `%se` in `%sj` with `%rp`, left
      * to right (PHP str_replace semantics; the replacement is never rescanned).
      * Always returns a FRESH string. Empty/absent search → a plain copy. */
-    public function strReplaceOne(): string
+    public function strReplaceOne(bool $ci = false): string
     {
+        $find = $ci ? '@__mir_memcasefind' : '@__mir_memfind';
         // Header-aware lengths (cached len@-16) — never a libc O(n) rescan of an
         // already-headered manticore string. A single-byte search (%is1, the
         // overwhelmingly common explode/implode delimiter) probes with memchr
         // instead of strstr (no substring-match machinery) in both passes.
-        $out  = "\ndefine ptr @__mir_str_replace_one(ptr %se, ptr %rp, ptr %sj) {\n";
+        $out  = "\ndefine ptr @" . ($ci ? '__mir_str_ireplace_one' : '__mir_str_replace_one') . "(ptr %se, ptr %rp, ptr %sj) {\n";
         $out .= "entry:\n";
         $out .= "  %slen = call i64 @__mir_strlen(ptr %se)\n";
         $out .= "  %rlen = call i64 @__mir_strlen(ptr %rp)\n";
@@ -5242,7 +5385,8 @@ bad4:
         $out .= "  %grow = icmp ugt i64 %rlen, %slen\n";
         $out .= "  br i1 %grow, label %gchk, label %alloc\n";
         $out .= "gchk:\n";
-        $out .= "  %gone = icmp eq i64 %slen, 1\n";
+        // one byte, case-sensitive: the vectorized count loop
+        $out .= "  %gone = icmp eq i64 %slen, " . ($ci ? '0' : '1') . "\n";
         $out .= "  br i1 %gone, label %cone, label %cloop\n";
         $out .= "cone:\n";
         $out .= "  %cc = call i64 @__mir_substr_count(ptr %sj, ptr %se)\n";
@@ -5253,7 +5397,7 @@ bad4:
         $out .= "  %ccnt = phi i64 [0, %gchk], [%ccnt1, %chit]\n";
         $out .= "  %cfrom = getelementptr inbounds i8, ptr %sj, i64 %cpos\n";
         $out .= "  %crem = sub i64 %jlen, %cpos\n";
-        $out .= "  %cf = call ptr @__mir_memfind(ptr %cfrom, i64 %crem, ptr %se, i64 %slen)\n";
+        $out .= "  %cf = call ptr {$find}(ptr %cfrom, i64 %crem, ptr %se, i64 %slen)\n";
         $out .= "  %cnull = icmp eq ptr %cf, null\n";
         $out .= "  br i1 %cnull, label %sized, label %chit\n";
         $out .= "chit:\n";
@@ -5282,7 +5426,7 @@ bad4:
         $out .= "  %dst = phi i64 [0, %alloc], [%dst2, %fhit]\n";
         $out .= "  %ffrom = getelementptr inbounds i8, ptr %sj, i64 %src\n";
         $out .= "  %frem = sub i64 %jlen, %src\n";
-        $out .= "  %ff = call ptr @__mir_memfind(ptr %ffrom, i64 %frem, ptr %se, i64 %slen)\n";
+        $out .= "  %ff = call ptr {$find}(ptr %ffrom, i64 %frem, ptr %se, i64 %slen)\n";
         $out .= "  %fnull = icmp eq ptr %ff, null\n";
         $out .= "  br i1 %fnull, label %tail, label %fhit\n";
         $out .= "fhit:\n";

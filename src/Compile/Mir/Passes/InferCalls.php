@@ -529,7 +529,7 @@ trait InferCalls
             return null;
         }
         // strpos is `int|false` — a tagged cell (Zend-faithful miss).
-        if ($n === 'strpos') {
+        if ($n === 'strpos' || $n === 'stripos') {
             return Type::cell();
         }
         // getenv is `string|false` — a tagged cell. With NO argument it is php's
@@ -570,7 +570,7 @@ trait InferCalls
             || $n === '__mc_fmt_int' || $n === '__mc_fmt_float' || $n === '__mc_fmt_str'
             || $n === 'addslashes' || $n === 'strrev' || $n === 'var_export' || $n === '__mc_json_escape'
             || $n === '__mc_b64_enc' || $n === '__mc_b64_dec' || $n === '__mc_bin2hex' || $n === '__mc_hex2bin'
-            || $n === '__mir_str_replace_one' || $n === '__mc_url_encode' || $n === '__mc_url_decode'
+            || $n === '__mir_str_replace_one' || $n === '__mc_url_encode' || $n === '__mc_url_decode' || $n === '__mc_str_ireplace_one'
             || $n === 'str_from_buffer' || $n === 'cstr_to_str'
             || $n === 'gettype' || $n === 'get_debug_type'
             || $n === '__mir_float_repr') {
