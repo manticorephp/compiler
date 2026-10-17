@@ -85,5 +85,11 @@ mysql: 2 :a :b @8,12
 == select :a-:b
 pgsql: 2 :a :b | select $1-$2
 mysql: 2 :a :b @7,10
+== select 'é', ?
+pgsql: 1 ? | select 'é', $1
+mysql: 1 ? @13
+== select é, ?
+pgsql: 1 ? | select é, $1
+mysql: 1 ? @11
 select $1, $2 2
 empty ok

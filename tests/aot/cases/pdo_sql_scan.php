@@ -40,6 +40,8 @@ select 1 :
 select ?:
 select (:a),:b;
 select :a-:b
+select 'é', ?
+select é, ?
 SQL;
 
 foreach (explode("\n", $cases) as $line) {
