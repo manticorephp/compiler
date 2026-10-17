@@ -40,8 +40,24 @@ if ($mode === 'drip') {
     for ($i = 0; $i < 20; $i++) { usleep(400000); if (@fwrite($c, 'x') === false) { break; } }
     $quit();
 }
-fwrite($c, $hs());
+fwrite($c, $hs(str_starts_with($mode, 'auth_') ? 'caching_sha2_password' : 'mysql_native_password'));
 $recv();                                                  // HandshakeResponse41
+// caching_sha2_password state machine: AuthMoreData (0x01) is only valid as 03 once, or 04 once followed by the key exchange
+$more = fn (int $seq, string $d): string => $pkt($seq, "\x01" . $d);
+if ($mode === 'auth_0105') { fwrite($c, $more(2, "\x05")); $quit(); }
+if ($mode === 'auth_repeat03') { fwrite($c, $more(2, "\x03") . $more(3, "\x03")); $quit(); }
+if ($mode === 'auth_nonpem' || $mode === 'auth_badkey' || $mode === 'auth_bigkey' || $mode === 'auth_double04') {
+    fwrite($c, $more(2, "\x04"));
+    $recv();                                              // the client's 0x02: public key request
+    if ($mode === 'auth_nonpem') { fwrite($c, $more(4, 'this is not a PEM key at all, just text')); $quit(); }
+    if ($mode === 'auth_badkey') { fwrite($c, $more(4, "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n")); $quit(); }
+    if ($mode === 'auth_bigkey') { fwrite($c, $more(4, "-----BEGIN PUBLIC KEY-----\n" . str_repeat('A', 9000))); $quit(); }
+    $k = openssl_pkey_new(['private_key_bits' => 2048]);
+    fwrite($c, $more(4, openssl_pkey_get_details($k)['key']));
+    $recv();                                              // the encrypted password
+    fwrite($c, $more(6, "\x04"));                          // a second 04
+    $quit();
+}
 if ($mode === 'switch_unknown') { fwrite($c, $pkt(2, "\xfesha256_password\0" . str_repeat('b', 20) . "\0")); $quit(); }
 if ($mode === 'switch_short') { fwrite($c, $pkt(2, "\xfemysql_native_password\0" . str_repeat('b', 10) . "\0")); $quit(); }
 if ($mode === 'switch_old') { fwrite($c, $pkt(2, "\xfe")); $quit(); }
@@ -58,6 +74,11 @@ while (true) {
     if ($p[0] !== "\x03") { fwrite($c, $ok(1)); continue; }
     $n++;
     if ($n > 1) { fwrite($c, $rs(1, 253, ['ok'])); continue; }
+    if ($mode === 'idle_slow' || $mode === 'idle_explicit') { sleep(3); fwrite($c, $rs(1, 253, ['ok'])); continue; }
+    if ($mode === 'stall_mid') { fwrite($c, substr($pkt(1, str_repeat('x', 100)), 0, 14)); sleep(5); continue; }
+    if ($mode === 'row_huge_len') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, "\xfe" . pack('P', 1 << 62)) . $eof(5)); continue; }
+    if ($mode === 'row_neg_len') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, "\xfe" . "\xff\xff\xff\xff\xff\xff\xff\xff") . $eof(5)); continue; }
+    if ($mode === 'coldef_huge_len') { fwrite($c, $pkt(1, "\x01") . $pkt(2, "\xfe" . pack('P', 1 << 62) . 'xxxx')); continue; }
     if ($mode === 'trunc_coldef') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $ls('def') . $ls('') . chr(50) . 'xx')); }
     elseif ($mode === 'trunc_coldef_fixed') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $ls('def') . $ls('') . $ls('t') . $ls('t') . $ls('a') . $ls('a') . "\x0c" . pack('v', 45))); }
     elseif ($mode === 'row_overrun') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, "\xfc\xe8\x03abc") . $eof(5)); }

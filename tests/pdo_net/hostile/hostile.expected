@@ -103,3 +103,12 @@ no fd leak
 float_plus: ok 5
 fast
 no fd leak
+idle_slow: ok waited
+fast
+no fd leak
+idle_explicit: HY000 7 timeout expired
+fast
+no fd leak
+stall_mid: HY000 7 timeout expired
+fast
+no fd leak

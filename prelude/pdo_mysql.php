@@ -93,6 +93,10 @@ final class __McPdoMyWire
     /** A command was sent and its last result packet has not arrived: the stream is mid-protocol. */
     private bool $inflight = false;
     private float $timeout = 30.0;
+    /** ATTR_TIMEOUT was set by the program: only then does it also bound the idle wait for a response (see fill()). */
+    public bool $explicitTimeout = false;
+    /** A command was sent and not one byte of its response has arrived: the server is executing it. */
+    private bool $awaiting = false;
     /** The peer hung up or a write failed: it is gone. */
     private bool $peerGone = false;
     /** Connect + authentication budget (monotonic seconds, 0 = none); a drip-feeding server cannot outlast it. */
@@ -179,9 +183,12 @@ final class __McPdoMyWire
 
     /**
      * The length-encoded integer at $o: its value, -1 for the NULL marker 0xFB,
-     * -2 when truncated or not a valid length (0xFF, or above PHP_INT_MAX).
+     * -2 when truncated, not a valid length (0xFF) or above $max. The default cap is
+     * 0x7FFFFFFF: no length, count or offset a server sends is larger, and a bigger one
+     * must never reach an addition ($o + $l wraps negative in compiled ints). Affected
+     * rows / insert id pass PHP_INT_MAX.
      */
-    public static function lenencAt(string $b, int $o): int
+    public static function lenencAt(string $b, int $o, int $max = 0x7FFFFFFF): int
     {
         $n = \strlen($b);
         if ($o >= $n) { return -2; }
@@ -191,8 +198,11 @@ final class __McPdoMyWire
         if ($c === 252) { return $o + 3 <= $n ? self::le16($b, $o + 1) : -2; }
         if ($c === 253) { return $o + 4 <= $n ? self::le24($b, $o + 1) : -2; }
         if ($c === 254) {
-            if ($o + 9 > $n || \ord($b[$o + 8]) >= 128) { return -2; }
-            return self::le32($b, $o + 1) | (self::le32($b, $o + 5) << 32);
+            if ($o + 9 > $n) { return -2; }
+            $hi = self::le32($b, $o + 5);
+            if ($hi > 0x7FFFFFFF) { return -2; }
+            $v = self::le32($b, $o + 1) | ($hi << 32);
+            return $v > $max ? -2 : $v;
         }
         return -2;
     }
@@ -265,16 +275,26 @@ final class __McPdoMyWire
         }
         // one packet gets 2 x the read timeout plus a 64 KiB/s floor of sustained progress: each fread() is bounded,
         // a 1-byte drip is not, and a big row on a slow link still arrives
-        $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
+        // ⚠ php's ATTR_TIMEOUT is a CONNECT timeout. The idle wait for the START of a response (the server is running the
+        // statement) is therefore unbounded unless the program set ATTR_TIMEOUT itself (superset); a packet that has begun
+        // arriving, and connect/auth, are always bounded.
+        $idle = $this->awaiting && !$this->connecting && !$this->explicitTimeout;
+        $dl = $this->timeout > 0.0 && !$idle ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
         while (\strlen($this->buf) < $n) {
             $c = \fread($this->s, 65536);
             if ($c === false || $c === '') {
                 $eof = \feof($this->s);
                 if ($eof) { $this->peerGone = true; }
+                if (!$eof && $idle) { continue; }
                 throw $this->ioFail($eof ? 2013 : 2006, $eof
                     ? 'Lost connection to MySQL server during query' : 'MySQL server has gone away (timeout expired)');
             }
             $this->buf .= $c;
+            $this->awaiting = false;
+            if ($idle) {
+                $idle = false;
+                $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
+            }
             if (\strlen($this->buf) < $n) {
                 $now = \__mc_monotonic_f();
                 if (($dl > 0.0 && $now >= $dl) || ($this->connecting && $this->authDeadline > 0.0 && $now >= $this->authDeadline)) {
@@ -391,15 +411,15 @@ final class __McPdoMyWire
     {
         $p = $this->packet(self::CTRL_CAP);
         $n = \strlen($p);
-        if ($n < 1) { throw $this->conMalformed('empty handshake'); }
+        if ($n < 1) { throw $this->malformed('empty handshake'); }
         if (\ord($p[0]) === 0xFF) { throw $this->errPacket($p); }
-        if (\ord($p[0]) !== 10) { throw $this->conMalformed('protocol version ' . (string) \ord($p[0])); }
+        if (\ord($p[0]) !== 10) { throw $this->malformed('protocol version ' . (string) \ord($p[0])); }
         $z = \strpos($p, "\0", 1);
-        if ($z === false) { throw $this->conMalformed('server version'); }
+        if ($z === false) { throw $this->malformed('server version'); }
         $this->serverVersion = \substr($p, 1, $z - 1);
         $o = $z + 1;
         // connection id 4, scramble part 1 (8) + filler, capabilities (low 2), charset, status, capabilities (high 2), auth data length, reserved 10
-        if ($o + 4 + 8 + 1 + 2 + 1 + 2 + 2 + 1 + 10 > $n) { throw $this->conMalformed('truncated handshake'); }
+        if ($o + 4 + 8 + 1 + 2 + 1 + 2 + 2 + 1 + 10 > $n) { throw $this->malformed('truncated handshake'); }
         $this->connId = self::le32($p, $o);
         $s1 = \substr($p, $o + 4, 8);
         $o += 13;
@@ -409,13 +429,13 @@ final class __McPdoMyWire
         $alen = \ord($p[$o + 7]);
         $o += 8 + 10;
         $this->srvCaps = $caps;
-        if (($caps & self::CLIENT_PROTOCOL_41) === 0) { throw $this->conMalformed('server does not speak protocol 4.1'); }
-        if (($caps & self::CLIENT_SECURE_CONNECTION) === 0) { throw $this->conMalformed('server lacks secure connection'); }
+        if (($caps & self::CLIENT_PROTOCOL_41) === 0) { throw $this->malformed('server does not speak protocol 4.1'); }
+        if (($caps & self::CLIENT_SECURE_CONNECTION) === 0) { throw $this->malformed('server lacks secure connection'); }
         // the scramble is 20 bytes: 8 + 12, the 13th byte of part 2 being a NUL
         $l2 = $alen - 8;
-        if ($l2 < 13 || $l2 > 64 || $o + $l2 > $n) { throw $this->conMalformed('scramble shorter than 20 bytes'); }
+        if ($l2 < 13 || $l2 > 64 || $o + $l2 > $n) { throw $this->malformed('scramble shorter than 20 bytes'); }
         $this->scramble = $s1 . \substr($p, $o, 12);
-        if ($p[$o + 12] !== "\0" && $l2 === 13) { throw $this->conMalformed('scramble not terminated'); }
+        if ($p[$o + 12] !== "\0" && $l2 === 13) { throw $this->malformed('scramble not terminated'); }
         $o += $l2;
         if (($caps & self::CLIENT_PLUGIN_AUTH) !== 0) {
             $z = \strpos($p, "\0", $o);
@@ -423,11 +443,6 @@ final class __McPdoMyWire
         } else {
             $this->plugin = 'mysql_native_password';
         }
-    }
-
-    private function conMalformed(string $what): PDOException
-    {
-        return $this->malformed($what);
     }
 
     /** Only the two plugins this driver can answer; anything else fails BEFORE a response is sent. */
@@ -441,8 +456,6 @@ final class __McPdoMyWire
 
     /**
      * HandshakeResponse41 and the rest of the authentication exchange, up to the OK packet.
-     *
-     * @param string $charset
      */
     public function auth(string $user, ?string $pw, string $db, int $charsetNo, bool $foundRows, bool $multi, bool $ignoreSpace): void
     {
@@ -479,12 +492,12 @@ final class __McPdoMyWire
         $steps = 0;
         while (true) {
             // ponytail: 16 is far beyond any real exchange (switch, more-data, full-auth); the cap only stops a ping-pong
-            if (++$steps > 16) { throw $this->conMalformed('too many authentication packets'); }
+            if (++$steps > 16) { throw $this->malformed('too many authentication packets'); }
             if ($this->authDeadline > 0.0 && \__mc_monotonic_f() >= $this->authDeadline) {
                 throw $this->ioFail(2006, 'MySQL server has gone away (timeout expired)');
             }
             $p = $this->packet(self::CTRL_CAP);
-            if (\strlen($p) < 1) { throw $this->conMalformed('empty authentication packet'); }
+            if (\strlen($p) < 1) { throw $this->malformed('empty authentication packet'); }
             $t = \ord($p[0]);
             if ($t === 0x00) {
                 $this->parseOk($p, new __McPdoMyResult());
@@ -493,17 +506,17 @@ final class __McPdoMyWire
             }
             if ($t === 0xFF) { throw $this->errPacket($p); }
             if ($t === 0xFE) {
-                if (++$switches > 2) { throw $this->conMalformed('too many authentication switches'); }
+                if (++$switches > 2) { throw $this->malformed('too many authentication switches'); }
                 if (\strlen($p) === 1) {
                     $this->closeSock();
                     throw __McPdo::connectFail('HY000', 2059, "Authentication plugin 'mysql_old_password' cannot be loaded");
                 }
                 $z = \strpos($p, "\0", 1);
-                if ($z === false) { throw $this->conMalformed('authentication switch'); }
+                if ($z === false) { throw $this->malformed('authentication switch'); }
                 $plugin = \substr($p, 1, $z - 1);
                 $data = \substr($p, $z + 1);
                 if ($data !== '' && $data[\strlen($data) - 1] === "\0") { $data = \substr($data, 0, \strlen($data) - 1); }
-                if (\strlen($data) !== 20) { throw $this->conMalformed('scramble shorter than 20 bytes'); }
+                if (\strlen($data) !== 20) { throw $this->malformed('scramble shorter than 20 bytes'); }
                 $scramble = $data;
                 $fast = false;
                 $full = false;
@@ -519,7 +532,7 @@ final class __McPdoMyWire
                     continue;
                 }
             }
-            throw $this->conMalformed('unexpected authentication packet');
+            throw $this->malformed('unexpected authentication packet');
         }
     }
 
@@ -532,12 +545,18 @@ final class __McPdoMyWire
     {
         $this->sendPacket("\x02");
         $k = $this->packet(self::CTRL_CAP);
-        if (\strlen($k) < 27 || \ord($k[0]) !== 1 || \strncmp(\substr($k, 1), '-----BEGIN PUBLIC KEY-----', 26) !== 0) {
-            throw $this->conMalformed('server public key');
+        // a 16384-bit key is ~2.4 KiB of PEM: 8 KiB is generous, anything bigger is hostile
+        if (\strlen($k) < 27 || \strlen($k) > 8192 || \ord($k[0]) !== 1 || \strncmp(\substr($k, 1), '-----BEGIN PUBLIC KEY-----', 26) !== 0) {
+            throw $this->malformed('server public key');
         }
         $enc = '';
-        // 4 = OPENSSL_PKCS1_OAEP_PADDING
-        if (!\openssl_public_encrypt(self::rsaPlain($pw, $scramble), $enc, \substr($k, 1), 4) || $enc === '') {
+        $ok = false;
+        try {
+            // 4 = OPENSSL_PKCS1_OAEP_PADDING; an unparsable key is a ValueError
+            $ok = \openssl_public_encrypt(self::rsaPlain($pw, $scramble), $enc, \substr($k, 1), 4);
+        } catch (\Throwable $t) {
+        }
+        if (!$ok || $enc === '') {
             $this->closeSock();
             throw __McPdo::connectFail('HY000', 2059, 'caching_sha2_password: could not encrypt the password with the server public key');
         }
@@ -573,10 +592,10 @@ final class __McPdoMyWire
     private function parseOk(string $p, __McPdoMyResult $r): void
     {
         $n = \strlen($p);
-        $a = self::lenencAt($p, 1);
+        $a = self::lenencAt($p, 1, \PHP_INT_MAX);
         if ($a < 0) { throw $this->malformed('OK packet'); }
         $o = 1 + self::lenencSize($p, 1);
-        $i = self::lenencAt($p, $o);
+        $i = self::lenencAt($p, $o, \PHP_INT_MAX);
         if ($i < 0) { throw $this->malformed('OK packet'); }
         $o += self::lenencSize($p, $o);
         if ($o + 4 > $n) { throw $this->malformed('OK packet'); }
@@ -593,7 +612,7 @@ final class __McPdoMyWire
         $l = self::lenencAt($b, $o);
         if ($l < 0) { throw $this->malformed('length-encoded string'); }
         $o += self::lenencSize($b, $o);
-        if ($o + $l > \strlen($b)) { throw $this->malformed('string overruns packet'); }
+        if ($l > \strlen($b) - $o) { throw $this->malformed('string overruns packet'); }
         $this->lp = $o + $l;
         return \substr($b, $o, $l);
     }
@@ -641,7 +660,7 @@ final class __McPdoMyWire
                 if ($l < 0) { throw $this->malformed('row length'); }
                 $o += self::lenencSize($b, $o);
             }
-            if ($o + $l > $bl) { throw $this->malformed('row value overruns packet'); }
+            if ($l > $bl - $o) { throw $this->malformed('row value overruns packet'); }
             $row[] = \substr($b, $o, $l);
             $o += $l;
         }
@@ -749,6 +768,7 @@ final class __McPdoMyWire
         $this->insertId = 0;
         $this->seq = 0;
         $this->sendPacket("\x03" . $sql);
+        $this->awaiting = true;
         $first = null;
         $last = null;
         $n = 0;
@@ -845,6 +865,13 @@ final class __McPdoMy implements __McPdoDrv
     public function setAttr(int $attr, mixed $value): bool
     {
         if ($attr === PDO::ATTR_EMULATE_PREPARES) { $this->emulate = (bool) $value; return true; }
+        // php: ATTR_TIMEOUT is connect-time only. Here a program that sets it also bounds the idle wait for a response (superset)
+        if ($attr === PDO::ATTR_TIMEOUT) {
+            $this->wire->setTimeout((float) $value);
+            $this->wire->explicitTimeout = true;
+            // php (measured): the call answers false and reads back as unsupported; the effect above is the superset
+            return false;
+        }
         // connect-time options (consumed by open()) and always-buffered results: accepted so they can ride the options array
         if ($attr === PDO::MYSQL_ATTR_USE_BUFFERED_QUERY || $attr === PDO::MYSQL_ATTR_FOUND_ROWS
             || $attr === PDO::MYSQL_ATTR_MULTI_STATEMENTS || $attr === PDO::MYSQL_ATTR_INIT_COMMAND
@@ -1178,7 +1205,12 @@ function __mc_pdo_mysql_open(string $rest, array $options, ?string $user, ?strin
     $timeout = isset($options[PDO::ATTR_TIMEOUT]) ? (float) $options[PDO::ATTR_TIMEOUT] : 30.0;
     $multi = !isset($options[PDO::MYSQL_ATTR_MULTI_STATEMENTS]) || (bool) $options[PDO::MYSQL_ATTR_MULTI_STATEMENTS];
 
+    // the driver cannot serve a LOAD DATA LOCAL INFILE request (CLIENT_LOCAL_FILES is never set): refuse up front
+    $li = isset($options[PDO::MYSQL_ATTR_LOCAL_INFILE]) ? $options[PDO::MYSQL_ATTR_LOCAL_INFILE] : false;
+    if ($li) { throw __McPdo::connectFail('HY000', 2000, 'LOCAL INFILE is not supported'); }
+
     $wire = new __McPdoMyWire($host, $port, $timeout);
+    $wire->explicitTimeout = isset($options[PDO::ATTR_TIMEOUT]);
     try {
         $wire->handshake();
         $cs = __McPdoMyWire::charsetNo($charset, $wire->serverVersion);

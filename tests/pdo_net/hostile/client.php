@@ -12,13 +12,17 @@ fclose($wc); fclose($w);
 $before = $fds();
 $t = microtime(true);
 try {
-    $db = new PDO($dsn, 'u', 'pw', [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow'], true) ? 1 : 3]);
+    // idle_slow: ATTR_TIMEOUT unset (the default must not bound a statement that is still running); *_explicit / stall_mid: set to 1
+    $opts = $mode === 'idle_slow' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid'], true) ? 1 : 3];
+    $db = new PDO($dsn, 'u', 'pw', $opts);
     if ($my) {
         $q = $db->query('select 1');   // not chained (#299)
         $r = $q->fetch(PDO::FETCH_NUM);
         $q = null;
         if ($mode === 'big_slow') {
             echo $mode, ': ok ', strlen($r[0]), ' ', microtime(true) - $t > 2.0 ? 'longer than 2 x timeout' : 'TOO FAST', "\n";
+        } elseif ($mode === 'idle_slow') {
+            echo $mode, ": ok ", microtime(true) - $t > 2.5 ? 'waited' : 'TOO FAST', "\n";
         } elseif (in_array($mode, ['int_max', 'int_min', 'uint_max', 'bit_max', 'float_plus'], true)) {
             echo $mode, ': ok ', json_encode($r[0]), "\n";
         }
@@ -47,10 +51,15 @@ try {
         $p->execute();
         $r = $p->fetch(PDO::FETCH_NUM);
         echo $mode, ': ok ', is_resource($r[0]) ? bin2hex(stream_get_contents($r[0])) : json_encode($r[0]), "\n";
+    } elseif ($mode === 'idle_slow') {
+        $q = $db->query('select 1');
+        $q->fetchAll();
+        $q = null;
+        echo $mode, ': ok ', microtime(true) - $t > 2.5 ? 'waited' : 'TOO FAST', "\n";
     } else {
         $db->query('select 1')->fetchAll();
     }
-    if (!in_array($mode, ['bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max'], true)) { echo "$mode: NO ERROR\n"; }
+    if (!in_array($mode, ['bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow'], true)) { echo "$mode: NO ERROR\n"; }
 } catch (PDOException $e) {
     $m = (string) $e->errorInfo[2];
     $i = strpos($m, 'failed: ');
@@ -63,5 +72,5 @@ try {
     if (!$my && in_array($mode, ['paramdesc_mismatch', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
 }
 $e = null; $p = null; $s = null; $q = null; $db = null;
-echo microtime(true) - $t < ($mode === 'big_slow' ? 10.0 : 3.0) ? "fast\n" : "SLOW\n";
+echo microtime(true) - $t < ($mode === 'big_slow' || $mode === 'idle_slow' ? 10.0 : 3.0) ? "fast\n" : "SLOW\n";
 echo $fds() === $before ? "no fd leak\n" : "FD LEAK\n";

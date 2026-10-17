@@ -88,6 +88,10 @@ final class __McPdoPgWire
     /** A request was sent (or owed answers are being read) and its ReadyForQuery has not arrived: the stream is mid-protocol. */
     private bool $inflight = false;
     private float $timeout = 30.0;
+    /** ATTR_TIMEOUT was set by the program: only then does it also bound the idle wait for a response (see fill()). */
+    public bool $explicitTimeout = false;
+    /** A request was sent and not one byte of its response has arrived: the server is executing it. */
+    private bool $awaiting = false;
     private string $addr = '';
     /** The peer hung up or a write failed: it is gone, so a CancelRequest would be pointless. */
     private bool $peerGone = false;
@@ -189,17 +193,27 @@ final class __McPdoPgWire
         }
         // one message gets 2 x the read timeout plus a 64 KiB/s floor of sustained progress: each fread() is bounded,
         // a 1-byte drip is not, and a big row on a slow link still arrives
-        $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
+        // ⚠ php's ATTR_TIMEOUT is a CONNECT timeout. The idle wait for the START of a response (the server is running the
+        // statement) is therefore unbounded unless the program set ATTR_TIMEOUT itself (superset); a message that has begun
+        // arriving, and connect/auth, are always bounded.
+        $idle = $this->awaiting && !$this->connecting && !$this->explicitTimeout;
+        $dl = $this->timeout > 0.0 && !$idle ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
         while (\strlen($this->buf) < $n) {
             $c = \fread($this->s, 65536);
             if ($c === false || $c === '') {
                 $eof = \feof($this->s);
                 if ($eof) { $this->peerGone = true; }
+                if (!$eof && $idle) { continue; }
                 throw $this->ioFail($eof
                     ? "server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request."
                     : 'timeout expired');
             }
             $this->buf .= $c;
+            $this->awaiting = false;
+            if ($idle) {
+                $idle = false;
+                $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
+            }
             if (\strlen($this->buf) < $n) {
                 $now = \__mc_monotonic_f();
                 if (($dl > 0.0 && $now >= $dl) || ($this->connecting && $this->authDeadline > 0.0 && $now >= $this->authDeadline)) {
@@ -493,7 +507,7 @@ final class __McPdoPgWire
             $l = (\ord($b[$o]) << 24) | (\ord($b[$o + 1]) << 16) | (\ord($b[$o + 2]) << 8) | \ord($b[$o + 3]);
             $o += 4;
             if ($l === 0xFFFFFFFF) { $row[] = null; continue; }
-            if ($o + $l > $bl) { throw $this->truncated(); }
+            if ($l > $bl - $o) { throw $this->truncated(); }
             $row[] = \substr($b, $o, $l);
             $o += $l;
         }
@@ -511,7 +525,10 @@ final class __McPdoPgWire
         $res->affected = $sp === false ? 0 : (int) \substr($res->tag, $sp + 1);
     }
 
-    /** Runs one query string over the simple protocol. Never throws on a server error. */
+    /**
+     * Runs one query string over the simple protocol. Never throws on a server error.
+     * The whole result is buffered with no row cap, like libpq / mysqlnd's buffered mode.
+     */
     public function simple(string $sql): __McPdoPgResult
     {
         $this->enter();
@@ -557,6 +574,7 @@ final class __McPdoPgWire
         if ($nul !== false) { $sql = \substr($sql, 0, $nul); }
         $this->settle();
         $this->send('Q', $sql . "\0");
+        $this->awaiting = true;
         $res = new __McPdoPgResult();
         $seenT = false;
         $copy = 0;
@@ -656,6 +674,7 @@ final class __McPdoPgWire
         $m .= self::frame('E', "\0\0\0\0\0");
         $m .= self::frame('S', '');
         $this->sendRaw($m);
+        $this->awaiting = true;
 
         $copy = 0;
         while (true) {
@@ -940,7 +959,13 @@ final class __McPdoPg implements __McPdoDrv
 
     public function setAttr(int $attr, mixed $value): bool
     {
-        // php (measured): ATTR_TIMEOUT is a connect-time option only; set afterwards it is a silent false
+        // php: ATTR_TIMEOUT is connect-time only. Here a program that sets it also bounds the idle wait for a response (superset)
+        if ($attr === PDO::ATTR_TIMEOUT) {
+            $this->wire->setTimeout((float) $value);
+            $this->wire->explicitTimeout = true;
+            // php (measured): the call answers false and reads back as unsupported; the effect above is the superset
+            return false;
+        }
         if ($attr === PDO::PGSQL_ATTR_DISABLE_PREPARES) { $this->disablePrepares = (bool) $value; return true; }
         if ($attr === PDO::ATTR_EMULATE_PREPARES) { $this->emulate = (bool) $value; return true; }
         if ($attr === PDO::ATTR_PREFETCH) { return true; }
@@ -1252,6 +1277,7 @@ function __mc_pdo_pgsql_open(string $rest, array $options, ?string $user, ?strin
     $timeout = isset($options[PDO::ATTR_TIMEOUT]) ? (float) $options[PDO::ATTR_TIMEOUT] : 30.0;
 
     $wire = new __McPdoPgWire($host, $port, $timeout);
+    $wire->explicitTimeout = isset($options[PDO::ATTR_TIMEOUT]);
     try {
         $wire->startup($user, $db, []);
         $wire->auth($user, $pw);

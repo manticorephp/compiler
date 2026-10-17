@@ -132,10 +132,18 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
 - `NO_BACKSLASH_ESCAPES` is read off the server status flag of each OK/EOF packet, so `quote()` follows
   a mid-session `SET sql_mode`; invalid UTF-8 is escaped byte by byte, never `false` (mysqlnd).
 - `errorInfo` of a core-raised HY093 is `[state, null, message]`; php has `[state, 0]`.
+- `quote()` assumes the charset the connection was opened with: a `SET NAMES gbk`-style statement issued by user code is not tracked (the same weakness as mysqlnd).
+- Timeouts (both network drivers): php's `ATTR_TIMEOUT` is a CONNECT timeout. Here connect + authentication and every
+  message already begun (mid-message deadline: 2 x timeout + n/64 KiB, a defence against drip-feeding) are always
+  bounded; the idle wait for the START of a response, while the server runs the statement, is unbounded unless the
+  program set `ATTR_TIMEOUT` itself (constructor options or `setAttribute`), which then also bounds that wait (superset
+  behaviour). Async cancellation / scope deadlines are the idiomatic way to bound a statement.
+- `MYSQL_ATTR_LOCAL_INFILE=true` throws at connect (`LOCAL INFILE is not supported`).
 - Gaps: TLS (`MYSQL_ATTR_SSL_*` is refused, never downgraded), unix sockets, compression, native
   prepares (`ATTR_EMULATE_PREPARES=false` throws), a few charset names (`charset=` knows utf8mb4, utf8,
   latin1, ascii, binary, latin2, cp1250, cp1251, koi8r/u, greek, hebrew), AUTO_INCREMENT ids above
   `PHP_INT_MAX`.
+
 ## Limitations
 
 `PDO::FETCH_BOUND` and `bindColumn()` throw — both need a stored by-reference binding, the same

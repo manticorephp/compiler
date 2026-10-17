@@ -28,12 +28,12 @@ for f in tests/pdo_net/cases/*.php; do
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
     if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
     pre="${f%.php}.pre"   # optional hook: server state a case needs before EACH run (php and native)
-    [ -x "$pre" ] && "$pre"
+    if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); fi
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
         echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); continue
     fi
-    [ -x "$pre" ] && "$pre"
+    if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     act=$("$WORK/$n" 2>&1)
     if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1))
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
@@ -44,7 +44,7 @@ if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out big_slow oid_miss over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus; do
+        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out big_slow oid_miss over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus idle_slow idle_explicit stall_mid; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" >/dev/null 2>&1 &
             sp=$!
@@ -62,7 +62,7 @@ if [[ -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ]]; then
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL mysql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max; do
+        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max row_huge_len row_neg_len coldef_huge_len auth_0105 auth_repeat03 auth_double04 auth_nonpem auth_badkey auth_bigkey idle_slow idle_explicit stall_mid; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" mysql >/dev/null 2>&1 &
             sp=$!

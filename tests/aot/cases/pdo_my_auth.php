@@ -1,5 +1,6 @@
 <?php
 // MySQL auth scrambles and wire helpers (no server): vectors computed with php's own sha1()/hash().
+// They are self-referential by construction; the live mysql_connect / mysql_native / mysql_auth_full cases are the real check.
 $gate = PDO::FETCH_ASSOC;   // a mention of PDO is what pulls the driver prelude in
 $salt = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14";
 foreach ([

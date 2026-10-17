@@ -137,3 +137,39 @@ no fd leak
 bit_max: ok "18446744073709551615"
 fast
 no fd leak
+row_huge_len: HY000 2027 Malformed packet (row length)
+fast
+no fd leak
+row_neg_len: HY000 2027 Malformed packet (row length)
+fast
+no fd leak
+coldef_huge_len: HY000 2027 Malformed packet (length-encoded string)
+fast
+no fd leak
+auth_0105: HY000 2027 Malformed packet (unexpected authentication packet)
+fast
+no fd leak
+auth_repeat03: HY000 2027 Malformed packet (unexpected authentication packet)
+fast
+no fd leak
+auth_double04: HY000 2027 Malformed packet (unexpected authentication packet)
+fast
+no fd leak
+auth_nonpem: HY000 2027 Malformed packet (server public key)
+fast
+no fd leak
+auth_badkey: HY000 2059 caching_sha2_password: could not encrypt the password with the server public key
+fast
+no fd leak
+auth_bigkey: HY000 2027 Malformed packet (server public key)
+fast
+no fd leak
+idle_slow: ok waited
+fast
+no fd leak
+idle_explicit: HY000 2006 MySQL server has gone away (timeout expired)
+fast
+no fd leak
+stall_mid: HY000 2006 MySQL server has gone away (timeout expired)
+fast
+no fd leak

@@ -56,6 +56,15 @@ elseif ($mode === 'drip') {
         $l = unpack('N', $rd(4))[1]; $rd($l - 4);
         if ($t === 'Q') { $n++; fwrite($c, $msg('T', $col) . $msg('D', pack('n', 1) . pack('N', strlen("t$n")) . "t$n") . $msg('C', "SELECT 1\0") . $z); }
     }
+} elseif ($mode === 'idle_slow' || $mode === 'idle_explicit' || $mode === 'stall_mid') {
+    // the server takes 3 s to START answering (idle_*), or starts a message and stalls inside it (stall_mid)
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    if ($mode === 'stall_mid') { fwrite($c, 'T' . pack('N', 100) . 'xx'); sleep(5); }
+    else {
+        sleep(3);
+        fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z);
+    }
 } elseif ($mode === 'short') { fwrite($c, 'R' . pack('N', 2)); }
 elseif ($mode === 'authok_after_sasl') {
     fwrite($c, $msg('R', pack('N', 10) . "SCRAM-SHA-256\0\0"));
