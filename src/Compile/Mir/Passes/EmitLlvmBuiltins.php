@@ -1850,15 +1850,7 @@ trait EmitLlvmBuiltins
      *  by-ref sink promoted, a by-value param converted at entry). */
     private function needsForwardCellify(Type $slotType, Type $valueType): bool
     {
-        if (!$slotType->isArray() || !$valueType->isArray()) { return false; }
-        if ($slotType->isShape() || $valueType->isShape()) { return false; }
-        $se = $slotType->element;
-        $ve = $valueType->element;
-        if ($se === null || $ve === null || $se->kind !== Type::KIND_CELL) { return false; }
-        $vk = $ve->kind;
-        return $vk === Type::KIND_INT || $vk === Type::KIND_FLOAT
-            || $vk === Type::KIND_STRING || $vk === Type::KIND_BOOL
-            || ($vk === Type::KIND_OBJ && !$this->isEnumType($ve)) || $vk === Type::KIND_ARRAY;
+        return \Compile\Mir\Ownership::forwardCellifies($slotType, $valueType, $this->enums);
     }
 
     /** A concrete OBJECT-element array being written back through a by-ref
