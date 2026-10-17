@@ -4565,6 +4565,7 @@ end:
             );
         }
         if ($this->rt->needsStrReplaceOne) { $out .= $this->lib->strReplaceOne(); }
+        if ($this->rt->needsStrFind || $this->rt->needsStrReplaceOne) { $out .= $this->lib->strFind(); }
         if ($this->rt->needsStrpos) {
             // Zend-faithful `int|false`: hit → NaN-boxed int(offset),
             // miss → NaN-boxed bool(false). Callers read the tag.

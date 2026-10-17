@@ -84,6 +84,8 @@ public bool $needsClosureRc = false;
     public bool $needsJsonDec = false;
     public bool $needsRyu = false;
     public bool $needsStrReplaceOne = false;
+    /** `__mir_memfind` + `__mir_substr_count` (memchr/memmem, binary-safe). */
+    public bool $needsStrFind = false;
     public bool $needsCliArgv = false;
 
     /** The program uses `\Fiber` — emit the fcontext `module asm` (arch-branched),

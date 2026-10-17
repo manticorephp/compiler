@@ -350,12 +350,30 @@ function ucwords(string $s, string $delimiters = " \t\r\n\x0C\x0B"): string
 }
 
 /** Count non-overlapping occurrences of `$needle` in `$haystack` (PHP
- *  `substr_count`). */
-function substr_count(string $haystack, string $needle): int
+ *  `substr_count`). The 2-argument call is a codegen builtin (memchr/memmem,
+ *  see EmitLlvmBuiltins::biSubstrCount); this body serves the offset/length
+ *  forms and is the bootstrap fallback. */
+function substr_count(string $haystack, string $needle, int $offset = 0, ?int $length = null): int
 {
-    if ($needle === "") { return 0; }
-    $count = 0;
     $nl = \strlen($needle);
+    if ($nl === 0) {
+        throw new \ValueError('substr_count(): Argument #2 ($needle) must not be empty');
+    }
+    $hl = \strlen($haystack);
+    if ($offset < 0) { $offset = $offset + $hl; }
+    if ($offset < 0 || $offset > $hl) {
+        throw new \ValueError('substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)');
+    }
+    if ($length !== null) {
+        if ($length < 0) { $length = $length + ($hl - $offset); }
+        if ($length < 0 || $length > $hl - $offset) {
+            throw new \ValueError('substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)');
+        }
+        $haystack = \substr($haystack, $offset, $length);
+    } elseif ($offset > 0) {
+        $haystack = \substr($haystack, $offset);
+    }
+    $count = 0;
     $pos = \strpos($haystack, $needle, 0);
     while ($pos !== false) {
         $count = $count + 1;

@@ -550,6 +550,7 @@ trait EmitLlvmBuiltins
             && \in_array(Node::literalInt($args[2] ?? null) ?? 0, [0, 1048576], true)
             && (!isset($args[2]) || Node::literalInt($args[2]) !== null)) { return $this->biJsonValidate($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
+        if ($name === 'substr_count' && $this->substrCountPlain($args)) { return $this->biSubstrCount($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
         if ($name === 'putenv')                       { return $this->biPutenv($args); }
         if ($name === 'get_object_vars')              { return $this->biGetObjectVars($args); }
@@ -5624,6 +5625,7 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsStrExplode = true;
         $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $delim = $this->lastValue;
@@ -10207,7 +10209,8 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsStrReplaceOne = true;
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
-        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
@@ -10225,6 +10228,38 @@ trait EmitLlvmBuiltins
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /** True for `substr_count($h, $n)` with the offset/length defaults the call
+     *  lowering fills in (`0`, `null`): the whole-string count the builtin does. */
+    private function substrCountPlain(array $args): bool
+    {
+        $c = \count($args);
+        if ($c === 2) { return true; }
+        if ($c < 3 || $c > 4) { return false; }
+        if (Node::literalInt($args[2]) !== 0) { return false; }
+        return $c === 3 || $args[3]->kind === Node::KIND_NULL_CONST;
+    }
+
+    /** `substr_count($h, $n)` (2-arg form): memchr/memmem loop, binary-safe;
+     *  the PHP body in Runtime/Stdlib/Strings.php is the bootstrap fallback.
+     *  @param Node[] $args */
+    private function biSubstrCount(array $args): string
+    {
+        $this->rt->needsStrFind = true;
+        $this->rt->needsConcat = true;   // __mir_strlen
+        $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+        $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $h = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $n = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_substr_count(ptr ' . $h . ', ptr ' . $n . ")\n";
+        $out .= $this->freeStrTemp($args[0], $h);
+        $out .= $this->freeStrTemp($args[1], $n);
+        return $this->finishI64($out, $reg);
     }
 
     /** Write a relocated vec ptr back through `$arrNode`'s local or

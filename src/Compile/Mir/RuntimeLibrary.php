@@ -4913,6 +4913,136 @@ bad4:
 ';
     }
 
+    /** Runtime: `@__mir_memfind(h, hlen, n, nlen)` — first occurrence of the
+     * non-empty needle in the bounded haystack, null when absent (memchr for a
+     * single byte, memmem otherwise: binary-safe, never stops at a NUL); and
+     * `@__mir_substr_count(h, n)` — non-overlapping occurrences, 0 for an empty
+     * needle. */
+    public function strFind(): string
+    {
+        $out  = "\ndefine ptr @__mir_memfind(ptr %h, i64 %hl, ptr %n, i64 %nl) {\n";
+        $out .= "entry:\n";
+        $out .= "  %short = icmp ult i64 %hl, %nl\n";
+        $out .= "  br i1 %short, label %none, label %chk1\n";
+        $out .= "chk1:\n";
+        $out .= "  %c0b = load i8, ptr %n\n";
+        $out .= "  %c0 = zext i8 %c0b to i32\n";
+        $out .= "  %is1 = icmp eq i64 %nl, 1\n";
+        $out .= "  br i1 %is1, label %one, label %chk2\n";
+        $out .= "one:\n";
+        $out .= "  %r1 = call ptr @memchr(ptr %h, i32 %c0, i64 %hl)\n";
+        $out .= "  ret ptr %r1\n";
+        // 2..8 bytes: memchr the first byte, confirm the last byte then memcmp (a
+        // false candidate costs at most 8 bytes, so the scan stays linear).
+        $out .= "chk2:\n";
+        $out .= "  %sm = icmp ule i64 %nl, 8\n";
+        $out .= "  br i1 %sm, label %small, label %big\n";
+        $out .= "small:\n";
+        $out .= "  %last = sub i64 %hl, %nl\n";
+        $out .= "  %nm1 = sub i64 %nl, 1\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %n, i64 %nm1\n";
+        $out .= "  %nlb = load i8, ptr %np\n";
+        $out .= "  br label %sloop\n";
+        $out .= "sloop:\n";
+        $out .= "  %cur = phi i64 [0, %small], [%next, %again]\n";
+        $out .= "  %win = sub i64 %last, %cur\n";
+        $out .= "  %win1 = add i64 %win, 1\n";
+        $out .= "  %hc = getelementptr inbounds i8, ptr %h, i64 %cur\n";
+        $out .= "  %p = call ptr @memchr(ptr %hc, i32 %c0, i64 %win1)\n";
+        $out .= "  %isnull = icmp eq ptr %p, null\n";
+        $out .= "  br i1 %isnull, label %none, label %cand\n";
+        $out .= "cand:\n";
+        $out .= "  %pl = getelementptr inbounds i8, ptr %p, i64 %nm1\n";
+        $out .= "  %plb = load i8, ptr %pl\n";
+        $out .= "  %leq = icmp eq i8 %plb, %nlb\n";
+        $out .= "  br i1 %leq, label %cmp, label %again\n";
+        $out .= "cmp:\n";
+        $out .= "  %cr = call i32 @memcmp(ptr %p, ptr %n, i64 %nl)\n";
+        $out .= "  %ceq = icmp eq i32 %cr, 0\n";
+        $out .= "  br i1 %ceq, label %hit, label %again\n";
+        $out .= "hit:\n";
+        $out .= "  ret ptr %p\n";
+        $out .= "again:\n";
+        $out .= "  %hi = ptrtoint ptr %h to i64\n";
+        $out .= "  %pi = ptrtoint ptr %p to i64\n";
+        $out .= "  %idx = sub i64 %pi, %hi\n";
+        $out .= "  %next = add i64 %idx, 1\n";
+        $out .= "  %more = icmp ule i64 %next, %last\n";
+        $out .= "  br i1 %more, label %sloop, label %none\n";
+        $out .= "big:\n";
+        $out .= "  %r2 = call ptr @memmem(ptr %h, i64 %hl, ptr %n, i64 %nl)\n";
+        $out .= "  ret ptr %r2\n";
+        $out .= "none:\n";
+        $out .= "  ret ptr null\n";
+        $out .= "}\n";
+        $out .= "\ndefine i64 @__mir_substr_count(ptr %h, ptr %n) {\n";
+        $out .= "entry:\n";
+        $out .= "  %hl = call i64 @__mir_strlen(ptr %h)\n";
+        $out .= "  %nl = call i64 @__mir_strlen(ptr %n)\n";
+        $out .= "  %emp = icmp eq i64 %nl, 0\n";
+        $out .= "  br i1 %emp, label %zero, label %chk\n";
+        $out .= "chk:\n";
+        $out .= "  %is1 = icmp eq i64 %nl, 1\n";
+        $out .= "  br i1 %is1, label %one, label %loop\n";
+        // one byte: a plain compare-and-add loop, which LLVM vectorizes
+        $out .= "one:\n";
+        $out .= "  %cb = load i8, ptr %n\n";
+        $out .= "  %hz = icmp eq i64 %hl, 0\n";
+        $out .= "  br i1 %hz, label %zero, label %oloop\n";
+        // 64 KiB blocks: the inner counter is i32 so the loop vectorizes in wide lanes
+        $out .= "oloop:\n";
+        $out .= "  %op0 = phi i64 [0, %one], [%op1, %oouter]\n";
+        $out .= "  %ot = phi i64 [0, %one], [%ot2, %oouter]\n";
+        $out .= "  %orem = sub i64 %hl, %op0\n";
+        $out .= "  %olt = icmp ult i64 %orem, 65536\n";
+        $out .= "  %oblk = select i1 %olt, i64 %orem, i64 65536\n";
+        $out .= "  %obase = getelementptr inbounds i8, ptr %h, i64 %op0\n";
+        $out .= "  br label %oin\n";
+        $out .= "oin:\n";
+        $out .= "  %oi = phi i64 [0, %oloop], [%oi2, %oin]\n";
+        $out .= "  %oc = phi i32 [0, %oloop], [%oc2, %oin]\n";
+        $out .= "  %op = getelementptr inbounds i8, ptr %obase, i64 %oi\n";
+        $out .= "  %ob = load i8, ptr %op\n";
+        $out .= "  %oe = icmp eq i8 %ob, %cb\n";
+        $out .= "  %oz = zext i1 %oe to i32\n";
+        $out .= "  %oc2 = add i32 %oc, %oz\n";
+        $out .= "  %oi2 = add i64 %oi, 1\n";
+        $out .= "  %od = icmp eq i64 %oi2, %oblk\n";
+        $out .= "  br i1 %od, label %oouter, label %oin\n";
+        $out .= "oouter:\n";
+        $out .= "  %ocz = zext i32 %oc2 to i64\n";
+        $out .= "  %ot2 = add i64 %ot, %ocz\n";
+        $out .= "  %op1 = add i64 %op0, %oblk\n";
+        $out .= "  %oend = icmp eq i64 %op1, %hl\n";
+        $out .= "  br i1 %oend, label %odone, label %oloop\n";
+        $out .= "odone:\n";
+        $out .= "  ret i64 %ot2\n";
+        $out .= "loop:\n";
+        $out .= "  %cur = phi ptr [%h, %chk], [%nx, %hit]\n";
+        $out .= "  %rem = phi i64 [%hl, %chk], [%rem2, %hit]\n";
+        $out .= "  %cnt = phi i64 [0, %chk], [%cnt1, %hit]\n";
+        $out .= "  %fits = icmp uge i64 %rem, %nl\n";
+        $out .= "  br i1 %fits, label %scan, label %done\n";
+        $out .= "scan:\n";
+        $out .= "  %f = call ptr @__mir_memfind(ptr %cur, i64 %rem, ptr %n, i64 %nl)\n";
+        $out .= "  %isn = icmp eq ptr %f, null\n";
+        $out .= "  br i1 %isn, label %done, label %hit\n";
+        $out .= "hit:\n";
+        $out .= "  %nx = getelementptr inbounds i8, ptr %f, i64 %nl\n";
+        $out .= "  %ci = ptrtoint ptr %cur to i64\n";
+        $out .= "  %ni = ptrtoint ptr %nx to i64\n";
+        $out .= "  %used = sub i64 %ni, %ci\n";
+        $out .= "  %rem2 = sub i64 %rem, %used\n";
+        $out .= "  %cnt1 = add i64 %cnt, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "done:\n";
+        $out .= "  ret i64 %cnt\n";
+        $out .= "zero:\n";
+        $out .= "  ret i64 0\n";
+        $out .= "}\n";
+        return $out;
+    }
+
     /** Runtime: replace every non-overlapping `%se` in `%sj` with `%rp`, left
      * to right (PHP str_replace semantics; the replacement is never rescanned).
      * Always returns a FRESH string. Empty/absent search → a plain copy. */
@@ -4933,25 +5063,14 @@ bad4:
         $out .= "  %nomatchposs = or i1 %semp, %stoolong\n";
         $out .= "  br i1 %nomatchposs, label %copy, label %prep\n";
         $out .= "prep:\n";
-        $out .= "  %is1 = icmp eq i64 %slen, 1\n";
-        $out .= "  %c0b = load i8, ptr %se\n";
-        $out .= "  %c0 = zext i8 %c0b to i32\n";
         $out .= "  br label %cloop\n";
-        // ── Pass 1: count matches ──
+        // ── Pass 1: count matches (bounded memmem/memchr: binary-safe) ──
         $out .= "cloop:\n";
         $out .= "  %cpos = phi i64 [0, %prep], [%cpos2, %chit]\n";
         $out .= "  %ccnt = phi i64 [0, %prep], [%ccnt1, %chit]\n";
         $out .= "  %cfrom = getelementptr inbounds i8, ptr %sj, i64 %cpos\n";
-        $out .= "  br i1 %is1, label %cm, label %cs\n";
-        $out .= "cm:\n";
         $out .= "  %crem = sub i64 %jlen, %cpos\n";
-        $out .= "  %cmr = call ptr @memchr(ptr %cfrom, i32 %c0, i64 %crem)\n";
-        $out .= "  br label %cj\n";
-        $out .= "cs:\n";
-        $out .= "  %csr = call ptr @strstr(ptr %cfrom, ptr %se)\n";
-        $out .= "  br label %cj\n";
-        $out .= "cj:\n";
-        $out .= "  %cf = phi ptr [%cmr, %cm], [%csr, %cs]\n";
+        $out .= "  %cf = call ptr @__mir_memfind(ptr %cfrom, i64 %crem, ptr %se, i64 %slen)\n";
         $out .= "  %cnull = icmp eq ptr %cf, null\n";
         $out .= "  br i1 %cnull, label %sized, label %chit\n";
         $out .= "chit:\n";
@@ -4975,16 +5094,8 @@ bad4:
         $out .= "  %src = phi i64 [0, %sized], [%src2, %fhit]\n";
         $out .= "  %dst = phi i64 [0, %sized], [%dst2, %fhit]\n";
         $out .= "  %ffrom = getelementptr inbounds i8, ptr %sj, i64 %src\n";
-        $out .= "  br i1 %is1, label %fm, label %fs\n";
-        $out .= "fm:\n";
         $out .= "  %frem = sub i64 %jlen, %src\n";
-        $out .= "  %fmr = call ptr @memchr(ptr %ffrom, i32 %c0, i64 %frem)\n";
-        $out .= "  br label %fj\n";
-        $out .= "fs:\n";
-        $out .= "  %fsr = call ptr @strstr(ptr %ffrom, ptr %se)\n";
-        $out .= "  br label %fj\n";
-        $out .= "fj:\n";
-        $out .= "  %ff = phi ptr [%fmr, %fm], [%fsr, %fs]\n";
+        $out .= "  %ff = call ptr @__mir_memfind(ptr %ffrom, i64 %frem, ptr %se, i64 %slen)\n";
         $out .= "  %fnull = icmp eq ptr %ff, null\n";
         $out .= "  br i1 %fnull, label %tail, label %fhit\n";
         $out .= "fhit:\n";
