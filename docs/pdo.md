@@ -160,14 +160,56 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
   options (`1004`, `1012`, `1002`, `1005`, `ATTR_PREFETCH`) answer `false` on `setAttribute()`, as php; `ATTR_PERSISTENT`
   is kept from the constructor and `false` afterwards; `ATTR_TIMEOUT` answers `false` yet takes effect (see Timeouts).
 - Refused loudly (php accepts them): `MYSQL_ATTR_USE_BUFFERED_QUERY=false` (`unbuffered queries are not supported yet`, at
-  connect and at `setAttribute`), `MYSQL_ATTR_COMPRESS=true` (`compression is not supported`), `MYSQL_ATTR_SSL_*`
-  (`TLS is not supported yet`). `exec()` of a statement that returns rows consumes the result (php leaves it pending and
+  connect and at `setAttribute`), `MYSQL_ATTR_COMPRESS=true` (`compression is not supported`). `exec()` of a statement that returns rows consumes the result (php leaves it pending and
   fails the next command with 2014 / 'pending result sets').
 - A deadlock (1213) cannot be provoked by two connections inside one thread; the tests raise it with `SIGNAL`.
-- Gaps: TLS (`MYSQL_ATTR_SSL_*` is refused, never downgraded), unix sockets, compression, native
+- TLS: any of `MYSQL_ATTR_SSL_KEY` / `_CERT` / `_CA` / `_CAPATH` / `_CIPHER` turns it on (`MYSQL_ATTR_SSL_VERIFY_SERVER_CERT` alone does
+  not, as mysqlnd); the server is then verified, chain AND host name, unless `SSL_VERIFY_SERVER_CERT` is `false` (php's default is
+  verify), in which case no CA is read at all. Without `_CA`/`_CAPATH` the host's default trust store is used. `_CIPHER` is the
+  OpenSSL cipher list (TLS 1.2 and below; TLS 1.3 suites are not affected, as in php), an empty or unknown list fails. `_CERT` must
+  load and `_KEY` (default: the certificate file) must match it; `_KEY` without `_CERT` is ignored (measured). Every TLS failure
+  reads `SQLSTATE[HY000] [2002] Cannot connect to MySQL using SSL`; a server without `CLIENT_SSL` reads `[2006]`, as mysqlnd. The
+  SSLRequest is sequence 1, the handshake response sequence 2 inside TLS; caching_sha2 full authentication sends the password +
+  NUL inside TLS instead of the RSA exchange. Hostile servers: bytes buffered after the handshake packet, or arriving between the
+  SSLRequest and the TLS handshake, end the attempt (plaintext injected before TLS must never be read as part of the session).
+  The new constants are the same ids under `Pdo\Mysql::ATTR_*`; the old names are what the tests use (`PDO::MYSQL_ATTR_*` is deprecated in 8.5).
+- Gaps: unix sockets, compression, native
   prepares (`ATTR_EMULATE_PREPARES=false` throws), a few charset names (`charset=` knows utf8mb4, utf8,
   latin1, ascii, binary, latin2, cp1250, cp1251, koi8r/u, greek, hebrew), AUTO_INCREMENT ids above
   `PHP_INT_MAX`.
+
+## `pgsql:` TLS (prelude/pdo_pgsql.php)
+
+DSN keys, graded against libpq: `sslmode` = `disable | allow | prefer` (default) `| require | verify-ca | verify-full`, `sslrootcert`,
+`sslcert`, `sslkey`, `sslcrl`; `sslsni` is honoured (`0` stops SNI), `sslcompression` / `sslcrldir` / `sslpassword` are accepted and ignored.
+An unknown `ssl*` key is `invalid connection option "x"`, a bad mode `invalid sslmode value: "x"` (an EMPTY value swallows the next
+token like php's connect string does: `invalid sslmode value: "sslrootcert=/x"`, or `"connect_timeout=30"` when last). `hostaddr` connects to the
+address while `host` is what the certificate is checked against.
+
+- Protocol: SSLRequest, then exactly ONE reply byte. `S` starts the handshake; `N` continues in plaintext only for `prefer`
+  (`server does not support SSL, but SSL was required` otherwise); `E` is `server sent an error response during SSL exchange`;
+  any other byte `received invalid response to SSL negotiation: X`. After an `S`, any further byte already buffered or
+  arriving before the ClientHello is sent ends the attempt with `received unencrypted data after SSL response` and is never
+  retried (CVE-2021-23222: injected plaintext must not be parsed as part of the encrypted session). Nothing of the startup
+  packet, the password or any SCRAM message is written before the handshake is done.
+- libpq's order: `allow` tries plaintext and then TLS, `prefer` TLS and then plaintext, on ANY failure after the TCP connection
+  was made; the messages of both attempts are joined with a newline. A refused TCP connect is not retried.
+- Verification as libpq: a root file that exists turns chain verification on for EVERY mode (`require` + a wrong
+  `sslrootcert` fails); `verify-ca` / `verify-full` need the file (`root certificate file "x" does not exist ...`);
+  `verify-full` also matches the host (DNS or IP SAN, CN only without SAN; `server certificate for "a" (and N other names)
+  does not match host name "b"`). `sslrootcert=system` uses the host store and is `verify-full` by default (`weak sslmode ...` for the
+  others). Defaults are `~/.postgresql/{postgresql.crt,postgresql.key,root.crt,root.crl}`. A client certificate whose file is missing is
+  skipped; its key must be missing-free and not group/world readable (libpq's wording). `sslcrl` that exists enables CRL checking of
+  the whole chain; a missing one is ignored.
+- Failures read `SSL error: <OpenSSL reason>` (plus libpq's protocol-version hint) or the libpq texts above; a silent peer is
+  `timeout expired` within `ATTR_TIMEOUT`.
+- Deviations: PG* environment variables are not read (`PGSSLMODE` ...); the key-file permission check runs before the certificate is
+  parsed (libpq reads the certificate first, which only matters when both are broken); `sslpassword` (encrypted keys) and `sslcrldir` are not supported;
+  `ATTR_CONNECTION_STATUS` is unchanged. Both drivers run the handshake themselves over libssl (the stdlib's
+  `stream_socket_enable_crypto()` knows no CA file, client certificate, cipher list or CRL).
+- Tests: `tests/pdo_net/up.sh` starts `mc-pg-ssl` (:54323; hba allows `u` over TLS only, `cu` by client certificate) and `mc-my-ssl`
+  (:33064; a certificate naming 127.0.0.1, user `cu` requires a client certificate) with a throwaway CA generated into
+  `tests/pdo_net/.certs` (git-ignored, removed by `down.sh`).
 
 ## Limitations
 
