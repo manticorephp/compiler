@@ -10313,6 +10313,16 @@ trait EmitLlvmBuiltins
                     && $arrNode->array->type->element->kind === Type::KIND_CELL);
             $valI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $valI, $innerCell);
+            // A boxed inner array lands in the parent through a bare set: describe
+            // the parent as a CELL buffer first, as a plain element store does
+            // ({@see emitElemEncode}). Left undescribed (hint 0, repr 0), a runtime
+            // walker - spread, merge, copy - takes no count on the inner arrays it
+            // copies out, and the copy's release frees them under the parent.
+            if ($innerCell) {
+                $enc = $this->ssa->allocReg();
+                $out .= '  ' . $enc . ' = call i64 @__mir_elem_encode(ptr ' . $parentPtr . ', i64 ' . $valI . ")\n";
+                $valI = $enc;
+            }
             $keyIsCell = $this->keyRidesCellChannel($arrNode->index);
             $keyIsString = !$keyIsCell
                 && ($arrNode->index->type->kind === Type::KIND_STRING
