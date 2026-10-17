@@ -10,8 +10,6 @@ ctor('buffered true', [1000 => true]);
 ctor('buffered false', [1000 => false]);
 ctor('compress', [1003 => true]);
 ctor('compress off', [1003 => false]);
-ctor('ssl ca', [1008 => '/nope/ca.pem']);
-ctor('ssl verify off', [1013 => false]);
 ctor('local infile', [1001 => true]);
 $db = mk([]);
 try { var_dump($db->setAttribute(1000, true)); } catch (PDOException $e) { echo $e->getMessage(), "\n"; }

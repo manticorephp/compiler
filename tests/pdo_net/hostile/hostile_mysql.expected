@@ -173,3 +173,21 @@ no fd leak
 stall_mid: HY000 2006 MySQL server has gone away
 fast
 no fd leak
+ssl_nocap: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+ssl_extra: HY000 2002 Cannot connect to MySQL using SSL
+fast
+no fd leak
+ssl_garbage: HY000 2002 Cannot connect to MySQL using SSL
+fast
+no fd leak
+ssl_silent: HY000 2002 Cannot connect to MySQL using SSL
+fast
+no fd leak
+ssl_close: HY000 2002 Cannot connect to MySQL using SSL
+fast
+no fd leak
+ssl_drip: HY000 2002 Cannot connect to MySQL using SSL
+fast
+no fd leak

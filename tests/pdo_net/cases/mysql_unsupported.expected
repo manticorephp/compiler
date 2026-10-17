@@ -2,8 +2,6 @@ buffered true: connected
 buffered false: SQLSTATE[HY000] [2000] unbuffered queries are not supported yet 2000
 compress: SQLSTATE[HY000] [2000] compression is not supported 2000
 compress off: connected
-ssl ca: SQLSTATE[HY000] [2026] TLS is not supported yet (MYSQL_ATTR_SSL_* options) 2026
-ssl verify off: SQLSTATE[HY000] [2026] TLS is not supported yet (MYSQL_ATTR_SSL_* options) 2026
 local infile: SQLSTATE[HY000] [2000] LOCAL INFILE is not supported 2000
 bool(true)
 SQLSTATE[HY000]: General error: unbuffered queries are not supported yet

@@ -1,3 +1,3 @@
 #!/bin/bash
-docker rm -f mc-pg mc-pg-ssl mc-my mc-my-native >/dev/null 2>&1 || true
+docker rm -f mc-pg mc-pg-ssl mc-my mc-my-ssl mc-my-native >/dev/null 2>&1 || true
 rm -rf "$(cd "$(dirname "$0")" && pwd)/.certs"

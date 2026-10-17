@@ -61,6 +61,7 @@ final class __McPdoMyWire
     private const CLIENT_FOUND_ROWS = 0x2;
     private const CLIENT_LONG_FLAG = 0x4;
     private const CLIENT_CONNECT_WITH_DB = 0x8;
+    private const CLIENT_SSL = 0x800;
     private const CLIENT_IGNORE_SPACE = 0x100;
     private const CLIENT_PROTOCOL_41 = 0x200;
     private const CLIENT_TRANSACTIONS = 0x2000;
@@ -108,6 +109,8 @@ final class __McPdoMyWire
     private string $scramble = '';
     private string $plugin = '';
     private int $cliCaps = 0;
+    /** The session runs inside TLS (caching_sha2 full authentication then sends the password in the clear, as mysqlnd). */
+    private bool $tls = false;
     /** @var resource */
     private $s;
     private string $buf = '';
@@ -468,9 +471,31 @@ final class __McPdoMyWire
     }
 
     /**
+     * SSLRequest (the first 32 bytes of a HandshakeResponse41, sequence 1), then the TLS handshake; the real response
+     * follows over TLS as sequence 2. A server says nothing between its handshake packet and our response, so a byte
+     * buffered or arriving there is an injection (CVE-2021-23222 class) and ends the attempt.
+     */
+    private function startTls(__McPdoTlsOpts $o, int $caps, int $charsetNo): void
+    {
+        if (\strlen($this->buf) > $this->pos || __McPdoTls::pendingPlain($this->s)) { throw $this->tlsFail(); }
+        $this->sendPacket(self::putLe($caps, 4) . self::putLe(0x40000000, 4) . \chr($charsetNo) . \str_repeat("\0", 23));
+        if (__McPdoTls::pendingPlain($this->s)) { throw $this->tlsFail(); }
+        $r = __McPdoTls::start($this->s, $o, $this->timeout > 0.0 ? 2.0 * $this->timeout : 0.0);
+        if ($r->stage !== '') { throw $this->tlsFail(); }
+        $this->tls = true;
+    }
+
+    /** mysqlnd words every TLS failure the same. */
+    private function tlsFail(): PDOException
+    {
+        $this->closeSock();
+        return __McPdo::connectFail('HY000', 2002, 'Cannot connect to MySQL using SSL');
+    }
+
+    /**
      * HandshakeResponse41 and the rest of the authentication exchange, up to the OK packet.
      */
-    public function auth(string $user, ?string $pw, string $db, int $charsetNo, bool $foundRows, bool $multi, bool $ignoreSpace): void
+    public function auth(string $user, ?string $pw, string $db, int $charsetNo, bool $foundRows, bool $multi, bool $ignoreSpace, ?__McPdoTlsOpts $tlsOpts = null): void
     {
         $pw = $pw === null ? '' : $pw;
         if (\strpos($user, "\0") !== false || \strpos($db, "\0") !== false) {
@@ -484,8 +509,14 @@ final class __McPdoMyWire
         if ($foundRows) { $caps |= self::CLIENT_FOUND_ROWS; }
         if ($multi) { $caps |= self::CLIENT_MULTI_STATEMENTS; }
         if ($ignoreSpace) { $caps |= self::CLIENT_IGNORE_SPACE; }
+        if ($tlsOpts !== null) {
+            // mysqlnd (measured): a server without CLIENT_SSL answers a client that wants TLS with 2006
+            if (($this->srvCaps & self::CLIENT_SSL) === 0) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $caps |= self::CLIENT_SSL;
+        }
         $caps &= $this->srvCaps | self::CLIENT_FOUND_ROWS | self::CLIENT_IGNORE_SPACE;
         $this->cliCaps = $caps;
+        if ($tlsOpts !== null) { $this->startTls($tlsOpts, $caps, $charsetNo); }
         $auth = $this->pluginResponse($this->plugin, $pw, $this->scramble);
         $r = self::putLe($caps, 4) . self::putLe(0x40000000, 4) . \chr($charsetNo) . \str_repeat("\0", 23) . $user . "\0";
         if (($caps & self::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) !== 0) {
@@ -551,11 +582,15 @@ final class __McPdoMyWire
 
     /**
      * caching_sha2_password perform_full_authentication over a plain socket: ask for
-     * the server's RSA key and send the password RSA-OAEP encrypted. Cleartext over
-     * TLS arrives with the TLS phase.
+     * the server's RSA key and send the password RSA-OAEP encrypted. Inside TLS the password is sent
+     * as is (NUL terminated), which is what mysqlnd does.
      */
     private function fullAuth(string $pw, string $scramble): void
     {
+        if ($this->tls) {
+            $this->sendPacket($pw . "\0");
+            return;
+        }
         $this->sendPacket("\x02");
         $k = $this->packet(self::CTRL_CAP);
         // a 16384-bit key is ~2.4 KiB of PEM: 8 KiB is generous, anything bigger is hostile
@@ -1255,6 +1290,44 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
 }
 
 /**
+ * mysqlnd turns TLS on when any of SSL_KEY / SSL_CERT / SSL_CA / SSL_CAPATH / SSL_CIPHER is set (SSL_VERIFY_SERVER_CERT alone does
+ * not) and then verifies the server (chain AND host name) unless SSL_VERIFY_SERVER_CERT is false. Measured against php 8.5: with
+ * verification off nothing about the CA is read; a missing SSL_CERT or an empty / unknown cipher fails; SSL_KEY without SSL_CERT is ignored.
+ *
+ * @param array<int,mixed> $options
+ */
+function __mc_pdo_mysql_tls_opts(array $options, string $host): ?__McPdoTlsOpts
+{
+    $want = false;
+    foreach ([1006, 1007, 1008, 1009, 1010] as $k) {
+        if (isset($options[$k])) { $want = true; }
+    }
+    if (!$want) { return null; }
+    $o = new __McPdoTlsOpts();
+    $o->host = $host;
+    $verify = !isset($options[1013]) || (bool) $options[1013];
+    $o->verifyChain = $verify;
+    $o->verifyName = $verify;
+    $ca = isset($options[1008]) ? $options[1008] : null;
+    $capath = isset($options[1009]) ? $options[1009] : null;
+    if ($verify) {
+        if (\is_string($ca) && $ca !== '') { $o->caFile = $ca; }
+        if (\is_string($capath) && $capath !== '') { $o->caDir = $capath; }
+        if ($o->caFile === '' && $o->caDir === '') { $o->systemRoots = true; }
+    }
+    $cipher = isset($options[1010]) ? $options[1010] : null;
+    // an empty list is invalid to OpenSSL: "\x01" is a name no cipher has
+    if (\is_string($cipher)) { $o->ciphers = $cipher === '' ? "\x01" : $cipher; }
+    $cert = isset($options[1007]) ? $options[1007] : null;
+    $key = isset($options[1006]) ? $options[1006] : null;
+    if (\is_string($cert) && $cert !== '') {
+        $o->cert = $cert;
+        if (\is_string($key)) { $o->key = $key; }
+    }
+    return $o;
+}
+
+/**
  * Entry point of the `mysql` arm of the facade. php (measured): the DSN carries
  * host, port, dbname, charset, unix_socket — a `user=` / `password=` key is NOT
  * read (unlike pdo_pgsql); the constructor arguments are the credentials.
@@ -1269,10 +1342,7 @@ function __mc_pdo_mysql_open(string $rest, array $options, ?string $user, ?strin
     $port = isset($p['port']) ? (int) $p['port'] : 3306;
     $db = isset($p['dbname']) ? $p['dbname'] : '';
     $charset = isset($p['charset']) ? $p['charset'] : 'utf8mb4';
-    // TLS arrives in its own phase: refused up front, never silently downgraded
-    foreach ([1006, 1007, 1008, 1009, 1010, 1011, 1013] as $k) {
-        if (isset($options[$k])) { throw __McPdo::connectFail('HY000', 2026, 'TLS is not supported yet (MYSQL_ATTR_SSL_* options)'); }
-    }
+    $tlsOpts = __mc_pdo_mysql_tls_opts($options, $host);
     $timeout = isset($options[PDO::ATTR_TIMEOUT]) ? (float) $options[PDO::ATTR_TIMEOUT] : 30.0;
     $multi = !isset($options[PDO::MYSQL_ATTR_MULTI_STATEMENTS]) || (bool) $options[PDO::MYSQL_ATTR_MULTI_STATEMENTS];
 
@@ -1294,7 +1364,7 @@ function __mc_pdo_mysql_open(string $rest, array $options, ?string $user, ?strin
         if ($cs === null) { throw __McPdo::connectFail('HY000', 2019, 'Unknown character set'); }
         $wire->auth($user === null ? '' : $user, $pw, $db, $cs,
             isset($options[PDO::MYSQL_ATTR_FOUND_ROWS]) && (bool) $options[PDO::MYSQL_ATTR_FOUND_ROWS], $multi,
-            isset($options[PDO::MYSQL_ATTR_IGNORE_SPACE]) && (bool) $options[PDO::MYSQL_ATTR_IGNORE_SPACE]);
+            isset($options[PDO::MYSQL_ATTR_IGNORE_SPACE]) && (bool) $options[PDO::MYSQL_ATTR_IGNORE_SPACE], $tlsOpts);
     } catch (\Throwable $e) {
         $wire->close();
         throw $e;
