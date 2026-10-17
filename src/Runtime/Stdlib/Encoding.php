@@ -528,18 +528,17 @@ function __mc_nested_assign(array &$node, array $segs, int $idx, string $val): v
  *
  * @param array<mixed,mixed> $data
  */
-function http_build_query(#[\Manticore\Attr\CellArg] array $data, string $numeric_prefix = '', string $arg_separator = '&'): string
+function http_build_query(#[\Manticore\Attr\CellArg] array $data, string $numeric_prefix = '', ?string $arg_separator = null, int $encoding_type = 1): string
 {
-    $sep = $arg_separator;
     $out = '';
-    \__mc_build_query($data, '', $numeric_prefix, $out, $sep);
+    \__mc_build_query($data, '', $numeric_prefix, $out, $arg_separator ?? '&', $encoding_type === 2);
     return $out;
 }
 
 /**
  * @param array<mixed,mixed> $data
  */
-function __mc_build_query(#[\Manticore\Attr\CellArg] array $data, string $prefix, string $numPrefix, string &$out, string $sep): void
+function __mc_build_query(#[\Manticore\Attr\CellArg] array $data, string $prefix, string $numPrefix, string &$out, string $sep, bool $raw): void
 {
     foreach ($data as $k => $v) {
         // php DROPS null entries entirely (they are not emitted as `k=`).
@@ -548,14 +547,16 @@ function __mc_build_query(#[\Manticore\Attr\CellArg] array $data, string $prefix
         if ($prefix === '' && $numPrefix !== '' && \__mc_all_digits($key)) {
             $key = $numPrefix . $key;
         }
-        $name = $prefix === '' ? \urlencode($key) : $prefix . '%5B' . \urlencode($key) . '%5D';
+        $ek = $raw ? \rawurlencode($key) : \urlencode($key);
+        $name = $prefix === '' ? $ek : $prefix . '%5B' . $ek . '%5D';
         if (\is_array($v)) {
-            \__mc_build_query($v, $name, '', $out, $sep);
+            \__mc_build_query($v, $name, '', $out, $sep, $raw);
         } else {
             if ($out !== '') { $out .= $sep; }
             $out .= $name;
             $out .= '=';
-            $out .= \urlencode(\__mc_scalar_str($v));
+            $ev = \__mc_scalar_str($v);
+            $out .= $raw ? \rawurlencode($ev) : \urlencode($ev);
         }
     }
 }
