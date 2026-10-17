@@ -155,6 +155,7 @@ final class __McPdo
         if ($state === '26000') { return 'Invalid SQL statement name'; }
         if ($state === '28000') { return 'Invalid authorization specification'; }
         if ($state === '42000') { return 'Syntax error or access violation'; }
+        if ($state === 'HY093') { return 'Invalid parameter number'; }
         if ($state === 'IM001') { return 'Driver does not support this function'; }
         return 'General error';
     }
