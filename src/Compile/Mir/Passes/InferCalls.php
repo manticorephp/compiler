@@ -357,7 +357,7 @@ trait InferCalls
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id' || $n === 'gc_collect_cycles'
             || $n === 'strcspn' || $n === '__mc_crc32b'
-            || $n === '__mc_b64_ok'
+            || $n === '__mc_b64_ok' || $n === '__mc_hex_ok'
             || $n === '__float_bits' || $n === '__ryu_msp'
             || $n === 'peek_i64' || $n === 'peek_i32' || $n === 'peek_i16'
             || $n === 'peek_i8'

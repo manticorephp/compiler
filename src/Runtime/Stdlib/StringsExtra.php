@@ -331,10 +331,16 @@ function hex2bin(string $string): string
     if (($n & 1) === 1) {
         throw new \ValueError('hex2bin(): Hexadecimal input string must have an even length');
     }
-    if (\strspn($string, '0123456789abcdefABCDEF') !== $n) {
+    if (\__mc_hex_ok($string) === 0) {
         throw new \ValueError('hex2bin(): Input string must be hexadecimal string');
     }
     return \__mc_hex2bin($string);
+}
+
+/** Native codegen builtin; this body is the bootstrap fallback. 1 when every byte is a hex digit. */
+function __mc_hex_ok(string $string): int
+{
+    return \strspn($string, '0123456789abcdefABCDEF') === \strlen($string) ? 1 : 0;
 }
 
 /** Native codegen builtin; this body is the bootstrap fallback. */

@@ -5395,6 +5395,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_b64_enc') { return '__mir_b64_enc'; }
         if ($name === '__mc_b64_dec') { return '__mir_b64_dec'; }
         if ($name === '__mc_b64_ok') { return '__mir_b64_ok'; }
+        if ($name === '__mc_hex_ok') { return '__mir_hex_ok'; }
         if ($name === '__mc_bin2hex') { return '__mir_bin2hex'; }
         if ($name === '__mc_hex2bin') { return '__mir_hex2bin'; }
         return '';
@@ -5410,7 +5411,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitPtrArg($args[0]);
         $s = $this->lastValue;
         $reg = $this->ssa->allocReg();
-        if ($fn === '__mir_b64_ok') {
+        if ($fn === '__mir_b64_ok' || $fn === '__mir_hex_ok') {
             $out .= '  ' . $reg . ' = call i64 @' . $fn . '(ptr ' . $s . ")\n";
             $out .= $this->freeStrTemp($args[0], $s);
             return $this->finishI64($out, $reg);

@@ -8413,7 +8413,12 @@ done:
             $dents[] = 'i8 ' . (string)$dec[$c];
             $hents[] = 'i8 ' . (string)$hex[$c];
         }
-        $out  = "\n@__mir_b64_alpha = private unnamed_addr constant [64 x i8] c\"" . $alpha . "\"\n";
+        $t12 = [];
+        for ($x = 0; $x < 4096; $x = $x + 1) {
+            $t12[] = 'i16 ' . (string)(\ord($alpha[$x >> 6]) | (\ord($alpha[$x & 63]) << 8));
+        }
+        $out  = "\n@__mir_b64_t12 = private unnamed_addr constant [4096 x i16] [" . \implode(', ', $t12) . "]\n";
+        $out .= "@__mir_b64_alpha = private unnamed_addr constant [64 x i8] c\"" . $alpha . "\"\n";
         $out .= "@__mir_b64_dtab = private unnamed_addr constant [256 x i8] [" . \implode(', ', $dents) . "]\n";
         $out .= "@__mir_hex_dtab = private unnamed_addr constant [256 x i8] [" . \implode(', ', $hents) . "]\n";
         $out .= "@__mir_hex_alpha = private unnamed_addr constant [16 x i8] c\"0123456789abcdef\"\n";
@@ -8451,17 +8456,19 @@ done:
         $out .= "  %s1 = shl i32 %z1, 8\n";
         $out .= "  %v0 = or i32 %s0, %s1\n";
         $out .= "  %v = or i32 %v0, %z2\n";
-        for ($q = 0; $q < 4; $q = $q + 1) {
-            $sh = 18 - 6 * $q;
-            $out .= '  %e' . $q . ' = lshr i32 %v, ' . $sh . "\n";
-            $out .= '  %f' . $q . ' = and i32 %e' . $q . ", 63\n";
-            $out .= '  %g' . $q . ' = zext i32 %f' . $q . " to i64\n";
-            $out .= '  %h' . $q . ' = getelementptr inbounds i8, ptr @__mir_b64_alpha, i64 %g' . $q . "\n";
-            $out .= '  %c' . $q . ' = load i8, ptr %h' . $q . "\n";
-            $out .= '  %oq' . $q . ' = add i64 %o, ' . $q . "\n";
-            $out .= '  %d' . $q . ' = getelementptr inbounds i8, ptr %buf, i64 %oq' . $q . "\n";
-            $out .= '  store i8 %c' . $q . ', ptr %d' . $q . "\n";
-        }
+        $out .= "  %vh = lshr i32 %v, 12\n";
+        $out .= "  %vl = and i32 %v, 4095\n";
+        $out .= "  %vhz = zext i32 %vh to i64\n";
+        $out .= "  %vlz = zext i32 %vl to i64\n";
+        $out .= "  %th = getelementptr inbounds [4096 x i16], ptr @__mir_b64_t12, i64 0, i64 %vhz\n";
+        $out .= "  %tl = getelementptr inbounds [4096 x i16], ptr @__mir_b64_t12, i64 0, i64 %vlz\n";
+        $out .= "  %ph = load i16, ptr %th\n";
+        $out .= "  %pl = load i16, ptr %tl\n";
+        $out .= "  %d0 = getelementptr inbounds i8, ptr %buf, i64 %o\n";
+        $out .= "  store i16 %ph, ptr %d0, align 1\n";
+        $out .= "  %o2 = add i64 %o, 2\n";
+        $out .= "  %d2 = getelementptr inbounds i8, ptr %buf, i64 %o2\n";
+        $out .= "  store i16 %pl, ptr %d2, align 1\n";
         $out .= "  %k2 = add i64 %k, 1\n";
         $out .= "  br label %loop\n";
         $out .= "tail:\n";
@@ -8518,12 +8525,62 @@ done:
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
         $out .= "  br label %loop\n";
         $out .= "loop:\n";
-        $out .= "  %i = phi i64 [0, %entry], [%i2, %cont]\n";
-        $out .= "  %j = phi i64 [0, %entry], [%j2, %cont]\n";
-        $out .= "  %acc = phi i32 [0, %entry], [%acc2, %cont]\n";
-        $out .= "  %bits = phi i32 [0, %entry], [%bits2, %cont]\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i2, %cont], [%qi4, %qok]\n";
+        $out .= "  %j = phi i64 [0, %entry], [%j2, %cont], [%jq, %qok]\n";
+        $out .= "  %acc = phi i32 [0, %entry], [%acc2, %cont], [%acc, %qok]\n";
+        $out .= "  %bits = phi i32 [0, %entry], [%bits2, %cont], [0, %qok]\n";
         $out .= "  %done = icmp uge i64 %i, %n\n";
-        $out .= "  br i1 %done, label %fin, label %body\n";
+        $out .= "  br i1 %done, label %fin, label %chkq\n";
+        // aligned (no pending bits) and 4 bytes left: decode a clean quad at once
+        $out .= "chkq:\n";
+        $out .= "  %qb = icmp eq i32 %bits, 0\n";
+        $out .= "  %qi4 = add i64 %i, 4\n";
+        $out .= "  %qf = icmp ule i64 %qi4, %n\n";
+        $out .= "  %qok0 = and i1 %qb, %qf\n";
+        $out .= "  br i1 %qok0, label %quad, label %body\n";
+        $out .= "quad:\n";
+        $out .= "  %q0p = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %q0 = load i8, ptr %q0p\n";
+        $out .= "  %q1p = getelementptr inbounds i8, ptr %q0p, i64 1\n";
+        $out .= "  %q1 = load i8, ptr %q1p\n";
+        $out .= "  %q2p = getelementptr inbounds i8, ptr %q0p, i64 2\n";
+        $out .= "  %q2 = load i8, ptr %q2p\n";
+        $out .= "  %q3p = getelementptr inbounds i8, ptr %q0p, i64 3\n";
+        $out .= "  %q3 = load i8, ptr %q3p\n";
+        for ($k = 0; $k < 4; $k = $k + 1) {
+            $out .= "  %q{$k}z = zext i8 %q{$k} to i64\n";
+            $out .= "  %q{$k}t = getelementptr inbounds [256 x i8], ptr @__mir_b64_dtab, i64 0, i64 %q{$k}z\n";
+            $out .= "  %q{$k}v = load i8, ptr %q{$k}t\n";
+        }
+        $out .= "  %qo1 = or i8 %q0v, %q1v\n";
+        $out .= "  %qo2 = or i8 %q2v, %q3v\n";
+        $out .= "  %qo = or i8 %qo1, %qo2\n";
+        $out .= "  %qclean = icmp ult i8 %qo, 64\n";
+        $out .= "  br i1 %qclean, label %qok, label %body\n";
+        $out .= "qok:\n";
+        $out .= "  %w0 = zext i8 %q0v to i32\n";
+        $out .= "  %w1 = zext i8 %q1v to i32\n";
+        $out .= "  %w2 = zext i8 %q2v to i32\n";
+        $out .= "  %w3 = zext i8 %q3v to i32\n";
+        $out .= "  %x0 = shl i32 %w0, 18\n";
+        $out .= "  %x1 = shl i32 %w1, 12\n";
+        $out .= "  %x2 = shl i32 %w2, 6\n";
+        $out .= "  %y0 = or i32 %x0, %x1\n";
+        $out .= "  %y1 = or i32 %x2, %w3\n";
+        $out .= "  %y = or i32 %y0, %y1\n";
+        $out .= "  %r0 = lshr i32 %y, 16\n";
+        $out .= "  %r1 = lshr i32 %y, 8\n";
+        $out .= "  %t0 = trunc i32 %r0 to i8\n";
+        $out .= "  %t1 = trunc i32 %r1 to i8\n";
+        $out .= "  %t2 = trunc i32 %y to i8\n";
+        $out .= "  %o0p = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 %t0, ptr %o0p\n";
+        $out .= "  %o1p = getelementptr inbounds i8, ptr %o0p, i64 1\n";
+        $out .= "  store i8 %t1, ptr %o1p\n";
+        $out .= "  %o2p = getelementptr inbounds i8, ptr %o0p, i64 2\n";
+        $out .= "  store i8 %t2, ptr %o2p\n";
+        $out .= "  %jq = add i64 %j, 3\n";
+        $out .= "  br label %loop\n";
         $out .= "body:\n";
         $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
         $out .= "  %c = load i8, ptr %sp\n";
@@ -8614,6 +8671,37 @@ done:
         $out .= "  ret i64 %res\n";
         $out .= "no:\n";
         $out .= "  ret i64 0\n";
+        $out .= "}\n";
+
+        // hex_ok: 1 when every byte is a hex digit (empty is 1; callers test the length)
+        $out .= "define i64 @__mir_hex_ok(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %z = icmp eq i64 %n, 0\n";
+        $out .= "  br i1 %z, label %yes, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i2, %loop]\n";
+        $out .= "  %bad = phi i8 [0, %entry], [%bad2, %loop]\n";
+        $out .= "  %p = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %c = load i8, ptr %p\n";
+        $out .= "  %d = sub i8 %c, 48\n";
+        $out .= "  %isd = icmp ult i8 %d, 10\n";
+        $out .= "  %l = or i8 %c, 32\n";
+        $out .= "  %a = sub i8 %l, 97\n";
+        $out .= "  %isa = icmp ult i8 %a, 6\n";
+        $out .= "  %ok = or i1 %isd, %isa\n";
+        $out .= "  %nok = xor i1 %ok, true\n";
+        $out .= "  %nz = zext i1 %nok to i8\n";
+        $out .= "  %bad2 = or i8 %bad, %nz\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  %end = icmp eq i64 %i2, %n\n";
+        $out .= "  br i1 %end, label %fin, label %loop\n";
+        $out .= "fin:\n";
+        $out .= "  %good = icmp eq i8 %bad2, 0\n";
+        $out .= "  %r = zext i1 %good to i64\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "yes:\n";
+        $out .= "  ret i64 1\n";
         $out .= "}\n";
 
         // bin2hex
