@@ -347,6 +347,7 @@ function ksort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uksort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
     }
+    if (\__mc_sort_assoc($arr, 0, 0)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -386,6 +387,7 @@ function krsort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uksort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
     }
+    if (\__mc_sort_assoc($arr, 0, 1)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -433,6 +435,7 @@ function asort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uasort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
     }
+    if (\__mc_sort_assoc($arr, 1, 0)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -474,6 +477,7 @@ function arsort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uasort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
     }
+    if (\__mc_sort_assoc($arr, 1, 1)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
