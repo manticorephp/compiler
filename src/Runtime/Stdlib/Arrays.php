@@ -382,12 +382,41 @@ function __mc_count_mode(mixed $arr, int $mode): int
  */
 function array_fill(int $start, int $count, mixed $value): array
 {
+    if ($count < 0) {
+        throw new \ValueError('array_fill(): Argument #2 ($count) must be greater than or equal to 0');
+    }
     $out = [];
-    $i = 0;
+    if ($count === 0) { return $out; }
+    $out[$start] = $value;
+    $i = 1;
+    if ($start < 0) {
+        // an append after a negative key continues from 0 here, php 8.3+ from start + 1
+        while ($i < $count) { $out[$start + $i] = $value; $i = $i + 1; }
+        return $out;
+    }
     while ($i < $count) {
-        $out[$start + $i] = $value;
+        $out[] = $value;
         $i = $i + 1;
     }
+    return $out;
+}
+
+/**
+ * The int form: a list of ints is one counted store loop in a presized buffer.
+ * A separate overload, not a branch of the general body: that body appends
+ * cells, so its return would box this raw int list element by element.
+ *
+ * @return int[]
+ */
+#[\Manticore\Attr\Overload('array_fill')]
+function array_fill__int(int $start, int $count, int $value): array
+{
+    if ($count < 0) {
+        throw new \ValueError('array_fill(): Argument #2 ($count) must be greater than or equal to 0');
+    }
+    if ($start === 0) { return \__mc_int_seq($value, 0, $count); }
+    $out = [];
+    for ($i = 0; $i < $count; $i = $i + 1) { $out[$start + $i] = $value; }
     return $out;
 }
 
