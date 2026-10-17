@@ -505,21 +505,55 @@ function strtr__pairs(string $string, array $replace_pairs): string
     }
     $np = \count($keys);
     if ($np === 0) { return $string; }
+    $n = \strlen($string);
+    /** @var int[] $klen */
+    $klen = [];
+    for ($p = 0; $p < $np; $p = $p + 1) { $klen[] = \strlen($keys[$p]); }
+    $out = '';
+    $run = 0;
+    $i = 0;
+    if ($np <= 8) {
+        // Few keys: each one's next occurrence comes from strpos (a native
+        // search), re-found only once the cursor has passed it. The earliest
+        // occurrence wins, the longest key on a tie.
+        /** @var int[] $nextAt */
+        $nextAt = [];
+        for ($p = 0; $p < $np; $p = $p + 1) { $nextAt[] = -1; }
+        while (true) {
+            $best = -1;
+            $bestAt = $n + 1;
+            for ($p = 0; $p < $np; $p = $p + 1) {
+                $at = $nextAt[$p];
+                if ($at < $i) {
+                    $f = \strpos($string, $keys[$p], $i);
+                    if ($f === false) { $at = $n + 1; } else { $at = (int)$f; }
+                    $nextAt[$p] = $at;
+                }
+                if ($at < $bestAt || ($at === $bestAt && $best >= 0 && $klen[$p] > $klen[$best])) {
+                    $best = $p;
+                    $bestAt = $at;
+                }
+            }
+            if ($best < 0) { break; }
+            $out .= \substr($string, $run, $bestAt - $run);
+            $out .= $vals[$best];
+            $i = $bestAt + $klen[$best];
+            $run = $i;
+        }
+        if ($run === 0) { return $string; }
+        return $out . \substr($string, $run);
+    }
     /** @var array<int, int[]> $buckets first byte → pair indices, longest key first */
     $buckets = [];
     for ($p = 0; $p < $np; $p = $p + 1) {
         $b = \ord($keys[$p][0]);
         $list = $buckets[$b] ?? [];
-        $len = \strlen($keys[$p]);
+        $len = $klen[$p];
         $at = \count($list);
-        while ($at > 0 && \strlen($keys[$list[$at - 1]]) < $len) { $at = $at - 1; }
+        while ($at > 0 && $klen[$list[$at - 1]] < $len) { $at = $at - 1; }
         \array_splice($list, $at, 0, [$p]);
         $buckets[$b] = $list;
     }
-    $n = \strlen($string);
-    $out = '';
-    $run = 0;
-    $i = 0;
     $firsts = '';
     for ($p = 0; $p < $np; $p = $p + 1) { $firsts = $firsts . $keys[$p][0]; }
     while ($i < $n) {
@@ -529,13 +563,18 @@ function strtr__pairs(string $string, array $replace_pairs): string
         $cands = $buckets[\ord($string[$i])] ?? null;
         if ($cands !== null) {
             foreach ($cands as $p) {
+                $kl = $klen[$p];
+                if ($kl > $n - $i) { continue; }
                 $key = $keys[$p];
-                if (\substr_compare($string, $key, $i, \strlen($key)) === 0) { $hit = $p; break; }
+                $j = 1;
+                while ($j < $kl && \ord($string[$i + $j]) === \ord($key[$j])) { $j = $j + 1; }
+                if ($j === $kl) { $hit = $p; break; }
             }
         }
         if ($hit < 0) { $i = $i + 1; continue; }
-        $out = $out . \substr($string, $run, $i - $run) . $vals[$hit];
-        $i = $i + \strlen($keys[$hit]);
+        $out .= \substr($string, $run, $i - $run);
+        $out .= $vals[$hit];
+        $i = $i + $klen[$hit];
         $run = $i;
     }
     if ($run === 0) { return $string; }
@@ -877,31 +916,63 @@ function stripcslashes(string $string): string
  */
 function substr_compare(string $haystack, string $needle, int $offset, ?int $length = null, bool $case_insensitive = false): int
 {
+    if ($length !== null) {
+        return \substr_compare__len($haystack, $needle, $offset, $length, $case_insensitive);
+    }
     $hl = \strlen($haystack);
+    $offset = \__mc_substr_cmp_offset($hl, $offset);
+    $rest = $hl - $offset;
+    $nl = \strlen($needle);
+    return \__mc_substr_cmp($haystack, $needle, $offset, $rest > $nl ? $rest : $nl, $case_insensitive);
+}
+
+/** The form with an explicit length: no nullable parameter to unbox per call. */
+#[\Manticore\Attr\Overload('substr_compare')]
+function substr_compare__len(string $haystack, string $needle, int $offset, int $length, bool $case_insensitive = false): int
+{
+    if ($length <= 0) {
+        if ($length === 0) { return 0; }
+        throw new \ValueError('substr_compare(): Argument #4 ($length) must be greater than or equal to 0');
+    }
+    $offset = \__mc_substr_cmp_offset(\strlen($haystack), $offset);
+    return \__mc_substr_cmp($haystack, $needle, $offset, $length, $case_insensitive);
+}
+
+function __mc_substr_cmp_offset(int $hl, int $offset): int
+{
     if ($offset < 0) {
         $offset = $hl + $offset;
         if ($offset < 0) { $offset = 0; }
     }
-    if ($offset > $hl) { return 1; }
-    $nl = \strlen($needle);
-    $rest = $hl - $offset;
-    $len = $length === null ? ($rest > $nl ? $rest : $nl) : $length;
-    if ($len < 0) { $len = 0; }
-    $a = \substr($haystack, $offset, $len);
-    $b = \substr($needle, 0, $len);
-    if ($case_insensitive) {
-        $a = \strtolower($a);
-        $b = \strtolower($b);
+    if ($offset > $hl) {
+        throw new \ValueError('substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($main_str)');
     }
-    // php returns the strcmp DIFFERENCE, not a normalised -1/1: symfony
-    // compares against 0, but the oracle prints the real value.
-    $la = \strlen($a);
-    $lb = \strlen($b);
+    return $offset;
+}
+
+/** Compares in place (no substr copies); php returns the strcmp DIFFERENCE, which symfony tests against 0. */
+function __mc_substr_cmp(string $haystack, string $needle, int $offset, int $len, bool $case_insensitive): int
+{
+    $rest = \strlen($haystack) - $offset;
+    $nl = \strlen($needle);
+    $la = $rest < $len ? $rest : $len;
+    $lb = $nl < $len ? $nl : $len;
     $m = $la < $lb ? $la : $lb;
     $i = 0;
+    if ($case_insensitive) {
+        while ($i < $m) {
+            $da = \ord($haystack[$offset + $i]);
+            $db = \ord($needle[$i]);
+            if ($da >= 65 && $da <= 90) { $da = $da + 32; }
+            if ($db >= 65 && $db <= 90) { $db = $db + 32; }
+            if ($da !== $db) { return $da - $db; }
+            $i = $i + 1;
+        }
+        return $la - $lb;
+    }
     while ($i < $m) {
-        $da = \ord($a[$i]);
-        $db = \ord($b[$i]);
+        $da = \ord($haystack[$offset + $i]);
+        $db = \ord($needle[$i]);
         if ($da !== $db) { return $da - $db; }
         $i = $i + 1;
     }
