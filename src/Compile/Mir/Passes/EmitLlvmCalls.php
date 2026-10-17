@@ -706,6 +706,7 @@ trait EmitLlvmCalls
     private function emitDynFnCall(Invoke_ $iv, string $keyPtr = ''): string
     {
         $this->rt->needsStrcmp = true;
+        $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
         // A caller that already materialized the name (the erased-callee tag
         // dispatch) passes it in — re-emitting the callee there would evaluate
         // it twice and, worse, hand this chain the still-boxed word.
@@ -856,7 +857,7 @@ trait EmitLlvmCalls
             $hitL = $this->ssa->allocLabel('dynf.hit');
             $nextL = $this->ssa->allocLabel('dynf.next');
             $cmp = $this->ssa->allocReg();
-            $out .= '  ' . $cmp . ' = call i32 @strcmp(ptr ' . $keyP . ', ptr ' . $this->litStr($fname) . ")\n";
+            $out .= '  ' . $cmp . ' = call i32 @strcasecmp(ptr ' . $keyP . ', ptr ' . $this->litStr($fname) . ")\n";
             $eq = $this->ssa->allocReg();
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
@@ -940,7 +941,7 @@ trait EmitLlvmCalls
                 if ($argc < $breq || $argc > $btot) { continue; }
                 $twinNames[] = $bname;
             }
-            \sort($twinNames, SORT_STRING);
+            \usort($twinNames, fn(string $a, string $b): int => \strcmp(\strtolower($a), \strtolower($b)));
             $twinId = '0';
             if ($twinNames !== []) {
                 $this->dynfExtraBodies .= $this->dynfBsearchFn();
@@ -1015,11 +1016,30 @@ trait EmitLlvmCalls
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
+        // No arm and no table row matched: php throws, it does not answer null.
+        $missL = $dynfSyms !== [] ? $this->ssa->allocLabel('dynf.miss') : '';
         if ($dynfSyms !== []) {
             $out .= $hasSpread
-                ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr)
-                : $this->emitDynfTablePath($iv, $keyP, $res, $endL, $dynfSyms);
+                ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr, $missL)
+                : $this->emitDynfTablePath($iv, $keyP, $res, $endL, $dynfSyms, $missL);
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $missL . ":\n";
         }
+        $nameNode = $this->dynCalleePure($iv->callee)
+            ? $iv->callee
+            : new \Compile\Mir\StringConst('', Type::string_());
+        $out .= $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                new \Compile\Mir\Concat(
+                    new \Compile\Mir\Concat(
+                        new \Compile\Mir\StringConst('Call to undefined function ', Type::string_()),
+                        $nameNode),
+                    new \Compile\Mir\StringConst('()', Type::string_())),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        ));
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $loaded = $this->ssa->allocReg();
@@ -1032,6 +1052,21 @@ trait EmitLlvmCalls
         return $out;
     }
 
+
+    /** A callee that re-evaluates without side effects (only locals, literals and reads). */
+    private function dynCalleePure(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_INVOKE || $n->kind === Node::KIND_METHOD_CALL
+            || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_NEW_OBJ || $n->kind === Node::KIND_NEW_DYN_OBJ
+            || $n->kind === Node::KIND_YIELD || $n->kind === Node::KIND_INCDEC
+            || $n->kind === Node::KIND_STORE_LOCAL || $n->kind === Node::KIND_STORE_ELEMENT
+            || $n->kind === Node::KIND_STORE_PROPERTY || $n->kind === Node::KIND_STORE_STATIC_PROP
+            || $n->kind === Node::KIND_STORE_DYN_PROP) { return false; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if (!$this->dynCalleePure($c)) { return false; }
+        }
+        return true;
+    }
     /**
      * The spread twin of {@see dynfThunk}: `i64 (ptr %spread, i64 %a0…)`.
      *
@@ -1129,7 +1164,7 @@ trait EmitLlvmCalls
      * @param string[]              $fixedRegs hoisted fixed-prefix values
      * @param array<string, string> $syms      candidate name => thunk symbol
      */
-    private function emitDynfSpreadTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, array $fixedRegs, string $spreadArr): string
+    private function emitDynfSpreadTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, array $fixedRegs, string $spreadArr, string $missL): string
     {
         $this->dynfExtraBodies .= $this->dynfLookupFn();
         $pair = $this->dynfTable($syms);
@@ -1147,7 +1182,7 @@ trait EmitLlvmCalls
         $hit = $this->ssa->allocReg();
         $out .= '  ' . $hit . ' = icmp ne ptr ' . $fn . ", null\n";
         $callL = $this->ssa->allocLabel('dynf.stab');
-        $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $endL . "\n";
+        $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $missL . "\n";
         $out .= $callL . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 ' . $fn . '(' . $argList . ")\n";
@@ -1165,10 +1200,10 @@ trait EmitLlvmCalls
      *
      * @param array<string, string> $syms candidate name => thunk symbol
      */
-    private function emitDynfTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms): string
+    private function emitDynfTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, string $missL): string
     {
         $this->dynfExtraBodies .= $this->dynfBsearchFn();
-        \ksort($syms, SORT_STRING);
+        \uksort($syms, fn(string $a, string $b): int => \strcmp(\strtolower($a), \strtolower($b)));
         $pair = $this->dynfTable($syms);
         $out = '';
         $argRegs = [];
@@ -1186,7 +1221,7 @@ trait EmitLlvmCalls
         $hit = $this->ssa->allocReg();
         $out .= '  ' . $hit . ' = icmp ne ptr ' . $fn . ", null\n";
         $callL = $this->ssa->allocLabel('dynf.tab');
-        $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $endL . "\n";
+        $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $missL . "\n";
         $out .= $callL . ":\n";
         $argList = '';
         foreach ($argRegs as $i => $r) {
@@ -1223,7 +1258,7 @@ trait EmitLlvmCalls
     {
         if ($this->dynfLookupEmitted) { return ''; }
         $this->dynfLookupEmitted = true;
-        $this->rt->needsStrcmp = true;
+        $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
         $out = "define linkonce_odr ptr @__mc_dynf_lookup(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
         $out .= "  %z = icmp eq i64 %cnt, 0\n";
         $out .= "  br i1 %z, label %miss, label %loop\n";
@@ -1232,7 +1267,7 @@ trait EmitLlvmCalls
         $out .= "  %off = mul i64 %i, 16\n";
         $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
         $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %cmp = call i32 @strcmp(ptr %np, ptr %name)\n";
+        $out .= "  %cmp = call i32 @strcasecmp(ptr %np, ptr %name)\n";
         $out .= "  %eq = icmp eq i32 %cmp, 0\n";
         $out .= "  br i1 %eq, label %hit, label %next\n";
         $out .= "hit:\n";
@@ -1247,12 +1282,12 @@ trait EmitLlvmCalls
         return $out;
     }
 
-    /** Binary search over rows sorted by strcmp order; a miss answers null. */
+    /** Binary search over rows sorted by lowercased-strcmp order, probed with strcasecmp (php function names are case-insensitive); a miss answers null. */
     private function dynfBsearchFn(): string
     {
         if ($this->dynfBsearchEmitted) { return ''; }
         $this->dynfBsearchEmitted = true;
-        $this->rt->needsStrcmp = true;
+        $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
         $out = "define linkonce_odr ptr @__mc_dynf_bsearch(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
         $out .= "  br label %loop\n";
         $out .= "loop:\n";
@@ -1267,7 +1302,7 @@ trait EmitLlvmCalls
         $out .= "  %off = mul i64 %mid, 16\n";
         $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
         $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %cmp = call i32 @strcmp(ptr %name, ptr %np)\n";
+        $out .= "  %cmp = call i32 @strcasecmp(ptr %name, ptr %np)\n";
         $out .= "  %eq = icmp eq i32 %cmp, 0\n";
         $out .= "  br i1 %eq, label %hit, label %cont\n";
         $out .= "cont:\n";

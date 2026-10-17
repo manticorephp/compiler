@@ -1,0 +1,41 @@
+int(2)
+30
+3
+strlen 24 4 2z eq le
+{"0":5,"k":2}
+len=4
+userfn 56 7 4z ne gt
+{"0":10,"k":4}
+len=8
+STRLEN 24 4 2z eq le
+{"0":5,"k":2}
+len=4
+UserFn 56 7 4z ne gt
+{"0":10,"k":4}
+len=8
+510
+46
+12
+ABC
+abc!
+ABC
+103
+4
+6
+6
+7
+Xx!
+1,2,3
+A,BB
+2,4
+string(3) "AB "
+string(3) "ab "
+int(65)
+string(1) "A"
+string(4) "abab"
+int(3)
+string(2) "ff"
+string(2) "Ab"
+ABC
+1,2,3
+Error: Call to undefined function no_such_fn_xyz()
