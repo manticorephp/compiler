@@ -2613,6 +2613,13 @@ trait InferScans
                 $ak = ($flag === '1' && $at->isArray() && $at->element !== null)
                     ? $at->element->kind
                     : $at->kind;
+                // A variadic pack built from a spread of an ERASED array feeds
+                // elements of unknown kind into a concrete slot: nothing here
+                // proves they fit.
+                if ($ak === Type::KIND_UNKNOWN && !$erased && $this->hasSpreadChild($siblings[$k])) {
+                    $found[$a->name] = true;
+                    continue;
+                }
                 if ($ak === Type::KIND_UNKNOWN || $ak === Type::KIND_VOID) { continue; }
                 // With an erased element there is no kind to match, so any
                 // concrete append widens — `array_push($erased, "x")` wrote its
@@ -2620,6 +2627,14 @@ trait InferScans
                 if ($ak !== $ek) { $found[$a->name] = true; }
             }
         }
+    }
+
+    private function hasSpreadChild(Node $n): bool
+    {
+        foreach (Walk::children($n) as $c) {
+            if ($c->kind === Node::KIND_SPREAD) { return true; }
+        }
+        return false;
     }
 
     /** A `vec[vec[scalar]]` — element is a concrete inner array whose own leaf is
