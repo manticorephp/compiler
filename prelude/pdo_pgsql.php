@@ -419,7 +419,7 @@ final class __McPdoPgWire
         $this->send('Q', $sql . "\0");
         $res = new __McPdoPgResult();
         $seenT = false;
-        $copy = false;
+        $copy = 0;
         while (true) {
             [$t, $b] = $this->msg();
             if ($t === 'D') {
@@ -441,14 +441,15 @@ final class __McPdoPgWire
                 $this->paramStatus($b);
             } elseif ($t === 'G') {
                 // COPY FROM STDIN: refuse it, the server answers with an error and ReadyForQuery
-                $copy = true;
+                $copy = 4;
                 $this->send('f', "COPY is not supported\0");
             } elseif ($t === 'H') {
-                $copy = true;
+                $copy = 3;
             } elseif ($t === 'Z') {
                 if (\strlen($b) < 1) { throw $this->truncated(); }
                 $this->status = $b[0];
-                if ($copy) { throw __McPdo::fail('HY000', 7, true, 'COPY is not supported', true); }
+                // php (measured): HY000, code = PGRES_COPY_IN 4 / PGRES_COPY_OUT 3, empty message; real COPY is later work
+                if ($copy > 0) { throw __McPdo::fail('HY000', $copy, true, '', true); }
                 return $res;
             }
         }
@@ -495,7 +496,7 @@ final class __McPdoPgWire
         $m .= self::frame('S', '');
         $this->sendRaw($m);
 
-        $copy = false;
+        $copy = 0;
         while (true) {
             [$t, $b] = $this->msg();
             if ($t === 'D') {
@@ -524,14 +525,17 @@ final class __McPdoPgWire
             } elseif ($t === 'S') {
                 $this->paramStatus($b);
             } elseif ($t === 'G') {
-                $copy = true;
-                $this->send('f', "COPY is not supported\0");
+                // ⚠ the Sync already sent with this batch is IGNORED while the server is in copy-in mode (measured:
+                // CopyFail alone leaves us waiting for a ReadyForQuery until the socket timeout), so send a second one
+                $copy = 4;
+                $this->sendRaw(self::frame('f', "COPY is not supported\0") . self::frame('S', ''));
             } elseif ($t === 'H') {
-                $copy = true;
+                $copy = 3;
             } elseif ($t === 'Z') {
                 if (\strlen($b) < 1) { throw $this->truncated(); }
                 $this->status = $b[0];
-                if ($copy) { throw __McPdo::fail('HY000', 7, true, 'COPY is not supported', true); }
+                // php (measured): HY000, code = PGRES_COPY_IN 4 / PGRES_COPY_OUT 3, empty message; real COPY is later work
+                if ($copy > 0) { throw __McPdo::fail('HY000', $copy, true, '', true); }
                 return;
             }
         }
@@ -783,6 +787,7 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
         foreach ($this->names as $i => $n) {
             if ($n === $name) { return $i + 1; }
         }
+        // `:1` is php's spelling of positional slot 1: answer 0 so the facade falls back to the number
         if (\ctype_digit(\substr($name, 1))) { return 0; }
         throw __McPdo::fail('HY093', 0, false, $name, true);
     }
@@ -906,26 +911,70 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
         if ($v === null) { return null; }
         $o = $this->res->oids[$i];
         if ($o === 25 || $o === 1043) { return $v; }
-        if ($o === 23 || $o === 20 || $o === 21 || $o === 26) { return (int) $v; }
+        if ($o === 23 || $o === 20 || $o === 21 || $o === 26) {
+            $d = $v !== '' && $v[0] === '-' ? \substr($v, 1) : $v;
+            if (\strlen($d) > 19 || !\ctype_digit($d)) { throw self::badValue('integer'); }
+            return (int) $v;
+        }
         if ($o === 16) { return $v === 't'; }
         if ($o === 701 || $o === 700) {
             if ($v === 'NaN') { return \NAN; }
             if ($v === 'Infinity') { return \INF; }
             if ($v === '-Infinity') { return -\INF; }
+            if (!\is_numeric($v)) { throw self::badValue('float'); }
             return (float) $v;
         }
         if ($o === 17) {
-            $raw = $v;
-            if (\substr($v, 0, 2) === '\\x') {
-                $raw = \hex2bin(\substr($v, 2));
-                if ($raw === false) { throw __McPdo::fail('08006', 7, true, 'protocol error: invalid bytea', true); }
-            }
             $f = \fopen('php://memory', 'w+');
-            \fwrite($f, $raw);
+            \fwrite($f, self::unbytea($v));
             \rewind($f);
             return $f;
         }
         return $v;
+    }
+
+    /**
+     * A malformed value from the server is HY000, NOT a closed connection: the
+     * DataRow was fully consumed and framed correctly, so the protocol is still
+     * in sync and the statement (and connection) stay usable.
+     */
+    private static function badValue(string $what): PDOException
+    {
+        return __McPdo::fail('HY000', 0, false, 'invalid ' . $what . ' value from server', true);
+    }
+
+    /** bytea text output: hex (`\xdeadbeef`, the default) or escape (`a\000b\\`, bytea_output=escape). */
+    private static function unbytea(string $v): string
+    {
+        $n = \strlen($v);
+        if ($n >= 2 && $v[0] === '\\' && $v[1] === 'x') {
+            $h = \substr($v, 2);
+            if ($h === '') { return ''; }
+            if (\strlen($h) % 2 !== 0 || !\ctype_xdigit($h)) { throw self::badValue('bytea'); }
+            return (string) \hex2bin($h);
+        }
+        if (\strpos($v, '\\') === false) { return $v; }
+        $out = '';
+        $i = 0;
+        while ($i < $n) {
+            $c = $v[$i];
+            if ($c !== '\\') {
+                $j = \strpos($v, '\\', $i);
+                $j = $j === false ? $n : $j;
+                $out .= \substr($v, $i, $j - $i);
+                $i = $j;
+            } elseif ($i + 1 < $n && $v[$i + 1] === '\\') {
+                $out .= '\\';
+                $i += 2;
+            } elseif ($i + 3 < $n && $v[$i + 1] >= '0' && $v[$i + 1] <= '3' && $v[$i + 2] >= '0' && $v[$i + 2] <= '7'
+                      && $v[$i + 3] >= '0' && $v[$i + 3] <= '7') {
+                $out .= \chr(((\ord($v[$i + 1]) - 48) << 6) | ((\ord($v[$i + 2]) - 48) << 3) | (\ord($v[$i + 3]) - 48));
+                $i += 4;
+            } else {
+                throw self::badValue('bytea');
+            }
+        }
+        return $out;
     }
 
     public function rowCount(): int { return $this->res === null ? 0 : $this->res->affected; }

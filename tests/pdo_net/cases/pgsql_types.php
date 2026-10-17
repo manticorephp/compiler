@@ -28,6 +28,16 @@ $st = $db->prepare('select ?::int8');
 $st->bindValue(1, PHP_INT_MAX, PDO::PARAM_INT); $st->execute(); var_dump($st->fetchColumn());
 $st->bindValue(1, PHP_INT_MIN, PDO::PARAM_INT); $st->execute(); var_dump($st->fetchColumn());
 
+// float values (not NAN: php 8.5 warns when coercing it to a string): bound as a float (string form) and as PARAM_STR text
+$st = $db->prepare('select ?::float8, ?::text');
+foreach ([INF, -INF, 1e100, 0.1 + 0.2, -0.0, 1.5e-7, 123456789.12345678, 1.0] as $f) {
+    foreach ([PDO::PARAM_STR, PDO::PARAM_INT] as $ty) {
+        $st->bindValue(1, $f, $ty); $st->bindValue(2, $f, PDO::PARAM_STR); $st->execute(); $r = $st->fetch(PDO::FETCH_NUM);
+        echo $ty, ' ', is_nan($r[0]) ? 'NAN' : var_export($r[0], true), ' ', $r[1], "\n";
+    }
+}
+$st->execute(['-0', '-0']); $r = $st->fetch(PDO::FETCH_NUM); var_dump($r[0], $r[1]);
+
 // bind types
 $st = $db->prepare('select ?::text');
 foreach ([[true, PDO::PARAM_BOOL], [false, PDO::PARAM_BOOL], [3, PDO::PARAM_BOOL], [0, PDO::PARAM_BOOL], ['0', PDO::PARAM_BOOL],

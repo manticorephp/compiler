@@ -1,31 +1,56 @@
-huge: 08006 invalid message length
+huge: 08006 7 invalid message length
 fast
 no fd leak
-short: 08006 invalid message length
+short: 08006 7 invalid message length
 fast
 no fd leak
-authok_after_sasl: 08006 SCRAM exchange incomplete: server did not prove its identity
+authok_after_sasl: 08006 7 SCRAM exchange incomplete: server did not prove its identity
 fast
 no fd leak
-sasl_final_unsolicited: 08006 unexpected SCRAM message
+sasl_final_unsolicited: 08006 7 unexpected SCRAM message
 fast
 no fd leak
-truncated_datarow: 08006 protocol error: truncated message
+truncated_datarow: 08006 7 protocol error: truncated message
 fast
 no fd leak
-truncated_rowdesc: 08006 protocol error: truncated message
+truncated_rowdesc: 08006 7 protocol error: truncated message
 fast
 no fd leak
-copy_in: HY000 COPY is not supported
+copy_in: HY000 4 
 fast
 no fd leak
-paramdesc_truncated: 08006 protocol error: truncated message
+paramdesc_truncated: 08006 7 protocol error: truncated message
 fast
 no fd leak
-paramdesc_mismatch: 08P01 ERROR:  bind message supplies 1 parameters, but prepared statement "pdo_stmt_00000001" requires 2
+paramdesc_mismatch: 08P01 7 ERROR:  bind message supplies 1 parameters, but prepared statement "pdo_stmt_00000001" requires 2
 reuse: ok
 fast
 no fd leak
-datarow_overrun: 08006 protocol error: truncated message
+datarow_overrun: 08006 7 protocol error: truncated message
+fast
+no fd leak
+ext_copy_in: HY000 4 
+reuse: ok
+fast
+no fd leak
+ext_copy_out: HY000 3 
+reuse: ok
+fast
+no fd leak
+bytea_odd: HY000 - invalid bytea value from server
+reuse: ok
+fast
+no fd leak
+bytea_nonhex: HY000 - invalid bytea value from server
+fast
+no fd leak
+bytea_escape: ok 6100625c63
+fast
+no fd leak
+bytea_escape_bad: HY000 - invalid bytea value from server
+fast
+no fd leak
+int_garbage: HY000 - invalid integer value from server
+reuse: ok
 fast
 no fd leak

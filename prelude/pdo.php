@@ -157,6 +157,7 @@ final class __McPdo
         if ($state === '42000') { return 'Syntax error or access violation'; }
         if ($state === 'HY093') { return 'Invalid parameter number'; }
         // pdo_pgsql's server states (the rest of its table lands with the error mapping).
+        if ($state === '08P01') { return '<<Unknown error>>'; }
         if ($state === '22012') { return 'Division by zero'; }
         if ($state === '22021') { return 'Character not in repertoire'; }
         if ($state === '22P02') { return 'Invalid text representation'; }
@@ -165,9 +166,8 @@ final class __McPdo
         if ($state === '23505') { return 'Unique violation'; }
         if ($state === '42601') { return 'Syntax error'; }
         if ($state === '42703') { return 'Undefined column'; }
-        if ($state === '42809') { return 'Wrong object type'; }
-        if ($state === '08P01') { return '<<Unknown error>>'; }
         if ($state === '42P01') { return 'Undefined table'; }
+        if ($state === '42809') { return 'Wrong object type'; }
         if ($state === 'IM001') { return 'Driver does not support this function'; }
         return 'General error';
     }

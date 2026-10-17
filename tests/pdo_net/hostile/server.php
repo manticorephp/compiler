@@ -51,6 +51,36 @@ elseif ($mode === 'authok_after_sasl') {
         fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '')
             . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z);
     }
+} elseif (in_array($mode, ['ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape', 'bytea_escape_bad', 'int_garbage'], true)) {
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();                                               // Parse Describe Bind Execute Sync
+    $typed = fn (int $oid) => pack('n', 1) . "a\0" . pack('NnNnNn', 0, 0, $oid, -1 & 0xffff, 0xffffffff, 0);
+    $head = $msg('1', '') . $msg('t', pack('n', 0));
+    $ok2 = fn () => $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z;
+    if ($mode === 'ext_copy_in') {
+        // CopyInResponse inside an extended batch: the batch's Sync is ignored during COPY, so the client must send CopyFail AND another Sync
+        fwrite($c, $head . $msg('n', '') . $msg('2', '') . $msg('G', "\0" . pack('n', 0)));
+        $t1 = $rd(1); $l = unpack('N', $rd(4))[1]; $rd($l - 4);
+        $t2 = $rd(1); $l = unpack('N', $rd(4))[1]; $rd($l - 4);
+        if ($t1 === 'f' && $t2 === 'S') {
+            fwrite($c, $msg('E', "SERROR\0C57014\0MCOPY from stdin failed\0\0") . $z);
+            $batch();
+            fwrite($c, $ok2());
+        }
+    } elseif ($mode === 'ext_copy_out') {
+        fwrite($c, $head . $msg('n', '') . $msg('2', '') . $msg('H', "\0" . pack('n', 0)) . $msg('d', "1\n") . $msg('c', '') . $msg('C', "COPY 1\0") . $z);
+        $batch();
+        fwrite($c, $ok2());
+    } elseif ($mode === 'int_garbage') {
+        fwrite($c, $head . $msg('T', $typed(23)) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 3) . 'abc') . $msg('C', "SELECT 1\0") . $z);
+        $batch();
+        fwrite($c, $ok2());
+    } else {
+        $val = ['bytea_odd' => '\xabc', 'bytea_nonhex' => '\xzz', 'bytea_escape' => 'a\000b\\\\c', 'bytea_escape_bad' => 'a\9'][$mode];
+        fwrite($c, $head . $msg('T', $typed(17)) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', strlen($val)) . $val) . $msg('C', "SELECT 1\0") . $z);
+        $batch();
+        fwrite($c, $ok2());
+    }
 }
 $end = microtime(true) + 6;
 stream_set_timeout($c, 1);
