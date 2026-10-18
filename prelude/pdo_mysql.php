@@ -1202,8 +1202,7 @@ final class __McPdoMyWire
                 $this->inflight = false;
                 return [];
             }
-            // ⚠ never `return [null]` here: it poisons the NULL elements of the real rows below (#336)
-            if ($skip) { return ['']; }
+            if ($skip) { return [null]; }
             return $r->bin ? $this->parseBinRow($p, $r) : $this->parseRow($p, \count($r->types));
         } catch (\Throwable $e) {
             $r->done = true;

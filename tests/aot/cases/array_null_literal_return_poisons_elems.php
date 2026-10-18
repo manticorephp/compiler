@@ -1,6 +1,5 @@
 <?php
 // A `return [null]` beside a `return $row` of type array<int,?string> makes a NULL element of $row read back as "0".
-// issue: #336
 class W {
     /** @var array<int,int> */
     public array $types = [253, 6, 253];
