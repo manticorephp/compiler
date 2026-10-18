@@ -125,7 +125,9 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
 - Authentication: `mysql_native_password`, `caching_sha2_password` (fast path; full authentication
   over a plain socket RSA-encrypts the password through `openssl_public_encrypt`; every PDO program carries
   the openssl prelude for that),
-  auth switch between the two. `sha256_password`, `mysql_clear_password`, ed25519: `[2059]`.
+  auth switch between the two; `sha256_password` (cleartext + NUL inside TLS, RSA key exchange on a plain socket, as mysqlnd;
+  an unknown user makes the server fake this plugin, and the login ends in php's `[1045] Access denied`).
+  `mysql_clear_password`, MariaDB `ed25519` / `parsec`: `[2054] The server requested authentication method unknown to the client [<plugin>]`, as mysqlnd.
 - php reads no `user=` / `password=` DSN key for mysql (unlike pgsql): the constructor arguments rule.
 - `exec()` of several statements answers the FIRST statement's count and runs all of them; `query()`
   of several keeps every result for `nextRowset()` (the one driver where it is not IM001). A SELECT
@@ -139,6 +141,9 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
   bounded; the idle wait for the START of a response, while the server runs the statement, is unbounded unless the
   program set `ATTR_TIMEOUT` itself (constructor options or `setAttribute`), which then also bounds that wait (superset
   behaviour). Async cancellation / scope deadlines are the idiomatic way to bound a statement.
+- Cancellation: a query abandoned mid-flight (fiber cancelled, `ATTR_TIMEOUT` expired; not on EOF) is stopped on the server with
+  `KILL QUERY <connection id>` from a second connection with the same credentials and TLS options (about 2 s at most, every error
+  swallowed, run under `Async\shield`); the handle itself is dead (`2006`), as php. `mysql_async_cancel` proves the query is gone from `information_schema.processlist`.
 - `MYSQL_ATTR_LOCAL_INFILE=true` throws at connect (`LOCAL INFILE is not supported`).
 - Errors: an ERR packet becomes `SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry ...`
   (state from the packet's `#` marker, descriptions from the shared 266-row table, unlisted states read
@@ -216,6 +221,23 @@ ahead of the next command), and a close on a dead connection is a no-op. Everyth
   placeholder count differs from the scanner's: that is a local, non-fatal `HY000 1210` raised before anything is sent, and the
   connection stays usable.
 
+### MariaDB
+
+`bash tests/pdo_net/run.sh --server mariadb -k mysql_` runs the same `mysql_*` cases against `mc-maria` (mariadb:11, `:33061`; `--server mysql` is the default,
+`mc-my`). Each case is graded against live php on THAT server. A case header line `// servers: mysql` (or `mariadb`) limits it; MySQL-only: the
+caching_sha2 / TLS / `mysql_native_password` login cases and the three global-state native-prepare cases (they need `mc-my-iso`).
+
+Supported, byte-identical to php/mysqlnd on mariadb:11 in the suite: `mysql_native_password`, text and binary protocol, `INSERT ... RETURNING` / `DELETE ... RETURNING`
+through `query()` and `prepare()`/`execute()` (`rowCount`, `columnCount`, rows; `lastInsertId` stays `0`, as php), the JSON (a BLOB-flagged text), `UUID` and `INET6` column
+types (`getColumnMeta`), MariaDB error texts and codes (always the server's own, never a hard-coded MySQL string), the `5.5.5-` replication prefix of `ATTR_SERVER_VERSION`
+(stripped as mysqlnd does), the optional `Flush tables:` of `ATTR_SERVER_INFO`. A PARAM_BOOL / bool-typed parameter of the binary protocol travels as TINY (MariaDB reports that
+column type back, MySQL widens it). The driver sends no MariaDB extended capability flags and reads none.
+
+Not supported: `ed25519` / `parsec` logins (`[2054]`, as php), `COM_RESET_CONNECTION` (never sent).
+
+Where the driver deliberately differs from php (both servers): `exec()` of a statement that returns rows (`SELECT`, `... RETURNING`) answers `0` and the connection stays
+usable; php (measured, 8.5, both servers) leaves the result pending and fails EVERY later command on that handle with `2014 Cannot execute queries while other unbuffered queries are active`.
+Reproducing that wedge was judged a footgun, not a feature.
 ## `pgsql:` TLS (prelude/pdo_pgsql.php)
 
 DSN keys, graded against libpq: `sslmode` = `disable | allow | prefer` (default) `| require | verify-ca | verify-full`, `sslrootcert`,
