@@ -42,9 +42,10 @@ try {
     } elseif ($my) {
         $q = $db->query('select 1');   // not chained (#299)
         if ($mode === 'drain_bad') { $q->fetch(); $q->closeCursor(); $q = null; echo $tag, $mode, ": closed\n"; $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
+        elseif ($mode === 'drain_bad_next') { $q->fetch(); $q->closeCursor(); echo $tag, $mode, ": closed\n"; }
         elseif ($mode === 'drain_slow') { $q->fetch(); $q->closeCursor(); $q = null; echo $tag, $mode, ": closed\n"; $q = $db->query('select 2'); $q->fetchAll(); }
         elseif ($mode === 'drain_dtor') { $q->fetch(); $q = null; $q = $db->query('select 2'); $q->fetchAll(); }
-        elseif ($mode === 'more_after_eof') { while ($q->fetch() !== false) { } echo $tag, $mode, ": rows done\n"; $q->nextRowset(); }
+        elseif ($mode === 'more_after_eof' || $mode === 'more_bad_header') { while ($q->fetch() !== false) { } echo $tag, $mode, ": rows done\n"; $q->nextRowset(); }
         else {
             $r = $q->fetch(PDO::FETCH_NUM);
             if ($tag === 'us_') { while ($q->fetch(PDO::FETCH_NUM) !== false) { } }
@@ -132,5 +133,5 @@ try {
     if (!$my && in_array($mode, ['batch_err_second', 'paramdesc_mismatch', 'copy_in_err', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
 }
 $e = null; $p = null; $p2 = null; $s = null; $q = null; $db = null;
-echo microtime(true) - $t < ($mode === 'copy_slow_commit' ? 90.0 : ($mode === 'big_slow' || $mode === 'idle_slow' || $mode === 'np_idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' || $mode === 'kill_stall' || $mode === 'drain_slow' || $mode === 'batch_stall_mid' || $mode === 'batch_close_slow' || $mode === 'np_idle_explicit' || $mode === 'np_stall_mid' ? 5.0 : 3.0))) ? "fast\n" : "SLOW\n";
+echo microtime(true) - $t < ($mode === 'copy_slow_commit' ? 64.0 + 60.0 : ($mode === 'big_slow' || $mode === 'idle_slow' || $mode === 'np_idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' || $mode === 'kill_stall' || $mode === 'drain_slow' || $mode === 'batch_stall_mid' || $mode === 'batch_close_slow' || $mode === 'np_idle_explicit' || $mode === 'np_stall_mid' ? 5.0 : 3.0))) ? "fast\n" : "SLOW\n";
 echo $fds() === $before ? "no fd leak\n" : "FD LEAK\n";

@@ -189,6 +189,8 @@ while (true) {
     elseif ($mode === 'rows_badseq') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $pkt(9, $ls('y')) . $eof(10)); }
     elseif ($mode === 'drain_bad') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $pkt(5, "\xfc\xe8\x03abc") . $eof(6)); }   // well framed, content nobody reads
     elseif ($mode === 'drain_dtor') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . substr($pkt(5, $ls('yyyy')), 0, 6)); fclose($c); exit; }
+    // more results promised, then a header that is not one: found by nextRowset() (more_bad_header) or by the drain of closeCursor() (drain_bad_next)
+    elseif ($mode === 'more_bad_header' || $mode === 'drain_bad_next') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $eof(5, 2 | 8) . $pkt(6, "\xfd\x40\x42\x0f")); }
     elseif ($mode === 'more_after_eof') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $eof(5, 2 | 8)); fclose($c); exit; }
     elseif ($mode === 'bad_seq_query') { fwrite($c, $pkt(7, "\x00\x00\x00\x02\x00\x00\x00")); }
     elseif ($mode === 'more_forever') { fwrite($c, $ok(1, 2 | 8)); fclose($c); exit; }

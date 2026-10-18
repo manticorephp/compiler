@@ -1077,7 +1077,7 @@ final class __McPdoPgWire
             } elseif ($t === 'H') {
                 $copy = 3;
             } elseif ($t === 'Z') {
-                if (\strlen($b) < 1) { throw $this->truncated(); }
+                if (\strlen($b) < 1 || !$synced) { throw $this->truncated(); }
                 $this->status = $b[0];
                 $this->inflight = false;
                 $this->pendErr = '';
@@ -1830,8 +1830,8 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
     {
         try {
             $this->endCursor();
-        } catch (PDOException $e) {
-            // the connection is gone: the portal went with it
+        } catch (\Throwable $e) {
+            // the wire is poisoned by whatever failed (gone, cancelled, malformed): the portal went with the connection
         }
         if ($this->prepared && !$this->unnamed) {
             $this->prepared = false;

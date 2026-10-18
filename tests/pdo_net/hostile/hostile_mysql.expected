@@ -338,6 +338,13 @@ us_more_after_eof: rows done
 us_more_after_eof: HY000 2006 MySQL server has gone away
 fast
 no fd leak
+us_more_bad_header: rows done
+us_more_bad_header: HY000 2027 Malformed packet (column count)
+fast
+no fd leak
+us_drain_bad_next: HY000 2027 Malformed packet (column count)
+fast
+no fd leak
 us_int_garbage: HY000 - invalid integer value from server
 reuse: ok
 fast

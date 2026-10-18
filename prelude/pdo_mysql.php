@@ -1156,11 +1156,9 @@ final class __McPdoMyWire
                 $this->inflight = false;
                 return [];
             }
-            if ($skip) { return [null]; }
-            // ⚠ the annotation is load-bearing: through a bare ternary the NULL element of the row reads back as "0"
-            /** @var array<int,?string> */
-            $row = $r->bin ? $this->parseBinRow($p, $r) : $this->parseRow($p, \count($r->types));
-            return $row;
+            // ⚠ never `return [null]` here: it poisons the NULL elements of the real rows below (#336)
+            if ($skip) { return ['']; }
+            return $r->bin ? $this->parseBinRow($p, $r) : $this->parseRow($p, \count($r->types));
         } catch (\Throwable $e) {
             $r->done = true;
             $this->openCursor = null;
@@ -1204,7 +1202,6 @@ final class __McPdoMyWire
             return;
         }
         $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + $this->timeout : 0.0;
-        $n = 0;
         while ($this->openCursor !== null) {
             $c = $this->openCursor;
             if ($c->done) {
@@ -1212,7 +1209,7 @@ final class __McPdoMyWire
                 continue;
             }
             if (\count($this->cursorRow($c, true)) === 0) { continue; }
-            if ((++$n & 15) === 0 && $dl > 0.0 && \__mc_monotonic_f() >= $dl) {
+            if ($dl > 0.0 && \__mc_monotonic_f() >= $dl) {
                 $this->openCursor = null;
                 $this->closeSock();
                 return;
@@ -2010,8 +2007,8 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     {
         try {
             $this->endCursor();
-        } catch (PDOException $e) {
-            // the connection is gone: the cursor went with it
+        } catch (\Throwable $e) {
+            // the wire is poisoned by whatever failed (gone, cancelled, malformed): the cursor went with the connection
         }
         $this->res = null;
         $this->head = null;
