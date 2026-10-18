@@ -85,6 +85,10 @@ for f in tests/pdo_net/cases/*.php; do
     if ! grep -q "expects-connect-failure" "$f" && grep -Eq "\[200[23]\]|Connection refused|could not connect|Connection to server" <<<"$exp$act"; then
         echo "FAIL $n (unexpected connection failure in the output, server probed reachable)"; fail=$((fail+1)); continue
     fi
+    # a key file libpq / the driver refuses as too open: php and native refuse alike, so the case would pass without testing the client-certificate lines.
+    # `// key-perms-refusals: N` in a case names the deliberate ones.
+    kp=$(grep -c 'has group or world access' <<<"$act"); okp=$(sed -n 's|^// key-perms-refusals: *||p' "$f" | head -n 1)
+    if [ "$kp" -gt "${okp:-0}" ]; then echo "FAIL $n ($kp key-permission refusal(s), ${okp:-0} expected: the key file is too open for the check to mean anything)"; fail=$((fail+1)); continue; fi
     if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1)); real=$((real+1))
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
 done

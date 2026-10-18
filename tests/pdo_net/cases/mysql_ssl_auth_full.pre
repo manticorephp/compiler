@@ -1,7 +1,3 @@
 #!/bin/bash
-# Empties the auth cache so the next login of u/pw is a caching_sha2 FULL authentication.
-# Exits non-zero when it cannot (no docker, no mc-my, PDO_MY_DSN elsewhere): run.sh then SKIPs the case.
-command -v docker >/dev/null 2>&1 || { echo "mysql_ssl_auth_full.pre: docker not found" >&2; exit 3; }
-[ "$(docker inspect -f '{{.State.Running}}' mc-my 2>/dev/null)" = true ] || { echo "mysql_ssl_auth_full.pre: container mc-my is not running" >&2; exit 3; }
-case "${PDO_MY_DSN-}" in *port=33060*) ;; *) echo "mysql_ssl_auth_full.pre: PDO_MY_DSN does not point at mc-my (:33060)" >&2; exit 3 ;; esac
-docker exec mc-my mysql -h 127.0.0.1 -uroot -ppw -e "flush privileges" 2>/dev/null || { echo "mysql_ssl_auth_full.pre: flush privileges failed" >&2; exit 3; }
+# Empties the auth cache so the next login of u/pw is a caching_sha2 FULL authentication (root over PDO, see flush_privileges.php).
+exec php -d xdebug.mode=off "$(dirname "$0")/../flush_privileges.php"

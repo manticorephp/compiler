@@ -1,5 +1,6 @@
 <?php
 // expects-connect-failure: every sslmode against a server with and without TLS, certificate checks, client certificates
+// key-perms-refusals: 1
 $dir = getenv('PDO_SSL_DIR');
 $home = getenv('HOME');
 $try = function (string $label, string $dsn, string $u = 'u', ?string $p = 'pw', array $o = []) use ($dir, $home) {
