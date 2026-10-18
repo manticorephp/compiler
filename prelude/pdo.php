@@ -857,14 +857,12 @@ class PDO
     /**
      * Superset (no Zend oracle): returns the session to a fresh-connection state, see {@see __McPdoDrv::reset()}.
      * Statements prepared before the call are invalid afterwards.
+     * Always throws PDOException on failure, in every error mode.
      */
     public function resetSession(): void
     {
-        try {
-            $this->drv->reset();
-        } catch (PDOException $e) {
-            $this->note($e, 'PDO::resetSession');
-        }
+        // never routed through the error mode: a pool must learn that a connection could not be reset, whatever ERRMODE says
+        $this->drv->reset();
     }
 
     /** Superset: true when the server still answers; a lost connection is false, never an exception. */

@@ -349,8 +349,9 @@ They are the `reset()` / `ping()` methods of the driver seam and what [`Async\Po
 |---|---|---|
 | sqlite | rolls back an open transaction | always true |
 | pgsql | closes an open batched portal, `ROLLBACK` if a transaction is open, then `DISCARD ALL` (session settings, temp tables, prepared statements, advisory locks, `LISTEN`s) | an empty query (one round trip) |
-| mysql / MariaDB | drains an unbuffered result (bounded by the connection timeout), drops the `COM_STMT_CLOSE`s still owed, `COM_RESET_CONNECTION` (rollback, session variables, temp tables, prepared statements), then re-runs `MYSQL_ATTR_INIT_COMMAND`; `ATTR_AUTOCOMMIT` is back to the server default (on) | `COM_PING` |
+| mysql / MariaDB | drains an unbuffered result (bounded by the connection timeout), drops the `COM_STMT_CLOSE`s still owed, `COM_RESET_CONNECTION` (rollback, session variables, temp tables, prepared statements), then restores the construction-time session: `SET NAMES <DSN charset>`, `ATTR_AUTOCOMMIT` (re-applied when the constructor option was false; the driver flag follows) and `MYSQL_ATTR_INIT_COMMAND` | `COM_PING` |
 
+`resetSession()` throws `PDOException` in **every** error mode (silent and warning included): a caller that pools connections must learn that a connection could not be reset.
 Both honour the busy gate (another fiber's statement finishes first) and an open cursor of the calling fiber
 (`ping()` answers false, `resetSession()` closes it). Statements prepared before a reset are invalid afterwards
 (mysql ids carry a generation, so a stale statement object never closes a newer statement of the same id).

@@ -127,16 +127,16 @@ async(function () {
 
     // maxLifetime recreates; idleTimeout recreates
     Conn::$made = 0;
-    $pool = new Pool(fn() => new Conn(), 1, null, null, 0.05);
+    $pool = new Pool(fn() => new Conn(), 1, null, null, 0.2);
     $c = $pool->acquire(); $id1 = $c->id; $pool->release($c);
     $c = $pool->acquire(); $same = $c->id === $id1; $pool->release($c);
-    delay(0.08);
+    delay(0.5);
     $c = $pool->acquire(); $new = $c->id !== $id1; $pool->release($c);
     echo "lifetime: reused=", $same ? "yes" : "no", " recreated=", $new ? "yes" : "no", "\n";
     Conn::$made = 0;
-    $pool = new Pool(fn() => new Conn(), 1, null, null, 0.0, 0.05);
+    $pool = new Pool(fn() => new Conn(), 1, null, null, 0.0, 0.2);
     $c = $pool->acquire(); $id1 = $c->id; $pool->release($c);
-    delay(0.08);
+    delay(0.5);
     $c = $pool->acquire(); echo "idle: recreated=", $c->id !== $id1 ? "yes" : "no", " idle=", $pool->stats()['idle'], "\n";
     $pool->release($c);
 
@@ -160,5 +160,37 @@ async(function () {
     $pool->release($a);
     echo "closed log=", $closed->log, "\n";
     try { $pool->acquire(); } catch (RuntimeException $e) { echo "after close: ", $e->getMessage(), "\n"; }
+
+    // max < 1 is refused, not clamped
+    try { new Pool(fn() => new Conn(), 0); echo "max: MISSING\n"; } catch (ValueError $e) { echo "max: ValueError\n"; }
+
+    // with(): a PDOException of SQLSTATE class 08 discards, any other returns the connection
+    Conn::$made = 0;
+    $pool = new Pool(fn() => new Conn(), 1);
+    foreach (['08006', '23505'] as $state) {
+        try {
+            $pool->with(function () use ($state) { $e = new PDOException('x'); $e->sqlstate = $state; throw $e; });
+        } catch (PDOException $e) {}
+        $s = $pool->stats();
+        echo "sqlstate ", $state, ": idle=", $s['idle'], " discarded=", $s['discarded'], "\n";
+    }
+
+    // a reset that throws inside with()'s finally discards; the body's result still returns
+    Conn::$made = 0;
+    $pool = new Pool(fn() => new Conn(), 1, function () { throw new RuntimeException('reset'); });
+    echo "with result=", $pool->with(fn(Conn $c) => 'r' . $c->id), "\n";
+    $s = $pool->stats();
+    echo "reset threw: idle=", $s['idle'], " busy=", $s['busy'], " discarded=", $s['discarded'], "\n";
+
+    // close() between a hand-off and the waiter resuming: the grant is dropped, the waiter gets the exception
+    Conn::$made = 0;
+    $pool = new Pool(fn() => new Conn(), 1, null, null, 0.0, 0.0, function (Conn $c) use ($closed) { $closed->log .= 'd'; });
+    $closed->log = '';
+    $a = $pool->acquire();
+    $w = spawn(function () use ($pool) { try { $pool->acquire(); return 'got'; } catch (RuntimeException $e) { return 'closed'; } });
+    delay(0.01);
+    $pool->release($a);   // hands to $w (woken, not yet running)
+    $pool->close();
+    echo $w->await(), " log=", $closed->log, " busy=", $pool->stats()['busy'], " idle=", $pool->stats()['idle'], "\n";
     echo "pooled\n";
 });

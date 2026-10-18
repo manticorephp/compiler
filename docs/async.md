@@ -395,7 +395,7 @@ $pool = Async\Pool::pdo('pgsql:host=db;dbname=app', 'u', 'pw', [PDO::ATTR_ERRMOD
 $rows = $pool->with(fn(PDO $db) => $db->query('select ...')->fetchAll());
 ```
 
-`new Async\Pool(callable $factory, int $max, ?callable $reset = null, ?callable $ping = null, float $maxLifetime = 0.0, float $idleTimeout = 0.0, ?callable $close = null)`;
+`max` below 1 is a `ValueError`. `new Async\Pool(callable $factory, int $max, ?callable $reset = null, ?callable $ping = null, float $maxLifetime = 0.0, float $idleTimeout = 0.0, ?callable $close = null)`;
 `Pool::pdo($dsn, $user, $pass, $options, $max)` wires `reset` to `PDO::resetSession()` and `ping` to `PDO::ping()`.
 
 | call | behaviour |
@@ -403,8 +403,8 @@ $rows = $pool->with(fn(PDO $db) => $db->query('select ...')->fetchAll());
 | `acquire(?float $timeout = null)` | an idle object, a new one while fewer than `max` exist, else parks FIFO. `Async\TimeoutException` when `$timeout` expires first. A closed pool throws `RuntimeException`. |
 | `release($conn)` | runs `reset` (under `shield`, so it may suspend), then hands the object to the first waiter or keeps it idle. A `reset` that throws discards the object. A second release, or an object that is not checked out from this pool, is a `LogicException`. |
 | `discard($conn)` | throws the object away (the capacity it held goes to the first waiter). |
-| `with($fn)` | acquire, `$fn($conn)`, release in `finally`. A `CancelledException`, or a `PDOException` of SQLSTATE class `08`, discards instead of returning. |
-| `close()` | refuses new acquires, wakes every waiter with a `RuntimeException`, drops the idle objects; objects still checked out are dropped when they come back. |
+| `with($fn)` | acquire, `$fn($conn)`, release in `finally`. A `CancelledException`, or a `PDOException` whose `sqlstate` is class `08`, discards instead of returning (a lost connection is mostly `HY000` here, which `ping` at the next acquire catches). |
+| `close()` | refuses new acquires, wakes every waiter with a `RuntimeException`, drops the idle objects; objects still checked out are dropped when they come back, and a waiter that was handed an object before `close()` but had not resumed yet gives it back and gets the same exception. |
 | `stats()` | `array<string,int>`: `idle`, `busy`, `waiting`, `created`, `discarded`. |
 
 Guarantees: at most `max` live objects; waiters are served in arrival order and a newcomer never overtakes one;

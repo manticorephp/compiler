@@ -3,6 +3,9 @@ pooled
 created=<=10 busy=0 waiting=0
 same connection=yes inTransaction=false tempTable=false application_name=''
 replaced=yes created=2 discarded=1
+silent reset threw
+failed reset: idle=0 discarded=1
+next ok=1
 ping=true
 reset: inTransaction=false
 dead ping=false

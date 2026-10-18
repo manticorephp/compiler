@@ -18,4 +18,10 @@ ping false: id=2 pings=1
 Async\Pool is closed | Async\Pool is closed
 closed log=c
 after close: Async\Pool is closed
+max: ValueError
+sqlstate 08006: idle=0 discarded=1
+sqlstate 23505: idle=1 discarded=1
+with result=r1
+reset threw: idle=0 busy=0 discarded=1
+closed log=d busy=0 idle=0
 pooled

@@ -51,6 +51,23 @@ async(function () {
     echo "replaced=", $pid2 !== $pid ? "yes" : "no", " created=", $s['created'], " discarded=", $s['discarded'], "\n";
     $pool->close();
 
+    // resetSession() throws in EVERY error mode; a pool whose reset fails discards the connection
+    $silent = [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT];
+    $admin = new PDO(dsn(), getenv("PDO_USER") ?: "u", getenv("PDO_PASS") ?: "pw", opts());
+    $db = new PDO(dsn(), getenv("PDO_USER") ?: "u", getenv("PDO_PASS") ?: "pw", $silent);
+    $admin->query("select pg_terminate_backend(" . (int) $db->query("select pg_backend_pid()")->fetchColumn() . ")")->fetchAll();
+    delay(0.2);
+    try { $db->resetSession(); echo "silent reset: MISSING\n"; } catch (PDOException $e) { echo "silent reset threw\n"; }
+    $pool = Pool::pdo(dsn(), getenv("PDO_USER") ?: "u", getenv("PDO_PASS") ?: "pw", $silent, 1);
+    $pool->with(function (PDO $d) use ($admin) {
+        $admin->query("select pg_terminate_backend(" . (int) $d->query("select pg_backend_pid()")->fetchColumn() . ")")->fetchAll();
+        delay(0.2);
+    });
+    $s = $pool->stats();
+    echo "failed reset: idle=", $s["idle"], " discarded=", $s["discarded"], "\n";
+    echo "next ok=", $pool->with(fn(PDO $d) => (int) $d->query("select 1")->fetchColumn()), "\n";
+    $pool->close();
+
     // PDO::ping / resetSession on a plain connection
     $db = new PDO(dsn(), getenv("PDO_USER") ?: "u", getenv("PDO_PASS") ?: "pw", opts());
     echo "ping=", var_export($db->ping(), true), "\n";

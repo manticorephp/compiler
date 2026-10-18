@@ -1639,7 +1639,8 @@ namespace Async {
                                     float $maxLifetime = 0.0, float $idleTimeout = 0.0, ?callable $close = null)
         {
             $this->factory = $factory;
-            $this->max = $max < 1 ? 1 : $max;
+            if ($max < 1) { throw new \ValueError('Async\\Pool::__construct(): Argument #2 ($max) must be greater than 0'); }
+            $this->max = $max;
             $this->reset = $reset;
             $this->ping = $ping;
             $this->maxLifetime = $maxLifetime;
@@ -1656,6 +1657,8 @@ namespace Async {
          */
         public static function pdo(string $dsn, ?string $user, ?string $pass, array $options, int $max): Pool
         {
+            // No class_exists() guard: PDO links on the demand gate (the identifier `pdo` of a call to this method is
+            // enough), and `new $cls` resolves against the linked classes.
             $cls = 'PDO';
             return new Pool(
                 function () use ($cls, $dsn, $user, $pass, $options): object { return new $cls($dsn, $user, $pass, $options); },
@@ -1730,8 +1733,8 @@ namespace Async {
             try {
                 return $fn($c);
             } catch (\Throwable $e) {
-                if ($e instanceof CancelledException
-                    || (\is_a($e, 'PDOException') && \strncmp((string) $e->getCode(), '08', 2) === 0)) {
+                // PDOException is named by string (the PDO gate must not follow Async\); its SQLSTATE is the `sqlstate` property
+                if ($e instanceof CancelledException || (\is_a($e, 'PDOException') && \strncmp($e->sqlstate, '08', 2) === 0)) {
                     $bad = true;
                 }
                 throw $e;
@@ -1812,7 +1815,13 @@ namespace Async {
                 }
                 throw $t;
             }
-            if ($w->closed) { throw new \RuntimeException('Async\\Pool is closed'); }
+            if ($w->closed || $this->closed) {
+                // close() ran after the grant and before this task resumed: give the grant back (a closed pool drops it)
+                if ($w->granted) {
+                    if ($w->entry !== null) { $this->settle($w->entry); } else { $this->free(); }
+                }
+                throw new \RuntimeException('Async\\Pool is closed');
+            }
             return $w->entry;
         }
 

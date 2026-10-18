@@ -1436,12 +1436,19 @@ final class __McPdoMy implements __McPdoDrv
     /** MYSQL_ATTR_INIT_COMMAND: a session reset wipes what it set up, so it runs again. */
     public string $initCmd = '';
 
-    /** COM_RESET_CONNECTION; the server's own defaults apply afterwards (autocommit on), then the init command runs again. */
+    /** The connection-time ATTR_AUTOCOMMIT and DSN charset: what a reset returns the session to. */
+    public bool $baseAutocommit = true;
+    public string $baseCharset = '';
+
+    /** COM_RESET_CONNECTION, then the session is set up again as the constructor did: charset, ATTR_AUTOCOMMIT, init command. */
     public function reset(): void
     {
         $e = $this->wire->resetConnection();
         if ($e !== null) { throw self::errFrom($e); }
-        $this->autocommit = true;
+        // the server's defaults apply after a reset; the handshake charset is lost with them
+        if ($this->baseCharset !== '') { $this->run('SET NAMES ' . $this->baseCharset); }
+        $this->autocommit = $this->baseAutocommit;
+        if (!$this->baseAutocommit) { $this->run('SET autocommit=0'); }
         if ($this->initCmd !== '') { $this->run($this->initCmd); }
     }
 
@@ -2141,6 +2148,8 @@ function __mc_pdo_mysql_open(string $rest, array $options, ?string $user, ?strin
         throw $e;
     }
     $drv = new __McPdoMy($wire);
+    $drv->baseCharset = $charset;
+    $drv->baseAutocommit = !isset($options[PDO::ATTR_AUTOCOMMIT]) || (bool) $options[PDO::ATTR_AUTOCOMMIT];
     $drv->unbuffered = isset($options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY]) && !(bool) $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY];
     // ⚠ #318: reading an option with a (string) cast beside (float) $options[ATTR_TIMEOUT] crashes; is_string() does not
     $init = isset($options[PDO::MYSQL_ATTR_INIT_COMMAND]) ? $options[PDO::MYSQL_ATTR_INIT_COMMAND] : null;
