@@ -57,17 +57,18 @@ Adding a driver means: implement `__McPdoDrv` + `__McPdoDrvStmt`, add one arm to
 `match` in `PDO::__construct`, and add the driver to the gate in `Main.php`.
 
 **The driver gate.** A DSN scheme is a runtime **string** and `PreludeDemand` is token-based, so the compiler cannot know which
-driver `new PDO($dsn)` will open. It keys on the driver NAME appearing anywhere in the program as code or inside a string
-literal (`'pgsql:host=..'`, `PDO::PGSQL_ATTR_FETCH_BATCH`, `pgsqlCopyToArray`):
+driver `new PDO($dsn)` will open. It reads the construction sites instead (`new PDO(..)`, `PDO::connect(..)`):
 
-- a program that names at least one of `sqlite` / `pgsql` / `mysql` links sqlite plus the ones it names; the other network driver is
-  replaced by its `*_off.php` stand-in and `new PDO('<other>:..')` throws `could not find driver`;
-- a program that names none (a fully dynamic DSN: `new PDO(getenv('DSN'))`) gets every driver;
-- a program that names one driver but builds a DSN for another at run time (`new PDO($env ?? 'sqlite::memory:')` run with a `pgsql:`
-  value) hits the stand-in. Spell the scheme once in the source (any string literal containing `pgsql` is enough) to link it.
+- when EVERY site starts its DSN with a literal `<driver>:` (`new PDO('sqlite::memory:')`, `new PDO("pgsql:host={$h}")`), the program links sqlite plus
+  the drivers those literals name; the other network driver is replaced by its `*_off.php` stand-in and opening it throws
+  `could not find driver (pdo_pgsql is not linked: ...)`;
+- any other site (a variable DSN, `getenv('DSN') ?: 'sqlite::memory:'`, a call, `class X extends PDO`), or a program with no site at all
+  (`function repo(PDO $db)` only), links every driver. A sqlite-only program that builds its DSN in a variable therefore pays for both network drivers;
+- the one hole is a site the scan cannot see (`new $cls('pgsql:..')` with a class name in a variable): spell a literal `pgsql:` DSN anywhere in a `new PDO(..)` to link it.
 
-The point is compile time: loading both network drivers into a sqlite-only program cost about 40% of its compile time (measured on
-`pdo_sqlite_basic`); the gate removes it. Tests: `pdo_gate_sqlite_only`, `pdo_gate_dynamic_dsn`.
+The point is compile time: loading both network drivers (and the openssl prelude they need) into a small sqlite program cost about 40% of its compile
+time (19.5 s against 13.7 s measured on `pdo_sqlite_basic`); with the gate it compiles as fast as before the drivers existed. Tests:
+`pdo_gate_sqlite_only`, `pdo_gate_pgsql_only`, `pdo_gate_dynamic_dsn`.
 
 ## Why there are no trampolines here
 
@@ -459,7 +460,7 @@ fixed in this tree.
 
 ## Tests
 
-`tests/aot/cases/pdo_sqlite_*.php` — seven cases, every one graded against the **real `php`
+`tests/aot/cases/pdo_sqlite_*.php` — thirteen cases, every one graded against the **real `php`
 interpreter**, since this host's php has `pdo_sqlite`. No expected output was hand-written.
 
 ```bash

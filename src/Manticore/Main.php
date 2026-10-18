@@ -4808,21 +4808,15 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // the way curl and pcntl do — and a program that only writes
     // `function repo(PDO $db)` calls nothing at all.
     $usePdo = $demand->mentionsAny(['PDO', 'PDOStatement', 'PDOException', 'PDORow']);
-    // ⚠ The sqlite driver rides the facade unconditionally, because a DSN scheme
-    // is a runtime STRING and PreludeDemand is token-based: nothing at compile
-    // time can tell which driver `new PDO($dsn)` will open. One driver exists,
-    // so loading it with the facade is honest. When a second driver lands, this
-    // splits the same way curl_multi does — on the driver's own class names.
+    // The sqlite driver rides the facade unconditionally. The network drivers (pgsql, mysql) are a few
+    // thousand lines each and cost ~40% of a small program's compile time, so they load only when the program can
+    // open them: a DSN scheme is a runtime STRING, so the gate reads the construction sites (see
+    // PreludeDemand::opensDriver). Every `new PDO('<driver>:..')` spelling its scheme as a literal narrows the set to
+    // those drivers; any other site (a variable DSN, a call, `extends PDO`) or no site at all keeps every driver.
+    // A driver left out is replaced by a stand-in that answers "could not find driver" and says why.
     $usePdoSqlite = $usePdo;
-    // The network drivers split on the driver NAME appearing in the program (a DSN
-    // scheme literal, a PDO::PGSQL_ATTR_* constant, a pgsql* method). A program that
-    // names none of the three has a fully dynamic DSN and gets every driver; one that
-    // names some gets those, and the others answer "could not find driver" from a stub.
-    $namesPgsql = $demand->namesDriver("pgsql");
-    $namesMysql = $demand->namesDriver("mysql");
-    $dsnUnknown = !$namesPgsql && !$namesMysql && !$demand->namesDriver("sqlite");
-    $usePdoPgsql = $usePdo && ($namesPgsql || $dsnUnknown);
-    $usePdoMysql = $usePdo && ($namesMysql || $dsnUnknown);
+    $usePdoPgsql = $usePdo && $demand->opensDriver("pgsql");
+    $usePdoMysql = $usePdo && $demand->opensDriver("mysql");
     // PDO::ERRMODE_WARNING routes through trigger_error, which lives in
     // errors.php — and the demand gate cannot see a call made from the prelude
     // itself, only one made from user code.
@@ -4848,8 +4842,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // enrols it automatically. The class arm matters because a program can take
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.
     // pdo_mysql's caching_sha2_password full authentication RSA-encrypts the password from the prelude, which the
-    // demand gate cannot see: any PDO program carries the openssl prelude (OpenSSL itself is linked into every binary).
-    $useOpenssl = $usePdo || $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
+    // demand gate cannot see: a program that can open a network driver carries the openssl prelude (OpenSSL itself is linked into every binary).
+    $useOpenssl = $usePdoPgsql || $usePdoMysql || $demand->callsAny(\Compile\Mir\PreludeDemand::definedFunctions($opensslSrc))
         || $demand->mentionsAny(['OpenSSLAsymmetricKey', 'OpenSSLCertificate', 'OpenSSLCertificateSigningRequest']);
     // ext/intl over the host ICU: gated on its functions and its classes, so a
     // program that uses neither never links libicu.

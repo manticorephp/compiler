@@ -1,5 +1,4 @@
 1
 bool(false)
 bool(false)
-bool(true)
-could not find driver
+could not find driver (pdo_pgsql is not linked: ever
