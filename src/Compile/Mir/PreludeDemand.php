@@ -29,6 +29,8 @@ final class PreludeDemand
     private array $methods = [];
     /** @var array<string,bool> lowercased identifiers appearing anywhere in code */
     private array $names = [];
+    /** @var array<string,bool> driver names (pgsql, mysql, sqlite) seen inside a string literal or an identifier */
+    private array $drivers = [];
     /** `yield from` occurs: its lowering calls the prelude's `__mc_yf_gen`. */
     private bool $yieldFrom = false;
 
@@ -112,6 +114,20 @@ final class PreludeDemand
             if (isset($this->names[\strtolower($n)])) { return true; }
         }
         return false;
+    }
+
+    /** A PDO driver name occurs in code or in a string literal (a DSN scheme, `PDO::PGSQL_ATTR_*`, `pgsqlCopyToArray`). */
+    public function namesDriver(string $driver): bool
+    {
+        return isset($this->drivers[$driver]);
+    }
+
+    private function noteDrivers(string $text): void
+    {
+        $l = \strtolower($text);
+        foreach (["pgsql", "mysql", "sqlite"] as $d) {
+            if (\str_contains($l, $d)) { $this->drivers[$d] = true; }
+        }
     }
 
     /** The variable `$name` occurs (pass the bare name, no `$`). */
@@ -225,6 +241,7 @@ final class PreludeDemand
                 continue;
             }
             if ($kind === TokenKind::StringLiteral) {
+                $this->noteDrivers($t->lexeme);
                 $this->walkInterpolation($t->lexeme);
                 $i = $i + 1;
                 continue;
@@ -242,6 +259,7 @@ final class PreludeDemand
             }
             $lower = \strtolower($t->lexeme);
             $this->names[$lower] = true;
+            $this->noteDrivers($lower);
             if ($i + 1 >= $n || $toks[$i + 1]->kind !== TokenKind::OpenParen) {
                 $i = $i + 1;
                 continue;
