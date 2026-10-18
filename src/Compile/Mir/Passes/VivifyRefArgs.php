@@ -60,6 +60,21 @@ final class VivifyRefArgs implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /**
+     * The first of `$fnNames` that declares method `$method` (`Class__method`, keyed off the FIRST `__`).
+     * One rule for every pass that must resolve an erased receiver the same way.
+     *
+     * @param string[] $fnNames
+     */
+    public static function firstDeclarer(array $fnNames, string $method): string
+    {
+        foreach ($fnNames as $fname) {
+            $i = \strpos($fname, '__');
+            if ($i !== false && \substr($fname, $i + 2) === $method) { return $fname; }
+        }
+        return '';
+    }
+
     public function requires(): array { return [InferTypes::NAME]; }
 
     /** @var array<string, bool[]> mangled fn name → per-param by-ref mask */

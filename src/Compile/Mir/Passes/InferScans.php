@@ -3230,9 +3230,8 @@ trait InferScans
             $mc = $n;
             $recv = $mc->object->type->class ?? '';
             if ($recv === '') {
-                // An erased receiver (`Class|false` lowers to a plain cell): only a method NAME that exactly one class
-                // declares names its callee for certain — php fatals on a receiver that is not that class anyway.
-                $only = $this->soleDeclarer($mc->method);
+                // An erased receiver (`Class|false` lowers to a plain cell): the first declarer of the method NAME stands for the callee, as the emitter and VivifyRefArgs do.
+                $only = $this->anyDeclarerFn($mc->method);
                 if ($only === '') { return ''; }
                 $offset = 1;
                 return $only;
@@ -3265,21 +3264,15 @@ trait InferScans
     }
 
     /** @var array<string,string> */
-    private array $soleDeclarerMemo = [];
+    private array $anyDeclarerMemo = [];
 
-    /** `Class__method` when exactly one class declares `$method`, '' otherwise. */
-    private function soleDeclarer(string $method): string
+    /** The first function declaring `$method`: the rule {@see VivifyRefArgs} vivifies by, so both agree on an erased receiver. */
+    private function anyDeclarerFn(string $method): string
     {
-        if (isset($this->soleDeclarerMemo[$method])) { return $this->soleDeclarerMemo[$method]; }
-        $found = '';
-        $n = 0;
-        foreach ($this->classes as $cn => $cd) {
-            if (!isset($cd->methodNames[$method]) || !isset($this->fnByName[$cn . '__' . $method])) { continue; }
-            $n = $n + 1;
-            $found = $cn . '__' . $method;
+        if (!isset($this->anyDeclarerMemo[$method])) {
+            $this->anyDeclarerMemo[$method] = VivifyRefArgs::firstDeclarer(\array_keys($this->fnByName), $method);
         }
-        $this->soleDeclarerMemo[$method] = $n === 1 ? $found : '';
-        return $this->soleDeclarerMemo[$method];
+        return $this->anyDeclarerMemo[$method];
     }
 
     /** The arguments of a call node of any kind. @return Node[] */
