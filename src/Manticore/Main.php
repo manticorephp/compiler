@@ -1622,6 +1622,7 @@ function thinlto_link_flags(): string
  */
 function import_stdlib_decls(bool $emitLibrary, bool $runtime): bool
 {
+    CompileArgs::$stdlibDynf = [];
     if ($runtime) { return true; }
     foreach (collect_stdlib_extern_decls(!$emitLibrary) as $d) { CompileArgs::$externDecls[] = $d; }
     if (CompileArgs::$sigError !== '') {
@@ -1651,6 +1652,7 @@ function collect_stdlib_extern_decls(bool $withTypes = false): array
             if ($withTypes) {
                 import_stdlib_types($sigJson);
             }
+            CompileArgs::$stdlibDynf = Sig::dynfFromJson($sigJson);
             return Sig::declsFromJson($sigJson);
         }
     }
@@ -2238,6 +2240,20 @@ final class CompileArgs
      * @var string[]
      */
     public static array $weakSyms = [];
+
+    /**
+     * The stdlib `.sig`'s exported dynamic-call thunks (function => shape mask),
+     * read with its declarations and handed to {@see \Compile\Mir\Passes\EmitLlvm::$stdlibDynf}.
+     * @var array<string, int>
+     */
+    public static array $stdlibDynf = [];
+
+    /**
+     * The stdlib build's {@see \Compile\Mir\Passes\EmitLlvm::$dynfExports},
+     * captured after emission for its `.sig`.
+     * @var array<string, int>
+     */
+    public static array $dynfExports = [];
 
     /**
      * Bundled-stdlib signatures for declare-only extern injection, collected
@@ -3250,6 +3266,10 @@ function build_compile_module(
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = $emitLibrary;
         $emit->emitFiberAsm = $emitLibrary && \basename($output) === "manticore_stdlib.o";
+        // The stdlib (a library that imports no stdlib) exports the dynamic-call
+        // thunks every program used to build for itself; anything else uses them.
+        $emit->exportDynf = $emitLibrary && !$withStdlib;
+        $emit->stdlibDynf = CompileArgs::$stdlibDynf;
         if ($streamIr) {
             $emit->streamIrPath = $llPath;
         }
@@ -3279,6 +3299,7 @@ function build_compile_module(
         }
         CompileArgs::$ffiLibs = \array_keys($emit->ffiLibs);
         CompileArgs::$weakSyms = \array_keys($emit->weakSyms);
+        CompileArgs::$dynfExports = $emit->dynfExports;
         $undefTraps = \array_keys($emit->undefinedCalls);
         \Compile\Stats::step('EmitLlvm', $statT, \count($module->functions), -1);
         \Compile\Stats::line('IR: ' . (string)\strlen($ir) . ' bytes');
@@ -3360,7 +3381,8 @@ function build_compile_module(
             Sig::emitModule(
                 $module,
                 CompileArgs::$ffiLibs,
-                CompileArgs::$weakSyms
+                CompileArgs::$weakSyms,
+                CompileArgs::$dynfExports
             )
         )) {
             dprint("build: cannot write " . $output . ".sig");
@@ -5525,6 +5547,7 @@ function compile_via_mir(array $sources, array $paths = []): ?string
         $statT = \Compile\Stats::begin('EmitLlvm');
         $emit = new \Compile\Mir\Passes\EmitLlvm();
         $emit->emitLibrary = CompileArgs::$emitLibrary;
+        $emit->stdlibDynf = CompileArgs::$stdlibDynf;
         $ir = $emit->emit($module);
         \Compile\Stats::step('EmitLlvm', $statT, -1, -1);
         $cgErrors = $emit->cellGuardErrors();

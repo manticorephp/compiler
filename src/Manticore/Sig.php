@@ -68,12 +68,19 @@ final class Sig
      * purely additive, so the schema does not bump — an older reader ignores
      * them and a newer one falls back when they are absent.
      *
+     * `$dynf` ({@see EmitLlvm::$dynfExports}, the stdlib only) is additive the
+     * same way: a reader that finds no `dynf` builds every thunk itself.
+     *
      * @param string[] $libs  native library names ('c' already dropped)
      * @param string[] $weak  C symbols declared extern_weak
+     * @param array<string, int> $dynf  function => exported dynamic-call thunk shapes
      */
     public static function emitModule(Module $module, array $libs = [],
-                                      array $weak = []): string
+                                      array $weak = [], array $dynf = []): string
     {
+        /** @var string[] $dynfList */
+        $dynfList = [];
+        foreach ($dynf as $dn => $dm) { $dynfList[] = (string)$dn . ':' . (string)$dm; }
         // `schema` and `abi` lead the object on purpose: {@see headerInt} reads
         // them out of the first bytes without decoding the whole file, so the
         // compatibility gate costs nothing on a 900-function stdlib interface.
@@ -90,7 +97,27 @@ final class Sig
         $out = $out . "],\"classes\":[" . self::emitTypes($module)
             . "],\"constants\":[" . self::emitGlobalConsts($module)
             . "],\"libs\":[" . self::jsonStrList($libs)
-            . "],\"weak\":[" . self::jsonStrList($weak) . "]}\n";
+            . "],\"weak\":[" . self::jsonStrList($weak)
+            . "],\"dynf\":[" . self::jsonStrList($dynfList) . "]}\n";
+        return $out;
+    }
+
+    /**
+     * The `dynf` thunk shapes a `.sig` records, function => bitmask; empty when
+     * absent.
+     * @return array<string, int>
+     */
+    public static function dynfFromJson(string $json): array
+    {
+        /** @var array<string, int> $out */
+        $out = [];
+        $list = self::strListFromJson($json, 'dynf');
+        if ($list === null) { return $out; }
+        foreach ($list as $e) {
+            $p = \strrpos($e, ':');
+            if ($p === false) { continue; }
+            $out[\substr($e, 0, $p)] = (int)\substr($e, $p + 1);
+        }
         return $out;
     }
 

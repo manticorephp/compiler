@@ -1101,7 +1101,18 @@ trait EmitLlvmCalls
         if (isset($this->dynfThunks[$key])) { return $this->dynfThunks[$key]; }
         $tot = isset($this->sigs->paramTypes[$fname]) ? \count($this->sigs->paramTypes[$fname]) : 0;
         if ($tot < $numFixed) { return ''; }
-        $sym = $this->mirHelperSym('__mir_dynfs_' . (string)\count($this->dynfThunks));
+        $bit = $this->dynfExportBit(true, $numFixed, $spreadElem);
+        $params = 'ptr %ft.sp';
+        for ($i = 0; $i < $numFixed; $i = $i + 1) { $params .= ', i64 %ft.a' . (string)$i; }
+        if ($this->dynfImported($fname, $bit)) {
+            $sym = $this->dynfExportSym($fname, $bit);
+            $this->dynfThunks[$key] = $sym;
+            $this->dynfExtraBodies .= 'declare i64 @' . $sym . '(' . $params . ")\n\n";
+            return $sym;
+        }
+        $exported = $this->dynfExporting($fname, $bit);
+        $sym = $exported ? $this->dynfExportSym($fname, $bit)
+            : $this->mirHelperSym('__mir_dynfs_' . (string)\count($this->dynfThunks));
         $this->dynfThunks[$key] = $sym;
 
         $oldSsa = $this->ssa;
@@ -1123,7 +1134,6 @@ trait EmitLlvmCalls
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
 
-        $params = 'ptr %ft.sp';
         $body = '';
         $callArgs = [];
         $cellT = Type::cell();
@@ -1132,9 +1142,7 @@ trait EmitLlvmCalls
             $slot = $this->ssa->allocReg();
             $body .= '  ' . $slot . " = alloca i64\n";
             if ($i < $numFixed) {
-                $p = '%ft.a' . (string)$i;
-                $params .= ', i64 ' . $p;
-                $body .= '  store i64 ' . $p . ', ptr ' . $slot . "\n";
+                $body .= '  store i64 %ft.a' . (string)$i . ', ptr ' . $slot . "\n";
                 $callArgs[] = new LoadLocal($lname, $cellT);
             } else {
                 $ev = $this->ssa->allocReg();
@@ -1165,9 +1173,78 @@ trait EmitLlvmCalls
             unset($this->dynfThunks[$key]);
             return '';
         }
-        $this->dynfExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
+        $this->dynfExtraBodies .= 'define ' . ($exported ? '' : 'linkonce_odr ') . 'i64 @' . $sym . '(' . $params
             . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
         return $sym;
+    }
+
+    /**
+     * Which shapes the stdlib exports a thunk for, as one bit each: a fixed
+     * argc 0..8 (bits 0-8), and a bare spread over an untyped (bit 9) or
+     * `mixed[]` pack (bit 10) — the shapes the prelude's own `$cb(...$args)`
+     * sites use. -1 = never exported; that shape keeps building its thunk in the
+     * module, as every shape did before. A fixed prefix before the spread is
+     * left out on purpose: each prefix length is another thunk per function,
+     * and no site in the prelude has one.
+     */
+    private function dynfExportBit(bool $spread, int $n, ?Type $elem): int
+    {
+        if (!$spread) { return $n <= 8 ? $n : -1; }
+        if ($elem === null || $n !== 0 || ($elem->class ?? '') !== '') { return -1; }
+        if ($elem->kind === Type::KIND_UNKNOWN) { return 9; }
+        if ($elem->kind === Type::KIND_CELL) { return 10; }
+        return -1;
+    }
+
+    /** The external symbol of the stdlib's thunk for `$fname` at shape `$bit`. */
+    private function dynfExportSym(string $fname, int $bit): string
+    {
+        return '__mc_sdynf' . (string)$bit . '_' . $this->mangle($fname);
+    }
+
+    /** A program's candidate whose thunk the linked stdlib already carries. */
+    private function dynfImported(string $fname, int $bit): bool
+    {
+        return $bit >= 0 && isset($this->externFnNames[$fname])
+            && ((($this->stdlibDynf[$fname] ?? 0) >> $bit) & 1) === 1;
+    }
+
+    /** The stdlib build emitting the thunk `$fname` at `$bit` as an export. */
+    private function dynfExporting(string $fname, int $bit): bool
+    {
+        return $bit >= 0 && isset($this->dynfExportFns[$fname]);
+    }
+
+    /**
+     * The stdlib build's exported thunks: every shape of every nameable function
+     * a program could name ({@see dynfExportBit}), built by the same
+     * {@see dynfThunk} / {@see dynfSpreadThunk} a call site uses, under the same
+     * candidate rules (arity range, no by-reference parameter). What closed is
+     * recorded in {@see $dynfExports}; the `.sig` carries it to programs, which
+     * then reference these instead of building their own. The candidate SET a
+     * program site matches is still decided by the program, so a name reaches
+     * exactly what it reached before.
+     */
+    private function emitDynfExports(): void
+    {
+        $spreadElems = [Type::unknown(), Type::cell()];
+        foreach ($this->dynfExportFns as $fname => $_) {
+            $fname = (string)$fname;
+            if ($this->anyRefParam($fname)) { continue; }
+            $rt = $this->sigs->returnType[$fname] ?? Type::cell();
+            $mask = 0;
+            for ($k = 0; $k <= 8; $k = $k + 1) {
+                if (!$this->dynfArityFits($fname, $k)) { continue; }
+                if ($this->dynfThunk($fname, $k, $rt) === $this->dynfExportSym($fname, $k)) { $mask = $mask | (1 << $k); }
+            }
+            foreach ($spreadElems as $el) {
+                $bit = $this->dynfExportBit(true, 0, $el);
+                if ($this->dynfSpreadThunk($fname, 0, $el, $rt) === $this->dynfExportSym($fname, $bit)) {
+                    $mask = $mask | (1 << $bit);
+                }
+            }
+            if ($mask !== 0) { $this->dynfExports[$fname] = $mask; }
+        }
     }
 
     /**
@@ -1448,14 +1525,25 @@ trait EmitLlvmCalls
      * bodies cost as much as the chain blocks they replaced (measured on t1:
      * 1510 thunks, module 14.88 -> 14.85 MB, i.e. a wash). The symbol carries the
      * module token, so a `linkonce_odr` body never coalesces with a different
-     * module's different body.
-     *
+     * module's different body — except a stdlib callee's, which the stdlib
+     * exports once under a fixed name ({@see emitDynfExports}).
      */
     private function dynfThunk(string $fname, int $argc, Type $rt): string
     {
         $key = $fname . '|' . (string)$argc;
         if (isset($this->dynfThunks[$key])) { return $this->dynfThunks[$key]; }
-        $sym = $this->mirHelperSym('__mir_dynft_' . (string)\count($this->dynfThunks));
+        $bit = $this->dynfExportBit(false, $argc, null);
+        if ($this->dynfImported($fname, $bit)) {
+            $sym = $this->dynfExportSym($fname, $bit);
+            $this->dynfThunks[$key] = $sym;
+            $decl = [];
+            for ($i = 0; $i < $argc; $i = $i + 1) { $decl[] = 'i64'; }
+            $this->dynfExtraBodies .= 'declare i64 @' . $sym . '(' . \implode(', ', $decl) . ")\n\n";
+            return $sym;
+        }
+        $exported = $this->dynfExporting($fname, $bit);
+        $sym = $exported ? $this->dynfExportSym($fname, $bit)
+            : $this->mirHelperSym('__mir_dynft_' . (string)\count($this->dynfThunks));
         // Registered BEFORE the body is built, for the reason dynmChainFn gives:
         // a half-built registry is the one state that emits two bodies for one
         // symbol. Removed again below if the body turns out not to be closed.
@@ -1533,7 +1621,7 @@ trait EmitLlvmCalls
             unset($this->dynfThunks[$key]);
             return '';
         }
-        $this->dynfExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
+        $this->dynfExtraBodies .= 'define ' . ($exported ? '' : 'linkonce_odr ') . 'i64 @' . $sym . '(' . $params
             . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
         return $sym;
     }
