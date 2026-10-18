@@ -37,6 +37,25 @@ ext_copy_out: HY000 3
 reuse: ok
 fast
 no fd leak
+notify_trunc: HY000 7 protocol error: truncated message
+fast
+no fd leak
+notify_unterminated: HY000 7 protocol error: truncated message
+fast
+no fd leak
+notify_over_cap: HY000 7 invalid message length
+fast
+no fd leak
+notify_flood: HY000 7 protocol error: too many unread notifications
+fast
+no fd leak
+copy_out_cap: HY000 7 invalid message length
+fast
+no fd leak
+copy_in_err: 22P02 7 ERROR:  invalid input syntax for type integer: "zz"
+reuse: ok
+fast
+no fd leak
 big_slow: ok 8000000 longer than 2 x timeout
 fast
 no fd leak

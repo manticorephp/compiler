@@ -927,6 +927,157 @@ class PDO
         return $this->unsupported('driver does not support that attribute', 'PDO::getAttribute');
     }
 
+    // ── pgsql extras: php 8.4 names, plus the pgsql* aliases php keeps on PDO (no deprecation is raised) ──
+
+    /** The pgsql driver, or php's own answer for a method the connected driver does not have. */
+    private function pg(string $method): __McPdoPg
+    {
+        $d = $this->drv;
+        if ($d instanceof __McPdoPg) { return $d; }
+        throw new Error('Call to undefined method PDO::' . $method . '()');
+    }
+
+    /**
+     * Waits (a fiber parks, the loop keeps running) up to $timeoutMilliseconds for a LISTEN notification; 0 only looks.
+     * The row is [message => channel, pid, payload] in ASSOC, [0, 1, 2] in NUM, both in BOTH (the default); payload only when non-empty.
+     */
+    public function getNotify(int $fetchMode = PDO::FETCH_DEFAULT, int $timeoutMilliseconds = 0): array|false
+    {
+        $pg = $this->pg('getNotify');
+        if ($fetchMode === PDO::FETCH_DEFAULT) { $fetchMode = PDO::FETCH_BOTH; }
+        if ($fetchMode !== PDO::FETCH_BOTH && $fetchMode !== PDO::FETCH_ASSOC && $fetchMode !== PDO::FETCH_NUM) {
+            throw new ValueError('PDO::getNotify(): Argument #1 ($fetchMode) must be one of PDO::FETCH_BOTH, PDO::FETCH_ASSOC, or PDO::FETCH_NUM');
+        }
+        if ($timeoutMilliseconds < 0) {
+            throw new ValueError('PDO::getNotify(): Argument #2 ($timeoutMilliseconds) must be greater than or equal to 0');
+        }
+        if ($timeoutMilliseconds > 2147483647) {
+            throw new ValueError('PDO::getNotify(): Argument #2 ($timeoutMilliseconds) must be less than or equal to 2147483647');
+        }
+        try {
+            $n = $pg->notify($timeoutMilliseconds);
+        } catch (PDOException $e) {
+            $this->note($e, 'PDO::getNotify');
+            return false;
+        }
+        $this->clearErr();
+        if ($n === null) { return false; }
+        return $this->notifyRow($n, $fetchMode);
+    }
+
+    /** @return array<string,mixed> */
+    private function notifyRow(__McPdoPgNotify $n, int $mode): array
+    {
+        /** @var array<string,mixed> */
+        $r = [];
+        if ($mode !== PDO::FETCH_ASSOC) {
+            $r[0] = $n->channel;
+            $r[1] = $n->pid;
+            if ($n->payload !== '') { $r[2] = $n->payload; }
+        }
+        if ($mode !== PDO::FETCH_NUM) {
+            $r['message'] = $n->channel;
+            $r['pid'] = $n->pid;
+            if ($n->payload !== '') { $r['payload'] = $n->payload; }
+        }
+        return $r;
+    }
+
+    public function getPid(): int { return $this->pg('getPid')->pid(); }
+
+    /** @param Traversable<mixed,mixed>|array<mixed,mixed> $rows each row is one text-format COPY line; a newline is added when missing */
+    public function copyFromArray(string $tableName, Traversable|array $rows, string $separator = "\t",
+                                  string $nullAs = '\\\\N', ?string $fields = null): bool
+    {
+        $pg = $this->pg('copyFromArray');
+        try {
+            $pg->copyFromRows($tableName, $rows, $separator, $nullAs, $fields);
+        } catch (PDOException $e) {
+            $this->note($e, 'PDO::copyFromArray');
+            return false;
+        }
+        $this->clearErr();
+        return true;
+    }
+
+    public function copyFromFile(string $tableName, string $filename, string $separator = "\t",
+                                 string $nullAs = '\\\\N', ?string $fields = null): bool
+    {
+        $pg = $this->pg('copyFromFile');
+        try {
+            $pg->copyFromFile($tableName, $filename, $separator, $nullAs, $fields);
+        } catch (PDOException $e) {
+            $this->note($e, 'PDO::copyFromFile');
+            return false;
+        }
+        $this->clearErr();
+        return true;
+    }
+
+    /** @return array<int,string>|false one element per row, trailing newline included */
+    public function copyToArray(string $tableName, string $separator = "\t", string $nullAs = '\\\\N', ?string $fields = null): array|false
+    {
+        $pg = $this->pg('copyToArray');
+        try {
+            $rows = $pg->copyToRows($tableName, $separator, $nullAs, $fields);
+        } catch (PDOException $e) {
+            $this->note($e, 'PDO::copyToArray');
+            return false;
+        }
+        $this->clearErr();
+        return $rows;
+    }
+
+    public function copyToFile(string $tableName, string $filename, string $separator = "\t",
+                               string $nullAs = '\\\\N', ?string $fields = null): bool
+    {
+        $pg = $this->pg('copyToFile');
+        try {
+            $pg->copyToFile($tableName, $filename, $separator, $nullAs, $fields);
+        } catch (PDOException $e) {
+            $this->note($e, 'PDO::copyToFile');
+            return false;
+        }
+        $this->clearErr();
+        return true;
+    }
+
+    public function pgsqlGetNotify(int $fetchMode = PDO::FETCH_DEFAULT, int $timeoutMilliseconds = 0): array|false
+    {
+        $this->pg('pgsqlGetNotify');
+        return $this->getNotify($fetchMode, $timeoutMilliseconds);
+    }
+
+    public function pgsqlGetPid(): int { return $this->pg('pgsqlGetPid')->pid(); }
+
+    public function pgsqlCopyFromArray(string $tableName, Traversable|array $rows, string $separator = "\t",
+                                       string $nullAs = '\\\\N', ?string $fields = null): bool
+    {
+        $this->pg('pgsqlCopyFromArray');
+        return $this->copyFromArray($tableName, $rows, $separator, $nullAs, $fields);
+    }
+
+    public function pgsqlCopyFromFile(string $tableName, string $filename, string $separator = "\t",
+                                      string $nullAs = '\\\\N', ?string $fields = null): bool
+    {
+        $this->pg('pgsqlCopyFromFile');
+        return $this->copyFromFile($tableName, $filename, $separator, $nullAs, $fields);
+    }
+
+    /** @return array<int,string>|false */
+    public function pgsqlCopyToArray(string $tableName, string $separator = "\t", string $nullAs = '\\\\N', ?string $fields = null): array|false
+    {
+        $this->pg('pgsqlCopyToArray');
+        return $this->copyToArray($tableName, $separator, $nullAs, $fields);
+    }
+
+    public function pgsqlCopyToFile(string $tableName, string $filename, string $separator = "\t",
+                                    string $nullAs = '\\\\N', ?string $fields = null): bool
+    {
+        $this->pg('pgsqlCopyToFile');
+        return $this->copyToFile($tableName, $filename, $separator, $nullAs, $fields);
+    }
+
     /** Shared body of begin/commit/rollback, so all three report identically. */
     private function run(string $what, string $fn): bool
     {

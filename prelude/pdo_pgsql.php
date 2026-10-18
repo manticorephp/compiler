@@ -51,6 +51,8 @@ final class __McPdoPgResult
     public ?__McPdoPgErr $err = null;
     /** The extended protocol's ParseComplete arrived (the named statement exists server-side). */
     public bool $parsed = false;
+    /** @var array<int,string> the CopyData rows of a COPY ... TO */
+    public array $lines = [];
 
     public function resetCols(): void
     {
@@ -60,6 +62,14 @@ final class __McPdoPgResult
         $this->lens = [];
         $this->mods = [];
     }
+}
+
+/** One NotificationResponse. */
+final class __McPdoPgNotify
+{
+    public string $channel = '';
+    public int $pid = 0;
+    public string $payload = '';
 }
 
 final class __McPdoPgWire
@@ -112,6 +122,9 @@ final class __McPdoPgWire
     private int $pos = 0;
     private string $nonce = '';
     private string $serverSig = '';
+    /** @var array<int,__McPdoPgNotify> NotificationResponses read but not yet handed to getNotify(), oldest at $noticeHead */
+    private array $notices = [];
+    private int $noticeHead = 0;
 
     public function __construct(string $host, int $port, float $timeout, string $hostaddr = '')
     {
@@ -296,8 +309,23 @@ final class __McPdoPgWire
         }
     }
 
-    /** @return array{0:string,1:string} message type byte and body */
+    /**
+     * The next message a request cycle cares about. A NotificationResponse can arrive between any two messages
+     * (LISTEN is session state): it is queued for getNotify() and reading goes on.
+     *
+     * @return array{0:string,1:string} message type byte and body
+     */
     public function msg(): array
+    {
+        while (true) {
+            [$t, $b] = $this->readMsg();
+            if ($t !== 'A') { return [$t, $b]; }
+            $this->queueNotify($b);
+        }
+    }
+
+    /** @return array{0:string,1:string} message type byte and body */
+    private function readMsg(): array
     {
         if (\strlen($this->buf) - $this->pos < 5) { $this->fill(5); }
         $p = $this->pos;
@@ -313,6 +341,217 @@ final class __McPdoPgWire
         $body = \substr($this->buf, $p + 5, $len - 4);
         $this->pos = $p + 1 + $len;
         return [$t, $body];
+    }
+
+    // ── LISTEN / NOTIFY ────────────────────────────────────────────────────
+
+    /** A NotificationResponse body: int32 pid, channel\0, payload\0. Every length is checked against the body. */
+    private function queueNotify(string $b): void
+    {
+        $bl = \strlen($b);
+        if ($bl < 6) { throw $this->truncated(); }
+        $z1 = \strpos($b, "\0", 4);
+        if ($z1 === false) { throw $this->truncated(); }
+        $z2 = \strpos($b, "\0", $z1 + 1);
+        if ($z2 === false || $z2 !== $bl - 1) { throw $this->truncated(); }
+        // ponytail: 100000 unread notifications end the session; libpq has no cap, a hostile server must not grow memory without one
+        if (\count($this->notices) - $this->noticeHead >= 100000) { throw $this->ioFail('protocol error: too many unread notifications'); }
+        $n = new __McPdoPgNotify();
+        $n->pid = self::i32($b, 0);
+        $n->channel = \substr($b, 4, $z1 - 4);
+        $n->payload = \substr($b, $z1 + 1, $z2 - $z1 - 1);
+        $this->notices[] = $n;
+    }
+
+    public function popNotify(): ?__McPdoPgNotify
+    {
+        if ($this->noticeHead >= \count($this->notices)) { return null; }
+        $n = $this->notices[$this->noticeHead];
+        $this->noticeHead++;
+        if ($this->noticeHead >= \count($this->notices)) { $this->notices = []; $this->noticeHead = 0; }
+        return $n;
+    }
+
+    /**
+     * Appends what arrives within $sec (<= 0: only what is already there) to the buffer; false = nothing came.
+     * The wait is the stream's own timeout, so under the scheduler the fiber parks in the read.
+     */
+    private function pull(float $sec): bool
+    {
+        if ($this->dead) { throw $this->ioFail('no connection to the server'); }
+        $poll = $sec <= 0.0;
+        if ($poll) {
+            \stream_set_blocking($this->s, false);
+        } else {
+            $whole = (int) $sec;
+            \stream_set_timeout($this->s, $whole, (int) (($sec - (float) $whole) * 1000000.0));
+        }
+        try {
+            $c = \fread($this->s, 65536);
+        } finally {
+            if ($poll) { \stream_set_blocking($this->s, true); } else { $this->setTimeout($this->timeout); }
+        }
+        if ($c === false || $c === '') {
+            if (\feof($this->s)) {
+                $this->peerGone = true;
+                throw $this->ioFail("server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\n\tbefore or while processing the request.");
+            }
+            return false;
+        }
+        if ($this->pos > 0) {
+            $this->buf = \substr($this->buf, $this->pos);
+            $this->pos = 0;
+        }
+        $this->buf .= $c;
+        return true;
+    }
+
+    /**
+     * PQconsumeInput + PQnotifies + php's poll: the oldest queued notification, else wait up to $ms for one (0 = look, do not wait).
+     * Holds the wire while it waits (ponytail: another fiber's query on this connection waits behind it, bounded by ATTR_TIMEOUT).
+     */
+    public function waitNotify(int $ms): ?__McPdoPgNotify
+    {
+        $n = $this->popNotify();
+        if ($n !== null) { return $n; }
+        $this->enter();
+        try {
+            $this->settle();
+            $this->inflight = false;
+            $this->idleLoop($ms);
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->inflight = false;
+            $this->busy = false;
+        }
+        return $this->popNotify();
+    }
+
+    private function idleLoop(int $ms): void
+    {
+        $deadline = $ms > 0 ? \__mc_monotonic_f() + (float) $ms / 1000.0 : 0.0;
+        // ponytail: bounds a server that streams ignorable messages for ever; a real session sees a handful
+        for ($steps = 0; $steps < 100000; $steps++) {
+            if (\strlen($this->buf) > $this->pos) {
+                // a message has begun: it is read to its end under the normal (bounded) message deadline
+                [$t, $b] = $this->readMsg();
+                if ($t === 'A') { $this->queueNotify($b); }
+                elseif ($t === 'S') { $this->paramStatus($b); }
+                elseif ($t === 'E') { throw $this->ioFail($this->parseErr($b, '')->text); }
+                elseif ($t !== 'N') { throw $this->ioFail('protocol error: unexpected message type'); }
+                if ($this->noticeHead < \count($this->notices)) { return; }
+                continue;
+            }
+            if ($deadline <= 0.0) {
+                if (!$this->pull(0.0)) { return; }
+                continue;
+            }
+            $left = $deadline - \__mc_monotonic_f();
+            if ($left <= 0.0) { return; }
+            if (!$this->pull($left < 0.001 ? 0.001 : $left)) {
+                if (\__mc_monotonic_f() >= $deadline) { return; }
+            }
+        }
+        throw $this->ioFail('protocol error: too many unsolicited messages');
+    }
+
+    // ── COPY ───────────────────────────────────────────────────────────────
+
+    /**
+     * One COPY statement over the simple protocol. $out = COPY ... TO (rows land in $res->lines, or are appended to $file
+     * when it is not ''), else COPY ... FROM STDIN fed with $chunks. A server error lands in $res->err after the stream
+     * is drained to ReadyForQuery, so the connection stays usable; the wrong direction (a table name that injected
+     * the other one) is HY000 with the PGRES_COPY_IN / PGRES_COPY_OUT code, as for exec('copy ...').
+     *
+     * @param array<int,string> $chunks
+     */
+    public function copy(string $sql, bool $out, array $chunks, string $file): __McPdoPgResult
+    {
+        $this->enter();
+        try {
+            return $this->copyRun($sql, $out, $chunks, $file);
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->inflight = false;
+            $this->busy = false;
+        }
+    }
+
+    /** @param array<int,string> $chunks */
+    private function copyRun(string $sql, bool $out, array $chunks, string $file): __McPdoPgResult
+    {
+        $nul = \strpos($sql, "\0");
+        if ($nul !== false) { $sql = \substr($sql, 0, $nul); }
+        $this->settle();
+        $this->send('Q', $sql . "\0");
+        $this->awaiting = true;
+        $res = new __McPdoPgResult();
+        $in = false;
+        $wrong = 0;
+        $pend = '';
+        $wfail = false;
+        while (true) {
+            [$t, $b] = $this->msg();
+            if ($t === 'd') {
+                if (!$in) { throw $this->truncated(); }
+                if ($wrong > 0 || !$out) { continue; }
+                if ($file === '') {
+                    $res->lines[] = $b;
+                } else {
+                    $pend .= $b;
+                    if (\strlen($pend) >= 65536) {
+                        if (!$wfail && \file_put_contents($file, $pend, \FILE_APPEND) === false) { $wfail = true; }
+                        $pend = '';
+                    }
+                }
+            } elseif ($t === 'c') {
+            } elseif ($t === 'C') {
+                $this->cmdTag($b, $res);
+            } elseif ($t === 'E') {
+                if ($res->err === null) { $res->err = $this->parseErr($b, $sql); $this->pendErr = $res->err->text; }
+            } elseif ($t === 'S') {
+                $this->paramStatus($b);
+            } elseif ($t === 'G') {
+                $in = true;
+                if ($out) {
+                    $wrong = 4;
+                    $this->send('f', "COPY is not supported\0");
+                } else {
+                    $this->sendCopyData($chunks);
+                    $this->send('c', '');
+                }
+            } elseif ($t === 'H') {
+                $in = true;
+                if (!$out) { $wrong = 3; }
+            } elseif ($t === 'Z') {
+                if (\strlen($b) < 1) { throw $this->truncated(); }
+                $this->status = $b[0];
+                $this->inflight = false;
+                $this->pendErr = '';
+                if ($pend !== '' && !$wfail && \file_put_contents($file, $pend, \FILE_APPEND) === false) { $wfail = true; }
+                if ($wrong > 0) { throw __McPdo::fail('HY000', 7, true, '', true); }
+                if ($wfail) { throw __McPdo::fail('HY000', 7, true, 'Unable to write to the file', true); }
+                return $res;
+            }
+        }
+    }
+
+    /** @param array<int,string> $chunks CopyData frames of at most 64 KiB, written in batches */
+    private function sendCopyData(array $chunks): void
+    {
+        $m = '';
+        foreach ($chunks as $c) {
+            $cl = \strlen($c);
+            for ($o = 0; $o < $cl; $o += 65536) {
+                $m .= self::frame('d', $cl - $o > 65536 ? \substr($c, $o, 65536) : ($o === 0 ? $c : \substr($c, $o)));
+                if (\strlen($m) >= 262144) { $this->sendRaw($m); $m = ''; }
+            }
+        }
+        if ($m !== '') { $this->sendRaw($m); }
     }
 
     /** Marks the connection dead and releases the fd (once). */
@@ -907,7 +1146,8 @@ final class __McPdoPgWire
             }
         }
         $head = 'LINE ' . (string) $line . ': ';
-        return $head . $pre . \substr($sql, $ibeg, $iend - $ibeg) . $suf . "\n"
+        // libpq shows a tab or a carriage return as a space
+        return $head . $pre . \str_replace(["\t", "\r"], ' ', \substr($sql, $ibeg, $iend - $ibeg)) . $suf . "\n"
             . \str_repeat(' ', \strlen($head) + \strlen($pre) + $off) . "^\n";
     }
 
@@ -995,6 +1235,63 @@ final class __McPdoPg implements __McPdoDrv
     {
         $r = $this->run($sql);
         return \count($r->cols) > 0 ? 0 : $r->affected;
+    }
+
+    // ── php's pdo_pgsql extras (reached through PDO::getNotify() & co.) ────
+
+    public function pid(): int { return $this->wire->pid; }
+
+    public function notify(int $ms): ?__McPdoPgNotify { return $this->wire->waitNotify($ms); }
+
+    /** php builds this text itself, interpolating the names raw (no quoting): the same text gives the same server error. */
+    private static function copyQuery(string $table, string $dir, string $sep, string $nullAs, ?string $fields): string
+    {
+        return 'COPY ' . $table . ($fields === null ? '' : ' (' . $fields . ')') . ' ' . $dir
+            . " WITH DELIMITER E'" . ($sep === '' ? "\t" : $sep[0]) . "' NULL AS E'" . $nullAs . "'";
+    }
+
+    private function copyDone(__McPdoPgResult $r): void
+    {
+        if ($r->err !== null) { throw __McPdo::fail($r->err->code, 7, true, $r->err->text, true); }
+    }
+
+    /** @param iterable<mixed,mixed> $rows */
+    public function copyFromRows(string $table, iterable $rows, string $sep, string $nullAs, ?string $fields): void
+    {
+        /** @var array<int,string> */
+        $chunks = [];
+        $cur = '';
+        foreach ($rows as $row) {
+            $s = (string) $row;
+            if ($s === '') { continue; }   // php skips an empty row
+            $cur .= $s[\strlen($s) - 1] === "\n" ? $s : $s . "\n";
+            if (\strlen($cur) >= 65536) { $chunks[] = $cur; $cur = ''; }
+        }
+        if ($cur !== '') { $chunks[] = $cur; }
+        $this->copyDone($this->wire->copy(self::copyQuery($table, 'FROM STDIN', $sep, $nullAs, $fields), false, $chunks, ''));
+    }
+
+    public function copyFromFile(string $table, string $file, string $sep, string $nullAs, ?string $fields): void
+    {
+        // ponytail: the whole file is read first; php streams it line by line. Chunked reads if multi-GB loads matter.
+        $data = \is_file($file) ? \file_get_contents($file) : false;
+        if ($data === false) { throw __McPdo::fail('HY000', 7, true, 'Unable to open the file', true); }
+        $this->copyDone($this->wire->copy(self::copyQuery($table, 'FROM STDIN', $sep, $nullAs, $fields), false, $data === '' ? [] : [$data], ''));
+    }
+
+    /** @return array<int,string> */
+    public function copyToRows(string $table, string $sep, string $nullAs, ?string $fields): array
+    {
+        $r = $this->wire->copy(self::copyQuery($table, 'TO STDIN', $sep, $nullAs, $fields), true, [], '');
+        $this->copyDone($r);
+        return $r->lines;
+    }
+
+    public function copyToFile(string $table, string $file, string $sep, string $nullAs, ?string $fields): void
+    {
+        // php opens (and truncates) the file before it asks the server anything
+        if (\file_put_contents($file, '') === false) { throw __McPdo::fail('HY000', 7, true, 'Unable to open the file for writing', true); }
+        $this->copyDone($this->wire->copy(self::copyQuery($table, 'TO STDIN', $sep, $nullAs, $fields), true, [], $file));
     }
 
     public function begin(): void { $this->run('BEGIN'); }

@@ -69,6 +69,14 @@ try {
         $p->execute();
         $r = $p->fetch(PDO::FETCH_NUM);
         echo $mode, ': ok ', is_resource($r[0]) ? bin2hex(stream_get_contents($r[0])) : json_encode($r[0]), "\n";
+    } elseif (in_array($mode, ['notify_trunc', 'notify_unterminated', 'notify_over_cap'], true)) {
+        $db->getNotify(PDO::FETCH_ASSOC, 3000);
+    } elseif ($mode === 'notify_flood') {
+        $q = $db->query('select 1');
+    } elseif ($mode === 'copy_out_cap') {
+        $db->copyToArray('t');
+    } elseif ($mode === 'copy_in_err') {
+        $db->copyFromArray('t', ['1', '2']);
     } elseif ($mode === 'idle_slow') {
         $q = $db->query('select 1');
         $q->fetchAll();
@@ -92,7 +100,7 @@ try {
     if ($my && in_array($mode, ['int_garbage', 'int_empty', 'int_overflow', 'int_underflow', 'uint_over', 'float_lead', 'float_trail', 'float_minus', 'float_plus', 'bit_long', 'err_mid_rows'], true)) {
         $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null;
     }
-    if (!$my && in_array($mode, ['paramdesc_mismatch', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
+    if (!$my && in_array($mode, ['paramdesc_mismatch', 'copy_in_err', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
 }
 $e = null; $p = null; $p2 = null; $s = null; $q = null; $db = null;
 echo microtime(true) - $t < ($mode === 'big_slow' || $mode === 'idle_slow' || $mode === 'np_idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' || $mode === 'kill_stall' || $mode === 'np_idle_explicit' || $mode === 'np_stall_mid' ? 5.0 : 3.0)) ? "fast\n" : "SLOW\n";

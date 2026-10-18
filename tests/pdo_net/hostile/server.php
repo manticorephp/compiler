@@ -92,6 +92,31 @@ elseif ($mode === 'drip') {
         sleep($mode === 'idle_slow' ? 6 : 9);
         fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z);
     }
+} elseif (in_array($mode, ['notify_trunc', 'notify_unterminated', 'notify_over_cap'], true)) {
+    // an unsolicited NotificationResponse the client meets while idle in getNotify(): no NULs / no payload terminator / a 100 MiB length
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    if ($mode === 'notify_trunc') { fwrite($c, $msg('A', pack('N', 7) . 'chan')); }
+    elseif ($mode === 'notify_unterminated') { fwrite($c, $msg('A', pack('N', 7) . "chan\0pay")); }
+    else { fwrite($c, 'A' . pack('N', 100 * 1024 * 1024)); }
+} elseif ($mode === 'notify_flood') {
+    // more notifications than the queue cap while the client waits for a query's answer
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    $one = $msg('A', pack('N', 7) . "c\0\0");
+    for ($i = 0; $i < 100010; $i++) { if (@fwrite($c, $one) === false) { break; } }
+} elseif ($mode === 'copy_out_cap') {
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    fwrite($c, $msg('H', "\0" . pack('n', 0)) . 'd' . pack('N', 100 * 1024 * 1024));
+} elseif ($mode === 'copy_in_err') {
+    // the server rejects the data (and discards the rest) before the client's CopyDone: the error must surface and the session go on
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    fwrite($c, $msg('G', "\0" . pack('n', 1) . pack('n', 0)));
+    while (true) { $t = $rd(1); if ($t === '') { break; } $l = unpack('N', $rd(4))[1]; $rd($l - 4); if ($t === 'c' || $t === 'f') { break; } }
+    fwrite($c, $msg('E', "SERROR\0C22P02\0Minvalid input syntax for type integer: \"zz\"\0\0") . $z);
+    $batch();
+    fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z);
 } elseif ($mode === 'short') { fwrite($c, 'R' . pack('N', 2)); }
 elseif ($mode === 'authok_after_sasl') {
     fwrite($c, $msg('R', pack('N', 10) . "SCRAM-SHA-256\0\0"));

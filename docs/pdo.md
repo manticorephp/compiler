@@ -276,6 +276,27 @@ address while `host` is what the certificate is checked against.
   (:33064; a certificate naming 127.0.0.1, user `cu` requires a client certificate) with a throwaway CA generated into
   `tests/pdo_net/.certs` (git-ignored, removed by `down.sh`).
 
+## `pgsql:` LISTEN/NOTIFY and COPY (prelude/pdo_pgsql.php)
+
+`getNotify(int $fetchMode = FETCH_DEFAULT, int $timeoutMilliseconds = 0): array|false`, `getPid()`, `copyFromArray()`, `copyFromFile()`, `copyToArray()`,
+`copyToFile()` (php 8.4 names) and their `pgsql*` aliases are methods of `PDO` itself (php puts them on `Pdo\Pgsql`; there is no such subclass here, so
+`PDO::connect()` returns a `PDO`). On a connection that is not pgsql they throw `Error: Call to undefined method PDO::getPid()`, as php does for the aliases.
+The aliases raise no deprecation (the superset throws instead of warning).
+
+- Notifications: a `NotificationResponse` that arrives between any two messages (inside a query's response too) is queued; `getNotify()` pops the queue,
+  else waits up to the timeout (0 only looks, without waiting). The wait is a read with a stream timeout, so under the scheduler the fiber parks and the
+  loop runs (`pgsql_async_notify`); cancelling the fiber loses nothing and the connection stays usable. Row shape as php: ASSOC `message`/`pid`/`payload`,
+  NUM `0/1/2`, BOTH (default) both; `payload` only when non-empty. Deviations: a timeout above `2147483647` is a `ValueError` (php warns and clamps); the wait holds
+  the connection, so a query on it from another fiber waits behind it (bounded by `ATTR_TIMEOUT`); more than 100000 unread notifications end the session.
+- COPY: simple-protocol `COPY t [(fields)] FROM|TO STDIN WITH DELIMITER E'<first byte of separator>' NULL AS E'<nullAs>'` built exactly as php builds it (names are
+  interpolated raw, no quoting; an empty separator is a tab; the default `nullAs` is `\\N`), so the server's error text matches php's. `copyFromArray` takes an
+  array or a Traversable, skips `''` rows and adds the missing newline; data goes out as CopyData frames of at most 64 KiB, then CopyDone. A server error is
+  a `PDOException` (`false` under the other error modes) after the stream is drained: the connection is usable, the load is all-or-nothing, and inside a
+  transaction it is aborted like after any error. `copyToFile` truncates the file before it asks the server (as php); `copyFromFile` reads the file whole
+  (php streams it line by line). Unopenable files are `HY000 Unable to open the file[ for writing]`.
+- The other direction smuggled through the table name (`'t TO STDOUT; --'` in `copyFromArray`) is `HY000` with an empty message; the session goes on.
+- Tests: `pgsql_notify`, `pgsql_copy` (byte parity with php), `pgsql_async_notify` (hand-written), hostile-server modes `notify_*`, `copy_out_cap`, `copy_in_err`.
+
 ## Limitations
 
 `PDO::FETCH_BOUND` and `bindColumn()` throw — both need a stored by-reference binding, the same
