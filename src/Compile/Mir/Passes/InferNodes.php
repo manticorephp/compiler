@@ -299,6 +299,7 @@ trait InferNodes
             if ($all || isset($rl['refPinnedLocals'])) { $this->refPinnedLocals = []; }
         }
         $this->localTypes = [];
+        $this->narrowSlots = [];
         $this->kindAliasOf = [];
         $this->currentParamTypes = [];
         // Computed BEFORE the walk, not after it: a store re-derives its local's
@@ -888,6 +889,7 @@ trait InferNodes
     private function inferStoreLocal(StoreLocal $node): Type
     {
         $valueType = $this->inferNode($node->value);
+        unset($this->narrowSlots[$node->name]);
         // The slot is a CELL for its whole lifetime — the store does not get to
         // narrow it back to what this particular value happens to be. The value
         // is still inferred above, because the emitter needs its type to know
@@ -1619,48 +1621,57 @@ trait InferNodes
     {
         $this->inferNode($node->cond);
         $saved = $this->localTypes;
+        $savedNs = $this->narrowSlots;
         // Flow-typing: narrow a local inside the then-branch from the guard.
         $this->narrowFromCond($node->cond);
-        $narrowed = $this->localTypes;
         $this->inferNode($node->then);
         $thenLocals = $this->localTypes;
-        $thenSlots = $this->unnarrowedSlots($thenLocals, $narrowed, $saved);
+        $thenNs = $this->narrowSlots;
         // A branch that DIVERGES (ends in return/throw) never reaches the merge,
         // so its narrowed locals must not flow past the `if` — else a guard like
         // `if ($v instanceof C) { ...; return; }` leaves `$v` mistyped (non-cell)
         // for the fall-through, and a later cell op reads it raw → crash.
         $thenDiv = $this->blockDiverges($node->then);
         if ($node->else === null) {
-            $this->planMergeShadow($node, $thenSlots, $saved);
+            $thenSlots = $this->slotView($thenLocals, $thenNs, $savedNs);
+            $savedSlots = $this->slotView($saved, $savedNs, $thenNs);
+            $this->planMergeShadow($node, $thenSlots, $savedSlots);
             if ($thenDiv) {
                 // `if (NEG) return/throw;` — the fall-through is the NEGATION of
                 // the guard, so narrow as if the un-negated form held below
                 // (`if ($x->kind !== KIND_X) return;` ⇒ `$x` IS X afterwards).
                 $this->localTypes = $saved;
+                $this->narrowSlots = $savedNs;
                 $this->narrowFromNegatedCond($node->cond);
             } else {
                 // A guard narrows the READ, not the slot: past the merge an
-                // unstored local is what it entered as ({@see unnarrowedSlots}).
+                // unstored local is what it entered as ({@see slotView}).
                 // Joined narrowed, `obj<Throwable>` ∪ `obj<I>` typed a raw
                 // object pointer `cell` and get_debug_type() answered "float".
-                $this->localTypes = $this->mergeLocals($saved, $thenSlots);
+                $this->localTypes = $this->mergeLocals($savedSlots, $thenSlots);
+                $this->narrowSlots = self::commonNarrowSlots($thenNs, $savedNs);
             }
             return Type::void();
         }
         $this->localTypes = $saved;
+        $this->narrowSlots = $savedNs;
         $this->inferNode($node->else);
         $elseLocals = $this->localTypes;
+        $elseNs = $this->narrowSlots;
+        $thenSlots = $this->slotView($thenLocals, $thenNs, $elseNs);
+        $elseSlots = $this->slotView($elseLocals, $elseNs, $thenNs);
         $elseDiv = $this->blockDiverges($node->else);
         /** @var array<string,Type> $agreed */
         $agreed = [];
         if (!$thenDiv && !$elseDiv) {
             $agreed = $this->unplantAgreedBoxBacks($node->then, $node->else, $thenSlots);
         }
-        $this->planMergeShadow($node, $thenSlots, $elseLocals);
+        $this->planMergeShadow($node, $thenSlots, $elseSlots);
         if ($thenDiv && !$elseDiv)      { $this->localTypes = $elseLocals; }
-        elseif ($elseDiv && !$thenDiv)  { $this->localTypes = $thenLocals; }
+        elseif ($elseDiv && !$thenDiv)  { $this->localTypes = $thenLocals; $this->narrowSlots = $thenNs; }
         else {
-            $this->localTypes = $this->mergeLocals($thenSlots, $elseLocals);
+            $this->narrowSlots = self::commonNarrowSlots($thenNs, $elseNs);
+            $this->localTypes = $this->mergeLocals($thenSlots, $elseSlots);
             // The slot leaves both arms raw now, whatever another merge of the
             // same name decided: `cellMergeLocals` is per NAME, not per merge.
             foreach ($agreed as $name => $t) {
@@ -2211,6 +2222,8 @@ trait InferNodes
         }
         $outerExitNames = $this->loopExitNames;
         $this->loopExitNames = $exitNames;
+        unset($this->narrowSlots[$node->valueVar]);
+        if ($node->keyVar !== null) { unset($this->narrowSlots[$node->keyVar]); }
         $saved = $this->localTypes;
         $this->localTypes[$node->valueVar] = $elem;
         if ($node->keyVar !== null) { $this->localTypes[$node->keyVar] = $keyT; }

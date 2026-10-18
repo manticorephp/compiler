@@ -505,6 +505,9 @@ final class InferTypes implements Pass
 
     /** @var array<string, Type> */
     private array $localTypes = [];
+    /** @var array<string, Type> a local an `instanceof` guard narrowed and nothing
+     *  stored since → the type its SLOT still holds ({@see slotView}) */
+    private array $narrowSlots = [];
     /** @var array<string, Type> current fn's param name → declared type. A
      *  concrete-element array param stays authoritative across a store: a
      *  cell-array value assigned to it de-cellifies (see inferStoreLocal). */
@@ -2357,24 +2360,39 @@ final class InferTypes implements Pass
     }
 
     /**
-     * The types the SLOTS hold at the end of a then-arm: a guard narrows a local
-     * in the arm (`$x instanceof C` → `obj<C>`) without touching its slot, so a
-     * local the arm never stored keeps the representation it entered with — the
-     * one an else-arm store must agree with at the merge.
-     * @param array<string,Type> $thenLocals @param array<string,Type> $narrowed @param array<string,Type> $saved
+     * One arm's locals as an if/else merge must compare them: a guard narrows a
+     * local (`$x instanceof C` → `obj<C>`) without touching its slot, so a local
+     * no store reached since keeps the representation it was narrowed from —
+     * the one the other arm must agree with. A name both arms still hold
+     * narrowed is one slot read alike on both, and keeps its read type.
+     *
+     * Read off the narrowed type alone, `if ($l instanceof M) { $l = new M(); }`
+     * took the raw object the arm STORED for the cell it entered with, and no
+     * box-back was planted: the loop head met a raw object and a cell (#338).
+     * @param array<string,Type> $locals @param array<string,Type> $ns @param array<string,Type> $otherNs
      * @return array<string,Type>
      */
-    private function unnarrowedSlots(array $thenLocals, array $narrowed, array $saved): array
+    private function slotView(array $locals, array $ns, array $otherNs): array
     {
         $out = [];
-        foreach ($thenLocals as $name => $t) {
+        foreach ($locals as $name => $t) {
             $slot = $t;
-            if (isset($narrowed[$name]) && isset($saved[$name])
-                && $t->exactString() === $narrowed[$name]->exactString()
-                && $t->exactString() !== $saved[$name]->exactString()) {
-                $slot = $saved[$name];
+            if (isset($ns[$name]) && !isset($otherNs[$name]) && $t->kind === Type::KIND_OBJ) {
+                $slot = $ns[$name];
             }
             $out[$name] = $slot;
+        }
+        return $out;
+    }
+
+    /** The narrowings both arms still hold past their merge.
+     *  @param array<string,Type> $a @param array<string,Type> $b
+     *  @return array<string,Type> */
+    private static function commonNarrowSlots(array $a, array $b): array
+    {
+        $out = [];
+        foreach ($a as $name => $t) {
+            if (isset($b[$name]) && $b[$name]->exactString() === $t->exactString()) { $out[$name] = $t; }
         }
         return $out;
     }
