@@ -49,6 +49,12 @@ no fd leak
 notify_flood: ok 100000
 fast
 no fd leak
+notify_bytes: ok 7
+fast
+no fd leak
+notify_big_d: HY000 7 invalid message length
+fast
+no fd leak
 copy_out_cap: HY000 7 invalid message length
 fast
 no fd leak

@@ -100,6 +100,17 @@ elseif ($mode === 'drip') {
         sleep($mode === 'idle_slow' ? 6 : 9);
         fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z);
     }
+} elseif ($mode === 'notify_bytes') {
+    // 12 notifications of 4 MiB while the client waits for a query's answer: the queue is capped in BYTES (32 MiB), not only in entries
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    $big = $msg('A', pack('N', 7) . "c\0" . str_repeat('p', 4194304) . "\0");
+    for ($i = 0; $i < 12; $i++) { if (@fwrite($c, $big) === false) { break; } }
+    fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z);
+} elseif ($mode === 'notify_big_d') {
+    // a DataRow-sized (100 MiB) message while the client idles in getNotify(): only A/S/N/E may arrive there, so it is refused at once
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    fwrite($c, 'D' . pack('N', 100 * 1024 * 1024));
 } elseif (in_array($mode, ['notify_trunc', 'notify_unterminated', 'notify_over_cap'], true)) {
     // an unsolicited NotificationResponse the client meets while idle in getNotify(): no NULs / no payload terminator / a 100 MiB length
     fwrite($c, $msg('R', pack('N', 0)) . $z);

@@ -92,9 +92,9 @@ try {
         $p->execute();
         $r = $p->fetch(PDO::FETCH_NUM);
         echo $tag, $mode, ': ok ', is_resource($r[0]) ? bin2hex(stream_get_contents($r[0])) : json_encode($r[0]), "\n";
-    } elseif (in_array($mode, ['notify_trunc', 'notify_unterminated', 'notify_over_cap'], true)) {
+    } elseif (in_array($mode, ['notify_trunc', 'notify_unterminated', 'notify_over_cap', 'notify_big_d'], true)) {
         $db->getNotify(PDO::FETCH_ASSOC, 3000);
-    } elseif ($mode === 'notify_flood') {
+    } elseif ($mode === 'notify_flood' || $mode === 'notify_bytes') {
         $q = $db->query('select 1');
         $k = 0;
         while ($db->getNotify(PDO::FETCH_NUM) !== false) { $k++; }
@@ -114,7 +114,7 @@ try {
     } else {
         $db->query('select 1')->fetchAll();
     }
-    if (!in_array($mode, ['np_ok', 'batch_ok', 'batch_close_slow', 'copy_slow_commit', 'notify_flood', 'np_close_once', 'np_idle_slow', 'np_float_odd', 'np_nan', 'bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow', 'idle_between'], true)) { echo "$tag$mode: NO ERROR\n"; }
+    if (!in_array($mode, ['np_ok', 'batch_ok', 'batch_close_slow', 'copy_slow_commit', 'notify_flood', 'notify_bytes', 'np_close_once', 'np_idle_slow', 'np_float_odd', 'np_nan', 'bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow', 'idle_between'], true)) { echo "$tag$mode: NO ERROR\n"; }
 } catch (PDOException $e) {
     $m = (string) $e->errorInfo[2];
     $i = strpos($m, 'failed: ');

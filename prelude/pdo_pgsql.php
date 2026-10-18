@@ -137,6 +137,8 @@ final class __McPdoPgWire
     /** @var array<int,__McPdoPgNotify> NotificationResponses read but not yet handed to getNotify(), oldest at $noticeHead */
     private array $notices = [];
     private int $noticeHead = 0;
+    /** Bytes held by the unread notifications (payload + channel + a fixed overhead per entry); capped like the entry count. */
+    private int $noticeBytes = 0;
 
     public function __construct(string $host, int $port, float $timeout, string $hostaddr = '')
     {
@@ -178,7 +180,7 @@ final class __McPdoPgWire
     public function timeoutValue(): float { return $this->timeout; }
 
     /** Unread LISTEN notifications belong to the session that is being reset. */
-    public function clearNotices(): void { $this->notices = []; $this->noticeHead = 0; }
+    public function clearNotices(): void { $this->notices = []; $this->noticeHead = 0; $this->noticeBytes = 0; }
 
     /** A reset is not the cursor owner's to refuse: another fiber's open portal is not ours to close. */
     public function assertCursorOwner(): void
@@ -384,23 +386,30 @@ final class __McPdoPgWire
         if ($z2 === false || $z2 !== $bl - 1) { throw $this->truncated(); }
         // ponytail: libpq queues without limit; here the oldest of 100000 unread notifications is dropped so a hostile or
         // unread flood cannot grow memory (the session goes on)
-        if (\count($this->notices) - $this->noticeHead >= 100000) {
-            $this->noticeHead++;
-            if ($this->noticeHead >= 100000) { $this->notices = \array_slice($this->notices, $this->noticeHead); $this->noticeHead = 0; }
-        }
+        // the same cap in bytes (32 MiB): 100000 entries of a 1 GiB payload each would not be 'a queue', it would be the heap
         $n = new __McPdoPgNotify();
         $n->pid = self::i32($b, 0);
         $n->channel = \substr($b, 4, $z1 - 4);
         $n->payload = \substr($b, $z1 + 1, $z2 - $z1 - 1);
         $this->notices[] = $n;
+        $this->noticeBytes += \strlen($n->channel) + \strlen($n->payload) + 64;
+        while ($this->noticeHead < \count($this->notices) - 1
+            && (\count($this->notices) - $this->noticeHead > 100000 || $this->noticeBytes > 33554432)) {
+            $old = $this->notices[$this->noticeHead];
+            $this->noticeBytes -= \strlen($old->channel) + \strlen($old->payload) + 64;
+            $this->notices[$this->noticeHead] = new __McPdoPgNotify();
+            $this->noticeHead++;
+            if ($this->noticeHead >= 100000) { $this->notices = \array_slice($this->notices, $this->noticeHead); $this->noticeHead = 0; }
+        }
     }
 
     public function popNotify(): ?__McPdoPgNotify
     {
         if ($this->noticeHead >= \count($this->notices)) { return null; }
         $n = $this->notices[$this->noticeHead];
+        $this->noticeBytes -= \strlen($n->channel) + \strlen($n->payload) + 64;
         $this->noticeHead++;
-        if ($this->noticeHead >= \count($this->notices)) { $this->notices = []; $this->noticeHead = 0; }
+        if ($this->noticeHead >= \count($this->notices)) { $this->notices = []; $this->noticeHead = 0; $this->noticeBytes = 0; }
         return $n;
     }
 
@@ -461,6 +470,19 @@ final class __McPdoPgWire
         return $this->popNotify();
     }
 
+    /**
+     * While idle (getNotify) only A / S / N / E may arrive, and none of them is big: a header announcing more than 64 MiB under any other
+     * type is refused before a byte of its body is awaited (readMsg() would allow a DataRow up to 1 GiB).
+     */
+    private function checkIdleHeader(): void
+    {
+        $p = $this->pos;
+        if (\strlen($this->buf) - $p < 5) { return; }
+        $len = (\ord($this->buf[$p + 1]) << 24) | (\ord($this->buf[$p + 2]) << 16) | (\ord($this->buf[$p + 3]) << 8) | \ord($this->buf[$p + 4]);
+        $t = $this->buf[$p];
+        if ($len > 67108864 && $t !== 'A' && $t !== 'S' && $t !== 'N' && $t !== 'E') { throw $this->ioFail('invalid message length'); }
+    }
+
     /** A whole message (or an invalid length, which readMsg() reports) is buffered: reading it cannot block. */
     private function msgReady(): bool
     {
@@ -478,6 +500,7 @@ final class __McPdoPgWire
         for ($steps = 0; $steps < 100000; $steps++) {
             if (\strlen($this->buf) > $this->pos && ($deadline > 0.0 || $this->msgReady())) {
                 // a message has begun: it is read to its end under the normal (bounded) message deadline
+                $this->checkIdleHeader();
                 [$t, $b] = $this->readMsg();
                 if ($t === 'A') { $this->queueNotify($b); }
                 elseif ($t === 'S') { $this->paramStatus($b); }
