@@ -717,20 +717,23 @@ function array_diff(array $arr, array ...$others): array
 
 /**
  * `array_intersect(arr, ...others)` — elements of `$arr` whose (string) value is
- * present in EVERY other array, keys preserved. One pass per other array.
+ * present in EVERY other array, keys preserved. One hash table of how many
+ * leading `$others` hold each value: O(n + m).
  */
 function array_intersect(array $arr, array ...$others): array
 {
-    $out = $arr;
-    foreach ($others as $o) {
-        /** @var array<string,bool> $seen */
-        $seen = [];
-        foreach ($o as $w) { $seen['s' . $w] = true; }
-        $next = [];
-        foreach ($out as $k => $v) {
-            if (isset($seen['s' . $v])) { $next[$k] = $v; }
+    $need = count($others);
+    /** @var array<string,int> $seen */
+    $seen = [];
+    foreach ($others as $oi => $o) {
+        foreach ($o as $w) {
+            $k = 's' . $w;
+            if (($seen[$k] ?? 0) === $oi) { $seen[$k] = $oi + 1; }
         }
-        $out = $next;
+    }
+    $out = [];
+    foreach ($arr as $k => $v) {
+        if (($seen['s' . $v] ?? 0) === $need) { $out[$k] = $v; }
     }
     return $out;
 }
