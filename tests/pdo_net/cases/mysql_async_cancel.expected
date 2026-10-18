@@ -1,0 +1,4 @@
+same pdo: PDOException 2006
+same pdo, again: PDOException 2006
+fresh: 7
+leaked running: 0

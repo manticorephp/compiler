@@ -19,7 +19,7 @@ no fd leak
 drip: HY000 2006 MySQL server has gone away
 fast
 no fd leak
-switch_unknown: HY000 2059 Authentication plugin 'sha256_password' cannot be loaded
+switch_unknown: HY000 2059 Authentication plugin 'auth_nonesuch' cannot be loaded
 fast
 no fd leak
 switch_short: HY000 2027 Malformed packet (scramble shorter than 20 bytes)

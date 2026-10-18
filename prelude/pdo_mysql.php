@@ -505,6 +505,8 @@ final class __McPdoMyWire
     {
         if ($plugin === 'mysql_native_password') { return self::nativeAuth($pw, $scramble); }
         if ($plugin === 'caching_sha2_password') { return self::sha2Auth($pw, $scramble); }
+        // sha256_password (mysqlnd): inside TLS the password in the clear + NUL; on a plain socket ask for the RSA key (0x01)
+        if ($plugin === 'sha256_password') { return $pw === '' ? "\0" : ($this->tls ? $pw . "\0" : "\x01"); }
         $this->closeSock();
         throw __McPdo::connectFail('HY000', 2059, "Authentication plugin '" . $plugin . "' cannot be loaded");
     }
@@ -615,6 +617,11 @@ final class __McPdoMyWire
                     continue;
                 }
             }
+            if ($t === 0x01 && $plugin === 'sha256_password' && !$full && !$this->tls) {
+                $full = true;
+                $this->sendEncrypted($p, $pw, $scramble);
+                continue;
+            }
             throw $this->malformed('unexpected authentication packet');
         }
     }
@@ -631,7 +638,12 @@ final class __McPdoMyWire
             return;
         }
         $this->sendPacket("\x02");
-        $k = $this->packet(self::CTRL_CAP);
+        $this->sendEncrypted($this->packet(self::CTRL_CAP), $pw, $scramble);
+    }
+
+    /** $k is the server's reply to a key request: 0x01 + PEM. Sends the password RSA-OAEP encrypted. */
+    private function sendEncrypted(string $k, string $pw, string $scramble): void
+    {
         // a 16384-bit key is ~2.4 KiB of PEM: 8 KiB is generous, anything bigger is hostile
         if (\strlen($k) < 27 || \strlen($k) > 8192 || \ord($k[0]) !== 1 || \strncmp(\substr($k, 1), '-----BEGIN PUBLIC KEY-----', 26) !== 0) {
             throw $this->malformed('server public key');

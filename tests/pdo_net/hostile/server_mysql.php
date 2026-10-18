@@ -72,7 +72,7 @@ if ($mode === 'auth_nonpem' || $mode === 'auth_badkey' || $mode === 'auth_bigkey
     fwrite($c, $more(6, "\x04"));                          // a second 04
     $quit();
 }
-if ($mode === 'switch_unknown') { fwrite($c, $pkt(2, "\xfesha256_password\0" . str_repeat('b', 20) . "\0")); $quit(); }
+if ($mode === 'switch_unknown') { fwrite($c, $pkt(2, "\xfeauth_nonesuch\0" . str_repeat('b', 20) . "\0")); $quit(); }
 if ($mode === 'switch_short') { fwrite($c, $pkt(2, "\xfemysql_native_password\0" . str_repeat('b', 10) . "\0")); $quit(); }
 if ($mode === 'switch_old') { fwrite($c, $pkt(2, "\xfe")); $quit(); }
 if ($mode === 'switch_loop') { for ($i = 0; $i < 5; $i++) { fwrite($c, $pkt(2 + 2 * $i, "\xfemysql_native_password\0" . str_repeat('b', 20) . "\0")); $recv(); } $quit(); }
