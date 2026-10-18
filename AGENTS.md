@@ -72,6 +72,7 @@ only as the `tools/difftest.sh` oracle and by a few Zend-hosted dev tools
 bash tests/aot/run.sh                # AOT suite: cases/*.php + expected/*.out, auto-discovered
 bash tests/aot/run.sh -k <substr>    # filter cases (do this first — the full suite is minutes)
 bash tests/aot/run.sh -j 0           # all cores (note: `-j 0` is two args)
+bash tests/pdo_net/run.sh          # PDO pgsql/mysql/mariadb vs php on live servers (tests/pdo_net/up.sh starts them in docker; CI job pdo-net)
 bash tests/cli/run.sh                # CLI golden: command wiring, options, exit codes, help, progress formats (codegen-independent; runs in CI)
 bash tests/aot/xfail.sh              # known-bug repros (tests/aot/repro): XFAIL = still open, XPASS = fixed, promote it
 bash tools/difftest.sh               # byte parity vs the `php` interpreter over the corpus

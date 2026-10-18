@@ -1,7 +1,9 @@
-# `ext/pdo` + `pdo_sqlite`
+# `ext/pdo` + `pdo_sqlite`, `pdo_pgsql`, `pdo_mysql`
 
-PHP Data Objects, with SQLite behind it. `new PDO('sqlite::memory:')` works, and so do
-prepared statements, the array fetch modes, transactions, and php's three error modes.
+PHP Data Objects with three drivers: SQLite (libsqlite3 over FFI), PostgreSQL and MySQL / MariaDB (the wire protocols in
+pure PHP over a socket: no libpq, no libmysqlclient). `new PDO('sqlite::memory:')` works, and so do
+prepared statements, the array fetch modes, transactions, and php's three error modes. The network drivers are
+sections `pgsql:` and `mysql:` below.
 
 ```php
 $db = new PDO('sqlite:/tmp/app.db');
@@ -18,13 +20,17 @@ foreach ($db->query('SELECT id, name FROM t')->fetchAll(PDO::FETCH_ASSOC) as $ro
 
 ## Where it lives, and why
 
-Two prelude files, both global-namespace, both demand-gated on a program mentioning `PDO` /
+Prelude files, all global-namespace, all demand-gated on a program mentioning `PDO` /
 `PDOStatement` / `PDOException` / `PDORow`:
 
 | file | what |
 |---|---|
 | `prelude/pdo.php` | the driver-agnostic facade: `PDO`, `PDOStatement`, `PDOException`, `PDORow`, every `PDO::` constant, the fetch modes, the DSN split, and the `__McPdoDrv` / `__McPdoDrvStmt` seam |
 | `prelude/pdo_sqlite.php` | the SQLite driver: ~30 libsqlite3 FFI bindings and the two classes that satisfy the seam |
+| `prelude/pdo_sql.php` | what the two network drivers share: the SQL scanner (placeholders, quoting, comments) and the TLS handshake over libssl |
+| `prelude/pdo_pgsql.php` | the PostgreSQL driver (protocol 3.0) |
+| `prelude/pdo_mysql.php` | the MySQL / MariaDB driver (client/server protocol) |
+| `prelude/pdo_pgsql_off.php`, `prelude/pdo_mysql_off.php` | stand-ins that answer `could not find driver` when the program does not name that driver (see below) |
 
 **The prelude and not `src/Runtime/Stdlib`** for the same reason as ext/curl: the stdlib
 `.o.sig` carries FUNCTIONS ONLY. `new PDO(...)` hands back an object and `PDO::FETCH_ASSOC` is
@@ -34,24 +40,34 @@ one of its instances — `instanceof` reads false and its properties come back a
 **Linking.** `#[\Ffi\Library('sqlite3')]` is the whole story: the emitter collects the library
 off every wrapper it emits and `generic_link_flags()` resolves it through
 `pkg-config --libs sqlite3`. A binary that never mentions PDO never emits a wrapper and never
-links `-lsqlite3`.
+links `-lsqlite3`. The network drivers add no library of their own: a socket, libssl (already in every binary) and, for
+mysql `caching_sha2_password`, `openssl_public_encrypt` (every PDO program therefore carries the openssl prelude).
 
 ## The driver seam
 
 `PDO` and `PDOStatement` hold no database knowledge. They delegate to two interfaces, and
-everything database-shaped lives behind them. A future `mysql:` / `pgsql:` driver is the
-opposite shape — a socket with `pack`/`unpack`, no FFI at all — and implements the same two
-interfaces without touching the facade.
+everything database-shaped lives behind them. `pgsql:` and `mysql:` are the opposite shape to
+sqlite — a socket and byte parsing, no FFI — and implement the same two interfaces without touching the facade.
 
 SQLite deserves saying plainly: **it is not a server.** There is no wire protocol and nothing to
 unpack; `sqlite3_step` is a `pread` on a local file. That is why this driver is FFI and the
 network drivers will not be.
 
 Adding a driver means: implement `__McPdoDrv` + `__McPdoDrvStmt`, add one arm to the scheme
-`match` in `PDO::__construct`, and split the prelude gate in `Main.php` the way `curl_multi`
-does. The sqlite driver currently rides the facade unconditionally, because a DSN scheme is a
-runtime **string** and `PreludeDemand` is token-based — nothing at compile time can tell which
-driver `new PDO($dsn)` will open.
+`match` in `PDO::__construct`, and add the driver to the gate in `Main.php`.
+
+**The driver gate.** A DSN scheme is a runtime **string** and `PreludeDemand` is token-based, so the compiler cannot know which
+driver `new PDO($dsn)` will open. It keys on the driver NAME appearing anywhere in the program as code or inside a string
+literal (`'pgsql:host=..'`, `PDO::PGSQL_ATTR_FETCH_BATCH`, `pgsqlCopyToArray`):
+
+- a program that names at least one of `sqlite` / `pgsql` / `mysql` links sqlite plus the ones it names; the other network driver is
+  replaced by its `*_off.php` stand-in and `new PDO('<other>:..')` throws `could not find driver`;
+- a program that names none (a fully dynamic DSN: `new PDO(getenv('DSN'))`) gets every driver;
+- a program that names one driver but builds a DSN for another at run time (`new PDO($env ?? 'sqlite::memory:')` run with a `pgsql:`
+  value) hits the stand-in. Spell the scheme once in the source (any string literal containing `pgsql` is enough) to link it.
+
+The point is compile time: loading both network drivers into a sqlite-only program cost about 40% of its compile time (measured on
+`pdo_sqlite_basic`); the gate removes it. Tests: `pdo_gate_sqlite_only`, `pdo_gate_dynamic_dsn`.
 
 ## Why there are no trampolines here
 
@@ -69,7 +85,8 @@ would need its own scanner; that is the driver's business, not the facade's.
 
 ## Async
 
-The API is synchronous, like Zend's. The scheduler shows up in one place: **`SQLITE_BUSY`**.
+The API is synchronous, like Zend's. For sqlite the scheduler shows up in one place: **`SQLITE_BUSY`**. (The network drivers park the fiber in
+every socket read; see "Async" under `pgsql:` and `mysql:` below.)
 
 `sqlite3_busy_timeout` is never called — it sleeps inside a C frame, which stalls the whole
 event loop, netpoller included, so one contended database would freeze every unrelated fiber in
@@ -101,8 +118,12 @@ throw would longjmp past sqlite's own half-updated frames, which `docs/ffi.md` f
   write-back *is* the whole feature, so there is no half of it worth approximating.
 - **`ATTR_PERSISTENT` is accepted and ignored.** One process, no persistent pool (see Async\Pool below). The constructor option is kept for
   `getAttribute()`; `setAttribute()` answers `false` afterwards (php, all drivers).
-- **`getAvailableDrivers()` returns what this binary linked** — `['sqlite']` — where php lists
-  every driver its build has.
+- **`getAvailableDrivers()` is the fixed list `['mysql', 'pgsql', 'sqlite']`**, where php lists the drivers its build has. It does
+  not follow the driver gate: a driver the gate left out is listed and then answers `could not find driver`.
+- **Where php warns and carries on, the network drivers throw** (a NUL byte in a pgsql DSN value, where php truncates; `getNotify()` with a
+  timeout above `2147483647`, where php clamps; a mysql statement mixing `?` and `:name`, refused at `prepare()` where php refuses at
+  `execute()`).
+- **No `Pdo\Pgsql` / `Pdo\Mysql` subclasses**: their methods live on `PDO` itself and `PDO::connect()` returns a `PDO`.
 
 `getColumnMeta()['table']` is **not** a divergence: `sqlite3_column_table_name()` is bound
 `#[\Ffi\Weak]` and called only when `sqlite3_compileoption_used('ENABLE_COLUMN_METADATA')` says
@@ -113,6 +134,31 @@ Cursor orientation is not one either: `$cursorOrientation` and `$cursorOffset` a
 ignored, exactly as pdo_sqlite does — a sqlite statement is forward-only and php returns the
 next row whatever is asked for (measured: `ORI_PRIOR` / `FIRST` / `LAST` / `ABS` / `REL` all
 behave as `ORI_NEXT`). Throwing was stricter than the oracle.
+
+## `pgsql:` (prelude/pdo_pgsql.php)
+
+Protocol 3.0 over a plain socket. DSN: `pgsql:host=..;port=..;dbname=..` plus `hostaddr`, `user`, `password` and the `ssl*` keys of the TLS
+section below. `user=` / `password=` in the DSN beat the constructor arguments (php does the same); `host` defaults to `localhost`,
+`port` to 5432, `dbname` to the user. Authentication: `trust`, cleartext, `md5`, `SCRAM-SHA-256` (the server must prove its identity, nonce and
+iteration count are validated). Statements are always server-side (extended protocol, named statements; `ATTR_EMULATE_PREPARES` is stored and
+ignored); `PDO::PGSQL_ATTR_DISABLE_PREPARES` re-parses an unnamed statement at every `execute()`. Placeholders `?` and `:name` are rewritten
+to `$n` by the shared scanner (comments, quotes, dollar quoting, `??`). Values are typed like pdo_pgsql (ints, floats, bool, bytea, text).
+`errorInfo` carries the server's SQLSTATE and message in libpq's rendering; a connect failure is `SQLSTATE[08006] [7] ..`.
+Attributes: `ATTR_SERVER_VERSION`, `ATTR_SERVER_INFO` (from ParameterStatus), `ATTR_CONNECTION_STATUS`, `ATTR_CLIENT_VERSION`
+(`manticore-pgwire 3.0`), `ATTR_TIMEOUT`, `PGSQL_ATTR_FETCH_BATCH` (superset, see Unbuffered cursors). Further sections: TLS, LISTEN/NOTIFY and
+COPY, unbuffered cursors, pooling.
+
+**Async (shared with mysql).** A socket read parks the fiber, so a query never stalls the loop; one connection is one protocol state machine:
+
+- *Busy gate.* While one fiber's request is on the wire, another fiber using the same `PDO` waits for it (polling the scheduler every 1 ms,
+  bounded by the connection timeout, then a `PDOException`); with no scheduler a second use of a busy handle throws `connection busy`.
+  Without the gate two fibers interleave bytes and each reads the other's result (reproduced before the fix).
+- *Poisoning.* A request that does not finish normally (fiber cancelled, `ATTR_TIMEOUT` expired, a malformed or truncated message, a write
+  failure) leaves the stream in an unknown place, so the connection is closed at once: the next use throws a connection error, it is never
+  answered from half a response. A server `ErrorResponse` is not a poison: the response is complete and the handle keeps working.
+- *Cancel on the server.* An abandoned request also stops the work on the server: pgsql sends a `CancelRequest` (pid + secret on a throwaway
+  socket), mysql `KILL QUERY` from a second connection; both run under `Async\shield` and swallow their own errors.
+- Tests (Manticore-only, hand-written expected output): `pgsql_async_*`, `mysql_async_*`.
 
 ## `mysql:` (prelude/pdo_mysql.php)
 
@@ -177,6 +223,7 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
   NUL inside TLS instead of the RSA exchange. Hostile servers: bytes buffered after the handshake packet, or arriving between the
   SSLRequest and the TLS handshake, end the attempt (plaintext injected before TLS must never be read as part of the session).
   The new constants are the same ids under `Pdo\Mysql::ATTR_*`; the old names are what the tests use (`PDO::MYSQL_ATTR_*` is deprecated in 8.5).
+- Async: the busy gate, poisoning and `KILL QUERY` cancellation are the ones described under `pgsql:`; the mysql wire uses the same guard shape.
 - Gaps: unix sockets, compression, `COM_STMT_SEND_LONG_DATA`, a few charset names (`charset=` knows utf8mb4, utf8,
   latin1, ascii, binary, latin2, cp1250, cp1251, koi8r/u, greek, hebrew), AUTO_INCREMENT ids above
   `PHP_INT_MAX`.
@@ -232,11 +279,12 @@ types (`getColumnMeta`), MariaDB error texts and codes (always the server's own,
 (stripped as mysqlnd does), the optional `Flush tables:` of `ATTR_SERVER_INFO`. A PARAM_BOOL / bool-typed parameter of the binary protocol travels as TINY (MariaDB reports that
 column type back, MySQL widens it). The driver sends no MariaDB extended capability flags and reads none.
 
-Not supported: `ed25519` / `parsec` logins (`[2054]`, as php), `COM_RESET_CONNECTION` (never sent).
+Not supported: `ed25519` / `parsec` logins (`[2054]`, as php). `COM_RESET_CONNECTION` is sent by `resetSession()` (see Pooling).
 
 Where the driver deliberately differs from php (both servers): `exec()` of a statement that returns rows (`SELECT`, `... RETURNING`) answers `0` and the connection stays
 usable; php (measured, 8.5, both servers) leaves the result pending and fails EVERY later command on that handle with `2014 Cannot execute queries while other unbuffered queries are active`.
 Reproducing that wedge was judged a footgun, not a feature.
+
 ## `pgsql:` TLS (prelude/pdo_pgsql.php)
 
 DSN keys, graded against libpq: `sslmode` = `disable | allow | prefer` (default) `| require | verify-ca | verify-full`, `sslrootcert`,
@@ -362,8 +410,8 @@ Tests: `async_pool_basic`, `async_pool_cancel`, `pdo_sqlite_reset` (AOT), `pgsql
 ## Limitations
 
 `PDO::FETCH_BOUND` and `bindColumn()` throw — both need a stored by-reference binding, the same
-missing primitive `bindParam()` documents above. `nextRowset()` reports IM001, as php's sqlite
-driver does. `nextRowset()` works on the `mysql:` driver.
+missing primitive `bindParam()` documents above. `nextRowset()` reports IM001 on sqlite and pgsql, as php does, and works on the
+`mysql:` driver. Out of scope: the `mysqli` and `pgsql_*` procedural APIs, `LOAD DATA LOCAL INFILE`.
 
 ## Regression notes: default fetch mode and variadic calls
 
@@ -423,7 +471,15 @@ bash tools/difftest.sh            # byte-exact parity vs php
 | `pdo_sqlite_errors` | all three ERRMODEs, SQLSTATE mapping, `errorInfo`, connect failures |
 | `pdo_sqlite_file` | file DSN, persistence across handles, the anonymous temp database |
 
+## Network driver tests
+
+`tests/pdo_net/` runs the `pgsql_*` and `mysql_*` cases against live servers, graded against php's own pdo_pgsql / pdo_mysql on the same
+server (a sibling `<case>.expected` replaces the oracle for Manticore-only behaviour). `bash tests/pdo_net/up.sh` starts the servers in docker
+(postgres 16, mysql 8.4 plain / TLS / native-password / isolated, mariadb 11), `bash tests/pdo_net/run.sh [-k substr] [--server mysql|mariadb]` runs
+them, `down.sh` removes them. A case whose server is unreachable is skipped; a run in which nothing ran fails. The oracle php needs `pdo_pgsql`
+and `pdo_mysql`. CI runs the job `pdo-net` on arm64 and amd64 against mysql and mariadb.
+
 ## Host requirement
 
-libsqlite3 with `pkg-config sqlite3`, and only to compile a program that mentions `PDO`.
+libsqlite3 with `pkg-config sqlite3`, and only to compile a program that uses the sqlite driver; the network drivers need nothing beyond libssl.
 See `docs/install.md`.

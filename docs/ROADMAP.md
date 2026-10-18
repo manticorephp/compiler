@@ -32,7 +32,7 @@ not here.
 - [x] Language: classes, interfaces, traits, enums, closures, generators, attributes,
       first-class callables, readonly, match, dynamic calls and `new $cls`
 - [x] Standard library highlights: full `array_*`, `ext/intl` (100%), `session`, `sockets`,
-      `json`, `tokenizer`, `iconv`, `ctype`, `bcmath` (functions and `BcMath\Number`), most of `mbstring`, `curl`, `pdo_sqlite`
+      `json`, `tokenizer`, `iconv`, `ctype`, `bcmath` (functions and `BcMath\Number`), most of `mbstring`, `curl`, `pdo` (sqlite, pgsql, mysql / MariaDB)
 - [x] Beyond PHP (superset): structured async I/O, FFI, a module system, HTTP/1.1 server,
       WebSocket client and server, typed native containers (`Manticore\Ds`)
 - [~] Overall PHP function coverage: **967 / 2135** functions, **169 / 327** classes
@@ -66,7 +66,7 @@ function compiles and fails at run time with `Call to undefined function`.
 - [~] Core 92 % — remaining `get_defined_vars`, `get_class_vars` [#215] · [x] `SPL` 100 % [#214]
 - [~] `password_*`, `crypt` — argon2, DES crypt open [#212] · [x] `hash` KDFs/copy/update_stream [#213]
 - [x] `openssl` — ciphers incl. CCM/OCB, digests, sign/verify, RSA/DSA/DH/EC/X25519/Ed25519 keys, derive, x509 + CSR + issue, seal/open, SPKAC, PKCS#7/#12, CMS [#211]; known gap: `config` / `req_extensions` / `x509_extensions` (openssl.cnf) options throw
-- [ ] PDO `pgsql` / `mysql` drivers [#210]
+- [x] PDO `pgsql` / `mysql` / MariaDB drivers [#210] (pure-PHP wire protocols, TLS, LISTEN/NOTIFY, COPY, unbuffered cursors, `Async\Pool::pdo()`); `FETCH_BOUND` / `bindColumn()` still open (needs by-reference binding)
 - [~] `standard` 82 % · `date` 84 % — tail tracked in [#218]
 - [~] `Reflection` 62 % — interface reflection, declaring class, defaults of plain functions
 - [~] `mbstring` 62 % — remaining: `mb_convert_variables`, `mb_parse_str`, `mb_http_*`,
