@@ -4,7 +4,7 @@ function opts(int $mode, array $o = []): array { return $o + [PDO::ATTR_ERRMODE 
 function pdo(int $mode = PDO::ERRMODE_EXCEPTION, array $o = []): PDO { return new PDO((string) getenv('PDO_MY_DSN'), getenv('PDO_USER') ?: 'u', getenv('PDO_PASS') ?: 'pw', opts($mode, $o)); }
 function norm(mixed $v): string {
     $s = var_export($v, true);
-    $s = preg_replace('/Uptime: \d+  Threads: \d+  Questions: \d+  Slow queries: \d+  Opens: \d+  Flush tables: \d+  Open tables: \d+  Queries per second avg: [\d.]+/', 'STATS', $s);
+    $s = preg_replace('/Uptime: \d+  Threads: \d+  Questions: \d+  Slow queries: \d+  Opens: \d+(  Flush tables: \d+)?  Open tables: \d+  Queries per second avg: [\d.]+/', 'STATS', $s);
     $s = preg_replace("/^'\\d+\\.\\d+\\.\\d+(-[A-Za-z0-9.-]+)?'$/", 'V', $s);
     if (preg_match("/^'(mysqlnd|manticore)[^']*'$/", $s)) { return 'CLIENTV'; }
     return $s;

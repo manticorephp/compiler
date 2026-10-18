@@ -1,4 +1,5 @@
 <?php
+// servers: mysql
 // expects-connect-failure: TLS options against mc-my (auto-generated certificate, fails name verification) and mc-my-ssl (:33064, our CA, server cert names 127.0.0.1)
 // Numeric option ids: 1006 SSL_KEY, 1007 SSL_CERT, 1008 SSL_CA, 1009 SSL_CAPATH, 1010 SSL_CIPHER, 1013 SSL_VERIFY_SERVER_CERT (the PDO::MYSQL_ATTR_* names are deprecated in 8.5)
 $dir = getenv('PDO_SSL_DIR');

@@ -1,4 +1,5 @@
 <?php
+// servers: mysql
 // caching_sha2_password FULL authentication over a plain socket: mysql_auth_full.pre runs `flush privileges` (empties the
 // server's auth cache) before each run, so the first login of u/pw asks for the RSA key. Bad credentials always do.
 $dsn = getenv('PDO_MY_DSN');

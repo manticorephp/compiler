@@ -1,14 +1,24 @@
 #!/bin/bash
 # pdo_net: byte parity of compiled PDO network drivers against php, on live servers.
-#   tests/pdo_net/run.sh [-k substr]
+#   tests/pdo_net/run.sh [-k substr] [--server mysql|mariadb]
+# --server picks the server the mysql_* cases run against (default mysql = mc-my :33060, mariadb = mc-maria :33061); the oracle is live php on THAT server.
+# A case header line `// servers: mysql` (default: both) limits a case; the other server SKIPs it with the reason.
 # Cases named pgsql_* / mysql_* use PDO_PG_DSN / PDO_MY_DSN (mysql_native : PDO_MY_NATIVE_DSN); SKIP when the server is unreachable.
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 FILTER=""
-[ "${1:-}" = "-k" ] && FILTER="$2"
+SERVER=mysql
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -k) FILTER="${2:-}"; shift 2 ;;
+        --server) SERVER="${2:-}"; shift 2 ;;
+        *) echo "usage: run.sh [-k substr] [--server mysql|mariadb]" >&2; exit 2 ;;
+    esac
+done
+case "$SERVER" in mysql) MY_PORT=33060 ;; mariadb) MY_PORT=33061 ;; *) echo "unknown --server $SERVER (mysql|mariadb)" >&2; exit 2 ;; esac
 export PDO_PG_DSN="${PDO_PG_DSN-pgsql:host=127.0.0.1;port=54320;dbname=d}"
 export PDO_PG_SSL_DSN="${PDO_PG_SSL_DSN-pgsql:host=127.0.0.1;port=54323;dbname=d}"
-export PDO_MY_DSN="${PDO_MY_DSN-mysql:host=127.0.0.1;port=33060;dbname=d}"
+export PDO_MY_DSN="${PDO_MY_DSN-mysql:host=127.0.0.1;port=$MY_PORT;dbname=d}"
 PDO_MY_DSN_DEFAULT="$PDO_MY_DSN"
 export PDO_MY_NATIVE_DSN="${PDO_MY_NATIVE_DSN-mysql:host=127.0.0.1;port=33062;dbname=d}"
 WORK="$ROOT/tests/pdo_net/.work"
@@ -28,10 +38,10 @@ reachable() { # dsn
 }
 
 pass=0; fail=0; skip=0
-# every started case's .post hook runs on ANY exit (Ctrl-C included)
-POSTS=()
-run_posts() { local p; for p in "${POSTS[@]:-}"; do [ -n "$p" ] && [ -x "$p" ] && "$p"; done; return 0; }
-trap 'run_posts; rm -rf "$WORK"' EXIT
+# a started case's .post hook runs on ANY exit (Ctrl-C included) unless the case already ran it: PENDING_POST names the one still owed
+PENDING_POST=""
+run_pending_post() { local p="$PENDING_POST"; PENDING_POST=""; [ -n "$p" ] && [ -x "$p" ] && "$p"; return 0; }
+trap 'run_pending_post; rm -rf "$WORK"' EXIT
 trap 'exit 130' INT TERM
 for f in tests/pdo_net/cases/*.php; do
     n=$(basename "$f" .php)
@@ -39,6 +49,9 @@ for f in tests/pdo_net/cases/*.php; do
     case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_native) dsn="$PDO_MY_NATIVE_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
     # a sibling <case>.dsn names the DSN to use instead (cases that need a server of their own: mc-my-iso, :33065)
     [ -f "${f%.php}.dsn" ] && dsn=$(cat "${f%.php}.dsn") && export PDO_MY_DSN="$dsn" || export PDO_MY_DSN="${PDO_MY_DSN_DEFAULT}"
+    # `// servers: mysql` in the first lines limits a case to those servers (comma separated; default both)
+    only=$(head -n 6 "$f" | sed -n 's|^// servers: *||p' | tr -d ' ')
+    if [ -n "$only" ] && [[ ",$only," != *",$SERVER,"* ]]; then echo "SKIP $n (servers: $only, running $SERVER)"; skip=$((skip+1)); continue; fi
     if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n (server unreachable)"; skip=$((skip+1)); continue; fi
     # a sibling <case>.needs lists further host:port servers the case talks to (one per line)
     down=""
@@ -47,16 +60,17 @@ for f in tests/pdo_net/cases/*.php; do
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
     if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
     pre="${f%.php}.pre"   # optional hook: server state a case needs before EACH run (php and native)
-    post="${f%.php}.post"; POSTS+=("$post") # optional hook: undoes it after EACH run (also a global the test user cannot restore itself)
-    if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
+    post="${f%.php}.post"; PENDING_POST="$post" # optional hook: undoes it after EACH run (also a global the test user cannot restore itself)
+    if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); run_pending_post; continue; fi
     if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); fi
     [ -x "$post" ] && "$post"
+    PENDING_POST="$post"
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
         echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); continue
     fi
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     act=$("$WORK/$n" 2>&1)
-    [ -x "$post" ] && "$post"
+    run_pending_post
     # a case that printed its own assertion failure fails even when php printed the same
     if grep -q 'ASSERTION FAILED' <<<"$exp$act"; then echo "FAIL $n (the case reports a failed assertion)"; fail=$((fail+1)); continue; fi
     # both sides printing the same refusal is a vacuous pass: only a case marked `# expects-connect-failure` may show one
@@ -67,7 +81,7 @@ for f in tests/pdo_net/cases/*.php; do
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
 done
 # Hostile-server cases: a fake server (Zend php) per mode, the compiled client, hand-written expectations.
-if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
+if [[ "$SERVER" = mysql && ( -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ) ]]; then
     H=tests/pdo_net/hostile
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
@@ -85,7 +99,7 @@ if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
     fi
 fi
 # The same fake-server harness speaking the MySQL protocol (server_mysql.php), one mode per connection.
-if [[ -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ]]; then
+if [[ "$SERVER" = mysql && ( -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ) ]]; then
     H=tests/pdo_net/hostile
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL mysql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then

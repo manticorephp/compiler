@@ -1,4 +1,5 @@
 <?php
+// servers: mysql
 // caching_sha2_password FULL authentication over TLS: the password goes in the clear INSIDE the TLS session (no RSA key exchange).
 // mysql_ssl_auth_full.pre empties the auth cache of mc-my before each run, so the first login of u/pw is a full authentication.
 $dsn = getenv('PDO_MY_DSN');

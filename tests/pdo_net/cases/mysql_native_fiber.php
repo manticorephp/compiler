@@ -1,4 +1,5 @@
 <?php
+// servers: mysql
 // Manticore-only (Async\ has no php oracle); expectation in the sibling .expected, server mc-my-iso (global Prepared_stmt_count).
 // A statement destroyed while ANOTHER fiber's cycle holds the connection: its COM_STMT_CLOSE is queued, sent when that cycle ends,
 // the server really deallocates it, and the stream stays in sync.

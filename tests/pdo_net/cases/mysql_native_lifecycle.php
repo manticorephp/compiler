@@ -1,4 +1,5 @@
 <?php
+// servers: mysql
 // statement lifecycle over COM_STMT_*: nothing leaks server-side (Prepared_stmt_count), ids are reused, close is exactly once
 function dsn(): string { return (string) getenv('PDO_MY_DSN'); }
 function pdo(): PDO { return new PDO(dsn(), getenv('PDO_USER') ?: 'u', getenv('PDO_PASS') ?: 'pw', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_EMULATE_PREPARES => false]); }
