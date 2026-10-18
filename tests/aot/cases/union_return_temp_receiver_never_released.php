@@ -1,6 +1,5 @@
 <?php
 // A method call on a temporary of a union return type (S|false) never releases the temporary.
-// issue: #299
 class S { public string $pad; function __construct(public Db $db) { $this->pad = str_repeat('x', 4096); } function col(): int { return 1; } }
 class Db { function q(): S|false { return new S($this); } }
 function run(Db $d): int { return $d->q()->col(); }

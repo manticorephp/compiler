@@ -8666,6 +8666,7 @@ trait EmitLlvmObjects
         $out = $this->emitNode($mc->object);
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
+        $recvWord = $thisArg;
         // A `mixed`/cell receiver carries a NaN-boxed object — strip the tag to
         // the raw object pointer so both the `$this` arg and the class_id
         // virtual dispatch read the object, not the boxed bits (else SIGSEGV).
@@ -9195,7 +9196,7 @@ trait EmitLlvmObjects
         // reference of its own.
         if (\Compile\Debug::$rcRecvTemp) {
             $recvFlavor = $this->freshRcArgFlavor($mc->object);
-            if ($recvFlavor !== '') { $out .= $this->rcReleaseReg($thisArg, $recvFlavor); }
+            if ($recvFlavor !== '') { $out .= $this->rcReleaseReg($recvWord, $recvFlavor); }
         }
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
