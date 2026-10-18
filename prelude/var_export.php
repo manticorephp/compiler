@@ -27,7 +27,7 @@ function __mir_var_export(mixed $v, int $indent): string
 {
     if ($v === null) { return 'NULL'; }
     if (is_bool($v)) { return $v ? 'true' : 'false'; }
-    if (is_int($v)) { return (string)$v; }
+    if (is_int($v)) { return $v === PHP_INT_MIN ? '-9223372036854775807-1' : (string)$v; }
     if (is_float($v)) {
         // upperE=1, forceDot=1 — var_export must round-trip as a float, so an
         // integer-valued decimal keeps its `.0`.

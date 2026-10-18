@@ -9539,8 +9539,13 @@ trait EmitLlvmBuiltins
             $out = $this->emitNode($args[0]);
             $out .= $this->coerceToI64();
             $r = $this->ssa->allocReg();
-            $out .= '  ' . $r . ' = call ptr @__mir_int_to_str(i64 ' . $this->lastValue . ")\n";
-            $this->lastValue = $r;
+            $iv = $this->lastValue;
+            $out .= '  ' . $r . ' = call ptr @__mir_int_to_str(i64 ' . $iv . ")\n";
+            $isMin = $this->ssa->allocReg();
+            $out .= '  ' . $isMin . ' = icmp eq i64 ' . $iv . ", -9223372036854775808\n";
+            $r2 = $this->ssa->allocReg();
+            $out .= '  ' . $r2 . ' = select i1 ' . $isMin . ', ptr ' . $this->litStr('-9223372036854775807-1') . ', ptr ' . $r . "\n";
+            $this->lastValue = $r2;
             $this->lastValueType = 'ptr';
             return $out;
         }
