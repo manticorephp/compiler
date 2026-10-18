@@ -287,13 +287,14 @@ The aliases raise no deprecation (the superset throws instead of warning).
   else waits up to the timeout (0 only looks, without waiting). The wait is a read with a stream timeout, so under the scheduler the fiber parks and the
   loop runs (`pgsql_async_notify`); cancelling the fiber loses nothing and the connection stays usable. Row shape as php: ASSOC `message`/`pid`/`payload`,
   NUM `0/1/2`, BOTH (default) both; `payload` only when non-empty. Deviations: a timeout above `2147483647` is a `ValueError` (php warns and clamps); the wait holds
-  the connection, so a query on it from another fiber waits behind it (bounded by `ATTR_TIMEOUT`); more than 100000 unread notifications end the session.
+  the connection, so a query on it from another fiber waits behind it (bounded by `ATTR_TIMEOUT`); past 100000 unread notifications the OLDEST is dropped (libpq queues without limit; the session goes on).
 - COPY: simple-protocol `COPY t [(fields)] FROM|TO STDIN WITH DELIMITER E'<first byte of separator>' NULL AS E'<nullAs>'` built exactly as php builds it (names are
   interpolated raw, no quoting; an empty separator is a tab; the default `nullAs` is `\\N`), so the server's error text matches php's. `copyFromArray` takes an
   array or a Traversable, skips `''` rows and adds the missing newline; data goes out as CopyData frames of at most 64 KiB, then CopyDone. A server error is
   a `PDOException` (`false` under the other error modes) after the stream is drained: the connection is usable, the load is all-or-nothing, and inside a
-  transaction it is aborted like after any error. `copyToFile` truncates the file before it asks the server (as php); `copyFromFile` reads the file whole
-  (php streams it line by line). Unopenable files are `HY000 Unable to open the file[ for writing]`.
+  transaction it is aborted like after any error. `copyToFile` truncates the file before it asks the server (as php); `copyFromFile` reads the file whole through a handle, so a FIFO works too
+  (php streams it line by line); `copyFromArray` turns every row into text before the first byte is sent (php sends row by row and consumes a generator lazily).
+  The wait between CopyDone and the server's answer (a slow commit or index build) is not bounded by the default timeout, as for any statement; a `copyToFile` keeps one handle for the whole transfer. Unopenable files are `HY000 Unable to open the file[ for writing]`.
 - The other direction smuggled through the table name (`'t TO STDOUT; --'` in `copyFromArray`) is `HY000` with an empty message; the session goes on.
 - Tests: `pgsql_notify`, `pgsql_copy` (byte parity with php), `pgsql_async_notify` (hand-written), hostile-server modes `notify_*`, `copy_out_cap`, `copy_in_err`.
 

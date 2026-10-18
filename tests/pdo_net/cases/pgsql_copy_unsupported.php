@@ -1,5 +1,5 @@
 <?php
-// COPY is not supported by the driver (yet); php answers HY000 with the libpq result status as the code and keeps the connection usable.
+// A COPY statement run through exec()/prepare() is refused (the COPY API is copyFrom*/copyTo*): php answers HY000 with the libpq result status as the code and keeps the connection usable.
 $db = new PDO(getenv('PDO_PG_DSN'), getenv('PDO_USER') ?: 'u', getenv('PDO_PASS') ?: 'pw', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT => 5]);
 $db->exec('create temp table ct(a int)');
 $db->exec('insert into ct values (1), (2)');

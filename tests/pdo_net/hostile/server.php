@@ -104,10 +104,24 @@ elseif ($mode === 'drip') {
     $batch();
     $one = $msg('A', pack('N', 7) . "c\0\0");
     for ($i = 0; $i < 100010; $i++) { if (@fwrite($c, $one) === false) { break; } }
+    fwrite($c, $msg('1', '') . $msg('t', pack('n', 0)) . $msg('T', $col) . $msg('2', '') . $msg('D', pack('n', 1) . pack('N', 2) . 'ok') . $msg('C', "SELECT 1\0") . $z);
 } elseif ($mode === 'copy_out_cap') {
     fwrite($c, $msg('R', pack('N', 0)) . $z);
     $batch();
     fwrite($c, $msg('H', "\0" . pack('n', 0)) . 'd' . pack('N', 100 * 1024 * 1024));
+} elseif ($mode === 'copy_slow_commit') {
+    // CopyDone arrives, the commit then takes 64 s (> 2 x the default 30 s timeout): the wait for CommandComplete must not be bounded
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    fwrite($c, $msg('G', "\0" . pack('n', 1) . pack('n', 0)));
+    while (true) { $t = $rd(1); if ($t === '') { break; } $l = unpack('N', $rd(4))[1]; $rd($l - 4); if ($t === 'c' || $t === 'f') { break; } }
+    sleep(64);
+    fwrite($c, $msg('C', "COPY 2\0") . $z);
+} elseif ($mode === 'copy_d_outside') {
+    // CopyData with no COPY in progress
+    fwrite($c, $msg('R', pack('N', 0)) . $z);
+    $batch();
+    fwrite($c, $msg('d', "1\n") . $z);
 } elseif ($mode === 'copy_in_err') {
     // the server rejects the data (and discards the rest) before the client's CopyDone: the error must surface and the session go on
     fwrite($c, $msg('R', pack('N', 0)) . $z);

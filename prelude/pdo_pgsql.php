@@ -354,8 +354,12 @@ final class __McPdoPgWire
         if ($z1 === false) { throw $this->truncated(); }
         $z2 = \strpos($b, "\0", $z1 + 1);
         if ($z2 === false || $z2 !== $bl - 1) { throw $this->truncated(); }
-        // ponytail: 100000 unread notifications end the session; libpq has no cap, a hostile server must not grow memory without one
-        if (\count($this->notices) - $this->noticeHead >= 100000) { throw $this->ioFail('protocol error: too many unread notifications'); }
+        // ponytail: libpq queues without limit; here the oldest of 100000 unread notifications is dropped so a hostile or
+        // unread flood cannot grow memory (the session goes on)
+        if (\count($this->notices) - $this->noticeHead >= 100000) {
+            $this->noticeHead++;
+            if ($this->noticeHead >= 100000) { $this->notices = \array_slice($this->notices, $this->noticeHead); $this->noticeHead = 0; }
+        }
         $n = new __McPdoPgNotify();
         $n->pid = self::i32($b, 0);
         $n->channel = \substr($b, 4, $z1 - 4);
@@ -429,12 +433,22 @@ final class __McPdoPgWire
         return $this->popNotify();
     }
 
+    /** A whole message (or an invalid length, which readMsg() reports) is buffered: reading it cannot block. */
+    private function msgReady(): bool
+    {
+        $have = \strlen($this->buf) - $this->pos;
+        if ($have < 5) { return false; }
+        $p = $this->pos;
+        $len = (\ord($this->buf[$p + 1]) << 24) | (\ord($this->buf[$p + 2]) << 16) | (\ord($this->buf[$p + 3]) << 8) | \ord($this->buf[$p + 4]);
+        return $len < 4 || $len > 67108864 || $have >= 1 + $len;
+    }
+
     private function idleLoop(int $ms): void
     {
         $deadline = $ms > 0 ? \__mc_monotonic_f() + (float) $ms / 1000.0 : 0.0;
         // ponytail: bounds a server that streams ignorable messages for ever; a real session sees a handful
         for ($steps = 0; $steps < 100000; $steps++) {
-            if (\strlen($this->buf) > $this->pos) {
+            if (\strlen($this->buf) > $this->pos && ($deadline > 0.0 || $this->msgReady())) {
                 // a message has begun: it is read to its end under the normal (bounded) message deadline
                 [$t, $b] = $this->readMsg();
                 if ($t === 'A') { $this->queueNotify($b); }
@@ -494,7 +508,15 @@ final class __McPdoPgWire
         $wrong = 0;
         $pend = '';
         $wfail = false;
+        $h = null;
+        if ($file !== '') {
+            $h = \fopen($file, 'ab');
+            if ($h === false) { $h = null; $wfail = true; }
+        }
+        try {
         while (true) {
+            // the server runs the statement (a commit, an index build) between our CopyDone and its answer: a wait, not a stall
+            $this->awaiting = true;
             [$t, $b] = $this->msg();
             if ($t === 'd') {
                 if (!$in) { throw $this->truncated(); }
@@ -504,7 +526,7 @@ final class __McPdoPgWire
                 } else {
                     $pend .= $b;
                     if (\strlen($pend) >= 65536) {
-                        if (!$wfail && \file_put_contents($file, $pend, \FILE_APPEND) === false) { $wfail = true; }
+                        if (!$wfail && $h !== null && \fwrite($h, $pend) === false) { $wfail = true; }
                         $pend = '';
                     }
                 }
@@ -532,11 +554,14 @@ final class __McPdoPgWire
                 $this->status = $b[0];
                 $this->inflight = false;
                 $this->pendErr = '';
-                if ($pend !== '' && !$wfail && \file_put_contents($file, $pend, \FILE_APPEND) === false) { $wfail = true; }
+                if ($pend !== '' && !$wfail && $h !== null && \fwrite($h, $pend) === false) { $wfail = true; }
                 if ($wrong > 0) { throw __McPdo::fail('HY000', 7, true, '', true); }
                 if ($wfail) { throw __McPdo::fail('HY000', 7, true, 'Unable to write to the file', true); }
                 return $res;
             }
+        }
+        } finally {
+            if ($h !== null) { \fclose($h); }
         }
     }
 
@@ -1255,7 +1280,12 @@ final class __McPdoPg implements __McPdoDrv
         if ($r->err !== null) { throw __McPdo::fail($r->err->code, 7, true, $r->err->text, true); }
     }
 
-    /** @param iterable<mixed,mixed> $rows */
+    /**
+     * ponytail: every row is turned into text and buffered before the first byte goes out (php sends row by row, so a
+     * generator is consumed lazily there); chunks are built in memory. Stream through the wire if huge loads matter.
+     *
+     * @param iterable<mixed,mixed> $rows
+     */
     public function copyFromRows(string $table, iterable $rows, string $sep, string $nullAs, ?string $fields): void
     {
         /** @var array<int,string> */
@@ -1273,8 +1303,10 @@ final class __McPdoPg implements __McPdoDrv
 
     public function copyFromFile(string $table, string $file, string $sep, string $nullAs, ?string $fields): void
     {
-        // ponytail: the whole file is read first; php streams it line by line. Chunked reads if multi-GB loads matter.
-        $data = \is_file($file) ? \file_get_contents($file) : false;
+        // ponytail: the whole file is read first (a FIFO or device too, via the handle); php streams it line by line. Chunked reads if multi-GB loads matter.
+        $fh = \fopen($file, 'rb');
+        $data = false;
+        if ($fh !== false) { $data = \stream_get_contents($fh); \fclose($fh); }
         if ($data === false) { throw __McPdo::fail('HY000', 7, true, 'Unable to open the file', true); }
         $this->copyDone($this->wire->copy(self::copyQuery($table, 'FROM STDIN', $sep, $nullAs, $fields), false, $data === '' ? [] : [$data], ''));
     }
