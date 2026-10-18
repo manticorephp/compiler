@@ -711,7 +711,7 @@ trait EmitLlvmLocals
         // so an arena-confined self-concat no longer grows the arena unbounded.
         if ($sv->kind === Node::KIND_CONCAT
             && $sv->type->kind === Type::KIND_STRING
-            && !isset($this->locals->refLocals[$sl->name])
+            && (!isset($this->locals->refLocals[$sl->name]) || $this->isPlainStrRefParam($sl->name))
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
             // Flatten `$s = $s . a . b . …` (left-nested, so the outer concat's
@@ -1228,8 +1228,18 @@ trait EmitLlvmLocals
                 // ({@see UnifiedArrayRuntime::emitCellOwnAlias}). The slot
                 // stores what comes back — a fresh boxed clone, or the same
                 // word now co-owned.
-                $owned = $this->ssa->allocReg();
-                $out .= '  ' . $owned . ' = call i64 @__mir_cell_own_alias(i64 ' . $aliasV . ")\n";
+                // A property slot COUNTS what it holds (every store into it
+                // retains), so a property read has no borrowed-source worry
+                // and a plain co-owner is enough. Cloning here made every
+                // `$this->mixedArr[$i]` O(n): the hidden `__fb_N` spill of the
+                // held read copied the whole array to read one element.
+                if ($v->kind === Node::KIND_PROPERTY_ACCESS) {
+                    $owned = $aliasV;
+                    $out .= '  call void @__mir_cell_retain(i64 ' . $aliasV . ")\n";
+                } else {
+                    $owned = $this->ssa->allocReg();
+                    $out .= '  ' . $owned . ' = call i64 @__mir_cell_own_alias(i64 ' . $aliasV . ")\n";
+                }
                 // A pass-through for the guard: the helper returns the same
                 // cell or a boxed clone of its payload, never a raw word.
                 $this->propagateCellProvenance($aliasV, $owned);
@@ -1496,6 +1506,15 @@ trait EmitLlvmLocals
         return $out . $this->rcReleaseSlot($cell, $flavor);
     }
 
+    /** A declared `string &$s` parameter: the box holds a raw string word, not a cell. */
+    private function isPlainStrRefParam(string $name): bool
+    {
+        $t = $this->locals->refParamTypes[$name] ?? null;
+        return $t !== null && $t->kind === Type::KIND_STRING
+            && !isset($this->locals->captureRefs[$name])
+            && !isset($this->locals->globalBacked[$name]);
+    }
+
     /**
      * Emit `$s .= rhs` as an in-place amortized append. Evaluates `rhs`,
      * loads the current accumulator, calls `__mir_str_append`, frees a
@@ -1509,6 +1528,16 @@ trait EmitLlvmLocals
         $this->rt->needsStrRc = true;
         $this->rt->needsConcat = true; // pulls strlen + the string runtime decls
         $slot = $this->locals->slots[$sl->name];
+        $out0 = '';
+        if (isset($this->locals->refLocals[$sl->name])) {
+            // `string &$s`: the slot holds the caller's box address; append
+            // through it, in place when the string is sole-owned.
+            $bi = $this->ssa->allocReg();
+            $bp = $this->ssa->allocReg();
+            $out0 = '  ' . $bi . ' = load i64, ptr ' . $slot . "\n"
+                  . '  ' . $bp . ' = inttoptr i64 ' . $bi . " to ptr\n";
+            $slot = $bp;
+        }
         // `$acc .= substr($src, $a[, $b])` — a scanner copying a run of its
         // input — appends the range straight out of `$src`: the substr temp
         // (alloc + copy + free per run) was 40% of htmlspecialchars. Never
@@ -1550,7 +1579,7 @@ trait EmitLlvmLocals
             $this->lastValueType = 'i64';
             return $out;
         }
-        $out = $this->emitNode($c->right);
+        $out = $out0 . $this->emitNode($c->right);
         $out .= $this->coerceToStr($c->right, false);
         $rp = $this->lastValue;
         $curI = $this->ssa->allocReg();

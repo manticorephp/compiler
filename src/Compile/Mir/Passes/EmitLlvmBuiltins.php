@@ -381,6 +381,8 @@ trait EmitLlvmBuiltins
         if ($name === 'strtolower')                   { return $this->biCaseConv($args, '__mir_strtolower'); }
         if ($name === 'strtoupper')                   { return $this->biCaseConv($args, '__mir_strtoupper'); }
         if ($name === 'strpos')                       { return $this->biStrpos($args); }
+        if ($name === 'stripos' && \count($args) >= 2) { return $this->biStrpos($args, true); }
+        if ($name === '__mc_str_ireplace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args, true); }
         if ($name === 'strcspn' && \count($args) >= 2) { return $this->biStrcspn($args); }
         if ($name === '__mc_crc32b' && \count($args) === 1) { return $this->biCrc32b($args); }
         if (\count($args) === 1 && \str_starts_with($name, '__mc_') && $this->codecFn($name) !== '') { return $this->biCodec($args, $this->codecFn($name)); }
@@ -404,6 +406,11 @@ trait EmitLlvmBuiltins
             $shape = $this->inArrayShape($args);
             if ($shape === 'str') { return $this->biInArrayStr($args); }
             if ($shape !== '') { return $this->biInArrayWord($args, $shape); }
+        }
+        if ($name === '__mc_search' && \count($args) === 2
+            && $args[1]->type->kind === Type::KIND_ARRAY
+            && InlineClosures::nativeScanShape($args[0]->type, $args[1]->type->element ?? null, true) !== '') {
+            return $this->biSearch($args);
         }
         if ($name === 'sprintf')                      { return $this->biSprintf($args, false); }
         if ($name === 'printf')                       { return $this->biSprintf($args, true); }
@@ -491,6 +498,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_list_range_into' && \count($args) === 5) { return $this->biListRangeInto($args); }
         if ($name === 'range' && InlineClosures::rangeIntShape($args)) { return $this->biRangeInt($args); }
         if ($name === '__mc_sort_native' && \count($args) === 1) { return $this->biSortNative($args); }
+        if ($name === '__mc_sort_assoc' && \count($args) === 3) { return $this->biSortNative($args); }
         if ($name === '__mc_int_seq' && \count($args) === 3) { return $this->biIntSeq($args); }
         if ($name === '__mc_fast_list' && \count($args) === 1) { return $this->biFastList($args); }
         if ($name === '__mc_fast_cat' && \count($args) === 1) { return $this->biFastCat($args); }
@@ -550,6 +558,8 @@ trait EmitLlvmBuiltins
             && \in_array(Node::literalInt($args[2] ?? null) ?? 0, [0, 1048576], true)
             && (!isset($args[2]) || Node::literalInt($args[2]) !== null)) { return $this->biJsonValidate($args); }
         if ($name === '__mir_str_replace_one' && \count($args) === 3) { return $this->biStrReplaceOne($args); }
+        if (($name === '__mc_url_encode' || $name === '__mc_url_decode') && \count($args) === 2) { return $this->biUrlCodec($args, $name === '__mc_url_encode' ? '__mir_url_enc' : '__mir_url_dec'); }
+        if ($name === 'substr_count' && $this->substrCountPlain($args)) { return $this->biSubstrCount($args); }
         if ($name === 'getenv')                       { return $this->biGetenv($args); }
         if ($name === 'putenv')                       { return $this->biPutenv($args); }
         if ($name === 'get_object_vars')              { return $this->biGetObjectVars($args); }
@@ -1840,15 +1850,7 @@ trait EmitLlvmBuiltins
      *  by-ref sink promoted, a by-value param converted at entry). */
     private function needsForwardCellify(Type $slotType, Type $valueType): bool
     {
-        if (!$slotType->isArray() || !$valueType->isArray()) { return false; }
-        if ($slotType->isShape() || $valueType->isShape()) { return false; }
-        $se = $slotType->element;
-        $ve = $valueType->element;
-        if ($se === null || $ve === null || $se->kind !== Type::KIND_CELL) { return false; }
-        $vk = $ve->kind;
-        return $vk === Type::KIND_INT || $vk === Type::KIND_FLOAT
-            || $vk === Type::KIND_STRING || $vk === Type::KIND_BOOL
-            || ($vk === Type::KIND_OBJ && !$this->isEnumType($ve)) || $vk === Type::KIND_ARRAY;
+        return \Compile\Mir\Ownership::forwardCellifies($slotType, $valueType, $this->enums);
     }
 
     /** A concrete OBJECT-element array being written back through a by-ref
@@ -3380,7 +3382,20 @@ trait EmitLlvmBuiltins
             $p = $cow;
         }
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i1 @__mir_array_sort_words(ptr ' . $p . ")\n";
+        if (\count($args) === 3) {
+            // __mc_sort_assoc($arr, byValue, reverse): the mode word is bit 0 | bit 1.
+            $out .= $this->emitNode($args[1]) . $this->coerceToI64();
+            $bv = $this->lastValue;
+            $out .= $this->emitNode($args[2]) . $this->coerceToI64();
+            $rv = $this->lastValue;
+            $rs = $this->ssa->allocReg();
+            $out .= '  ' . $rs . ' = shl i64 ' . $rv . ", 1\n";
+            $md = $this->ssa->allocReg();
+            $out .= '  ' . $md . ' = or i64 ' . $bv . ', ' . $rs . "\n";
+            $out .= '  ' . $r . ' = call i1 @__mir_array_sort_assoc(ptr ' . $p . ', i64 ' . $md . ")\n";
+        } else {
+            $out .= '  ' . $r . ' = call i1 @__mir_array_sort_words(ptr ' . $p . ")\n";
+        }
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
         return $this->finishI64($out, $z);
@@ -5273,9 +5288,9 @@ trait EmitLlvmBuiltins
     }
 
     /** @param Node[] $args */
-    private function biStrpos(array $args): string
+    private function biStrpos(array $args, bool $ci = false): string
     {
-        $this->rt->needsStrpos = true;
+        if ($ci) { $this->rt->needsStrCase = true; $this->rt->needsStrFind = true; $this->libcExtra['llvm.cttz.i16'] = 'declare i16 @llvm.cttz.i16(i16, i1)'; } else { $this->rt->needsStrpos = true; }
         // Binary-safe: header lengths (needsConcat pulls __mir_strlen) plus a
         // memchr/memcmp scan. NOT strlen/strstr — a NUL in either argument made
         // the search silently wrong.
@@ -5294,9 +5309,21 @@ trait EmitLlvmBuiltins
             $out .= $this->emitNode($args[2]);
             $out .= $this->coerceIntArg($args[2]);
             $off = $this->lastValue;
+            $hl = $this->ssa->allocReg();
+            $out .= '  ' . $hl . ' = call i64 @__mir_strlen(ptr ' . $h . ")\n";
+            $nh = $this->ssa->allocReg();
+            $out .= '  ' . $nh . ' = sub i64 0, ' . $hl . "\n";
+            $b1 = $this->ssa->allocReg();
+            $out .= '  ' . $b1 . ' = icmp sgt i64 ' . $off . ', ' . $hl . "\n";
+            $b2 = $this->ssa->allocReg();
+            $out .= '  ' . $b2 . ' = icmp slt i64 ' . $off . ', ' . $nh . "\n";
+            $bad = $this->ssa->allocReg();
+            $out .= '  ' . $bad . ' = or i1 ' . $b1 . ', ' . $b2 . "\n";
+            $fn = $ci ? 'stripos' : 'strpos';
+            $out .= $this->emitThrowIf($bad, 'ValueError', $fn . '(): Argument #3 ($offset) must be contained in argument #1 ($haystack)', $fn);
         }
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call i64 @__mir_strpos(ptr ' . $h . ', ptr ' . $n
+        $out .= '  ' . $reg . ' = call i64 @' . ($ci ? '__mir_stripos' : '__mir_strpos') . '(ptr ' . $h . ', ptr ' . $n
               . ', i64 ' . $off . ")\n";
         // __mir_strpos tags on every `ret` (hit, hitoff, miss —
         // EmitLlvmRuntime.php's emitted body has no untagged path).
@@ -5393,6 +5420,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_b64_enc') { return '__mir_b64_enc'; }
         if ($name === '__mc_b64_dec') { return '__mir_b64_dec'; }
         if ($name === '__mc_b64_ok') { return '__mir_b64_ok'; }
+        if ($name === '__mc_hex_ok') { return '__mir_hex_ok'; }
         if ($name === '__mc_bin2hex') { return '__mir_bin2hex'; }
         if ($name === '__mc_hex2bin') { return '__mir_hex2bin'; }
         return '';
@@ -5408,7 +5436,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitPtrArg($args[0]);
         $s = $this->lastValue;
         $reg = $this->ssa->allocReg();
-        if ($fn === '__mir_b64_ok') {
+        if ($fn === '__mir_b64_ok' || $fn === '__mir_hex_ok') {
             $out .= '  ' . $reg . ' = call i64 @' . $fn . '(ptr ' . $s . ")\n";
             $out .= $this->freeStrTemp($args[0], $s);
             return $this->finishI64($out, $reg);
@@ -5624,6 +5652,7 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsStrExplode = true;
         $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
         $delim = $this->lastValue;
@@ -5716,6 +5745,74 @@ trait EmitLlvmBuiltins
         $z = $this->ssa->allocReg();
         $out .= '  ' . $z . ' = zext i1 ' . $r . " to i64\n";
         return $this->finishI64($out, $z);
+    }
+
+    /**
+     * `__mc_search($needle, $arr)` — strict `array_search` of a string / int /
+     * float / bool over an array of the same kind: the position the native scan
+     * finds ({@see UnifiedArrayRuntime::emitInArrayStr} with `$pos`), turned into
+     * the key cell, or `false`. Only emitted for a shape `nativeScanShape` covers.
+     *
+     * @param Node[] $args
+     */
+    private function biSearch(array $args): string
+    {
+        $shape = InlineClosures::nativeScanShape($args[0]->type, $args[1]->type->element ?? null, true);
+        $this->rt->needsTagged = true;
+        $this->rt->needsCellKey = true;
+        if ($shape === 'str') {
+            $this->rt->needsConcat = true;
+            $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+            $out = $this->emitPtrArg($args[0]);
+            $needle = $this->lastValue;
+            $out .= $this->emitArrPtrArg($args[1]);
+            $arr = $this->lastValue;
+            $nw = $this->ssa->allocReg();
+            $out .= '  ' . $nw . ' = ptrtoint ptr ' . $needle . " to i64\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = call i64 @__mir_array_find_str(ptr ' . $arr . ', i64 ' . $nw . ")\n";
+            $out .= $this->freeStrTemp($args[0], $needle);
+        } else {
+            $out = $this->emitNode($args[0]);
+            if ($shape === 'float') {
+                $out .= $this->coerceTo('double');
+                $w = $this->ssa->allocReg();
+                $out .= '  ' . $w . ' = bitcast double ' . $this->lastValue . " to i64\n";
+            } else {
+                $out .= $this->coerceToI64();
+                $w = $this->lastValue;
+            }
+            $out .= $this->emitArrPtrArg($args[1]);
+            $arr = $this->lastValue;
+            $hint = $this->elementHintCodeForType($args[0]->type);
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = call i64 @__mir_array_find_word(ptr ' . $arr . ', i64 ' . $w
+                  . ', i64 ' . (string)$hint . ', i64 ' . ($shape === 'float' ? '1' : '0') . ")\n";
+        }
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $nf = $this->ssa->allocLabel('as.nf');
+        $hit = $this->ssa->allocLabel('as.hit');
+        $done = $this->ssa->allocLabel('as.done');
+        $neg = $this->ssa->allocReg();
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $p . ", 0\n";
+        $out .= '  br i1 ' . $neg . ', label %' . $nf . ', label %' . $hit . "\n";
+        $out .= $nf . ":\n";
+        $bf = $this->ssa->allocReg();
+        $out .= '  ' . $bf . " = call i64 @__manticore_box_bool(i64 0)\n";
+        $out .= '  store i64 ' . $bf . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $hit . ":\n";
+        $k = $this->ssa->allocReg();
+        $out .= '  ' . $k . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arr . ', i64 ' . $p . ")\n";
+        $out .= $this->cellEndpointRetain($k);
+        $out .= '  store i64 ' . $k . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $done . "\n";
+        $out .= $done . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->markCellBoxed($r);
+        return $this->finishI64($out, $r);
     }
 
     /** @param Node[] $args  implode($sep, $vec) / join. */
@@ -7412,7 +7509,7 @@ trait EmitLlvmBuiltins
      * still pointed at. COW only copies when the buffer is actually shared, so
      * a uniquely-owned worklist (the self-host source's usage) is unaffected.
      */
-    private function mutArrayCow(Node $arrNode, string $arr): string
+    private function mutArrayCow(Node $arrNode, string $arr, bool $writeBack = true): string
     {
         $k = $arrNode->kind;
         if ($k !== Node::KIND_LOAD_LOCAL && $k !== Node::KIND_PROPERTY_ACCESS
@@ -7424,27 +7521,61 @@ trait EmitLlvmBuiltins
         $cow = $this->ssa->allocReg();
         $out = '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrNode->type, $arrNode)
              . '(ptr ' . $arr . ")\n";
-        $out .= $this->vecWriteBack($arrNode, $cow, $arrNode->type->kind === Type::KIND_CELL);
+        if ($writeBack) {
+            $out .= $this->vecWriteBack($arrNode, $cow, $arrNode->type->kind === Type::KIND_CELL);
+        }
         $this->lastValue = $cow;
         $this->lastValueType = 'ptr';
         return $out;
     }
 
     /**
-     * `array_shift($v)` — return element 0, slide the tail down one slot
-     * (memmove, no-op on 0 bytes), decrement length in place. No realloc.
+     * `array_shift($v)` — return element 0.
+     *
+     * Into a slot {@see vecWriteBack} can store to, `__mir_array_shift_mv`
+     * drops element 0 of a uniquely owned packed buffer by moving the HEADER
+     * one slot on (O(1), the array pointer changes — {@see
+     * MemoryAbi::ARRAY_HEAD_GAP_OFFSET}) and the moved buffer is written back,
+     * the way a relocating unshift is. Any other base keeps the in-place
+     * `__mir_array_shift` (memmove of the tail, pointer unchanged): a moved
+     * buffer nobody stores back would leave its holder on the old header.
      */
     private function biArrayShift(Call $c): string
     {
         $this->libcExtra['memmove'] = 'declare ptr @memmove(ptr, ptr, i64)';
-        $out = $this->emitNode($c->args[0]);
-        $out .= $this->arrayArgToPtr($c->args[0]);
+        $arrNode = $c->args[0];
+        $out = $this->emitNode($arrNode);
+        $out .= $this->arrayArgToPtr($arrNode);
         $arr = $this->lastValue;
-        $out .= $this->mutArrayCow($c->args[0], $arr);
+        if (!$this->canVecWriteBack($arrNode)) {
+            $out .= $this->mutArrayCow($arrNode, $arr);
+            $arr = $this->lastValue;
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $v . ' = call i64 @' . $this->takeSymbol($c, 'shift') . '(ptr ' . $arr . ")\n";
+            return $out . $this->finishElem($c, $v);
+        }
+        $out .= $this->mutArrayCow($arrNode, $arr, false);
         $arr = $this->lastValue;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca ptr\n";
         $v = $this->ssa->allocReg();
-        $out .= '  ' . $v . ' = call i64 @' . $this->takeSymbol($c, 'shift') . '(ptr ' . $arr . ")\n";
+        $out .= '  ' . $v . ' = call i64 @' . $this->takeSymbol($c, 'shift_mv') . '(ptr ' . $arr
+              . ', ptr ' . $slot . ")\n";
+        $np = $this->ssa->allocReg();
+        $out .= '  ' . $np . ' = load ptr, ptr ' . $slot . "\n";
+        $out .= $this->vecWriteBack($arrNode, $np, $arrNode->type->kind === Type::KIND_CELL);
         return $out . $this->finishElem($c, $v);
+    }
+
+    /** Whether {@see vecWriteBack} stores into a slot for this base, rather than dropping the buffer. */
+    private function canVecWriteBack(Node $arrNode): bool
+    {
+        $k = $arrNode->kind;
+        if ($k === Node::KIND_LOAD_LOCAL) {
+            return isset($this->locals->globalBacked[$arrNode->name])
+                || isset($this->locals->slots[$arrNode->name]);
+        }
+        return $k === Node::KIND_PROPERTY_ACCESS || $k === Node::KIND_STATIC_PROP;
     }
 
     /**
@@ -10203,11 +10334,13 @@ trait EmitLlvmBuiltins
      * chunk straight subject→out (no per-chunk `substr` malloc, unlike the PHP
      * worker). @param Node[] $args
      */
-    private function biStrReplaceOne(array $args): string
+    private function biStrReplaceOne(array $args, bool $ci = false): string
     {
-        $this->rt->needsStrReplaceOne = true;
+        if ($ci) { $this->rt->needsStrCase = true; $this->rt->needsStrFind = true; $this->libcExtra['llvm.cttz.i16'] = 'declare i16 @llvm.cttz.i16(i16, i1)'; } else { $this->rt->needsStrReplaceOne = true; }
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
-        $this->libcExtra['strstr'] = 'declare ptr @strstr(ptr, ptr)';
+        $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
         $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $out = $this->emitPtrArg($args[0]);
@@ -10217,7 +10350,7 @@ trait EmitLlvmBuiltins
         $out .= $this->emitPtrArg($args[2]);
         $sj = $this->lastValue;
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call ptr @__mir_str_replace_one(ptr ' . $se
+        $out .= '  ' . $reg . ' = call ptr @' . ($ci ? '__mir_str_ireplace_one' : '__mir_str_replace_one') . '(ptr ' . $se
               . ', ptr ' . $rp . ', ptr ' . $sj . ")\n";
         $out .= $this->freeStrTemp($args[0], $se);
         $out .= $this->freeStrTemp($args[1], $rp);
@@ -10225,6 +10358,59 @@ trait EmitLlvmBuiltins
         $this->lastValue = $reg;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /** `__mc_url_encode($s, $raw)` / `__mc_url_decode($s, $raw)`: whole-buffer
+     *  percent codecs ({@see RuntimeLibrary::urlCodec}); the PHP bodies in
+     *  Runtime/Stdlib/Encoding.php are the bootstrap fallback. @param Node[] $args */
+    private function biUrlCodec(array $args, string $fn): string
+    {
+        $this->rt->needsUrlCodec = true;
+        $this->rt->needsConcat = true;   // __mir_strlen
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $raw = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call ptr @' . $fn . '(ptr ' . $s . ', i64 ' . $raw . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** True for `substr_count($h, $n)` with the offset/length defaults the call
+     *  lowering fills in (`0`, `null`): the whole-string count the builtin does. */
+    private function substrCountPlain(array $args): bool
+    {
+        $c = \count($args);
+        if ($c === 2) { return true; }
+        if ($c < 3 || $c > 4) { return false; }
+        if (Node::literalInt($args[2]) !== 0) { return false; }
+        return $c === 3 || $args[3]->kind === Node::KIND_NULL_CONST;
+    }
+
+    /** `substr_count($h, $n)` (2-arg form): memchr/memmem loop, binary-safe;
+     *  the PHP body in Runtime/Stdlib/Strings.php is the bootstrap fallback.
+     *  @param Node[] $args */
+    private function biSubstrCount(array $args): string
+    {
+        $this->rt->needsStrFind = true;
+        $this->rt->needsConcat = true;   // __mir_strlen
+        $this->libcExtra['memmem'] = 'declare ptr @memmem(ptr, i64, ptr, i64)';
+        $this->libcExtra['memcmp'] = 'declare i32 @memcmp(ptr, ptr, i64)';
+        $this->libcExtra['memchr'] = 'declare ptr @memchr(ptr, i32, i64)';
+        $out = $this->emitPtrArg($args[0]);
+        $h = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $n = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_substr_count(ptr ' . $h . ', ptr ' . $n . ")\n";
+        $out .= $this->freeStrTemp($args[0], $h);
+        $out .= $this->freeStrTemp($args[1], $n);
+        return $this->finishI64($out, $reg);
     }
 
     /** Write a relocated vec ptr back through `$arrNode`'s local or
@@ -10313,6 +10499,16 @@ trait EmitLlvmBuiltins
                     && $arrNode->array->type->element->kind === Type::KIND_CELL);
             $valI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $valI, $innerCell);
+            // A boxed inner array lands in the parent through a bare set: describe
+            // the parent as a CELL buffer first, as a plain element store does
+            // ({@see emitElemEncode}). Left undescribed (hint 0, repr 0), a runtime
+            // walker - spread, merge, copy - takes no count on the inner arrays it
+            // copies out, and the copy's release frees them under the parent.
+            if ($innerCell) {
+                $enc = $this->ssa->allocReg();
+                $out .= '  ' . $enc . ' = call i64 @__mir_elem_encode(ptr ' . $parentPtr . ', i64 ' . $valI . ")\n";
+                $valI = $enc;
+            }
             $keyIsCell = $this->keyRidesCellChannel($arrNode->index);
             $keyIsString = !$keyIsCell
                 && ($arrNode->index->type->kind === Type::KIND_STRING

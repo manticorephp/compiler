@@ -47,6 +47,10 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
     private int $__i = 0;
     // Declared LAST: a property added mid-class shifts every later offset.
     private int $__f = 0;
+    // The ArrayObject whose live storage this iterator walks (null = own copy).
+    private mixed $__o = null;
+    // count() of the storage when __k was built.
+    private int $__n = 0;
 
     public function __construct(mixed $array = [], int $flags = 0)
     {
@@ -61,10 +65,48 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
     private function __rebuildKeys(): void
     {
         $ks = [];
-        foreach ($this->__s as $k => $v) {
+        foreach ($this->__st() as $k => $v) {
             $ks[] = $k;
         }
         $this->__k = $ks;
+        $this->__n = \count($ks);
+    }
+
+    private function __st(): mixed
+    {
+        return $this->__o === null ? $this->__s : $this->__o->__storage();
+    }
+
+    public function __bind(mixed $o): void
+    {
+        $this->__o = $o;
+        $this->__rebuildKeys();
+    }
+
+    // Positions on the next live element. Elements appended since the key list
+    // was built are visited too: past the end, a changed count or tail key
+    // appends the new keys (ponytail: O(n) per extension).
+    private function __sync(): void
+    {
+        $s = $this->__st();
+        $n = \count($this->__k);
+        if ($this->__i >= $n) {
+            $lk = $n > 0 ? \array_key_last($s) : null;
+            if (\count($s) !== $this->__n || ($n > 0 && $lk !== $this->__k[$n - 1])) {
+                $seen = [];
+                foreach ($this->__k as $k) { $seen[$k] = true; }
+                $ks = $this->__k;
+                foreach ($s as $k => $v) {
+                    if (!isset($seen[$k])) { $ks[] = $k; }
+                }
+                $this->__k = $ks;
+                $this->__n = \count($s);
+                $n = \count($ks);
+            }
+        }
+        while ($this->__i < $n && !\array_key_exists($this->__k[$this->__i], $s)) {
+            $this->__i = $this->__i + 1;
+        }
     }
 
     public function rewind(): void
@@ -83,16 +125,20 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
 
     public function valid(): bool
     {
-        return $this->__i < count($this->__k);
+        $this->__sync();
+        return $this->__i < \count($this->__k);
     }
 
     public function current(): mixed
     {
-        return $this->__s[$this->__k[$this->__i]];
+        $this->__sync();
+        $s = $this->__st();
+        return $s[$this->__k[$this->__i]];
     }
 
     public function key(): mixed
     {
+        $this->__sync();
         return $this->__k[$this->__i];
     }
 
@@ -103,16 +149,17 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
 
     public function offsetExists(mixed $o): bool
     {
-        return isset($this->__s[$o]);
+        return isset($this->__st()[$o]);
     }
 
     public function offsetGet(mixed $o): mixed
     {
-        return $this->__s[$o];
+        return $this->__st()[$o];
     }
 
     public function offsetSet(mixed $o, mixed $v): void
     {
+        if ($this->__o !== null) { $this->__o->offsetSet($o, $v); return; }
         if ($o === null) {
             $this->__s[] = $v;
         } else {
@@ -122,22 +169,24 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
 
     public function offsetUnset(mixed $o): void
     {
+        if ($this->__o !== null) { $this->__o->offsetUnset($o); return; }
         unset($this->__s[$o]);
     }
 
     public function count(): int
     {
-        return count($this->__s);
+        return \count($this->__st());
     }
 
     public function append(mixed $v): void
     {
+        if ($this->__o !== null) { $this->__o->append($v); return; }
         $this->__s[] = $v;
     }
 
     public function getArrayCopy(): mixed
     {
-        return $this->__s;
+        return $this->__st();
     }
 
     public function getFlags(): int
@@ -158,7 +207,7 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
      */
     public function __serialize(): array
     {
-        return [$this->__f, $this->__s, [], null];
+        return [$this->__f, $this->__st(), [], null];
     }
 
     public function __unserialize(array $data): void
@@ -219,6 +268,11 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
         $this->__s[] = $v;
     }
 
+    public function __storage(): mixed
+    {
+        return $this->__s;
+    }
+
     public function getArrayCopy(): mixed
     {
         return $this->__s;
@@ -226,7 +280,9 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
 
     public function getIterator(): ArrayIterator
     {
-        return new ArrayIterator($this->__s);
+        $it = new ArrayIterator([]);
+        $it->__bind($this);
+        return $it;
     }
 
     public function getFlags(): int

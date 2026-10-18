@@ -1655,6 +1655,13 @@ function fwrite(\Resource $stream, string|array $data, ?int $length = null): int
         $wl = (int)$len;
         $pos = $stream->rpos;
         $blen = \strlen($stream->rbuf);
+        if ($pos === $blen) {
+            // Appending at the end (the common write loop): extend in place
+            // instead of rebuilding the whole buffer per write.
+            $stream->rbuf .= \substr($data, 0, $wl);
+            $stream->rpos = $pos + $wl;
+            return $wl;
+        }
         $before = $pos > 0 ? \substr($stream->rbuf, 0, $pos) : '';
         $after = ($pos + $wl < $blen) ? \substr($stream->rbuf, $pos + $wl, $blen - ($pos + $wl)) : '';
         $newBuf = $before . \substr($data, 0, $wl) . $after;

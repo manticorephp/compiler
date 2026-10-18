@@ -1,6 +1,5 @@
 <?php
 // A closure that stores into its by-value captured array leaks the per-call copy (the capture param is untyped, so nothing owns the copy).
-// issue: #209
 function run(string $v, int $n) {
     $seen = ['a' => 1, 'b' => 2];
     return preg_replace_callback('/x/', function ($m) use ($seen, $n) { $seen['k'] = $n; $seen['z'] = 1; return (string)count($seen); }, $v);

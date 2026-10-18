@@ -75,11 +75,16 @@ function array_flip(array $a): array
  */
 function str_split(string $s, int $length = 1): array
 {
-    if ($length < 1) { $length = 1; }
+    if ($length < 1) { throw new \ValueError('str_split(): Argument #2 ($length) must be greater than 0'); }
     $out = [];
     $n = \strlen($s);
-    if ($n === 0) { $out[] = ""; return $out; }
+    if ($n === 0) { return $out; }
     $i = 0;
+    if ($length === 1) {
+        // an index read answers a cached one-byte string; substr() allocates
+        while ($i < $n) { $out[] = $s[$i]; $i = $i + 1; }
+        return $out;
+    }
     while ($i < $n) {
         $out[] = \substr($s, $i, $length);
         $i = $i + $length;
@@ -347,6 +352,7 @@ function ksort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uksort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
     }
+    if (\__mc_sort_assoc($arr, 0, 0)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -386,6 +392,7 @@ function krsort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uksort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
     }
+    if (\__mc_sort_assoc($arr, 0, 1)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -433,6 +440,7 @@ function asort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uasort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($x, $y, $flags));
     }
+    if (\__mc_sort_assoc($arr, 1, 0)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -474,6 +482,7 @@ function arsort(array &$arr, int $flags = 0): bool
     if ($flags !== 0) {
         return uasort($arr, fn(mixed $x, mixed $y): int => __mc_sort_cmp($y, $x, $flags));
     }
+    if (\__mc_sort_assoc($arr, 1, 1)) { return true; }
     $keys = array_keys($arr);
     $n = count($keys);
     if ($n < 2) { return true; }
@@ -690,40 +699,41 @@ function array_fill_keys(array $keys, mixed $value): array
 /**
  * `array_diff(arr, ...others)` — elements of `$arr` whose (string) value is in
  * none of the other arrays, keys preserved (PHP compares values as strings).
+ * One hash set over the others: O(n + m), not O(n * m).
  */
 function array_diff(array $arr, array ...$others): array
 {
+    /** @var array<string,bool> $seen */
+    $seen = [];
+    foreach ($others as $o) {
+        foreach ($o as $w) { $seen['s' . $w] = true; }
+    }
     $out = [];
     foreach ($arr as $k => $v) {
-        $found = false;
-        foreach ($others as $o) {
-            foreach ($o as $w) {
-                if ($w == $v) { $found = true; break; }
-            }
-            if ($found) { break; }
-        }
-        if (!$found) { $out[$k] = $v; }
+        if (!isset($seen['s' . $v])) { $out[$k] = $v; }
     }
     return $out;
 }
 
 /**
  * `array_intersect(arr, ...others)` — elements of `$arr` whose (string) value is
- * present in EVERY other array, keys preserved.
+ * present in EVERY other array, keys preserved. One hash table of how many
+ * leading `$others` hold each value: O(n + m).
  */
 function array_intersect(array $arr, array ...$others): array
 {
+    $need = count($others);
+    /** @var array<string,int> $seen */
+    $seen = [];
+    foreach ($others as $oi => $o) {
+        foreach ($o as $w) {
+            $k = 's' . $w;
+            if (($seen[$k] ?? 0) === $oi) { $seen[$k] = $oi + 1; }
+        }
+    }
     $out = [];
     foreach ($arr as $k => $v) {
-        $inAll = true;
-        foreach ($others as $o) {
-            $inThis = false;
-            foreach ($o as $w) {
-                if ($w == $v) { $inThis = true; break; }
-            }
-            if (!$inThis) { $inAll = false; break; }
-        }
-        if ($inAll) { $out[$k] = $v; }
+        if (($seen['s' . $v] ?? 0) === $need) { $out[$k] = $v; }
     }
     return $out;
 }
@@ -736,13 +746,9 @@ function array_diff_key(array $arr, array ...$others): array
 {
     $out = [];
     foreach ($arr as $k => $v) {
-        $ks = (string)$k;
         $found = false;
         foreach ($others as $o) {
-            foreach ($o as $ok => $_) {
-                if ((string)$ok === $ks) { $found = true; break; }
-            }
-            if ($found) { break; }
+            if (array_key_exists($k, $o)) { $found = true; break; }
         }
         if (!$found) { $out[$k] = $v; }
     }
@@ -757,14 +763,9 @@ function array_intersect_key(array $arr, array ...$others): array
 {
     $out = [];
     foreach ($arr as $k => $v) {
-        $ks = (string)$k;
         $inAll = true;
         foreach ($others as $o) {
-            $inThis = false;
-            foreach ($o as $ok => $_) {
-                if ((string)$ok === $ks) { $inThis = true; break; }
-            }
-            if (!$inThis) { $inAll = false; break; }
+            if (!array_key_exists($k, $o)) { $inAll = false; break; }
         }
         if ($inAll) { $out[$k] = $v; }
     }
@@ -784,6 +785,35 @@ function array_unique(array $arr, int $flags = 2): array
     /** @var mixed[] $out */
     $out = [];
     if ($flags === 2) {
+        // All ints / all strings: the value is its own set key (a canonical int string
+        // becomes the int key, which is the same identity), no prefix concat per element.
+        $allInt = true;
+        $allStr = true;
+        foreach ($arr as $v) {
+            if (!\is_int($v)) { $allInt = false; }
+            if (!\is_string($v)) { $allStr = false; }
+            if (!$allInt && !$allStr) { break; }
+        }
+        if ($allInt) {
+            /** @var array<int,bool> $seenInt */
+            $seenInt = [];
+            foreach ($arr as $k => $v) {
+                if (isset($seenInt[$v])) { continue; }
+                $seenInt[$v] = true;
+                $out[$k] = $v;
+            }
+            return $out;
+        }
+        if ($allStr) {
+            /** @var array<string,bool> $seenStr */
+            $seenStr = [];
+            foreach ($arr as $k => $v) {
+                if (isset($seenStr[$v])) { continue; }
+                $seenStr[$v] = true;
+                $out[$k] = $v;
+            }
+            return $out;
+        }
         // Linear: the string form of a value is its identity. The 's' prefix
         // keeps every key a string ("1" would otherwise become the int key 1).
         /** @var array<string,bool> $seen */
@@ -932,4 +962,52 @@ function uksort(array &$arr, callable $cmp): bool
     foreach ($keys as $k2) { $new[$k2] = $arr[$k2]; }
     $arr = $new;
     return true;
+}
+
+/**
+ * `array_column(rows, column [, index])` — the values of one column of a list
+ * of rows, optionally keyed by another column. PRELUDE: compiled with the
+ * program, the rows keep their static type (a stdlib body needed a boxed copy of
+ * the whole input per call). OBJECT rows work through `get_object_vars()` in a
+ * branch of their own, so the common array-row path never meets a union row
+ * type. A row without the column is skipped; a column holding null is kept.
+ */
+function array_column(array $array, int|string|null $column_key, int|string|null $index_key = null): array
+{
+    $out = [];
+    foreach ($array as $rawRow) {
+        if (!\is_array($rawRow)) {
+            $vars = \__mc_object_vars($rawRow);
+            if ($column_key === null) {
+                $oval = $vars;
+            } else {
+                $oval = $vars[$column_key] ?? null;
+                if ($oval === null && !\array_key_exists($column_key, $vars)) { continue; }
+            }
+            if ($index_key !== null && isset($vars[$index_key])) {
+                $out[$vars[$index_key]] = $oval;
+            } else {
+                $out[] = $oval;
+            }
+            continue;
+        }
+        if ($column_key === null) {
+            $val = $rawRow;
+        } else {
+            $val = $rawRow[$column_key] ?? null;
+            if ($val === null && !\array_key_exists($column_key, $rawRow)) { continue; }
+        }
+        if ($index_key !== null && isset($rawRow[$index_key])) {
+            $out[$rawRow[$index_key]] = $val;
+        } else {
+            $out[] = $val;
+        }
+    }
+    return $out;
+}
+
+/** get_object_vars() through an erased receiver: an enum case has no static property walk. */
+function __mc_object_vars(mixed $o): array
+{
+    return \get_object_vars($o);
 }

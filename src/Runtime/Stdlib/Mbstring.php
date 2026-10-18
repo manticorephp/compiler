@@ -241,6 +241,17 @@ function __mc_mb_u8_len(string $s): int
     $i = 0;
     $c = 0;
     while ($i < $n) {
+        $b = \ord($s[$i]);
+        if ($b < 0x80) {
+            $i = $i + 1;
+            $c = $c + 1;
+            continue;
+        }
+        if ($b >= 0xC2 && $b < 0xE0 && $i + 1 < $n && (\ord($s[$i + 1]) & 0xC0) === 0x80) {
+            $i = $i + 2;
+            $c = $c + 1;
+            continue;
+        }
         $next = \__mc_mb_u8_step($s, $i, $n);
         $i = $next < 0 ? -$next : $next;
         $c = $c + 1;
@@ -277,6 +288,11 @@ function __mc_mb_seek(int $w, string $s, int $from, int $chars): int
     }
     $i = $from;
     while ($chars > 0 && $i < $n) {
+        if (\ord($s[$i]) < 0x80) {
+            $i = $i + 1;
+            $chars = $chars - 1;
+            continue;
+        }
         $next = \__mc_mb_u8_step($s, $i, $n);
         $i = $next < 0 ? -$next : $next;
         $chars = $chars - 1;
@@ -513,6 +529,18 @@ function mb_str_split(string $string, int $length = 1, ?string $encoding = null)
         while ($i < $n) {
             $out[] = \substr($string, $i, $step);
             $i = $i + $step;
+        }
+        return $out;
+    }
+    if ($kind === 0 && $length === 1) {
+        $n = \strlen($string);
+        $i = 0;
+        while ($i < $n) {
+            $b = \ord($string[$i]);
+            $l = $b < 0xC2 ? 1 : ($b < 0xE0 ? 2 : ($b < 0xF0 ? 3 : ($b < 0xF5 ? 4 : 1)));
+            if ($i + $l > $n) { $l = $n - $i; }
+            if ($l === 1) { $out[] = $string[$i]; } else { $out[] = \substr($string, $i, $l); }
+            $i = $i + $l;
         }
         return $out;
     }

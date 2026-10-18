@@ -370,7 +370,49 @@ trait EmitLlvmRuntime
         }
         $out .= "define ptr @__mir_realloc_tagged(ptr %p, i64 %n) {\n";
         $out .= "entry:\n";
-        $out .= "  %base = getelementptr inbounds i8, ptr %p, i64 -8\n";
+        $out .= "  %base0 = getelementptr inbounds i8, ptr %p, i64 -8\n";
+        // A shifted PACKED array's block starts `gap*8` before its tag
+        // (MemoryAbi::ARRAY_HEAD_GAP_OFFSET). Move tag + header + live slots
+        // back to the block start first, so the grow below sees a plain block;
+        // when the reclaimed slots already cover the request that is the
+        // whole grow.
+        $this->libcExtra['memmove'] = 'declare ptr @memmove(ptr, ptr, i64)';
+        $out .= "  %gtag = load i64, ptr %base0\n";
+        $out .= "  %gisarr = icmp eq i64 %gtag, " . (string)\Compile\MemoryAbi::ARRAY_TAG_MAGIC . "\n";
+        $out .= "  br i1 %gisarr, label %gchk, label %gno\n";
+        $out .= "gchk:\n";
+        $out .= "  %gfp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n";
+        $out .= "  %gfl = load i64, ptr %gfp\n";
+        $out .= "  %gh = and i64 %gfl, " . (string)\Compile\MemoryAbi::ARRAY_FLAG_HASHED . "\n";
+        $out .= "  %gpk = icmp eq i64 %gh, 0\n";
+        $out .= "  %ggp = getelementptr inbounds i8, ptr %p, i64 " . (string)\Compile\MemoryAbi::ARRAY_HEAD_GAP_OFFSET . "\n";
+        $out .= "  %gap = load i64, ptr %ggp\n";
+        $out .= "  %gnz = icmp sgt i64 %gap, 0\n";
+        $out .= "  %gdo = and i1 %gpk, %gnz\n";
+        $out .= "  br i1 %gdo, label %gcompact, label %gno\n";
+        $out .= "gcompact:\n";
+        $out .= "  %gsh = shl i64 %gap, 3\n";
+        $out .= "  %gneg = sub i64 0, %gsh\n";
+        $out .= "  %gblk = getelementptr inbounds i8, ptr %base0, i64 %gneg\n";
+        $out .= "  %glen = load i64, ptr %p\n";
+        $out .= "  %gdb = shl i64 %glen, 3\n";
+        $out .= "  %gmv = add i64 %gdb, " . (string)(8 + \Compile\MemoryAbi::ARRAY_HEADER_SIZE) . "\n";
+        $out .= "  call ptr @memmove(ptr %gblk, ptr %base0, i64 %gmv)\n";
+        $out .= "  %gp = getelementptr inbounds i8, ptr %gblk, i64 8\n";
+        $out .= "  %ggp2 = getelementptr inbounds i8, ptr %gp, i64 " . (string)\Compile\MemoryAbi::ARRAY_HEAD_GAP_OFFSET . "\n";
+        $out .= "  store i64 0, ptr %ggp2\n";
+        $out .= "  %gcp = getelementptr inbounds i8, ptr %gp, i64 " . (string)\Compile\MemoryAbi::ARRAY_CAPACITY_OFFSET . "\n";
+        $out .= "  %gcap = load i64, ptr %gcp\n";
+        $out .= "  %gcap2 = add i64 %gcap, %gap\n";
+        $out .= "  store i64 %gcap2, ptr %gcp\n";
+        $out .= "  %gav0 = shl i64 %gcap2, 3\n";
+        $out .= "  %gav = add i64 %gav0, " . (string)\Compile\MemoryAbi::ARRAY_HEADER_SIZE . "\n";
+        $out .= "  %gfit = icmp ule i64 %n, %gav\n";
+        $out .= "  br i1 %gfit, label %gfits, label %gno\n";
+        $out .= "gfits:\n";
+        $out .= "  ret ptr %gp\n";
+        $out .= "gno:\n";
+        $out .= "  %base = phi ptr [ %base0, %entry ], [ %base0, %gchk ], [ %gblk, %gcompact ]\n";
         if (\Compile\Debug::$arenaArrays) {
             // Arena-array grow (Debug::$arenaArrays): an ARRAY_TAG_ARENA buffer
             // is arena-bumped, so libc realloc/free would corrupt — route to
@@ -4545,6 +4587,7 @@ end:
         if ($this->rt->needsStrrev) { $out .= $this->lib->strrev(); }
         if ($this->rt->needsAddslashes) { $out .= $this->lib->addslashes(); }
         if ($this->rt->needsCodec) { $out .= $this->lib->codec(); }
+        if ($this->rt->needsUrlCodec) { $out .= $this->lib->urlCodec(); }
         if ($this->rt->needsJsonEscape) { $out .= $this->lib->jsonEscape(); }
         if ($this->rt->needsRyu) { $out .= $this->lib->ryuMsp(); }
         if ($this->rt->needsJsonEnc) { $out .= $this->lib->jsonEnc(); }
@@ -4565,6 +4608,8 @@ end:
             );
         }
         if ($this->rt->needsStrReplaceOne) { $out .= $this->lib->strReplaceOne(); }
+        if ($this->rt->needsStrFind || $this->rt->needsStrReplaceOne) { $out .= $this->lib->strFind(); }
+        if ($this->rt->needsStrCase) { $out .= $this->lib->strCaseFind(); $out .= $this->lib->strReplaceOne(true); }
         if ($this->rt->needsStrpos) {
             // Zend-faithful `int|false`: hit → NaN-boxed int(offset),
             // miss → NaN-boxed bool(false). Callers read the tag.

@@ -149,6 +149,9 @@ function trim(string $s, string $mask = " \t\n\r\0\x0B"): string
  */
 function strrpos(string $haystack, string $needle, int $offset = 0): int|false
 {
+    if ($offset > \strlen($haystack) || $offset < -\strlen($haystack)) {
+        throw new \ValueError('strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)');
+    }
     $hLen = \strlen($haystack);
     $nLen = \strlen($needle);
     // PHP 8 allows an empty needle: it matches at the end of the haystack,
@@ -183,6 +186,9 @@ function strrpos(string $haystack, string $needle, int $offset = 0): int|false
  */
 function strpos(string $haystack, string $needle, int $offset = 0): int|false
 {
+    if ($offset > \strlen($haystack) || $offset < -\strlen($haystack)) {
+        throw new \ValueError('strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)');
+    }
     // Self-host robustness: the `?string` → `string` coerce sometimes
     // hands us a null ptr that the strict-equal guards upstream
     // miss. Belt-and-braces — treat null haystack/needle as "no
@@ -264,15 +270,27 @@ function str_replace__str(array|string $search, array|string $replace, string $s
             $one = $needles[$i];
             $i = $i + 1;
             if ($one === '') { continue; }
-            $count = $count + \substr_count($out, $one);
+            $d = \strlen($rep) - \strlen($one);
+            $before = \strlen($out);
+            // equal lengths leave no trace in the size: count first
+            $hits = $d === 0 ? \substr_count($out, $one) : 0;
             $out = __mir_str_replace_one($one, $rep, $out);
+            if ($d !== 0) { $hits = \intdiv(\strlen($out) - $before, $d); }
+            $count = $count + $hits;
         }
         return $out;
     }
     $needle = (string)$search;
     if ($needle === '') { return $subject; }
-    $count = \substr_count($subject, $needle);
-    return __mir_str_replace_one($needle, (string)$replace, $subject);
+    $rep = (string)$replace;
+    $d = \strlen($rep) - \strlen($needle);
+    if ($d === 0) {
+        $count = \substr_count($subject, $needle);
+        return __mir_str_replace_one($needle, $rep, $subject);
+    }
+    $out = __mir_str_replace_one($needle, $rep, $subject);
+    $count = \intdiv(\strlen($out) - \strlen($subject), $d);
+    return $out;
 }
 
 /**
@@ -350,12 +368,30 @@ function ucwords(string $s, string $delimiters = " \t\r\n\x0C\x0B"): string
 }
 
 /** Count non-overlapping occurrences of `$needle` in `$haystack` (PHP
- *  `substr_count`). */
-function substr_count(string $haystack, string $needle): int
+ *  `substr_count`). The 2-argument call is a codegen builtin (memchr/memmem,
+ *  see EmitLlvmBuiltins::biSubstrCount); this body serves the offset/length
+ *  forms and is the bootstrap fallback. */
+function substr_count(string $haystack, string $needle, int $offset = 0, ?int $length = null): int
 {
-    if ($needle === "") { return 0; }
-    $count = 0;
     $nl = \strlen($needle);
+    if ($nl === 0) {
+        throw new \ValueError('substr_count(): Argument #2 ($needle) must not be empty');
+    }
+    $hl = \strlen($haystack);
+    if ($offset < 0) { $offset = $offset + $hl; }
+    if ($offset < 0 || $offset > $hl) {
+        throw new \ValueError('substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)');
+    }
+    if ($length !== null) {
+        if ($length < 0) { $length = $length + ($hl - $offset); }
+        if ($length < 0 || $length > $hl - $offset) {
+            throw new \ValueError('substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)');
+        }
+        $haystack = \substr($haystack, $offset, $length);
+    } elseif ($offset > 0) {
+        $haystack = \substr($haystack, $offset);
+    }
+    $count = 0;
     $pos = \strpos($haystack, $needle, 0);
     while ($pos !== false) {
         $count = $count + 1;
@@ -615,19 +651,27 @@ function str_word_count(string $s, int $format = 0): int|array
     $words = [];
     /** @var int[] $starts */
     $starts = [];
-    $cur = "";
     $st = 0;
     $inWord = false;
+    $count = 0;
     for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = \substr($s, $i, 1);
-        $isAlpha = ($c >= "a" && $c <= "z") || ($c >= "A" && $c <= "Z");
-        $isInner = $isAlpha || $c === "'" || $c === "-";
+        $c = \ord($s[$i]);
+        $l = $c | 32;
+        $isAlpha = $l >= 97 && $l <= 122;
+        $isInner = $isAlpha || $c === 39 || $c === 45;
         // A run STARTS on an alphabetic char; `'`/`-` only continue an open run.
-        if ($isAlpha && !$inWord) { $cur = $c; $st = $i; $inWord = true; }
-        elseif ($inWord && $isInner) { $cur = $cur . $c; }
-        elseif (!$isInner && $inWord) { $words[] = $cur; $starts[] = $st; $inWord = false; }
+        if ($isAlpha && !$inWord) { $st = $i; $inWord = true; }
+        elseif (!$isInner && $inWord) {
+            $count = $count + 1;
+            if ($format !== 0) { $words[] = \substr($s, $st, $i - $st); $starts[] = $st; }
+            $inWord = false;
+        }
     }
-    if ($inWord) { $words[] = $cur; $starts[] = $st; }
+    if ($inWord) {
+        $count = $count + 1;
+        if ($format !== 0) { $words[] = \substr($s, $st, $n - $st); $starts[] = $st; }
+    }
+    if ($format === 0) { return $count; }
     if ($format === 1) { return $words; }
     if ($format === 2) {
         /** @var array<int,string> $byPos */

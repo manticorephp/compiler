@@ -192,9 +192,49 @@ function __mc_mb_final_sigma(array $w, int $base, int $len, int $i, array $conv,
 }
 
 /** mbstring_convert_case: `$s` in `$enc`, case-converted, back in `$enc`. */
+/**
+ * UPPER/LOWER over well-formed UTF-8 without the wchar round trip: ASCII bytes
+ * pass through (strtoupper/strtolower finish them), each non-ASCII codepoint is
+ * looked up in the full mapping, whose values are already UTF-8. Context-free,
+ * so the caller keeps U+03A3 (final sigma) on the general path.
+ */
+function __mc_mb_case_utf8(int $mode, string $s): string
+{
+    $t = \__mc_mb_case_full($mode);
+    $n = \strlen($s);
+    $out = "";
+    $run = 0;
+    $i = 0;
+    while ($i < $n) {
+        $b = \ord($s[$i]);
+        if ($b < 0x80) { $i = $i + 1; continue; }
+        if ($b < 0xE0) {
+            $len = 2;
+            $cp = (($b & 0x1F) << 6) | (\ord($s[$i + 1]) & 0x3F);
+        } elseif ($b < 0xF0) {
+            $len = 3;
+            $cp = (($b & 0x0F) << 12) | ((\ord($s[$i + 1]) & 0x3F) << 6) | (\ord($s[$i + 2]) & 0x3F);
+        } else {
+            $len = 4;
+            $cp = (($b & 0x07) << 18) | ((\ord($s[$i + 1]) & 0x3F) << 12) | ((\ord($s[$i + 2]) & 0x3F) << 6) | (\ord($s[$i + 3]) & 0x3F);
+        }
+        if (isset($t[$cp])) {
+            $out = $out . \substr($s, $run, $i - $run) . $t[$cp];
+            $run = $i + $len;
+        }
+        $i = $i + $len;
+    }
+    $out = $out . \substr($s, $run);
+    return $mode === 0 ? \strtoupper($out) : \strtolower($out);
+}
+
 function __mc_mb_convert_case(int $mode, string $s, string $enc): string
 {
     if ($s === "") { return ""; }
+    if ($mode <= 1 && $enc === "UTF-8" && \preg_match('//u', $s) === 1
+        && ($mode === 0 || !\str_contains($s, "\xCE\xA3"))) {
+        return \__mc_mb_case_utf8($mode, $s);
+    }
     $w = \__mc_mb_raw_units(\__mc_mb_dec8($enc, $s, true));
     return (string)\__mc_mb_enc8($enc, \__mc_mb_wchars8(\__mc_mb_case_wchars($mode, $w, $enc === "ISO-8859-9")));
 }

@@ -66,6 +66,10 @@ final class __McPcreCache
     /** The idle match block of the pattern last used, kept out of the map: one slot, one compare. */
     public static int $slotCode = 0;
     public static int $slotMd = 0;
+    /** Match context carrying the JIT stack (0 until the first compile). */
+    public static int $mctx = 0;
+    /** preg_last_error() state. */
+    public static int $err = 0;
 }
 
 function __preg_compile(string $pattern): int
@@ -97,6 +101,12 @@ function __preg_compile(string $pattern): int
     \Runtime\Libc\free($erroff);
     if ($code === 0) {
         return 0;
+    }
+    // JIT like php's pcre.jit=1; a failure just leaves the interpreter.
+    \Runtime\Pcre\jitCompile($code, 1);
+    if (__McPcreCache::$mctx === 0) {
+        __McPcreCache::$mctx = \Runtime\Pcre\matchContextCreate(0);
+        \Runtime\Pcre\jitStackAssign(__McPcreCache::$mctx, 0, \Runtime\Pcre\jitStackCreate(32768, 196608, 0));
     }
     __McPcreCache::$code[$pattern] = $code;
     return $code;
@@ -156,7 +166,7 @@ function __preg_test(string $pattern, string $subject, int $offset = 0): int
         return -1;
     }
     $md = \__preg_md($code, 0);
-    $rc = \Runtime\Pcre\exec($code, $subject, \strlen($subject), $offset, 0, $md, 0);
+    $rc = \Runtime\Pcre\exec($code, $subject, \strlen($subject), $offset, 0, $md, __McPcreCache::$mctx);
     \__preg_md($code, $md);
     $rc = $rc & 0xFFFFFFFF;
     if ($rc >= 0x80000000) {
@@ -209,7 +219,7 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
         return 0;
     }
     $md = \__preg_md($code, 0);
-    $rc = \Runtime\Pcre\exec($code, $subject, \strlen($subject), $offset, 0, $md, 0);
+    $rc = \Runtime\Pcre\exec($code, $subject, \strlen($subject), $offset, 0, $md, __McPcreCache::$mctx);
     // A C int came back in a 64-bit slot: keep the low 32 bits, sign-extend.
     $rc = $rc & 0xFFFFFFFF;
     if ($rc >= 0x80000000) {
@@ -323,22 +333,20 @@ function __preg_name_map(int $code): array
  */
 function preg_quote(string $str, string $delimiter = ""): string
 {
-    $special = ".\\+*?[^]\$(){}=!<>|:-#";
-    $out = "";
+    $mask = ".\\+*?[^]\$(){}=!<>|:-#\0";
+    if ($delimiter !== "") { $mask .= $delimiter[0]; }
     $n = \strlen($str);
-    for ($i = 0; $i < $n; $i = $i + 1) {
-        $c = $str[$i];
-        if ($c === "\0") {
-            $out .= "\\000";
-            continue;
-        }
-        $isSpecial = \strpos($special, $c) !== false;
-        $isDelim = $delimiter !== "" && $c === $delimiter;
-        if ($isSpecial || $isDelim) {
-            $out .= "\\";
-        }
-        $out .= $c;
+    $i = \strcspn($str, $mask);
+    if ($i === $n) { return $str; }
+    $out = "";
+    $from = 0;
+    while ($i < $n) {
+        if ($i > $from) { $out .= \substr($str, $from, $i - $from); }
+        if ($str[$i] === "\0") { $out .= "\\000"; } else { $out .= "\\" . $str[$i]; }
+        $from = $i + 1;
+        $i = $from + \strcspn($str, $mask, $from);
     }
+    if ($from < $n) { $out .= \substr($str, $from, $n - $from); }
     return $out;
 }
 
@@ -352,11 +360,11 @@ function preg_quote(string $str, string $delimiter = ""): string
  */
 function __preg_match_at(int $code, int $md, string $subject, int $len, int $offset): array
 {
-    $rc = \Runtime\Pcre\exec($code, $subject, $len, $offset, 0, $md, 0);
+    $rc = \Runtime\Pcre\exec($code, $subject, $len, $offset, 0, $md, __McPcreCache::$mctx);
     $rc = $rc & 0xFFFFFFFF;                       // C int in an i64 slot
     if ($rc >= 0x80000000) { $rc = $rc - 0x100000000; }
     if ($rc <= 0) {
-        \__preg_error($rc < -1 ? 1 : 0);          // <-1 = real error; -1 = nomatch
+        \__preg_error(\__preg_errcode($rc));          // <-1 = real error; -1 = nomatch
         return [];
     }
     \__preg_error(0);
@@ -367,18 +375,46 @@ function __preg_match_at(int $code, int $md, string $subject, int $len, int $off
     return $out;
 }
 
+/**
+ * One match attempt: the group count (> 0) on a match with the groups left in
+ * the match block's ovector, 0 on no match or an error (recorded for
+ * preg_last_error). Callers read the ovector themselves — no per-match vector.
+ */
+function __preg_exec(int $code, int $md, string $subject, int $len, int $offset): int
+{
+    $rc = \Runtime\Pcre\exec($code, $subject, $len, $offset, 0, $md, __McPcreCache::$mctx);
+    $rc = $rc & 0xFFFFFFFF;
+    if ($rc >= 0x80000000) { $rc = $rc - 0x100000000; }
+    if ($rc <= 0) {
+        __McPcreCache::$err = \__preg_errcode($rc);
+        return 0;
+    }
+    __McPcreCache::$err = 0;
+    return $rc;
+}
+
 /** Step past a match end, forcing progress on an empty match (avoid a loop). */
 function __preg_advance(int $matchStart, int $matchEnd): int
 {
     return $matchEnd > $matchStart ? $matchEnd : $matchEnd + 1;
 }
 
+/** php's preg_last_error() code for a pcre2_match return `$rc` (<= 0). */
+function __preg_errcode(int $rc): int
+{
+    if ($rc >= -1) { return 0; }                 // -1 = no match
+    if ($rc >= -23) { return 4; }                // PCRE2_ERROR_UTF8_ERR1..21 and friends
+    if ($rc === -36) { return 5; }               // PCRE2_ERROR_BADUTFOFFSET
+    if ($rc === -47) { return 2; }               // MATCHLIMIT
+    if ($rc === -53) { return 3; }               // DEPTHLIMIT
+    if ($rc === -46) { return 6; }               // JIT_STACKLIMIT
+    return 1;
+}
 /** preg_last_error() state. Pass -1 to read, >=0 to set; returns current. */
 function __preg_error(int $set = -1): int
 {
-    static $err = 0;
-    if ($set >= 0) { $err = $set; }
-    return $err;
+    if ($set >= 0) { __McPcreCache::$err = $set; }
+    return __McPcreCache::$err;
 }
 
 function preg_last_error(): int
@@ -413,6 +449,59 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
     $offsetCapture = ($flags & 256) !== 0;        // PREG_OFFSET_CAPTURE
     $len = \strlen($subject);
     $md = \__preg_md($code, 0);
+    $declared = \__preg_capture_count($code) + 1;   // +1: group 0, the whole match
+
+    // Plain strings, no named group: straight from the ovector into the result,
+    // no per-match int vector, row array or second copy.
+    if (!$offsetCapture && \__preg_name_map($code) === []) {
+        $asNull = ($flags & 512) !== 0;               // PREG_UNMATCHED_AS_NULL
+        $ov = \Runtime\Pcre\ovectorPtr($md);
+        $err = 0;
+        $count = 0;
+        /** @var mixed[] $flat */
+        $flat = [];
+        while ($offset <= $len) {
+            $rc = \Runtime\Pcre\exec($code, $subject, $len, $offset, 0, $md, __McPcreCache::$mctx);
+            $rc = $rc & 0xFFFFFFFF;
+            if ($rc >= 0x80000000) { $rc = $rc - 0x100000000; }
+            if ($rc <= 0) {
+                $err = \__preg_errcode($rc);
+                break;
+            }
+            $count = $count + 1;
+            // pattern order pads every declared group; set order stops at the last participant
+            $upto = ($setOrder && !$asNull) ? $rc : $declared;
+            /** @var mixed[] $row */
+            $row = [];
+            for ($g = 0; $g < $upto; $g = $g + 1) {
+                $s = $g < $rc ? \peek_i64($ov, $g * 16) : -1;
+                if ($s < 0) {
+                    if ($asNull) { $val = null; } else { $val = ""; }
+                } else {
+                    $val = \substr($subject, $s, \peek_i64($ov, $g * 16 + 8) - $s);
+                }
+                if ($setOrder) { $row[] = $val; } else { $flat[] = $val; }
+            }
+            if ($setOrder) { $matches[] = $row; }
+            $ms = \peek_i64($ov, 0);
+            $offset = \__preg_advance($ms, \peek_i64($ov, 8));
+        }
+        \__preg_md($code, $md);
+        \__preg_error($err);
+        if (!$setOrder) {
+            if ($declared === 1) {
+                $matches[0] = $flat;
+            } else {
+                for ($g = 0; $g < $declared; $g = $g + 1) {
+                    /** @var mixed[] $col */
+                    $col = [];
+                    for ($i = 0; $i < $count; $i = $i + 1) { $col[] = $flat[$i * $declared + $g]; }
+                    $matches[$g] = $col;
+                }
+            }
+        }
+        return $count;
+    }
 
     // Collect each match's groups as a local mixed[][] — already CELLS, so the
     // offset-capture pair (itself an array) and a plain string share one shape.
@@ -438,6 +527,7 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
     \__preg_md($code, $md);
 
     $count = \count($rows);
+    if (!$setOrder) { $ngroups = $declared; }
     // Same interleaving rule as preg_match: a named group is reported under its
     // NAME first, then under its number — at the top level in pattern order,
     // and inside each row in set order.
@@ -564,13 +654,11 @@ function __preg_cells(array $strs): array
 // ── replacement (backreference expansion) ──────────────────────────────────
 
 /**
- * Expand `$N`, `${N}`, `\N` backreferences in $repl using the match ovector
- * `[rc, s0, e0, ...]` over $subject. `$0` / `\0` is the whole match.
- * @param int[] $m
+ * Expand `$N`, `${N}`, `\N` backreferences in $repl from the match ovector
+ * (`$rc` groups) over $subject. `$0` / `\0` is the whole match.
  */
-function __preg_expand(string $repl, string $subject, array $m): string
+function __preg_expand(string $repl, string $subject, \Ffi\Ptr $ov, int $rc): string
 {
-    $rc = $m[0];
     $out = "";
     $n = \strlen($repl);
     $i = 0;
@@ -586,9 +674,8 @@ function __preg_expand(string $repl, string $subject, array $m): string
                 $num = (int)\substr($repl, $numStart, $j - $numStart);
                 if ($braced && $j < $n && $repl[$j] === '}') { $j = $j + 1; }
                 if ($num < $rc) {
-                    $s = $m[1 + $num * 2];
-                    $e = $m[2 + $num * 2];
-                    if ($s >= 0) { $out .= \substr($subject, $s, $e - $s); }
+                    $s = \peek_i64($ov, $num * 16);
+                    if ($s >= 0) { $out .= \substr($subject, $s, \peek_i64($ov, $num * 16 + 8) - $s); }
                 }
                 $i = $j;
                 continue;
@@ -667,14 +754,15 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
     $pos = 0;
     // No `$N` / `\N` in the replacement: it is inserted as written.
     $literal = \strcspn($replacement, '$\\') === \strlen($replacement);
+    $ov = \Runtime\Pcre\ovectorPtr($md);
     while ($pos <= $len) {
         if ($limit >= 0 && $count >= $limit) { break; }
-        $m = \__preg_match_at($code, $md, $subject, $len, $pos);
-        if ($m === []) { break; }
-        $ms = $m[1];
-        $me = $m[2];
+        $rc = \__preg_exec($code, $md, $subject, $len, $pos);
+        if ($rc === 0) { break; }
+        $ms = \peek_i64($ov, 0);
+        $me = \peek_i64($ov, 8);
         $out .= \substr($subject, $pos, $ms - $pos);         // text before the match
-        $out .= $literal ? $replacement : \__preg_expand($replacement, $subject, $m);  // the replacement
+        $out .= $literal ? $replacement : \__preg_expand($replacement, $subject, $ov, $rc);  // the replacement
         $count = $count + 1;
         $next = \__preg_advance($ms, $me);
         if ($me === $ms) { $out .= \substr($subject, $ms, 1); }  // empty match: keep the char
@@ -734,20 +822,22 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
     $names = \__preg_name_map($code);
     $out = "";
     $pos = 0;
+    $ov = \Runtime\Pcre\ovectorPtr($md);
+    $hasNames = $names !== [];
     while ($pos <= $len) {
         if ($limit >= 0 && $count >= $limit) { break; }
-        $m = \__preg_match_at($code, $md, $subject, $len, $pos);
-        if ($m === []) { break; }
-        $ms = $m[1];
-        $me = $m[2];
-        $rc = $m[0];
-        $groups = [];
+        $rc = \__preg_exec($code, $md, $subject, $len, $pos);
+        if ($rc === 0) { break; }
+        $ms = \peek_i64($ov, 0);
+        $me = \peek_i64($ov, 8);
+        /** @var mixed[] $arg */
+        $arg = [];
         for ($i = 0; $i < $rc; $i = $i + 1) {
-            $s = $m[1 + $i * 2];
-            $e = $m[2 + $i * 2];
-            $groups[] = $s < 0 ? "" : \substr($subject, $s, $e - $s);
+            $s = \peek_i64($ov, $i * 16);
+            $g = $s < 0 ? "" : \substr($subject, $s, \peek_i64($ov, $i * 16 + 8) - $s);
+            if ($hasNames && isset($names[$i])) { $arg[$names[$i]] = $g; }
+            $arg[$i] = $g;
         }
-        $arg = \__preg_row_named(\__preg_cells($groups), $names);
         $out .= \substr($subject, $pos, $ms - $pos);
         $out .= $callback($arg);
         $count = $count + 1;
@@ -788,15 +878,16 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
     if ($code === 0) { $out[] = $subject; return $out; }
     $len = \strlen($subject);
     $md = \__preg_md($code, 0);
+    $ov = \Runtime\Pcre\ovectorPtr($md);
     $last = 0;
     $pos = 0;
     $pieces = 0;
     while ($pos <= $len) {
         if ($limit > 0 && $pieces >= $limit - 1) { break; }
-        $m = \__preg_match_at($code, $md, $subject, $len, $pos);
-        if ($m === []) { break; }
-        $ms = $m[1];
-        $me = $m[2];
+        $rc = \__preg_exec($code, $md, $subject, $len, $pos);
+        if ($rc === 0) { break; }
+        $ms = \peek_i64($ov, 0);
+        $me = \peek_i64($ov, 8);
         if ($me === $ms && $ms === $last) {
             // empty match at the cursor — advance without splitting
             $pos = $ms + 1;
@@ -805,11 +896,9 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
         $piece = \substr($subject, $last, $ms - $last);
         if (!$noEmpty || $piece !== "") { $out[] = $piece; $pieces = $pieces + 1; }
         if ($delimCap) {
-            $rc = $m[0];
             for ($i = 1; $i < $rc; $i = $i + 1) {
-                $s = $m[1 + $i * 2];
-                $e = $m[2 + $i * 2];
-                $g = $s < 0 ? "" : \substr($subject, $s, $e - $s);
+                $s = \peek_i64($ov, $i * 16);
+                $g = $s < 0 ? "" : \substr($subject, $s, \peek_i64($ov, $i * 16 + 8) - $s);
                 if (!$noEmpty || $g !== "") { $out[] = $g; }
             }
         }

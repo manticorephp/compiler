@@ -826,7 +826,9 @@ trait InferScans
             // `type` — `$fn->params[$idx]->type = …` is an indirect write
             // through the readonly `$params` array property and is rejected.
             $param = $fn->params[$idx];
-            $vt = Type::vec(Type::string_());
+            // The KEY stays erased: a bare `array` may arrive keyed by strings or by a
+            // mix, and a guess typed `vec` would read a string key as an int.
+            $vt = Type::assoc(Type::cell(), Type::string_());
             $param->type = $vt;
             // Mark it a GUESS: read from BODY USAGE, not from a hint, a doc form
             // or a call site. Call sites that later disagree with each other
@@ -1893,11 +1895,10 @@ trait InferScans
             // same reason the prelude is excluded, one boundary further out.
             if ($fn->isExtern) { continue; }
             // A PARAM is the CALLER's array — its elements keep whatever
-            // representation the caller built, and storing a cell into it can't
-            // retroactively make them cells. Forcing vec[cell] on one made the
-            // rc walkers drop raw string elements as cells (libmalloc abort in
-            // stat_functions). Only a locally-CONSTRUCTED `[]` is ours to retype.
-            if (!$this->bodyHas($fn, Node::KIND_ARRAY_LIT)) { continue; }
+            // representation the caller built, so it is retyped only where that
+            // representation is converted ({@see widenElemParam}); every other
+            // candidate is a locally-CONSTRUCTED `[]`.
+            if (!$this->bodyHas($fn, Node::KIND_ARRAY_LIT) && !$this->hasConvertibleElemBinding($fn)) { continue; }
             if (!$this->bodyHas($fn, 'se:' . Node::KIND_LOAD_LOCAL)
                 && !$this->bodyHas($fn, 'se:' . Node::KIND_ARRAY_ACCESS)) { continue; }
             $found = [];
@@ -1911,6 +1912,9 @@ trait InferScans
             $classes = [];
             $this->scanLocalElemClasses($fn->body, $classes);
             foreach ($classes as $name => $seen) {
+                // A `use ($a)` copy holds the capture site's elements too.
+                $cap = $this->valueCaptureElemClass($fn, $name);
+                if ($cap !== '') { $seen[$cap] = true; }
                 if (\count($seen) >= 2) { $found[$name] = true; }
             }
             // The literal walk only answers for a candidate.
@@ -1920,8 +1924,8 @@ trait InferScans
             $lits = [];
             $this->scanArrayLitLocals($fn->body, $lits);
             foreach ($found as $name => $unused) {
-                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
+                if (!$this->ownsElemRepr($fn, $name, $skip, $lits)) { continue; }
                 $this->forcedCellElemLocals[$fn->name][$name] = true;
                 $this->lastInferenceChangedFunctions[$fn->name] = true;
                 $changed = true;
@@ -2018,8 +2022,8 @@ trait InferScans
                 // the reason spelled out in {@see InferNodes} at the
                 // assocValClasses seed.
                 if (\count($seen) < 2 && !isset($seen['null'])) { continue; }
-                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
+                if (!$this->ownsElemRepr($fn, $name, $skip, $lits)) { continue; }
                 $this->forcedCellElemLocals[$fn->name][$name] = true;
                 $this->lastInferenceChangedFunctions[$fn->name] = true;
                 $changed = true;
@@ -2052,8 +2056,8 @@ trait InferScans
             $lits = [];
             $this->scanArrayLitLocals($fn->body, $lits);
             foreach ($found as $name => $unused) {
-                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
+                if (!$this->ownsElemRepr($fn, $name, $skip, $lits)) { continue; }
                 $this->forcedCellElemLocals[$fn->name][$name] = true;
                 $this->lastInferenceChangedFunctions[$fn->name] = true;
                 $changed = true;
@@ -2170,8 +2174,8 @@ trait InferScans
             if ($fn->isExtern) { continue; }
             if (!$this->bodyHas($fn, Node::KIND_CLOSURE) && !$this->bodyHas($fn, Node::KIND_INVOKE)
                 && !$this->bodyHasAnyOf($fn, $foreignCallees)) { continue; }
-            // Only a locally-CONSTRUCTED `[]` is ours to retype: a param is the
-            // caller's array and its elements already have a representation.
+            // A locally-CONSTRUCTED `[]` is ours to retype; a param only where
+            // its representation is converted ({@see widenElemParam}).
             $found = [];
             $this->collectByRefWidenArgs($fn->body, $foreign, $found);
             // The literal walk only answers for a candidate — most bodies have
@@ -2182,8 +2186,8 @@ trait InferScans
             $lits = [];
             $this->scanArrayLitLocals($fn->body, $lits);
             foreach ($found as $name => $unused) {
-                if (isset($skip[$name]) || !isset($lits[$name])) { continue; }
                 if (isset($this->byRefCellElemLocals[$fn->name][$name])) { continue; }
+                if (!$this->ownsElemRepr($fn, $name, $skip, $lits)) { continue; }
                 $this->byRefCellElemLocals[$fn->name][$name] = true;
                 $this->rescanTouched[$fn->name] = true;
                 $changed = true;
@@ -2613,6 +2617,13 @@ trait InferScans
                 $ak = ($flag === '1' && $at->isArray() && $at->element !== null)
                     ? $at->element->kind
                     : $at->kind;
+                // A variadic pack built from a spread of an ERASED array feeds
+                // elements of unknown kind into a concrete slot: nothing here
+                // proves they fit.
+                if ($ak === Type::KIND_UNKNOWN && !$erased && $this->hasSpreadChild($siblings[$k])) {
+                    $found[$a->name] = true;
+                    continue;
+                }
                 if ($ak === Type::KIND_UNKNOWN || $ak === Type::KIND_VOID) { continue; }
                 // With an erased element there is no kind to match, so any
                 // concrete append widens — `array_push($erased, "x")` wrote its
@@ -2620,6 +2631,14 @@ trait InferScans
                 if ($ak !== $ek) { $found[$a->name] = true; }
             }
         }
+    }
+
+    private function hasSpreadChild(Node $n): bool
+    {
+        foreach (Walk::children($n) as $c) {
+            if ($c->kind === Node::KIND_SPREAD) { return true; }
+        }
+        return false;
     }
 
     /** A `vec[vec[scalar]]` — element is a concrete inner array whose own leaf is
@@ -3193,6 +3212,106 @@ trait InferScans
             $this->byRefElemRetyped[$fn->name . '#' . (string)$idx] = true;
             return;
         }
+    }
+
+    /**
+     * May this body retype local `$name`'s element channel to a cell? A local
+     * bound to a literal it builds itself, or a value-capture copy, converts at
+     * its store; a param only per {@see widenElemParam} (which, for a by-ref
+     * one, retypes it — so ask only when about to widen).
+     *
+     * @param array<string,bool> $params
+     * @param array<string,bool> $lits
+     */
+    private function ownsElemRepr(FunctionDef $fn, string $name, array $params, array $lits): bool
+    {
+        if (isset($params[$name])) { return $this->widenElemParam($fn, $name); }
+        return isset($lits[$name]) || $this->isValueCaptureCopy($fn, $name);
+    }
+
+    /**
+     * May a widening of param `$name`'s element channel to a cell be made from
+     * the body? Only where the caller's representation is CONVERTED: a by-value
+     * param is rebuilt with boxed elements at entry ({@see
+     * InferNodes::cellElemParamEntry}); a by-ref one is retyped and its callers'
+     * arrays follow ({@see retypeByRefParamElems}) — never a shared prelude body's.
+     */
+    private function widenElemParam(FunctionDef $fn, string $name): bool
+    {
+        $i = -1;
+        foreach ($fn->params as $p) {
+            $i = $i + 1;
+            if ($p->name !== $name) { continue; }
+            if ($p->variadic || !$this->isTypedElemArray($this->paramArrivalType($fn, $i))) { return false; }
+            if ($p->byRef) {
+                if ($fn->isPrelude) { return false; }
+                $this->retypeByRefParamElems($fn, $name);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * The type param `$i` ARRIVES in: its declared type, except a by-value
+     * closure capture that declares nothing — the uniform closure ABI erases it,
+     * and the body is seeded with the capture site's type instead.
+     */
+    private function paramArrivalType(FunctionDef $fn, int $i): Type
+    {
+        $p = $fn->params[$i];
+        if ($p->type->kind !== Type::KIND_UNKNOWN || $p->byRef) { return $p->type; }
+        $cl = $this->closureNodeByName[$fn->name] ?? null;
+        if ($cl === null || !isset($cl->captures[$i]) || ($cl->captureByRef[$i] ?? false)) { return $p->type; }
+        return $cl->captures[$i]->type;
+    }
+
+    private function hasConvertibleElemBinding(FunctionDef $fn): bool
+    {
+        if (\str_starts_with($fn->name, '__closure_')) { return true; }
+        foreach ($fn->params as $p) {
+            if (!$p->variadic && $this->isTypedElemArray($p->type)) { return true; }
+        }
+        return false;
+    }
+
+    /** A closure's `use ($name)` copy: bound once, by a store from its capture
+     *  param `__cap_<name>`, so that store converts it like a param's entry. */
+    private function isValueCaptureCopy(FunctionDef $fn, string $name): bool
+    {
+        return $this->valueCaptureIndex($fn, $name) >= 0;
+    }
+
+    /** The {@see typeValueClass} of the elements a `use ($name)` copy arrives
+     *  with — the capture SITE's array, which the body's own nodes may not
+     *  have been typed from yet. '' when unknown or not such a copy. */
+    private function valueCaptureElemClass(FunctionDef $fn, string $name): string
+    {
+        $i = $this->valueCaptureIndex($fn, $name);
+        if ($i < 0) { return ''; }
+        $cl = $this->closureNodeByName[$fn->name] ?? null;
+        if ($cl === null || !isset($cl->captures[$i])) { return ''; }
+        $t = $cl->captures[$i]->type;
+        if (!$this->isTypedElemArray($t)) { return ''; }
+        return $this->typeValueClass($t->element);
+    }
+
+    private function valueCaptureIndex(FunctionDef $fn, string $name): int
+    {
+        if (!\str_starts_with($fn->name, '__closure_')) { return -1; }
+        $i = -1;
+        foreach ($fn->params as $p) {
+            $i = $i + 1;
+            if ($p->name === '__cap_' . $name) { return $p->byRef ? -1 : $i; }
+        }
+        return -1;
+    }
+
+    /** An unshaped array of raw elements that a store into a cell-element slot
+     *  rebuilds ({@see \Compile\Mir\Ownership::forwardCellifies}). */
+    private function isTypedElemArray(Type $t): bool
+    {
+        return \Compile\Mir\Ownership::forwardCellifies(Type::vec(Type::cell()), $t, $this->enums);
     }
 
     /** `Class::prop` → its array element channel becomes a cell; true when it changed. */
