@@ -184,9 +184,11 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
 - `quote()` assumes the charset the connection was opened with: a `SET NAMES gbk`-style statement issued by user code is not tracked (the same weakness as mysqlnd).
 - Timeouts (both network drivers): php's `ATTR_TIMEOUT` is a CONNECT timeout. Here connect + authentication and every
   message already begun (mid-message deadline: 2 x timeout + n/64 KiB, a defence against drip-feeding) are always
-  bounded; the idle wait for the START of a response, while the server runs the statement, is unbounded unless the
-  program set `ATTR_TIMEOUT` itself (constructor options or `setAttribute`), which then also bounds that wait (superset
-  behaviour). Async cancellation / scope deadlines are the idiomatic way to bound a statement.
+  bounded. The idle wait for the START of any message of a response (the first one, and every later one: after a NOTICE, between
+  the result sets of a multi-statement `exec()` or `CALL`, between slow rows) is unbounded unless the program set `ATTR_TIMEOUT`
+  itself (constructor options or `setAttribute`), which then bounds each such wait to that timeout (superset behaviour). Tests:
+  hostile `idle_between` (a stall between messages must succeed past 30 s), `stall_mid` (a stall inside one must fail),
+  `pgsql_long_after_notice`, `mysql_long_multi`. Async cancellation / scope deadlines are the idiomatic way to bound a statement.
 - Cancellation: a query abandoned mid-flight (fiber cancelled, `ATTR_TIMEOUT` expired; not on EOF) is stopped on the server with
   `KILL QUERY <connection id>` from a second connection with the same credentials and TLS options (about 2 s at most, every error
   swallowed, run under `Async\shield`); the handle itself is dead (`2006`), as php. `mysql_async_cancel` proves the query is gone from `information_schema.processlist`.

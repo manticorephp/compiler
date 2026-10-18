@@ -167,6 +167,9 @@ no fd leak
 idle_slow: ok waited
 fast
 no fd leak
+idle_between: ok waited
+fast
+no fd leak
 idle_explicit: HY000 2006 MySQL server has gone away
 fast
 no fd leak

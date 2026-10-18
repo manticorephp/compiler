@@ -291,6 +291,9 @@ final class __McPdoPgWire
         }
         // one message gets 2 x the read timeout plus a 64 KiB/s floor of sustained progress: each fread() is bounded,
         // a 1-byte drip is not, and a big row on a slow link still arrives
+        // nothing of the next message buffered: this wait is for its START (the server is working), at EVERY message boundary of a
+        // response, not only the first one (notices, slow rows, multi-result CALLs, multi-statement exec)
+        if ($this->buf === '') { $this->awaiting = true; }
         // ⚠ php's ATTR_TIMEOUT is a CONNECT timeout. The idle wait for the START of a response (the server is running the
         // statement) is therefore unbounded unless the program set ATTR_TIMEOUT itself (superset); a message that has begun
         // arriving, and connect/auth, are always bounded.

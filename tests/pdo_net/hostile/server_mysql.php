@@ -162,6 +162,7 @@ while (true) {
     if ($n > 1) { fwrite($c, $rs(1, 253, ['ok'])); continue; }
     if ($mode === 'idle_slow' || $mode === 'idle_explicit') { sleep($mode === 'idle_slow' ? 6 : 9); fwrite($c, $rs(1, 253, ['ok'])); continue; }
     if ($mode === 'stall_mid') { fwrite($c, substr($pkt(1, str_repeat('x', 100)), 0, 14)); sleep(9); continue; }
+    if ($mode === 'idle_between') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a'))); sleep(32); fwrite($c, $eof(3) . $pkt(4, "\x02ok") . $eof(5)); continue; }
     if ($mode === 'row_huge_len') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, "\xfe" . pack('P', 1 << 62)) . $eof(5)); continue; }
     if ($mode === 'row_neg_len') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, "\xfe" . "\xff\xff\xff\xff\xff\xff\xff\xff") . $eof(5)); continue; }
     if ($mode === 'coldef_huge_len') { fwrite($c, $pkt(1, "\x01") . $pkt(2, "\xfe" . pack('P', 1 << 62) . 'xxxx')); continue; }

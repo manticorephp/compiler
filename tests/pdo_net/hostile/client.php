@@ -17,7 +17,7 @@ $t = microtime(true);
 $np = false;
 try {
     // idle_slow: ATTR_TIMEOUT unset (the default must not bound a statement that is still running); *_explicit / stall_mid: set to 1
-    $opts = $mode === 'idle_slow' || $mode === 'np_idle_slow' || $mode === 'copy_slow_commit' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid', 'kill_stall', 'drain_slow', 'batch_stall_mid', 'batch_close_slow', 'np_idle_explicit', 'np_stall_mid', 'ssl_silent', 'ssl_drip'], true) ? 1 : 3];
+    $opts = $mode === 'idle_slow' || $mode === 'idle_between' || $mode === 'np_idle_slow' || $mode === 'copy_slow_commit' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid', 'kill_stall', 'drain_slow', 'batch_stall_mid', 'batch_close_slow', 'np_idle_explicit', 'np_stall_mid', 'ssl_silent', 'ssl_drip'], true) ? 1 : 3];
     if ($my && str_starts_with($mode, 'ssl_')) { $opts += [1008 => '/nonexistent', 1013 => false]; }   // MYSQL_ATTR_SSL_CA, MYSQL_ATTR_SSL_VERIFY_SERVER_CERT: TLS wanted, nothing verified
     if ($tag === 'us_') { $opts += [1000 => false]; }
     if ($tag === 'fb_') { $opts += [1300 => 2]; }
@@ -53,8 +53,8 @@ try {
         $q = null;
         if ($mode === 'big_slow') {
             echo $tag, $mode, ': ok ', strlen($r[0]), ' ', microtime(true) - $t > 2.0 ? 'longer than 2 x timeout' : 'TOO FAST', "\n";
-        } elseif ($mode === 'idle_slow') {
-            echo $tag, $mode, ": ok ", microtime(true) - $t > 5.0 ? 'waited' : 'TOO FAST', "\n";
+        } elseif ($mode === 'idle_slow' || $mode === 'idle_between') {
+            echo $tag, $mode, ": ok ", microtime(true) - $t > ($mode === 'idle_between' ? 31.0 : 5.0) ? 'waited' : 'TOO FAST', "\n";
         } elseif (in_array($mode, ['int_max', 'int_min', 'uint_max', 'bit_max', 'float_plus'], true)) {
             echo $tag, $mode, ': ok ', json_encode($r[0]), "\n";
         }
@@ -106,15 +106,15 @@ try {
         $db->copyToArray('t');
     } elseif ($mode === 'copy_in_err') {
         $db->copyFromArray('t', ['1', '2']);
-    } elseif ($mode === 'idle_slow') {
+    } elseif ($mode === 'idle_slow' || $mode === 'idle_between') {
         $q = $db->query('select 1');
         $q->fetchAll();
         $q = null;
-        echo $tag, $mode, ': ok ', microtime(true) - $t > 5.0 ? 'waited' : 'TOO FAST', "\n";
+        echo $tag, $mode, ': ok ', microtime(true) - $t > ($mode === 'idle_between' ? 31.0 : 5.0) ? 'waited' : 'TOO FAST', "\n";
     } else {
         $db->query('select 1')->fetchAll();
     }
-    if (!in_array($mode, ['np_ok', 'batch_ok', 'batch_close_slow', 'copy_slow_commit', 'notify_flood', 'np_close_once', 'np_idle_slow', 'np_float_odd', 'np_nan', 'bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow'], true)) { echo "$tag$mode: NO ERROR\n"; }
+    if (!in_array($mode, ['np_ok', 'batch_ok', 'batch_close_slow', 'copy_slow_commit', 'notify_flood', 'np_close_once', 'np_idle_slow', 'np_float_odd', 'np_nan', 'bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow', 'idle_between'], true)) { echo "$tag$mode: NO ERROR\n"; }
 } catch (PDOException $e) {
     $m = (string) $e->errorInfo[2];
     $i = strpos($m, 'failed: ');
@@ -133,5 +133,5 @@ try {
     if (!$my && in_array($mode, ['batch_err_second', 'paramdesc_mismatch', 'copy_in_err', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
 }
 $e = null; $p = null; $p2 = null; $s = null; $q = null; $db = null;
-echo microtime(true) - $t < ($mode === 'copy_slow_commit' ? 64.0 + 60.0 : ($mode === 'big_slow' || $mode === 'idle_slow' || $mode === 'np_idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' || $mode === 'kill_stall' || $mode === 'drain_slow' || $mode === 'batch_stall_mid' || $mode === 'batch_close_slow' || $mode === 'np_idle_explicit' || $mode === 'np_stall_mid' ? 5.0 : 3.0))) ? "fast\n" : "SLOW\n";
+echo microtime(true) - $t < ($mode === 'copy_slow_commit' ? 64.0 + 60.0 : ($mode === 'idle_between' ? 45.0 : ($mode === 'big_slow' || $mode === 'idle_slow' || $mode === 'np_idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' || $mode === 'kill_stall' || $mode === 'drain_slow' || $mode === 'batch_stall_mid' || $mode === 'batch_close_slow' || $mode === 'np_idle_explicit' || $mode === 'np_stall_mid' ? 5.0 : 3.0)))) ? "fast\n" : "SLOW\n";
 echo $fds() === $before ? "no fd leak\n" : "FD LEAK\n";
