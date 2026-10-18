@@ -220,3 +220,39 @@ itself can be relied on to make the box.
    coalesces by name, so it cannot depend on which module saw the `&`).
 
 `tests/aot/cases/refbox_sources.php` asserts the clone and the outliving read.
+
+## A stored reference to a by-ref param
+
+A callee that keeps a reference to its by-ref parameter (`$this->refs[] = &$v`,
+`use (&$v)` in a closure that may outlive the call, or passing it on to a
+parameter that does) is handed an ADDRESS: the caller's slot, a scratch slot the
+call site made to convert a representation, a property slot or a buffer element.
+None of those outlives the reference. Two halves make it safe:
+
+1. **The caller boxes** (`VivifyRefArgs`). A local at such a position becomes a
+   ref-cell target (a counted frame box); a property there joins
+   `refCellPropNames` (promoted in place); an element is marked
+   `ArrayAccess_::$refStored` and handed over as its box (`elemRefBoxAddr`).
+   The analysis is conservative: a dispatched call asks every holder of the
+   method NAME, a run-time callee (closure value, callable, function name,
+   `$o->$m()`) asks every function of the module.
+2. **The callee never rewrites what it cannot prove decodes REF.**
+   `__mir_ref_adopt` shares an existing box (or the box a slot already holds as
+   `cell(REF, box)`); any other address gets a fresh box holding a COPY
+   (`__mir_ref_fresh`, rc 0 — the consumer's retain is its first count). A raw
+   by-ref param (`int &$v`) always copies. A by-ref param a closure captures by
+   reference is moved into a frame box for the call and written back on every
+   exit, the unwind included (`EmitLlvmModule::boxCapturedByRefParamIr`).
+
+The copy is the known ceiling: a holder of a copy does not see the caller's
+LATER writes (a `global`-backed name, a static, a raw-elemented array element, a
+typed by-ref param — #344, `tests/aot/repro/wrong/ref_store_typed_param_stale.php`).
+It never dangles and never corrupts the caller's slot.
+
+Every helper that reads `p-8` of an address that may not be a box is
+`noinline` (`__mir_ref_is_box`, `retain`, `unref`, `adopt`): inlined next to the
+caller's `alloca` that read is out of bounds, and -O2 used it to fold the
+caller's receiver to null.
+
+A frame's boxes are released on the unwind too: every cleanup pad of a frame
+that owns one gives the counts back (`EmitLlvmExceptions::ehBoxReleases`).

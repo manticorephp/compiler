@@ -3919,13 +3919,18 @@ final class UnifiedArrayRuntime
      * retain / unref / release answer no-op on an address whose `data-8` is
      * not the magic: a REF cell or a by-ref capture may carry a property slot,
      * a static or a caller's slot, and those have no count to touch.
+     *   `__mir_ref_is_box(p) -> i1`   that test alone.
+     * ⚠ Every helper that reads `p-8` of an address that may NOT be a box is
+     * `noinline`: inlined next to the caller's `alloca`, that read is an
+     * out-of-bounds access LLVM is entitled to treat as UB, and -O2 folded the
+     * caller's own receiver to null (`$t->set($x)` threw "on null").
      */
     private function emitRefBoxRc(): void
     {
         $i64 = Type::i64();
         $magic = Value::int($i64, MemoryAbi::REF_TAG_MAGIC);
         $rcOff = Value::int($i64, MemoryAbi::REF_RC_OFFSET);
-        $hdrOff = Value::int($i64, -8);
+        $hdrOff = Value::int($i64, MemoryAbi::REF_MAGIC_OFFSET);
 
         $fn = $this->module->func('__mir_ref_new', Type::ptr());
         $v = $fn->param($i64, 'v');
@@ -3937,7 +3942,18 @@ final class UnifiedArrayRuntime
         $e->store(Value::int($i64, 1), $e->gep(Type::i8(), $data, [$rcOff]));
         $e->ret($data);
 
+        $fn = $this->module->func('__mir_ref_is_box', Type::i1());
+        $fn->attrs = 'noinline';
+        $p = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $no = $fn->block('no');
+        $e->brIf($e->icmp('eq', $p, Value::null()), $no, $chk);
+        $chk->ret($chk->icmp('eq', $chk->load($i64, $chk->gep(Type::i8(), $p, [$hdrOff])), $magic));
+        $no->ret(Value::int(Type::i1(), 0));
+
         $fn = $this->module->func('__mir_ref_retain', Type::void());
+        $fn->attrs = 'noinline';
         $p = $fn->param(Type::ptr(), 'p');
         $e = $fn->block('entry');
         $chk = $fn->block('chk');
@@ -3951,6 +3967,7 @@ final class UnifiedArrayRuntime
         $done->retVoid();
 
         $fn = $this->module->func('__mir_ref_unref', Type::i1());
+        $fn->attrs = 'noinline';
         $p = $fn->param(Type::ptr(), 'p');
         $e = $fn->block('entry');
         $chk = $fn->block('chk');
@@ -4029,20 +4046,41 @@ final class UnifiedArrayRuntime
         $make->store($make->or_($make->and_($bi, $mask), Value::int($i64, MemoryAbi::CELL_REF_TAG_BITS)), $slot);
         $make->ret($box);
 
-        // `__mir_ref_adopt(addr) -> data`: the box behind a by-ref PARAMETER's
-        // address, for a callee that STORES a reference to it. The address is
-        // either an existing box (the caller's local was promoted) or the
-        // caller's own cell slot, which dies with the caller's frame — that one
-        // is promoted in place so the stored REF cell owns a counted box.
+        // `__mir_ref_fresh(v) -> data`: a box holding `v` (whose count the
+        // caller already took for it) with NO holder yet — the consumer of the
+        // REF cell or capture made from it takes the first count, exactly as it
+        // takes one more on a box someone else already holds.
+        $fn = $this->module->func('__mir_ref_fresh', Type::ptr());
+        $v = $fn->param($i64, 'v');
+        $e = $fn->block('entry');
+        $box = $e->call('__mir_ref_new', Type::ptr(), [$v]);
+        $e->store(Value::int($i64, 0), $e->gep(Type::i8(), $box, [Value::int($i64, MemoryAbi::REF_RC_OFFSET)]));
+        $e->ret($box);
+
+        // `__mir_ref_adopt(addr) -> data`: the box a STORED reference to a
+        // by-ref parameter's address (a CELL slot) may share. An existing box
+        // (the caller's local is a ref-cell target, a promoted property), or
+        // the box a slot already holds as `cell(REF, box)` (a promoted element),
+        // is shared: every reader of such storage decodes REF. Any other
+        // address — a caller's plain or scratch slot, an unpromoted property,
+        // an element, a static — is NEVER rewritten: its readers need not decode
+        // REF. The reference gets a fresh box holding a COPY instead: heap-safe,
+        // but a later write through that address is not seen by the holder
+        // (docs/design/reference-cells.md, "A stored reference to a by-ref param").
         $fn = $this->module->func('__mir_ref_adopt', Type::ptr());
         $p = $fn->param(Type::ptr(), 'p');
         $e = $fn->block('entry');
         $isBox = $fn->block('isbox');
-        $promote = $fn->block('promote');
-        $hdr = $e->load($i64, $e->gep(Type::i8(), $p, [Value::int($i64, -8)]));
-        $e->brIf($e->icmp('eq', $hdr, Value::int($i64, MemoryAbi::REF_TAG_MAGIC)), $isBox, $promote);
+        $slot = $fn->block('slot');
+        $shared = $fn->block('shared');
+        $copy = $fn->block('copy');
+        $e->brIf($e->call('__mir_ref_is_box', Type::i1(), [$p]), $isBox, $slot);
         $isBox->ret($p);
-        $promote->ret($promote->call('__mir_ref_promote_slot', Type::ptr(), [$p]));
+        $w = $slot->load($i64, $p);
+        $slot->brIf($this->isRefCellIr($slot, $w), $shared, $copy);
+        $shared->ret($shared->inttoptr($shared->and_($w, $mask), Type::ptr()));
+        $copy->call('__mir_cell_retain', Type::void(), [$w]);
+        $copy->ret($copy->call('__mir_ref_fresh', Type::ptr(), [$w]));
         $fn = $this->module->func('__mir_ref_slot_store', Type::i1());
         $slot = $fn->param(Type::ptr(), 'slot');
         $v = $fn->param($i64, 'v');

@@ -74,6 +74,9 @@ trait EmitLlvmExceptions
     private array $ehPadBodies = [];
     /** @var array<int, bool> pads some invoke unwinds to */
     private array $ehPadUsed = [];
+    /** The frame owns reference boxes ({@see EmitLlvmModule::newOwnedBoxIr}): every
+     *  unwind out of it gives their counts back, whatever else is live. */
+    private bool $ehBoxes = false;
     /** The function being emitted, for its leaf-statement drop sets. */
     private ?\Compile\Mir\FunctionDef $ehFn = null;
     /** @var array<int, int> leaf statement `spl_object_id` → its index in {@see \Compile\Mir\FunctionDef::$ownStmtNodes} */
@@ -94,11 +97,45 @@ trait EmitLlvmExceptions
         $this->ehPersonality = false;
         $this->ehFn = null;
         $this->ehStmtIdx = [];
+        $this->ehBoxes = false;
         if ($this->nothrow === null || (!$resume && ($fn->isGenerator || $this->gen->inGenerator))) { return; }
         $this->ehFn = $fn;
         foreach ($fn->ownStmtNodes as $si => $st) { $this->ehStmtIdx[\spl_object_id($st)] = $si; }
-        $this->ehPersonality = $fn->ownStmtNodes !== [] || $this->ehNeedsPads($fn->body);
+        $this->ehPersonality = $fn->ownStmtNodes !== [] || $this->ehNeedsPads($fn->body)
+            || (!$resume && !$fn->returnsByRef && $this->ehMayOwnBoxes($fn->body));
         $this->ehOn = $this->ehPersonality;
+    }
+
+    /** The prologue may make a frame-owned box: a `&` cell, a by-ref capture, an element alias. */
+    private function ehMayOwnBoxes(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_REF_CELL || $k === Node::KIND_REF_ADDR) { return true; }
+        if ($k === Node::KIND_CLOSURE && \in_array(true, $this->ehClosure($n)->captureByRef, true)) { return true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->ehMayOwnBoxes($c)) { return true; }
+        }
+        return false;
+    }
+
+    /** After the prologue: the frame's boxes are known, and every unwind out of it releases them. */
+    private function ehFrameBoxesReady(): void
+    {
+        $this->ehBoxes = $this->ehOn && !$this->frame->returnsByRef
+            && ($this->locals->ownedBoxes !== [] || $this->locals->elemRefBoxes !== []);
+    }
+
+    /** The frame's box releases, for a cleanup pad ({@see emitOwnedBoxReleases} without the hand-out). */
+    private function ehBoxReleases(): string
+    {
+        $out = $this->byRefParamWriteBackIr();
+        foreach ($this->locals->ownedBoxes as $name => $_) { $out .= $this->ownedBoxReleaseIr($name, false); }
+        foreach ($this->locals->elemRefBoxes as $ename => $eo) {
+            $eb = $this->ssa->allocReg();
+            $out .= '  ' . $eb . ' = load ptr, ptr ' . $eo . "\n";
+            $out .= '  call void @__mir_ref_release(ptr ' . $eb . ")\n";
+        }
+        return $out;
     }
 
     /** The used pads' IR, for the end of the function; marking stops. */
@@ -148,6 +185,7 @@ trait EmitLlvmExceptions
     }
 
     private function ehThrow(Node $n): \Compile\Mir\Throw_ { return $n; }
+    private function ehClosure(Node $n): \Compile\Mir\Closure_ { return $n; }
     private function ehTry(Node $n): \Compile\Mir\TryCatch_ { return $n; }
     private function ehForeach(Node $n): \Compile\Mir\Foreach_ { return $n; }
 
@@ -177,7 +215,7 @@ trait EmitLlvmExceptions
         // emitter-synthesised one (intdiv's DivisionByZeroError) has no flow state.
         if ($k === Node::KIND_THROW) {
             $tl = $this->ehThrow($n)->ownLive;
-            return $tl === [] ? $out : $this->ehMark($out, $tl);
+            return ($tl === [] && !$this->ehBoxes) ? $out : $this->ehMark($out, $tl);
         }
         if ($parent) { return $this->ehMark($out, []); }
         if ($this->ehStmtIdx !== []) {
@@ -225,9 +263,9 @@ trait EmitLlvmExceptions
     private function ehMark(string $text, array $live, bool $raisesOnly = false): string
     {
         if (!$this->ehOn) { return $text; }
-        if ($live === [] && $this->ehCallDepth === 0) { return $text; }
+        if ($live === [] && $this->ehCallDepth === 0 && !$this->ehBoxes) { return $text; }
         if (\strpos($text, 'call ') === false) { return $text; }
-        $pad = $live === [] ? 0 : $this->ehPadFor($live);
+        $pad = ($live === [] && !$this->ehBoxes) ? 0 : $this->ehPadFor($live);
         if ($pad === 0 && $this->ehCallDepth === 0) { return $text; }
         $tag = ' ;!e' . (string)$pad;
         $lines = \explode("\n", $text);
@@ -301,7 +339,7 @@ trait EmitLlvmExceptions
      */
     private function ehMarkRaise(string $text, array $live): string
     {
-        if (!$this->ehOn || $live === [] || $this->ssa !== $this->ehSsa) { return $text; }
+        if (!$this->ehOn || ($live === [] && !$this->ehBoxes) || $this->ssa !== $this->ehSsa) { return $text; }
         return $this->ehMark($text, $live);
     }
 
@@ -320,14 +358,14 @@ trait EmitLlvmExceptions
             // two ops of one name and flavor need not emit the same drop.
             $key .= $name . '#' . (string)\spl_object_id($op) . ';';
         }
-        if ($key === '') { return 0; }
+        if ($key === '' && !$this->ehBoxes) { return 0; }
         if (isset($this->ehPadKeys[$key])) { return $this->ehPadKeys[$key]; }
         $pad = \count($this->ehPadKeys) + 1;
         $this->ehPadKeys[$key] = $pad;
         $lbl = $this->ssa->allocLabel('ehlp');
         $this->ehPadLabels[$pad] = $lbl;
         if ($this->nothrow !== null && $this->nothrow->releasesRaise()) {
-            $this->ehPadBodies[$pad] = $this->ehRaisingPad($lbl, $live);
+            $this->ehPadBodies[$pad] = $this->ehWithBoxReleases($this->ehRaisingPad($lbl, $live));
             return $pad;
         }
         $lp = $this->ssa->allocReg();
@@ -341,8 +379,18 @@ trait EmitLlvmExceptions
                 : '  call void ' . $this->ehDropHelper($fl) . '(ptr ' . $slot . ")\n";
         }
         $body .= '  resume { ptr, i32 } ' . $lp . "\n";
-        $this->ehPadBodies[$pad] = $body;
+        $this->ehPadBodies[$pad] = $this->ehWithBoxReleases($body);
         return $pad;
+    }
+
+    /** `$pad` (a cleanup pad's IR) releasing the frame's boxes first, right after its landingpad. */
+    private function ehWithBoxReleases(string $pad): string
+    {
+        if (!$this->ehBoxes) { return $pad; }
+        $at = \strpos($pad, " cleanup\n");
+        if ($at === false) { return $pad; }
+        $at = $at + 9;
+        return \substr($pad, 0, $at) . $this->ehBoxReleases() . \substr($pad, $at);
     }
 
     /**

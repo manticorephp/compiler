@@ -999,15 +999,12 @@ trait InferScans
                 // sites hand it `[$definition]`, and that single parameter
                 // stopped the whole tier-3 build.
                 //
-                // WITHDRAWN, not replaced. Substituting a different concrete
-                // claim — vec[cell] — was measured and rejected twice: it moves
-                // the element REPR, so every caller must re-encode to match, and
-                // the compiler's own LowerFromAst::lowerConstCallable then read
-                // `$info['method']` as a tagged cell out of a raw slot and threw
-                // `Call to undefined method ::()`. Going back to erased asks
-                // nothing of the callers: it is what the parameter was before the
-                // heuristic guessed, and an erased element is not `concrete()`,
-                // so the conflict check has nothing left to refuse.
+                // WITHDRAWN to a CELL element (the key kept): `vec[cell]` /
+                // `assoc[K, cell]`, the shape an erased array's elements already
+                // have at run time, so a caller passing an erased array (#318)
+                // needs no re-encode, and a cell element is not `concrete()`, so
+                // the conflict check has nothing left to refuse. The guess is
+                // flagged withdrawn (`elemGuessWithdrawn`) so it is not re-made.
                 //
                 // Never a PRELUDE function — its body is emitted linkonce_odr
                 // into every module, so this module's call sites are not all of

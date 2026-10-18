@@ -227,6 +227,9 @@ final class MemoryAbi
      */
     public const REF_TAG_MAGIC = 0x7E66000000000008;
 
+    /** The box's {@see REF_TAG_MAGIC} word, relative to the data ptr. */
+    public const REF_MAGIC_OFFSET = -8;
+
     /** The box's value word, relative to the data ptr the cell payload holds. */
     public const REF_VALUE_OFFSET = 0;
 

@@ -95,6 +95,13 @@ final class LocalSlots
      *  Declared LAST — a field added mid-struct shifts every later offset. */
     public array $ownedBoxes = [];
 
+    /** @var array<string, string[]> a by-ref PARAMETER a closure captures by
+     *  reference, moved into a frame box ({@see \Compile\Mir\Passes\EmitLlvmModule::
+     *  boxCapturedByRefParamIr}) → [alloca of the caller's address, alloca of the
+     *  box] the exit writes back through; both null when the caller's storage
+     *  already was a box. Declared LAST. */
+    public array $byRefParamWb = [];
+
     /**
      * Locals a reference CELL points at ({@see \Compile\Mir\RefCell_}). Only a
      * plain local is collected here — a property / element / static-prop source

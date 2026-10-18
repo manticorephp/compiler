@@ -135,6 +135,19 @@ trait EmitLlvmGenerator
             if ($p->byRef) { $this->locals->refLocals[$p->name] = true; }
         }
         $this->initOwnSlots($fn->body, $genParamNames);
+        // A body local a `&` cell points at (`[&$v]`, a by-ref arg a callee keeps)
+        // lives in a reference BOX, as in a plain function: its frame slot holds
+        // the box's address from creation on, so every holder — the REF cell,
+        // the frame — shares one storage that outlives a scratch slot. The frame
+        // never gives its count back: the residual frame-local leak noted below.
+        $this->locals->refCellTargets = [];
+        $this->locals->collectRefCellTargets($fn->body);
+        $this->locals->refCellTargets = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->locals->refCellTargets);
+        /** @var array<string, bool> */
+        $genBoxed = [];
+        foreach ($this->locals->refCellTargets as $rcn => $_) {
+            if (!isset($genParamNames[$rcn])) { $genBoxed[$rcn] = true; }
+        }
 
         // ── creator ──
         // A generator CLOSURE composes two frame mechanisms: it is invoked with
@@ -251,6 +264,13 @@ trait EmitLlvmGenerator
                         $out .= $this->rcRetainReg('%arg.' . $name, $fl);
                     }
                 }
+            } elseif (isset($genBoxed[$name])) {
+                $gb = $this->ssa->allocReg();
+                $out .= '  ' . $gb . ' = call ptr @__mir_ref_new(i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ")\n";
+                $gbi = $this->ssa->allocReg();
+                $out .= '  ' . $gbi . ' = ptrtoint ptr ' . $gb . " to i64\n";
+                $out .= $this->genStoreAt($fr, $off, $gbi);
+                $this->rt->needsRefCells = true;
             } else {
                 $out .= $this->genStoreAt($fr, $off, '0');
             }
@@ -272,6 +292,10 @@ trait EmitLlvmGenerator
                 $this->locals->refParamTypes[$gp->name] = $gp->type;
                 if ($gp->retypedByRef) { $this->locals->refParamRetyped[$gp->name] = true; }
             }
+        }
+        foreach ($genBoxed as $gbn => $_) {
+            $this->locals->refLocals[$gbn] = true;
+            $this->locals->refParamTypes[$gbn] = Type::cell();
         }
         $this->locals->ownedBoxes = [];
         $this->locals->aliasLocals = [];

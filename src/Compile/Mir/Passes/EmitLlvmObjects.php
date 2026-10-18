@@ -3366,15 +3366,49 @@ trait EmitLlvmObjects
         }
         $out = $addrIr;
         $this->rt->needsRefCells = true;
-        // A by-ref PARAMETER's address is the caller's slot, dead once the
-        // caller returns: a reference STORED from it must own a counted box.
-        if ($src->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->refLocals[$src->name])) {
+        // A local bound to an ADDRESS it does not own — a by-ref parameter, a
+        // `$r = &…` alias — may point at a caller's slot, a scratch slot or a
+        // buffer element, none of which outlives the reference being STORED.
+        // The stored REF cell must point at a counted box instead
+        // (docs/design/reference-cells.md, "A stored reference to a by-ref param").
+        if ($src->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->refLocals[$src->name])
+            && !isset($this->locals->ownedBoxes[$src->name])) {
             $pk = ($this->locals->refParamTypes[$src->name] ?? Type::unknown())->kind;
-            if ($pk === Type::KIND_CELL || $pk === Type::KIND_UNKNOWN) {
+            if ($pk === Type::KIND_CELL) {
+                // A CELL slot: share the box behind it, or box a copy.
                 $ap = $this->ssa->allocReg();
                 $out .= '  ' . $ap . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
                 $ab = $this->ssa->allocReg();
                 $out .= '  ' . $ab . ' = call ptr @__mir_ref_adopt(ptr ' . $ap . ")\n";
+                $ai = $this->ssa->allocReg();
+                $out .= '  ' . $ai . ' = ptrtoint ptr ' . $ab . " to i64\n";
+                $this->lastValue = $ai;
+            } else {
+                // A RAW slot (`int &$v`, a bare `array &$a`): it cannot hold
+                // `cell(REF, box)` and is never a box (a box is a cell channel,
+                // and a raw by-ref param of a cell local gets a scratch slot), so
+                // the reference boxes a cell COPY of the current value.
+                $pt = $this->locals->refParamTypes[$src->name] ?? Type::unknown();
+                $ap = $this->ssa->allocReg();
+                $out .= '  ' . $ap . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+                $rw = $this->ssa->allocReg();
+                $out .= '  ' . $rw . ' = load i64, ptr ' . $ap . "\n";
+                $this->lastValue = $rw;
+                $this->lastValueType = 'i64';
+                if ($pk === Type::KIND_FLOAT) {
+                    $d = $this->ssa->allocReg();
+                    $out .= '  ' . $d . ' = bitcast i64 ' . $rw . " to double\n";
+                    $this->lastValue = $d;
+                    $this->lastValueType = 'double';
+                }
+                $out .= $this->boxToCellShallow($pt);
+                $out .= $this->coerceToI64();
+                $cv = $this->lastValue;
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= '  call void @__mir_cell_retain(i64 ' . $cv . ")\n";
+                $ab = $this->ssa->allocReg();
+                $out .= '  ' . $ab . ' = call ptr @__mir_ref_fresh(i64 ' . $cv . ")\n";
                 $ai = $this->ssa->allocReg();
                 $out .= '  ' . $ai . ' = ptrtoint ptr ' . $ab . " to i64\n";
                 $this->lastValue = $ai;

@@ -1393,12 +1393,7 @@ trait EmitLlvmLocals
             // box (`$o = &$x`, both boxed — LocalSlots::closeRefCellsOverAliases);
             // every box holds a cell it owns, so any box will do. The magic tells
             // a box from the storage a by-ref param points at.
-            $hp = $this->ssa->allocReg();
-            $out .= '  ' . $hp . ' = getelementptr inbounds i8, ptr ' . $bp . ", i64 -8\n";
-            $hv = $this->ssa->allocReg();
-            $out .= '  ' . $hv . ' = load i64, ptr ' . $hp . "\n";
-            $out .= '  ' . $same . ' = icmp eq i64 ' . $hv . ', '
-                  . (string)\Compile\MemoryAbi::REF_TAG_MAGIC . "\n";
+            $out .= '  ' . $same . ' = call i1 @__mir_ref_is_box(ptr ' . $bp . ")\n";
         } else {
             // A capture box holds the local's own representation; only its own.
             $own = $this->ssa->allocReg();
@@ -1762,6 +1757,19 @@ trait EmitLlvmLocals
         }
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
             $aa = $a;
+            // An element a callee keeps a reference to is handed over as its
+            // BOX ({@see \Compile\Mir\ArrayAccess_::$refStored}), the promotion a
+            // `[&$a[$k]]` makes: the buffer address dies with the next insert. A
+            // raw-elemented array cannot hold the box; its element address stays,
+            // and the stored reference gets a copy ({@see EmitLlvmObjects::emitRefCell}).
+            if ($aa->refStored) {
+                $rel = $aa->array->type->element ?? null;
+                $rek = $rel === null ? Type::KIND_UNKNOWN : $rel->kind;
+                if ($rek === Type::KIND_CELL || $rek === Type::KIND_UNKNOWN) {
+                    $bir = $this->elemRefBoxAddr($aa);
+                    if ($bir !== null) { $this->rt->needsRefCells = true; return $bir; }
+                }
+            }
             // `&$c[]` references the element the append creates.
             $isAppend = $aa->index->kind === Node::KIND_NULL_CONST;
             $keyKind = $isAppend ? 'append' : $this->arrayElemKeyKind($aa->index);

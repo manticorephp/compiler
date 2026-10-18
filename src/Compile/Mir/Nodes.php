@@ -1658,6 +1658,13 @@ final class ArrayAccess_ extends Node
     public bool $probe = false;
 
     /**
+     * A BY-REF argument to a parameter its callee keeps a reference to
+     * ({@see Passes\VivifyRefArgs}): the element is promoted to a reference box
+     * and the callee gets the box, so the stored reference shares the element.
+     */
+    public bool $refStored = false;
+
+    /**
      * A base php fetches AFTER the key in `$base[$k]` under isset / `??` (delayed
      * fetch): a variable, a property, a static property or an element of one.
      * A call base (`f()[$k]`) runs first.
