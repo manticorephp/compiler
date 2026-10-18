@@ -55,6 +55,14 @@ final class __McPdoMyResult
     public int $warnings = 0;
     public ?__McPdoMyErr $err = null;
     public ?__McPdoMyResult $next = null;
+    /** Unbuffered: only the header was read, the rows are still on the wire (see __McPdoMyWire::cursorRow). */
+    public bool $stream = false;
+    /** A streamed result whose closing EOF/ERR has been read. */
+    public bool $done = false;
+    /** A done streamed result the server promised more behind: they are read by nextRowset() or when the cursor is drained. */
+    public bool $more = false;
+    /** The statement made this result its current one (php's pending-result-sets error until it does). */
+    public bool $entered = false;
 }
 
 /** The reply to COM_STMT_PREPARE: statement id and the counts the server announced. */
@@ -114,6 +122,12 @@ final class __McPdoMyWire
     private array $owed = [];
     /** One request/response cycle owns the wire; a second fiber on the same connection waits (see enter()). */
     private bool $busy = false;
+    /** An unbuffered result whose rows are still on the wire: the connection is held until it ends (see enter()). */
+    public ?__McPdoMyResult $openCursor = null;
+    private ?object $curFiber = null;
+    private bool $curBin = false;
+    /** A cursorRow() is parked in a read: nobody else may touch the socket. */
+    private bool $reading = false;
     /** A command was sent and its last result packet has not arrived: the stream is mid-protocol. */
     private bool $inflight = false;
     /** The KILL QUERY connection of cancelRequest(): its own failures must never ask for another cancel. */
@@ -423,6 +437,7 @@ final class __McPdoMyWire
             $this->cancelRequest();
         }
         $this->dead = true;
+        $this->openCursor = null;
         if ($this->closed) { return; }
         $this->closed = true;
         \fclose($this->s);
@@ -934,7 +949,7 @@ final class __McPdoMyWire
     }
 
     /** One result (OK, ERR or a result set) of the response to a command. */
-    private function readResult(bool $bin = false): __McPdoMyResult
+    private function readResult(bool $bin = false, bool $stream = false): __McPdoMyResult
     {
         $r = new __McPdoMyResult();
         $p = $this->packet(self::CTRL_CAP);
@@ -961,6 +976,13 @@ final class __McPdoMyWire
         if (\strlen($e) < 5 || \strlen($e) >= 9 || \ord($e[0]) !== 0xFE) { throw $this->malformed('missing EOF after column definitions'); }
         $r->isSet = true;
         $r->bin = $bin;
+        if ($stream) {
+            $r->stream = true;
+            // the metadata EOF already carries SERVER_MORE_RESULTS_EXISTS, which is what mysqlnd's more_results() answers
+            $r->status = self::le16($e, 3);
+            $this->status = $r->status;
+            return $r;
+        }
         while (true) {
             $p = $this->packet(self::ROW_CAP);
             $bl = \strlen($p);
@@ -989,25 +1011,25 @@ final class __McPdoMyWire
      * result's ->err and the stream is in sync. A protocol failure poisons the
      * connection and throws.
      */
-    public function query(string $sql): __McPdoMyResult
+    public function query(string $sql, bool $stream = false): __McPdoMyResult
     {
-        return $this->cycle("\x03" . $sql, false);
+        return $this->cycle("\x03" . $sql, false, $stream);
     }
 
     /**
      * COM_STMT_EXECUTE of statement $id; $params is everything after the iteration count (NULL bitmap, bound flag, types,
      * values), empty for a statement without parameters. Same chain and same failure contract as query(), with binary rows.
      */
-    public function execute(int $id, string $params): __McPdoMyResult
+    public function execute(int $id, string $params, bool $stream = false): __McPdoMyResult
     {
-        return $this->cycle("\x17" . self::putLe($id, 4) . "\0" . self::putLe(1, 4) . $params, true);
+        return $this->cycle("\x17" . self::putLe($id, 4) . "\0" . self::putLe(1, 4) . $params, true, $stream);
     }
 
-    private function cycle(string $cmd, bool $bin): __McPdoMyResult
+    private function cycle(string $cmd, bool $bin, bool $stream = false): __McPdoMyResult
     {
         $this->enter();
         try {
-            return $this->queryRun($cmd, $bin);
+            return $this->queryRun($cmd, $bin, $stream);
         } catch (\Throwable $t) {
             // a cancel/timeout/protocol failure inside a cycle leaves half a response on the wire: nobody may reuse it
             if ($this->inflight) { $this->closeSock(); }
@@ -1024,13 +1046,22 @@ final class __McPdoMyWire
      */
     private function enter(): void
     {
-        if ($this->busy) {
+        // php: any command while an unbuffered result is open is 2014. Another fiber is not the owner: it waits for the cursor to end.
+        if ($this->openCursor !== null && !$this->dead && (!\Runtime\AsyncHook::active() || \Fiber::getCurrent() === $this->curFiber)) {
+            $e = new __McPdoMyErr();
+            $e->no = 2014;
+            $e->msg = ($this->status & 8) !== 0 || !$this->openCursor->entered
+                ? 'Cannot execute queries while there are pending result sets. Consider unsetting the previous PDOStatement or calling PDOStatement::closeCursor()'
+                : 'Cannot execute queries while other unbuffered queries are active.  Consider using PDOStatement::fetchAll().  Alternatively, if your code is only ever going to run against mysql, you may enable query buffering by setting the Pdo\\Mysql::ATTR_USE_BUFFERED_QUERY attribute.';
+            throw __McPdoMy::errFrom($e);
+        }
+        if ($this->busy || $this->openCursor !== null) {
             if (!\Runtime\AsyncHook::active()) { throw __McPdo::fail('HY000', 0, false, 'connection busy', true); }
             $sleeper = \Runtime\AsyncHook::sleeper();
             if ($sleeper === null) { throw __McPdo::fail('HY000', 0, false, 'connection busy', true); }
             // php: a timeout of 0 is unlimited
             $deadline = $this->timeout > 0.0 ? \__mc_monotonic_f() + $this->timeout : 0.0;
-            while ($this->busy && !$this->dead) {
+            while (($this->busy || $this->openCursor !== null) && !$this->dead) {
                 if ($deadline > 0.0 && \__mc_monotonic_f() >= $deadline) {
                     throw __McPdo::fail('HY000', 0, false, 'timeout expired waiting for the connection', true);
                 }
@@ -1040,7 +1071,7 @@ final class __McPdoMyWire
         $this->busy = true;
     }
 
-    private function queryRun(string $cmd, bool $bin): __McPdoMyResult
+    private function queryRun(string $cmd, bool $bin, bool $stream = false): __McPdoMyResult
     {
         if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
         $this->drainOwed();
@@ -1050,20 +1081,143 @@ final class __McPdoMyWire
         $this->sendPacket($cmd);
         $this->awaiting = true;
         $this->respStart = true;
+        return $this->readChain($bin, $stream);
+    }
+
+    /**
+     * Reads results until the chain ends, or ($stream) until one result set's header: its rows stay on the wire, the
+     * connection stays mid-protocol (inflight) and openCursor names the result until cursorRow() reaches its end.
+     */
+    private function readChain(bool $bin, bool $stream): __McPdoMyResult
+    {
         $first = null;
         $last = null;
         $n = 0;
         while (true) {
-            $r = $this->readResult($bin);
+            $r = $this->readResult($bin, $stream);
             if ($first === null) { $first = $r; } else { $last->next = $r; }
             $last = $r;
             if (!$r->isSet && $r->err === null) { $this->insertId = $r->insertId; }
+            if ($r->stream) {
+                $this->openCursor = $r;
+                $this->curBin = $bin;
+                $this->curFiber = \Runtime\AsyncHook::active() ? \Fiber::getCurrent() : null;
+                return $first;
+            }
             if ($r->err !== null || ($r->status & 8) === 0) { break; }
             // ponytail: bounds a server that keeps promising "more results"; no real batch comes near it
             if (++$n > 100000) { throw $this->malformed('too many result sets'); }
         }
         $this->inflight = false;
         return $first;
+    }
+
+    /**
+     * The next row of the open streamed result $r, [] once it ended (done) or failed (->err). $skip reads and
+     * frames the row without decoding it. When the server promises more results, the next chain is linked behind $r
+     * here, so the connection is free again exactly when the last result ended. Any failure (protocol, cancellation,
+     * timeout) poisons the connection: half a result is still on the wire and nobody may reuse it.
+     *
+     * @return array<int,?string> empty at the end of the result (a row has at least one column)
+     */
+    public function cursorRow(__McPdoMyResult $r, bool $skip = false): array
+    {
+        if ($r->done || $this->openCursor !== $r) { return []; }
+        if ($this->dead) {
+            $r->done = true;
+            $this->openCursor = null;
+            return [];
+        }
+        $this->reading = true;
+        try {
+            $this->awaiting = true;
+            $p = $this->packet(self::ROW_CAP);
+            $bl = \strlen($p);
+            if ($bl < 1) { throw $this->malformed('empty row'); }
+            $t = \ord($p[0]);
+            if ($t === 0xFE && $bl < 9) {
+                if ($bl < 5) { throw $this->malformed('EOF packet'); }
+                $r->warnings = self::le16($p, 1);
+                $r->status = self::le16($p, 3);
+                $this->status = $r->status;
+                $r->done = true;
+                if (($r->status & 8) !== 0) {
+                    $r->more = true;
+                } else {
+                    $this->openCursor = null;
+                    $this->inflight = false;
+                }
+                return [];
+            }
+            if ($t === 0xFF) {
+                $r->err = $this->parseErr($p);
+                $r->done = true;
+                $this->openCursor = null;
+                $this->inflight = false;
+                return [];
+            }
+            if ($skip) { return [null]; }
+            // ⚠ the annotation is load-bearing: through a bare ternary the NULL element of the row reads back as "0"
+            /** @var array<int,?string> */
+            $row = $r->bin ? $this->parseBinRow($p, $r) : $this->parseRow($p, \count($r->types));
+            return $row;
+        } catch (\Throwable $e) {
+            $r->done = true;
+            $this->openCursor = null;
+            $this->closeSock();
+            throw $e;
+        } finally {
+            $this->reading = false;
+        }
+    }
+
+    /** Reads the results behind a finished streamed result $r (see ->more) and links them to it. */
+    public function cursorNext(__McPdoMyResult $r): void
+    {
+        if (!$r->more || $this->openCursor !== $r) { return; }
+        $r->more = false;
+        $this->openCursor = null;
+        $this->reading = true;
+        try {
+            $this->awaiting = true;
+            $r->next = $this->readChain($this->curBin, true);
+        } catch (\Throwable $e) {
+            $this->closeSock();
+            throw $e;
+        } finally {
+            $this->reading = false;
+        }
+    }
+
+    /**
+     * Reads the open cursor (and every result chained behind it) to its end and drops the rows. Draining a huge result
+     * costs a full transfer, so it is bounded by the connection timeout: past it the connection is closed instead
+     * (the server stops the statement), never left mid-result.
+     */
+    public function drainCursor(): void
+    {
+        if ($this->openCursor === null) { return; }
+        if ($this->reading) {
+            // another fiber is parked inside a read of this very result: two readers would shred the stream
+            $this->openCursor = null;
+            $this->closeSock();
+            return;
+        }
+        $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + $this->timeout : 0.0;
+        $n = 0;
+        while ($this->openCursor !== null) {
+            $c = $this->openCursor;
+            if ($c->done) {
+                $this->cursorNext($c);
+                continue;
+            }
+            if (\count($this->cursorRow($c, true)) === 0) { continue; }
+            if ((++$n & 15) === 0 && $dl > 0.0 && \__mc_monotonic_f() >= $dl) {
+                $this->openCursor = null;
+                $this->closeSock();
+                return;
+            }
+        }
     }
 
     /**
@@ -1116,7 +1270,7 @@ final class __McPdoMyWire
     /** Ends a cycle: closes queued by destructors while the wire was held are sent now, then the wire is free. */
     private function release(): void
     {
-        $this->inflight = false;
+        $this->inflight = $this->openCursor !== null;
         try {
             if (!$this->dead && \count($this->owed) > 0) { $this->drainOwed(); }
         } catch (PDOException $e) {
@@ -1138,7 +1292,8 @@ final class __McPdoMyWire
     {
         if ($this->dead) { return; }
         $this->owed[] = $id;
-        if ($this->busy) { return; }
+        // a COM_STMT_CLOSE written into a half-read result would corrupt it: it waits for the next command
+        if ($this->busy || $this->openCursor !== null) { return; }
         $this->busy = true;
         try {
             $this->drainOwed();
@@ -1191,7 +1346,7 @@ final class __McPdoMyWire
     public function close(): void
     {
         try {
-            if (!$this->dead && !$this->busy && !$this->connecting) {
+            if (!$this->dead && !$this->busy && !$this->connecting && $this->openCursor === null) {
                 try { $this->seq = 0; $this->sendPacket("\x01"); } catch (PDOException $e) {}
             }
         } finally {
@@ -1211,6 +1366,8 @@ final class __McPdoMy implements __McPdoDrv
     public bool $fetchTables = false;
     /** ATTR_DEFAULT_STR_PARAM = PARAM_STR_NATL. */
     public bool $natl = false;
+    /** MYSQL_ATTR_USE_BUFFERED_QUERY = false: statements stream their rows from the socket. */
+    public bool $unbuffered = false;
 
     public function __construct(__McPdoMyWire $wire)
     {
@@ -1296,11 +1453,7 @@ final class __McPdoMy implements __McPdoDrv
             // php (measured): the call answers false and reads back as unsupported; the effect above is the superset
             return false;
         }
-        // results are always buffered; unbuffered cursors arrive with the async phase
-        if ($attr === PDO::MYSQL_ATTR_USE_BUFFERED_QUERY) {
-            if (!(bool) $value) { throw __McPdo::fail('HY000', 0, false, 'unbuffered queries are not supported yet', true); }
-            return true;
-        }
+        if ($attr === PDO::MYSQL_ATTR_USE_BUFFERED_QUERY) { $this->unbuffered = !(bool) $value; return true; }
         if ($attr === PDO::ATTR_FETCH_TABLE_NAMES) { $this->fetchTables = (bool) $value; return true; }
         // assume_national_character_set_strings: only the NATL type switches it on
         if ($attr === PDO::ATTR_DEFAULT_STR_PARAM) { $this->natl = (int) $value === PDO::PARAM_STR_NATL; return true; }
@@ -1322,7 +1475,7 @@ final class __McPdoMy implements __McPdoDrv
         if ($attr === PDO::ATTR_EMULATE_PREPARES) { return $this->emulate; }
         if ($attr === PDO::ATTR_AUTOCOMMIT) { return $this->autocommit; }
         if ($attr === PDO::ATTR_SERVER_INFO) { return $this->wire->statistics(); }
-        if ($attr === PDO::MYSQL_ATTR_USE_BUFFERED_QUERY) { return true; }
+        if ($attr === PDO::MYSQL_ATTR_USE_BUFFERED_QUERY) { return !$this->unbuffered; }
         if ($attr === PDO::ATTR_FETCH_TABLE_NAMES) { return $this->fetchTables; }
         if ($attr === PDO::ATTR_DEFAULT_STR_PARAM) { return $this->natl ? PDO::PARAM_STR_NATL : PDO::PARAM_STR_CHAR; }
         // LOCAL INFILE is refused at connect (see open()), so the option can only read back as off
@@ -1378,6 +1531,10 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     private array $ps = [];
     /** What rowCount() answers while no result is current (after a failed execute php still reports the previous one). */
     private int $lastRows = 0;
+    /** The first result of the last execute(): the chain a streamed cursor of this statement belongs to. */
+    private ?__McPdoMyResult $head = null;
+    /** @var array<int,?string> the row step() last streamed */
+    private array $curRow = [];
 
     public function __construct(__McPdoMy $db, string $sql, bool $native = false)
     {
@@ -1500,10 +1657,13 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
             throw __McPdo::fail('HY000', 1210, true, 'Incorrect arguments to mysqld_stmt_execute', true);
         }
         $this->lastRows = $this->rowCount();
+        $this->endCursor();
         $this->res = null;
         $this->idx = -1;
-        $r = $this->db->wire->execute($this->stmtId, $payload);
+        $r = $this->db->wire->execute($this->stmtId, $payload, $this->db->unbuffered);
+        $this->head = $r;
         if ($r->err !== null) { throw __McPdoMy::errFrom($r->err); }
+        $r->entered = true;
         $this->res = $r;
     }
 
@@ -1583,16 +1743,51 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
             }
             $q .= \substr($this->sql, $o);
         }
+        $this->endCursor();
         $this->res = null;
         $this->idx = -1;
-        $r = $this->db->wire->query($q);
+        $r = $this->db->wire->query($q, $this->db->unbuffered);
+        $this->head = $r;
         if ($r->err !== null) { throw __McPdoMy::errFrom($r->err); }
+        $r->entered = true;
         $this->res = $r;
+    }
+
+    /** The connection's open cursor is one of this statement's results. */
+    private function ownsCursor(): bool
+    {
+        $c = $this->db->wire->openCursor;
+        if ($c === null) { return false; }
+        for ($n = $this->head; $n !== null; $n = $n->next) {
+            if ($n === $c) { return true; }
+        }
+        return false;
+    }
+
+    /** Re-executing, closing or destroying the statement ends its own unbuffered result first (as pdo core's cursor_closer). */
+    private function endCursor(): void
+    {
+        if ($this->ownsCursor()) { $this->db->wire->drainCursor(); }
     }
 
     public function step(): bool
     {
         if ($this->res === null) { return false; }
+        if ($this->res->stream) {
+            $r = $this->res;
+            $row = $this->db->wire->cursorRow($r);
+            if (\count($row) === 0) {
+                $this->curRow = [];
+                if ($r->err !== null) {
+                    $e = $r->err;
+                    $r->err = null;
+                    throw __McPdoMy::errFrom($e);
+                }
+                return false;
+            }
+            $this->curRow = $row;
+            return true;
+        }
         if ($this->idx + 1 >= \count($this->res->rows)) { return false; }
         $this->idx++;
         return true;
@@ -1602,6 +1797,18 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     public function nextRowset(): bool
     {
         if ($this->res === null) { return false; }
+        if ($this->res->stream && !$this->res->done) {
+            $r = $this->res;
+            while (\count($this->db->wire->cursorRow($r, true)) > 0) {
+            }
+            if ($r->err !== null) {
+                $e = $r->err;
+                $r->err = null;
+                $this->res = null;
+                throw __McPdoMy::errFrom($e);
+            }
+        }
+        if ($this->res->more) { $this->db->wire->cursorNext($this->res); }
         $n = $this->res->next;
         if ($n === null) { return false; }
         if ($n->err !== null) {
@@ -1617,6 +1824,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
             $n->lens = $this->res->lens;
             $n->decs = $this->res->decs;
         }
+        $n->entered = true;
         $this->res = $n;
         $this->idx = -1;
         return true;
@@ -1700,7 +1908,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     public function columnValue(int $i): mixed
     {
         if ($this->res === null) { return null; }
-        $v = $this->res->rows[$this->idx][$i];
+        if ($this->res->stream) { $v = $this->curRow[$i]; } else { $v = $this->res->rows[$this->idx][$i]; }
         if ($v === null) { return null; }
         $t = $this->res->types[$i];
         if ($this->res->bin) { return $this->binValue($v, $t, $this->res->flags[$i], $this->res->decs[$i]); }
@@ -1784,11 +1992,13 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     public function rowCount(): int
     {
         if ($this->res === null) { return $this->native ? $this->lastRows : 0; }
-        return $this->res->isSet ? \count($this->res->rows) : $this->res->affected;
+        // mysqlnd (measured): an unbuffered result reports 0 rows, before and after the last fetch
+        return $this->res->isSet ? ($this->res->stream ? 0 : \count($this->res->rows)) : $this->res->affected;
     }
 
     public function closeCursor(): void
     {
+        $this->endCursor();
         if ($this->res !== null) {
             $this->idx = \count($this->res->rows);
             $this->res->next = null;
@@ -1798,7 +2008,13 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     /** The statement object is going away: the server's copy is released exactly once. */
     public function close(): void
     {
+        try {
+            $this->endCursor();
+        } catch (PDOException $e) {
+            // the connection is gone: the cursor went with it
+        }
         $this->res = null;
+        $this->head = null;
         if ($this->prepared) {
             $this->prepared = false;
             $this->db->wire->closeStmt($this->stmtId);
@@ -1865,9 +2081,6 @@ function __mc_pdo_mysql_open(string $rest, array $options, ?string $user, ?strin
     $timeout = isset($options[PDO::ATTR_TIMEOUT]) ? (float) $options[PDO::ATTR_TIMEOUT] : 30.0;
     $multi = !isset($options[PDO::MYSQL_ATTR_MULTI_STATEMENTS]) || (bool) $options[PDO::MYSQL_ATTR_MULTI_STATEMENTS];
 
-    if (isset($options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY]) && !(bool) $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY]) {
-        throw __McPdo::connectFail('HY000', 2000, 'unbuffered queries are not supported yet');
-    }
     if (isset($options[PDO::MYSQL_ATTR_COMPRESS]) && (bool) $options[PDO::MYSQL_ATTR_COMPRESS]) {
         throw __McPdo::connectFail('HY000', 2000, 'compression is not supported');
     }
@@ -1889,6 +2102,7 @@ function __mc_pdo_mysql_open(string $rest, array $options, ?string $user, ?strin
         throw $e;
     }
     $drv = new __McPdoMy($wire);
+    $drv->unbuffered = isset($options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY]) && !(bool) $options[PDO::MYSQL_ATTR_USE_BUFFERED_QUERY];
     // ⚠ #318: reading an option with a (string) cast beside (float) $options[ATTR_TIMEOUT] crashes; is_string() does not
     $init = isset($options[PDO::MYSQL_ATTR_INIT_COMMAND]) ? $options[PDO::MYSQL_ATTR_INIT_COMMAND] : null;
     if (\is_string($init)) {

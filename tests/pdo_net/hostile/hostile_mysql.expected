@@ -294,6 +294,82 @@ no fd leak
 np_stall_mid: HY000 2006 MySQL server has gone away
 fast
 no fd leak
+us_row_overrun: HY000 2027 Malformed packet (row value overruns packet)
+fast
+no fd leak
+us_row_trailing: HY000 2027 Malformed packet (row has trailing bytes)
+fast
+no fd leak
+us_row_short: HY000 2027 Malformed packet (row has too few columns)
+fast
+no fd leak
+us_row_huge_len: HY000 2027 Malformed packet (row length)
+fast
+no fd leak
+us_row_neg_len: HY000 2027 Malformed packet (row length)
+fast
+no fd leak
+us_err_mid_rows: 70100 1317 Query execution was interrupted
+reuse: ok
+fast
+no fd leak
+us_rows_trunc: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+us_rows_noeof: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+us_rows_badseq: HY000 2027 Malformed packet (packets out of order)
+fast
+no fd leak
+us_drain_bad: closed
+reuse: ok
+us_drain_bad: NO ERROR
+fast
+no fd leak
+us_drain_dtor: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+us_drain_slow: closed
+us_drain_slow: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+us_more_after_eof: rows done
+us_more_after_eof: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+us_int_garbage: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+us_bit_long: HY000 - invalid bit value from server
+reuse: ok
+fast
+no fd leak
+us_stall_mid: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+us_np_ok: ok 'okay'
+fast
+no fd leak
+us_np_row_overrun: HY000 2027 Malformed packet (binary row value overruns packet)
+fast
+no fd leak
+us_np_bitmap_short: HY000 2027 Malformed packet (binary row: NULL bitmap)
+fast
+no fd leak
+us_np_trailing: HY000 2027 Malformed packet (binary row has trailing bytes)
+fast
+no fd leak
+us_np_dt_overrun: HY000 2027 Malformed packet (binary row overruns packet)
+fast
+no fd leak
+us_np_huge_lenenc: HY000 2027 Malformed packet (binary row length)
+fast
+no fd leak
+us_np_stall_mid: HY000 2006 MySQL server has gone away
+fast
+no fd leak
 kill_stall: HY000 2006 MySQL server has gone away
 fast
 no fd leak

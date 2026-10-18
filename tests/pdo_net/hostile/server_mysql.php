@@ -2,6 +2,7 @@
 // Fake hostile MySQL server (Zend php), the mysql half of server.php. usage: server.php <mode> <portfile> mysql
 // Serves ONE connection, then waits until the client hangs up (or 6 s).
 [, $mode, $portFile] = $argv;
+$mode = preg_replace('/^us_/', '', $mode);   // us_<mode>: same server behaviour, the client streams
 $srv = stream_socket_server('tcp://127.0.0.1:0', $en, $es);
 file_put_contents($portFile . '.tmp', (string) parse_url('tcp://' . stream_socket_get_name($srv, false), PHP_URL_PORT));
 rename($portFile . '.tmp', $portFile);
@@ -177,6 +178,18 @@ while (true) {
     elseif ($mode === 'trunc_stream') { fwrite($c, $pkt(1, "\x01") . substr($pkt(2, $coldef('a')), 0, 10)); fclose($c); exit; }
     elseif ($mode === 'over_cap_query') { fwrite($c, "\xff\xff\xff\x01"); }
     elseif ($mode === 'err_mid_rows') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $err(5, 1317, '70100', 'Query execution was interrupted')); }
+    elseif ($mode === 'drain_slow') {
+        // an endless result, one row per 20 ms: draining it would take as long as the server likes
+        fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3));
+        for ($i = 0; $i < 300; $i++) { usleep(20000); if (@fwrite($c, $pkt(4 + $i, $ls('x'))) === false) { break; } }
+        exit;
+    }
+    elseif ($mode === 'rows_trunc') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . substr($pkt(5, $ls('yyyy')), 0, 6)); fclose($c); exit; }
+    elseif ($mode === 'rows_noeof') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x'))); fclose($c); exit; }
+    elseif ($mode === 'rows_badseq') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $pkt(9, $ls('y')) . $eof(10)); }
+    elseif ($mode === 'drain_bad') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $pkt(5, "\xfc\xe8\x03abc") . $eof(6)); }   // well framed, content nobody reads
+    elseif ($mode === 'drain_dtor') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . substr($pkt(5, $ls('yyyy')), 0, 6)); fclose($c); exit; }
+    elseif ($mode === 'more_after_eof') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $eof(5, 2 | 8)); fclose($c); exit; }
     elseif ($mode === 'bad_seq_query') { fwrite($c, $pkt(7, "\x00\x00\x00\x02\x00\x00\x00")); }
     elseif ($mode === 'more_forever') { fwrite($c, $ok(1, 2 | 8)); fclose($c); exit; }
     elseif ($mode === 'big_slow') {

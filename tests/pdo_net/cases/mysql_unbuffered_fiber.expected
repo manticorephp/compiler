@@ -1,0 +1,10 @@
+b asks
+a open
+a second query: 2014
+a row 1
+a row 2
+a row 3
+a done
+b got 7
+waiter: SQLSTATE[HY000]: General error: timeout expired waiting for the connection
+after: 9
