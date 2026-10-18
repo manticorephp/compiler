@@ -116,6 +116,8 @@ final class __McPdoMyWire
     private bool $busy = false;
     /** A command was sent and its last result packet has not arrived: the stream is mid-protocol. */
     private bool $inflight = false;
+    /** The KILL QUERY connection of cancelRequest(): its own failures must never ask for another cancel. */
+    private bool $noCancel = false;
     private float $timeout = 30.0;
     /** ATTR_TIMEOUT was set by the program: only then does it also bound the idle wait for a response (see fill()). */
     public bool $explicitTimeout = false;
@@ -417,7 +419,7 @@ final class __McPdoMyWire
     private function closeSock(): void
     {
         // a command abandoned mid-flight (cancel, timeout) keeps running server-side: ask the server to stop it
-        if (!$this->closed && $this->inflight && !$this->connecting && !$this->peerGone && $this->connId > 0) {
+        if (!$this->closed && $this->inflight && !$this->noCancel && !$this->connecting && !$this->peerGone && $this->connId > 0) {
             $this->cancelRequest();
         }
         $this->dead = true;
@@ -450,6 +452,7 @@ final class __McPdoMyWire
             $t0 = \__mc_monotonic_f();
             $w = new self($this->host, $this->port, 1.0);
             $w->explicitTimeout = true;
+            $w->noCancel = true;
             $w->handshake();
             $w->auth($this->kUser, $this->kPw, '', $this->kCs, false, false, false, $this->kTls);
             $left = 2.0 - (\__mc_monotonic_f() - $t0);

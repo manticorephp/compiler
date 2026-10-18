@@ -27,6 +27,26 @@ $hs = function (string $plugin = 'mysql_native_password', int $alen = 21, int $p
 };
 $quit = function () use ($c) { $end = microtime(true) + 6; stream_set_timeout($c, 1); while (microtime(true) < $end) { $x = fread($c, 1024); if ($x === '' && feof($c)) { break; } } exit; };
 
+// kill_stall: the client's query stalls (ATTR_TIMEOUT 1), its cancel hook connects again and sends KILL QUERY, which stalls too.
+// Every accepted connection is counted in <portfile>.conns: a third one would mean the KILL connection cancelled itself.
+if ($mode === 'kill_stall') {
+    $held = [$c];
+    $n = 1;
+    file_put_contents($portFile . '.conns', (string) $n);
+    $end = microtime(true) + 7;
+    while (true) {
+        $cc = $held[$n - 1];
+        fwrite($cc, $hs());
+        $s0 = fread($cc, 65536);                       // HandshakeResponse41
+        fwrite($cc, $ok(2));
+        stream_set_blocking($cc, false);
+        do {
+            $r = [$srv]; $w = null; $e = null;
+            if (stream_select($r, $w, $e, 0, 200000) > 0) { $nc = stream_socket_accept($srv, 1); $held[] = $nc; $n++; file_put_contents($portFile . '.conns', (string) $n); continue 2; }
+        } while (microtime(true) < $end);
+        exit;
+    }
+}
 // ── handshake-phase modes ────────────────────────────────────────────────
 if ($mode === 'huge') { fwrite($c, "\xff\xff\xff\x00"); $quit(); }                       // a 16 MB handshake
 if ($mode === 'badseq') { fwrite($c, $pkt(5, substr($hs(), 4))); $quit(); }

@@ -294,3 +294,7 @@ no fd leak
 np_stall_mid: HY000 2006 MySQL server has gone away
 fast
 no fd leak
+kill_stall: HY000 2006 MySQL server has gone away
+fast
+no fd leak
+kill_stall: connections 2
