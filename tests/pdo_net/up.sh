@@ -39,6 +39,8 @@ if ! docker inspect mc-my-ssl >/dev/null 2>&1; then
     docker cp "$CERTS" mc-my-ssl:/certsrc
 fi
 start mc-my-ssl
+# throwaway server for cases that need GLOBAL state or global counters (Prepared_stmt_count, max_prepared_stmt_count): never the shared mc-my
+start mc-my-iso -p 127.0.0.1:33065:3306 -e MYSQL_USER=u -e MYSQL_PASSWORD=pw -e MYSQL_DATABASE=d -e MYSQL_ROOT_PASSWORD=pw mysql:8.4
 # mysql 8.4 ships mysql_native_password OFF: a second server with it on, for the native-password and auth-switch cases
 start mc-my-native -p 127.0.0.1:33062:3306 -e MYSQL_DATABASE=d -e MYSQL_ROOT_PASSWORD=pw mysql:8.4 --mysql-native-password=ON
 # TCP logins: the init-time temporary servers listen on the unix socket only
@@ -46,6 +48,7 @@ wait_for mc-pg 60 docker exec -e PGPASSWORD=pw mc-pg psql -h 127.0.0.1 -U u d -c
 wait_for mc-pg-ssl 60 docker exec mc-pg-ssl psql -U u d -c "select 1"
 docker exec mc-pg-ssl psql -U u d -c "create user cu" 2>/dev/null || true
 wait_for mc-my 120 docker exec mc-my mysql -h 127.0.0.1 -uu -ppw d -e 'select 1'
+wait_for mc-my-iso 120 docker exec mc-my-iso mysql -h 127.0.0.1 -uu -ppw d -e 'select 1'
 wait_for mc-my-native 120 docker exec mc-my-native mysql -h 127.0.0.1 -uroot -ppw d -e 'select 1'
 wait_for mc-my-ssl 120 docker exec mc-my-ssl mysql -h 127.0.0.1 -uu -ppw d -e 'select 1'
 docker exec mc-my-ssl mysql -h 127.0.0.1 -uroot -ppw -e "create user if not exists 'cu'@'%' identified by 'pw' require x509; grant all on d.* to 'cu'@'%'" 2>/dev/null

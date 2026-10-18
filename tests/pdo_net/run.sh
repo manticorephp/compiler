@@ -9,10 +9,10 @@ FILTER=""
 export PDO_PG_DSN="${PDO_PG_DSN-pgsql:host=127.0.0.1;port=54320;dbname=d}"
 export PDO_PG_SSL_DSN="${PDO_PG_SSL_DSN-pgsql:host=127.0.0.1;port=54323;dbname=d}"
 export PDO_MY_DSN="${PDO_MY_DSN-mysql:host=127.0.0.1;port=33060;dbname=d}"
+PDO_MY_DSN_DEFAULT="$PDO_MY_DSN"
 export PDO_MY_NATIVE_DSN="${PDO_MY_NATIVE_DSN-mysql:host=127.0.0.1;port=33062;dbname=d}"
 WORK="$ROOT/tests/pdo_net/.work"
 mkdir -p "$WORK"
-trap 'rm -rf "$WORK"' EXIT
 # TLS material: pg's comes from up.sh (.certs); mysql's CA is the one mc-my generated for itself, copied out per run
 # the hostile TLS server (ssl_tls12) needs a certificate of its own: hermetic, generated per run
 bash "$ROOT/tests/pdo_net/mkcerts.sh" "$WORK/tls" && export MC_TLS_DIR="$WORK/tls"
@@ -28,10 +28,17 @@ reachable() { # dsn
 }
 
 pass=0; fail=0; skip=0
+# every started case's .post hook runs on ANY exit (Ctrl-C included)
+POSTS=()
+run_posts() { local p; for p in "${POSTS[@]:-}"; do [ -n "$p" ] && [ -x "$p" ] && "$p"; done; return 0; }
+trap 'run_posts; rm -rf "$WORK"' EXIT
+trap 'exit 130' INT TERM
 for f in tests/pdo_net/cases/*.php; do
     n=$(basename "$f" .php)
     [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
     case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_native) dsn="$PDO_MY_NATIVE_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
+    # a sibling <case>.dsn names the DSN to use instead (cases that need a server of their own: mc-my-iso, :33065)
+    [ -f "${f%.php}.dsn" ] && dsn=$(cat "${f%.php}.dsn") && export PDO_MY_DSN="$dsn" || export PDO_MY_DSN="${PDO_MY_DSN_DEFAULT}"
     if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n (server unreachable)"; skip=$((skip+1)); continue; fi
     # a sibling <case>.needs lists further host:port servers the case talks to (one per line)
     down=""
@@ -40,7 +47,7 @@ for f in tests/pdo_net/cases/*.php; do
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
     if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
     pre="${f%.php}.pre"   # optional hook: server state a case needs before EACH run (php and native)
-    post="${f%.php}.post" # optional hook: undoes it after EACH run (also a global the test user cannot restore itself)
+    post="${f%.php}.post"; POSTS+=("$post") # optional hook: undoes it after EACH run (also a global the test user cannot restore itself)
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); fi
     [ -x "$post" ] && "$post"
@@ -50,6 +57,8 @@ for f in tests/pdo_net/cases/*.php; do
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     act=$("$WORK/$n" 2>&1)
     [ -x "$post" ] && "$post"
+    # a case that printed its own assertion failure fails even when php printed the same
+    if grep -q 'ASSERTION FAILED' <<<"$exp$act"; then echo "FAIL $n (the case reports a failed assertion)"; fail=$((fail+1)); continue; fi
     # both sides printing the same refusal is a vacuous pass: only a case marked `# expects-connect-failure` may show one
     if ! grep -q "expects-connect-failure" "$f" && grep -Eq "\[200[23]\]|Connection refused|could not connect|Connection to server" <<<"$exp$act"; then
         echo "FAIL $n (unexpected connection failure in the output, server probed reachable)"; fail=$((fail+1)); continue

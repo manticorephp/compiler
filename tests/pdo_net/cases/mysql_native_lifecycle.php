@@ -68,6 +68,8 @@ delta($mon, $base, 'half fetched');
 
 // a multi-result CALL is drained and the statement still closes
 $db->exec('drop procedure if exists mc_nl');
+// a failed run must leave nothing behind
+register_shutdown_function(function () { $c = new PDO((string) getenv('PDO_MY_DSN'), getenv('PDO_USER') ?: 'u', getenv('PDO_PASS') ?: 'pw'); $c->exec('drop procedure if exists mc_nl'); });
 $db->exec('create procedure mc_nl(in x int) begin select x; select x + 1; end');
 $c = $db->prepare('call mc_nl(?)');
 $c->execute([1]);
@@ -113,7 +115,8 @@ $qi = $dk->query('select connection_id()'); $id = $qi->fetchColumn(); $qi = null
 $k1 = $dk->prepare('select 1');
 $k2 = $dk->prepare('select 2');
 $mon->exec('kill ' . $id);
-usleep(300000);
+$until = microtime(true) + 5.0;
+while (count_($mon) > $base && microtime(true) < $until) { usleep(20000); }
 $k1 = null;
 $k2 = null;
 $dk = null;

@@ -954,8 +954,7 @@ final class __McPdoMyWire
             if ($this->inflight) { $this->closeSock(); }
             throw $t;
         } finally {
-            $this->inflight = false;
-            $this->busy = false;
+            $this->release();
         }
     }
 
@@ -1051,7 +1050,19 @@ final class __McPdoMyWire
             if ($this->inflight) { $this->closeSock(); }
             throw $t;
         } finally {
-            $this->inflight = false;
+            $this->release();
+        }
+    }
+
+    /** Ends a cycle: closes queued by destructors while the wire was held are sent now, then the wire is free. */
+    private function release(): void
+    {
+        $this->inflight = false;
+        try {
+            if (!$this->dead && \count($this->owed) > 0) { $this->drainOwed(); }
+        } catch (PDOException $e) {
+            // the write failed: closeSock() already ran
+        } finally {
             $this->busy = false;
         }
     }
@@ -1068,8 +1079,8 @@ final class __McPdoMyWire
         $this->busy = true;
         try {
             $this->drainOwed();
-        } catch (\Throwable $t) {
-            // the write failed: closeSock() already ran, nothing is left to close
+        } catch (PDOException $e) {
+            // the write failed: closeSock() already ran, nothing is left to close; a cancellation is NOT swallowed
         } finally {
             $this->busy = false;
         }
@@ -1106,8 +1117,7 @@ final class __McPdoMyWire
             if ($this->inflight) { $this->closeSock(); }
             throw $t;
         } finally {
-            $this->inflight = false;
-            $this->busy = false;
+            $this->release();
         }
     }
 
@@ -1369,6 +1379,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         }
         $this->pk[$s] = 4;
         if (\is_bool($value)) { $this->ps[$s] = $value ? '1' : ''; }
+        // is_resource() last: it crashes on a denormal float (#331)
         elseif (\is_resource($value)) { $this->ps[$s] = (string) \stream_get_contents($value); }
         else { $this->ps[$s] = (string) $value; }
     }

@@ -212,7 +212,9 @@ ahead of the next command), and a close on a dead connection is a no-op. Everyth
   anything is read; parameter / column definition counts must match the announcement and be followed by their EOF; every binary
   row is bounds-checked (`$l > $len - $o`, never `$o + $l > $len`), the NULL bitmap must fit, DATETIME length must be 0/4/7/11 and
   TIME length 0/8/12, a length-encoded string above 2^31 or with the top bit set is refused, trailing bytes are refused. Each ends the
-  connection with `[2027] Malformed packet`, closing the socket once.
+  connection with `[2027] Malformed packet`, closing the socket once. The one exception is a statement whose server-side
+  placeholder count differs from the scanner's: that is a local, non-fatal `HY000 1210` raised before anything is sent, and the
+  connection stays usable.
 
 ## `pgsql:` TLS (prelude/pdo_pgsql.php)
 
