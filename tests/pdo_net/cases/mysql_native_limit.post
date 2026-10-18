@@ -1,0 +1,4 @@
+#!/bin/bash
+# Resets the GLOBAL max_prepared_stmt_count of the throwaway server mc-my-iso (also after an interrupted run).
+command -v docker >/dev/null 2>&1 && docker exec mc-my-iso mysql -h 127.0.0.1 -uroot -ppw -e "set global max_prepared_stmt_count = DEFAULT" 2>/dev/null
+exit 0

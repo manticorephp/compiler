@@ -1,13 +1,14 @@
 <?php
+// servers: mysql
 // max_prepared_stmt_count (GLOBAL): runs on the throwaway server named by the sibling .dsn (mc-my-iso), never the shared one.
-// The case sets the limit to 5 itself, as root, and restores it on any exit.
+// The case sets the limit to 5 itself, as root, and resets it to DEFAULT on any exit.
 $dsn = (string) getenv('PDO_MY_DSN');
 if (!str_contains($dsn, 'port=33065')) { echo "ASSERTION FAILED: this case must run on the isolated server\n"; exit(1); }
 $admin = new PDO($dsn, 'root', 'pw', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-$qa = $admin->query('select @@max_prepared_stmt_count');
-$orig = (int) $qa->fetchColumn();
-$qa = null;
-register_shutdown_function(function () use ($admin, $orig) { $admin->exec('set global max_prepared_stmt_count = ' . $orig); });
+// DEFAULT, not a recorded value: an interrupted run must not poison the next (a stale limit self-heals right here, and
+// mysql_native_limit.post resets it when the runner is interrupted)
+$admin->exec('set global max_prepared_stmt_count = DEFAULT');
+register_shutdown_function(function () use ($admin) { $admin->exec('set global max_prepared_stmt_count = DEFAULT'); });
 $admin->exec('set global max_prepared_stmt_count = 5');
 $seen = 0;
 foreach ([PDO::ERRMODE_SILENT, PDO::ERRMODE_EXCEPTION] as $mode) {
