@@ -153,6 +153,21 @@ comparison CHAIN emitted as code.
 
 Loop: `php tools/prof/ircensus.php` for bytes-per-`define` by family;
 `build --keep-ir manticore.t1.json` is a 23 s A/B.
+
+**`dynf` stdlib thunks live in `stdlib.o` (2026-10-18).** A dynamic-name site
+(`$cb(...)`, `call_user_func`, the prelude's async runtime) used to build one
+`linkonce_odr` thunk per candidate and arity — ~1–2.4k bodies per program, since
+the stdlib has ~950 nameable functions. Now the stdlib build (`exportDynf`) emits
+them once as external `__mc_sdynf<bit>_<fn>` (bits 0–8 = fixed argc, 9/10 = a
+bare spread over an untyped / `mixed[]` pack) and lists what closed in the
+`.sig` `dynf` key (`name:mask`). A program still decides its candidate SET as
+before; only the row's target changes: a stdlib (`isExtern`) candidate whose
+shape the mask covers points at the library symbol, everything else (prelude and
+user functions, by-ref arms, other shapes) is built in the module as before. A
+`.sig` without `dynf` means "build everything here". Measured on the 19-case
+sample: IR 54.9 → 41.2 MB, clang 44.6 → 26.5 s; `stdlib.o` 7.2 → 8.9 MB.
+What is left in affected programs is the prelude: by-ref inline arms and prelude
+thunks keep bodies like `usort`/`uksort`/`array_filter` (100–200 KB each) alive.
 Exit: the three families under 50 MB, T5 IR under 1.0 GB, and the clang wall down with it
 (it tracks IR bytes near-linearly).
 
