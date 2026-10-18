@@ -1544,7 +1544,7 @@ final class __McTok
         $j = $i;
         while ($j < $len) {
             $c = \ord($s[$j]);
-            if ($c === 10) { break; }
+            if ($c === 10 || $c === 13) { break; }
             if ($c === 63 && $j + 1 < $len && \ord($s[$j + 1]) === 62) { break; }
             $j = $j + 1;
         }
