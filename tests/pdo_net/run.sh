@@ -66,7 +66,7 @@ for f in tests/pdo_net/cases/*.php; do
     [ -x "$post" ] && "$post"
     PENDING_POST="$post"
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
-        echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); continue
+        echo "FAIL $n (compile)"; tail -n 20 "$WORK/$n.log"; fail=$((fail+1)); PENDING_POST=""; continue
     fi
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     act=$("$WORK/$n" 2>&1)
@@ -81,7 +81,7 @@ for f in tests/pdo_net/cases/*.php; do
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
 done
 # Hostile-server cases: a fake server (Zend php) per mode, the compiled client, hand-written expectations.
-if [[ "$SERVER" = mysql && ( -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ) ]]; then
+if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
     H=tests/pdo_net/hostile
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
@@ -104,12 +104,14 @@ if [[ "$SERVER" = mysql && ( -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ) ]]
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL mysql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max row_huge_len row_neg_len coldef_huge_len auth_0105 auth_repeat03 auth_double04 auth_nonpem auth_badkey auth_bigkey idle_slow idle_explicit stall_mid ssl_nocap ssl_extra ssl_garbage ssl_silent ssl_close ssl_drip np_ok np_close_once np_cols_absurd np_params_absurd np_trunc_ok np_prep_long np_params_fewer np_params_more np_cols_more np_params_mismatch np_err_prepare np_err_exec np_row_overrun np_bitmap_short np_dt_len np_time_len np_time_len3 np_dt_overrun np_huge_lenenc np_neg_lenenc np_int_short np_trailing np_hdr np_unexpected np_badseq np_colcount_absurd np_no_eof np_float_odd np_nan np_year_short np_idle_slow np_idle_explicit np_stall_mid; do
+        for m in huge badseq short_scramble proto9 unsolicited_plugin err_handshake drip switch_unknown switch_short switch_old switch_loop more_data_native eof_in_auth trunc_coldef trunc_coldef_fixed row_overrun row_trailing row_short colcount_absurd colcount_zero_len no_eof local_infile empty_pkt trunc_stream over_cap_query err_mid_rows bad_seq_query more_forever big_slow int_garbage int_empty int_max int_min int_overflow int_underflow uint_max uint_over float_lead float_trail float_minus float_plus bit_long bit_max row_huge_len row_neg_len coldef_huge_len auth_0105 auth_repeat03 auth_double04 auth_nonpem auth_badkey auth_bigkey idle_slow idle_explicit stall_mid ssl_nocap ssl_extra ssl_garbage ssl_silent ssl_close ssl_drip np_ok np_close_once np_cols_absurd np_params_absurd np_trunc_ok np_prep_long np_params_fewer np_params_more np_cols_more np_params_mismatch np_err_prepare np_err_exec np_row_overrun np_bitmap_short np_dt_len np_time_len np_time_len3 np_dt_overrun np_huge_lenenc np_neg_lenenc np_int_short np_trailing np_hdr np_unexpected np_badseq np_colcount_absurd np_no_eof np_float_odd np_nan np_year_short np_idle_slow np_idle_explicit np_stall_mid kill_stall; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" mysql >/dev/null 2>&1 &
             sp=$!
             for _ in $(seq 1 100); do [ -s "$WORK/port" ] && break; kill -0 $sp 2>/dev/null || break; sleep 0.1; done
             act+=$("$WORK/hostile" $m "$(cat "$WORK/port")" mysql 2>&1)$'\n'
+            # the KILL connection must not cancel itself: exactly two connections (the client's and its cancel hook)
+            if [ "$m" = kill_stall ]; then sleep 0.6; act+="kill_stall: connections $(cat "$WORK/port.conns" 2>/dev/null)"$'\n'; fi
             kill $sp 2>/dev/null; wait $sp 2>/dev/null
         done
         if [ "$act" = "$(cat $H/hostile_mysql.expected)"$'\n' ]; then echo "PASS mysql_hostile"; pass=$((pass+1))
@@ -117,4 +119,6 @@ if [[ "$SERVER" = mysql && ( -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ) ]]
     fi
 fi
 echo "pass=$pass fail=$fail skip=$skip"
+# a run where every case SKIPped (a server that is down) proved nothing: it must not look green
+if [ "$pass" = 0 ] && [ "$skip" != 0 ]; then echo "FAIL: nothing ran ($skip skipped; is the server up? tests/pdo_net/up.sh)" >&2; exit 1; fi
 [ "$fail" = 0 ]
