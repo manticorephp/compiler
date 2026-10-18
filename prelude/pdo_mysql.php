@@ -544,7 +544,7 @@ final class __McPdoMyWire
         // sha256_password (mysqlnd): inside TLS the password in the clear + NUL; on a plain socket ask for the RSA key (0x01)
         if ($plugin === 'sha256_password') { return $pw === '' ? "\0" : ($this->tls ? $pw . "\0" : "\x01"); }
         $this->closeSock();
-        throw __McPdo::connectFail('HY000', 2059, "Authentication plugin '" . $plugin . "' cannot be loaded");
+        throw __McPdo::connectFail('HY000', 2054, 'The server requested authentication method unknown to the client [' . $plugin . ']');
     }
 
     /**
@@ -639,6 +639,10 @@ final class __McPdoMyWire
                 $z = \strpos($p, "\0", 1);
                 if ($z === false) { throw $this->malformed('authentication switch'); }
                 $plugin = \substr($p, 1, $z - 1);
+                if ($plugin !== 'mysql_native_password' && $plugin !== 'caching_sha2_password' && $plugin !== 'sha256_password') {
+                    // mysqlnd (measured against MariaDB ed25519): the plugin is refused before its data is looked at
+                    $this->pluginResponse($plugin, $pw, '');
+                }
                 $data = \substr($p, $z + 1);
                 if ($data !== '' && $data[\strlen($data) - 1] === "\0") { $data = \substr($data, 0, \strlen($data) - 1); }
                 if (\strlen($data) !== 20) { throw $this->malformed('scramble shorter than 20 bytes'); }
@@ -1429,8 +1433,14 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         if ($value === null || $t === PDO::PARAM_NULL) { $this->pk[$s] = 1; return; }
         // ⚠ the scalar tests come first: is_resource() on a denormal float crashes (#331)
         if ($t !== PDO::PARAM_STR) {
-            if (\is_bool($value)) { $this->pk[$s] = 2; $this->pi[$s] = $value ? 1 : 0; return; }
-            if (\is_int($value)) { $this->pk[$s] = 2; $this->pi[$s] = $t === PDO::PARAM_BOOL ? ($value !== 0 ? 1 : 0) : $value; return; }
+            // a bool that stays a bool (PARAM_BOOL, PARAM_LOB) travels as TINY; MariaDB reports it back (MySQL widens it to LONGLONG)
+            if (\is_bool($value)) { $this->pk[$s] = $t === PDO::PARAM_INT ? 2 : 5; $this->pi[$s] = $value ? 1 : 0; return; }
+            if (\is_int($value)) {
+                if ($t === PDO::PARAM_BOOL) { $this->pk[$s] = 5; $this->pi[$s] = $value !== 0 ? 1 : 0; return; }
+                $this->pk[$s] = 2;
+                $this->pi[$s] = $value;
+                return;
+            }
             if (\is_float($value)) { $this->pk[$s] = 3; $this->ps[$s] = __McPdoMyWire::putF64($value); return; }
         } elseif (\is_float($value) || \is_int($value)) {
             $this->pk[$s] = 4;
@@ -1463,6 +1473,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
             $k = $this->pk[$i];
             if ($k === 1) { $ty .= "\x06\0"; }
             elseif ($k === 2) { $ty .= "\x08\0"; $va .= __McPdoMyWire::putLe($this->pi[$i], 8); }
+            elseif ($k === 5) { $ty .= "\x01\0"; $va .= \chr($this->pi[$i]); }
             elseif ($k === 3) { $ty .= "\x05\0"; $va .= $this->ps[$i]; }
             else { $ty .= "\xfd\0"; $va .= __McPdoMyWire::lenencInt(\strlen($this->ps[$i])) . $this->ps[$i]; }
         }

@@ -10,7 +10,7 @@ no fd leak
 proto9: HY000 2027 Malformed packet (protocol version 9)
 fast
 no fd leak
-unsolicited_plugin: HY000 2059 Authentication plugin 'foo_plugin' cannot be loaded
+unsolicited_plugin: HY000 2054 The server requested authentication method unknown to the client [foo_plugin]
 fast
 no fd leak
 err_handshake: HY000 1040 Too many connections
@@ -19,7 +19,7 @@ no fd leak
 drip: HY000 2006 MySQL server has gone away
 fast
 no fd leak
-switch_unknown: HY000 2059 Authentication plugin 'auth_nonesuch' cannot be loaded
+switch_unknown: HY000 2054 The server requested authentication method unknown to the client [auth_nonesuch]
 fast
 no fd leak
 switch_short: HY000 2027 Malformed packet (scramble shorter than 20 bytes)
