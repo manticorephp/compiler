@@ -1562,6 +1562,379 @@ namespace Async {
         }
     }
 
+    /** @internal A pooled connection and its age. */
+    final class PoolEntry
+    {
+        public object $conn;
+        public float $born = 0.0;
+        public float $idleSince = 0.0;
+
+        public function __construct(object $conn, float $now)
+        {
+            $this->conn = $conn;
+            $this->born = $now;
+            $this->idleSince = $now;
+        }
+    }
+
+    /** @internal One task parked in {@see Pool::acquire()}. A grant hands over an entry, or (entry null) a capacity ticket to create one. */
+    final class PoolWaiter
+    {
+        public Task $task;
+        public ?PoolEntry $entry = null;
+        public bool $granted = false;
+        public bool $closed = false;
+
+        public function __construct(Task $task)
+        {
+            $this->task = $task;
+        }
+    }
+
+    /**
+     * A bounded pool of connections (or any objects), shared by tasks.
+     *
+     *   $pool = new Async\Pool(fn() => new Conn(), 10);
+     *   $pool->with(fn($c) => $c->query(...));
+     *
+     * - At most $max live objects. Waiters are served FIFO, and a newcomer never overtakes a waiter.
+     * - A grant is HANDED to the first waiter (a returned object, or the capacity a discard freed), never left
+     *   for whoever wakes first, so a cancelled or timed-out waiter can neither consume a slot nor lose a wake-up.
+     * - release() runs $reset (under shield, it may suspend); a reset that throws discards the object.
+     * - acquire() drops idle objects older than $idleTimeout / $maxLifetime (0 = never) and, when $ping is given,
+     *   pings an idle object before handing it out (false or a thrown \Exception discards it).
+     * - with() discards instead of returning when the body was cancelled or failed with a PDOException of SQLSTATE
+     *   class 08 (the connection is gone or half-read).
+     * - Objects only (the pool keys its books by object id). $close, when given, is called on every object the pool
+     *   throws away.
+     *
+     * @template T
+     */
+    final class Pool
+    {
+        /** @var callable */
+        private $factory;
+        /** @var ?callable */
+        private $reset;
+        /** @var ?callable */
+        private $ping;
+        /** @var ?callable */
+        private $close;
+        private int $max;
+        private float $maxLifetime;
+        private float $idleTimeout;
+        private bool $closed = false;
+        /** Capacity in use: checked out, being created or validated, or handed to a waiter. */
+        private int $busy = 0;
+        private int $created = 0;
+        private int $discarded = 0;
+        /** @var PoolEntry[] idle objects, most recently used last */
+        private array $idle = [];
+        /** @var array<int,PoolEntry> checked-out entries by spl_object_id */
+        private array $out = [];
+        /** @var PoolWaiter[] FIFO */
+        private array $waiters = [];
+
+        public function __construct(callable $factory, int $max, ?callable $reset = null, ?callable $ping = null,
+                                    float $maxLifetime = 0.0, float $idleTimeout = 0.0, ?callable $close = null)
+        {
+            $this->factory = $factory;
+            $this->max = $max < 1 ? 1 : $max;
+            $this->reset = $reset;
+            $this->ping = $ping;
+            $this->maxLifetime = $maxLifetime;
+            $this->idleTimeout = $idleTimeout;
+            $this->close = $close;
+        }
+
+        /**
+         * A pool of PDO connections: release() calls PDO::resetSession(), acquire() PDO::ping().
+         * PDO is named by string so that Async\ does not pull the PDO prelude into programs that never use it; the
+         * PDO gate also fires on the identifier `pdo`, i.e. on a call to this very method.
+         *
+         * @param array<int,mixed> $options
+         */
+        public static function pdo(string $dsn, ?string $user, ?string $pass, array $options, int $max): Pool
+        {
+            $cls = 'PDO';
+            return new Pool(
+                function () use ($cls, $dsn, $user, $pass, $options): object { return new $cls($dsn, $user, $pass, $options); },
+                $max,
+                function (object $c): void { $c->resetSession(); },
+                function (object $c): bool { return $c->ping(); }
+            );
+        }
+
+        /**
+         * Take an object, creating one while there is capacity, else park FIFO.
+         * @throws TimeoutException when $timeout seconds pass first
+         * @return T
+         */
+        public function acquire(?float $timeout = null): mixed
+        {
+            $sched = Scheduler::instance();
+            $sched->checkCancel();
+            if ($this->closed) { throw new \RuntimeException('Async\\Pool is closed'); }
+            $entry = null;
+            if (\count($this->waiters) === 0) {
+                $this->sweep();
+                $n = \count($this->idle);
+                if ($n > 0) {
+                    $entry = \array_pop($this->idle);
+                    $this->busy = $this->busy + 1;
+                } elseif ($this->busy < $this->max) {
+                    $this->busy = $this->busy + 1;
+                } else {
+                    $entry = $this->park($sched, $timeout);
+                }
+            } else {
+                $entry = $this->park($sched, $timeout);
+            }
+            return $this->checkout($entry);
+        }
+
+        /** Return an object. A second release, or one of another pool's objects, is a LogicException. */
+        public function release(mixed $conn): void
+        {
+            $e = $this->claim($conn, 'release');
+            $ok = true;
+            if ($this->reset !== null && !$this->closed) {
+                try {
+                    $r = $this->reset;
+                    shield(function () use ($r, $conn): void { $r($conn); });
+                } catch (\Throwable $t) {
+                    $ok = false;
+                }
+            }
+            if ($ok) {
+                $this->settle($e);
+            } else {
+                $this->drop($e);
+                $this->free();
+            }
+        }
+
+        /** Throw an object away instead of returning it (it is broken, or its state is unknown). */
+        public function discard(mixed $conn): void
+        {
+            $e = $this->claim($conn, 'discard');
+            $this->drop($e);
+            $this->free();
+        }
+
+        /** acquire, run $fn($conn), release in `finally`; a cancelled body or a PDOException of SQLSTATE class 08 discards. */
+        public function with(callable $fn): mixed
+        {
+            $c = $this->acquire();
+            $bad = false;
+            try {
+                return $fn($c);
+            } catch (\Throwable $e) {
+                if ($e instanceof CancelledException
+                    || (\is_a($e, 'PDOException') && \strncmp((string) $e->getCode(), '08', 2) === 0)) {
+                    $bad = true;
+                }
+                throw $e;
+            } finally {
+                if ($bad) { $this->discard($c); } else { $this->release($c); }
+            }
+        }
+
+        /** Refuse new acquires, wake every waiter with a RuntimeException, drop the idle objects; checked-out ones are dropped when they come back. */
+        public function close(): void
+        {
+            if ($this->closed) { return; }
+            $this->closed = true;
+            $sched = Scheduler::instance();
+            $q = $this->waiters;
+            $this->waiters = [];
+            foreach ($q as $w) {
+                $w->closed = true;
+                $sched->wake($w->task);
+            }
+            $idle = $this->idle;
+            $this->idle = [];
+            foreach ($idle as $e) { $this->drop($e); }
+        }
+
+        /** @return array<string,int> idle, busy, waiting, created, discarded */
+        public function stats(): array
+        {
+            return [
+                'idle' => \count($this->idle),
+                'busy' => $this->busy,
+                'waiting' => \count($this->waiters),
+                'created' => $this->created,
+                'discarded' => $this->discarded,
+            ];
+        }
+
+        // ── internals ──────────────────────────────────────────────────────
+
+        private function claim(mixed $conn, string $what): PoolEntry
+        {
+            $id = \is_object($conn) ? \spl_object_id($conn) : -1;
+            if (!isset($this->out[$id])) {
+                throw new \LogicException('Async\\Pool::' . $what . '(): the object is not checked out from this pool');
+            }
+            $e = $this->out[$id];
+            unset($this->out[$id]);
+            return $e;
+        }
+
+        /** Parks FIFO until a grant: an entry, or null = capacity to create one. Holds one `busy` ticket on return. */
+        private function park(Scheduler $sched, ?float $timeout): ?PoolEntry
+        {
+            $w = new PoolWaiter($sched->current());
+            $this->waiters[] = $w;
+            $deadline = $timeout === null ? 0.0 : \__mc_monotonic_f() + $timeout;
+            try {
+                while (!$w->granted && !$w->closed) {
+                    $sched->checkCancel();
+                    if ($timeout !== null) {
+                        if (\__mc_monotonic_f() >= $deadline) {
+                            throw new TimeoutException('Async\\Pool::acquire() timed out after ' . (string) $timeout . 's');
+                        }
+                        $sched->armTimer($deadline);
+                    }
+                    try {
+                        \Fiber::suspend();
+                    } finally {
+                        if ($timeout !== null) { $sched->disarmTimer(); }
+                    }
+                }
+            } catch (\Throwable $t) {
+                if ($w->granted) {
+                    // the grant arrived and cannot be used: pass it on
+                    if ($w->entry !== null) { $this->settle($w->entry); } else { $this->free(); }
+                } else {
+                    $this->forget($w);
+                }
+                throw $t;
+            }
+            if ($w->closed) { throw new \RuntimeException('Async\\Pool is closed'); }
+            return $w->entry;
+        }
+
+        private function forget(PoolWaiter $w): void
+        {
+            $keep = [];
+            foreach ($this->waiters as $x) {
+                if ($x !== $w) { $keep[] = $x; }
+            }
+            $this->waiters = $keep;
+        }
+
+        /** Validates $entry (null = nothing to validate) or creates a fresh object. A `busy` ticket is held on entry; a failure gives it up. */
+        private function checkout(?PoolEntry $entry): object
+        {
+            try {
+                if ($entry !== null && !$this->usable($entry)) {
+                    $this->drop($entry);
+                    $entry = null;
+                }
+                if ($entry === null) {
+                    $f = $this->factory;
+                    $c = $f();
+                    if (!\is_object($c)) { throw new \UnexpectedValueException('Async\\Pool: the factory must return an object'); }
+                    $this->created = $this->created + 1;
+                    $entry = new PoolEntry($c, \__mc_monotonic_f());
+                }
+            } catch (\Throwable $t) {
+                if ($entry !== null) { $this->drop($entry); }
+                $this->free();
+                throw $t;
+            }
+            $this->out[\spl_object_id($entry->conn)] = $entry;
+            return $entry->conn;
+        }
+
+        private function expired(PoolEntry $e, float $now): bool
+        {
+            return ($this->maxLifetime > 0.0 && $now - $e->born > $this->maxLifetime)
+                || ($this->idleTimeout > 0.0 && $now - $e->idleSince > $this->idleTimeout);
+        }
+
+        private function usable(PoolEntry $e): bool
+        {
+            if ($this->expired($e, \__mc_monotonic_f())) { return false; }
+            if ($this->ping === null) { return true; }
+            try {
+                $p = $this->ping;
+                return $p($e->conn) === true;
+            } catch (\Exception $x) {
+                return false;
+            }
+        }
+
+        private function sweep(): void
+        {
+            if ($this->maxLifetime <= 0.0 && $this->idleTimeout <= 0.0) { return; }
+            $now = \__mc_monotonic_f();
+            $keep = [];
+            foreach ($this->idle as $e) {
+                if ($this->expired($e, $now)) { $this->drop($e); } else { $keep[] = $e; }
+            }
+            $this->idle = $keep;
+        }
+
+        private function drop(PoolEntry $e): void
+        {
+            $this->discarded = $this->discarded + 1;
+            if ($this->close !== null) {
+                try {
+                    $c = $this->close;
+                    $c($e->conn);
+                } catch (\Throwable $t) {
+                    // a connection being thrown away has nothing left to report
+                }
+            }
+        }
+
+        /** A healthy object comes back holding a `busy` ticket: to the first waiter, else idle. */
+        private function settle(PoolEntry $e): void
+        {
+            if ($this->closed) {
+                $this->drop($e);
+                $this->busy = $this->busy - 1;
+                return;
+            }
+            $w = $this->nextWaiter();
+            if ($w !== null) {
+                $w->entry = $e;
+                $w->granted = true;
+                Scheduler::instance()->wake($w->task);
+                return;
+            }
+            $e->idleSince = \__mc_monotonic_f();
+            $this->busy = $this->busy - 1;
+            $this->idle[] = $e;
+        }
+
+        /** Gives a `busy` ticket up (the object was discarded or never made) and offers the capacity to the first waiter. */
+        private function free(): void
+        {
+            $this->busy = $this->busy - 1;
+            if ($this->closed) { return; }
+            $w = $this->nextWaiter();
+            if ($w !== null) {
+                $this->busy = $this->busy + 1;
+                $w->granted = true;
+                Scheduler::instance()->wake($w->task);
+            }
+        }
+
+        /** The first waiter that is still alive; dead ones (cancelled, finished) are skipped and removed. */
+        private function nextWaiter(): ?PoolWaiter
+        {
+            while (\count($this->waiters) > 0) {
+                $w = \array_shift($this->waiters);
+                if ($w->task->state === Task::PENDING && !$w->task->cancelRequested) { return $w; }
+            }
+            return null;
+        }
+    }
+
     /**
      * The ambient view of the scope the calling task is in: cancellation, the
      * effective deadline, and scoped values.

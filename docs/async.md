@@ -92,6 +92,7 @@ async(function () {
 | `Channel::send/next/recv/close` | `next(): Received` is the comma-ok form |
 | `SelectCase::recv(Channel)` / `::send(Channel, $v)` | one arm of a `select()` |
 | `Semaphore(int)` — `acquire/release/withPermit` | "N at a time" |
+| `Pool(factory, max, reset, ping, maxLifetime, idleTimeout)` — `acquire/release/with/discard/close/stats`, `Pool::pdo()` | bounded, FIFO pool of connections; see [Connection pool](#connection-pool) |
 | `TaskGroup::run(callable)` | what `group()` wraps |
 | `TaskGroup::token(): CancellationToken` | the read-only half of this scope's cancellation |
 | `TaskGroup::cancel()` | the write half |
@@ -384,6 +385,35 @@ one task that has to survive an overload), a hard error turns overload into a cr
 instead of flow control, and `live` counts timers and reporters that share nothing
 with the work being limited. The policy — park, shed, or answer 503 — belongs to the
 application, and a Semaphore owned by the scope that owns the work already expresses it.
+
+### Connection pool
+
+`Async\Pool` bounds how many connections (any objects) exist and hands them out FIFO.
+
+```php
+$pool = Async\Pool::pdo('pgsql:host=db;dbname=app', 'u', 'pw', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION], 10);
+$rows = $pool->with(fn(PDO $db) => $db->query('select ...')->fetchAll());
+```
+
+`new Async\Pool(callable $factory, int $max, ?callable $reset = null, ?callable $ping = null, float $maxLifetime = 0.0, float $idleTimeout = 0.0, ?callable $close = null)`;
+`Pool::pdo($dsn, $user, $pass, $options, $max)` wires `reset` to `PDO::resetSession()` and `ping` to `PDO::ping()`.
+
+| call | behaviour |
+|---|---|
+| `acquire(?float $timeout = null)` | an idle object, a new one while fewer than `max` exist, else parks FIFO. `Async\TimeoutException` when `$timeout` expires first. A closed pool throws `RuntimeException`. |
+| `release($conn)` | runs `reset` (under `shield`, so it may suspend), then hands the object to the first waiter or keeps it idle. A `reset` that throws discards the object. A second release, or an object that is not checked out from this pool, is a `LogicException`. |
+| `discard($conn)` | throws the object away (the capacity it held goes to the first waiter). |
+| `with($fn)` | acquire, `$fn($conn)`, release in `finally`. A `CancelledException`, or a `PDOException` of SQLSTATE class `08`, discards instead of returning. |
+| `close()` | refuses new acquires, wakes every waiter with a `RuntimeException`, drops the idle objects; objects still checked out are dropped when they come back. |
+| `stats()` | `array<string,int>`: `idle`, `busy`, `waiting`, `created`, `discarded`. |
+
+Guarantees: at most `max` live objects; waiters are served in arrival order and a newcomer never overtakes one;
+a returned object or freed capacity is **handed** to the first live waiter, so a waiter that is cancelled or times
+out neither consumes a slot nor loses a wake-up (a grant that arrives as it is cancelled is passed on).
+`acquire()` drops idle objects older than `idleTimeout` or `maxLifetime` (0 = unlimited), and pings an idle (or
+handed-over) object when `ping` is given — a `false` or an `\Exception` discards it and the call creates a fresh one.
+A freshly created object is not pinged. Objects only: the pool keys its books by object id. `Pool::pdo()` needs no
+other mention of `PDO` in the program.
 
 ### Scoped values
 

@@ -896,7 +896,7 @@ final class __McPdoPgWire
 
     /**
      * Takes the wire for one cycle. Two fibers sharing a connection must not interleave packets.
-     * ponytail: polling park (1 ms sleeper) bounded by ATTR_TIMEOUT, not a wait-queue; Async\Pool (Task 11) is the upgrade.
+     * ponytail: polling park (1 ms sleeper) bounded by ATTR_TIMEOUT, not a wait-queue; one connection per task via Async\Pool avoids the contention.
      * Without a scheduler a second entry is a re-entrancy bug, not contention.
      */
     private function enter(): void
@@ -1467,6 +1467,26 @@ final class __McPdoPg implements __McPdoDrv
     public function commit(): void { $this->run('COMMIT'); }
     public function rollback(): void { $this->run('ROLLBACK'); }
     public function inTransaction(): bool { return $this->wire->status !== 'I'; }
+
+    /** DISCARD ALL cannot run inside a transaction block: roll back first. An open batched portal is closed first. */
+    public function reset(): void
+    {
+        $oc = $this->wire->openCursor;
+        if ($oc !== null) { $this->wire->cursorClose($oc); }
+        if ($this->wire->status !== 'I') { $this->run('ROLLBACK'); }
+        $this->run('DISCARD ALL');
+    }
+
+    /** An empty query: one round trip, no work. A dead or busy-for-ever connection answers false. */
+    public function ping(): bool
+    {
+        try {
+            return $this->wire->simple('')->err === null;
+        } catch (\Throwable $t) {
+            if ($t instanceof PDOException) { return false; }
+            throw $t;
+        }
+    }
 
     public function lastInsertId(?string $name): string
     {

@@ -1,0 +1,9 @@
+100
+pooled
+created=<=10 busy=0 waiting=0
+same connection=yes inTransaction=false tempTable=false leak=NULL prepared=42 autocommit=1 charset=utf8mb4
+replaced=yes created=2 discarded=1
+ping=true
+reset with open cursor: 9
+reset: inTransaction=false
+dead ping=false

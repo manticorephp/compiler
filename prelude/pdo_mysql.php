@@ -1041,7 +1041,7 @@ final class __McPdoMyWire
 
     /**
      * Takes the wire for one cycle. Two fibers sharing a connection must not interleave packets.
-     * ponytail: polling park (1 ms sleeper) bounded by ATTR_TIMEOUT, not a wait-queue; Async\Pool (Task 11) is the upgrade.
+     * ponytail: polling park (1 ms sleeper) bounded by ATTR_TIMEOUT, not a wait-queue; one connection per task via Async\Pool avoids the contention.
      * Without a scheduler a second entry is a re-entrancy bug, not contention.
      */
     private function enter(): void
@@ -1340,6 +1340,32 @@ final class __McPdoMyWire
         }
     }
 
+    /** Bumped by every session reset: a statement id from an earlier generation names nothing (or somebody else's statement). */
+    public int $gen = 0;
+
+    /** COM_PING. False on any failure, never throws. */
+    public function ping(): bool
+    {
+        try {
+            return $this->cycle("\x0e", false)->err === null;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * COM_RESET_CONNECTION: rolls back, drops session variables, temporary tables and every prepared statement.
+     * An unbuffered result still on the wire is drained first (bounded, see drainCursor()); the COM_STMT_CLOSEs
+     * still owed name statements that no longer exist.
+     */
+    public function resetConnection(): ?__McPdoMyErr
+    {
+        $this->drainCursor();
+        $this->owed = [];
+        $this->gen = $this->gen + 1;
+        return $this->cycle("\x1f", false)->err;
+    }
+
     public function close(): void
     {
         try {
@@ -1406,6 +1432,20 @@ final class __McPdoMy implements __McPdoDrv
     public function commit(): void { $this->run('COMMIT'); }
     public function rollback(): void { $this->run('ROLLBACK'); }
     public function inTransaction(): bool { return ($this->wire->status & 1) !== 0; }
+
+    /** MYSQL_ATTR_INIT_COMMAND: a session reset wipes what it set up, so it runs again. */
+    public string $initCmd = '';
+
+    /** COM_RESET_CONNECTION; the server's own defaults apply afterwards (autocommit on), then the init command runs again. */
+    public function reset(): void
+    {
+        $e = $this->wire->resetConnection();
+        if ($e !== null) { throw self::errFrom($e); }
+        $this->autocommit = true;
+        if ($this->initCmd !== '') { $this->run($this->initCmd); }
+    }
+
+    public function ping(): bool { return $this->wire->ping(); }
 
     /** The name is ignored, as in pdo_mysql. */
     public function lastInsertId(?string $name): string { return (string) $this->wire->insertId; }
@@ -1515,6 +1555,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
     /** The server holds a prepared statement for this object and COM_STMT_CLOSE has not been sent. */
     private bool $prepared = false;
     private int $stmtId = 0;
+    private int $stmtGen = 0;
     /** Placeholders the SERVER counted in the rewritten text. */
     private int $serverParams = 0;
     /** A `:name` occurs twice: pdo_mysql cannot bind that natively, execute() refuses it. */
@@ -1568,6 +1609,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         $p = $this->db->wire->prepare($this->nsql);
         if ($p->err !== null) { throw __McPdoMy::errFrom($p->err); }
         $this->stmtId = $p->id;
+        $this->stmtGen = $this->db->wire->gen;
         $this->serverParams = $p->params;
         $this->prepared = true;
     }
@@ -2014,7 +2056,7 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         $this->head = null;
         if ($this->prepared) {
             $this->prepared = false;
-            $this->db->wire->closeStmt($this->stmtId);
+            if ($this->stmtGen === $this->db->wire->gen) { $this->db->wire->closeStmt($this->stmtId); }
         }
     }
 
@@ -2103,6 +2145,7 @@ function __mc_pdo_mysql_open(string $rest, array $options, ?string $user, ?strin
     // ⚠ #318: reading an option with a (string) cast beside (float) $options[ATTR_TIMEOUT] crashes; is_string() does not
     $init = isset($options[PDO::MYSQL_ATTR_INIT_COMMAND]) ? $options[PDO::MYSQL_ATTR_INIT_COMMAND] : null;
     if (\is_string($init)) {
+        $drv->initCmd = $init;
         try {
             $drv->run($init);
         } catch (PDOException $e) {

@@ -95,6 +95,16 @@ interface __McPdoDrv
     public function setAttr(int $attr, mixed $value): bool;
     public function getAttr(int $attr): mixed;
 
+    /**
+     * Returns the session to the state a fresh connection has (superset, for Async\Pool): an open transaction is rolled
+     * back, session variables, temporary tables and server-side prepared statements are dropped. Throws when the
+     * connection cannot be reused.
+     */
+    public function reset(): void;
+
+    /** True when the server still answers on this connection. Never throws. */
+    public function ping(): bool;
+
     public function close(): void;
 }
 
@@ -842,6 +852,25 @@ class PDO
     public function inTransaction(): bool
     {
         return $this->drv->inTransaction();
+    }
+
+    /**
+     * Superset (no Zend oracle): returns the session to a fresh-connection state, see {@see __McPdoDrv::reset()}.
+     * Statements prepared before the call are invalid afterwards.
+     */
+    public function resetSession(): void
+    {
+        try {
+            $this->drv->reset();
+        } catch (PDOException $e) {
+            $this->note($e, 'PDO::resetSession');
+        }
+    }
+
+    /** Superset: true when the server still answers; a lost connection is false, never an exception. */
+    public function ping(): bool
+    {
+        return $this->drv->ping();
     }
 
     public function lastInsertId(?string $name = null): mixed

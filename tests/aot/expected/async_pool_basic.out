@@ -1,0 +1,21 @@
+peak=5 created=5 idle=5 busy=0 waiting=0
+waiting=4
+fifo=1234L
+timeout: ok prompt=yes waiting=0
+reacquired same=yes
+with threw boom
+after throw idle=1 busy=0 discarded=0
+waiter got fresh id=2 created=2 discarded=1
+double: LogicException
+foreign: LogicException
+scalar: LogicException
+reset calls=1 idle=0 discarded=1
+next id=2
+lifetime: reused=yes recreated=yes
+idle: recreated=yes idle=0
+fresh pinged=0
+ping false: id=2 pings=1
+Async\Pool is closed | Async\Pool is closed
+closed log=c
+after close: Async\Pool is closed
+pooled

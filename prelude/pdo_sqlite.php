@@ -370,6 +370,13 @@ final class __McPdoSqliteDrv implements __McPdoDrv
     public function commit(): void { $this->simple('COMMIT'); }
     public function rollback(): void { $this->simple('ROLLBACK'); }
 
+    public function reset(): void
+    {
+        if ($this->inTransaction()) { $this->simple('ROLLBACK'); }
+    }
+
+    public function ping(): bool { return true; }
+
     public function inTransaction(): bool
     {
         return \__mc_pdosq_get_autocommit(\int_to_ptr($this->addr)) === 0;
