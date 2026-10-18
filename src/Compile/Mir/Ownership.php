@@ -543,6 +543,30 @@ final class Ownership
     }
 
     /**
+     * Does storing a `$value` array into a `$slot` whose elements are cells
+     * REBUILD it — a fresh cell array that co-owns every element? Then the
+     * stored word is a new +1 and an owned predecessor is the store's to drop,
+     * even when it is the slot's own value (a by-value param converted at
+     * entry). One predicate for the emitter ({@see
+     * Passes\EmitLlvmBuiltins::needsForwardCellify}) and {@see Passes\OwnershipFlow}.
+     * An enum element is an ordinal no cell describes, so it is never rebuilt.
+     *
+     * @param array<string, EnumDef> $enums
+     */
+    public static function forwardCellifies(Type $slot, Type $value, array $enums): bool
+    {
+        if (!$slot->isArray() || !$value->isArray()) { return false; }
+        if ($slot->isShape() || $value->isShape()) { return false; }
+        $se = $slot->element;
+        $ve = $value->element;
+        if ($se === null || $ve === null || $se->kind !== Type::KIND_CELL) { return false; }
+        $vk = $ve->kind;
+        if ($vk === Type::KIND_OBJ) { return $ve->class === null || !isset($enums[$ve->class]); }
+        return $vk === Type::KIND_INT || $vk === Type::KIND_FLOAT
+            || $vk === Type::KIND_STRING || $vk === Type::KIND_BOOL || $vk === Type::KIND_ARRAY;
+    }
+
+    /**
      * Does an ELEMENT read of this type co-own what it hands out? One predicate
      * for the store side ({@see storedOwned}) and the emitter's element-read
      * retain ({@see Passes\EmitLlvmLocals::elemReadCoOwn}).
