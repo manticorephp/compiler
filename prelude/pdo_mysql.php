@@ -189,6 +189,9 @@ final class __McPdoMyWire
 
     public function timeoutValue(): float { return $this->timeout; }
 
+    /** The collation id the handshake announced (mysql: utf8mb4_0900_ai_ci, mariadb: its own default). */
+    public function charsetId(): int { return $this->kCs; }
+
     /** A reset is not the cursor owner's to refuse: another fiber's open result is not ours to drain. */
     public function assertCursorOwner(): void
     {
@@ -1483,7 +1486,17 @@ final class __McPdoMy implements __McPdoDrv
         $e = $this->wire->resetConnection();
         if ($e !== null) { throw self::errFrom($e); }
         // the server's defaults apply after a reset; the handshake charset is lost with them
-        if ($this->baseCharset !== '') { $this->run('SET NAMES ' . $this->baseCharset); }
+        if ($this->baseCharset !== '') {
+            // `SET NAMES cs` alone picks the SERVER's default collation for cs, which is not always the one the handshake asked for: MySQL honours the
+            // collation id of the handshake exactly, so name it; MariaDB maps the id onto its own default for the charset (measured: utf8mb4_uca1400_ai_ci
+            // after a handshake with 45), which is what a plain SET NAMES gives back.
+            $c = '';
+            if (\strpos($this->wire->serverVersion, 'MariaDB') === false) {
+                $coll = $this->run('SELECT COLLATION_NAME FROM information_schema.COLLATIONS WHERE ID = ' . (string) $this->wire->charsetId())->rows;
+                $c = isset($coll[0][0]) ? (string) $coll[0][0] : '';
+            }
+            $this->run('SET NAMES ' . $this->baseCharset . ($c !== '' && \preg_match('/^[a-z0-9_]+$/', $c) === 1 ? ' COLLATE ' . $c : ''));
+        }
         $this->autocommit = $this->baseAutocommit;
         if (!$this->baseAutocommit) { $this->run('SET autocommit=0'); }
         if ($this->initCmd !== '') { $this->run($this->initCmd); }

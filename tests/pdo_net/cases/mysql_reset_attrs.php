@@ -14,6 +14,7 @@ function show(PDO $db): string {
 async(function () use ($dsn, $base) {
     $db = new PDO($dsn, "u", "pw", $base);
     echo "start: ", show($db), "\n";
+    $coll = $db->query('select @@collation_connection')->fetchAll(PDO::FETCH_COLUMN)[0];
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_SILENT);
     $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_NUM);
     $db->setAttribute(PDO::ATTR_CASE, PDO::CASE_UPPER);
@@ -26,6 +27,7 @@ async(function () use ($dsn, $base) {
     $db->resetSession();
     echo "reset: ", show($db), "\n";
     echo "errState after: ", $db->errorCode(), "\n";
+    echo "collation kept: ", $db->query('select @@collation_connection')->fetchAll(PDO::FETCH_COLUMN)[0] === $coll ? 'yes' : 'NO', "\n";
     echo "row: ", json_encode($db->query('select 1 as a')->fetch()), "\n";
     try { $db->query('select nonexistent'); echo "no throw\n"; } catch (PDOException $e) { echo "throws again\n"; }
 
