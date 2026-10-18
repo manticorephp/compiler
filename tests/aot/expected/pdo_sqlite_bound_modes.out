@@ -1,0 +1,65 @@
+oracle 0 str 
+{"1":0,"2":5,"3":null,"4":false}
+
+{"1":"","2":5,"3":null,"4":null}
+oracle 1 str 
+{"1":null,"2":5,"3":null,"4":null}
+{"1":null,"2":5,"3":null,"4":null}
+{"1":null,"2":5,"3":null,"4":null}
+oracle 2 str 
+{"1":0,"2":5,"3":"","4":false}
+
+{"1":"","2":5,"3":"","4":""}
+oracle 0 str 1
+{"1":"","2":"5","3":null,"4":""}
+{"1":"","2":"5","3":null,"4":""}
+{"1":"","2":"5","3":null,"4":""}
+string(1) "2"
+string(1) "1"
+string(1) "1"
+int(9)
+string(1) "2"
+stdClass Object
+(
+    [a] => 1
+    [b] => 2
+)
+string(1) "1"
+int(1)
+int(1)
+array(1) {
+  [0]=>
+  array(2) {
+    ["a"]=>
+    int(1)
+    ["b"]=>
+    int(2)
+  }
+}
+string(1) "1"
+array(1) {
+  [0]=>
+  int(1)
+}
+string(1) "1"
+array(1) {
+  [1]=>
+  int(2)
+}
+string(1) "1"
+array(1) {
+  [0]=>
+  int(3)
+}
+string(1) "1"
+array(1) {
+  [1]=>
+  array(1) {
+    [0]=>
+    array(1) {
+      ["b"]=>
+      int(2)
+    }
+  }
+}
+string(1) "1"

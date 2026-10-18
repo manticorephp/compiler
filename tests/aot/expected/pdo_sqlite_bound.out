@@ -1,0 +1,155 @@
+-- idx+name
+bool(true)
+bool(true)
+bool(true)
+string(1) "1"
+string(1) "a"
+string(3) "1.5"
+NULL
+bool(true)
+string(1) "2"
+string(2) "bb"
+string(3) "2.5"
+string(1) "x"
+bool(false)
+string(1) "2"
+-- types
+string(1) "1"
+int(0)
+int(1)
+NULL
+bool(true)
+string(1) "2"
+int(0)
+int(2)
+NULL
+bool(true)
+-- lob
+bool(true)
+string(2) "bl"
+string(1) "a"
+-- maxlen
+bool(true)
+int(1)
+string(1) "a"
+-- rebind
+bool(false)
+string(1) "1"
+-- nonexist name
+bool(true)
+bool(true)
+Array
+(
+    [0] => 00000
+    [1] => 
+    [2] => 
+)
+-- nonexist idx
+bool(true)
+ValueError: PDOStatement::bindColumn(): Argument #1 ($column) must be greater than or equal to 1
+-- after exec
+bool(true)
+bool(true)
+bool(true)
+string(1) "1"
+string(1) "a"
+-- reexec
+1
+1
+1
+-- fetchAll bound
+array(2) {
+  [0]=>
+  bool(true)
+  [1]=>
+  bool(true)
+}
+string(1) "2"
+-- foreach
+int(0)
+bool(true)
+string(1) "1"
+string(1) "a"
+int(1)
+bool(true)
+string(1) "2"
+string(2) "bb"
+-- query setFetchMode
+bool(true)
+string(1) "1"
+bool(true)
+string(1) "2"
+-- no bound
+bool(true)
+bool(true)
+bool(false)
+-- stringify
+string(1) "1"
+string(3) "1.5"
+NULL
+-- oracle
+string(0) ""
+-- case
+bool(true)
+bool(true)
+string(1) "a"
+NULL
+-- zero cols
+bool(true)
+bool(false)
+-- flags
+bool(true)
+string(1) "1"
+-- fetchColumn/other modes keep bound
+array(2) {
+  ["id"]=>
+  int(1)
+  ["name"]=>
+  string(1) "a"
+}
+string(1) "1"
+string(2) "bb"
+string(1) "2"
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  string(1) "a"
+}
+string(1) "1"
+-- ostr/ int conv
+int(0)
+string(1) "3"
+string(3) "4.7"
+int(12)
+-- bind type invalid
+bool(true)
+int(1)
+-- bind name unknown silent
+bool(true)
+Array
+(
+    [0] => 
+    [1] => 
+    [2] => 
+)
+bool(true)
+-- bind name unknown warn
+bool(true)
+Array
+(
+    [0] => 
+    [1] => 
+    [2] => 
+)
+bool(true)
+-- bind idx 0 silent
+ValueError: PDOStatement::bindColumn(): Argument #1 ($column) must be greater than or equal to 1
+-- invalid index at fetch
+bool(true)
+Invalid column index
+bool(false)
+bool(true)
+bool(true)
+bool(false)
+Invalid column index

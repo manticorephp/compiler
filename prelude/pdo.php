@@ -32,9 +32,6 @@
  *    (prelude/exceptions.php), and php is itself inconsistent about this — a
  *    connect failure already yields int 14. The SQLSTATE is in `errorInfo[0]`
  *    and in the message, exactly where php puts them.
- *  - `bindColumn()` / `PDO::FETCH_BOUND` throw. Both exist only to write back
- *    into a caller's variable at fetch time, and a stored by-reference binding
- *    has no representation here — an array carries no is_ref bit.
  *  - `ATTR_PERSISTENT` is accepted and ignored: one process, no pool.
  */
 
@@ -1254,12 +1251,23 @@ class PDOStatement implements IteratorAggregate
     public array $bound = [];
     /** @var array<int,int> the PARAM_* type each bound value was given */
     public array $boundType = [];
+    /** @var array<int,mixed> bindParam() variables by 1-based index, held BY REFERENCE and re-read at execute() */
+    public array $paramRefs = [];
+    /** @var array<int,mixed> bindColumn() variables, held BY REFERENCE and written on every fetched row */
+    public array $colRefs = [];
+    /** @var array<int,int> 0-based column of each bindColumn() slot, -1 when bound by name */
+    public array $colIdx = [];
+    /** @var array<int,string> column name of each bindColumn() slot bound by name */
+    public array $colName = [];
+    /** @var array<int,int> PARAM_* type of each bindColumn() slot */
+    public array $colType = [];
 
     public function execute(?array $params = null): bool
     {
         if ($params !== null) {
             $this->bound = [];
             $this->boundType = [];
+            $this->paramRefs = [];
             foreach ($params as $k => $v) {
                 /*
                  * php binds an execute() array as PARAM_STR throughout — that is
@@ -1274,6 +1282,7 @@ class PDOStatement implements IteratorAggregate
             }
         }
         try {
+            foreach ($this->paramRefs as $i => $r) { $this->bound[$i] = $r; }
             foreach ($this->bound as $i => $v) {
                 try {
                     $this->drv->bind($i, $v, $this->boundType[$i]);
@@ -1296,41 +1305,59 @@ class PDOStatement implements IteratorAggregate
 
     public function bindValue(string|int $param, mixed $value, int $type = 2): bool
     {
+        if (\is_int($param) && $param < 1) {
+            throw new ValueError('PDOStatement::bindValue(): Argument #1 ($param) must be greater than or equal to 1');
+        }
         $idx = $this->resolveParam($param);
         if ($idx === 0) { return false; }
         $this->bound[$idx] = $value;
         $this->boundType[$idx] = $type;
+        unset($this->paramRefs[$idx]);
+        return true;
+    }
+
+    /** The variable is held by reference: execute() re-reads it, as php does. */
+    public function bindParam(string|int $param, mixed &$var, int $type = 2,
+                              int $maxLength = 0, mixed $driverOptions = null): bool
+    {
+        if (\is_int($param) && $param < 1) {
+            throw new ValueError('PDOStatement::bindParam(): Argument #1 ($param) must be greater than or equal to 1');
+        }
+        $idx = $this->resolveParam($param);
+        if ($idx === 0) { return false; }
+        $this->bound[$idx] = $var;
+        $this->boundType[$idx] = $type;
+        $this->paramRefs[$idx] = &$var;
         return true;
     }
 
     /**
-     * ⚠ DIVERGENCE: php re-reads the caller's variable at execute() time; this
-     * captures it at bind time.
-     *
-     * A stored by-reference binding needs a zval reference, and an array here
-     * carries no is_ref bit — there is nothing to store. Bind-then-execute is
-     * the overwhelmingly common shape and works identically; only a program that
-     * mutates the variable BETWEEN bindParam() and execute() sees a difference.
-     * Throwing instead would break every Doctrine-shaped caller outright, which
-     * is why this one is documented rather than refused.
-     */
-    public function bindParam(string|int $param, mixed &$var, int $type = 2,
-                              int $maxLength = 0, mixed $driverOptions = null): bool
-    {
-        return $this->bindValue($param, $var, $type);
-    }
-
-    /**
-     * ⚠ REFUSED, for the same missing primitive — but here the write-back IS the
-     * entire feature, so there is no half of it worth approximating.
+     * Bind a result column to a variable, written on EVERY fetched row in every
+     * fetch mode (FETCH_BOUND itself just returns true). A column that does not
+     * exist is accepted and simply never written, as in php.
      */
     public function bindColumn(string|int $column, mixed &$var, int $type = 2,
                                int $maxLength = 0, mixed $driverOptions = null): bool
     {
-        throw new PDOException(
-            'PDOStatement::bindColumn() is not implemented: it needs a stored '
-            . 'by-reference binding, which has no representation here. '
-            . 'Use fetch(PDO::FETCH_ASSOC) or fetch(PDO::FETCH_NUM) instead.', 0);
+        $idx = -1;
+        $name = '';
+        if (\is_int($column)) {
+            if ($column < 1) {
+                throw new ValueError('PDOStatement::bindColumn(): Argument #1 ($column) must be greater than or equal to 1');
+            }
+            $idx = $column - 1;
+        } else {
+            $name = $column;
+        }
+        $slot = \count($this->colRefs);
+        foreach ($this->colIdx as $s => $ci) {
+            if ($idx >= 0 ? $ci === $idx : ($ci < 0 && $this->colName[$s] === $name)) { $slot = $s; break; }
+        }
+        $this->colIdx[$slot] = $idx;
+        $this->colName[$slot] = $name;
+        $this->colType[$slot] = $type & 0xFFFF;
+        $this->colRefs[$slot] = &$var;
+        return true;
     }
 
     public function fetch(int $mode = 0, int $cursorOrientation = 0, int $cursorOffset = 0): mixed
@@ -1586,10 +1613,57 @@ class PDOStatement implements IteratorAggregate
         if ($this->pending) {
             $this->pending = false;
             if (!$this->drv->step()) { $this->done = true; return false; }
+            if ($this->colRefs !== []) { $this->writeBound(); }
             return true;
         }
         if (!$this->drv->step()) { $this->done = true; return false; }
+        if ($this->colRefs !== []) { $this->writeBound(); }
         return true;
+    }
+
+    /** Write the current row into every bindColumn() variable. */
+    private function writeBound(): void
+    {
+        $n = $this->drv->columnCount();
+        foreach ($this->colRefs as $s => &$r) {
+            $i = $this->colIdx[$s];
+            if ($i >= $n) { throw new ValueError('Invalid column index'); }
+            if ($i < 0) {
+                for ($j = 0; $j < $n; $j++) {
+                    if ($this->columnKey($j) === $this->colName[$s]) { $i = $j; break; }
+                }
+            }
+            if ($i < 0) { continue; }
+            $r = $this->boundValue($i, $this->colType[$s]);
+        }
+        unset($r);
+    }
+
+    /** One column converted to the PARAM_* type it was bound with; ATTR_STRINGIFY_FETCHES makes every type STR. */
+    private function boundValue(int $i, int $t): mixed
+    {
+        $v = $this->drv->columnValue($i);
+        $db = $this->db;
+        $oracle = $db === null ? PDO::NULL_NATURAL : $db->oracleNulls;
+        if ($v === '' && $oracle === PDO::NULL_EMPTY_STRING) { $v = null; }
+        if ($db !== null && $db->stringify) { $t = PDO::PARAM_STR; }
+        if ($v !== null && !\is_resource($v)) {
+            if ($t === PDO::PARAM_STR) {
+                $v = \is_bool($v) ? ($v ? '1' : '0') : (string) $v;
+            } elseif ($t === PDO::PARAM_INT) {
+                $v = (int) $v;
+            } elseif ($t === PDO::PARAM_BOOL) {
+                $v = (bool) $v;
+            } elseif ($t === PDO::PARAM_LOB && \is_string($v)) {
+                $f = \fopen('php://memory', 'w+');
+                \fwrite($f, $v);
+                \rewind($f);
+                $v = $f;
+            }
+        }
+        if ($t === PDO::PARAM_NULL) { $v = null; }
+        if ($v === null && $oracle === PDO::NULL_TO_STRING) { return ''; }
+        return $v;
     }
 
     /** One column, with ATTR_STRINGIFY_FETCHES and ATTR_ORACLE_NULLS applied. */
@@ -1688,11 +1762,7 @@ class PDOStatement implements IteratorAggregate
             }
             return $row;
         }
-        if ($base === PDO::FETCH_BOUND) {
-            throw new PDOException(
-                'PDO::FETCH_BOUND is not implemented: it needs a stored '
-                . 'by-reference binding, which has no representation here.', 0);
-        }
+        if ($base === PDO::FETCH_BOUND) { return true; }
         throw new PDOException('unsupported PDO fetch mode ' . $base, 0);
     }
 

@@ -110,13 +110,7 @@ throw would longjmp past sqlite's own half-updated frames, which `docs/ffi.md` f
   `Throwable::getCode(): int` is an interface contract here (`prelude/exceptions.php`), and php
   is itself inconsistent — a connect failure already yields int `14`. The SQLSTATE is in
   `errorInfo[0]` and in the message, exactly where php puts them.
-- **`bindParam()` binds by value at bind time.** php re-reads the caller's variable at
-  `execute()`. A stored by-reference binding needs a zval reference and an array here carries no
-  is_ref bit. Bind-then-execute — the overwhelmingly common shape — is identical; only a program
-  that mutates the variable *between* `bindParam()` and `execute()` sees a difference. Documented
-  rather than refused, because throwing would break every Doctrine-shaped caller outright.
-- **`bindColumn()` / `PDO::FETCH_BOUND` throw**, for the same missing primitive — but there the
-  write-back *is* the whole feature, so there is no half of it worth approximating.
+- **`unset()` of a variable held by a stored reference does not disconnect it** (`bindColumn()` / `bindParam()` variable unset between bind and fetch/execute): a later fetch still writes through the reference and revives the variable, and an `execute()` after the unset binds `0`/null, not the old value. Compiler bug #340.
 - **`ATTR_PERSISTENT` is accepted and ignored.** One process, no persistent pool (see Async\Pool below). The constructor option is kept for
   `getAttribute()`; `setAttribute()` answers `false` afterwards (php, all drivers).
 - **`getAvailableDrivers()` is the fixed list `['mysql', 'pgsql', 'sqlite']`**, where php lists the drivers its build has. It does
@@ -423,8 +417,7 @@ Tests: `async_pool_basic`, `async_pool_cancel`, `pdo_sqlite_reset` (AOT), `pgsql
 
 ## Limitations
 
-`PDO::FETCH_BOUND` and `bindColumn()` throw — both need a stored by-reference binding, the same
-missing primitive `bindParam()` documents above. `nextRowset()` reports IM001 on sqlite and pgsql, as php does, and works on the
+`nextRowset()` reports IM001 on sqlite and pgsql, as php does, and works on the
 `mysql:` driver. Out of scope: the `mysqli` and `pgsql_*` procedural APIs, `LOAD DATA LOCAL INFILE`.
 
 ## Regression notes: default fetch mode and variadic calls
