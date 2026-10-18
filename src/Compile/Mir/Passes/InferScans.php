@@ -3229,7 +3229,14 @@ trait InferScans
         if ($n->kind === Node::KIND_METHOD_CALL) {
             $mc = $n;
             $recv = $mc->object->type->class ?? '';
-            if ($recv === '') { return ''; }
+            if ($recv === '') {
+                // An erased receiver (`Class|false` lowers to a plain cell): only a method NAME that exactly one class
+                // declares names its callee for certain — php fatals on a receiver that is not that class anyway.
+                $only = $this->soleDeclarer($mc->method);
+                if ($only === '') { return ''; }
+                $offset = 1;
+                return $only;
+            }
             $decl = $this->resolveMethodClass($recv, $mc->method);
             $offset = 1;
             if ($decl !== '' && isset($this->fnByName[$decl . '__' . $mc->method])) { return $decl . '__' . $mc->method; }
@@ -3255,6 +3262,24 @@ trait InferScans
             return $decl . '____construct';
         }
         return '';
+    }
+
+    /** @var array<string,string> */
+    private array $soleDeclarerMemo = [];
+
+    /** `Class__method` when exactly one class declares `$method`, '' otherwise. */
+    private function soleDeclarer(string $method): string
+    {
+        if (isset($this->soleDeclarerMemo[$method])) { return $this->soleDeclarerMemo[$method]; }
+        $found = '';
+        $n = 0;
+        foreach ($this->classes as $cn => $cd) {
+            if (!isset($cd->methodNames[$method]) || !isset($this->fnByName[$cn . '__' . $method])) { continue; }
+            $n = $n + 1;
+            $found = $cn . '__' . $method;
+        }
+        $this->soleDeclarerMemo[$method] = $n === 1 ? $found : '';
+        return $this->soleDeclarerMemo[$method];
     }
 
     /** The arguments of a call node of any kind. @return Node[] */

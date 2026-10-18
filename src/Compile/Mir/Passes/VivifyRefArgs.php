@@ -263,6 +263,11 @@ final class VivifyRefArgs implements Pass
             $mc = $this->asMethodCall($n);
             $recv = $mc->object->type->class ?? '';
             $target = $recv === '' ? '' : $this->resolveMethodFn($recv, $mc->method);
+            if ($recv === '' && $target === '') {
+                // A union / erased receiver (`PDOStatement|false` out of prepare()): the emitter widens to
+                // SOME declarer of the method, and so does this pass — otherwise the out-variable is never defined.
+                $target = $this->anyDeclarer[$mc->method] ?? '';
+            }
             if ($target !== '') {
                 $this->scanArgs($target, $mc->args, 1);
             } elseif ($recv !== '') {
