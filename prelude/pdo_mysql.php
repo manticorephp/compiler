@@ -1266,6 +1266,8 @@ final class __McPdoMyWire
             // the server went quiet (or away) while we drained: the connection is closed, never left mid-result, and closing never hangs
             $this->openCursor = null;
             $this->closeSock();
+            // a quiet or vanished server (2006) ends the drain silently; a protocol violation is still the caller's to hear about
+            if ($e->driverCode !== 2006) { throw $e; }
         } finally {
             $this->endDrain();
         }
