@@ -1,0 +1,10 @@
+start: 2 2 0 false false false
+changed: 0 3 1 true true true
+errState before: 42S22
+reset: 2 2 0 false false false
+errState after: 00000
+row: {"a":1}
+throws again
+foreign reset refused
+owner still reads: 2
+owner reset ok

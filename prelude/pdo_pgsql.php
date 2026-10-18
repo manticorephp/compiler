@@ -175,6 +175,19 @@ final class __McPdoPgWire
         $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
     }
 
+    public function timeoutValue(): float { return $this->timeout; }
+
+    /** Unread LISTEN notifications belong to the session that is being reset. */
+    public function clearNotices(): void { $this->notices = []; $this->noticeHead = 0; }
+
+    /** A reset is not the cursor owner's to refuse: another fiber's open portal is not ours to close. */
+    public function assertCursorOwner(): void
+    {
+        if ($this->openCursor !== null && !$this->dead && \Runtime\AsyncHook::active() && \Fiber::getCurrent() !== $this->curFiber) {
+            throw __McPdo::fail('HY000', 0, false, 'cannot reset a connection whose open cursor belongs to another fiber', true);
+        }
+    }
+
     public function setTimeout(float $t): void
     {
         $this->timeout = $t;
@@ -1472,12 +1485,34 @@ final class __McPdoPg implements __McPdoDrv
     public function inTransaction(): bool { return $this->wire->status !== 'I'; }
 
     /** DISCARD ALL cannot run inside a transaction block: roll back first. An open batched portal is closed first. */
+    private bool $baseDisablePrepares = false;
+    private int $baseFetchBatch = 0;
+    private bool $baseEmulate = false;
+    private float $baseTimeout = 30.0;
+    private bool $baseExplicit = false;
+
+    public function markBase(): void
+    {
+        $this->baseDisablePrepares = $this->disablePrepares;
+        $this->baseFetchBatch = $this->fetchBatch;
+        $this->baseEmulate = $this->emulate;
+        $this->baseTimeout = $this->wire->timeoutValue();
+        $this->baseExplicit = $this->wire->explicitTimeout;
+    }
+
     public function reset(): void
     {
+        $this->wire->assertCursorOwner();
         $oc = $this->wire->openCursor;
         if ($oc !== null) { $this->wire->cursorClose($oc); }
         if ($this->wire->status !== 'I') { $this->run('ROLLBACK'); }
         $this->run('DISCARD ALL');
+        $this->wire->clearNotices();
+        $this->disablePrepares = $this->baseDisablePrepares;
+        $this->fetchBatch = $this->baseFetchBatch;
+        $this->emulate = $this->baseEmulate;
+        $this->wire->setTimeout($this->baseTimeout);
+        $this->wire->explicitTimeout = $this->baseExplicit;
     }
 
     /** An empty query: one round trip, no work. A dead or busy-for-ever connection answers false. */

@@ -327,7 +327,7 @@ save_compiler_cache
 if [ -n "${MC_PDO_NET:-}" ]; then
     echo
     echo "=== tests/pdo_net/run.sh --server $MC_PDO_NET ==="
-    bash tests/pdo_net/run.sh --server "$MC_PDO_NET" > "$MC_LOGDIR/pdo_net.log" 2>&1
+    MC_PDO_STRICT=1 bash tests/pdo_net/run.sh --server "$MC_PDO_NET" > "$MC_LOGDIR/pdo_net.log" 2>&1
     pdo_rc=$?
     tail -40 "$MC_LOGDIR/pdo_net.log"
     exit "$pdo_rc"

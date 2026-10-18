@@ -38,6 +38,8 @@ reachable() { # dsn
 }
 
 pass=0; fail=0; skip=0
+real=0        # cases that ran against a server (the hostile fake-server runs need none and prove nothing about the real ones)
+unreach=0     # SKIPs because a server was not reachable; MC_PDO_STRICT=1 (CI) turns any of them into a failure
 # a started case's .post hook runs on ANY exit (Ctrl-C included) unless the case already ran it: PENDING_POST names the one still owed
 PENDING_POST=""
 run_pending_post() { local p="$PENDING_POST"; PENDING_POST=""; [ -n "$p" ] && [ -x "$p" ] && "$p"; return 0; }
@@ -52,17 +54,18 @@ for f in tests/pdo_net/cases/*.php; do
     # `// servers: mysql` in the first lines limits a case to those servers (comma separated; default both)
     only=$(head -n 6 "$f" | sed -n 's|^// servers: *||p' | tr -d ' ')
     if [ -n "$only" ] && [[ ",$only," != *",$SERVER,"* ]]; then echo "SKIP $n (servers: $only, running $SERVER)"; skip=$((skip+1)); continue; fi
-    if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n (server unreachable)"; skip=$((skip+1)); continue; fi
+    if [ -z "$dsn" ] || ! reachable "$dsn"; then echo "SKIP $n (server unreachable)"; skip=$((skip+1)); unreach=$((unreach+1)); continue; fi
     # a sibling <case>.needs lists further host:port servers the case talks to (one per line)
     down=""
     if [ -f "${f%.php}.needs" ]; then while read -r hp; do [ -n "$hp" ] && ! reachable "host=${hp%%:*};port=${hp##*:}" && down="$hp"; done < "${f%.php}.needs"; fi
-    if [ -n "$down" ]; then echo "SKIP $n ($down unreachable)"; skip=$((skip+1)); continue; fi
+    if [ -n "$down" ]; then echo "SKIP $n ($down unreachable)"; skip=$((skip+1)); unreach=$((unreach+1)); continue; fi
     # Manticore-only cases (Async\ has no oracle) carry a hand-written <case>.expected instead of php output
     if [ ! -f "${f%.php}.expected" ] && grep -q 'Async\\' "$f"; then echo "FAIL $n (Async\ case without a hand-written ${n}.expected)"; fail=$((fail+1)); continue; fi
     pre="${f%.php}.pre"   # optional hook: server state a case needs before EACH run (php and native)
     post="${f%.php}.post"; PENDING_POST="$post" # optional hook: undoes it after EACH run (also a global the test user cannot restore itself)
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); run_pending_post; continue; fi
-    if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); fi
+    prc=0
+    if [ -f "${f%.php}.expected" ]; then exp=$(cat "${f%.php}.expected"); else exp=$(php -d xdebug.mode=off "$f" 2>&1); prc=$?; fi
     [ -x "$post" ] && "$post"
     PENDING_POST="$post"
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
@@ -70,14 +73,19 @@ for f in tests/pdo_net/cases/*.php; do
     fi
     if [ -x "$pre" ] && ! "$pre"; then echo "SKIP $n (pre-hook failed)"; skip=$((skip+1)); continue; fi
     act=$("$WORK/$n" 2>&1)
+    nrc=$?
     run_pending_post
+    # the exit status is part of the behaviour: a crash after identical output (a SIGSEGV in a destructor) is not a pass.
+    # Oracle cases compare with php's status; hand-written ones expect 0 unless the case says `// expects-exit-nonzero`.
+    if [ ! -f "${f%.php}.expected" ]; then want=$prc; elif grep -q 'expects-exit-nonzero' "$f"; then want=$nrc; else want=0; fi
+    if [ "$nrc" != "$want" ]; then echo "FAIL $n (native exit status $nrc, expected $want)"; fail=$((fail+1)); continue; fi
     # a case that printed its own assertion failure fails even when php printed the same
     if grep -q 'ASSERTION FAILED' <<<"$exp$act"; then echo "FAIL $n (the case reports a failed assertion)"; fail=$((fail+1)); continue; fi
     # both sides printing the same refusal is a vacuous pass: only a case marked `# expects-connect-failure` may show one
     if ! grep -q "expects-connect-failure" "$f" && grep -Eq "\[200[23]\]|Connection refused|could not connect|Connection to server" <<<"$exp$act"; then
         echo "FAIL $n (unexpected connection failure in the output, server probed reachable)"; fail=$((fail+1)); continue
     fi
-    if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1))
+    if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1)); real=$((real+1))
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
 done
 # Hostile-server cases: a fake server (Zend php) per mode, the compiled client, hand-written expectations.
@@ -91,7 +99,8 @@ if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" >/dev/null 2>&1 &
             sp=$!
             for _ in $(seq 1 100); do [ -s "$WORK/port" ] && break; kill -0 $sp 2>/dev/null || break; sleep 0.1; done
-            act+=$("$WORK/hostile" $m "$(cat "$WORK/port")" 2>&1)$'\n'
+            hout=$("$WORK/hostile" $m "$(cat "$WORK/port")" 2>&1); hrc=$?
+            act+="$hout"$'\n'; [ "$hrc" = 0 ] || act+="$m: native exit status $hrc"$'\n'
             kill $sp 2>/dev/null; wait $sp 2>/dev/null
         done
         if [ "$act" = "$(cat $H/hostile.expected)"$'\n' ]; then echo "PASS pgsql_hostile"; pass=$((pass+1))
@@ -109,7 +118,8 @@ if [[ "$SERVER" = mysql && ( -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ) ]]
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" mysql >/dev/null 2>&1 &
             sp=$!
             for _ in $(seq 1 100); do [ -s "$WORK/port" ] && break; kill -0 $sp 2>/dev/null || break; sleep 0.1; done
-            act+=$("$WORK/hostile" $m "$(cat "$WORK/port")" mysql 2>&1)$'\n'
+            hout=$("$WORK/hostile" $m "$(cat "$WORK/port")" mysql 2>&1); hrc=$?
+            act+="$hout"$'\n'; [ "$hrc" = 0 ] || act+="$m: native exit status $hrc"$'\n'
             # the KILL connection must not cancel itself: exactly two connections (the client's and its cancel hook)
             if [ "$m" = kill_stall ]; then sleep 0.6; act+="kill_stall: connections $(cat "$WORK/port.conns" 2>/dev/null)"$'\n'; fi
             kill $sp 2>/dev/null; wait $sp 2>/dev/null
@@ -119,6 +129,8 @@ if [[ "$SERVER" = mysql && ( -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ) ]]
     fi
 fi
 echo "pass=$pass fail=$fail skip=$skip"
-# a run where every case SKIPped (a server that is down) proved nothing: it must not look green
-if [ "$pass" = 0 ] && [ "$skip" != 0 ]; then echo "FAIL: nothing ran ($skip skipped; is the server up? tests/pdo_net/up.sh)" >&2; exit 1; fi
+# a run where every case SKIPped (a server that is down) proved nothing: it must not look green, hostile passes included
+if [ "$real" = 0 ] && [ "$skip" != 0 ]; then echo "FAIL: nothing ran against a server ($skip skipped; is the server up? tests/pdo_net/up.sh)" >&2; exit 1; fi
+# strict (CI): the servers are supposed to be there, so an unreachable one is a failure, not a skip
+if [ "${MC_PDO_STRICT:-0}" = 1 ] && [ "$unreach" != 0 ]; then echo "FAIL: $unreach case(s) skipped because a server was unreachable (MC_PDO_STRICT=1)" >&2; exit 1; fi
 [ "$fail" = 0 ]

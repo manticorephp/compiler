@@ -370,9 +370,14 @@ final class __McPdoSqliteDrv implements __McPdoDrv
     public function commit(): void { $this->simple('COMMIT'); }
     public function rollback(): void { $this->simple('ROLLBACK'); }
 
+    private float $baseTimeout = 30.0;
+
+    public function markBase(): void { $this->baseTimeout = $this->timeout; }
+
     public function reset(): void
     {
         if ($this->inTransaction()) { $this->simple('ROLLBACK'); }
+        $this->timeout = $this->baseTimeout;
     }
 
     public function ping(): bool { return true; }

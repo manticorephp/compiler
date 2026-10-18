@@ -187,6 +187,16 @@ final class __McPdoMyWire
         $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
     }
 
+    public function timeoutValue(): float { return $this->timeout; }
+
+    /** A reset is not the cursor owner's to refuse: another fiber's open result is not ours to drain. */
+    public function assertCursorOwner(): void
+    {
+        if ($this->openCursor !== null && !$this->dead && \Runtime\AsyncHook::active() && \Fiber::getCurrent() !== $this->curFiber) {
+            throw __McPdo::fail('HY000', 0, false, 'cannot reset a connection whose open cursor belongs to another fiber', true);
+        }
+    }
+
     public function setTimeout(float $t): void
     {
         $this->timeout = $t;
@@ -1450,8 +1460,26 @@ final class __McPdoMy implements __McPdoDrv
     public string $baseCharset = '';
 
     /** COM_RESET_CONNECTION, then the session is set up again as the constructor did: charset, ATTR_AUTOCOMMIT, init command. */
+    private bool $baseEmulate = true;
+    private bool $baseFetchTables = false;
+    private bool $baseNatl = false;
+    private bool $baseUnbuffered = false;
+    private float $baseTimeout = 30.0;
+    private bool $baseExplicit = false;
+
+    public function markBase(): void
+    {
+        $this->baseEmulate = $this->emulate;
+        $this->baseFetchTables = $this->fetchTables;
+        $this->baseNatl = $this->natl;
+        $this->baseUnbuffered = $this->unbuffered;
+        $this->baseTimeout = $this->wire->timeoutValue();
+        $this->baseExplicit = $this->wire->explicitTimeout;
+    }
+
     public function reset(): void
     {
+        $this->wire->assertCursorOwner();
         $e = $this->wire->resetConnection();
         if ($e !== null) { throw self::errFrom($e); }
         // the server's defaults apply after a reset; the handshake charset is lost with them
@@ -1459,6 +1487,12 @@ final class __McPdoMy implements __McPdoDrv
         $this->autocommit = $this->baseAutocommit;
         if (!$this->baseAutocommit) { $this->run('SET autocommit=0'); }
         if ($this->initCmd !== '') { $this->run($this->initCmd); }
+        $this->emulate = $this->baseEmulate;
+        $this->fetchTables = $this->baseFetchTables;
+        $this->natl = $this->baseNatl;
+        $this->unbuffered = $this->baseUnbuffered;
+        $this->wire->setTimeout($this->baseTimeout);
+        $this->wire->explicitTimeout = $this->baseExplicit;
     }
 
     public function ping(): bool { return $this->wire->ping(); }

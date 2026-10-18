@@ -403,11 +403,15 @@ They are the `reset()` / `ping()` methods of the driver seam and what [`Async\Po
 
 `resetSession()` throws `PDOException` in **every** error mode (silent and warning included): a caller that pools connections must learn that a connection could not be reset.
 Both honour the busy gate (another fiber's statement finishes first) and an open cursor of the calling fiber
-(`ping()` answers false, `resetSession()` closes it). Statements prepared before a reset are invalid afterwards
+(`ping()` answers false, `resetSession()` closes it); an open cursor that belongs to ANOTHER fiber makes `resetSession()` throw (the owner's rows are not ours to drop).
+What the program changed on the handle since the constructor is undone as well: `ATTR_ERRMODE`, `ATTR_DEFAULT_FETCH_MODE`, `ATTR_CASE`, `ATTR_ORACLE_NULLS`,
+`ATTR_STRINGIFY_FETCHES`, `ATTR_STATEMENT_CLASS`, the recorded error state, and the driver's own attributes (`PGSQL_ATTR_FETCH_BATCH`, `PGSQL_ATTR_DISABLE_PREPARES`,
+`ATTR_EMULATE_PREPARES`, `MYSQL_ATTR_USE_BUFFERED_QUERY`, `ATTR_TIMEOUT` and whether it bounds the idle wait, `ATTR_DEFAULT_STR_PARAM`, `ATTR_FETCH_TABLE_NAMES`) return to their
+construction-time values; unread pgsql notifications are dropped. Statements prepared before a reset are invalid afterwards
 (mysql ids carry a generation, so a stale statement object never closes a newer statement of the same id).
 A server that does not know `COM_RESET_CONNECTION` (MySQL < 5.7.3, MariaDB < 10.2) makes `resetSession()` throw, which a pool treats as "discard".
 
-Tests: `async_pool_basic`, `async_pool_cancel`, `pdo_sqlite_reset` (AOT), `pgsql_pool`, `mysql_pool` (pdo_net, both mysql servers).
+Tests: `async_pool_basic`, `async_pool_cancel`, `pdo_sqlite_reset` (AOT), `pgsql_pool`, `mysql_pool`, `pgsql_reset_attrs`, `mysql_reset_attrs` (pdo_net, both mysql servers).
 
 ## Limitations
 

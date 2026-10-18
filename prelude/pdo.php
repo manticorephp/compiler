@@ -102,6 +102,9 @@ interface __McPdoDrv
      */
     public function reset(): void;
 
+    /** Called once the constructor has applied its options: what reset() returns the driver's own attributes to. */
+    public function markBase(): void;
+
     /** True when the server still answers on this connection. Never throws. */
     public function ping(): bool;
 
@@ -739,6 +742,15 @@ class PDO
     public string $stmtClassName = 'PDOStatement';
     /** @var array<int,mixed> */
     public array $stmtClassArgs = [];
+    // construction-time values, what resetSession() restores
+    private int $baseErrmode = 2;
+    private int $baseCase = 0;
+    private int $baseOracleNulls = 0;
+    private bool $baseStringify = false;
+    private int $baseDefaultFetch = 4;
+    private string $baseStmtClass = 'PDOStatement';
+    /** @var array<int,mixed> */
+    private array $baseStmtArgs = [];
 
     public function __construct(string $dsn, ?string $username = null,
                                 ?string $password = null, ?array $options = null)
@@ -774,6 +786,14 @@ class PDO
                 elseif (\is_int($k)) { $this->setAttribute($k, $v); }
             }
         }
+        $this->drv->markBase();
+        $this->baseErrmode = $this->errmode;
+        $this->baseCase = $this->case;
+        $this->baseOracleNulls = $this->oracleNulls;
+        $this->baseStringify = $this->stringify;
+        $this->baseDefaultFetch = $this->defaultFetch;
+        $this->baseStmtClass = $this->stmtClassName;
+        $this->baseStmtArgs = $this->stmtClassArgs;
     }
 
     /** php 8.4's named constructor. `new static` so a subclass stays itself. */
@@ -866,6 +886,15 @@ class PDO
     {
         // never routed through the error mode: a pool must learn that a connection could not be reset, whatever ERRMODE says
         $this->drv->reset();
+        // the session is fresh again, and so is what the program set on the handle since the constructor
+        $this->errmode = $this->baseErrmode;
+        $this->case = $this->baseCase;
+        $this->oracleNulls = $this->baseOracleNulls;
+        $this->stringify = $this->baseStringify;
+        $this->defaultFetch = $this->baseDefaultFetch;
+        $this->stmtClassName = $this->baseStmtClass;
+        $this->stmtClassArgs = $this->baseStmtArgs;
+        $this->clearErr();
     }
 
     /** Superset: true when the server still answers; a lost connection is false, never an exception. */
