@@ -330,7 +330,8 @@ if [ -n "${MC_PDO_NET:-}" ]; then
     # the runner's checkout is mounted world-readable; the private key must be 0600 and OURS (this tree is a copy owned by the container user),
     # or the key-permission check rejects it and every client-certificate line passes vacuously
     chmod 600 tests/pdo_net/.certs/client.key 2>/dev/null
-    MC_PDO_STRICT=1 bash tests/pdo_net/run.sh --server "$MC_PDO_NET" > "$MC_LOGDIR/pdo_net.log" 2>&1
+    # the pgsql cases do not depend on the mysql-protocol server: only the mysql row runs them
+    MC_PDO_STRICT=1 bash tests/pdo_net/run.sh --server "$MC_PDO_NET" ${MC_PDO_NET_ARGS:-} > "$MC_LOGDIR/pdo_net.log" 2>&1
     pdo_rc=$?
     tail -40 "$MC_LOGDIR/pdo_net.log"
     exit "$pdo_rc"

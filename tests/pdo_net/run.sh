@@ -1,6 +1,7 @@
 #!/bin/bash
 # pdo_net: byte parity of compiled PDO network drivers against php, on live servers.
-#   tests/pdo_net/run.sh [-k substr] [--server mysql|mariadb]
+#   tests/pdo_net/run.sh [-k substr] [--server mysql|mariadb] [--no-pgsql]
+# --no-pgsql leaves out every pgsql_* case and the pgsql hostile run (CI's second server row repeats nothing the first one proved).
 # --server picks the server the mysql_* cases run against (default mysql = mc-my :33060, mariadb = mc-maria :33061); the oracle is live php on THAT server.
 # A case header line `// servers: mysql` (default: both) limits a case; the other server SKIPs it with the reason.
 # Cases named pgsql_* / mysql_* use PDO_PG_DSN / PDO_MY_DSN (mysql_native : PDO_MY_NATIVE_DSN); SKIP when the server is unreachable.
@@ -8,11 +9,13 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 FILTER=""
 SERVER=mysql
+NOPG=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -k) FILTER="${2:-}"; shift 2 ;;
         --server) SERVER="${2:-}"; shift 2 ;;
-        *) echo "usage: run.sh [-k substr] [--server mysql|mariadb]" >&2; exit 2 ;;
+        --no-pgsql) NOPG=1; shift ;;
+        *) echo "usage: run.sh [-k substr] [--server mysql|mariadb] [--no-pgsql]" >&2; exit 2 ;;
     esac
 done
 case "$SERVER" in mysql) MY_PORT=33060 ;; mariadb) MY_PORT=33061 ;; *) echo "unknown --server $SERVER (mysql|mariadb)" >&2; exit 2 ;; esac
@@ -48,6 +51,7 @@ trap 'exit 130' INT TERM
 for f in tests/pdo_net/cases/*.php; do
     n=$(basename "$f" .php)
     [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
+    [[ "$NOPG" = 1 && "$n" == pgsql_* ]] && continue
     case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_native) dsn="$PDO_MY_NATIVE_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
     # a sibling <case>.dsn names the DSN to use instead (cases that need a server of their own: mc-my-iso, :33065)
     [ -f "${f%.php}.dsn" ] && dsn=$(cat "${f%.php}.dsn") && export PDO_MY_DSN="$dsn" || export PDO_MY_DSN="${PDO_MY_DSN_DEFAULT}"
@@ -93,12 +97,12 @@ for f in tests/pdo_net/cases/*.php; do
     else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
 done
 # Hostile-server cases: a fake server (Zend php) per mode, the compiled client, hand-written expectations.
-if [[ -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ]]; then
+if [[ "$NOPG" != 1 && ( -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ) ]]; then
     H=tests/pdo_net/hostile
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
         act=""
-        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out notify_trunc notify_unterminated notify_over_cap notify_flood copy_out_cap copy_d_outside copy_in_err copy_slow_commit big_slow oid_miss over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus idle_slow idle_between idle_explicit stall_mid ssl_n ssl_e ssl_byte ssl_eof ssl_extra ssl_late ssl_garbage ssl_silent ssl_close ssl_drip ssl_tls12 fb_batch_ok fb_batch_rows_over fb_batch_suspended_body fb_batch_more_over fb_batch_overrun2 fb_batch_trunc fb_batch_early_z fb_batch_stall_mid fb_batch_err_second fb_batch_close_slow; do
+        for m in huge short authok_after_sasl sasl_final_unsolicited truncated_datarow truncated_rowdesc copy_in paramdesc_truncated paramdesc_mismatch datarow_overrun ext_copy_in ext_copy_out notify_trunc notify_unterminated notify_over_cap notify_flood notify_bytes notify_big_d copy_out_cap copy_d_outside copy_in_err copy_slow_commit big_slow oid_miss over_cap drip ignore_flood oid_flood bytea_odd bytea_nonhex bytea_escape bytea_escape_bad int_garbage int_max int_min int_overflow int_underflow float_lead float_trail float_minus float_plus idle_slow idle_between idle_explicit stall_mid ssl_n ssl_e ssl_byte ssl_eof ssl_extra ssl_late ssl_garbage ssl_silent ssl_close ssl_drip ssl_tls12 fb_batch_ok fb_batch_rows_over fb_batch_suspended_body fb_batch_more_over fb_batch_overrun2 fb_batch_trunc fb_batch_early_z fb_batch_stall_mid fb_batch_err_second fb_batch_close_slow; do
             rm -f "$WORK/port"
             php -d xdebug.mode=off $H/server.php $m "$WORK/port" >/dev/null 2>&1 &
             sp=$!

@@ -125,6 +125,9 @@ throw would longjmp past sqlite's own half-updated frames, which `docs/ffi.md` f
   timeout above `2147483647`, where php clamps; a mysql statement mixing `?` and `:name`, refused at `prepare()` where php refuses at
   `execute()`).
 - **No `Pdo\Pgsql` / `Pdo\Mysql` subclasses**: their methods live on `PDO` itself and `PDO::connect()` returns a `PDO`.
+- **A dump shows php's shape, `var_export` / `json_encode` / `(array)` do not**: `print_r` / `var_dump` of a `PDO` print an empty object (a `PDOStatement` its `queryString`) through `__debugInfo()`, but the
+  facade's bookkeeping properties are public, so `var_export`, `json_encode` and `(array)` list them (driver object, error state, fetch mode). No credential is among them: the mysql password lives in a
+  static table, never in an instance property. `get_object_vars()` outside the class also lists private properties (#337).
 
 `getColumnMeta()['table']` is **not** a divergence: `sqlite3_column_table_name()` is bound
 `#[\Ffi\Weak]` and called only when `sqlite3_compileoption_used('ENABLE_COLUMN_METADATA')` says
@@ -337,7 +340,7 @@ The aliases raise no deprecation (the superset throws instead of warning).
   else waits up to the timeout (0 only looks, without waiting). The wait is a read with a stream timeout, so under the scheduler the fiber parks and the
   loop runs (`pgsql_async_notify`); cancelling the fiber loses nothing and the connection stays usable. Row shape as php: ASSOC `message`/`pid`/`payload`,
   NUM `0/1/2`, BOTH (default) both; `payload` only when non-empty. Deviations: a timeout above `2147483647` is a `ValueError` (php warns and clamps); the wait holds
-  the connection, so a query on it from another fiber waits behind it (bounded by `ATTR_TIMEOUT`); past 100000 unread notifications the OLDEST is dropped (libpq queues without limit; the session goes on).
+  the connection, so a query on it from another fiber waits behind it (bounded by `ATTR_TIMEOUT`); past 100000 unread notifications, or 32 MiB of them (payload + channel + 64 bytes each), the OLDEST is dropped (libpq queues without limit; the session goes on); while idle in `getNotify()` any message but `A` / `S` / `N` / `E` announcing more than 64 MiB is refused at once (`invalid message length`).
 - COPY: simple-protocol `COPY t [(fields)] FROM|TO STDIN WITH DELIMITER E'<first byte of separator>' NULL AS E'<nullAs>'` built exactly as php builds it (names are
   interpolated raw, no quoting; an empty separator is a tab; the default `nullAs` is `\\N`), so the server's error text matches php's. `copyFromArray` takes an
   array or a Traversable, skips `''` rows and adds the missing newline; data goes out as CopyData frames of at most 64 KiB, then CopyDone. A server error is

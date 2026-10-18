@@ -360,6 +360,7 @@ jobs:
             -e MC_LOGDIR=/logs \
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_PDO_NET=${{ matrix.server }} \
+            -e MC_PDO_NET_ARGS="${{ matrix.server == 'mariadb' && '--no-pgsql' || '' }}" \
             -e PDO_MY_SSL_CA=/pdo-net/my_ca.pem \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
