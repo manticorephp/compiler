@@ -405,6 +405,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, int> {@see Module::$builtinTwinReq} */
     private array $builtinTwinReq = [];
+    /** @var array<string, string[]> {@see Module::$builtinTwinParams} */
+    private array $builtinTwinParams = [];
     /** @var array<string, int> */
     private array $builtinTwinTot = [];
     /** @var array<string, bool> */
@@ -731,6 +733,7 @@ final class EmitLlvm implements EmitVisitor
         $this->includeSlots = $module->includeSlots;
         $this->builtinTwinReq = $module->builtinTwinReq;
         $this->builtinTwinRet = $module->builtinTwinRet;
+        $this->builtinTwinParams = $module->builtinTwinParams;
         $this->builtinTwinRef = $module->builtinTwinRef;
         // Only a twin the program NAMES in a string literal can be the target of
         // a call by name. Arming every one at every dynamic site inlined builtins

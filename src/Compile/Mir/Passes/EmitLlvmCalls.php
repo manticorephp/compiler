@@ -971,6 +971,18 @@ trait EmitLlvmCalls
                 $out .= '  ' . $eq . ' = icmp eq i64 ' . $twinId . ', ' . (string)$twinIds[$bname] . "\n";
                 $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
                 $out .= $hitL . ":\n";
+                $badArg = $this->twinIncompatibleArg($bname, $iv->args);
+                if ($badArg !== null) {
+                    // The arm is a direct builtin call over static types: a pointer
+                    // argument bound to a scalar parameter has no valid coercion
+                    // (`dechex($closure)` was invalid IR). php: a TypeError.
+                    $out .= $this->emitThrowIf('true', 'TypeError', $bname . '(): Argument #' . (string)($badArg[0] + 1)
+                        . ' must be of type ' . $badArg[1] . ', ' . $badArg[2] . ' given');
+                    $out .= '  store i64 0, ptr ' . $res . "\n";
+                    $out .= '  br label %' . $endL . "\n";
+                    $out .= $nextL . ":\n";
+                    continue;
+                }
                 $out .= $this->emitNode(new \Compile\Mir\Call($bname, $iv->args, $brt));
                 $out .= $this->boxToCell($brt);
                 $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
@@ -1564,6 +1576,34 @@ trait EmitLlvmCalls
             if ($pk === Type::KIND_FLOAT && $this->isPtrCarrierKind($ak)) { return false; }
         }
         return true;
+    }
+
+    /**
+     * A twin arm emits a DIRECT builtin call over the site's static argument
+     * types, so a pointer-carried argument (closure, object, array, string)
+     * bound to a scalar-hinted twin parameter would be coerced from the wrong
+     * carrier (`dechex($closure)` read the pointer as an i64 operand: invalid
+     * IR). Answers [argIndex, expectedHint, givenTypeName] for the first such
+     * argument, or null when the arm can be a plain call.
+     *
+     * @param Node[] $args
+     * @return array{0:int,1:string,2:string}|null
+     */
+    private function twinIncompatibleArg(string $bname, array $args): ?array
+    {
+        $hints = $this->builtinTwinParams[$bname] ?? [];
+        foreach ($args as $i => $a) {
+            $hint = $hints[$i] ?? '';
+            $k = $a->type->kind;
+            if (!$this->isPtrCarrierKind($k)) { continue; }
+            $bad = $hint === 'int' || $hint === 'float' || $hint === 'bool'
+                || ($hint === 'string' && $k !== Type::KIND_STRING);
+            if (!$bad) { continue; }
+            $given = $k === Type::KIND_CLOSURE ? 'Closure'
+                : ($k === Type::KIND_ARRAY ? 'array' : ($k === Type::KIND_STRING ? 'string' : ($a->type->class ?? 'object')));
+            return [(int)$i, $hint, $given];
+        }
+        return null;
     }
 
     /** A kind whose LLVM carrier is a pointer rather than a plain i64/double. */

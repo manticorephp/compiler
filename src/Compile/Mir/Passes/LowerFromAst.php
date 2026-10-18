@@ -1368,6 +1368,9 @@ final class LowerFromAst implements Pass
                 // what it names, and this runs for every builtin twin in the
                 // stdlib whether or not the program ever calls one by name.
                 $module->builtinTwinRet[$name] = $extDecl->returnType ?? '';
+                $hints = [];
+                foreach ($extDecl->params as $bp) { $hints[] = \strtolower($bp->typeHint ?? ''); }
+                $module->builtinTwinParams[$name] = $hints;
                 foreach ($extDecl->params as $bp) {
                     if ($bp->byRef) { $module->builtinTwinRef[$name] = true; }
                 }
