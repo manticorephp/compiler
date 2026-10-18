@@ -322,6 +322,17 @@ if [ -z "$BUILT" ]; then
 fi
 save_compiler_cache
 
+# The network PDO drivers against live servers (started by the caller, reachable on
+# 127.0.0.1): MC_PDO_NET=<mysql|mariadb> runs ONLY tests/pdo_net and stops here.
+if [ -n "${MC_PDO_NET:-}" ]; then
+    echo
+    echo "=== tests/pdo_net/run.sh --server $MC_PDO_NET ==="
+    bash tests/pdo_net/run.sh --server "$MC_PDO_NET" > "$MC_LOGDIR/pdo_net.log" 2>&1
+    pdo_rc=$?
+    tail -40 "$MC_LOGDIR/pdo_net.log"
+    exit "$pdo_rc"
+fi
+
 # Before the suite, because it is seconds and it covers what the suite cannot:
 # the suite always calls `bin/manticore` by path, so it never notices a compiler
 # that cannot find its own prelude when it is reached the way an installed one is.

@@ -28,7 +28,7 @@ mkdir -p "$WORK"
 bash "$ROOT/tests/pdo_net/mkcerts.sh" "$WORK/tls" && export MC_TLS_DIR="$WORK/tls"
 export PDO_SSL_DIR="$ROOT/tests/pdo_net/.certs"
 if command -v docker >/dev/null 2>&1 && [ "$(docker inspect -f '{{.State.Running}}' mc-my 2>/dev/null)" = true ]; then
-    docker cp mc-my:/var/lib/mysql/ca.pem "$WORK/my_ca.pem" >/dev/null 2>&1 && export PDO_MY_SSL_CA="$WORK/my_ca.pem"
+    [ -z "${PDO_MY_SSL_CA:-}" ] && docker cp mc-my:/var/lib/mysql/ca.pem "$WORK/my_ca.pem" >/dev/null 2>&1 && export PDO_MY_SSL_CA="$WORK/my_ca.pem"
 fi
 
 reachable() { # dsn
