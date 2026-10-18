@@ -197,6 +197,7 @@ elseif ($mode === 'authok_after_sasl') {
     elseif ($mode === 'batch_suspended_body') { fwrite($c, $head . $row('a') . $row('b') . $msg('s', 'x')); }
     else { fwrite($c, $head . $row('a') . $row('b') . $msg('s', '')); }
     if ($mode === 'batch_close_slow') { $upTo('S'); sleep(9); }
+    elseif ($mode === 'batch_close_idle_default') { $upTo('S'); sleep(12); }
     else {
         $upTo('H');                                         // the second Execute
         if ($mode === 'batch_ok') { fwrite($c, $row('c') . $msg('C', "SELECT 3\0")); $upTo('S'); fwrite($c, $z); }

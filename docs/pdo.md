@@ -192,7 +192,11 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
   the result sets of a multi-statement `exec()` or `CALL`, between slow rows) is unbounded unless the program set `ATTR_TIMEOUT`
   itself (constructor options or `setAttribute`), which then bounds each such wait to that timeout (superset behaviour). Tests:
   hostile `idle_between` (a stall between messages must succeed past 30 s), `stall_mid` (a stall inside one must fail),
-  `pgsql_long_after_notice`, `mysql_long_multi`. Async cancellation / scope deadlines are the idiomatic way to bound a statement.
+  `pgsql_long_after_notice`, `mysql_long_multi`.
+  A default-config connection to a silent peer (no FIN, no RST) therefore waits at message boundaries, as php does for a running statement. What is always
+  bounded: a message that has begun (including the continuation frames of a mysql packet above 16 MB), connect + authentication, and every close or drain
+  (`closeCursor()`, destruction, `resetSession()`, the Close of a suspended pgsql portal): at most 5 s (the connection timeout when shorter), after which the
+  connection is closed (hostile `us_drain_idle_default`, `fb_batch_close_idle_default`). Async cancellation / scope deadlines are the idiomatic way to bound a statement.
 - Cancellation: a query abandoned mid-flight (fiber cancelled, `ATTR_TIMEOUT` expired; not on EOF) is stopped on the server with
   `KILL QUERY <connection id>` from a second connection with the same credentials and TLS options (about 2 s at most, every error
   swallowed, run under `Async\shield`); the handle itself is dead (`2006`), as php. `mysql_async_cancel` proves the query is gone from `information_schema.processlist`.

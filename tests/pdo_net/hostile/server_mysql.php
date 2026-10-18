@@ -179,6 +179,12 @@ while (true) {
     elseif ($mode === 'trunc_stream') { fwrite($c, $pkt(1, "\x01") . substr($pkt(2, $coldef('a')), 0, 10)); fclose($c); exit; }
     elseif ($mode === 'over_cap_query') { fwrite($c, "\xff\xff\xff\x01"); }
     elseif ($mode === 'err_mid_rows') { fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')) . $err(5, 1317, '70100', 'Query execution was interrupted')); }
+    elseif ($mode === 'drain_idle_default') {
+        // one row, then silence (no FIN, no RST) for 12 s: closing the cursor must not wait for the server
+        fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3) . $pkt(4, $ls('x')));
+        sleep(12);
+        exit;
+    }
     elseif ($mode === 'drain_slow') {
         // an endless result, one row per 20 ms: draining it would take as long as the server likes
         fwrite($c, $pkt(1, "\x01") . $pkt(2, $coldef('a')) . $eof(3));

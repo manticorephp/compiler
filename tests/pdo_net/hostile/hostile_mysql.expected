@@ -337,6 +337,10 @@ us_drain_slow: closed
 us_drain_slow: HY000 2006 MySQL server has gone away
 fast
 no fd leak
+us_drain_idle_default: closed
+us_drain_idle_default: HY000 2006 MySQL server has gone away
+fast
+no fd leak
 us_more_after_eof: rows done
 us_more_after_eof: HY000 2006 MySQL server has gone away
 fast

@@ -17,7 +17,7 @@ $t = microtime(true);
 $np = false;
 try {
     // idle_slow: ATTR_TIMEOUT unset (the default must not bound a statement that is still running); *_explicit / stall_mid: set to 1
-    $opts = $mode === 'idle_slow' || $mode === 'idle_between' || $mode === 'np_idle_slow' || $mode === 'copy_slow_commit' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid', 'kill_stall', 'drain_slow', 'batch_stall_mid', 'batch_close_slow', 'np_idle_explicit', 'np_stall_mid', 'ssl_silent', 'ssl_drip'], true) ? 1 : 3];
+    $opts = $mode === 'idle_slow' || $mode === 'idle_between' || $mode === 'drain_idle_default' || $mode === 'batch_close_idle_default' || $mode === 'np_idle_slow' || $mode === 'copy_slow_commit' ? [] : [PDO::ATTR_TIMEOUT => in_array($mode, ['drip', 'big_slow', 'idle_explicit', 'stall_mid', 'kill_stall', 'drain_slow', 'batch_stall_mid', 'batch_close_slow', 'np_idle_explicit', 'np_stall_mid', 'ssl_silent', 'ssl_drip'], true) ? 1 : 3];
     if ($my && str_starts_with($mode, 'ssl_')) { $opts += [1008 => '/nonexistent', 1013 => false]; }   // MYSQL_ATTR_SSL_CA, MYSQL_ATTR_SSL_VERIFY_SERVER_CERT: TLS wanted, nothing verified
     if ($tag === 'us_') { $opts += [1000 => false]; }
     if ($tag === 'fb_') { $opts += [1300 => 2]; }
@@ -43,6 +43,7 @@ try {
         $q = $db->query('select 1');   // not chained (#299)
         if ($mode === 'drain_bad') { $q->fetch(); $q->closeCursor(); $q = null; echo $tag, $mode, ": closed\n"; $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
         elseif ($mode === 'drain_bad_next') { $q->fetch(); $q->closeCursor(); echo $tag, $mode, ": closed\n"; }
+        elseif ($mode === 'drain_idle_default') { $q->fetch(); $q->closeCursor(); $q = null; echo $tag, $mode, ": closed\n"; $q = $db->query('select 2'); $q->fetchAll(); }
         elseif ($mode === 'drain_slow') { $q->fetch(); $q->closeCursor(); $q = null; echo $tag, $mode, ": closed\n"; $q = $db->query('select 2'); $q->fetchAll(); }
         elseif ($mode === 'drain_dtor') { $q->fetch(); $q = null; $q = $db->query('select 2'); $q->fetchAll(); }
         elseif ($mode === 'more_after_eof' || $mode === 'more_bad_header') { while ($q->fetch() !== false) { } echo $tag, $mode, ": rows done\n"; $q->nextRowset(); }
@@ -66,7 +67,7 @@ try {
     } elseif (str_starts_with($mode, 'batch_')) {
         $p = $db->prepare('select 1');
         $p->execute();
-        if ($mode === 'batch_close_slow') { $p->fetch(); $p->closeCursor(); echo $tag, $mode, ": closed\n"; }
+        if ($mode === 'batch_close_slow' || $mode === 'batch_close_idle_default') { $p->fetch(); $p->closeCursor(); echo $tag, $mode, ": closed\n"; }
         else {
             $out = [];
             while (($r = $p->fetch(PDO::FETCH_NUM)) !== false) { $out[] = $r[0]; }
@@ -114,7 +115,7 @@ try {
     } else {
         $db->query('select 1')->fetchAll();
     }
-    if (!in_array($mode, ['np_ok', 'batch_ok', 'batch_close_slow', 'copy_slow_commit', 'notify_flood', 'notify_bytes', 'np_close_once', 'np_idle_slow', 'np_float_odd', 'np_nan', 'bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow', 'idle_between'], true)) { echo "$tag$mode: NO ERROR\n"; }
+    if (!in_array($mode, ['np_ok', 'batch_ok', 'batch_close_slow', 'copy_slow_commit', 'batch_close_idle_default', 'notify_flood', 'notify_bytes', 'np_close_once', 'np_idle_slow', 'np_float_odd', 'np_nan', 'bytea_escape', 'int_max', 'int_min', 'float_plus', 'oid_flood', 'big_slow', 'oid_miss', 'uint_max', 'bit_max', 'idle_slow', 'idle_between'], true)) { echo "$tag$mode: NO ERROR\n"; }
 } catch (PDOException $e) {
     $m = (string) $e->errorInfo[2];
     $i = strpos($m, 'failed: ');
@@ -133,5 +134,5 @@ try {
     if (!$my && in_array($mode, ['batch_err_second', 'paramdesc_mismatch', 'copy_in_err', 'ext_copy_in', 'ext_copy_out', 'bytea_odd', 'bytea_nonhex', 'bytea_escape_bad', 'int_garbage', 'int_overflow', 'int_underflow', 'float_lead', 'float_trail', 'float_minus'], true)) { $s = $db->query('select 1'); echo 'reuse: ', $s->fetchColumn(), "\n"; $s = null; }
 }
 $e = null; $p = null; $p2 = null; $s = null; $q = null; $db = null;
-echo microtime(true) - $t < ($mode === 'copy_slow_commit' ? 64.0 + 60.0 : ($mode === 'idle_between' ? 45.0 : ($mode === 'big_slow' || $mode === 'idle_slow' || $mode === 'np_idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' || $mode === 'kill_stall' || $mode === 'drain_slow' || $mode === 'batch_stall_mid' || $mode === 'batch_close_slow' || $mode === 'np_idle_explicit' || $mode === 'np_stall_mid' ? 5.0 : 3.0)))) ? "fast\n" : "SLOW\n";
+echo microtime(true) - $t < ($mode === 'copy_slow_commit' ? 64.0 + 60.0 : ($mode === 'idle_between' ? 45.0 : ($mode === 'drain_idle_default' || $mode === 'batch_close_idle_default' ? 9.0 : ($mode === 'big_slow' || $mode === 'idle_slow' || $mode === 'np_idle_slow' ? 15.0 : ($mode === 'idle_explicit' || $mode === 'stall_mid' || $mode === 'kill_stall' || $mode === 'drain_slow' || $mode === 'batch_stall_mid' || $mode === 'batch_close_slow' || $mode === 'np_idle_explicit' || $mode === 'np_stall_mid' ? 5.0 : 3.0))))) ? "fast\n" : "SLOW\n";
 echo $fds() === $before ? "no fd leak\n" : "FD LEAK\n";

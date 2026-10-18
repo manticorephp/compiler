@@ -220,3 +220,6 @@ no fd leak
 fb_batch_close_slow: HY000 7 timeout expired
 fast
 no fd leak
+fb_batch_close_idle_default: HY000 7 timeout expired
+fast
+no fd leak
