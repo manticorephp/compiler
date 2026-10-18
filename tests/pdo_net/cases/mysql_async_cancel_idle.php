@@ -1,7 +1,7 @@
 <?php
 // Manticore-only (no php oracle: Async\ is a superset); expectation lives in the sibling .expected file.
 // A fiber cancelled during an UNBOUNDED idle wait (the server is running `select sleep(5)`, no ATTR_TIMEOUT set) is released at
-// once and poisons its connection. The server-side sleep is left to expire (KILL QUERY on cancel is a later phase).
+// once and poisons its connection. The cancel hook then runs KILL QUERY from a second connection (see mysql_async_cancel).
 use function Async\async;
 use function Async\spawn;
 use function Async\delay;

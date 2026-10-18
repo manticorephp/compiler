@@ -20,7 +20,7 @@ async(function () {
     try { $db->query('select 1'); echo "usable\n"; } catch (PDOException $e) { echo "dead\n"; }
     $fresh = pdo();
     $n = -1;
-    for ($i = 0; $i < 40; $i++) {
+    for ($i = 0; $i < 20; $i++) {
         $st = $fresh->prepare("select count(*) from information_schema.processlist where id = ? and command = 'Query'");
         $st->execute([$id]);
         $n = (int) $st->fetchColumn();

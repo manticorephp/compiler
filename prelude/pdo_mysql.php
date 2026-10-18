@@ -101,6 +101,12 @@ final class __McPdoMyWire
     public int $insertId = 0;
     /** The endpoint, for ATTR_CONNECTION_STATUS. */
     public string $host = '';
+    private int $port = 0;
+    /** What a second connection needs to log in again (see cancelRequest). */
+    private string $kUser = '';
+    private string $kPw = '';
+    private int $kCs = 0;
+    private ?__McPdoTlsOpts $kTls = null;
     /** libmysql's prefix is absent; php prints `SQLSTATE[HY000] [2002] ...` for every connect failure. */
     private bool $connecting = true;
     private bool $closed = false;
@@ -138,6 +144,7 @@ final class __McPdoMyWire
     public function __construct(string $host, int $port, float $timeout)
     {
         $this->host = $host;
+        $this->port = $port;
         $ip = $host;
         if (\strpos($host, ':') === false && \ip2long($host) === false) {
             $ip = \gethostbyname($host);
@@ -419,9 +426,38 @@ final class __McPdoMyWire
         \fclose($this->s);
     }
 
-    /** ponytail: Task 8.5 sends KILL QUERY <connId> from a second connection, under Async\shield; nothing to cancel with yet. */
+    /**
+     * Best effort, as pdo_pgsql's CancelRequest: a second connection with the same credentials runs KILL QUERY <connId>.
+     * Bounded (~2 s connect + auth, the reply bounded by what is left), every error swallowed.
+     * A cancelled task re-raises at every park, and this connection parks: hold the cancellation back for the exchange.
+     * Named by string, not spelled, so a synchronous PDO program does not pull the scheduler in (see \Runtime\AsyncHook).
+     */
     private function cancelRequest(): void
     {
+        $this->inflight = false;
+        if (\Runtime\AsyncHook::active() && \function_exists('Async\\shield')) {
+            $shield = 'Async\\shield';
+            $shield(function (): void { $this->sendKill(); });
+            return;
+        }
+        $this->sendKill();
+    }
+
+    private function sendKill(): void
+    {
+        $w = null;
+        try {
+            $t0 = \__mc_monotonic_f();
+            $w = new self($this->host, $this->port, 1.0);
+            $w->explicitTimeout = true;
+            $w->handshake();
+            $w->auth($this->kUser, $this->kPw, '', $this->kCs, false, false, false, $this->kTls);
+            $left = 2.0 - (\__mc_monotonic_f() - $t0);
+            $w->setTimeout($left > 0.2 ? $left / 2.0 : 0.1);
+            $w->query('KILL QUERY ' . (string) $this->connId);
+        } catch (\Throwable $e) {
+        }
+        if ($w !== null) { $w->close(); }
     }
 
     private function ioFail(int $no, string $m): PDOException
@@ -539,6 +575,10 @@ final class __McPdoMyWire
     public function auth(string $user, ?string $pw, string $db, int $charsetNo, bool $foundRows, bool $multi, bool $ignoreSpace, ?__McPdoTlsOpts $tlsOpts = null): void
     {
         $pw = $pw === null ? '' : $pw;
+        $this->kUser = $user;
+        $this->kPw = $pw;
+        $this->kCs = $charsetNo;
+        $this->kTls = $tlsOpts;
         if (\strpos($user, "\0") !== false || \strpos($db, "\0") !== false) {
             $this->closeSock();
             throw __McPdo::connectFail('HY000', 2000, 'invalid NUL byte in user or database name');
@@ -1074,6 +1114,10 @@ final class __McPdoMyWire
             if (!$this->dead && \count($this->owed) > 0) { $this->drainOwed(); }
         } catch (PDOException $e) {
             // the write failed: closeSock() already ran
+        } catch (\Throwable $t) {
+            // a cancellation inside the write may have left half a COM_STMT_CLOSE on a live socket
+            $this->closeSock();
+            throw $t;
         } finally {
             $this->busy = false;
         }
@@ -1092,7 +1136,11 @@ final class __McPdoMyWire
         try {
             $this->drainOwed();
         } catch (PDOException $e) {
-            // the write failed: closeSock() already ran, nothing is left to close; a cancellation is NOT swallowed
+            // the write failed: closeSock() already ran, nothing is left to close
+        } catch (\Throwable $t) {
+            // a cancellation inside the write may have left half a COM_STMT_CLOSE on a live socket
+            $this->closeSock();
+            throw $t;
         } finally {
             $this->busy = false;
         }
