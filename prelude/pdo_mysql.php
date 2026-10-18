@@ -141,6 +141,10 @@ final class __McPdoMyWire
     public bool $explicitTimeout = false;
     /** A command was sent and not one byte of its response has arrived: the server is executing it. */
     private bool $awaiting = false;
+    /** Absolute deadline of a close/drain in progress (0 = none): while set, no wait is idle, every wait ends by then, and the stream timeout is the same bound. */
+    private float $drainDl = 0.0;
+    /** Inside a logical packet (a 0xFFFFFF frame was full): its next frame is not the start of anything. */
+    private bool $midPacket = false;
     /** The peer hung up or a write failed: it is gone. */
     private bool $peerGone = false;
     /** Connect + authentication budget (monotonic seconds, 0 = none); a drip-feeding server cannot outlast it. */
@@ -188,6 +192,23 @@ final class __McPdoMyWire
     }
 
     public function timeoutValue(): float { return $this->timeout; }
+
+    /** Close/drain bound: at most DRAIN_SECONDS (the connection timeout when that is shorter), however long the server idles. */
+    private const DRAIN_SECONDS = 5.0;
+
+    private function startDrain(): void
+    {
+        $b = $this->timeout > 0.0 && $this->timeout < self::DRAIN_SECONDS ? $this->timeout : self::DRAIN_SECONDS;
+        $this->drainDl = \__mc_monotonic_f() + $b;
+        \stream_set_timeout($this->s, (int) $b, (int) (($b - (float) (int) $b) * 1000000.0));
+    }
+
+    private function endDrain(): void
+    {
+        $this->drainDl = 0.0;
+        if (!$this->dead) { $this->setTimeout($this->timeout); }
+    }
+
 
     /** The collation id the handshake announced (mysql: utf8mb4_0900_ai_ci, mariadb: its own default). */
     public function charsetId(): int { return $this->kCs; }
@@ -361,12 +382,13 @@ final class __McPdoMyWire
         // a 1-byte drip is not, and a big row on a slow link still arrives
         // nothing of the next message buffered: this wait is for its START (the server is working), at EVERY message boundary of a
         // response, not only the first one (notices, slow rows, multi-result CALLs, multi-statement exec)
-        if ($this->buf === '') { $this->awaiting = true; }
+        if ($this->buf === '' && !$this->midPacket) { $this->awaiting = true; }
         // ⚠ php's ATTR_TIMEOUT is a CONNECT timeout. The idle wait for the START of a response (the server is running the
         // statement) is therefore unbounded unless the program set ATTR_TIMEOUT itself (superset); a packet that has begun
         // arriving, and connect/auth, are always bounded.
-        $idle = $this->awaiting && !$this->connecting && !$this->explicitTimeout;
+        $idle = $this->awaiting && !$this->connecting && !$this->explicitTimeout && $this->drainDl === 0.0;
         $dl = $this->timeout > 0.0 && !$idle ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
+        if ($this->drainDl > 0.0) { $dl = $this->drainDl; }
         while (\strlen($this->buf) < $n) {
             $c = \fread($this->s, 65536);
             if ($c === false || $c === '') {
@@ -381,6 +403,7 @@ final class __McPdoMyWire
             if ($idle) {
                 $idle = false;
                 $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
+                if ($this->drainDl > 0.0) { $dl = $this->drainDl; }
             }
             if (\strlen($this->buf) < $n) {
                 $now = \__mc_monotonic_f();
@@ -400,6 +423,7 @@ final class __McPdoMyWire
     {
         $out = '';
         while (true) {
+            $this->midPacket = $out !== '';
             if (\strlen($this->buf) - $this->pos < 4) { $this->fill(4); }
             $p = $this->pos;
             $len = \ord($this->buf[$p]) | (\ord($this->buf[$p + 1]) << 8) | (\ord($this->buf[$p + 2]) << 16);
@@ -423,7 +447,7 @@ final class __McPdoMyWire
             }
             $out .= \substr($this->buf, $p + 4, $len);
             $this->pos = $p + 4 + $len;
-            if ($len < 0xFFFFFF) { return $out; }
+            if ($len < 0xFFFFFF) { $this->midPacket = false; return $out; }
         }
     }
 
@@ -1223,19 +1247,27 @@ final class __McPdoMyWire
             $this->closeSock();
             return;
         }
-        $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + $this->timeout : 0.0;
-        while ($this->openCursor !== null) {
-            $c = $this->openCursor;
-            if ($c->done) {
-                $this->cursorNext($c);
-                continue;
+        $this->startDrain();
+        try {
+            while ($this->openCursor !== null) {
+                $c = $this->openCursor;
+                if ($c->done) {
+                    $this->cursorNext($c);
+                    continue;
+                }
+                if (\count($this->cursorRow($c, true)) === 0) { continue; }
+                if (\__mc_monotonic_f() >= $this->drainDl) {
+                    $this->openCursor = null;
+                    $this->closeSock();
+                    return;
+                }
             }
-            if (\count($this->cursorRow($c, true)) === 0) { continue; }
-            if ($dl > 0.0 && \__mc_monotonic_f() >= $dl) {
-                $this->openCursor = null;
-                $this->closeSock();
-                return;
-            }
+        } catch (PDOException $e) {
+            // the server went quiet (or away) while we drained: the connection is closed, never left mid-result, and closing never hangs
+            $this->openCursor = null;
+            $this->closeSock();
+        } finally {
+            $this->endDrain();
         }
     }
 

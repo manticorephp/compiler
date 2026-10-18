@@ -114,6 +114,8 @@ final class __McPdoPgWire
     public bool $explicitTimeout = false;
     /** A request was sent and not one byte of its response has arrived: the server is executing it. */
     private bool $awaiting = false;
+    /** Absolute deadline of a close/drain in progress (0 = none): while set, no wait is idle, every wait ends by then, and the stream timeout is the same bound. */
+    private float $drainDl = 0.0;
     private string $addr = '';
     /** The peer hung up or a write failed: it is gone, so a CancelRequest would be pointless. */
     private bool $peerGone = false;
@@ -178,6 +180,23 @@ final class __McPdoPgWire
     }
 
     public function timeoutValue(): float { return $this->timeout; }
+
+    /** Close/drain bound: at most DRAIN_SECONDS (the connection timeout when that is shorter), however long the server idles. */
+    private const DRAIN_SECONDS = 5.0;
+
+    private function startDrain(): void
+    {
+        $b = $this->timeout > 0.0 && $this->timeout < self::DRAIN_SECONDS ? $this->timeout : self::DRAIN_SECONDS;
+        $this->drainDl = \__mc_monotonic_f() + $b;
+        \stream_set_timeout($this->s, (int) $b, (int) (($b - (float) (int) $b) * 1000000.0));
+    }
+
+    private function endDrain(): void
+    {
+        $this->drainDl = 0.0;
+        if (!$this->dead) { $this->setTimeout($this->timeout); }
+    }
+
 
     /** Unread LISTEN notifications belong to the session that is being reset. */
     public function clearNotices(): void { $this->notices = []; $this->noticeHead = 0; $this->noticeBytes = 0; }
@@ -312,8 +331,9 @@ final class __McPdoPgWire
         // ⚠ php's ATTR_TIMEOUT is a CONNECT timeout. The idle wait for the START of a response (the server is running the
         // statement) is therefore unbounded unless the program set ATTR_TIMEOUT itself (superset); a message that has begun
         // arriving, and connect/auth, are always bounded.
-        $idle = $this->awaiting && !$this->connecting && !$this->explicitTimeout;
+        $idle = $this->awaiting && !$this->connecting && !$this->explicitTimeout && $this->drainDl === 0.0;
         $dl = $this->timeout > 0.0 && !$idle ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
+        if ($this->drainDl > 0.0) { $dl = $this->drainDl; }
         while (\strlen($this->buf) < $n) {
             $c = \fread($this->s, 65536);
             if ($c === false || $c === '') {
@@ -329,6 +349,7 @@ final class __McPdoPgWire
             if ($idle) {
                 $idle = false;
                 $dl = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout + (float) $n / 65536.0 : 0.0;
+                if ($this->drainDl > 0.0) { $dl = $this->drainDl; }
             }
             if (\strlen($this->buf) < $n) {
                 $now = \__mc_monotonic_f();
@@ -1207,6 +1228,7 @@ final class __McPdoPgWire
         try {
             $this->sendRaw(self::frame('C', "P\0") . self::frame('S', ''));
             $this->awaiting = true;
+            $this->startDrain();
             while (true) {
                 [$t, $b] = $this->msg();
                 if ($t === 'S') {
@@ -1225,6 +1247,7 @@ final class __McPdoPgWire
             $this->closeSock();
             throw $e;
         } finally {
+            $this->endDrain();
             $this->busy = false;
         }
     }
@@ -1244,7 +1267,8 @@ final class __McPdoPgWire
             $this->owed++;
             if ($this->owed > 1000) {
                 $this->inflight = true;
-                $this->drainOwed();
+                $this->startDrain();
+                try { $this->drainOwed(); } finally { $this->endDrain(); }
                 $this->inflight = false;
             }
         } catch (\Throwable $t) {

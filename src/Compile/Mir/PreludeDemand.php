@@ -137,6 +137,14 @@ final class PreludeDemand
         if ($j >= 0 && $toks[$j]->kind === TokenKind::Backslash) { $j = $j - 1; }
         $prev = $j >= 0 ? $toks[$j] : null;
         $arg = -1;
+        // `use PDO as Db;` hides every later `new Db(..)`; `Pool::pdo('pgsql:..')` (Async\Pool) opens a PDO from inside the prelude.
+        // Neither site can be read, so the driver is a run-time matter.
+        if (($i + 1 < $n && $toks[$i + 1]->kind === TokenKind::Keyword && \strtolower($toks[$i + 1]->lexeme) === 'as')
+            || ($prev !== null && $prev->kind === TokenKind::DoubleColon && $i + 1 < $n && $toks[$i + 1]->kind === TokenKind::OpenParen)) {
+            $this->dsnSites = true;
+            $this->dsnDynamic = true;
+            return;
+        }
         if ($prev !== null && $prev->kind === TokenKind::Keyword && \strtolower($prev->lexeme) === 'new'
             && $i + 2 < $n && $toks[$i + 1]->kind === TokenKind::OpenParen) {
             $arg = $i + 2;
