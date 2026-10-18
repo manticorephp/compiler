@@ -1014,7 +1014,7 @@ trait InferScans
                 // them (the premise that already keeps this scan off prelude
                 // by-ref params).
                 if (isset($conflict[$key])) {
-                    if (!$fn->isPrelude && $p->elemGuessed && !isset($erasedArg[$key])) {
+                    if (!$fn->isPrelude && $p->elemGuessed) {
                         $cur = $p->type;
                         $k = isset($assocKey[$key]) ? $assocKey[$key]
                             : ($cur->isArray() ? $cur->key : null);

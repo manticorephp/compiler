@@ -1,6 +1,5 @@
 <?php
 // A bare `array` param read as (float) $o[2] and (string) $o[1002] crashes (an int read as a string pointer) once a caller also passes [].
-// issue: #318
 function open(array $options): string {
     $t = isset($options[2]) ? (float) $options[2] : 30.0;
     $i = '';
