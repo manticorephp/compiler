@@ -112,7 +112,11 @@ final class __McPdoMyWire
     private int $port = 0;
     /** What a second connection needs to log in again (see cancelRequest). */
     private string $kUser = '';
-    private string $kPw = '';
+    /** The password lives in a static table, never in an instance property: a dump of the object graph (print_r, json_encode, (array)) must not show it. */
+    private int $kPwId = 0;
+    /** @var array<int,string> */
+    private static array $pwStore = [];
+    private static int $pwSeq = 0;
     private int $kCs = 0;
     private ?__McPdoTlsOpts $kTls = null;
     /** libmysql's prefix is absent; php prints `SQLSTATE[HY000] [2002] ...` for every connect failure. */
@@ -443,6 +447,7 @@ final class __McPdoMyWire
         $this->openCursor = null;
         if ($this->closed) { return; }
         $this->closed = true;
+        unset(self::$pwStore[$this->kPwId]);
         \fclose($this->s);
     }
 
@@ -472,7 +477,7 @@ final class __McPdoMyWire
             $w->explicitTimeout = true;
             $w->noCancel = true;
             $w->handshake();
-            $w->auth($this->kUser, $this->kPw, '', $this->kCs, false, false, false, $this->kTls);
+            $w->auth($this->kUser, self::$pwStore[$this->kPwId] ?? '', '', $this->kCs, false, false, false, $this->kTls);
             $left = 2.0 - (\__mc_monotonic_f() - $t0);
             $w->setTimeout($left > 0.2 ? $left / 2.0 : 0.1);
             $w->query('KILL QUERY ' . (string) $this->connId);
@@ -597,7 +602,8 @@ final class __McPdoMyWire
     {
         $pw = $pw === null ? '' : $pw;
         $this->kUser = $user;
-        $this->kPw = $pw;
+        if ($this->kPwId === 0) { self::$pwSeq = self::$pwSeq + 1; $this->kPwId = self::$pwSeq; }
+        self::$pwStore[$this->kPwId] = $pw;
         $this->kCs = $charsetNo;
         $this->kTls = $tlsOpts;
         if (\strpos($user, "\0") !== false || \strpos($db, "\0") !== false) {

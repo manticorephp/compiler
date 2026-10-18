@@ -583,6 +583,9 @@ XX002 Index corrupted
 #[\Manticore\Attr\Uncomparable]
 class PDO
 {
+    /** php prints an empty object: the driver, its socket and its settings are not the program's to dump. @return array<string,mixed> */
+    public function __debugInfo(): array { return []; }
+
     public const PARAM_NULL = 0;
     public const PARAM_BOOL = 5;
     public const PARAM_INT = 1;
@@ -1194,6 +1197,9 @@ class PDO
 class PDOStatement implements IteratorAggregate
 {
     public string $queryString = '';
+
+    /** @return array<string,mixed> */
+    public function __debugInfo(): array { return ['queryString' => $this->queryString]; }
 
     public ?__McPdoDrvStmt $drv = null;
     public ?PDO $db = null;

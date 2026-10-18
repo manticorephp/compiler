@@ -57,5 +57,5 @@ docker exec mc-maria mariadb -h 127.0.0.1 -uroot -ppw -e "install soname 'auth_e
 docker exec mc-maria mariadb -h 127.0.0.1 -uroot -ppw -e "create user if not exists 'ed'@'%' identified via ed25519 using password('pw'); grant all on d.* to 'ed'@'%'"
 wait_for mc-my-ssl 120 docker exec mc-my-ssl mysql -h 127.0.0.1 -uu -ppw d -e 'select 1'
 docker exec mc-my-ssl mysql -h 127.0.0.1 -uroot -ppw -e "create user if not exists 'cu'@'%' identified by 'pw' require x509; grant all on d.* to 'cu'@'%'" 2>/dev/null
-docker exec mc-my-native mysql -h 127.0.0.1 -uroot -ppw -e "create user if not exists 'nu'@'%' identified with mysql_native_password by 'npw'; create user if not exists 'ne'@'%' identified with mysql_native_password by ''; grant all on d.* to 'nu'@'%'; grant all on d.* to 'ne'@'%'"
+docker exec mc-my-native mysql -h 127.0.0.1 -uroot -ppw -e "create user if not exists 'nu'@'%' identified with mysql_native_password by 'npw'; create user if not exists 'ne'@'%' identified with mysql_native_password by ''; create user if not exists 'sx'@'%' identified with mysql_native_password by 'npw-secret-xyz'; grant all on d.* to 'sx'@'%'; grant all on d.* to 'nu'@'%'; grant all on d.* to 'ne'@'%'"
 echo up

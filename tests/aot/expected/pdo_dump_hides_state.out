@@ -1,0 +1,9 @@
+PDO Object
+(
+)
+PDOStatement Object
+(
+    [queryString] => select 1
+)
+object(PDO)#1 (0) {
+}
