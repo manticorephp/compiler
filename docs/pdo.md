@@ -110,8 +110,6 @@ throw would longjmp past sqlite's own half-updated frames, which `docs/ffi.md` f
   `Throwable::getCode(): int` is an interface contract here (`prelude/exceptions.php`), and php
   is itself inconsistent — a connect failure already yields int `14`. The SQLSTATE is in
   `errorInfo[0]` and in the message, exactly where php puts them.
-- **`unset()` of a variable held by a stored reference does not disconnect it** (`bindColumn()` / `bindParam()` variable unset between bind and fetch/execute): a later fetch still writes through the reference and revives the variable, and an `execute()` after the unset binds `0`/null, not the old value. Compiler bug #340.
-- **Two or more `bindColumn()`/`bindParam()` locals of a function that returns the statement, outliving them, can corrupt memory** (the statement keeps references to locals whose frame is gone). Compiler bug #341; bind to variables that outlive the statement.
 - **`ATTR_PERSISTENT` is accepted and ignored.** One process, no persistent pool (see Async\Pool below). The constructor option is kept for
   `getAttribute()`; `setAttribute()` answers `false` afterwards (php, all drivers).
 - **`getAvailableDrivers()` is the fixed list `['mysql', 'pgsql', 'sqlite']`**, where php lists the drivers its build has. It does

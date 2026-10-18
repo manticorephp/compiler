@@ -3366,6 +3366,20 @@ trait EmitLlvmObjects
         }
         $out = $addrIr;
         $this->rt->needsRefCells = true;
+        // A by-ref PARAMETER's address is the caller's slot, dead once the
+        // caller returns: a reference STORED from it must own a counted box.
+        if ($src->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->refLocals[$src->name])) {
+            $pk = ($this->locals->refParamTypes[$src->name] ?? Type::unknown())->kind;
+            if ($pk === Type::KIND_CELL || $pk === Type::KIND_UNKNOWN) {
+                $ap = $this->ssa->allocReg();
+                $out .= '  ' . $ap . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+                $ab = $this->ssa->allocReg();
+                $out .= '  ' . $ab . ' = call ptr @__mir_ref_adopt(ptr ' . $ap . ")\n";
+                $ai = $this->ssa->allocReg();
+                $out .= '  ' . $ai . ' = ptrtoint ptr ' . $ab . " to i64\n";
+                $this->lastValue = $ai;
+            }
+        }
         $m = $this->ssa->allocReg();
         $out .= '  ' . $m . ' = and i64 ' . $this->lastValue . ', '
               . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";

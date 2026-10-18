@@ -4029,6 +4029,20 @@ final class UnifiedArrayRuntime
         $make->store($make->or_($make->and_($bi, $mask), Value::int($i64, MemoryAbi::CELL_REF_TAG_BITS)), $slot);
         $make->ret($box);
 
+        // `__mir_ref_adopt(addr) -> data`: the box behind a by-ref PARAMETER's
+        // address, for a callee that STORES a reference to it. The address is
+        // either an existing box (the caller's local was promoted) or the
+        // caller's own cell slot, which dies with the caller's frame — that one
+        // is promoted in place so the stored REF cell owns a counted box.
+        $fn = $this->module->func('__mir_ref_adopt', Type::ptr());
+        $p = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        $isBox = $fn->block('isbox');
+        $promote = $fn->block('promote');
+        $hdr = $e->load($i64, $e->gep(Type::i8(), $p, [Value::int($i64, -8)]));
+        $e->brIf($e->icmp('eq', $hdr, Value::int($i64, MemoryAbi::REF_TAG_MAGIC)), $isBox, $promote);
+        $isBox->ret($p);
+        $promote->ret($promote->call('__mir_ref_promote_slot', Type::ptr(), [$p]));
         $fn = $this->module->func('__mir_ref_slot_store', Type::i1());
         $slot = $fn->param(Type::ptr(), 'slot');
         $v = $fn->param($i64, 'v');

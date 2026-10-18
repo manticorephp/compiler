@@ -105,6 +105,12 @@ final class VivifyRefArgs implements Pass
     /** @var array<string, true> locals php auto-vivifies as an ARRAY (`$x[] = v`) */
     private array $autoviv = [];
 
+    /** @var array<string, bool[]> fn → per-param: the callee STORES a reference to this by-ref param */
+    private array $refStoring = [];
+
+    /** @var array<string, true> locals handed to such a param in the current function */
+    private array $holds = [];
+
     public function run(Module $module): Module
     {
         $this->refMasks = [];
@@ -157,6 +163,7 @@ final class VivifyRefArgs implements Pass
             $this->classParent[$cname] = $cd->parent;
         }
 
+        $this->computeRefStoring($module);
         foreach ($module->functions as $fn) {
             $this->vivifyFunction($fn, $module);
         }
@@ -164,13 +171,75 @@ final class VivifyRefArgs implements Pass
         return $module;
     }
 
+    /**
+     * A by-ref param whose callee STORES a reference to it (`$this->refs[$k] =
+     * &$v`, or hands it on to a param that does). The reference outlives the
+     * callee, so the CALLER's local must own a counted box rather than a stack
+     * slot: {@see vivifyFunction} makes each such local a ref-cell target.
+     */
+    private function computeRefStoring(Module $module): void
+    {
+        $this->refStoring = [];
+        $any = false;
+        foreach ($module->functions as $fn) {
+            $idx = [];
+            $pi = 0;
+            foreach ($fn->params as $p) {
+                if ($p->byRef) { $idx[$p->name] = $pi; }
+                $pi = $pi + 1;
+            }
+            if (\count($idx) === 0) { continue; }
+            $names = [];
+            $this->refCellSources($fn->body, $names);
+            foreach ($names as $nm => $unused) {
+                if (!isset($idx[$nm])) { continue; }
+                $this->refStoring[$fn->name][$idx[$nm]] = true;
+                $any = true;
+            }
+        }
+        if (!$any) { return; }
+        $changed = true;
+        while ($changed) {
+            $changed = false;
+            foreach ($module->functions as $fn) {
+                $idx = [];
+                $pi = 0;
+                foreach ($fn->params as $p) {
+                    if ($p->byRef) { $idx[$p->name] = $pi; }
+                    $pi = $pi + 1;
+                }
+                if (\count($idx) === 0) { continue; }
+                $this->candidates = [];
+                $this->holds = [];
+                $this->walk($fn->body);
+                foreach ($this->holds as $nm => $unused) {
+                    if (!isset($idx[$nm]) || ($this->refStoring[$fn->name][$idx[$nm]] ?? false)) { continue; }
+                    $this->refStoring[$fn->name][$idx[$nm]] = true;
+                    $changed = true;
+                }
+            }
+        }
+    }
+
+    /** @param array<string, true> $out locals that are the source of a `&` cell */
+    private function refCellSources(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_REF_CELL) {
+            $kids = Walk::children($n);
+            if ($kids[0]->kind === Node::KIND_LOAD_LOCAL) { $out[$this->asLoadLocal($kids[0])->name] = true; }
+            return;
+        }
+        foreach (Walk::children($n) as $c) { $this->refCellSources($c, $out); }
+    }
+
     private function vivifyFunction(FunctionDef $fn, Module $module): void
     {
         $this->defined = DefinedLocals::collect($fn);
         $this->candidates = [];
         $this->autoviv = [];
+        $this->holds = [];
         $this->walk($fn->body);
-        if (\count($this->candidates) === 0 && \count($this->autoviv) === 0) { return; }
+        if (\count($this->candidates) === 0 && \count($this->autoviv) === 0 && \count($this->holds) === 0) { return; }
 
         // A `global $x` name in __main writes through `@g_x`, not a stack slot
         // ({@see EmitLlvmModule}), so an init here would neither create the
@@ -206,6 +275,17 @@ final class VivifyRefArgs implements Pass
             if (isset($skip[$name]) || isset($this->defined[$name])
                 || isset($this->candidates[$name])) { continue; }
             $inits[] = new StoreLocal($name, new \Compile\Mir\ArrayLit([], Type::unknown()), Type::unknown());
+        }
+        // A local a callee keeps a reference to is a ref-cell target for its whole
+        // frame: the frame owns a counted box, and the callee's stored REF cell
+        // shares it. The statement only TAKES the reference (no effect at entry);
+        // the ref-cell collectors do the rest ({@see LocalSlots::collectRefCellTargets}).
+        // A by-ref param forwarded on already holds the caller's box (or slot).
+        $byRefParams = [];
+        foreach ($fn->params as $p) { if ($p->byRef) { $byRefParams[$p->name] = true; } }
+        foreach ($this->holds as $hname => $unusedH) {
+            if (isset($skip[$hname]) || isset($byRefParams[$hname])) { continue; }
+            $inits[] = new \Compile\Mir\RefCell_(new \Compile\Mir\LoadLocal($hname, Type::unknown()), Type::cell());
         }
         if (\count($inits) === 0) { return; }
         $fn->body->stmts = \array_merge($inits, $fn->body->stmts);
@@ -404,6 +484,7 @@ final class VivifyRefArgs implements Pass
             if (!($mask[$pi] ?? false)) { continue; }
             if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
             $ll = $this->asLoadLocal($a);
+            if ($this->refStoring[$fnName][$pi] ?? false) { $this->holds[$ll->name] = true; }
             if (isset($this->candidates[$ll->name])) { continue; }
             $this->candidates[$ll->name] = $ptypes[$pi] ?? Type::unknown();
         }

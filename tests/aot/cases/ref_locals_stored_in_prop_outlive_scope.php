@@ -1,6 +1,5 @@
 <?php
 // Two function locals stored by reference in an array property outlive their function: reads and writes through them corrupt the heap.
-// issue: #341
 class H {
     /** @var array<int,mixed> */
     public array $refs = [];

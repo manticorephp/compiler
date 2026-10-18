@@ -1,6 +1,5 @@
 <?php
 // unset() of a local that a callee stored by reference does not disconnect it: later writes through the stored reference revive the variable
-// issue: #340
 class S {
     /** @var array<int,mixed> */
     public array $r = [];
