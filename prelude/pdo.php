@@ -465,6 +465,13 @@ XX002 Index corrupted
      * The one place a PDOException is built, so its typed fields and its
      * php-facing `errorInfo` array can never disagree.
      */
+    public static function keyPairError(): PDOException
+    {
+        $e = self::fail('HY000', 0, false, 'PDO::FETCH_KEY_PAIR fetch mode requires the result set to contain exactly 2 columns.', true);
+        $e->errorInfo = ['HY000', 0];
+        return $e;
+    }
+
     public static function fail(string $state, int $code, bool $hasCode,
                                 string $msg, bool $hasMsg): PDOException
     {
@@ -932,7 +939,13 @@ class PDO
     public function setAttribute(int $attribute, mixed $value): bool
     {
         $this->clearErr();
-        if ($attribute === PDO::ATTR_ERRMODE) { $this->errmode = (int) $value; return true; }
+        if ($attribute === PDO::ATTR_ERRMODE) {
+            if (!(\is_int($value) || \is_bool($value) || (\is_string($value) && \is_numeric($value)))) {
+                throw new TypeError('Attribute value must be of type int for selected attribute, ' . \get_debug_type($value) . ' given');
+            }
+            $this->errmode = (int) $value;
+            return true;
+        }
         if ($attribute === PDO::ATTR_CASE) { $this->case = (int) $value; return true; }
         if ($attribute === PDO::ATTR_ORACLE_NULLS) { $this->oracleNulls = (int) $value; return true; }
         if ($attribute === PDO::ATTR_STRINGIFY_FETCHES) { $this->stringify = (bool) $value; return true; }
@@ -965,7 +978,6 @@ class PDO
 
     public function getAttribute(int $attribute): mixed
     {
-        $this->clearErr();
         if ($attribute === PDO::ATTR_ERRMODE) { return $this->errmode; }
         if ($attribute === PDO::ATTR_CASE) { return $this->case; }
         if ($attribute === PDO::ATTR_ORACLE_NULLS) { return $this->oracleNulls; }
@@ -981,7 +993,7 @@ class PDO
         } catch (PDOException $e) {
             return $this->note($e, 'PDO::getAttribute');
         }
-        if ($v !== null) { return $v; }
+        if ($v !== null) { $this->clearErr(); return $v; }
         return $this->unsupported('driver does not support that attribute', 'PDO::getAttribute');
     }
 
@@ -1190,11 +1202,7 @@ class PDO
      *  error, which warns even under ERRMODE_SILENT (measured). */
     private function unsupported(string $msg, string $fn): mixed
     {
-        $this->errState = 'IM001';
-        $this->errCode = 0;
-        $this->errHasCode = false;
-        $this->errMsg = '';
-        $this->errHasMsg = false;
+        $this->errState = 'IM001'; // php's pdo_raise_impl_error sets the state only; code and message stay
         __McPdo::raise($this->errmode === PDO::ERRMODE_SILENT ? PDO::ERRMODE_WARNING : $this->errmode, 'IM001', 0, false, $msg, true, $fn);
         return false;
     }
@@ -1414,8 +1422,7 @@ class PDOStatement implements IteratorAggregate
             // The only mode whose ROWS become the result's KEYS, so it cannot go
             // through the append loop below.
             if ($this->drv->columnCount() !== 2) {
-                throw new PDOException(
-                    'PDO::FETCH_KEY_PAIR needs a result set with exactly 2 columns', 0);
+                throw __McPdo::keyPairError();
             }
             $out = [];
             while ($this->advance()) { $out[$this->value(0)] = $this->value(1); }
@@ -1578,11 +1585,7 @@ class PDOStatement implements IteratorAggregate
 
     private function unsupported(string $msg, string $fn): mixed
     {
-        $this->errState = 'IM001';
-        $this->errCode = 0;
-        $this->errHasCode = false;
-        $this->errMsg = '';
-        $this->errHasMsg = false;
+        $this->errState = 'IM001'; // php's pdo_raise_impl_error sets the state only; code and message stay
         __McPdo::raise($this->errmode() === PDO::ERRMODE_SILENT ? PDO::ERRMODE_WARNING : $this->errmode(), 'IM001', 0, false, $msg, true, $fn);
         return false;
     }
@@ -1727,8 +1730,7 @@ class PDOStatement implements IteratorAggregate
         }
         if ($base === PDO::FETCH_KEY_PAIR) {
             if ($n !== 2) {
-                throw new PDOException(
-                    'PDO::FETCH_KEY_PAIR needs a result set with exactly 2 columns', 0);
+                throw __McPdo::keyPairError();
             }
             return [$this->value(0), $this->value(1)];
         }
@@ -1791,8 +1793,7 @@ class PDOStatement implements IteratorAggregate
         if ($base === PDO::FETCH_NAMED) { return $this->rowNamed($n, $skip); }
         if ($base === PDO::FETCH_KEY_PAIR) {
             if ($n !== 2) {
-                throw new PDOException(
-                    'PDO::FETCH_KEY_PAIR needs a result set with exactly 2 columns', 0);
+                throw __McPdo::keyPairError();
             }
             return [$this->value(0), $this->value(1)];
         }
