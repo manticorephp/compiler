@@ -1494,6 +1494,18 @@ trait EmitLlvmCalls
             $this->locals->slots[$lname] = $slot;
             $callArgs[] = new LoadLocal($lname, $cellT);
         }
+        // The thunk's arguments are CELLS and no TypeCheck pass runs over its body, so
+        // a string parameter must be fed the way a direct call feeds it (TypeCheck
+        // wraps the cell in a string cast): an object or array otherwise reached the
+        // callee as a raw word read as string bytes.
+        $thunkPts = $this->sigs->paramTypes[$fname] ?? [];
+        foreach ($callArgs as $ci => $ca) {
+            $tp = $thunkPts[$ci] ?? null;
+            if ($tp === null || $tp->kind !== Type::KIND_STRING) { continue; }
+            $cast = new \Compile\Mir\Cast('string', $ca, Type::string_());
+            $cast->keepNull = true;
+            $callArgs[$ci] = $cast;
+        }
         if ($this->cellPackVariadic($fname)) {
             $vi = \count($this->sigs->paramTypes[$fname]) - 1;
             $elems = [];
