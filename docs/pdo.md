@@ -164,8 +164,7 @@ MULTI_STATEMENTS (on by default, as php), `ATTR_TIMEOUT`.
   `ATTR_DEFAULT_STR_PARAM = PARAM_STR_NATL` makes `quote()` and bound strings `N'..'`. Once connected, the connect-time
   options (`1004`, `1012`, `1002`, `1005`, `ATTR_PREFETCH`) answer `false` on `setAttribute()`, as php; `ATTR_PERSISTENT`
   is kept from the constructor and `false` afterwards; `ATTR_TIMEOUT` answers `false` yet takes effect (see Timeouts).
-- Refused loudly (php accepts them): `MYSQL_ATTR_USE_BUFFERED_QUERY=false` (`unbuffered queries are not supported yet`, at
-  connect and at `setAttribute`), `MYSQL_ATTR_COMPRESS=true` (`compression is not supported`). `exec()` of a statement that returns rows consumes the result (php leaves it pending and
+- Refused loudly (php accepts them): `MYSQL_ATTR_COMPRESS=true` (`compression is not supported`). `MYSQL_ATTR_USE_BUFFERED_QUERY=false` works (see Unbuffered cursors). `exec()` of a statement that returns rows consumes the result (php leaves it pending and
   fails the next command with 2014 / 'pending result sets').
 - A deadlock (1213) cannot be provoked by two connections inside one thread; the tests raise it with `SIGNAL`.
 - TLS: any of `MYSQL_ATTR_SSL_KEY` / `_CERT` / `_CA` / `_CAPATH` / `_CIPHER` turns it on (`MYSQL_ATTR_SSL_VERIFY_SERVER_CERT` alone does
@@ -297,6 +296,48 @@ The aliases raise no deprecation (the superset throws instead of warning).
   The wait between CopyDone and the server's answer (a slow commit or index build) is not bounded by the default timeout, as for any statement; a `copyToFile` keeps one handle for the whole transfer. Unopenable files are `HY000 Unable to open the file[ for writing]`.
 - The other direction smuggled through the table name (`'t TO STDOUT; --'` in `copyFromArray`) is `HY000` with an empty message; the session goes on.
 - Tests: `pgsql_notify`, `pgsql_copy` (byte parity with php), `pgsql_async_notify` (hand-written), hostile-server modes `notify_*`, `copy_out_cap`, `copy_in_err`.
+
+## Unbuffered cursors
+
+**mysql** (`MYSQL_ATTR_USE_BUFFERED_QUERY = false`, at connect or `setAttribute`; byte parity with php, both protocols, both servers).
+`query()` / `execute()` read the column definitions and stop; every `fetch()` reads one row packet off the socket, so memory stays flat
+whatever the result size (300 000 rows are tested). While the cursor is open the connection belongs to it:
+
+- another command on the handle (`exec`, `query`, `prepare` of a native statement, `beginTransaction`, ...) throws php's
+  `SQLSTATE[HY000]: General error: 2014 Cannot execute queries while other unbuffered queries are active.  Consider using ...` -- or, when the
+  server announced more results of a multi-statement query, `... while there are pending result sets ...`, with php's text. `quote()`,
+  `lastInsertId()` and `inTransaction()` need no round trip and keep working. `exec()` is always buffered.
+- the cursor ends when the last row (and the last `nextRowset()`) is fetched, on `closeCursor()`, when the statement is executed again, or when it
+  is destroyed. Closing early reads and discards the remaining rows (framing is checked, content is not decoded); a drain that outlasts
+  `ATTR_TIMEOUT` closes the connection instead, so a huge unread result costs at most that long and the handle is never reused with half a result on it.
+- an error after some rows (killed query, a function failing on row N) is raised by the `fetch()` that reaches it, with the rows before it
+  delivered; the connection stays usable (verified against php with a JSON error mid-result).
+- `rowCount()` of a streamed `SELECT` is `0` (mysqlnd), `columnCount()` is known at once.
+- Under a scheduler the owner of the cursor gets the 2014 error; another task waits behind it (bounded by `ATTR_TIMEOUT`) and runs when the
+  cursor ends. Cancelling a task parked inside a row read, or destroying its half-read cursor while it is being cancelled, closes the
+  connection (`KILL QUERY` is sent): the next use reports `2006`, never a stream with half a result on it.
+- Per-statement `prepare(..., [MYSQL_ATTR_USE_BUFFERED_QUERY => false])` is not read; the attribute is per connection.
+- Hostile servers: a row that overruns its packet, has trailing bytes or too few columns, a length beyond the packet, truncated streams, a
+  missing closing EOF, out-of-order sequence ids, a stall inside a row, a stream that never ends while closing (`us_*` modes of the hostile harness).
+
+**pgsql** (superset: php has no cursor attribute, so no oracle; tests are hand-written). `PDO::PGSQL_ATTR_FETCH_BATCH = <rows>` (`1300`;
+`0`, the default, buffers as before; negative or above 2^31-1 is a `ValueError`) executes the portal with a row limit. The server answers
+`PortalSuspended` after each batch and `fetch()` asks for the next one with another `Execute`; the `Sync` is sent only when the portal finishes
+(or fails), so memory holds one batch. Rows are identical to the buffered run for every batch size (1, 7, 999, 1000, 1001, 5000 against 1000 rows).
+
+- The open portal owns the protocol state, so the same rules apply: a second statement on the handle throws
+  `SQLSTATE[HY000]: General error: cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor()`,
+  another task waits. A `Close(S)` of a destroyed statement is deferred until the portal is gone (a `Sync` would destroy it).
+- `closeCursor()`, a re-`execute()` and destruction send `Close(portal)` + `Sync`: one round trip, whatever the result size; no rows are read.
+  Inside a transaction block the portal is closed explicitly and the transaction goes on.
+- An error in the first batch (syntax error, a failing row among the first N) is raised by `execute()`, as without batching; an error in a later batch is raised by
+  the `fetch()` that runs out of the rows preceding it. In a transaction the block is then aborted (`25P02`), as always.
+- `rowCount()` of a batched `SELECT` is the number of rows received so far (the total at the end); `columnCount()` is known at once.
+- Cancellation parked in a batch read, or while the cursor's `Close` is in flight, closes the connection (`CancelRequest` is sent): the next use reports a connection error.
+- Hostile servers: more rows than the limit, a non-empty `PortalSuspended`, a field length beyond its `DataRow` in a later batch, a closed
+  connection or a stall between batches, a `ReadyForQuery` where a batch was expected, a `Close` that is never answered (`fb_batch_*`).
+- Tests: `mysql_unbuffered` (php oracle), `mysql_unbuffered_big`, `mysql_unbuffered_cancel`, `mysql_unbuffered_fiber`, `pgsql_fetch_batch`, `pgsql_fetch_batch_async`,
+  hostile modes `us_*` and `fb_batch_*`.
 
 ## Limitations
 

@@ -55,6 +55,7 @@ foreach ([true, false] as $emu) {
     t('mid f2', fn() => $s->fetch(PDO::FETCH_NUM));
     t('mid f3', fn() => $s->fetch(PDO::FETCH_NUM));
     t('mid f4', fn() => $s->fetch(PDO::FETCH_NUM));
+    $s->closeCursor();
     t('after err', fn() => one($db, 'select 13'));
     // types survive streaming (text and binary rows)
     $s = $db->query("select 7 i, 1.5 d, 'x' s, null n, cast('2024-01-02 03:04:05' as datetime) dt, 18446744073709551615 u");

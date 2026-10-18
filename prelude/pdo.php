@@ -664,6 +664,8 @@ class PDO
      * exist there either.
      */
     public const PGSQL_ATTR_DISABLE_PREPARES = 1000;
+    /** Manticore superset (php has none): rows per portal Execute, 0 = buffered. */
+    public const PGSQL_ATTR_FETCH_BATCH = 1300;
     public const PGSQL_TRANSACTION_IDLE = 0;
     public const PGSQL_TRANSACTION_ACTIVE = 1;
     public const PGSQL_TRANSACTION_INTRANS = 2;

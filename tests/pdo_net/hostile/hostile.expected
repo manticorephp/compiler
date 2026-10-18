@@ -178,3 +178,36 @@ ssl_tls12: 08006 7 SSL error: tlsv1 alert protocol version
 This may indicate that the server does not support any SSL protocol version between TLSv1.3 and TLSv1.3.
 fast
 no fd leak
+fb_batch_ok: ok a,b,c
+fast
+no fd leak
+fb_batch_rows_over: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_suspended_body: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_more_over: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_overrun2: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_trunc: HY000 7 server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+fast
+no fd leak
+fb_batch_early_z: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_stall_mid: HY000 7 timeout expired
+fast
+no fd leak
+fb_batch_err_second: 22012 7 ERROR:  division by zero
+reuse: ok
+fast
+no fd leak
+fb_batch_close_slow: HY000 7 timeout expired
+fast
+no fd leak

@@ -53,6 +53,12 @@ final class __McPdoPgResult
     public bool $parsed = false;
     /** @var array<int,string> the CopyData rows of a COPY ... TO */
     public array $lines = [];
+    /** PGSQL_ATTR_FETCH_BATCH: the portal was executed with a row limit, so ->rows is only the current batch. */
+    public bool $batched = false;
+    /** The last Execute ended in PortalSuspended: the portal is open on the server and has more rows. */
+    public bool $suspended = false;
+    /** Rows received over all batches. */
+    public int $seen = 0;
 
     public function resetCols(): void
     {
@@ -95,6 +101,12 @@ final class __McPdoPgWire
     private bool $closed = false;
     /** One request/response cycle owns the wire; a second fiber on the same connection waits (see enter()). */
     private bool $busy = false;
+    /** A PGSQL_ATTR_FETCH_BATCH portal that is suspended on the server: the connection is held until it ends (see enter()). */
+    public ?__McPdoPgResult $openCursor = null;
+    private ?object $curFiber = null;
+    private int $curBatch = 0;
+    /** A cursorMore() is parked in a read: nobody else may touch the socket. */
+    private bool $reading = false;
     /** A request was sent (or owed answers are being read) and its ReadyForQuery has not arrived: the stream is mid-protocol. */
     private bool $inflight = false;
     private float $timeout = 30.0;
@@ -587,6 +599,7 @@ final class __McPdoPgWire
             $this->cancelRequest();
         }
         $this->dead = true;
+        $this->openCursor = null;
         // PQtransactionStatus() of a lost connection: PQTRANS_UNKNOWN, which php reads as "in a transaction"
         $this->status = 'U';
         $this->pid = 0;
@@ -888,13 +901,17 @@ final class __McPdoPgWire
      */
     private function enter(): void
     {
-        if ($this->busy) {
+        // an open batched portal owns the protocol state: its owner may not start another statement, another fiber waits
+        if ($this->openCursor !== null && !$this->dead && (!\Runtime\AsyncHook::active() || \Fiber::getCurrent() === $this->curFiber)) {
+            throw __McPdo::fail('HY000', 0, false, 'cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor()', true);
+        }
+        if ($this->busy || $this->openCursor !== null) {
             if (!\Runtime\AsyncHook::active()) { throw __McPdo::fail('HY000', 0, false, 'connection busy', true); }
             $sleeper = \Runtime\AsyncHook::sleeper();
             if ($sleeper === null) { throw __McPdo::fail('HY000', 0, false, 'connection busy', true); }
             // php: a timeout of 0 is unlimited
             $deadline = $this->timeout > 0.0 ? \__mc_monotonic_f() + $this->timeout : 0.0;
-            while ($this->busy && !$this->dead) {
+            while (($this->busy || $this->openCursor !== null) && !$this->dead) {
                 if ($deadline > 0.0 && \__mc_monotonic_f() >= $deadline) {
                     throw __McPdo::fail('HY000', 0, false, 'timeout expired waiting for the connection', true);
                 }
@@ -963,18 +980,18 @@ final class __McPdoPgWire
      * @param array<int,?string> $params
      * @param array<int,bool> $bin
      */
-    public function extended(string $name, string $sql, bool $parse, array $params, array $bin, __McPdoPgResult $res): void
+    public function extended(string $name, string $sql, bool $parse, array $params, array $bin, __McPdoPgResult $res, int $batch = 0): void
     {
         $np = \count($params);
         if ($np > 65535) { throw __McPdo::fail('HY000', 0, false, 'too many parameters', true); }
         $this->enter();
         try {
-            $this->extendedRun($name, $sql, $parse, $params, $bin, $res, $np);
+            $this->extendedRun($name, $sql, $parse, $params, $bin, $res, $np, $batch);
         } catch (\Throwable $t) {
             if ($this->inflight) { $this->closeSock(); }
             throw $t;
         } finally {
-            $this->inflight = false;
+            $this->inflight = $this->openCursor !== null;
             $this->busy = false;
         }
     }
@@ -983,7 +1000,7 @@ final class __McPdoPgWire
      * @param array<int,?string> $params
      * @param array<int,bool> $bin
      */
-    private function extendedRun(string $name, string $sql, bool $parse, array $params, array $bin, __McPdoPgResult $res, int $np): void
+    private function extendedRun(string $name, string $sql, bool $parse, array $params, array $bin, __McPdoPgResult $res, int $np, int $batch = 0): void
     {
         $nul = \strpos($sql, "\0");
         if ($nul !== false) { $sql = \substr($sql, 0, $nul); }
@@ -1008,16 +1025,28 @@ final class __McPdoPgWire
             $b .= $v === null ? "\xff\xff\xff\xff" : self::be32(\strlen($v)) . $v;
         }
         $m .= self::frame('B', $b . "\0\0");
-        $m .= self::frame('E', "\0\0\0\0\0");
-        $m .= self::frame('S', '');
+        // a batched portal runs with a row limit and no Sync: the server stops at PortalSuspended and waits (see cursorMore())
+        $m .= self::frame('E', "\0" . self::be32($batch));
+        $m .= self::frame($batch > 0 ? 'H' : 'S', '');
         $this->sendRaw($m);
         $this->awaiting = true;
+        $res->batched = $batch > 0;
+        $synced = $batch === 0;
 
         $copy = 0;
         while (true) {
             [$t, $b] = $this->msg();
             if ($t === 'D') {
+                if ($batch > 0 && \count($res->rows) >= $batch) { throw $this->truncated(); }
                 $res->rows[] = $this->dataRow($b, \count($res->cols));
+                $res->seen++;
+            } elseif ($t === 's') {
+                if ($b !== '' || $batch === 0) { throw $this->truncated(); }
+                $res->suspended = true;
+                $this->openCursor = $res;
+                $this->curBatch = $batch;
+                $this->curFiber = \Runtime\AsyncHook::active() ? \Fiber::getCurrent() : null;
+                return;
             } elseif ($t === '1') {
                 if ($b !== '') { throw $this->truncated(); }
                 $res->parsed = true;
@@ -1033,14 +1062,17 @@ final class __McPdoPgWire
                 $res->resetCols();
             } elseif ($t === 'C') {
                 $this->cmdTag($b, $res);
+                if (!$synced) { $synced = true; $this->sendRaw(self::frame('S', '')); }
             } elseif ($t === 'E') {
                 if ($res->err === null) { $res->err = $this->parseErr($b, $sql); $this->pendErr = $res->err->text; }
+                if (!$synced) { $synced = true; $this->sendRaw(self::frame('S', '')); }
             } elseif ($t === 'S') {
                 $this->paramStatus($b);
             } elseif ($t === 'G') {
                 // ⚠ the Sync already sent with this batch is IGNORED while the server is in copy-in mode (measured:
                 // CopyFail alone leaves us waiting for a ReadyForQuery until the socket timeout), so send a second one
                 $copy = 4;
+                $synced = true;
                 $this->sendRaw(self::frame('f', "COPY is not supported\0") . self::frame('S', ''));
             } elseif ($t === 'H') {
                 $copy = 3;
@@ -1057,13 +1089,116 @@ final class __McPdoPgWire
     }
 
     /**
+     * The next batch of the suspended portal $res: Execute with the same row limit, Flush. ->rows is REPLACED (memory stays
+     * one batch), the closing CommandComplete / ErrorResponse is followed by a Sync and the connection is free again at its
+     * ReadyForQuery. A server error lands in ->err for step() to raise after the rows that preceded it. Any protocol failure,
+     * cancellation or timeout poisons the connection: the portal is half-read and nobody may reuse it.
+     */
+    public function cursorMore(__McPdoPgResult $res): void
+    {
+        if (!$res->suspended || $this->openCursor !== $res) { return; }
+        if ($this->dead) {
+            $res->suspended = false;
+            $this->openCursor = null;
+            return;
+        }
+        $this->reading = true;
+        try {
+            $res->rows = [];
+            $res->suspended = false;
+            $this->sendRaw(self::frame('E', "\0" . self::be32($this->curBatch)) . self::frame('H', ''));
+            $this->awaiting = true;
+            $synced = false;
+            $n = 0;
+            while (true) {
+                [$t, $b] = $this->msg();
+                if ($t === 'D') {
+                    if ($n >= $this->curBatch) { throw $this->truncated(); }
+                    $res->rows[] = $this->dataRow($b, \count($res->cols));
+                    $res->seen++;
+                    $n++;
+                } elseif ($t === 's') {
+                    if ($b !== '' || $synced) { throw $this->truncated(); }
+                    $res->suspended = true;
+                    return;
+                } elseif ($t === 'C') {
+                    $this->cmdTag($b, $res);
+                    if (!$synced) { $synced = true; $this->sendRaw(self::frame('S', '')); }
+                } elseif ($t === 'E') {
+                    if ($res->err === null) { $res->err = $this->parseErr($b, ''); $this->pendErr = $res->err->text; }
+                    if (!$synced) { $synced = true; $this->sendRaw(self::frame('S', '')); }
+                } elseif ($t === 'S') {
+                    $this->paramStatus($b);
+                } elseif ($t === 'Z') {
+                    if (\strlen($b) < 1 || !$synced) { throw $this->truncated(); }
+                    $this->status = $b[0];
+                    $this->inflight = false;
+                    $this->pendErr = '';
+                    $this->openCursor = null;
+                    return;
+                }
+            }
+        } catch (\Throwable $e) {
+            $this->openCursor = null;
+            $this->closeSock();
+            throw $e;
+        } finally {
+            $this->reading = false;
+        }
+    }
+
+    /**
+     * Ends the suspended portal $res without reading its rows: Close(portal) + Sync. The server drops what it has not sent,
+     * so closing costs one round trip however big the result is.
+     */
+    public function cursorClose(__McPdoPgResult $res): void
+    {
+        if ($this->openCursor !== $res) { return; }
+        $res->suspended = false;
+        if ($this->dead) {
+            $this->openCursor = null;
+            return;
+        }
+        if ($this->reading) {
+            // another fiber is parked inside a read of this very portal: two readers would shred the stream
+            $this->closeSock();
+            return;
+        }
+        $this->busy = true;
+        try {
+            $this->sendRaw(self::frame('C', "P\0") . self::frame('S', ''));
+            $this->awaiting = true;
+            while (true) {
+                [$t, $b] = $this->msg();
+                if ($t === 'S') {
+                    $this->paramStatus($b);
+                } elseif ($t === 'Z') {
+                    if (\strlen($b) < 1) { throw $this->truncated(); }
+                    $this->status = $b[0];
+                    break;
+                }
+            }
+            $this->inflight = false;
+            $this->pendErr = '';
+            $this->openCursor = null;
+        } catch (\Throwable $e) {
+            $this->openCursor = null;
+            $this->closeSock();
+            throw $e;
+        } finally {
+            $this->busy = false;
+        }
+    }
+
+    /**
      * Close(S) + Sync, fire and forget: a statement going out of scope must not
      * wait on the network. The ReadyForQuery is read before the next request.
      */
     public function closeStmt(string $name): void
     {
         if ($this->dead) { return; }
-        if ($this->busy) { $this->deferred[] = $name; return; }
+        // a Sync written into a suspended portal would destroy it: the close waits for the next request
+        if ($this->busy || $this->openCursor !== null) { $this->deferred[] = $name; return; }
         $this->busy = true;
         try {
             $this->sendRaw(self::frame('C', 'S' . $name . "\0") . self::frame('S', ''));
@@ -1197,6 +1332,8 @@ final class __McPdoPg implements __McPdoDrv
     private int $stmtN = 0;
     /** PGSQL_ATTR_DISABLE_PREPARES: every execute() is one unnamed Parse/Bind/Execute, nothing stays server-side. */
     public bool $disablePrepares = false;
+    /** PGSQL_ATTR_FETCH_BATCH (superset): rows per Execute; 0 = the whole result is buffered. */
+    public int $fetchBatch = 0;
     /** ATTR_EMULATE_PREPARES is stored for getAttribute() and otherwise ignored: statements are always server-side. */
     private bool $emulate = false;
     /** @var array<int,string> pg_type.typname by OID, as php's getColumnMeta() looks it up */
@@ -1373,6 +1510,12 @@ final class __McPdoPg implements __McPdoDrv
             return false;
         }
         if ($attr === PDO::PGSQL_ATTR_DISABLE_PREPARES) { $this->disablePrepares = (bool) $value; return true; }
+        if ($attr === PDO::PGSQL_ATTR_FETCH_BATCH) {
+            $n = (int) $value;
+            if ($n < 0 || $n > 2147483647) { throw new \ValueError('PDO::PGSQL_ATTR_FETCH_BATCH must be between 0 and 2147483647'); }
+            $this->fetchBatch = $n;
+            return true;
+        }
         if ($attr === PDO::ATTR_EMULATE_PREPARES) { $this->emulate = (bool) $value; return true; }
         if ($attr === PDO::ATTR_PREFETCH) { return true; }
         return false;
@@ -1392,6 +1535,7 @@ final class __McPdoPg implements __McPdoDrv
                 . '; Session Authorization: ' . $w->sessAuth . '; Date Style: ' . $w->dateStyle;
         }
         if ($attr === PDO::PGSQL_ATTR_DISABLE_PREPARES) { return $this->disablePrepares; }
+        if ($attr === PDO::PGSQL_ATTR_FETCH_BATCH) { return $this->fetchBatch; }
         if ($attr === PDO::ATTR_EMULATE_PREPARES) { return $this->emulate; }
         return null;
     }
@@ -1501,6 +1645,7 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
         $this->bin = [];
         $this->maxBound = 0;
 
+        $this->endCursor();
         $r = new __McPdoPgResult();
         $prev = $this->res;
         if ($this->prepared && !$this->unnamed && $prev !== null) {
@@ -1511,7 +1656,7 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
             $r->mods = $prev->mods;
         }
         try {
-            $this->db->wire->extended($this->name, $this->sql, !$this->prepared || $this->unnamed, $params, $bin, $r);
+            $this->db->wire->extended($this->name, $this->sql, !$this->prepared || $this->unnamed, $params, $bin, $r, $this->db->fetchBatch);
         } catch (\Throwable $t) {
             // no stale rows of the previous run behind a failed one
             $this->res = null;
@@ -1522,16 +1667,39 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
         $this->res = $r;
         $this->idx = -1;
         if ($r->err !== null) {
-            throw __McPdo::fail($r->err->code, 7, true, $r->err->text, true);
+            $e = $r->err;
+            $r->err = null;
+            throw __McPdo::fail($e->code, 7, true, $e->text, true);
         }
+    }
+
+    /** The connection's open portal is this statement's result. */
+    private function endCursor(): void
+    {
+        $r = $this->res;
+        if ($r !== null && $r->suspended && $this->db->wire->openCursor === $r) { $this->db->wire->cursorClose($r); }
     }
 
     public function step(): bool
     {
-        if ($this->res === null) { return false; }
-        if ($this->idx + 1 >= \count($this->res->rows)) { return false; }
-        $this->idx++;
-        return true;
+        $r = $this->res;
+        if ($r === null) { return false; }
+        while (true) {
+            if ($this->idx + 1 < \count($r->rows)) {
+                $this->idx++;
+                return true;
+            }
+            if (!$r->suspended) { break; }
+            $this->db->wire->cursorMore($r);
+            $this->idx = -1;
+        }
+        // an error of a later batch comes after the rows that preceded it; the first batch's was raised by execute()
+        if ($r->err !== null) {
+            $e = $r->err;
+            $r->err = null;
+            throw __McPdo::fail($e->code, 7, true, $e->text, true);
+        }
+        return false;
     }
 
     public function columnCount(): int { return $this->res === null ? 0 : \count($this->res->cols); }
@@ -1645,15 +1813,26 @@ final class __McPdoPgStmt implements __McPdoDrvStmt
         return $out;
     }
 
-    public function rowCount(): int { return $this->res === null ? 0 : $this->res->affected; }
+    /** A batched SELECT reports the rows received so far (the total once the portal ended). */
+    public function rowCount(): int
+    {
+        if ($this->res === null) { return 0; }
+        return $this->res->batched && \count($this->res->cols) > 0 ? $this->res->seen : $this->res->affected;
+    }
 
     public function closeCursor(): void
     {
+        $this->endCursor();
         if ($this->res !== null) { $this->idx = \count($this->res->rows); }
     }
 
     public function close(): void
     {
+        try {
+            $this->endCursor();
+        } catch (PDOException $e) {
+            // the connection is gone: the portal went with it
+        }
         if ($this->prepared && !$this->unnamed) {
             $this->prepared = false;
             try { $this->db->wire->closeStmt($this->name); } catch (PDOException $e) {}

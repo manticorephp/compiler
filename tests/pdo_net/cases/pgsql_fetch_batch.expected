@@ -1,0 +1,52 @@
+attr: [0,1000]
+negative: ValueError PDO::PGSQL_ATTR_FETCH_BATCH must be between 0 and 2147483647 0
+attr kept: 1000
+batch 1: 1000 rows, identical
+batch 7: 1000 rows, identical
+batch 999: 1000 rows, identical
+batch 1000: 1000 rows, identical
+batch 1001: 1000 rows, identical
+batch 5000: 1000 rows, identical
+exact multiple: 30
+empty result: [false,0,1]
+fetchAll: [2500,3126250]
+foreach: [1,2,3,4,5,6,7,8]
+columnCount: 2
+rowCount before: 4
+rowCount in batch 2: 8
+rowCount at end: 10
+dml rowCount: [25,0,25]
+exec while open: PDOException SQLSTATE[HY000]: General error: cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor() ["HY000",null,"cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor()"]
+query while open: PDOException SQLSTATE[HY000]: General error: cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor() ["HY000",null,"cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor()"]
+prepare+execute while open: PDOException SQLSTATE[HY000]: General error: cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor() ["HY000",null,"cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor()"]
+begin while open: PDOException SQLSTATE[HY000]: General error: cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor() ["HY000",null,"cannot run another statement while a PGSQL_ATTR_FETCH_BATCH cursor is open: fetch it to the end or call closeCursor()"]
+quote: "'a''b'"
+fetch 1: [1]
+fetch rest: 9
+usable after end: 4
+closeCursor: true
+fetch after closeCursor: false
+reuse after closeCursor: 5
+reuse after destruct: 6
+re-execute: [1,2,3,4,5,6]
+after re-execute: 7
+close stmt while open: 19
+after deferred close: 8
+txn stream: [12,false]
+txn close early: true
+mid f1: [-5]
+mid f2: [-10]
+mid f3: PDOException SQLSTATE[22012]: Division by zero: 7 ERROR:  division by zero ["22012",7,"ERROR:  division by zero"]
+mid f4: false
+after mid error: 11
+first batch error: PDOException SQLSTATE[22012]: Division by zero: 7 ERROR:  division by zero ["22012",7,"ERROR:  division by zero"]
+syntax error: PDOException SQLSTATE[42601]: Syntax error: 7 ERROR:  syntax error at or near "selec"
+LINE 1: selec 1
+        ^ ["42601",7,"ERROR:  syntax error at or near \"selec\"\nLINE 1: selec 1\n        ^"]
+  error 22012
+  aborted 25P02
+txn error: 12
+rows=300000 sum=45000150000 len=19200000
+batched: flat
+buffered rows=300000 grew
+close big: 13

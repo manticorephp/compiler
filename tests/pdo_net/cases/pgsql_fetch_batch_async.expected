@@ -1,0 +1,10 @@
+A mid-read: PDOException HY000
+A active: 0
+B holding: PDOException HY000
+C task: done
+C finished: usable
+b asks
+a open
+a second query refused
+a done
+b got 7
