@@ -1,6 +1,5 @@
 <?php
 // An array<string, mixed> built from json_decode() compares unequal (== and ===) to the same literal array when a value is itself an array
-// issue: #366
 /** @return array<string, mixed> */
 function g(string $s): array
 {
