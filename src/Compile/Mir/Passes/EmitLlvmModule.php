@@ -999,6 +999,7 @@ trait EmitLlvmModule
         // loads/stores deref it.
         $this->locals->refLocals = [];
         $this->locals->ownedBoxes = [];
+        $this->locals->byRefParamWb = [];
         $this->locals->refParamTypes = [];
         $this->locals->refParamRetyped = [];
         $this->locals->captureRefs = [];
@@ -1228,9 +1229,21 @@ trait EmitLlvmModule
         $this->locals->collectUnsetNames($fn->body);
         $this->locals->byRefCaptured = [];
         $this->locals->collectByRefCaptured($fn->body);
+        $refCellNames = [];
+        if ($this->locals->byRefCaptured !== [] && !$this->frame->returnsByRef) {
+            $this->locals->refCellTargets = [];
+            $this->locals->collectRefCellTargets($fn->body);
+            $refCellNames = LocalSlots::closeRefCellsOverAliases($fn->body, $this->locals->refCellTargets);
+        }
         foreach ($this->locals->byRefCaptured as $bname => $_) {
             if (!isset($this->locals->slots[$bname])) { continue; }
-            if (isset($this->locals->refLocals[$bname])) { continue; }
+            if (isset($this->locals->refLocals[$bname])) {
+                if (isset($paramNames[$bname]) && !$this->frame->returnsByRef && !isset($refCellNames[$bname])
+                    && !isset($this->locals->captureRefs[$bname]) && !isset($this->locals->aliasLocals[$bname])) {
+                    $bodySink->write($this->boxCapturedByRefParamIr($bname));
+                }
+                continue;
+            }
             if (isset($paramNames[$bname])) {
                 $bodySink->write($this->boxByRefCapturedParamIr($fn, $bname));
                 continue;
@@ -1250,6 +1263,7 @@ trait EmitLlvmModule
         }
         $bodySink->write($this->emitRefCellBoxes($fn->body, $paramNames, $paramTypes));
         $bodySink->write($this->emitElemRefBoxSlots($fn->body));
+        $this->ehFrameBoxesReady();
         // Stamp the correct backtrace frame name for a method now that the
         // callee identity is exact ($fn->name is stable — it drives the define
         // header). The caller pushed a bare method-name placeholder because a
@@ -1581,7 +1595,7 @@ trait EmitLlvmModule
     private function emitOwnedBoxReleases(array $exempt): string
     {
         if ($this->gen->inGenerator || $this->frame->returnsByRef) { return ''; }
-        $out = '';
+        $out = $this->byRefParamWriteBackIr();
         foreach ($this->locals->ownedBoxes as $name => $_) {
             $out .= $this->ownedBoxReleaseIr($name, isset($exempt[$name]));
         }
@@ -1643,6 +1657,102 @@ trait EmitLlvmModule
         $out .= '  call void @__mir_ref_free(ptr ' . $bp . ")\n";
         $out .= '  br label %' . $doneL . "\n";
         $out .= $doneL . ":\n";
+        return $out;
+    }
+
+    /**
+     * A by-ref PARAMETER a closure captures by reference (`function f(int &$n) {
+     * $cb = function () use (&$n) {…}; }`). The capture packs the parameter's
+     * address, and the caller's storage behind it — a scratch slot, an element,
+     * a property — need not outlive the call, while the closure may. Unless that
+     * storage already is a reference box (then the frame takes a count on it and
+     * shares it), the value moves into a box of the frame's own for the call:
+     * the body and every capture read and write the box, and each exit — the
+     * unwind included — writes its value back to the caller's address
+     * ({@see byRefParamWriteBackIr}). A closure that outlives the call keeps the
+     * box; the caller's later writes are not seen by it.
+     */
+    private function boxCapturedByRefParamIr(string $name): string
+    {
+        $flavor = $this->ownedBoxFlavor($name);
+        $slot = $this->locals->slots[$name];
+        $own = $this->ssa->allocReg();
+        $wa = $this->ssa->allocReg();
+        $wb = $this->ssa->allocReg();
+        $out = '  ' . $own . " = alloca ptr\n  " . $wa . " = alloca ptr\n  " . $wb . " = alloca ptr\n";
+        $pi = $this->ssa->allocReg();
+        $out .= '  ' . $pi . ' = load i64, ptr ' . $slot . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $pi . " to ptr\n";
+        $isb = $this->ssa->allocReg();
+        $out .= '  ' . $isb . ' = call i1 @__mir_ref_is_box(ptr ' . $p . ")\n";
+        $shL = $this->ssa->allocLabel('bprm.share');
+        $cpL = $this->ssa->allocLabel('bprm.copy');
+        $jL = $this->ssa->allocLabel('bprm.join');
+        $out .= '  br i1 ' . $isb . ', label %' . $shL . ', label %' . $cpL . "\n";
+        $out .= $shL . ":\n";
+        $out .= '  call void @__mir_ref_retain(ptr ' . $p . ")\n";
+        $out .= '  store ptr ' . $p . ', ptr ' . $own . "\n";
+        $out .= '  store ptr null, ptr ' . $wa . "\n  store ptr null, ptr " . $wb . "\n";
+        $out .= '  br label %' . $jL . "\n";
+        $out .= $cpL . ":\n";
+        $v = $this->ssa->allocReg();
+        $out .= '  ' . $v . ' = load i64, ptr ' . $p . "\n";
+        if ($flavor !== '') { $out .= $this->rcRetainReg($v, $flavor); }
+        $bx = $this->ssa->allocReg();
+        $out .= '  ' . $bx . ' = call ptr @__mir_ref_new(i64 ' . $v . ")\n";
+        // One count for the frame's box ({@see ownedBoxReleaseIr}), one the write-back gives back.
+        $out .= '  call void @__mir_ref_retain(ptr ' . $bx . ")\n";
+        $out .= '  store ptr ' . $bx . ', ptr ' . $own . "\n";
+        $out .= '  store ptr ' . $p . ', ptr ' . $wa . "\n  store ptr " . $bx . ', ptr ' . $wb . "\n";
+        $bi = $this->ssa->allocReg();
+        $out .= '  ' . $bi . ' = ptrtoint ptr ' . $bx . " to i64\n";
+        $out .= '  store i64 ' . $bi . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $jL . "\n";
+        $out .= $jL . ":\n";
+        $this->locals->ownedBoxes[$name] = $own;
+        $this->locals->byRefParamWb[$name] = [$wa, $wb];
+        $this->rt->needsRefCells = true;
+        return $out;
+    }
+
+    /** Each {@see boxCapturedByRefParamIr} box's value written back to the caller's address, and its count given back. */
+    private function byRefParamWriteBackIr(): string
+    {
+        $out = '';
+        foreach ($this->locals->byRefParamWb as $name => $pair) {
+            $flavor = $this->ownedBoxFlavor($name);
+            $a = $this->ssa->allocReg();
+            $out .= '  ' . $a . ' = load ptr, ptr ' . $pair[0] . "\n";
+            $nn = $this->ssa->allocReg();
+            $out .= '  ' . $nn . ' = icmp eq ptr ' . $a . ", null\n";
+            $doL = $this->ssa->allocLabel('bprm.wb');
+            $dnL = $this->ssa->allocLabel('bprm.wbdone');
+            $out .= '  br i1 ' . $nn . ', label %' . $dnL . ', label %' . $doL . "\n";
+            $out .= $doL . ":\n";
+            $b = $this->ssa->allocReg();
+            $out .= '  ' . $b . ' = load ptr, ptr ' . $pair[1] . "\n";
+            $nv = $this->ssa->allocReg();
+            $out .= '  ' . $nv . ' = load i64, ptr ' . $b . "\n";
+            $ov = $this->ssa->allocReg();
+            $out .= '  ' . $ov . ' = load i64, ptr ' . $a . "\n";
+            if ($flavor !== '') { $out .= $this->rcRetainReg($nv, $flavor); }
+            $out .= '  store i64 ' . $nv . ', ptr ' . $a . "\n";
+            if ($flavor !== '') { $out .= $this->rcReleaseReg($ov, $flavor); }
+            $last = $this->ssa->allocReg();
+            $out .= '  ' . $last . ' = call i1 @__mir_ref_unref(ptr ' . $b . ")\n";
+            $drL = $this->ssa->allocLabel('bprm.drop');
+            $out .= '  br i1 ' . $last . ', label %' . $drL . ', label %' . $dnL . "\n";
+            $out .= $drL . ":\n";
+            if ($flavor !== '') {
+                $lv = $this->ssa->allocReg();
+                $out .= '  ' . $lv . ' = load i64, ptr ' . $b . "\n";
+                $out .= $this->rcReleaseReg($lv, $flavor);
+            }
+            $out .= '  call void @__mir_ref_free(ptr ' . $b . ")\n";
+            $out .= '  br label %' . $dnL . "\n";
+            $out .= $dnL . ":\n";
+        }
         return $out;
     }
 

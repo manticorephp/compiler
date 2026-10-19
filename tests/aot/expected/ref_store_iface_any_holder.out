@@ -1,0 +1,33 @@
+42
+42
+str
+string(1) "x"
+float(1.5)
+array(4) {
+  [0]=>
+  int(50)
+  [1]=>
+  string(5) "later"
+  [2]=>
+  array(1) {
+    [0]=>
+    int(1)
+  }
+  [3]=>
+  array(1) {
+    [0]=>
+    int(0)
+  }
+}
+7
+2.5
+array(1) {
+  [0]=>
+  float(3.5)
+}
+p
+p
+array(1) {
+  [0]=>
+  string(1) "q"
+}

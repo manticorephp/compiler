@@ -1,0 +1,10 @@
+w2 waiting=0 idle=1 busy=0
+w1 cancelled
+w2 busy=0 idle=1
+timeout waiting=1
+long busy=0
+cancelled body: idle=0 busy=0 discarded=1
+fresh after discard id=2
+scope timeout waiting=0
+churn: busy=0 waiting=0 idle<=3=yes created<=3=yes
+pooled

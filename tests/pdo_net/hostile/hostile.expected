@@ -1,0 +1,225 @@
+huge: 08006 7 invalid message length
+fast
+no fd leak
+short: 08006 7 invalid message length
+fast
+no fd leak
+authok_after_sasl: 08006 7 SCRAM exchange incomplete: server did not prove its identity
+fast
+no fd leak
+sasl_final_unsolicited: 08006 7 unexpected SCRAM message
+fast
+no fd leak
+truncated_datarow: HY000 7 protocol error: truncated message
+fast
+no fd leak
+truncated_rowdesc: HY000 7 protocol error: truncated message
+fast
+no fd leak
+copy_in: HY000 4 
+fast
+no fd leak
+paramdesc_truncated: HY000 7 protocol error: truncated message
+fast
+no fd leak
+paramdesc_mismatch: 08P01 7 ERROR:  bind message supplies 1 parameters, but prepared statement "pdo_stmt_00000001" requires 2
+reuse: ok
+fast
+no fd leak
+datarow_overrun: HY000 7 protocol error: truncated message
+fast
+no fd leak
+ext_copy_in: HY000 4 
+reuse: ok
+fast
+no fd leak
+ext_copy_out: HY000 3 
+reuse: ok
+fast
+no fd leak
+notify_trunc: HY000 7 protocol error: truncated message
+fast
+no fd leak
+notify_unterminated: HY000 7 protocol error: truncated message
+fast
+no fd leak
+notify_over_cap: HY000 7 invalid message length
+fast
+no fd leak
+notify_flood: ok 100000
+fast
+no fd leak
+notify_bytes: ok 7
+fast
+no fd leak
+notify_big_d: HY000 7 invalid message length
+fast
+no fd leak
+copy_out_cap: HY000 7 invalid message length
+fast
+no fd leak
+copy_d_outside: HY000 7 protocol error: truncated message
+fast
+no fd leak
+copy_in_err: 22P02 7 ERROR:  invalid input syntax for type integer: "zz"
+reuse: ok
+fast
+no fd leak
+copy_slow_commit: ok
+fast
+no fd leak
+big_slow: ok 8000000 longer than 2 x timeout
+fast
+no fd leak
+oid_miss: "" "seen2"
+fast
+no fd leak
+over_cap: 08006 7 invalid message length
+fast
+no fd leak
+drip: 08006 7 timeout expired
+fast
+no fd leak
+ignore_flood: 08006 7 protocol error: too many startup messages
+fast
+no fd leak
+oid_flood: bounded
+fast
+no fd leak
+bytea_odd: HY000 - invalid bytea value from server
+reuse: ok
+fast
+no fd leak
+bytea_nonhex: HY000 - invalid bytea value from server
+reuse: ok
+fast
+no fd leak
+bytea_escape: ok 6100625c63
+fast
+no fd leak
+bytea_escape_bad: HY000 - invalid bytea value from server
+reuse: ok
+fast
+no fd leak
+int_garbage: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+int_max: ok 9223372036854775807
+fast
+no fd leak
+int_min: ok -9223372036854775808
+fast
+no fd leak
+int_overflow: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+int_underflow: HY000 - invalid integer value from server
+reuse: ok
+fast
+no fd leak
+float_lead: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_trail: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_minus: HY000 - invalid float value from server
+reuse: ok
+fast
+no fd leak
+float_plus: ok 5
+fast
+no fd leak
+idle_slow: ok waited
+fast
+no fd leak
+idle_between: ok waited
+fast
+no fd leak
+idle_explicit: HY000 7 timeout expired
+fast
+no fd leak
+stall_mid: HY000 7 timeout expired
+fast
+no fd leak
+ssl_n: 08006 7 server does not support SSL, but SSL was required
+fast
+no fd leak
+ssl_e: 08006 7 server sent an error response during SSL exchange
+fast
+no fd leak
+ssl_byte: 08006 7 received invalid response to SSL negotiation: X
+fast
+no fd leak
+ssl_eof: 08006 7 server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+fast
+no fd leak
+ssl_extra: 08006 7 received unencrypted data after SSL response
+fast
+no fd leak
+ssl_late: 08006 7 SSL error: wrong version number
+This may indicate that the server does not support any SSL protocol version between TLSv1.2 and TLSv1.3.
+fast
+no fd leak
+ssl_garbage: 08006 7 SSL error: wrong version number
+This may indicate that the server does not support any SSL protocol version between TLSv1.2 and TLSv1.3.
+fast
+no fd leak
+ssl_silent: 08006 7 timeout expired
+fast
+no fd leak
+ssl_close: 08006 7 server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+SSL SYSCALL error: EOF detected
+fast
+no fd leak
+ssl_drip: 08006 7 timeout expired
+fast
+no fd leak
+ssl_tls12: 08006 7 SSL error: tlsv1 alert protocol version
+This may indicate that the server does not support any SSL protocol version between TLSv1.3 and TLSv1.3.
+fast
+no fd leak
+fb_batch_ok: ok a,b,c
+fast
+no fd leak
+fb_batch_rows_over: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_suspended_body: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_more_over: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_overrun2: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_trunc: HY000 7 server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+fast
+no fd leak
+fb_batch_early_z: HY000 7 protocol error: truncated message
+fast
+no fd leak
+fb_batch_stall_mid: HY000 7 timeout expired
+fast
+no fd leak
+fb_batch_err_second: 22012 7 ERROR:  division by zero
+reuse: ok
+fast
+no fd leak
+fb_batch_close_slow: HY000 7 timeout expired
+fast
+no fd leak
+fb_batch_close_idle_default: HY000 7 timeout expired
+fast
+no fd leak

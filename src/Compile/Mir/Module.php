@@ -166,6 +166,12 @@ final class Module
      *  RuntimeFeatures::$needsCellKey}) is answered too late for that. */
     public bool $hasRefCells = false;
 
+    /** Property names some call hands BY REF to a parameter its callee keeps a
+     *  reference to ({@see Passes\VivifyRefArgs}): promoted like a `[&$o->p]`
+     *  target, so the reference shares the property's box rather than a copy.
+     *  @var array<string, bool> */
+    public array $refStoredPropNames = [];
+
     /** The error/shutdown prelude is compiled in, so main() registers the
      *  atexit trampoline that drains register_shutdown_function's queue and the
      *  uncaught path offers the Throwable to a set_exception_handler() first.

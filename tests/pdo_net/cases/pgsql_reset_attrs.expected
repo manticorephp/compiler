@@ -1,0 +1,11 @@
+start: 2 2 0 false 3 false
+changed: 0 3 1 true 0 true
+errState before: 42703
+reset: 2 2 0 false 3 false
+errState after: 00000
+notify queue: false
+row: {"a":1}
+throws again
+foreign reset refused
+owner still reads: 2
+owner reset ok

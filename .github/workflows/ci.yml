@@ -298,6 +298,81 @@ jobs:
           path: ci-logs/
           if-no-files-found: warn
 
+  # PDO network drivers (pgsql, mysql, mariadb) against live servers, graded
+  # against php's own pdo_pgsql / pdo_mysql. The servers run on the runner via
+  # tests/pdo_net/up.sh; the toolchain container shares its network (host) and
+  # gate.sh stops after the build when MC_PDO_NET is set. Reads the compiler
+  # cache of the `linux` rows and never writes it.
+  pdo-net:
+    name: pdo-net-${{ matrix.tag }}-${{ matrix.server }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [arm64, amd64]
+        server: [mysql, mariadb]
+        include:
+          - tag: arm64
+            runner: ubuntu-24.04-arm
+          - tag: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: toolchain
+          tags: manticore-toolchain:${{ matrix.tag }}
+          load: true
+          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
+
+      - name: Restore the compiler cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-cache
+          key: mc-compiler-${{ matrix.tag }}-${{ hashFiles('Dockerfile') }}-${{ github.run_id }}
+          restore-keys: |
+            mc-compiler-${{ matrix.tag }}-${{ hashFiles('Dockerfile') }}-
+
+      # postgres 16, mysql 8.4 (plain, TLS, native-password, isolated) and mariadb 11,
+      # with the throwaway TLS certificates; then the CA mysql made for itself.
+      - name: Start the database servers
+        run: |
+          bash tests/pdo_net/up.sh
+          mkdir -p ci-pdo && docker cp mc-my:/var/lib/mysql/ca.pem ci-pdo/my_ca.pem && chmod -R a+rX ci-pdo tests/pdo_net/.certs
+
+      - name: Build + pdo_net
+        run: |
+          mkdir -p ci-logs ci-cache && chmod -R 777 ci-logs ci-cache
+          docker run --rm --network host \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/ci-logs":/logs \
+            -v "$PWD/ci-cache":/compiler-cache \
+            -v "$PWD/ci-pdo":/pdo-net:ro \
+            -e MC_GATE=0 \
+            -e MC_LOGDIR=/logs \
+            -e MC_COMPILER_CACHE=/compiler-cache \
+            -e MC_PDO_NET=${{ matrix.server }} \
+            -e MC_PDO_NET_ARGS="${{ matrix.server == 'mariadb' && '--no-pgsql' || '' }}" \
+            -e PDO_MY_SSL_CA=/pdo-net/my_ca.pem \
+            manticore-toolchain:${{ matrix.tag }} \
+            /bin/bash /repo/tools/docker/gate.sh
+
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-pdo-net-${{ matrix.tag }}-${{ matrix.server }}
+          path: ci-logs/
+          if-no-files-found: warn
+
   # The bootstrap rule, checked on every push: this tree must build from the
   # PINNED release alone — no cache, no published `main`, no Zend. A merge that
   # uses a feature newer than BOOTSTRAP_VERSION goes red HERE, while every other

@@ -1,0 +1,10 @@
+buffered true: connected
+buffered false: connected
+compress: SQLSTATE[HY000] [2000] compression is not supported 2000
+compress off: connected
+local infile: SQLSTATE[HY000] [2000] LOCAL INFILE is not supported 2000
+bool(true)
+bool(true)
+bool(true)
+string(5) "00000"
+bool(false)

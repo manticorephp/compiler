@@ -2851,9 +2851,18 @@ trait InferNodes
                 // runtime object is a `ClassStmt`). Borrow the type
                 // from a subclass that declares it; EmitLlvm resolves
                 // the matching layout offset the same way.
-                $sub = $this->subclassPropType($objType->class, $node->property);
-                if ($sub !== null) { $node->type = $sub; }
+                // No subclass declares it: EmitLlvm reads it by class_id
+                // (emitRawPropByClassId), which answers a tagged cell — a
+                // bag value, another holder's boxed slot, or null.
+                $node->type = $this->subclassPropType($objType->class, $node->property)
+                    ?? Type::cell();
             }
+        } elseif ($objType->kind === Type::KIND_OBJ && $objType->class !== null
+            && $node->type->kind === Type::KIND_UNKNOWN) {
+            // An interface receiver (`Throwable $e`): no layout of its own, the
+            // same class_id read as an undeclared property on a class.
+            $node->type = $this->subclassPropType($objType->class, $node->property)
+                ?? Type::cell();
         }
         return $node->type;
     }

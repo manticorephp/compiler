@@ -1001,22 +1001,19 @@ trait InferScans
                 // sites hand it `[$definition]`, and that single parameter
                 // stopped the whole tier-3 build.
                 //
-                // WITHDRAWN, not replaced. Substituting a different concrete
-                // claim — vec[cell] — was measured and rejected twice: it moves
-                // the element REPR, so every caller must re-encode to match, and
-                // the compiler's own LowerFromAst::lowerConstCallable then read
-                // `$info['method']` as a tagged cell out of a raw slot and threw
-                // `Call to undefined method ::()`. Going back to erased asks
-                // nothing of the callers: it is what the parameter was before the
-                // heuristic guessed, and an erased element is not `concrete()`,
-                // so the conflict check has nothing left to refuse.
+                // WITHDRAWN to a CELL element (the key kept): `vec[cell]` /
+                // `assoc[K, cell]`, the shape an erased array's elements already
+                // have at run time, so a caller passing an erased array (#318)
+                // needs no re-encode, and a cell element is not `concrete()`, so
+                // the conflict check has nothing left to refuse. The guess is
+                // flagged withdrawn (`elemGuessWithdrawn`) so it is not re-made.
                 //
                 // Never a PRELUDE function — its body is emitted linkonce_odr
                 // into every module, so this module's call sites are not all of
                 // them (the premise that already keeps this scan off prelude
                 // by-ref params).
                 if (isset($conflict[$key])) {
-                    if (!$fn->isPrelude && $p->elemGuessed && !isset($erasedArg[$key])) {
+                    if (!$fn->isPrelude && $p->elemGuessed) {
                         $cur = $p->type;
                         $k = isset($assocKey[$key]) ? $assocKey[$key]
                             : ($cur->isArray() ? $cur->key : null);
@@ -3348,7 +3345,13 @@ trait InferScans
         if ($n->kind === Node::KIND_METHOD_CALL) {
             $mc = $n;
             $recv = $mc->object->type->class ?? '';
-            if ($recv === '') { return ''; }
+            if ($recv === '') {
+                // An erased receiver (`Class|false` lowers to a plain cell): the first declarer of the method NAME stands for the callee, as the emitter and VivifyRefArgs do.
+                $only = $this->anyDeclarerFn($mc->method);
+                if ($only === '') { return ''; }
+                $offset = 1;
+                return $only;
+            }
             $decl = $this->resolveMethodClass($recv, $mc->method);
             $offset = 1;
             if ($decl !== '' && isset($this->fnByName[$decl . '__' . $mc->method])) { return $decl . '__' . $mc->method; }
@@ -3374,6 +3377,18 @@ trait InferScans
             return $decl . '____construct';
         }
         return '';
+    }
+
+    /** @var array<string,string> */
+    private array $anyDeclarerMemo = [];
+
+    /** The first function declaring `$method`: the rule {@see VivifyRefArgs} vivifies by, so both agree on an erased receiver. */
+    private function anyDeclarerFn(string $method): string
+    {
+        if (!isset($this->anyDeclarerMemo[$method])) {
+            $this->anyDeclarerMemo[$method] = VivifyRefArgs::firstDeclarer(\array_keys($this->fnByName), $method);
+        }
+        return $this->anyDeclarerMemo[$method];
     }
 
     /** The arguments of a call node of any kind. @return Node[] */

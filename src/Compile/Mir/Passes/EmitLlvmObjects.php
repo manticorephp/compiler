@@ -1576,11 +1576,6 @@ trait EmitLlvmObjects
         if (\count($fixed) === 0 && $enumArms === [] && $magic === []) {
             return \implode('', $outChunks) . $this->emitBagReadByClassId($pa, $objPtr);
         }
-        // Static fast path: a single holder and no bag class anywhere, so the
-        // cell can only be that class — read the slot with no class_id switch.
-        if (\count($fixed) === 1 && !$hasBag && $enumArms === [] && $magic === []) {
-            return \implode('', $outChunks) . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
-        }
         // Runtime dispatch on the object's class_id. Fixed-slot-only reads are
         // extracted once per property: the caller keeps only the object coercion
         // and a normal call, while the helper owns the shared switch.
@@ -1866,8 +1861,8 @@ trait EmitLlvmObjects
      * (var_dump / echo dispatch on the tag; a raw load would render a string
      * slot as its pointer-as-int). `cellToPtr` normalises both a raw obj ptr and
      * a boxed-obj cell. Replaces the old blind offset-16 read (correct only for a
-     * single-property class). A class_id with no fixed holder falls back to slot
-     * 16 raw, and a no-holder property to a null cell.
+     * single-property class). A class_id with no fixed holder reads its bag, or
+     * answers a null cell.
      */
     private function emitRawPropByClassId(PropertyAccess_ $pa): string
     {
@@ -1878,20 +1873,14 @@ trait EmitLlvmObjects
         $out = $this->emitNode($pa->object);
         $out .= $this->cellToPtr();
         $objPtr = $this->lastValue;
-        // No known holder → nothing better than the historical raw slot-16 read.
+        // No class declares `$prop`: only a bag object can hold it; anything else
+        // reads an undefined property — null, never the first field of the object.
         if (\count($fixed) === 0 && $magic === []) {
-            $gep = $this->ssa->allocReg();
-            $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
-            $ld = $this->ssa->allocReg();
-            $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
-            $this->lastValue = $ld;
-            $this->lastValueType = 'i64';
-            return $out;
+            return $out . $this->emitBagReadByName($prop, $objPtr);
         }
-        // A single holder → its real offset, boxed by its declared type.
-        if (\count($fixed) === 1 && $magic === []) {
-            return $out . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
-        }
+        // Even a single holder is read through the class_id switch: the receiver
+        // may be any class, and a holder's offset can lie past the end of a
+        // smaller object (`$e->errorInfo` on a ValueError read PDOException's slot).
         // NO unconditional shortcut for a single magic holder: the receiver is
         // ERASED, so "one class declares __get" says nothing about the class in
         // hand. Calling it anyway ran Ovl::__get with a Plain2 `$this` and read
@@ -1932,17 +1921,15 @@ trait EmitLlvmObjects
         $switch .= "  ]\n";
         $out .= $switch . $bodies;
         $out .= $def . ":\n";
-        $gep = $this->ssa->allocReg();
-        $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
-        $ld = $this->ssa->allocReg();
-        $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
-        $out .= '  store i64 ' . $ld . ', ptr ' . $res . "\n";
+        $out .= $this->emitBagReadByName($prop, $objPtr);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
+        $this->markCellOpaque($r);
         return $out;
     }
 
@@ -3366,6 +3353,54 @@ trait EmitLlvmObjects
         }
         $out = $addrIr;
         $this->rt->needsRefCells = true;
+        // A local bound to an ADDRESS it does not own — a by-ref parameter, a
+        // `$r = &…` alias — may point at a caller's slot, a scratch slot or a
+        // buffer element, none of which outlives the reference being STORED.
+        // The stored REF cell must point at a counted box instead
+        // (docs/design/reference-cells.md, "A stored reference to a by-ref param").
+        if ($src->kind === Node::KIND_LOAD_LOCAL && isset($this->locals->refLocals[$src->name])
+            && !isset($this->locals->ownedBoxes[$src->name])) {
+            $pk = ($this->locals->refParamTypes[$src->name] ?? Type::unknown())->kind;
+            if ($pk === Type::KIND_CELL) {
+                // A CELL slot: share the box behind it, or box a copy.
+                $ap = $this->ssa->allocReg();
+                $out .= '  ' . $ap . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+                $ab = $this->ssa->allocReg();
+                $out .= '  ' . $ab . ' = call ptr @__mir_ref_adopt(ptr ' . $ap . ")\n";
+                $ai = $this->ssa->allocReg();
+                $out .= '  ' . $ai . ' = ptrtoint ptr ' . $ab . " to i64\n";
+                $this->lastValue = $ai;
+            } else {
+                // A RAW slot (`int &$v`, a bare `array &$a`): it cannot hold
+                // `cell(REF, box)` and is never a box (a box is a cell channel,
+                // and a raw by-ref param of a cell local gets a scratch slot), so
+                // the reference boxes a cell COPY of the current value.
+                $pt = $this->locals->refParamTypes[$src->name] ?? Type::unknown();
+                $ap = $this->ssa->allocReg();
+                $out .= '  ' . $ap . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+                $rw = $this->ssa->allocReg();
+                $out .= '  ' . $rw . ' = load i64, ptr ' . $ap . "\n";
+                $this->lastValue = $rw;
+                $this->lastValueType = 'i64';
+                if ($pk === Type::KIND_FLOAT) {
+                    $d = $this->ssa->allocReg();
+                    $out .= '  ' . $d . ' = bitcast i64 ' . $rw . " to double\n";
+                    $this->lastValue = $d;
+                    $this->lastValueType = 'double';
+                }
+                $out .= $this->boxToCellShallow($pt);
+                $out .= $this->coerceToI64();
+                $cv = $this->lastValue;
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
+                $out .= '  call void @__mir_cell_retain(i64 ' . $cv . ")\n";
+                $ab = $this->ssa->allocReg();
+                $out .= '  ' . $ab . ' = call ptr @__mir_ref_fresh(i64 ' . $cv . ")\n";
+                $ai = $this->ssa->allocReg();
+                $out .= '  ' . $ai . ' = ptrtoint ptr ' . $ab . " to i64\n";
+                $this->lastValue = $ai;
+            }
+        }
         $m = $this->ssa->allocReg();
         $out .= '  ' . $m . ' = and i64 ' . $this->lastValue . ', '
               . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
@@ -8666,6 +8701,7 @@ trait EmitLlvmObjects
         $out = $this->emitNode($mc->object);
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
+        $recvWord = $thisArg;
         // A `mixed`/cell receiver carries a NaN-boxed object — strip the tag to
         // the raw object pointer so both the `$this` arg and the class_id
         // virtual dispatch read the object, not the boxed bits (else SIGSEGV).
@@ -9195,7 +9231,7 @@ trait EmitLlvmObjects
         // reference of its own.
         if (\Compile\Debug::$rcRecvTemp) {
             $recvFlavor = $this->freshRcArgFlavor($mc->object);
-            if ($recvFlavor !== '') { $out .= $this->rcReleaseReg($thisArg, $recvFlavor); }
+            if ($recvFlavor !== '') { $out .= $this->rcReleaseReg($recvWord, $recvFlavor); }
         }
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`

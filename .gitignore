@@ -37,3 +37,5 @@ probe/
 # being measured. Two `git add -A` sweeps already committed one.
 manticore.probe*.json
 bin/manticore.fast
+tests/pdo_net/.work
+tests/pdo_net/.certs

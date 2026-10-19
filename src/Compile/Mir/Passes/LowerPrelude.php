@@ -216,7 +216,8 @@ trait LowerPrelude
             // pdo_sqlite.php implements the __McPdoDrv / __McPdoDrvStmt
             // interfaces pdo.php declares, and a class built before the
             // interface it implements inherits nothing.
-            $src .= $this->pdoSrc . $this->pdoSqliteSrc;
+            $src .= $this->pdoSrc . $this->pdoSqliteSrc . $this->pdoSqlSrc
+                . $this->pdoPgsqlSrc . $this->pdoMysqlSrc;
         }
         if ($this->tokenizerSrc !== '') {
             // ext/tokenizer. Core BEFORE api — classes are built in source order

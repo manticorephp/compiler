@@ -1,0 +1,14 @@
+100
+pooled
+created=<=10 busy=0 waiting=0
+same connection=yes inTransaction=false tempTable=false leak=NULL prepared=42 autocommit=1 charset=utf8mb4
+replaced=yes created=2 discarded=1
+silent reset threw
+failed reset: idle=0 discarded=1
+next ok=1
+first: latin1,0,7
+after reset: latin1,0,7 attr=false
+ping=true
+reset with open cursor: 9
+reset: inTransaction=false
+dead ping=false

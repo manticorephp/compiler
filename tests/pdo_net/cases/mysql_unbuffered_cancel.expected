@@ -1,0 +1,8 @@
+A mid-read: PDOException 2006
+A killed: 0
+B holding: PDOException 2006
+B killed: 0
+C task: done
+C finished: usable
+D waiter: 42
+D after: usable

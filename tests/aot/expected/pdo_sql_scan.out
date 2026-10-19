@@ -1,0 +1,95 @@
+== select '?' , ":x", $$ ? $$, E'\'?' -- ? ~n~ , /* ? */ ?
+pgsql: 1 ? | select '?' , ":x", $$ ? $$, E'\'?' -- ? ~n~ , /* ? */ $1
+mysql: 2 ? ? @22,52
+== select 'a\'?'
+pgsql: 1 ? | select 'a\'$1'
+mysql: 0  @
+== select ?::int
+pgsql: 1 ? | select $1::int
+mysql: 1 ? @7
+== select :a, :a, :b
+pgsql: 2 :a :b | select $1, $1, $2
+mysql: 3 :a :a :b @7,11,15
+== select ?, :a
+pgsql: SQLSTATE[HY093]: Invalid parameter number: mixed named and positional parameters [HY093]
+mysql: SQLSTATE[HY093]: Invalid parameter number: mixed named and positional parameters [HY093]
+== select :a, ?
+pgsql: SQLSTATE[HY093]: Invalid parameter number: mixed named and positional parameters [HY093]
+mysql: SQLSTATE[HY093]: Invalid parameter number: mixed named and positional parameters [HY093]
+== select ??, ?
+pgsql: 1 ? | select ?, $1
+mysql: 1 ? @11
+== select ???
+pgsql: 1 ? | select ?$1
+mysql: 0  @
+== select ????? ?
+pgsql: 2 ? ? | select ??$1 $2
+mysql: 1 ? @13
+== select 1 /* /* ? */ ? */ , ?
+pgsql: 2 ? ? | select 1 /* /* ? */ $1 */ , $2
+mysql: 2 ? ? @20,27
+== select 1 # ?~n~, ?
+pgsql: 2 ? ? | select 1 # $1~n~, $2
+mysql: 1 ? @15
+== select 1 -- ?~n~, ?
+pgsql: 1 ? | select 1 -- ?~n~, $1
+mysql: 1 ? @16
+== select 1 --?~n~, ?
+pgsql: 1 ? | select 1 --?~n~, $1
+mysql: 2 ? ? @11,15
+== select 'x ?
+pgsql: 1 ? | select 'x $1
+mysql: 1 ? @10
+== select 'it''s ?', ?
+pgsql: 1 ? | select 'it''s ?', $1
+mysql: 1 ? @18
+== select $a$ ? $b$ ? $a$ ?
+pgsql: 1 ? | select $a$ ? $b$ ? $a$ $1
+mysql: 3 ? ? ? @11,17,23
+== select $$ ? , ?
+pgsql: 0  | select $$ ? , ?
+mysql: 2 ? ? @10,14
+== select $1$ ? $1$ ?
+pgsql: 2 ? ? | select $1$ $1 $1$ $2
+mysql: 2 ? ? @11,17
+== select a:b, 1:c, :d
+pgsql: 1 :d | select a:b, 1:c, $1
+mysql: 1 :d @17
+== select :a:b, :é, ::int, :1, a:::x
+pgsql: 2 :a :1 | select $1:b, :é, ::int, $2, a:::x
+mysql: 2 :a :1 @7,25
+== select "a\"?", ?
+pgsql: 2 ? ? | select "a\"$1", $2
+mysql: 1 ? @15
+== select `a?`, ?
+pgsql: 2 ? ? | select `a$1`, $2
+mysql: 1 ? @13
+== select e'\'?' ?
+pgsql: 1 ? | select e'\'?' $1
+mysql: 1 ? @14
+== select 1 /* ? 
+pgsql: 0  | select 1 /* ? 
+mysql: 0  @
+== select ?
+pgsql: 1 ? | select $1
+mysql: 1 ? @7
+== select 1 :
+pgsql: 0  | select 1 :
+mysql: 0  @
+== select ?:
+pgsql: 1 ? | select $1:
+mysql: 1 ? @7
+== select (:a),:b;
+pgsql: 2 :a :b | select ($1),$2;
+mysql: 2 :a :b @8,12
+== select :a-:b
+pgsql: 2 :a :b | select $1-$2
+mysql: 2 :a :b @7,10
+== select 'é', ?
+pgsql: 1 ? | select 'é', $1
+mysql: 1 ? @13
+== select é, ?
+pgsql: 1 ? | select é, $1
+mysql: 1 ? @11
+select $1, $2 2
+empty ok

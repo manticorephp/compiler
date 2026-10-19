@@ -133,7 +133,7 @@ RUN curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.or
         > /etc/apt/sources.list.d/php.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        php8.5-cli php8.5-mbstring php8.5-curl php8.5-sqlite3 php8.5-intl \
+        php8.5-cli php8.5-mbstring php8.5-curl php8.5-sqlite3 php8.5-intl php8.5-pgsql php8.5-mysql \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --set php /usr/bin/php8.5
 

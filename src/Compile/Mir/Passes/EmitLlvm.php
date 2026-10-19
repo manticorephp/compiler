@@ -918,6 +918,7 @@ final class EmitLlvm implements EmitVisitor
             $this->scanCellPropStores($fn->body);
             $this->collectRefCellPropNames($fn->body);
         }
+        foreach ($module->refStoredPropNames as $rsp => $_) { $this->refCellPropNames[$rsp] = true; }
         \Compile\Stats::step('  property scan', $statT, -1, -1);
         $streaming = $this->streamIrPath !== '';
         $bodyPath = $streaming ? $this->streamIrPath . '.bodies' : '';

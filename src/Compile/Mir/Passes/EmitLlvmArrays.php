@@ -2480,6 +2480,11 @@ trait EmitLlvmArrays
     private function emitElemEncodeRaw(string $arrPtr, StoreElement $se): string
     {
         $kind = $this->elementHintCodeForType($se->value->type) ?? 0;
+        // A NULL is the raw word 0: boxing it as a pointer kind yields the NULL
+        // cell, where kind 0 would land a bare 0 (a float) among tagged cells.
+        if ($kind === 0 && $se->value->type->kind === Type::KIND_NULL) {
+            $kind = \Compile\MemoryAbi::ARRAY_ELEM_HINT_STR;
+        }
         $enc = $this->ssa->allocReg();
         $out = '  ' . $enc . ' = call i64 @__mir_elem_encode_raw(ptr ' . $arrPtr . ', i64 '
              . $this->elemValReg . ', i64 ' . (string)$kind . ")\n";

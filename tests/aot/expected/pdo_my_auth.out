@@ -1,0 +1,14 @@
+"pw" native ok sha2 ok
+"password" native ok sha2 ok
+"" native ok sha2 ok
+717503
+0 enc ok dec ok
+250 enc ok dec ok
+251 enc ok dec ok
+65535 enc ok dec ok
+65536 enc ok dec ok
+16777215 enc ok dec ok
+16777216 enc ok dec ok
+-1 -2 -2 -2
+305419896 78563412 197121
+18446744073709551615 256 0

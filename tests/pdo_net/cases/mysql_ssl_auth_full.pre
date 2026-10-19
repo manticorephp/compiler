@@ -1,0 +1,3 @@
+#!/bin/bash
+# Empties the auth cache so the next login of u/pw is a caching_sha2 FULL authentication (root over PDO, see flush_privileges.php).
+exec php -d xdebug.mode=off "$(dirname "$0")/../flush_privileges.php"

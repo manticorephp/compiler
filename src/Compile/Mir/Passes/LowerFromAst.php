@@ -480,6 +480,11 @@ final class LowerFromAst implements Pass
     /** pdo_sqlite — the libsqlite3 driver. Implements the interfaces pdoSrc
      *  declares, so it implies pdoSrc and must be concatenated AFTER it. */
     public string $pdoSqliteSrc = '';
+    /** pdo_sql (shared by the socket drivers), pdo_pgsql, pdo_mysql — same
+     *  contract as pdoSqliteSrc; pdo_sql precedes the two drivers. */
+    public string $pdoSqlSrc = '';
+    public string $pdoPgsqlSrc = '';
+    public string $pdoMysqlSrc = '';
     /** ext/tokenizer's scanner core — DEMAND-GATED. Names nothing Zend owns so
      *  it stays loadable under `php` for tools/tokenizer_diff.php. */
     public string $tokenizerSrc = '';

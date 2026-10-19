@@ -1,0 +1,6 @@
+peer: got hello yes
+client: cancelled
+released in time: yes
+peer: client socket closed yes
+next connection: true
+no fd leak

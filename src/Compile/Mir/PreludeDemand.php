@@ -29,6 +29,11 @@ final class PreludeDemand
     private array $methods = [];
     /** @var array<string,bool> lowercased identifiers appearing anywhere in code */
     private array $names = [];
+    /** @var array<string,bool> PDO driver schemes (pgsql, mysql, sqlite) a `new PDO('<scheme>:..')` / `PDO::connect(..)` site spells literally */
+    private array $dsnSchemes = [];
+    /** A construction site whose first argument does not start with a literal `<driver>:` (or a subclass of PDO): the driver is a run-time matter. */
+    private bool $dsnDynamic = false;
+    private bool $dsnSites = false;
     /** `yield from` occurs: its lowering calls the prelude's `__mc_yf_gen`. */
     private bool $yieldFrom = false;
 
@@ -112,6 +117,55 @@ final class PreludeDemand
             if (isset($this->names[\strtolower($n)])) { return true; }
         }
         return false;
+    }
+
+    /**
+     * Which PDO drivers the program can open, decided from its construction sites. True when every site (`new PDO(..)`,
+     * `PDO::connect(..)`) starts its DSN with a literal `<driver>:` and one of them names $driver; a program with no site
+     * at all, or with any site whose scheme is not literal (a variable, a call, `extends PDO`), may open any driver.
+     */
+    public function opensDriver(string $driver): bool
+    {
+        if (!$this->dsnSites || $this->dsnDynamic) { return true; }
+        return isset($this->dsnSchemes[$driver]);
+    }
+
+    /** @param Token[] $toks */
+    private function noteDsnSite(array $toks, int $i, int $n): void
+    {
+        $j = $i - 1;
+        if ($j >= 0 && $toks[$j]->kind === TokenKind::Backslash) { $j = $j - 1; }
+        $prev = $j >= 0 ? $toks[$j] : null;
+        $arg = -1;
+        // `use PDO as Db;` hides every later `new Db(..)`; `Pool::pdo('pgsql:..')` (Async\Pool) opens a PDO from inside the prelude.
+        // Neither site can be read, so the driver is a run-time matter.
+        if (($i + 1 < $n && $toks[$i + 1]->kind === TokenKind::Keyword && \strtolower($toks[$i + 1]->lexeme) === 'as')
+            || ($prev !== null && $prev->kind === TokenKind::DoubleColon && $i + 1 < $n && $toks[$i + 1]->kind === TokenKind::OpenParen)) {
+            $this->dsnSites = true;
+            $this->dsnDynamic = true;
+            return;
+        }
+        if ($prev !== null && $prev->kind === TokenKind::Keyword && \strtolower($prev->lexeme) === 'new'
+            && $i + 2 < $n && $toks[$i + 1]->kind === TokenKind::OpenParen) {
+            $arg = $i + 2;
+        } elseif ($prev !== null && $prev->kind === TokenKind::Keyword && \strtolower($prev->lexeme) === 'extends') {
+            $this->dsnSites = true;
+            $this->dsnDynamic = true;
+            return;
+        } elseif ($i + 4 < $n && $toks[$i + 1]->kind === TokenKind::DoubleColon && $toks[$i + 2]->kind === TokenKind::Identifier
+            && \strtolower($toks[$i + 2]->lexeme) === 'connect' && $toks[$i + 3]->kind === TokenKind::OpenParen) {
+            $arg = $i + 4;
+        }
+        if ($arg < 0) { return; }
+        $this->dsnSites = true;
+        $t = $toks[$arg];
+        if ($t->kind === TokenKind::StringLiteral) {
+            $l = \strtolower(\substr($t->lexeme, 1));
+            foreach (["pgsql", "mysql", "sqlite"] as $d) {
+                if (\substr($l, 0, \strlen($d) + 1) === $d . ':') { $this->dsnSchemes[$d] = true; return; }
+            }
+        }
+        $this->dsnDynamic = true;
     }
 
     /** The variable `$name` occurs (pass the bare name, no `$`). */
@@ -242,6 +296,7 @@ final class PreludeDemand
             }
             $lower = \strtolower($t->lexeme);
             $this->names[$lower] = true;
+            if ($lower === 'pdo') { $this->noteDsnSite($toks, $i, $n); }
             if ($i + 1 >= $n || $toks[$i + 1]->kind !== TokenKind::OpenParen) {
                 $i = $i + 1;
                 continue;

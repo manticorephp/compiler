@@ -1,0 +1,5 @@
+released promptly: yes
+same pdo: PDOException
+same pdo, again: PDOException 2006
+fresh: 7
+poisoned handle released

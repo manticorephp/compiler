@@ -60,6 +60,21 @@ final class VivifyRefArgs implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /**
+     * The first of `$fnNames` that declares method `$method` (`Class__method`, keyed off the FIRST `__`).
+     * One rule for every pass that must resolve an erased receiver the same way.
+     *
+     * @param string[] $fnNames
+     */
+    public static function firstDeclarer(array $fnNames, string $method): string
+    {
+        foreach ($fnNames as $fname) {
+            $i = \strpos($fname, '__');
+            if ($i !== false && \substr($fname, $i + 2) === $method) { return $fname; }
+        }
+        return '';
+    }
+
     public function requires(): array { return [InferTypes::NAME]; }
 
     /** @var array<string, bool[]> mangled fn name → per-param by-ref mask */
@@ -89,6 +104,27 @@ final class VivifyRefArgs implements Pass
 
     /** @var array<string, true> locals php auto-vivifies as an ARRAY (`$x[] = v`) */
     private array $autoviv = [];
+
+    /** @var array<string, bool[]> fn → per-param: the callee STORES a reference to this by-ref param */
+    private array $refStoring = [];
+
+    /** @var array<string, bool[]> method name → per-ARGUMENT: SOME holder of the name stores a reference there */
+    private array $storingByMethod = [];
+
+    /** @var bool[] per-ARGUMENT: SOME function of the module stores a reference there */
+    private array $storingAny = [];
+
+    /** @var array<string, bool> {@see Module::$refStoredPropNames} */
+    private array $storedProps = [];
+
+    /** Some element argument was marked {@see \Compile\Mir\ArrayAccess_::$refStored}. */
+    private bool $storedElems = false;
+
+    /** @var array<string, int> fn → parameter index of its argument 0 (receiver / captures first) */
+    private array $argBase = [];
+
+    /** @var array<string, true> locals handed to such a param in the current function */
+    private array $holds = [];
 
     public function run(Module $module): Module
     {
@@ -142,20 +178,167 @@ final class VivifyRefArgs implements Pass
             $this->classParent[$cname] = $cd->parent;
         }
 
+        $this->storedElems = false;
+        $this->computeRefStoring($module);
+        $this->storedProps = [];
         foreach ($module->functions as $fn) {
             $this->vivifyFunction($fn, $module);
         }
+        $module->refStoredPropNames = $this->storedProps;
+        if ($this->storedProps !== [] || $this->storedElems) { $module->hasRefCells = true; }
         $module->markPassApplied(self::NAME);
         return $module;
     }
 
+    /**
+     * A by-ref param whose callee STORES a reference to it — `$this->refs[$k] =
+     * &$v`, `use (&$v)` (a closure may outlive the call), the same through a
+     * `$r = &$v` alias, or handing it on to a param that does. The reference
+     * outlives the callee, so the CALLER's local must own a counted box rather
+     * than a stack slot: {@see vivifyFunction} makes each such local a ref-cell
+     * target.
+     *
+     * CONSERVATIVE by construction. A dispatched call (`$o->m($x)`, `static::m`)
+     * asks every holder of the method NAME — the resolved declarer may be
+     * overridden, and an interface receiver names no body at all — and a call
+     * whose target is chosen at run time (a closure value, a callable, a
+     * function name in a variable) asks every function of the module. A miss is
+     * not a crash ({@see EmitLlvmObjects::emitRefCell} boxes a copy of what it
+     * cannot share), but the holder would then not see the caller's later
+     * writes; a false hit only costs the caller's local its box.
+     */
+    private function computeRefStoring(Module $module): void
+    {
+        $this->refStoring = [];
+        $this->argBase = [];
+        $any = false;
+        foreach ($module->functions as $fn) {
+            $np = \count($fn->params);
+            $cap = $this->closureCaptures[$fn->name] ?? -1;
+            $this->argBase[$fn->name] = $cap >= 0 ? $cap : (($np > 0 && $fn->params[0]->name === 'this') ? 1 : 0);
+            $idx = $this->byRefParamIdx($fn);
+            if (\count($idx) === 0) { continue; }
+            $names = [];
+            $this->refCellSources($fn->body, $names);
+            $names = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $names);
+            foreach ($names as $nm => $unused) {
+                if (!isset($idx[$nm])) { continue; }
+                $this->refStoring[$fn->name][$idx[$nm]] = true;
+                $any = true;
+            }
+        }
+        $this->rebuildStoringUnions();
+        if (!$any) { return; }
+        $changed = true;
+        while ($changed) {
+            $changed = false;
+            foreach ($module->functions as $fn) {
+                $idx = $this->byRefParamIdx($fn);
+                if (\count($idx) === 0) { continue; }
+                $this->candidates = [];
+                $this->holds = [];
+                $this->walk($fn->body);
+                foreach ($this->holds as $nm => $unused) {
+                    if (!isset($idx[$nm]) || ($this->refStoring[$fn->name][$idx[$nm]] ?? false)) { continue; }
+                    $this->refStoring[$fn->name][$idx[$nm]] = true;
+                    $changed = true;
+                }
+            }
+            if ($changed) { $this->rebuildStoringUnions(); }
+        }
+    }
+
+    /** @return array<string, int> by-ref param name → its parameter index */
+    private function byRefParamIdx(FunctionDef $fn): array
+    {
+        $idx = [];
+        $pi = 0;
+        foreach ($fn->params as $p) {
+            if ($p->byRef) { $idx[$p->name] = $pi; }
+            $pi = $pi + 1;
+        }
+        return $idx;
+    }
+
+    /** {@see $storingByMethod} and {@see $storingAny} from {@see $refStoring}, by argument position. */
+    private function rebuildStoringUnions(): void
+    {
+        $this->storingByMethod = [];
+        $this->storingAny = [];
+        foreach ($this->refStoring as $fname => $per) {
+            $base = $this->argBase[$fname] ?? 0;
+            $i = \strpos($fname, '__');
+            $m = $i === false ? '' : \substr($fname, $i + 2);
+            foreach ($per as $pi => $on) {
+                if (!$on) { continue; }
+                $ai = $pi - $base;
+                if ($ai < 0) { continue; }
+                $this->storingAny[$ai] = true;
+                if ($m !== '') { $this->storingByMethod[$m][$ai] = true; }
+            }
+        }
+    }
+
+    /** Does the by-ref param `$pi` of `$fnName` — or, for a dispatched `$method`, of any holder of it — keep a reference? */
+    private function storesAt(string $fnName, int $pi, string $method): bool
+    {
+        if ($this->refStoring[$fnName][$pi] ?? false) { return true; }
+        if ($method === '') { return false; }
+        return $this->storingByMethod[$method][$pi - ($this->argBase[$fnName] ?? 0)] ?? false;
+    }
+
+    /**
+     * Mark every bare local at an argument position SOME function of the module
+     * stores a reference to: the call's target is chosen at run time.
+     *
+     * @param Node[] $args
+     */
+    private function holdAnyStoring(array $args): void
+    {
+        if ($this->storingAny === []) { return; }
+        $ai = 0;
+        foreach ($args as $a) {
+            $slot = $ai;
+            $ai = $ai + 1;
+            if (!($this->storingAny[$slot] ?? false)) { continue; }
+            if ($a->kind === Node::KIND_ARRAY_ACCESS) {
+                $this->asArrayAccess($a)->refStored = true;
+                $this->storedElems = true;
+                continue;
+            }
+            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $this->holds[$this->asLoadLocal($a)->name] = true;
+        }
+    }
+
+    /** @param array<string, true> $out locals a `&` cell or a by-ref closure capture takes */
+    private function refCellSources(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_REF_CELL) {
+            $kids = Walk::children($n);
+            if ($kids[0]->kind === Node::KIND_LOAD_LOCAL) { $out[$this->asLoadLocal($kids[0])->name] = true; }
+            return;
+        }
+        if ($n->kind === Node::KIND_CLOSURE) {
+            $cl = $this->asClosure($n);
+            $ci = 0;
+            foreach ($cl->captures as $c) {
+                if (($cl->captureByRef[$ci] ?? false) && $c->kind === Node::KIND_LOAD_LOCAL) {
+                    $out[$this->asLoadLocal($c)->name] = true;
+                }
+                $ci = $ci + 1;
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->refCellSources($c, $out); }
+    }
     private function vivifyFunction(FunctionDef $fn, Module $module): void
     {
         $this->defined = DefinedLocals::collect($fn);
         $this->candidates = [];
         $this->autoviv = [];
+        $this->holds = [];
         $this->walk($fn->body);
-        if (\count($this->candidates) === 0 && \count($this->autoviv) === 0) { return; }
+        if (\count($this->candidates) === 0 && \count($this->autoviv) === 0 && \count($this->holds) === 0) { return; }
 
         // A `global $x` name in __main writes through `@g_x`, not a stack slot
         // ({@see EmitLlvmModule}), so an init here would neither create the
@@ -191,6 +374,18 @@ final class VivifyRefArgs implements Pass
             if (isset($skip[$name]) || isset($this->defined[$name])
                 || isset($this->candidates[$name])) { continue; }
             $inits[] = new StoreLocal($name, new \Compile\Mir\ArrayLit([], Type::unknown()), Type::unknown());
+        }
+        // A local a callee keeps a reference to is a ref-cell target for its whole
+        // frame: the frame owns a counted box, and the callee's stored REF cell
+        // shares it. The statement only TAKES the reference (no effect at entry);
+        // the ref-cell collectors do the rest ({@see LocalSlots::collectRefCellTargets}).
+        // A by-ref param forwarded on already holds the caller's box (or slot).
+        $byRefParams = [];
+        foreach ($fn->params as $p) { if ($p->byRef) { $byRefParams[$p->name] = true; } }
+        foreach ($this->holds as $hname => $unusedH) {
+            if (isset($skip[$hname]) || isset($byRefParams[$hname])) { continue; }
+            $inits[] = new \Compile\Mir\RefCell_(new \Compile\Mir\LoadLocal($hname, Type::unknown()), Type::cell());
+            $module->hasRefCells = true;
         }
         if (\count($inits) === 0) { return; }
         $fn->body->stmts = \array_merge($inits, $fn->body->stmts);
@@ -255,7 +450,7 @@ final class VivifyRefArgs implements Pass
             // A selfish instance call prepends `$this` at lowering, so the
             // static form indexes from 0 like a free call.
             $sc = $this->asStaticCall($n);
-            $this->scanArgs($this->resolveMethodFn($sc->class, $sc->method), $sc->args, 0);
+            $this->scanArgs($this->resolveMethodFn($sc->class, $sc->method), $sc->args, 0, $sc->method);
         } elseif ($k === Node::KIND_NEW_OBJ) {
             $no = $this->asNewObj($n);
             $this->scanArgs($no->class . '____construct', $no->args, 1);
@@ -263,8 +458,13 @@ final class VivifyRefArgs implements Pass
             $mc = $this->asMethodCall($n);
             $recv = $mc->object->type->class ?? '';
             $target = $recv === '' ? '' : $this->resolveMethodFn($recv, $mc->method);
+            if ($recv === '' && $target === '') {
+                // A union / erased receiver (`PDOStatement|false` out of prepare()): the emitter widens to
+                // SOME declarer of the method, and so does this pass — otherwise the out-variable is never defined.
+                $target = $this->anyDeclarer[$mc->method] ?? '';
+            }
             if ($target !== '') {
-                $this->scanArgs($target, $mc->args, 1);
+                $this->scanArgs($target, $mc->args, 1, $mc->method);
             } elseif ($recv !== '') {
                 // Nothing in this closed world declares the method — the class
                 // lives in a package a lower tier does not include, or the
@@ -332,6 +532,7 @@ final class VivifyRefArgs implements Pass
                 $this->scanArgs($cls, $iv->args, $this->closureCaptures[$cls]);
             } elseif ($this->closureRefUnion !== 0 && $this->isErasedCallee($iv->callee)) {
                 $this->scanErasedArgs($iv->args);
+                $this->holdAnyStoring($iv->args);
             } elseif ($iv->callee->type->kind === Type::KIND_STRING) {
                 // A callee that is a function NAME in a variable —
                 // `$match = 'preg_match'; … $match($re, $s, $matches, …)`
@@ -347,6 +548,11 @@ final class VivifyRefArgs implements Pass
                 // the CLOSURE-union path, whose slot mask only describes
                 // closures, and a string callee is never one.
                 $this->vivifyBareLocals($iv->args);
+                $this->holdAnyStoring($iv->args);
+            } else {
+                // A dynamic method (`$o->$m($x)`), or an erased callee while no
+                // closure takes anything by-ref: the target is chosen at run time.
+                $this->holdAnyStoring($iv->args);
             }
         }
         foreach (Walk::children($n) as $c) { $this->walk($c); }
@@ -359,7 +565,7 @@ final class VivifyRefArgs implements Pass
      *
      * @param Node[] $args
      */
-    private function scanArgs(string $fnName, array $args, int $base): void
+    private function scanArgs(string $fnName, array $args, int $base, string $method = ''): void
     {
         if ($fnName === '') { return; }
         if (!isset($this->refMasks[$fnName])) {
@@ -382,8 +588,18 @@ final class VivifyRefArgs implements Pass
             $pi = $base + $ai;
             $ai = $ai + 1;
             if (!($mask[$pi] ?? false)) { continue; }
+            if ($a->kind === Node::KIND_PROPERTY_ACCESS && $this->storesAt($fnName, $pi, $method)) {
+                $this->storedProps[$this->asPropAccess($a)->property] = true;
+                continue;
+            }
+            if ($a->kind === Node::KIND_ARRAY_ACCESS && $this->storesAt($fnName, $pi, $method)) {
+                $this->asArrayAccess($a)->refStored = true;
+                $this->storedElems = true;
+                continue;
+            }
             if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
             $ll = $this->asLoadLocal($a);
+            if ($this->storesAt($fnName, $pi, $method)) { $this->holds[$ll->name] = true; }
             if (isset($this->candidates[$ll->name])) { continue; }
             $this->candidates[$ll->name] = $ptypes[$pi] ?? Type::unknown();
         }
@@ -487,6 +703,8 @@ final class VivifyRefArgs implements Pass
     private function asMethodCall(Node $n): \Compile\Mir\MethodCall_ { return $n; }
     private function asInvoke(Node $n): \Compile\Mir\Invoke_ { return $n; }
     private function asLoadLocal(Node $n): \Compile\Mir\LoadLocal { return $n; }
+    private function asPropAccess(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
+    private function asArrayAccess(Node $n): \Compile\Mir\ArrayAccess_ { return $n; }
     private function asStoreLocal(Node $n): StoreLocal { return $n; }
     private function asClosure(Node $n): \Compile\Mir\Closure_ { return $n; }
     private function asStoreElement(Node $n): \Compile\Mir\StoreElement { return $n; }

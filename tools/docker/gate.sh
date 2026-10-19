@@ -322,6 +322,21 @@ if [ -z "$BUILT" ]; then
 fi
 save_compiler_cache
 
+# The network PDO drivers against live servers (started by the caller, reachable on
+# 127.0.0.1): MC_PDO_NET=<mysql|mariadb> runs ONLY tests/pdo_net and stops here.
+if [ -n "${MC_PDO_NET:-}" ]; then
+    echo
+    echo "=== tests/pdo_net/run.sh --server $MC_PDO_NET ==="
+    # the runner's checkout is mounted world-readable; the private key must be 0600 and OURS (this tree is a copy owned by the container user),
+    # or the key-permission check rejects it and every client-certificate line passes vacuously
+    chmod 600 tests/pdo_net/.certs/client.key 2>/dev/null
+    # the pgsql cases do not depend on the mysql-protocol server: only the mysql row runs them
+    MC_PDO_STRICT=1 bash tests/pdo_net/run.sh --server "$MC_PDO_NET" ${MC_PDO_NET_ARGS:-} > "$MC_LOGDIR/pdo_net.log" 2>&1
+    pdo_rc=$?
+    tail -40 "$MC_LOGDIR/pdo_net.log"
+    exit "$pdo_rc"
+fi
+
 # Before the suite, because it is seconds and it covers what the suite cannot:
 # the suite always calls `bin/manticore` by path, so it never notices a compiler
 # that cannot find its own prelude when it is reached the way an installed one is.

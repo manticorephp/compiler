@@ -1,0 +1,9 @@
+payload wake from B
+sibling ran while parked: yes
+woke promptly: yes
+timeout: false on time, ticks 10
+a got for-a, c got for-c
+after cancel: 5
+late: late
+query result: 9
+queued: during
