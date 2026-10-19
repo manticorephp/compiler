@@ -1,6 +1,5 @@
 <?php
 // sprintf() over a spread array literal holding a mixed (cell) value leaks the literal array.
-// issue: #357
 function t(array $p): int { $c = $p[0]; return strlen(sprintf("%s!", ...[$c])); }
 $p = ["ab", 1];
 t($p);

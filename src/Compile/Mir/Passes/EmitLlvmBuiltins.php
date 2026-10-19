@@ -6026,7 +6026,11 @@ trait EmitLlvmBuiltins
         $a0 = $args[0];
         // A RUNTIME (non-literal) format can't be translated at compile time —
         // pack the args and drive the runtime {@see \__mc_format} engine.
-        if ($a0->kind !== Node::KIND_STRING_CONST) {
+        // …and so can't a spread: its arity is a run-time property. Tested by
+        // node, not type: a `mixed` pack is typed cell and passed the `%s` gate
+        // below as ONE string argument.
+        if ($a0->kind !== Node::KIND_STRING_CONST
+            || (\count($args) === 2 && $args[1]->kind === Node::KIND_SPREAD)) {
             return $this->biFormatRuntime($args, $toStdout);
         }
         $fmt = $a0->value;

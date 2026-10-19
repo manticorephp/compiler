@@ -720,6 +720,36 @@ final class SpillFreshBases
         $this->rewriteConsumed($n);
         $this->spillHeldReads($n);
         $this->spillFreshArgs($n);
+        $this->spillFreshPacks($n);
+    }
+
+    /**
+     * `f(...[$c])`, `sprintf($f, ...g())`: the call reads its arguments out of
+     * the pack — every reader borrows the elements — and nobody owned the pack
+     * itself, so each call stranded it (#357). It is a fresh base like any
+     * other: spilled in place, `unset` after the statement. A pack feeding a
+     * KNOWN by-ref parameter stays (its write-back may re-evaluate the operand);
+     * an erased callee reads a pack by value on every path, so its conservative
+     * pin does not apply. An arena literal inside a loop is that loop's.
+     */
+    private function spillFreshPacks(Node $n): void
+    {
+        $args = $this->callArgs($n);
+        if ($args === []) { return; }
+        $byRef = [];
+        foreach ($this->refArgIndexes($n, true) as $ri) { $byRef[$ri] = true; }
+        $cnt = \count($args);
+        for ($i = 0; $i < $cnt; $i = $i + 1) {
+            if ($args[$i]->kind !== Node::KIND_SPREAD || isset($byRef[$i])) { continue; }
+            $sp = $this->asSpread($args[$i]);
+            $o = $sp->operand;
+            if (isset($this->pinned[\spl_object_id($o)])) { continue; }
+            if ($this->loopDepth > 0 && $o->allocKind === AllocationKind::ARENA) { continue; }
+            $t = $o->type;
+            if ($t->kind !== Type::KIND_ARRAY || $t->element === null || $t->element->kind === Type::KIND_ARRAY) { continue; }
+            if ($o->kind !== Node::KIND_ARRAY_LIT && !$this->isFreshValue($o)) { continue; }
+            $sp->operand = $this->spill($o);
+        }
     }
 
     /**
