@@ -767,9 +767,10 @@ final class __McTok
                 $name = true;
             } elseif ($pid === __McTokId::T_CASE && ($nt === ';' || $nt === '=')) {
                 $name = true;
-            } elseif ($nt === ';' && ($pid === __McTokId::T_AS
-                || (($pid === __McTokId::T_PUBLIC || $pid === __McTokId::T_PROTECTED || $pid === __McTokId::T_PRIVATE)
-                    && $ppid === __McTokId::T_AS))) {
+            } elseif ($nt === ';' && (($pid === __McTokId::T_AS && !self::isMemberModifier($id))
+                || (self::isMemberModifier($pid) && $ppid === __McTokId::T_AS))) {
+                // A trait alias: `as echo;` names the alias, but `as protected;`
+                // is the bare modifier form, and `as final list;` names it again.
                 $name = true;
             } elseif ($nt === '=' && $this->inConstDecl($sig, $k)) {
                 $name = true;
@@ -779,6 +780,12 @@ final class __McTok
             }
             $k = $k + 1;
         }
+    }
+
+    /** Zend's `member_modifier`: static, abstract, final, private, protected, public, readonly. */
+    private static function isMemberModifier(int $id): bool
+    {
+        return ($id >= __McTokId::T_STATIC && $id <= __McTokId::T_PUBLIC) || $id === __McTokId::T_READONLY;
     }
 
     /**
