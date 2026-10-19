@@ -87,5 +87,10 @@ foreach ($s->fetchAll(PDO::FETCH_NUM) as $r) { var_dump($r); }
 echo "== a value above max_allowed_packet\n";
 $big = $db->prepare('select length(?)');
 $v = str_repeat('x', 70 * 1024 * 1024);
-try { $big->execute([$v]); echo $big->fetchColumn(), "\n"; } catch (PDOException $e) { echo get_class($e), ' ', preg_replace('/\d+/', 'N', $e->getMessage()), "\n"; }
+// the server answers ERR 1153 and closes mid-packet: whether the client's write fails first (2006) or it reads the ERR (1153)
+// is a kernel race php loses on macOS and wins on Linux, so either answer is graded as the one outcome
+try { $big->execute([$v]); echo $big->fetchColumn(), "\n"; } catch (PDOException $e) {
+    $m = $e->getMessage();
+    echo get_class($e), ' ', str_contains($m, 'max_allowed_packet') || str_contains($m, 'gone away') ? 'refused, connection closed' : preg_replace('/\d+/', 'N', $m), "\n";
+}
 $v = null;
