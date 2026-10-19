@@ -1,6 +1,5 @@
 <?php
 // after token_get_all() of a concatenated string, reading an int-keyed local array by key answers 0
-// issue: #364
 /** @param int[] $keys */
 function run(array $keys, string $name): void
 {

@@ -160,7 +160,8 @@ final class ApplyMemoryMode implements Pass
     /**
      * Locals a subtree mutates through their own storage — an element store, an
      * `unset` of an element, an alias bound to the local, or a by-ref argument
-     * position. Each one can reach a runtime helper that reallocates the buffer.
+     * position — or reads by key (the lazy bucket index). Each one can reach a
+     * runtime helper that allocates for the buffer.
      *
      * @param array<string,bool> $out
      */
@@ -191,6 +192,14 @@ final class ApplyMemoryMode implements Pass
             if ($r !== null) { $out[$r] = true; }
         } elseif ($k === Node::KIND_REF_ALIAS) {
             $out[$n->source] = true;
+        } elseif ($k === Node::KIND_ARRAY_ACCESS && $n->array->type->kind !== \Compile\Mir\Type::KIND_STRING) {
+            // A keyed READ allocates for the container too: the first lookup on
+            // a hashed map past the index threshold builds its bucket index
+            // lazily, in the arena when the buffer is ARRAY_TAG_ARENA. Built
+            // inside the window, the next restore hands those bytes to the next
+            // temporary and every later lookup misses.
+            $r = $this->rootLocalName($n);
+            if ($r !== null) { $out[$r] = true; }
         }
         foreach (Walk::children($n) as $c) { $this->collectInPlaceMutations($c, $out); }
     }
