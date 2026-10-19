@@ -94,7 +94,7 @@ for f in tests/pdo_net/cases/*.php; do
     kp=$(grep -c 'has group or world access' <<<"$act"); okp=$(sed -n 's|^// key-perms-refusals: *||p' "$f" | head -n 1)
     if [ "$kp" -gt "${okp:-0}" ]; then echo "FAIL $n ($kp key-permission refusal(s), ${okp:-0} expected: the key file is too open for the check to mean anything)"; fail=$((fail+1)); continue; fi
     if [ "$exp" = "$act" ]; then echo "PASS $n"; pass=$((pass+1)); real=$((real+1))
-    else echo "FAIL $n"; echo "--- php"; echo "$exp" | head -n 20; echo "--- native"; echo "$act" | head -n 20; fail=$((fail+1)); fi
+    else echo "FAIL $n"; echo "--- diff (php < > native)"; diff <(echo "$exp") <(echo "$act") | head -n 40 | cut -c1-300; fail=$((fail+1)); fi
 done
 # Hostile-server cases: a fake server (Zend php) per mode, the compiled client, hand-written expectations.
 if [[ "$NOPG" != 1 && ( -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ) ]]; then
