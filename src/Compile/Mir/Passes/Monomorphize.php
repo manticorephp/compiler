@@ -364,6 +364,12 @@ final class Monomorphize implements Pass
                 // erased branch above cannot see it — recognise the conflict here
                 // so each concrete site gets its own re-inferred body.
                 $dims[] = $idx;
+            } elseif ($this->shapeUnprovenByArg($p, $idx, $calls)) {
+                // A param carrying a SHAPE whose container field a site's arg
+                // does not prove ({@see Type::proveShapeFields}): the original
+                // body reads that field's elements raw; the site needs a clone
+                // whose fields claim only what it passes.
+                $dims[] = $idx;
             } elseif ($this->isCallableParam($p->type)) {
                 foreach ($calls as $call) {
                     if ($idx < \count($call->args)
@@ -402,6 +408,32 @@ final class Monomorphize implements Pass
     }
 
     /**
+     * A shape-carrying param one of whose call sites passes an array that
+     * leaves a container field's element claim unproven.
+     *
+     * @param Call[] $calls
+     */
+    private function shapeUnprovenByArg(Param $p, int $idx, array $calls): bool
+    {
+        if ($p->variadic || $p->byRef || !$p->type->hasShape()) { return false; }
+        foreach ($calls as $call) {
+            if ($idx >= \count($call->args)) { continue; }
+            $at = $call->args[$idx]->type;
+            if ($this->isSpecializableArray($at) && $this->shapeUnproven($p->type, $at)) { return true; }
+        }
+        return false;
+    }
+
+    /** {@see shapedParamType}'s walk: does `$arg` leave a field of a shape in `$declared` unproven? */
+    private function shapeUnproven(Type $declared, Type $arg): bool
+    {
+        if ($arg->exactString() === $declared->exactString()) { return false; }
+        if (!$arg->isArray() || $arg->element === null || $declared->element === null) { return false; }
+        if ($declared->isShape()) { return $declared->proveShapeFields($arg) !== null; }
+        return $this->shapeUnproven($declared->element, $arg->element);
+    }
+
+    /**
      * True when any dimension is a conflicted-concrete array param (added by the
      * middle branch of {@see dimensions}). Such a dim specializes from a SINGLE
      * key — the original body is known-wrong for the conflicting site, so even
@@ -421,6 +453,7 @@ final class Monomorphize implements Pass
                 && $this->paramConflictsWithArg($p, $di, $calls)) {
                 return true;
             }
+            if ($this->shapeUnprovenByArg($p, $di, $calls)) { return true; }
         }
         return false;
     }
@@ -600,9 +633,14 @@ final class Monomorphize implements Pass
      */
     private function shapedParamType(Type $declared, Type $arg): Type
     {
-        if ($arg->toString() === $declared->toString()) { return $declared; }
+        if ($arg->exactString() === $declared->exactString()) { return $declared; }
         if (!$arg->isArray() || $arg->element === null || $declared->element === null) { return $declared; }
-        if ($declared->isShape()) { return $declared->withElement($arg->element); }
+        if ($declared->isShape()) {
+            // The fields stay the contract, but a container field's element
+            // claim only as deep as the arg proves it ({@see Type::proveShapeFields}).
+            $proved = $declared->proveShapeFields($arg) ?? $declared;
+            return $proved->withElement($arg->element);
+        }
         return $declared->withElement($this->shapedParamType($declared->element, $arg->element));
     }
 

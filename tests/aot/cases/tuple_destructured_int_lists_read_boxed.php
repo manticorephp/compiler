@@ -1,6 +1,5 @@
 <?php
 // an int list vivified in a returned tuple, destructured and passed to an array<string, int[]> parameter, reads its ints as boxed words
-// issue: #365
 /** @return array{0: array<string, int[]>, 1: int} */
 function index(): array
 {

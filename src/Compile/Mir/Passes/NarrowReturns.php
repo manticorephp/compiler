@@ -274,7 +274,25 @@ final class NarrowReturns implements Pass
         // widen is monotone (cell is the top element, so it never re-fires) and only
         // ever moves scalar → cell, never the reverse.
         $rt = $fn->returnType;
-        $mayWiden = !$this->concreteOnly && $rt->isArray() && $rt->element !== null
+        // A SHAPE return: its fields are the contract every caller reads by, so
+        // they are never re-derived from the body — but a container field's
+        // ELEMENT claim holds only as far as each return proves it. `return
+        // [$by, 0]` with an erased `$by` under `array{0: array<string, int[]>}`
+        // handed callers a list of tagged words typed `int[]`.
+        if ($rt->isShape()) {
+            if ($this->concreteOnly) { return false; }
+            $this->collected = [];
+            $this->collectReturns($fn->body);
+            $proved = $rt;
+            foreach ($this->nonNullReturns($this->collected) as $ret) {
+                $p = $proved->proveShapeFields(TypeCheck::givenShape($ret->value));
+                if ($p !== null) { $proved = $p; }
+            }
+            if ($proved === $rt) { return false; }
+            $fn->returnType = $proved;
+            return true;
+        }
+        $mayWiden =!$this->concreteOnly && $rt->isArray() && $rt->element !== null
             && $rt->element->kind !== Type::KIND_CELL;
         if ($rt->kind !== Type::KIND_UNKNOWN && !$mayWiden) { return false; }
         // Early (concreteOnly) pass: a function with an ERASED param (bare

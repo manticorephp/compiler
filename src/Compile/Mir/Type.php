@@ -458,6 +458,49 @@ final class Type
         return self::arrayOf($el, $this->key, $this->fields, $this->nullableFields, $this->declared);
     }
 
+    /**
+     * This DECLARED shape, with every container field's element claim kept only
+     * as deep as `$given` (the value filling the slot) proves it, and widened to
+     * a cell below that. A scalar field stays: its read is unboxed and checked
+     * by the field type. A container field cannot be: its value is a pointer,
+     * and the raw elements it promises are read unchecked — an `int[]` field
+     * filled by an erased list (cell elements) read its tagged words as ints.
+     * `$given` without fields proves no container field. Null when nothing moved.
+     */
+    public function proveShapeFields(self $given): ?self
+    {
+        if ($this->fields === null) { return null; }
+        $moved = false;
+        $out = [];
+        foreach ($this->fields as $ek => $df) {
+            $gf = $given->fields !== null ? ($given->fields[$ek] ?? null) : null;
+            $nf = self::proveContainer($df, $gf);
+            if ($nf !== $df) { $moved = true; }
+            $out[$ek] = $nf;
+        }
+        if (!$moved) { return null; }
+        return self::shapeOf($out, $this->nullableFields, $this->declared);
+    }
+
+    /** {@see proveShapeFields} for one slot: `$want` as far as `$given` proves it. */
+    private static function proveContainer(self $want, ?self $given): self
+    {
+        if ($want->kind !== self::KIND_ARRAY) { return $want; }
+        if ($want->isShape()) {
+            return $want->proveShapeFields($given ?? self::unknown()) ?? $want;
+        }
+        $we = $want->element;
+        if ($we === null || $we->kind === self::KIND_CELL) { return $want; }
+        $ge = ($given !== null && $given->kind === self::KIND_ARRAY) ? $given->element : null;
+        if ($ge === null) { return $want->withElement(self::cell()); }
+        if ($ge->kind !== $we->kind) { return $want->withElement(self::cell()); }
+        if ($we->kind === self::KIND_ARRAY) {
+            $ne = self::proveContainer($we, $ge);
+            return $ne === $we ? $want : $want->withElement($ne);
+        }
+        return $want;
+    }
+
     /** `array{0:obj<Node>,1?:bool}` — diagnostics only; {@see toString} stays golden-stable. */
     public function shapeString(): string
     {
