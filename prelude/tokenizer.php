@@ -903,6 +903,19 @@ final class __McTok
     {
         $j = $this->identEnd($s, $len, $i);
         $w = \substr($s, $i, $j - $i);
+        // A name swallows `\Seg` runs whatever its first segment spells: `use\C`
+        // and `new\X` are ONE T_NAME_QUALIFIED to Zend, a reserved word included,
+        // and `namespace\X` is T_NAME_RELATIVE. Only a property name after `->`
+        // stays a bare label.
+        if ($this->afterArrow === 0 && $j < $len && \ord($s[$j]) === 92) {
+            $e = $this->qualifiedEnd($s, $len, $j);
+            if ($e > $j) {
+                $qid = \strtolower($w) === 'namespace'
+                    ? __McTokId::T_NAME_RELATIVE : __McTokId::T_NAME_QUALIFIED;
+                $this->push($qid, \substr($s, $i, $e - $i), $line, $i);
+                return $e;
+            }
+        }
         $arrow = $this->afterArrow;
         // TOKEN_PARSE makes the lexer follow the PARSER's context, so a reserved
         // word standing where a member NAME belongs is an identifier. Measured:
@@ -931,13 +944,6 @@ final class __McTok
                     return $yf;
                 }
             }
-            if ($id === __McTokId::T_NAMESPACE && $j < $len && \ord($s[$j]) === 92) {
-                $e = $this->qualifiedEnd($s, $len, $j);
-                if ($e > $j) {
-                    $this->push(__McTokId::T_NAME_RELATIVE, \substr($s, $i, $e - $i), $line, $i);
-                    return $e;
-                }
-            }
             if ($id !== __McTokId::T_STRING) {
                 $this->push($id, $w, $line, $i);
                 return $j;
@@ -949,14 +955,6 @@ final class __McTok
             }
         }
 
-        // A qualified name swallows `\Seg` runs: Foo\Bar is ONE token.
-        if ($j < $len && \ord($s[$j]) === 92) {
-            $e = $this->qualifiedEnd($s, $len, $j);
-            if ($e > $j) {
-                $this->push(__McTokId::T_NAME_QUALIFIED, \substr($s, $i, $e - $i), $line, $i);
-                return $e;
-            }
-        }
         $this->push(__McTokId::T_STRING, $w, $line, $i);
         return $j;
     }
