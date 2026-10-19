@@ -1,6 +1,5 @@
 <?php
 // token_get_all() lexes `enum` as T_ENUM in `class enum extends B` / `class enum implements C`; Zend gives T_STRING
-// issue: #362
 foreach (['class enum extends B {}', 'class enum implements C {}', 'class enum {}'] as $src) {
     $names = [];
     foreach (token_get_all('<?php ' . $src) as $t) {

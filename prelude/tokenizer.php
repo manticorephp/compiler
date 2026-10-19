@@ -982,19 +982,46 @@ final class __McTok
         return $e;
     }
 
+    /**
+     * Zend's `"enum"{WHITESPACE_OR_COMMENTS}[a-zA-Z_\x80-\xff]` (T_ENUM) minus `"enum"{WHITESPACE_OR_COMMENTS}("extends"|"implements")`
+     * (a plain name: `class enum extends B`). The run between the word and the name is whitespace, `/* *\/` and `//` / `#` comments.
+     */
     private function isEnumKeyword(string $s, int $len, string $w, int $j): bool
     {
         if (\strtolower($w) !== 'enum') { return false; }
         $p = $j;
-        $sawWs = false;
+        $saw = false;
         while ($p < $len) {
             $c = \ord($s[$p]);
-            if ($c !== 32 && $c !== 9 && $c !== 10 && $c !== 13) { break; }
-            $sawWs = true;
-            $p = $p + 1;
+            if ($c === 32 || $c === 9 || $c === 10 || $c === 13) {
+                $p = $p + 1;
+                $saw = true;
+                continue;
+            }
+            if ($c === 47 && $p + 1 < $len && \ord($s[$p + 1]) === 42) {
+                $e = \strpos($s, '*/', $p + 2);
+                if ($e === false) { return false; }
+                $p = $e + 2;
+                $saw = true;
+                continue;
+            }
+            if ($c === 35 || ($c === 47 && $p + 1 < $len && \ord($s[$p + 1]) === 47)) {
+                $p = $p + ($c === 35 ? 1 : 2);
+                while ($p < $len) {
+                    $d = \ord($s[$p]);
+                    if ($d === 10 || $d === 13) { break; }
+                    if ($d === 63 && $p + 1 < $len && \ord($s[$p + 1]) === 62) { return false; }
+                    $p = $p + 1;
+                }
+                $saw = true;
+                continue;
+            }
+            break;
         }
-        if (!$sawWs || $p >= $len) { return false; }
-        return $this->cls(\ord($s[$p])) === self::K_ID;
+        if (!$saw || $p >= $len) { return false; }
+        if ($this->cls(\ord($s[$p])) !== self::K_ID) { return false; }
+        $rest = \strtolower(\substr($s, $p, 10));
+        return !(\str_starts_with($rest, 'extends') || \str_starts_with($rest, 'implements'));
     }
 
     /** End of `yield from` counted from just after `yield`, or 0. */
