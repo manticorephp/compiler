@@ -5300,8 +5300,7 @@ trait EmitLlvmBuiltins
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out = $this->emitPtrArg($args[0]);
         $h = $this->lastValue;
-        $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->emitPtrArg($args[1]);
         $n = $this->lastValue;
         // Optional 3rd arg: byte offset to start searching from (default 0).
         $off = '0';
@@ -6400,7 +6399,7 @@ trait EmitLlvmBuiltins
         // Spread `...$arr`: the array IS the argument list — hand it over as-is.
         if (\count($args) === 2 && $args[1]->kind === Node::KIND_SPREAD) {
             $out = $this->emitNode($args[0]);
-            $out .= $this->coerceToPtr();
+            $out .= $this->coerceToStr($args[0]);
             $fmtI = $this->ssa->allocReg();
             $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
             $out .= $this->emitSpreadOperand($args[1]->operand);
