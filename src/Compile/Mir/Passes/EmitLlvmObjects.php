@@ -1866,8 +1866,8 @@ trait EmitLlvmObjects
      * (var_dump / echo dispatch on the tag; a raw load would render a string
      * slot as its pointer-as-int). `cellToPtr` normalises both a raw obj ptr and
      * a boxed-obj cell. Replaces the old blind offset-16 read (correct only for a
-     * single-property class). A class_id with no fixed holder falls back to slot
-     * 16 raw, and a no-holder property to a null cell.
+     * single-property class). A class_id with no fixed holder reads its bag, or
+     * answers a null cell.
      */
     private function emitRawPropByClassId(PropertyAccess_ $pa): string
     {
@@ -1878,15 +1878,10 @@ trait EmitLlvmObjects
         $out = $this->emitNode($pa->object);
         $out .= $this->cellToPtr();
         $objPtr = $this->lastValue;
-        // No known holder → nothing better than the historical raw slot-16 read.
+        // No class declares `$prop`: only a bag object can hold it; anything else
+        // reads an undefined property — null, never the first field of the object.
         if (\count($fixed) === 0 && $magic === []) {
-            $gep = $this->ssa->allocReg();
-            $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
-            $ld = $this->ssa->allocReg();
-            $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
-            $this->lastValue = $ld;
-            $this->lastValueType = 'i64';
-            return $out;
+            return $out . $this->emitBagReadByName($prop, $objPtr);
         }
         // A single holder → its real offset, boxed by its declared type.
         if (\count($fixed) === 1 && $magic === []) {
@@ -1932,17 +1927,15 @@ trait EmitLlvmObjects
         $switch .= "  ]\n";
         $out .= $switch . $bodies;
         $out .= $def . ":\n";
-        $gep = $this->ssa->allocReg();
-        $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 16\n";
-        $ld = $this->ssa->allocReg();
-        $out .= '  ' . $ld . ' = load i64, ptr ' . $gep . "\n";
-        $out .= '  store i64 ' . $ld . ', ptr ' . $res . "\n";
+        $out .= $this->emitBagReadByName($prop, $objPtr);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
+        $this->markCellOpaque($r);
         return $out;
     }
 
