@@ -1175,6 +1175,13 @@ final class OwnershipFlow implements Pass
             $this->skipLoad[\spl_object_id($v)] = true;
             return;
         }
+        if ($v->kind === Node::KIND_LOAD_LOCAL && self::asLoadLocal($v)->name === $name
+            && Ownership::forwardCellifies($sl->type, $v->type, $this->enums)) {
+            $lat->storeMode[$id] = OwnLattice::SELF_REBUILD;
+            $this->skipLoad[\spl_object_id($v)] = true;
+            $this->noteOwnKey($name, $key);
+            return;
+        }
         if ($v->kind === Node::KIND_LOAD_LOCAL && self::asLoadLocal($v)->name === $name) {
             $lat->storeMode[$id] = OwnLattice::SELF_COPY;
             $this->skipLoad[\spl_object_id($v)] = true;
@@ -1707,6 +1714,11 @@ final class OwnershipFlow implements Pass
                 if ($x > 0 && $rel && $sl->value->type->kind === Type::KIND_ARRAY) {
                     $sl->ownOld = $this->dropOp($name, $x);
                 }
+                continue;
+            }
+            if ($mode === OwnLattice::SELF_REBUILD) {
+                if ($x > 0 && $rel) { $sl->ownOld = $this->dropOp($name, $x); }
+                $this->say($sl->line, $name, $x, 'self-rebuild');
                 continue;
             }
             if ($mode === OwnLattice::SELF_COPY) {

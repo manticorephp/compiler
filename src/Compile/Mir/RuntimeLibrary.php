@@ -1976,10 +1976,33 @@ final class RuntimeLibrary
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap)\n";
         $out .= "  br label %loop\n";
         $out .= "loop:\n";
-        $out .= "  %i = phi i64 [0, %entry], [%i2, %cont]\n";
-        $out .= "  %j = phi i64 [0, %entry], [%j2, %cont]\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i2, %cont], [%i16, %vcopy]\n";
+        $out .= "  %j = phi i64 [0, %entry], [%j2, %cont], [%j16, %vcopy]\n";
         $out .= "  %done = icmp sge i64 %i, %slen\n";
-        $out .= "  br i1 %done, label %fin, label %body\n";
+        $out .= "  br i1 %done, label %fin, label %chkv\n";
+        // 16 clean bytes (none of ' " \ NUL) are copied with one vector store
+        $out .= "chkv:\n";
+        $out .= "  %i16 = add i64 %i, 16\n";
+        $out .= "  %vroom = icmp ule i64 %i16, %slen\n";
+        $out .= "  br i1 %vroom, label %vload, label %body\n";
+        $out .= "vload:\n";
+        $out .= "  %vp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %v = load <16 x i8>, ptr %vp, align 1\n";
+        $out .= "  %m1 = icmp eq <16 x i8> %v, <i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39, i8 39>\n";
+        $out .= "  %m2 = icmp eq <16 x i8> %v, <i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34, i8 34>\n";
+        $out .= "  %m3 = icmp eq <16 x i8> %v, <i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92, i8 92>\n";
+        $out .= "  %m4 = icmp eq <16 x i8> %v, zeroinitializer\n";
+        $out .= "  %m12 = or <16 x i1> %m1, %m2\n";
+        $out .= "  %m34 = or <16 x i1> %m3, %m4\n";
+        $out .= "  %mall = or <16 x i1> %m12, %m34\n";
+        $out .= "  %mask = bitcast <16 x i1> %mall to i16\n";
+        $out .= "  %clean = icmp eq i16 %mask, 0\n";
+        $out .= "  br i1 %clean, label %vcopy, label %body\n";
+        $out .= "vcopy:\n";
+        $out .= "  %vd = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store <16 x i8> %v, ptr %vd, align 1\n";
+        $out .= "  %j16 = add i64 %j, 16\n";
+        $out .= "  br label %loop\n";
         $out .= "body:\n";
         $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
         $out .= "  %c = load i8, ptr %sp\n";
@@ -4913,16 +4936,462 @@ bad4:
 ';
     }
 
+    /**
+     * Runtime: urlencode / rawurlencode and urldecode / rawurldecode over whole
+     * buffers. `%raw` is 0 for the form flavour (space <-> '+', '~' escaped) and 1
+     * for RFC 3986. Encoding counts the escapes first (a vectorizable compare
+     * loop) so the output is allocated exactly; decoding never grows, so it
+     * allocates the input length and trims.
+     */
+    public function urlCodec(): string
+    {
+        // unreserved: alnum - _ . (and ~ when raw); `%esc` = needs %XX
+        $cls = function (string $p): string {
+            $o  = "  %{$p}d = sub i8 %{$p}b, 48\n";
+            $o .= "  %{$p}isd = icmp ult i8 %{$p}d, 10\n";
+            $o .= "  %{$p}l = or i8 %{$p}b, 32\n";
+            $o .= "  %{$p}e = sub i8 %{$p}l, 97\n";
+            $o .= "  %{$p}isa = icmp ult i8 %{$p}e, 26\n";
+            $o .= "  %{$p}m1 = icmp eq i8 %{$p}b, 45\n";
+            $o .= "  %{$p}m2 = icmp eq i8 %{$p}b, 95\n";
+            $o .= "  %{$p}m3 = icmp eq i8 %{$p}b, 46\n";
+            $o .= "  %{$p}t0 = icmp eq i8 %{$p}b, 126\n";
+            $o .= "  %{$p}t = and i1 %{$p}t0, %israw\n";
+            $o .= "  %{$p}u1 = or i1 %{$p}isd, %{$p}isa\n";
+            $o .= "  %{$p}u2 = or i1 %{$p}m1, %{$p}m2\n";
+            $o .= "  %{$p}u3 = or i1 %{$p}m3, %{$p}t\n";
+            $o .= "  %{$p}u4 = or i1 %{$p}u1, %{$p}u2\n";
+            $o .= "  %{$p}unres = or i1 %{$p}u4, %{$p}u3\n";
+            $o .= "  %{$p}sp0 = icmp eq i8 %{$p}b, 32\n";
+            $o .= "  %{$p}sp = and i1 %{$p}sp0, %isform\n";
+            $o .= "  %{$p}ok = or i1 %{$p}unres, %{$p}sp\n";
+            $o .= "  %{$p}esc = xor i1 %{$p}ok, true\n";
+            return $o;
+        };
+        $hexd = '0123456789ABCDEF';
+        $out = "\n";
+        foreach (['form' => false, 'raw' => true] as $tn => $isRaw) {
+            $ents = [];
+            for ($c = 0; $c < 256; $c = $c + 1) {
+                $unres = ($c >= 48 && $c <= 57) || (($c | 32) >= 97 && ($c | 32) <= 122) || $c === 45 || $c === 95 || $c === 46
+                    || ($isRaw && $c === 126);
+                if ($unres) { $b0 = $c; $b1 = 0; $b2 = 0; $len = 1; }
+                elseif (!$isRaw && $c === 32) { $b0 = 43; $b1 = 0; $b2 = 0; $len = 1; }
+                else { $b0 = 37; $b1 = \ord($hexd[$c >> 4]); $b2 = \ord($hexd[$c & 15]); $len = 3; }
+                $ents[] = 'i32 ' . (string)($b0 | ($b1 << 8) | ($b2 << 16) | ($len << 24));
+            }
+            $out .= '@__mir_url_tab_' . $tn . ' = private unnamed_addr constant [256 x i32] [' . \implode(', ', $ents) . "]\n";
+        }
+        $out .= "define ptr @__mir_url_enc(ptr %s, i64 %raw) {\n";
+        $out .= "entry:\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %israw = icmp ne i64 %raw, 0\n";
+        $out .= "  %isform = xor i1 %israw, true\n";
+        $out .= "  %tab = select i1 %israw, ptr @__mir_url_tab_raw, ptr @__mir_url_tab_form\n";
+        $out .= "  %z = icmp eq i64 %n, 0\n";
+        $out .= "  br i1 %z, label %alloc, label %cloop\n";
+        $out .= "cloop:\n";
+        $out .= "  %ci = phi i64 [0, %entry], [%ci2, %cloop]\n";
+        $out .= "  %cc = phi i64 [0, %entry], [%cc2, %cloop]\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %ci\n";
+        $out .= "  %cb = load i8, ptr %cp\n";
+        $out .= $cls('c');
+        $out .= "  %cz = zext i1 %cesc to i64\n";
+        $out .= "  %cc2 = add i64 %cc, %cz\n";
+        $out .= "  %ci2 = add i64 %ci, 1\n";
+        $out .= "  %cend = icmp eq i64 %ci2, %n\n";
+        $out .= "  br i1 %cend, label %alloc, label %cloop\n";
+        $out .= "alloc:\n";
+        $out .= "  %esc = phi i64 [0, %entry], [%cc2, %cloop]\n";
+        $out .= "  %e2 = shl i64 %esc, 1\n";
+        $out .= "  %olen = add i64 %n, %e2\n";
+        $out .= "  %cap = add i64 %olen, 4\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap)\n";
+        $out .= "  br i1 %z, label %fin, label %floop\n";
+        // branchless fill: one 4-byte table entry per input byte (up to 3 output
+        // bytes + the length in the top byte), stored unaligned; the slack bytes
+        // past the end are overwritten by the next entry or trimmed by set_len
+        $out .= "floop:\n";
+        $out .= "  %i = phi i64 [0, %alloc], [%i2, %floop]\n";
+        $out .= "  %j = phi i64 [0, %alloc], [%j2, %floop]\n";
+        $out .= "  %fp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %fb = load i8, ptr %fp\n";
+        $out .= "  %fz = zext i8 %fb to i64\n";
+        $out .= "  %tp = getelementptr inbounds [256 x i32], ptr %tab, i64 0, i64 %fz\n";
+        $out .= "  %ent = load i32, ptr %tp\n";
+        $out .= "  %dp = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i32 %ent, ptr %dp, align 1\n";
+        $out .= "  %len32 = lshr i32 %ent, 24\n";
+        $out .= "  %len = zext i32 %len32 to i64\n";
+        $out .= "  %j2 = add i64 %j, %len\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  %fend = icmp eq i64 %i2, %n\n";
+        $out .= "  br i1 %fend, label %fin, label %floop\n";
+        $out .= "fin:\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %olen\n";
+        $out .= "  store i8 0, ptr %np\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %olen)\n";
+        $out .= "  ret ptr %buf\n";
+        $out .= "}\n";
+
+        // value of a hex digit as i32, -1 when it is not one
+        $hv = function (string $p, string $src): string {
+            $o  = "  %{$p}x = zext i8 {$src} to i32\n";
+            $o .= "  %{$p}d = sub i32 %{$p}x, 48\n";
+            $o .= "  %{$p}isd = icmp ult i32 %{$p}d, 10\n";
+            $o .= "  %{$p}l = or i32 %{$p}x, 32\n";
+            $o .= "  %{$p}a = sub i32 %{$p}l, 97\n";
+            $o .= "  %{$p}isa = icmp ult i32 %{$p}a, 6\n";
+            $o .= "  %{$p}a10 = add i32 %{$p}a, 10\n";
+            $o .= "  %{$p}v1 = select i1 %{$p}isa, i32 %{$p}a10, i32 -1\n";
+            $o .= "  %{$p}v = select i1 %{$p}isd, i32 %{$p}d, i32 %{$p}v1\n";
+            return $o;
+        };
+        $out .= "define ptr @__mir_url_dec(ptr %s, i64 %raw) {\n";
+        $out .= "entry:\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %israw = icmp ne i64 %raw, 0\n";
+        $out .= "  %notraw = xor i1 %israw, true\n";
+        $out .= "  %cap = add i64 %n, 1\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap)\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i2, %cont]\n";
+        $out .= "  %j = phi i64 [0, %entry], [%j2, %cont]\n";
+        $out .= "  %done = icmp uge i64 %i, %n\n";
+        $out .= "  br i1 %done, label %fin, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %b = load i8, ptr %sp\n";
+        $out .= "  %isplus0 = icmp eq i8 %b, 43\n";
+        $out .= "  %isplus = and i1 %isplus0, %notraw\n";
+        $out .= "  %ispct = icmp eq i8 %b, 37\n";
+        $out .= "  %i2p = add i64 %i, 2\n";
+        $out .= "  %room = icmp ult i64 %i2p, %n\n";
+        $out .= "  %trypct = and i1 %ispct, %room\n";
+        $out .= "  br i1 %trypct, label %pct, label %lit\n";
+        $out .= "pct:\n";
+        $out .= "  %p1 = getelementptr inbounds i8, ptr %sp, i64 1\n";
+        $out .= "  %c1 = load i8, ptr %p1\n";
+        $out .= "  %p2 = getelementptr inbounds i8, ptr %sp, i64 2\n";
+        $out .= "  %c2 = load i8, ptr %p2\n";
+        $out .= $hv('h', '%c1');
+        $out .= $hv('g', '%c2');
+        $out .= "  %hok = icmp sge i32 %hv, 0\n";
+        $out .= "  %gok = icmp sge i32 %gv, 0\n";
+        $out .= "  %bothok = and i1 %hok, %gok\n";
+        $out .= "  %hs = shl i32 %hv, 4\n";
+        $out .= "  %byte32 = or i32 %hs, %gv\n";
+        $out .= "  %byte8 = trunc i32 %byte32 to i8\n";
+        $out .= "  br i1 %bothok, label %pctok, label %lit\n";
+        $out .= "pctok:\n";
+        $out .= "  %dq = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 %byte8, ptr %dq\n";
+        $out .= "  %jq = add i64 %j, 1\n";
+        $out .= "  %iq = add i64 %i, 3\n";
+        $out .= "  br label %cont\n";
+        $out .= "lit:\n";
+        $out .= "  %lb = select i1 %isplus, i8 32, i8 %b\n";
+        $out .= "  %dl = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 %lb, ptr %dl\n";
+        $out .= "  %jl = add i64 %j, 1\n";
+        $out .= "  %il = add i64 %i, 1\n";
+        $out .= "  br label %cont\n";
+        $out .= "cont:\n";
+        $out .= "  %j2 = phi i64 [%jq, %pctok], [%jl, %lit]\n";
+        $out .= "  %i2 = phi i64 [%iq, %pctok], [%il, %lit]\n";
+        $out .= "  br label %loop\n";
+        $out .= "fin:\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 0, ptr %np\n";
+        $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %j)\n";
+        $out .= "  ret ptr %buf\n";
+        $out .= "}\n";
+        return $out;
+    }
+    /**
+     * Runtime: ASCII case-insensitive search. `@__mir_memcasefind(h, hl, n, nl)` is
+     * the first match of a non-empty needle in the bounded haystack (null when
+     * absent); `@__mir_stripos(h, n, off)` is php's `stripos` over it, scanning from
+     * the offset only (no lowercased copy of the haystack), answering the same
+     * NaN-boxed `int|false` as `@__mir_strpos`. Bytes >= 0x80 never fold.
+     */
+    public function strCaseFind(): string
+    {
+        $lower = function (string $dst, string $src): string {
+            return "  %{$dst}d = sub i8 {$src}, 65\n"
+                 . "  %{$dst}u = icmp ult i8 %{$dst}d, 26\n"
+                 . "  %{$dst}a = select i1 %{$dst}u, i8 32, i8 0\n"
+                 . "  %{$dst} = add i8 {$src}, %{$dst}a\n";
+        };
+        // does needle[1..nl) match p[1..nl) ignoring ASCII case
+        $out  = "\ndefine i1 @__mir_cieq(ptr %p, ptr %n, i64 %nl) {\n";
+        $out .= "entry:\n";
+        $out .= "  br label %cmp\n";
+        $out .= "cmp:\n";
+        $out .= "  %j = phi i64 [1, %entry], [%j1, %cstep]\n";
+        $out .= "  %jdone = icmp uge i64 %j, %nl\n";
+        $out .= "  br i1 %jdone, label %yes, label %cstep\n";
+        $out .= "cstep:\n";
+        $out .= "  %hp = getelementptr inbounds i8, ptr %p, i64 %j\n";
+        $out .= "  %hb = load i8, ptr %hp\n";
+        $out .= $lower('hw', '%hb');
+        $out .= "  %np = getelementptr inbounds i8, ptr %n, i64 %j\n";
+        $out .= "  %nb = load i8, ptr %np\n";
+        $out .= $lower('nw', '%nb');
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  %same = icmp eq i8 %hw, %nw\n";
+        $out .= "  br i1 %same, label %cmp, label %no\n";
+        $out .= "yes:\n";
+        $out .= "  ret i1 true\n";
+        $out .= "no:\n";
+        $out .= "  ret i1 false\n";
+        $out .= "}\n";
+
+        // 16 start positions per step: (byte | 0x20) == first letter, or byte == first
+        // non-letter; a candidate is confirmed byte-wise by @__mir_cieq
+        $out .= "\ndefine ptr @__mir_memcasefind(ptr %h, i64 %hl, ptr %n, i64 %nl) {\n";
+        $out .= "entry:\n";
+        $out .= "  %short = icmp ult i64 %hl, %nl\n";
+        $out .= "  br i1 %short, label %none, label %start\n";
+        $out .= "start:\n";
+        $out .= "  %n0 = load i8, ptr %n\n";
+        $out .= $lower('c0', '%n0');
+        $out .= "  %cd = sub i8 %c0, 97\n";
+        $out .= "  %isl = icmp ult i8 %cd, 26\n";
+        $out .= "  %orm = select i1 %isl, i8 32, i8 0\n";
+        $out .= "  %lastp = sub i64 %hl, %nl\n";
+        $out .= "  %limit = add i64 %lastp, 1\n";
+        $out .= "  %ov0 = insertelement <16 x i8> poison, i8 %orm, i64 0\n";
+        $out .= "  %ov = shufflevector <16 x i8> %ov0, <16 x i8> poison, <16 x i32> zeroinitializer\n";
+        $out .= "  %cv0 = insertelement <16 x i8> poison, i8 %c0, i64 0\n";
+        $out .= "  %cv = shufflevector <16 x i8> %cv0, <16 x i8> poison, <16 x i32> zeroinitializer\n";
+        $out .= "  br label %vloop\n";
+        $out .= "vloop:\n";
+        $out .= "  %i = phi i64 [0, %start], [%i16, %vadv], [%ires, %vres]\n";
+        $out .= "  %i16 = add i64 %i, 16\n";
+        $out .= "  %room = icmp ule i64 %i16, %limit\n";
+        $out .= "  br i1 %room, label %vload, label %tloop\n";
+        $out .= "vload:\n";
+        $out .= "  %vp = getelementptr inbounds i8, ptr %h, i64 %i\n";
+        $out .= "  %v = load <16 x i8>, ptr %vp, align 1\n";
+        $out .= "  %w = or <16 x i8> %v, %ov\n";
+        $out .= "  %m = icmp eq <16 x i8> %w, %cv\n";
+        $out .= "  %mask = bitcast <16 x i1> %m to i16\n";
+        $out .= "  %nz = icmp ne i16 %mask, 0\n";
+        $out .= "  br i1 %nz, label %vhit, label %vadv\n";
+        $out .= "vadv:\n";
+        $out .= "  br label %vloop\n";
+        $out .= "vhit:\n";
+        $out .= "  %tz = call i16 @llvm.cttz.i16(i16 %mask, i1 true)\n";
+        $out .= "  %tz64 = zext i16 %tz to i64\n";
+        $out .= "  %idx = add i64 %i, %tz64\n";
+        $out .= "  %cp = getelementptr inbounds i8, ptr %h, i64 %idx\n";
+        $out .= "  %ok = call i1 @__mir_cieq(ptr %cp, ptr %n, i64 %nl)\n";
+        $out .= "  br i1 %ok, label %hit, label %vres\n";
+        $out .= "vres:\n";
+        $out .= "  %ires = add i64 %idx, 1\n";
+        $out .= "  br label %vloop\n";
+        $out .= "hit:\n";
+        $out .= "  %hitp = phi ptr [%cp, %vhit], [%tp, %tchk]\n";
+        $out .= "  ret ptr %hitp\n";
+        $out .= "tloop:\n";
+        $out .= "  %ti = phi i64 [%i, %vloop], [%ti1, %tnext]\n";
+        $out .= "  %tmore = icmp ult i64 %ti, %limit\n";
+        $out .= "  br i1 %tmore, label %tbody, label %none\n";
+        $out .= "tbody:\n";
+        $out .= "  %tp = getelementptr inbounds i8, ptr %h, i64 %ti\n";
+        $out .= "  %tb = load i8, ptr %tp\n";
+        $out .= "  %tw = or i8 %tb, %orm\n";
+        $out .= "  %teq = icmp eq i8 %tw, %c0\n";
+        $out .= "  br i1 %teq, label %tchk, label %tnext\n";
+        $out .= "tchk:\n";
+        $out .= "  %tok = call i1 @__mir_cieq(ptr %tp, ptr %n, i64 %nl)\n";
+        $out .= "  br i1 %tok, label %hit, label %tnext\n";
+        $out .= "tnext:\n";
+        $out .= "  %ti1 = add i64 %ti, 1\n";
+        $out .= "  br label %tloop\n";
+        $out .= "none:\n";
+        $out .= "  ret ptr null\n";
+        $out .= "}\n";
+        $out .= "\ndefine i64 @__mir_stripos(ptr %h, ptr %n, i64 %off) {\n";
+        $out .= "entry:\n";
+        $out .= "  %hlen = call i64 @__mir_strlen(ptr %h)\n";
+        $out .= "  %nlen = call i64 @__mir_strlen(ptr %n)\n";
+        $out .= "  %isneg = icmp slt i64 %off, 0\n";
+        $out .= "  %fromend = add i64 %hlen, %off\n";
+        $out .= "  %off1 = select i1 %isneg, i64 %fromend, i64 %off\n";
+        $out .= "  %neg2 = icmp slt i64 %off1, 0\n";
+        $out .= "  %off2 = select i1 %neg2, i64 0, i64 %off1\n";
+        $out .= "  %toobig = icmp sgt i64 %off2, %hlen\n";
+        $out .= "  br i1 %toobig, label %miss, label %chk0\n";
+        $out .= "chk0:\n";
+        $out .= "  %isempty = icmp eq i64 %nlen, 0\n";
+        $out .= "  br i1 %isempty, label %hitoff, label %scan\n";
+        $out .= "scan:\n";
+        $out .= "  %hc = getelementptr inbounds i8, ptr %h, i64 %off2\n";
+        $out .= "  %rem = sub i64 %hlen, %off2\n";
+        $out .= "  %f = call ptr @__mir_memcasefind(ptr %hc, i64 %rem, ptr %n, i64 %nlen)\n";
+        $out .= "  %isnull = icmp eq ptr %f, null\n";
+        $out .= "  br i1 %isnull, label %miss, label %hit\n";
+        $out .= "hit:\n";
+        $out .= "  %hi = ptrtoint ptr %h to i64\n";
+        $out .= "  %fi = ptrtoint ptr %f to i64\n";
+        $out .= "  %idx = sub i64 %fi, %hi\n";
+        $out .= "  %dm = and i64 %idx, 281474976710655\n";
+        $out .= "  %db = or i64 %dm, -4222124650659840\n";
+        $out .= "  ret i64 %db\n";
+        $out .= "hitoff:\n";
+        $out .= "  %om = and i64 %off2, 281474976710655\n";
+        $out .= "  %ob = or i64 %om, -4222124650659840\n";
+        $out .= "  ret i64 %ob\n";
+        $out .= "miss:\n";
+        $out .= "  ret i64 -3940649673949184\n";
+        $out .= "}\n";
+        return $out;
+    }
+
+    /** Runtime: `@__mir_memfind(h, hlen, n, nlen)` — first occurrence of the
+     * non-empty needle in the bounded haystack, null when absent (memchr for a
+     * single byte, memmem otherwise: binary-safe, never stops at a NUL); and
+     * `@__mir_substr_count(h, n)` — non-overlapping occurrences, 0 for an empty
+     * needle. */
+    public function strFind(): string
+    {
+        $out  = "\ndefine ptr @__mir_memfind(ptr %h, i64 %hl, ptr %n, i64 %nl) {\n";
+        $out .= "entry:\n";
+        $out .= "  %short = icmp ult i64 %hl, %nl\n";
+        $out .= "  br i1 %short, label %none, label %chk1\n";
+        $out .= "chk1:\n";
+        $out .= "  %c0b = load i8, ptr %n\n";
+        $out .= "  %c0 = zext i8 %c0b to i32\n";
+        $out .= "  %is1 = icmp eq i64 %nl, 1\n";
+        $out .= "  br i1 %is1, label %one, label %chk2\n";
+        $out .= "one:\n";
+        $out .= "  %r1 = call ptr @memchr(ptr %h, i32 %c0, i64 %hl)\n";
+        $out .= "  ret ptr %r1\n";
+        // 2..8 bytes: memchr the first byte, confirm the last byte then memcmp (a
+        // false candidate costs at most 8 bytes, so the scan stays linear).
+        $out .= "chk2:\n";
+        $out .= "  %sm = icmp ule i64 %nl, 8\n";
+        $out .= "  br i1 %sm, label %small, label %big\n";
+        $out .= "small:\n";
+        $out .= "  %last = sub i64 %hl, %nl\n";
+        $out .= "  %nm1 = sub i64 %nl, 1\n";
+        $out .= "  %np = getelementptr inbounds i8, ptr %n, i64 %nm1\n";
+        $out .= "  %nlb = load i8, ptr %np\n";
+        $out .= "  br label %sloop\n";
+        $out .= "sloop:\n";
+        $out .= "  %cur = phi i64 [0, %small], [%next, %again]\n";
+        $out .= "  %win = sub i64 %last, %cur\n";
+        $out .= "  %win1 = add i64 %win, 1\n";
+        $out .= "  %hc = getelementptr inbounds i8, ptr %h, i64 %cur\n";
+        $out .= "  %p = call ptr @memchr(ptr %hc, i32 %c0, i64 %win1)\n";
+        $out .= "  %isnull = icmp eq ptr %p, null\n";
+        $out .= "  br i1 %isnull, label %none, label %cand\n";
+        $out .= "cand:\n";
+        $out .= "  %pl = getelementptr inbounds i8, ptr %p, i64 %nm1\n";
+        $out .= "  %plb = load i8, ptr %pl\n";
+        $out .= "  %leq = icmp eq i8 %plb, %nlb\n";
+        $out .= "  br i1 %leq, label %cmp, label %again\n";
+        $out .= "cmp:\n";
+        $out .= "  %cr = call i32 @memcmp(ptr %p, ptr %n, i64 %nl)\n";
+        $out .= "  %ceq = icmp eq i32 %cr, 0\n";
+        $out .= "  br i1 %ceq, label %hit, label %again\n";
+        $out .= "hit:\n";
+        $out .= "  ret ptr %p\n";
+        $out .= "again:\n";
+        $out .= "  %hi = ptrtoint ptr %h to i64\n";
+        $out .= "  %pi = ptrtoint ptr %p to i64\n";
+        $out .= "  %idx = sub i64 %pi, %hi\n";
+        $out .= "  %next = add i64 %idx, 1\n";
+        $out .= "  %more = icmp ule i64 %next, %last\n";
+        $out .= "  br i1 %more, label %sloop, label %none\n";
+        $out .= "big:\n";
+        $out .= "  %r2 = call ptr @memmem(ptr %h, i64 %hl, ptr %n, i64 %nl)\n";
+        $out .= "  ret ptr %r2\n";
+        $out .= "none:\n";
+        $out .= "  ret ptr null\n";
+        $out .= "}\n";
+        $out .= "\ndefine i64 @__mir_substr_count(ptr %h, ptr %n) {\n";
+        $out .= "entry:\n";
+        $out .= "  %hl = call i64 @__mir_strlen(ptr %h)\n";
+        $out .= "  %nl = call i64 @__mir_strlen(ptr %n)\n";
+        $out .= "  %emp = icmp eq i64 %nl, 0\n";
+        $out .= "  br i1 %emp, label %zero, label %chk\n";
+        $out .= "chk:\n";
+        $out .= "  %is1 = icmp eq i64 %nl, 1\n";
+        $out .= "  br i1 %is1, label %one, label %loop\n";
+        // one byte: a plain compare-and-add loop, which LLVM vectorizes
+        $out .= "one:\n";
+        $out .= "  %cb = load i8, ptr %n\n";
+        $out .= "  %hz = icmp eq i64 %hl, 0\n";
+        $out .= "  br i1 %hz, label %zero, label %oloop\n";
+        // 64 KiB blocks: the inner counter is i32 so the loop vectorizes in wide lanes
+        $out .= "oloop:\n";
+        $out .= "  %op0 = phi i64 [0, %one], [%op1, %oouter]\n";
+        $out .= "  %ot = phi i64 [0, %one], [%ot2, %oouter]\n";
+        $out .= "  %orem = sub i64 %hl, %op0\n";
+        $out .= "  %olt = icmp ult i64 %orem, 65536\n";
+        $out .= "  %oblk = select i1 %olt, i64 %orem, i64 65536\n";
+        $out .= "  %obase = getelementptr inbounds i8, ptr %h, i64 %op0\n";
+        $out .= "  br label %oin\n";
+        $out .= "oin:\n";
+        $out .= "  %oi = phi i64 [0, %oloop], [%oi2, %oin]\n";
+        $out .= "  %oc = phi i32 [0, %oloop], [%oc2, %oin]\n";
+        $out .= "  %op = getelementptr inbounds i8, ptr %obase, i64 %oi\n";
+        $out .= "  %ob = load i8, ptr %op\n";
+        $out .= "  %oe = icmp eq i8 %ob, %cb\n";
+        $out .= "  %oz = zext i1 %oe to i32\n";
+        $out .= "  %oc2 = add i32 %oc, %oz\n";
+        $out .= "  %oi2 = add i64 %oi, 1\n";
+        $out .= "  %od = icmp eq i64 %oi2, %oblk\n";
+        $out .= "  br i1 %od, label %oouter, label %oin\n";
+        $out .= "oouter:\n";
+        $out .= "  %ocz = zext i32 %oc2 to i64\n";
+        $out .= "  %ot2 = add i64 %ot, %ocz\n";
+        $out .= "  %op1 = add i64 %op0, %oblk\n";
+        $out .= "  %oend = icmp eq i64 %op1, %hl\n";
+        $out .= "  br i1 %oend, label %odone, label %oloop\n";
+        $out .= "odone:\n";
+        $out .= "  ret i64 %ot2\n";
+        $out .= "loop:\n";
+        $out .= "  %cur = phi ptr [%h, %chk], [%nx, %hit]\n";
+        $out .= "  %rem = phi i64 [%hl, %chk], [%rem2, %hit]\n";
+        $out .= "  %cnt = phi i64 [0, %chk], [%cnt1, %hit]\n";
+        $out .= "  %fits = icmp uge i64 %rem, %nl\n";
+        $out .= "  br i1 %fits, label %scan, label %done\n";
+        $out .= "scan:\n";
+        $out .= "  %f = call ptr @__mir_memfind(ptr %cur, i64 %rem, ptr %n, i64 %nl)\n";
+        $out .= "  %isn = icmp eq ptr %f, null\n";
+        $out .= "  br i1 %isn, label %done, label %hit\n";
+        $out .= "hit:\n";
+        $out .= "  %nx = getelementptr inbounds i8, ptr %f, i64 %nl\n";
+        $out .= "  %ci = ptrtoint ptr %cur to i64\n";
+        $out .= "  %ni = ptrtoint ptr %nx to i64\n";
+        $out .= "  %used = sub i64 %ni, %ci\n";
+        $out .= "  %rem2 = sub i64 %rem, %used\n";
+        $out .= "  %cnt1 = add i64 %cnt, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "done:\n";
+        $out .= "  ret i64 %cnt\n";
+        $out .= "zero:\n";
+        $out .= "  ret i64 0\n";
+        $out .= "}\n";
+        return $out;
+    }
+
     /** Runtime: replace every non-overlapping `%se` in `%sj` with `%rp`, left
      * to right (PHP str_replace semantics; the replacement is never rescanned).
      * Always returns a FRESH string. Empty/absent search → a plain copy. */
-    public function strReplaceOne(): string
+    public function strReplaceOne(bool $ci = false): string
     {
+        $find = $ci ? '@__mir_memcasefind' : '@__mir_memfind';
         // Header-aware lengths (cached len@-16) — never a libc O(n) rescan of an
         // already-headered manticore string. A single-byte search (%is1, the
         // overwhelmingly common explode/implode delimiter) probes with memchr
         // instead of strstr (no substring-match machinery) in both passes.
-        $out  = "\ndefine ptr @__mir_str_replace_one(ptr %se, ptr %rp, ptr %sj) {\n";
+        $out  = "\ndefine ptr @" . ($ci ? '__mir_str_ireplace_one' : '__mir_str_replace_one') . "(ptr %se, ptr %rp, ptr %sj) {\n";
         $out .= "entry:\n";
         $out .= "  %slen = call i64 @__mir_strlen(ptr %se)\n";
         $out .= "  %rlen = call i64 @__mir_strlen(ptr %rp)\n";
@@ -4932,26 +5401,26 @@ bad4:
         $out .= "  %stoolong = icmp ugt i64 %slen, %jlen\n";
         $out .= "  %nomatchposs = or i1 %semp, %stoolong\n";
         $out .= "  br i1 %nomatchposs, label %copy, label %prep\n";
+        // Output can only grow when the replacement is longer: otherwise the
+        // subject length already bounds it and the counting pass is skipped.
         $out .= "prep:\n";
-        $out .= "  %is1 = icmp eq i64 %slen, 1\n";
-        $out .= "  %c0b = load i8, ptr %se\n";
-        $out .= "  %c0 = zext i8 %c0b to i32\n";
-        $out .= "  br label %cloop\n";
-        // ── Pass 1: count matches ──
+        $out .= "  %jcap = add i64 %jlen, 1\n";
+        $out .= "  %grow = icmp ugt i64 %rlen, %slen\n";
+        $out .= "  br i1 %grow, label %gchk, label %alloc\n";
+        $out .= "gchk:\n";
+        // one byte, case-sensitive: the vectorized count loop
+        $out .= "  %gone = icmp eq i64 %slen, " . ($ci ? '0' : '1') . "\n";
+        $out .= "  br i1 %gone, label %cone, label %cloop\n";
+        $out .= "cone:\n";
+        $out .= "  %cc = call i64 @__mir_substr_count(ptr %sj, ptr %se)\n";
+        $out .= "  br label %sized\n";
+        // ── Pass 1: count matches (bounded memmem/memchr: binary-safe) ──
         $out .= "cloop:\n";
-        $out .= "  %cpos = phi i64 [0, %prep], [%cpos2, %chit]\n";
-        $out .= "  %ccnt = phi i64 [0, %prep], [%ccnt1, %chit]\n";
+        $out .= "  %cpos = phi i64 [0, %gchk], [%cpos2, %chit]\n";
+        $out .= "  %ccnt = phi i64 [0, %gchk], [%ccnt1, %chit]\n";
         $out .= "  %cfrom = getelementptr inbounds i8, ptr %sj, i64 %cpos\n";
-        $out .= "  br i1 %is1, label %cm, label %cs\n";
-        $out .= "cm:\n";
         $out .= "  %crem = sub i64 %jlen, %cpos\n";
-        $out .= "  %cmr = call ptr @memchr(ptr %cfrom, i32 %c0, i64 %crem)\n";
-        $out .= "  br label %cj\n";
-        $out .= "cs:\n";
-        $out .= "  %csr = call ptr @strstr(ptr %cfrom, ptr %se)\n";
-        $out .= "  br label %cj\n";
-        $out .= "cj:\n";
-        $out .= "  %cf = phi ptr [%cmr, %cm], [%csr, %cs]\n";
+        $out .= "  %cf = call ptr {$find}(ptr %cfrom, i64 %crem, ptr %se, i64 %slen)\n";
         $out .= "  %cnull = icmp eq ptr %cf, null\n";
         $out .= "  br i1 %cnull, label %sized, label %chit\n";
         $out .= "chit:\n";
@@ -4963,28 +5432,24 @@ bad4:
         $out .= "  br label %cloop\n";
         // outlen = jlen + count*rlen - count*slen ; alloc outlen+1
         $out .= "sized:\n";
-        $out .= "  %crep = mul i64 %ccnt, %rlen\n";
-        $out .= "  %csea = mul i64 %ccnt, %slen\n";
+        $out .= "  %cn = phi i64 [%ccnt, %cloop], [%cc, %cone]\n";
+        $out .= "  %crep = mul i64 %cn, %rlen\n";
+        $out .= "  %csea = mul i64 %cn, %slen\n";
         $out .= "  %o1 = add i64 %jlen, %crep\n";
         $out .= "  %outlen = sub i64 %o1, %csea\n";
         $out .= "  %ocap = add i64 %outlen, 1\n";
-        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %ocap)\n";
+        $out .= "  br label %alloc\n";
+        $out .= "alloc:\n";
+        $out .= "  %cap = phi i64 [%jcap, %prep], [%ocap, %sized]\n";
+        $out .= "  %buf = call ptr @__mir_str_alloc(i64 %cap)\n";
         // ── Pass 2: fill ──
         $out .= "  br label %floop\n";
         $out .= "floop:\n";
-        $out .= "  %src = phi i64 [0, %sized], [%src2, %fhit]\n";
-        $out .= "  %dst = phi i64 [0, %sized], [%dst2, %fhit]\n";
+        $out .= "  %src = phi i64 [0, %alloc], [%src2, %fhit]\n";
+        $out .= "  %dst = phi i64 [0, %alloc], [%dst2, %fhit]\n";
         $out .= "  %ffrom = getelementptr inbounds i8, ptr %sj, i64 %src\n";
-        $out .= "  br i1 %is1, label %fm, label %fs\n";
-        $out .= "fm:\n";
         $out .= "  %frem = sub i64 %jlen, %src\n";
-        $out .= "  %fmr = call ptr @memchr(ptr %ffrom, i32 %c0, i64 %frem)\n";
-        $out .= "  br label %fj\n";
-        $out .= "fs:\n";
-        $out .= "  %fsr = call ptr @strstr(ptr %ffrom, ptr %se)\n";
-        $out .= "  br label %fj\n";
-        $out .= "fj:\n";
-        $out .= "  %ff = phi ptr [%fmr, %fm], [%fsr, %fs]\n";
+        $out .= "  %ff = call ptr {$find}(ptr %ffrom, i64 %frem, ptr %se, i64 %slen)\n";
         $out .= "  %fnull = icmp eq ptr %ff, null\n";
         $out .= "  br i1 %fnull, label %tail, label %fhit\n";
         $out .= "fhit:\n";
@@ -8115,12 +8580,18 @@ done:
             $dents[] = 'i8 ' . (string)$dec[$c];
             $hents[] = 'i8 ' . (string)$hex[$c];
         }
-        $out  = "\n@__mir_b64_alpha = private unnamed_addr constant [64 x i8] c\"" . $alpha . "\"\n";
+        $t12 = [];
+        for ($x = 0; $x < 4096; $x = $x + 1) {
+            $t12[] = 'i16 ' . (string)(\ord($alpha[$x >> 6]) | (\ord($alpha[$x & 63]) << 8));
+        }
+        $out  = "\n@__mir_b64_t12 = private unnamed_addr constant [4096 x i16] [" . \implode(', ', $t12) . "]\n";
+        $out .= "@__mir_b64_alpha = private unnamed_addr constant [64 x i8] c\"" . $alpha . "\"\n";
         $out .= "@__mir_b64_dtab = private unnamed_addr constant [256 x i8] [" . \implode(', ', $dents) . "]\n";
         $out .= "@__mir_hex_dtab = private unnamed_addr constant [256 x i8] [" . \implode(', ', $hents) . "]\n";
         $out .= "@__mir_hex_alpha = private unnamed_addr constant [16 x i8] c\"0123456789abcdef\"\n";
 
         // base64_encode
+        $out .= "declare i64 @llvm.bswap.i64(i64)\n";
         $out .= "define ptr @__mir_b64_enc(ptr %s) {\n";
         $out .= "entry:\n";
         $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
@@ -8132,9 +8603,45 @@ done:
         $out .= "  %olen = shl i64 %blocks, 2\n";
         $out .= "  %sz = add i64 %olen, 1\n";
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
-        $out .= "  br label %loop\n";
+        // Two blocks per step: one unaligned 8-byte load (byte-swapped so the first
+        // byte is on top) yields 6 input bytes = 2 blocks = 4 twelve-bit lookups.
+        // Needs 8 readable bytes, so the pair loop stops 8 short of the end and the
+        // block loop below finishes the rest.
+        $out .= "  %ge8 = icmp uge i64 %n, 8\n";
+        $out .= "  %nm8 = sub i64 %n, 8\n";
+        $out .= "  %kp0 = udiv i64 %nm8, 6\n";
+        $out .= "  %kp1 = add i64 %kp0, 1\n";
+        $out .= "  %kp = select i1 %ge8, i64 %kp1, i64 0\n";
+        $out .= "  %pk = shl i64 %kp, 1\n";
+        $out .= "  br label %ploop\n";
+        $out .= "ploop:\n";
+        $out .= "  %pj = phi i64 [0, %entry], [%pj2, %pbody]\n";
+        $out .= "  %pmore = icmp ult i64 %pj, %kp\n";
+        $out .= "  br i1 %pmore, label %pbody, label %loop\n";
+        $out .= "pbody:\n";
+        $out .= "  %pin = mul i64 %pj, 6\n";
+        $out .= "  %pout = shl i64 %pj, 3\n";
+        $out .= "  %pip = getelementptr inbounds i8, ptr %s, i64 %pin\n";
+        $out .= "  %pw = load i64, ptr %pip, align 1\n";
+        $out .= "  %pb = call i64 @llvm.bswap.i64(i64 %pw)\n";
+        $out .= "  %pa = lshr i64 %pb, 40\n";
+        $out .= "  %pc0 = lshr i64 %pb, 16\n";
+        $out .= "  %pc = and i64 %pc0, 16777215\n";
+        $out .= "  %pa1 = lshr i64 %pa, 12\n";
+        $out .= "  %pa2 = and i64 %pa, 4095\n";
+        $out .= "  %pc1 = lshr i64 %pc, 12\n";
+        $out .= "  %pc2 = and i64 %pc, 4095\n";
+        foreach ([['a1', 0], ['a2', 2], ['c1', 4], ['c2', 6]] as [$r, $off]) {
+            $out .= '  %pt' . $r . ' = getelementptr inbounds [4096 x i16], ptr @__mir_b64_t12, i64 0, i64 %p' . $r . "\n";
+            $out .= '  %pv' . $r . ' = load i16, ptr %pt' . $r . "\n";
+            $out .= '  %po' . $r . ' = add i64 %pout, ' . $off . "\n";
+            $out .= '  %pd' . $r . ' = getelementptr inbounds i8, ptr %buf, i64 %po' . $r . "\n";
+            $out .= '  store i16 %pv' . $r . ', ptr %pd' . $r . ", align 1\n";
+        }
+        $out .= "  %pj2 = add i64 %pj, 1\n";
+        $out .= "  br label %ploop\n";
         $out .= "loop:\n";
-        $out .= "  %k = phi i64 [0, %entry], [%k2, %body]\n";
+        $out .= "  %k = phi i64 [%pk, %ploop], [%k2, %body]\n";
         $out .= "  %more = icmp ult i64 %k, %q\n";
         $out .= "  br i1 %more, label %body, label %tail\n";
         $out .= "body:\n";
@@ -8153,17 +8660,19 @@ done:
         $out .= "  %s1 = shl i32 %z1, 8\n";
         $out .= "  %v0 = or i32 %s0, %s1\n";
         $out .= "  %v = or i32 %v0, %z2\n";
-        for ($q = 0; $q < 4; $q = $q + 1) {
-            $sh = 18 - 6 * $q;
-            $out .= '  %e' . $q . ' = lshr i32 %v, ' . $sh . "\n";
-            $out .= '  %f' . $q . ' = and i32 %e' . $q . ", 63\n";
-            $out .= '  %g' . $q . ' = zext i32 %f' . $q . " to i64\n";
-            $out .= '  %h' . $q . ' = getelementptr inbounds i8, ptr @__mir_b64_alpha, i64 %g' . $q . "\n";
-            $out .= '  %c' . $q . ' = load i8, ptr %h' . $q . "\n";
-            $out .= '  %oq' . $q . ' = add i64 %o, ' . $q . "\n";
-            $out .= '  %d' . $q . ' = getelementptr inbounds i8, ptr %buf, i64 %oq' . $q . "\n";
-            $out .= '  store i8 %c' . $q . ', ptr %d' . $q . "\n";
-        }
+        $out .= "  %vh = lshr i32 %v, 12\n";
+        $out .= "  %vl = and i32 %v, 4095\n";
+        $out .= "  %vhz = zext i32 %vh to i64\n";
+        $out .= "  %vlz = zext i32 %vl to i64\n";
+        $out .= "  %th = getelementptr inbounds [4096 x i16], ptr @__mir_b64_t12, i64 0, i64 %vhz\n";
+        $out .= "  %tl = getelementptr inbounds [4096 x i16], ptr @__mir_b64_t12, i64 0, i64 %vlz\n";
+        $out .= "  %ph = load i16, ptr %th\n";
+        $out .= "  %pl = load i16, ptr %tl\n";
+        $out .= "  %d0 = getelementptr inbounds i8, ptr %buf, i64 %o\n";
+        $out .= "  store i16 %ph, ptr %d0, align 1\n";
+        $out .= "  %o2 = add i64 %o, 2\n";
+        $out .= "  %d2 = getelementptr inbounds i8, ptr %buf, i64 %o2\n";
+        $out .= "  store i16 %pl, ptr %d2, align 1\n";
         $out .= "  %k2 = add i64 %k, 1\n";
         $out .= "  br label %loop\n";
         $out .= "tail:\n";
@@ -8220,12 +8729,62 @@ done:
         $out .= "  %buf = call ptr @__mir_str_alloc(i64 %sz)\n";
         $out .= "  br label %loop\n";
         $out .= "loop:\n";
-        $out .= "  %i = phi i64 [0, %entry], [%i2, %cont]\n";
-        $out .= "  %j = phi i64 [0, %entry], [%j2, %cont]\n";
-        $out .= "  %acc = phi i32 [0, %entry], [%acc2, %cont]\n";
-        $out .= "  %bits = phi i32 [0, %entry], [%bits2, %cont]\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i2, %cont], [%qi4, %qok]\n";
+        $out .= "  %j = phi i64 [0, %entry], [%j2, %cont], [%jq, %qok]\n";
+        $out .= "  %acc = phi i32 [0, %entry], [%acc2, %cont], [%acc, %qok]\n";
+        $out .= "  %bits = phi i32 [0, %entry], [%bits2, %cont], [0, %qok]\n";
         $out .= "  %done = icmp uge i64 %i, %n\n";
-        $out .= "  br i1 %done, label %fin, label %body\n";
+        $out .= "  br i1 %done, label %fin, label %chkq\n";
+        // aligned (no pending bits) and 4 bytes left: decode a clean quad at once
+        $out .= "chkq:\n";
+        $out .= "  %qb = icmp eq i32 %bits, 0\n";
+        $out .= "  %qi4 = add i64 %i, 4\n";
+        $out .= "  %qf = icmp ule i64 %qi4, %n\n";
+        $out .= "  %qok0 = and i1 %qb, %qf\n";
+        $out .= "  br i1 %qok0, label %quad, label %body\n";
+        $out .= "quad:\n";
+        $out .= "  %q0p = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %q0 = load i8, ptr %q0p\n";
+        $out .= "  %q1p = getelementptr inbounds i8, ptr %q0p, i64 1\n";
+        $out .= "  %q1 = load i8, ptr %q1p\n";
+        $out .= "  %q2p = getelementptr inbounds i8, ptr %q0p, i64 2\n";
+        $out .= "  %q2 = load i8, ptr %q2p\n";
+        $out .= "  %q3p = getelementptr inbounds i8, ptr %q0p, i64 3\n";
+        $out .= "  %q3 = load i8, ptr %q3p\n";
+        for ($k = 0; $k < 4; $k = $k + 1) {
+            $out .= "  %q{$k}z = zext i8 %q{$k} to i64\n";
+            $out .= "  %q{$k}t = getelementptr inbounds [256 x i8], ptr @__mir_b64_dtab, i64 0, i64 %q{$k}z\n";
+            $out .= "  %q{$k}v = load i8, ptr %q{$k}t\n";
+        }
+        $out .= "  %qo1 = or i8 %q0v, %q1v\n";
+        $out .= "  %qo2 = or i8 %q2v, %q3v\n";
+        $out .= "  %qo = or i8 %qo1, %qo2\n";
+        $out .= "  %qclean = icmp ult i8 %qo, 64\n";
+        $out .= "  br i1 %qclean, label %qok, label %body\n";
+        $out .= "qok:\n";
+        $out .= "  %w0 = zext i8 %q0v to i32\n";
+        $out .= "  %w1 = zext i8 %q1v to i32\n";
+        $out .= "  %w2 = zext i8 %q2v to i32\n";
+        $out .= "  %w3 = zext i8 %q3v to i32\n";
+        $out .= "  %x0 = shl i32 %w0, 18\n";
+        $out .= "  %x1 = shl i32 %w1, 12\n";
+        $out .= "  %x2 = shl i32 %w2, 6\n";
+        $out .= "  %y0 = or i32 %x0, %x1\n";
+        $out .= "  %y1 = or i32 %x2, %w3\n";
+        $out .= "  %y = or i32 %y0, %y1\n";
+        $out .= "  %r0 = lshr i32 %y, 16\n";
+        $out .= "  %r1 = lshr i32 %y, 8\n";
+        $out .= "  %t0 = trunc i32 %r0 to i8\n";
+        $out .= "  %t1 = trunc i32 %r1 to i8\n";
+        $out .= "  %t2 = trunc i32 %y to i8\n";
+        $out .= "  %o0p = getelementptr inbounds i8, ptr %buf, i64 %j\n";
+        $out .= "  store i8 %t0, ptr %o0p\n";
+        $out .= "  %o1p = getelementptr inbounds i8, ptr %o0p, i64 1\n";
+        $out .= "  store i8 %t1, ptr %o1p\n";
+        $out .= "  %o2p = getelementptr inbounds i8, ptr %o0p, i64 2\n";
+        $out .= "  store i8 %t2, ptr %o2p\n";
+        $out .= "  %jq = add i64 %j, 3\n";
+        $out .= "  br label %loop\n";
         $out .= "body:\n";
         $out .= "  %sp = getelementptr inbounds i8, ptr %s, i64 %i\n";
         $out .= "  %c = load i8, ptr %sp\n";
@@ -8316,6 +8875,37 @@ done:
         $out .= "  ret i64 %res\n";
         $out .= "no:\n";
         $out .= "  ret i64 0\n";
+        $out .= "}\n";
+
+        // hex_ok: 1 when every byte is a hex digit (empty is 1; callers test the length)
+        $out .= "define i64 @__mir_hex_ok(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %n = call i64 @__mir_strlen(ptr %s)\n";
+        $out .= "  %z = icmp eq i64 %n, 0\n";
+        $out .= "  br i1 %z, label %yes, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [0, %entry], [%i2, %loop]\n";
+        $out .= "  %bad = phi i8 [0, %entry], [%bad2, %loop]\n";
+        $out .= "  %p = getelementptr inbounds i8, ptr %s, i64 %i\n";
+        $out .= "  %c = load i8, ptr %p\n";
+        $out .= "  %d = sub i8 %c, 48\n";
+        $out .= "  %isd = icmp ult i8 %d, 10\n";
+        $out .= "  %l = or i8 %c, 32\n";
+        $out .= "  %a = sub i8 %l, 97\n";
+        $out .= "  %isa = icmp ult i8 %a, 6\n";
+        $out .= "  %ok = or i1 %isd, %isa\n";
+        $out .= "  %nok = xor i1 %ok, true\n";
+        $out .= "  %nz = zext i1 %nok to i8\n";
+        $out .= "  %bad2 = or i8 %bad, %nz\n";
+        $out .= "  %i2 = add i64 %i, 1\n";
+        $out .= "  %end = icmp eq i64 %i2, %n\n";
+        $out .= "  br i1 %end, label %fin, label %loop\n";
+        $out .= "fin:\n";
+        $out .= "  %good = icmp eq i8 %bad2, 0\n";
+        $out .= "  %r = zext i1 %good to i64\n";
+        $out .= "  ret i64 %r\n";
+        $out .= "yes:\n";
+        $out .= "  ret i64 1\n";
         $out .= "}\n";
 
         // bin2hex

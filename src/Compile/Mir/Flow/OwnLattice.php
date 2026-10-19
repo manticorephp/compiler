@@ -52,6 +52,10 @@ final class OwnLattice implements Lattice
      *  merge types it `cell` where a path left a raw word). A real cell is an
      *  alias copy — +1, the old dropped; anything else is left as it is. */
     public const SELF_COPY = 3;
+    /** `$x = $x` that REBUILDS the slot's array with cell elements
+     *  ({@see \Compile\Mir\Ownership::forwardCellifies}): the slot then owns a
+     *  fresh +1, and an owned predecessor is dropped. */
+    public const SELF_REBUILD = 4;
 
     /** @var array<string, int> */
     public array $entryState = [];
@@ -317,6 +321,8 @@ final class OwnLattice implements Lattice
                 // A cell self-copy stores `__mir_cell_own_alias`'s answer, a
                 // value the slot owns: a borrowed cell leaves it owned.
                 if (self::isBorrow($x) && isset($this->cellish[self::borrowKey($x)])) { $v = $this->storeKey[$id]; }
+            } elseif ($mode === self::SELF_REBUILD) {
+                $v = $this->storeKey[$id];
             } elseif ($mode === self::SELF_APPEND) {
                 $v = $this->storeKey[$id];
             } else {

@@ -1,6 +1,5 @@
 <?php
 // A string value read from an array<int, mixed> and stored into a bare-array parameter reads back as 0
-// issue: #161
 class Dbg {
     /** @return array<int, mixed> */
     public function __debugInfo(): array { return [1, 'x']; }

@@ -2552,6 +2552,9 @@ function __mc_yf_wrap(mixed $src): \Generator
  * the order Zend gives them). The root is the element `compare()` ranks
  * highest. A `compare()` that throws leaves the heap corrupted: every later
  * read or write throws until recoverFromCorruption().
+ *
+ * SplMinHeap and SplMaxHeap themselves (no user `compare()`) take a path with
+ * no virtual call and no try/catch per comparison: a `try` costs a setjmp.
  */
 abstract class SplHeap implements Iterator, Countable
 {
@@ -2559,15 +2562,34 @@ abstract class SplHeap implements Iterator, Countable
     private bool $isCorrupted = false;
     /** @var array<int, mixed> */
     private array $heap = [];
-
     abstract protected function compare(mixed $value1, mixed $value2): int;
+
+    /** 1 = SplMaxHeap itself, -1 = SplMinHeap itself, 0 = a user compare() (no property: var_dump shows the real ones) */
+    private function __mcDir(): int
+    {
+        $c = \get_class($this);
+        return $c === 'SplMaxHeap' ? 1 : ($c === 'SplMinHeap' ? -1 : 0);
+    }
 
     public function insert(mixed $value): true
     {
         if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
-        $err = null;
+        $dir = $this->__mcDir();
         $i = \count($this->heap);
         $this->heap[] = $value;
+        if ($dir !== 0) {
+            $max = $dir > 0;
+            while ($i > 0) {
+                $p = ($i - 1) >> 1;
+                $pv = $this->heap[$p];
+                if ($max ? ($pv <=> $value) >= 0 : ($value <=> $pv) >= 0) { break; }
+                $this->heap[$i] = $pv;
+                $i = $p;
+            }
+            $this->heap[$i] = $value;
+            return true;
+        }
+        $err = null;
         while ($i > 0) {
             $p = \intdiv($i - 1, 2);
             if ($this->__mcCmp($this->heap[$p], $value, $err) >= 0) { break; }
@@ -2655,8 +2677,27 @@ abstract class SplHeap implements Iterator, Countable
         $bottom = \array_pop($this->heap);
         $n = \count($this->heap);
         if ($n === 0) { return $top; }
-        $limit = \intdiv($n, 2);
+        $limit = $n >> 1;
         $i = 0;
+        $dir = $this->__mcDir();
+        if ($dir !== 0) {
+            $max = $dir > 0;
+            while ($i < $limit) {
+                $j = 2 * $i + 1;
+                $cj = $this->heap[$j];
+                if ($j + 1 !== $n) {
+                    $r = $this->heap[$j + 1];
+                    if ($max ? ($r <=> $cj) > 0 : ($cj <=> $r) > 0) { $j = $j + 1; $cj = $r; }
+                } else {
+                    if ($max ? ($bottom <=> $cj) > 0 : ($cj <=> $bottom) > 0) { $j = $j + 1; $cj = $bottom; }
+                }
+                if ($max ? ($bottom <=> $cj) >= 0 : ($cj <=> $bottom) >= 0) { break; }
+                $this->heap[$i] = $cj;
+                $i = $j;
+            }
+            $this->heap[$i] = $bottom;
+            return $top;
+        }
         while ($i < $limit) {
             $j = 2 * $i + 1;
             if ($j !== $n && $this->__mcCmp($this->__mcAt($j + 1, $n, $bottom), $this->heap[$j], $err) > 0) { $j = $j + 1; }
@@ -2685,7 +2726,13 @@ class SplMaxHeap extends SplHeap
     protected function compare(mixed $value1, mixed $value2): int { return $value1 <=> $value2; }
 }
 
-/** A heap of `[data, priority]` pairs ranked by `compare()` over the priorities. */
+/**
+ * A heap of data/priority pairs ranked by `compare()` over the priorities. The two
+ * halves live in parallel arrays (a pair array per element cost an allocation and
+ * two string-key lookups per comparison); the pair is built only for
+ * EXTR_BOTH and serialization. SplPriorityQueue itself takes the path with no
+ * virtual call and no try/catch per comparison.
+ */
 class SplPriorityQueue implements Iterator, Countable
 {
     public const EXTR_BOTH = 3;
@@ -2694,25 +2741,56 @@ class SplPriorityQueue implements Iterator, Countable
 
     private int $flags = 1;
     private bool $isCorrupted = false;
-    /** @var array<int, array<string, mixed>> */
-    private array $heap = [];
-
+    /** @var array<int, mixed> */
+    private array $hd = [];
+    /** @var array<int, mixed> */
+    private array $hp = [];
     public function compare(mixed $priority1, mixed $priority2): int { return $priority1 <=> $priority2; }
+
+    /** SplPriorityQueue itself (no user compare()); no property: it would show in var_dump */
+    private function __mcPlain(): bool
+    {
+        return \get_class($this) === 'SplPriorityQueue';
+    }
+
+    /** @return array<string, mixed> php's debug view: the pairs rebuilt, private names mangled */
+    public function __debugInfo(): array
+    {
+        $els = [];
+        $n = \count($this->hp);
+        for ($i = 0; $i < $n; $i = $i + 1) { $els[] = ['data' => $this->hd[$i], 'priority' => $this->hp[$i]]; }
+        return ["\0SplPriorityQueue\0flags" => $this->flags, "\0SplPriorityQueue\0isCorrupted" => $this->isCorrupted, "\0SplPriorityQueue\0heap" => $els];
+    }
 
     public function insert(mixed $value, mixed $priority): true
     {
         if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
+        $i = \count($this->hp);
+        $this->hd[] = $value;
+        $this->hp[] = $priority;
+        if ($this->__mcPlain()) {
+            while ($i > 0) {
+                $p = ($i - 1) >> 1;
+                $pp = $this->hp[$p];
+                if (($pp <=> $priority) >= 0) { break; }
+                $this->hd[$i] = $this->hd[$p];
+                $this->hp[$i] = $pp;
+                $i = $p;
+            }
+            $this->hd[$i] = $value;
+            $this->hp[$i] = $priority;
+            return true;
+        }
         $err = null;
-        $el = ['data' => $value, 'priority' => $priority];
-        $i = \count($this->heap);
-        $this->heap[] = $el;
         while ($i > 0) {
             $p = \intdiv($i - 1, 2);
-            if ($this->__mcCmp($this->heap[$p], $el, $err) >= 0) { break; }
-            $this->heap[$i] = $this->heap[$p];
+            if ($this->__mcCmp($this->hp[$p], $priority, $err) >= 0) { break; }
+            $this->hd[$i] = $this->hd[$p];
+            $this->hp[$i] = $this->hp[$p];
             $i = $p;
         }
-        $this->heap[$i] = $el;
+        $this->hd[$i] = $value;
+        $this->hp[$i] = $priority;
         if ($err !== null) { $this->isCorrupted = true; throw $err; }
         return true;
     }
@@ -2729,36 +2807,38 @@ class SplPriorityQueue implements Iterator, Countable
     public function extract(): mixed
     {
         if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
-        if ($this->heap === []) { throw new RuntimeException("Can't extract from an empty heap"); }
+        if ($this->hp === []) { throw new RuntimeException("Can't extract from an empty heap"); }
         $err = null;
-        $top = $this->__mcDeleteTop($err);
+        $topD = $this->hd[0];
+        $topP = $this->hp[0];
+        $this->__mcDeleteTop($err);
         if ($err !== null) { $this->isCorrupted = true; throw $err; }
-        return $this->__mcView($top);
+        return $this->__mcView($topD, $topP);
     }
 
     public function top(): mixed
     {
         if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
-        if ($this->heap === []) { throw new RuntimeException("Can't peek at an empty heap"); }
-        return $this->__mcView($this->heap[0]);
+        if ($this->hp === []) { throw new RuntimeException("Can't peek at an empty heap"); }
+        return $this->__mcView($this->hd[0], $this->hp[0]);
     }
 
-    public function isEmpty(): bool { return $this->heap === []; }
+    public function isEmpty(): bool { return $this->hp === []; }
 
-    public function count(): int { return \count($this->heap); }
+    public function count(): int { return \count($this->hp); }
 
     public function rewind(): void {}
 
-    public function valid(): bool { return $this->heap !== []; }
+    public function valid(): bool { return $this->hp !== []; }
 
-    public function current(): mixed { return $this->heap === [] ? null : $this->__mcView($this->heap[0]); }
+    public function current(): mixed { return $this->hp === [] ? null : $this->__mcView($this->hd[0], $this->hp[0]); }
 
-    public function key(): int { return \count($this->heap) - 1; }
+    public function key(): int { return \count($this->hp) - 1; }
 
     public function next(): void
     {
         if ($this->isCorrupted) { throw new RuntimeException('Heap is corrupted, heap properties are no longer ensured.'); }
-        if ($this->heap === []) { return; }
+        if ($this->hp === []) { return; }
         $err = null;
         $this->__mcDeleteTop($err);
         if ($err !== null) { $this->isCorrupted = true; throw $err; }
@@ -2775,54 +2855,65 @@ class SplPriorityQueue implements Iterator, Countable
     /** @return array<int, mixed> */
     public function __serialize(): array
     {
-        return [[], ['flags' => $this->flags, 'heap_elements' => $this->heap]];
+        $els = [];
+        $n = \count($this->hp);
+        for ($i = 0; $i < $n; $i = $i + 1) { $els[] = ['data' => $this->hd[$i], 'priority' => $this->hp[$i]]; }
+        return [[], ['flags' => $this->flags, 'heap_elements' => $els]];
     }
 
     /** @param array<int, mixed> $data */
     public function __unserialize(array $data): void
     {
         $this->flags = (int)$data[1]['flags'];
-        $this->heap = \array_values($data[1]['heap_elements']);
+        $this->hd = [];
+        $this->hp = [];
+        foreach ($data[1]['heap_elements'] as $el) {
+            $this->hd[] = $el['data'];
+            $this->hp[] = $el['priority'];
+        }
     }
 
-    /** @param array<string, mixed> $el */
-    private function __mcView(array $el): mixed
+    private function __mcView(mixed $data, mixed $priority): mixed
     {
-        if ($this->flags === 1) { return $el['data']; }
-        if ($this->flags === 2) { return $el['priority']; }
-        return $el;
+        if ($this->flags === 1) { return $data; }
+        if ($this->flags === 2) { return $priority; }
+        return ['data' => $data, 'priority' => $priority];
     }
 
-    /** @param array<string, mixed> $a  @param array<string, mixed> $b */
-    private function __mcCmp(array $a, array $b, ?Throwable &$err): int
+    private function __mcCmp(mixed $a, mixed $b, ?Throwable &$err): int
     {
         if ($err !== null) { return 0; }
         try {
-            return $this->compare($a['priority'], $b['priority']);
+            return $this->compare($a, $b);
         } catch (Throwable $e) {
             $err = $e;
             return 0;
         }
     }
 
-    /** @return array<string, mixed> */
-    private function __mcDeleteTop(?Throwable &$err): array
+    /** Removes the root; the caller has already read it. */
+    private function __mcDeleteTop(?Throwable &$err): void
     {
-        $top = $this->heap[0];
-        $bottom = \array_pop($this->heap);
-        $n = \count($this->heap);
-        if ($n === 0) { return $top; }
-        $limit = \intdiv($n, 2);
+        $bottomD = \array_pop($this->hd);
+        $bottomP = \array_pop($this->hp);
+        $n = \count($this->hp);
+        if ($n === 0) { return; }
+        $limit = $n >> 1;
         $i = 0;
+        $plain = $this->__mcPlain();
         while ($i < $limit) {
             $j = 2 * $i + 1;
-            if ($j !== $n && $this->__mcCmp($j + 1 === $n ? $bottom : $this->heap[$j + 1], $this->heap[$j], $err) > 0) { $j = $j + 1; }
-            $child = $j === $n ? $bottom : $this->heap[$j];
-            if ($this->__mcCmp($bottom, $child, $err) >= 0) { break; }
-            $this->heap[$i] = $child;
+            if ($j !== $n) {
+                $r = $j + 1 === $n ? $bottomP : $this->hp[$j + 1];
+                if ($plain ? ($r <=> $this->hp[$j]) > 0 : $this->__mcCmp($r, $this->hp[$j], $err) > 0) { $j = $j + 1; }
+            }
+            $cp = $j === $n ? $bottomP : $this->hp[$j];
+            if ($plain ? ($bottomP <=> $cp) >= 0 : $this->__mcCmp($bottomP, $cp, $err) >= 0) { break; }
+            $this->hd[$i] = $j === $n ? $bottomD : $this->hd[$j];
+            $this->hp[$i] = $cp;
             $i = $j;
         }
-        $this->heap[$i] = $bottom;
-        return $top;
+        $this->hd[$i] = $bottomD;
+        $this->hp[$i] = $bottomP;
     }
 }

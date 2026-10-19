@@ -449,7 +449,7 @@ trait LowerFns
             || $n === '__mir_argc' || $n === '__mir_argv_at' || $n === '__mir_to_cell'
             || $n === '__mir_env_count' || $n === '__mir_env_at'
             || $n === '__mir_clock_ns' || $n === '__mc_pool_start'
-            || $n === 'strtolower' || $n === 'strtoupper' || $n === 'strpos'
+            || $n === 'strtolower' || $n === 'strtoupper' || $n === 'strpos' || $n === 'stripos'
             || $n === 'implode' || $n === 'join'
             || $n === 'sprintf' || $n === 'printf'
             || $n === 'exit' || $n === 'die' || $n === 'error_log'
@@ -1283,9 +1283,14 @@ trait LowerFns
         for ($j = $si; $j < $vidx; $j = $j + 1) {
             $src = $j === $si ? \Parser\Ast\Expr::assign($tmp, $this->spreadValueOf($spread), $span) : $tmp;
             $idx = \Parser\Ast\Expr::int($j - $si, $span);
+            // Positional by iteration order, as php unpacks: an array keyed 1, 2 (or sparse) still
+            // feeds its first value to the first parameter. Reading through the key list keeps
+            // the element typed (array_values would re-box it).
+            $cnt = \Parser\Ast\Expr::binary('>', \Parser\Ast\Expr::call('count', [$src], $span), $idx, $span);
+            $kAt = \Parser\Ast\Expr::arrayAccess(\Parser\Ast\Expr::call('array_keys', [$tmp], $span), $idx, $span);
             $out[] = new \Compile\Mir\Ternary(
-                $this->lowerExpr(\Parser\Ast\Expr::call('array_key_exists', [$idx, $src], $span)),
-                $this->lowerExpr(\Parser\Ast\Expr::arrayAccess($tmp, $idx, $span)),
+                $this->lowerExpr($cnt),
+                $this->lowerExpr(\Parser\Ast\Expr::arrayAccess($tmp, $kAt, $span)),
                 $this->lowerOmittedParam($params[$j], $selfClass, $params, $astArgs),
                 Type::unknown());
         }

@@ -84,6 +84,11 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     ck() { # label, condition-exit-code
         if [ "$2" != 0 ]; then echo "progress FAIL: $1"; fail=1; fi
     }
+    # Host- or timing-dependent checks (core count, polling cadence, redraw throttle, pty):
+    # a miss is reported but never fails the run. A hard check must hold on every runner.
+    soft() { # label, condition-exit-code
+        if [ "$2" != 0 ]; then echo "progress WARN (soft): $1"; fi
+    }
     "$MC" compile f.php -o pp --progress=plain >"$WORK/po" 2>"$e"; ck "plain rc" $?
     [ ! -s "$WORK/po" ]; ck "plain stdout empty" $?
     bad="$(grep -Evc '^\[ *[0-9]+\] .+  [0-9]+\.[0-9]s$|^done in [0-9]+\.[0-9]s$|^      .+ [0-9]+/[0-9]+$' "$e")"
@@ -118,7 +123,8 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     "$MC" compile f.php -o pt --progress=plain --timings >/dev/null 2>"$e"; grep -q '^timings (longest first):' "$e"; ck "timings table" $?
     for s in parse EmitLlvm link; do grep -Eq "^\[ *[0-9]+\] $s( |  )" "$e"; ck "plain stage $s (single-file)" $?; done
     "$MC" compile f.php -o pj --progress=json >/dev/null 2>"$e"
-    grep -v '"event":"counter"' "$e" | head -n1 | grep -q '"event":"stage_start"'; ck "json first non-counter line stage_start" $?
+    # sed reads to EOF: `head -n1` here closes the pipe early and `pipefail` turns the SIGPIPE into a failure on BusyBox
+    [ "$(grep -v '"event":"counter"' "$e" | sed -n 1p | grep -c '"event":"stage_start"')" = 1 ]; ck "json first non-counter line stage_start" $?
     tail -n1 "$e" | grep -q '"event":"done"'; ck "json last line done" $?
     awk -F'"t_ms":' '/"event":"stage_start"/ { t = $2 + 0; if (t < p) bad = 1; p = t } END { exit bad }' "$e"; ck "json stage_start t_ms non-decreasing" $?
     for s in parse LowerFromAst EmitLlvm link Verify; do
@@ -153,11 +159,12 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     { echo '<?php'; for i in $(seq 1 120); do echo "function g$i(int \$x): int { \$s = 0; for (\$k = 0; \$k < \$x; \$k++) { \$s += \$k * $i + strlen((string)\$k); } return \$s; }"; done; echo 'echo g1(10) + g120(5), "\n";'; } > sp.php
     splitck() { # label, stderr file: >=2 clang counters, total>=2 (a split really happened), starts below total, ends at total
         grep '"label":"clang"' "$2" | sed 's/.*"done":\([0-9]*\),"total":\([0-9]*\).*/\1 \2/' \
-            | awk 'NR == 1 { f = $1 } { if ($1 > $2) bad = 1; d = $1; t = $2; n++ } END { exit (bad || n < 2 || t < 2 || f >= t || d != t) }'; ck "$1" $?
+            | awk 'NR == 1 { f = $1 } { if ($1 > $2) bad = 1; d = $1; t = $2; n++ } END { exit (bad || n < 2 || t < 2 || f >= t || d != t) }'; soft "$1" $?
     }
     MANTICORE_SPLIT_JOBS=4 "$MC" compile sp.php -o sp_off -j 0 --progress=off >/dev/null 2>&1; ck "split off rc" $?
     MANTICORE_SPLIT_JOBS=4 "$MC" compile sp.php -o sp_pl -j 0 --progress=plain >/dev/null 2>"$e"; ck "split plain rc" $?
-    grep -Eq '^      clang ([2-9]|[1-9][0-9]+)/\1$' "$e"; ck "split plain clang N/N tally (N>=2)" $?
+    # awk, not a `\1` backreference in an ERE: BusyBox grep does not match it. Depends on the core count, so soft.
+    awk '/^      clang [0-9]+\/[0-9]+$/ { split($2, a, "/"); if (a[1] == a[2] && a[1] >= 2) ok = 1 } END { exit !ok }' "$e"; soft "split plain clang N/N tally (N>=2)" $?
     MANTICORE_SPLIT_JOBS=4 "$MC" compile sp.php -o sp_js -j 0 --progress=json >/dev/null 2>"$e"; ck "split json rc" $?
     splitck "split json clang counters (compile)" "$e"
     [ "$(./sp_off)" = "$(./sp_pl)" ] && [ "$(./sp_off)" = "$(./sp_js)" ]; ck "split binary output same" $?
@@ -183,7 +190,7 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     LC_ALL=C awk '/done in/ { bad = (prev ~ /narrow round/) } { prev = $0 } END { exit bad }' "$e"; ck "live: no stale stage before done" $?
     # stats lines start at column 0 under a forced live line; auto + stats falls back to plain
     MANTICORE_STATS=1 "$MC" compile f.php -o ps --progress=live 2>&1 >/dev/null | LC_ALL=C tr '\r' '\n' | LC_ALL=C sed 's/\x1b\[2K//g' >"$e"
-    [ -s "$e" ] && grep -q '^stats:' "$e" && ! grep 'stats:' "$e" | grep -vq '^stats:'; ck "live+stats: stats lines start at column 0" $?
+    [ -s "$e" ] && awk '/stats:/ { n++; if ($0 !~ /^stats:/) bad = 1 } END { exit (bad || n == 0) }' "$e"; ck "live+stats: stats lines start at column 0" $?
     # TTY + stats: auto must fall back to plain (no redraws). Best-effort under a pty; SKIP when script(1) is unusable.
     if command -v script >/dev/null 2>&1; then
         MANTICORE_STATS=1 script -q /dev/null "$MC" compile f.php -o pt --progress=auto >"$e" 2>&1 </dev/null
@@ -192,7 +199,7 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
         fi
         if grep -aq 'stats:' "$e"; then
             tr -d '\r' <"$e" >"$e.n"
-            LC_ALL=C grep -aq '^\[ *[0-9]*\] parse' "$e.n" && ! LC_ALL=C grep -aq "$(printf '\033')\[2K" "$e.n"; ck "tty+stats: auto is plain" $?
+            LC_ALL=C grep -aq '^\[ *[0-9]*\] parse' "$e.n" && ! LC_ALL=C grep -aq "$(printf '\033')\[2K" "$e.n"; soft "tty+stats: auto is plain" $?
         else
             echo "SKIP: tty+stats auto check (script(1) pty unusable)"
         fi
@@ -201,7 +208,8 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     fi
     # nested stage end must not blank the live line: the first line drawn after `property scan` ends shows the outer EmitLlvm
     "$MC" compile f.php -o pn --progress=live 2>&1 >/dev/null | LC_ALL=C tr '\r' '\n' | cat -v >"$e"
-    LC_ALL=C awk '/property scan/ { seen = 1; next } seen && /M-\^WM-\^O/ { ok = /EmitLlvm/; exit } END { exit !ok }' "$e"; ck "live shows outer stage right after nested end" $?
+    # redraws are throttled to >=100 ms, so on a fast host the line may not be redrawn right after the nested end: soft
+    LC_ALL=C awk '/property scan/ { seen = 1; next } seen && /M-\^WM-\^O/ { ok = /EmitLlvm/; exit } END { exit !ok }' "$e"; soft "live shows outer stage right after nested end" $?
 }
 
 helps() {

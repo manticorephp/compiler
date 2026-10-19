@@ -441,6 +441,11 @@ trait InferNodes
         // single forward pass would leave the early stores typed by the
         // unrefined scalar element → stored raw → read back as garbage).
         foreach ($this->assocValClasses as $name => $classes) {
+            // A by-value typed array PARAM holds its callers' elements as well:
+            // `$a[] = 's'` into a `vec[int]` param is mixed with one store (the
+            // entry store converts it, {@see cellElemParamEntry}).
+            $pc = $this->byValueParamElemClass($fn, $name);
+            if ($pc !== '') { $classes[$pc] = true; }
             // A `null` element is special: its raw repr (0) differs from its cell
             // repr (box_null), so even a HOMOGENEOUS-null local ($d[]=null only)
             // must ride a cell element — else the store writes raw 0 and a later
@@ -2888,9 +2893,11 @@ trait InferNodes
      */
     private function cellElemParamEntry(FunctionDef $fn): void
     {
+        $i = -1;
         foreach ($fn->params as $p) {
+            $i = $i + 1;
             if (!isset($this->cellElemLocals[$p->name]) || $p->byRef || $p->variadic) { continue; }
-            $pt = $p->type;
+            $pt = $this->paramArrivalType($fn, $i);
             if (!$pt->isArray() || $pt->isShape() || $pt->element === null) { continue; }
             $ek = $pt->element->kind;
             if ($ek === Type::KIND_CELL || $ek === Type::KIND_UNKNOWN) { continue; }
@@ -2906,6 +2913,19 @@ trait InferNodes
             $entry = new \Compile\Mir\StoreLocal($p->name, new \Compile\Mir\LoadLocal($p->name, $pt), $cellT);
             $fn->body->stmts = \array_merge([$entry], $fn->body->stmts);
         }
+    }
+
+    private function byValueParamElemClass(FunctionDef $fn, string $name): string
+    {
+        $i = -1;
+        foreach ($fn->params as $p) {
+            $i = $i + 1;
+            if ($p->name !== $name) { continue; }
+            $pt = $this->paramArrivalType($fn, $i);
+            if ($p->byRef || $p->variadic || !$this->isTypedElemArray($pt)) { return ''; }
+            return $this->typeValueClass($pt->element);
+        }
+        return '';
     }
 
     private function collectRefElemBases(Node $n): void

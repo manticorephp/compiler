@@ -1,0 +1,21 @@
+strlen => 5
+strtoupper => 'HELLO'
+ucfirst => 'Hello'
+userfn => '<hello>'
+STRLEN => 5
+\strlen => 5
+UserFn => '<hello>'
+nope_fn => nope_fn => Call to undefined function nope_fn()
+strlen => 5
+strlen => 5
+54
+2,2,2,2,2,2,AB,AB,AB,<ab>,<ab>,<ab>,
+cba
+ABC
+cba
+ABC
+cba
+ABC
+3
+Call to undefined function strlen_()
+3

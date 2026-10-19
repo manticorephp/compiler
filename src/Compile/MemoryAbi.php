@@ -59,8 +59,14 @@ final class MemoryAbi
      * releases the captures, 0..3 / -1 are the cycle collector's walk of a
      * Closure-typed property. A v20 fn takes no mode and would release the
      * captured objects of a node the collector is reclaiming.
+     *
+     * v22: a PACKED heap array's `buckets@48` word is its HEAD GAP ({@see
+     * ARRAY_HEAD_GAP_OFFSET}): `array_shift` slides the header forward one slot
+     * instead of moving the data, so the malloc block starts `gap*8` bytes before
+     * the tag. A v21 release / promote / realloc frees `ptr-8` — the middle of
+     * a v22 block.
      */
-    public const VERSION = 21;
+    public const VERSION = 22;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -849,6 +855,24 @@ final class MemoryAbi
 
     /** `ptr` — hash bucket side-array; null until the index is built. */
     public const ARRAY_BUCKETS_PTR_OFFSET = 48;
+
+    /**
+     * `i64` — PACKED mode only, the same word as {@see ARRAY_BUCKETS_PTR_OFFSET}:
+     * the HEAD GAP, how many 8-byte slots of the malloc block lie in front of
+     * the tag. A packed array has no bucket index (`nbuckets` stays 0, so no
+     * index reader looks at this word), and every fresh header zeroes it.
+     *
+     * `array_shift` on a uniquely owned heap packed array writes the header
+     * (and tag) one slot further on instead of moving the data: element 1
+     * becomes element 0, the array pointer moves +8, capacity drops by 1 and
+     * the gap grows by 1 — O(1). `array_unshift` spends the gap backwards, and
+     * reallocates with front slack when there is none. The block start is
+     * `ptr - 8 - gap*8`: every free of an array goes through it (release,
+     * promote), and `__mir_realloc_tagged` first moves a gapped header back to
+     * the block start (gap 0), reusing the freed slots as capacity when they
+     * cover the request. A copy is a fresh block: copies and clones zero it.
+     */
+    public const ARRAY_HEAD_GAP_OFFSET = 48;
 
     /** Bit 0 of the flags word: HASHED mode. Cleared ⇒ PACKED. */
     public const ARRAY_FLAG_HASHED = 1;

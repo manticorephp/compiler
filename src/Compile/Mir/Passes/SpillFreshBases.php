@@ -1239,8 +1239,10 @@ final class SpillFreshBases
         if ($t->kind === Type::KIND_CELL) {
             if (!$this->cellMayHoldRc($t)) { return false; }
             // A codegen builtin's cell result may be an element it BORROWED
-            // (`current`, `end`); only a body's +1 return is owned.
-            if ($k === Node::KIND_CALL && !isset($this->refMasks[$callee])) { return false; }
+            // (`current`, `end`); only a body's +1 return is owned — and the
+            // element array_pop / array_shift MOVE out of the array.
+            if ($k === Node::KIND_CALL && !isset($this->refMasks[$callee])
+                && $callee !== 'array_shift' && $callee !== 'array_pop') { return false; }
         }
         if ($this->isFreshContainer($v, 2)) { return true; }
         // A closure a body returned is +1 like any object, and a closure local

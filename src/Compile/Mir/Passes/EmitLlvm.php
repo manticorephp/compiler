@@ -405,12 +405,16 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, int> {@see Module::$builtinTwinReq} */
     private array $builtinTwinReq = [];
+    /** @var array<string, string[]> {@see Module::$builtinTwinParams} */
+    private array $builtinTwinParams = [];
     /** @var array<string, int> */
     private array $builtinTwinTot = [];
     /** @var array<string, bool> */
     private array $callableShims = [];
     /** @var array<string, string> */
     private array $builtinTwinRet = [];
+    /** @var array<string, bool> */
+    private array $builtinTwinRef = [];
 
     /** Names a dynamic `function_exists()` answers true for ({@see Module::$knownFnNames}).
      *  @var string[] */
@@ -512,6 +516,19 @@ final class EmitLlvm implements EmitVisitor
      * the `--emit-library` compile path.
      */
     public bool $emitLibrary = false;
+    /**
+     * The stdlib build: emit an EXTERNAL dynamic-call thunk per nameable function
+     * and shape ({@see EmitLlvmCalls::dynfExportBit}), and record which in
+     * {@see $dynfExports} for the `.sig`. Programs then point their name tables
+     * at these instead of each building ~2k thunk bodies of their own.
+     */
+    public bool $exportDynf = false;
+    /** Output of an {@see $exportDynf} build: function => shape bitmask.
+     *  @var array<string, int> */
+    public array $dynfExports = [];
+    /** Input for a program: the stdlib `.sig`'s {@see $dynfExports}.
+     *  @var array<string, int> */
+    public array $stdlibDynf = [];
     /** Whether staged emission defers string globals to the body writer. */
     public bool $deferStringGlobals = false;
 
@@ -729,6 +746,8 @@ final class EmitLlvm implements EmitVisitor
         $this->includeSlots = $module->includeSlots;
         $this->builtinTwinReq = $module->builtinTwinReq;
         $this->builtinTwinRet = $module->builtinTwinRet;
+        $this->builtinTwinParams = $module->builtinTwinParams;
+        $this->builtinTwinRef = $module->builtinTwinRef;
         // Only a twin the program NAMES in a string literal can be the target of
         // a call by name. Arming every one at every dynamic site inlined builtins
         // the program never uses — `gc_collect_cycles` pulled the cycle
@@ -768,8 +787,16 @@ final class EmitLlvm implements EmitVisitor
         // decides whether the run-time by-ref machinery is emitted at all.
         $this->sigs->closureRefUnion = FunctionSignatures::closureRefUnion(
             $module->functions, $module->closureCaptures);
+        $this->externFnNames = [];
+        $this->dynfExportFns = [];
+        $this->dynfExports = [];
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
+            if ($fn->isExtern) {
+                $this->externFnNames[$fn->name] = true;
+            } elseif ($this->exportDynf && !$fn->isPrelude && $this->dynfNameable($fn->name)) {
+                $this->dynfExportFns[$fn->name] = true;
+            }
             $mask = [];
             $tmask = [];
             $camask = [];
@@ -874,6 +901,11 @@ final class EmitLlvm implements EmitVisitor
         $this->newDynTableCache = null;
         $this->classlessCandidatesMemo = [];
         $this->dynfLookupEmitted = false;
+        $this->dynfBsearchEmitted = false;
+        $this->dynfIcmpEmitted = false;
+        $this->dynfZeroEmitted = false;
+        $this->dynfCacheSeq = 0;
+        $this->dynfIdTab = null;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
         $this->propOwnElemVeto = [];
@@ -1168,6 +1200,9 @@ final class EmitLlvm implements EmitVisitor
         \Compile\Progress::counter('functions', $emitIndex, $functionTotal);
         unset($functionKeys);
         $this->rootSnapshot('post-function-emission', $module, true, $bodyBytes);
+        // Before every lazy-helper flush below: a thunk body is an ordinary call
+        // and may ask for any of them.
+        if ($this->exportDynf) { $this->emitDynfExports(); }
         // One `__mc_drop` per capturing closure literal seen above — it releases
         // the captures its env co-owns, and its address is already stamped into
         // every env {@see EmitLlvmCalls::emitClosure}.
@@ -2166,6 +2201,18 @@ final class EmitLlvm implements EmitVisitor
 
     /** The module already carries one copy of `__mc_dynf_lookup`. */
     private bool $dynfLookupEmitted = false;
+    private bool $dynfBsearchEmitted = false;
+    private bool $dynfIcmpEmitted = false;
+    private bool $dynfZeroEmitted = false;
+    private int $dynfCacheSeq = 0;
+    /** @var array{0:string,1:int,2:array<string,int>}|null */
+    private ?array $dynfIdTab = null;
+    /** Signature-only imports (their bodies live in another object).
+     *  @var array<string, bool> */
+    private array $externFnNames = [];
+    /** {@see $exportDynf}: the functions whose thunks the stdlib exports.
+     *  @var array<string, bool> */
+    private array $dynfExportFns = [];
 
     /** A `require`/`include` site asked for the include-slot chain, so the module
      *  needs the one shared body ({@see EmitLlvmBuiltins::emitInclResolveFn}). */

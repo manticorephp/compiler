@@ -9,7 +9,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **19** (v19: descriptor grew `visit_fn@64` — the json encoders walk public props without a temporary array; v18: v17 AND the native-buffer lineage — the `BUF_*` block, §7c, the descriptor's `json_fn@56`, buffer kind 12 (`U64`); v17: a Generator frame OWNS every cell of its header and `__mir_str_reclaim` destroys a frame it frees — v17 and v18 each merged two lineages that both called themselves v17, so neither links with the other, see the comments at the top of `MemoryAbi`; v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **22** (v22: a PACKED array's `buckets@48` word is its head gap, §4.1; v21: a closure DROP fn takes a mode; v20: `Manticore\Ds` hash table block and the cell object-tag constants; v19: descriptor grew `visit_fn@64` — the json encoders walk public props without a temporary array; v18: v17 AND the native-buffer lineage — the `BUF_*` block, §7c, the descriptor's `json_fn@56`, buffer kind 12 (`U64`); v17: a Generator frame OWNS every cell of its header and `__mir_str_reclaim` destroys a frame it frees — v17 and v18 each merged two lineages that both called themselves v17, so neither links with the other, see the comments at the top of `MemoryAbi`; v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -162,8 +162,18 @@ offset 24 : i64  rc              -- SINGLE FIXED OFFSET for every array
 offset 32 : i64  flags           -- mode + element repr + tombstones + internal pointer
 offset 40 : i64  n_buckets       -- 0 = index not built
 offset 48 : ptr  buckets         -- side allocation; null until built
+                                 -- PACKED: i64 head gap (v22), see below
 offset 56 : ...  data
 ```
+
+**Head gap** (v22). A PACKED buffer has no bucket index (`n_buckets` stays 0), so its
+`buckets` word is the HEAD GAP: how many 8-byte slots of the malloc block lie in front of
+the tag. `array_shift` on a uniquely owned heap packed buffer writes tag + header one slot
+further on instead of moving the data (array pointer +8, capacity -1, gap +1), and the
+caller stores the moved pointer back; `array_unshift` spends the gap the other way and
+regrows with front slack when there is none. The block start is `ptr - 8 - gap*8`: release
+and promote free that, and `__mir_realloc_tagged` first moves a gapped header back to the
+block start. Copies and clones are fresh blocks and zero the word.
 
 The fixed rc offset is the structural fix: a value can never have its rc read at the wrong
 offset regardless of mode. Mode lives in the flags word instead.

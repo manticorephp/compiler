@@ -357,7 +357,7 @@ trait InferCalls
             || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id' || $n === 'gc_collect_cycles'
             || $n === 'strcspn' || $n === '__mc_crc32b'
-            || $n === '__mc_b64_ok'
+            || $n === '__mc_b64_ok' || $n === '__mc_hex_ok'
             || $n === '__float_bits' || $n === '__ryu_msp'
             || $n === 'peek_i64' || $n === 'peek_i32' || $n === 'peek_i16'
             || $n === 'peek_i8'
@@ -451,6 +451,8 @@ trait InferCalls
         if (($n === '__mc_list_range_into' && \count($args) === 5) || ($n === '__mc_list_cat_into' && \count($args) === 2)) { return Type::void(); }
         if ($n === 'range' && InlineClosures::rangeIntShape($args)) { return Type::vec(Type::int_()); }
         if ($n === '__mc_sort_native' && \count($args) === 1) { return Type::bool_(); }
+        if ($n === '__mc_search' && \count($args) === 2) { return Type::cell(); }
+        if ($n === '__mc_sort_assoc' && \count($args) === 3) { return Type::bool_(); }
         if ($n === '__mc_int_seq' && \count($args) === 3) { return Type::vec(Type::int_()); }
         if (($n === '__mc_fast_cat' || $n === '__mc_fast_list') && \count($args) === 1) { return Type::bool_(); }
         // prelude/weak.php: arm the free-path death hook; an address back to
@@ -517,6 +519,12 @@ trait InferCalls
         // popped value echoes / flavours correctly.
         if ($n === 'array_pop' || $n === 'array_shift') {
             if (\count($args) >= 1 && $args[0]->type->element !== null) {
+                // An int/float/bool slot has no NULL: an empty array answers php's NULL
+                // only as a self-describing cell ({@see EmitLlvmBuiltins::takeSymbol}).
+                $ek = $args[0]->type->element->kind;
+                if ($ek === Type::KIND_INT || $ek === Type::KIND_FLOAT || $ek === Type::KIND_BOOL) {
+                    return Type::cell();
+                }
                 return $args[0]->type->element;
             }
             // A CELL container (a `mixed` slot holding an array, e.g.
@@ -529,7 +537,7 @@ trait InferCalls
             return null;
         }
         // strpos is `int|false` — a tagged cell (Zend-faithful miss).
-        if ($n === 'strpos') {
+        if ($n === 'strpos' || $n === 'stripos') {
             return Type::cell();
         }
         // getenv is `string|false` — a tagged cell. With NO argument it is php's
@@ -570,7 +578,7 @@ trait InferCalls
             || $n === '__mc_fmt_int' || $n === '__mc_fmt_float' || $n === '__mc_fmt_str'
             || $n === 'addslashes' || $n === 'strrev' || $n === 'var_export' || $n === '__mc_json_escape'
             || $n === '__mc_b64_enc' || $n === '__mc_b64_dec' || $n === '__mc_bin2hex' || $n === '__mc_hex2bin'
-            || $n === '__mir_str_replace_one'
+            || $n === '__mir_str_replace_one' || $n === '__mc_url_encode' || $n === '__mc_url_decode' || $n === '__mc_str_ireplace_one'
             || $n === 'str_from_buffer' || $n === 'cstr_to_str'
             || $n === 'gettype' || $n === 'get_debug_type'
             || $n === '__mir_float_repr') {
