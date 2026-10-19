@@ -250,7 +250,7 @@ ahead of the next command), and a close on a dead connection is a no-op. Everyth
   `bindValue(1, 5, PARAM_INT)` and a string for `execute([5])`.
 - Large values: a value travels inline in the execute packet (split at 16 MB like any packet); `COM_STMT_SEND_LONG_DATA` is not
   used, and neither does pdo_mysql. A value above the server's `max_allowed_packet` is answered by the server (it closes the
-  connection: `2006`), not pre-checked.
+  connection after its `08S01` / `1153` ERR, which is what the statement reports), not pre-checked.
 - Result typing (mysqlnd, binary protocol): TINY / SHORT / INT24 / LONG / LONGLONG -> int (UNSIGNED BIGINT above `PHP_INT_MAX`
   stays a string), DOUBLE -> float exactly, FLOAT -> the double of its `%.Nf` text (fixed decimals) or of 6 significant digits
   (`0.1f` is `0.1`), BIT -> int (a 64-bit value with the top bit set: string), YEAR / DECIMAL / JSON / ENUM / SET / strings / blobs

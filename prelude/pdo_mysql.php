@@ -465,12 +465,35 @@ final class __McPdoMyWire
                 $w = \fwrite($this->s, $m);
                 if ($w === false || $w === 0) {
                     $this->peerGone = true;
-                    throw $this->ioFail(2006, 'MySQL server has gone away');
+                    throw $this->lastWords() ?? $this->ioFail(2006, 'MySQL server has gone away');
                 }
                 $m = $w >= \strlen($m) ? '' : \substr($m, $w);
             }
             // a payload that is an exact multiple of 0xFFFFFF ends with an empty frame
         } while ($o < $n || ($c === 0xFFFFFF && $o === $n));
+    }
+
+    /**
+     * A write the peer refused: the server may have answered and closed before reading the rest (a packet above
+     * max_allowed_packet: ERR 1153, then close). Whether the write fails first is a race the kernel decides (Linux
+     * resets mid-write, macOS takes the bytes); the server's own ERR, when it sent one, is the answer either way.
+     * Bounded: one second, whatever is already queued.
+     */
+    private function lastWords(): ?PDOException
+    {
+        if ($this->connecting) { return null; }
+        \stream_set_timeout($this->s, 1);
+        $b = \substr($this->buf, $this->pos);
+        while (\strlen($b) < 4 || \strlen($b) < 4 + (\ord($b[0]) | (\ord($b[1]) << 8) | (\ord($b[2]) << 16))) {
+            $c = \fread($this->s, 65536);
+            if ($c === false || $c === '') { break; }
+            $b .= $c;
+        }
+        if (\strlen($b) < 5 || \ord($b[4]) !== 0xFF) { return null; }
+        $len = \ord($b[0]) | (\ord($b[1]) << 8) | (\ord($b[2]) << 16);
+        if (\strlen($b) < 4 + $len) { return null; }
+        $this->closeSock();
+        return __McPdoMy::errFrom($this->parseErr(\substr($b, 4, $len)));
     }
 
     /** Marks the connection dead and releases the fd (once). */
