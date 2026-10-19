@@ -92,7 +92,7 @@ async(function () {
 | `Channel::send/next/recv/close` | `next(): Received` is the comma-ok form |
 | `SelectCase::recv(Channel)` / `::send(Channel, $v)` | one arm of a `select()` |
 | `Semaphore(int)` — `acquire/release/withPermit` | "N at a time" |
-| `Pool(factory, max, reset, ping, maxLifetime, idleTimeout)` — `acquire/release/with/discard/close/stats`, `Pool::pdo()` | bounded, FIFO pool of connections; see [Connection pool](#connection-pool) |
+| `Pool(factory, max, reset, ping, maxLifetime, idleTimeout, close)` — `acquire/release/with/discard/close/stats`, `Pool::pdo()` | bounded, FIFO pool of objects (`max` ≥ 1); `acquire(?float $timeout)` throws `TimeoutException`; `stats()`; `Pool::pdo` = reset via `resetSession()`, ping via `ping()`; see [Connection pool](#connection-pool), [Databases](#databases) |
 | `TaskGroup::run(callable)` | what `group()` wraps |
 | `TaskGroup::token(): CancellationToken` | the read-only half of this scope's cancellation |
 | `TaskGroup::cancel()` | the write half |
@@ -463,11 +463,12 @@ re-arming readiness is a hot spin that starves every sibling task and never even
 watchdog, because it suspends on every iteration. It shows up only as `stats()['wakes']`
 climbing with wall time instead of with connections.
 
-The seam is `\Runtime\AsyncHook` — eleven callbacks installed by the scheduler:
+The seam is `\Runtime\AsyncHook` — eleven netpoller callbacks installed by the scheduler:
 `waitReadable` / `waitWritable`, their bounded variants `waitReadableFor` /
 `waitWritableFor`, `onClose`, `sleeper`, the DNS-cache pair `dnsGet` / `dnsPut`, and the
 `select` trio `selectAdd` / `selectWait` / `selectDone`. With no scheduler running it costs
-one null check per would-block.
+one null check per would-block. Two more pairs are installed beside them: `blocking` / `cancelPoint`
+(the blocking pool below) and `idleWait` / `idleWake` (a close waits for the pool jobs on that handle).
 
 Plain streams **are** the API. `Async\read/write/accept/connect/close` also exist, bypassing
 the stream layer for raw `recv`/`send` on the fd — worth roughly 2× when you are counting
@@ -483,6 +484,76 @@ async(function () {
     [$x, $y] = Async\awaitAll($a, $b);   // ~1 RTT, not 2
 });
 ```
+
+## Databases
+
+PDO drivers sit on the same hook; per-driver detail is in [docs/pdo.md](pdo.md).
+
+| driver | parks the fiber | blocks the loop | on cancel / `ATTR_TIMEOUT` |
+|---|---|---|---|
+| `pgsql` | every socket read and write (pure-PHP wire protocol), connect, TLS handshake, `getNotify()` | nothing in the driver | handle is closed (poisoned); server work stopped by a `CancelRequest` |
+| `mysql` / MariaDB | the same | nothing in the driver | handle is closed; server work stopped by `KILL QUERY` from a second connection |
+| `sqlite` | only the `SQLITE_BUSY` backoff (`ATTR_TIMEOUT`, 30 s default) | every `sqlite3_step`: a `pread` on a local file through FFI | a running `sqlite3_step` is not interruptible (`sqlite3_progress_handler` is not bound); a cancelled task throws at its next park |
+
+**One handle, one request.** A connection is one protocol state machine. While a fiber's request is
+on the wire, another fiber using the same `PDO` polls the scheduler every 1 ms until it is free,
+bounded by the connection timeout (`PDOException`, `timeout expired waiting for the connection`).
+With no scheduler a second use of a busy handle throws `connection busy`. Concurrency comes from
+several connections, not from sharing one: use a `Pool` and give each task its own.
+
+**A cancelled or timed-out query leaves the handle dead.** The stream is left mid-response, so the
+driver closes the socket at once and the next use throws a connection error. Before it closes, it
+asks the server to stop the work, under `shield()`: pgsql sends a `CancelRequest` (pid + secret on
+a throwaway socket), mysql runs `KILL QUERY <id>` on a second connection; both are best effort and
+swallow their own errors. A server `ErrorResponse` is not a poison, the handle keeps working.
+`Pool::with()` discards the connection when the body is cancelled (`timeout()`, `cancel()`, a
+sibling's failure) or fails with SQLSTATE class `08`, so the pool opens a fresh one. Any other dead
+handle fails the `resetSession()` in `release()`, or the `ping()` at the next `acquire()`, and is
+dropped there.
+
+**`release()` cleans the session.** `Pool::pdo()` resets with `PDO::resetSession()`: an open
+transaction is rolled back (pgsql `ROLLBACK` + `DISCARD ALL`; mysql `COM_RESET_CONNECTION`; sqlite
+`ROLLBACK`), session settings, temp tables and prepared statements go, and attributes the task
+changed on the handle return to their construction-time values (table in
+[docs/pdo.md](pdo.md#pooling-and-session-reset)). Do not rely on it: commit or roll back before
+returning. A reset that throws discards the connection.
+
+**`LISTEN` needs its own connection.** `getNotify($mode, $ms)` parks the fiber, but for as long as
+it waits it holds the connection: a query on that handle from another fiber waits behind it
+(bounded by `ATTR_TIMEOUT`), and `DISCARD ALL` on release would drop the `LISTEN`s. Open a
+dedicated `new PDO(...)` for the listener, outside the pool.
+
+**Sizing.** The pool's `max` is a per-process figure: with `->workers(N)` the database sees up to
+`N × max` connections, so keep it under the server's `max_connections` with headroom for the cancel connection, admin sessions and migrations. A task that wants a
+connection beyond `max` parks FIFO: bound that wait with `acquire($timeout)` or a surrounding
+`timeout()`, and decide what an expiry means (503, shed) rather than letting requests pile up.
+`with()` takes no timeout of its own. Do not hold a checked-out connection across unrelated I/O
+(an HTTP call, a `delay()`): the connection is busy for as long as the task is, and the next
+waiter pays for it.
+
+```php
+use Http\{Request, Response, Server};
+
+$pool = Async\Pool::pdo('pgsql:host=db;dbname=app', 'u', 'pw', [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION], 10);
+
+(new Server('tcp://0.0.0.0:8080'))->workers(4)->serve(function (Request $req) use ($pool): Response {
+    $id = (int) $req->query('id', '0');
+    try {
+        $row = Async\timeout(2.0, fn() => $pool->with(function (PDO $db) use ($id) {
+            $st = $db->prepare('select name from users where id = ?');
+            $st->execute([$id]);
+            return $st->fetch(PDO::FETCH_ASSOC);
+        }));
+    } catch (Async\TimeoutException) {
+        return (new Response())->text("busy\n");   // 2 s covered the wait for a connection AND the query
+    }
+    return (new Response())->text(json_encode($row) . "\n");
+});
+```
+
+The pool is built before the fork but holds no connection until the first `acquire()`, so each
+worker opens its own. `Pool::pdo()` takes only the connection arguments and `max`; for
+`maxLifetime`, `idleTimeout` or a `close` callback, build the pool with `new Async\Pool(...)`.
 
 ## Blocking calls run on a pool
 
@@ -503,7 +574,7 @@ touches none of them: the scheduler marshals plain integers and buffers to it an
 result back on the loop thread. Nothing else changed for the program; output is byte-identical
 to the inline path, and outside `async()` every call runs inline as before.
 
-Not pooled, still inline: sockets (they have a readiness path), `popen` / `proc_open` pipes,
+Not pooled, still inline: sockets (they have a readiness path), `popen` / `proc_open` pipes, the `curl_*` extension (libcurl through FFI, no `AsyncHook` use),
 `tmpfile`, `STDIN` / `STDOUT` / `STDERR`, and `file_exists` / `is_readable` (an `access`
 call), `fgets`, `stream_get_contents`, `copy`, `rewinddir` (`glob` walks through the pooled `scandir` and stat). A slow one of these still stalls
 the loop — measured on a 64 MB page-cache-hot file, a single inline `fread($h, 64MB)` holds
@@ -567,7 +638,8 @@ run PHP avoid that copy, which is why the pool is threads.
 
 ## ⚠ What is NOT async
 
-Everything in the "still inline" list above, plus CPU-bound stretches with no suspend point.
+Everything in the "still inline" list above, plus CPU-bound stretches with no suspend point. A
+running `sqlite3_step` is one of them (see [Databases](#databases)).
 Those are what `Async\watchdog()` exists to name.
 
 `stream_select` / `socket_select` are reactor-native: the task registers a record per fd,
