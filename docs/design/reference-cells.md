@@ -230,12 +230,12 @@ call site made to convert a representation, a property slot or a buffer element.
 None of those outlives the reference. Two halves make it safe:
 
 1. **The caller boxes** (`VivifyRefArgs`). A local at such a position becomes a
-   ref-cell target (a counted frame box); a property there joins
+   ref-cell target (a counted frame box); a TYPED property there is NOT promoted (stale copy, #353); an untyped one joins
    `refCellPropNames` (promoted in place); an element is marked
    `ArrayAccess_::$refStored` and handed over as its box (`elemRefBoxAddr`).
    The analysis is conservative: a dispatched call asks every holder of the
    method NAME, a run-time callee (closure value, callable, function name,
-   `$o->$m()`) asks every function of the module.
+   `$o->$m()`) asks every function of the module, for locals and elements only: a PROPERTY argument to a run-time callee is not covered (#353). Inherited constructors, first-class callables and spread calls are also missed (#352).
 2. **The callee never rewrites what it cannot prove decodes REF.**
    `__mir_ref_adopt` shares an existing box (or the box a slot already holds as
    `cell(REF, box)`); any other address gets a fresh box holding a COPY
@@ -244,10 +244,22 @@ None of those outlives the reference. Two halves make it safe:
    reference is moved into a frame box for the call and written back on every
    exit, the unwind included (`EmitLlvmModule::boxCapturedByRefParamIr`).
 
-The copy is the known ceiling: a holder of a copy does not see the caller's
-LATER writes (a `global`-backed name, a static, a raw-elemented array element, a
-typed by-ref param — #344, `tests/aot/repro/wrong/ref_store_typed_param_stale.php`).
-It never dangles and never corrupts the caller's slot.
+The copy is the known ceiling, and it is wider than "a stale holder":
+
+- a holder of a copy does not see the caller's LATER writes (a `global`-backed
+  name, a static, a raw-elemented array element, a typed by-ref param — #344,
+  `tests/aot/repro/wrong/ref_store_typed_param_stale.php`);
+- every `&$v` on the copy path makes a NEW box, so two holders stored by ONE
+  callee do not alias each other, nor the callee's own `$v` (#351);
+- call shapes the any-holder rule misses hand the callee a plain address: an
+  inherited constructor, a first-class callable, a spread call (#352), a typed
+  property argument and a property argument through a run-time callee (#353);
+- it does not always protect the callee itself: a typed by-ref param
+  (`int &$v`) whose reference was stored and is then read in a mixed context
+  in the callee decodes the raw slot as a cell — wrong value or SIGSEGV (#349).
+
+The heap-safety claim is therefore limited to the caller's slot: the copy path
+never leaves a dangling address behind, but it is not free of corruption (#349).
 
 Every helper that reads `p-8` of an address that may not be a box is
 `noinline` (`__mir_ref_is_box`, `retain`, `unref`, `adopt`): inlined next to the
