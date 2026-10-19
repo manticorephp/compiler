@@ -164,6 +164,20 @@ interface __McPdoDrvStmt
 final class __McPdo
 {
     /**
+     * TCP_NODELAY on a fresh driver socket, as mysqlnd and libpq set it. Without it Nagle holds every small write
+     * after the first behind the server's delayed ACK (~40 ms on Linux): a run of COM_STMT_CLOSEs, which have no
+     * reply, sat in the send buffer while the next statement on another connection already ran.
+     */
+    public static function noDelay(\Resource $s): void
+    {
+        $one = \Runtime\Libc\calloc(4, 1);
+        if ($one === null) { return; }
+        \poke_i32($one, 0, 1);
+        \Runtime\Libc\sys_setsockopt(\__mc_stream_fd($s), SOL_TCP, TCP_NODELAY, $one, 4);
+        \Runtime\Libc\free($one);
+    }
+
+    /**
      * php's `pdo_sqlstate_state_to_description` table (all 266 rows, measured through
      * a live server), one `CODE description` per line. An unlisted state is php's
      * `<<Unknown error>>`.

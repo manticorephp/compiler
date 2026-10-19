@@ -187,6 +187,7 @@ final class __McPdoMyWire
             throw __McPdo::connectFail('HY000', 2002, $es);
         }
         $this->s = $s;
+        __McPdo::noDelay($s);
         $this->setTimeout($timeout);
         $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
     }

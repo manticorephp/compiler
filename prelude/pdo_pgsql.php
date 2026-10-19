@@ -174,6 +174,7 @@ final class __McPdoPgWire
                 . "\n\tIs the server running on that host and accepting TCP/IP connections?");
         }
         $this->s = $s;
+        __McPdo::noDelay($s);
         $this->addr = 'tcp://' . (\strpos($host, ':') === false ? $host : '[' . $host . ']') . ':' . (string) $port;
         $this->setTimeout($timeout);
         $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
