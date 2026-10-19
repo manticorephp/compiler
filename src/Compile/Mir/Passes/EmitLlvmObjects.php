@@ -1576,11 +1576,6 @@ trait EmitLlvmObjects
         if (\count($fixed) === 0 && $enumArms === [] && $magic === []) {
             return \implode('', $outChunks) . $this->emitBagReadByClassId($pa, $objPtr);
         }
-        // Static fast path: a single holder and no bag class anywhere, so the
-        // cell can only be that class — read the slot with no class_id switch.
-        if (\count($fixed) === 1 && !$hasBag && $enumArms === [] && $magic === []) {
-            return \implode('', $outChunks) . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
-        }
         // Runtime dispatch on the object's class_id. Fixed-slot-only reads are
         // extracted once per property: the caller keeps only the object coercion
         // and a normal call, while the helper owns the shared switch.
@@ -1883,10 +1878,9 @@ trait EmitLlvmObjects
         if (\count($fixed) === 0 && $magic === []) {
             return $out . $this->emitBagReadByName($prop, $objPtr);
         }
-        // A single holder → its real offset, boxed by its declared type.
-        if (\count($fixed) === 1 && $magic === []) {
-            return $out . $this->emitFixedPropLoad($objPtr, $fixed[0], $prop);
-        }
+        // Even a single holder is read through the class_id switch: the receiver
+        // may be any class, and a holder's offset can lie past the end of a
+        // smaller object (`$e->errorInfo` on a ValueError read PDOException's slot).
         // NO unconditional shortcut for a single magic holder: the receiver is
         // ERASED, so "one class declares __get" says nothing about the class in
         // hand. Calling it anyway ran Ovl::__get with a Plain2 `$this` and read

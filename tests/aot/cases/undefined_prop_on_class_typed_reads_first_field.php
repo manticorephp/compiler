@@ -19,3 +19,9 @@ var_dump(viaIssetIface(new C));
 $s = new stdClass; $s->nope = 'dyn';
 function viaObj(object $o) { return $o->nope ?? 'dflt'; }
 var_dump(viaObj($s), viaObj(new C));
+class Holder extends Exception { public ?array $info = ['h']; }
+class Big extends Error { public string $a = 'A'; public string $b = 'B'; }
+function oneHolder(Throwable $e) { return json_encode($e->info ?? null); }
+echo oneHolder(new Big('v')), ' ', oneHolder(new Holder('h')), "\n";
+function oneHolderMixed(mixed $e) { return json_encode($e->info ?? null); }
+echo oneHolderMixed(new Big('v')), ' ', oneHolderMixed(new Holder('h')), "\n";
