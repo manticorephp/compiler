@@ -449,6 +449,7 @@ function __mc_tok_casts(): array
         'double' => 382,
         'real' => 382,
         'string' => 383,
+        'binary' => 383,
         'array' => 384,
         'object' => 385,
         'unset' => 387,
