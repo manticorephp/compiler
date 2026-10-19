@@ -1,5 +1,5 @@
 attr: [0,1000]
-negative: ValueError PDO::PGSQL_ATTR_FETCH_BATCH must be between 0 and 2147483647 0
+negative: ValueError PDO::PGSQL_ATTR_FETCH_BATCH must be between 0 and 2147483647 null
 attr kept: 1000
 batch 1: 1000 rows, identical
 batch 7: 1000 rows, identical
