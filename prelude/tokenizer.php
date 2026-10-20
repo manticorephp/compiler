@@ -878,6 +878,17 @@ final class __McTok
             return $j;
         }
 
+        // `b'…'`, `b"…"` and `b<<<E` (either case): the binary flag is part of
+        // the string token, not a T_STRING of its own.
+        if (($b === 98 || $b === 66) && $i + 1 < $len) {
+            $nx = \ord($s[$i + 1]);
+            if ($nx === 39) { return $this->scanSingle($s, $len, $i, $line, 1); }
+            if ($nx === 34) { return $this->scanQuote($s, $len, $i, $line, $nx, 1); }
+            if ($nx === 60 && $i + 3 < $len && \ord($s[$i + 2]) === 60 && \ord($s[$i + 3]) === 60) {
+                $e = $this->scanHeredocStart($s, $len, $i, $line, 1);
+                if ($e >= 0) { return $e; }
+            }
+        }
         if ($k === self::K_ID) { return $this->scanIdent($s, $len, $i, $line); }
         if ($k === self::K_DIGIT) { return $this->scanNumber($s, $len, $i, $line); }
         if ($b === 46 && $i + 1 < $len && $this->cls(\ord($s[$i + 1])) === self::K_DIGIT) { return $this->scanNumber($s, $len, $i, $line); }
@@ -1179,23 +1190,24 @@ final class __McTok
         return \strcmp($digits, $limit) > 0;
     }
 
-    private function scanQuote(string $s, int $len, int $i, int $line, int $b): int
+    /** $p = length of a `b` prefix already at $i. */
+    private function scanQuote(string $s, int $len, int $i, int $line, int $b, int $p = 0): int
     {
-        if ($b === 39) { return $this->scanSingle($s, $len, $i, $line); }
+        if ($b === 39) { return $this->scanSingle($s, $len, $i, $line, $p); }
         // A double-quoted string with no interpolation trigger is ONE
         // T_CONSTANT_ENCAPSED_STRING; otherwise it opens a state.
         if ($b === 34) {
-            $end = $this->plainDqEnd($s, $len, $i);
+            $end = $this->plainDqEnd($s, $len, $i + $p);
             if ($end > 0) {
                 $text = \substr($s, $i, $end - $i);
                 $this->push(__McTokId::T_CONSTANT_ENCAPSED_STRING, $text, $line, $i);
                 $this->line = $line + $this->nl($s, $i, $end);
                 return $end;
             }
-            $this->push(34, '"', $line, $i);
+            $this->push(34, $p === 0 ? '"' : \substr($s, $i, $p + 1), $line, $i);
             $this->stStack[] = $this->st;
             $this->st = self::ST_DQ;
-            return $i + 1;
+            return $i + $p + 1;
         }
         $this->push(96, '`', $line, $i);
         $this->stStack[] = $this->st;
@@ -1203,9 +1215,9 @@ final class __McTok
         return $i + 1;
     }
 
-    private function scanSingle(string $s, int $len, int $i, int $line): int
+    private function scanSingle(string $s, int $len, int $i, int $line, int $p = 0): int
     {
-        $j = $i + 1;
+        $j = $i + $p + 1;
         while ($j < $len) {
             $c = \ord($s[$j]);
             if ($c === 92) { $j = $j + 2; continue; }
@@ -1401,9 +1413,10 @@ final class __McTok
         return $end;
     }
 
-    private function scanHeredocStart(string $s, int $len, int $i, int $line): int
+    /** $pre = length of a `b` prefix at $i; not a heredoc opener answers -1. */
+    private function scanHeredocStart(string $s, int $len, int $i, int $line, int $pre = 0): int
     {
-        $p = $i + 3;
+        $p = $i + $pre + 3;
         while ($p < $len) {
             $c = \ord($s[$p]);
             if ($c !== 32 && $c !== 9) { break; }
@@ -1415,17 +1428,17 @@ final class __McTok
             $p = $p + 1;
         }
         if ($p >= $len || $this->cls(\ord($s[$p])) !== self::K_ID) {
-            return $this->pushBad($s, $i, $line);
+            return -1;
         }
         $le = $this->identEnd($s, $len, $p);
         $label = \substr($s, $p, $le - $p);
         $q = $le;
         if ($quote !== 0) {
-            if ($q >= $len || \ord($s[$q]) !== $quote) { return $this->pushBad($s, $i, $line); }
+            if ($q >= $len || \ord($s[$q]) !== $quote) { return -1; }
             $q = $q + 1;
         }
         if ($q < $len && \ord($s[$q]) === 13) { $q = $q + 1; }
-        if ($q >= $len || \ord($s[$q]) !== 10) { return $this->pushBad($s, $i, $line); }
+        if ($q >= $len || \ord($s[$q]) !== 10) { return -1; }
         $q = $q + 1;
         $this->push(__McTokId::T_START_HEREDOC, \substr($s, $i, $q - $i), $line, $i);
         $this->line = $line + $this->nl($s, $i, $q);
@@ -1470,7 +1483,8 @@ final class __McTok
             return $i + 1;
         }
         if ($b === 60 && $i + 2 < $len && \ord($s[$i + 1]) === 60 && \ord($s[$i + 2]) === 60) {
-            return $this->scanHeredocStart($s, $len, $i, $line);
+            $e = $this->scanHeredocStart($s, $len, $i, $line);
+            if ($e >= 0) { return $e; }
         }
         if ($b === 40) {
             $e = $this->castEnd($s, $len, $i);
