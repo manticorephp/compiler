@@ -1,6 +1,5 @@
 <?php
 // A qualified call to an undefined function (foo\f() in namespace A) falls back to A\f / the global function instead of throwing.
-// issue: #377
 namespace A;
 
 function f(): string { return "A\\f called"; }

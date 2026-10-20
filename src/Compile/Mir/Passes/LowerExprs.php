@@ -535,7 +535,7 @@ trait LowerExprs
             if (\count($expr->args) === 1 && $expr->args[0]->kind === 'Ellipsis') {
                 return $this->lowerFcc($expr->function);
             }
-            $callee = $this->resolveCallName($expr->function);
+            $callee = $this->resolveCallName($expr->function, $expr->qualified);
             $mm = $this->minMaxSpreadCall($callee, $expr->args);
             if ($mm !== null) { return $this->lowerExpr($mm); }
             $savedPost = $this->pendingCallPost;
