@@ -4876,27 +4876,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $curlFns[] = $fn;
         }
     }
-    $useCurl = $demand->callsAny($curlFns)
-        || $demand->mentionsAny([
-            'CurlHandle',
-            'CURLOPT_URL',
-            'CURLOPT_RETURNTRANSFER',
-            'CURLOPT_POST',
-            'CURLOPT_POSTFIELDS',
-            'CURLOPT_HTTPHEADER',
-            'CURLOPT_HEADER',
-            'CURLOPT_NOBODY',
-            'CURLOPT_FOLLOWLOCATION',
-            'CURLOPT_TIMEOUT',
-            'CURLOPT_CUSTOMREQUEST',
-            'CURLOPT_USERAGENT',
-            'CURLOPT_WRITEFUNCTION',
-            'CURLOPT_HEADERFUNCTION',
-            'CURLOPT_SSL_VERIFYPEER',
-            'CURLINFO_HTTP_CODE',
-            'CURLINFO_RESPONSE_CODE',
-            'CURLE_OK',
-        ]);
+    // Every `CURL*` constant the file defines is a mention too: a class constant
+    // list such as monolog's `[CURLE_COULDNT_RESOLVE_HOST, …]` calls nothing.
+    $curlNames = ['CurlHandle'];
+    if (\preg_match_all('/^const (CURL\w+)\s*=/m', $curlSrc, $curlConsts) > 0) {
+        foreach ($curlConsts[1] as $cc) { $curlNames[] = $cc; }
+    }
+    $useCurl = $demand->callsAny($curlFns) || $demand->mentionsAny($curlNames);
     // curl_multi_* / curl_share_* — same prefixed family, own gate, and it
     // forces curl.php on because it names __McCurl and CurlHandle.
     $curlMultiFns = [];

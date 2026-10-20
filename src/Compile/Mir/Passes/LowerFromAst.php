@@ -852,6 +852,10 @@ final class LowerFromAst implements Pass
             }
         }
         $stmts = $this->dropShadowedBuiltinTypes($stmts, $preludeCount, $userStart);
+        // A class's static property default is lowered while its ClassDef is built, long before the
+        // define pre-pass below: without the unconditional constants known by then, `static $a = [X]`
+        // lowered `X` to the undefined-constant throw. The later pass skips what is registered.
+        $this->registerUnconditionalDefines($stmts);
         // The flattened local list is now the lowering owner; release the
         // merged Program statement-array before class bodies are lowered.
         $this->program = new Program([], "", [], $this->program->docComments);
