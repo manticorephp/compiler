@@ -12,7 +12,8 @@ use Manticore\Attr\RefOut;
 
 /**
  * Map PHP inline modifiers (the chars after the closing delimiter) to a
- * PCRE2 compile-option bitmask. Bit values are from pcre2.h.
+ * PCRE2 compile-option bitmask. Bit values are from pcre2.h. -1 for a modifier
+ * php does not know (its "Unknown modifier" compile error).
  */
 function __preg_options(string $mods): int
 {
@@ -28,6 +29,10 @@ function __preg_options(string $mods): int
         elseif ($c === 'A')  { $opt = $opt | 0x80000000; }   // PCRE2_ANCHORED
         elseif ($c === 'D')  { $opt = $opt | 0x00000010; }   // PCRE2_DOLLAR_ENDONLY
         elseif ($c === 'u')  { $opt = $opt | 0x00080000 | 0x00020000; } // PCRE2_UTF|PCRE2_UCP
+        elseif ($c === 'J')  { $opt = $opt | 0x00000040; }   // PCRE2_DUPNAMES
+        elseif ($c === 'n')  { $opt = $opt | 0x00002000; }   // PCRE2_NO_AUTO_CAPTURE
+        elseif ($c === 'S' || $c === 'X' || $c === ' ' || $c === "\n" || $c === "\r") { }
+        else { return -1; }
     }
     return $opt;
 }
@@ -78,19 +83,32 @@ function __preg_compile(string $pattern): int
     // php-cs-fixer pattern is a fresh multi-KB concatenation every time.
     $hit = __McPcreCache::$code[$pattern] ?? 0;
     if ($hit !== 0) {
+        __McPcreCache::$err = 0;
         return $hit;
     }
-    $close = \__preg_close_delim($pattern[0]);
-    $endPos = \strrpos($pattern, $close);
-    // strrpos is int|false; a delimiter-less pattern is not a valid PHP regex,
-    // so bail rather than let false coerce into the substr offsets below.
-    if ($endPos === false) {
+    // php: a pattern that does not compile is PREG_INTERNAL_ERROR, and every
+    // preg_* answers its error value (false / null).
+    __McPcreCache::$err = 1;
+    // php skips leading whitespace; then an empty pattern, or an alphanumeric /
+    // backslash delimiter, is rejected.
+    $pat = \ltrim($pattern, " \t\n\r\v\f");
+    if ($pat === '' || \ctype_alnum($pat[0]) || $pat[0] === '\\') {
+        return 0;
+    }
+    $close = \__preg_close_delim($pat[0]);
+    $endPos = \strrpos($pat, $close);
+    // No closing delimiter: strrpos finds nothing, or (same open and close)
+    // only the opening one at 0.
+    if ($endPos === false || $endPos === 0) {
         return 0;
     }
     $end = $endPos;
-    $body = \substr($pattern, 1, $end - 1);
-    $mods = \substr($pattern, $end + 1);
+    $body = \substr($pat, 1, $end - 1);
+    $mods = \substr($pat, $end + 1);
     $opt = \__preg_options($mods);
+    if ($opt === -1) {
+        return 0;
+    }
 
     // Out-params: errorcode (int) + erroroffset (size_t). 8 bytes each is a
     // safe over-allocation for both.
@@ -109,6 +127,7 @@ function __preg_compile(string $pattern): int
         \Runtime\Pcre\jitStackAssign(__McPcreCache::$mctx, 0, \Runtime\Pcre\jitStackCreate(32768, 196608, 0));
     }
     __McPcreCache::$code[$pattern] = $code;
+    __McPcreCache::$err = 0;
     return $code;
 }
 
@@ -207,7 +226,7 @@ function __preg_test(string $pattern, string $subject, int $offset = 0): int
  * @param mixed[] $matches
  * @param-out mixed[] $matches
  */
-function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed> &$matches = [], int $flags = 0, int $offset = 0): int
+function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed> &$matches = [], int $flags = 0, int $offset = 0): int|false
 {
     // Written straight into the by-ref so the caller's container is the one
     // that grows.
@@ -216,7 +235,7 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
     $asNull = ($flags & 512) !== 0;               // PREG_UNMATCHED_AS_NULL
     $code = \__preg_compile($pattern);
     if ($code === 0) {
-        return 0;
+        return false;
     }
     $md = \__preg_md($code, 0);
     $rc = \Runtime\Pcre\exec($code, $subject, \strlen($subject), $offset, 0, $md, __McPcreCache::$mctx);
@@ -226,9 +245,12 @@ function preg_match(string $pattern, string $subject, #[RefOut] array<int, mixed
         $rc = $rc - 0x100000000;
     }
     if ($rc <= 0) {
-        // <0: no-match (-1) or error; ==0: ovector too small (won't happen).
+        // -1: no match; below that an error (a bad UTF-8 subject under /u, a
+        // match limit) — php answers false and records it for preg_last_error.
         \__preg_md($code, $md);
-        return 0;
+        $err = \__preg_errcode($rc);
+        __McPcreCache::$err = $err;
+        return $err === 0 ? 0 : false;
     }
     $ov = \Runtime\Pcre\ovectorPtr($md);
     // A named group appears TWICE in php's $matches — under its name first,
@@ -429,7 +451,7 @@ function preg_last_error_msg(): string
     if ($e === 2) { return "Backtrack limit exhausted"; }
     if ($e === 3) { return "Recursion limit exhausted"; }
     if ($e === 4) { return "Malformed UTF-8 characters, possibly incorrectly encoded"; }
-    if ($e === 5) { return "The offset did not correspond to the beginning of a valid UTF-8 character"; }
+    if ($e === 5) { return "The offset did not correspond to the beginning of a valid UTF-8 code point"; }
     if ($e === 6) { return "JIT stack limit exhausted"; }
     return "Internal error";
 }
@@ -440,11 +462,11 @@ function preg_last_error_msg(): string
  * @param mixed[] $matches
  * @param-out mixed[] $matches
  */
-function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matches = [], int $flags = 1, int $offset = 0): int
+function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matches = [], int $flags = 1, int $offset = 0): int|false
 {
     $matches = [];
     $code = \__preg_compile($pattern);
-    if ($code === 0) { return 0; }
+    if ($code === 0) { return false; }
     $setOrder = ($flags & 2) !== 0;               // PREG_SET_ORDER
     $offsetCapture = ($flags & 256) !== 0;        // PREG_OFFSET_CAPTURE
     $len = \strlen($subject);
@@ -500,7 +522,8 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
                 }
             }
         }
-        return $count;
+        // php fills $matches with what matched before the error, then answers false.
+        return $err === 0 ? $count : false;
     }
 
     // Collect each match's groups as a local mixed[][] — already CELLS, so the
@@ -565,7 +588,7 @@ function preg_match_all(string $pattern, string $subject, #[RefOut] array &$matc
             $matches[$g] = \__mir_to_cell(\__preg_copy_cells($col));
         }
     }
-    return $count;
+    return __McPcreCache::$err === 0 ? $count : false;
 }
 
 /**
@@ -709,7 +732,9 @@ function preg_replace(array|string $pattern, array|string $replacement, array|st
         $out = [];
         foreach ($subject as $k => $one) {
             $c = 0;
-            $out[$k] = \__preg_replace_list($pattern, $replacement, (string)$one, $limit, $c);
+            $r = \__preg_replace_list($pattern, $replacement, (string)$one, $limit, $c);
+            // php leaves out a subject whose replacement failed.
+            if ($r !== null) { $out[$k] = $r; }
             $count = $count + $c;
         }
         return $out;
@@ -719,7 +744,7 @@ function preg_replace(array|string $pattern, array|string $replacement, array|st
 
 /** A pattern list over one string subject — php's order: pattern by pattern. */
 #[\Manticore\Attr\Overload('preg_replace')]
-function __preg_replace_list(array|string $pattern, array|string $replacement, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+function __preg_replace_list(array|string $pattern, array|string $replacement, string $subject, int $limit = -1, #[RefOut] int &$count = 0): ?string
 {
     $count = 0;
     if (!\is_array($pattern)) {
@@ -735,7 +760,9 @@ function __preg_replace_list(array|string $pattern, array|string $replacement, s
     foreach ($pattern as $p) {
         $r = \is_array($replacement) ? ($reps[$i] ?? '') : $replacement;
         $c = 0;
-        $out = \preg_replace__str((string)$p, $r, $out, $limit, $c);
+        $next = \preg_replace__str((string)$p, $r, $out, $limit, $c);
+        if ($next === null) { return null; }
+        $out = $next;
         $count = $count + $c;
         $i = $i + 1;
     }
@@ -743,11 +770,11 @@ function __preg_replace_list(array|string $pattern, array|string $replacement, s
 }
 
 #[\Manticore\Attr\Overload('preg_replace')]
-function preg_replace__str(string $pattern, string $replacement, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+function preg_replace__str(string $pattern, string $replacement, string $subject, int $limit = -1, #[RefOut] int &$count = 0): ?string
 {
     $count = 0;
     $code = \__preg_compile($pattern);
-    if ($code === 0) { return $subject; }
+    if ($code === 0) { return null; }
     $len = \strlen($subject);
     $md = \__preg_md($code, 0);
     $out = "";
@@ -758,7 +785,10 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
     while ($pos <= $len) {
         if ($limit >= 0 && $count >= $limit) { break; }
         $rc = \__preg_exec($code, $md, $subject, $len, $pos);
-        if ($rc === 0) { break; }
+        if ($rc === 0) {
+            if (__McPcreCache::$err !== 0) { \__preg_md($code, $md); return null; }
+            break;
+        }
         $ms = \peek_i64($ov, 0);
         $me = \peek_i64($ov, 8);
         $out .= \substr($subject, $pos, $ms - $pos);         // text before the match
@@ -785,7 +815,8 @@ function preg_replace_callback(array|string $pattern, callable $callback, array|
         $out = [];
         foreach ($subject as $k => $one) {
             $c = 0;
-            $out[$k] = \__preg_replace_callback_list($pattern, $callback, (string)$one, $limit, $c);
+            $r = \__preg_replace_callback_list($pattern, $callback, (string)$one, $limit, $c);
+            if ($r !== null) { $out[$k] = $r; }
             $count = $count + $c;
         }
         return $out;
@@ -795,7 +826,7 @@ function preg_replace_callback(array|string $pattern, callable $callback, array|
 
 /** A pattern list over one string subject. */
 #[\Manticore\Attr\Overload('preg_replace_callback')]
-function __preg_replace_callback_list(array|string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+function __preg_replace_callback_list(array|string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): ?string
 {
     $count = 0;
     if (!\is_array($pattern)) {
@@ -804,18 +835,20 @@ function __preg_replace_callback_list(array|string $pattern, callable $callback,
     $out = $subject;
     foreach ($pattern as $p) {
         $c = 0;
-        $out = \preg_replace_callback__str((string)$p, $callback, $out, $limit, $c);
+        $next = \preg_replace_callback__str((string)$p, $callback, $out, $limit, $c);
+        if ($next === null) { return null; }
+        $out = $next;
         $count = $count + $c;
     }
     return $out;
 }
 
 #[\Manticore\Attr\Overload('preg_replace_callback')]
-function preg_replace_callback__str(string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+function preg_replace_callback__str(string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): ?string
 {
     $count = 0;
     $code = \__preg_compile($pattern);
-    if ($code === 0) { return $subject; }
+    if ($code === 0) { return null; }
     $len = \strlen($subject);
     $md = \__preg_md($code, 0);
     // A named group reaches the callback under its name too, as in preg_match.
@@ -827,7 +860,10 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
     while ($pos <= $len) {
         if ($limit >= 0 && $count >= $limit) { break; }
         $rc = \__preg_exec($code, $md, $subject, $len, $pos);
-        if ($rc === 0) { break; }
+        if ($rc === 0) {
+            if (__McPcreCache::$err !== 0) { \__preg_md($code, $md); return null; }
+            break;
+        }
         $ms = \peek_i64($ov, 0);
         $me = \peek_i64($ov, 8);
         /** @var mixed[] $arg */
@@ -853,12 +889,14 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
 /**
  * @param array<string, callable> $patterns
  */
-function preg_replace_callback_array(array $patterns, string $subject, int $limit = -1, #[RefOut] int &$count = 0): string
+function preg_replace_callback_array(array $patterns, string $subject, int $limit = -1, #[RefOut] int &$count = 0): ?string
 {
     $count = 0;
     foreach ($patterns as $pattern => $callback) {
         $c = 0;
-        $subject = \preg_replace_callback($pattern, $callback, $subject, $limit, $c);
+        $next = \preg_replace_callback__str($pattern, $callback, $subject, $limit, $c);
+        if ($next === null) { return null; }
+        $subject = $next;
         $count = $count + $c;
     }
     return $subject;
@@ -867,15 +905,15 @@ function preg_replace_callback_array(array $patterns, string $subject, int $limi
 // ── preg_split ─────────────────────────────────────────────────────────────
 
 /**
- * @return string[]
+ * @return string[]|false
  */
-function preg_split(string $pattern, string $subject, int $limit = -1, int $flags = 0): array
+function preg_split(string $pattern, string $subject, int $limit = -1, int $flags = 0): array|false
 {
     $noEmpty = ($flags & 1) !== 0;          // PREG_SPLIT_NO_EMPTY
     $delimCap = ($flags & 2) !== 0;         // PREG_SPLIT_DELIM_CAPTURE
     $out = [];
     $code = \__preg_compile($pattern);
-    if ($code === 0) { $out[] = $subject; return $out; }
+    if ($code === 0) { return false; }
     $len = \strlen($subject);
     $md = \__preg_md($code, 0);
     $ov = \Runtime\Pcre\ovectorPtr($md);
@@ -885,7 +923,10 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
     while ($pos <= $len) {
         if ($limit > 0 && $pieces >= $limit - 1) { break; }
         $rc = \__preg_exec($code, $md, $subject, $len, $pos);
-        if ($rc === 0) { break; }
+        if ($rc === 0) {
+            if (__McPcreCache::$err !== 0) { \__preg_md($code, $md); return false; }
+            break;
+        }
         $ms = \peek_i64($ov, 0);
         $me = \peek_i64($ov, 8);
         if ($me === $ms && $ms === $last) {
@@ -932,7 +973,10 @@ function preg_grep(string $pattern, array $array, int $flags = 0): array
     $tmp = [];
     foreach ($array as $key => $value) {
         $s = \__mir_untag_str($value);
-        $hit = \preg_match($pattern, $s, $tmp) === 1;
+        $r = \preg_match($pattern, $s, $tmp);
+        // php stops at the first error and answers what it kept so far.
+        if ($r === false) { break; }
+        $hit = $r === 1;
         if ($hit !== $invert) { $out[$key] = $s; }
     }
     return $out;
