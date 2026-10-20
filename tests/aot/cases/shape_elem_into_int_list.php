@@ -1,6 +1,5 @@
 <?php
 // An int appended from a shape element of a function result (array{0: int, 1: string}) makes the int list compare unequal to its own values.
-// issue: #369
 /** @return array<int, array{0: int, 1: string}> */
 function pairs(): array
 {

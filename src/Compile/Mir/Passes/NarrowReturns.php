@@ -418,6 +418,17 @@ final class NarrowReturns implements Pass
                 && $rt->element !== null && $rt->element->kind === $result->element->kind) {
                 return false;
             }
+            // A key-channel fix moves the KEY, not the element: a declared SHAPE
+            // element is the contract callers read its fields by. Rebuilt from the
+            // body it fell to `vec[cell]`, so `$p[0]` of `array<int, array{0: int,
+            // …}>` typed int before this pass and cell after it, and an int list
+            // fed from it no longer matched the `int[]` callee Monomorphize had
+            // already bound.
+            $re = $result->element;
+            if ($keyFix && $rt->element !== null && $rt->element->isShape()
+                && $re !== null && $re->kind === Type::KIND_ARRAY) {
+                $result = $result->withElement($rt->element->proveShapeFields($re) ?? $rt->element);
+            }
         }
         $fn->returnType = $result;
         return true;
