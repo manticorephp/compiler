@@ -1793,6 +1793,18 @@ trait InferNodes
         return $node->type;
     }
 
+    /** A property read off an object type whose class declares no such property. */
+    private function undeclaredPropRead(Node $n): bool
+    {
+        if ($n->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        $pa = $n;
+        $ot = $pa->object->type;
+        if ($ot->kind !== Type::KIND_OBJ || $ot->class === null) { return false; }
+        $cd = $this->classes[$ot->class] ?? null;
+        // An interface has no ClassDef: nothing it names is a declared slot.
+        return $cd === null || (!isset($cd->propertyTypes[$pa->property]) && !$cd->usesBag());
+    }
+
     private function inferNullCoalesce(NullCoalesce_ $node): Type
     {
         $lt = $this->inferNode($node->left);
@@ -1823,6 +1835,10 @@ trait InferNodes
             $node->type = $rt;
         } elseif ($this->armArrayJoin($lt, $rt) !== null) {
             $node->type = $this->armArrayJoin($lt, $rt);
+        } elseif ($lt->kind === Type::KIND_UNKNOWN && $this->undeclaredPropRead($node->left)) {
+            // `$iface->p ?? d`: a property the receiver's type does not declare is read by the holder's
+            // real slot and comes back as a tagged cell; the fallback must be boxed beside it.
+            $node->type = Type::cell();
         } elseif ($lt->kind === Type::KIND_UNKNOWN
             && $rt->kind !== Type::KIND_NULL && $rt->kind !== Type::KIND_UNKNOWN) {
             $node->type = $rt;

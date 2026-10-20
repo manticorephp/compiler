@@ -3216,7 +3216,8 @@ trait EmitLlvmExpr
             $lpa = $nc->left;
             if ($lpa->object->kind === Node::KIND_PROPERTY_ACCESS
                 && $lpa->object->type->kind === Type::KIND_OBJ) {
-                return $this->emitCoalesceChain($nc, $n->type);
+                $chained = $this->emitCoalesceChain($nc, $n->type);
+                if ($chained !== null) { return $chained; }
             }
         }
         // An array/assoc access can be ABSENT (PHP: missing key/index →
@@ -3422,7 +3423,8 @@ trait EmitLlvmExpr
         return $out . $this->coalesceFloatResult($n, $wantCell);
     }
 
-    private function emitCoalesceChain(NullCoalesce_ $nc, Type $resultType): string
+    /** The fused property-chain `??`, or null when the leaf property is not a declared slot (an interface-typed receiver). */
+    private function emitCoalesceChain(NullCoalesce_ $nc, Type $resultType): ?string
     {
         $chain = [];
         $node = $nc->left;
@@ -3441,6 +3443,7 @@ trait EmitLlvmExpr
             }
         }
         $hops = \count($chain);
+        if ($hops === 0) { return null; }
         $leafPa = $chain[0];
         if ($leafPa->kind !== Node::KIND_PROPERTY_ACCESS) {
             throw new \RuntimeException('emitCoalesceChain: non-property leaf');

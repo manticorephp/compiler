@@ -966,7 +966,7 @@ trait EmitLlvmModule
     {
         try {
             return $this->emitFunctionBody($fn);
-        } catch (\RuntimeException $e) {
+        } catch (\Throwable $e) {
             throw new \RuntimeException($e->getMessage() . ' (in ' . $fn->name . ')');
         }
     }
