@@ -13,6 +13,7 @@ use Compile\Mir\NullConst;
 use Compile\Mir\Ternary;
 use Compile\Mir\Foreach_;
 use Compile\Mir\If_;
+use Compile\Mir\IntConst;
 use Compile\Mir\Isset_;
 use Compile\Mir\LoadLocal;
 use Compile\Mir\Module;
@@ -211,11 +212,15 @@ final class ExtractScope
             }
             $stmts[] = $chain;
         } else {
-            $stmts[] = new StoreLocal($vl, $call->args[1], Type::unknown());
+            // Boxed in a one-element array, like extract's plan values: inference types a
+            // plain temp by its value, and a typed value stored into every candidate slot
+            // would join arr / obj / str classes the ownership flow cannot reconcile.
+            $stmts[] = new StoreLocal($vl, new ArrayLit([new ArrayElement_(null, $call->args[1])], Type::unknown()), Type::unknown());
+            $boxed = static fn(): ArrayAccess_ => new ArrayAccess_(new LoadLocal($vl, Type::unknown()), new IntConst(0, Type::int_()), Type::cell());
             foreach ($locals as $n) {
-                $stmts[] = new If_($is($n), new Block([new StoreLocal($n, new LoadLocal($vl, Type::unknown()), Type::cell())], Type::void()), null);
+                $stmts[] = new If_($is($n), new Block([new StoreLocal($n, $boxed(), Type::cell())], Type::void()), null);
             }
-            $stmts[] = new LoadLocal($vl, Type::unknown());
+            $stmts[] = $boxed();
         }
         $site->stmts = $stmts;
     }
