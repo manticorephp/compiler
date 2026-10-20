@@ -3483,9 +3483,17 @@ final class EmitLlvm implements EmitVisitor
         $eqc = $this->ssa->allocReg();
         $out .= '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
         $out .= '  br label %' . $jnL . "\n";
-        $out .= $nsL . ":\n  br label %" . $jnL . "\n";
+        // A null cell against an absent (null) string cond is the one non-string cell that is ===.
+        $out .= $nsL . ":\n";
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq i64 ' . $subj . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";
+        $condNull = $this->ssa->allocReg();
+        $out .= '  ' . $condNull . ' = icmp eq ptr ' . $cp . ", null\n";
+        $nullEq = $this->ssa->allocReg();
+        $out .= '  ' . $nullEq . ' = and i1 ' . $isNull . ', ' . $condNull . "\n";
+        $out .= '  br label %' . $jnL . "\n";
         $out .= $jnL . ":\n";
-        $out .= '  ' . $eq . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ false, %' . $nsL . " ]\n";
+        $out .= '  ' . $eq . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ ' . $nullEq . ', %' . $nsL . " ]\n";
         return $out;
     }
 
