@@ -723,8 +723,9 @@ trait LowerTypes
     private function isBareArrayHint(?string $hint): bool
     {
         if ($hint === null) { return false; }
-        $low = \strtolower(\ltrim($hint, '?\\'));
-        return $low === 'array';
+        // `array|null` is `?array` spelled out: it erases the same way.
+        $low = \strtolower(\str_replace(' ', '', \ltrim($hint, '?\\')));
+        return $low === 'array' || $low === 'array|null' || $low === 'null|array';
     }
 
     /** A RETURN hint the +1 erased-array convention covers
