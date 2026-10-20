@@ -1,6 +1,5 @@
 <?php
 // An int list passed to an int[] parameter reads wrong values when the same function later array_splices it (reduced from manticore-fmt).
-// issue: #370
 final class Gap
 {
     public const G_COMMENT = 4;

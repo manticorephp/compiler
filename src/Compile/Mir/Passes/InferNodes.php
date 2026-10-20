@@ -1069,8 +1069,17 @@ trait InferNodes
         // `/** @var RouteCollection[] $imported */ $imported = $this->import(…)
         // ?: []` holds a single collection, which the next line wraps after
         // `!\is_array($imported)` — folded to false, and no route loaded.
+        //
+        // …and except an array slot whose ELEMENT repr is a cell (cellElemLocals:
+        // a by-ref callee such as array_splice writes foreign elements into it).
+        // `@var int[]` names the values, not the buffer: pinned to vec[int] here
+        // while every `$x[] = v` boxed into vec[cell], the merges joined the two
+        // to vec[unknown] and a load read a buffer of mixed raw and boxed words.
+        // The cell arm below builds the slot the way the element stores see it.
         if ($node->declaredType !== null
-            && !($node->declaredType->isArray() && $valueType->kind === Type::KIND_CELL)) {
+            && !($node->declaredType->isArray() && $valueType->kind === Type::KIND_CELL)
+            && !(isset($this->cellElemLocals[$node->name]) && $node->declaredType->isArray()
+                && !$node->declaredType->isShape() && $valueType->isArray())) {
             $dt = $node->declaredType;
             if ($node->value->kind === Node::KIND_ARRAY_LIT && $dt->isArray()) {
                 $node->value->type = $dt;
