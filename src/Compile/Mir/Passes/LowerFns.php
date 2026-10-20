@@ -1100,7 +1100,7 @@ trait LowerFns
             foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
             return $out;
         }
-        if ($k === 'DynamicStaticProp') { return $this->collectVars($e->nameExpr); }
+        if ($k === 'DynamicStaticProp' || $k === 'VarVar') { return $this->collectVars($e->nameExpr); }
         if ($k === 'DynamicStaticMethodCall') {
             $out = $this->collectVars($e->nameExpr);
             foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }

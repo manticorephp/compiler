@@ -815,6 +815,11 @@ trait LowerExprs
             return $this->lowerDynStaticPropRead($this->asDynStaticProp($expr));
         }
         if ($expr->kind === 'DynamicStaticAccess') { return $this->lowerDynamicStaticAccessExpr($expr); }
+        if ($expr->kind === 'VarVar') {
+            // `$$n` READ: a marker, expanded to a chain over the function's locals ({@see ExtractScope}).
+            $this->sawExtract = true;
+            return new Block([new Call(ExtractScope::VV_READ, [$this->lowerExpr($this->asVarVar($expr)->nameExpr)], Type::unknown())], Type::unknown());
+        }
         if ($expr->kind === 'DynamicStaticCall') {
             return $this->lowerDynStaticCall($expr);
         }

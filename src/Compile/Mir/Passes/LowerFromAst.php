@@ -4720,8 +4720,22 @@ final class LowerFromAst implements Pass
         /** @var \Parser\Ast\PropertyAccess $e */
         return $e;
     }
+
+    private function asVarVar(\Parser\Ast\Expr $e): \Parser\Ast\VarVar
+    {
+        /** @var \Parser\Ast\VarVar $e */
+        return $e;
+    }
+
     private function lowerAssign(\Parser\Ast\Assign $expr): Node
     {
+        if ($expr->target->kind === 'VarVar') {
+            $this->sawExtract = true;
+            return new Block([new Call(ExtractScope::VV_WRITE, [
+                $this->lowerExpr($this->asVarVar($expr->target)->nameExpr),
+                $this->lowerExpr($expr->value),
+            ], Type::unknown())], Type::unknown());
+        }
         if ($expr->target->kind === 'Variable') {
             $this->trackCallableAssign($this->varName($expr->target), $expr->value);
         }
