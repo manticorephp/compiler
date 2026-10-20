@@ -81,14 +81,11 @@ The one memory operation you call from PHP code is cycle collection:
 $freed = gc_collect_cycles();   // run the collector, returns objects reclaimed
 ```
 
-Manticore ships a synchronous **Bacon–Rajan cycle collector**. It is **opt-in
-and zero-overhead**: a program that never calls `gc_collect_cycles()` pays
-nothing for it (and cycles simply leak). Call it at a natural boundary (end of a
-request, between batches) when you build reference cycles you need reclaimed.
-
-Current limits: the collector is **manual-trigger only** (no automatic
-threshold) and does not scan static/global roots — call it explicitly, and from
-a scope where the cycle's roots are live locals.
+Manticore ships a synchronous **Bacon–Rajan cycle collector**. It is
+linked in only by a program that references `gc_collect_cycles()` (zero overhead
+otherwise, and cycles then leak). Once linked it also runs **automatically** at
+allocations when the root buffer reaches an adaptive threshold, as php's
+`gc_adjust_threshold` does; call it explicitly at a natural boundary to reclaim sooner.
 
 ---
 

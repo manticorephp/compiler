@@ -251,7 +251,7 @@ implicit monomorphization of erased `array` / `callable` params
 
 **Standard library:** the `array_*` family in full, strings (incl. the whole `preg_*`
 family over host PCRE2), **mbstring** (every encoding Zend ships, case mapping,
-width, MIME/HTML-entity codecs — pure PHP; `mb_ereg*` not yet), **ext/intl** complete
+width, MIME/HTML-entity codecs — pure PHP; `mb_ereg*` parked: Oniguruma is EOL), **ext/intl** complete
 over the system ICU (`Collator`, `NumberFormatter`, `IntlDateFormatter`, `IntlCalendar`,
 `MessageFormatter`, `Transliterator`, `IntlBreakIterator`, `IntlChar`, …), type/reflection,
 math, `ctype_*`, JSON, `var_dump`/`print_r`, SPL, date/time, sockets and streams, hashing
@@ -316,58 +316,62 @@ are data-dependent and `$argc`-seeded so LLVM cannot fold them away. Times are s
 
 | Case | Native (s) | PHP (s) | Speedup | Native RSS (MiB) | PHP RSS (MiB) | Parity |
 |---|---:|---:|---:|---:|---:|---|
-| `alloc_churn` | 0.04 | 0.32 | 8.0× | 2.4 | 28.1 | ok |
-| `array` | 0.08 | 0.90 | 11.2× | 8.7 | 35.8 | ok |
-| `assoc` | 0.07 | 0.24 | 3.4× | 2.3 | 28.0 | ok |
-| `assoc_small` | 0.03 | 0.17 | 5.7× | 2.1 | 27.9 | ok |
-| `closures` | 0.02 | 0.61 | 30.5× | 2.1 | 28.1 | ok |
-| `crc32` | 0.03 | 0.24 | 8.0× | 2.2 | 28.2 | ok |
-| `dijkstra` | 0.02 | 0.32 | 16.0× | 2.6 | 29.2 | ok |
-| `explode` | 0.05 | 0.33 | 6.6× | 2.0 | 28.1 | ok |
-| `fib` | 0.10 | 11.59 | 115.9× | 2.0 | 28.0 | ok |
-| `fiber_pingpong` | 0.03 | 0.36 | 12.0× | 2.3 | 28.1 | ok |
-| `fiber_switch` | 0.05 | 0.55 | 11.0× | 2.4 | 28.7 | ok |
-| `foreach_assoc` | 0.02 | 0.19 | 9.5× | 26.4 | 41.5 | ok |
-| `funcarr` | 0.03 | 1.02 | 34.0× | 2.5 | 28.2 | ok |
-| `generator_yield` | 0.02 | 0.72 | 36.0× | 2.0 | 28.0 | ok |
-| `http_parse` | 0.92 | — | — | 3.2 | — | php-skip |
-| `http_scale` | 0.93 | — | — | 3.3 | — | php-skip |
-| `htmlspecialchars` | 0.09 | 0.40 | 4.4× | 2.2 | 28.6 | ok |
-| `implode_int` | 0.19 | 0.27 | 1.4× | 2.2 | 28.3 | ok |
-| `in_array` | 0.11 | 0.26 | 2.4× | 2.1 | 27.9 | ok |
-| `json` | 0.05 | 0.23 | 4.6× | 2.1 | 28.4 | ok |
-| `json_decode` | 0.10 | 0.30 | 3.0× | 15.3 | 46.0 | ok |
-| `json_decode_object` | 0.01 | 0.15 | 15.0× | 6.3 | 33.9 | ok |
-| `json_decode_records` | 0.06 | 0.23 | 3.8× | 10.8 | 39.3 | ok |
+| `alloc_churn` | 0.05 | 0.39 | 7.8× | 2.6 | 27.6 | ok |
+| `array` | 0.09 | 1.00 | 11.1× | 8.7 | 35.5 | ok |
+| `assoc` | 0.08 | 0.31 | 3.9× | 2.3 | 27.7 | ok |
+| `assoc_small` | 0.04 | 0.20 | 5.0× | 2.1 | 27.5 | ok |
+| `bcmath_big` | 0.00 | 0.16 | ∞ | 2.8 | 27.9 | ok |
+| `bcmath_money` | 0.16 | 0.26 | 1.6× | 2.3 | 27.8 | ok |
+| `bcmath_number` | 0.21 | 0.27 | 1.3× | 2.5 | 28.0 | ok |
+| `closures` | 0.03 | 0.79 | 26.3× | 2.1 | 28.0 | ok |
+| `crc32` | 0.03 | 0.31 | 10.3× | 2.2 | 28.0 | ok |
+| `dijkstra` | 0.02 | 0.43 | 21.5× | 3.4 | 29.1 | ok |
+| `explode` | 0.05 | 0.45 | 9.0× | 2.1 | 27.7 | ok |
+| `fib` | 0.13 | 13.61 | 104.7× | 2.1 | 27.8 | ok |
+| `fiber_pingpong` | 0.04 | 0.50 | 12.5× | 2.5 | 27.9 | ok |
+| `fiber_switch` | 0.07 | 0.70 | 10.0× | 2.6 | 27.8 | ok |
+| `foreach_assoc` | 0.03 | 0.25 | 8.3× | 26.4 | 41.1 | ok |
+| `funcarr` | 0.05 | 1.27 | 25.4× | 2.5 | 28.0 | ok |
+| `generator_yield` | 0.03 | 0.91 | 30.3× | 2.1 | 28.1 | ok |
+| `htmlspecialchars` | 0.09 | 0.58 | 6.4× | 2.2 | 28.0 | ok |
+| `http_parse` | 1.96 | — | — | 3.4 | — | php-skip |
+| `http_scale` | 1.20 | — | — | 3.6 | — | php-skip |
+| `implode_int` | 0.02 | 0.29 | 14.5× | 2.2 | 28.1 | ok |
+| `in_array` | 0.07 | 0.27 | 3.9× | 2.1 | 28.0 | ok |
+| `in_array_int` | 0.02 | 0.32 | 16.0× | 2.1 | 28.2 | ok |
+| `json` | 0.05 | 0.25 | 5.0× | 2.2 | 27.7 | ok |
+| `json_decode` | 0.11 | 0.32 | 2.9× | 15.2 | 45.5 | ok |
+| `json_decode_object` | 0.02 | 0.17 | 8.5× | 6.4 | 33.5 | ok |
+| `json_decode_records` | 0.07 | 0.24 | 3.4× | 10.6 | 38.9 | ok |
 | `json_deep` | 0.03 | 0.19 | 6.3× | 2.2 | 28.4 | ok |
-| `json_escape_heavy` | 0.02 | 0.15 | 7.5× | 2.8 | 28.5 | ok |
-| `json_objects` | 0.08 | 0.35 | 4.4× | 4.6 | 29.3 | ok |
-| `json_pretty` | 0.01 | 0.15 | 15.0× | 4.9 | 29.8 | ok |
-| `json_records` | 0.20 | 0.62 | 3.1× | 11.2 | 33.3 | ok |
-| `json_utf8` | 0.06 | 0.24 | 4.0× | 4.6 | 29.4 | ok |
-| `ksort_asort` | 0.02 | 0.13 | 6.5× | 5.8 | 29.1 | ok |
-| `loop` | 0.06 | 1.34 | 22.3× | 2.0 | 27.9 | ok |
-| `mandelbrot` | 0.03 | 0.96 | 32.0× | 2.0 | 28.3 | ok |
-| `mathf` | 0.02 | 0.72 | 36.0× | 2.0 | 28.0 | ok |
-| `matmul` | 0.01 | 0.17 | 17.0× | 2.6 | 28.9 | ok |
-| `nbody` | 0.04 | 0.35 | 8.8× | 2.1 | 28.3 | ok |
-| `nested_array_local` | 0.02 | 0.18 | 9.0× | 2.5 | 28.1 | ok |
-| `net_bulk` | 0.01 | 0.14 | 14.0× | 3.0 | 28.4 | ok |
-| `net_lines` | 0.02 | 0.15 | 7.5× | 2.8 | 28.1 | ok |
-| `oop` | 0.06 | 3.12 | 52.0× | 2.0 | 28.1 | ok |
-| `refslot` | 0.00 | 0.13 | ∞ | 2.6 | 28.2 | ok |
-| `sieve` | 0.03 | 0.43 | 14.3× | 28.2 | 58.7 | ok |
-| `sort` | 0.05 | 0.20 | 4.0× | 2.5 | 28.3 | ok |
-| `spectralnorm` | 0.01 | 1.55 | 155.0× | 2.2 | 28.0 | ok |
-| `sprintf` | 0.07 | 0.19 | 2.7× | 2.0 | 28.1 | ok |
-| `strcat` | 0.10 | 0.80 | 8.0× | 32.4 | 59.1 | ok |
-| `strops` | 0.03 | 0.22 | 7.3× | 2.1 | 28.1 | ok |
-| `tokenize` | 0.03 | — | — | 14.8 | — | php-skip |
-| `unset_churn` | 0.00 | 0.12 | ∞ | 3.6 | 29.4 | ok |
-| `variadic_pack` | 0.08 | 0.26 | 3.2× | 2.7 | 28.1 | ok |
-| `wordcount` | 0.02 | 0.16 | 8.0× | 2.0 | 28.0 | ok |
+| `json_escape_heavy` | 0.02 | 0.15 | 7.5× | 2.9 | 28.5 | ok |
+| `json_objects` | 0.08 | 0.37 | 4.6× | 4.7 | 29.4 | ok |
+| `json_pretty` | 0.02 | 0.16 | 8.0× | 3.7 | 29.0 | ok |
+| `json_records` | 0.23 | 0.63 | 2.7× | 18.0 | 33.1 | ok |
+| `json_utf8` | 0.06 | 0.25 | 4.2× | 6.3 | 29.3 | ok |
+| `ksort_asort` | 0.01 | 0.14 | 14.0× | 4.9 | 29.2 | ok |
+| `loop` | 0.07 | 1.41 | 20.1× | 2.0 | 28.2 | ok |
+| `mandelbrot` | 0.04 | 1.00 | 25.0× | 2.1 | 28.0 | ok |
+| `mathf` | 0.02 | 0.72 | 36.0× | 2.1 | 27.9 | ok |
+| `matmul` | 0.01 | 0.17 | 17.0× | 2.7 | 28.6 | ok |
+| `nbody` | 0.04 | 0.37 | 9.2× | 2.1 | 28.2 | ok |
+| `nested_array_local` | 0.02 | 0.19 | 9.5× | 2.7 | 27.7 | ok |
+| `net_bulk` | 0.01 | 0.15 | 15.0× | 3.5 | 27.7 | ok |
+| `net_lines` | 0.02 | 0.16 | 8.0× | 3.0 | 28.0 | ok |
+| `oop` | 0.06 | 3.20 | 53.3× | 2.1 | 28.1 | ok |
+| `refslot` | 0.00 | 0.14 | ∞ | 2.7 | 27.8 | ok |
+| `sieve` | 0.04 | 0.48 | 12.0× | 28.2 | 58.5 | ok |
+| `sort` | 0.01 | 0.21 | 21.0× | 2.4 | 28.0 | ok |
+| `spectralnorm` | 0.01 | 1.62 | 162.0× | 2.3 | 28.0 | ok |
+| `sprintf` | 0.08 | 0.20 | 2.5× | 2.0 | 27.9 | ok |
+| `strcat` | 0.10 | 0.83 | 8.3× | 32.4 | 59.1 | ok |
+| `strops` | 0.02 | 0.23 | 11.5× | 2.1 | 28.0 | ok |
+| `tokenize` | 0.04 | — | — | 18.3 | — | php-skip |
+| `unset_churn` | 0.00 | 0.13 | ∞ | 3.6 | 29.1 | ok |
+| `variadic_pack` | 0.07 | 0.27 | 3.9× | 2.9 | 27.9 | ok |
+| `wordcount` | 0.02 | 0.17 | 8.5× | 2.1 | 27.9 | ok |
 
-All 47 comparable cases are faster natively; three HTTP/tokenization cases are
+All 51 comparable cases are faster natively; three HTTP/tokenization cases are
 native-only because they use Manticore prelude APIs. The sub-10 ms values are at the
 harness's two-decimal precision, so treat their speedups as directional. The table also
 shows the start-up-memory advantage: most native binaries stay near 2–3 MiB RSS, while
@@ -431,8 +435,9 @@ PHP source
 
 **Memory** ([`docs/memory.md`](docs/memory.md)): reference counting on strings,
 objects, vecs and assoc arrays with copy-on-write, so frees are deterministic and there
-are no GC pauses; a synchronous Bacon–Rajan cycle collector that is opt-in and
-zero-overhead until `gc_collect_cycles()` is reached; and three allocation modes
+are no GC pauses; a synchronous Bacon–Rajan cycle collector that runs automatically at allocations
+(adaptive threshold, like php's) and is linked in only by a program that references
+`gc_collect_cycles()`; and three allocation modes
 (`--memory` / `MANTICORE_MEMORY`) — `hybrid` (default, escape analysis routes each
 allocation between arena and heap-rc), `rc`, `arena`.
 
@@ -490,10 +495,8 @@ The Linux gate is not optional for anything touching `src/Runtime/`, syscalls or
 
 - **Integer overflow wraps** (two's-complement) instead of promoting to float —
   `PHP_INT_MAX + 1` gives `PHP_INT_MIN`.
-- **`extract()`** is not implemented (dynamic symbol-table writes the typed frame does
-  not model). `compact()` works.
 - **`goto` into a loop body** is unsupported (plain forward/backward `goto` works).
-- **Cycle collector** is manual-trigger only and does not scan static/global roots.
+- **Cycle collector** is linked in only by a program that references `gc_collect_cycles()`; without that, cycles leak.
 - **`trait`s and generic classes do not cross a compiled-library boundary.**
   Classes, interfaces, enums and constants do (`.sig` schema 2); a trait and a
   `@template` class both need their method bodies on the far side.

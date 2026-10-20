@@ -144,7 +144,8 @@ Known semantic gaps in detail: [`gaps.md`](gaps.md).
 - [ ] Surface the ABI version in `manticore version`
 - [ ] Dependency fetching and a shared module cache (design exists, not built)
 - [ ] `dump-mir --after=<pass>`
-- [ ] Automatic cycle collection (manual trigger only today)
+- [x] Automatic cycle collection (adaptive threshold; linked in by a `gc_collect_cycles()` reference)
+- [ ] Link the cycle collector without a `gc_collect_cycles()` reference
 - [ ] Windows
 
 ## Not planned
