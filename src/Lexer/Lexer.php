@@ -801,12 +801,4 @@ final class Lexer
     {
         return $this->isIdentStart($c) || $this->isDigit($c);
     }
-
-    private function isHexDigit($c): bool
-    {
-        $b = \is_int($c) ? $c : \ord($c);
-        return ($b >= 0x30 && $b <= 0x39)
-            || ($b >= 0x61 && $b <= 0x66)
-            || ($b >= 0x41 && $b <= 0x46);
-    }
 }
