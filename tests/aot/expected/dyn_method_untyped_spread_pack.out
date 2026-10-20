@@ -1,0 +1,7 @@
+3
+4
+0
+hidden7
+magic:whatever:2
+11
+Error: Call to undefined method A::nope()

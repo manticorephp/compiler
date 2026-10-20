@@ -5553,6 +5553,7 @@ trait EmitLlvmObjects
         $fixedArgs = $iv->args;
         $pack = null;
         $packElem = null;
+        $packCell = false;
         foreach ($iv->args as $i => $a) {
             if ($a->kind !== Node::KIND_SPREAD) { continue; }
             if ($argc !== 1) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.multi_spread', 1); } return null; }
@@ -5567,9 +5568,10 @@ trait EmitLlvmObjects
                 continue;
             }
             $pt = $op->type;
-            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.pack_shape', 1); } return null; }
+            $packCell = $pt->kind === Type::KIND_CELL;
+            if ((!$pt->isVec() && !$packCell) || $op->kind !== Node::KIND_LOAD_LOCAL) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.pack_shape', 1); } return null; }
             $el = $pt->element;
-            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+            if (!$packCell && $el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
                 $packElem = $el;
             }
             $pack = $op;
@@ -5599,7 +5601,28 @@ trait EmitLlvmObjects
         // A borrowed cell pack rides as is; a concrete-element one is rebuilt
         // as cells (the trampoline's contract) and that copy is ours to drop.
         $fresh = $pack === null || $packElem !== null;
-        if ($pack !== null) {
+        if ($pack !== null && $packCell) {
+            // An untyped `array $parameters` rides as a cell: strip the tag to
+            // the vec[cell] payload the trampolines take, as the ABI path does.
+            $out .= $this->emitNode($pack);
+            $out .= $this->coerceToI64();
+            $packCellReg = $this->lastValue;
+            $out .= $this->cellTagIr($packCellReg);
+            $isArr = $this->ssa->allocReg();
+            $out .= '  ' . $isArr . ' = icmp eq i64 ' . $this->cellTagReg . ", 7\n";
+            $packGood = $this->ssa->allocLabel('dynd.array');
+            $packBad = $this->ssa->allocLabel('dynd.nonarray');
+            $out .= '  br i1 ' . $isArr . ', label %' . $packGood . ', label %' . $packBad . "\n";
+            $out .= $packBad . ":\n";
+            $out .= $this->emitNamedFatal('PHP Fatal error: Only arrays and Traversables can be unpacked');
+            $out .= "  unreachable\n";
+            $out .= $packGood . ":\n";
+            $payload = $this->ssa->allocReg();
+            $out .= '  ' . $payload . ' = and i64 ' . $packCellReg . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $argsPtr = $this->ssa->allocReg();
+            $out .= '  ' . $argsPtr . ' = inttoptr i64 ' . $payload . " to ptr\n";
+            $this->lastValue = $argsPtr;
+        } elseif ($pack !== null) {
             $out .= $this->emitNode($pack);
             $out .= $this->coerceToPtr();
             if ($packElem !== null) {
