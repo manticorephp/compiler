@@ -70,7 +70,8 @@ final class ExtractScope
                 $names[$p->name] = true;
                 $params[$p->name] = true;
             }
-            self::scan($fn->body, $sites, $names);
+            $lits = [];
+            self::scan($fn->body, $sites, $names, $lits);
             if ($sites === []) { continue; }
             $locals = [];
             foreach ($names as $n => $_b) {
@@ -87,7 +88,7 @@ final class ExtractScope
                     self::fillDefinedVars($site, $ordered, $params);
                     continue;
                 }
-                self::fill($site, $locals, $params, $fn->name === '__main');
+                self::fill($site, $locals, $params, $fn->name === '__main', $lits);
             }
         }
     }
@@ -95,9 +96,11 @@ final class ExtractScope
     /**
      * @param Block[] $sites
      * @param array<string, bool> $names
+     * @param array<string, bool> $lits
      */
-    private static function scan(Node $n, array &$sites, array &$names): void
+    private static function scan(Node $n, array &$sites, array &$names, array &$lits): void
     {
+        if ($n instanceof StringConst && $n->value !== '') { $lits[(string)$n->value] = true; }
         if ($n instanceof Block && \count($n->stmts) === 1) {
             $c = $n->stmts[0];
             if ($c instanceof Call && ($c->function === self::SITE || $c->function === self::GDV_SITE || $c->function === self::VV_READ || $c->function === self::VV_WRITE)) { $sites[] = $n; }
@@ -116,20 +119,21 @@ final class ExtractScope
         elseif ($n instanceof RefBind_) { $names[$n->target] = true; }
         elseif ($n instanceof RefAddr_) { $names[$n->target] = true; }
         foreach ($n->children() as $ch) {
-            self::scan($ch, $sites, $names);
+            self::scan($ch, $sites, $names, $lits);
         }
     }
 
     /**
      * @param string[] $locals
      * @param array<string, bool> $params
+     * @param array<string, bool> $lits
      */
-    private static function fill(Block $site, array $locals, array $params, bool $inMain): void
+    private static function fill(Block $site, array $locals, array $params, bool $inMain, array $lits): void
     {
         $call = $site->stmts[0];
         if (!($call instanceof Call)) { return; }
         if ($call->function === self::VV_READ || $call->function === self::VV_WRITE) {
-            self::fillVarVar($site, $call, $locals);
+            self::fillVarVar($site, $call, self::varVarCandidates($locals, $lits));
             return;
         }
         $plan = '__mc_extract' . (string)self::$seq;
@@ -188,6 +192,29 @@ final class ExtractScope
             new ArrayLit($vals, Type::unknown()),
             new ArrayLit($defs, Type::unknown()),
         ], Type::unknown())];
+    }
+
+    /**
+     * The locals a `$$n` can name: those some string literal of the function spells
+     * outright, begins or ends (`'from' . 'Translations'` builds `fromTranslations`).
+     * A name that comes wholly from outside matches none, and then every local stays a
+     * candidate. ponytail: a name built from outside data AND beside unrelated
+     * literals is missed; the cost of more candidates is an ownership join per local.
+     *
+     * @param string[] $locals
+     * @param array<string, bool> $lits
+     * @return string[]
+     */
+    private static function varVarCandidates(array $locals, array $lits): array
+    {
+        $out = [];
+        foreach ($locals as $n) {
+            foreach ($lits as $l => $_b) {
+                $l = (string)$l;
+                if ($l === $n || \str_starts_with($n, $l) || \str_ends_with($n, $l)) { $out[] = $n; break; }
+            }
+        }
+        return $out === [] ? $locals : $out;
     }
 
     /**
