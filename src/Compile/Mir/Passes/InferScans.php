@@ -1891,6 +1891,30 @@ trait InferScans
             // An IMPORTED body is compiled and linked, not ours to retype — the
             // same reason the prelude is excluded, one boundary further out.
             if ($fn->isExtern) { continue; }
+            // WHOLE-array stores that disagree on the element repr: `$p = f()`
+            // (vec[string]) then, on a branch, `$p = g($p)` (vec[cell]). The
+            // merge erased the slot to vec[unknown], the next `$p[$k] = 's'`
+            // re-narrowed it to vec[string], and the cell buffer g() built was
+            // read as raw string pointers (SIGSEGV). A cell element makes every
+            // such store convert its value ({@see InferNodes::inferStoreLocal},
+            // forward-cellify), so one slot holds one repr on every path. A local
+            // only: a param's arrival repr is the caller's. Decided before
+            // Monomorphize has bound the calls: retyping the slot after it would
+            // hand a vec[cell] to a callee specialized for the old element.
+            $whole = [];
+            if (!$module->hasPassApplied(Monomorphize::NAME)) {
+                $this->scanWholeStoreElemClasses($fn->body, $whole);
+            }
+            foreach ($whole as $name => $seen) {
+                if (\count($seen) < 2 || isset($seen['shape'])) { continue; }
+                if (isset($this->forcedCellElemLocals[$fn->name][$name])) { continue; }
+                $isParam = false;
+                foreach ($fn->params as $prm) { if ($prm->name === $name) { $isParam = true; } }
+                if ($isParam) { continue; }
+                $this->forcedCellElemLocals[$fn->name][$name] = true;
+                $this->lastInferenceChangedFunctions[$fn->name] = true;
+                $changed = true;
+            }
             // A PARAM is the CALLER's array — its elements keep whatever
             // representation the caller built, so it is retyped only where that
             // representation is converted ({@see widenElemParam}); every other
@@ -1959,6 +1983,29 @@ trait InferScans
             }
         }
         foreach (Walk::children($n) as $c) { $this->scanLocalElemClasses($c, $out); }
+    }
+
+    /**
+     * Element classes of the whole arrays stored into each local (`$x = <array>`),
+     * keyed by local name; 'shape' marks a shaped value, whose fields are its own
+     * contract. An erased element says nothing and is skipped.
+     *
+     * @param array<string, array<string,bool>> $out
+     */
+    private function scanWholeStoreElemClasses(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL) {
+            $vt = $n->value->type;
+            if ($vt->isArray()) {
+                if ($vt->hasShape()) {
+                    $out[$n->name]['shape'] = true;
+                } elseif ($vt->element !== null) {
+                    $cls = $this->typeValueClass($vt->element);
+                    if ($cls !== '') { $out[$n->name][$cls] = true; }
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->scanWholeStoreElemClasses($c, $out); }
     }
 
     /** The {@see coarseValueClass} class of an INFERRED type, or '' when the type
