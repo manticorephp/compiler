@@ -780,6 +780,20 @@ trait LowerFns
 
     private function lowerInvoke(\Parser\Ast\Invoke $expr): Node
     {
+        // `$f($a, ...$b, $c)` / `$f(...$a, ...$b)`: the call paths take ONE trailing spread, so fold the
+        // arguments into a single unpacking array literal, `$f(...[$a, ...$b, $c])`.
+        $nSpread = 0;
+        $lastSpread = -1;
+        $named = false;
+        foreach ($expr->args as $i => $a) {
+            if ($a->kind === 'Spread') { $nSpread = $nSpread + 1; $lastSpread = $i; }
+            if ($a->kind === 'NamedArg') { $named = true; }
+        }
+        if (!$named && ($nSpread > 1 || ($nSpread === 1 && $lastSpread !== \count($expr->args) - 1))) {
+            $els = [];
+            foreach ($expr->args as $a) { $els[] = new \Parser\Ast\ArrayElement(null, $a); }
+            $expr = new \Parser\Ast\Invoke($expr->callee, [\Parser\Ast\Expr::spread(\Parser\Ast\Expr::arrayLit($els, $expr->span), $expr->span)], $expr->span);
+        }
         // Literal string / array callable invoked directly: `"fn"(x)`,
         // `"C::m"(x)`, `[$o,"m"](x)`, `["C","m"](x)` → the matching call.
         $calleeAst = $expr->callee;
