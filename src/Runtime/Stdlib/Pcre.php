@@ -911,6 +911,7 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
 {
     $noEmpty = ($flags & 1) !== 0;          // PREG_SPLIT_NO_EMPTY
     $delimCap = ($flags & 2) !== 0;         // PREG_SPLIT_DELIM_CAPTURE
+    $offCap = ($flags & 4) !== 0;          // PREG_SPLIT_OFFSET_CAPTURE
     $out = [];
     $code = \__preg_compile($pattern);
     if ($code === 0) { return false; }
@@ -935,12 +936,12 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
             continue;
         }
         $piece = \substr($subject, $last, $ms - $last);
-        if (!$noEmpty || $piece !== "") { $out[] = $piece; $pieces = $pieces + 1; }
+        if (!$noEmpty || $piece !== "") { $out[] = $offCap ? [$piece, $last] : $piece; $pieces = $pieces + 1; }
         if ($delimCap) {
             for ($i = 1; $i < $rc; $i = $i + 1) {
                 $s = \peek_i64($ov, $i * 16);
                 $g = $s < 0 ? "" : \substr($subject, $s, \peek_i64($ov, $i * 16 + 8) - $s);
-                if (!$noEmpty || $g !== "") { $out[] = $g; }
+                if (!$noEmpty || $g !== "") { $out[] = $offCap ? [$g, $s] : $g; }
             }
         }
         $last = $me;
@@ -948,7 +949,7 @@ function preg_split(string $pattern, string $subject, int $limit = -1, int $flag
     }
     \__preg_md($code, $md);
     $tail = \substr($subject, $last, $len - $last);
-    if (!$noEmpty || $tail !== "") { $out[] = $tail; }
+    if (!$noEmpty || $tail !== "") { $out[] = $offCap ? [$tail, $last] : $tail; }
     return $out;
 }
 
