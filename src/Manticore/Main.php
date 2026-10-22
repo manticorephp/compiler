@@ -4859,7 +4859,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'highlight_file',
             'show_source',
         ])
-        || $demand->mentions('PhpToken');
+        || $demand->mentionsAny(['PhpToken', '__McTok', '__McTokId']);
     // definedFunctions gate: adding a function to prelude/openssl_x509.php
     // enrols it automatically. The class arm matters because a program can take
     // an OpenSSLAsymmetricKey parameter without naming any of the functions.

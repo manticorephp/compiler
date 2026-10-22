@@ -309,7 +309,7 @@ final class TypeCheck
                     . ' given, ' . $p->type->toString() . ' expected)';
             }
             $this->shapeWarn = '';
-            $sw = $this->shapeConflict($this->givenShape($arg), $p->type);
+            $sw = $this->shapeConflict(self::givenShape($arg), $p->type);
             if ($sw !== null) {
                 $this->errors[] = $this->at($arg) . $inFn . '(): argument ' . (string)($ai + 1) . ' to '
                     . $label . '() — ' . $sw;
@@ -505,13 +505,13 @@ final class TypeCheck
             $rt = $this->returnTypes[$inFn] ?? null;
             if ($rt !== null && $rt->hasShape()) {
                 $this->shapeWarn = '';
-                $sw = $this->shapeConflict($this->givenShape($n->value), $rt);
+                $sw = $this->shapeConflict(self::givenShape($n->value), $rt);
                 if ($sw !== null) { $this->errors[] = $this->at($n) . $inFn . '(): return — ' . $sw; }
                 $this->takeShapeWarn($n, $inFn . '(): return — ');
             }
         } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
             $at = $n->array->type;
-            $k = $this->constKey($n->index);
+            $k = self::constKey($n->index);
             if ($k !== null && $at->isShape()) {
                 $ft = $at->shapeField($k);
                 if ($ft !== null && $this->storeIncompatible($n->value->type, $ft, $at->declared)) {
@@ -521,21 +521,21 @@ final class TypeCheck
             }
         } elseif ($n->kind === Node::KIND_ARRAY_ACCESS) {
             $at = $n->array->type;
-            $k = $this->constKey($n->index);
+            $k = self::constKey($n->index);
             if ($k !== null && !$n->probe && $at->isShape() && $at->declared && $at->shapeField($k) === null) {
                 $this->errors[] = $this->at($n) . $inFn . '(): key ' . (string)$k . ' is not in ' . $at->shapeString();
             }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL && $n->declaredType !== null
             && $n->declaredType->hasShape()) {
             $this->shapeWarn = '';
-            $sw = $this->shapeConflict($this->givenShape($n->value), $n->declaredType);
+            $sw = $this->shapeConflict(self::givenShape($n->value), $n->declaredType);
             if ($sw !== null) { $this->errors[] = $this->at($n) . $inFn . '(): $' . $n->name . ' — ' . $sw; }
             $this->takeShapeWarn($n, $inFn . '(): $' . $n->name . ' — ');
         }
     }
 
     /** The literal key of an index node — an int or string constant — or null. */
-    private function constKey(Node $index): int|string|null
+    private static function constKey(Node $index): int|string|null
     {
         if ($index->kind === Node::KIND_INT_CONST) { return $index->value; }
         if ($index->kind === Node::KIND_STRING_CONST) { return $index->value; }
@@ -548,7 +548,7 @@ final class TypeCheck
      * but its children keep theirs), else the node's static type. A literal
      * with a dynamic key or a spread offers nothing checkable.
      */
-    private function givenShape(Node $v): Type
+    public static function givenShape(Node $v): Type
     {
         if ($v->kind !== Node::KIND_ARRAY_LIT) { return $v->type; }
         $fields = [];
@@ -557,7 +557,7 @@ final class TypeCheck
             if ($el->value->kind === Node::KIND_SPREAD) { return Type::unknown(); }
             if ($el->key === null) { $k = $next; }
             else {
-                $k = $this->constKey($el->key);
+                $k = self::constKey($el->key);
                 if ($k === null) { return Type::unknown(); }
             }
             $ek = Type::shapeKey($k);
@@ -568,7 +568,7 @@ final class TypeCheck
             // `shapeOf` then makes the element the sub-shape itself when every
             // sub-literal spells the same one, which is what the element arm of
             // {@see shapeConflict} compares.
-            $fields[$ek] = $this->givenShape($el->value);
+            $fields[$ek] = self::givenShape($el->value);
         }
         return Type::shapeOf($fields, []);
     }

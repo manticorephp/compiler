@@ -4998,6 +4998,30 @@ trait EmitLlvmBuiltins
             if ($a->type->kind !== Type::KIND_STRING) { $allStr = false; }
         }
         $count = \count($args);
+        if ($count > 1) {
+            foreach ($args as $sa) {
+                if ($sa->kind !== Node::KIND_SPREAD) { continue; }
+                // A spread beside fixed operands (`min(5, ...$xs)`): the operand
+                // list is a run-time property, so php's variadic loop runs over
+                // the packed list in the stdlib fold. Emitted one by one, the
+                // spread's ARRAY was compared as an operand.
+                if (!isset($this->definedFns[$this->mangle('__mc_minmax_of')])) {
+                    $this->libcExtra['manticore___mc_minmax_of'] =
+                        'declare i64 @manticore___mc_minmax_of(i64, i64)';
+                }
+                $out = $this->emitArgPack($args, false);
+                $pk = $this->lastValue;
+                $out .= $this->boxToCell(Type::vec(Type::cell()));
+                $box = $this->lastValue;
+                $r = $this->ssa->allocReg();
+                $out .= '  ' . $r . ' = call i64 @manticore___mc_minmax_of(i64 ' . $box
+                      . ', i64 ' . ($pred === 'sgt' ? '1' : '0') . ")\n";
+                $out .= '  call void @__mir_array_release_cell(ptr ' . $pk . ")\n";
+                $this->lastValue = $r;
+                $this->lastValueType = 'i64';
+                return $out;
+            }
+        }
         // ONE array argument is the "max of its ELEMENTS" form (`max([1,2,3])`
         // is 3, not the array). The numeric paths below unboxed the array
         // POINTER as an int and printed a raw address; defer to the stdlib fold,
@@ -5300,8 +5324,7 @@ trait EmitLlvmBuiltins
         $this->libcExtra['strlen'] = 'declare i64 @strlen(ptr)';
         $out = $this->emitPtrArg($args[0]);
         $h = $this->lastValue;
-        $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->emitPtrArg($args[1]);
         $n = $this->lastValue;
         // Optional 3rd arg: byte offset to start searching from (default 0).
         $off = '0';
@@ -6027,8 +6050,14 @@ trait EmitLlvmBuiltins
         $a0 = $args[0];
         // A RUNTIME (non-literal) format can't be translated at compile time —
         // pack the args and drive the runtime {@see \__mc_format} engine.
+        // …and so can't a spread: its arity is a run-time property. Tested by
+        // node, not type: a `mixed` pack is typed cell and passed the `%s` gate
+        // below as ONE string argument.
         if ($a0->kind !== Node::KIND_STRING_CONST) {
             return $this->biFormatRuntime($args, $toStdout);
+        }
+        foreach ($args as $sa) {
+            if ($sa->kind === Node::KIND_SPREAD) { return $this->biFormatRuntime($args, $toStdout); }
         }
         $fmt = $a0->value;
         // Translate specifiers + record per-arg conversion kind.
@@ -6400,7 +6429,7 @@ trait EmitLlvmBuiltins
         // Spread `...$arr`: the array IS the argument list — hand it over as-is.
         if (\count($args) === 2 && $args[1]->kind === Node::KIND_SPREAD) {
             $out = $this->emitNode($args[0]);
-            $out .= $this->coerceToPtr();
+            $out .= $this->coerceToStr($args[0]);
             $fmtI = $this->ssa->allocReg();
             $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
             $out .= $this->emitSpreadOperand($args[1]->operand);
@@ -6415,6 +6444,20 @@ trait EmitLlvmBuiltins
         $out .= $this->coerceToStr($args[0]);
         $fmtI = $this->ssa->allocReg();
         $out .= '  ' . $fmtI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+        $hasSpread = false;
+        for ($k = 1; $k <= $count; $k = $k + 1) {
+            if ($args[$k]->kind === Node::KIND_SPREAD) { $hasSpread = true; }
+        }
+        if ($hasSpread) {
+            // Fixed args AND a spread (`sprintf($f, $a, ...$b)`). Handing the
+            // spread over as ONE value formatted the pack itself as "Array".
+            $rest = [];
+            for ($k = 1; $k <= $count; $k = $k + 1) { $rest[] = $args[$k]; }
+            $out .= $this->emitArgPack($rest, true);
+            $packedI = $this->ssa->allocReg();
+            $out .= '  ' . $packedI . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+            return $this->formatCallAndFinish($out, $fmtI, $packedI, $toStdout, true);
+        }
         // Pack args[1..] into a packed CELL array (mirrors emitArrayLitDirect).
         $arr = $this->ssa->allocReg();
         $out .= '  ' . $arr . ' = call ptr @__mir_array_alloc(i64 ' . (string)$count . ")\n";
@@ -6445,6 +6488,55 @@ trait EmitLlvmBuiltins
         $arrI = $this->ssa->allocReg();
         $out .= '  ' . $arrI . ' = ptrtoint ptr ' . $arr . " to i64\n";
         return $this->formatCallAndFinish($out, $fmtI, $arrI, $toStdout, true);
+    }
+
+    /**
+     * The argument list of a variadic builtin called with a spread among its
+     * arguments, built like the literal `[$a, ...$b]`: each fixed arg boxed and
+     * appended in order (its payload co-owned), each spread merged with php's
+     * key rules. Leaves the fresh cell array's pointer in lastValue; the caller
+     * releases it with `__mir_array_release_cell`. `$objToStr` converts an object
+     * arg HERE, where its `__toString` resolves (the stdlib formatter knows no
+     * user class).
+     *
+     * @param Node[] $args
+     */
+    private function emitArgPack(array $args, bool $objToStr): string
+    {
+        $slot = $this->ssa->allocReg();
+        $out = '  ' . $slot . " = alloca ptr\n";
+        $init = $this->ssa->allocReg();
+        $out .= '  ' . $init . ' = call ptr @__mir_array_alloc(i64 ' . (string)\count($args) . ")\n";
+        $out .= '  store ptr ' . $init . ', ptr ' . $slot . "\n";
+        // Described as a CELL buffer before any merge, so `__mir_array_spread_into`
+        // boxes a raw source's words by that source's own hint.
+        $cellHint = $this->elementHintCodeForType(Type::cell());
+        if ($cellHint !== null) { $out .= $this->emitElemHintStamp($init, $cellHint); }
+        foreach ($args as $el) {
+            if ($el->kind === Node::KIND_SPREAD) {
+                $out .= $this->emitArraySpreadUnified($slot, $this->asSpreadNode($el), true);
+                continue;
+            }
+            $out .= $this->emitNode($el);
+            if ($objToStr && ($el->type->kind === Type::KIND_OBJ || $el->type->kind === Type::KIND_CLOSURE)) {
+                $out .= $this->coerceToStr($el);
+                $out .= $this->boxToCell(Type::string_());
+            } else {
+                $out .= $this->retainCellPayload($el);
+                $out .= $this->boxToCell($el->type);
+            }
+            $val = $this->lastValue;
+            $cur = $this->ssa->allocReg();
+            $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
+            $next = $this->ssa->allocReg();
+            $out .= '  ' . $next . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $val . ")\n";
+            $out .= '  store ptr ' . $next . ', ptr ' . $slot . "\n";
+        }
+        $packed = $this->ssa->allocReg();
+        $out .= '  ' . $packed . ' = load ptr, ptr ' . $slot . "\n";
+        $this->lastValue = $packed;
+        $this->lastValueType = 'ptr';
+        return $out;
     }
 
     /** Emit the `__mc_format` call + printf/return tail shared by biFormatRuntime. */

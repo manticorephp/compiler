@@ -115,9 +115,21 @@ function extension_loaded(string $extension): bool
  * honest number available here, and it is what the only real callers
  * (progress-bar "memory used" displays) want. Named as a divergence rather than
  * faked with a counter that would drift.
+ *
+ * Linux answers VmHWM from /proc/self/status, not getrusage(2): Linux carries
+ * `ru_maxrss` ACROSS execve, so it starts at the peak of whatever process exec'd
+ * this one (a 20 MB test runner, a shell) and a program's own growth stays
+ * invisible until it passes that number. VmHWM is this address space's own peak.
  */
 function __mc_rss_bytes(): int
 {
+    if (!\__mc_host_is_darwin()) {
+        $s = \is_readable('/proc/self/status') ? \file_get_contents('/proc/self/status') : false;
+        $p = \is_string($s) ? \strpos($s, "\nVmHWM:") : false;
+        if ($p !== false) {
+            return (int)\trim(\substr($s, $p + 7, \strpos($s, 'kB', $p) - $p - 7)) * 1024;
+        }
+    }
     $buf = \Runtime\Libc\calloc(1, 256);
     // struct rusage opens with two struct timeval (16 bytes each on Darwin and
     // glibc/x86_64 alike), so ru_maxrss is at offset 32 on both.

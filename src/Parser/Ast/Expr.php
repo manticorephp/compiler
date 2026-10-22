@@ -125,9 +125,9 @@ abstract class Expr
     }
 
     /** @param Expr[] $args */
-    public static function call(string $function, array $args, Span $span): CallExpr
+    public static function call(string $function, array $args, Span $span, bool $qualified = false): CallExpr
     {
-        return new CallExpr($function, $args, $span);
+        return new CallExpr($function, $args, $span, $qualified);
     }
 
     /** @param Expr[] $args */
@@ -446,11 +446,16 @@ final class ArrayAccess extends Expr
 
 final class CallExpr extends Expr
 {
-    /** @param Expr[] $args */
+    /**
+     * @param Expr[] $args
+     * @param bool $qualified the source spelled the name with a `\` (`A\f()`,
+     *        `\f()`): php never falls back to the global function for it.
+     */
     public function __construct(
         public readonly string $function,
         public readonly array $args,
         Span $span,
+        public readonly bool $qualified = false,
     ) {
         parent::__construct('Call', $span);
     }

@@ -1,0 +1,12 @@
+public: T_AS as | T_PUBLIC public | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+protected: T_AS as | T_PROTECTED protected | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+private: T_AS as | T_PRIVATE private | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+static: T_AS as | T_STATIC static | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+abstract: T_AS as | T_ABSTRACT abstract | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+final: T_AS as | T_FINAL final | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+echo: T_AS as | T_STRING echo | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+protected echo: T_AS as | T_PROTECTED protected | T_STRING echo | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+final list: T_AS as | T_FINAL final | T_STRING list | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+public function: T_AS as | T_PUBLIC public | T_STRING function | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+var: T_AS as | T_STRING var | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c
+private c: T_AS as | T_PRIVATE private | T_STRING c | T_STRING b | T_AS as | T_PRIVATE private | T_STRING c

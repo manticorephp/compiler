@@ -393,9 +393,18 @@ final class Lexer
             return;
         }
 
-        $kind = in_array(strtolower($lex), self::KEYWORDS, true)
+        $lower = strtolower($lex);
+        $kind = in_array($lower, self::KEYWORDS, true)
             ? TokenKind::Keyword
             : TokenKind::Identifier;
+        // A label glued to `\Name` is ONE qualified name to php, a reserved word
+        // included: `echo\A\f()` calls `A\echo\A\f`, `new\X` reads a constant.
+        // Only `namespace\X` stays the keyword — the relative-name prefix.
+        if ($kind === TokenKind::Keyword && $lower !== 'namespace'
+            && $this->pos + 1 < $this->len && \ord($this->src[$this->pos]) === 92
+            && $this->isIdentStart(\ord($this->src[$this->pos + 1]))) {
+            $kind = TokenKind::Identifier;
+        }
         $this->tokens[] = new Token($kind, $lex, $line, $col);
     }
 
@@ -791,13 +800,5 @@ final class Lexer
     private function isIdentPart($c): bool
     {
         return $this->isIdentStart($c) || $this->isDigit($c);
-    }
-
-    private function isHexDigit($c): bool
-    {
-        $b = \is_int($c) ? $c : \ord($c);
-        return ($b >= 0x30 && $b <= 0x39)
-            || ($b >= 0x61 && $b <= 0x66)
-            || ($b >= 0x41 && $b <= 0x46);
     }
 }

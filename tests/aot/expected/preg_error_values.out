@@ -1,0 +1,61 @@
+false 4 Malformed UTF-8 characters, possibly incorrectly encoded
+array(0) {
+}
+1 0 No error
+false 4 Malformed UTF-8 characters, possibly incorrectly encoded
+array(1) {
+  [0]=>
+  array(0) {
+  }
+}
+2 0 No error
+NULL 4 Malformed UTF-8 characters, possibly incorrectly encoded
+'b' 0 No error
+NULL 4 Malformed UTF-8 characters, possibly incorrectly encoded
+array (
+  'x' => 'b',
+  'z' => 'bb',
+) 0 No error
+NULL 4 Malformed UTF-8 characters, possibly incorrectly encoded
+array (
+  0 => 'b',
+) 4 Malformed UTF-8 characters, possibly incorrectly encoded
+NULL 4 Malformed UTF-8 characters, possibly incorrectly encoded
+false 4 Malformed UTF-8 characters, possibly incorrectly encoded
+array (
+  0 => 'a',
+) 4 Malformed UTF-8 characters, possibly incorrectly encoded
+1 0 No error
+false 1 Internal error
+NULL 1 Internal error
+false 1 Internal error
+1 0 No error
+false 5 The offset did not correspond to the beginning of a valid UTF-8 code point
+1 0 No error
+1 0 No error
+false 1 Internal error
+false 1 Internal error
+false 1 Internal error
+false 1 Internal error
+1 0 No error
+array(4) {
+  [0]=>
+  string(1) "b"
+  ["x"]=>
+  string(1) "b"
+  [1]=>
+  string(0) ""
+  [2]=>
+  string(1) "b"
+}
+1 0 No error
+array(3) {
+  [0]=>
+  string(2) "ab"
+  ["y"]=>
+  string(1) "b"
+  [1]=>
+  string(1) "b"
+}
+1 0 No error
+1 0 No error

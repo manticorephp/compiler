@@ -3133,8 +3133,9 @@ final class Parser
         if ($this->check(TokenKind::OpenParen)) {
             $args = $this->parseArgList();
             $fl = \strtolower($literal);
-            if (isset($this->useFnAliases[$fl]) && !\str_contains($literal, '\\')) { $name = $this->useFnAliases[$fl]; }
-            return Expr::call($name, $args, $span);
+            $qualified = \str_contains($literal, '\\');
+            if (isset($this->useFnAliases[$fl]) && !$qualified) { $name = $this->useFnAliases[$fl]; }
+            return Expr::call($name, $args, $span, $qualified);
         }
 
         return Expr::identifier($name, $span);

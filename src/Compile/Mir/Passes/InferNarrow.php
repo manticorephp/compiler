@@ -99,6 +99,9 @@ trait InferNarrow
                     && $this->classImplementsT((string)$cur->class, $io->class)) {
                     return;
                 }
+                if ($cur !== null && $cur->kind !== Type::KIND_OBJ && !isset($this->narrowSlots[$name])) {
+                    $this->narrowSlots[$name] = $this->localTypes[$name];
+                }
                 $this->localTypes[$name] = Type::obj($io->class);
             } else {
                 // `$obj->prop instanceof C` → narrow the property PATH within the

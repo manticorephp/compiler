@@ -1107,14 +1107,13 @@ trait EmitLlvmExpr
                 return true;
             }
             if (($na === self::EK_ARRAY) !== ($nb === self::EK_ARRAY)) {
-                // A raw array facing a CELL (an erased `list<T>` / array_map result
-                // holding the same arrays boxed) is comparable when the raw side's
-                // own elements ARE cells: boxing it then tells the tagged path the
-                // truth about its inner repr. `assoc[string,cell]` rows are the case.
-                $arrSide = $na === self::EK_ARRAY ? $a : $b;
+                // A raw array facing a CELL (an erased `list<T>` / array_map /
+                // json_decode result holding the same arrays boxed): the runtime
+                // recurses into the pair itself, the raw side by the rest of its
+                // chain and the cell side by its buffer hint
+                // ({@see mixedArrayRecurse}), so no inner repr is guessed.
                 $other = $na === self::EK_ARRAY ? $nb : $na;
-                return $other === self::EK_CELL && $i + 1 < 16 && (($arrSide >> (($i + 1) * 4)) & 15) === self::EK_CELL
-                    && ($i + 2 >= 16 || ($arrSide >> (($i + 2) * 4)) === 0);
+                return $other === self::EK_CELL || $other === self::EK_HINT;
             }
             if ($na !== self::EK_ARRAY) {
                 return true;
@@ -1143,6 +1142,40 @@ trait EmitLlvmExpr
             . '  br label %' . $out . "j\n"
             . $out . "j:\n"
             . '  %' . $out . ' = phi i64 [ %' . $out . 'd, %' . $out . 'dec ], [ %' . $out . 'c, %' . $out . "chn ]\n";
+    }
+
+    /**
+     * The element pair where ONE side is a RAW nested array (its chain nibble
+     * {@see EK_ARRAY}) and the other a cell — an `array<string, mixed>` built
+     * from json_decode() against the same literal. When the cell holds an
+     * array too, both are compared one level down: the raw side by the rest of
+     * its chain, the cell side by its buffer's hint ({@see EK_HINT}). Handing
+     * the boxed raw array to the tagged comparator instead would read its raw
+     * elements as cells. Expects `%va`/`%vb` (both sides as cells), `%aisarr`/
+     * `%bisarr`, `%eka`/`%ekb`; branches to `mxgo` (with `%mxpa`/`%mxka`/
+     * `%mxpb`/`%mxkb` live, the caller emits the recursive call there) or to
+     * `tagcmp`, which the caller defines.
+     */
+    private static function mixedArrayRecurse(string $mask): string
+    {
+        $out  = "  %mxone = xor i1 %aisarr, %bisarr\n";
+        $out .= "  %mxta = call i64 @__manticore_tag(i64 %va)\n";
+        $out .= "  %mxtb = call i64 @__manticore_tag(i64 %vb)\n";
+        $out .= "  %mxaa = icmp eq i64 %mxta, 7\n";
+        $out .= "  %mxab = icmp eq i64 %mxtb, 7\n";
+        $out .= "  %mxarr = and i1 %mxaa, %mxab\n";
+        $out .= "  %mxgo0 = and i1 %mxone, %mxarr\n";
+        $out .= "  br i1 %mxgo0, label %mxgo, label %tagcmp\n";
+        $out .= "mxgo:\n";
+        $out .= "  %mxia = and i64 %va, " . $mask . "\n";
+        $out .= "  %mxpa = inttoptr i64 %mxia to ptr\n";
+        $out .= "  %mxib = and i64 %vb, " . $mask . "\n";
+        $out .= "  %mxpb = inttoptr i64 %mxib to ptr\n";
+        $out .= "  %mxra = lshr i64 %eka, 4\n";
+        $out .= "  %mxrb = lshr i64 %ekb, 4\n";
+        $out .= "  %mxka = select i1 %aisarr, i64 %mxra, i64 " . (string)self::EK_HINT . "\n";
+        $out .= "  %mxkb = select i1 %bisarr, i64 %mxrb, i64 " . (string)self::EK_HINT . "\n";
+        return $out;
     }
 
     private function elemToCellRuntime(): string
@@ -1293,6 +1326,17 @@ trait EmitLlvmExpr
             }
             $out .= "viacell:\n";
             $out .= self::elemToCellByChain('a', 'rawa', 'eka', 'va') . self::elemToCellByChain('b', 'rawb', 'ekb', 'vb');
+            $out .= self::mixedArrayRecurse($mask);
+            if ($eq) {
+                $out .= "  %mxr = call i1 @" . $fn . "(ptr %mxpa, i64 %mxka, ptr %mxpb, i64 %mxkb)\n";
+                $out .= "  br i1 %mxr, label %cont, label %no\n";
+            } else {
+                $out .= "  %mxr = call i64 @" . $fn . "(ptr %mxpa, i64 %mxka, ptr %mxpb, i64 %mxkb)\n";
+                $out .= "  %mxz = icmp eq i64 %mxr, 0\n";
+                $out .= "  br i1 %mxz, label %cont, label %mxdiff\n";
+                $out .= "mxdiff:\n  ret i64 %mxr\n";
+            }
+            $out .= "tagcmp:\n";
             if ($eq) {
                 $out .= "  %e = call i64 @__manticore_tagged_loose_eq(i64 %va, i64 %vb)\n";
                 $out .= "  %eb = icmp ne i64 %e, 0\n";
@@ -1355,6 +1399,10 @@ trait EmitLlvmExpr
         $out .= "  br i1 %re, label %cont, label %no\n";
         $out .= "viacell:\n";
         $out .= self::elemToCellByChain('a', 'rawa', 'eka', 'va') . self::elemToCellByChain('b', 'rawb', 'ekb', 'vb');
+        $out .= self::mixedArrayRecurse($mask);
+        $out .= "  %mxr = call i1 @__mir_array_strict_eq(ptr %mxpa, i64 %mxka, ptr %mxpb, i64 %mxkb)\n";
+        $out .= "  br i1 %mxr, label %cont, label %no\n";
+        $out .= "tagcmp:\n";
         $out .= "  %veq = call i64 @__manticore_tagged_strict_eq(i64 %va, i64 %vb)\n";
         $out .= "  %veqb = icmp ne i64 %veq, 0\n";
         $out .= "  br i1 %veqb, label %cont, label %no\n";

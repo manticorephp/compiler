@@ -3419,11 +3419,14 @@ final class LowerFromAst implements Pass
      * to the global function / builtin. We keep the name when it's a known
      * user function; otherwise strip to the last segment so a namespaced
      * `ltrim()` reaches the global builtin instead of an undefined
-     * `@manticore_Ns_ltrim`.
+     * `@manticore_Ns_ltrim`. A QUALIFIED source name (`A\f()`, `\A\f()`)
+     * never falls back: `foo\A\f()` in namespace A is `A\foo\A\f`, defined
+     * or not.
      */
-    private function resolveCallName(string $name): string
+    private function resolveCallName(string $name, bool $qualified = false): string
     {
         if (isset($this->fnDecls[$name])) { return $name; }
+        if ($qualified && \str_contains($name, '\\')) { return $name; }
         $bare = $this->bareName($name);
         if ($bare !== $name && isset($this->fnDecls[$bare])) { return $bare; }
         // `use function` / global builtin: an unqualified call namespaced

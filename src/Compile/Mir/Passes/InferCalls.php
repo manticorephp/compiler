@@ -130,7 +130,9 @@ trait InferCalls
                 if (!$at->isArray()) { continue; }
                 if (($pe !== null && $pe->kind === Type::KIND_CELL)
                     || $at->toString() === $pt->toString()) {
-                    $a->type = $pt;
+                    // The fields, but a container field's element claim only as
+                    // deep as the literal's own elements prove it.
+                    $a->type = $pt->proveShapeFields(TypeCheck::givenShape($a)) ?? $pt;
                 }
                 continue;
             }
