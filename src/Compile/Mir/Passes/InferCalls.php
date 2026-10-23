@@ -397,7 +397,13 @@ trait InferCalls
             $bothInt = \count($args) === 2
                 && $args[0]->type->kind === Type::KIND_INT
                 && $args[1]->type->kind === Type::KIND_INT;
-            if (!$bothInt) { return Type::float_(); }
+            if (!$bothInt) {
+                $ka = $args[0]->type->kind ?? '';
+                $kb = $args[1]->type->kind ?? '';
+                $cellPow = ($ka === Type::KIND_CELL && ($kb === Type::KIND_CELL || $kb === Type::KIND_INT))
+                    || ($ka === Type::KIND_INT && $kb === Type::KIND_CELL);
+                return $cellPow ? Type::numericCell() : Type::float_();
+            }
             if (!\Compile\Mir\IntConst::isConstInt($args[1])) { return Type::numericCell(); }
             return \Compile\Mir\IntConst::valueOf($args[1]) >= 0 ? Type::int_() : Type::float_();
         }

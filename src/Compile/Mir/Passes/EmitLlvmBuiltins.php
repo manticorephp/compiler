@@ -4300,6 +4300,7 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $reg . ' = call i64 @__mir_ipow(i64 ' . $b . ', i64 ' . $e . ")\n";
             return $this->finishI64($out, $reg);
         }
+        if ($this->powCellShape($args)) { return $this->biPowCell($args); }
         // A numericCell operand lands here (it is not KIND_INT), so the double
         // conversion must UNBOX it via tagged_to_double rather than bitcast its
         // tagged bits — coerceDoubleOperand, the same path float arithmetic uses.
@@ -4310,6 +4311,81 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $reg . ' = call double @llvm.pow.f64(double ' . $b . ', double ' . $e . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
         return $out;
+    }
+
+    /**
+     * `mixed ** mixed` / `int ** mixed`: no float operand is known, so the result
+     * is php's run-time answer (int for int operands with a non-negative
+     * exponent, else float); InferCalls types the call as the numeric cell.
+     * @param Node[] $args
+     */
+    private function powCellShape(array $args): bool
+    {
+        $a = $args[0]->type->kind;
+        $b = $args[1]->type->kind;
+        return ($a === Type::KIND_CELL && ($b === Type::KIND_CELL || $b === Type::KIND_INT))
+            || ($a === Type::KIND_INT && $b === Type::KIND_CELL);
+    }
+
+    /** @param Node[] $args */
+    private function biPowCell(array $args): string
+    {
+        $this->rt->needsIpow = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsTaggedArith = true;
+        $this->rt->needsTaggedToInt = true;
+        $this->rt->needsStrtol = true;
+        $this->rt->needsTaggedToFloat = true;
+        $this->rt->needsStrtod = true;
+        $this->libcExtra['llvm.pow.f64'] = 'declare double @llvm.pow.f64(double, double)';
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type);
+        $l = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->boxToCell($args[1]->type);
+        $r = $this->lastValue;
+        $afl = $this->ssa->allocReg();
+        $bfl = $this->ssa->allocReg();
+        $isf = $this->ssa->allocReg();
+        $out .= '  ' . $afl . ' = call i1 @__mir_cell_num_is_float(i64 ' . $l . ")\n";
+        $out .= '  ' . $bfl . ' = call i1 @__mir_cell_num_is_float(i64 ' . $r . ")\n";
+        $out .= '  ' . $isf . ' = or i1 ' . $afl . ', ' . $bfl . "\n";
+        $ia = $this->ssa->allocReg();
+        $ib = $this->ssa->allocReg();
+        $out .= '  ' . $ia . ' = call i64 @__manticore_tagged_to_int(i64 ' . $l . ")\n";
+        $out .= '  ' . $ib . ' = call i64 @__manticore_tagged_to_int(i64 ' . $r . ")\n";
+        $neg = $this->ssa->allocReg();
+        $out .= '  ' . $neg . ' = icmp slt i64 ' . $ib . ", 0\n";
+        $useF = $this->ssa->allocReg();
+        $out .= '  ' . $useF . ' = or i1 ' . $isf . ', ' . $neg . "\n";
+        $lInt = $this->ssa->allocLabel('powc.int');
+        $lFlt = $this->ssa->allocLabel('powc.flt');
+        $lEnd = $this->ssa->allocLabel('powc.end');
+        $out .= '  br i1 ' . $useF . ', label %' . $lFlt . ', label %' . $lInt . "\n";
+        $out .= $lInt . ":\n";
+        $ri = $this->ssa->allocReg();
+        $bi = $this->ssa->allocReg();
+        $out .= '  ' . $ri . ' = call i64 @__mir_ipow(i64 ' . $ia . ', i64 ' . $ib . ")\n";
+        $out .= '  ' . $bi . ' = call i64 @__manticore_box_int(i64 ' . $ri . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lFlt . ":\n";
+        $da = $this->ssa->allocReg();
+        $db = $this->ssa->allocReg();
+        $rf = $this->ssa->allocReg();
+        $bf = $this->ssa->allocReg();
+        $out .= '  ' . $da . ' = call double @__manticore_tagged_to_double(i64 ' . $l . ")\n";
+        $out .= '  ' . $db . ' = call double @__manticore_tagged_to_double(i64 ' . $r . ")\n";
+        $out .= '  ' . $rf . ' = call double @llvm.pow.f64(double ' . $da . ', double ' . $db . ")\n";
+        $out .= '  ' . $bf . ' = call i64 @__manticore_box_float(double ' . $rf . ")\n";
+        $out .= '  br label %' . $lEnd . "\n";
+        $out .= $lEnd . ":\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = phi i64 [ ' . $bi . ', %' . $lInt . ' ], [ ' . $bf . ', %' . $lFlt . " ]\n";
+        $out .= $this->dropOperandCell($args[0], $l);
+        $out .= $this->dropOperandCell($args[1], $r);
+        $ret = $this->finishI64($out, $res);
+        $this->markCellBoxed($this->lastValue);
+        return $ret;
     }
 
     /**
@@ -4512,18 +4588,46 @@ trait EmitLlvmBuiltins
                 $out .= $this->freeStrTemp($args[0], $strPtr);
                 return $this->finishI64($out, $reg);
             }
-            $baseArg = 'i32 10';
-            if (\count($args) > 1) {
-                $out .= $this->emitNode($args[1]);
-                $out .= $this->coerceToI64();
-                $b32 = $this->ssa->allocReg();
-                $out .= '  ' . $b32 . ' = trunc i64 ' . $this->lastValue . " to i32\n";
-                $baseArg = 'i32 ' . $b32;
-            }
-            $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i64 @strtol(ptr ' . $strPtr . ', ptr null, ' . $baseArg . ")\n";
+            $out .= $this->emitNode($args[1]);
+            $out .= $this->coerceIntArg($args[1]);
+            $reg = $this->intvalStrBase($strPtr, $this->lastValue, $out);
             $out .= $this->freeStrTemp($args[0], $strPtr);
             return $this->finishI64($out, $reg);
+        }
+        // A `mixed` value with a base: only a STRING honours it (php ignores the
+        // base for every other type), so branch on the tag.
+        if ($ok === Type::KIND_CELL && \count($args) > 1) {
+            $this->rt->needsTaggedToInt = true;
+            $this->rt->needsTagged = true;
+            $this->rt->needsStrtol = true;
+            $out .= $this->coerceToI64();
+            $cw = $this->lastValue;
+            $out .= $this->emitNode($args[1]);
+            $out .= $this->coerceIntArg($args[1]);
+            $base = $this->lastValue;
+            $tg = $this->ssa->allocReg();
+            $out .= '  ' . $tg . ' = call i64 @__manticore_tag(i64 ' . $cw . ")\n";
+            $isS = $this->ssa->allocReg();
+            $out .= '  ' . $isS . ' = icmp eq i64 ' . $tg . ", 4\n";
+            $lS = $this->ssa->allocLabel('iv.str');
+            $lO = $this->ssa->allocLabel('iv.oth');
+            $lE = $this->ssa->allocLabel('iv.end');
+            $out .= '  br i1 ' . $isS . ', label %' . $lS . ', label %' . $lO . "\n";
+            $out .= $lS . ":\n";
+            $sp = $this->ssa->allocReg();
+            $out .= '  ' . $sp . ' = and i64 ' . $cw . ", 281474976710655\n";
+            $spp = $this->ssa->allocReg();
+            $out .= '  ' . $spp . ' = inttoptr i64 ' . $sp . " to ptr\n";
+            $rs = $this->intvalStrBase($spp, $base, $out);
+            $out .= '  br label %' . $lE . "\n";
+            $out .= $lO . ":\n";
+            $ro = $this->ssa->allocReg();
+            $out .= '  ' . $ro . ' = call i64 @__manticore_tagged_to_int(i64 ' . $cw . ")\n";
+            $out .= '  br label %' . $lE . "\n";
+            $out .= $lE . ":\n";
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . ' = phi i64 [ ' . $rs . ', %' . $lS . ' ], [ ' . $ro . ', %' . $lO . " ]\n";
+            return $this->finishI64($out, $res);
         }
         // A CELL / UNKNOWN (a `mixed` arg) must be DECODED by tag, not read raw:
         // the i64 carrier is a NaN-boxed value, so coerceToI64 alone would return
@@ -4540,6 +4644,26 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->coerceToI64();
         return $this->finishI64($out, $this->lastValue);
+    }
+
+    /**
+     * `intval($str, $base)` over a string pointer: base 10 is the cast rule
+     * (`"1e3"` is 1000), any other base is strtol's own. Appends the IR to $out.
+     */
+    private function intvalStrBase(string $strPtr, string $base, string &$out): string
+    {
+        $this->rt->needsStrtol = true;
+        $b32 = $this->ssa->allocReg();
+        $out .= '  ' . $b32 . ' = trunc i64 ' . $base . " to i32\n";
+        $st = $this->ssa->allocReg();
+        $out .= '  ' . $st . ' = call i64 @strtol(ptr ' . $strPtr . ', ptr null, i32 ' . $b32 . ")\n";
+        $ci = $this->ssa->allocReg();
+        $out .= '  ' . $ci . ' = call i64 @__mir_str_to_int(ptr ' . $strPtr . ")\n";
+        $is10 = $this->ssa->allocReg();
+        $out .= '  ' . $is10 . ' = icmp eq i64 ' . $base . ", 10\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = select i1 ' . $is10 . ', i64 ' . $ci . ', i64 ' . $st . "\n";
+        return $reg;
     }
 
     /** @param Node[] $args */
@@ -4755,6 +4879,14 @@ trait EmitLlvmBuiltins
         // 0 (a `?array` return, `null ∪ string`, a null-seeded loop array), and
         // `=== null` already answers it that way.
         $ak = $a->type->kind;
+        // A static enum type carries the case ORDINAL (0 is a real case, not a
+        // null pointer), and a nullable enum is a cell — so it is never null.
+        if ($this->isEnumType($a->type) && ($kind === Type::KIND_OBJ || $kind === Type::KIND_NULL)) {
+            $out = $a->kind === Node::KIND_LOAD_LOCAL ? '' : $this->emitNode($a);
+            $this->lastValue = $kind === Type::KIND_OBJ ? '1' : '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         if ((($ak === Type::KIND_OBJ || $ak === Type::KIND_ARRAY || $ak === Type::KIND_STRING)
                 && ($kind === Type::KIND_NULL || $kind === $ak))
             || ($ak === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {
@@ -5258,11 +5390,27 @@ trait EmitLlvmBuiltins
         // start / length normalization (negative offsets, clamping) lives in
         // the runtime @__mir_substr to match Zend exactly. `haveLen` = 0 means
         // "length omitted → to end of string".
-        if (\count($args) >= 3) {
+        if (\count($args) >= 3 && $args[2]->type->kind === Type::KIND_CELL) {
+            // A `null` length means "to the end" (php 8): test the tag before the int coercion folds null to 0.
+            $this->rt->needsTagged = true;
+            $out .= $this->emitNode($args[2]) . $this->coerceToI64();
+            $cw = $this->lastValue;
+            $tg = $this->ssa->allocReg();
+            $out .= '  ' . $tg . ' = call i64 @__manticore_tag(i64 ' . $cw . ")\n";
+            $nl = $this->ssa->allocReg();
+            $out .= '  ' . $nl . ' = icmp eq i64 ' . $tg . ", 3\n";
+            $hv = $this->ssa->allocReg();
+            $out .= '  ' . $hv . ' = select i1 ' . $nl . ", i64 0, i64 1\n";
+            $this->lastValue = $cw;
+            $out .= $this->coerceIntArg($args[2]);
+            $len = $this->lastValue;
+            $haveLen = $hv;
+        } elseif (\count($args) >= 3 && $args[2]->type->kind !== Type::KIND_NULL) {
             $out .= $this->emitIntArg($args[2]);
             $len = $this->lastValue;
             $haveLen = '1';
         } else {
+            if (\count($args) >= 3) { $out .= $this->emitNode($args[2]); }
             $len = '0';
             $haveLen = '0';
         }
@@ -6136,8 +6284,16 @@ trait EmitLlvmBuiltins
         // `sprintf('%s', 5)` handed libc strlen the integer 5. The runtime
         // engine owns those conversions.
         for ($ci = 0; $ci < $argN && $ci + 1 < \count($args); $ci = $ci + 1) {
-            if ($convs[$ci] !== 's') { continue; }
             $ck = $args[$ci + 1]->type->kind;
+            if ($convs[$ci] !== 's') {
+                // A numeric conversion over a string / array / object carrier
+                // would printf the pointer: php parses the numeric string.
+                if ($ck === Type::KIND_STRING || $ck === Type::KIND_ARRAY || $ck === Type::KIND_OBJ
+                    || $ck === Type::KIND_CLOSURE || $ck === Type::KIND_UNION) {
+                    return $this->biFormatRuntime($args, $toStdout);
+                }
+                continue;
+            }
             if ($ck !== Type::KIND_STRING && $ck !== Type::KIND_CELL && $ck !== Type::KIND_UNKNOWN) {
                 return $this->biFormatRuntime($args, $toStdout);
             }

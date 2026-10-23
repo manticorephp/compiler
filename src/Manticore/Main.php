@@ -4636,6 +4636,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'class_implements',
             'class_parents',
             'get_mangled_object_vars',
+            'get_class_vars',
             'get_defined_constants',
         ]);
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
