@@ -63,11 +63,11 @@ th,td{text-align:left;padding:10px 10px;border-bottom:1px solid var(--line)}
 tbody tr{transition:background .15s}
 tbody tr:hover{background:var(--accent-soft)}
 td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono);font-size:.92em}
-td.x{display:flex;align-items:center;gap:10px;justify-content:flex-end}
-.bar{flex:0 1 110px;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+td.x{text-align:right;white-space:nowrap}
+.bar{display:inline-block;width:110px;vertical-align:middle;margin-right:10px;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
 .bar i{display:block;height:100%;width:0;background:var(--accent);border-radius:3px;transition:width .9s cubic-bezier(.2,.7,.2,1)}
 .in .bar i{width:var(--w)}
-td.x b{min-width:4.5ch;text-align:right;font-weight:600}
+td.x b{display:inline-block;min-width:5ch;text-align:right;font-weight:600;font-family:var(--mono);font-size:.92em}
 
 ul{padding-left:0;list-style:none}
 li{margin:.1em 0;padding:6px 10px;margin-left:-10px;border-radius:6px;transition:background .15s,transform .15s}
