@@ -677,9 +677,10 @@ trait LowerExprs
             $mn = $expr->name;
             if ($mn === '__LINE__') { return new IntConst($expr->span->line, Type::int_()); }
             if ($mn === '__CLASS__') { return new StringConst($this->currentLowerClass, Type::string_()); }
-            if ($mn === '__FUNCTION__') { return new StringConst($this->currentLowerFn, Type::string_()); }
+            if ($mn === '__FUNCTION__') { return new StringConst($this->closureMagic !== '' ? $this->closureMagic : $this->currentLowerFn, Type::string_()); }
             if ($mn === '__METHOD__') {
-                $m = $this->currentLowerClass !== ''
+                if ($this->closureMagic !== '') { return new StringConst($this->closureMagic, Type::string_()); }
+                $m = $this->currentLowerClass !== '' && $this->currentLowerFn !== ''
                     ? $this->currentLowerClass . '::' . $this->currentLowerFn
                     : $this->currentLowerFn;
                 return new StringConst($m, Type::string_());
@@ -937,6 +938,14 @@ trait LowerExprs
      * which is parsed as one source with no path. That is also what keeps the
      * rewrite from firing on `prelude/async.php`'s own internal calls.
      */
+    private function closureMagicName(\Parser\Ast\Span $span): string
+    {
+        $scope = $this->closureMagic !== '' ? $this->closureMagic . '()'
+            : ($this->currentLowerFn === '' ? $span->file
+                : ($this->currentLowerClass !== '' ? $this->currentLowerClass . '::' : '') . $this->currentLowerFn . '()');
+        return '{closure:' . $scope . ':' . (string)$span->line . '}';
+    }
+
     private function callSite(\Parser\Ast\Span $span): string
     {
         $file = $span->file;

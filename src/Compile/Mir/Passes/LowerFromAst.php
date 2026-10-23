@@ -259,6 +259,8 @@ final class LowerFromAst implements Pass
 
     /** Enclosing function / method name (for __FUNCTION__ / __METHOD__). */
     private string $currentLowerFn = '';
+    /** `{closure:SCOPE:LINE}` while a closure body lowers: what `__FUNCTION__` / `__METHOD__` read there. */
+    private string $closureMagic = '';
 
     /** Set true while lowering a method body when `static::`/`new static` is seen. */
     private bool $sawStaticUse = false;
@@ -1491,6 +1493,7 @@ final class LowerFromAst implements Pass
             // top-level closure reading `$this` capture a non-existent local
             // instead of a late-bound placeholder).
             $this->currentLowerClass = '';
+            $this->currentLowerFn = '';
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
             // …nor parameters: a preceding function's by-ref names would
@@ -3558,7 +3561,10 @@ final class LowerFromAst implements Pass
         $this->setCurrentLowerParams($expr->params);
         $savedHasThis = $this->currentLowerFnHasThis;
         if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
+        $savedClosureMagic = $this->closureMagic;
+        $this->closureMagic = $this->closureMagicName($expr->span);
         $body = $this->lowerBlockNode($expr->body);
+        $this->closureMagic = $savedClosureMagic;
         $this->currentLowerFnHasThis = $savedHasThis;
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
@@ -3612,7 +3618,10 @@ final class LowerFromAst implements Pass
         $this->setCurrentLowerParams($expr->params);
         $savedHasThis = $this->currentLowerFnHasThis;
         if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
+        $savedClosureMagic = $this->closureMagic;
+        $this->closureMagic = $this->closureMagicName($expr->span);
         $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
+        $this->closureMagic = $savedClosureMagic;
         $this->currentLowerFnHasThis = $savedHasThis;
         $afIsGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
@@ -6635,6 +6644,7 @@ final class LowerFromAst implements Pass
      */
     private function foldNumericKey(?Node $k): ?Node
     {
+        if ($k instanceof NullConst) { $k->asKey = true; return $k; }
         if (!($k instanceof StringConst)) { return $k; }
         $s = $k->value;
         if ($s === '' || (string)(int)$s !== $s) { return $k; }
