@@ -477,6 +477,21 @@ trait LowerExprs
                     new IntConst($this->silenceDepth > 0 ? 1 : 0, Type::int_()),
                 ], Type::bool_());
             }
+            // `is_callable("name")` of a function the closed-world table knows
+            // (a codegen builtin included) is true; any value that is not an
+            // array literal may be a name built at run time, so the runtime
+            // `__mir_fn_exists` table must exist ({@see EmitLlvm::emitIsCallableDyn}).
+            if ($fnBare === 'is_callable' && \count($expr->args) >= 1) {
+                $a0 = $expr->args[0];
+                if ($a0->kind === 'StringLiteral') {
+                    $lit = $this->stringLitValue($a0);
+                    if (\count($expr->args) === 1 && !\str_contains($lit, '::') && $this->functionIsKnown($lit)) {
+                        return new IntConst(1, Type::bool_());
+                    }
+                } elseif ($a0->kind !== 'ArrayLit') {
+                    $this->sawDynFnExists = true;
+                }
+            }
             // `function_exists("Name")` → compile-time 1/0 against the
             // declared functions (incl. FFI externs / use-function
             // aliases). A non-literal arg conservatively folds to false.

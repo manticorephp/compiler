@@ -822,6 +822,22 @@ trait EmitLlvmCalls
             }
             if (\count($dynfSyms) < self::DYNF_TABLE_MIN) { $dynfSyms = []; }
         }
+        if ($dynfSyms !== []) {
+            $twElem = null;
+            if ($hasSpread) {
+                $twSp = $this->asSpreadNode($iv->args[$spreadIdx])->operand->type->element;
+                $twElem = $twSp === null ? Type::unknown() : $twSp;
+            }
+            foreach ($this->allTwinTot as $bname => $btot) {
+                $bname = (string)$bname;
+                // A spread site has no inline twin arms, so the named twins come here too.
+                if (isset($this->sigs->returnType[$bname]) || (!$hasSpread && isset($this->builtinTwinTot[$bname]))
+                    || isset($this->builtinTwinRef[$bname])) { continue; }
+                if (!$hasSpread && ($argc < ($this->builtinTwinReq[$bname] ?? $btot) || $argc > $btot)) { continue; }
+                $tsym = $this->dynfTwinThunk($bname, $hasSpread ? $numFixed : $argc, $hasSpread, $twElem);
+                if ($tsym !== '') { $dynfSyms[$bname] = $tsym; }
+            }
+        }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
@@ -1207,6 +1223,28 @@ trait EmitLlvmCalls
     {
         return $bit >= 0 && isset($this->externFnNames[$fname])
             && ((($this->stdlibDynf[$fname] ?? 0) >> $bit) & 1) === 1;
+    }
+
+    /**
+     * The stdlib's exported thunk of a builtin twin the program does not name in a
+     * string literal, or ''. A name built at run time (`'str' . 'len'`) must reach
+     * it too, but arming an inline arm for every twin at every dynamic site would
+     * inline each builtin the program never calls ({@see collectTwinNames}); the
+     * stdlib's own thunk costs one `declare`.
+     */
+    private function dynfTwinThunk(string $bname, int $n, bool $spread, ?Type $elem): string
+    {
+        $bit = $this->dynfExportBit($spread, $n, $elem);
+        if ($bit < 0 || ((($this->stdlibDynf[$bname] ?? 0) >> $bit) & 1) !== 1) { return ''; }
+        $sym = $this->dynfExportSym($bname, $bit);
+        $key = 't|' . $bname . '|' . (string)$bit;
+        if (!isset($this->dynfThunks[$key])) {
+            $this->dynfThunks[$key] = $sym;
+            $decl = $spread ? ['ptr'] : [];
+            for ($i = 0; $i < $n; $i = $i + 1) { $decl[] = 'i64'; }
+            $this->dynfExtraBodies .= 'declare i64 @' . $sym . '(' . \implode(', ', $decl) . ")\n\n";
+        }
+        return $sym;
     }
 
     /** The stdlib build emitting the thunk `$fname` at `$bit` as an export. */
@@ -3491,6 +3529,11 @@ trait EmitLlvmCalls
         return true;
     }
 
+    private function isNameIntoCallable(?Type $pt, Node $a): bool
+    {
+        return $pt !== null && $pt->kind === Type::KIND_CLOSURE && $a->type->kind === Type::KIND_STRING;
+    }
+
     /** Does `$fname` declare any parameter by reference? */
     private function anyRefParam(string $fname): bool
     {
@@ -5145,9 +5188,13 @@ trait EmitLlvmCalls
                 $out .= $this->emitCellifyArrayRaw($a->type->element);
                 $out .= $this->coerceToI64();
                 $argList .= 'i64 ' . $this->lastValue;
-            } elseif (($tmask[$ai] ?? false) && $a->type->kind !== Type::KIND_CELL) {
+            } elseif ((($tmask[$ai] ?? false) || $this->isNameIntoCallable($ptypes[$ai] ?? null, $a))
+                && $a->type->kind !== Type::KIND_CELL) {
                 // Tagged (mixed/union) param: NaN-box the arg by its
                 // static type so the callee can read its runtime tag.
+                // A function-NAME string bound to a `callable` param rides the
+                // same way: a raw string word carries no tag a `callable` slot
+                // could tell from a closure env.
                 $out .= $this->emitArgCollectingLitElems($a, null, false);
                 $this->cellifyMoveBlocked = true;
                 $out .= $this->boxToCell($a->type, $a);

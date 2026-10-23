@@ -8292,8 +8292,8 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $z . ' = zext i1 ' . $ne . " to i64\n";
             return $this->finishI64($out, $z);
         }
-        // An erased value or an array is decided at run time.
-        if ($k === Type::KIND_CELL || $a->type->isArray()) {
+        // An erased value, a string (a function name) or an array is decided at run time.
+        if ($k === Type::KIND_CELL || $k === Type::KIND_STRING || $a->type->isArray()) {
             return $this->emitIsCallableDyn($a);
         }
         // int/float/bool/null/plain object/non-literal string/array → not callable.
@@ -8306,8 +8306,9 @@ trait EmitLlvmBuiltins
      * 'method']` whose method (or `__call` / `__callStatic`) exists. Evaluated
      * as a condition over a scratch cell holding `$v`, through the same
      * builtins user code reaches.
-     * ponytail: visibility-blind like the literal fold above, and a function
-     * NAME string still answers false (no runtime function registry here).
+     * ponytail: visibility-blind like the literal fold above; a function NAME
+     * is looked up in the closed-world table `function_exists` uses, and a
+     * `'C::m'` string built at run time still answers false.
      */
     private function emitIsCallableDyn(Node $a): string
     {
@@ -8338,7 +8339,12 @@ trait EmitLlvmBuiltins
                     $or($call('method_exists', [$el(0), $el(1)]), $call('method_exists', [$el(0), $str('__call')]))),
                 $and($call('is_string', [$el(0)]),
                     $or($call('method_exists', [$el(0), $el(1)]), $call('method_exists', [$el(0), $str('__callStatic')])))))))));
-        $out .= $this->emitNode($or($invokable, $pair));
+        // A function NAME: the closed-world table answers it, as function_exists($v) does.
+        $callable = $or($invokable, $pair);
+        if (\count($this->knownFnNames) > 0) {
+            $callable = $or($and($call('is_string', [$t()]), $call('__mir_fn_exists', [$t()])), $callable);
+        }
+        $out .= $this->emitNode($callable);
         return $out . $this->coerceToI64();
     }
 

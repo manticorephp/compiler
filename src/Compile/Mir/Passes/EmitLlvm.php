@@ -409,6 +409,9 @@ final class EmitLlvm implements EmitVisitor
     private array $builtinTwinParams = [];
     /** @var array<string, int> */
     private array $builtinTwinTot = [];
+    /** Every builtin twin, named in the program or not: {@see Module::$builtinTwinTot}.
+     *  @var array<string, int> */
+    private array $allTwinTot = [];
     /** @var array<string, bool> */
     private array $callableShims = [];
     /** @var array<string, string> */
@@ -754,6 +757,7 @@ final class EmitLlvm implements EmitVisitor
         // collector into the module, and its possible-root buffering delayed
         // destructors that php runs at once.
         $this->builtinTwinTot = [];
+        $this->allTwinTot = $module->builtinTwinTot;
         if ($module->builtinTwinTot !== []) {
             /** @var array<string, bool> $named */
             $named = [];
