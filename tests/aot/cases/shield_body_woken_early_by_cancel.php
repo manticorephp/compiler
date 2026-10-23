@@ -1,6 +1,5 @@
 <?php
 // A cancel() that arrives while a shield()ed body is parked in delay() wakes it early instead of letting it finish
-// issue: #399
 use function Async\async;
 use function Async\spawn;
 use function Async\shield;

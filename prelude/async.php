@@ -1639,7 +1639,7 @@ namespace Async {
          */
         private function wakeReceiver(Task $r, mixed $value, bool $ok): bool
         {
-            if ($r->state !== Task::PENDING || $r->cancelRequested) {
+            if ($r->state !== Task::PENDING || ($r->cancelRequested && $r->shield === 0)) {
                 return false;
             }
             if ($r->selecting) {
@@ -1658,7 +1658,7 @@ namespace Async {
         /** The send-side mirror of {@see wakeReceiver} — claim a parked sender. */
         private function claimSender(Task $s): bool
         {
-            if ($s->state !== Task::PENDING || $s->cancelRequested) {
+            if ($s->state !== Task::PENDING || ($s->cancelRequested && $s->shield === 0)) {
                 return false;
             }
             if ($s->selecting) {
@@ -1956,7 +1956,7 @@ namespace Async {
             // Skip entries whose task died or was cancelled while queued.
             while (\count($this->waitQ) > 0) {
                 $t = \array_shift($this->waitQ);
-                if ($t->state === Task::PENDING && !$t->cancelRequested) {
+                if ($t->state === Task::PENDING && (!$t->cancelRequested || $t->shield > 0)) {
                     Scheduler::instance()->wake($t);
                     return;
                 }
@@ -2070,7 +2070,7 @@ namespace Async {
             // Skip entries whose task died or was cancelled while queued.
             while (\count($this->waitQ) > 0) {
                 $t = \array_shift($this->waitQ);
-                if ($t->state === Task::PENDING && !$t->cancelRequested) {
+                if ($t->state === Task::PENDING && (!$t->cancelRequested || $t->shield > 0)) {
                     Scheduler::instance()->wake($t);
                     return;
                 }
@@ -2636,7 +2636,7 @@ namespace Async {
         {
             while (\count($this->waiters) > 0) {
                 $w = \array_shift($this->waiters);
-                if ($w->task->state === Task::PENDING && !$w->task->cancelRequested) { return $w; }
+                if ($w->task->state === Task::PENDING && (!$w->task->cancelRequested || $w->task->shield > 0)) { return $w; }
             }
             return null;
         }
@@ -3566,6 +3566,9 @@ namespace Async {
             // A pool job writes into memory the task owns and cannot be stopped:
             // the task stays parked until the job is done ({@see offload()}).
             if ($task->offloadOp >= 0) { return; }
+            // A shielded body keeps its registrations: cancellation is sticky and is raised at
+            // the first suspend point after the shield ends ({@see checkCancel}).
+            if ($task->shield > 0) { return; }
             $this->releaseIo($task);
             if ($task->timerActive) {
                 $task->timerActive = false;
