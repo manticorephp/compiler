@@ -3738,6 +3738,9 @@ trait InferScans
         $seed = [];
         $bad = [];
         $read = [];
+        $this->elSeen = [];
+        $this->elBad = [];
+        $this->elEmpty = [];
         $this->walkLocalFacts($body, $seed, $bad, $read, false);
         $out = [];
         foreach ($seed as $name => $unused) {
@@ -3779,6 +3782,7 @@ trait InferScans
         $k = $n->kind;
         $this->scanArithUsedNode($n, $k);
         $this->scanRefPinnedNode($n, $k);
+        $this->noteEmptyLitStore($n);
         if ($k === Node::KIND_ARRAY_ACCESS && $n->array->kind === Node::KIND_LOAD_LOCAL) {
             // An element READ of a local. A plain `$out[$k] = v` does NOT reach
             // here — a StoreElement holds its base directly, not wrapped in an

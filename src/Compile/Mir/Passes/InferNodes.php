@@ -578,7 +578,7 @@ trait InferNodes
         // arrays this function builds from `[]` (the soundness gate on the
         // elemLoopLocals pin below). {@see InferScans::scanLocalFacts}.
         $this->scanLocalFacts($fn->body);
-        $this->emptyLitNest = $this->emptyLitNesting($fn->body);
+        $this->emptyLitNest = $this->emptyLitNesting();
         // LAST, so it wins over every seeding scan above (a float/assoc seed would
         // otherwise pin a slot the loop already proved polymorphic): a name a loop
         // re-kinds is a cell from function ENTRY — its reads dispatch by tag
