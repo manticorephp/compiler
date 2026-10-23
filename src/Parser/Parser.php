@@ -292,7 +292,7 @@ final class Parser
 
         if ($tok->kind === TokenKind::Keyword) {
             $kw = strtolower($tok->lexeme);
-            if ($kw === 'namespace') return $this->parseNamespace();
+            if ($kw === 'namespace' && !$this->namespaceRelativeAhead()) return $this->parseNamespace();
             if ($kw === 'use')       return $this->parseUseDecl();
             if ($kw === 'class' || $kw === 'final' || $kw === 'abstract' || $kw === 'readonly') {
                 if ($kw === 'class' || $this->isClassModifierFollowedByClass()) {
@@ -2566,6 +2566,10 @@ final class Parser
         if ($low === 'self' || $low === 'static' || $low === 'parent') {
             return $literal;
         }
+        if (str_starts_with($low, 'namespace\\')) {
+            $rest = substr($literal, 10);
+            return $this->currentNamespace !== '' ? $this->currentNamespace . '\\' . $rest : $rest;
+        }
         // Scalar / pseudo types stay unqualified — `int` in
         // `namespace Foo` is still PHP's int, not `Foo\int`.
         // Inline checks instead of `static $scalar = [...]`: the
@@ -2732,6 +2736,9 @@ final class Parser
                 // Taking a full expression here would swallow the `and`.
                 $inner = $this->parseAssign();
                 return Expr::unary('print', $inner, $span);
+            }
+            if ($lower === 'namespace' && $this->namespaceRelativeAhead()) {
+                return $this->parseNameOrCall($span);
             }
             if ($lower === 'static') {
                 $next = $this->tokens[$this->pos + 1] ?? null;
@@ -3075,6 +3082,13 @@ final class Parser
     /**
      * Identifier-led primary: function call, static-class reference, or bare name.
      */
+    /** `namespace\name`: the keyword at the cursor starts a namespace-relative name, not a declaration. */
+    private function namespaceRelativeAhead(): bool
+    {
+        $next = $this->tokens[$this->pos + 1] ?? null;
+        return $next !== null && $next->kind === TokenKind::Backslash;
+    }
+
     private function parseNameOrCall(Span $span): Expr
     {
         $literal = $this->parseClassNameLiteral();
