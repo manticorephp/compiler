@@ -1139,12 +1139,69 @@ trait EmitLlvmArrays
             $fast = $se->index->kind === Node::KIND_NULL_CONST
                 ? $this->emitNbufAppend($se->array, $se->value, $mc)
                 : $this->emitNbufSet($se->array, $se->index, $se->value, $mc);
-            if ($fast !== null) { return $fast; }
-            return $this->emitMethodCall($mc);
+            if ($fast !== null) { return $fast . $this->offsetSetResult($se); }
+            if (!$this->offsetSetValueIsReadable($se->value)
+                && $this->offsetSetValueIsScalar($se->value) && $this->offsetSetOperandsScalar($se)) {
+                $mark = \count($this->preEvalNodes);
+                $out = '';
+                if (!$this->offsetSetKeyIsQuiet($se->index)) {
+                    $out .= $this->emitNode($se->index);
+                    $this->preEvalNodes[] = $se->index;
+                    $this->preEvalRegs[] = $this->lastValue;
+                    $this->preEvalTypes[] = $this->lastValueType;
+                }
+                $out .= $this->emitNode($se->value);
+                $this->preEvalNodes[] = $se->value;
+                $this->preEvalRegs[] = $this->lastValue;
+                $this->preEvalTypes[] = $this->lastValueType;
+                $reg = $this->lastValue;
+                $type = $this->lastValueType;
+                $out .= $this->emitMethodCall($mc);
+                $this->popPreEval($mark);
+                $this->lastValue = $reg;
+                $this->lastValueType = $type;
+                return $out;
+            }
+            return $this->emitMethodCall($mc) . $this->offsetSetResult($se);
         }
         return $this->emitStoreElementErased($se);
     }
 
+    /** A value `offsetSet` may be followed by a second read of: a local, a constant, pure arithmetic over them. */
+    private function offsetSetValueIsReadable(Node $v): bool
+    {
+        $k = $v->kind;
+        return $k === Node::KIND_STRING_CONST || $k === Node::KIND_NULL_CONST || $this->nbufPureExpr($v);
+    }
+
+    private function offsetSetValueIsScalar(Node $v): bool
+    {
+        $k = $v->type->kind;
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL;
+    }
+
+    private function offsetSetKeyIsQuiet(Node $k): bool
+    {
+        return $k->kind === Node::KIND_NULL_CONST || $k->kind === Node::KIND_STRING_CONST || $this->nbufPureExpr($k);
+    }
+
+    /** A side-effect-free receiver and a key that is quiet or an unowned scalar: both may be evaluated ahead of the call. */
+    private function offsetSetOperandsScalar(StoreElement $se): bool
+    {
+        return $this->nbufPureExpr($se->array)
+            && ($this->offsetSetKeyIsQuiet($se->index) || $this->offsetSetValueIsScalar($se->index));
+    }
+
+    /** `$o[$k] = $v` as an expression is `$v`, not what `offsetSet` returned: read a readable value again after the call. */
+    private function offsetSetResult(StoreElement $se): string
+    {
+        if (!$this->offsetSetValueIsReadable($se->value)) {
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return '';
+        }
+        return $this->emitNode($se->value);
+    }
     /** An erased base that can be tested for "is an object" and then re-evaluated by the arm
      *  that runs: a plain local, or a property chain over one (loads only, no side effects). */
     private function erasedBaseMayBeObject(Node $b): bool

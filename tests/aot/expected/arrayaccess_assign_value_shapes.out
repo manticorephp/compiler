@@ -1,0 +1,28 @@
+float(2.5)
+int(4)
+string(3) "str"
+int(7)
+bool(true)
+int(9)
+int(9)
+int(11)
+int(11)
+int(11)
+side k
+side v
+int(42)
+int(9)
+float(1.5)
+int(4)
+float(2.5)
+int(5)
+int(8)
+int(8)
+string(2) "xy"
+int(42)
+array(2) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+}

@@ -1,6 +1,5 @@
 <?php
 // The value of `$obj[$k] = $v` used as an expression is 0/garbage instead of $v for an ArrayAccess object
-// issue: #397
 class Box implements ArrayAccess {
     private array $d = [];
     public function offsetExists(mixed $o): bool { return isset($this->d[$o]); }
