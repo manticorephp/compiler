@@ -2624,7 +2624,21 @@ trait EmitLlvmModule
         // local must be dropped like any other. `function mk(): mixed { $v = [];
         // …; return $v; }` leaked the whole source vec plus one ref on every
         // element, with its release stranded in the unreachable dead block.
+        // The +1 this return takes — ONE decision, the pass reads the same one
+        // ({@see \Compile\Mir\Ownership::returnRetain}); the branches below execute it.
+        $retKind = $v === null ? \Compile\Mir\Ownership::RET_NONE
+            : $this->own->returnRetain($v, $this->frame->returnType,
+                $this->frame->isClosure || $this->frame->isTrampoline, $this->frame->erasedArrayReturn,
+                $returnedLocal !== null && isset($this->frame->ownLocals[$returnedLocal]));
         $exempt = $this->returnRebuildsArray($v) ? [] : $this->returnedLocalNames($v);
+        // A reference-box local hands the caller a count on its value at the
+        // box release ({@see ownedBoxReleaseIr}); a return that retains the
+        // value itself has already taken that count, and a second one leaks.
+        if ($retKind !== \Compile\Mir\Ownership::RET_NONE) {
+            foreach ($exempt as $en => $_) {
+                if (isset($this->locals->ownedBoxes[$en])) { unset($exempt[$en]); }
+            }
+        }
         $ownMoved = ($returnedLocal !== null && !$this->returnRebuildsArray($v)) ? $returnedLocal : '';
         $leave = $this->emitOwnedBoxReleases($exempt);
         // Close the frame arena before every exit, so confined values
@@ -2654,11 +2668,6 @@ trait EmitLlvmModule
         if ($this->own->returnCondNormalized($v, $this->frame->erasedArrayReturn) && !$this->own->condOwnedTemp($v)) {
             $this->frame->erasedCond = $v;
         }
-        // The +1 this return takes — ONE decision, the pass reads the same one
-        // ({@see \Compile\Mir\Ownership::returnRetain}); the branches below execute it.
-        $retKind = $this->own->returnRetain($v, $this->frame->returnType,
-            $this->frame->isClosure || $this->frame->isTrampoline, $this->frame->erasedArrayReturn,
-            $returnedLocal !== null && isset($this->frame->ownLocals[$returnedLocal]));
         $out = $this->emitNode($v);
         $this->frame->erasedCond = null;
         // Uniform closure ABI: a closure returns a scalar as a tagged cell, so a

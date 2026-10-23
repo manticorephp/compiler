@@ -2197,8 +2197,16 @@ final class UnifiedArrayRuntime
         // for itself — anything else is left alone there.
         $doclo = $fn->block('doclo');
         $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $dorel, $doclo);
-        $doclo->call('__mir_closure_release', Type::void(), [$opp]);
-        $doclo->br($done);
+        // A Generator frame boxed as an object: its header is a string's
+        // (GENERATOR_TAG_MAGIC@-24), so it counts and frees like one.
+        $dogen = $fn->block('dogen');
+        $docl2 = $fn->block('docl2');
+        $gcap = $doclo->load(Type::i64(), $doclo->gep(Type::i8(), $opp, [Value::int(Type::i64(), -24)]));
+        $doclo->brIf($doclo->icmp('eq', $gcap, Value::int(Type::i64(), MemoryAbi::GENERATOR_TAG_MAGIC)), $dogen, $docl2);
+        $dogen->call('__mir_rc_release_str', Type::void(), [$opp]);
+        $dogen->br($done);
+        $docl2->call('__mir_closure_release', Type::void(), [$opp]);
+        $docl2->br($done);
         $dorel->call('__mir_rc_release', Type::void(), [$opp]);
         $dorel->br($done);
 
@@ -2601,8 +2609,14 @@ final class UnifiedArrayRuntime
         $hdr = $chkmagic->load(Type::i64(), $chkmagic->gep(Type::i8(), $opp, [Value::int(Type::i64(), -8)]));
         $doclo = $fn->block('doclo');
         $chkmagic->brIf($chkmagic->icmp('eq', $hdr, Value::int(Type::i64(), MemoryAbi::RC_TAG_MAGIC)), $doret, $doclo);
-        $doclo->call('__mir_closure_retain', Type::void(), [$opp]);
-        $doclo->br($done);
+        $dogen = $fn->block('dogen');
+        $docl2 = $fn->block('docl2');
+        $gcap = $doclo->load(Type::i64(), $doclo->gep(Type::i8(), $opp, [Value::int(Type::i64(), -24)]));
+        $doclo->brIf($doclo->icmp('eq', $gcap, Value::int(Type::i64(), MemoryAbi::GENERATOR_TAG_MAGIC)), $dogen, $docl2);
+        $dogen->call('__mir_rc_retain_str', Type::void(), [$opp]);
+        $dogen->br($done);
+        $docl2->call('__mir_closure_retain', Type::void(), [$opp]);
+        $docl2->br($done);
         $doret->call('__mir_rc_retain', Type::void(), [$opp]);
         $doret->br($done);
 

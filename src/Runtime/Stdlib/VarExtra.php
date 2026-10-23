@@ -6,6 +6,23 @@
  * these fill the small remaining gaps.
  */
 
+/**
+ * `get_object_vars($o)` called from OUTSIDE any class: only the public properties.
+ * LowerExprs rewrites such calls here; `(array)` carries the visibility in its keys
+ * (`"\0*\0p"` protected, `"\0C\0p"` private), so the non-public ones are dropped.
+ *
+ * @return array<string, mixed>
+ */
+function __mc_public_object_vars(object $o): array
+{
+    $out = [];
+    foreach ((array)$o as $k => $v) {
+        if (\is_string($k) && $k !== '' && $k[0] === "\0") { continue; }
+        $out[(string)$k] = $v;
+    }
+    return $out;
+}
+
 /** `(bool)` of any value (PHP `boolval`). */
 function boolval(mixed $value): bool
 {
