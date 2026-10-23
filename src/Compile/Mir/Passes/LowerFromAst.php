@@ -99,6 +99,7 @@ final class LowerFromAst implements Pass
     use LowerTypeDefs;
     use LowerSuperglobals;
     use LowerAttrChecks;
+    use LowerClassDeclChecks;
 
     public const NAME = 'lower-from-ast';
 
@@ -983,6 +984,8 @@ final class LowerFromAst implements Pass
         // so a fatal aborts ahead of the expensive work — and interfaces are
         // visible only here, since they never get a ClassDef.
         $this->checkAttributes($stmts, $preludeCount);
+        // Linking contracts (final / abstract / visibility); see LowerClassDeclChecks.
+        $this->checkClassDecls();
         // The `Ffi\*` attributes are ours, not Zend's, so unlike the reserved
         // set they are checked across the WHOLE statement list — prelude
         // included. prelude/resource.php and prelude/io_poll.php carry them, and
