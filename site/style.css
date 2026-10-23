@@ -42,7 +42,7 @@ h1 em{font-style:normal;color:var(--accent)}
 h2{font-size:1.2rem;margin:3.2rem 0 .75rem;letter-spacing:-.015em;font-weight:650}
 p.lead{font-size:1.15rem;color:var(--mute);margin:0 0 2rem}
 
-code,pre{font:.88em var(--mono)}
+code,pre{font:.88em var(--mono);font-variant-ligatures:none}
 code{background:var(--surface);padding:.12em .4em;border-radius:5px}
 .code{position:relative;margin:1.2rem 0}
 pre{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px;overflow-x:auto;margin:0;

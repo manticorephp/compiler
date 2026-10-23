@@ -1226,7 +1226,13 @@ function ref_doc_sections(RDoc $d, array $params, string $ret, string $ns, array
         $h .= '<p class="dep"><b>Deprecated.</b> ' . ref_inline($d->deprecatedText) . "</p>\n";
     }
     $h .= ref_md($d->body, $root);
-    if (count($d->templates) > 0) {
+    $tdoc = false;
+    foreach ($d->templates as $t) {
+        if ($t->text !== '') {
+            $tdoc = true;
+        }
+    }
+    if ($tdoc) {
         $h .= "<h4>Type parameters</h4>\n<dl class=\"params\">\n";
         foreach ($d->templates as $t) {
             $h .= '<dt><code>' . htmlspecialchars($t->name) . '</code></dt><dd>' . ref_inline($t->text) . "</dd>\n";
@@ -1382,6 +1388,13 @@ function ref_render(array $items, string $out, array $index, string $repo, array
             $sig = ref_callable_sig('', $it->name, $it->params, $it->returns, $ns, $index, $root);
         } else {
             $sig = ($it->final ? 'final ' : '') . ($it->abstract ? 'abstract ' : '') . ($it->readonly ? 'readonly ' : '') . $it->kind . ' ' . htmlspecialchars($it->name);
+            if (count($it->doc->templates) > 0) {
+                $tn = [];
+                foreach ($it->doc->templates as $t) {
+                    $tn[] = $t->name;
+                }
+                $sig .= '&lt;' . htmlspecialchars(implode(', ', $tn)) . '&gt;';
+            }
             if ($it->backing !== '') {
                 $sig .= ': ' . $it->backing;
             }
