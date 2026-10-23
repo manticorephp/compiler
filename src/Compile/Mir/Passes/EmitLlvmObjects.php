@@ -6878,6 +6878,20 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** The `$newThis` of a rebind as a raw object word: an erased (cell/unknown) object is NaN-boxed, and the `$this` slot holds the bare pointer. */
+    private function emitNewThis(Node $objNode): string
+    {
+        $out = $this->emitNode($objNode);
+        $out .= $this->coerceToI64();
+        if ($objNode->type->kind === Type::KIND_CELL || $objNode->type->kind === Type::KIND_UNKNOWN) {
+            $um = $this->ssa->allocReg();
+            $out .= '  ' . $um . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+            $this->lastValue = $um;
+            $this->lastValueType = 'i64';
+        }
+        return $out;
+    }
+
     /** Copy a closure's env struct, rebinding the `$this` slot (struct slot 1)
      *  to `$objNode`. Shared by Closure::bind / ->bindTo / ->call. The bound
      *  value carries the same fn ptr (slot 0), so an invoke dispatches through
@@ -6945,8 +6959,7 @@ trait EmitLlvmObjects
         }
         $hasThis = $this->closureHasThis[$fnName] ?? true;
         if ($hasThis && $cnt >= 1) {
-            $out .= $this->emitNode($objNode);
-            $out .= $this->coerceToI64();
+            $out .= $this->emitNewThis($objNode);
             $objV = $this->lastValue;
             $tg = $this->ssa->allocReg();
             $out .= '  ' . $tg . ' = getelementptr inbounds i64, ptr ' . $buf . ", i64 1\n";
@@ -6983,8 +6996,7 @@ trait EmitLlvmObjects
         $this->rt->needsClosureRc = true;
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $hdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
-        $out = $this->emitNode($objNode);
-        $out .= $this->coerceToI64();
+        $out = $this->emitNewThis($objNode);
         $objV = $this->lastValue;
         $srcMagic = $this->closureHdrLoad($src, \Compile\MemoryAbi::STRING_HASH_OFFSET);
         $out .= $this->closureHdrLoadOut;
@@ -8687,6 +8699,12 @@ trait EmitLlvmObjects
             $iv = new \Compile\Mir\Invoke_($mc->object, $mc->args, $n->type);
             $iv->srcArgc = -2;
             return $this->emitNode($iv);
+        }
+        // An erased receiver may be a Closure OR an invokable object. Virtual
+        // dispatch on the name alone ran the first class's `__invoke` on a closure env.
+        if (!$this->inErasedInvokeArm && \strtolower($mc->method) === '__invoke' && $this->anyClassHasMethod('__invoke')
+            && ($recvType->kind === Type::KIND_CELL || $recvType->kind === Type::KIND_UNKNOWN)) {
+            return $this->emitErasedExplicitInvoke($n, $mc);
         }
         if (($isClosureRecv || $erasedRecv) && $mc->method === 'bindTo'&& \count($mc->args) >= 1) {
             $out = $this->emitClosureRebind($mc->object, $mc->args[0]);

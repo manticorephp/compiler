@@ -3961,6 +3961,16 @@ final class LowerFromAst implements Pass
         return $node;
     }
 
+    /** `$recv->$name(...)` with a RUNTIME method name: a variadic closure forwarding to the dynamic call. */
+    private function synthDynMethodClosure(Node $recv, Node $name): Node
+    {
+        $mir = [new Param(name: '__fa', type: Type::vec(Type::cell()), byRef: false, variadic: true)];
+        $dyn = new DynProp_(new LoadLocal('__frecv', $recv->type), new LoadLocal('__fname', $name->type), Type::cell());
+        $dyn->scope = $this->currentLowerClass;
+        $body = new Invoke_($dyn, [new Spread_(new LoadLocal('__fa', Type::vec(Type::cell())), Type::unknown())], Type::unknown());
+        return $this->buildClosureNode($mir, ['__frecv', '__fname'], [$recv->type, $name->type], [$recv, $name], $body, Type::unknown());
+    }
+
     /** A string callable `"fn"` / `"C::m"` applied to `$astArgs`. */
     private function lowerStringCallable(string $name, array $astArgs): Node
     {
@@ -6317,6 +6327,7 @@ final class LowerFromAst implements Pass
     /** DynProp object/name via typed params (subclass fields, self-host offset). */
     private function dynPropObject(\Parser\Ast\DynProp $d): \Parser\Ast\Expr { return $d->object; }
     private function dynPropName(\Parser\Ast\DynProp $d): \Parser\Ast\Expr { return $d->name; }
+    private function dynPropNullsafe(\Parser\Ast\DynProp $d): bool { return $d->nullsafe; }
     /**
      * Return true/false when a declaration and all of its parent interfaces are
      * known, or null when an opaque parent prevents a sound answer.

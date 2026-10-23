@@ -3844,6 +3844,13 @@ trait EmitLlvmBuiltins
             $this->lastValueType = 'i64';
             return '';
         }
+        // A Closure / callable slot holds an env pointer (or a callable array):
+        // box_int below would wrap its address as an INTEGER cell.
+        if ($ek === Type::KIND_CLOSURE) {
+            $this->lastValue = $ev;
+            $this->lastValueType = 'i64';
+            return $this->boxCallableSlotIr();
+        }
         $elem = $t;
         $this->rt->needsTagged = true;
         $boxed = $this->ssa->allocReg();

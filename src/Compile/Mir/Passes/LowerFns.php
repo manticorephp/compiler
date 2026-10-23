@@ -791,6 +791,14 @@ trait LowerFns
                 }
                 return $this->lowerFcc($nm);
             }
+            // `$o->$name(...)`: a METHOD closure over ($o, $name) — the callee's
+            // DynProp would read a PROPERTY called $name.
+            if ($ck === 'DynProp') {
+                return $this->synthDynMethodClosure(
+                    $this->lowerExpr($this->dynPropObject($calleeAst)),
+                    $this->lowerExpr($this->dynPropName($calleeAst)),
+                );
+            }
             $cc = $this->coerceCallableArg(Type::closure(), $calleeAst);
             if ($cc !== null) { return $cc; }
             // A runtime callable VALUE becomes a real Closure, as php's `$c(...)` does
@@ -821,6 +829,18 @@ trait LowerFns
                 return $this->lowerStrSetCallable($vn, $stableName,
                     $this->stableCallablesAlt[$vn] ?? '', $expr->args);
             }
+        }
+        // Nullsafe `$obj?->$name(args)`: null short-circuits the whole call, args included.
+        if ($ck === 'DynProp' && $this->dynPropNullsafe($calleeAst)) {
+            $obj = $this->lowerExpr($this->dynPropObject($calleeAst));
+            $tmp = '__ns_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $cond = new Cmp(new StoreLocal($tmp, $obj, $obj->type), new NullConst(Type::null_()), '===');
+            $dyn = new DynProp_(new LoadLocal($tmp, $obj->type), $this->lowerExpr($this->dynPropName($calleeAst)), Type::cell());
+            $dyn->scope = $this->currentLowerClass;
+            $nsArgs = [];
+            foreach ($expr->args as $a) { $nsArgs[] = $this->lowerExpr($a); }
+            return new Ternary($cond, new NullConst(Type::null_()), new Invoke_($dyn, $nsArgs, Type::unknown()), Type::unknown());
         }
         $callee = $this->lowerExpr($calleeAst);
         $args = [];
