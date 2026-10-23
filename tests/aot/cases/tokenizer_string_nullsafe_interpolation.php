@@ -1,6 +1,5 @@
 <?php
 // __McTok (prelude tokenizer) does not lex the nullsafe operator in simple interpolation ("$a?->b"): the `?->b` stays string text; Zend lexes T_NULLSAFE_OBJECT_OPERATOR + T_STRING.
-// issue: #383
 // Zend:      "$a?->b" -> T_VARIABLE "$a", T_NULLSAFE_OBJECT_OPERATOR "?->", T_STRING "b"
 // Manticore: "$a?->b" -> T_VARIABLE "$a", T_ENCAPSED_AND_WHITESPACE "?->b"
 // Effect: explicit_string_variable wraps only `$a` (`{$a}?->b`), upstream `{$a?->b}`.
