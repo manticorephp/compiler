@@ -466,7 +466,7 @@ final class RefParser
                 $x = '{';
             }
             $this->i++;
-            if ($x === $open) {
+            if ($x === $open || ($open === '[' && $x === '#[')) {
                 $d++;
             } elseif ($x === $close) {
                 $d--;
