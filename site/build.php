@@ -1596,13 +1596,39 @@ function copy_tree(string $from, string $to, string $skip): void
 {
     @mkdir($to, 0777, true);
     foreach (scandir($from) as $f) {
-        if ($f === '.' || $f === '..' || $f === $skip) {
+        if ($f === '.' || $f === '..' || $f === $skip || substr($f, -3) === '.sh') {
             continue;
         }
         if (is_dir("$from/$f")) {
             copy_tree("$from/$f", "$to/$f", '');
         } else {
             copy("$from/$f", "$to/$f");
+        }
+    }
+}
+
+/**
+ * Appends ?v=<content hash> to the stylesheet and script URLs of every page, so a deploy is never
+ * served against a cached older asset.
+ */
+function bust_assets(string $dir, string $siteDir): void
+{
+    $hashes = [];
+    foreach (['style.css', 'app.js', 'vendor/highlight.min.js', 'vendor/llvm.min.js'] as $a) {
+        $hashes[$a] = substr(md5(file_get_contents($siteDir . '/' . $a)), 0, 8);
+    }
+    foreach (scandir($dir) as $f) {
+        if ($f === '.' || $f === '..') {
+            continue;
+        }
+        $p = $dir . '/' . $f;
+        if (is_dir($p)) {
+            bust_assets($p, $siteDir);
+        } elseif (substr($f, -5) === '.html') {
+            $html = preg_replace_callback('~(href|src)="((?:\.\./)*)(style\.css|app\.js|vendor/(?:highlight|llvm)\.min\.js)"~', function (array $m) use ($hashes): string {
+                return $m[1] . '="' . $m[2] . $m[3] . '?v=' . $hashes[$m[3]] . '"';
+            }, file_get_contents($p));
+            file_put_contents($p, $html);
         }
     }
 }
@@ -1731,5 +1757,7 @@ RefCtx::$docs = $set;
 ref_render($items, $out, $index, REPO_DIR, $search);
 
 file_put_contents("$out/search.json", json_encode($search, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+
+bust_assets($out, __DIR__);
 
 echo 'built ', count($all) + 2, " pages into $out\n";
