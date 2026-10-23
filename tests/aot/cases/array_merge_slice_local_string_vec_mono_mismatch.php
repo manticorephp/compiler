@@ -1,6 +1,5 @@
 <?php
 // A string[] local reassigned from array_merge()/array_slice() results is read back with the wrong element repr when unrelated bare-array calls of the same functions exist (SIGSEGV).
-// issue: #384
 /** @return string[] */
 function pieces(string $g): array
 {
