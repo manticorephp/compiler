@@ -4879,6 +4879,14 @@ trait EmitLlvmBuiltins
         // 0 (a `?array` return, `null ∪ string`, a null-seeded loop array), and
         // `=== null` already answers it that way.
         $ak = $a->type->kind;
+        // A static enum type carries the case ORDINAL (0 is a real case, not a
+        // null pointer), and a nullable enum is a cell — so it is never null.
+        if ($this->isEnumType($a->type) && ($kind === Type::KIND_OBJ || $kind === Type::KIND_NULL)) {
+            $out = $a->kind === Node::KIND_LOAD_LOCAL ? '' : $this->emitNode($a);
+            $this->lastValue = $kind === Type::KIND_OBJ ? '1' : '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         if ((($ak === Type::KIND_OBJ || $ak === Type::KIND_ARRAY || $ak === Type::KIND_STRING)
                 && ($kind === Type::KIND_NULL || $kind === $ak))
             || ($ak === Type::KIND_CLOSURE && $kind === Type::KIND_NULL)) {

@@ -321,6 +321,23 @@ trait LowerExprs
                     return new ArrayLit($elems, Type::unknown());
                 }
             }
+            // `get_class_vars($c)` / `get_object_vars($o)` answer by the CALLING scope's
+            // visibility. The scope is known here and nowhere later, so pass it on (`''` =
+            // no class) to the helper that filters; runtime-internal helpers (`__mc_*`,
+            // `get_mangled_object_vars`) want every property and keep the plain builtin.
+            if ($fnBare === 'get_class_vars' && \count($expr->args) === 1) {
+                return new Call('__mc_get_class_vars', [
+                    $this->lowerExpr($expr->args[0]),
+                    new StringConst($this->currentLowerClass, Type::string_()),
+                ], Type::assoc(Type::string_(), Type::cell()));
+            }
+            if ($fnBare === 'get_object_vars' && \count($expr->args) === 1
+                && $this->currentLowerClass === ''
+                && \strncmp($this->currentLowerFn, '__mc_', 5) !== 0
+                && $this->currentLowerFn !== 'get_mangled_object_vars') {
+                return new Call('__mc_public_object_vars', [$this->lowerExpr($expr->args[0])],
+                    Type::assoc(Type::string_(), Type::cell()));
+            }
             // `array_multisort($a, SORT_DESC, $b, …)` — every array argument is
             // BY REF and the SORT_* flags are interleaved positionally, which
             // needs a by-ref VARIADIC pack; that does not exist (the caller

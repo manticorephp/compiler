@@ -1488,6 +1488,7 @@ final class LowerFromAst implements Pass
             // top-level closure reading `$this` capture a non-existent local
             // instead of a late-bound placeholder).
             $this->currentLowerClass = '';
+            $this->currentLowerFn = '';
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
             // …nor parameters: a preceding function's by-ref names would
