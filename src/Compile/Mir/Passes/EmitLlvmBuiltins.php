@@ -895,8 +895,19 @@ trait EmitLlvmBuiltins
         $isClo = $this->ssa->allocReg();
         $out .= '  ' . $isClo . ' = icmp eq i64 ' . $cwm . ', '
               . (string)\Compile\MemoryAbi::CLOSURE_TAG_MAGIC . "\n";
+        // A Generator frame (string-shaped header, GENERATOR_TAG_MAGIC@-24) is an
+        // object too; left as an int it was never counted, so a cell holding the
+        // generator a closure returned leaked it.
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 -24\n";
+        $gw = $this->ssa->allocReg();
+        $out .= '  ' . $gw . ' = load i64, ptr ' . $gp . "\n";
+        $isGen = $this->ssa->allocReg();
+        $out .= '  ' . $isGen . ' = icmp eq i64 ' . $gw . ', ' . (string)\Compile\MemoryAbi::GENERATOR_TAG_MAGIC . "\n";
+        $isObjLike = $this->ssa->allocReg();
+        $out .= '  ' . $isObjLike . ' = or i1 ' . $isClo . ', ' . $isGen . "\n";
         $cb = $this->ssa->allocReg();
-        $out .= '  ' . $cb . ' = select i1 ' . $isClo . ', i64 ' . $ob . ', i64 ' . $intB . "\n";
+        $out .= '  ' . $cb . ' = select i1 ' . $isObjLike . ', i64 ' . $ob . ', i64 ' . $intB . "\n";
         $out .= '  store i64 ' . $cb . ', ptr ' . $slot . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
