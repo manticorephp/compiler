@@ -33,6 +33,7 @@
   <a href="docs/install.html">Install</a>
   <a href="docs/">Read the docs</a>
 </div>
+<p class="ver rv">Latest release <a href="https://github.com/manticorephp/compiler/releases">v{{version}}</a></p>
 
 <h2 class="rv">Same bytes as Zend</h2>
 <p class="rv">The Zend interpreter is the oracle. If <code>php</code> runs a program, the native binary prints the same output. Every plain-runnable test case is diffed against it.</p>
@@ -51,7 +52,7 @@
 <p class="rv"><a href="https://github.com/manticorephp/compiler#benchmarks">Full table</a></p>
 
 <h2 class="rv">More than PHP</h2>
-<ul class="rv">
+<ul class="rv fx">
   <li><a href="docs/async.html">Structured concurrency</a></li>
   <li><a href="docs/ffi.html">FFI</a> to any C library</li>
   <li><a href="docs/modules.html">Modules</a> and <a href="docs/attributes.html">compile-time attributes</a></li>
@@ -67,19 +68,6 @@ manticore version</code></pre><button class="copy">Copy</button></div>
 <footer>MIT licensed · <a href="https://github.com/manticorephp/compiler">manticorephp/compiler</a></footer>
 </main>
 
-<script>
-var d=document.documentElement,b=document.getElementById("theme"),m=["auto","light","dark"];
-function cur(){return d.dataset.theme||"auto"}
-function show(){b.title="Theme: "+cur()}
-b.onclick=function(){var n=m[(m.indexOf(cur())+1)%3];
-  if(n=="auto")delete d.dataset.theme;else d.dataset.theme=n;
-  try{n=="auto"?localStorage.removeItem("theme"):localStorage.setItem("theme",n)}catch(e){}show()};
-show();
-document.querySelectorAll(".copy").forEach(function(c){c.onclick=function(){
-  navigator.clipboard.writeText(c.previousElementSibling.innerText).then(function(){
-    c.textContent="Copied";setTimeout(function(){c.textContent="Copy"},1400)})}});
-var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){e.target.classList.add("in");io.unobserve(e.target)}})},{threshold:.15});
-document.querySelectorAll(".rv").forEach(function(e){io.observe(e)});
-</script>
+<script src="app.js"></script>
 </body>
 </html>
