@@ -1,6 +1,5 @@
 <?php
 // A method call on a value of unknown type (closure, null) is dispatched to an unrelated class's __call instead of the closure method / an Error
-// issue: #292
 class Plain {}
 class Magic { public function __call($n, $a) { return "magic:$n"; } }
 final class Reg {

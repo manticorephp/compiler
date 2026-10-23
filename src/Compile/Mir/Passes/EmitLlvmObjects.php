@@ -8554,6 +8554,68 @@ trait EmitLlvmObjects
         return $this->emitMethodCallInner($n);
     }
 
+    /**
+     * `$r->m(...)` on an ERASED receiver when no class declares `m` but some
+     * class has `__call`. The receiver is not necessarily one of those classes:
+     * a Closure answers `__invoke` / `call`, anything else is php's Error. So
+     * the receiver is spilled once and the arm is picked at run time instead
+     * of dispatching blindly into an unrelated class's `__call`.
+     */
+    private function emitErasedMagicCall(\Compile\Mir\MethodCall_ $mc): string
+    {
+        $out = $this->emitNode($mc->object);
+        $out .= $this->coerceToI64();
+        $cellV = $this->lastValue;
+        $rawV = $this->ssa->allocReg();
+        $out .= '  ' . $rawV . ' = and i64 ' . $cellV . ", 281474976710655\n";
+        $tag = \substr($this->ssa->allocReg(), 2);
+        $cellName = '__emc' . $tag;
+        $fnName = '__emf' . $tag;
+        $cellSlot = $this->ssa->allocReg();
+        $fnSlot = $this->ssa->allocReg();
+        $out .= '  ' . $cellSlot . " = alloca i64\n";
+        $out .= '  store i64 ' . $cellV . ', ptr ' . $cellSlot . "\n";
+        $out .= '  ' . $fnSlot . " = alloca i64\n";
+        $out .= '  store i64 ' . $rawV . ', ptr ' . $fnSlot . "\n";
+        $this->locals->slots[$cellName] = $cellSlot;
+        $this->locals->slots[$fnName] = $fnSlot;
+        $cell = Type::cell();
+        $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
+        $t = fn (): Node => new \Compile\Mir\LoadLocal($cellName, $cell);
+        $fnT = fn (): Node => new \Compile\Mir\LoadLocal($fnName, Type::closure());
+        $call = fn (string $f, array $args, Type $ty): Node => new \Compile\Mir\Call($f, $args, $ty);
+        $err = fn (Node $msg): Node => new \Compile\Mir\Call('__mir_throw_error', [$msg], $cell);
+        $lm = \strtolower($mc->method);
+        if ($lm === '__invoke') {
+            $onClosure = new \Compile\Mir\Invoke_($fnT(), $mc->args, $cell);
+        } elseif ($lm === 'call') {
+            $onClosure = new \Compile\Mir\MethodCall_($fnT(), 'call', $mc->args, $cell);
+        } else {
+            $onClosure = $err($str('Call to undefined method Closure::' . $mc->method . '()'));
+        }
+        $elems = [];
+        foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+        $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
+        $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
+        $isObj = $call('is_object', [$t()], Type::bool_());
+        $hasMagic = new \Compile\Mir\Ternary($isObj, $call('method_exists', [$t(), $str('__call')], Type::bool_()),
+            new \Compile\Mir\BoolConst(false, Type::bool_()), Type::bool_());
+        $missing = new \Compile\Mir\Ternary($isObj,
+            new \Compile\Mir\Concat(new \Compile\Mir\Concat($str('Call to undefined method '),
+                $call('get_class', [$t()], Type::string_())), $str('::' . $mc->method . '()')),
+            new \Compile\Mir\Concat($str('Call to a member function ' . $mc->method . '() on '),
+                $call('get_debug_type', [$t()], Type::string_())),
+            Type::string_());
+        $tree = new \Compile\Mir\Ternary(new \Compile\Mir\Instanceof_($t(), 'Closure'), $onClosure,
+            new \Compile\Mir\Ternary($hasMagic, $viaMagic, $err($missing), $cell), $cell);
+        $out .= $this->emitNode($tree);
+        if ($mc->type->kind !== Type::KIND_CELL && $mc->type->kind !== Type::KIND_UNKNOWN
+            && $mc->type->kind !== Type::KIND_VOID) {
+            $out .= $this->unboxCellToType($mc->type);
+        }
+        return $out;
+    }
+
     private function emitMethodCallInner(\Compile\Mir\MethodCall_ $n): string
     {
         $mc = $n;
@@ -8694,6 +8756,9 @@ trait EmitLlvmObjects
         // against the resolved callee's signature. Recorded in docs/ROADMAP.md.
         if (!isset($this->classes[$mcStatic]) && $this->anyClassDeclares('__call')
             && !$this->anyClassDeclares($mc->method)) {
+            if ($mc->object->type->kind === Type::KIND_CELL || $mc->object->type->kind === Type::KIND_UNKNOWN) {
+                return $this->emitErasedMagicCall($mc);
+            }
             $elems = [];
             foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
             $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
