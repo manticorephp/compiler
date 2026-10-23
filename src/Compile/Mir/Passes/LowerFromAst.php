@@ -100,6 +100,7 @@ final class LowerFromAst implements Pass
     use LowerSuperglobals;
     use LowerAttrChecks;
     use LowerClassDeclChecks;
+    use LowerSigCompat;
 
     public const NAME = 'lower-from-ast';
 
@@ -994,6 +995,7 @@ final class LowerFromAst implements Pass
         // visible only here, since they never get a ClassDef.
         $this->checkAttributes($stmts, $preludeCount);
         // Linking contracts (final / abstract / visibility); see LowerClassDeclChecks.
+        $this->markPreludeClasses($stmts, $preludeCount);
         $this->checkClassDecls();
         // The `Ffi\*` attributes are ours, not Zend's, so unlike the reserved
         // set they are checked across the WHOLE statement list — prelude

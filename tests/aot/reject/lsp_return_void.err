@@ -1,0 +1,1 @@
+Declaration of B::f(): void must be compatible with A::f(): mixed

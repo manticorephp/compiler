@@ -1,0 +1,1 @@
+Declaration of C::f(I&J&Countable $x) must be compatible with A::f(I&J $x)

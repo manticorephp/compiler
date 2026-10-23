@@ -1,0 +1,1 @@
+Declaration of B::f(): void must be compatible with A::f(?int $a = null, string $s = 'a long str...', array $r = [], array $n = [...], float $d = 1.5, int $c = PHP_INT_MAX, $k = self::X, int ...$more): static

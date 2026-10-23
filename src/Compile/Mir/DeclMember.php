@@ -17,5 +17,8 @@ final class DeclMember
         public bool $isFinal,
         public string $declClass,
         public bool $fromTrait = false,
+        public ?\Parser\Ast\MethodDecl $decl = null,
+        public ?string $type = null,
+        public bool $isReadonly = false,
     ) {}
 }

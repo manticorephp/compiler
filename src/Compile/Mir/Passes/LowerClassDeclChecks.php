@@ -17,7 +17,7 @@ use Compile\Mir\DeclTable;
  * neither constant modifiers nor source lines). Covers prelude and user classes
  * alike. A class whose ancestry includes a type with no declaration here (a
  * library class) is checked only for the rules that need no further ancestor.
- * Signature (LSP) compatibility is NOT checked.
+ * Signature, property-type and constant-type compatibility: LowerSigCompat.
  */
 trait LowerClassDeclChecks
 {
@@ -56,6 +56,10 @@ trait LowerClassDeclChecks
                     $this->declFail('Class ' . $cls . ' cannot extend final class ' . $pn, $span);
                 }
                 $parentTable = $this->declTableOf($pn);
+                if ($pd->isReadonly !== $d->isReadonly && !$this->lspSkipClass($pn)) {
+                    $this->declFail(($d->isReadonly ? 'Readonly class ' : 'Non-readonly class ') . $cls
+                        . ' cannot extend ' . ($pd->isReadonly ? 'readonly' : 'non-readonly') . ' class ' . $pn, $span);
+                }
             }
         }
         $ifaceTables = [];
@@ -137,6 +141,22 @@ trait LowerClassDeclChecks
                 $mspan);
         }
         $this->checkVisibility($cls . '::' . $mname . '()', $vis, $inh, $mspan);
+        if ($m->isAbstract && !$inh->isAbstract && !$this->lspSkipClass($inh->declClass)) {
+            $this->declFail('Cannot make non abstract method ' . $inh->declClass . '::' . $inh->name
+                . '() abstract in class ' . $cls, $mspan);
+        }
+        $seen = [];
+        $cands = [];
+        if ($parentTable !== null) { $cands[] = $parentTable; }
+        foreach ($ifaceTables as $it) { $cands[] = $it; }
+        foreach ($cands as $tbl) {
+            $im = $tbl->methods[$key] ?? null;
+            if ($im === null || $im->isStatic !== $m->isStatic || $im->visibility === 'private') { continue; }
+            $id = $im->declClass . '::' . $im->name;
+            if (isset($seen[$id])) { continue; }
+            $seen[$id] = true;
+            $this->checkSigCompat($cls, $m, $im, $mspan);
+        }
     }
 
     /** @param DeclTable[] $ifaceTables */
@@ -158,6 +178,7 @@ trait LowerClassDeclChecks
         }
         $this->checkVisibility($cls . '::' . $name, $c->visibility === '' ? 'public' : $c->visibility,
             $inh, $classSpan);
+        $this->checkConstType($cls, $c, $inh, $classSpan);
     }
 
     private function checkOwnProps(\Parser\Ast\ClassDecl $d, string $cls, ?DeclTable $parentTable,
@@ -166,17 +187,24 @@ trait LowerClassDeclChecks
         if ($parentTable === null) { return; }
         foreach ($d->properties as $p) {
             $inh = $parentTable->props[$p->name] ?? null;
-            if ($inh === null || $inh->isStatic !== $p->isStatic) { continue; }
+            if ($inh === null || $inh->visibility === 'private') { continue; }
+            if (!$this->checkPropCompat($cls, $p->name, $p->isStatic, $p->isReadonly || $d->isReadonly,
+                $inh, $classSpan)) { continue; }
             $this->checkVisibility($cls . '::$' . $p->name,
                 $p->visibility === '' ? 'public' : $p->visibility, $inh, $classSpan);
+            $this->checkPropType($cls, $p->name, $p->typeHint, false, $inh, $classSpan);
         }
         foreach ($d->methods as $m) {
             if (\strtolower($m->name) !== '__construct') { continue; }
             foreach ($m->params as $par) {
                 if ($par->promoted === '') { continue; }
                 $inh = $parentTable->props[$par->name] ?? null;
-                if ($inh === null || $inh->isStatic) { continue; }
+                if ($inh === null || $inh->visibility === 'private') { continue; }
+                if (!$this->checkPropCompat($cls, $par->name, false, $par->promotedReadonly || $d->isReadonly,
+                    $inh, $classSpan)) { continue; }
                 $this->checkVisibility($cls . '::$' . $par->name, $par->promoted, $inh, $classSpan);
+                $this->checkPropType($cls, $par->name, $par->typeHint,
+                    $par->default !== null && $par->default->kind === 'NullLiteral', $inh, $classSpan);
             }
         }
     }
@@ -225,21 +253,24 @@ trait LowerClassDeclChecks
         foreach ($d->methods as $m) {
             $t->methods[\strtolower($m->name)] = new DeclMember($m->name,
                 $m->visibility === '' ? 'public' : $m->visibility, $m->isStatic,
-                $m->isAbstract || $isIface, $m->isFinal, $cls);
+                $m->isAbstract || $isIface, $m->isFinal, $cls, false, $m);
         }
         foreach ($d->consts as $c) {
             $t->consts[$c->name] = new DeclMember($c->name,
-                $c->visibility === '' ? 'public' : $c->visibility, false, false, $c->isFinal, $cls);
+                $c->visibility === '' ? 'public' : $c->visibility, false, false, $c->isFinal, $cls, false, null,
+                $c->typeHint);
         }
         foreach ($d->properties as $p) {
             $t->props[$p->name] = new DeclMember($p->name,
-                $p->visibility === '' ? 'public' : $p->visibility, $p->isStatic, false, false, $cls);
+                $p->visibility === '' ? 'public' : $p->visibility, $p->isStatic, false, false, $cls, false, null,
+                $p->typeHint, $p->isReadonly || $d->isReadonly);
         }
         foreach ($d->methods as $m) {
             if (\strtolower($m->name) !== '__construct') { continue; }
             foreach ($m->params as $par) {
                 if ($par->promoted === '') { continue; }
-                $t->props[$par->name] = new DeclMember($par->name, $par->promoted, false, false, false, $cls);
+                $t->props[$par->name] = new DeclMember($par->name, $par->promoted, false, false, false, $cls, false,
+                    null, $par->typeHint, $par->promotedReadonly || $d->isReadonly);
             }
         }
 
@@ -261,12 +292,12 @@ trait LowerClassDeclChecks
                     if ($pm !== null && !$pm->isAbstract) { continue; }
                 }
                 $t->methods[$key] = new DeclMember($mem->name, $mem->visibility, $mem->isStatic,
-                    $mem->isAbstract, $mem->isFinal, $cls, true);
+                    $mem->isAbstract, $mem->isFinal, $cls, true, $mem->decl);
             }
             foreach ($tt->props as $key => $mem) {
                 if (!isset($t->props[$key])) {
                     $t->props[$key] = new DeclMember($mem->name, $mem->visibility, $mem->isStatic,
-                        false, false, $cls, true);
+                        false, false, $cls, true, null, $mem->type, $mem->isReadonly);
                 }
             }
         }
@@ -276,7 +307,7 @@ trait LowerClassDeclChecks
             if ($src === null || isset($t->methods[\strtolower($a->alias)])) { continue; }
             $t->methods[\strtolower($a->alias)] = new DeclMember($a->alias,
                 $a->visibility === '' ? $src->visibility : $a->visibility, $src->isStatic,
-                $src->isAbstract, $src->isFinal, $cls, true);
+                $src->isAbstract, $src->isFinal, $cls, true, $src->decl);
         }
 
         if ($parent !== null) {
