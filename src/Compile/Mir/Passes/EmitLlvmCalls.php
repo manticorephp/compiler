@@ -2005,6 +2005,7 @@ trait EmitLlvmCalls
             $out .= $noArrL . ":\n";
         }
         if (($ck0 === Node::KIND_LOAD_LOCAL || $ck0 === Node::KIND_PROPERTY_ACCESS)
+            && $n->srcArgc !== -2
             && $this->anyClassHasMethod('__invoke')) {
             $isObjT = $this->ssa->allocReg();
             $out .= '  ' . $isObjT . ' = icmp eq i64 ' . $tag . ", 8\n";
@@ -2023,7 +2024,9 @@ trait EmitLlvmCalls
             $out .= $objL . ":\n";
             $mc = new \Compile\Mir\MethodCall_($n->callee, '__invoke', $n->args, Type::cell());
             $mc->srcArgc = \count($n->args);
+            $this->inErasedInvokeArm = true;
             $out .= $this->emitNode($mc);
+            $this->inErasedInvokeArm = false;
             $out .= $this->coerceToI64();
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
