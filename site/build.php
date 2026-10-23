@@ -1643,8 +1643,13 @@ foreach (glob(REPO_DIR . '/docs/*.md') as $f) {
     $files[] = 'docs/' . basename($f);
 }
 $design = [];
+// Only the notes that describe how the compiler is built. Plans, decisions and epics stay in the
+// repository: they go stale, and a link to one from the site falls back to GitHub.
+const INTERNALS = ['mir', 'memory-abi', 'refcount-cow', 'ownership-flow', 'reference-cells', 'monomorphization', 'module-system', 'native-buffers', 'stage0-bootstrap', 'late-static-binding'];
 foreach (glob(REPO_DIR . '/docs/design/*.md') as $f) {
-    $design[] = 'docs/design/' . basename($f);
+    if (in_array(basename($f, '.md'), INTERNALS, true)) {
+        $design[] = 'docs/design/' . basename($f);
+    }
 }
 sort($files);
 sort($design);
@@ -1678,7 +1683,7 @@ foreach ($files as $p) {
     }
 }
 $search = [];
-$groups = ['Guides' => $guides, 'Reference' => $ref, 'Design notes' => $design];
+$groups = ['Guides' => $guides, 'Reference' => $ref, 'Internals' => $design];
 
 foreach ($all as $p) {
     $depth = substr_count($p, '/');          // docs/x.md = 1, docs/design/x.md = 2
