@@ -138,6 +138,24 @@ trait LowerExprs
             // gates that were already bare (func_get_args, sscanf, …) have
             // always made the same trade.
             $fnBare = $this->bareName($fn);
+            // php's ZIP form: the prelude `array_map` is single-array on purpose (a variadic
+            // pack destabilised the self-host), so N arrays go to the zip helper.
+            if ($fnBare === 'array_map' && \count($expr->args) >= 3) {
+                $zip = true;
+                foreach ($expr->args as $a) {
+                    if ($a->kind === 'NamedArg' || $a->kind === 'Spread') { $zip = false; }
+                }
+                if ($zip) {
+                    $els = [];
+                    $zi = 1;
+                    while ($zi < \count($expr->args)) {
+                        $els[] = new \Parser\Ast\ArrayElement(null, $expr->args[$zi]);
+                        $zi = $zi + 1;
+                    }
+                    return $this->lowerCallExpr(\Parser\Ast\Expr::call('__mc_array_map_zip',
+                        [$expr->args[0], \Parser\Ast\Expr::arrayLit($els, $expr->span)], $expr->span, true));
+                }
+            }
             // `__mc_raw_prop_store($obj, 'prop', $v)` — ReflectSynth's set-hook-bypassing
             // write (`ReflectionProperty::setRawValue`): the store itself, hook skipped.
             if ($fnBare === '__mc_raw_prop_store' && \count($expr->args) === 3
