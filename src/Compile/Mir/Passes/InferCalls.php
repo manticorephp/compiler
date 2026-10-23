@@ -1044,7 +1044,8 @@ trait InferCalls
         foreach ($this->classes as $cd) {
             if ($this->resolveMethodClass($cd->name, $method) !== '') { return null; }
             if ($magic === null && $this->classDefinesMagic($cd->name, '__call')) {
-                $magic = $this->magicReturnType($cd->name, '__call') ?? Type::cell();
+                // Any value may sit behind an erased receiver (a closure, null): __call answers only some.
+                $magic = Type::cell();
             }
         }
         return $magic;

@@ -475,6 +475,13 @@ trait EmitLlvmCalls
                 $flavors[] = 'ref:' . (isset($this->locals->ownedBoxes[$bn]) ? $this->ownedBoxFlavor($bn) : '');
                 continue;
             }
+            // The late-bound `$this` placeholder of a top-level closure: bind
+            // stores the RAW object pointer there, which a cell flavor ignores.
+            if ($i === 1 && $c->kind === Node::KIND_NULL_CONST
+                && ($this->closureHasThis['__closure_' . (string)$cl->id] ?? false)) {
+                $flavors[] = 'obj';
+                continue;
+            }
             $t = $c->type;
             $k = $t->kind;
             if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) { $flavors[] = 'cell'; continue; }
