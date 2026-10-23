@@ -655,9 +655,10 @@ trait EmitLlvmObjects
         // bare 16-byte header and ran on — `new \WeakMap()` then took array
         // paths over an object and SIGSEGV'd (symfony's ProgressBar).
         if ($cd === null) {
+            $what = isset($this->interfaceNames[$className]) ? 'interface ' : (isset($this->enums[$className]) ? 'enum ' : '');
             $thr = new \Compile\Mir\Call(
                 '__mir_throw_error',
-                [new \Compile\Mir\StringConst('Class "' . $className . '" not found', Type::string_())],
+                [new \Compile\Mir\StringConst($what !== '' ? 'Cannot instantiate ' . $what . $className : 'Class "' . $className . '" not found', Type::string_())],
                 Type::cell(),
             );
             $out = $this->emitBuiltin($thr) ?? '';
@@ -1231,6 +1232,20 @@ trait EmitLlvmObjects
     }
 
     private function emitPropertyAccess(PropertyAccess_ $n): string
+    {
+        $acls = $n->object->type->kind === Type::KIND_OBJ ? ($n->object->type->class ?? '') : '';
+        $aerr = $acls !== '' ? $this->propAccessError($acls, $n->property) : '';
+        if ($aerr === '') { return $this->emitPropertyAccessAllowed($n); }
+        $getCls = $this->resolveMethodClass($acls, '__get');
+        if ($getCls !== '') {
+            $out = $this->emitNode($n->object);
+            $out .= $this->coerceToPtr();
+            return $out . $this->emitMagicGetCell($getCls, $this->lastValue, $n->property, $n->type);
+        }
+        return $this->emitAccessDenied($n->object, $aerr) . $this->emitPropertyAccessAllowed($n);
+    }
+
+    private function emitPropertyAccessAllowed(PropertyAccess_ $n): string
     {
         $pa = $n;
         // `$byte->value` on a `#[TypeDef]`: the value IS the property. No load, no
@@ -2029,6 +2044,9 @@ trait EmitLlvmObjects
         $hasBag = $this->bagClassNames() !== [];
         $out = $this->emitObjPtrOf($n->object);
         $objPtr = $this->lastValue;
+        if (($prop === 'name' || $prop === 'value') && $this->enums !== [] && $n->object->kind === Node::KIND_LOAD_LOCAL) {
+            $out .= $this->emitEnumWriteGuard($n->object, $objPtr, $prop);
+        }
         // Evaluate the RHS once; keep both a boxed-cell form (for cell slots) and
         // the payload retained once (the object takes an owning reference — only
         // one arm runs at runtime, so a single retain is correct).
@@ -2082,6 +2100,42 @@ trait EmitLlvmObjects
               . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
         $this->lastValue = $cellVal;
         $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** An enum case reached through an erased carrier is read-only: its
+     *  singleton is told by the sentinel at `data-8`, and the write raises php's Error. */
+    private function emitEnumWriteGuard(Node $recv, string $objPtr, string $prop): string
+    {
+        $mp = $this->ssa->allocReg();
+        $out = '  ' . $mp . ' = getelementptr inbounds i8, ptr ' . $objPtr . ", i64 -8\n";
+        $mw = $this->ssa->allocReg();
+        $out .= '  ' . $mw . ' = load i64, ptr ' . $mp . "\n";
+        $isEnum = $this->ssa->allocReg();
+        $out .= '  ' . $isEnum . ' = icmp eq i64 ' . $mw . ', ' . (string)\Compile\MemoryAbi::ENUM_TAG_MAGIC . "\n";
+        $thr = $this->ssa->allocLabel('enum.ro');
+        $ok = $this->ssa->allocLabel('enum.rw');
+        $out .= '  br i1 ' . $isEnum . ', label %' . $thr . ', label %' . $ok . "\n" . $thr . ":\n";
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $msg = new \Compile\Mir\Concat(
+            new \Compile\Mir\Concat(
+                new \Compile\Mir\StringConst('Cannot modify readonly property ', Type::string_()),
+                new \Compile\Mir\Call('get_class', [$recv], Type::string_()),
+            ),
+            new \Compile\Mir\StringConst('::$' . $prop, Type::string_()),
+        );
+        $out .= $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                $msg,
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        ));
+        $out .= '  br label %' . $ok . "\n" . $ok . ":\n";
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
         return $out;
     }
 
@@ -2674,6 +2728,91 @@ trait EmitLlvmObjects
             $this->sigs->returnType[$declCls . '____get'] ?? null);
     }
 
+    /** The class the function being emitted was written in: '' for global code,
+     *  null where its scope is not knowable (a closure — rebindable — a runtime
+     *  thunk or built-in code), where no access is checked. */
+    private function accessScope(): ?string
+    {
+        $f = $this->frame;
+        if ($f->isMain) { return ''; }
+        if ($f->isPrelude || $f->isClosure || $f->isTrampoline) { return null; }
+        $nm = $f->name;
+        if (\strncmp($nm, '__', 2) === 0) { return null; }
+        $best = '';
+        $i = \strpos($nm, '__', 1);
+        while ($i !== false) {
+            $c = \substr($nm, 0, $i);
+            if (isset($this->classes[$c])) { $best = $c; }
+            $i = \strpos($nm, '__', $i + 1);
+        }
+        return $best;
+    }
+
+    /** A reified specialization (`Box$of$int`) answers for its origin. */
+    private function accessCanon(string $cls): string
+    {
+        $cd = $this->classes[$cls] ?? null;
+        return $cd !== null && $cd->originClass !== '' ? $cd->originClass : $cls;
+    }
+
+    private function accessIsA(string $c, string $anc): bool
+    {
+        for ($d = 0; $c !== '' && $d < 64; $d = $d + 1) {
+            if ($c === $anc) { return true; }
+            $cd = $this->classes[$c] ?? null;
+            if ($cd === null) { return false; }
+            $c = $cd->parent;
+        }
+        return false;
+    }
+
+    /** Whether code in the current scope may NOT touch a `$vis` member declared in `$owner`. */
+    private function accessDenied(string $vis, string $owner): bool
+    {
+        if ($vis === 'public' || $vis === '' || $owner === '') { return false; }
+        $s = $this->accessScope();
+        if ($s === null) { return false; }
+        if ($vis === 'private') { return $this->accessCanon($s) !== $this->accessCanon($owner); }
+        return $s === '' || !($this->accessIsA($s, $owner) || $this->accessIsA($owner, $s));
+    }
+
+    private function accessScopeLabel(): string
+    {
+        $s = $this->accessScope();
+        return $s === null || $s === '' ? 'global scope' : 'scope ' . $s;
+    }
+
+    /** php's message for `$obj->prop` on a `$cls` receiver that the current scope may not reach, '' when allowed. */
+    private function propAccessError(string $cls, string $prop): string
+    {
+        $cd = $this->classes[$cls] ?? null;
+        $pm = $cd === null ? null : ($cd->propertyMeta[$prop] ?? null);
+        if ($pm === null || $pm->isStatic || $pm->visibility === 'public') { return ''; }
+        // An ancestor's private property is invisible to the subclass, not forbidden:
+        // php treats the name as a dynamic one there.
+        if ($pm->visibility === 'private' && $this->accessCanon($pm->declaringClass) !== $this->accessCanon($cls)) { return ''; }
+        if (!$this->accessDenied($pm->visibility, $pm->declaringClass)) { return ''; }
+        return 'Cannot access ' . $pm->visibility . ' property ' . $cls . '::$' . $prop;
+    }
+
+    /** php's message for `$obj->m()` on a `$cls` receiver that the current scope may not reach, '' when allowed. */
+    private function methodAccessError(string $cls, string $method): string
+    {
+        $cd = $this->classes[$cls] ?? null;
+        $mm = $cd === null ? null : ($cd->methodMeta[$method] ?? null);
+        if ($mm === null || !$this->accessDenied($mm->visibility, $mm->declaringClass)) { return ''; }
+        return 'Call to ' . $mm->visibility . ' method ' . $mm->declaringClass . '::' . $method
+            . '() from ' . $this->accessScopeLabel();
+    }
+
+    /** `$recv` evaluated for its effects, then a throw of `$msg` — and the real access follows
+     *  in code that never runs, so the node still types and emits as it always did. */
+    private function emitAccessDenied(Node $recv, string $msg): string
+    {
+        $out = $recv->kind === Node::KIND_LOAD_LOCAL ? '' : $this->emitNode($recv);
+        return $out . $this->emitThrowIf('true', 'Error', $msg);
+    }
+
     /** The class in `$cls`'s ancestry that DECLARES `$prop` as `readonly`, or ''
      *  — only that class's scope may write the slot. */
     private function readonlyDeclClass(string $cls, string $prop): string
@@ -2711,6 +2850,31 @@ trait EmitLlvmObjects
     }
 
     private function emitStoreProperty(\Compile\Mir\StoreProperty $n): string
+    {
+        $acls = $n->object->type->kind === Type::KIND_OBJ ? ($n->object->type->class ?? '') : '';
+        if ($acls !== '' && isset($this->enums[$acls]) && ($n->property === 'name' || $n->property === 'value')) {
+            return $this->emitNode($n->value)
+                . $this->emitThrowError('Cannot modify readonly property ' . $acls . '::$' . $n->property);
+        }
+        $aerr = $acls !== '' ? $this->propAccessError($acls, $n->property) : '';
+        if ($aerr === '') { return $this->emitStorePropertyAllowed($n); }
+        $setCls = $this->resolveMethodClass($acls, '__set');
+        if ($setCls !== '') {
+            $out = $this->emitNode($n->object);
+            $out .= $this->coerceToPtr();
+            $objPtr = $this->lastValue;
+            $out .= $this->emitNode($n->value);
+            $out .= $this->boxToCell($n->value->type, $n->value);
+            $val = $this->lastValue;
+            $out .= $this->emitMagicCall($setCls, '__set', $objPtr, $n->property, $val);
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        return $this->emitAccessDenied($n->object, $aerr) . $this->emitStorePropertyAllowed($n);
+    }
+
+    private function emitStorePropertyAllowed(\Compile\Mir\StoreProperty $n): string
     {
         // A UNION receiver has no single layout: dispatch the store on the runtime
         // class_id to each atom's slot offset (mirrors emitUnionPropertyAccess).
@@ -8536,6 +8700,23 @@ trait EmitLlvmObjects
     }
 
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
+    {
+        $acls = $n->object->type->kind === Type::KIND_OBJ ? ($n->object->type->class ?? '') : '';
+        $aerr = $acls !== '' ? $this->methodAccessError($acls, $n->method) : '';
+        if ($aerr !== '') {
+            if ($this->resolveMethodClass($acls, '__call') !== '') {
+                $elems = [];
+                foreach ($n->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+                $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
+                $nameNode = new \Compile\Mir\StringConst($n->method, Type::string_());
+                return $this->emitMethodCall(new \Compile\Mir\MethodCall_($n->object, '__call', [$nameNode, $argsArr], $n->type));
+            }
+            return $this->emitAccessDenied($n->object, $aerr) . $this->emitMethodCallChecked($n);
+        }
+        return $this->emitMethodCallChecked($n);
+    }
+
+    private function emitMethodCallChecked(\Compile\Mir\MethodCall_ $n): string
     {
         $guard = $this->nullReceiverGuard($n);
         if ($guard !== '') { return $guard . $this->emitMethodCallUnguarded($n); }

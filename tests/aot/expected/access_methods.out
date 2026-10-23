@@ -1,0 +1,14 @@
+Error: Call to private method A::priv() from global scope
+Error: Call to protected method A::prot() from global scope
+Error: Call to protected method A::prot() from global scope
+Error: Call to private method A::priv() from global scope
+privprot
+privprot
+priv
+priv
+prot
+prot
+call:hidden
+tp
+Error: Call to private method UT::tp() from global scope
+priv

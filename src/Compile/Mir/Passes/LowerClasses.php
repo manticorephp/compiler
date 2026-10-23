@@ -1250,6 +1250,21 @@ trait LowerClasses
         return $m->body;
     }
 
+    /** The class that declares constant `$name` along `$className`'s `extends` chain, '' if none. */
+    private function findClassConstOwner(string $className, string $name): string
+    {
+        $decl = $this->classDecls[$className] ?? null;
+        if ($decl === null) { return ''; }
+        foreach ($decl->consts as $const) {
+            if ($const->name === $name) { return $className; }
+        }
+        foreach ($decl->extends as $parentName) {
+            $found = $this->findClassConstOwner(\ltrim($parentName, '\\'), $name);
+            if ($found !== '') { return $found; }
+        }
+        return '';
+    }
+
     /**
      * Resolve `Class::CONST` to its initializer expression, walking the
      * class's own consts, its trait uses, then its parent chain. Null if

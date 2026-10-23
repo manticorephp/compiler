@@ -214,6 +214,13 @@ final class LowerFromAst implements Pass
      *  no receiver to forward, however the callee is declared. */
     private bool $currentLowerFnHasThis = false;
 
+    /** Closures being lowered around the current expression: a closure's scope
+     *  can be rebound at run time, so no member-access check is made inside one. */
+    private int $lowerClosureDepth = 0;
+
+    /** The statement being lowered belongs to the built-in prelude. */
+    private bool $lowerInPrelude = false;
+
     /** `@template` names declared by the class being lowered, in order.
      *  @var string[] */
     private array $currentTypeParams = [];
@@ -1433,6 +1440,7 @@ final class LowerFromAst implements Pass
             // `dump-mir` can hide them by default (golden snapshots stay
             // focused on user code, not boilerplate).
             $isPrelude = $stmtIdx < $preludeCount;
+            $this->lowerInPrelude = $isPrelude;
             $stmtIdx = $stmtIdx + 1;
             // FunctionStmt wraps FunctionDecl in `$decl`; the kind
             // discriminant is 'Function' (mirrors how ClassStmt
@@ -3563,7 +3571,9 @@ final class LowerFromAst implements Pass
         if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
         $savedClosureMagic = $this->closureMagic;
         $this->closureMagic = $this->closureMagicName($expr->span);
+        $this->lowerClosureDepth = $this->lowerClosureDepth + 1;
         $body = $this->lowerBlockNode($expr->body);
+        $this->lowerClosureDepth = $this->lowerClosureDepth - 1;
         $this->closureMagic = $savedClosureMagic;
         $this->currentLowerFnHasThis = $savedHasThis;
         $isGen = $this->sawYield;
@@ -3620,7 +3630,9 @@ final class LowerFromAst implements Pass
         if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
         $savedClosureMagic = $this->closureMagic;
         $this->closureMagic = $this->closureMagicName($expr->span);
+        $this->lowerClosureDepth = $this->lowerClosureDepth + 1;
         $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
+        $this->lowerClosureDepth = $this->lowerClosureDepth - 1;
         $this->closureMagic = $savedClosureMagic;
         $this->currentLowerFnHasThis = $savedHasThis;
         $afIsGen = $this->sawYield;
@@ -6795,6 +6807,8 @@ final class LowerFromAst implements Pass
     {
         // `new self` / `new static` / `new parent` → concrete class.
         $cls = $this->resolveStaticClass($expr->class);
+        $den = $this->newAccessError($cls);
+        if ($den !== '') { return $this->throwErrorExpr($den); }
         $params = $this->resolveMethodParams($cls, '__construct');
         if ($params !== null) {
             $args = $this->defaultFillArgs($params, $expr->args, $this->resolveMethodDeclClass($cls, '__construct'));
@@ -7169,6 +7183,79 @@ final class LowerFromAst implements Pass
         return false;
     }
 
+    /** Whether the lexical scope may NOT touch a `$vis` member declared in `$owner`.
+     *  False where the scope is not knowable: a closure (rebindable), built-in code, or
+     *  a `__mc_*` function the compiler synthesises (reflection and trampolines reach any member). */
+    private function lowerAccessDenied(string $vis, string $owner): bool
+    {
+        if ($vis === 'public' || $vis === '' || $owner === '') { return false; }
+        if ($this->lowerClosureDepth > 0 || $this->lowerInPrelude) { return false; }
+        if (\strncmp($this->currentLowerFn, '__mc_', 5) === 0) { return false; }
+        $s = $this->currentLowerClass;
+        if ($s !== '' && isset($this->classTable[$s]) && $this->classTable[$s]->isPreludeClass) { return false; }
+        if ($vis === 'private') { return \strcasecmp($s, $owner) !== 0; }
+        return $s === '' || !($this->lowerClassIsA($s, $owner) || $this->lowerClassIsA($owner, $s));
+    }
+
+    private function lowerScopeLabel(): string
+    {
+        return $this->currentLowerClass === '' ? 'global scope' : 'scope ' . $this->currentLowerClass;
+    }
+
+    /** php's message for `Class::$prop` read or written from a scope that may not, '' when allowed. */
+    private function staticPropAccessError(string $rawClass, string $rawName): string
+    {
+        $cls = \ltrim($this->resolveStaticClass($rawClass), '\\');
+        $pn = $rawName;
+        if (\strlen($pn) > 0 && $pn[0] === '$') { $pn = \substr($pn, 1); }
+        $dc = $this->staticPropDeclClass($cls, $pn);
+        $cd = $dc === '' ? null : ($this->classTable[$dc] ?? null);
+        $pm = $cd === null ? null : ($cd->propertyMeta[$pn] ?? null);
+        if ($pm === null || !$this->lowerAccessDenied($pm->visibility, $pm->declaringClass)) { return ''; }
+        return 'Cannot access ' . $pm->visibility . ' property ' . $cls . '::$' . $pn;
+    }
+
+    /** php's message for `Class::CONST` from a scope that may not read it, '' when allowed. */
+    private function classConstAccessError(string $cname, string $name): string
+    {
+        $owner = $this->findClassConstOwner(\ltrim($cname, '\\'), $name);
+        $od = $owner === '' ? null : ($this->classDecls[$owner] ?? null);
+        if ($od === null) { return ''; }
+        foreach ($od->consts as $const) {
+            if ($const->name !== $name) { continue; }
+            if (!$this->lowerAccessDenied($const->visibility, $owner)) { return ''; }
+            return 'Cannot access ' . $const->visibility . ' constant ' . \ltrim($cname, '\\') . '::' . $name;
+        }
+        return '';
+    }
+
+    /** php's message for `C::m()` that is out of reach or names an instance method with no `$this` to give it; '__callStatic' when the class's magic takes the denied call instead. */
+    private function staticCallAccessError(string $class, string $method, bool $hasThis): string
+    {
+        $cd = $this->classTable[\ltrim($class, '\\')] ?? null;
+        $mm = $cd === null ? null : ($cd->methodMeta[$method] ?? null);
+        if ($mm === null) { return ''; }
+        if ($this->lowerAccessDenied($mm->visibility, $mm->declaringClass)) {
+            if (isset($cd->methodMeta['__callStatic'])) { return '__callStatic'; }
+            return 'Call to ' . $mm->visibility . ' method ' . $mm->declaringClass . '::' . $method
+                . '() from ' . $this->lowerScopeLabel();
+        }
+        if (!$mm->isStatic && !$hasThis && !$mm->isAbstract
+            && $this->lowerClosureDepth === 0 && !$this->lowerInPrelude) {
+            return 'Non-static method ' . $mm->declaringClass . '::' . $method . '() cannot be called statically';
+        }
+        return '';
+    }
+
+    /** php's message for `new C` when its constructor is out of reach, '' when allowed. */
+    private function newAccessError(string $cls): string
+    {
+        $cd = $this->classTable[\ltrim($cls, '\\')] ?? null;
+        $mm = $cd === null ? null : ($cd->methodMeta['__construct'] ?? null);
+        if ($mm === null || !$this->lowerAccessDenied($mm->visibility, $mm->declaringClass)) { return ''; }
+        return 'Call to ' . $mm->visibility . ' ' . $mm->declaringClass . '::__construct() from ' . $this->lowerScopeLabel();
+    }
+
     private function lowerStaticCall(\Parser\Ast\StaticCall $expr): Node
     {
         $class = $expr->class;
@@ -7260,6 +7347,16 @@ final class LowerFromAst implements Pass
         // CliDumper's) is an instance call too: php hands it `$this`.
         $namesOwnLine = !$isSelfish && $this->currentLowerClass !== ''
             && $this->lowerClassIsA($this->currentLowerClass, \ltrim($class, '\\'));
+        $den = $this->staticCallAccessError($class, $expr->method, ($isSelfish || $namesOwnLine) && $this->currentLowerFnHasThis);
+        if ($den === '__callStatic') {
+            $elems = [];
+            foreach ($expr->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $this->lowerExpr($a)); }
+            $packed = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
+            $magic = new StaticCall_($class, '__callStatic', [new StringConst($expr->method, Type::string_()), $packed], Type::unknown(), $scope);
+            $magic->srcArgc = 2;
+            return $magic;
+        }
+        if ($den !== '') { return $this->throwErrorExpr($den); }
         if (($isSelfish || $namesOwnLine) && $this->currentLowerFnHasThis
             && !$this->methodIsStatic($class, $expr->method)) {
             $args[] = new LoadLocal('this', Type::obj($this->currentLowerClass));

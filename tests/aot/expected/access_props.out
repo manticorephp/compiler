@@ -1,0 +1,24 @@
+Error: Cannot access private property A::$p
+Error: Cannot access protected property A::$q
+Error: Cannot access private property A::$p
+Error: Cannot access protected property B::$q
+Error: Cannot access private property A::$p
+3
+1
+7
+3
+2
+8
+2
+7/2
+7
+7
+7
+7
+7
+7
+6
+4
+set:hidden=1
+set:prot=2
+7

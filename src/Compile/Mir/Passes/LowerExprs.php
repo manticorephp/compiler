@@ -193,7 +193,12 @@ trait LowerExprs
             }
             if ($fn === 'isset') {
                 $ts = [];
-                foreach ($expr->args as $a) { $ts[] = $this->markProbe($this->lowerExpr($a)); }
+                foreach ($expr->args as $a) {
+                    if ($a->kind === 'Variable' && $a->name === 'this' && $this->currentLowerClass !== '' && !$this->currentLowerFnHasThis) {
+                        return new BoolConst(false, Type::bool_());
+                    }
+                    $ts[] = $this->markProbe($this->lowerExpr($a));
+                }
                 return new Isset_($ts, Type::bool_());
             }
             if ($fn === 'unset') {
@@ -610,7 +615,10 @@ trait LowerExprs
             }
             // Class::$prop → load the static-property global.
             $sp = $this->staticPropRef($saClass, $saName);
-            if ($sp !== null) { return $sp; }
+            if ($sp !== null) {
+                $den = $this->staticPropAccessError($saClass, $saName);
+                return $den !== '' ? $this->throwErrorExpr($den) : $sp;
+            }
             // Class::CONST → inline the constant's initializer. Lower it
             // with the owning class as `self` so a `self::OTHER` inside
             // the initializer (e.g. `COLOR_CLEAR_MASK = ~self::COLOR_MASK`)
@@ -618,6 +626,8 @@ trait LowerExprs
             $cname = $this->resolveStaticClass($saClass);
             $cv = $this->findClassConst($cname, $saName);
             if ($cv !== null) {
+                $den = $this->classConstAccessError($cname, $saName);
+                if ($den !== '') { return $this->throwErrorExpr($den); }
                 $this->noteDeprecatedConstUse($cname . '::' . $saName, $expr->span->line);
                 $prevC = $this->currentLowerClass;
                 $this->currentLowerClass = $cname;
@@ -680,6 +690,9 @@ trait LowerExprs
             // at the ArrayAccess above it, so reaching here means the whole array
             // was read (foreach/count) or handed to a by-ref parameter.
             if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead(); }
+            if ($expr->name === 'this' && $this->currentLowerClass !== '' && !$this->currentLowerFnHasThis) {
+                return $this->throwErrorExpr('Using $this when not in object context');
+            }
             return new LoadLocal($expr->name, Type::unknown());
         }
         if ($expr->kind === 'Assign') { return $this->lowerAssign($expr); }
@@ -1079,6 +1092,8 @@ trait LowerExprs
         if ($target->kind === 'StaticAccess') {
             $ref = $this->staticPropRef($this->staticAccessClass($target), $this->staticAccessName($target));
             if ($ref !== null) {
+                $den = $this->staticPropAccessError($this->staticAccessClass($target), $this->staticAccessName($target));
+                if ($den !== '') { return $this->throwErrorExpr($den); }
                 return new StoreStaticProp_($ref->global, $value, $value->type, $ref->type);
             }
         }
