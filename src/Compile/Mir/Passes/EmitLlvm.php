@@ -358,6 +358,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** Post-call IR releasing the slot of the latest {@see emitRefValueSlot}. */
     private string $lastRefSlotDrop = '';
+    /** True while the erased-callee object arm emits its `__invoke` call: that call must reach dispatch, not the closure rewrite. */
+    private bool $inErasedInvokeArm = false;
 
     // ── generator state (set while emitting a `$resume` function) ──
     /** Per-function generator emit state (fresh each {@see emit}). */

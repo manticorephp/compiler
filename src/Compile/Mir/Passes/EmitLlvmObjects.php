@@ -8588,26 +8588,33 @@ trait EmitLlvmObjects
         $lm = \strtolower($mc->method);
         if ($lm === '__invoke') {
             $onClosure = new \Compile\Mir\Invoke_($fnT(), $mc->args, $cell);
-        } elseif ($lm === 'call') {
-            $onClosure = new \Compile\Mir\MethodCall_($fnT(), 'call', $mc->args, $cell);
+        } elseif ($lm === 'call' && $mc->args !== []) {
+            // rebind then invoke: the typed `call` arm answers a raw word, not a cell
+            $bound = new \Compile\Mir\MethodCall_($fnT(), 'bindTo', [$mc->args[0]], Type::closure());
+            $onClosure = new \Compile\Mir\Invoke_($bound, \array_slice($mc->args, 1), $cell);
         } else {
             $onClosure = $err($str('Call to undefined method Closure::' . $mc->method . '()'));
         }
         $elems = [];
         foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
         $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
-        $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
+        $magic = $this->anyClassDeclares('__call');
         $isObj = $call('is_object', [$t()], Type::bool_());
-        $hasMagic = new \Compile\Mir\Ternary($isObj, $call('method_exists', [$t(), $str('__call')], Type::bool_()),
-            new \Compile\Mir\BoolConst(false, Type::bool_()), Type::bool_());
         $missing = new \Compile\Mir\Ternary($isObj,
             new \Compile\Mir\Concat(new \Compile\Mir\Concat($str('Call to undefined method '),
                 $call('get_class', [$t()], Type::string_())), $str('::' . $mc->method . '()')),
             new \Compile\Mir\Concat($str('Call to a member function ' . $mc->method . '() on '),
                 $call('get_debug_type', [$t()], Type::string_())),
             Type::string_());
+        $rest = $err($missing);
+        if ($magic) {
+            $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
+            $hasMagic = new \Compile\Mir\Ternary($isObj, $call('method_exists', [$t(), $str('__call')], Type::bool_()),
+                new \Compile\Mir\BoolConst(false, Type::bool_()), Type::bool_());
+            $rest = new \Compile\Mir\Ternary($hasMagic, $viaMagic, $rest, $cell);
+        }
         $tree = new \Compile\Mir\Ternary(new \Compile\Mir\Instanceof_($t(), 'Closure'), $onClosure,
-            new \Compile\Mir\Ternary($hasMagic, $viaMagic, $err($missing), $cell), $cell);
+            $rest, $cell);
         $out .= $this->emitNode($tree);
         if ($mc->type->kind !== Type::KIND_CELL && $mc->type->kind !== Type::KIND_UNKNOWN
             && $mc->type->kind !== Type::KIND_VOID) {
@@ -8675,7 +8682,13 @@ trait EmitLlvmObjects
         // into an unrelated class's `__call`.
         $erasedRecv = ($recvType->kind === Type::KIND_CELL || $recvType->kind === Type::KIND_UNKNOWN)
             && !$this->anyClassDeclares($mc->method);
-        if (($isClosureRecv || $erasedRecv) && $mc->method === 'bindTo' && \count($mc->args) >= 1) {
+        if ($isClosureRecv && !$this->inErasedInvokeArm &&\strtolower($mc->method) === '__invoke') {
+            // srcArgc -2: a known closure, skip the erased-callee object arm (it would rebuild this call)
+            $iv = new \Compile\Mir\Invoke_($mc->object, $mc->args, $n->type);
+            $iv->srcArgc = -2;
+            return $this->emitNode($iv);
+        }
+        if (($isClosureRecv || $erasedRecv) && $mc->method === 'bindTo'&& \count($mc->args) >= 1) {
             $out = $this->emitClosureRebind($mc->object, $mc->args[0]);
             if ($erasedRecv && ($n->type->kind === Type::KIND_CELL || $n->type->kind === Type::KIND_UNKNOWN)) {
                 $out .= $this->boxToCell(Type::closure());
@@ -8754,11 +8767,13 @@ trait EmitLlvmObjects
         // is NOT handled: the two shapes need different argument lists, so they
         // cannot share one switch, and the arg emission below is already built
         // against the resolved callee's signature. Recorded in docs/ROADMAP.md.
-        if (!isset($this->classes[$mcStatic]) && $this->anyClassDeclares('__call')
-            && !$this->anyClassDeclares($mc->method)) {
+        if (!isset($this->classes[$mcStatic]) && !$this->anyClassDeclares($mc->method)) {
             if ($mc->object->type->kind === Type::KIND_CELL || $mc->object->type->kind === Type::KIND_UNKNOWN) {
                 return $this->emitErasedMagicCall($mc);
             }
+        }
+        if (!isset($this->classes[$mcStatic]) && !$this->anyClassDeclares($mc->method)
+            && $this->anyClassDeclares('__call')) {
             $elems = [];
             foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
             $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));
