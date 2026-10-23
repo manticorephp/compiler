@@ -28,7 +28,7 @@ name: [builtins.md](builtins.md).
 | Undefined array key / property / `null[...]` read | warning, `null` | **silent**; the value is `null` or a zero of the inferred type ([details](#warnings-and-notices)) | by design / gap |
 | Other engine warnings and notices | printed, execution continues | not printed; some become exceptions | by design |
 | `set_error_handler` | receives engine warnings | receives only `trigger_error()` | by design |
-| `private` / `protected` access from outside | `Error` | succeeds ([details](#visibility-is-not-enforced)) | known gap |
+| `private` / `protected` access from outside | `Error` | `Error` when the receiver's class is known at compile time; not checked through erased receivers or inside closures ([details](#visibility-is-enforced-where-the-class-is-known)) | partial gap |
 | `eval()` | works | not supported ([details](#features-that-need-the-interpreter)) | by design |
 | Variable variables `$$n`, `${'n'}` | work | parse error | gap |
 | `get_defined_vars()` | works | not defined | gap |
@@ -39,7 +39,7 @@ name: [builtins.md](builtins.md).
 | `php.ini`, `ini_set('memory_limit')`, extensions, PECL | yes | none; the manifest and FFI replace them ([details](#configuration)) | by design |
 | Default time zone | `UTC` | the host's zone | by design |
 | A function Manticore does not ship | n/a | compiles, traps at run time with `Call to undefined function` ([details](#functions-that-do-not-exist-yet)) | by design |
-| `"10" + "5.5"`, `[1.7 => 'x']`, `array_map($f, $a, $b)` | `15.5`, key `1`, zipped | `15`, garbage key, first array only | bug |
+| `"10" + "5.5"` | `15.5` | `15` ([#403](https://github.com/manticorephp/compiler/issues/403)) | bug |
 
 ---
 
@@ -112,19 +112,28 @@ parameter). Promoting to float needs value-range analysis and is a [known gap](g
 factorials, `PHP_INT_MAX` sentinels), use `bcmath`, `float`, or check with
 `intdiv`/comparisons before the operation.
 
-### Visibility is not enforced
+### Visibility is enforced where the class is known
 
 ```php
 class P { private $secret = 's'; protected function hid() { return 'h'; } }
-var_dump((new P)->secret);     // php: Error: Cannot access private property P::$secret
-                               // Manticore: string(1) "s"
+try { (new P)->secret; } catch (Error $e) { echo $e->getMessage(); }
+// both: Cannot access private property P::$secret
 ```
 
-`private` and `protected` are checked by neither the compiler nor the runtime, so a
-program that *relies* on the error (or on `__get` firing for an inaccessible member)
-behaves differently. A correct program is unaffected. `readonly`, `abstract`,
-`final` and interface instantiation are enforced as in php. See
-[gaps.md, Magic methods](gaps.md#magic-methods--what-is-knowingly-not-done).
+Member access, static calls, class constants and `new` are checked against the enclosing
+class when the compiler knows the receiver's class, and a denied access throws php's `Error`
+with php's message. `__get`, `__set`, `__call` and `__callStatic` still fire for an inaccessible
+member, and `Closure::bind`, reflection and the hierarchy rules (`parent::`, `self::`, `static::`,
+protected access between siblings) behave as in php.
+
+Not checked, so a violation still runs: access through an erased, `mixed` or union-typed receiver,
+a variable member name (`$o->$name`), and anything inside a closure. A typed property without a
+default that is read before it is set answers the zero of its type, where php throws
+`Typed property A::$x must not be accessed before initialization`.
+
+Class declarations php refuses at compile time are refused too: extending a `final` class,
+overriding a `final` method or constant, leaving an abstract method unimplemented, and
+weakening a member's visibility. Method-signature compatibility (LSP) is not checked yet.
 
 ### Features that need the interpreter
 
@@ -149,13 +158,9 @@ These are php-correct, Manticore-wrong. Each has (or is getting) a minimal repro
 | Snippet | php | Manticore |
 |---|---|---|
 | `var_dump("10" + "5.5");` and `$p = explode(",", "5,3.5"); $p[0] + $p[1]` | `float(15.5)`, `float(8.5)` | `int(15)`, `int(8)` — a fractional numeric string is truncated in arithmetic. `"9" ** 2` is `float(81)` where php says `int(81)`  ([#403](https://github.com/manticorephp/compiler/issues/403)) |
-| `$a[1.7] = 'f'; $a[null] = 'n';` (also `[1.7 => 'f']`) | key `1`, key `""` | key is the float's bit pattern, key `0` — cast keys with `(int)` / `(string)` yourself; `true` keys are right  ([#404](https://github.com/manticorephp/compiler/issues/404)) |
 | `is_callable('strlen')`, `is_callable('strtoupper')` | `true` | `false` for functions Manticore inlines as codegen builtins (calling them by name, `array_map('strtoupper', …)`, works; `array_map` is `true`)  ([#323](https://github.com/manticorephp/compiler/issues/323)) |
 | `class_exists('DateTime')`, `class_exists($name)` for a built-in class the program never names | `true` | `false` — built-in classes are linked on demand ([superset.md, rule 3](superset.md#the-rules-the-superset-lives-under)); naming the class anywhere in the program (`new ArrayObject`) is enough. Your own classes are always found  ([#409](https://github.com/manticorephp/compiler/issues/409)) |
-| `array_map($f, $a, $b)` / `array_map(null, $a, $b)` | zips the arrays | uses the first array only. `bin/manticore compile` warns: `too many arguments to array_map()`  ([#405](https://github.com/manticorephp/compiler/issues/405)) |
-| `fclose($f); var_dump($f, is_resource($f));` | `resource(5) of type (Unknown)`, `false` | still `stream` / `true`  ([#406](https://github.com/manticorephp/compiler/issues/406)) |
 | `include $f; include_once $f;` | second returns `true` | executes the file again  ([#407](https://github.com/manticorephp/compiler/issues/407)) |
-| `echo __FUNCTION__;` at top level | empty | an internal name such as `__mc_defaults`  ([#408](https://github.com/manticorephp/compiler/issues/408)) |
 
 ---
 
@@ -260,7 +265,6 @@ What this means for a port:
   `is_object($x) ? … : (is_resource($x) ? … : …)` takes the object branch for a
   stream; test `is_resource()` first.
 - `get_resource_id()` counts from `1`, not from php's startup-dependent number.
-- A closed handle still answers `is_resource() === true` (see [Known wrong answers](#known-wrong-answers)).
 - **`Resource` is a reserved global class name.** `class Resource {}` in the global
   namespace fails the build (`invalid redefinition of function 'manticore_Resource___…'`).
   In a namespace (`App\Resource`) it is fine, and `$f instanceof Resource` there means
