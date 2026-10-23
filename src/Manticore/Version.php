@@ -5,5 +5,5 @@ namespace Manticore;
 
 final class Version
 {
-    public const STRING = '0.15.0';
+    public const STRING = '0.16.0';
 }
