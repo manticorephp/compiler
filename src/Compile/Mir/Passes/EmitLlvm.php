@@ -4858,6 +4858,18 @@ final class EmitLlvm implements EmitVisitor
                 $this->lastValueType = 'ptr';
                 $cellified = true;
             }
+        } elseif ($cellVals && $opT->isArray() && ($opElem === null || $opElem->kind === Type::KIND_UNKNOWN)) {
+            // An ERASED element source holds whatever its runtime hint says —
+            // raw ints, raw pointers — so into a cell-valued literal it merges
+            // as a copy boxed by that hint, like a cell operand.
+            $out .= $this->coerceToI64();
+            $word = $this->lastValue;
+            $out .= $this->coerceToPtr();
+            $cc = $this->ssa->allocReg();
+            $out .= '  ' . $cc . ' = call ptr @__mir_array_cellified_copy(ptr ' . $this->lastValue . ")\n";
+            $this->lastValue = $cc;
+            $this->lastValueType = 'ptr';
+            $cellified = true;
         }
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;

@@ -4980,6 +4980,18 @@ trait EmitLlvmCalls
             $out .= $this->emitCellArrayToTyped($paramType);
             $out .= '  call void @__mir_array_release_buf(ptr ' . $src . ")\n";
             $a->type = $paramType;
+        } elseif ($collect && $paramType !== null && $this->needsDeCellify($paramType, $a->type)
+            && $this->freshRcArgFlavor($a) === '') {
+            // A BORROWED cell-element array (a local whose whole stores disagree,
+            // retyped after the callee was bound to a concrete element: #376,
+            // #384) handed to a concrete-element param. The callee reads raw
+            // words, so it gets a co-owning typed copy; the copy is the call's
+            // own temp and goes after the call, whatever the arg's own release.
+            $out .= $this->coerceToPtr();
+            $out .= $this->emitCellArrayToTyped($paramType, true);
+            $out .= $this->coerceToI64();
+            $this->litElemDropRegs[] = $this->lastValue;
+            $this->litElemDropFlavors[] = '!' . $this->discardReleaseFlavor($paramType);
         }
         // An int/bool arg to a declared `float` param converts numerically
         // (sitofp) — else the integer bits bitcast through the i64 ABI carrier
@@ -5014,6 +5026,14 @@ trait EmitLlvmCalls
     private function takeLitElemDrops(int $mark, bool $released, array &$regs, array &$flavs, string $outer = ''): void
     {
         $n = \count($this->litElemDropRegs);
+        // A `!` flavor is an argument's de-cellify copy, not a literal element:
+        // the call owns it outright, so it goes whether or not the literal does.
+        for ($i = $mark; $i < $n; $i++) {
+            $f = $this->litElemDropFlavors[$i];
+            if (!\str_starts_with($f, '!')) { continue; }
+            $regs[] = $this->litElemDropRegs[$i];
+            $flavs[] = \substr($f, 1);
+        }
         if ($released) {
             $at = -1;
             if ($outer !== '') {
@@ -5025,6 +5045,7 @@ trait EmitLlvmCalls
             $addR = [];
             $addF = [];
             for ($i = $mark; $i < $n; $i++) {
+                if (\str_starts_with($this->litElemDropFlavors[$i], '!')) { continue; }
                 $addR[] = $this->litElemDropRegs[$i];
                 $addF[] = $at >= 0 ? 'sole:' . $outer . ':' . $this->litElemDropFlavors[$i] : $this->litElemDropFlavors[$i];
             }

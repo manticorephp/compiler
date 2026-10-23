@@ -1,6 +1,5 @@
 <?php
 // A local array assigned a string[] on one path and a cell-element array on another is read back as raw strings after an element store (SIGSEGV).
-// issue: #376
 /** @return string[] */
 function pieces(string $g): array
 {
