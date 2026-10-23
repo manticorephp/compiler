@@ -5364,7 +5364,7 @@ trait EmitLlvmCalls
                 $cellBoxDrops[] = [$a, $this->lastValue];
             } else {
                 $litMark = \count($this->litElemDropRegs);
-                $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai] ?? null);
+                $out .= $this->emitArgCollectingLitElems($a, ($camask[$ai] ?? false) ? null : ($ptypes[$ai] ?? null));
                 // ABI: every fn takes i64 args. Float / ptr values
                 // cross the boundary as the bit-pattern in i64.
                 $out .= $this->coerceToI64();
