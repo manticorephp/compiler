@@ -1215,7 +1215,10 @@ function ref_callable_sig(string $mods, string $name, array $params, string $ret
     return $s;
 }
 
-/** @param array<string,string> $index */
+/**
+ * @param RParam[] $params
+ * @param array<string,string> $index
+ */
 function ref_doc_sections(RDoc $d, array $params, string $ret, string $ns, array $index, string $root, string $repo): string
 {
     $h = '';
