@@ -36,6 +36,10 @@ worker and forwards SIGTERM/SIGINT to all of them. The parent serves nothing;
 `serve()` returns once every worker has exited. `workers(0)` (the default)
 serves in-process.
 
+`Server::onListener($resource)` serves an already-bound listener (socket activation). The server
+does not close a listener it did not open, and it does not make the listener non-blocking for you:
+call `stream_set_blocking($l, false)` first.
+
 `->maxConnections(N)` is the ceiling per worker, 4096 by default (a live
 connection costs ~32 KB). The permit is taken **before**
 `accept`, so at the ceiling the worker stops accepting and the queue stays in
@@ -150,6 +154,10 @@ A mutable fluent builder. Every setter returns the Response.
     ->stream(fn (Http\ChunkedWriter $w) => …);
 ```
 
+Set the status with `status()` or the constructor. Assigning `$res->status = 201` directly does not
+mark it as set, so an ambient `http_response_code()` value (default 200) replaces it when the response
+is sent.
+
 **There is no `Response::json()`, deliberately.** `json_encode` is a codegen
 builtin, inlined per call site; putting it behind a `mixed`-argument method
 would pull the generic tagged encoder into *every* HTTP program. Write
@@ -184,7 +192,8 @@ the connection dropped.
 Request bodies go the other way: `->maxBodySize(N)` (8 MiB) is buffered into
 `$req->body()`, and anything past it is a **413** unless `->streamBodies(true)`
 is on, in which case `$req->stream()` is a `Buffer\Reader` with the declared
-length as its budget. A body the handler ignores is drained before the
+length as its budget. Only a declared `Content-Length` past the cap is streamed; a body at or
+under it is still buffered, so `$req->stream()` is `null` for it even with streaming on. A body the handler ignores is drained before the
 connection is reused. A chunked body is always buffered — it declares no total,
 so the cap is applied per chunk, which is the only point at which it can be.
 
@@ -392,7 +401,7 @@ $server->serverName('acme/1.0')   // the Server: header, default 'manticore'
     ->compat(false)               // seed the superglobals per request
     ->onError(fn (\Throwable $e, Request $r) => (new Response(500))->text('…'));
 
-$server->stats();                 // ['served'=>, 'accepted'=>, 'errors'=>, 'stopped'=>]
+$server->stats();                 // ['served'=>, 'open'=>, 'accepted'=>, 'errors'=>, 'upgraded'=>, 'stopped'=>]  (ints; stopped is 0 or 1)
 ```
 
 Also refused, always: a malformed request line, a header name with whitespace

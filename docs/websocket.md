@@ -133,7 +133,8 @@ fragmentation on send. `send()`/`sendBinary()` on a closed connection throws
 ## Closing
 
 `close(int $code = 1000, string $reason = '')` — `$code` must be a sendable close
-code (`closeCodeSendable`) and `$reason` at most 123 bytes (the close frame's
+code (1000–1003, 1007–1014 or 3000–4999; 1004–1006 and 1015 are reserved for local
+reporting and are never sent) and `$reason` at most 123 bytes (the close frame's
 payload is 2 bytes of code plus the reason, and a control frame caps at 125); either
 violation throws `ValueError` before anything is sent:
 
@@ -166,11 +167,12 @@ connection you know is otherwise alive.
 
 ## Limits and limitations
 
-`maxFrameSize` (default = `maxMessageSize`, 16 MiB) is checked from the frame header
+`maxFrameSize` (16 MiB by default, independent of `maxMessageSize`) is checked from the frame header
 **before** the payload is read, so an oversized frame never gets buffered; over the
 limit closes with **`1009`**. `maxMessageSize` (16 MiB default) bounds the
 reassembled message across fragments, checked incrementally as fragments arrive —
-same code, same close.
+same code, same close. `maxMessageSize($n)` also lowers `maxFrameSize` when that is larger than
+`$n`; `maxFrameSize($n)` never touches `maxMessageSize`.
 
 ## Compression
 
