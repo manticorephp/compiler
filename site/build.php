@@ -1664,7 +1664,7 @@ foreach ($all as $p) {
     $excerpts[$p] = $md->excerpt;
 }
 
-$order = ['install', 'cli', 'superset', 'async', 'modules', 'ffi', 'attributes', 'generics', 'memory', 'ds', 'http', 'websocket', 'pdo', 'curl'];
+$order = ['install', 'cli', 'superset', 'differences', 'async', 'modules', 'ffi', 'attributes', 'generics', 'memory', 'ds', 'http', 'websocket', 'pdo', 'curl'];
 $guides = [];
 $ref = [];
 foreach ($order as $o) {
