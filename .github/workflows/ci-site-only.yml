@@ -1,0 +1,20 @@
+name: ci-site-only
+
+# Companion of ci.yml. ci.yml skips a PR that only touches site/**, and a required
+# check a skipped workflow never reports leaves that PR unmergeable. This reports
+# the same names green. A PR that also touches real code runs both; ci.yml's rows
+# still gate it.
+on:
+  pull_request:
+    paths:
+      - 'site/**'
+
+jobs:
+  stub:
+    name: ${{ matrix.check }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        check: [linux-arm64, linux-amd64, linux-alpine-arm64, linux-alpine-amd64, macos-arm64, bootstrap-from-pin]
+    steps:
+      - run: echo "site-only change, compiler CI not needed"
