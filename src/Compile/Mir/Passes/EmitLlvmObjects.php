@@ -4689,7 +4689,7 @@ trait EmitLlvmObjects
             $out = '';
             /** @var array<string, string> $owned */
             $owned = [];
-            $recvL = $this->dynHoistOperand($dp->object, $out, $owned, false);
+            $recvL = $this->dynHoistOperand($dp->object, $out, $owned, true);
             $nameL = $this->dynHoistOperand($dp->name, $out, $owned, false);
             $args = [];
             foreach ($iv->args as $a) {

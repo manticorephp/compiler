@@ -1,6 +1,5 @@
 <?php
 // foreach over an IteratorAggregate whose getIterator() is a generator leaks the generator per loop.
-// issue: #268
 final class RG implements IteratorAggregate {
     public function __construct(private \Closure $gen) {}
     public function getIterator(): \Traversable { $g = $this->gen; yield from $g(); }

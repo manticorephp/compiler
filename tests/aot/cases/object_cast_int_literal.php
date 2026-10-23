@@ -1,6 +1,5 @@
 <?php
 // (object) cast of an int-valued array literal leaks its property bag.
-// issue: #261
 function t(): int { $x = (object)["a" => 1]; return 1; }
 t();
 $b = memory_get_usage();
