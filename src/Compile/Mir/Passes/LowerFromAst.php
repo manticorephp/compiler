@@ -2581,23 +2581,62 @@ final class LowerFromAst implements Pass
     private function synthIfaceFactories(Module $module): array
     {
         $out = [];
+        $targets = [];
         foreach ($module->classes as $cd) {
             if ($cd->isStruct || $cd->isPreludeClass) { continue; }
-            if (!isset($this->classDecls[$cd->name])) { continue; }
-            $names = [];
-            $visited = [];
-            $this->collectInterfaceNames($cd->name, $names, $visited);
+            $targets[] = $cd->name;
+        }
+        // An interface has no ClassDef but does get a reflection row.
+        foreach ($module->interfaceNames as $in => $_) {
+            if (!isset($module->internalInterfaceNames[$in])) { $targets[] = $in; }
+        }
+        foreach ($targets as $tn) {
+            if (!isset($this->classDecls[$tn])) { continue; }
+            $names = $this->orderedInterfaceNames($tn);
             if ($names === []) { continue; }
             $sp = new \Parser\Ast\Span(0, 0);
             $elems = [];
-            foreach ($names as $iname => $_) {
+            foreach ($names as $iname) {
                 $elems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($iname, $sp));
             }
             $body = new \Parser\Ast\Block([
                 \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
             ]);
             $out[] = new \Parser\Ast\FunctionDecl(
-                \Compile\Mir\Passes\ReflectSynth::ifacesFn($cd->name), [], 'array', $body, $sp);
+                \Compile\Mir\Passes\ReflectSynth::ifacesFn($tn), [], 'array', $body, $sp);
+        }
+        return $out;
+    }
+
+    /**
+     * Interface names in Zend's `ce->interfaces` order (class_implements()):
+     * parent's list first, then the declared ones (+ Stringable), then each
+     * declared one's own list reversed; a class declaring none gets its
+     * parent's list reversed.
+     *
+     * @return string[]
+     */
+    private function orderedInterfaceNames(string $class): array
+    {
+        $decl = $this->classDecls[\ltrim($class, '\\')] ?? null;
+        if ($decl === null) { return []; }
+        $declared = [];
+        $isIface = ($decl->kind ?? 'class') === 'interface';
+        foreach ($isIface ? $decl->extends : $decl->implements as $i) { $declared[] = \ltrim($i, '\\'); }
+        $parent = !$isIface && $decl->extends !== [] ? $this->orderedInterfaceNames($decl->extends[0]) : [];
+        if (!$isIface && !\in_array('Stringable', $declared, true) && !\in_array('Stringable', $parent, true)
+                && isset($this->classDecls['Stringable']) && $this->declDeclaresToString($decl)) {
+            $declared[] = 'Stringable';
+        }
+        if ($declared === []) { return \array_reverse($parent); }
+        $out = $parent;
+        foreach ($declared as $d) {
+            if (!\in_array($d, $out, true)) { $out[] = $d; }
+        }
+        foreach ($declared as $d) {
+            foreach (\array_reverse($this->orderedInterfaceNames($d)) as $n) {
+                if (!\in_array($n, $out, true)) { $out[] = $n; }
+            }
         }
         return $out;
     }

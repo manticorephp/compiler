@@ -1866,8 +1866,11 @@ trait EmitLlvmRuntime
             $out .= $mPair[0];
             $mFlds = $mPair[1];
         }
+        $ifacesFn = \Compile\Mir\Passes\ReflectSynth::ifacesFn($name);
+        $ifacesFnFld = isset($this->sigs->paramTypes[$ifacesFn]) ? 'ptr @manticore_' . $this->mangle($ifacesFn) : 'ptr null';
         $out .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
-            $key, 'ptr ' . $this->strSymBytes($nameSym), $flags, 0, 'ptr null', $mFlds);
+            $key, 'ptr ' . $this->strSymBytes($nameSym), $flags, 0, 'ptr null', $mFlds,
+            'i64 0, ptr null', 'ptr null', 'i64 0, ptr null', 'ptr null', $ifacesFnFld);
         $out .= \Compile\Mir\RuntimeLibrary::reflNodeAndCtor($key);
         $reflIds[] = $key;
         return $out;
