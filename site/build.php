@@ -70,7 +70,7 @@ final class Md
                 if ($lvl === 1 && $this->title === '') {
                     $this->title = html_entity_decode(strip_tags($this->inline($text)));
                 }
-                if ($lvl === 2) {
+                if ($lvl === 2 || $lvl === 3) {
                     $this->headings[] = $id . '|' . html_entity_decode(strip_tags($this->inline($text)));
                 }
                 $out .= "<h$lvl id=\"$id\">" . $this->inline($text) . ($lvl > 1 ? "<a class=\"anchor\" href=\"#$id\">#</a>" : '') . "</h$lvl>\n";
@@ -332,6 +332,7 @@ final class Md
 function page(string $title, string $body, string $root, string $side, string $mside): string
 {
     $t = htmlspecialchars($title);
+    $search = "<input class=\"sq\" type=\"search\" placeholder=\"Search docs (press /)\" aria-label=\"Search docs\" data-src=\"{$root}search.json\" data-base=\"{$root}docs/\"><div class=\"sr\"></div>";
     return <<<HTML
 <!doctype html>
 <html lang="en">
@@ -352,13 +353,15 @@ function page(string $title, string $body, string $root, string $side, string $m
   <button id="theme" aria-label="Toggle theme" title="Theme: auto">◐</button>
 </div></nav>
 <div class="docs">
-<aside class="side">$side</aside>
+<aside class="side">$search<div class="sl">$side</div></aside>
 <main class="prose">
-<details class="mside"><summary>Menu</summary><div class="side">$mside</div></details>
+<details class="mside"><summary>Menu</summary><div class="side">$search<div class="sl">$mside</div></div></details>
 $body
 </main>
 </div>
-<script src="{$root}app.js"></script>
+<script defer src="{$root}vendor/highlight.min.js"></script>
+<script defer src="{$root}vendor/llvm.min.js"></script>
+<script defer src="{$root}app.js"></script>
 </body>
 </html>
 HTML;
@@ -485,6 +488,7 @@ foreach ($files as $p) {
         $ref[] = $p;
     }
 }
+$search = [];
 $groups = ['Guides' => $guides, 'Reference' => $ref, 'Design notes' => $design];
 
 foreach ($all as $p) {
@@ -492,6 +496,13 @@ foreach ($all as $p) {
     $root = str_repeat('../', $depth);
     $md = new Md(dirname($p), $set, str_repeat('../', $depth - 1));
     $body = $md->render(file_get_contents(REPO_DIR . '/' . $p));
+    $lab = label($p, $titles[$p]);
+    $url = substr($p, 5, -3) . '.html';
+    $search[] = [$titles[$p], $lab, $url, $excerpts[$p]];
+    foreach ($md->headings as $h) {
+        $parts = explode('|', $h, 2);
+        $search[] = [$parts[1], $lab, $url . '#' . $parts[0], ''];
+    }
     $edit = REPO . '/edit/main/' . $p;
     $body .= "<p class=\"edit\"><a href=\"$edit\">Edit this page on GitHub</a></p>\n";
     $side = sidebar($groups, $titles, str_repeat('../', $depth - 1), $p);
@@ -516,5 +527,7 @@ foreach ($groups as $g => $paths) {
 }
 $side = sidebar($groups, $titles, '', '');
 file_put_contents("$out/docs/index.html", page('Documentation', $body, '../', $side, $side));
+
+file_put_contents("$out/search.json", json_encode($search, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
 echo 'built ', count($all) + 2, " pages into $out\n";

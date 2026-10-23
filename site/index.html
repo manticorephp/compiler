@@ -27,7 +27,7 @@
 <h1 class="rv">PHP in.<br><em>Native binary out.</em></h1>
 <p class="lead rv">Manticore compiles PHP 8.5+ to standalone arm64 and x86_64 binaries through LLVM. No interpreter, no <code>php.ini</code>, no extension loader. The compiler is written in PHP and compiles itself to a byte-identical fixpoint.</p>
 
-<div class="code rv"><pre><code>manticore compile app.php -o app &amp;&amp; ./app</code></pre><button class="copy">Copy</button></div>
+<div class="code rv"><pre><code class="lang-bash">manticore compile app.php -o app &amp;&amp; ./app</code></pre><button class="copy">Copy</button></div>
 
 <div class="cta rv">
   <a href="docs/install.html">Install</a>
@@ -60,7 +60,7 @@
 </ul>
 
 <h2 class="rv">Install</h2>
-<div class="code rv"><pre><code>curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
+<div class="code rv"><pre><code class="lang-bash">curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
 export PATH="$HOME/.manticore/bin:$PATH"
 manticore version</code></pre><button class="copy">Copy</button></div>
 <p class="rv">macOS and Linux (glibc and musl), arm64 and x86_64.</p>
@@ -68,6 +68,7 @@ manticore version</code></pre><button class="copy">Copy</button></div>
 <footer>MIT licensed · <a href="https://github.com/manticorephp/compiler">manticorephp/compiler</a></footer>
 </main>
 
-<script src="app.js"></script>
+<script defer src="vendor/highlight.min.js"></script>
+<script defer src="app.js"></script>
 </body>
 </html>
