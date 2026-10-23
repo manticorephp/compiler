@@ -928,7 +928,7 @@ final class RefParser
             if (preg_match('/^\s*(```|~~~)/', $l)) {
                 $fence = !$fence;
             }
-            if (!$fence && preg_match('/^@(\w+)\s*(.*)$/', $l, $m)) {
+            if (!$fence && preg_match('/^\s*@(\w+)\s*(.*)$/', $l, $m)) {
                 $tags[] = $m[1] . ' ' . $m[2];
                 $cur = count($tags) - 1;
                 continue;

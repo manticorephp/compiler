@@ -1,0 +1,6 @@
+step 1
+step 2
+onCancel hook ran
+loop stopped at step 3
+sleeper cancelled
+scope joined

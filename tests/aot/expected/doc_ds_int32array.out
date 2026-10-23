@@ -1,0 +1,7 @@
+4 60 30
+[10,20,0,30]
+Value 2147483648 is out of range for Int32Array (-2147483648..2147483647)
+Manticore\Ds\Int32Array element must be of type int, float given
+Index invalid or out of range
+20,40,0,60
+1

@@ -1,0 +1,6 @@
+got 1
+got 2
+got 3
+closed
+send failed: send on a closed channel
+ab

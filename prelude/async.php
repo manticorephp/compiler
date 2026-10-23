@@ -50,33 +50,87 @@ namespace Async {
     // ── errors ─────────────────────────────────────────────────────────────
 
     /**
-     * Raised inside a task whose scope was cancelled. Extends \Error, NOT
-     * \Exception, on purpose: `catch (\Exception $e)` — the blanket catch most
-     * PHP code is written with — must not be able to eat cancellation. (Trio
-     * picks BaseException for the same reason.) A `catch (\Throwable)` still
-     * sees it, which is why cancellation is also STICKY: swallowing it once only
-     * buys the task until its next suspend point.
+     * Raised inside a task that was cancelled.
+     *
+     * Cancellation is delivered at the task's current suspend point (a `delay()`, a channel wait, a blocking stream call, an `await()`) and is **sticky**: it is raised again at every later suspend point until the task ends. Catching it once therefore buys a task one more suspend, not immunity. Let it propagate, or run cleanup that must itself suspend inside `shield()`.
+     *
+     * It extends `\Error`, not `\Exception`, on purpose: the blanket `catch (\Exception $e)` most PHP code is written with cannot swallow it. A scope that cancelled its own children does not count their `CancelledException` as a failure.
+     *
+     * ```php
+     * try {
+     *     delay(10.0);
+     * } catch (CancelledException $e) {
+     *     shield(fn() => $conn->close());   // cleanup that suspends
+     *     throw $e;                          // always rethrow
+     * }
+     * ```
+     *
+     * @see shield
+     * @see Task::cancel
+     * @see TaskGroup::cancel
+     * @see CancellationToken
+     * @example doc_async_cancellation
      */
+    // Raised inside a task whose scope was cancelled. Extends \Error, NOT
+    // \Exception, on purpose: `catch (\Exception $e)` — the blanket catch most
+    // PHP code is written with — must not be able to eat cancellation. (Trio
+    // picks BaseException for the same reason.) A `catch (\Throwable)` still
+    // sees it, which is why cancellation is also STICKY: swallowing it once only
+    // buys the task until its next suspend point.
     final class CancelledException extends \Error {}
 
-    /** A deadline elapsed before the work finished. {@see timeout()}, {@see Task::awaitWithin()}. */
+    /**
+     * Thrown when a deadline elapses before the work finishes.
+     *
+     * Raised by `timeout()`, `Task::awaitWithin()` and `Pool::acquire()` with a timeout. By the time it is thrown, the work that was under the deadline has been cancelled and joined.
+     *
+     * @see timeout
+     * @see Task::awaitWithin
+     * @see Pool::acquire
+     * @example doc_async_timeout
+     */
     final class TimeoutException extends \RuntimeException {}
 
-    /** The loop ran out of work while tasks were still parked — nothing can wake them. */
+    /**
+     * Thrown by `async()` when the loop runs out of work while tasks are still parked.
+     *
+     * Nothing can wake those tasks (no timer, no I/O, no sender), so the program would hang forever; this is Go's "all goroutines are asleep". The message embeds the same task table as `dump()`: every live task, what it is parked on, and where it was spawned.
+     *
+     * @see dump
+     */
+    // The loop ran out of work while tasks were still parked — nothing can wake them.
     final class DeadlockException extends \RuntimeException {}
 
-    /** send() on a channel that is already closed. */
+    /**
+     * Thrown when sending to a closed channel.
+     *
+     * Raised by `Channel::send()` (and a `SelectCase::send()` arm of `select()`) when the channel is closed, including when it is closed while the sender is parked.
+     *
+     * @see Channel::close
+     * @example doc_async_channel
+     */
     final class ChannelClosedException extends \RuntimeException {}
 
     /**
-     * Several sibling errors as one throwable. Raised by {@see awaitAny()} when
-     * EVERY input failed. `previous` is the first error so a plain getPrevious()
-     * still gives a representative cause; {@see errors()} is the full map keyed
-     * by the failing task's INPUT position.
+     * Several task errors as one throwable.
+     *
+     * Thrown by `awaitAny()` when every input task failed. `getPrevious()` is the first error, as a representative cause; `errors()` is the full map keyed by the failing task's input position.
+     *
+     * @see awaitAny
+     * @example doc_async_await_any
      */
+    // Several sibling errors as one throwable. Raised by {@see awaitAny()} when
+    // EVERY input failed. `previous` is the first error so a plain getPrevious()
+    // still gives a representative cause; {@see errors()} is the full map keyed
+    // by the failing task's INPUT position.
     final class AggregateError extends \RuntimeException
     {
-        /** @param array<int, \Throwable> $errors keyed by input position */
+        /**
+         * Build an aggregate from a message and the individual errors.
+         *
+         * @param string $message  the exception message
+         * @param array<int, \Throwable> $errors keyed by input position
+         */
         public function __construct(string $message, private array $errors)
         {
             $first = null;
@@ -84,7 +138,11 @@ namespace Async {
             parent::__construct($message, 0, $first);
         }
 
-        /** @return array<int, \Throwable> */
+        /**
+         * Every collected error, keyed by the failing task's input position.
+         *
+         * @return array<int, \Throwable> the errors, keyed by input position
+         */
         public function errors(): array
         {
             return $this->errors;
@@ -94,15 +152,27 @@ namespace Async {
     // ── results (objects, not tuples) ───────────────────────────────────────
 
     /**
-     * One receive from a channel. Go returns `v, ok`; PHP has no multi-return,
-     * and collapsing it into "null means closed" makes null an illegal payload —
-     * so it is an object.
+     * One receive from a channel, as an object.
      *
-     *   $r = $ch->next();
-     *   if (!$r->ok) { break; }        // closed and drained
+     * Go returns `v, ok`. PHP has no multi-return, and collapsing it to "null means closed" would make `null` an illegal payload, so `Channel::next()` returns this instead.
+     *
+     * ```php
+     * $r = $ch->next();
+     * if (!$r->ok) { break; }        // closed and drained
+     * echo $r->value;
+     * ```
+     *
+     * @see Channel::next
+     * @example doc_async_channel
      */
     final class Received
     {
+        /**
+         * Build a receive result.
+         *
+         * @param mixed $value  the received value; null when the channel was closed
+         * @param bool $ok  false when the channel was closed and drained instead of delivering a value
+         */
         public function __construct(
             public mixed $value,
             public bool $ok,
@@ -110,16 +180,28 @@ namespace Async {
     }
 
     /**
-     * Which {@see select()} case fired, and with what.
+     * Which `select()` case fired, and with what.
      *
-     * - `index`   — position in the case list handed to select()
-     * - `value`   — the received value; always null for a send case
-     * - `ok`      — false when the channel was closed rather than delivering
-     * - `channel` — the channel that completed
-     * - `isSend`  — true when the case that fired was a send
+     * - `index`: position in the case list handed to `select()`
+     * - `value`: the received value; always null for a send case
+     * - `ok`: false when the channel was closed rather than delivering a value
+     * - `channel`: the channel that completed
+     * - `isSend`: true when the case that fired was a send
+     *
+     * @see select
+     * @example doc_async_select
      */
     final class Selected
     {
+        /**
+         * Build a select result.
+         *
+         * @param int $index  position of the winning case
+         * @param mixed $value  received value, null for a send case
+         * @param bool $ok  false when the channel was closed
+         * @param ?Channel $channel  the channel that completed
+         * @param bool $isSend  whether the winning case was a send
+         */
         public function __construct(
             public int $index,
             public mixed $value,
@@ -130,12 +212,24 @@ namespace Async {
     }
 
     /**
-     * How one task turned out, when you asked for the OUTCOME rather than the
-     * value — {@see awaitAllSettled()} / {@see mapSettled()}. `ok` decides which
-     * of `value` / `error` is meaningful.
+     * How one task turned out, when you asked for the outcome rather than the value.
+     *
+     * Returned by `Task::join()`, `awaitAllSettled()` and `mapSettled()`. `ok` decides which of `value` and `error` is meaningful: on success `error` is null, on failure `value` is null.
+     *
+     * @see awaitAllSettled
+     * @see mapSettled
+     * @see Task::join
+     * @example doc_async_settled
      */
     final class Settled
     {
+        /**
+         * Build an outcome.
+         *
+         * @param bool $ok  true when the task returned normally
+         * @param mixed $value  the task's return value when `$ok`
+         * @param ?\Throwable $error  what the task threw when not `$ok`
+         */
         public function __construct(
             public bool $ok,
             public mixed $value,
@@ -144,25 +238,57 @@ namespace Async {
     }
 
     /**
-     * One arm of a {@see select()}. Build with the factories — a bare Channel in
-     * the case list is also accepted as shorthand for `SelectCase::recv($ch)`.
+     * One arm of a `select()`.
+     *
+     * Build it with `SelectCase::recv()` or `SelectCase::send()`. A bare `Channel` in the case list is also accepted, as shorthand for `SelectCase::recv($ch)`.
+     *
+     * @see select
+     * @example doc_async_select
      */
     final class SelectCase
     {
+        /**
+         * Kind of a receive arm.
+         */
         public const RECV = 0;
+        /**
+         * Kind of a send arm.
+         */
         public const SEND = 1;
 
+        /**
+         * Build a case from its parts; prefer `recv()` and `send()`.
+         *
+         * @param int $kind  `SelectCase::RECV` or `SelectCase::SEND`
+         * @param Channel $channel  the channel to receive from or send to
+         * @param mixed $value  the value to send; ignored for a receive
+         */
         public function __construct(
             public int $kind,
             public Channel $channel,
             public mixed $value,
         ) {}
 
+        /**
+         * A case that completes when a value can be received from `$ch` (or `$ch` is closed).
+         *
+         * @param Channel $ch  the channel to receive from
+         * @return SelectCase  the receive arm
+         */
         public static function recv(Channel $ch): SelectCase
         {
             return new SelectCase(self::RECV, $ch, null);
         }
 
+        /**
+         * A case that completes when `$value` can be sent to `$ch`.
+         *
+         * Sending to a closed channel makes `select()` throw `ChannelClosedException`.
+         *
+         * @param Channel $ch  the channel to send to
+         * @param mixed $value  the value to send
+         * @return SelectCase  the send arm
+         */
         public static function send(Channel $ch, mixed $value): SelectCase
         {
             return new SelectCase(self::SEND, $ch, $value);
@@ -170,21 +296,46 @@ namespace Async {
     }
 
     /**
-     * The READ half of cancellation — a handle you can pass anywhere (into a
-     * helper, a library, a long loop) without also handing over the power to
-     * cancel. The WRITE half is the scope itself: `TaskGroup::cancel()`. Keeping
-     * them as two views of ONE object means there is no second cancellation
-     * state to keep in sync with the scope tree — a token is just a view of a
-     * `TaskGroup`, and cancellation walks the same parent chain the scheduler
-     * already uses.
+     * The read-only half of cancellation.
      *
-     * Inside a task, `Context::token()` gives the token of the scope it is in.
+     * A token can be handed to a helper, a library or a long loop so that it can observe cancellation without also getting the power to cancel. The write half is the scope itself, `TaskGroup::cancel()`. A token is a view of a `TaskGroup`, so there is no second cancellation state to keep in sync with the scope tree. Inside a task, `Context::token()` gives the token of the scope it is in.
+     *
+     * ```php
+     * group(function (TaskGroup $g) {
+     *     $token = $g->token();
+     *     $g->spawn(function () use ($token) {
+     *         while (!$token->isCancelled()) { step(); }
+     *     });
+     * });
+     * ```
+     *
+     * @see TaskGroup::token
+     * @see Context::token
+     * @example doc_async_cancellation
      */
+    // The READ half of cancellation — a handle you can pass anywhere (into a
+    // helper, a library, a long loop) without also handing over the power to
+    // cancel. The WRITE half is the scope itself: `TaskGroup::cancel()`. Keeping
+    // them as two views of ONE object means there is no second cancellation
+    // state to keep in sync with the scope tree — a token is just a view of a
+    // `TaskGroup`, and cancellation walks the same parent chain the scheduler
+    // already uses.
+    //
+    // Inside a task, `Context::token()` gives the token of the scope it is in.
     final class CancellationToken
     {
+        /**
+         * Create a token that observes `$scope`; normally obtained from `TaskGroup::token()` or `Context::token()`.
+         *
+         * @param TaskGroup $scope  the scope to observe
+         */
         public function __construct(private TaskGroup $scope) {}
 
-        /** True once this scope, or any ancestor, was cancelled. */
+        /**
+         * True once this scope, or any ancestor, was cancelled.
+         *
+         * @return bool  whether cancellation was requested
+         */
         public function isCancelled(): bool
         {
             $g = $this->scope;
@@ -196,10 +347,15 @@ namespace Async {
         }
 
         /**
-         * Cancellation checkpoint. A task that suspends gets a
-         * CancelledException delivered automatically; this is for a CPU-bound
-         * loop that never reaches a suspend point.
+         * Cancellation checkpoint: throw `CancelledException` if cancellation was requested.
+         *
+         * A task that suspends gets the exception delivered automatically; this is for a CPU-bound loop that never reaches a suspend point.
+         *
+         * @throws CancelledException  when the scope was cancelled
          */
+        // Cancellation checkpoint. A task that suspends gets a
+        // CancelledException delivered automatically; this is for a CPU-bound
+        // loop that never reaches a suspend point.
         public function throwIfCancelled(): void
         {
             if ($this->isCancelled()) {
@@ -207,13 +363,21 @@ namespace Async {
             }
         }
 
-        /** The earliest deadline on this scope or an ancestor, as a unix time. */
+        /**
+         * The earliest deadline on this scope or an ancestor, as a unix time.
+         *
+         * @return ?float  unix timestamp, or null when no deadline applies
+         */
         public function deadline(): ?float
         {
             return __wallDeadline($this->scope->deadlineAt());
         }
 
-        /** Seconds left before the deadline (never negative); null when unbounded. */
+        /**
+         * Seconds left before the deadline, never negative.
+         *
+         * @return ?float  seconds remaining, or null when unbounded
+         */
         public function remaining(): ?float
         {
             $d = $this->scope->deadlineAt();
@@ -223,10 +387,15 @@ namespace Async {
         }
 
         /**
-         * Run $fn when this scope is cancelled — the hook for releasing a
-         * resource the scheduler knows nothing about (a handle, a lock, a
-         * subprocess). Fires once, synchronously, inside `cancel()`.
+         * Run `$fn` when this scope is cancelled.
+         *
+         * The hook for releasing a resource the scheduler knows nothing about (a handle, a lock, a subprocess). It fires once, synchronously, inside `cancel()`; if the scope is already cancelled it runs immediately. A handler that throws does not unwind `cancel()`: the exception is recorded as the scope's failure.
+         *
+         * @param callable $fn  called with no arguments
          */
+        // Run $fn when this scope is cancelled — the hook for releasing a
+        // resource the scheduler knows nothing about (a handle, a lock, a
+        // subprocess). Fires once, synchronously, inside `cancel()`.
         public function onCancel(callable $fn): void
         {
             if ($this->isCancelled()) {
@@ -238,11 +407,6 @@ namespace Async {
     }
 
     /**
-     * A running unit of async work — a fiber plus its settled state. Created by
-     * {@see spawn()} / {@see TaskGroup::spawn()}, never constructed directly.
-     * Its public fields are scheduler bookkeeping, not API.
-     */
-    /**
      * One task's interest in one fd, for `stream_select`/`socket_select`.
      *
      * The read/write paths chain waiters through `Task->ioNext` — ONE link, which
@@ -252,12 +416,22 @@ namespace Async {
      * and both are unlinked in one pass when the select ends. Records, not a
      * nested `array<int, Task[]>` — the element-repr hazard that shaped the
      * read/write chains applies here too.
+     * @internal
      */
     final class SelectReg
     {
+        /**
+         * @internal
+         */
         public ?SelectReg $fdNext = null;
+        /**
+         * @internal
+         */
         public ?SelectReg $ownNext = null;
 
+        /**
+         * @internal
+         */
         public function __construct(
             public Task $task,
             public int $fd,
@@ -265,17 +439,60 @@ namespace Async {
         ) {}
     }
 
+    /**
+     * A running unit of async work: a green thread plus its settled state.
+     *
+     * A `Task` is the handle returned by `spawn()` and `TaskGroup::spawn()`; it is never constructed directly. Every task is owned by exactly one scope (a `TaskGroup`) that cannot finish until the task has settled, so a task never outlives the code that started it.
+     *
+     * Use `await()` to wait for the result (rethrowing the task's exception), `join()` to wait without rethrowing, `awaitWithin()` to wait with a deadline, and `cancel()` to ask it to stop. A failure nobody awaited is escalated to the owning scope, which cancels its other tasks and rethrows it when the scope ends. Unlike a Fiber, a task is scheduled for you: it starts running when the spawning task next suspends, and suspends transparently inside ordinary stream calls.
+     *
+     * Its other public fields are scheduler bookkeeping, not API.
+     *
+     * ```php
+     * $t = spawn(fn() => compute());
+     * $value = $t->await();
+     * ```
+     *
+     * @see spawn
+     * @see TaskGroup
+     * @see awaitAll
+     * @example doc_async_spawn
+     */
+    // A running unit of async work — a fiber plus its settled state. Created by
+    // {@see spawn()} / {@see TaskGroup::spawn()}, never constructed directly.
+    // Its public fields are scheduler bookkeeping, not API.
     final class Task
     {
+        /**
+         * @internal
+         */
         public const PENDING = 0;
+        /**
+         * @internal
+         */
         public const DONE = 1;
+        /**
+         * @internal
+         */
         public const FAILED = 2;
 
+        /**
+         * @internal
+         */
         public int $state = self::PENDING;
+        /**
+         * @internal
+         */
         public mixed $result = null;
+        /**
+         * @internal
+         */
         public ?\Throwable $error = null;
 
-        /** @var Task[] tasks awaiting THIS one — woken when it settles */
+        /**
+         * @internal
+         * @var Task[] tasks awaiting THIS one — woken when it settles
+         */
         public array $waiters = [];
 
         /**
@@ -284,10 +501,14 @@ namespace Async {
          * never be lost. Set at REGISTRATION time, before the awaiter parks —
          * "has a waiter right now" is not a usable proxy (a bulk await is parked
          * on one task while the others settle).
+         * @internal
          */
         public bool $claimed = false;
 
-        /** Already sitting in the run queue — keeps wake() idempotent. */
+        /**
+         * @internal
+         * Already sitting in the run queue — keeps wake() idempotent.
+         */
         public bool $queued = false;
 
         /**
@@ -295,14 +516,24 @@ namespace Async {
          * CancelledException until the task actually terminates — a one-shot
          * throw would let `try { … } catch (\Throwable) {}` pin the scope open
          * forever, which is exactly the shape real code is written in.
+         * @internal
          */
         public bool $cancelRequested = false;
-        /** Nesting depth of {@see shield()} — cancellation is held back while > 0. */
+        /**
+         * @internal
+         * Nesting depth of {@see shield()} — cancellation is held back while > 0.
+         */
         public int $shield = 0;
 
-        /** The fd this task is parked on, or -1. Owned by the scheduler. */
+        /**
+         * @internal
+         * The fd this task is parked on, or -1. Owned by the scheduler.
+         */
         public int $ioFd = -1;
-        /** True when the park is for writability (else readability). */
+        /**
+         * @internal
+         * True when the park is for writability (else readability).
+         */
         public bool $ioWrite = false;
         /**
          * INTRUSIVE chain of the other tasks parked on the SAME fd (the scheduler's
@@ -311,12 +542,19 @@ namespace Async {
          * and its fread() returned empty while the other got the data. A chain on
          * the Task avoids a nested `array<int, Task[]>` in prelude code (the known
          * element-repr hazard) and pushes/pops in O(1).
+         * @internal
          */
         public ?Task $ioNext = null;
-        /** The op of the pool job this task is parked on, or -1. Owned by the scheduler. */
+        /**
+         * @internal
+         * The op of the pool job this task is parked on, or -1. Owned by the scheduler.
+         */
         public int $offloadOp = -1;
 
-        /** Armed while parked on a timer; cleared on wake/cancel (lazy heap delete). */
+        /**
+         * @internal
+         * Armed while parked on a timer; cleared on wake/cancel (lazy heap delete).
+         */
         public bool $timerActive = false;
         /**
          * Which arming the heap slot belongs to. A task that woke from the
@@ -326,13 +564,23 @@ namespace Async {
          * connection's first idle timer closed it 5 s after accept, mid-request.
          * The slot carries the sequence it was pushed under; only the latest is
          * the task's timer.
+         * @internal
          */
         public int $timerSeq = 0;
 
-        /** Head of this task's own {@see SelectReg} list, and how many it holds. */
+        /**
+         * @internal
+         * Head of this task's own {@see SelectReg} list, and how many it holds.
+         */
         public ?SelectReg $selHead = null;
+        /**
+         * @internal
+         */
         public int $selFds = 0;
-        /** Set by the reactor when one of those fds fired — select's "why did I wake". */
+        /**
+         * @internal
+         * Set by the reactor when one of those fds fired — select's "why did I wake".
+         */
         public bool $selWoken = false;
 
         /**
@@ -341,31 +589,57 @@ namespace Async {
          * other task, but it does not count towards "is there still work?", so a
          * program whose real tasks have all finished exits instead of being
          * pinned open by the pump's own timer.
+         * @internal
          */
         public bool $daemon = false;
 
-        /** A value handed to this task while it was parked on a {@see Channel}. */
+        /**
+         * @internal
+         * A value handed to this task while it was parked on a {@see Channel}.
+         */
         public mixed $chanValue = null;
-        /** False when the delivering channel was closed (recv/select report !ok). */
+        /**
+         * @internal
+         * False when the delivering channel was closed (recv/select report !ok).
+         */
         public bool $chanOk = true;
-        /** True while parked across several channels in a {@see select()}. */
+        /**
+         * @internal
+         * True while parked across several channels in a {@see select()}.
+         */
         public bool $selecting = false;
-        /** Set once ONE channel commits to this select-waiter (the single claim). */
+        /**
+         * @internal
+         * Set once ONE channel commits to this select-waiter (the single claim).
+         */
         public bool $selectClaimed = false;
-        /** The channel that actually completed — identifies the winning case. */
+        /**
+         * @internal
+         * The channel that actually completed — identifies the winning case.
+         */
         public ?Channel $chanReady = null;
-        /** True when the completed case was a SEND. */
+        /**
+         * @internal
+         * True when the completed case was a SEND.
+         */
         public bool $chanSend = false;
-        /** The single channel this task is parked on, for deregistration on cancel. */
+        /**
+         * @internal
+         * The single channel this task is parked on, for deregistration on cancel.
+         */
         public ?Channel $chanHost = null;
         /**
          * This task's index in $chanHost's queue, so a cancel can tombstone it in
          * O(1) instead of rebuilding the queue around it. -1 when the task is not
          * parked on exactly one channel — a select() waiter sits in several queues
          * at once and no single index describes it.
+         * @internal
          */
         public int $chanSlot = -1;
-        /** @var Channel[] every channel a select() parked this task on */
+        /**
+         * @internal
+         * @var Channel[] every channel a select() parked this task on
+         */
         public array $selectChans = [];
         /**
          * The select() answer to $chanSlot: this task's index in EACH channel it is
@@ -375,14 +649,24 @@ namespace Async {
          * slow path, so a task that never selects pays one empty array for it.
          *
          * @var array<int,int>
+         * @internal
          */
         public array $selectSlots = [];
 
-        /** Position in owner->children, or -1 once pruned (O(1) removal). */
+        /**
+         * @internal
+         * Position in owner->children, or -1 once pruned (O(1) removal).
+         */
         public int $idx = -1;
 
-        /** Monotonic id, and an optional label from {@see named()} — diagnostics only. */
+        /**
+         * @internal
+         * Monotonic id, and an optional label from {@see named()} — diagnostics only.
+         */
         public int $id = 0;
+        /**
+         * @internal
+         */
         public string $name = '';
 
         /**
@@ -395,6 +679,7 @@ namespace Async {
          * a program hangs, and nobody remembers to call {@see named()} BEFORE the
          * hang. '' when the spawn came from somewhere the rewrite does not reach
          * (a dynamic callable, a spawn inside the prelude itself).
+         * @internal
          */
         public string $origin = '';
 
@@ -404,11 +689,28 @@ namespace Async {
          * hangs: the scope tree cannot answer that (settled children are pruned, and
          * a nested group's children hang off the group, not the root). O(1) link on
          * spawn, O(1) unlink on settle, no array to grow.
+         * @internal
          */
         public ?Task $allNext = null;
+        /**
+         * @internal
+         */
         public ?Task $allPrev = null;
 
-        /** Label this task for diagnostics: `spawn(…)->named('worker-3')`. */
+        /**
+         * Label this task for diagnostics and return it, so it chains off `spawn()`.
+         *
+         * The label shows up in `Task::label()`, `dump()` and the watchdog and failure reports.
+         *
+         * ```php
+         * $t = spawn(fn() => serve())->named('http');
+         * ```
+         *
+         * @param string $name  the label
+         * @return Task  this task
+         * @see dump
+         * @see failure
+         */
         public function named(string $name): Task
         {
             $this->name = $name;
@@ -419,10 +721,18 @@ namespace Async {
          * Longest stretch this task has held the loop, in seconds — the watchdog's
          * rate limit: report the first breach, then only a doubling, so a genuinely
          * CPU-bound worker cannot turn the log into its own bottleneck.
+         * @internal
          */
         public float $wdWorst = 0.0;
 
-        /** Just the identity — `#id "label" at file:line`, no state. */
+        /**
+         * The task's identity as text: `#id "label" at file:line`.
+         *
+         * The id is unique for the life of the process. The label appears only when set with `named()`. The location is where the task was spawned; a task started through `$g->spawn(...)` shows `near file:line` of the enclosing scope instead, and a task spawned from a dynamic callable may have none.
+         *
+         * @return string  e.g. `#3 "http" at server.php:31`
+         */
+        // Just the identity — `#id "label" at file:line`, no state.
         public function label(): string
         {
             $name = $this->name === '' ? '' : (' "' . $this->name . '"');
@@ -435,7 +745,15 @@ namespace Async {
             return '#' . (string)$this->id . $name . $where;
         }
 
-        /** One line for the diagnostic report: id, label, state, what it waits on. */
+        /**
+         * One diagnostic line for this task: its label, its state and what it is parked on.
+         *
+         * The state is one of `ready`, `done`, `failed(Class)`, `timer`, `channel`, `select(...)`, `io-read fd=N`, `io-write fd=N` or `offload op=...`, followed by flags such as `cancel-requested`, `shielded` and `awaited`. This is the per-task line of `dump()`.
+         *
+         * @return string  the diagnostic line
+         * @see dump
+         */
+        // One line for the diagnostic report: id, label, state, what it waits on.
         public function describe(): string
         {
             $what = 'ready';
@@ -472,11 +790,18 @@ namespace Async {
          * PER-TASK recv scratch buffer. Must not be shared: a read holds the
          * pointer across a suspend, so one global buffer that grows (free +
          * calloc) hands every parked reader a dangling pointer.
+         * @internal
          */
         public ?\Ffi\Ptr $rbuf = null;
+        /**
+         * @internal
+         */
         public int $rbufLen = 0;
 
-        /** Unique for the life of the process — never reused, unlike an object id. */
+        /**
+         * @internal
+         * Unique for the life of the process — never reused, unlike an object id.
+         */
         public int $id = 0;
         private static int $lastId = 0;
 
@@ -487,6 +812,7 @@ namespace Async {
          * inside a nested TaskGroup::run(). Keeping the scope here, per task, and
          * not on a scheduler-global stack is what makes nesting sound under
          * interleaving: a fiber can only ever read its OWN open scope.
+         * @internal
          */
         public function __construct(
             public \Fiber $fiber,
@@ -497,19 +823,40 @@ namespace Async {
             $this->id = self::$lastId;
         }
 
+        /**
+         * Whether the task has settled, by returning, throwing or being cancelled.
+         *
+         * @return bool  true once settled; false while still running or parked
+         */
         public function isDone(): bool { return $this->state !== self::PENDING; }
 
         /**
-         * Ask this task to stop. It is deregistered from whatever it waits on and
-         * raises CancelledException at its suspend point — and at every one after
-         * that. Returns immediately; use {@see await()} to see it out.
+         * Ask this task to stop.
+         *
+         * The task is taken off whatever it is waiting on (timer, channel, stream) and gets a `CancelledException` at that suspend point, and at every suspend point after it. `cancel()` returns immediately and does not wait: use `join()` to see the task out. Cancelling a task that has already settled does nothing; cancelling the running task only sets the flag, which it hits at its next suspend point. A task waiting on a blocking-pool file job cannot be stopped until that job finishes.
+         *
+         * ```php
+         * $t->cancel();
+         * $t->join();     // wait for it to unwind, without rethrowing
+         * ```
+         *
+         * @see join
+         * @see shield
+         * @see CancelledException
+         * @example doc_async_shield
          */
+        // Ask this task to stop. It is deregistered from whatever it waits on and
+        // raises CancelledException at its suspend point — and at every one after
+        // that. Returns immediately; use {@see await()} to see it out.
         public function cancel(): void
         {
             Scheduler::instance()->cancelTask($this);
         }
 
-        /** Register $w as a waiter, once. Small lists — a scan beats a map here. */
+        /**
+         * @internal
+         * Register $w as a waiter, once. Small lists — a scan beats a map here.
+         */
         public function addWaiter(Task $w): void
         {
             foreach ($this->waiters as $x) {
@@ -518,7 +865,10 @@ namespace Async {
             $this->waiters[] = $w;
         }
 
-        /** Unregister $w — a waiter that stopped waiting before this settled. */
+        /**
+         * @internal
+         * Unregister $w — a waiter that stopped waiting before this settled.
+         */
         public function dropWaiter(Task $w): void
         {
             /** @var Task[] $keep */
@@ -530,10 +880,20 @@ namespace Async {
         }
 
         /**
-         * Suspend the calling task until this one settles, then return its value
-         * (or rethrow its error). Loops: a wake is a HINT, not a promise — the
-         * state is what decides.
+         * Suspend the calling task until this one settles, then return its value or rethrow its error.
+         *
+         * Awaiting a task claims its outcome: a failure you await is not additionally escalated to the owning scope. If the awaited task was cancelled, its `CancelledException` is rethrown into the caller, which will unwind the caller's scope; use `join()` after cancelling a task yourself. The caller itself can be cancelled while it waits, in which case it is taken off the wait.
+         *
+         * @return mixed  the task's return value
+         * @throws \Throwable  whatever the task threw
+         * @see join
+         * @see awaitWithin
+         * @see awaitAll
+         * @example doc_async_spawn
          */
+        // Suspend the calling task until this one settles, then return its value
+        // (or rethrow its error). Loops: a wake is a HINT, not a promise — the
+        // state is what decides.
         public function await(): mixed
         {
             $sched = Scheduler::instance();
@@ -549,12 +909,20 @@ namespace Async {
         }
 
         /**
-         * Wait for this task and report HOW it ended, without rethrowing. What
-         * you want after cancelling one yourself: `$t->cancel(); $t->join();`
-         * reads as "stop it and see it out", whereas `await()` would raise the
-         * task's own CancelledException into a caller that is not being
-         * cancelled at all — and that would unwind the caller's scope.
+         * Wait for this task and report how it ended, without rethrowing.
+         *
+         * This is what you want after cancelling a task yourself: `$t->cancel(); $t->join();` reads as "stop it and see it out", whereas `await()` would raise the task's own `CancelledException` into a caller that is not being cancelled.
+         *
+         * @return Settled  the outcome: `ok` with `value`, or the `error`
+         * @see await
+         * @see Settled
+         * @example doc_async_shield
          */
+        // Wait for this task and report HOW it ended, without rethrowing. What
+        // you want after cancelling one yourself: `$t->cancel(); $t->join();`
+        // reads as "stop it and see it out", whereas `await()` would raise the
+        // task's own CancelledException into a caller that is not being
+        // cancelled at all — and that would unwind the caller's scope.
         public function join(): Settled
         {
             $sched = Scheduler::instance();
@@ -569,10 +937,20 @@ namespace Async {
         }
 
         /**
-         * Await with a deadline. On expiry the task is CANCELLED and joined (it
-         * does not keep running unobserved), then {@see TimeoutException} is
-         * thrown — a timeout that leaves the work running is not a timeout.
+         * Await this task with a deadline.
+         *
+         * On expiry the task is cancelled and joined (it does not keep running unobserved), and then `TimeoutException` is thrown. A timeout that leaves the work running is not a timeout.
+         *
+         * @param float $seconds  how long to wait, in seconds
+         * @return mixed  the task's return value
+         * @throws TimeoutException  when the task did not settle in time
+         * @throws \Throwable  whatever the task threw
+         * @see timeout
+         * @see await
          */
+        // Await with a deadline. On expiry the task is CANCELLED and joined (it
+        // does not keep running unobserved), then {@see TimeoutException} is
+        // thrown — a timeout that leaves the work running is not a timeout.
         public function awaitWithin(float $seconds): mixed
         {
             $sched = Scheduler::instance();
@@ -590,30 +968,57 @@ namespace Async {
     }
 
     /**
-     * A structured-concurrency scope (a "nursery"). Every spawn() attaches to the
-     * innermost scope OPEN IN THE CALLING TASK; the scope does not close until all
-     * its children have settled, so a task can never outlive it. The first child
-     * failure cancels the siblings and propagates out of the group.
+     * A structured-concurrency scope (a "nursery").
      *
-     *   Async\group(function (TaskGroup $g) {
-     *       $g->spawn(fn() => work(1));
-     *       $g->spawn(fn() => work(2));
-     *   }); // returns only once both children are done
+     * Every `spawn()` attaches to the innermost scope open in the calling task. The scope does not close until all of its children have settled, so a task can never outlive the code that opened the scope. The first child failure cancels the siblings and propagates out of the scope once they have been joined. Cancellation is recursive: cancelling a scope cancels the scopes nested in it.
+     *
+     * Open a scope with `group()` or `TaskGroup::run()`. The scope lives on the task, not in a global stack, so scopes opened by concurrently running tasks never adopt each other's children. `async()` opens an implicit root scope, which is why even a top-level `spawn()` is joined.
+     *
+     * ```php
+     * Async\group(function (TaskGroup $g) {
+     *     $g->spawn(fn() => work(1));
+     *     $g->spawn(fn() => work(2));
+     * }); // returns only once both children are done
+     * ```
+     *
+     * @see group
+     * @see Task
+     * @see CancellationToken
+     * @example doc_async_group
+     * @example doc_async_failure
      */
     final class TaskGroup
     {
-        /** @var Task[] live children (settled ones are pruned) */
+        /**
+         * @internal
+         * @var Task[] live children (settled ones are pruned)
+         */
         public array $children = [];
+        /**
+         * @internal
+         */
         public bool $cancelled = false;
+        /**
+         * @internal
+         */
         public ?\Throwable $failure = null;
 
-        /** Unix time this scope must finish by, or null. Set by {@see timeout()}. */
+        /**
+         * @internal
+         * Unix time this scope must finish by, or null. Set by {@see timeout()}.
+         */
         public ?float $deadline = null;
 
-        /** @var callable[] run once when this scope is cancelled */
+        /**
+         * @internal
+         * @var callable[] run once when this scope is cancelled
+         */
         public array $cancelHandlers = [];
 
-        /** @var array<string, mixed> scoped values, inherited down the chain */
+        /**
+         * @internal
+         * @var array<string, mixed> scoped values, inherited down the chain
+         */
         public array $values = [];
 
         /**
@@ -623,12 +1028,23 @@ namespace Async {
          * rewritten at lowering, and the scope it spawns into is the next best
          * answer — reported as `near <site>` so it is never mistaken for the exact
          * spawn line.
+         * @internal
          */
         public string $site = '';
 
+        /**
+         * @internal
+         */
         public function __construct(public ?TaskGroup $parent = null) {}
 
-        /** The read-only cancellation handle for this scope. */
+        /**
+         * The read-only cancellation handle for this scope.
+         *
+         * Pass the token to code that should observe cancellation without being able to cause it.
+         *
+         * @return CancellationToken  a view of this scope
+         * @see CancellationToken
+         */
         public function token(): CancellationToken
         {
             return new CancellationToken($this);
@@ -639,6 +1055,7 @@ namespace Async {
          * clock ({@see __wallDeadline()} for a unix time). A nested timeout
          * can only ever TIGHTEN the enclosing one — a 30s inner scope inside a
          * 2s outer one still dies at 2s.
+         * @internal
          */
         public function deadlineAt(): ?float
         {
@@ -653,7 +1070,10 @@ namespace Async {
             return $best;
         }
 
-        /** True when $t is owned by this scope or one nested inside it. */
+        /**
+         * @internal
+         * True when $t is owned by this scope or one nested inside it.
+         */
         public function owns(Task $t): bool
         {
             $g = $t->owner;
@@ -665,15 +1085,26 @@ namespace Async {
         }
 
         /**
-         * Open a scope, run $body($group), then join every child before returning.
-         * {@see group()} is the everyday spelling of this.
+         * Open a scope, run `$body($group)`, then wait for every child before returning.
+         *
+         * Returns the body's value. If the body throws or a child fails, the remaining children are cancelled and joined first, and then the first failure is thrown; a `CancelledException` that cancelled the scope itself is never swallowed. `group()` is the everyday spelling of this.
+         *
+         * @param callable $body  receives the new `TaskGroup`; its return value is returned
+         * @return mixed  the body's return value
+         * @throws \Throwable  the first failure in the scope
+         * @see group
+         * @example doc_async_group
+         * @example doc_async_failure
          */
         public static function run(callable $body): mixed
         {
             return self::runAt('', $body);
         }
 
-        /** {@see run()} with the compiler-folded call site. @internal */
+        /**
+         * @internal
+         * {@see run()} with the compiler-folded call site. @internal
+         */
         public static function runAt(string $site, callable $body): mixed
         {
             $sched = Scheduler::instance();
@@ -710,7 +1141,17 @@ namespace Async {
             return $result;
         }
 
-        /** Spawn a child task into this group. Returns a handle to await. */
+        /**
+         * Spawn a child task into this scope and return a handle to await.
+         *
+         * The task is owned by this scope and joined when the scope closes. The task starts when the calling task next suspends. Spawning into a scope that is already cancelled starts the child, which is cancelled at its first suspend point.
+         *
+         * @param callable $fn  the task body
+         * @param mixed ...$args  passed to `$fn`
+         * @return Task  the handle; `await()` it or let the scope join it
+         * @see spawn
+         * @example doc_async_group
+         */
         public function spawn(callable $fn, mixed ...$args): Task
         {
             return $this->spawnAt('', $fn, ...$args);
@@ -721,6 +1162,7 @@ namespace Async {
          * {@see Task::$origin}. `@internal`: written by the lowering rewrite, not
          * by hand (`$g->spawn(…)` is the API and picks this up automatically when
          * the receiver is statically a TaskGroup).
+         * @internal
          */
         public function spawnAt(string $site, callable $fn, mixed ...$args): Task
         {
@@ -743,6 +1185,7 @@ namespace Async {
          * Wait for every child to settle. Children are pruned as they settle, so
          * this drains until empty rather than walking a snapshot. A child failure
          * (other than the cancellation we ourselves caused) becomes the group's.
+         * @internal
          */
         public function joinAll(): void
         {
@@ -761,7 +1204,10 @@ namespace Async {
             }
         }
 
-        /** Drop a settled child. True O(1): swap the last element into its slot. */
+        /**
+         * @internal
+         * Drop a settled child. True O(1): swap the last element into its slot.
+         */
         public function childSettled(Task $task): void
         {
             $i = $task->idx;
@@ -775,7 +1221,10 @@ namespace Async {
             $task->idx = -1;
         }
 
-        /** Record the first real failure and cancel the remaining children. */
+        /**
+         * @internal
+         * Record the first real failure and cancel the remaining children.
+         */
         public function fail(\Throwable $e): void
         {
             if ($e instanceof CancelledException) {
@@ -791,11 +1240,18 @@ namespace Async {
         }
 
         /**
-         * Cancel every live child FOR REAL: a parked child is deregistered from
-         * whatever it waits on and raises CancelledException at its suspend
-         * point; a child that itself opened scopes unwinds through their joins,
-         * so cancellation is recursive by construction.
+         * Cancel every live child of this scope. The write half of cancellation.
+         *
+         * Handlers registered with `CancellationToken::onCancel()` run first, synchronously. Then each parked child is taken off whatever it waits on and gets a `CancelledException` at its suspend point; a child that opened scopes of its own unwinds through their joins, so cancellation is recursive. A child that calls `cancel()` on its own scope is cancelled too. Cancelling twice does nothing, and the call does not wait: the scope still joins its children when it closes. Cancelling a scope is not a failure of the scope.
+         *
+         * @see CancellationToken
+         * @see Task::cancel
+         * @example doc_async_cancellation
          */
+        // Cancel every live child FOR REAL: a parked child is deregistered from
+        // whatever it waits on and raises CancelledException at its suspend
+        // point; a child that itself opened scopes unwinds through their joins,
+        // so cancellation is recursive by construction.
         public function cancel(): void
         {
             if ($this->cancelled) { return; }
@@ -821,17 +1277,29 @@ namespace Async {
     }
 
     /**
-     * A CSP channel over the cooperative scheduler. Unbuffered (cap 0) is a
-     * rendezvous; buffered parks only when full (send) / empty (recv).
-     * close() wakes everyone: pending recv reports !ok, pending/future send throws.
+     * A typed pipe between tasks, in the style of a Go channel.
      *
-     * Consumption is a `foreach` — the channel is the iterable, and the loop ends
-     * when it is closed and drained:
+     * A channel with capacity 0 (the default) is an unbuffered rendezvous: `send()` waits until a receiver takes the value. A buffered channel accepts up to `capacity` values without a waiting receiver and parks senders only when full and receivers only when empty. Values are delivered in FIFO order and waiting tasks are served in arrival order. Waiting suspends the task, never the process, and a waiting task can be cancelled.
      *
-     *   foreach ($ch as $value) { … }
+     * Consume with `foreach`: the channel is itself iterable and the loop ends when the channel is closed and drained. `next()` is the explicit form for when you must tell "closed" from a legitimate `null` payload, and `recv()` is the terse form that cannot. Use `select()` to wait on several channels at once.
      *
-     * {@see next()} is the explicit form when you need to tell "closed" from a
-     * legitimate null payload; {@see recv()} is the terse form that cannot.
+     * ```php
+     * $ch = channel();
+     * spawn(function () use ($ch) {
+     *     $ch->send(1);
+     *     $ch->send(2);
+     *     $ch->close();
+     * });
+     * foreach ($ch as $value) {
+     *     echo $value;
+     * }
+     * ```
+     *
+     * @see channel
+     * @see select
+     * @see Received
+     * @example doc_async_channel
+     * @example doc_async_select
      */
     final class Channel implements \IteratorAggregate
     {
@@ -876,6 +1344,11 @@ namespace Async {
         private int $id = 0;
         private static int $nextId = 0;
 
+        /**
+         * Create a channel; `channel()` is the usual spelling.
+         *
+         * @param int $capacity  buffer size; 0 (the default, and any negative value) means unbuffered
+         */
         public function __construct(int $capacity = 0)
         {
             $this->cap = $capacity < 0 ? 0 : $capacity;
@@ -883,23 +1356,51 @@ namespace Async {
             $this->id = self::$nextId;
         }
 
-        /** The key this channel's send/recv queue occupies in a waiter's slot map. */
+        /**
+         * @internal
+         * The key this channel's send/recv queue occupies in a waiter's slot map.
+         */
         public function queueKey(bool $send): int
         {
             return $send ? $this->id * 2 + 1 : $this->id * 2;
         }
 
+        /**
+         * Whether `close()` has been called.
+         *
+         * Values still buffered when the channel was closed can be received after this turns true.
+         *
+         * @return bool  true once closed
+         */
         public function isClosed(): bool
         {
             return $this->closed;
         }
 
+        /**
+         * Iterate over the received values: `foreach ($channel as $value)`.
+         *
+         * Each step receives one value, suspending while the channel is empty. The loop ends once the channel is closed and drained. The keys are the 0-based count of values received by this iteration. The values are consumed, so two loops over one channel split the stream between them.
+         *
+         * @return \Iterator  an iterator over the channel's values
+         */
         public function getIterator(): \Iterator
         {
             return new ChannelIterator($this);
         }
 
-        /** Send $value, suspending until it is buffered or taken by a receiver. */
+        /**
+         * Send `$value`, suspending until it is buffered or taken by a receiver.
+         *
+         * Returns at once when a receiver is already waiting or the buffer has room. Otherwise the calling task parks (on an unbuffered channel, until a receiver takes this exact value). A task cancelled while parked withdraws its value, so it is never delivered.
+         *
+         * @param mixed $value  the value to deliver; may be `null`
+         * @throws ChannelClosedException  when the channel is closed, or closed while this call waits
+         * @throws CancelledException  when the task is cancelled while waiting
+         * @see next
+         * @example doc_async_channel
+         */
+        // Send $value, suspending until it is buffered or taken by a receiver.
         public function send(mixed $value): void
         {
             if ($this->closed) {
@@ -1053,10 +1554,19 @@ namespace Async {
 
 
         /**
-         * The next delivery, as an object. `ok` is false once the channel is
-         * closed and drained — the only honest way to report that when null is a
-         * legal payload.
+         * Receive the next value as a `Received` object.
+         *
+         * Buffered values come first, then values from parked senders; if the channel is empty the calling task parks until a sender arrives or the channel is closed. `ok` is false once the channel is closed and drained, the only unambiguous way to report that when `null` is a legal payload.
+         *
+         * @return Received  `value` and `ok`; `ok` is false when the channel is closed and drained
+         * @throws CancelledException  when the task is cancelled while waiting
+         * @see recv
+         * @see getIterator
+         * @example doc_async_channel
          */
+        // The next delivery, as an object. `ok` is false once the channel is
+        // closed and drained — the only honest way to report that when null is a
+        // legal payload.
         public function next(): Received
         {
             $sched = Scheduler::instance();
@@ -1089,10 +1599,18 @@ namespace Async {
         }
 
         /**
-         * The terse receive: the value, or null once the channel is closed and
-         * drained. Convenient, but it cannot carry a legitimate null payload —
-         * use {@see next()} or `foreach` when null is a real value.
+         * Receive the next value, or `null` once the channel is closed and drained.
+         *
+         * Convenient, but it cannot tell a `null` payload from a closed channel: use `next()` or `foreach` when `null` is a real value.
+         *
+         * @return mixed  the received value, or null when the channel is closed and drained
+         * @throws CancelledException  when the task is cancelled while waiting
+         * @see next
+         * @example doc_async_channel
          */
+        // The terse receive: the value, or null once the channel is closed and
+        // drained. Convenient, but it cannot carry a legitimate null payload —
+        // use {@see next()} or `foreach` when null is a real value.
         public function recv(): mixed
         {
             return $this->next()->value;
@@ -1156,7 +1674,10 @@ namespace Async {
 
         // ── select() support ────────────────────────────────────────────────
 
-        /** Non-blocking receive attempt for the select() fast path. */
+        /**
+         * @internal
+         * Non-blocking receive attempt for the select() fast path.
+         */
         public function trySelectRecv(): ?Received
         {
             if (\count($this->buffer) > 0) {
@@ -1174,7 +1695,10 @@ namespace Async {
             return null;
         }
 
-        /** Non-blocking send attempt for the select() fast path. */
+        /**
+         * @internal
+         * Non-blocking send attempt for the select() fast path.
+         */
         public function trySelectSend(mixed $value): bool
         {
             if ($this->closed) {
@@ -1190,7 +1714,10 @@ namespace Async {
             return false;
         }
 
-        /** Park $t on this channel's receive queue (select() slow path). */
+        /**
+         * @internal
+         * Park $t on this channel's receive queue (select() slow path).
+         */
         public function registerSelectRecv(Task $t): void
         {
             $t->chanSlot = -1;   // in several queues at once — no single slot to hold
@@ -1198,7 +1725,10 @@ namespace Async {
             $t->selectSlots[$this->queueKey(false)] = \count($this->recvQ) - 1;
         }
 
-        /** Park $t on this channel's send queue offering $value (select() slow path). */
+        /**
+         * @internal
+         * Park $t on this channel's send queue offering $value (select() slow path).
+         */
         public function registerSelectSend(Task $t, mixed $value): void
         {
             $t->chanSlot = -1;
@@ -1217,6 +1747,7 @@ namespace Async {
          *
          * The scan below is the safety net, not the path: it survives a caller that
          * removes a waiter some other way, and it walks only the live tail.
+         * @internal
          */
         public function removeWaiter(Task $t): void
         {
@@ -1288,7 +1819,15 @@ namespace Async {
             }
         }
 
-        /** Close: parked receivers report !ok, parked/future senders throw. */
+        /**
+         * Close the channel. Calling it again does nothing.
+         *
+         * Values already buffered can still be received. Tasks parked in a receive wake with `ok` false (or `null` from `recv()`); tasks parked in a send, and every later `send()`, throw `ChannelClosedException`. The usual pattern is for the producer to close the channel, so that consumers' `foreach` loops end.
+         *
+         * @see ChannelClosedException
+         * @example doc_async_channel
+         */
+        // Close: parked receivers report !ok, parked/future senders throw.
         public function close(): void
         {
             if ($this->closed) {
@@ -1317,6 +1856,7 @@ namespace Async {
      * `foreach ($channel as $value)`. A plain Iterator rather than a generator:
      * each call is an ordinary frame on the fiber's own stack, so parking inside
      * it is just a fiber suspend with no generator machinery in between.
+     * @internal
      */
     final class ChannelIterator implements \Iterator
     {
@@ -1342,13 +1882,18 @@ namespace Async {
     }
 
     /**
-     * A counting semaphore — the bound on "do N of these at a time". Parks the
-     * task rather than the process, so a limiter costs nothing while it waits.
+     * A counting semaphore: the bound on "do N of these at a time".
      *
-     *   $sem = new Async\Semaphore(10);
-     *   $sem->withPermit(fn() => fetch($url));
+     * `acquire()` takes a permit and parks the task, not the process, while none is free, so a limiter costs nothing while it waits. Waiting tasks are woken in arrival order as permits are released. `withPermit()` is the safe form that releases the permit however the callable ends. For the common "map over a list, N at a time" shape see `mapConcurrent()`.
      *
-     * {@see mapConcurrent()} is the batteries-included form.
+     * ```php
+     * $sem = new Async\Semaphore(10);
+     * $sem->withPermit(fn() => fetch($url));
+     * ```
+     *
+     * @see mapConcurrent
+     * @see Mutex
+     * @example doc_async_semaphore
      */
     final class Semaphore
     {
@@ -1356,17 +1901,35 @@ namespace Async {
         /** @var Task[] tasks waiting for a permit, FIFO */
         private array $waitQ = [];
 
+        /**
+         * Create a semaphore holding `$permits` permits.
+         *
+         * @param int $permits  number of permits; values below 1 are raised to 1
+         */
         public function __construct(int $permits)
         {
             $this->free = $permits < 1 ? 1 : $permits;
         }
 
-        /** Permits currently available. */
+        /**
+         * Permits currently available.
+         *
+         * @return int  the number of permits that can be acquired without waiting
+         */
         public function available(): int
         {
             return $this->free;
         }
 
+        /**
+         * Take a permit, suspending until one is free.
+         *
+         * Every `acquire()` must be paired with a `release()`; prefer `withPermit()`, which cannot forget.
+         *
+         * @throws CancelledException  when the task is cancelled while waiting (no permit is taken)
+         * @see release
+         * @see withPermit
+         */
         public function acquire(): void
         {
             $sched = Scheduler::instance();
@@ -1380,6 +1943,13 @@ namespace Async {
             $this->free = $this->free - 1;
         }
 
+        /**
+         * Return a permit and wake the first waiting task.
+         *
+         * Releasing more often than acquiring raises the permit count above its initial value; this is not checked.
+         *
+         * @see acquire
+         */
         public function release(): void
         {
             $this->free = $this->free + 1;
@@ -1393,7 +1963,14 @@ namespace Async {
             }
         }
 
-        /** Hold a permit for the duration of $fn, releasing it however $fn ends. */
+        /**
+         * Hold a permit for the duration of `$fn`, releasing it however `$fn` ends.
+         *
+         * @param callable $fn  called with no arguments while the permit is held
+         * @return mixed  the value returned by `$fn`
+         * @throws \Throwable  whatever `$fn` throws, after the permit is released
+         * @example doc_async_semaphore
+         */
         public function withPermit(callable $fn): mixed
         {
             $this->acquire();
@@ -1406,31 +1983,23 @@ namespace Async {
     }
 
     /**
-     * A mutual-exclusion lock for a critical section that SPANS A SUSPEND POINT.
+     * A mutual-exclusion lock for a critical section that spans a suspend point.
      *
-     * ⚠ Read this before reaching for one. The scheduler is cooperative and
-     * single-threaded: nothing else runs between two suspend points, so an
-     * ordinary read-modify-write —
+     * The scheduler is cooperative and single-threaded: nothing else runs between two suspend points, so an ordinary read-modify-write such as `$shared->n = $shared->n + 1` is already atomic. There is no data race to protect against, and no need for atomics. What a `Mutex` protects is interleaving: a section that suspends in the middle (an `await()`, a `delay()`, a stream read) lets other tasks run and observe or change half-updated state.
      *
-     *     $shared->n = $shared->n + 1;
+     * ```php
+     * $mu->withLock(function () use ($store) {
+     *     $a = fetch();           // suspends: another task runs here
+     *     $b = fetch();
+     *     $store->write($a, $b);  // must not interleave with another writer
+     * });
+     * ```
      *
-     * — is already atomic by construction. There is no data race to protect
-     * against, and therefore no need for atomics in this runtime at all. (They
-     * would only start to mean something under real shared-memory threading,
-     * which is a separate epic; the forked `workers()` are shared-nothing.)
+     * Waiting tasks are woken in arrival order. The lock is not reentrant: locking it again from the task that holds it throws `LogicException` instead of deadlocking. It is not tied to the owner on release: `unlock()` works from any task.
      *
-     * What a Mutex protects is INTERLEAVING: a section that suspends in the
-     * middle, so other tasks get to run and can observe or mutate half-updated
-     * state.
-     *
-     *     $mu->withLock(function () use ($store) {
-     *         $a = fetch();          // suspends — another task runs here
-     *         $b = fetch();
-     *         $store->write($a, $b); // must not interleave with another writer
-     *     });
-     *
-     * Not reentrant: locking one you already hold is a deadlock, so it is a
-     * LogicException instead. FIFO, so no waiter starves.
+     * @see Semaphore
+     * @see Once
+     * @example doc_async_mutex
      */
     final class Mutex
     {
@@ -1439,8 +2008,21 @@ namespace Async {
         /** @var Task[] tasks waiting for the lock, FIFO */
         private array $waitQ = [];
 
+        /**
+         * Whether the lock is currently held.
+         *
+         * @return bool  true while some task holds the lock
+         */
         public function isLocked(): bool { return $this->held; }
 
+        /**
+         * Take the lock, suspending until it is free.
+         *
+         * @throws \LogicException  when the calling task already holds the lock
+         * @throws CancelledException  when the task is cancelled while waiting (the lock is not taken)
+         * @see withLock
+         * @see tryLock
+         */
         public function lock(): void
         {
             $sched = Scheduler::instance();
@@ -1458,7 +2040,12 @@ namespace Async {
             $this->owner = $me;
         }
 
-        /** Take the lock only if it is free. Never suspends. */
+        /**
+         * Take the lock only if it is free. Never suspends.
+         *
+         * @return bool  true if the lock was taken; false if someone holds it
+         * @example doc_async_mutex
+         */
         public function tryLock(): bool
         {
             if ($this->held) { return false; }
@@ -1467,6 +2054,12 @@ namespace Async {
             return true;
         }
 
+        /**
+         * Release the lock and wake the first waiting task.
+         *
+         * @throws \LogicException  when the lock is not held
+         * @see lock
+         */
         public function unlock(): void
         {
             if (!$this->held) {
@@ -1484,7 +2077,14 @@ namespace Async {
             }
         }
 
-        /** Hold the lock for the duration of $fn, releasing it however $fn ends. */
+        /**
+         * Hold the lock for the duration of `$fn`, releasing it however `$fn` ends.
+         *
+         * @param callable $fn  called with no arguments while the lock is held
+         * @return mixed  the value returned by `$fn`
+         * @throws \Throwable  whatever `$fn` throws, after the lock is released
+         * @example doc_async_mutex
+         */
         public function withLock(callable $fn): mixed
         {
             $this->lock();
@@ -1497,15 +2097,18 @@ namespace Async {
     }
 
     /**
-     * Run something exactly once, however many tasks ask for it — the lazy
-     * initialiser (a connection pool, a parsed config). Needed because the work
-     * suspends: without it two tasks both see "not ready yet" and both build.
-     * Everyone gets the same value, or the same error.
+     * Run something exactly once, however many tasks ask for it.
      *
-     *   $pool = $once->run(fn() => buildPool());
+     * The lazy initialiser: a connection pool, a parsed config. It exists because the work suspends; without it two tasks both see "not ready yet" and both build. Everyone who calls `run()` gets the same value, or the same error. Callers that arrive while the initialiser is running wait for it.
      *
-     * A CANCELLED initialiser is not a result: the state resets so the next
-     * caller can try again instead of inheriting someone else's cancellation.
+     * ```php
+     * $pool = $once->run(fn() => buildPool());
+     * ```
+     *
+     * A cancelled initialiser is not a result: the state resets so the next caller can try again instead of inheriting someone else's cancellation. A failure other than cancellation is remembered and rethrown to every later caller.
+     *
+     * @see Mutex
+     * @example doc_async_once
      */
     final class Once
     {
@@ -1519,8 +2122,24 @@ namespace Async {
         /** @var Task[] tasks waiting for the in-flight initialiser */
         private array $waitQ = [];
 
+        /**
+         * Whether the initialiser has finished, with a value or with an error.
+         *
+         * @return bool  true once finished; false while fresh, running or after a cancelled attempt
+         */
         public function hasRun(): bool { return $this->state === self::DONE; }
 
+        /**
+         * Run `$fn` unless it already ran, and return its result.
+         *
+         * The first caller runs `$fn`; concurrent callers wait and receive its result. Later calls return the stored value, or rethrow the stored error, without calling `$fn` again.
+         *
+         * @param callable $fn  the initialiser, called with no arguments at most once
+         * @return mixed  the value `$fn` returned
+         * @throws \Throwable  whatever `$fn` threw, to every caller
+         * @throws CancelledException  when the running initialiser or this waiting task is cancelled
+         * @example doc_async_once
+         */
         public function run(callable $fn): mixed
         {
             $sched = Scheduler::instance();
@@ -1562,7 +2181,10 @@ namespace Async {
         }
     }
 
-    /** @internal A pooled connection and its age. */
+    /**
+     * @internal
+     * A pooled connection and its age.
+     */
     final class PoolEntry
     {
         public object $conn;
@@ -1577,7 +2199,10 @@ namespace Async {
         }
     }
 
-    /** @internal One task parked in {@see Pool::acquire()}. A grant hands over an entry, or (entry null) a capacity ticket to create one. */
+    /**
+     * @internal
+     * One task parked in {@see Pool::acquire()}. A grant hands over an entry, or (entry null) a capacity ticket to create one.
+     */
     final class PoolWaiter
     {
         public Task $task;
@@ -1592,23 +2217,22 @@ namespace Async {
     }
 
     /**
-     * A bounded pool of connections (or any objects), shared by tasks.
+     * A bounded, FIFO pool of connections (or any objects), shared by tasks.
      *
-     *   $pool = new Async\Pool(fn() => new Conn(), 10);
-     *   $pool->with(fn($c) => $c->query(...));
+     * At most `$max` live objects exist at any time. A task that wants one beyond that parks until an object comes back; waiters are served in arrival order and a newcomer never overtakes a waiter. A returned object or freed capacity is handed to the first live waiter, so a waiter that is cancelled or times out neither consumes a slot nor loses a wake-up. Objects are created lazily by the factory, on the first `acquire()` that needs one.
      *
-     * - At most $max live objects. Waiters are served FIFO, and a newcomer never overtakes a waiter.
-     * - A grant is HANDED to the first waiter (a returned object, or the capacity a discard freed), never left
-     *   for whoever wakes first, so a cancelled or timed-out waiter can neither consume a slot nor lose a wake-up.
-     * - release() runs $reset (under shield, it may suspend); a reset that throws discards the object.
-     * - acquire() drops idle objects older than $idleTimeout / $maxLifetime (0 = never) and, when $ping is given,
-     *   pings an idle object before handing it out (false or a thrown \Exception discards it).
-     * - with() discards instead of returning when the body was cancelled or failed with a PDOException of SQLSTATE
-     *   class 08 (the connection is gone or half-read).
-     * - Objects only (the pool keys its books by object id). $close, when given, is called on every object the pool
-     *   throws away.
+     * ```php
+     * $pool = new Async\Pool(fn() => new Conn(), 10);
+     * $rows = $pool->with(fn($c) => $c->query('select 1'));
+     * ```
+     *
+     * Optional hooks keep the objects healthy: `$reset` runs on every `release()` (under `shield()`, so it may suspend), `$ping` validates an idle object before it is handed out, `$maxLifetime` and `$idleTimeout` retire old objects, and `$close` is called on every object the pool throws away. Objects only: the pool keys its books by object id. `Pool::pdo()` builds a pool of PDO connections.
+     *
+     * Prefer `with()`, which releases in a `finally`. `with()` discards, instead of returning, the object when its body was cancelled or failed with a `PDOException` whose SQLSTATE is class `08` (the connection is gone or half-read).
      *
      * @template T
+     * @see Semaphore
+     * @example doc_async_pool
      */
     final class Pool
     {
@@ -1635,6 +2259,18 @@ namespace Async {
         /** @var PoolWaiter[] FIFO */
         private array $waiters = [];
 
+        /**
+         * Create a pool.
+         *
+         * @param callable $factory  creates a new object; must return an object
+         * @param int $max  maximum number of live objects, at least 1
+         * @param ?callable $reset  called with the object on every `release()`; if it throws, the object is discarded
+         * @param ?callable $ping  called with an idle object before `acquire()` hands it out; a `false` result or an exception discards the object (a freshly created object is not pinged)
+         * @param float $maxLifetime  seconds after which an object is retired when next considered; 0 means unlimited
+         * @param float $idleTimeout  seconds an object may sit idle before it is retired; 0 means unlimited
+         * @param ?callable $close  called with every object the pool discards
+         * @throws \ValueError  when `$max` is below 1
+         */
         public function __construct(callable $factory, int $max, ?callable $reset = null, ?callable $ping = null,
                                     float $maxLifetime = 0.0, float $idleTimeout = 0.0, ?callable $close = null)
         {
@@ -1649,12 +2285,27 @@ namespace Async {
         }
 
         /**
-         * A pool of PDO connections: release() calls PDO::resetSession(), acquire() PDO::ping().
-         * PDO is named by string so that Async\ does not pull the PDO prelude into programs that never use it; the
-         * PDO gate also fires on the identifier `pdo`, i.e. on a call to this very method.
+         * A pool of PDO connections.
          *
+         * `release()` calls `PDO::resetSession()` (rolling back an open transaction and clearing session state) and `acquire()` pings an idle connection with `PDO::ping()`. For `$maxLifetime`, `$idleTimeout` or a `$close` callback build the pool with `new Pool(...)`. The pool holds no connection until the first `acquire()`.
+         *
+         * ```php
+         * $pool = Async\Pool::pdo('pgsql:host=db;dbname=app', 'u', 'pw', [], 10);
+         * $rows = $pool->with(fn(PDO $db) => $db->query('select 1')->fetchAll());
+         * ```
+         *
+         * @param string $dsn  the PDO data source name
+         * @param ?string $user  the database user
+         * @param ?string $pass  the database password
          * @param array<int,mixed> $options
+         * @param int $max  maximum number of connections, at least 1
+         * @return Pool  a pool whose objects are `PDO` instances
+         * @throws \ValueError  when `$max` is below 1
          */
+        // A pool of PDO connections: release() calls PDO::resetSession(), acquire() PDO::ping().
+        // PDO is named by string so that Async\ does not pull the PDO prelude into programs that never use it; the
+        // PDO gate also fires on the identifier `pdo`, i.e. on a call to this very method.
+        //
         public static function pdo(string $dsn, ?string $user, ?string $pass, array $options, int $max): Pool
         {
             // No class_exists() guard: PDO links on the demand gate (the identifier `pdo` of a call to this method is
@@ -1669,10 +2320,19 @@ namespace Async {
         }
 
         /**
-         * Take an object, creating one while there is capacity, else park FIFO.
+         * Take an object, creating one while there is capacity, else park FIFO until one is free.
+         *
+         * The wait for a free object is bounded by `$timeout`; creating or validating the object is not. Pair every `acquire()` with `release()` or `discard()`, or use `with()`.
+         *
+         * @param ?float $timeout  seconds to wait for a free object, or null to wait without a limit
          * @throws TimeoutException when $timeout seconds pass first
-         * @return T
+         * @throws \RuntimeException  when the pool is closed, or closed while waiting
+         * @throws CancelledException  when the task is cancelled while waiting
+         * @return T  an object checked out to the caller
+         * @see with
+         * @see release
          */
+        // Take an object, creating one while there is capacity, else park FIFO.
         public function acquire(?float $timeout = null): mixed
         {
             $sched = Scheduler::instance();
@@ -1696,7 +2356,15 @@ namespace Async {
             return $this->checkout($entry);
         }
 
-        /** Return an object. A second release, or one of another pool's objects, is a LogicException. */
+        /**
+         * Return an object to the pool.
+         *
+         * Runs the `$reset` hook (shielded, so it may suspend), then hands the object to the first waiter or keeps it idle. If the hook throws, the object is discarded instead. When the pool is closed the object is dropped.
+         *
+         * @param mixed $conn  an object obtained from `acquire()`
+         * @throws \LogicException  on a second release, or an object that is not checked out from this pool
+         */
+        // Return an object. A second release, or one of another pool's objects, is a LogicException.
         public function release(mixed $conn): void
         {
             $e = $this->claim($conn, 'release');
@@ -1717,7 +2385,15 @@ namespace Async {
             }
         }
 
-        /** Throw an object away instead of returning it (it is broken, or its state is unknown). */
+        /**
+         * Throw an object away instead of returning it, because it is broken or its state is unknown.
+         *
+         * The capacity it held goes to the first waiter, and the `$close` hook, if any, is called with the object.
+         *
+         * @param mixed $conn  an object obtained from `acquire()`
+         * @throws \LogicException  when the object is not checked out from this pool
+         */
+        // Throw an object away instead of returning it (it is broken, or its state is unknown).
         public function discard(mixed $conn): void
         {
             $e = $this->claim($conn, 'discard');
@@ -1725,7 +2401,18 @@ namespace Async {
             $this->free();
         }
 
-        /** acquire, run $fn($conn), release in `finally`; a cancelled body or a PDOException of SQLSTATE class 08 discards. */
+        /**
+         * Acquire an object, run `$fn($object)`, and release it in a `finally`.
+         *
+         * The object is discarded instead of released when the body was cancelled, or failed with a `PDOException` whose SQLSTATE is class `08`. `with()` takes no timeout of its own: bound the whole call with `timeout()`.
+         *
+         * @param callable $fn  called with the object
+         * @return mixed  the value returned by `$fn`
+         * @throws \Throwable  whatever `$fn` throws, after the object is released or discarded
+         * @see acquire
+         * @example doc_async_pool
+         */
+        // acquire, run $fn($conn), release in `finally`; a cancelled body or a PDOException of SQLSTATE class 08 discards.
         public function with(callable $fn): mixed
         {
             $c = $this->acquire();
@@ -1743,7 +2430,13 @@ namespace Async {
             }
         }
 
-        /** Refuse new acquires, wake every waiter with a RuntimeException, drop the idle objects; checked-out ones are dropped when they come back. */
+        /**
+         * Close the pool. Calling it again does nothing.
+         *
+         * New `acquire()` calls are refused, every waiter wakes with a `RuntimeException`, and idle objects are dropped. Objects still checked out are dropped when they come back.
+         *
+         * @see acquire
+         */
         public function close(): void
         {
             if ($this->closed) { return; }
@@ -1760,7 +2453,12 @@ namespace Async {
             foreach ($idle as $e) { $this->drop($e); }
         }
 
-        /** @return array<string,int> idle, busy, waiting, created, discarded */
+        /**
+         * Counters for monitoring the pool.
+         *
+         * @return array<string,int> `idle`, `busy`, `waiting`, `created` and `discarded`
+         * @example doc_async_pool
+         */
         public function stats(): array
         {
             return [
@@ -1945,23 +2643,47 @@ namespace Async {
     }
 
     /**
-     * The ambient view of the scope the calling task is in: cancellation, the
-     * effective deadline, and scoped values.
+     * The ambient view of the scope the calling task is in: cancellation, the effective deadline, and scoped values.
+     *
+     * These are static methods that answer for the calling task, so a helper deep in the call stack can check for cancellation or read the request id without being passed anything. Outside `async()` there is no scope: `isCancelled()` is false, `deadline()`, `remaining()` and `value()` return null.
+     *
+     * ```php
+     * Context::withValue('request-id', $id, function () {
+     *     spawn(fn() => log(Context::value('request-id')));
+     * });
+     * ```
+     *
+     * @see CancellationToken
+     * @see timeout
+     * @example doc_async_context
      */
+    // The ambient view of the scope the calling task is in: cancellation, the
+    // effective deadline, and scoped values.
     final class Context
     {
         /**
-         * The innermost scope open in the calling task, or null outside async().
-         * A QUERY: it must not build the engine — one built here, before a
-         * fork, hands every child a reactor fd that is dead (kqueue) or shared
-         * with the parent (epoll).
+         * The innermost scope open in the calling task.
+         *
+         * Safe to call anywhere: it never builds the engine.
+         *
+         * @return ?TaskGroup  the scope, or null outside `async()`
          */
+        // The innermost scope open in the calling task, or null outside async().
+        // A QUERY: it must not build the engine — one built here, before a
+        // fork, hands every child a reactor fd that is dead (kqueue) or shared
+        // with the parent (epoll).
         public static function currentScope(): ?TaskGroup
         {
             return Scheduler::hasInstance() ? Scheduler::instance()->currentGroup() : null;
         }
 
-        /** The cancellation handle of the scope the calling task is in. */
+        /**
+         * The cancellation handle of the scope the calling task is in.
+         *
+         * @return CancellationToken  a read-only view of the current scope
+         * @throws \LogicException  outside `async()`, where there is no scope
+         * @see TaskGroup::token
+         */
         public static function token(): CancellationToken
         {
             $group = self::currentScope();
@@ -1971,7 +2693,11 @@ namespace Async {
             return $group->token();
         }
 
-        /** True once the calling task's scope (or an ancestor) has been cancelled. */
+        /**
+         * Whether the calling task's scope, or any ancestor, has been cancelled.
+         *
+         * @return bool  true once cancellation was requested; false outside `async()`
+         */
         public static function isCancelled(): bool
         {
             $group = self::currentScope();
@@ -1982,7 +2708,13 @@ namespace Async {
             return false;
         }
 
-        /** Cancellation checkpoint — call at loop heads in long CPU-bound tasks. */
+        /**
+         * Cancellation checkpoint: throw if the calling task's scope was cancelled.
+         *
+         * Call it at loop heads in long CPU-bound tasks, which never reach a suspend point where cancellation would otherwise be delivered.
+         *
+         * @throws CancelledException  when the scope was cancelled
+         */
         public static function throwIfCancelled(): void
         {
             if (self::isCancelled()) {
@@ -1990,14 +2722,26 @@ namespace Async {
             }
         }
 
-        /** The effective deadline (unix time) of the calling task, or null. */
+        /**
+         * The effective deadline of the calling task as a unix time.
+         *
+         * The earliest deadline of the enclosing `timeout()` scopes; a nested scope can only tighten it.
+         *
+         * @return ?float  unix timestamp, or null when there is no deadline
+         * @see timeout
+         */
         public static function deadline(): ?float
         {
             $group = self::currentScope();
             return $group === null ? null : __wallDeadline($group->deadlineAt());
         }
 
-        /** Seconds left before the deadline; null when unbounded. */
+        /**
+         * Seconds left before the effective deadline, never negative.
+         *
+         * @return ?float  seconds remaining, or null when unbounded
+         * @example doc_async_context
+         */
         public static function remaining(): ?float
         {
             $group = self::currentScope();
@@ -2008,10 +2752,18 @@ namespace Async {
         }
 
         /**
-         * A value bound by an enclosing {@see withValue()} scope, or null. The
-         * request-id / correlation-id carrier: every task spawned inside the
-         * binding scope sees it, nothing outside does.
+         * A value bound by an enclosing `withValue()` scope.
+         *
+         * The request-id or correlation-id carrier: every task spawned inside the binding scope sees the value, nothing outside does. An inner binding shadows an outer one.
+         *
+         * @param string $key  the name the value was bound under
+         * @return mixed  the bound value, or null when unbound
+         * @see withValue
+         * @example doc_async_context
          */
+        // A value bound by an enclosing {@see withValue()} scope, or null. The
+        // request-id / correlation-id carrier: every task spawned inside the
+        // binding scope sees it, nothing outside does.
         public static function value(string $key): mixed
         {
             $g = self::currentScope();
@@ -2022,7 +2774,18 @@ namespace Async {
             return null;
         }
 
-        /** Bind $key for the duration of $body — a scope, so it is joined like any other. */
+        /**
+         * Bind `$key` to `$value` for the duration of `$body`.
+         *
+         * `$body` runs in a scope of its own, so it is joined like any other scope: every task it spawns finishes before `withValue()` returns.
+         *
+         * @param string $key  the name to bind
+         * @param mixed $value  the value to bind
+         * @param callable $body  called with the new `TaskGroup`
+         * @return mixed  the value returned by `$body`
+         * @see value
+         * @example doc_async_context
+         */
         public static function withValue(string $key, mixed $value, callable $body): mixed
         {
             return TaskGroup::run(function (TaskGroup $g) use ($key, $value, $body) {
@@ -2036,6 +2799,7 @@ namespace Async {
      * The engine: a run queue, an Io\Poll reactor and a timer heap. One per
      * async() call — the singleton is torn down when run() returns, so repeated
      * async() calls in one program are fully independent.
+     * @internal
      */
     final class Scheduler
     {
@@ -3651,53 +4415,107 @@ namespace Async {
     // ── public API ─────────────────────────────────────────────────────────
 
     /**
-     * Run $main to completion on the async engine and RETURN ITS VALUE, so an
-     * async block composes like an ordinary call:
+     * Run `$main` to completion on the async engine and return its value.
      *
-     *   $rows = Async\async(fn() => Async\awaitAll($a, $b));
+     * This is the entry point: an async block composes like an ordinary call. It opens the implicit root scope, so a top-level `spawn()` is still structured and joined before `async()` returns. Whatever escapes the root scope is thrown from `async()`. If the loop runs out of work while tasks are still parked, `DeadlockException` is thrown instead of exiting silently. A root cancellation (see `shutdownOn()`) is a shutdown, not a failure: `async()` returns normally.
      *
-     * Opens the implicit ROOT scope, so a top-level {@see spawn()} is still
-     * structured. Throws whatever escaped the root scope, or a
-     * {@see DeadlockException} if the loop ran dry with tasks still parked.
+     * ```php
+     * $total = Async\async(function () {
+     *     $a = Async\spawn(fn() => 1);
+     *     $b = Async\spawn(fn() => 2);
+     *     return $a->await() + $b->await();
+     * });
+     * ```
+     *
+     * Each `async()` call starts a fresh, independent engine.
+     *
+     * @param callable $main  the program; called with no arguments, as the root task
+     * @return mixed  the value returned by `$main`
+     * @throws \Throwable  whatever escaped the root scope
+     * @throws DeadlockException  when tasks are left parked with nothing to wake them
+     * @see spawn
+     * @see group
+     * @see shutdownOn
+     * @example doc_async_spawn
      */
+    // Run $main to completion on the async engine and RETURN ITS VALUE, so an
+    // async block composes like an ordinary call:
+    //
+    //   $rows = Async\async(fn() => Async\awaitAll($a, $b));
+    //
+    // Opens the implicit ROOT scope, so a top-level {@see spawn()} is still
+    // structured. Throws whatever escaped the root scope, or a
+    // {@see DeadlockException} if the loop ran dry with tasks still parked.
     function async(callable $main): mixed
     {
         return Scheduler::forRun()->run($main, '');
     }
 
-    /** @internal {@see async()} with the compiler-folded call site. */
+    /**
+     * @internal
+     * {@see async()} with the compiler-folded call site.
+     */
     function __asyncAt(string $site, callable $main): mixed
     {
         return Scheduler::forRun()->run($main, $site);
     }
 
     /**
-     * Open a child scope and return the body's value — the everyday form of
-     * {@see TaskGroup::run()}. Returns only once every task spawned inside has
-     * settled; the first failure cancels the rest and propagates.
+     * Open a child scope and return the body's value.
      *
-     *   $total = Async\group(function (TaskGroup $g) {
-     *       $a = $g->spawn(fn() => fetch(1));
-     *       $b = $g->spawn(fn() => fetch(2));
-     *       return $a->await() + $b->await();
-     *   });
+     * The everyday form of `TaskGroup::run()`. It returns only once every task spawned inside has settled; the first failure cancels the rest, joins them, and propagates.
+     *
+     * ```php
+     * $total = Async\group(function (TaskGroup $g) {
+     *     $a = $g->spawn(fn() => fetch(1));
+     *     $b = $g->spawn(fn() => fetch(2));
+     *     return $a->await() + $b->await();
+     * });
+     * ```
+     *
+     * @param callable $body  receives the new `TaskGroup`; its return value is returned
+     * @return mixed  the body's return value
+     * @throws \Throwable  the first failure in the scope
+     * @see TaskGroup
+     * @see timeout
+     * @example doc_async_group
+     * @example doc_async_failure
      */
     function group(callable $body): mixed
     {
         return TaskGroup::runAt('', $body);
     }
 
-    /** @internal {@see group()} with the compiler-folded call site. */
+    /**
+     * @internal
+     * {@see group()} with the compiler-folded call site.
+     */
     function __groupAt(string $site, callable $body): mixed
     {
         return TaskGroup::runAt($site, $body);
     }
 
     /**
-     * Spawn a concurrent task into the scope open in THIS task, returning a handle.
-     * Never fire-and-forget: the task is owned by, and joined at the end of, that
-     * scope.
+     * Spawn a concurrent task into the scope open in the calling task and return a handle.
+     *
+     * Never fire-and-forget: the task is owned by, and joined at the end of, that scope. The new task starts when the calling task next suspends. To spawn into a specific scope use `$group->spawn()`.
+     *
+     * ```php
+     * $t = Async\spawn(fn($x) => $x * 2, 21);
+     * echo $t->await();   // 42
+     * ```
+     *
+     * @param callable $fn  the task body
+     * @param mixed ...$args  passed to `$fn`
+     * @return Task  the handle; `await()` it or let the scope join it
+     * @throws \LogicException  outside `async()`, where there is no scope to own the task
+     * @see TaskGroup::spawn
+     * @see Task
+     * @example doc_async_spawn
      */
+    // Spawn a concurrent task into the scope open in THIS task, returning a handle.
+    // Never fire-and-forget: the task is owned by, and joined at the end of, that
+    // scope.
     function spawn(callable $fn, mixed ...$args): Task
     {
         return __spawnAt('', $fn, ...$args);
@@ -3719,37 +4537,78 @@ namespace Async {
     }
 
     /**
-     * Hold cancellation back for the duration of $body — for cleanup that must
-     * itself suspend (a close handshake, a final flush). Without it a cancelled
-     * task could never release anything that needs I/O, because every suspend
-     * point re-raises. Keep it short: a shielded task cannot be stopped.
+     * Hold cancellation back while `$body` runs.
+     *
+     * For cleanup that must itself suspend (a close handshake, a final flush). Without it a cancelled task could never release anything that needs I/O, because every suspend point re-raises `CancelledException`. A cancellation requested during or before the shield is delivered at the first suspend point after it ends. Keep it short: a shielded task cannot be stopped. Shields nest.
+     *
+     * ```php
+     * try {
+     *     delay(30.0);
+     * } catch (CancelledException $e) {
+     *     shield(fn() => $conn->sendCloseFrame());
+     *     throw $e;
+     * }
+     * ```
+     *
+     * @param callable $body  the cleanup, called with no arguments
+     * @return mixed  the value returned by `$body`
+     * @throws \Throwable  whatever `$body` throws
+     * @see CancelledException
+     * @see Task::cancel
+     * @example doc_async_shield
      */
+    // Hold cancellation back for the duration of $body — for cleanup that must
+    // itself suspend (a close handshake, a final flush). Without it a cancelled
+    // task could never release anything that needs I/O, because every suspend
+    // point re-raises. Keep it short: a shielded task cannot be stopped.
     function shield(callable $body): mixed
     {
         return Scheduler::instance()->shielded($body);
     }
 
     /**
-     * Run $body in a scope that must finish within $seconds. On expiry the whole
-     * scope — the body AND everything it spawned — is cancelled and joined, then
-     * {@see TimeoutException} is thrown. A timeout that leaves work running is
-     * not a timeout.
+     * Run `$body` in a scope that must finish within `$seconds`.
      *
-     *   $page = Async\timeout(2.0, fn() => file_get_contents($url));
+     * On expiry the whole scope, meaning the body and everything it spawned, is cancelled and joined, and then `TimeoutException` is thrown. A timeout that leaves work running is not a timeout. The deadline is visible inside through `Context::remaining()`, and a nested `timeout()` can only tighten an enclosing one: a 30 second scope inside a 2 second one still ends at 2 seconds. Deadlines use a monotonic clock, so clock changes do not move them.
      *
-     * The deadline is visible inside via `Context::remaining()`, and it only ever
-     * TIGHTENS an enclosing one ({@see TaskGroup::deadlineAt()}).
+     * ```php
+     * $page = Async\timeout(2.0, fn() => file_get_contents($url));
+     * ```
      *
-     * ⚠ Cooperative: the body must reach a suspend point for the deadline to be
-     * enforced. A purely CPU-bound body should call `Context::throwIfCancelled()`
-     * at its loop head.
+     * The deadline is cooperative: the body must reach a suspend point for it to be enforced. A purely CPU-bound body should call `Context::throwIfCancelled()` at its loop head.
+     *
+     * @param float $seconds  the time budget, in seconds
+     * @param callable $body  called with the timeout's `TaskGroup`
+     * @return mixed  the value returned by `$body`
+     * @throws TimeoutException  when the deadline passed first
+     * @throws \LogicException  outside `async()`
+     * @throws \Throwable  whatever `$body` or a task it spawned threw
+     * @see Task::awaitWithin
+     * @see Context::remaining
+     * @example doc_async_timeout
      */
+    // Run $body in a scope that must finish within $seconds. On expiry the whole
+    // scope — the body AND everything it spawned — is cancelled and joined, then
+    // {@see TimeoutException} is thrown. A timeout that leaves work running is
+    // not a timeout.
+    //
+    //   $page = Async\timeout(2.0, fn() => file_get_contents($url));
+    //
+    // The deadline is visible inside via `Context::remaining()`, and it only ever
+    // TIGHTENS an enclosing one ({@see TaskGroup::deadlineAt()}).
+    //
+    // ⚠ Cooperative: the body must reach a suspend point for the deadline to be
+    // enforced. A purely CPU-bound body should call `Context::throwIfCancelled()`
+    // at its loop head.
     function timeout(float $seconds, callable $body): mixed
     {
         return __timeoutAt('', $seconds, $body);
     }
 
-    /** @internal {@see timeout()} with the compiler-folded call site. */
+    /**
+     * @internal
+     * {@see timeout()} with the compiler-folded call site.
+     */
     function __timeoutAt(string $site, float $seconds, callable $body): mixed
     {
         $sched = Scheduler::instance();
@@ -3792,20 +4651,19 @@ namespace Async {
     }
 
     /**
-     * Wait for every task and return their results keyed by INPUT position.
+     * Wait for every task and return their results keyed by input position.
      *
-     * FAIL-FAST: the first failure cancels the tasks still running, joins them,
-     * and rethrows that error — the structured-concurrency contract, not
-     * Promise.allSettled. Every input is claimed BEFORE parking, so a sibling
-     * that fails while this call is parked elsewhere is not mistaken for an
-     * unhandled failure and escalated behind our back.
+     * Fail-fast: the first failure cancels the tasks still running, joins them, and rethrows that error, which is the structured-concurrency contract rather than `Promise.allSettled`. Every input is claimed before parking, so a sibling that fails while this call is parked is not mistaken for an unhandled failure and escalated behind your back.
      *
-     * OWNERSHIP: this takes responsibility for the tasks you hand it, so on
-     * failure it cancels them — but only those owned by the CALLER's scope or one
-     * nested inside it. A task borrowed from an enclosing scope, which someone
-     * else may still be awaiting, is left alone.
+     * Ownership: on failure this cancels only the tasks owned by the caller's scope or one nested inside it. A task borrowed from an enclosing scope, which someone else may still be awaiting, is left alone. With no tasks it returns an empty array.
      *
+     * @param Task ...$tasks  the tasks to wait for
      * @return mixed[] results keyed by input position (0..N-1)
+     * @throws \Throwable  the first failure among the tasks
+     * @see awaitAllSettled
+     * @see awaitAny
+     * @see mapConcurrent
+     * @example doc_async_await_all
      */
     function awaitAll(Task ...$tasks): array
     {
@@ -3849,11 +4707,15 @@ namespace Async {
     }
 
     /**
-     * Wait for every task and report how each one turned out — never throws, and
-     * never cancels anything. The counterpart to {@see awaitAll()} for the
-     * "fetch a hundred of them and tell me which failed" shape.
+     * Wait for every task and report how each one turned out.
      *
+     * Never throws on a task failure and never cancels anything: the counterpart to `awaitAll()` for the "fetch a hundred of them and tell me which failed" shape. Reporting a failure counts as handling it, so it is not escalated to the enclosing scope.
+     *
+     * @param Task ...$tasks  the tasks to wait for
      * @return Settled[] keyed by input position (0..N-1)
+     * @see awaitAll
+     * @see mapSettled
+     * @example doc_async_settled
      */
     function awaitAllSettled(Task ...$tasks): array
     {
@@ -3887,16 +4749,25 @@ namespace Async {
     }
 
     /**
-     * {@see mapConcurrent()} that collects outcomes instead of failing fast — at
-     * most $limit in flight, one {@see Settled} per input position.
+     * `mapConcurrent()` that collects outcomes instead of failing fast.
      *
-     * Each body is wrapped so a throw never reaches the scope: a child that
-     * actually FAILED would trip the group's fail-fast and cancel its siblings,
-     * which is the opposite of settled semantics.
+     * Runs at most `$limit` calls at once and returns one `Settled` per input position. A call that throws becomes a failed `Settled` and does not cancel its siblings.
      *
      * @param mixed[] $items
-     * @return Settled[]
+     * @param callable $fn  called as `$fn($item, $key)` for each item
+     * @param int $limit  maximum calls in flight; values below 1 are raised to 1
+     * @return Settled[]  one outcome per item, keyed like `$items`
+     * @see mapConcurrent
+     * @see awaitAllSettled
+     * @example doc_async_settled
      */
+    // {@see mapConcurrent()} that collects outcomes instead of failing fast — at
+    // most $limit in flight, one {@see Settled} per input position.
+    //
+    // Each body is wrapped so a throw never reaches the scope: a child that
+    // actually FAILED would trip the group's fail-fast and cancel its siblings,
+    // which is the opposite of settled semantics.
+    //
     function mapSettled(array $items, callable $fn, int $limit): array
     {
         if ($limit < 1) { $limit = 1; }
@@ -3926,10 +4797,16 @@ namespace Async {
     }
 
     /**
-     * Wait for the FIRST successful task and return its value. No watcher fibers:
-     * this parks directly on the inputs, so nothing is orphaned when a winner
-     * appears. If every task failed, throws an {@see AggregateError} with the
-     * errors keyed by INPUT position.
+     * Wait for the first successful task and return its value.
+     *
+     * A failure is ignored while another task can still succeed. If every task failed, `AggregateError` is thrown with the errors keyed by input position. The other tasks are not cancelled; they keep running under their own scope, and their outcomes are not reported here. Cancel them yourself when you no longer need them.
+     *
+     * @param Task ...$tasks  the tasks to wait for; at least one
+     * @return mixed  the value of the first task to succeed
+     * @throws AggregateError  when every task failed
+     * @throws \LogicException  when called with no tasks
+     * @see awaitAll
+     * @example doc_async_await_any
      */
     function awaitAny(Task ...$tasks): mixed
     {
@@ -3960,13 +4837,27 @@ namespace Async {
     }
 
     /**
-     * Map $fn over $items with at most $limit running at once — the everyday
-     * "fetch 1000 URLs, 10 at a time". Results are keyed by input position; the
-     * first failure cancels the rest and propagates (fail-fast, like awaitAll).
+     * Map `$fn` over `$items` with at most `$limit` calls running at once.
+     *
+     * The everyday "fetch 1000 URLs, 10 at a time". Results are keyed like `$items`; the first failure cancels the rest and propagates (fail-fast, like `awaitAll()`).
+     *
+     * ```php
+     * $pages = Async\mapConcurrent($urls, fn($u) => file_get_contents($u), 10);
+     * ```
      *
      * @param mixed[] $items
-     * @return mixed[]
+     * @param callable $fn  called as `$fn($item, $key)` for each item
+     * @param int $limit  maximum calls in flight; values below 1 are raised to 1
+     * @return mixed[]  the results, keyed like `$items`
+     * @throws \Throwable  the first failure
+     * @see mapSettled
+     * @see Semaphore
+     * @example doc_async_map_concurrent
      */
+    // Map $fn over $items with at most $limit running at once — the everyday
+    // "fetch 1000 URLs, 10 at a time". Results are keyed by input position; the
+    // first failure cancels the rest and propagates (fail-fast, like awaitAll).
+    //
     function mapConcurrent(array $items, callable $fn, int $limit): array
     {
         if ($limit < 1) { $limit = 1; }
@@ -3992,26 +4883,40 @@ namespace Async {
     }
 
     /**
-     * Graceful shutdown: on any of $signals, cancel the ROOT scope.
+     * Graceful shutdown: on any of `$signals`, cancel the root scope.
      *
-     *   Async\async(function () {
-     *       Async\shutdownOn(SIGTERM, SIGINT);
-     *       serveForever();                 // unwinds cleanly on the signal
-     *   });
+     * ```php
+     * Async\async(function () {
+     *     Async\shutdownOn(SIGTERM, SIGINT);
+     *     serveForever();                 // unwinds cleanly on the signal
+     * });
+     * ```
      *
-     * This is the ONLY signal-aware thing in Async\, and it earns its place by
-     * being about SCOPES, not about signals: everything else follows from
-     * cancellation already being structured. The accept loop and every live
-     * connection raise CancelledException at their next suspend point, each
-     * scope joins its children, `shield()` covers a final flush, and async()
-     * returns normally — a root cancellation is a shutdown, not a failure.
+     * This is about scopes, not about signals: everything else follows from cancellation already being structured. The accept loop and every live connection get `CancelledException` at their next suspend point, each scope joins its children, `shield()` covers a final flush, and `async()` returns normally, because a root cancellation is a shutdown, not a failure. The handler is installed with `pcntl_signal()`; plain `pcntl_signal()` also works inside `async()`. Process control (fork, workers, supervision) lives under `Process\`, not here.
      *
-     * Registering a handler is plain `pcntl_signal()`; the scheduler notices a
-     * non-empty registry and starts pumping by itself, so an ordinary
-     * `pcntl_signal(SIGHUP, …)` works inside async() with no async-specific
-     * spelling. Process control (fork / workers / supervision) is NOT here —
-     * it is under `Process\`, because none of it involves a scheduler.
+     * @param int ...$signals  the signal numbers, e.g. `SIGTERM`
+     * @see dumpOn
+     * @see shield
      */
+    // Graceful shutdown: on any of $signals, cancel the ROOT scope.
+    //
+    //   Async\async(function () {
+    //       Async\shutdownOn(SIGTERM, SIGINT);
+    //       serveForever();                 // unwinds cleanly on the signal
+    //   });
+    //
+    // This is the ONLY signal-aware thing in Async\, and it earns its place by
+    // being about SCOPES, not about signals: everything else follows from
+    // cancellation already being structured. The accept loop and every live
+    // connection raise CancelledException at their next suspend point, each
+    // scope joins its children, `shield()` covers a final flush, and async()
+    // returns normally — a root cancellation is a shutdown, not a failure.
+    //
+    // Registering a handler is plain `pcntl_signal()`; the scheduler notices a
+    // non-empty registry and starts pumping by itself, so an ordinary
+    // `pcntl_signal(SIGHUP, …)` works inside async() with no async-specific
+    // spelling. Process control (fork / workers / supervision) is NOT here —
+    // it is under `Process\`, because none of it involves a scheduler.
     function shutdownOn(int ...$signals): void
     {
         foreach ($signals as $s) {
@@ -4024,23 +4929,37 @@ namespace Async {
     }
 
     /**
-     * Print {@see dump()} to STDERR whenever one of $signals arrives — Go's
-     * SIGQUIT-dumps-every-goroutine, which is how you interrogate a process that
-     * is ALREADY hung and that you cannot restart:
+     * Print `dump()` to STDERR whenever one of `$signals` arrives.
      *
-     *   async(function () {
-     *       Async\dumpOn(SIGQUIT);      // then: kill -QUIT <pid>
-     *       serveForever();
-     *   });
+     * Go's SIGQUIT-dumps-every-goroutine, for interrogating a process that is already hung and cannot be restarted. SIGQUIT is the natural choice. The handler runs as ordinary async code (a daemon task), so the report is a consistent snapshot.
      *
-     * SIGQUIT is the natural choice — it is not used for anything else here, and
-     * the default disposition (core dump) is replaced by this. It is one line
-     * rather than a default because a signal handler is the program's to own.
+     * ```php
+     * Async\async(function () {
+     *     Async\dumpOn(SIGQUIT);      // then: kill -QUIT <pid>
+     *     serveForever();
+     * });
+     * ```
      *
-     * The handler is ordinary async code: the scheduler runs the signal pump as a
-     * daemon task, so this allocates and writes from inside the loop, and the
-     * report it takes is a consistent snapshot rather than a half-updated one.
+     * @param int ...$signals  the signal numbers, e.g. `SIGQUIT`
+     * @see dump
+     * @see shutdownOn
      */
+    // Print {@see dump()} to STDERR whenever one of $signals arrives — Go's
+    // SIGQUIT-dumps-every-goroutine, which is how you interrogate a process that
+    // is ALREADY hung and that you cannot restart:
+    //
+    //   async(function () {
+    //       Async\dumpOn(SIGQUIT);      // then: kill -QUIT <pid>
+    //       serveForever();
+    //   });
+    //
+    // SIGQUIT is the natural choice — it is not used for anything else here, and
+    // the default disposition (core dump) is replaced by this. It is one line
+    // rather than a default because a signal handler is the program's to own.
+    //
+    // The handler is ordinary async code: the scheduler runs the signal pump as a
+    // daemon task, so this allocates and writes from inside the loop, and the
+    // report it takes is a consistent snapshot rather than a half-updated one.
     function dumpOn(int ...$signals): void
     {
         foreach ($signals as $s) {
@@ -4053,22 +4972,31 @@ namespace Async {
     }
 
     /**
-     * Read $path in $chunk-sized pieces, YIELDING between them, and return the
-     * whole contents ('' when it cannot be opened).
+     * Read a whole file in chunks, yielding to other tasks between them.
      *
-     * Regular-file I/O has no readiness signal — O_NONBLOCK is a no-op for files on
-     * both targets and there is no thread pool — so this is COOPERATIVE, not async:
-     * each fread still blocks for its own chunk. That is enough, and MEASURED:
-     * on a 64 MB page-cache-hot file a single `fread($h, 64 MB)` stalls every other
-     * task for 15-25 ms, while this keeps the worst gap at ~2 ms (1 ms of which is
-     * the observer's own tick granularity). A fork+socketpair worker pool was
-     * considered and rejected: it would copy every byte through a socket, which for
-     * a hot read costs more than the read itself, and it only pays off for a
-     * genuinely blocking (cold / networked) filesystem.
+     * A big read does not hold the loop for its full duration: after each chunk the task gives other tasks a turn, so a 64 MB file stalls others for about 2 ms at a time instead of 15-25 ms. It is cancellation-aware: a cancelled task stops at the next chunk boundary with `CancelledException` instead of reading the rest.
      *
-     * Cancellation-aware: the yield is Scheduler::sleep, so a cancelled task stops
-     * at the next chunk boundary instead of reading the rest of the file.
+     * @param string $path  the file to read
+     * @param int $chunk  bytes per read; default 1 MiB
+     * @return string  the file's contents, or '' when it cannot be opened
+     * @throws CancelledException  when the task is cancelled between chunks
+     * @see writeFile
      */
+    // Read $path in $chunk-sized pieces, YIELDING between them, and return the
+    // whole contents ('' when it cannot be opened).
+    //
+    // Regular-file I/O has no readiness signal — O_NONBLOCK is a no-op for files on
+    // both targets and there is no thread pool — so this is COOPERATIVE, not async:
+    // each fread still blocks for its own chunk. That is enough, and MEASURED:
+    // on a 64 MB page-cache-hot file a single `fread($h, 64 MB)` stalls every other
+    // task for 15-25 ms, while this keeps the worst gap at ~2 ms (1 ms of which is
+    // the observer's own tick granularity). A fork+socketpair worker pool was
+    // considered and rejected: it would copy every byte through a socket, which for
+    // a hot read costs more than the read itself, and it only pays off for a
+    // genuinely blocking (cold / networked) filesystem.
+    //
+    // Cancellation-aware: the yield is Scheduler::sleep, so a cancelled task stops
+    // at the next chunk boundary instead of reading the rest of the file.
     function readFile(string $path, int $chunk = 1048576): string
     {
         $h = \fopen($path, 'rb');
@@ -4094,10 +5022,20 @@ namespace Async {
     }
 
     /**
-     * Write $data to $path in $chunk-sized pieces, yielding between them. Returns
-     * the byte count written, or -1 when the file cannot be opened. Same
-     * cooperative contract as {@see readFile()}.
+     * Write `$data` to a file in chunks, yielding to other tasks between them.
+     *
+     * The same contract as `readFile()`. The file is created or truncated.
+     *
+     * @param string $path  the file to write
+     * @param string $data  the contents
+     * @param int $chunk  bytes per write; default 1 MiB
+     * @return int  the number of bytes written, or -1 when the file cannot be opened
+     * @throws CancelledException  when the task is cancelled between chunks
+     * @see readFile
      */
+    // Write $data to $path in $chunk-sized pieces, yielding between them. Returns
+    // the byte count written, or -1 when the file cannot be opened. Same
+    // cooperative contract as {@see readFile()}.
     function writeFile(string $path, string $data, int $chunk = 1048576): int
     {
         $h = \fopen($path, 'wb');
@@ -4120,39 +5058,53 @@ namespace Async {
     }
 
     /**
-     * A snapshot of the engine as text: every live task with its id, label and what
-     * it is parked on (fd + direction, timer, channel, select), plus the live /
-     * io-parked / timer / ready counts. The running task is marked `*`.
+     * A snapshot of the engine as text.
      *
-     *   async(function () {
-     *       Async\spawn(fn() => serve())->named('http');
-     *       pcntl_signal(SIGQUIT, fn() => print Async\dump());   // hung? ask it
-     *   });
+     * Lists every live task with its id, label, where it was spawned and what it is parked on (an fd and direction, a timer, a channel, a select), plus the live, io-parked, timer and ready counts. The running task is marked `*`. A `DeadlockException` embeds the same report.
      *
-     * Returns '' when no scheduler is running. A DeadlockException already embeds
-     * this, because "all tasks are asleep" alone tells you nothing.
+     * ```
+     * async: 3 live task(s), 2 parked on I/O, 1 on timers, 0 ready
+     * * #1 at server.php:14 ready
+     *   #4 "http" at server.php:31 io-read fd=9 +deadline awaited
+     *   #7 near server.php:44 timer
+     * ```
+     *
+     * @return string  the report, or '' when no scheduler is running
+     * @see dumpOn
+     * @see watchdog
+     * @see Task::describe
      */
+    // A snapshot of the engine as text: every live task with its id, label and what
+    // it is parked on (fd + direction, timer, channel, select), plus the live /
+    // io-parked / timer / ready counts. The running task is marked `*`.
+    //
+    //   async(function () {
+    //       Async\spawn(fn() => serve())->named('http');
+    //       pcntl_signal(SIGQUIT, fn() => print Async\dump());   // hung? ask it
+    //   });
+    //
+    // Returns '' when no scheduler is running. A DeadlockException already embeds
+    // this, because "all tasks are asleep" alone tells you nothing.
     function dump(): string
     {
         return Scheduler::hasInstance() ? Scheduler::instance()->report() : '';
     }
 
     /**
-     * Where the last failure came FROM: the task that raised it, the `file:line`
-     * it was spawned at, and the scopes it sat inside.
+     * Where the last failure came from.
      *
-     *   try { async(fn() => …); }
-     *   catch (\Throwable $e) { fwrite(STDERR, Async\failure()); }
+     * Names the task that raised it, the `file:line` it was spawned at, and the scope it sat in. A child's exception reaches you carrying the trace of whoever joined it, and the task that actually failed is not in that trace; this is recorded beside the exception, at the moment of failure. It names only the first real failure: the cancellation wave after it is not blamed on the tasks that were swept up.
      *
-     *   task #7 "worker" at jobs.php:31 raised RuntimeException: no such row
-     *     in scope near jobs.php:12
+     * ```php
+     * try { async(fn() => work()); }
+     * catch (\Throwable $e) { fwrite(STDERR, Async\failure()); }
+     * // task #7 "worker" at jobs.php:31 raised RuntimeException: no such row
+     * //   in scope near jobs.php:12
+     * ```
      *
-     * A child's exception reaches you carrying the trace of whoever JOINED it —
-     * the task that actually failed is not in that trace, and cannot be added to
-     * it (mutating a user's throwable is impossible; wrapping it breaks `catch`).
-     * So this is recorded beside the exception, at the moment of failure.
-     *
-     * '' when the last run did not fail. Cleared by every async().
+     * @return string  the report, or '' when the last run did not fail; reset by every `async()`
+     * @see dump
+     * @see Task::named
      */
     function failure(): string
     {
@@ -4160,19 +5112,17 @@ namespace Async {
     }
 
     /**
-     * Watch for a task that HOLDS THE LOOP longer than $milliseconds, and name it
-     * on STDERR when one does. 0 turns it off; `MANTICORE_ASYNC_WATCHDOG=<ms>`
-     * does the same thing without touching the program.
+     * Name any task that holds the loop longer than `$milliseconds`.
      *
-     *   async: watchdog — task #4 "report" at app.php:88 held the loop 214.3 ms (limit 50 ms)
+     * When a task runs that long without suspending, a line naming it is written to STDERR. `0` turns it off. `MANTICORE_ASYNC_WATCHDOG=<ms>` does the same without touching the program. A cooperative loop cannot preempt, so the report necessarily comes after the stall; it catches the otherwise invisible causes: a CPU-bound stretch with no suspend point, a blocking call, a library falling back to blocking I/O. Each task reports its first breach and then only a doubling, so a CPU-heavy worker does not flood the log.
      *
-     * This is the answer to "everything stalled and nothing says why". A
-     * cooperative loop cannot preempt, so the report necessarily comes AFTER the
-     * stall — but the failure modes it catches are otherwise invisible: regular
-     * file I/O (blocking BY DESIGN here, see Async\readFile), a CPU-bound stretch
-     * with no suspend point, a third-party library falling back to a blocking
-     * call. Each task reports its first breach and then only a doubling, so a
-     * knowingly CPU-heavy worker does not flood the log.
+     * ```
+     * async: watchdog - task #4 "report" at app.php:88 held the loop 214.3 ms (limit 50 ms)
+     * ```
+     *
+     * @param float $milliseconds  the threshold; 0 or less turns the watchdog off
+     * @see dump
+     * @see stats
      */
     function watchdog(float $milliseconds): void
     {
@@ -4180,22 +5130,30 @@ namespace Async {
     }
 
     /**
-     * Engine counters — monotonic totals (`spawned`, `settled`, `cancelled`,
-     * `wakes`, `reactor_waits`, `timer_fires`, `watchdog`) plus the current gauges
-     * (`live`, `ready`, `io_parked`, `timers`). Empty outside a scheduler.
+     * Engine counters.
      *
-     * For benchmarks and for asserting engine BEHAVIOUR in a test — e.g. that a
-     * run did not silently fall back to polling (`reactor_waits`), or that the
-     * watchdog fired exactly once.
+     * Monotonic totals (`spawned`, `settled`, `cancelled`, `wakes`, `reactor_waits`, `timer_fires`, `watchdog`, `offloaded`), the blocking-pool size (`pool_threads`) and the current gauges (`live`, `ready`, `io_parked`, `timers`). Useful for benchmarks and for asserting engine behaviour in a test, e.g. that a run did not silently fall back to polling, or that the watchdog fired exactly once. `live` is the gauge to alert on when tasks pile up.
      *
-     * @return array<string,int>
+     * @return array<string,int> the counters by name; empty outside a running engine
+     * @see dump
      */
+    // Engine counters — monotonic totals (`spawned`, `settled`, `cancelled`,
+    // `wakes`, `reactor_waits`, `timer_fires`, `watchdog`) plus the current gauges
+    // (`live`, `ready`, `io_parked`, `timers`). Empty outside a scheduler.
+    //
+    // For benchmarks and for asserting engine BEHAVIOUR in a test — e.g. that a
+    // run did not silently fall back to polling (`reactor_waits`), or that the
+    // watchdog fired exactly once.
+    //
     function stats(): array
     {
         return Scheduler::hasInstance() ? Scheduler::instance()->stats() : [];
     }
 
-    /** @internal milliseconds, one decimal, for the watchdog line. */
+    /**
+     * @internal
+     * milliseconds, one decimal, for the watchdog line.
+     */
     function __ms(float $seconds): string
     {
         return (string)\round($seconds * 1000.0, 1);
@@ -4212,29 +5170,52 @@ namespace Async {
         return $monotonic - \__mc_monotonic_f() + \microtime(true);
     }
 
-    /** Suspend the current task for $seconds without blocking the loop. */
+    /**
+     * Suspend the current task for `$seconds` without blocking the loop.
+     *
+     * Other tasks run meanwhile. `delay(0.0)` gives them a turn and returns. The wait is on a monotonic clock. Under the scheduler, `sleep()` and `usleep()` behave the same way.
+     *
+     * @param float $seconds  how long to wait, in seconds
+     * @throws CancelledException  when the task is cancelled
+     * @example doc_async_spawn
+     */
+    // Suspend the current task for $seconds without blocking the loop.
     function delay(float $seconds): void
     {
         Scheduler::instance()->sleep($seconds);
     }
 
-    /** Make a channel; capacity 0 = unbuffered rendezvous. */
+    /**
+     * Make a channel.
+     *
+     * @param int $capacity  buffer size; 0 (the default) is an unbuffered rendezvous
+     * @return Channel  the new channel
+     * @see Channel
+     * @example doc_async_channel
+     */
     function channel(int $capacity = 0): Channel
     {
         return new Channel($capacity);
     }
 
     /**
-     * Wait for whichever case is ready first. Cases are {@see SelectCase}s; a bare
-     * Channel is shorthand for a receive.
+     * Wait for whichever case is ready first.
      *
-     *   $r = Async\select([$a, SelectCase::send($b, $v)]);
-     *   if ($r->isSend) { … } else { echo $r->value; }
+     * Cases are `SelectCase`s; a bare `Channel` is shorthand for a receive. If several are ready right now, the first in list order wins. Otherwise the task parks on every case and the first channel to reach it claims it: exactly one case fires, and the losers are deregistered. A receive on a closed channel counts as ready with `ok` false.
      *
-     * Exactly one case fires: a waiter parked across several channels is won by
-     * the FIRST channel to reach it, and the losers see the claim and skip it.
+     * ```php
+     * $r = Async\select([$a, SelectCase::send($b, $v)]);
+     * if ($r->isSend) { echo "sent"; } else { echo $r->value; }
+     * ```
      *
      * @param array<int, Channel|SelectCase> $cases
+     * @return Selected  which case fired and with what
+     * @throws \LogicException  when `$cases` is empty
+     * @throws ChannelClosedException  when a send case targets a closed channel
+     * @throws CancelledException  when the task is cancelled while waiting
+     * @see selectNow
+     * @see selectWithin
+     * @example doc_async_select
      */
     function select(array $cases): Selected
     {
@@ -4248,10 +5229,15 @@ namespace Async {
     }
 
     /**
-     * The non-blocking form (Go's `default:` arm): the first ready case, or null
-     * when nothing is ready right now.
+     * The non-blocking `select()` (Go's `default:` arm).
+     *
+     * Returns the first ready case, or null when nothing is ready right now. Never suspends.
      *
      * @param array<int, Channel|SelectCase> $cases
+     * @return ?Selected  the ready case, or null
+     * @throws \LogicException  when `$cases` is empty
+     * @see select
+     * @example doc_async_select
      */
     function selectNow(array $cases): ?Selected
     {
@@ -4259,9 +5245,15 @@ namespace Async {
     }
 
     /**
-     * select() with a deadline (Go's `time.After` arm): null on expiry.
+     * `select()` with a deadline (Go's `time.After` arm).
      *
+     * @param float $seconds  how long to wait, in seconds
      * @param array<int, Channel|SelectCase> $cases
+     * @return ?Selected  the case that fired, or null if the deadline expired first
+     * @throws \LogicException  when `$cases` is empty
+     * @throws CancelledException  when the task is cancelled while waiting
+     * @see select
+     * @example doc_async_select
      */
     function selectWithin(float $seconds, array $cases): ?Selected
     {
@@ -4373,23 +5365,38 @@ namespace Async {
     // result needs the sign extension a bare i64 read would skip. Every one of
     // these binds a symbol `Runtime\Libc` also binds, and the emitter requires
     // all bindings of a C symbol to declare the same signature.
+    /**
+     * @internal
+     */
     #[\Ffi\Library('c'), \Ffi\Symbol('recv')]
     function sys_recv(#[\Ffi\CType('int')] int $fd, \Ffi\Ptr $buf,
                       #[\Ffi\CType('size_t')] int $len,
                       #[\Ffi\CType('int')] int $flags): int {}
 
+    /**
+     * @internal
+     */
     #[\Ffi\Library('c'), \Ffi\Symbol('send')]
     function sys_send(#[\Ffi\CType('int')] int $fd, string $buf,
                       #[\Ffi\CType('size_t')] int $len,
                       #[\Ffi\CType('int')] int $flags): int {}
 
+    /**
+     * @internal
+     */
     #[\Ffi\Library('c'), \Ffi\Symbol('fork'), \Ffi\CType('int')]
     function sys_fork(): int {}
 
+    /**
+     * @internal
+     */
     #[\Ffi\Library('c'), \Ffi\Symbol('getpid'), \Ffi\CType('int')]
     function sys_getpid(): int {}
 
-    /** @internal Connect to $addr (e.g. "tcp://127.0.0.1:8080"), non-blocking. */
+    /**
+     * @internal
+     * Connect to $addr (e.g. "tcp://127.0.0.1:8080"), non-blocking.
+     */
     function connect(string $addr): \Resource
     {
         $errno = 0;
@@ -4421,14 +5428,20 @@ namespace Async {
         }
     }
 
-    /** @internal Drop the connection's persistent reactor watcher, then close it. */
+    /**
+     * @internal
+     * Drop the connection's persistent reactor watcher, then close it.
+     */
     function close(\Resource $conn): void
     {
         Scheduler::instance()->closeConn($conn);
         \fclose($conn);
     }
 
-    /** @internal Read up to $length bytes (raw recv), suspending until readable. */
+    /**
+     * @internal
+     * Read up to $length bytes (raw recv), suspending until readable.
+     */
     function read(\Resource $conn, int $length): string
     {
         $fd = $conn->addr;
@@ -4460,7 +5473,10 @@ namespace Async {
         return '';                               // EOF or error → closed
     }
 
-    /** @internal Write all of $data (raw send), suspending on back-pressure. */
+    /**
+     * @internal
+     * Write all of $data (raw send), suspending on back-pressure.
+     */
     function write(\Resource $conn, string $data): int
     {
         $fd = $conn->addr;
