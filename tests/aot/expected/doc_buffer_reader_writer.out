@@ -1,0 +1,8 @@
+queued: 10, on the wire: 0
+queued: 0, on the wire: 22
+remaining: 10
+read: HELL
+read: O-BODY
+budget spent: true, read ''
+left in buffer: next-request
+readAll(50): 0 bytes, over=true

@@ -1,0 +1,18 @@
+HTTP/1.1 200 OK
+method: POST
+path: /a/c
+target: /a%2Fb/../c?name=Ada&tags[]=x&tags[]=y
+query string: name=Ada&tags[]=x&tags[]=y
+version: 1.1
+name: Ada
+page: 1
+queryArray: {"name":"Ada","tags":["x","y"]}
+user-agent: demo/1.0
+content type: application/x-www-form-urlencoded
+content length: 21
+cookie sid: abc123
+post title: Hello World
+body: title=Hello+World&x=1
+keep-alive: false
+is POST: true
+secure: false

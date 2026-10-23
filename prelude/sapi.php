@@ -29,6 +29,7 @@
 
 namespace Manticore\Sapi {
 
+    /** @internal Per-flow request state (headers, status, superglobal snapshots) behind the Manticore\Sapi functions. */
     final class Context
     {
         /** @var array<int,string> response header lines, in the order php would send them */
@@ -131,7 +132,13 @@ namespace Manticore\Sapi {
         public static array $seen = [];
     }
 
-    /** The characters php refuses in a cookie name, and in a raw cookie value. */
+    /**
+     * @internal Whether a cookie name or raw value holds a character php refuses.
+     * The characters php refuses in a cookie name, and in a raw cookie value.
+     * @param string $s  text to check
+     * @param bool $withEq  also refuse `=` (names only)
+     * @return bool  true when a forbidden byte is present
+     */
     function cookieBad(string $s, bool $withEq): bool
     {
         $n = \strlen($s);
@@ -149,6 +156,10 @@ namespace Manticore\Sapi {
     }
 
     /**
+     * @internal Scheduler hook: swap the per-task request context.
+     * @param int $from  task id whose context is parked
+     * @param int $to  task id whose context becomes live
+     *
      * Park the live context under $from and make $to's the live one.
      *
      * Called from Scheduler::step around every resume — the single place a task
@@ -236,26 +247,41 @@ namespace Manticore\Sapi {
     }
 
     /**
-     * Begin serving a request on the current flow: seed the GPC superglobals and
-     * start an empty response.
+     * Begin serving a request on the current flow: seed the request superglobals and start an empty response.
      *
-     * $server is MERGED over the process $_SERVER rather than replacing it, so the
-     * CLI keys (SCRIPT_NAME, argv, REQUEST_TIME) stay visible to a framework that
-     * reads them while the caller supplies REQUEST_URI / REQUEST_METHOD / headers.
-     * $_REQUEST is built GET-then-POST, which is php's default request_order.
+     * A server written on Async calls this with the parsed request, runs the
+     * handler, then calls {@see requestEnd}. `$server` is merged over the process
+     * `$_SERVER`, so CLI keys such as `SCRIPT_NAME` and `argv` stay visible.
+     * `$_REQUEST` is built GET-then-POST, php's default request order, and
+     * `$_SESSION` starts empty. While the request is live, `header()`,
+     * `setcookie()` and `http_response_code()` record into this flow's response.
      *
-     * ⚠ The seeding is ELEMENT BY ELEMENT, which is not style. A whole-array
-     * store of a concrete-element array into a cell-element superglobal leaves
-     * the elements RAW while every reader decodes them by tag — `echo $_GET['a']`
-     * then printed 2.1E-314. Storing one element at a time boxes each value by
-     * its static type, which is exactly what the readers expect. $get, $post and
-     * $files are `mixed`-valued because they nest (`?a[]=1`, `a[b][c]`,
-     * $_FILES['f']['size']); the caller builds every level as a cell-element
-     * array (Http\parseQueryNested) so the nested stores stay typed too. Their
-     * keys are int-or-string cells ({@see Context::$emptyGpc}): `?0=x` and an
-     * anonymous upload land under the INT key, as php does, and the element
-     * store below dispatches on the key's tag.
+     * @param array<string,string> $server  entries merged over `$_SERVER` (REQUEST_URI, REQUEST_METHOD, HTTP_* ...)
+     * @param array<int|string,mixed> $get  becomes `$_GET`; nested values for `a[]=1` style input
+     * @param array<int|string,mixed> $post  becomes `$_POST`
+     * @param array<string,string> $cookie  becomes `$_COOKIE`
+     * @param array<int|string,mixed> $files  becomes `$_FILES`
      */
+    // Implementation notes (previous docblock, kept verbatim):
+    // Begin serving a request on the current flow: seed the GPC superglobals and
+    // start an empty response.
+    //
+    // $server is MERGED over the process $_SERVER rather than replacing it, so the
+    // CLI keys (SCRIPT_NAME, argv, REQUEST_TIME) stay visible to a framework that
+    // reads them while the caller supplies REQUEST_URI / REQUEST_METHOD / headers.
+    // $_REQUEST is built GET-then-POST, which is php's default request_order.
+    //
+    // ⚠ The seeding is ELEMENT BY ELEMENT, which is not style. A whole-array
+    // store of a concrete-element array into a cell-element superglobal leaves
+    // the elements RAW while every reader decodes them by tag — `echo $_GET['a']`
+    // then printed 2.1E-314. Storing one element at a time boxes each value by
+    // its static type, which is exactly what the readers expect. $get, $post and
+    // $files are `mixed`-valued because they nest (`?a[]=1`, `a[b][c]`,
+    // $_FILES['f']['size']); the caller builds every level as a cell-element
+    // array (Http\parseQueryNested) so the nested stores stay typed too. Their
+    // keys are int-or-string cells ({@see Context::$emptyGpc}): `?0=x` and an
+    // anonymous upload land under the INT key, as php does, and the element
+    // store below dispatches on the key's tag.
     function requestBegin(array<string, string> $server = [], array<int|string, mixed> $get = [], array<int|string, mixed> $post = [], array<string, string> $cookie = [], array<int|string, mixed> $files = []): void
     {
         foreach ($server as $k => $v) {
@@ -312,20 +338,6 @@ namespace Manticore\Sapi {
     }
 
     /**
-     * Finish the request. The context stays parked, so a handler may still read
-     * $_SESSION after this returns; the next requestBegin() on the same flow
-     * resets it.
-     *
-     * The upload sweep is php's: every temp file the multipart parser produced
-     * for this request and nobody moved is unlinked here, on every path out of
-     * the handler — a thrown handler leaves no file behind.
-     *
-     * The status and the header block are read back through their own typed
-     * accessors rather than one `['status' => …, 'headers' => …]` array: a
-     * heterogeneous array erases its element type, and the reader then decodes an
-     * int as a cell (`status=2.06E-321`). Three accessors, three concrete types.
-     */
-    /**
      * Forget a task's parked context. Called from `Scheduler::step` the moment a
      * task SETTLES, which is the only point at which its id can never come back.
      *
@@ -336,6 +348,9 @@ namespace Manticore\Sapi {
      * node COUNT stayed flat — not a leak of objects, a set of maps nobody
      * pruned. The session and output-buffer tiers park under the same id and are
      * dropped through the same guarded hooks.
+     *
+     * @internal Scheduler hook: free a settled task's parked context.
+     * @param int $id  the settled task's id
      */
     function contextDrop(int $id): void
     {
@@ -363,6 +378,28 @@ namespace Manticore\Sapi {
         }
     }
 
+    /**
+     * Finish the request: release its uploads and mark the response not live.
+     *
+     * Temp files produced by the multipart parser that the handler did not move
+     * with `move_uploaded_file()` are deleted, on every path out of the handler.
+     * The context stays parked, so `$_SESSION` is still readable afterwards; the
+     * next {@see requestBegin} on the same flow resets it. Read the outcome with
+     * {@see responseStatus} and {@see responseHeaders}.
+     */
+    // Implementation notes (previous docblock, kept verbatim):
+    // Finish the request. The context stays parked, so a handler may still read
+    // $_SESSION after this returns; the next requestBegin() on the same flow
+    // resets it.
+    //
+    // The upload sweep is php's: every temp file the multipart parser produced
+    // for this request and nobody moved is unlinked here, on every path out of
+    // the handler — a thrown handler leaves no file behind.
+    //
+    // The status and the header block are read back through their own typed
+    // accessors rather than one `['status' => …, 'headers' => …]` array: a
+    // heterogeneous array erases its element type, and the reader then decodes an
+    // int as a cell (`status=2.06E-321`). Three accessors, three concrete types.
     function requestEnd(): void
     {
         Context::$active = false;
@@ -400,28 +437,52 @@ namespace Manticore\Sapi {
         }
     }
 
-    /** The response code the handler settled on. */
+    /**
+     * The response status code of the current flow.
+     *
+     * 200 until the handler calls `http_response_code()` or sends a `HTTP/1.1 <code>` line through `header()`.
+     *
+     * @return int  the status code
+     */
     function responseStatus(): int
     {
         return Context::$status;
     }
 
     /**
-     * The response header lines, in the order php would send them.
-     * @return array<int,string>
+     * The queued response header lines, in the order php would send them.
+     *
+     * Includes `Set-Cookie` lines queued by `setcookie()`; each entry is a full `Name: value` line.
+     *
+     * @return array<int,string>  header lines
      */
     function responseHeaders(): array<int, string>
     {
         return Context::$headers;
     }
 
-    /** Mark this request's head as written. The server's to call, not a user's. */
+    /**
+     * Mark this request's response head as written.
+     *
+     * A server calls it right after writing the status line and headers; from then on `headers_sent()` answers true and `header()` is ignored for this request.
+     */
     function responseSent(): void
     {
         Context::$sent = true;
     }
 
-    /** Render one Set-Cookie line, php's attribute order, from an options array. */
+    /**
+     * @internal Render one Set-Cookie line, php's attribute order, from an options array.
+     * @param string $name  cookie name
+     * @param string $value  already-encoded value; empty deletes the cookie
+     * @param int $expires  Unix timestamp, 0 for a session cookie
+     * @param string $path  path attribute
+     * @param string $domain  domain attribute
+     * @param bool $secure  add `secure`
+     * @param bool $httponly  add `HttpOnly`
+     * @param string $samesite  SameSite value, empty to omit
+     * @return string  the full `Set-Cookie: ...` line
+     */
     function cookieLine(string $name, string $value, int $expires, string $path, string $domain, bool $secure, bool $httponly, string $samesite): string
     {
         $line = 'Set-Cookie: ' . $name . '=';
@@ -456,7 +517,19 @@ namespace Manticore\Sapi {
         return $line;
     }
 
-    /** Shared by setcookie and setrawcookie; $raw skips the value encoding. */
+    /**
+     * @internal Shared by setcookie and setrawcookie; $raw skips the value encoding.
+     * @param string $fn  calling function name, for error messages
+     * @param bool $raw  skip percent-encoding of the value
+     * @param string $name  cookie name
+     * @param string $value  cookie value
+     * @param mixed $expires_or_options  timestamp or options array
+     * @param string $path  path attribute
+     * @param string $domain  domain attribute
+     * @param bool $secure  secure flag
+     * @param bool $httponly  HttpOnly flag
+     * @return bool  false when headers were already sent
+     */
     function setCookie(string $fn, bool $raw, string $name, string $value, mixed $expires_or_options, string $path, string $domain, bool $secure, bool $httponly): bool
     {
         if ($name === '' || cookieBad($name, true)) {

@@ -5,22 +5,34 @@ namespace Ffi;
 use Attribute;
 
 /**
- * Marks an FFI binding whose C symbol may be ABSENT on the current OS/target.
+ * Marks a binding whose C symbol may be missing on the current OS or target.
  *
- * The compiler emits `declare extern_weak …` instead of a plain `declare`, so a
- * symbol missing at link time resolves to null rather than an undefined-symbol
- * error. The decorated function must never be CALLED on a target where the
- * symbol is absent (guard the call with a runtime OS branch) — extern_weak only
- * makes the *reference* tolerable, not the call. Used together with
- * {@see Symbol}: e.g. epoll_* (Linux-only) referenced from a macOS build.
+ * The reference is emitted as `extern_weak`, so a symbol absent at link time
+ * resolves to null instead of failing the link. The function must still never
+ * be called where the symbol is absent: guard calls with a runtime OS check.
+ * Use it together with {@see Symbol}, for example `epoll_*` (Linux only)
+ * referenced from a macOS build. A library reached only through weak bindings
+ * may be dropped from the link line by `--as-needed`.
  *
- * On Darwin, ld64 still errors on a weak-undefined symbol unless it is allowed
- * with `-Wl,-U,_<sym>`. That allowance is DERIVED from every `extern_weak` the
- * module actually emitted and carried across a library's `.sig`, so it cannot
- * drift from the bindings the way a hand-written list did — and a program that
- * pulls in no weak binding gets no `-U` flags at all. GNU ld auto-binds a
- * weak-undefined to 0, so Linux needs no flag.
+ * @see Symbol
  */
+// Implementation notes (previous docblock, kept verbatim):
+// Marks an FFI binding whose C symbol may be ABSENT on the current OS/target.
+//
+// The compiler emits `declare extern_weak …` instead of a plain `declare`, so a
+// symbol missing at link time resolves to null rather than an undefined-symbol
+// error. The decorated function must never be CALLED on a target where the
+// symbol is absent (guard the call with a runtime OS branch) — extern_weak only
+// makes the *reference* tolerable, not the call. Used together with
+// {@see Symbol}: e.g. epoll_* (Linux-only) referenced from a macOS build.
+//
+// On Darwin, ld64 still errors on a weak-undefined symbol unless it is allowed
+// with `-Wl,-U,_<sym>`. That allowance is DERIVED from every `extern_weak` the
+// module actually emitted and carried across a library's `.sig`, so it cannot
+// drift from the bindings the way a hand-written list did — and a program that
+// pulls in no weak binding gets no `-U` flags at all. GNU ld auto-binds a
+// weak-undefined to 0, so Linux needs no flag.
+
 #[Attribute(Attribute::TARGET_FUNCTION)]
 final class Weak
 {

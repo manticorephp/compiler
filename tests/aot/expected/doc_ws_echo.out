@@ -1,0 +1,3 @@
+echo: hello (text)
+000102 (binary)
+open: false, close code: 1000
