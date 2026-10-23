@@ -5075,7 +5075,8 @@ trait EmitLlvmCalls
             $out .= $this->emitCellArrayToTyped($paramType);
             $out .= '  call void @__mir_array_release_buf(ptr ' . $src . ")\n";
             $a->type = $paramType;
-        } elseif ($collect && $paramType !== null && $this->needsDeCellify($paramType, $a->type)
+        } elseif ($collect && $paramType !== null && !$paramType->hasShape() && !$a->type->hasShape()
+            && $this->needsDeCellify($paramType, $a->type)
             && $this->freshRcArgFlavor($a) === '') {
             // A BORROWED cell-element array (a local whose whole stores disagree,
             // retyped after the callee was bound to a concrete element: #376,
