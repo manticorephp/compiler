@@ -1848,6 +1848,78 @@ trait EmitLlvmCalls
      * whose payload is masked out of the box. Both arms leave a boxed cell, so
      * the merged result matches the invoke's inferred cell type.
      */
+    /**
+     * `$erased->__invoke(...)` while some class defines `__invoke`: a Closure env
+     * (tag 8, no RC magic at -8) is called through its struct; anything else keeps
+     * the ordinary method dispatch (and its errors), over the receiver evaluated
+     * once into a scratch local.
+     */
+    private function emitErasedExplicitInvoke(Node $n, \Compile\Mir\MethodCall_ $mc): string
+    {
+        $out = $this->emitNode($mc->object);
+        $out .= $this->coerceToI64();
+        $raw = $this->lastValue;
+        $out .= $this->cellTagIr($raw);
+        $tag = $this->cellTagReg;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $chkL = $this->ssa->allocLabel('exinv.chk');
+        $magL = $this->ssa->allocLabel('exinv.mag');
+        $closL = $this->ssa->allocLabel('exinv.clos');
+        $oldL = $this->ssa->allocLabel('exinv.old');
+        $endL = $this->ssa->allocLabel('exinv.end');
+        $isObj = $this->ssa->allocReg();
+        $out .= '  ' . $isObj . ' = icmp eq i64 ' . $tag . ", 8\n";
+        $out .= '  br i1 ' . $isObj . ', label %' . $chkL . ', label %' . $oldL . "\n";
+        $out .= $chkL . ":\n";
+        $pw = $this->ssa->allocReg();
+        $out .= '  ' . $pw . ' = and i64 ' . $raw . ", 281474976710655\n";
+        $out .= $this->plausiblePtrIr($pw);
+        $out .= '  br i1 ' . $this->plausiblePtrReg . ', label %' . $magL . ', label %' . $oldL . "\n";
+        $out .= $magL . ":\n";
+        $struct = $this->ssa->allocReg();
+        $out .= '  ' . $struct . ' = inttoptr i64 ' . $pw . " to ptr\n";
+        $mp = $this->ssa->allocReg();
+        $out .= '  ' . $mp . ' = getelementptr inbounds i8, ptr ' . $struct . ", i64 -8\n";
+        $mw = $this->ssa->allocReg();
+        $out .= '  ' . $mw . ' = load i64, ptr ' . $mp . "\n";
+        $isRc = $this->ssa->allocReg();
+        $out .= '  ' . $isRc . ' = icmp eq i64 ' . $mw . ', ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+        $out .= '  br i1 ' . $isRc . ', label %' . $oldL . ', label %' . $closL . "\n";
+        $out .= $closL . ":\n";
+        $iv = new Invoke_($mc->object, $mc->args, Type::cell());
+        $out .= $this->emitClosureStructInvoke($iv, $struct, false);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $oldL . ":\n";
+        $cvName = '__exinv_recv' . \substr($this->ssa->allocReg(), 2);
+        $cvSlot = $this->ssa->allocReg();
+        $out .= '  ' . $cvSlot . " = alloca i64\n";
+        $out .= '  store i64 ' . $raw . ', ptr ' . $cvSlot . "\n";
+        $this->locals->slots[$cvName] = $cvSlot;
+        $mc2 = new \Compile\Mir\MethodCall_(new \Compile\Mir\LoadLocal($cvName, $mc->object->type), $mc->method, $mc->args, Type::cell());
+        $mc2->srcArgc = $mc->srcArgc;
+        $this->inErasedInvokeArm = true;
+        $out .= $this->emitNode($mc2);
+        $this->inErasedInvokeArm = false;
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $out .= '  br label %' . $endL . "\n";
+        $out .= $endL . ":\n";
+        $loaded = $this->ssa->allocReg();
+        $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $loaded;
+        $this->lastValueType = 'i64';
+        if ($this->isCellScalarParam($n->type)) {
+            $out .= $this->unboxCellToType($n->type);
+        }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
+        return $out;
+    }
+
+
     private function emitErasedInvoke(Invoke_ $n): string
     {
         $out = $this->emitNode($n->callee);
@@ -2042,7 +2114,20 @@ trait EmitLlvmCalls
             $out .= '  br label %' . $endL . "\n";
             $out .= $noArrL . ":\n";
         }
-        if (($ck0 === Node::KIND_LOAD_LOCAL || $ck0 === Node::KIND_PROPERTY_ACCESS)
+        $calleeNode = $n->callee;
+        $pureCallee = $ck0 === Node::KIND_LOAD_LOCAL || $ck0 === Node::KIND_PROPERTY_ACCESS;
+        if (!$pureCallee && $n->srcArgc !== -2 && $this->anyClassHasMethod('__invoke')) {
+            // An impure callee (`id($o)(3)`) was evaluated once into $raw: hand the
+            // `__invoke` call a scratch local over that word instead of re-running it.
+            $cvName = '__erinv_obj' . \substr($this->ssa->allocReg(), 2);
+            $cvSlot = $this->ssa->allocReg();
+            $out .= '  ' . $cvSlot . " = alloca i64\n";
+            $out .= '  store i64 ' . $raw . ', ptr ' . $cvSlot . "\n";
+            $this->locals->slots[$cvName] = $cvSlot;
+            $calleeNode = new \Compile\Mir\LoadLocal($cvName, Type::cell());
+            $pureCallee = true;
+        }
+        if ($pureCallee
             && $n->srcArgc !== -2
             && $this->anyClassHasMethod('__invoke')) {
             $isObjT = $this->ssa->allocReg();
@@ -2060,7 +2145,7 @@ trait EmitLlvmCalls
             $out .= '  ' . $isRc . ' = icmp eq i64 ' . $mw . ', ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
             $out .= '  br i1 ' . $isRc . ', label %' . $objL . ', label %' . $cloL . "\n";
             $out .= $objL . ":\n";
-            $mc = new \Compile\Mir\MethodCall_($n->callee, '__invoke', $n->args, Type::cell());
+            $mc = new \Compile\Mir\MethodCall_($calleeNode, '__invoke', $n->args, Type::cell());
             $mc->srcArgc = \count($n->args);
             $this->inErasedInvokeArm = true;
             $out .= $this->emitNode($mc);
