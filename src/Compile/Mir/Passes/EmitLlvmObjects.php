@@ -2953,7 +2953,10 @@ trait EmitLlvmObjects
                     // array-hinted slot.
                     $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
                 } elseif ($propType !== null) {
+                    $pcls = $n->object->type->class ?? '';
+                    $this->unboxPropCtx = $pcls !== '' ? $pcls . '::$' . $n->property : '';
                     $out .= $this->unboxCellToType($propType);
+                    $this->unboxPropCtx = '';
                 }
             }
             $out .= $this->coerceToI64();

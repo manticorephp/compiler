@@ -6737,6 +6737,8 @@ trait EmitLlvmExpr
      * inttoptr's the tagged bits → fault).
      */
     private bool $intGuardOff = false;
+    /** "Class::$prop" while a typed-property store unboxes, else ''. */
+    private string $unboxPropCtx = '';
 
     private function unboxCellToType(Type $pt): string
     {
@@ -6784,7 +6786,10 @@ trait EmitLlvmExpr
                 }
                 $cnd = $this->ssa->allocReg();
                 $out .= '  ' . $cnd . ' = icmp eq i32 ' . $bad . ', ' . (string)$bw[0] . "\n";
-                $out .= $this->emitThrowIf($cnd, 'TypeError', 'Argument must be of type int, ' . $bw[1] . ' given');
+                $msg = $this->unboxPropCtx !== ''
+                    ? 'Cannot assign ' . $bw[1] . ' to property ' . $this->unboxPropCtx . ' of type int'
+                    : 'Argument must be of type int, ' . $bw[1] . ' given';
+                $out .= $this->emitThrowIf($cnd, 'TypeError', $msg);
             }
             $this->lastValue = $keep;
             $r = $this->ssa->allocReg();
