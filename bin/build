@@ -224,6 +224,8 @@ if [[ $FAST -eq 1 ]]; then
         echo "   (installed compiler predates -O on \`build\` — building at its default)"
     fi
 fi
+# The shipping compiler stays ONE translation unit: auto-split trades ~7% runtime for build time.
+export MANTICORE_AUTO_SPLIT=0
 set +e
 # shellcheck disable=SC2086
 if [[ -n "${CELLGUARD_PASS1:-}" ]]; then export MANTICORE_CELLGUARD="$CELLGUARD_PASS1"; fi
