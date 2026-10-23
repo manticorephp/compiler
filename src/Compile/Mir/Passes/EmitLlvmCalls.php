@@ -5075,7 +5075,8 @@ trait EmitLlvmCalls
             $out .= $this->emitCellArrayToTyped($paramType);
             $out .= '  call void @__mir_array_release_buf(ptr ' . $src . ")\n";
             $a->type = $paramType;
-        } elseif ($collect && $paramType !== null && $this->needsDeCellify($paramType, $a->type)
+        } elseif ($collect && $paramType !== null && !$paramType->hasShape() && !$a->type->hasShape()
+            && $this->needsDeCellify($paramType, $a->type)
             && $this->freshRcArgFlavor($a) === '') {
             // A BORROWED cell-element array (a local whose whole stores disagree,
             // retyped after the callee was bound to a concrete element: #376,
@@ -5363,7 +5364,7 @@ trait EmitLlvmCalls
                 $cellBoxDrops[] = [$a, $this->lastValue];
             } else {
                 $litMark = \count($this->litElemDropRegs);
-                $out .= $this->emitArgCollectingLitElems($a, $ptypes[$ai] ?? null);
+                $out .= $this->emitArgCollectingLitElems($a, ($camask[$ai] ?? false) ? null : ($ptypes[$ai] ?? null));
                 // ABI: every fn takes i64 args. Float / ptr values
                 // cross the boundary as the bit-pattern in i64.
                 $out .= $this->coerceToI64();
