@@ -3224,7 +3224,8 @@ final class InferTypes implements Pass
                 if ($pn !== '') { $this->sharedWordLocals[$pn] = true; }
             }
         }
-        $this->collectRefCapturedLocals($fn->body);
+        // Only a closure literal binds a by-ref capture, so a body without one has nothing to walk for.
+        if ($this->bodyHas($fn, Node::KIND_CLOSURE)) { $this->collectRefCapturedLocals($fn->body); }
     }
 
     private function collectRefCapturedLocals(Node $n): void
