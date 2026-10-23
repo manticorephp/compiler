@@ -2350,8 +2350,8 @@ trait EmitLlvmCalls
         /** @var string[] $argRegs the argument words, in call order */
         $argRegs = [];
         $this->closurePackNode = null;
-        $callArgs = ($known && $dynSpread === -1)
-            ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
+        $callArgs = $known
+            ?$this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
         $packNode = $this->closurePackNode;
         $packTarget = $this->closurePackTarget;
         // A known closure that reads func_get_args() takes its surplus arguments through
@@ -2384,7 +2384,36 @@ trait EmitLlvmCalls
                 $out .= '  ' . $spreadLen . ' = call i64 @__mir_array_live_len(ptr ' . $arr . ")\n";
                 $spreadCnt = $this->ssa->allocReg();
                 $out .= '  ' . $spreadCnt . ' = add i64 ' . $spreadLen . ', ' . (string)$base . "\n";
+                $spVi = -1;
+                foreach ($this->sigs->variadicParams[$fn] ?? [] as $vk => $isVar) {
+                    if ($isVar) { $spVi = (int)$vk; break; }
+                }
+                $spVpos = $spVi - $capCnt;
+                $spDefs = $this->sigs->paramDefaults[$fn] ?? [];
                 while ($pi < $nparams) {
+                    if ($spVi >= 0 && $pi === $spVpos) {
+                        // The rest of the array, renumbered, is the ONE vec the variadic takes.
+                        $tel = $calleeParams[$spVi]->element ?? null;
+                        if ($tel === null || $tel->kind === Type::KIND_UNKNOWN) { $tel = Type::cell(); }
+                        $packTy = Type::vec($tel);
+                        $srcI = $this->ssa->allocReg();
+                        $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arr . " to i64\n";
+                        $this->lastValue = $srcI;
+                        $this->lastValueType = 'i64';
+                        $out .= $this->emitCellArrayToTyped($packTy, true, (string)($pi - $base));
+                        $packReg = $this->lastValue;
+                        $out .= $this->closureArgRepr($packTy, $calleeParams[$spVi]);
+                        $erasedArgDrops .= $this->rcReleaseReg($packReg, $this->discardReleaseFlavor($packTy));
+                        $argList .= ', i64 ' . $this->lastValue;
+                        $argTypes .= ', i64';
+                        $pi = $pi + 1;
+                        continue;
+                    }
+                    if (($spDefs[$capCnt + $pi] ?? null) === null) {
+                        $short = $this->ssa->allocReg();
+                        $out .= '  ' . $short . ' = icmp ule i64 ' . $spreadLen . ', ' . (string)($pi - $base) . "\n";
+                        $out .= $this->emitThrowIf($short, 'ArgumentCountError', 'Too few arguments to function {closure}()');
+                    }
                     $ev = $this->ssa->allocReg();
                     $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
                           . ', i64 ' . (string)($pi - $base) . ")\n";
@@ -2811,7 +2840,13 @@ trait EmitLlvmCalls
         $out = [];
         $elems = [];
         foreach ($args as $k => $a) {
-            if ($k < $vpos) { $out[] = $a; } else { $elems[] = new ArrayElement_(null, $a); }
+            if ($k < $vpos) {
+                // A spread over the fixed params expands across them; the pack cannot follow.
+                if ($a->kind === Node::KIND_SPREAD) { return $args; }
+                $out[] = $a;
+            } else {
+                $elems[] = new ArrayElement_(null, $a);
+            }
         }
         // An untyped pack (`...$r`, element `unknown`) is read back as cells by
         // the body, so its literal boxes every element; a typed one stays raw.
