@@ -190,7 +190,7 @@ dispatches on); `target` = the acted-on value (or null for whole-frame arena
 enter/leave).
 
 > Arena arrays: the flat-scalar non-escaping array arena path is a live
-> feature (default on, `MANTICORE_ARENA_ARRAYS`). See `docs/epic-arena-arrays.md`.
+> feature (default on, `MANTICORE_ARENA_ARRAYS`). See [memory.md](../memory.md).
 
 ---
 
@@ -231,4 +231,4 @@ state after the full pipeline. Landing it is a roadmap item.
 | Memory ABI (offsets, tags, rc encoding) | `src/Compile/MemoryAbi.php` |
 
 Related design docs: `type-system-v2.md`, `monomorphization.md`,
-`generators-and-pointers.md`, `../memory.md`, `../epic-arena-arrays.md`.
+`generators-and-pointers.md`, `../memory.md`.
