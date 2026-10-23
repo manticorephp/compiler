@@ -1397,6 +1397,14 @@ final class RuntimeLibrary
         $out .= "ret:\n";
         $out .= "  ret ptr %datap\n}\n";
 
+        // The immortal empty string (rc -1, len 0, cap 0): `$s[$i]` out of range
+        // answers it, like the interned 1-char strings, so a caller that
+        // retains and releases its temp never owns a fresh allocation.
+        $emptyPost = '8'; // the NUL byte, padded
+        $out .= "\n@__mir_empty_str = linkonce_odr global <{ [" . $nRcAt . " x i8], i64, ["
+              . $emptyPost . " x i8] }> <{ [" . $nRcAt . " x i8] zeroinitializer, i64 -1, ["
+              . $emptyPost . " x i8] zeroinitializer }>, align 16\n";
+
         // `$s[$i]` read — negative index counts from the end; out-of-range → "".
         // Returns the interned 1-char string (binary-safe, immortal).
         $out .= "\ndefine ptr @__mir_str_char_at(ptr %s, i64 %i) {\nentry:\n";
@@ -1409,8 +1417,7 @@ final class RuntimeLibrary
         $out .= "  %oob = or i1 %lo, %hi\n";
         $out .= "  br i1 %oob, label %empty, label %one\n";
         $out .= "empty:\n";
-        $out .= "  %e = call ptr @__mir_str_new(ptr null, i64 0)\n";
-        $out .= "  ret ptr %e\n";
+        $out .= "  ret ptr getelementptr inbounds (i8, ptr @__mir_empty_str, i64 " . $nH . ")\n";
         $out .= "one:\n";
         $out .= "  %cp = getelementptr inbounds i8, ptr %s, i64 %ix\n";
         $out .= "  %cb = load i8, ptr %cp\n";
