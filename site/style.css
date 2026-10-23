@@ -25,7 +25,9 @@ body{margin:0;background:var(--bg);color:var(--fg);font:17px/1.65 var(--sans);fo
 nav{position:sticky;top:0;z-index:10;background:color-mix(in srgb,var(--bg) 78%,transparent);
   backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);border-bottom:1px solid var(--line)}
 nav .w{display:flex;gap:6px;align-items:center;height:56px}
-nav b{margin-right:auto;font-weight:650;letter-spacing:-.01em}
+nav b{margin-right:auto;font-weight:650;letter-spacing:-.01em;display:flex;align-items:center;gap:10px}
+.logo{width:22px;height:24px;background:var(--fg);-webkit-mask:url(logo.svg) center/contain no-repeat;mask:url(logo.svg) center/contain no-repeat;transition:background .2s}
+nav b:hover .logo{background:var(--accent)}
 nav a,nav button{color:var(--fg);padding:6px 10px;border-radius:6px;font:inherit;font-size:.92em;background:none;border:0;cursor:pointer;
   transition:background .15s,color .15s}
 nav a:hover,nav button:hover{background:var(--accent-soft);color:var(--accent);text-decoration:none}
