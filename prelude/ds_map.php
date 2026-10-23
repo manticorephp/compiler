@@ -43,9 +43,10 @@ namespace Manticore\Ds {
      * `JsonSerializable` (encoded as a JSON object).
      *
      * Changing the map while it is being iterated is not supported. Updating
-     * the value of a key that is already present is safe; adding keys can make
-     * the running loop visit them, and some changes (such as `clear()`) make
-     * the loop throw a `RuntimeException` ("Map modified during iteration").
+     * the value of a key that is already present is safe, and so is removing
+     * keys (the loop skips them). Adding a new key or `clear()` makes the running
+     * loop throw a `RuntimeException` ("Map modified during iteration") after
+     * the current step.
      *
      * ```php
      * $ages = new Map();

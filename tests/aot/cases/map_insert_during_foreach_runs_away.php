@@ -1,6 +1,5 @@
 <?php
 // Inserting keys while a foreach iterates a Manticore\Ds\Map never throws, so the loop runs away
-// issue: #398
 use Manticore\Ds\Map;
 $m = new Map();
 $m->set('a', 1);
