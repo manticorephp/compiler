@@ -1,6 +1,5 @@
 <?php
 // __McTok (prelude tokenizer) lexes a hex / binary / octal / underscored index of a simple string offset ("$a[0x1F]") as T_NUM_STRING "0" + T_STRING "x1F"; Zend makes one T_NUM_STRING.
-// issue: #382
 // Zend:      "$a[0x1F]" -> T_VARIABLE "$a", "[", T_NUM_STRING "0x1F", "]"      (same for 0b11, 0o7, 1_0)
 // Manticore: "$a[0x1F]" -> T_VARIABLE "$a", "[", T_NUM_STRING "0", T_STRING "x1F", "]"
 // Effect: explicit_string_variable quotes the "T_STRING before ]" -> `{$a[0'x1F']}` (upstream leaves `{$a[0x1F]}`).

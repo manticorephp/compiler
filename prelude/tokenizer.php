@@ -1322,6 +1322,13 @@ final class __McTok
             $this->st = self::ST_OFFSET;
             return $e + 1;
         }
+        if ($e + 3 < $len && \ord($s[$e]) === 63 && \ord($s[$e + 1]) === 45 && \ord($s[$e + 2]) === 62
+            && $this->cls(\ord($s[$e + 3])) === self::K_ID) {
+            $this->push(__McTokId::T_NULLSAFE_OBJECT_OPERATOR, '?->', $line, $e);
+            $pe = $this->identEnd($s, $len, $e + 3);
+            $this->push(__McTokId::T_STRING, \substr($s, $e + 3, $pe - $e - 3), $line, $e + 3);
+            return $pe;
+        }
         if ($e + 1 < $len && \ord($s[$e]) === 45 && \ord($s[$e + 1]) === 62
             && $e + 2 < $len && $this->cls(\ord($s[$e + 2])) === self::K_ID) {
             $this->push(__McTokId::T_OBJECT_OPERATOR, '->', $line, $e);
@@ -1344,7 +1351,19 @@ final class __McTok
         }
         if ($this->cls($b) === self::K_DIGIT || $b === 45) {
             $j = $b === 45 ? $i + 1 : $i;
-            while ($j < $len && $this->cls(\ord($s[$j])) === self::K_DIGIT) { $j = $j + 1; }
+            $x = $j + 2 < $len && \ord($s[$j]) === 48 ? \ord($s[$j + 1]) | 32 : 0;
+            $set = $x === 120 ? '0123456789abcdefABCDEF' : ($x === 98 ? '01' : ($x === 111 ? '01234567' : ''));
+            if ($set !== '' && \strpos($set, $s[$j + 2]) !== false) {
+                $j = $j + 2;
+            } else {
+                $set = '0123456789';
+            }
+            while ($j < $len) {
+                $d = $s[$j];
+                if (\strpos($set, $d) !== false) { $j = $j + 1; continue; }
+                if ($d === '_' && $j + 1 < $len && \strpos($set, $s[$j + 1]) !== false) { $j = $j + 2; continue; }
+                break;
+            }
             $this->push(__McTokId::T_NUM_STRING, \substr($s, $i, $j - $i), $line, $i);
             return $j;
         }
