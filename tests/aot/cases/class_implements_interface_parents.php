@@ -1,6 +1,5 @@
 <?php
 // class_implements() and ReflectionClass::getInterfaceNames() of an interface omit the interfaces it extends.
-// issue: #242
 
 interface I {}
 interface J extends I {}

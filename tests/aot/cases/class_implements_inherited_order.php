@@ -1,6 +1,5 @@
 <?php
 // class_implements() of a subclass lists inherited interfaces in a different order than php.
-// issue: #243
 
 interface I {}
 interface J extends I {}
