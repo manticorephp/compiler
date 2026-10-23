@@ -1,6 +1,5 @@
 <?php
 // A store into a by-reference closure capture leaks a string per store.
-// issue: #348
 function app(string &$t, string $x): void { $f = function () use (&$t, $x) { $t = str_repeat($x, 30); }; $f(); }
 function loopit(): void { $s = "s"; for ($i = 0; $i < 1000; $i++) { app($s, "x"); } }
 loopit();

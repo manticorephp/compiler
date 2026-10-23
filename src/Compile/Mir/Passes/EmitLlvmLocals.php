@@ -1309,7 +1309,7 @@ trait EmitLlvmLocals
             $out .= $this->ownedBoxOverwriteIr($sl->name, $addr);
             $sv = $sl->value;
             $out .= $this->refParamOverwriteIr($sl->name, $p, $val,
-                $sv instanceof \Compile\Mir\LoadLocal && $sv->name === $sl->name);
+                $sv instanceof \Compile\Mir\LoadLocal && $sv->name === $sl->name, $sl->type);
             $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
         } else {
             // Release-before-overwrite, where OwnershipFlow owns the old value.
@@ -1350,16 +1350,32 @@ trait EmitLlvmLocals
      * name rebound by `=&`, and `$a = $a` (`$selfLoad`: the value read the slot
      * itself and took no count, so the same word must not be given back).
      */
-    private function refParamOverwriteIr(string $name, string $slotPtr, string $val, bool $selfLoad = false): string
+    private function refParamOverwriteIr(string $name, string $slotPtr, string $val, bool $selfLoad = false,
+                                         ?Type $captureType = null): string
     {
         if ($this->frame->isTrampoline) { return ''; }
         $pt = $this->locals->refParamTypes[$name] ?? null;
+        $viaCapture = false;
+        if ($captureType !== null && $this->frame->isClosure
+            && isset($this->locals->captureRefs[$name])) {
+            // A closure's by-ref CAPTURE whose two ends agree on a concrete type
+            // (a cell-typed end is stored by the cell branch of emitStoreLocal)
+            // holds that type's representation in a box that owns it: the store
+            // gives the predecessor back, as the enclosing frame's own does
+            // ({@see ownedBoxOverwriteIr}).
+            $pt = $captureType;
+            $viaCapture = true;
+        }
         if ($pt === null || isset($this->locals->aliasLocals[$name])
             || isset($this->locals->ownedBoxes[$name])) { return ''; }
         $flavor = $this->discardReleaseFlavor($pt);
         // A closure's by-ref parameter is cell-typed by the ABI: the caller hands
         // over cell storage that owns its value. Only that cell flavor is known.
-        if ($this->frame->isClosure && ($flavor !== 'cell' || isset($this->locals->captureRefs[$name]))) { return ''; }
+        if ($viaCapture) {
+            if ($flavor === 'cell') { return ''; }
+        } elseif ($this->frame->isClosure && ($flavor !== 'cell' || isset($this->locals->captureRefs[$name]))) {
+            return '';
+        }
         if ($flavor === '') {
             // The one refusal the design keeps: an erased parameter names no
             // representation for the old word, so it is left to leak.
