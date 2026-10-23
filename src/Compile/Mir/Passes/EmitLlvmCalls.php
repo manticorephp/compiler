@@ -2312,8 +2312,8 @@ trait EmitLlvmCalls
         /** @var string[] $argRegs the argument words, in call order */
         $argRegs = [];
         $this->closurePackNode = null;
-        $callArgs = ($known && $dynSpread === -1)
-            ? $this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
+        $callArgs = $known
+            ?$this->closureVariadicPack($iv->args, $fn, $capCnt) : $iv->args;
         $packNode = $this->closurePackNode;
         $packTarget = $this->closurePackTarget;
         // A known closure that reads func_get_args() takes its surplus arguments through
@@ -2773,7 +2773,13 @@ trait EmitLlvmCalls
         $out = [];
         $elems = [];
         foreach ($args as $k => $a) {
-            if ($k < $vpos) { $out[] = $a; } else { $elems[] = new ArrayElement_(null, $a); }
+            if ($k < $vpos) {
+                // A spread over the fixed params expands across them; the pack cannot follow.
+                if ($a->kind === Node::KIND_SPREAD) { return $args; }
+                $out[] = $a;
+            } else {
+                $elems[] = new ArrayElement_(null, $a);
+            }
         }
         // An untyped pack (`...$r`, element `unknown`) is read back as cells by
         // the body, so its literal boxes every element; a typed one stays raw.
