@@ -1003,8 +1003,12 @@ final class RefParser
     }
 }
 
-const REF_SOURCES = ['prelude/ds.php', 'prelude/ds_map.php', 'prelude/async.php'];
-const REF_NAMESPACES = ['Manticore\\Ds', 'Async'];
+const REF_SOURCES = [
+    'prelude/ds.php', 'prelude/ds_map.php', 'prelude/async.php',
+    'prelude/http.php', 'prelude/websocket.php', 'prelude/buffer.php', 'prelude/pcntl.php', 'prelude/io_poll.php', 'prelude/sapi.php',
+    'src/Ffi/CType.php', 'src/Ffi/Library.php', 'src/Ffi/Ownership.php', 'src/Ffi/Ptr.php', 'src/Ffi/Symbol.php', 'src/Ffi/Variadic.php', 'src/Ffi/Weak.php',
+];
+const REF_NAMESPACES = ['Manticore\\Ds', 'Async', 'Http', 'Http\\WebSocket', 'Buffer', 'Process', 'Io\\Poll', 'Manticore\\Sapi', 'Ffi'];
 
 function ref_public_member(RMember $m): bool
 {
