@@ -698,14 +698,16 @@ function explode(string $delim, string $subject, int $limit = PHP_INT_MAX): arra
  */
 function array_combine(array $keys, array $values): array
 {
+    if (\count($keys) !== \count($values)) {
+        throw new \ValueError('array_combine(): Argument #1 ($keys) and argument #2 ($values) must have the same number of elements');
+    }
     $ks = [];
     foreach ($keys as $k) { $ks[] = $k; }
-    $vs = [];
-    foreach ($values as $v) { $vs[] = $v; }
     $out = [];
-    $n = \count($ks);
-    for ($i = 0; $i < $n; $i = $i + 1) {
-        $out[$ks[$i]] = $vs[$i];
+    $i = 0;
+    foreach ($values as $v) {
+        $out[$ks[$i]] = $v;
+        $i = $i + 1;
     }
     return $out;
 }
