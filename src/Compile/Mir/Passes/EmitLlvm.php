@@ -2367,6 +2367,22 @@ final class EmitLlvm implements EmitVisitor
                 }
             }
         }
+        // A read through a base type sees every subclass's instances: a property
+        // a subclass's own constructor may leave unwritten is checked on the
+        // ancestors that declare it too.
+        foreach ($this->classes as $name => $cd) {
+            foreach ($cd->propertyMaybeUninit as $pn => $_) {
+                $cur = $cd->parent;
+                $guard = 0;
+                while ($cur !== '' && isset($this->classes[$cur]) && $guard < 256) {
+                    $acd = $this->classes[$cur];
+                    if ($acd->propertyOffset($pn) < 0) { break; }
+                    $acd->propertyMaybeUninit[$pn] = true;
+                    $cur = $acd->parent;
+                    $guard = $guard + 1;
+                }
+            }
+        }
         /** @var array<string, string> $rootOf */
         $rootOf = [];
         foreach ($this->classes as $name => $cd) {

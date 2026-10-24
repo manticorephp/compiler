@@ -236,8 +236,8 @@ trait LowerClasses
     private function maybeUninitProps(\Parser\Ast\ClassDecl $decl, string $parent, array $propHooks): array
     {
         $out = [];
-        if ($parent !== '' && isset($this->classTable[$parent])) {
-            foreach ($this->classTable[$parent]->propertyMaybeUninit as $pn => $_) { $out[$pn] = true; }
+        if ($parent !== '' && isset($this->rawMaybeUninit[$parent])) {
+            foreach ($this->rawMaybeUninit[$parent] as $pn => $_) { $out[$pn] = true; }
         }
         foreach ($decl->properties as $prop) {
             if ($prop->isStatic) { continue; }
@@ -260,13 +260,150 @@ trait LowerClasses
                 }
             }
         }
+        $ctor = null;
         foreach ($decl->methods as $m) {
             if ($m->name !== '__construct') { continue; }
+            $ctor = $m;
             foreach ($m->params as $p) {
                 if ($p->promoted !== '') { unset($out[$p->name]); }
             }
         }
+        $this->rawMaybeUninit[$decl->name] = $out;
+        // What the constructor DEFINITELY assigns before `$this` can be seen
+        // is never read uninitialized, and pays no check.
+        $assigned = [];
+        if ($ctor !== null) {
+            $assigned = $this->ctorDefinitelyAssigns($ctor, $parent);
+        } elseif (!$this->traitDeclaresCtor($decl) && $parent !== '') {
+            $assigned = $this->ctorAssigned[$parent] ?? [];
+        }
+        $this->ctorAssigned[$decl->name] = $assigned;
+        foreach ($assigned as $pn => $_) { unset($out[$pn]); }
         return $out;
+    }
+
+    /** Typed props php starts uninitialized, before the ctor analysis, per class.
+     *  @var array<string, array<string, bool>> */
+    private array $rawMaybeUninit = [];
+
+    /** Props each class's effective constructor definitely assigns.
+     *  @var array<string, array<string, bool>> */
+    private array $ctorAssigned = [];
+
+    private function traitDeclaresCtor(\Parser\Ast\ClassDecl $decl): bool
+    {
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
+            $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->methods as $tm) {
+                if ($tm->name === '__construct') { return true; }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The `$this->p` a constructor assigns in its leading straight-line run,
+     * before anything could observe the object: the scan stops at the first
+     * statement that is not `$this->p = <expr>` / `$local = <expr>` /
+     * `parent::__construct(…)` (which contributes what the parent's assigns,
+     * and ends the run), or whose expression could reach `$this` (a method
+     * call on it, a closure, `self::`…). Conservative: stopping early only
+     * leaves a property checked.
+     *
+     * @return array<string, bool>
+     */
+    private function ctorDefinitelyAssigns(\Parser\Ast\MethodDecl $ctor, string $parent): array
+    {
+        $out = [];
+        $body = $this->methodDeclBody($ctor);
+        if ($body === null) { return $out; }
+        foreach ($body->statements as $st) {
+            if (!($st instanceof \Parser\Ast\ExpressionStmt)) { break; }
+            $e = $st->expr;
+            if ($e instanceof \Parser\Ast\Assign) {
+                $t = $e->target;
+                if (!$this->thisFreeExpr($e->value)) { break; }
+                if ($t instanceof \Parser\Ast\PropertyAccess && !$t->nullsafe
+                    && $t->object instanceof \Parser\Ast\Variable && $t->object->name === 'this') {
+                    $out[$t->property] = true;
+                    continue;
+                }
+                if ($t instanceof \Parser\Ast\Variable && $t->name !== 'this') { continue; }
+                break;
+            }
+            if ($e instanceof \Parser\Ast\StaticCall && \strtolower($e->class) === 'parent'
+                && \strtolower($e->method) === '__construct') {
+                if ($this->thisFreeArgs($e->args) && $parent !== '') {
+                    foreach ($this->ctorAssigned[$parent] ?? [] as $pn => $_) { $out[$pn] = true; }
+                }
+                break;
+            }
+            break;
+        }
+        return $out;
+    }
+
+    /** @param \Parser\Ast\Expr[] $args */
+    private function thisFreeArgs(array $args): bool
+    {
+        foreach ($args as $a) {
+            if (!$this->thisFreeExpr($a)) { return false; }
+        }
+        return true;
+    }
+
+    /** Whether evaluating `$e` cannot reach the object under construction: no
+     *  `$this`, no closure (which binds it), no `self::` / `static::` /
+     *  `parent::` call, no scope-reading builtin. Unknown shapes answer false. */
+    private function thisFreeExpr(?\Parser\Ast\Expr $e): bool
+    {
+        if ($e === null) { return true; }
+        if ($e instanceof \Parser\Ast\IntLiteral || $e instanceof \Parser\Ast\FloatLiteral
+            || $e instanceof \Parser\Ast\StringLiteral || $e instanceof \Parser\Ast\BoolLiteral
+            || $e instanceof \Parser\Ast\NullLiteral || $e instanceof \Parser\Ast\MagicConstant
+            || $e instanceof \Parser\Ast\Identifier) {
+            return true;
+        }
+        if ($e instanceof \Parser\Ast\Variable) { return $e->name !== 'this'; }
+        if ($e instanceof \Parser\Ast\BinaryOp) { return $this->thisFreeExpr($e->left) && $this->thisFreeExpr($e->right); }
+        if ($e instanceof \Parser\Ast\UnaryOp) { return $this->thisFreeExpr($e->operand); }
+        if ($e instanceof \Parser\Ast\Cast) { return $this->thisFreeExpr($e->operand); }
+        if ($e instanceof \Parser\Ast\InstanceofExpr) { return $this->thisFreeExpr($e->operand); }
+        if ($e instanceof \Parser\Ast\NullCoalesce) { return $this->thisFreeExpr($e->left) && $this->thisFreeExpr($e->right); }
+        if ($e instanceof \Parser\Ast\Ternary) {
+            return $this->thisFreeExpr($e->condition) && $this->thisFreeExpr($e->then) && $this->thisFreeExpr($e->else);
+        }
+        if ($e instanceof \Parser\Ast\ArrayLit) {
+            foreach ($e->elements as $el) {
+                if ($el->byRef || !$this->thisFreeExpr($el->key) || !$this->thisFreeExpr($el->value)) { return false; }
+            }
+            return true;
+        }
+        if ($e instanceof \Parser\Ast\ArrayAccess) { return $this->thisFreeExpr($e->array) && $this->thisFreeExpr($e->index); }
+        if ($e instanceof \Parser\Ast\PropertyAccess) { return $this->thisFreeExpr($e->object); }
+        if ($e instanceof \Parser\Ast\NamedArg) { return $this->thisFreeExpr($e->value); }
+        if ($e instanceof \Parser\Ast\Spread) { return $this->thisFreeExpr($e->value); }
+        if ($e instanceof \Parser\Ast\NewExpr) {
+            $c = \strtolower($e->class);
+            return $c !== 'self' && $c !== 'static' && $c !== 'parent' && $this->thisFreeArgs($e->args);
+        }
+        if ($e instanceof \Parser\Ast\StaticAccess) { return true; }
+        if ($e instanceof \Parser\Ast\StaticCall) {
+            $c = \strtolower($e->class);
+            return $c !== 'self' && $c !== 'static' && $c !== 'parent' && $this->thisFreeArgs($e->args);
+        }
+        if ($e instanceof \Parser\Ast\MethodCallExpr) { return $this->thisFreeExpr($e->object) && $this->thisFreeArgs($e->args); }
+        if ($e instanceof \Parser\Ast\CallExpr) {
+            $f = \strtolower(\ltrim($e->function, '\\'));
+            if ($f === 'func_get_args' || $f === 'func_get_arg' || $f === 'get_defined_vars' || $f === 'compact'
+                || $f === 'extract' || $f === 'debug_backtrace' || $f === 'get_object_vars' || $f === 'get_class'
+                || $f === 'get_called_class') {
+                return false;
+            }
+            return $this->thisFreeArgs($e->args);
+        }
+        return false;
     }
 
     private function buildClassDef(\Parser\Ast\ClassDecl $decl, int $classId): ClassDef
