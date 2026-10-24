@@ -224,6 +224,11 @@ if [[ $FAST -eq 1 ]]; then
         echo "   (installed compiler predates -O on \`build\` — building at its default)"
     fi
 fi
+# The shipping compiler stays ONE translation unit: auto-split trades ~7% runtime for build time.
+export MANTICORE_AUTO_SPLIT=0
+# The compiler never builds cycles it needs reclaimed within one run: the collector cost ~5% of a
+# build (cc_collect_cycles) and freed nothing measurable (RSS 978 vs 975 MB on manticore-fmt).
+export MANTICORE_AUTO_GC=0
 set +e
 # shellcheck disable=SC2086
 if [[ -n "${CELLGUARD_PASS1:-}" ]]; then export MANTICORE_CELLGUARD="$CELLGUARD_PASS1"; fi

@@ -578,7 +578,7 @@ trait InferNodes
         // arrays this function builds from `[]` (the soundness gate on the
         // elemLoopLocals pin below). {@see InferScans::scanLocalFacts}.
         $this->scanLocalFacts($fn->body);
-        $this->emptyLitNest = $this->emptyLitNesting($fn->body);
+        $this->emptyLitNest = $this->emptyLitNesting();
         // LAST, so it wins over every seeding scan above (a float/assoc seed would
         // otherwise pin a slot the loop already proved polymorphic): a name a loop
         // re-kinds is a cell from function ENTRY — its reads dispatch by tag
@@ -757,13 +757,28 @@ trait InferNodes
             if (\count($this->tryStoreFrames) > 0) { $this->noteTryStore($node->name); }
             return $st;
         }
+        // Hottest kinds first: the arms are mutually exclusive and each test is a string compare.
+        if ($kind === Node::KIND_METHOD_CALL)     { return $this->inferMethodCall($node); }
+        if ($kind === Node::KIND_PROPERTY_ACCESS) { return $this->inferPropertyAccess($node); }
+        if ($kind === Node::KIND_CALL)        { return $this->inferCall($node); }
+        if ($kind === Node::KIND_BLOCK)       { return $this->inferBlock($node); }
+        if ($kind === Node::KIND_IF)          { return $this->inferIf($node); }
+        if ($kind === Node::KIND_RETURN)      { return $this->inferReturn($node); }
+        if ($kind === Node::KIND_CMP)         { return $this->inferCmp($node); }
+        if ($kind === Node::KIND_CONCAT)      { return $this->inferConcat($node); }
+        if ($kind === Node::KIND_ARRAY_ACCESS)    { return $this->inferArrayAccess($node); }
+        if ($kind === Node::KIND_STATIC_CALL)     { return $this->inferStaticCall($node); }
+        if ($kind === Node::KIND_NOT)         { return $this->inferNot($node); }
+        if ($kind === Node::KIND_NEW_OBJ)         { return $this->inferNewObj($node); }
+        if ($kind === Node::KIND_STORE_PROPERTY)  { return $this->inferStoreProperty($node); }
+        if ($kind === Node::KIND_TERNARY)     { return $this->inferTernary($node); }
         if ($kind === Node::KIND_ADD)         { return $this->inferAdd($node); }
+        if ($kind === Node::KIND_STORE_ELEMENT)   { return $this->inferStoreElement($node); }
         if ($kind === Node::KIND_SUB)         { return $this->inferSub($node); }
         if ($kind === Node::KIND_MUL)         { return $this->inferMul($node); }
         if ($kind === Node::KIND_DIV)         { return $this->inferDiv($node); }
         if ($kind === Node::KIND_MOD)         { return $this->inferMod($node); }
         if ($kind === Node::KIND_NEG)         { return $this->inferNeg($node); }
-        if ($kind === Node::KIND_NOT)         { return $this->inferNot($node); }
         if ($kind === Node::KIND_BITOP)       { return $this->inferBitOp($node); }
         if ($kind === Node::KIND_BITNOT)      { return $this->inferBitNot($node); }
         if ($kind === Node::KIND_CAST)        { return $this->inferCast($node); }
@@ -785,14 +800,8 @@ trait InferNodes
         if ($kind === Node::KIND_REF_CELL) { return $this->inferRefCell($node); }
         if ($kind === Node::KIND_THROW) { return $this->inferThrow($node); }
         if ($kind === Node::KIND_TRY_CATCH) { return $this->inferTryCatch($node); }
-        if ($kind === Node::KIND_TERNARY)     { return $this->inferTernary($node); }
-        if ($kind === Node::KIND_CONCAT)      { return $this->inferConcat($node); }
-        if ($kind === Node::KIND_CMP)         { return $this->inferCmp($node); }
         if ($kind === Node::KIND_SPACESHIP)   { return $this->inferSpaceship($node); }
         if ($kind === Node::KIND_ECHO)        { return $this->inferEcho($node); }
-        if ($kind === Node::KIND_RETURN)      { return $this->inferReturn($node); }
-        if ($kind === Node::KIND_CALL)        { return $this->inferCall($node); }
-        if ($kind === Node::KIND_IF)          { return $this->inferIf($node); }
         if ($kind === Node::KIND_WHILE)       { return $this->inferWhile($node); }
         if ($kind === Node::KIND_FOR)         { return $this->inferFor($node); }
         if ($kind === Node::KIND_DOWHILE)     { return $this->inferDoWhile($node); }
@@ -819,9 +828,6 @@ trait InferNodes
         }
         if ($kind === Node::KIND_SPREAD)          { return $this->inferSpread($node); }
         if ($kind === Node::KIND_ARRAY_LIT)       { return $this->inferArrayLit($node); }
-        if ($kind === Node::KIND_ARRAY_ACCESS)    { return $this->inferArrayAccess($node); }
-        if ($kind === Node::KIND_STORE_ELEMENT)   { return $this->inferStoreElement($node); }
-        if ($kind === Node::KIND_NEW_OBJ)         { return $this->inferNewObj($node); }
         // `new $cls(...)`. The RESULT stays whatever lowering gave it — the
         // class is a runtime value — but the ARGUMENTS still have to be
         // inferred, and this arm was simply absent: every node under a dynamic
@@ -846,11 +852,6 @@ trait InferNodes
         }
         if ($kind === Node::KIND_DYN_PROP) { return $this->inferDynProp($node); }
         if ($kind === Node::KIND_STORE_DYN_PROP) { return $this->inferStoreDynProp($node); }
-        if ($kind === Node::KIND_PROPERTY_ACCESS) { return $this->inferPropertyAccess($node); }
-        if ($kind === Node::KIND_STORE_PROPERTY)  { return $this->inferStoreProperty($node); }
-        if ($kind === Node::KIND_METHOD_CALL)     { return $this->inferMethodCall($node); }
-        if ($kind === Node::KIND_STATIC_CALL)     { return $this->inferStaticCall($node); }
-        if ($kind === Node::KIND_BLOCK)       { return $this->inferBlock($node); }
         return $node->type;
     }
 
