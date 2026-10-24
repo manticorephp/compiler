@@ -3224,7 +3224,8 @@ final class InferTypes implements Pass
                 if ($pn !== '') { $this->sharedWordLocals[$pn] = true; }
             }
         }
-        $this->collectRefCapturedLocals($fn->body);
+        // Only a closure literal binds a by-ref capture, so a body without one has nothing to walk for.
+        if ($this->bodyHas($fn, Node::KIND_CLOSURE)) { $this->collectRefCapturedLocals($fn->body); }
     }
 
     private function collectRefCapturedLocals(Node $n): void
@@ -3314,46 +3315,45 @@ final class InferTypes implements Pass
      *  instead of `vec[unknown]` beside `vec[vec[…]]`. Read off the stores'
      *  types from the previous run.
      *  @return array<string, Type> */
-    private function emptyLitNesting(Node $body): array
+    private function emptyLitNesting(): array
     {
-        /** @var array<string, Type> $seen */
-        $seen = [];
-        /** @var array<string, bool> $bad */
-        $bad = [];
-        /** @var array<string, bool> $empty */
-        $empty = [];
-        $this->scanEmptyLitNesting($body, $seen, $bad, $empty);
         $out = [];
-        foreach ($empty as $name => $unused) {
-            if (isset($bad[$name]) || !isset($seen[$name])) { continue; }
-            $out[$name] = $seen[$name];
+        foreach ($this->elEmpty as $name => $unused) {
+            if (isset($this->elBad[$name]) || !isset($this->elSeen[$name])) { continue; }
+            $out[$name] = $this->elSeen[$name];
         }
         return $out;
     }
 
-    /** @param array<string, Type> $seen @param array<string, bool> $bad
-     *  @param array<string, bool> $empty */
-    private function scanEmptyLitNesting(Node $n, array &$seen, array &$bad, array &$empty): void
+    /** Accumulators of {@see emptyLitNesting}, filled one node at a time by
+     *  {@see noteEmptyLitStore} from the {@see InferScans::walkLocalFacts} walk.
+     *  @var array<string, Type> */
+    private array $elSeen = [];
+    /** @var array<string, bool> */
+    private array $elBad = [];
+    /** @var array<string, bool> */
+    private array $elEmpty = [];
+
+    private function noteEmptyLitStore(Node $n): void
     {
         if ($n instanceof StoreLocal) {
             $name = $n->name;
             $v = $n->value;
             if ($v instanceof ArrayLit && \count($v->elements) === 0) {
-                $empty[$name] = true;
-            } elseif (!isset($bad[$name])) {
+                $this->elEmpty[$name] = true;
+            } elseif (!isset($this->elBad[$name])) {
                 $vt = $v->type;
                 $k = $vt->isArray() ? self::nestingKey($vt) : '';
                 if (!\str_contains($k, ':')) {
-                    $bad[$name] = true;
-                } elseif (!isset($seen[$name])) {
-                    $seen[$name] = $vt;
-                } elseif (self::nestingKey($seen[$name]) !== $k
-                    || $seen[$name]->isAssoc() !== $vt->isAssoc()) {
-                    $bad[$name] = true;
+                    $this->elBad[$name] = true;
+                } elseif (!isset($this->elSeen[$name])) {
+                    $this->elSeen[$name] = $vt;
+                } elseif (self::nestingKey($this->elSeen[$name]) !== $k
+                    || $this->elSeen[$name]->isAssoc() !== $vt->isAssoc()) {
+                    $this->elBad[$name] = true;
                 }
             }
         }
-        foreach (Walk::children($n) as $c) { $this->scanEmptyLitNesting($c, $seen, $bad, $empty); }
     }
 
     /** A VALUE join (ternary arms, match arms, returns) of an ERASED value with

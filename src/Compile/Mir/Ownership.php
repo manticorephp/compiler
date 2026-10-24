@@ -432,6 +432,10 @@ final class Ownership
             return true;
         }
         if ($value instanceof Cast && self::castArrayMints($value)) { return true; }
+        // `(object)$array` builds a fresh stdClass (rc=1, see EmitLlvmExpr::emitCast).
+        // A scalar / erased operand answers a BOXED cell, an object operand itself.
+        if ($value instanceof Cast && $value->target === 'object'
+            && $value->type->kind === Type::KIND_OBJ && $value->operand->type->isArray()) { return true; }
         // A fresh RcHeap allocation: `new` (obj) / array-literal (vec) /
         // concat (string). Arena values are excluded — freed by the arena
         // scope; rc-releasing them would be wrong (their header is -1 so

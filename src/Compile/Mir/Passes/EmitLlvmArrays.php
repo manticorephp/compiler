@@ -2822,7 +2822,7 @@ trait EmitLlvmArrays
      * `$cur` is the element as it is NOW (the caller emits the matching
      * `__mir_array_get_*`). Leaves the value to store in {@see elemValReg}.
      */
-    private function emitElemWriteThrough(string $cur, string $val): string
+    private function emitElemWriteThrough(string $cur, string $val, bool $dropOld = false): string
     {
         $istag = $this->ssa->allocReg();
         $sh = $this->ssa->allocReg();
@@ -2846,7 +2846,18 @@ trait EmitLlvmArrays
         $out .= '  ' . $boxp . ' = inttoptr i64 ' . $mask . " to ptr\n";
         $out .= '  ' . $dst . ' = select i1 ' . $both . ', ptr ' . $boxp
               . ', ptr ' . $scratch . "\n";
+        // `$dropOld`: a whole-value store through the binding replaces what the
+        // box owned, and `$val` already carries the count the box now keeps
+        // ({@see emitStoreElemValue}). The scratch is zeroed so the non-ref path
+        // gives back a word every release self-guards.
+        $old = '';
+        if ($dropOld) {
+            $old = $this->ssa->allocReg();
+            $out .= '  store i64 0, ptr ' . $scratch . "\n";
+            $out .= '  ' . $old . ' = load i64, ptr ' . $dst . "\n";
+        }
         $out .= '  store i64 ' . $val . ', ptr ' . $dst . "\n";
+        if ($dropOld) { $out .= $this->rcReleaseReg($old, 'cell'); }
         $out .= '  ' . $keep . ' = select i1 ' . $both . ', i64 ' . $cur
               . ', i64 ' . $val . "\n";
         // The slot keeps either its own REF cell (a slot read) or the value.
@@ -3107,7 +3118,7 @@ trait EmitLlvmArrays
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
             }
             if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
-                $out .= $this->emitElemWriteThrough($curE, $val);
+                $out .= $this->emitElemWriteThrough($curE, $val, true);
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_cell(ptr ' . $arrPtr . ', i64 ' . $key . ', i64 ' . $val . ")\n";
@@ -3141,7 +3152,7 @@ trait EmitLlvmArrays
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_str(ptr ' . $arrPtr . ', ptr ' . $key . $this->litKeyHashArgs($se->index) . ")\n";
             }
             if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
-                $out .= $this->emitElemWriteThrough($curE, $val);
+                $out .= $this->emitElemWriteThrough($curE, $val, true);
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr ' . $arrPtr . ', ptr ' . $key . ', i64 ' . $val . $this->litKeyHashArgs($se->index) . ")\n";
@@ -3166,7 +3177,7 @@ trait EmitLlvmArrays
                 $out .= '  ' . $curE . ' = call i64 @__mir_array_get_int(ptr ' . $arrPtr . ', i64 ' . $idx . ")\n";
             }
             if ($this->rt->needsRefCells && !$rebinds && $this->elemSlotMayHoldRef($se->array->type)) {
-                $out .= $this->emitElemWriteThrough($curE, $val);
+                $out .= $this->emitElemWriteThrough($curE, $val, true);
                 $val = $this->elemValReg;
             }
             $out .= '  ' . $next . ' = call ptr @__mir_array_set_int(ptr ' . $arrPtr . ', i64 ' . $idx . ', i64 ' . $val . ")\n";

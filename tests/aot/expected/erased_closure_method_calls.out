@@ -1,0 +1,12 @@
+3
+15
+6
+4
+5
+8
+NULL
+Call to undefined method Closure::nope()
+Call to undefined method A::nope()
+Call to a member function nope() on null
+Call to a member function nope() on int
+Call to undefined method A::__invoke()

@@ -1022,8 +1022,9 @@ function clang_tuning_flags(): string
  * module alone is ~20x its text in clang). Split, it is ~2 minutes at 2.2 GB,
  * and {@see \Compile\Mir\SplitModule}'s `available_externally` copies keep the
  * inlining a part boundary used to cost (the compiler built in 8 parts: +6.6%
- * instead of +53%). The compiler's own module (~85 MB) is below the line, so
- * `bin/build` is unchanged; a library never gets here — its `.o` is one unit.
+ * instead of +53%). `bin/build` exports MANTICORE_AUTO_SPLIT=0, so the
+ * compiler's own ~85 MB module stays one unit and
+ * its output is unchanged; a library never gets here — its `.o` is one unit.
  */
 function auto_split_parts(int $irBytes): int
 {
@@ -1141,7 +1142,7 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         }
         $stagedJobs = $forcedJobs >= 2 ? $forcedJobs : assemble_jobs();
         $stagedBytes = (int)\substr($payload, $cut + 1);
-        if ($autoSplit && $forcedSplit === false && CompileArgs::$jobs === 1) {
+        if ($autoSplit && $forcedSplit === false && CompileArgs::$jobs === 1 && \getenv("MANTICORE_AUTO_SPLIT") !== "0") {
             $autoParts = auto_split_parts($stagedBytes);
             if ($autoParts >= 2) {
                 $stagedJobs = $autoParts;
@@ -2187,7 +2188,7 @@ final class CompileArgs
     public static int $jobs = 1;
 
     /** Below this much staged IR an application assembles as ONE translation unit. */
-    public const AUTO_SPLIT_MIN_BYTES = 134217728;
+    public const AUTO_SPLIT_MIN_BYTES = 33554432;
 
     /** Staged IR per part when the split is automatic: clang peaks at ~15x its input. */
     public const AUTO_SPLIT_PART_BYTES = 10485760;
@@ -4636,6 +4637,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'class_implements',
             'class_parents',
             'get_mangled_object_vars',
+            'get_class_vars',
             'get_defined_constants',
         ]);
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,

@@ -1,0 +1,21 @@
+array(1) {
+  [0]=>
+  string(1) "a"
+}
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "c"
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "d"
+}
+{"a":1,"dyn":5}
+{"a":1,"d":4}
+{"a":1}

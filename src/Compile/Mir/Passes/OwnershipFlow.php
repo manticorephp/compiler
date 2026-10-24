@@ -743,7 +743,9 @@ final class OwnershipFlow implements Pass
                 $name = $name . ':arr';
                 $cur = $cur->element;
             }
-            return $name . ':' . ($cur === null ? '?' : $cur->kind);
+            // A scalar or cell innermost element is released by the erased repr walk too
+            // (`[[]]` beside `[[1]]` is ONE slot); the slot type keeps the general side.
+            return $name . ':' . ($cur === null ? '?' : (Ownership::isNonRcScalarKind($cur->kind) || $cur->kind === Type::KIND_CELL ? Type::KIND_UNKNOWN : $cur->kind));
         }
         // A Generator frame is an object word like any other: the rc helpers
         // self-route on the header (`__mir_rc_retain` / `__mir_rc_release` take
@@ -918,7 +920,7 @@ final class OwnershipFlow implements Pass
         if (isset($this->keyId[$key])) {
             $k = $this->keyId[$key];
             if ($ks !== 'mix' && !isset($this->erasedPropNames[$name])
-                && $this->refinesElement($this->keyType[$k], $t)) {
+                && ($this->refinesElement($this->keyType[$k], $t) || $this->widensInnermost($this->keyType[$k], $t))) {
                 $this->keyType[$k] = $t;
                 $this->keyFlavor[$k] = $this->flavorFor($name, $ks, $t);
             }
@@ -951,6 +953,24 @@ final class OwnershipFlow implements Pass
     private function noteOwnKey(string $name, int $k): void
     {
         if (!isset($this->firstOwnKey[$name])) { $this->firstOwnKey[$name] = $k; }
+    }
+
+    /** A nested array typed down to a scalar, met by the same nesting typed down to
+     *  an erased element: the erased type releases both (its repr walk frees a scalar
+     *  array's buffer and a cell array by its own bits), the specific one would drop an
+     *  erased element by a shape it does not have. */
+    private function widensInnermost(Type $old, Type $new): bool
+    {
+        if (!$old->isArray() || !$new->isArray()) { return false; }
+        $o = $old->element;
+        $n = $new->element;
+        if ($o === null || $n === null || $o->kind !== Type::KIND_ARRAY || $n->kind !== Type::KIND_ARRAY) { return false; }
+        while ($o !== null && $o->kind === Type::KIND_ARRAY && $n !== null && $n->kind === Type::KIND_ARRAY) {
+            $o = $o->element;
+            $n = $n->element;
+        }
+        if ($o === null || $n === null) { return false; }
+        return (Ownership::isNonRcScalarKind($o->kind) || $o->kind === Type::KIND_CELL) && $n->kind === Type::KIND_UNKNOWN;
     }
 
     /** `vec[unknown]` deepened to a concrete obj / string element — the one
