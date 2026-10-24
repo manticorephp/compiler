@@ -4802,7 +4802,7 @@ namespace Async {
     /**
      * Wait for the first successful task and return its value.
      *
-     * A failure is ignored while another task can still succeed. If every task failed, `AggregateError` is thrown with the errors keyed by input position. The other tasks are not cancelled; they keep running under their own scope, and their outcomes are not reported here. Cancel them yourself when you no longer need them.
+     * A failure is ignored while another task can still succeed. If every task failed, `AggregateError` is thrown with the errors keyed by input position. The other tasks are not cancelled; they keep running under their own scope. A failure that happened before the winner finished is ignored; a loser still running when the winner is returned is released from this call, so if it fails later the error is escalated to its owning scope like any unclaimed failure. Cancel the losers yourself when you no longer need them.
      *
      * @param Task ...$tasks  the tasks to wait for; at least one
      * @return mixed  the value of the first task to succeed
@@ -4818,12 +4818,19 @@ namespace Async {
             throw new \LogicException('awaitAny() with no tasks blocks forever');
         }
         $sched = Scheduler::instance();
-        foreach ($tasks as $t) { $t->claimed = true; }
+        /** @var bool[] $wasClaimed */
+        $wasClaimed = [];
+        foreach ($tasks as $i => $t) { $wasClaimed[$i] = $t->claimed; $t->claimed = true; }
 
         while (true) {
             $pending = 0;
             foreach ($tasks as $t) {
-                if ($t->state === Task::DONE) { return $t->result; }
+                if ($t->state === Task::DONE) {
+                    foreach ($tasks as $i => $u) {
+                        if ($u->state === Task::PENDING && !$wasClaimed[$i]) { $u->claimed = false; }
+                    }
+                    return $t->result;
+                }
                 if ($t->state === Task::PENDING) { $pending = $pending + 1; }
             }
             if ($pending === 0) { break; }

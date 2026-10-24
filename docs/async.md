@@ -59,6 +59,8 @@ async(function () {
 - `awaitAll` is **fail-fast**: results keyed by input position, and the first failure
   cancels + joins the rest and is rethrown as-is. `awaitAny` returns the first success and
   throws an `AggregateError` (keyed by input position) only if everything failed.
+  Losers are not cancelled; one still running when the winner returns is released from the
+  call, so a later failure escalates to its owning scope (never dropped).
 
 ## API
 
