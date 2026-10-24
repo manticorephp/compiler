@@ -386,6 +386,9 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, int> closure fn name → capture count */
     private array $closureCaptures = [];
 
+    /** @var array<string, bool> closure fns whose scope is global (declared outside a class, no rebind in the program) */
+    private array $unscopedClosures = [];
+
     /** Resolved source path → the global slot holding that file's top-level
      *  `return` value ({@see Module::$includeSlots}). Read by the
      *  `require`/`include` builtin. @var array<string, string> */
@@ -740,6 +743,7 @@ final class EmitLlvm implements EmitVisitor
         $this->noDiscardMethods = $module->noDiscardMethods;
         $this->attrSiteErrors = $module->attrSiteErrors;
         $this->closureCaptures = $module->closureCaptures;
+        $this->unscopedClosures = $module->closureRebinds ? [] : $module->unscopedClosures;
         $this->closureRawRefUnionMemo = -1;
         $this->closureHasThis = $module->closureHasThis;
         $this->globalNames = $module->globalNames;

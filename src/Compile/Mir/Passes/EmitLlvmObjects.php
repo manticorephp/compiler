@@ -2766,6 +2766,7 @@ trait EmitLlvmObjects
     {
         $f = $this->frame;
         if ($f->isMain) { return ''; }
+        if ($f->isClosure && !$f->isPrelude && isset($this->unscopedClosures[$f->name])) { return ''; }
         if ($f->isPrelude || $f->isClosure || $f->isTrampoline) { return null; }
         $nm = $f->name;
         if (\strncmp($nm, '__', 2) === 0) { return null; }
