@@ -77,6 +77,7 @@ trait LowerClassDeclChecks
         foreach ($d->methods as $m) {
             $this->checkOwnMethod($d, $cls, $m, $parentTable, $ifaceTables);
         }
+        if ($kind === 'class' && $parentTable !== null) { $this->checkTraitMethodVisibility($d, $cls, $parentTable); }
         foreach ($d->consts as $c) {
             $this->checkOwnConst($cls, $c, $parentTable, $ifaceTables, $span);
         }
@@ -156,6 +157,28 @@ trait LowerClassDeclChecks
             if (isset($seen[$id])) { continue; }
             $seen[$id] = true;
             $this->checkSigCompat($cls, $m, $im, $mspan);
+        }
+    }
+
+    /** A trait method the class imports (not redefined in the class) must not weaken the parent method. */
+    private function checkTraitMethodVisibility(\Parser\Ast\ClassDecl $d, string $cls, DeclTable $parentTable): void
+    {
+        $own = [];
+        foreach ($d->methods as $m) { $own[\strtolower($m->name)] = true; }
+        foreach ($d->uses as $tn) {
+            $tt = $this->declTableOf(\ltrim($tn, '\\'));
+            if ($tt === null) { continue; }
+            foreach ($tt->methods as $key => $mem) {
+                $inh = $parentTable->methods[$key] ?? null;
+                if ($inh === null || isset($own[$key])) { continue; }
+                $vis = $mem->visibility;
+                foreach ($d->traitAdaptations as $a) {
+                    if ($a->kind === 'as' && $a->alias === '' && $a->visibility !== '' && \strtolower($a->method) === $key) {
+                        $vis = $a->visibility;
+                    }
+                }
+                $this->checkVisibility($cls . '::' . $mem->name . '()', $vis, $inh, $d->span);
+            }
         }
     }
 
