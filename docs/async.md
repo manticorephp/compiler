@@ -93,7 +93,7 @@ async(function () {
 | `Channel` (`IteratorAggregate`) | `foreach ($ch as $v)` — ends when closed and drained |
 | `Channel::send/next/recv/close` | `next(): Received` is the comma-ok form |
 | `SelectCase::recv(Channel)` / `::send(Channel, $v)` | one arm of a `select()` |
-| `Semaphore(int)` — `acquire/release/withPermit` | "N at a time" |
+| `Semaphore(int)` — `acquire/release/withPermit` (a `release()` with no permit held throws `LogicException`) | "N at a time" |
 | `Pool(factory, max, reset, ping, maxLifetime, idleTimeout, close)` — `acquire/release/with/discard/close/stats`, `Pool::pdo()` | bounded, FIFO pool of objects (`max` ≥ 1); `acquire(?float $timeout)` throws `TimeoutException`; `stats()`; `Pool::pdo` = reset via `resetSession()`, ping via `ping()`; see [Connection pool](#connection-pool), [Databases](#databases) |
 | `TaskGroup::run(callable)` | what `group()` wraps |
 | `TaskGroup::token(): CancellationToken` | the read-only half of this scope's cancellation |

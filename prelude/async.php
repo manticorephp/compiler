@@ -1898,6 +1898,7 @@ namespace Async {
     final class Semaphore
     {
         private int $free;
+        private int $permits;
         /** @var Task[] tasks waiting for a permit, FIFO */
         private array $waitQ = [];
 
@@ -1909,6 +1910,7 @@ namespace Async {
         public function __construct(int $permits)
         {
             $this->free = $permits < 1 ? 1 : $permits;
+            $this->permits = $this->free;
         }
 
         /**
@@ -1946,12 +1948,14 @@ namespace Async {
         /**
          * Return a permit and wake the first waiting task.
          *
-         * Releasing more often than acquiring raises the permit count above its initial value; this is not checked.
-         *
+         * @throws \LogicException  when every permit is already free: a release without a matching acquire is a caller bug and would lift the bound
          * @see acquire
          */
         public function release(): void
         {
+            if ($this->free >= $this->permits) {
+                throw new \LogicException('Semaphore::release() without a matching acquire()');
+            }
             $this->free = $this->free + 1;
             // Skip entries whose task died or was cancelled while queued.
             while (\count($this->waitQ) > 0) {
