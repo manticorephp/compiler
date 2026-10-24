@@ -4300,6 +4300,7 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $reg . ' = call i64 @__mir_ipow(i64 ' . $b . ', i64 ' . $e . ")\n";
             return $this->finishI64($out, $reg);
         }
+        if ($this->powTakesCells($args)) { return $this->biPowCells($args); }
         // A numericCell operand lands here (it is not KIND_INT), so the double
         // conversion must UNBOX it via tagged_to_double rather than bitcast its
         // tagged bits — coerceDoubleOperand, the same path float arithmetic uses.
@@ -4309,6 +4310,52 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call double @llvm.pow.f64(double ' . $b . ', double ' . $e . ")\n";
         $this->lastValue = $reg; $this->lastValueType = 'double';
+        return $out;
+    }
+
+    /** @param Node[] $args */
+    private function powTakesCells(array $args): bool
+    {
+        if ($args[0]->type->kind === Type::KIND_INT && $args[1]->type->kind === Type::KIND_INT) { return false; }
+        foreach ($args as $a) {
+            $k = $a->type->kind;
+            if ($k === Type::KIND_FLOAT) { return false; }
+            if ($k !== Type::KIND_INT && $k !== Type::KIND_STRING && !$a->type->isNumericCell()) { return false; }
+        }
+        return true;
+    }
+
+    /**
+     * `**` over a numeric STRING or a numeric cell: php picks int-or-float from
+     * the operands themselves (`"9" ** 2` is int(81)), so both ride boxed into
+     * `__manticore_tagged_pow`.
+     *
+     * @param Node[] $args
+     */
+    private function biPowCells(array $args): string
+    {
+        $this->rt->needsTaggedArith = true;
+        $this->rt->needsTaggedPow = true;
+        $this->rt->needsTagged = true;
+        $this->rt->needsTaggedToInt = true;
+        $this->rt->needsTaggedToFloat = true;
+        $this->rt->needsStrtol = true;
+        $this->rt->needsStrtod = true;
+        $this->rt->needsIpow = true;
+        $this->libcExtra['llvm.pow.f64'] = 'declare double @llvm.pow.f64(double, double)';
+        $out = $this->emitNode($args[0]);
+        $out .= $this->boxToCell($args[0]->type);
+        $l = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->boxToCell($args[1]->type);
+        $r = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__manticore_tagged_pow(i64 ' . $l . ', i64 ' . $r . ")\n";
+        $out .= $this->dropOperandCell($args[0], $l);
+        $out .= $this->dropOperandCell($args[1], $r);
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        $this->markCellBoxed($reg);
         return $out;
     }
 

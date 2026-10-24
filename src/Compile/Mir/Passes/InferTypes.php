@@ -2263,6 +2263,13 @@ final class InferTypes implements Pass
             && $this->cellArithOperand($lt) && $this->cellArithOperand($rt)) {
             return Type::numericCell();
         }
+        // A numeric STRING operand beside a string / int / cell: php decides
+        // int-or-float from the text (`"10" + "5.5"` is float(15.5)), so the result
+        // is a numeric cell and the tagged helper reads the strings at run time.
+        if ($lt->kind === Type::KIND_STRING && ($rt->kind === Type::KIND_STRING || $this->cellArithOperand($rt))
+            || $rt->kind === Type::KIND_STRING && $this->cellArithOperand($lt)) {
+            return Type::numericCell();
+        }
         // Everything left takes the INTEGER path, and that path is total: it
         // coerces every operand to i64 first (strtol for a string, unbox_int
         // for a cell, the raw word otherwise — {@see EmitLlvmExpr::

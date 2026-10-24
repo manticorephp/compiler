@@ -59,6 +59,7 @@ public bool $needsClosureRc = false;
     public bool $needsTaggedCompare = false;
     public bool $needsTaggedEq = false;
     public bool $needsTaggedArith = false;
+    public bool $needsTaggedPow = false;
     public bool $needsTaggedTruthy = false;
     /** Array indexed by a `mixed`/cell key — int-vs-string key dispatch helpers. */
     public bool $needsCellKey = false;

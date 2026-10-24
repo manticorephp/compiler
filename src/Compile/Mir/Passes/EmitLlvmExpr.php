@@ -1997,6 +1997,29 @@ trait EmitLlvmExpr
             . $this->taggedArithOne('mul', 'mul', 'fmul');
     }
 
+    /** `__manticore_tagged_pow(a, b)`: float if either side is float or the exponent is negative, else int. */
+    private function taggedPowRuntime(): string
+    {
+        $out  = "\ndefine i64 @__manticore_tagged_pow(i64 %a, i64 %b) {\nentry:\n";
+        $out .= "  %afl = call i1 @__mir_cell_num_is_float(i64 %a)\n";
+        $out .= "  %bfl = call i1 @__mir_cell_num_is_float(i64 %b)\n";
+        $out .= "  %isf = or i1 %afl, %bfl\n";
+        $out .= "  %ib = call i64 @__manticore_tagged_to_int(i64 %b)\n";
+        $out .= "  %neg = icmp slt i64 %ib, 0\n";
+        $out .= "  %fl = or i1 %isf, %neg\n";
+        $out .= "  br i1 %fl, label %flt, label %int\n";
+        $out .= "flt:\n";
+        $out .= "  %fa = call double @__manticore_tagged_to_double(i64 %a)\n";
+        $out .= "  %fb = call double @__manticore_tagged_to_double(i64 %b)\n";
+        $out .= "  %fr = call double @llvm.pow.f64(double %fa, double %fb)\n";
+        $out .= "  %fx = call i64 @__manticore_box_float(double %fr)\n  ret i64 %fx\n";
+        $out .= "int:\n";
+        $out .= "  %ia = call i64 @__manticore_tagged_to_int(i64 %a)\n";
+        $out .= "  %ir = call i64 @__mir_ipow(i64 %ia, i64 %ib)\n";
+        $out .= "  %ix = call i64 @__manticore_box_int(i64 %ir)\n  ret i64 %ix\n}\n";
+        return $out;
+    }
+
     /**
      * `__mir_cell_num_is_float(cell) -> i1` — whether a numeric operand takes
      * the FLOAT arm: a float cell, or a STRING cell whose numeric prefix is a

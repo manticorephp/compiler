@@ -779,6 +779,7 @@ trait EmitLlvmModule
             $out .= "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n";
             $out .= "declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n";
             $out .= $this->taggedArithRuntime();
+            if ($this->rt->needsTaggedPow) { $out .= $this->taggedPowRuntime(); }
         }
         if ($this->rt->needsTaggedTruthy) {
             $out .= $this->taggedTruthyRuntime();
