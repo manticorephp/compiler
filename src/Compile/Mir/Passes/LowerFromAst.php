@@ -4473,7 +4473,9 @@ final class LowerFromAst implements Pass
         // the same node `[&$v]` stores, and the emitter REPLACES the slot's
         // binding rather than writing through whatever reference it held —
         // which is the whole point of that line.
-        if ($expr->target->kind === 'ArrayAccess'
+        if (($expr->target->kind === 'ArrayAccess'
+                || ($expr->target->kind === 'PropertyAccess'
+                    && $this->propSlotMayHoldRef($this->asPropertyAccessAst($expr->target))))
             && \Compile\Debug::$refCells
             && ($expr->source->kind === 'Variable'
                 || $expr->source->kind === 'PropertyAccess'
@@ -4485,6 +4487,26 @@ final class LowerFromAst implements Pass
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->source));
     }
 
+    /**
+     * Can `$o->p = &$v` bind? Only a slot of the boxed-cell channel (untyped /
+     * `mixed`) can hold a reference. A property NAME some class declares with a
+     * concrete type keeps the value copy: the receiver's class is not known here
+     * and a reference-cell slot is read by name. Open: typed-property reference repr.
+     */
+    private function propSlotMayHoldRef(\Parser\Ast\PropertyAccess $target): bool
+    {
+        foreach ($this->classTable as $cd) {
+            $t = $cd->propertyTypes[$target->property] ?? null;
+            if ($t !== null && $t->kind !== Type::KIND_CELL) { return false; }
+        }
+        return true;
+    }
+
+    private function asPropertyAccessAst(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess
+    {
+        /** @var \Parser\Ast\PropertyAccess $e */
+        return $e;
+    }
     private function lowerAssign(\Parser\Ast\Assign $expr): Node
     {
         if ($expr->target->kind === 'Variable') {

@@ -2036,8 +2036,15 @@ final class EmitLlvm implements EmitVisitor
             }
             return;
         }
+        if ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $sp = \Compile\Mir\Walk::children($n);
+            $last = $sp[\count($sp) - 1];
+            if ($last->kind === Node::KIND_REF_CELL) { $this->refCellPropNames[$this->asStoreProp($n)->property] = true; }
+        }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectRefCellPropNames($c); }
     }
+
+    private function asStoreProp(Node $n): \Compile\Mir\StoreProperty { return $n; }
 
     private function asPropAccess(Node $n): \Compile\Mir\PropertyAccess_ { return $n; }
 

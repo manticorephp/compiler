@@ -2712,6 +2712,9 @@ trait EmitLlvmObjects
 
     private function emitStoreProperty(\Compile\Mir\StoreProperty $n): string
     {
+        if ($n->value->kind === Node::KIND_REF_CELL) {
+            return $this->emitRebindProperty($n);
+        }
         // A UNION receiver has no single layout: dispatch the store on the runtime
         // class_id to each atom's slot offset (mirrors emitUnionPropertyAccess).
         if ($n->object->type->kind === Type::KIND_UNION) {
@@ -3013,6 +3016,55 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `$o->p = &$v`: the slot is REBOUND to the reference, not written through
+     * whatever reference it held. The slot receives `cell(REF, box)` and the
+     * count on the box that goes with it; what it held before is given back by
+     * tag. Only a statically known class whose slot is a boxed `mixed` / untyped
+     * cell can hold the REF cell ({@see EmitLlvm::$refCellPropNames} makes every
+     * reader of that name decode it). Any other slot falls back to the old
+     * value copy (open: typed-property reference repr).
+     */
+    private function emitRebindProperty(\Compile\Mir\StoreProperty $n): string
+    {
+        $cls = $n->object->type->class ?? '';
+        $ok = $cls !== '' && isset($this->classes[$cls])
+            && $n->object->type->kind !== Type::KIND_UNION
+            && $this->classes[$cls]->propertyOffset($n->property) >= 0
+            && $this->classes[$cls]->propertyWidth($n->property) === 8
+            && !isset($this->classes[$cls]->propHooks[$n->property]);
+        $propType = $ok ? ($this->classes[$cls]->propertyTypes[$n->property] ?? null) : null;
+        if (!$ok || !$this->cellPropBoxed($propType, $cls, $n->property)) {
+            // No slot representation for a reference (typed / hooked / dynamic
+            // property): keep the value-copy binding. Symfony's `private array
+            // $sections` bound to a by-ref ctor param relies on it compiling.
+            $src = \Compile\Mir\Walk::children($n->value)[0];
+            return $this->emitStoreProperty(new \Compile\Mir\StoreProperty(
+                $n->object, $n->property, $src, $n->type, $n->bypassHook,
+            ));
+        }
+        $out = $this->emitNode($n->object);
+        $out .= $this->coerceToPtr();
+        $objPtr = $this->lastValue;
+        $out .= $this->emitNode($n->value);
+        $out .= $this->coerceToI64();
+        $ref = $this->lastValue;
+        $this->rt->needsRc = true;
+        $this->rt->needsRefCells = true;
+        $out .= '  call void @__mir_cell_retain(i64 ' . $ref . ")\n";
+        $out .= $this->propSlotGep($n->object, $objPtr, $n->property);
+        $gep = $this->lastValue;
+        $old = $this->ssa->allocReg();
+        $out .= '  ' . $old . ' = load i64, ptr ' . $gep . "\n";
+        $out .= '  store i64 ' . $ref . ', ptr ' . $gep . "\n";
+        $out .= $this->rcReleaseReg($old, 'cell');
+        $this->rt->needsTagged = true;
+        $d = $this->ssa->allocReg();
+        $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $ref . ")\n";
+        $this->lastValue = $d;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
     /**
      * IR for `$o->s = $o->s . rhs` as an in-place amortized append, or null when
      * the store is not that shape.
