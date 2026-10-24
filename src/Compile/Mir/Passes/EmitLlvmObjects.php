@@ -1407,6 +1407,10 @@ trait EmitLlvmObjects
         }
         $out .= $this->propSlotGep($pa->object, $objPtr, $pa->property);
         $gep = $this->lastValue;
+        if ($pa->initCheck) {
+            $out .= $this->emitInitReadCheck($objPtr, $this->slotHolder($pa->object, $pa->property), $pa->property,
+                $this->propertyOffsetOrNull($pa->object, $pa->property) ?? -1, $gep);
+        }
         $out .= $this->emitSlotLoad(
             $gep,
             $this->slotHolder($pa->object, $pa->property),
@@ -10114,6 +10118,134 @@ trait EmitLlvmObjects
         $m = $this->ssa->allocReg();
         $out .= '  ' . $m . ' = select i1 ' . $inr . ', i64 ' . $m0 . ", i64 0\n";
         return [$wp, $m];
+    }
+
+    /**
+     * Flag every property access in `$n` that is a plain READ of the value
+     * ({@see PropertyAccess_::$initCheck}); the base of an element write, a
+     * reference, a by-ref argument, an `isset` / `unset` / `??` operand are
+     * not — php vivifies or tests those instead of throwing. Unknown callees
+     * count as by-ref: a missed check reads as before, a wrong one throws.
+     */
+    private function markInitReads(Node $n): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_PROPERTY_ACCESS) {
+            $n->initCheck = true;
+            $this->markInitReads($n->object);
+            return;
+        }
+        if ($k === Node::KIND_STORE_ELEMENT) {
+            $this->markInitLvalue($n->array);
+            $this->markInitReads($n->index);
+            $this->markInitReads($n->value);
+            return;
+        }
+        if ($k === Node::KIND_FOREACH && $n->byRef) {
+            $this->markInitLvalue($n->array);
+            $this->markInitReads($n->body);
+            return;
+        }
+        if ($k === Node::KIND_NULLCOALESCE) {
+            $this->markInitLvalue($n->left);
+            $this->markInitReads($n->right);
+            return;
+        }
+        if ($k === Node::KIND_REF_ADDR || $k === Node::KIND_REF_CELL
+            || $k === Node::KIND_ISSET || $k === Node::KIND_UNSET) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) { $this->markInitLvalue($c); }
+            return;
+        }
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE || $k === Node::KIND_NEW_DYN_OBJ) {
+            $mask = $this->initArgRefMask($n);
+            $args = $n->args;
+            /** @var array<int, bool> $isArg */
+            $isArg = [];
+            foreach ($args as $i => $a) {
+                $isArg[\spl_object_id($a)] = true;
+                if ($mask === null || ($mask[$i] ?? false)) { $this->markInitLvalue($a); }
+                else { $this->markInitReads($a); }
+            }
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if (!isset($isArg[\spl_object_id($c)])) { $this->markInitReads($c); }
+            }
+            return;
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->markInitReads($c); }
+    }
+
+    /** {@see markInitReads} for a node in WRITE position: its property / element
+     *  chain is not read, the receivers and keys along it are. */
+    private function markInitLvalue(Node $n): void
+    {
+        if ($n->kind === Node::KIND_PROPERTY_ACCESS) {
+            $this->markInitReads($n->object);
+            return;
+        }
+        if ($n->kind === Node::KIND_ARRAY_ACCESS) {
+            $this->markInitLvalue($n->array);
+            $this->markInitReads($n->index);
+            return;
+        }
+        $this->markInitReads($n);
+    }
+
+    /** Per-argument by-ref flags of a call, or null when the callee is not
+     *  known well enough to say (then every argument counts as by-ref).
+     *  @return bool[]|null */
+    private function initArgRefMask(Node $n): ?array
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL) {
+            $fn = $n->function;
+            if (isset($this->sigs->refParams[$fn])) { return $this->sigs->refParams[$fn]; }
+            $bare = $fn;
+            $m = \strpos($bare, '$mono$');
+            if ($m !== false) { $bare = \substr($bare, 0, $m); }
+            $p = \strrpos($bare, '\\');
+            if ($p !== false) { $bare = \substr($bare, $p + 1); }
+            $bare = \strtolower($bare);
+            if (\in_array($bare, NarrowScalarGuards::BYREF_BUILTINS, true)
+                || \Compile\Mir\VecCopyOnAssign::mutatesArg0($bare)) { return null; }
+            return [];
+        }
+        $cls = '';
+        $method = '';
+        if ($k === Node::KIND_METHOD_CALL) {
+            $cls = $n->object->type->class ?? '';
+            $method = $n->method;
+        } elseif ($k === Node::KIND_STATIC_CALL) {
+            $cls = $n->class;
+            $method = $n->method;
+        } elseif ($k === Node::KIND_NEW_OBJ) {
+            $cls = $n->class;
+            $method = '__construct';
+        } else {
+            return null;
+        }
+        $cls = \ltrim($cls, '\\');
+        if ($cls === '' || !isset($this->classes[$cls])) { return null; }
+        $decl = $this->resolveMethodClass($cls, $method);
+        if ($decl === '') { return $k === Node::KIND_NEW_OBJ ? [] : null; }
+        return $this->sigs->refParams[$decl . '__' . $method] ?? null;
+    }
+
+    /** `Typed property C::$p must not be accessed before initialization` when
+     *  `$prop` is still unset on `$objPtr`; '' when no check applies. */
+    private function emitInitReadCheck(string $objPtr, ?ClassDef $h, string $prop, int $off, string $gep): string
+    {
+        if ($h === null || !$h->initChecked($prop)) { return ''; }
+        $out = '';
+        $c = $this->emitInitTest($objPtr, $h, $prop, $off, $gep, $out);
+        if ($c === '') { return ''; }
+        $u = $this->ssa->allocReg();
+        $out .= '  ' . $u . ' = xor i1 ' . $c . ", true\n";
+        $decl = $h->propertyMeta[$prop]->declaringClass ?? '';
+        if ($decl === '') { $decl = $h->name; }
+        $shown = isset($this->classes[$decl]) ? $this->classes[$decl]->display() : $decl;
+        return $out . $this->emitThrowIf($u, 'Error',
+            'Typed property ' . \ltrim($shown, '\\') . '::$' . $prop . ' must not be accessed before initialization');
     }
 
     /** The class whose init-map facts govern `$objExpr->$prop`: the slot holder,

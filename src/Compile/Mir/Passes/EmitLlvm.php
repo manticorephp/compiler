@@ -920,6 +920,16 @@ final class EmitLlvm implements EmitVisitor
         $this->moduleIsLibrary = $module->isLibraryModule;
         $this->grantInitMaps($module);
         $this->grantBagsForDynamicStores($module);
+        $anyInitMap = false;
+        foreach ($this->classes as $cd) {
+            if ($cd->initMapOffset >= 0) { $anyInitMap = true; break; }
+        }
+        if ($anyInitMap) {
+            foreach ($module->functions as $fn) {
+                if ($fn->isExtern || $this->initReadsExempt($fn->name)) { continue; }
+                $this->markInitReads($fn->body);
+            }
+        }
         $statT = \Compile\Stats::begin('  property scan');
         foreach ($module->functions as $fn) {
             $this->scanCellPropStores($fn->body);
@@ -2393,6 +2403,15 @@ final class EmitLlvm implements EmitVisitor
                 $cd->initMapProps = $set;
             }
         }
+    }
+
+    /** Compiler-generated walkers (`__mir_*`, `__mc_*`: var_dump, serialize,
+     *  unserialize, …) read slots to SHOW them, never as a php-level read; the
+     *  reflection getter `__mc_pget_*` is `getValue()`, which php checks. */
+    private function initReadsExempt(string $name): bool
+    {
+        if (\str_starts_with($name, '__mc_pget_')) { return false; }
+        return \str_starts_with($name, '__mir_') || \str_starts_with($name, '__mc_');
     }
 
     private function grantBagsForDynamicStores(\Compile\Mir\Module $module): void
