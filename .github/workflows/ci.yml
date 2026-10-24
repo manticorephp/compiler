@@ -310,8 +310,8 @@ jobs:
         run: |
           pdo=false
           if [ "${{ github.event_name }}" = pull_request ]; then
-            gh pr diff "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --name-only \
-              | grep -qE '^(prelude/pdo|tests/pdo_net/|tools/docker/gate\.sh|\.github/workflows/ci\.yml)' && pdo=true
+            files="$(gh pr diff "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --name-only)"
+            if echo "$files" | grep -qE '^(prelude/pdo|tests/pdo_net/|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then pdo=true; fi
           fi
           echo "pdo=$pdo" >> "$GITHUB_OUTPUT"
 
