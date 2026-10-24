@@ -376,8 +376,7 @@ function array_splice(array &$input, int $offset, ?int $length = null, mixed $re
         $input = array_merge($fastHead, $fastMid, $fastTail);
         return $fastRemoved;
     }
-    $keys = array_keys($input);
-    $n = count($keys);
+    $n = count($input);
     $start = $offset;
     if ($start < 0) { $start = $n + $start; }
     if ($start < 0) { $start = 0; }
@@ -393,12 +392,8 @@ function array_splice(array &$input, int $offset, ?int $length = null, mixed $re
 
     $out = [];
     $removed = [];
-    $i = 0;
-    while ($i < $start) {
-        $k = $keys[$i];
-        if (is_string($k)) { $out[$k] = $input[$k]; } else { $out[] = $input[$k]; }
-        $i = $i + 1;
-    }
+    // One pass over the entries (no key-list lookups); the replacement lands
+    // before the entry at `$start`, or after the last one when `$start == $n`.
     // Branch the LOOP, not the value. TODO(array|cell merge): a local that
     // merges an array literal with a `mixed` value — `$repl = []; if
     // (is_array($replacement)) { $repl = $replacement; }` — types `unknown`
@@ -406,22 +401,29 @@ function array_splice(array &$input, int $offset, ?int $length = null, mixed $re
     // a slot the foreach then reads as a NaN-boxed cell → SIGSEGV. Pre-existing
     // and not specific to this function; planMergeShadow boxes such a merge only
     // for SCALAR kinds today.
-    if (is_array($replacement)) {
-        foreach ($replacement as $rv) { $out[] = $rv; }
-    } else {
-        $out[] = $replacement;
+    $isArr = is_array($replacement);
+    $pos = 0;
+    foreach ($input as $k => $v) {
+        if ($pos === $start) {
+            if ($isArr) {
+                foreach ($replacement as $rv) { $out[] = $rv; }
+            } else {
+                $out[] = $replacement;
+            }
+        }
+        if ($pos >= $start && $pos < $end) {
+            if (is_string($k)) { $removed[$k] = $v; } else { $removed[] = $v; }
+        } else {
+            if (is_string($k)) { $out[$k] = $v; } else { $out[] = $v; }
+        }
+        $pos = $pos + 1;
     }
-    $i = $start;
-    while ($i < $end) {
-        $k = $keys[$i];
-        if (is_string($k)) { $removed[$k] = $input[$k]; } else { $removed[] = $input[$k]; }
-        $i = $i + 1;
-    }
-    $i = $end;
-    while ($i < $n) {
-        $k = $keys[$i];
-        if (is_string($k)) { $out[$k] = $input[$k]; } else { $out[] = $input[$k]; }
-        $i = $i + 1;
+    if ($start === $n) {
+        if ($isArr) {
+            foreach ($replacement as $rv) { $out[] = $rv; }
+        } else {
+            $out[] = $replacement;
+        }
     }
     $input = $out;
     return $removed;

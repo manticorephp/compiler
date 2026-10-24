@@ -251,7 +251,12 @@ trait EmitLlvmExpr
         $out .= "entry:\n";
         $out .= "  %i = bitcast double %f to i64\n";
         $out .= "  %isnan = fcmp uno double %f, %f\n";
-        $out .= "  %b = select i1 %isnan, i64 9221120237041090560, i64 %i\n";
+        $out .= "  %dlo = icmp ugt i64 %i, " . (string)\Compile\MemoryAbi::FLOAT_DENORM_MIN_BITS . "\n";
+        $out .= "  %dhi = icmp ult i64 %i, " . (string)(\Compile\MemoryAbi::CELL_PAYLOAD_MASK + 1) . "\n";
+        $out .= "  %dnm = and i1 %dlo, %dhi\n";
+        $out .= "  %dti = or i64 %i, " . (string)\Compile\MemoryAbi::FLOAT_DENORM_TAG . "\n";
+        $out .= "  %bi = select i1 %dnm, i64 %dti, i64 %i\n";
+        $out .= "  %b = select i1 %isnan, i64 9221120237041090560, i64 %bi\n";
         $out .= "  ret i64 %b\n";
         $out .= "}\n";
         // box_array: (ptrtoint(p) & PAYLOAD_MASK) | tagBits(ARRAY=7). 0 → NULL
@@ -514,7 +519,7 @@ trait EmitLlvmExpr
             . "s0:\n  %kp = phi ptr [ %kp0, %sptr ], [ " . $empty . ", %snull ]\n  br label %s\n"
             . "iint:\n  %ki0 = call i64 @__mir_ckey_unbox_int(i64 %k)\n  br label %i0\n"
             . "ibool:\n  %kb = and i64 %k, 1\n  br label %i0\n"
-            . "idbl:\n  %kf = bitcast i64 %k to double\n"
+            . "idbl:\n" . \Compile\Mir\RuntimeLibrary::denormDecodeIr('%kdec', '%k', 'dn') . "  %kf = bitcast i64 %kdec to double\n"
             . "  %klo = fcmp oge double %kf, 0xC3E0000000000000\n"
             . "  %khi = fcmp olt double %kf, 0x43E0000000000000\n"
             . "  %kin = and i1 %klo, %khi\n"
@@ -576,7 +581,7 @@ trait EmitLlvmExpr
         $out .= "  call void @__mir_out_str(ptr %p)\n";
         $out .= "  ret void\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         // PHP-formatted (echo scientific form is "1.0E+20", not C's "1e+20").
         $out .= "  call void @__mir_out_float(double %fd)\n";
         $out .= "  ret void\n";
@@ -710,7 +715,7 @@ trait EmitLlvmExpr
         $out .= "  %pptr = inttoptr i64 %pp to ptr\n";
         $out .= "  ret ptr %pptr\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         // PHP `(string)` scientific form is "1.0E+20", not C's "1e+20".
         $out .= "  %fbuf = call ptr @__mir_float_to_str(double %fd)\n";
         $out .= "  ret ptr %fbuf\n";
@@ -789,7 +794,7 @@ trait EmitLlvmExpr
         $out .= "  %sv = call i64 @__mir_str_to_int(ptr %sptr)\n";
         $out .= "  ret i64 %sv\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         $out .= "  %fi = fptosi double %fd to i64\n";
         $out .= "  ret i64 %fi\n";
         $out .= "asarray:\n";
@@ -912,7 +917,7 @@ trait EmitLlvmExpr
         $out .= "  %sv = call double @__mir_php_strtod(ptr %sptr, ptr null)\n";
         $out .= "  ret double %sv\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         $out .= "  ret double %fd\n";
         $out .= "asarray:\n";
         $out .= "  %ap = and i64 %v, 281474976710655\n";
@@ -1200,7 +1205,7 @@ trait EmitLlvmExpr
         $out .= "asint:\n";
         $out .= "  %bi = call i64 @__manticore_box_int(i64 %v)\n  ret i64 %bi\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         $out .= "  %bf = call i64 @__manticore_box_float(double %fd)\n  ret i64 %bf\n";
         $out .= "asstr:\n";
         $out .= "  %sp = inttoptr i64 %v to ptr\n";
@@ -2165,7 +2170,7 @@ trait EmitLlvmExpr
         $out .= "asnull:\n";
         $out .= "  ret i64 0\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         $out .= "  %fnz = fcmp une double %fd, 0.000000e+00\n";
         $out .= "  %fr = zext i1 %fnz to i64\n";
         $out .= "  ret i64 %fr\n";
@@ -3254,7 +3259,19 @@ trait EmitLlvmExpr
             $out = $this->emitNode($nc->right);
             return $out . $this->armRetainLast($n, $nc->right);
         }
-        if ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) {
+        // `$o->p ?? d` on a typed property php may leave uninitialized: the
+        // default also wins while the property was never written.
+        $initHolder = null;
+        if ($nc->left->kind === Node::KIND_PROPERTY_ACCESS
+            && $nc->left->object->kind === Node::KIND_LOAD_LOCAL
+            && $nc->left->object->type->kind === Type::KIND_OBJ) {
+            $ih = $this->slotHolder($nc->left->object, $nc->left->property);
+            if ($ih !== null && $ih->initChecked($nc->left->property)
+                && $this->propertyOffsetOrNull($nc->left->object, $nc->left->property) !== null) {
+                $initHolder = $ih;
+            }
+        }
+        if (($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) && $initHolder === null) {
             // A raw int/float/bool is never null, so the left always wins. But if
             // the node is typed a CELL (the fallback carries a different repr,
             // e.g. `$obj->intProp ?? "str"`), the consumer expects a tagged value
@@ -3280,6 +3297,24 @@ trait EmitLlvmExpr
         $out .= '  ' . $nnul . ' = icmp ne i64 ' . $lv . ", -3659174697238528\n";
         $bit = $this->ssa->allocReg();
         $out .= '  ' . $bit . ' = and i1 ' . $nz . ', ' . $nnul . "\n";
+        if ($initHolder !== null) {
+            // The receiver is a plain local, read again for its pointer; the
+            // property read above already threw for a null one.
+            $lpa = $nc->left;
+            $out .= $this->emitNode($lpa->object);
+            $out .= $this->coerceToPtr();
+            $ini = $this->emitInitTest($this->lastValue, $initHolder, $lpa->property,
+                (int)$this->propertyOffsetOrNull($lpa->object, $lpa->property), '', $out);
+            if ($ini !== '') {
+                if ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) {
+                    $bit = $ini;
+                } else {
+                    $b2 = $this->ssa->allocReg();
+                    $out .= '  ' . $b2 . ' = and i1 ' . $bit . ', ' . $ini . "\n";
+                    $bit = $b2;
+                }
+            }
+        }
         // A cell result (arms of differing repr) boxes BOTH arms so a consumer
         // (echo / var_dump) dispatches on the arm actually taken.
         $wantCell = $n->type->kind === Type::KIND_CELL;
@@ -3375,6 +3410,15 @@ trait EmitLlvmExpr
             $out .= $cont . ":\n";
             $op = $this->ssa->allocReg();
             $out .= '  ' . $op . ' = inttoptr i64 ' . $cur . " to ptr\n";
+            // An uninitialized typed property is not set: take the default.
+            $ch = $this->slotHolder($hop->object, $hop->property);
+            if ($ch !== null && $ch->initChecked($hop->property)) {
+                $ini = $this->emitInitTest($op, $ch, $hop->property, $hoff, '', $out);
+                if ($ini !== '') {
+                    $hin = $this->ssa->allocLabel('ncc.init');
+                    $out .= '  br i1 ' . $ini . ', label %' . $hin . ', label %' . $useR . "\n" . $hin . ":\n";
+                }
+            }
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $op . ', i64 ' . (string)$hoff . "\n";
             $nx = $this->ssa->allocReg();

@@ -1,0 +1,22 @@
+2
+Error: Typed property A::$i must not be accessed before initialization
+5
+6
+Error: Typed property A::$s must not be accessed before initialization
+ab
+Error: Typed property A::$n must not be accessed before initialization
+int(3)
+Error: Typed property A::$next must not be accessed before initialization
+Error: Typed property B::$f must not be accessed before initialization
+2.5 7
+Error: Typed property A::$i must not be accessed before initialization
+9
+Error: Typed property A::$s must not be accessed before initialization
+1
+array(2) {
+  [0]=>
+  string(1) "b"
+  [1]=>
+  string(1) "b"
+}
+NULL

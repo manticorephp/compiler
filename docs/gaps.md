@@ -90,9 +90,11 @@ dispatch for `__get`/`__set`/`__isset`/`__unset`/`__call` are **done**. What is 
    false, passing it to a `callable` parameter hands the callee the boxed word (SIGSEGV), and
    `$c(...$args)` over it faults. A `Closure`-typed slot (`Closure::fromCallable()` at the
    boundary) is the working form today. (`Stringable`, formerly item 7, is implicit now.)
-8. **Uninitialized typed properties serialize as their zero value.** Manticore zero-fills
-   every slot, so `class P { public int $x; }` writes `1:{s:1:"x";i:0;}` where php writes
-   `0:{}`. Needs an init bitmap in the object header — an object-ABI change.
+8. **Uninitialized typed properties: the edges.** The init bitmap (memory-abi §3.3) makes a
+   typed read throw and every view skip the property, but a read through an ERASED receiver
+   (`mixed $o; $o->p`, `$o->$name`) answers the zero instead of throwing, and a reference
+   or by-ref argument to an uninitialized non-nullable property initializes it where php
+   throws `Cannot access uninitialized non-nullable property … by reference`.
 9. **`R:` is never emitted.** It marks a php REFERENCE, and a Manticore array carries no
    is_ref bit, so there is no runtime fact to emit it from. It is accepted on input as a
    value copy.

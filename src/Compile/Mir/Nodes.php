@@ -1858,6 +1858,11 @@ final class PropertyAccess_ extends Node
      *  the value. '' when the binding is fine. Field order is layout: append. */
     public string $byRefTypeErrorHead = '';
     public string $byRefTypeErrorTail = '';
+
+    /** Set at emission ({@see Passes\EmitLlvmObjects::markInitReads}): a plain
+     *  READ of the value — not the base of a write, a reference or a by-ref
+     *  argument — so an uninitialized typed slot throws. Appended: layout. */
+    public bool $initCheck = false;
 }
 
 /**

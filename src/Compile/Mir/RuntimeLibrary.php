@@ -42,6 +42,21 @@ final class RuntimeLibrary
         return '{ i64, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr }';
     }
 
+    /**
+     * IR decoding a boxed risky denormal ({@see \Compile\MemoryAbi::FLOAT_DENORM_TAG}):
+     * `$res` = the double bits of cell word `$w`. Any other word passes through, so
+     * it is safe on a raw (never-encoded) double too. `$p` prefixes the temporaries.
+     */
+    public static function denormDecodeIr(string $res, string $w, string $p): string
+    {
+        return '  %' . $p . 'h = lshr i64 ' . $w . ", 48\n"
+            . '  %' . $p . 't = icmp eq i64 %' . $p . "h, " . (string)(\Compile\MemoryAbi::FLOAT_DENORM_TAG >> 48) . "\n"
+            . '  %' . $p . 'l = and i64 ' . $w . ", " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+            . '  %' . $p . 'g = icmp ugt i64 %' . $p . "l, " . (string)\Compile\MemoryAbi::FLOAT_DENORM_MIN_BITS . "\n"
+            . '  %' . $p . 'c = and i1 %' . $p . 't, %' . $p . "g\n"
+            . '  ' . $res . ' = select i1 %' . $p . 'c, i64 %' . $p . 'l, i64 ' . $w . "\n";
+    }
+
     /** `@__mir_cmpview_<id>(ptr %o) -> i64` ({@see \Compile\MemoryAbi::DESCRIPTOR_CMP_VIEW_FN_OFFSET}). */
     public static function cmpViewFnSymbol(int $id): string
     {
@@ -2971,8 +2986,9 @@ no:
   ret i64 1
 }
 ';
-        $out .= "\ndefine void @__mir_json_double(ptr %slotp, ptr %lp, i64 %cell) {\n";
+        $out .= "\ndefine void @__mir_json_double(ptr %slotp, ptr %lp, i64 %cellin) {\n";
         $out .= "entry:\n";
+        $out .= self::denormDecodeIr('%cell', '%cellin', 'dn');
         // The exact short-decimal path first; then Ryu's one-call packed form
         // (digits <= 51 bits); flag bit set → re-run as two scalar calls;
         // scal(0) < 0 → string path.
@@ -4022,8 +4038,14 @@ entry:
 }
 
 ; d:<shortest repr>; — the json double writer, E for e; INF / NAN / +-0 spelled here.
-define void @__mir_ser_dbl(ptr %slotp, ptr %lp, i64 %cell) {
+define void @__mir_ser_dbl(ptr %slotp, ptr %lp, i64 %cellin) {
 entry:
+  %dnh = lshr i64 %cellin, 48
+  %dnt = icmp eq i64 %dnh, 32752
+  %dnl = and i64 %cellin, 281474976710655
+  %dng = icmp ugt i64 %dnl, 65535
+  %dnc = and i1 %dnt, %dng
+  %cell = select i1 %dnc, i64 %dnl, i64 %cellin
   %ab = and i64 %cell, 9223372036854775807
   %isz = icmp eq i64 %ab, 0
   br i1 %isz, label %zero, label %nz

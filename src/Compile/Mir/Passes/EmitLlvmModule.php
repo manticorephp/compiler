@@ -1844,6 +1844,17 @@ trait EmitLlvmModule
         $this->locals->refCellTargets = LocalSlots::closeRefCellsOverAliases($body, $this->locals->refCellTargets);
         $out = '';
         foreach ($this->locals->refCellTargets as $rname => $_) {
+            if (isset($this->locals->refLocals[$rname]) && isset($paramNames[$rname])) {
+                // A by-ref CELL param whose reference is stored: one frame box every `&$v` shares
+                // (a raw `array &$a` keeps the copy path in emitRefCell).
+                if (($this->locals->refParamTypes[$rname] ?? null) !== null
+                    && $this->locals->refParamTypes[$rname]->kind === Type::KIND_CELL
+                    && !isset($this->locals->ownedBoxes[$rname]) && !$this->frame->returnsByRef
+                    && !isset($this->locals->captureRefs[$rname]) && !isset($this->locals->aliasLocals[$rname])) {
+                    $out .= $this->boxCapturedByRefParamIr($rname);
+                }
+                continue;
+            }
             if (isset($paramNames[$rname])) {
                 $out .= $this->boxRefCellParamIr($rname, $paramTypes[$rname] ?? null);
                 continue;

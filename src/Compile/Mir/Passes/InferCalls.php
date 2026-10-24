@@ -311,6 +311,7 @@ trait InferCalls
             || $n === '__mir_fiber_ctx_free' || $n === '__mir_fiber_guard_set'
             || $n === '__mir_fiber_guard_install') { return Type::void(); }
         if ($n === '__mir_object_class_id') { return Type::int_(); }
+        if ($n === '__mir_prop_inited') { return Type::bool_(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
         // Reflection Tier-2: an rmeta HANDLE is a raw address carried as an int
         // (the Ffi\Ptr::$address idiom), never an obj — nothing may retain,
@@ -400,8 +401,9 @@ trait InferCalls
             if (!$bothInt) {
                 $ka = $args[0]->type->kind ?? '';
                 $kb = $args[1]->type->kind ?? '';
-                $cellPow = ($ka === Type::KIND_CELL && ($kb === Type::KIND_CELL || $kb === Type::KIND_INT))
-                    || ($ka === Type::KIND_INT && $kb === Type::KIND_CELL);
+                $cellPow = $ka !== Type::KIND_FLOAT && $kb !== Type::KIND_FLOAT
+                    && ($ka === Type::KIND_CELL || $ka === Type::KIND_INT || $ka === Type::KIND_STRING)
+                    && ($kb === Type::KIND_CELL || $kb === Type::KIND_INT || $kb === Type::KIND_STRING);
                 return $cellPow ? Type::numericCell() : Type::float_();
             }
             if (!\Compile\Mir\IntConst::isConstInt($args[1])) { return Type::numericCell(); }
@@ -854,6 +856,11 @@ trait InferCalls
         if ($node->direct !== '') {
             $node->type = $this->sigs[$node->direct] ?? Type::cell();
             return $node->type;
+        }
+        // `\Ffi\Ptr` members (isNull / offset) are inline address arithmetic, see emitPtrMember.
+        if ($objType->kind === Type::KIND_OBJ && $objType->class === 'Ffi\\Ptr' && !isset($this->classes['Ffi\\Ptr'])) {
+            if ($node->method === 'isNull') { $node->type = Type::bool_(); return $node->type; }
+            if ($node->method === 'offset') { $node->type = $objType; return $node->type; }
         }
         $mcCls = $objType->class;
         if ($mcCls !== null && $mcCls !== '') {

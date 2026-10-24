@@ -65,8 +65,18 @@ final class MemoryAbi
      * instead of moving the data, so the malloc block starts `gap*8` bytes before
      * the tag. A v21 release / promote / realloc frees `ptr-8` — the middle of
      * a v22 block.
+     *
+     * v23: a DENORMAL float whose bits fall in (0xFFFF, 2^48) is boxed with
+     * {@see FLOAT_DENORM_TAG} or'ed in (a signaling-NaN word, never produced
+     * otherwise — box_float canonicalizes every NaN), so a cell can never look
+     * like a heap pointer. Every cell -> double read decodes it.
+     *
+     * v24: an object whose class tree declares a typed property php starts
+     * UNINITIALIZED carries an INIT BITMAP ({@see INIT_MAP_SLOT_BYTES}) at an
+     * offset agreed across the tree, past every member's properties and bag;
+     * the instance grows by its words. A v23 object of such a class is shorter.
      */
-    public const VERSION = 22;
+    public const VERSION = 24;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -274,6 +284,17 @@ final class MemoryAbi
     /** The payload pointer, relative to the malloc base. */
     public const BIGINT_BOX_VALUE_OFFSET = 8;
 
+    /**
+     * `0x7FF0 << 48`: the exponent-all-ones header of a boxed risky denormal. The
+     * low 48 bits are the double's own bits; the encoded set is {@see
+     * FLOAT_DENORM_MIN_BITS} < low48 (so +Inf and the canonical NaN never match).
+     * A raw denormal in that range would pass the `plausiblePtrIr` window and
+     * be dereferenced by every `ptr-8` probe (`is_resource`, `instanceof`, ...).
+     */
+    public const FLOAT_DENORM_TAG = 9218868437227405312;
+    /** Denormal bits at or below this stay raw: the probe's `> 0xFFFF` bound rejects them. */
+    public const FLOAT_DENORM_MIN_BITS = 65535;
+
     /** A cell's 48-bit payload field, `0xFFFFFFFFFFFF`. */
     public const CELL_PAYLOAD_MASK = 281474976710655;
 
@@ -403,6 +424,16 @@ final class MemoryAbi
 
     /** Non-`#[Struct]` instances reserve this much before properties. */
     public const OBJECT_HEADER_SIZE = 16;
+
+    /**
+     * Init bitmap (v24): bit `(slot_offset - OBJECT_HEADER_SIZE) / INIT_MAP_SLOT_BYTES`
+     * of the i64 words at `ClassDef::$initMapOffset` is set once the slot has been
+     * written. 0 at allocation (the instance template carries 0); `clone` copies
+     * it; `unset()` clears it. Only word-wide slots of a property php starts
+     * uninitialized are tracked. Bit `b` lives in word `b / INIT_MAP_WORD_BITS`.
+     */
+    public const INIT_MAP_SLOT_BYTES = 8;
+    public const INIT_MAP_WORD_BITS = 64;
 
     /**
      * `ptr` — the class DESCRIPTOR (`@__mir_cd_<id> = { i64 class_id,

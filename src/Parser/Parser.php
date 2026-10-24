@@ -943,7 +943,13 @@ final class Parser
     {
         $this->advance(); // 'const'
         $typeHint = null;
-        if ($this->check(TokenKind::Identifier) || $this->check(TokenKind::Keyword)) {
+        if (
+            $this->check(TokenKind::Question)
+            || $this->check(TokenKind::Backslash)
+            || $this->check(TokenKind::OpenParen)
+        ) {
+            $typeHint = $this->parseTypeHint();
+        } elseif ($this->check(TokenKind::Identifier) || $this->check(TokenKind::Keyword)) {
             $next = $this->tokens[$this->pos + 1] ?? null;
             if ($next !== null && $next->kind !== TokenKind::Equals) {
                 $typeHint = $this->parseTypeHint();

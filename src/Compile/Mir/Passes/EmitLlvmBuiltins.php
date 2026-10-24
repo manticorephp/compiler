@@ -485,6 +485,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_clo_this')           { return $this->biMcReflCloThis($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_object_class_id')          { return $this->biObjectClassId($args); }
+        if ($name === '__mir_prop_inited')             { return $this->biPropInited($args); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
         if ($name === 'array_keys') {
@@ -653,6 +654,31 @@ trait EmitLlvmBuiltins
     }
 
     /** Return an object's exact runtime class_id, or zero for non-objects. */
+    /**
+     * `__mir_prop_inited($o, 'p'): bool` — has typed property `p` of the object
+     * been written ({@see \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES})? True for a
+     * property no init bit tracks. The generated var_dump / print_r / serialize /
+     * var_export walkers ask it before they read a slot php starts uninitialized.
+     * @param Node[] $args
+     */
+    private function biPropInited(array $args): string
+    {
+        $prop = $args[1]->kind === Node::KIND_STRING_CONST ? (string)$args[1]->value : '';
+        $cls = $args[0]->type->kind === Type::KIND_OBJ ? \ltrim((string)($args[0]->type->class ?? ''), '\\') : '';
+        $cd = ($cls !== '' && isset($this->classes[$cls])) ? $this->classes[$cls] : null;
+        if ($cd === null || $prop === '' || $cd->initMapBit($prop) < 0) {
+            $this->lastValue = '1';
+            $this->lastValueType = 'i64';
+            return '';
+        }
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $ini = $this->emitInitTest($this->lastValue, $cd, $prop, $cd->propertyOffset($prop), '', $out);
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = zext i1 ' . $ini . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
     private function biObjectClassId(array $args): string
     {
         $out = $this->emitNode($args[0]);
@@ -4332,7 +4358,7 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * `mixed ** mixed` / `int ** mixed`: no float operand is known, so the result
+     * `**` over cells, numeric strings and ints (no float operand): `"9" ** 2` is int(81), so the result
      * is php's run-time answer (int for int operands with a non-negative
      * exponent, else float); InferCalls types the call as the numeric cell.
      * @param Node[] $args
@@ -4341,8 +4367,9 @@ trait EmitLlvmBuiltins
     {
         $a = $args[0]->type->kind;
         $b = $args[1]->type->kind;
-        return ($a === Type::KIND_CELL && ($b === Type::KIND_CELL || $b === Type::KIND_INT))
-            || ($a === Type::KIND_INT && $b === Type::KIND_CELL);
+        return !($a === Type::KIND_INT && $b === Type::KIND_INT)
+            && ($a === Type::KIND_CELL || $a === Type::KIND_INT || $a === Type::KIND_STRING)
+            && ($b === Type::KIND_CELL || $b === Type::KIND_INT || $b === Type::KIND_STRING);
     }
 
     /** @param Node[] $args */
@@ -9745,6 +9772,22 @@ trait EmitLlvmBuiltins
                     $pm = $cd->propertyMeta[$pn] ?? null;
                     if ($pm !== null && $pm->visibility !== 'public') { continue; }
                 }
+                // php leaves an uninitialized typed property out of every view.
+                $ini = '';
+                if (!$forCompare && $cd->initChecked($pn)) {
+                    $ini = $this->emitInitTest($objp, $cd, $pn, $cd->propertyOffset($pn), '', $out);
+                }
+                $lSkip = '';
+                $lSetEnd = '';
+                $lJoin = '';
+                $curBefore = $cur;
+                if ($ini !== '') {
+                    $lSet = $this->ssa->allocLabel('pv.set');
+                    $lSkip = $this->ssa->allocLabel('pv.skip');
+                    $lSetEnd = $this->ssa->allocLabel('pv.setend');
+                    $lJoin = $this->ssa->allocLabel('pv.join');
+                    $out .= '  br i1 ' . $ini . ', label %' . $lSet . ', label %' . $lSkip . "\n" . $lSet . ":\n";
+                }
                 $out .= $this->emitDeclaredPropCell($objp, $cd, $pn, $pt);
                 $boxed = $this->lastValue;
                 // ⚠ THE MAP OWNS ITS ELEMENTS. A cell that BORROWS the slot's
@@ -9770,6 +9813,16 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $next . ' = call ptr @__mir_array_set_str(ptr '
                       . $cur . ', ptr ' . $this->litStr($mangle ? $this->mangledPropKey($cd, $pn) : $pn) . ', i64 ' . $boxed . ", i64 0, i64 0)\n";
                 $cur = $next;
+                if ($ini !== '') {
+                    $joined = $this->ssa->allocReg();
+                    $out .= '  br label %' . $lSetEnd . "\n" . $lSetEnd . ":\n"
+                          . '  br label %' . $lJoin . "\n"
+                          . $lSkip . ":\n  br label %" . $lJoin . "\n"
+                          . $lJoin . ":\n"
+                          . '  ' . $joined . ' = phi ptr [ ' . $next . ', %' . $lSetEnd . ' ], [ '
+                          . $curBefore . ', %' . $lSkip . " ]\n";
+                    $cur = $joined;
+                }
             }
         }
         // The map OWNS one count of every cell it holds (above): say so in its
@@ -9862,12 +9915,21 @@ trait EmitLlvmBuiltins
             if ($this->isBufSlot($cd, $pn)) { continue; }
             $pm = $cd->propertyMeta[$pn] ?? null;
             if ($pm !== null && $pm->visibility !== 'public') { continue; }
+            $ini = $cd->initChecked($pn)
+                ? $this->emitInitTest('%o', $cd, $pn, $cd->propertyOffset($pn), '', $out) : '';
+            $lSkip = '';
+            if ($ini !== '') {
+                $lSet = $this->ssa->allocLabel('pw.set');
+                $lSkip = $this->ssa->allocLabel('pw.skip');
+                $out .= '  br i1 ' . $ini . ', label %' . $lSet . ', label %' . $lSkip . "\n" . $lSet . ":\n";
+            }
             $out .= $this->emitDeclaredPropCell('%o', $cd, $pn, $pt);
             $boxed = $this->lastValue;
             $out .= '  call void %cb(ptr %ctx, ptr ' . $this->litStr($pn) . ', i64 ' . $boxed . ")\n";
             if ($this->propCellMode === 2) {
                 $out .= '  call void @__mir_cell_drop(i64 ' . $boxed . ")\n";
             }
+            if ($lSkip !== '') { $out .= '  br label %' . $lSkip . "\n" . $lSkip . ":\n"; }
         }
         if ($cd->usesBag()) {
             $bg = $this->ssa->allocReg();
@@ -10754,6 +10816,8 @@ trait EmitLlvmBuiltins
             $asI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
             $out .= '  store i64 ' . $asI . ', ptr ' . $g . "\n";
+            $out .= $this->emitInitMark($objp, $this->initMapHolder($arrNode->object, $arrNode->property),
+                $arrNode->property, $this->propertyOffsetOrNull($arrNode->object, $arrNode->property) ?? -1, $g);
             return $out;
         }
         // Nested element store (`$m[k][...] = v`): the modified inner array

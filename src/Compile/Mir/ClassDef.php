@@ -324,17 +324,60 @@ final class ClassDef
         return -1;
     }
 
-    /** Instance size in bytes: header + every property's slot + the bag slot. */
+    /** Instance size in bytes: header + every property's slot + the bag slot
+     *  + the init bitmap. */
     public function instanceSize(): int
     {
-        if (!$this->hasBag) { return $this->layoutEnd(); }
-        $bag = $this->bagOffset();
         $end = $this->layoutEnd();
-        return ($bag > $end ? $bag : $end) + 8;
+        if ($this->hasBag) {
+            $bag = $this->bagOffset();
+            $end = ($bag > $end ? $bag : $end) + 8;
+        }
+        if ($this->initMapOffset >= 0) {
+            $mapEnd = $this->initMapOffset + 8 * $this->initMapWords;
+            if ($mapEnd > $end) { $end = $mapEnd; }
+        }
+        return $end;
     }
 
     /** Zend's `internal` class: declared by the prelude or the runtime library
      *  (php's own classes), not by the program or a user library.
      *  {@see \Compile\MemoryAbi::RMETA_FLAG_INTERNAL}. */
     public bool $isInternal = false;
+
+    /** Typed instance properties php starts UNINITIALIZED: a native type, no
+     *  default, not promoted, not hooked. This class's own view (inherited +
+     *  own); a read of one that was never written throws. Filled at lowering.
+     *  @var array<string, bool> */
+    public array $propertyMaybeUninit = [];
+
+    /** Byte offset of the per-object init bitmap, or -1 (no bitmap). AGREED
+     *  across the whole class tree, like {@see $bagOffsetFixed}; set by
+     *  {@see Passes\EmitLlvm::grantInitMaps}. {@see \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES} */
+    public int $initMapOffset = -1;
+
+    /** 64-bit words in the bitmap. */
+    public int $initMapWords = 0;
+
+    /** Properties whose stores set their bit: every maybe-uninit property of
+     *  ANY class in the tree, so an instance read through a base type finds its
+     *  bit set whichever class in the tree wrote it. @var array<string, bool> */
+    public array $initMapProps = [];
+
+    /** Bit of `$prop` in the init bitmap, or -1 when its stores set none. One
+     *  bit per word-wide slot past the header: a function of the OFFSET, so it
+     *  is the same in every class that puts `$prop` at the same place. */
+    public function initMapBit(string $prop): int
+    {
+        if ($this->initMapOffset < 0 || !isset($this->initMapProps[$prop])) { return -1; }
+        $off = $this->propertyOffset($prop);
+        if ($off < 0 || $this->propertyWidth($prop) !== 8) { return -1; }
+        return \intdiv($off - $this->headerSize(), \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES);
+    }
+
+    /** Whether a read of `$prop` through this class must test its bit. */
+    public function initChecked(string $prop): bool
+    {
+        return isset($this->propertyMaybeUninit[$prop]) && $this->initMapBit($prop) >= 0;
+    }
 }

@@ -439,6 +439,7 @@ namespace Io\Poll {
         private array $watchers = [];
         /** @var int[] fd → fd (to rebuild the poll set; keeps insertion set) */
         private array $fds = [];
+        private int $pollCursor = 0;
         // epoll/kqueue reactor fd; -1 for the Poll backend (rebuilds pollfd each wait).
         private int $reactorFd = -1;
         // struct epoll_event layout is arch-dependent: aarch64 is naturally
@@ -576,7 +577,7 @@ namespace Io\Poll {
         /**
          * Wait until a watched handle is ready.
          *
-         * Returns the watchers whose handles became ready, with their triggered events set. `null` timeout waits without limit, `0` polls and returns at once. A signal interrupting the wait yields an empty array. With nothing watched the call returns an empty array immediately. `$maxEvents` limits the batch the kernel returns (64 by default) on the epoll and kqueue backends; the poll backend ignores it.
+         * Returns the watchers whose handles became ready, with their triggered events set. `null` timeout waits without limit, `0` polls and returns at once. A signal interrupting the wait yields an empty array. With nothing watched the call returns an empty array immediately. `$maxEvents` limits the batch the kernel returns (64 by default) on the epoll and kqueue backends. The poll backend returns at most `$maxEvents` watchers and reports the rest on the next call, rotating the scan start so no descriptor is starved.
          *
          * @param int|null $timeoutSeconds  seconds to wait, or null to wait indefinitely
          * @param int $timeoutMicroseconds  additional microseconds
@@ -621,20 +622,26 @@ namespace Io\Poll {
                 \Runtime\Libc\free($buf);
                 throw new FailedPollWaitException("poll() failed");
             }
+            // Level-triggered: a ready watcher left out by the $maxEvents cap is
+            // reported again by the next wait(). The scan starts where the last
+            // capped batch stopped, so a busy low-numbered fd cannot starve the rest.
+            $max = ($maxEvents === null) ? $n : ($maxEvents < 1 ? 1 : $maxEvents);
+            $fdList = \array_values($this->fds);
             $result = [];
-            $i = 0;
-            foreach ($this->fds as $fd) {
-                $off = $i * 8;
-                $revents = \peek_i16($buf, $off + 6) & 0xFFFF;
-                $w = $this->watchers[$fd];
-                if ($revents !== 0) {
+            $next = 0;
+            for ($k = 0; $k < $n; $k = $k + 1) {
+                $i = ($this->pollCursor + $k) % $n;
+                $w = $this->watchers[$fdList[$i]];
+                $revents = \peek_i16($buf, $i * 8 + 6) & 0xFFFF;
+                if ($revents !== 0 && \count($result) < $max) {
                     $w->__setTriggered(__revents_to_bits($revents));
                     $result[] = $w;
+                    $next = $i + 1;
                 } else {
                     $w->__setTriggered(0);
                 }
-                $i = $i + 1;
             }
+            if ($maxEvents !== null) { $this->pollCursor = $next; }
             \Runtime\Libc\free($buf);
             return $result;
         }

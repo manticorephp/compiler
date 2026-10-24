@@ -40,6 +40,8 @@ use Compile\Mir\Type;
 final class ExtractScope
 {
     public const SITE = '__mc_extract_site';
+    /** `get_defined_vars()` marker: a zero-arg Call, expanded to the locals that hold a value. */
+    public const GDV_SITE = '__mc_gdv_site';
 
     private const NOT_LOCALS = [
         'this' => true, 'GLOBALS' => true, '_SERVER' => true, '_GET' => true, '_POST' => true,
@@ -69,8 +71,15 @@ final class ExtractScope
                 if (isset(self::NOT_LOCALS[$n]) || \str_starts_with($n, '__') || !self::validName($n)) { continue; }
                 $locals[] = $n;
             }
+            // first-appearance order, as get_defined_vars() lists them
+            $ordered = $locals;
             \sort($locals);
             foreach ($sites as $site) {
+                $first = $site->stmts[0];
+                if ($first instanceof Call && $first->function === self::GDV_SITE) {
+                    self::fillDefinedVars($site, $ordered, $params);
+                    continue;
+                }
                 self::fill($site, $locals, $params, $fn->name === '__main');
             }
         }
@@ -84,7 +93,7 @@ final class ExtractScope
     {
         if ($n instanceof Block && \count($n->stmts) === 1) {
             $c = $n->stmts[0];
-            if ($c instanceof Call && $c->function === self::SITE) { $sites[] = $n; }
+            if ($c instanceof Call && ($c->function === self::SITE || $c->function === self::GDV_SITE)) { $sites[] = $n; }
         }
         if ($n instanceof LoadLocal) { $names[$n->name] = true; }
         elseif ($n instanceof StoreLocal) { $names[$n->name] = true; }
@@ -144,6 +153,30 @@ final class ExtractScope
         }
         $stmts[] = new Call('__mc_extract_count', [new LoadLocal($plan, Type::unknown())], Type::int_());
         $site->stmts = $stmts;
+    }
+
+    /**
+     * `get_defined_vars()` → `__mc_gdv_filter([name => $name, …], [name => defined?, …])`.
+     *
+     * @param string[] $locals
+     * @param array<string, bool> $params
+     */
+    private static function fillDefinedVars(Block $site, array $locals, array $params): void
+    {
+        $vals = [];
+        $defs = [];
+        foreach ($locals as $n) {
+            $key = new StringConst($n, Type::string_());
+            $vals[] = new ArrayElement_($key, new LoadLocal($n, Type::unknown()));
+            $def = isset($params[$n])
+                ? new BoolConst(true, Type::bool_())
+                : new Isset_([new LoadLocal($n, Type::unknown())], Type::bool_());
+            $defs[] = new ArrayElement_(new StringConst($n, Type::string_()), $def);
+        }
+        $site->stmts = [new Call('__mc_gdv_filter', [
+            new ArrayLit($vals, Type::unknown()),
+            new ArrayLit($defs, Type::unknown()),
+        ], Type::unknown())];
     }
 
     private static function validName(string $n): bool

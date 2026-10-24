@@ -747,6 +747,8 @@ final class LowerFromAst implements Pass
     private array $lvTemps = [];
     /** @var string[] value temps of the expression statement being lowered ({@see storeToTarget}) */
     private array $valueTemps = [];
+    /** the `Assign` that is a whole expression statement: its value is discarded */
+    private ?\Parser\Ast\Expr $stmtAssign = null;
 
     /** @var array<string, \Parser\Ast\FunctionDecl> fn name → decl (defaults / named args) */
     private array $fnDecls = [];
@@ -4498,7 +4500,9 @@ final class LowerFromAst implements Pass
         // the same node `[&$v]` stores, and the emitter REPLACES the slot's
         // binding rather than writing through whatever reference it held —
         // which is the whole point of that line.
-        if ($expr->target->kind === 'ArrayAccess'
+        if (($expr->target->kind === 'ArrayAccess'
+                || ($expr->target->kind === 'PropertyAccess'
+                    && $this->propSlotMayHoldRef($this->asPropertyAccessAst($expr->target))))
             && \Compile\Debug::$refCells
             && ($expr->source->kind === 'Variable'
                 || $expr->source->kind === 'PropertyAccess'
@@ -4510,6 +4514,26 @@ final class LowerFromAst implements Pass
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->source));
     }
 
+    /**
+     * Can `$o->p = &$v` bind? Only a slot of the boxed-cell channel (untyped /
+     * `mixed`) can hold a reference. A property NAME some class declares with a
+     * concrete type keeps the value copy: the receiver's class is not known here
+     * and a reference-cell slot is read by name. Open: typed-property reference repr.
+     */
+    private function propSlotMayHoldRef(\Parser\Ast\PropertyAccess $target): bool
+    {
+        foreach ($this->classTable as $cd) {
+            $t = $cd->propertyTypes[$target->property] ?? null;
+            if ($t !== null && $t->kind !== Type::KIND_CELL) { return false; }
+        }
+        return true;
+    }
+
+    private function asPropertyAccessAst(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess
+    {
+        /** @var \Parser\Ast\PropertyAccess $e */
+        return $e;
+    }
     private function lowerAssign(\Parser\Ast\Assign $expr): Node
     {
         if ($expr->target->kind === 'Variable') {
@@ -4529,6 +4553,25 @@ final class LowerFromAst implements Pass
         }
         $h = $this->hoistLvalueExpr($expr);
         if ($h !== null) { return $h; }
+        // `$o[$k] = <computed>` as a VALUE: an ArrayAccess store has no result of its
+        // own, so park the computed value in a local and yield that.
+        if ($expr !== $this->stmtAssign && $expr->target->kind === 'ArrayAccess'
+            && $this->lvPure($expr->target->array) && !$this->lvPure($expr->value)
+            && ($expr->target->index === null || $this->lvPure($expr->target->index))) {
+            $value = $this->lowerExpr($expr->value);
+            // A BORROWED read (`$a[i]`, `$o->p`) is not a freshly built value: it already
+            // round-trips through the plain store, while parking it in a temp made `===`
+            // against the object it was assigned come out false (widened-global elements).
+            $vk = $expr->value->kind;
+            if ($vk === 'ArrayAccess' || $vk === 'PropertyAccess') { return $this->storeToTarget($expr->target, $value); }
+            $vtmp = '__av_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            return new Block([
+                new StoreLocal($vtmp, $value, $value->type),
+                $this->storeToTarget($expr->target, new LoadLocal($vtmp, $value->type)),
+                new LoadLocal($vtmp, $value->type),
+            ], $value->type);
+        }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
     }
 
@@ -6082,7 +6125,9 @@ final class LowerFromAst implements Pass
      *  buys a silent `false`. */
     private function fixedBuiltinArity(string $bare): int
     {
-        if ($bare === 'method_exists' || $bare === 'property_exists') { return 2; }
+        if ($bare === 'method_exists' || $bare === 'property_exists'
+            || $bare === 'str_repeat' || $bare === 'intdiv') { return 2; }
+        if ($bare === 'strlen' || $bare === 'ord' || $bare === 'chr') { return 1; }
         return 0;
     }
 
@@ -6855,12 +6900,28 @@ final class LowerFromAst implements Pass
         return $ndo;
     }
 
+    /**
+     * `\Ffi\Ptr` as a user program sees it: no class is linked, a Ptr IS its
+     * address (an i64). Its constructor and `null()` lower to `int_to_ptr`; the
+     * members are emitted inline ({@see EmitLlvmObjects::emitPtrMember}). False
+     * when the tree declares the class itself (the compiler's own build).
+     */
+    private function ptrIntrinsicClass(string $class): bool
+    {
+        $c = \ltrim($class, '\\');
+        return \strtolower($c) === 'ffi\\ptr' && !isset($this->classTable[$c]) && !isset($this->classDecls[$c]);
+    }
+
     private function lowerNewExpr(\Parser\Ast\NewExpr $expr): Node
     {
         // `new self` / `new static` / `new parent` → concrete class.
         $cls = $this->resolveStaticClass($expr->class);
         $den = $this->newAccessError($cls);
         if ($den !== '') { return $this->throwErrorExpr($den); }
+        // A Ptr is its address at run time ({@see ptrIntrinsicClass}): `new Ptr($a)` IS int_to_ptr($a).
+        if ($this->ptrIntrinsicClass($cls) && \count($expr->args) === 1) {
+            return new Call('int_to_ptr', [$this->lowerExpr($expr->args[0])], Type::obj('Ffi\\Ptr'));
+        }
         $params = $this->resolveMethodParams($cls, '__construct');
         if ($params !== null) {
             $args = $this->defaultFillArgs($params, $expr->args, $this->resolveMethodDeclClass($cls, '__construct'));
@@ -7217,6 +7278,7 @@ final class LowerFromAst implements Pass
             return new StaticCall_($decl !== '' ? $decl : $thisCls,
                 $expr->method, $args, Type::unknown(), $scope);
         }
+        if (\strtolower($expr->method) === 'bindto' || \strtolower($expr->method) === 'call') { $this->module->closureRebinds = true; }
         $mc = new MethodCall_($obj, $expr->method, $args, Type::unknown());
         $mc->srcArgc = \count($expr->args);
         return $mc;
@@ -7332,6 +7394,10 @@ final class LowerFromAst implements Pass
         } else {
             $scope = \ltrim($class, '\\');
         }
+        // `Ptr::null()` — see {@see ptrIntrinsicClass}.
+        if ($this->ptrIntrinsicClass($class) && \strtolower($expr->method) === 'null' && $expr->args === []) {
+            return new Call('int_to_ptr', [new IntConst(0, Type::int_())], Type::obj('Ffi\\Ptr'));
+        }
         // `Closure::fromCallable($c)` → the same closure a first-class callable
         // builds. A string / `C::m` / `[$o,"m"]` literal reuses coerceCallableArg;
         // a value already a closure passes through.
@@ -7429,6 +7495,7 @@ final class LowerFromAst implements Pass
         // Sibling of the `$this->prop` half in {@see
         // EmitLlvmObjects::emitPropertyAccess}: one root, two spellings.
         $bindScope = '';
+        if (\strtolower(\ltrim($class, '\\')) === 'closure' && \strtolower($expr->method) === 'bind') { $this->module->closureRebinds = true; }
         if (\strtolower(\ltrim($class, '\\')) === 'closure' && $expr->method === 'bind'
             && \count($expr->args) >= 3) {
             $sc = $this->guardClassArgName($expr->args[2]);

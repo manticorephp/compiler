@@ -28,6 +28,8 @@ final class __McUnSt
     public int $n = 0;
     /** @var array<int,mixed> value slot -> the value it held */
     public array $vars = [];
+    /** false when the input has no `R:`: only objects can then be named by a later `r:` */
+    public bool $keepAll = true;
     public bool $allowAll = true;
     /** @var array<string,bool> */
     public array $allowed = [];
@@ -49,6 +51,7 @@ function unserialize(string $data, array $options = []): mixed
     if (__mc_unser_ok() === 1) { return $fast; }
     $st = new __McUnSt();
     $st->s = $data;
+    $st->keepAll = strpos($data, 'R:') !== false;
     if (array_key_exists('allowed_classes', $options)) {
         $ac = $options['allowed_classes'];
         if (is_array($ac)) {
@@ -92,35 +95,63 @@ function __mc_un_upto(\__McUnSt $st, string $stop): string
     return $raw;
 }
 
-/** Consume `$lit` at the cursor, or fail the parse. */
-function __mc_un_lit(\__McUnSt $st, string $lit): void
+/** php's `uiv` / `iv` token up to `$stop`: digits only (`$signed` also allows one
+ *  leading `+`/`-`). Anything else — empty, a space, `1.5`, `x` — fails the parse.
+ *  Walks bytes in place; 19+ digits take the slow path so `(int)` saturates as php. */
+function __mc_un_num(\__McUnSt $st, int $stop, bool $signed): int
+{
+    $s = $st->s;
+    $n = strlen($s);
+    $p = $st->p;
+    $q = $p;
+    $neg = false;
+    if ($signed && $q < $n) {
+        $c = ord($s[$q]);
+        if ($c === 45 || $c === 43) { $neg = $c === 45; $q = $q + 1; }
+    }
+    $d0 = $q;
+    $acc = 0;
+    while ($q < $n) {
+        $c = ord($s[$q]);
+        if ($c < 48 || $c > 57) { break; }
+        $acc = $acc * 10 + ($c - 48);
+        $q = $q + 1;
+    }
+    if ($q === $d0 || $q >= $n || ord($s[$q]) !== $stop) { $st->ok = false; return 0; }
+    $st->p = $q + 1;
+    if ($q - $d0 > 18) { return (int)substr($s, $p, $q - $p); }
+    return $neg ? -$acc : $acc;
+}
+/** Consume byte `$c` at the cursor, or fail the parse. */
+function __mc_un_ch(\__McUnSt $st, int $c): void
 {
     if (!$st->ok) { return; }
-    $n = strlen($lit);
-    if (substr($st->s, $st->p, $n) !== $lit) { $st->ok = false; return; }
-    $st->p = $st->p + $n;
+    $p = $st->p;
+    if ($p >= strlen($st->s) || ord($st->s[$p]) !== $c) { $st->ok = false; return; }
+    $st->p = $p + 1;
 }
 
-/** `<len>:"<bytes>"` plus `$tail` — LEN is a BYTE count, so the body is taken
+/** `<len>:"<bytes>"` plus the byte `$tail` — LEN is a BYTE count, so the body is taken
  *  by length, never scanned for the closing quote (a serialized string may
- *  contain `";`). `$tail` is `";` for a string value and `":` for the class
+ *  contain `";`). `$tail` is 59 (`;`) for a string value and 58 (`:`) for the class
  *  name in an `O:` header. */
-function __mc_un_qstr(\__McUnSt $st, string $tail): string
+function __mc_un_qstr(\__McUnSt $st, int $tail): string
 {
-    $len = (int)__mc_un_upto($st, ':');
+    $len = __mc_un_num($st, 58, false);
     if (!$st->ok || $len < 0) { $st->ok = false; return ''; }
-    __mc_un_lit($st, '"');
+    __mc_un_ch($st, 34);
     if (!$st->ok) { return ''; }
     if ($st->p + $len > strlen($st->s)) { $st->ok = false; return ''; }
     $body = substr($st->s, $st->p, $len);
     $st->p = $st->p + $len;
-    __mc_un_lit($st, $tail);
+    __mc_un_ch($st, 34);
+    __mc_un_ch($st, $tail);
     return $body;
 }
 
 function __mc_un_str(\__McUnSt $st): string
 {
-    return __mc_un_qstr($st, '";');
+    return __mc_un_qstr($st, 59);
 }
 
 /** `"\0*\0prop"` / `"\0Cls\0prop"` back to `prop`. The fill arms are generated
@@ -130,22 +161,31 @@ function __mc_un_demangle(string $k): string
 {
     if (strlen($k) === 0) { return $k; }
     $nul = chr(0);
-    if (substr($k, 0, 1) !== $nul) { return $k; }
+    if (ord($k[0]) !== 0) { return $k; }
     $q = strpos($k, $nul, 1);
     if ($q === false) { return $k; }
     return substr($k, $q + 1);
+}
+
+/** The two bytes at the cursor as `b0 * 256 + b1` (-1 past the end), so the
+ *  type dispatch compares ints and allocates no 2-byte string per value. */
+function __mc_un_tag(\__McUnSt $st): int
+{
+    $p = $st->p;
+    if ($p + 2 > strlen($st->s)) { return -1; }
+    return ord($st->s[$p]) * 256 + ord($st->s[$p + 1]);
 }
 
 /** An array KEY: `i:<n>;` or `s:<len>:"…";`. Keys are not values, so no slot. */
 function __mc_un_key(\__McUnSt $st): mixed
 {
     if (!$st->ok) { return 0; }
-    $t = substr($st->s, $st->p, 2);
-    if ($t === 'i:') {
+    $t = __mc_un_tag($st);
+    if ($t === 26938) {
         $st->p = $st->p + 2;
-        return (int)__mc_un_upto($st, ';');
+        return __mc_un_num($st, 59, true);
     }
-    if ($t === 's:') {
+    if ($t === 29498) {
         $st->p = $st->p + 2;
         return __mc_un_str($st);
     }
@@ -160,48 +200,49 @@ function __mc_unser_val(\__McUnSt $st): mixed
     // value whatever it turns out to be, and a back-reference consumes one too.
     $slot = $st->n + 1;
     $st->n = $slot;
-    $t = substr($st->s, $st->p, 2);
-    if ($t === 'N;') {
+    $t = __mc_un_tag($st);
+    if ($t === 20027) {
         $st->p = $st->p + 2;
         return null;
     }
-    if ($t === 'b:') {
+    if ($t === 25146) {
         $st->p = $st->p + 2;
-        $b = __mc_un_upto($st, ';') === '1';
-        $st->vars[$slot] = $b;
+        $braw = __mc_un_upto($st, ';');
+        if ($st->ok && $braw !== '0' && $braw !== '1') { $st->ok = false; return null; }
+        $b = $braw === '1';
+        if ($st->keepAll) { $st->vars[$slot] = $b; }
         return $b;
     }
-    if ($t === 'i:') {
+    if ($t === 26938) {
         $st->p = $st->p + 2;
-        $raw = __mc_un_upto($st, ';');
         // php's grammar is [+-]?[0-9]+ — a bare "i:;" is an error, not 0.
-        $sg = (strlen($raw) > 0 && ($raw[0] === '-' || $raw[0] === '+')) ? 1 : 0;
-        if ($st->ok && !ctype_digit(substr($raw, $sg))) { $st->ok = false; return null; }
-        $i = (int)$raw;
-        $st->vars[$slot] = $i;
+        $i = __mc_un_num($st, 59, true);
+        if (!$st->ok) { return null; }
+        if ($st->keepAll) { $st->vars[$slot] = $i; }
         return $i;
     }
-    if ($t === 'd:') {
+    if ($t === 25658) {
         $st->p = $st->p + 2;
         $raw = __mc_un_upto($st, ';');
         // A cast reads these as 0.0 — php spells them out in the stream.
         if ($raw === 'INF') { $d = INF; }
         else if ($raw === '-INF') { $d = -INF; }
         else if ($raw === 'NAN') { $d = NAN; }
-        else { $d = (float)$raw; }
-        $st->vars[$slot] = $d;
+        else if ($st->ok && preg_match('/^[+-]?(?:[0-9]+|[0-9]*\.[0-9]+|[0-9]+\.[0-9]*)(?:[eE][+-]?[0-9]+)?$/D', $raw) === 1) { $d = (float)$raw; }
+        else { $st->ok = false; return null; }
+        if ($st->keepAll) { $st->vars[$slot] = $d; }
         return $d;
     }
-    if ($t === 's:') {
+    if ($t === 29498) {
         $st->p = $st->p + 2;
         $s = __mc_un_str($st);
-        $st->vars[$slot] = $s;
+        if ($st->keepAll) { $st->vars[$slot] = $s; }
         return $s;
     }
-    if ($t === 'a:') {
+    if ($t === 24890) {
         $st->p = $st->p + 2;
-        $cnt = (int)__mc_un_upto($st, ':');
-        __mc_un_lit($st, '{');
+        $cnt = __mc_un_num($st, 58, false);
+        __mc_un_ch($st, 123);
         $arr = [];
         $i = 0;
         while ($i < $cnt) {
@@ -212,18 +253,18 @@ function __mc_unser_val(\__McUnSt $st): mixed
             $arr[$k] = $val;
             $i = $i + 1;
         }
-        __mc_un_lit($st, '}');
+        __mc_un_ch($st, 125);
         if (!$st->ok) { return null; }
         // Recorded only AFTER it is complete: an array is a value in php and is
         // never the target of a well-formed `r:`, so nothing observes the gap.
-        $st->vars[$slot] = $arr;
+        if ($st->keepAll) { $st->vars[$slot] = $arr; }
         return $arr;
     }
-    if ($t === 'O:') {
+    if ($t === 20282) {
         $st->p = $st->p + 2;
-        $cls = __mc_un_qstr($st, '":');
-        $cnt = (int)__mc_un_upto($st, ':');
-        __mc_un_lit($st, '{');
+        $cls = __mc_un_qstr($st, 58);
+        $cnt = __mc_un_num($st, 58, false);
+        __mc_un_ch($st, 123);
         if (!$st->ok) { return null; }
         $o = __mc_unser_alloc($cls, $st);
         if (!$st->ok) { return null; }
@@ -252,25 +293,28 @@ function __mc_unser_val(\__McUnSt $st): mixed
             else { __mc_unser_set($o, __mc_un_demangle((string)$k), $val); }
             $i = $i + 1;
         }
-        __mc_un_lit($st, '}');
+        __mc_un_ch($st, 125);
         if (!$st->ok) { return null; }
         if ($magic) { __mc_unser_magic($o, $props); }
         return $o;
     }
-    if ($t === 'E:') {
+    if ($t === 17722) {
         $st->p = $st->p + 2;
-        $spec = __mc_un_qstr($st, '";');
+        $spec = __mc_un_qstr($st, 59);
         if (!$st->ok) { return null; }
         $e = __mc_unser_enum($spec, $st);
         if (!$st->ok) { return null; }
         $st->vars[$slot] = $e;
         return $e;
     }
-    if ($t === 'r:' || $t === 'R:') {
+    if ($t === 29242 || $t === 21050) {
         $st->p = $st->p + 2;
-        $k = (int)__mc_un_upto($st, ';');
+        $k = __mc_un_num($st, 59, false);
         if (!$st->ok) { return null; }
+        // php: `r:` names an object (an enum case included); `R:` (a reference) is not a value slot.
+        if ($t === 21050) { $st->n = $slot - 1; }
         if (!array_key_exists($k, $st->vars)) { $st->ok = false; return null; }
+        if ($t === 29242 && (!is_object($st->vars[$k]))) { $st->ok = false; return null; }
         return $st->vars[$k];
     }
     $st->ok = false;
