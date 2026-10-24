@@ -60,7 +60,7 @@ jobs:
         run: bash tools/check_version.sh
 
   linux:
-    name: linux-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native-runner' || '' }}
+    name: linux-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native-runner' || format(' ({0}/4)', matrix.shard) }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -74,21 +74,30 @@ jobs:
       # row reads and writes — cache key, published seed, logs — so a glibc
       # compiler never reaches a musl container: the loader would refuse it, and
       # a refusal is not a diagnosis.
+      # Each row is split into SHARDS slices of the suite (tests/aot/run.sh
+      # --shard i/N); every slice builds the compiler itself — warm, from the
+      # cache — and runs 1/N of the cases, so the wall clock is build + suite/N.
       matrix:
+        row: [arm64, amd64, alpine-arm64, alpine-amd64]
+        shard: [1, 2, 3, 4]
         include:
-          - arch: arm64
+          - row: arm64
+            arch: arm64
             runner: ubuntu-24.04-arm
             tag: arm64
             dockerfile: Dockerfile
-          - arch: amd64
+          - row: amd64
+            arch: amd64
             runner: ubuntu-latest
             tag: amd64
             dockerfile: Dockerfile
-          - arch: arm64
+          - row: alpine-arm64
+            arch: arm64
             runner: ubuntu-24.04-arm
             tag: alpine-arm64
             dockerfile: Dockerfile.alpine
-          - arch: amd64
+          - row: alpine-amd64
+            arch: amd64
             runner: ubuntu-latest
             tag: alpine-amd64
             dockerfile: Dockerfile.alpine
@@ -96,7 +105,9 @@ jobs:
           # native tests/aot/runner, streamed live — beside the run.sh row so the
           # two can be compared for speed and readability. It reads the arm64
           # compiler cache and never writes it, nor publishes a seed.
-          - arch: arm64
+          - row: arm64-native
+            shard: 0
+            arch: arm64
             runner: ubuntu-24.04-arm
             tag: arm64
             dockerfile: Dockerfile
@@ -177,43 +188,34 @@ jobs:
             -e MC_SEED_DIR=/seed \
             -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
             -e MC_RUNNER=${{ matrix.suite || 'sh' }} \
+            -e MC_SHARD=${{ matrix.suite != 'native' && format('{0}/4', matrix.shard) || '' }} \
+            -e MC_XFAIL=${{ matrix.shard == 1 && 1 || 0 }} \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
 
       # A red suite on top of a good build still leaves a compiler worth keeping —
       # save before the job's result is decided, not after.
       - name: Save the compiler cache
-        if: always() && matrix.suite != 'native' && hashFiles('ci-cache/bin/manticore') != ''
+        if: always() && matrix.suite != 'native' && matrix.shard == 1 && hashFiles('ci-cache/bin/manticore') != ''
         uses: actions/cache/save@v4
         with:
           path: ci-cache
           key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-${{ github.run_id }}
 
-      # Publish what this run just built and tested, from the artifacts it
-      # already has — NOT by building a second compiler (the root Dockerfile's
-      # `runtime` target builds one from the pin), which a push must not pay
-      # twice for the same bytes.
-      #
-      # Only on main, and only after the suite: a red suite never reaches here,
-      # and what is published is therefore always a compiler that passed.
-      - name: Publish this compiler as the seed
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.suite != 'native'
-        run: |
-          docker build --target base -t manticore-base:local -f ${{ matrix.dockerfile }} .
-          docker build -f tools/docker/Dockerfile.publish \
-            --build-arg BASE=manticore-base:local \
-            -t "$IMAGE:main-${{ matrix.tag }}" \
-            -t "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}" \
-            ci-cache
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$IMAGE:main-${{ matrix.tag }}"
-          docker push "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}"
-
+      # The compiler of shard 1 goes to the `publish` job below, which runs only
+      # when every shard of every row is green.
+      - name: Keep the compiler for publishing
+        if: matrix.shard == 1 && matrix.suite != 'native'
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-${{ matrix.tag }}
+          path: ci-cache/
+          if-no-files-found: error
       - name: Summary
         if: always()
         run: |
           {
-            echo "## linux-${{ matrix.tag }}${{ matrix.suite == 'native' && ' (native runner)' || '' }} — \`${GITHUB_SHA::12}\`"
+            echo "## linux-${{ matrix.tag }}${{ matrix.suite == 'native' && ' (native runner)' || format(' shard {0}/4', matrix.shard) }} — \`${GITHUB_SHA::12}\`"
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
             echo '```'
@@ -227,7 +229,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native' || '' }}
+          name: logs-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native' || format('-{0}', matrix.shard) }}
           path: ci-logs/
           if-no-files-found: warn
 
@@ -419,8 +421,47 @@ jobs:
   # `:main` as one multi-arch tag, from the two the jobs above pushed. Merged by
   # digest — nothing is rebuilt and nothing is emulated, and `docker pull
   # ghcr.io/manticorephp/compiler:main` resolves to the right architecture.
-  seed-manifest:
+  # What the suite just passed, published as the seed — once per tag, after EVERY
+  # shard of every row is green: a red slice never reaches here, so what is
+  # published is always a compiler that passed the whole suite.
+  publish:
     needs: linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: publish-${{ matrix.tag }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - {tag: arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile}
+          - {tag: amd64, runner: ubuntu-latest, dockerfile: Dockerfile}
+          - {tag: alpine-arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile.alpine}
+          - {tag: alpine-amd64, runner: ubuntu-latest, dockerfile: Dockerfile.alpine}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-${{ matrix.tag }}
+          path: ci-cache
+      # From the artifacts the shards already have — NOT a second compiler built
+      # from the pin (the root Dockerfile's `runtime` target).
+      - name: Publish this compiler as the seed
+        run: |
+          docker build --target base -t manticore-base:local -f ${{ matrix.dockerfile }} .
+          docker build -f tools/docker/Dockerfile.publish \
+            --build-arg BASE=manticore-base:local \
+            -t "$IMAGE:main-${{ matrix.tag }}" \
+            -t "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}" \
+            ci-cache
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:main-${{ matrix.tag }}"
+          docker push "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}"
+
+  seed-manifest:
+    needs: publish
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

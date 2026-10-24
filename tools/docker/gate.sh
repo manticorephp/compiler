@@ -45,6 +45,8 @@
 #   MC_SUITE=0|1     0 = build and install_smoke only, no AOT suite. What the
 #                    release asks for: CI has already run the suite against that
 #                    commit, and a second run is a slower release, not new news.
+#   MC_SHARD=<i>/<n> run only slice i of n of the suite (tests/aot/run.sh --shard);
+#                    CI splits a row across n jobs. Unset = the whole suite.
 #   MC_XFAIL=0|1|strict  run tests/aot/xfail.sh (known-bug repros) after the suite.
 #                    1 (default) REPORTS: an XPASS — a tracked bug that no longer
 #                    reproduces here — is printed and lands in the summary, but
@@ -405,7 +407,7 @@ elif [ -n "${MC_FILTER:-}" ]; then
 else
     echo "=== tests/aot/run.sh (full suite, -j $MC_JOBS) ==="
     t0=$SECONDS
-    MC_JOBS="$MC_JOBS" bash tests/aot/run.sh > "$MC_LOGDIR/suite.log" 2>&1
+    MC_JOBS="$MC_JOBS" bash tests/aot/run.sh ${MC_SHARD:+--shard "$MC_SHARD"} > "$MC_LOGDIR/suite.log" 2>&1
     suite_rc=$?
     tail -15 "$MC_LOGDIR/suite.log"
     echo "suite time: $((SECONDS - t0))s (run.sh)"

@@ -12,6 +12,7 @@
 #   tests/aot/run.sh -k union       # filter substring
 #   tests/aot/run.sh -v             # verbose: show stderr / IR on fail
 #   tests/aot/run.sh -j 8           # 8 cases at a time (0 = one per core)
+#   tests/aot/run.sh --shard 2/4    # every 4th case, starting at the 2nd (CI splits a row)
 #   tests/aot/run.sh -O 1           # compile the cases at -O1 (default 2)
 #
 # ⚠ -O is an ITERATION lever, not a gate setting. A green -O1/-O0 run is not
@@ -42,6 +43,7 @@ BACKEND_ARGS=""
 JOBS="${MC_JOBS:-1}"
 OPT="${MC_OPT:-2}"
 ONE=""
+SHARD="${MC_SHARD:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -53,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         -O|--opt)     OPT="$2"; shift 2 ;;
         -O*)          OPT="${1#-O}"; shift ;;
         --one)        ONE="$2"; shift 2 ;;
+        --shard)      SHARD="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,24p' "$0"
             exit 0
@@ -267,6 +270,21 @@ if [[ -n "$FILTER" ]]; then
     # under `set -u`, so a filter that matches nothing died with
     # `filtered[@]: unbound variable` instead of the friendly message below.
     if [[ ${#filtered[@]} -eq 0 ]]; then cases=(); else cases=("${filtered[@]}"); fi
+fi
+
+# Shard i/n: cases i, i+n, i+2n … of the discovery order. Round-robin, not a
+# contiguous block, so a family of slow neighbours (http_*, ws_*) spreads out.
+if [[ -n "$SHARD" ]]; then
+    if ! [[ "$SHARD" =~ ^([0-9]+)/([0-9]+)$ ]] || [[ "${BASH_REMATCH[1]}" -lt 1 || "${BASH_REMATCH[1]}" -gt "${BASH_REMATCH[2]}" ]]; then
+        echo "fatal: --shard takes i/n with 1 <= i <= n (got '$SHARD')" >&2
+        exit 2
+    fi
+    sh_i=$((BASH_REMATCH[1] - 1)); sh_n=${BASH_REMATCH[2]}
+    sharded=()
+    for ((k = 0; k < ${#cases[@]}; k++)); do
+        [[ $((k % sh_n)) -eq $sh_i ]] && sharded+=("${cases[k]}")
+    done
+    if [[ ${#sharded[@]} -eq 0 ]]; then cases=(); else cases=("${sharded[@]}"); fi
 fi
 
 if [[ ${#cases[@]} -eq 0 ]]; then
