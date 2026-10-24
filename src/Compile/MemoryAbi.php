@@ -65,8 +65,13 @@ final class MemoryAbi
      * instead of moving the data, so the malloc block starts `gap*8` bytes before
      * the tag. A v21 release / promote / realloc frees `ptr-8` — the middle of
      * a v22 block.
+     *
+     * v23: a DENORMAL float whose bits fall in (0xFFFF, 2^48) is boxed with
+     * {@see FLOAT_DENORM_TAG} or'ed in (a signaling-NaN word, never produced
+     * otherwise — box_float canonicalizes every NaN), so a cell can never look
+     * like a heap pointer. Every cell -> double read decodes it.
      */
-    public const VERSION = 22;
+    public const VERSION = 23;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -273,6 +278,17 @@ final class MemoryAbi
     public const BIGINT_BOX_RC_OFFSET = -8;
     /** The payload pointer, relative to the malloc base. */
     public const BIGINT_BOX_VALUE_OFFSET = 8;
+
+    /**
+     * `0x7FF0 << 48`: the exponent-all-ones header of a boxed risky denormal. The
+     * low 48 bits are the double's own bits; the encoded set is {@see
+     * FLOAT_DENORM_MIN_BITS} < low48 (so +Inf and the canonical NaN never match).
+     * A raw denormal in that range would pass the `plausiblePtrIr` window and
+     * be dereferenced by every `ptr-8` probe (`is_resource`, `instanceof`, ...).
+     */
+    public const FLOAT_DENORM_TAG = 9218868437227405312;
+    /** Denormal bits at or below this stay raw: the probe's `> 0xFFFF` bound rejects them. */
+    public const FLOAT_DENORM_MIN_BITS = 65535;
 
     /** A cell's 48-bit payload field, `0xFFFFFFFFFFFF`. */
     public const CELL_PAYLOAD_MASK = 281474976710655;

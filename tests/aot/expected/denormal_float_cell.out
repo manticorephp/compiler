@@ -1,0 +1,95 @@
+float(1.0E-310)
+false,false,false,true,false
+1.0E-310 2.0E-310 2.0E-310 same
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(8) "1.0E-310"
+bool(true)
+bool(true)
+[1.0e-310] d:1.0E-310; 1.0E-310
+bool(true)
+1.000000e-310
+float(5.0E-324)
+false,false,false,true,false
+4.9406564584125E-324 9.8813129168249E-324 9.8813129168249E-324 same
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(20) "4.9406564584125E-324"
+bool(true)
+bool(true)
+[5.0e-324] d:5.0E-324; 5.0E-324
+bool(true)
+4.940656e-324
+float(2.2250738585072014E-308)
+false,false,false,true,false
+2.2250738585072E-308 4.4501477170144E-308 4.4501477170144E-308 same
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(20) "2.2250738585072E-308"
+bool(true)
+bool(true)
+[2.2250738585072014e-308] d:2.2250738585072014E-308; 2.2250738585072014E-308
+bool(true)
+2.225074e-308
+float(1.4E-309)
+false,false,false,true,false
+1.4E-309 2.8E-309 2.8E-309 same
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(8) "1.4E-309"
+bool(true)
+bool(true)
+[1.4e-309] d:1.4E-309; 1.4E-309
+bool(true)
+1.400000e-309
+float(-1.0E-310)
+false,false,false,true,false
+-1.0E-310 -2.0E-310 -2.0E-310 same
+bool(true)
+bool(true)
+bool(false)
+bool(true)
+string(9) "-1.0E-310"
+bool(true)
+bool(true)
+[-1.0e-310] d:-1.0E-310; -1.0E-310
+bool(true)
+-1.000000e-310
+float(2.5E-320)
+false,false,false,true,false
+2.4999721679567E-320 4.9999443359134E-320 4.9999443359134E-320 same
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(20) "2.4999721679567E-320"
+bool(true)
+bool(true)
+[2.5e-320] d:2.5E-320; 2.5E-320
+bool(true)
+2.499972e-320
+float(2.0E-314)
+false,false,false,true,false
+1.9999999999278E-314 3.9999999998555E-314 3.9999999998555E-314 same
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+string(20) "1.9999999999278E-314"
+bool(true)
+bool(true)
+[2.0e-314] d:2.0E-314; 2.0E-314
+bool(true)
+2.000000e-314
+bool(true)
+float(2.2250738585072014E-308)
+float(-1.0E-310)
+float(2.365075858509702E-308)
