@@ -1489,6 +1489,7 @@ final class LowerFromAst implements Pass
             // instead of a late-bound placeholder).
             $this->currentLowerClass = '';
             $this->currentLowerFnHasThis = false;
+            $this->currentLowerFn = '';
         $this->currentTypeParams = [];
             // …nor parameters: a preceding function's by-ref names would
             // suppress a top-level out-argument's init.
