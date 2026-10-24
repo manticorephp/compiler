@@ -468,9 +468,19 @@ trait LowerPrelude
                     . "    __mir_dump_debug_body(\$d, \$indent);\n"
                     . "    echo \$pad, \"}\\n\"; return;\n  }\n}\n";
             } else {
+                // php counts only the INITIALIZED properties.
+                $maybe = $this->maybeUninitIn($cd);
+                if ($maybe !== []) {
+                    $body .= "    \$cnt = " . (string)(\count($props) - \count($maybe)) . ";\n";
+                    foreach ($maybe as $mp => $_m) {
+                        $body .= "    if (__mir_prop_inited(\$v, '" . $mp . "')) { \$cnt = \$cnt + 1; }\n";
+                    }
+                    $pc = "' . (string)\$cnt . '";
+                }
                 if ($cd->usesBag()) {
+                    $pcx = $maybe !== [] ? '$cnt' : $pc;
                     $body .= "    \$bag = \\__mir_obj_bag(\$v);\n"
-                        . "    echo 'object(" . $cd->display() . ")#1 (', (string)(" . $pc . " + count(\$bag)), \") {\\n\";\n";
+                        . "    echo 'object(" . $cd->display() . ")#1 (', (string)(" . $pcx . " + count(\$bag)), \") {\\n\";\n";
                 } else {
                     $body .= "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
                 }
@@ -492,6 +502,13 @@ trait LowerPrelude
                         $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  ';"
                             . " echo 'object(" . $tdd->display() . ")#1 (1) {', \"\\n\", \$pad, '    [\"" . $tdd->typeDefProp . "\"]=>', \"\\n\", \$pad, '    ';"
                             . " __mir_var_dump(\$v->" . $p . "->" . $tdd->typeDefProp . ", \$indent + 2); echo \$pad, \"  }\\n\";\n";
+                        continue;
+                    }
+                    if (isset($maybe[$p])) {
+                        $th = isset($cd->propertyMeta[$p]) ? \ltrim($cd->propertyMeta[$p]->typeHint, '\\') : '';
+                        $body .= "    if (__mir_prop_inited(\$v, '" . $p . "')) {\n"
+                            . "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n"
+                            . "    } else { echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  uninitialized(" . $th . ")', \"\\n\"; }\n";
                         continue;
                     }
                     $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
@@ -541,6 +558,23 @@ trait LowerPrelude
                 . "  return '\"' . \$n . '\":\"' . \$c . '\":private';\n}\n";
         }
         return $body . $dispatch;
+    }
+
+    /**
+     * The properties of `$cd` a generated walker must ask `__mir_prop_inited`
+     * about before reading ({@see \Compile\Mir\ClassDef::$propertyMaybeUninit});
+     * empty for a prelude class, whose layout carries no init bitmap.
+     *
+     * @return array<string, bool>
+     */
+    private function maybeUninitIn(\Compile\Mir\ClassDef $cd): array
+    {
+        if ($cd->isPreludeClass || $cd->isExternClass || $cd->isStruct) { return []; }
+        $out = [];
+        foreach ($cd->propertyNames as $p) {
+            if (isset($cd->propertyMaybeUninit[$p])) { $out[$p] = true; }
+        }
+        return $out;
     }
 
     /** Class names the unconditional prelude files declare, filled once.
@@ -761,8 +795,30 @@ trait LowerPrelude
                     $entries .= "        . \"s:" . (string)strlen($key) . ":\\\"" . $this->dqBody($key)
                         . "\\\";\" . __mc_ser_val(\$v->" . $p . ", \$st)\n";
                 }
+                $maybe = $this->maybeUninitIn($cd);
                 $body .= "  if (\$v instanceof \\" . $cname . ") {\n";
-                if ($this->declaresMethod($cname, '__serialize')) {
+                if ($maybe !== [] && !$this->declaresMethod($cname, '__serialize')) {
+                    // An uninitialized typed property is left out, and the
+                    // count is the properties actually written.
+                    $body .= "        \$b = '';\n        \$cnt = 0;\n";
+                    foreach ($props as $p) {
+                        $key = $this->serPropKey($cname, $p);
+                        $line = "\$b = \$b . \"s:" . (string)strlen($key) . ":\\\"" . $this->dqBody($key)
+                            . "\\\";\" . __mc_ser_val(\$v->" . $p . ", \$st); \$cnt = \$cnt + 1;";
+                        $body .= isset($maybe[$p])
+                            ? "        if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
+                            : "        " . $line . "\n";
+                    }
+                    if ($cd->usesBag()) {
+                        $body .= "        foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
+                            . "          if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
+                            . "          else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                            . "          \$b = \$b . __mc_ser_val(\$val, \$st);\n"
+                            . "          \$cnt = \$cnt + 1;\n"
+                            . "        }\n";
+                    }
+                    $body .= "        return \"" . $this->dqBody($head) . "\" . (string)\$cnt . ':{' . \$b . '}';\n      }\n";
+                } elseif ($this->declaresMethod($cname, '__serialize')) {
                     $body .= "    \$d = \$v->__serialize();\n"
                         . "    \$b = '';\n"
                         . "    foreach (\$d as \$k => \$val) {\n"
@@ -1032,8 +1088,11 @@ trait LowerPrelude
                             $key = $p . ':' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . ':private';
                         }
                     }
-                    $body .= "    \$out = \$out . \$pad . \"    [" . $this->dqBody($key) . "] => \" . __mir_print_r_str(\$v->"
-                        . $p . ", \$indent + 8) . \"\\n\";\n";
+                    $line = "\$out = \$out . \$pad . \"    [" . $this->dqBody($key) . "] => \" . __mir_print_r_str(\$v->"
+                        . $p . ", \$indent + 8) . \"\\n\";";
+                    $body .= isset($this->maybeUninitIn($cd)[$p])
+                        ? "    if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
+                        : "    " . $line . "\n";
                 }
                 if ($cd->usesBag()) {
                     $body .= "    foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
@@ -1089,8 +1148,11 @@ trait LowerPrelude
                 . "  if (\$v instanceof \\" . $cname . ") {\n"
                 . "  \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
             foreach ($cd->propertyNames as $p) {
-                $body .= "    \$out = \$out . \$ipad . \"'" . $p . "' => \" . __mir_var_export(\$v->"
-                    . $p . ", \$indent + 2) . \",\\n\";\n";
+                $line = "\$out = \$out . \$ipad . \"'" . $p . "' => \" . __mir_var_export(\$v->"
+                    . $p . ", \$indent + 2) . \",\\n\";";
+                $body .= isset($this->maybeUninitIn($cd)[$p])
+                    ? "    if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
+                    : "    " . $line . "\n";
             }
             if ($cd->usesBag()) {
                 $body .= "  foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"

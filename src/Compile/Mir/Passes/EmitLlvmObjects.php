@@ -6466,6 +6466,27 @@ trait EmitLlvmObjects
                 $out .= '  ' . $nnul . ' = icmp ne i64 ' . $rv . ", -3659174697238528\n";
                 $setc = $this->ssa->allocReg();
                 $out .= '  ' . $setc . ' = and i1 ' . $nz . ', ' . $nnul . "\n";
+                // An uninitialized typed property is not set; once written, a
+                // raw int / float / bool slot is set whatever it holds (0 is a value).
+                if ($t->kind === Node::KIND_PROPERTY_ACCESS) {
+                    $ih = $this->slotHolder($t->object, $t->property);
+                    $ini = '';
+                    if ($ih !== null && $ih->initChecked($t->property)) {
+                        $ini = $this->emitInitTest($objPtr, $ih, $t->property,
+                            $this->propertyOffsetOrNull($t->object, $t->property) ?? -1, '', $out);
+                    }
+                    $tk0 = $t->type->kind;
+                    $raw = ($tk0 === Type::KIND_INT || $tk0 === Type::KIND_FLOAT || $tk0 === Type::KIND_BOOL)
+                        && $ih !== null && $ih->propertyWidth($t->property) === 8
+                        && !$this->cellPropBoxed($ih->propertyTypes[$t->property] ?? null, $ih->name, $t->property);
+                    if ($raw) {
+                        $setc = $ini !== '' ? $ini : 'true';
+                    } elseif ($ini !== '') {
+                        $both = $this->ssa->allocReg();
+                        $out .= '  ' . $both . ' = and i1 ' . $setc . ', ' . $ini . "\n";
+                        $setc = $both;
+                    }
+                }
                 $setz = $this->ssa->allocReg();
                 $out .= '  ' . $setz . ' = zext i1 ' . $setc . " to i64\n";
                 $out .= '  store i64 ' . $setz . ', ptr ' . $rSlot . "\n";
@@ -6839,6 +6860,9 @@ trait EmitLlvmObjects
                     }
                     $out .= $this->emitSlotStore($uGep,
                         $this->slotHolder($upa->object, $upa->property), $upa->property, '0');
+                    // php: an unset typed property is uninitialized again.
+                    $out .= $this->emitInitClear($uObjP, $this->initMapHolder($upa->object, $upa->property),
+                        $upa->property, $this->propertyOffset($upa->object, $upa->property));
                     if ($uOld !== '') { $out .= $this->rcReleaseReg($uOld, $uDrop); }
                 }
                 // Same thing with the receiver's class ERASED — dispatch at

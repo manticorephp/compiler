@@ -2351,6 +2351,22 @@ final class EmitLlvm implements EmitVisitor
     private function grantInitMaps(\Compile\Mir\Module $module): void
     {
         if ($module->isLibraryModule) { return; }
+        // `unset()` leaves ANY typed property uninitialized, a defaulted one too.
+        /** @var array<string, bool> $unsetProps */
+        $unsetProps = [];
+        foreach ($module->functions as $fn) {
+            if (!$fn->isExtern) { $this->scanUnsetProps($fn->body, $unsetProps); }
+        }
+        if ($unsetProps !== []) {
+            foreach ($this->classes as $cd) {
+                foreach ($unsetProps as $pn => $_) {
+                    $pm = $cd->propertyMeta[$pn] ?? null;
+                    if ($pm !== null && !$pm->isStatic && $pm->typeHint !== '') {
+                        $cd->propertyMaybeUninit[$pn] = true;
+                    }
+                }
+            }
+        }
         /** @var array<string, string> $rootOf */
         $rootOf = [];
         foreach ($this->classes as $name => $cd) {
@@ -2403,6 +2419,18 @@ final class EmitLlvm implements EmitVisitor
                 $cd->initMapProps = $set;
             }
         }
+    }
+
+    /** Names of the properties some `unset($x->p)` in `$n` targets.
+     *  @param array<string, bool> $out */
+    private function scanUnsetProps(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_UNSET) {
+            foreach (\Compile\Mir\Walk::children($n) as $t) {
+                if ($t->kind === Node::KIND_PROPERTY_ACCESS) { $out[$t->property] = true; }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->scanUnsetProps($c, $out); }
     }
 
     /** Compiler-generated walkers (`__mir_*`, `__mc_*`: var_dump, serialize,
