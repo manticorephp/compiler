@@ -86,6 +86,9 @@ final class TypeCheck
     /** @var array<string, \Compile\Mir\ClassDef> */
     private array $classes = [];
 
+    /** @var array<string, bool> `fn::name` of a `static` local: it may hold null whatever its slot type says */
+    private array $staticLocals = [];
+
     public function run(Module $module): Module
     {
         $this->classes = $module->classes;
@@ -133,6 +136,7 @@ final class TypeCheck
                 $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1, $n);
             }
         }
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) { $this->staticLocals[$inFn . '::' . $n->name] = true; }
         $this->coerceScalarSink($n, $inFn);
         $this->checkShapeNode($n, $inFn);
         // An arm its own guard rules out never runs: `is_array($v) ? f($v) : g($v)`
@@ -175,7 +179,7 @@ final class TypeCheck
     }
 
     /**
-     * Coercive mode for a scalar SINK that is not a call: a `return` under a
+     * Coercive mode for a scalar SINK that is not a call: a null-typed array key, a `return` under a
      * declared `int|float|string` return type and an assignment to a property
      * declared so. A scalar of another kind (a numeric string out of `explode`,
      * a float, an int bound to `string`) is converted where it lands; left alone
@@ -185,14 +189,20 @@ final class TypeCheck
     {
         if ($n->kind === Node::KIND_RETURN && $n->value !== null) {
             $want = $this->declaredScalarReturns[$inFn] ?? null;
-            if ($want !== null) { $n->value = $this->scalarCast($n->value, $want); }
+            if ($want !== null) { $n->value = $this->scalarCast($n->value, $want, $inFn); }
+        } elseif ($n->kind === Node::KIND_STORE_ELEMENT || $n->kind === Node::KIND_ARRAY_ACCESS) {
+            // A local whose FINAL type is `null` used as an array key is php's "" key.
+            if ($n->array->type->isArray() && $n->index->kind === Node::KIND_LOAD_LOCAL
+                && $n->index->type->kind === Type::KIND_NULL) {
+                $n->index = new \Compile\Mir\StringConst('', Type::string_());
+            }
         } elseif ($n->kind === Node::KIND_STORE_PROPERTY) {
             $cls = $n->object->type->class ?? '';
             while ($cls !== '' && isset($this->classes[$cls])) {
                 $cd = $this->classes[$cls];
                 $pt = $cd->propertyTypes[$n->property] ?? null;
                 if ($pt !== null) {
-                    if (!isset($cd->propHooks[$n->property])) { $n->value = $this->scalarCast($n->value, $pt); }
+                    if (!isset($cd->propHooks[$n->property])) { $n->value = $this->scalarCast($n->value, $pt, $inFn); }
                     return;
                 }
                 $cls = $cd->parent;
@@ -200,8 +210,9 @@ final class TypeCheck
         }
     }
 
-    private function scalarCast(Node $v, Type $want): Node
+    private function scalarCast(Node $v, Type $want, string $inFn): Node
     {
+        if ($v->kind === Node::KIND_LOAD_LOCAL && isset($this->staticLocals[$inFn . '::' . $v->name])) { return $v; }
         $wk = $want->kind;
         $vk = $v->type->kind;
         if ($wk === $vk || ($wk === Type::KIND_FLOAT && $vk === Type::KIND_INT)) { return $v; }
