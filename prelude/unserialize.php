@@ -28,6 +28,8 @@ final class __McUnSt
     public int $n = 0;
     /** @var array<int,mixed> value slot -> the value it held */
     public array $vars = [];
+    /** @var array<int,bool> slots holding an enum case: php refuses `r:` to them */
+    public array $enums = [];
     public bool $allowAll = true;
     /** @var array<string,bool> */
     public array $allowed = [];
@@ -92,6 +94,17 @@ function __mc_un_upto(\__McUnSt $st, string $stop): string
     return $raw;
 }
 
+/** php's `uiv` / `iv` token up to `$stop`: digits only (`$signed` also allows one
+ *  leading `+`/`-`). Anything else — empty, a space, `1.5`, `x` — fails the parse. */
+function __mc_un_num(\__McUnSt $st, string $stop, bool $signed): int
+{
+    $raw = __mc_un_upto($st, $stop);
+    if (!$st->ok) { return 0; }
+    $sg = ($signed && strlen($raw) > 0 && ($raw[0] === '-' || $raw[0] === '+')) ? 1 : 0;
+    if (!ctype_digit(substr($raw, $sg))) { $st->ok = false; return 0; }
+    return (int)$raw;
+}
+
 /** Consume `$lit` at the cursor, or fail the parse. */
 function __mc_un_lit(\__McUnSt $st, string $lit): void
 {
@@ -107,7 +120,7 @@ function __mc_un_lit(\__McUnSt $st, string $lit): void
  *  name in an `O:` header. */
 function __mc_un_qstr(\__McUnSt $st, string $tail): string
 {
-    $len = (int)__mc_un_upto($st, ':');
+    $len = __mc_un_num($st, ':', false);
     if (!$st->ok || $len < 0) { $st->ok = false; return ''; }
     __mc_un_lit($st, '"');
     if (!$st->ok) { return ''; }
@@ -143,7 +156,7 @@ function __mc_un_key(\__McUnSt $st): mixed
     $t = substr($st->s, $st->p, 2);
     if ($t === 'i:') {
         $st->p = $st->p + 2;
-        return (int)__mc_un_upto($st, ';');
+        return __mc_un_num($st, ';', true);
     }
     if ($t === 's:') {
         $st->p = $st->p + 2;
@@ -167,17 +180,17 @@ function __mc_unser_val(\__McUnSt $st): mixed
     }
     if ($t === 'b:') {
         $st->p = $st->p + 2;
-        $b = __mc_un_upto($st, ';') === '1';
+        $braw = __mc_un_upto($st, ';');
+        if ($st->ok && $braw !== '0' && $braw !== '1') { $st->ok = false; return null; }
+        $b = $braw === '1';
         $st->vars[$slot] = $b;
         return $b;
     }
     if ($t === 'i:') {
         $st->p = $st->p + 2;
-        $raw = __mc_un_upto($st, ';');
         // php's grammar is [+-]?[0-9]+ — a bare "i:;" is an error, not 0.
-        $sg = (strlen($raw) > 0 && ($raw[0] === '-' || $raw[0] === '+')) ? 1 : 0;
-        if ($st->ok && !ctype_digit(substr($raw, $sg))) { $st->ok = false; return null; }
-        $i = (int)$raw;
+        $i = __mc_un_num($st, ';', true);
+        if (!$st->ok) { return null; }
         $st->vars[$slot] = $i;
         return $i;
     }
@@ -188,7 +201,8 @@ function __mc_unser_val(\__McUnSt $st): mixed
         if ($raw === 'INF') { $d = INF; }
         else if ($raw === '-INF') { $d = -INF; }
         else if ($raw === 'NAN') { $d = NAN; }
-        else { $d = (float)$raw; }
+        else if ($st->ok && preg_match('/^[+-]?(?:[0-9]+|[0-9]*\.[0-9]+|[0-9]+\.[0-9]*)(?:[eE][+-]?[0-9]+)?$/D', $raw) === 1) { $d = (float)$raw; }
+        else { $st->ok = false; return null; }
         $st->vars[$slot] = $d;
         return $d;
     }
@@ -200,7 +214,7 @@ function __mc_unser_val(\__McUnSt $st): mixed
     }
     if ($t === 'a:') {
         $st->p = $st->p + 2;
-        $cnt = (int)__mc_un_upto($st, ':');
+        $cnt = __mc_un_num($st, ':', false);
         __mc_un_lit($st, '{');
         $arr = [];
         $i = 0;
@@ -222,7 +236,7 @@ function __mc_unser_val(\__McUnSt $st): mixed
     if ($t === 'O:') {
         $st->p = $st->p + 2;
         $cls = __mc_un_qstr($st, '":');
-        $cnt = (int)__mc_un_upto($st, ':');
+        $cnt = __mc_un_num($st, ':', false);
         __mc_un_lit($st, '{');
         if (!$st->ok) { return null; }
         $o = __mc_unser_alloc($cls, $st);
@@ -264,13 +278,17 @@ function __mc_unser_val(\__McUnSt $st): mixed
         $e = __mc_unser_enum($spec, $st);
         if (!$st->ok) { return null; }
         $st->vars[$slot] = $e;
+        $st->enums[$slot] = true;
         return $e;
     }
     if ($t === 'r:' || $t === 'R:') {
         $st->p = $st->p + 2;
-        $k = (int)__mc_un_upto($st, ';');
+        $k = __mc_un_num($st, ';', false);
         if (!$st->ok) { return null; }
+        // php: `r:` names a non-enum object only; `R:` (a reference) is not a value slot.
+        if ($t === 'R:') { $st->n = $slot - 1; }
         if (!array_key_exists($k, $st->vars)) { $st->ok = false; return null; }
+        if ($t === 'r:' && (!is_object($st->vars[$k]) || isset($st->enums[$k]))) { $st->ok = false; return null; }
         return $st->vars[$k];
     }
     $st->ok = false;
