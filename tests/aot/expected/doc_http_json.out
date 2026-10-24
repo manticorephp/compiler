@@ -1,0 +1,3 @@
+HTTP/1.1 201 Created {"greeting":"hello Ada","method":"POST"}
+HTTP/1.1 400 Bad Request {"error":"name required"}
+HTTP/1.1 415 Unsupported Media Type send application/json

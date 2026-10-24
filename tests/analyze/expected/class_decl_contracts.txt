@@ -1,0 +1,6 @@
+tests/analyze/cases/class_decl_contracts.php:3:0: error: Class SubF cannot extend final class F
+tests/analyze/cases/class_decl_contracts.php:5:0: error: Cannot override final method Fm::f()
+tests/analyze/cases/class_decl_contracts.php:7:0: error: Class Missing contains 1 abstract method and must therefore be declared abstract or implement the remaining method (I::g)
+tests/analyze/cases/class_decl_contracts.php:9:0: error: Access level to SubVis::v() must be public (as in class Vis)
+
+Found 4 error(s), 0 warning(s).

@@ -47,14 +47,20 @@ function splitStr(string $sep, string $s): array<int, string>
 }
 
 /**
- * The reason phrase for a status code, or '' when we do not know it.
+ * The reason phrase for a status code, or `''` for a code that has no phrase here.
  *
- * A `match`, and a plain one: the table is written once for the whole process,
- * so the arms cost nothing per request. This is also why {@see Status} is a
- * class of `const int` rather than a backed enum — 42 enum cases would mean
- * `from`/`tryFrom`/`cases()` arms in the IR of every program that serves HTTP,
- * to produce a value that goes on the wire as an int.
+ * Covers the 1xx-5xx codes listed in `Status`. `Status::text()` calls this.
+ *
+ * @param $code  HTTP status code.
+ * @return string  The phrase (`404` gives `Not Found`), or an empty string for an unknown code.
  */
+// The reason phrase for a status code, or '' when we do not know it.
+//
+// A `match`, and a plain one: the table is written once for the whole process,
+// so the arms cost nothing per request. This is also why {@see Status} is a
+// class of `const int` rather than a backed enum — 42 enum cases would mean
+// `from`/`tryFrom`/`cases()` arms in the IR of every program that serves HTTP,
+// to produce a value that goes on the wire as an int.
 function reason(int $code): string
 {
     return match ($code) {
@@ -390,7 +396,18 @@ function inCidrParsed(string $packedIp, array<int, string> $net): bool
     return (\ord($packedIp[$full]) & $mask) === (\ord($network[$full]) & $mask);
 }
 
-/** Is `$ip` inside `$cidr`? A bare address is /32 or /128. Malformed → false. */
+/**
+ * Whether an IP address lies inside a CIDR network.
+ *
+ * A bare address without a prefix is treated as `/32` (IPv4) or `/128` (IPv6). A malformed address
+ * or network gives `false`. An IPv4 address never matches an IPv6 network or the reverse,
+ * including the v4-mapped `::ffff:a.b.c.d` form.
+ *
+ * @param $ip  Address to test, IPv4 or IPv6 text form.
+ * @param $cidr  Network such as `10.0.0.0/8` or `2001:db8::/32`.
+ * @return bool  `true` when `$ip` is inside `$cidr`.
+ */
+// Is `$ip` inside `$cidr`? A bare address is /32 or /128. Malformed → false.
 function inCidr(string $ip, string $cidr): bool
 {
     $net = cidrParse($cidr);
@@ -534,7 +551,11 @@ function proxyTrusted(string $ip, array $trusted): bool
     return false;
 }
 
-/** The first comma-separated element, trimmed. @internal */
+/**
+ * The first comma-separated element, trimmed.
+ *
+ * @internal
+ */
 function firstToken(string $v): string
 {
     $c = \strpos($v, ',');
@@ -770,7 +791,11 @@ function nestedWalk(array &$node, array $segs, int $idx, mixed $val): void
     $node[$k] = $child;
 }
 
-/** "0" or a digit run with no leading zero, optionally negated; ≤ 18 digits. @internal */
+/**
+ * "0" or a digit run with no leading zero, optionally negated; ≤ 18 digits.
+ *
+ * @internal
+ */
 function canonicalIntKey(string $s): bool
 {
     $n = \strlen($s);
@@ -825,7 +850,11 @@ function parseQueryNested(string $qs, int $maxVars): array<int|string, mixed>
     return $out;
 }
 
-/** A chunk source over a string. @internal */
+/**
+ * A chunk source over a string.
+ *
+ * @internal
+ */
 function stringSource(string $s): \Closure
 {
     $pos = 0;
@@ -928,18 +957,36 @@ function parseCookies(string $line): array<string, string>
 }
 
 /**
- * A request path mapped under `$root`, or null when it does not name a regular
- * file inside it.
+ * Maps a request path to a regular file under a document root, or returns `null`.
  *
- * Both sides go through `realpath`, so a symlink that leaves the root is
- * refused by construction rather than by string surgery on `..`. A DIRECTORY
- * answers null: which index file a directory stands for is the handler's
- * policy, not this function's (`safePath($root, $req->path . '/index.html')`).
+ * The root and the candidate both go through `realpath`, so `..` segments and symlinks that leave
+ * the root are refused. A directory, a missing file, a missing root, an empty path, a path that
+ * does not start with `/` and any path ending in `/` all answer `null`: which index file a
+ * directory stands for is the handler's policy. Pass `Request::$path`, which the server has
+ * already percent-decoded and `..`-collapsed.
  *
- * The path arrives already percent-decoded and `..`-collapsed by the server
- * ({@see normPath}), so an encoded `%2e%2e` is a literal path segment here and
- * simply names nothing.
+ * ```php
+ * $file = Http\safePath($root, $req->path);
+ * return $file === null ? (new Response(404))->text('not found') : (new Response())->file($file);
+ * ```
+ *
+ * @param $root  Directory to serve files from. It must exist.
+ * @param $reqPath  Request path, normally `$request->path`. It must start with `/`.
+ * @return ?string  The real path of a regular file inside `$root`, or `null` when there is none.
+ * @example doc_http_static_safe_path
+ * @see Response
  */
+// A request path mapped under `$root`, or null when it does not name a regular
+// file inside it.
+//
+// Both sides go through `realpath`, so a symlink that leaves the root is
+// refused by construction rather than by string surgery on `..`. A DIRECTORY
+// answers null: which index file a directory stands for is the handler's
+// policy, not this function's (`safePath($root, $req->path . '/index.html')`).
+//
+// The path arrives already percent-decoded and `..`-collapsed by the server
+// ({@see normPath}), so an encoded `%2e%2e` is a literal path segment here and
+// simply names nothing.
 function safePath(string $root, string $reqPath): ?string
 {
     if ($reqPath === '' || $reqPath[0] !== '/') {
@@ -967,7 +1014,16 @@ function safePath(string $root, string $reqPath): ?string
     return $full;
 }
 
-/** Content-Type from the extension; `application/octet-stream` when unknown. */
+/**
+ * The `Content-Type` for a file name, chosen by its extension (case-insensitive).
+ *
+ * Text types carry `charset=utf-8`. An unknown or missing extension gives
+ * `application/octet-stream`. `Response::file()` uses this when no type is passed.
+ *
+ * @param $path  File path or name. Only the part after the last `.` of the last path segment matters.
+ * @return string  A media type such as `text/html; charset=utf-8` or `image/png`.
+ */
+// Content-Type from the extension; `application/octet-stream` when unknown.
 function mimeFor(string $path): string
 {
     $dot = \strrpos($path, '.');
@@ -1045,7 +1101,11 @@ function acceptsGzip(string $ae): bool
     return $star;
 }
 
-/** Text-like content types worth deflating. @internal */
+/**
+ * Text-like content types worth deflating.
+ *
+ * @internal
+ */
 function compressible(string $ct): bool
 {
     $semi = \strpos($ct, ';');
@@ -1382,34 +1442,59 @@ function contentLength(string $v): int
 }
 
 /**
- * The nine methods RFC 9110 defines, as a typed lens over the wire token.
+ * The nine HTTP methods defined by RFC 9110, as a typed view of the request method token.
  *
- * {@see Request::$method} stays a raw `string` and this enum is optional on
- * purpose: WebDAV's `PROPFIND`, a CDN's `PURGE` and anything else a handler is
- * entitled to answer have no case here, and a `?Method` on the hot path would
- * put a null check in front of every route test. `methodEnum()` is for the
- * handler that wants exhaustive `match`; `$method === 'GET'` stays legal.
+ * `Request::$method` stays a raw string: methods outside this list (`PROPFIND`, `PURGE`) are legal
+ * and have no case here. Use `Request::methodEnum()` for an exhaustive `match`, or
+ * `Request::is(Method::Post)` for a single test.
+ *
+ * @example doc_http_status_method
+ * @see Request
  */
+// The nine methods RFC 9110 defines, as a typed lens over the wire token.
+//
+// {@see Request::$method} stays a raw `string` and this enum is optional on
+// purpose: WebDAV's `PROPFIND`, a CDN's `PURGE` and anything else a handler is
+// entitled to answer have no case here, and a `?Method` on the hot path would
+// put a null check in front of every route test. `methodEnum()` is for the
+// handler that wants exhaustive `match`; `$method === 'GET'` stays legal.
 enum Method: string
 {
+    /** `GET`: retrieve a representation of the resource. */
     case Get = 'GET';
+    /** `HEAD`: like `GET`, headers only. */
     case Head = 'HEAD';
+    /** `POST`: submit data for processing. */
     case Post = 'POST';
+    /** `PUT`: replace the resource. */
     case Put = 'PUT';
+    /** `PATCH`: partially modify the resource. */
     case Patch = 'PATCH';
+    /** `DELETE`: remove the resource. */
     case Delete = 'DELETE';
+    /** `OPTIONS`: ask what the resource supports. */
     case Options = 'OPTIONS';
+    /** `TRACE`: echo the request back for diagnosis. */
     case Trace = 'TRACE';
+    /** `CONNECT`: open a tunnel (the server answers 501). */
     case Connect = 'CONNECT';
 
-    /** No side effects expected of the origin (§9.2.1). */
+    /**
+     * No side effects expected of the origin (§9.2.1).
+     *
+     * @return bool  `true` for `GET`, `HEAD`, `OPTIONS` and `TRACE`.
+     */
     public function isSafe(): bool
     {
         return $this === Method::Get || $this === Method::Head
             || $this === Method::Options || $this === Method::Trace;
     }
 
-    /** Repeating it must read the same as doing it once (§9.2.2). */
+    /**
+     * Repeating it must read the same as doing it once (§9.2.2).
+     *
+     * @return bool  `true` for the safe methods plus `PUT` and `DELETE`.
+     */
     public function isIdempotent(): bool
     {
         return $this->isSafe() || $this === Method::Put || $this === Method::Delete;
@@ -1420,6 +1505,8 @@ enum Method: string
      * a GET with a body is legal on the wire and forbidden to mean anything, so
      * the framing rules read this to decide whether a missing Content-Length is
      * a 411 or simply an empty request.
+     *
+     * @return bool  `true` for `POST`, `PUT` and `PATCH`.
      */
     public function allowsBody(): bool
     {
@@ -1428,65 +1515,127 @@ enum Method: string
 }
 
 /**
- * Status codes, and the two predicates the response path needs.
+ * HTTP status codes as integer constants, plus helpers for the response path.
  *
- * A class of `const int`, not a backed enum, and the reason is IR volume: 42
- * enum cases put `from`/`tryFrom`/`cases()` arms into every program that serves
- * HTTP, to model a value that is an `int` on the wire and an `int` in every
- * comparison. {@see text} delegates to {@see reason}, so the table is written
- * once for the whole process.
+ * A class of `const int` rather than an enum, so the value is a plain `int` everywhere it is
+ * compared or sent. Pass a constant wherever a status is expected: `new
+ * Response(Status::NOT_FOUND)`.
+ *
+ * @example doc_http_status_method
+ * @see Response
  */
+// Status codes, and the two predicates the response path needs.
+//
+// A class of `const int`, not a backed enum, and the reason is IR volume: 42
+// enum cases put `from`/`tryFrom`/`cases()` arms into every program that serves
+// HTTP, to model a value that is an `int` on the wire and an `int` in every
+// comparison. {@see text} delegates to {@see reason}, so the table is written
+// once for the whole process.
 final class Status
 {
+    /** `100 Continue`. */
     public const CONTINUE = 100;
+    /** `101 Switching Protocols`. */
     public const SWITCHING_PROTOCOLS = 101;
+    /** `200 OK`. */
     public const OK = 200;
+    /** `201 Created`. */
     public const CREATED = 201;
+    /** `202 Accepted`. */
     public const ACCEPTED = 202;
+    /** `204 No Content`. */
     public const NO_CONTENT = 204;
+    /** `206 Partial Content`. */
     public const PARTIAL_CONTENT = 206;
+    /** `301 Moved Permanently`. */
     public const MOVED_PERMANENTLY = 301;
+    /** `302 Found`. */
     public const FOUND = 302;
+    /** `303 See Other`. */
     public const SEE_OTHER = 303;
+    /** `304 Not Modified`. */
     public const NOT_MODIFIED = 304;
+    /** `307 Temporary Redirect`. */
     public const TEMPORARY_REDIRECT = 307;
+    /** `308 Permanent Redirect`. */
     public const PERMANENT_REDIRECT = 308;
+    /** `400 Bad Request`. */
     public const BAD_REQUEST = 400;
+    /** `401 Unauthorized`. */
     public const UNAUTHORIZED = 401;
+    /** `403 Forbidden`. */
     public const FORBIDDEN = 403;
+    /** `404 Not Found`. */
     public const NOT_FOUND = 404;
+    /** `405 Method Not Allowed`. */
     public const METHOD_NOT_ALLOWED = 405;
+    /** `406 Not Acceptable`. */
     public const NOT_ACCEPTABLE = 406;
+    /** `408 Request Timeout`. */
     public const REQUEST_TIMEOUT = 408;
+    /** `409 Conflict`. */
     public const CONFLICT = 409;
+    /** `410 Gone`. */
     public const GONE = 410;
+    /** `411 Length Required`. */
     public const LENGTH_REQUIRED = 411;
+    /** `412 Precondition Failed`. */
     public const PRECONDITION_FAILED = 412;
+    /** `413 Content Too Large`. */
     public const CONTENT_TOO_LARGE = 413;
+    /** `414 URI Too Long`. */
     public const URI_TOO_LONG = 414;
+    /** `415 Unsupported Media Type`. */
     public const UNSUPPORTED_MEDIA_TYPE = 415;
+    /** `416 Range Not Satisfiable`. */
     public const RANGE_NOT_SATISFIABLE = 416;
+    /** `417 Expectation Failed`. */
     public const EXPECTATION_FAILED = 417;
+    /** `421 Misdirected Request`. */
     public const MISDIRECTED_REQUEST = 421;
+    /** `422 Unprocessable Content`. */
     public const UNPROCESSABLE_CONTENT = 422;
+    /** `425 Too Early`. */
     public const TOO_EARLY = 425;
+    /** `426 Upgrade Required`. */
     public const UPGRADE_REQUIRED = 426;
+    /** `428 Precondition Required`. */
     public const PRECONDITION_REQUIRED = 428;
+    /** `429 Too Many Requests`. */
     public const TOO_MANY_REQUESTS = 429;
+    /** `431 Request Header Fields Too Large`. */
     public const REQUEST_HEADER_FIELDS_TOO_LARGE = 431;
+    /** `500 Internal Server Error`. */
     public const INTERNAL_SERVER_ERROR = 500;
+    /** `501 Not Implemented`. */
     public const NOT_IMPLEMENTED = 501;
+    /** `502 Bad Gateway`. */
     public const BAD_GATEWAY = 502;
+    /** `503 Service Unavailable`. */
     public const SERVICE_UNAVAILABLE = 503;
+    /** `504 Gateway Timeout`. */
     public const GATEWAY_TIMEOUT = 504;
+    /** `505 HTTP Version Not Supported`. */
     public const HTTP_VERSION_NOT_SUPPORTED = 505;
 
-    /** The reason phrase, or '' for a code we do not name. */
+    /**
+     * The reason phrase for a status code, or `''` for a code without one.
+     *
+     * @param $code  HTTP status code.
+     * @return string  The phrase, for example `Not Found`.
+     */
+    // The reason phrase, or '' for a code we do not name.
     public static function text(int $code): string
     {
         return reason($code);
     }
 
+    /**
+     * Whether a code is one of the redirects `redirect()` is meant for.
+     *
+     * @param $code  HTTP status code.
+     * @return bool  `true` for 301, 302, 303, 307 and 308.
+     */
     public static function isRedirect(int $code): bool
     {
         return $code === 301 || $code === 302 || $code === 303
@@ -1496,6 +1645,9 @@ final class Status
     /**
      * Whether a response with this code may carry a body at all (§6.4.1).
      * 1xx, 204 and 304 may not — not even a `Content-Length: 0`.
+     *
+     * @param $code  HTTP status code.
+     * @return bool  `false` for 1xx, 204 and 304; `true` otherwise.
      */
     public static function hasBody(int $code): bool
     {
@@ -1507,37 +1659,68 @@ final class Status
 }
 
 /**
- * Which forwarded headers a trusted proxy may set. `const int` flags, not an
- * enum, for the same reason {@see Status} is not one.
+ * Bit flags that say which forwarded headers a trusted proxy may set.
  *
- * `FORWARDED` is NOT in `ALL` — opt in explicitly. A proxy that merely passes
- * a client-supplied `Forwarded:` header through is exactly as unsafe as
- * trusting an arbitrary `X-Forwarded-*`; RFC 7239 support is offered, not
- * defaulted.
+ * Pass them as the second argument of `Server::trustedProxies()`. Combine with `|`. `ALL` is the
+ * four `X-Forwarded-*` headers; `FORWARDED` (RFC 7239 `Forwarded:`) is not part of it and must be
+ * granted explicitly, because a proxy that merely passes a client-sent `Forwarded:` header through
+ * makes it as untrustworthy as any other header.
+ *
+ * @example doc_http_proxy
+ * @see Server
  */
+// Which forwarded headers a trusted proxy may set. `const int` flags, not an
+// enum, for the same reason {@see Status} is not one.
+//
+// `FORWARDED` is NOT in `ALL` — opt in explicitly. A proxy that merely passes
+// a client-supplied `Forwarded:` header through is exactly as unsafe as
+// trusting an arbitrary `X-Forwarded-*`; RFC 7239 support is offered, not
+// defaulted.
 final class Proxy
 {
+    /** Trust `X-Forwarded-For` to set `Request::$remoteAddr`. */
     public const FOR = 1;
+    /** Trust `X-Forwarded-Proto` to set `Request::$secure`. */
     public const PROTO = 2;
+    /** Trust `X-Forwarded-Host` to replace the `Host` header. */
     public const HOST = 4;
+    /** Trust `X-Forwarded-Port` to set `Request::$forwardedPort`. */
     public const PORT = 8;
+    /**
+     * Also read the RFC 7239 `Forwarded:` header. Each field is still gated by its own flag (`FOR`,
+     * `PROTO`, `HOST`).
+     */
     public const FORWARDED = 16;
+    /** `FOR | PROTO | HOST | PORT` (15). Does not include `FORWARDED`. */
     public const ALL = 15;
 }
 
 /**
- * A header block: a lookup by lowercased name, and the wire lines in order.
+ * A set of HTTP header fields: case-insensitive lookup on top of the ordered wire lines.
  *
- * Two structures rather than one because the two questions are different. A
- * handler asks "what is the Content-Type" — one hash probe, case-insensitive,
- * repeats comma-joined the way §5.2 says a recipient may. The wire asks "what
- * exactly do I send" — order preserved, and `Set-Cookie` repeated rather than
- * joined, because joining it is the one case §5.2 explicitly excludes.
+ * The lookup side answers "what is the `Content-Type`": names are case-insensitive and a repeated
+ * field is comma-joined (`a, b`). The wire side keeps every line in the order it was added, and
+ * does not join repeats, which is what `Set-Cookie` needs. `Request::$headers` holds what the
+ * client sent; `Response::$headers` holds what will be sent.
  *
- * ⚠ Both properties carry a DECLARED element type, and that is load-bearing:
- * `private array $map = []` types `assoc[string,unknown]`, and every index read
- * off it then comes back as a raw pointer instead of a string.
+ * `get()`, `has()`, `int()` and `all()` use the lookup side. `lines()` and `render()` use the wire
+ * side.
+ *
+ * @example doc_http_headers
+ * @see Request
+ * @see Response
  */
+// A header block: a lookup by lowercased name, and the wire lines in order.
+//
+// Two structures rather than one because the two questions are different. A
+// handler asks "what is the Content-Type" — one hash probe, case-insensitive,
+// repeats comma-joined the way §5.2 says a recipient may. The wire asks "what
+// exactly do I send" — order preserved, and `Set-Cookie` repeated rather than
+// joined, because joining it is the one case §5.2 explicitly excludes.
+//
+// ⚠ Both properties carry a DECLARED element type, and that is load-bearing:
+// `private array $map = []` types `assoc[string,unknown]`, and every index read
+// off it then comes back as a raw pointer instead of a string.
 final class Headers
 {
     /**
@@ -1584,7 +1767,17 @@ final class Headers
     private static array<string, string> $emptyMap = [];
     private static array<int, string> $emptyLines = [];
 
-    /** Build from wire lines, as they came off the head. */
+    /**
+     * Builds a header set from raw `Name: value` lines.
+     *
+     * A line without a colon, with an empty name, or with a name that is not a valid HTTP token is
+     * skipped. Whitespace around the value is trimmed. Lines are not unfolded: pass one complete field
+     * per element.
+     *
+     * @param $lines  Header lines without the trailing CRLF.
+     * @return Headers  A new `Headers` holding the valid lines, in order.
+     */
+    // Build from wire lines, as they came off the head.
     public static function fromLines(array<int, string> $lines): Headers
     {
         $h = new Headers();
@@ -1597,11 +1790,27 @@ final class Headers
         return $h;
     }
 
+    /**
+     * Whether a field is present. The name is case-insensitive.
+     *
+     * @param $n  Field name.
+     * @return bool  `true` if at least one line with that name exists.
+     */
     public function has(string $n): bool
     {
         return isset($this->map[lowerName($n)]);
     }
 
+    /**
+     * The value of a field. The name is case-insensitive.
+     *
+     * If the field occurs more than once, the values are joined with `, ` in the order they were
+     * added.
+     *
+     * @param $n  Field name.
+     * @param $default  Returned when the field is absent.
+     * @return string  The value, or `$default`.
+     */
     public function get(string $n, string $default = ''): string
     {
         $k = lowerName($n);
@@ -1611,7 +1820,13 @@ final class Headers
         return $this->map[$k];
     }
 
-    /** The value as an int, or $default when absent or not all digits. */
+    /**
+     * The value as an int, or $default when absent or not all digits.
+     *
+     * @param $n  Field name.
+     * @param $default  Returned when the field is absent, empty, longer than 18 digits, or contains anything but digits.
+     * @return int  The value as an integer, or `$default`.
+     */
     public function int(string $n, int $default = 0): int
     {
         $k = lowerName($n);
@@ -1634,7 +1849,15 @@ final class Headers
         return $out;
     }
 
-    /** Replace every occurrence of $n with a single line. */
+    /**
+     * Sets a field, replacing every existing line with that name.
+     *
+     * The new line goes to the end of the wire order and keeps the capitalisation of `$n` as written.
+     *
+     * @param $n  Field name.
+     * @param $v  Field value.
+     */
+    // Replace every occurrence of $n with a single line.
     public function set(string $n, string $v): void
     {
         $k = lowerName($n);
@@ -1644,9 +1867,16 @@ final class Headers
     }
 
     /**
-     * Append a line, keeping any that are already there. The lookup value is
-     * comma-joined; the wire keeps both lines, which is what `Set-Cookie` needs.
+     * Appends a field line and keeps any lines that are already there.
+     *
+     * Lookup (`get()`) then answers the values comma-joined; the wire gets one line per call, which is
+     * what `Set-Cookie` needs.
+     *
+     * @param $n  Field name.
+     * @param $v  Field value.
      */
+    // Append a line, keeping any that are already there. The lookup value is
+    // comma-joined; the wire keeps both lines, which is what `Set-Cookie` needs.
     public function add(string $n, string $v): void
     {
         $k = lowerName($n);
@@ -1658,6 +1888,11 @@ final class Headers
         $this->block .= $n . ': ' . $v . "\r\n";
     }
 
+    /**
+     * Removes every line with this name. The name is case-insensitive; an absent name is not an error.
+     *
+     * @param $n  Field name.
+     */
     public function remove(string $n): void
     {
         $k = lowerName($n);
@@ -1665,25 +1900,37 @@ final class Headers
         $this->dropLines($k);
     }
 
-    /** Distinct field names. */
+    /**
+     * The number of distinct field names (a repeated field counts once).
+     *
+     * @return int  The count.
+     */
+    // Distinct field names.
     public function count(): int
     {
         return \count($this->map);
     }
 
-    /** @return array<string,string> lowercased name => value */
+    /**
+     * All fields for lookup: lowercased name to value, repeats comma-joined.
+     *
+     * @return array<string,string> lowercased name => value
+     */
     public function all(): array<string, string>
     {
         return $this->map;
     }
 
     /**
-     * @return array<int,string> the wire lines, in order
+     * The wire lines, in the order they were added, one `Name: value` string per line without the
+     * CRLF.
      *
-     * Split on demand. Nothing on the response path calls this — render()
-     * hands the block over whole — so the array only ever exists for a caller
-     * that genuinely wants one (the SAPI absorption, a test).
+     * @return array<int,string> the wire lines, in order
      */
+    //
+    // Split on demand. Nothing on the response path calls this — render()
+    // hands the block over whole — so the array only ever exists for a caller
+    // that genuinely wants one (the SAPI absorption, a test).
     public function lines(): array<int, string>
     {
         $out = [];
@@ -1700,13 +1947,20 @@ final class Headers
         return $out;
     }
 
-    /** The wire block, terminating CRLF included. */
+    /**
+     * The block as it goes on the wire: every line followed by CRLF, then the empty line that ends a
+     * head.
+     *
+     * @return string  The serialized block.
+     */
+    // The wire block, terminating CRLF included.
     public function render(): string
     {
         return $this->block . "\r\n";
     }
 
-    /** Drop every field. */
+    /** Removes every field. */
+    // Drop every field.
     public function clear(): void
     {
         $this->map = self::$emptyMap;
@@ -1714,12 +1968,15 @@ final class Headers
     }
 
     /**
-     * Become a copy of `$o`.
+     * Replaces this set with a copy of another, keeping repeated lines and their order.
      *
-     * Through the public wire lines rather than the private fields, so repeats
-     * and their order survive exactly — which is what the SAPI absorption needs
-     * (`Set-Cookie` accumulates, everything else replaces).
+     * @param $o  The set to copy.
      */
+    // Become a copy of `$o`.
+    //
+    // Through the public wire lines rather than the private fields, so repeats
+    // and their order survive exactly — which is what the SAPI absorption needs
+    // (`Set-Cookie` accumulates, everything else replaces).
     public function copyFrom(Headers $o): void
     {
         $this->clear();
@@ -1764,22 +2021,53 @@ final class Headers
 }
 
 /**
- * One uploaded file, php's $_FILES row as an object. `tmpName` is '' unless
- * `error` is ERR_OK; the temp file is the request's and goes away with it
- * unless {@see moveTo} claims it first.
+ * One file received in a `multipart/form-data` upload: php's `$_FILES` row as an object.
+ *
+ * Get them from `Request::files()` or `Request::allFiles()`. The bytes were written to a temporary
+ * file during parsing. Unless you claim it with `moveTo()`, the temporary file is deleted when the
+ * request ends, whether the handler returned or threw. `tmpName` is empty unless `error` is
+ * `ERR_OK`.
+ *
+ * @example doc_http_upload
+ * @see Request
  */
+// One uploaded file, php's $_FILES row as an object. `tmpName` is '' unless
+// `error` is ERR_OK; the temp file is the request's and goes away with it
+// unless {@see moveTo} claims it first.
 final class UploadedFile
 {
+    /** The upload succeeded (php `UPLOAD_ERR_OK`). */
     public const ERR_OK = 0;
+    /**
+     * The file exceeded `Server::uploadMaxFilesize()` (php `UPLOAD_ERR_INI_SIZE`). No temporary file
+     * is kept.
+     */
     public const ERR_INI_SIZE = 1;
+    /** The file exceeded the form's `MAX_FILE_SIZE` field (php `UPLOAD_ERR_FORM_SIZE`). */
     public const ERR_FORM_SIZE = 2;
+    /** The body ended in the middle of the file (php `UPLOAD_ERR_PARTIAL`). */
     public const ERR_PARTIAL = 3;
+    /** The part carried no file, for example `filename=""` (php `UPLOAD_ERR_NO_FILE`). */
     public const ERR_NO_FILE = 4;
+    /** There was no temporary directory to write to (php `UPLOAD_ERR_NO_TMP_DIR`). */
     public const ERR_NO_TMP_DIR = 6;
+    /** The temporary file could not be written (php `UPLOAD_ERR_CANT_WRITE`). */
     public const ERR_CANT_WRITE = 7;
 
     private bool $moved = false;
 
+    /**
+     * Describes one uploaded file. The server builds these while parsing; construct one yourself only
+     * in tests.
+     *
+     * @param $field  The form field name (`name=` of the part).
+     * @param $name  Base name of the file as the client sent it.
+     * @param $fullPath  The client's file name exactly as sent (php 8.1's `full_path`).
+     * @param $type  The part's `Content-Type`, as the client claimed it. Empty when `error` is not `ERR_OK`.
+     * @param $size  Size in bytes; `0` when `error` is not `ERR_OK`.
+     * @param $error  One of the `ERR_*` constants.
+     * @param $tmpName  Path of the temporary file; empty when `error` is not `ERR_OK`.
+     */
     public function __construct(
         public readonly string $field,
         /** basename of what the client sent */
@@ -1793,12 +2081,27 @@ final class UploadedFile
     ) {
     }
 
+    /**
+     * Whether the file arrived intact and has not been moved: `error` is `ERR_OK`, `tmpName` is set,
+     * and `moveTo()` has not succeeded yet.
+     *
+     * @return bool  `true` if `moveTo()` and `contents()` will work.
+     */
     public function isValid(): bool
     {
         return $this->error === self::ERR_OK && !$this->moved && $this->tmpName !== '';
     }
 
-    /** rename(2), falling back to copy+unlink across devices. */
+    /**
+     * Moves the temporary file to its final place, so it survives the end of the request.
+     *
+     * Uses `rename()` and falls back to copy-and-delete across devices. After a successful move
+     * `isValid()` is `false`. Does nothing and answers `false` for a file that is not valid.
+     *
+     * @param $dest  Destination path. An existing file is overwritten.
+     * @return bool  `true` on success.
+     */
+    // rename(2), falling back to copy+unlink across devices.
     public function moveTo(string $dest): bool
     {
         if (!$this->isValid()) {
@@ -1818,6 +2121,11 @@ final class UploadedFile
         return $ok;
     }
 
+    /**
+     * Reads the whole file into memory.
+     *
+     * @return string  The bytes, or an empty string if the file is not valid.
+     */
     public function contents(): string
     {
         if (!$this->isValid()) {
@@ -1840,6 +2148,8 @@ final class UploadedFile
  * {@see Part} per part and hands its bytes to the consumer through
  * {@see readPart} — no temp file, nothing retained, a part the consumer stops
  * reading is drained before the next one is opened.
+ *
+ * @internal
  */
 final class Multipart
 {
@@ -2315,13 +2625,31 @@ final class Multipart
 }
 
 /**
- * One part of a streamed multipart body ({@see Request::multipart}): a bounded
- * view over the parser's current part. Its bytes are read from the wire as the
- * handler asks for them and are retained nowhere else; once the generator
- * moves on, {@see read} answers ''.
+ * One part of a streamed `multipart/form-data` body, read straight off the connection.
+ *
+ * Get parts from `Request::multipart()`. Nothing is buffered beyond a single read and no temporary
+ * file is created. A part is readable only while it is the current one: once the loop moves on,
+ * `read()` answers `''`. A part you stop reading is drained for you when the loop advances.
+ *
+ * @see Request
+ * @see Server
  */
+// One part of a streamed multipart body ({@see Request::multipart}): a bounded
+// view over the parser's current part. Its bytes are read from the wire as the
+// handler asks for them and are retained nowhere else; once the generator
+// moves on, {@see read} answers ''.
 final class Part
 {
+    /**
+     * Created by `Request::multipart()`; not meant to be constructed by user code.
+     *
+     * @param $name  The `name=` of the part's `Content-Disposition`.
+     * @param $filename  The `filename=`; empty for a plain field, and also for a file part sent with `filename=""`.
+     * @param $type  The part's `Content-Type`, empty when it has none.
+     * @param $seq  Internal sequence number.
+     * @param $m  Internal parser.
+     * @internal
+     */
     public function __construct(
         /** The `name=` of the Content-Disposition. */
         public readonly string $name,
@@ -2336,13 +2664,29 @@ final class Part
     ) {
     }
 
-    /** Up to $max bytes of this part; '' once its delimiter is reached. */
+    /**
+     * Reads up to `$max` bytes of this part.
+     *
+     * Answers `''` once the part's closing delimiter is reached, or when this part is no longer the
+     * current one. If the client cuts the connection mid-part, the remaining bytes are returned and
+     * then `''`; there is no error signal in this mode.
+     *
+     * @param $max  Largest number of bytes to return.
+     * @return string  The bytes, or an empty string at the end of the part.
+     */
+    // Up to $max bytes of this part; '' once its delimiter is reached.
     public function read(int $max): string
     {
         return $this->m->readPart($max, $this->seq);
     }
 
-    /** The rest of this part as one string — the consumer's memory, uncapped. */
+    /**
+     * Reads the rest of this part into one string. The size is not capped; use `read()` for large
+     * files.
+     *
+     * @return string  The remaining bytes.
+     */
+    // The rest of this part as one string — the consumer's memory, uncapped.
     public function readAll(): string
     {
         $out = '';
@@ -2354,15 +2698,36 @@ final class Part
 }
 
 /**
- * One parsed request. Immutable to the handler.
+ * One parsed HTTP request, as the handler receives it. Read-only.
  *
- * The public surface is `readonly`; the two memo fields and the bitfield beside
- * them are not, and that is deliberate rather than a loophole. PHP freezes only
- * the properties declared `readonly`, so nothing a handler can reach changes —
- * but a request whose query is scanned afresh for every `query()` call scans it
- * five times for a handler reading five parameters. `$parsed` keeps the
- * already-done test to a single load.
+ * The public properties are `readonly`. Query and cookie parsing is lazy and cached: reading five
+ * query parameters scans the query string once. The path is percent-decoded and `..`-collapsed (so
+ * it can be used to look files up); `target` keeps the raw request-target for code that needs the
+ * wire form.
+ *
+ * ```php
+ * $server->serve(function (Request $req): Response {
+ *     $name = $req->query('name', 'world');
+ *     return (new Response())->text("hello $name\n");
+ * });
+ * ```
+ *
+ * The server refuses malformed requests before the handler runs (see `Server`), so a handler only
+ * ever sees a request that is well-formed HTTP/1.0 or 1.1.
+ *
+ * @example doc_http_request
+ * @see Response
+ * @see Server
+ * @see Headers
  */
+// One parsed request. Immutable to the handler.
+//
+// The public surface is `readonly`; the two memo fields and the bitfield beside
+// them are not, and that is deliberate rather than a loophole. PHP freezes only
+// the properties declared `readonly`, so nothing a handler can reach changes —
+// but a request whose query is scanned afresh for every `query()` call scans it
+// five times for a handler reading five parameters. `$parsed` keeps the
+// already-done test to a single load.
 final class Request
 {
     private const P_QUERY = 1;
@@ -2390,6 +2755,27 @@ final class Request
     /** @var array<int, UploadedFile> */
     private static array<int, UploadedFile> $noFiles = [];
 
+    /**
+     * Creates a request value. The server builds these while parsing; construct one yourself only in
+     * tests.
+     *
+     * @param $method  The raw method token, for example `GET` or `PROPFIND`.
+     * @param $target  The request-target exactly as it arrived, still percent-encoded.
+     * @param $path  The decoded, `..`-collapsed path. `%2F` is a separator here; read `$target` when the difference matters.
+     * @param $queryString  The raw query string, without the leading `?`.
+     * @param $version  `1.1` or `1.0`.
+     * @param $headers  The request header fields.
+     * @param $bodyRaw  The buffered body; empty when the body is streamed.
+     * @param $streamed  Whether the body was left on the wire for `stream()` instead of buffered.
+     * @param $remoteAddr  The client address as `ip:port`. Behind a trusted proxy this is the address the proxy reported (no port).
+     * @param $secure  Whether the connection is TLS (or a trusted proxy reported `https`).
+     * @param $peerAddr  The socket's own peer address, always. `remoteAddr` may come from a proxy header, this never does.
+     * @param $forwardedPort  `X-Forwarded-Port` from a trusted proxy, otherwise an empty string.
+     * @param $maxInputVars  php's `max_input_vars`: pairs beyond this many are dropped by `queryArray()` and `postArray()`.
+     * @param $maxFileUploads  php's `max_file_uploads`: file parts beyond this many are dropped.
+     * @param $uploadMaxFilesize  php's `upload_max_filesize` in bytes: a larger file part is kept with `ERR_INI_SIZE` and no temporary file.
+     * @param $reader  The body reader, present only for a streamed body.
+     */
     public function __construct(
         /** The raw method token — `GET`, but also `PROPFIND`. */
         public readonly string $method,
@@ -2429,11 +2815,30 @@ final class Request
         $this->uploadMaxFilesize = $uploadMaxFilesize;
     }
 
+    /**
+     * A request header value. The name is case-insensitive.
+     *
+     * A field sent more than once comes back comma-joined.
+     *
+     * @param $n  Header name.
+     * @param $d  Returned when the header is absent.
+     * @return string  The value, or `$d`.
+     */
     public function header(string $n, string $d = ''): string
     {
         return $this->headers->get($n, $d);
     }
 
+    /**
+     * One query-string parameter, decoded (`+` is a space).
+     *
+     * The query is flat and last-wins: `?a[]=1` is the key `a[]`, and for a repeated key the last
+     * value is returned. Use `queryArray()` for php's nested `$_GET` shape.
+     *
+     * @param $k  Parameter name.
+     * @param $d  Returned when the parameter is absent.
+     * @return string  The value, or `$d`.
+     */
     public function query(string $k, string $d = ''): string
     {
         if (($this->parsed & self::P_QUERY) === 0) {
@@ -2446,7 +2851,11 @@ final class Request
         return $this->queryCache[$k];
     }
 
-    /** @return array<string,string> flat, last-wins */
+    /**
+     * All query-string parameters as a flat, last-wins map of decoded names to decoded values.
+     *
+     * @return array<string,string> flat, last-wins
+     */
     public function queries(): array<string, string>
     {
         if (($this->parsed & self::P_QUERY) === 0) {
@@ -2456,7 +2865,17 @@ final class Request
         return $this->queryCache;
     }
 
-    /** php's $_GET shape: nested (`a[]`, `a[b][c]`), last-wins, max_input_vars-capped. @return array<int|string, mixed> */
+    /**
+     * The query string in php's `$_GET` shape.
+     *
+     * Names nest exactly like `parse_str()`: `a[]=1&b[x]=2` gives `['a' => ['1'], 'b' => ['x' =>
+     * '2']]`, `.` and spaces in a name become `_`, and a canonical decimal key becomes an `int`. At
+     * most `max_input_vars` pairs (default 1000, `Server::maxInputVars()`) are read; the rest are
+     * dropped silently.
+     *
+     * @return array<int|string, mixed>  The nested array.
+     */
+    // php's $_GET shape: nested (`a[]`, `a[b][c]`), last-wins, max_input_vars-capped.
     public function queryArray(): array<int|string, mixed>
     {
         if (($this->parsed & self::P_QUERY_NESTED) === 0) {
@@ -2466,7 +2885,18 @@ final class Request
         return $this->queryNested;
     }
 
-    /** php's $_POST shape from a urlencoded form, or a multipart body's fields. @return array<int|string, mixed> */
+    /**
+     * The form fields of the body in php's `$_POST` shape.
+     *
+     * Filled from an `application/x-www-form-urlencoded` body, or from the fields of a buffered
+     * `multipart/form-data` body (a multipart body is parsed on the first call). Any other content
+     * type gives an empty array. Names nest like `queryArray()` and the same `max_input_vars` cap
+     * applies.
+     *
+     * @return array<int|string, mixed>  The nested array.
+     * @throws \LogicException  when the body is a streamed multipart body; read it with `multipart()`
+     */
+    // php's $_POST shape from a urlencoded form, or a multipart body's fields.
     public function postArray(): array<int|string, mixed>
     {
         if (($this->parsed & self::P_POST) === 0) {
@@ -2512,6 +2942,14 @@ final class Request
         }
     }
 
+    /**
+     * Whether a buffered `multipart/form-data` body could not be parsed.
+     *
+     * The server answers such a request with `400` before the handler runs, so a handler normally sees
+     * `false`. Always `false` for a streamed body and for other content types.
+     *
+     * @return bool  `true` if the body is multipart and malformed.
+     */
     public function multipartFailed(): bool
     {
         if ($this->streamed) {
@@ -2522,14 +2960,26 @@ final class Request
     }
 
     /**
-     * The parts of a STREAMED multipart body ({@see Server::streamBodies}),
-     * one {@see Part} at a time, read from the wire as the handler consumes
-     * them — no temp file, nothing buffered beyond one read. The body is the
-     * generator's: {@see allFiles}/{@see postArray} refuse a streamed
-     * multipart body, and a buffered one is theirs (this throws).
+     * The parts of a streamed `multipart/form-data` body, one at a time.
      *
-     * @return \Generator<int, Part>
+     * Only available when the server streams bodies (`Server::streamBodies()`) and the body is larger
+     * than `maxBodySize`. Each `Part` is read from the connection as the handler consumes it: no
+     * temporary file, nothing buffered beyond one read. The generator owns the body, so call this once
+     * and do not mix it with `allFiles()` or `postArray()`.
+     *
+     * The generator is lazy: a malformed body throws `RuntimeException('malformed multipart')` while
+     * you iterate, not when you call `multipart()`. If the handler lets it escape, the server answers
+     * `500` (or calls `onError`).
+     *
+     * @return \Generator<int, Part>  The parts in wire order.
+     * @throws \LogicException  on first iteration, when the body is buffered (use `allFiles()`) or was already consumed
+     * @see Part
      */
+    // The parts of a STREAMED multipart body ({@see Server::streamBodies}),
+    // one {@see Part} at a time, read from the wire as the handler consumes
+    // them — no temp file, nothing buffered beyond one read. The body is the
+    // generator's: {@see allFiles}/{@see postArray} refuse a streamed
+    // multipart body, and a buffered one is theirs (this throws).
     public function multipart(): \Generator
     {
         if (!$this->streamed) {
@@ -2548,7 +2998,19 @@ final class Request
         }
     }
 
-    /** Every file part, in wire order. @return array<int, UploadedFile> */
+    /**
+     * Every uploaded file of a buffered `multipart/form-data` body, in wire order, including `f[]`
+     * names.
+     *
+     * The body is parsed on the first call. Each file was written to a temporary file that is deleted
+     * when the request ends unless you call `UploadedFile::moveTo()`. At most `max_file_uploads` files
+     * (default 20, `Server::maxFileUploads()`) are kept. Without a multipart body the result is empty.
+     *
+     * @return array<int, UploadedFile>  The files in wire order.
+     * @throws \LogicException  when the body is a streamed multipart body; read it with `multipart()`
+     * @see UploadedFile
+     */
+    // Every file part, in wire order.
     public function allFiles(): array<int, UploadedFile>
     {
         $this->ensureMultipart('allFiles');
@@ -2556,7 +3018,14 @@ final class Request
         return $m === null ? self::$noFiles : $m->files();
     }
 
-    /** The first file per field name. @return array<string, UploadedFile> */
+    /**
+     * The first uploaded file for each field name, keyed by field. Use `allFiles()` when a field can
+     * carry several files.
+     *
+     * @return array<string, UploadedFile>  Field name to file.
+     * @throws \LogicException  when the body is a streamed multipart body
+     */
+    // The first file per field name.
     public function files(): array<string, UploadedFile>
     {
         $out = [];
@@ -2569,12 +3038,17 @@ final class Request
     }
 
     /**
-     * php's $_FILES: six columns, nested names transposed per column
-     * (`f[]`×2 → `$_FILES['f']['name'] = [0 => …, 1 => …]`, `u[avatar]` →
-     * `$_FILES['u']['name']['avatar']`). A part with filename= but no name= is
-     * php's anonymous upload: rfc1867 files it under a running int, `$_FILES[0]`.
-     * @return array<int|string, mixed>
+     * The uploads in php's `$_FILES` shape: six columns (`name`, `full_path`, `type`, `tmp_name`,
+     * `error`, `size`), with nested names such as `f[]` or `u[avatar]` transposed per column. A part
+     * with a `filename=` but no `name=` is filed under a running integer key, as php does.
+     *
+     * @return array<int|string, mixed>  The nested array.
+     * @throws \LogicException  when the body is a streamed multipart body
      */
+    // php's $_FILES: six columns, nested names transposed per column
+    // (`f[]`×2 → `$_FILES['f']['name'] = [0 => …, 1 => …]`, `u[avatar]` →
+    // `$_FILES['u']['name']['avatar']`). A part with filename= but no name= is
+    // php's anonymous upload: rfc1867 files it under a running int, `$_FILES[0]`.
     public function filesArray(): array<int|string, mixed>
     {
         $out = \Manticore\Sapi\Context::$emptyGpc;
@@ -2617,6 +3091,15 @@ final class Request
         nestedAssign($out, \substr($field, 0, $b) . '[' . $col . ']' . \substr($field, $b), $val, false);
     }
 
+    /**
+     * One cookie from the `Cookie` header, urldecoded.
+     *
+     * Last-wins for a repeated name.
+     *
+     * @param $k  Cookie name.
+     * @param $d  Returned when the cookie is absent.
+     * @return string  The value, or `$d`.
+     */
     public function cookie(string $k, string $d = ''): string
     {
         if (($this->parsed & self::P_COOKIE) === 0) {
@@ -2629,7 +3112,11 @@ final class Request
         return $this->cookieCache[$k];
     }
 
-    /** @return array<string,string> */
+    /**
+     * All cookies of the `Cookie` header as a map of names to urldecoded values, last-wins.
+     *
+     * @return array<string,string>  Cookie name to value.
+     */
     public function cookies(): array<string, string>
     {
         if (($this->parsed & self::P_COOKIE) === 0) {
@@ -2639,18 +3126,41 @@ final class Request
         return $this->cookieCache;
     }
 
-    /** The buffered body. '' for a streamed one — use {@see stream}. */
+    /**
+     * The request body as a string.
+     *
+     * Bodies up to `Server::maxBodySize()` (8 MiB by default) are buffered here. A chunked body is
+     * always buffered. For a streamed body this is an empty string; read `stream()` instead.
+     *
+     * @return string  The body bytes.
+     * @example doc_http_json
+     */
+    // The buffered body. '' for a streamed one — use {@see stream}.
     public function body(): string
     {
         return $this->bodyRaw;
     }
 
-    /** The body reader for a streamed body, null when it was buffered. */
+    /**
+     * The body reader for a streamed body, otherwise `null`.
+     *
+     * The server streams a body only when `Server::streamBodies(true)` is on and the declared
+     * `Content-Length` exceeds `maxBodySize`; the reader's budget is that length. A body the handler
+     * does not read is drained before the connection is reused.
+     *
+     * @return ?\Buffer\Reader  A reader, or `null` when the body was buffered.
+     */
+    // The body reader for a streamed body, null when it was buffered.
     public function stream(): ?\Buffer\Reader
     {
         return $this->reader;
     }
 
+    /**
+     * Whether the request carries a body (buffered and non-empty, or streamed).
+     *
+     * @return bool  `true` if there is a body to read.
+     */
     public function hasBody(): bool
     {
         return $this->streamed || $this->bodyRaw !== '';
@@ -2659,6 +3169,8 @@ final class Request
     /**
      * The declared `Content-Length`, or -1 when the request did not declare one
      * (a chunked body never does — its size is only known once it is read).
+     *
+     * @return int  The declared length in bytes, or `-1`.
      */
     public function contentLength(): int
     {
@@ -2669,7 +3181,11 @@ final class Request
         return contentLength($v);
     }
 
-    /** The media type without its parameters, lowercased. */
+    /**
+     * The media type without its parameters, lowercased.
+     *
+     * @return string  For example `application/json`; empty when there is no `Content-Type`.
+     */
     public function contentType(): string
     {
         $v = $this->headers->get('content-type');
@@ -2680,18 +3196,37 @@ final class Request
         return \strtolower(\trim($v));
     }
 
-    /** The method as a {@see Method}, or null for one outside RFC 9110. */
+    /**
+     * The method as a {@see Method}, or null for one outside RFC 9110.
+     *
+     * @return ?Method  The matching `Method` case, or `null` for a token such as `PROPFIND`. Matching is case-sensitive.
+     */
     public function methodEnum(): ?Method
     {
         return Method::tryFrom($this->method);
     }
 
+    /**
+     * Whether the request method is this one. Compared to the raw token, so it is case-sensitive.
+     *
+     * @param $m  The method to test for.
+     * @return bool  `true` on a match.
+     */
     public function is(Method $m): bool
     {
         return $this->method === $m->value;
     }
 
-    /** Whether the connection may be reused after this message. */
+    /**
+     * Whether the client allows the connection to be reused after this message.
+     *
+     * HTTP/1.1 is persistent unless it sends `Connection: close`; HTTP/1.0 is not unless it sends
+     * `Connection: keep-alive`. The server also closes for other reasons (`Response::close()`,
+     * `Server::keepAliveMax()`, shutdown), so this is the client's wish only.
+     *
+     * @return bool  `true` if the client wants to keep the connection open.
+     */
+    // Whether the connection may be reused after this message.
     public function isKeepAlive(): bool
     {
         return !connClose($this->headers->get('connection'), $this->version);
@@ -2699,17 +3234,50 @@ final class Request
 }
 
 /**
- * A response under construction: mutable, fluent, and the handler's return value.
+ * A response under construction: the value a handler returns.
  *
- * Mutable rather than `with*()`-immutable because a handler builds exactly one
- * of these and throws it over the wall. PSR-7's immutability buys substitution
- * across middleware — and middleware is explicitly not in this layer; a package
- * that wants PSR-7 wraps this.
+ * Mutable and fluent: every setter returns the same `Response`, so calls chain. A new response is
+ * `200 OK` with no body. The server fills in what the handler left out: `Content-Length` (or
+ * chunked framing for a stream), `Date`, `Server`, and `Connection` when the connection will
+ * close. `HEAD` requests get the headers of the matching `GET` and no body.
  *
- * Every setter answers `Response`, not `static`: the class is `final`.
+ * ```php
+ * return (new Response(201))
+ *     ->type('application/json')
+ *     ->body(json_encode(['id' => 7]));
+ * ```
+ *
+ * There is no `json()` helper: encode with `json_encode()` and set the type yourself, so only
+ * programs that serialize pay for the encoder.
+ *
+ * A response has one body kind at a time. `text()`, `html()`, `body()`, `write()`, `stream()` and
+ * `file()` replace each other (`write()` appends to a string body). php's own `header()`,
+ * `setcookie()`, `http_response_code()` and `echo` also work inside a handler; the explicit
+ * `Response` wins when both are used (see `Server::captureEcho()`).
+ *
+ * @example doc_http_response
+ * @example doc_http_ambient
+ * @see Request
+ * @see Server
+ * @see Status
  */
+// A response under construction: mutable, fluent, and the handler's return value.
+//
+// Mutable rather than `with*()`-immutable because a handler builds exactly one
+// of these and throws it over the wall. PSR-7's immutability buys substitution
+// across middleware — and middleware is explicitly not in this layer; a package
+// that wants PSR-7 wraps this.
+//
+// Every setter answers `Response`, not `static`: the class is `final`.
 final class Response
 {
+    /**
+     * The status code, `200` by default.
+     *
+     * Set it through `status()` or the constructor. Assigning the property directly works for reading
+     * and for tests, but does not mark the status as chosen by the handler, so an ambient
+     * `http_response_code()` call can still replace it.
+     */
     public int $status = 200;
 
     /** The header block. The OBJECT is fixed; its contents are meant to change. */
@@ -2740,6 +3308,12 @@ final class Response
      *  socket after a 101 ({@see takeover}). */
     private ?\Closure $takeoverFn = null;
 
+    /**
+     * Creates a response.
+     *
+     * @param $status  Status code; see `Status` for named constants.
+     * @param $body  Initial body. Content-Type is not set by this; use `text()`, `html()` or `type()`.
+     */
     public function __construct(int $status = 200, string $body = '')
     {
         $this->headers = new Headers();
@@ -2750,6 +3324,12 @@ final class Response
         $this->body = $body;
     }
 
+    /**
+     * Sets the status code.
+     *
+     * @param $c  Status code, for example `Status::NOT_FOUND`.
+     * @return Response  This response.
+     */
     public function status(int $c): Response
     {
         $this->status = $c;
@@ -2757,32 +3337,65 @@ final class Response
         return $this;
     }
 
-    /** Replace this header. */
+    /**
+     * Sets a header, replacing every existing line with that name.
+     *
+     * @param $n  Header name.
+     * @param $v  Header value.
+     * @return Response  This response.
+     */
+    // Replace this header.
     public function header(string $n, string $v): Response
     {
         $this->headers->set($n, $v);
         return $this;
     }
 
-    /** Append a header, keeping any already set. */
+    /**
+     * Adds a header line and keeps any already set, so the field can repeat on the wire (for example
+     * `Set-Cookie`).
+     *
+     * @param $n  Header name.
+     * @param $v  Header value.
+     * @return Response  This response.
+     */
+    // Append a header, keeping any already set.
     public function addHeader(string $n, string $v): Response
     {
         $this->headers->add($n, $v);
         return $this;
     }
 
+    /**
+     * Removes every line with this header name. An absent name is not an error.
+     *
+     * @param $n  Header name.
+     * @return Response  This response.
+     */
     public function withoutHeader(string $n): Response
     {
         $this->headers->remove($n);
         return $this;
     }
 
+    /**
+     * Sets the `Content-Type` header. Shorthand for `header('Content-Type', $ct)`.
+     *
+     * @param $ct  Media type, with parameters if needed, for example `application/json` or `text/csv; charset=utf-8`.
+     * @return Response  This response.
+     */
     public function type(string $ct): Response
     {
         $this->headers->set('Content-Type', $ct);
         return $this;
     }
 
+    /**
+     * Sets a plain-text body and the type `text/plain; charset=utf-8`.
+     *
+     * @param $s  The body.
+     * @return Response  This response.
+     */
     public function text(string $s): Response
     {
         $this->dropFile();
@@ -2791,6 +3404,12 @@ final class Response
         return $this;
     }
 
+    /**
+     * Sets an HTML body and the type `text/html; charset=utf-8`.
+     *
+     * @param $s  The body.
+     * @return Response  This response.
+     */
     public function html(string $s): Response
     {
         $this->dropFile();
@@ -2799,6 +3418,15 @@ final class Response
         return $this;
     }
 
+    /**
+     * Sets the body without touching the `Content-Type`.
+     *
+     * Combine with `type()`.
+     *
+     * @param $b  The body bytes.
+     * @return Response  This response.
+     * @example doc_http_json
+     */
     public function body(string $b): Response
     {
         $this->dropFile();
@@ -2806,7 +3434,13 @@ final class Response
         return $this;
     }
 
-    /** Append to the body — the in-place amortized `.=`, not a fresh string. */
+    /**
+     * Appends to the body. Appending is amortized: repeated calls do not copy the body each time.
+     *
+     * @param $b  Bytes to append.
+     * @return Response  This response.
+     */
+    // Append to the body — the in-place amortized `.=`, not a fresh string.
     public function write(string $b): Response
     {
         $this->dropFile();
@@ -2815,12 +3449,32 @@ final class Response
     }
 
     /**
-     * Produce the body from a closure taking a {@see \Buffer\Writer}.
+     * Produces the body from a closure while it is being sent.
      *
-     * The response then goes out chunked: the length is not knowable before the
-     * closure has run, and buffering it to find out is the thing streaming
-     * exists to avoid.
+     * The closure receives an `Http\ChunkedWriter`. There is no `Content-Length`: an HTTP/1.1 client
+     * gets `Transfer-Encoding: chunked`, an HTTP/1.0 client gets the raw bytes and the end of the
+     * connection ends the body. Call `flush()` on the writer to push bytes to the client; otherwise
+     * they are batched. If the closure throws, the head has already been sent, so the server ends the
+     * framing and drops the connection instead of answering `500`. Streamed bodies are never
+     * compressed, and `HEAD` requests do not run the closure.
+     *
+     * ```php
+     * return (new Response())->type('text/plain')->stream(function (Http\ChunkedWriter $w) {
+     *     $w->write("line\n");
+     *     $w->flush();
+     * });
+     * ```
+     *
+     * @param $fn  A `Closure(ChunkedWriter): void`.
+     * @return Response  This response.
+     * @example doc_http_stream
+     * @see ChunkedWriter
      */
+    // Produce the body from a closure taking a {@see \Buffer\Writer}.
+    //
+    // The response then goes out chunked: the length is not knowable before the
+    // closure has run, and buffering it to find out is the thing streaming
+    // exists to avoid.
     public function stream(callable $fn): Response
     {
         $this->dropFile();
@@ -2829,15 +3483,38 @@ final class Response
     }
 
     /**
-     * Send a file from disk. The head is built from ONE `fstat` of the OPENED
-     * fd, so the length on the wire is the length of the file the body will
-     * read — a path stat'ed and then opened is two different files under a
-     * concurrent write.
+     * Sends a file from disk.
      *
-     * A missing or unreadable path is the HANDLER's bug and throws here, not on
-     * the wire; {@see safePath} is the one that answers null for a request path
-     * that names nothing.
+     * The length on the wire is the size of the file that was opened, so a file replaced during the
+     * request cannot produce a mismatched length. On a plain TCP connection the bytes go out with
+     * `sendfile(2)` and never enter the process; over TLS they are read and written in 64 KiB pieces.
+     * The head gets `Content-Type` (from the extension unless set), `Last-Modified`, a weak `ETag` and
+     * `Accept-Ranges: bytes`, each only if you have not set it yourself.
+     *
+     * For a response left at `200` to a `GET` or `HEAD`, the server answers `If-None-Match` and
+     * `If-Modified-Since` with `304` and a single `Range: bytes=a-b` with `206` (`416` if
+     * unsatisfiable). A response with another status is sent as is. With `Server::compression()` on, a
+     * `<path>.gz` file that is not older than the original is sent in its place when the client
+     * accepts gzip; a file is never compressed on the fly.
+     *
+     * A missing, unreadable or non-regular path is a bug in the handler, not a `404`: it throws. Turn
+     * a request path into a safe file path with `safePath()`.
+     *
+     * @param $path  Path of a regular file.
+     * @param $type  Content-Type to use; `null` picks one with `mimeFor()`.
+     * @return Response  This response.
+     * @throws \RuntimeException  when the path cannot be opened or is not a regular file
+     * @example doc_http_file
+     * @see Request
      */
+    // Send a file from disk. The head is built from ONE `fstat` of the OPENED
+    // fd, so the length on the wire is the length of the file the body will
+    // read — a path stat'ed and then opened is two different files under a
+    // concurrent write.
+    //
+    // A missing or unreadable path is the HANDLER's bug and throws here, not on
+    // the wire; {@see safePath} is the one that answers null for a request path
+    // that names nothing.
     public function file(string $path, ?string $type = null): Response
     {
         $r = @\fopen($path, 'rb');
@@ -2876,15 +3553,44 @@ final class Response
         return $this;
     }
 
+    /**
+     * Whether the body is a file set with `file()`.
+     *
+     * @return bool  `true` for a file body.
+     */
     public function isFile(): bool { return $this->fileRes !== null; }
+    /** @internal */
     public function fileResource(): ?\Resource { return $this->fileRes; }
+    /**
+     * The path given to `file()`, or an empty string.
+     *
+     * @return string  The path.
+     */
     public function filePath(): string { return $this->filePath; }
+    /**
+     * The size in bytes of the file opened by `file()`, or `0`.
+     *
+     * @return int  The size.
+     */
     public function fileSize(): int { return $this->fileSize; }
+    /**
+     * The modification time (Unix timestamp) of the file opened by `file()`, or `0`.
+     *
+     * @return int  The timestamp.
+     */
     public function fileMtime(): int { return $this->fileMtime; }
+    /** @internal */
     public function fileOffset(): int { return $this->fileOff; }
+    /** @internal */
     public function fileLength(): int { return $this->fileLen; }
 
-    /** WEAK: a byte-identical copy on another host carries another mtime. */
+    /**
+     * The weak `ETag` for the file: `W/"<mtime-hex>-<size-hex>"`. It is weak because a byte-identical
+     * copy on another host has another mtime.
+     *
+     * @return string  The tag, including the quotes and the `W/` prefix.
+     */
+    // WEAK: a byte-identical copy on another host carries another mtime.
     public function fileEtag(): string
     {
         return 'W/"' . \dechex($this->fileMtime) . '-' . \dechex($this->fileSize) . '"';
@@ -2945,6 +3651,13 @@ final class Response
         }
     }
 
+    /**
+     * Sets a `Location` header and the status. There is no body.
+     *
+     * @param $loc  Target URL or path.
+     * @param $code  Redirect status: 301, 302, 303, 307 or 308.
+     * @return Response  This response.
+     */
     public function redirect(string $loc, int $code = 302): Response
     {
         $this->headers->set('Location', $loc);
@@ -2952,10 +3665,25 @@ final class Response
     }
 
     /**
-     * Queue a `Set-Cookie`, rendered by the same function `setcookie()` uses —
-     * one renderer, php's attribute order. The value is percent-encoded, as
-     * `setcookie()` encodes it.
+     * Queues a `Set-Cookie` header.
+     *
+     * Rendered by the same code as php's `setcookie()`, with the same attribute order. The value is
+     * percent-encoded. Safe defaults: `HttpOnly`, `SameSite=Lax`, path `/`. Several cookies, and
+     * cookies from `setcookie()`, all reach the client as separate lines.
+     *
+     * @param $n  Cookie name.
+     * @param $v  Cookie value. An empty string deletes the cookie: an already expired `deleted` cookie is sent.
+     * @param $expires  Expiry as a Unix timestamp; `0` makes a session cookie.
+     * @param $path  The `Path` attribute.
+     * @param $domain  The `Domain` attribute; empty omits it.
+     * @param $secure  Send only over HTTPS.
+     * @param $httponly  Hide from client-side scripts. On by default.
+     * @param $sameSite  The `SameSite` value, normally `Lax`, `Strict` or `None`; empty omits the attribute.
+     * @return Response  This response.
      */
+    // Queue a `Set-Cookie`, rendered by the same function `setcookie()` uses —
+    // one renderer, php's attribute order. The value is percent-encoded, as
+    // `setcookie()` encodes it.
     public function cookie(
         string $n,
         string $v,
@@ -2974,7 +3702,13 @@ final class Response
         return $this;
     }
 
-    /** Close the connection after this response. */
+    /**
+     * Closes the connection after this response: the server sends `Connection: close` and keeps no
+     * keep-alive.
+     *
+     * @return Response  This response.
+     */
+    // Close the connection after this response.
     public function close(): Response
     {
         $this->close = true;
@@ -2982,30 +3716,58 @@ final class Response
     }
 
     /**
-     * Hand the connection to $fn once this response's head is written.
+     * Hands the connection to a closure once this response's head has been written. Used for protocol
+     * upgrades such as WebSocket.
      *
-     * Protocol-agnostic: the server writes the status line and headers, ends
-     * the request context, and calls `$fn($conn, $buf, $server)` in the same
-     * fiber — `$buf` holds whatever the peer sent past the request head. The
-     * connection is closed when $fn returns and is never read as HTTP again.
-     * Only a 101 on HTTP/1.1 may take over; anything else answers 500.
+     * The server writes the status line and headers, then calls `$fn($conn, $buf, $server)` with the
+     * socket, a `Buffer\ByteBuffer` holding any bytes the client sent after the request head, and the
+     * `Server`. The connection is closed when `$fn` returns and is never read as HTTP again. Only a
+     * `101` response to an HTTP/1.1 request can take over, and only if the handler read any streamed
+     * body fully; anything else is a handler bug and the server answers `500` without calling `$fn`.
+     *
+     * @param $fn  A `Closure(Resource, Buffer\ByteBuffer, Server): void` that owns the connection.
+     * @return Response  This response.
+     * @see Server
      */
+    // Hand the connection to $fn once this response's head is written.
+    //
+    // Protocol-agnostic: the server writes the status line and headers, ends
+    // the request context, and calls `$fn($conn, $buf, $server)` in the same
+    // fiber — `$buf` holds whatever the peer sent past the request head. The
+    // connection is closed when $fn returns and is never read as HTTP again.
+    // Only a 101 on HTTP/1.1 may take over; anything else answers 500.
     public function takeover(\Closure $fn): Response
     {
         $this->takeoverFn = $fn;
         return $this;
     }
 
+    /**
+     * Whether `takeover()` was called.
+     *
+     * @return bool  `true` if a takeover closure is set.
+     */
     public function isTakeover(): bool { return $this->takeoverFn !== null; }
 
     /** @internal */
     public function takeoverFn(): ?\Closure { return $this->takeoverFn; }
 
+    /**
+     * The string body set by `text()`, `html()`, `body()`, the constructor or `write()`. Empty for a
+     * stream or a file.
+     *
+     * @return string  The body bytes.
+     */
     public function getBody(): string
     {
         return $this->body;
     }
 
+    /**
+     * Whether the body is produced by a closure set with `stream()`.
+     *
+     * @return bool  `true` for a streamed body.
+     */
     public function isStreaming(): bool
     {
         return $this->bodyFn !== null;
@@ -3017,11 +3779,22 @@ final class Response
         return $this->bodyFn;
     }
 
+    /**
+     * Whether `close()` was called.
+     *
+     * @return bool  `true` if the handler asked to close the connection.
+     */
     public function wantsClose(): bool
     {
         return $this->close;
     }
 
+    /**
+     * Whether the handler chose a status through the constructor or `status()`. If not, an ambient
+     * `http_response_code()` decides.
+     *
+     * @return bool  `true` if a status was set explicitly.
+     */
     public function statusWasSet(): bool
     {
         return $this->statusSet;
@@ -3625,15 +4398,23 @@ final class Outbox
 }
 
 /**
- * The Request being served on this flow, or null outside one.
+ * The request being served on the current flow, or `null` outside one.
  *
- * The ambient reader for code too deep to be handed the Request — a logger, a
- * repository, an error page. It reads the per-request `Async\Context` scope
- * {@see Server} opens, so it is visible inside any task the handler spawns and
- * in nothing outside that request, which is what makes it safe with many
- * requests in flight at once. Bind your own the same way:
- * `Async\Context::withValue('app.user', $u, fn() => …)`.
+ * For code that is too deep to be handed the `Request`: a logger, a repository, an error page. The
+ * server binds the request in a per-request `Async\Context` scope, so it is visible in the handler
+ * and in every task the handler spawns, and in nothing else. That keeps it correct with many
+ * requests in flight. Bind your own request-scoped values with `Async\Context::withValue()`.
+ *
+ * @return ?Request  The current request, or `null` when called outside a request.
  */
+// The Request being served on this flow, or null outside one.
+//
+// The ambient reader for code too deep to be handed the Request — a logger, a
+// repository, an error page. It reads the per-request `Async\Context` scope
+// {@see Server} opens, so it is visible inside any task the handler spawns and
+// in nothing outside that request, which is what makes it safe with many
+// requests in flight at once. Bind your own the same way:
+// `Async\Context::withValue('app.user', $u, fn() => …)`.
 function request(): ?Request
 {
     $v = \Async\Context::value(Server::CTX_REQUEST);
@@ -3644,31 +4425,51 @@ function request(): ?Request
 }
 
 /**
- * The writer a streaming response body is handed.
+ * The writer a streaming response body receives; see `Response::stream()`.
  *
- * Chunked framing lives HERE rather than in `Buffer\Writer`, and deliberately:
- * `Buffer\` is parsed before `Http\`, so a buffer that knew about
- * `Transfer-Encoding` would invert the dependency. This composes the plain
- * writer instead.
+ * For an HTTP/1.1 client each `write()` becomes one chunk of `Transfer-Encoding: chunked`. For an
+ * HTTP/1.0 client, which has no chunked encoding, bytes go out raw and the close of the connection
+ * ends the body. The server writes the terminating chunk itself when the closure returns.
  *
- * `$framed` is false for an HTTP/1.0 peer, which has no chunked encoding: the
- * bytes go out raw and the connection close IS the framing, which is why the
- * Server forces `Connection: close` on that path.
+ * @example doc_http_stream
+ * @see Response
  */
+// The writer a streaming response body is handed.
+//
+// Chunked framing lives HERE rather than in `Buffer\Writer`, and deliberately:
+// `Buffer\` is parsed before `Http\`, so a buffer that knew about
+// `Transfer-Encoding` would invert the dependency. This composes the plain
+// writer instead.
+//
+// `$framed` is false for an HTTP/1.0 peer, which has no chunked encoding: the
+// bytes go out raw and the connection close IS the framing, which is why the
+// Server forces `Connection: close` on that path.
 final class ChunkedWriter
 {
     private \Buffer\Writer $w;
     private bool $framed;
     private bool $ended = false;
 
+    /**
+     * Created by the server for each streamed response.
+     *
+     * @param $w  The underlying writer.
+     * @param $framed  Whether to add chunked framing (false for HTTP/1.0 peers).
+     * @internal
+     */
     public function __construct(\Buffer\Writer $w, bool $framed = true)
     {
         $this->w = $w;
         $this->framed = $framed;
     }
 
-    /** Write one chunk. An empty write is dropped — a zero-length chunk is the
-     *  TERMINATOR, so sending one here would end the body early. */
+    /**
+     * Queues one chunk. An empty string is ignored, because a zero-length chunk would end the body.
+     *
+     * @param $s  Bytes to send.
+     */
+    //  Write one chunk. An empty write is dropped — a zero-length chunk is the
+    //  TERMINATOR, so sending one here would end the body early.
     public function write(string $s): void
     {
         if ($s === '') {
@@ -3677,13 +4478,21 @@ final class ChunkedWriter
         $this->w->write($this->framed ? chunkFrame($s) : $s);
     }
 
-    /** Push what is queued to the socket — what makes streaming observable. */
+    /**
+     * Sends everything queued to the client now. Without it the writer batches output (up to 64 KiB)
+     * before writing to the socket.
+     */
+    // Push what is queued to the socket — what makes streaming observable.
     public function flush(): void
     {
         $this->w->flush();
     }
 
-    /** The terminating zero-length chunk. Idempotent; the Server calls it. */
+    /**
+     * Writes the terminating zero-length chunk and flushes. Idempotent. The server calls it for you
+     * after the closure returns, so a handler normally never needs to.
+     */
+    // The terminating zero-length chunk. Idempotent; the Server calls it.
     public function end(): void
     {
         if ($this->ended) {
@@ -3696,11 +4505,22 @@ final class ChunkedWriter
         $this->w->flush();
     }
 
+    /**
+     * The number of bytes handed to the socket so far, chunk framing included. Bytes still queued are
+     * not counted.
+     *
+     * @return int  The byte count.
+     */
     public function bytesWritten(): int
     {
         return $this->w->bytesWritten();
     }
 
+    /**
+     * Whether chunked framing is in use (`false` for an HTTP/1.0 client).
+     *
+     * @return bool  `true` for chunked framing.
+     */
     public function isChunked(): bool
     {
         return $this->framed;
@@ -3714,28 +4534,80 @@ final class Takeover
 }
 
 /**
- * An HTTP/1.1 server: `(new Server($addr))->serve($handler)`, where `$handler`
- * is `callable(Request): Response`.
+ * An HTTP/1.1 server: `(new Server($addr))->serve($handler)`, where the handler is
+ * `callable(Request): Response`.
  *
- * Written on ORDINARY blocking-style stream I/O — `stream_socket_accept`,
- * `fread`, `fwrite`, `fclose` — never `Async\read`/`Async\write`. Inside
- * `Async\async()` every one of those routes its would-block through the
- * netpoller and suspends the fiber, so this reads like a blocking server and
- * runs like an evented one. It also means a `tls://` listener works: the raw
- * async path carries neither buffering nor TLS.
+ * ```php
+ * use Http\{Request, Response, Server};
  *
- * Concurrency is a per-connection task under one {@see \Async\TaskGroup}, so
- * the scope cannot close while a request is in flight and cancelling it
- * cancels every connection. The permit is taken BEFORE the accept: at the
- * ceiling this worker simply stops accepting and the queue stays in the
- * kernel's backlog, which is what backpressure means for a server.
+ * (new Server('tcp://127.0.0.1:8080'))->serve(function (Request $req): Response {
+ *     return (new Response())->text('hello ' . $req->query('name', 'world') . "\n");
+ * });
+ * ```
+ *
+ * The binary is the server: there is no fpm and no worker pool to configure. One process serves
+ * many connections at once. Each connection is a task, and reads and writes suspend the task
+ * instead of blocking the process, so a handler may use ordinary blocking-looking code. A `tls://`
+ * address serves TLS.
+ *
+ * Configure with the fluent setters below before calling `serve()`. Limits and timeouts and their
+ * defaults:
+ *
+ * | setter | default | on breach |
+ * |---|---|---|
+ * | `maxHeaderBytes` | 16384 | `431` |
+ * | `maxHeaderCount` | 100 | `431` |
+ * | `maxBodySize` | 8388608 | `413`, or the body is streamed |
+ * | `maxFileUploads` | 20 | further file parts are dropped |
+ * | `uploadMaxFilesize` | 2097152 | the part is kept with `ERR_INI_SIZE` |
+ * | `maxInputVars` | 1000 | extra pairs are dropped silently |
+ * | `maxConnections` | 4096 | the worker stops accepting; the kernel backlog queues |
+ * | `keepAliveMax` | 0 | the connection closes after N requests; 0 means never |
+ * | `idleTimeout` | 5.0 s | silent close between requests |
+ * | `headerTimeout` | 10.0 s | `408`, once a request has started arriving |
+ * | `writeTimeout` | 30.0 s | the write is abandoned |
+ *
+ * Requests the server refuses before the handler runs get a bodyless response and a closed
+ * connection: `400` for a malformed request line or header, a header name followed by whitespace
+ * before the colon, HTTP/1.1 without `Host`, or `Transfer-Encoding` together with
+ * `Content-Length`; `411` for a body-bearing method without framing; `413`, `417` for an `Expect`
+ * other than `100-continue`, `431`, `501` for `CONNECT`, and `505` for any version other than 1.0
+ * and 1.1. `Expect: 100-continue` is answered only after the request head has been accepted.
+ *
+ * If the handler throws, the server answers `500` (or calls `onError()`) and keeps serving.
+ * Forwarded headers are ignored unless the peer is listed in `trustedProxies()`.
+ *
+ * @example doc_http_server_basic
+ * @example doc_http_limits
+ * @see Request
+ * @see Response
+ * @see Proxy
  */
+// An HTTP/1.1 server: `(new Server($addr))->serve($handler)`, where `$handler`
+// is `callable(Request): Response`.
+//
+// Written on ORDINARY blocking-style stream I/O — `stream_socket_accept`,
+// `fread`, `fwrite`, `fclose` — never `Async\read`/`Async\write`. Inside
+// `Async\async()` every one of those routes its would-block through the
+// netpoller and suspends the fiber, so this reads like a blocking server and
+// runs like an evented one. It also means a `tls://` listener works: the raw
+// async path carries neither buffering nor TLS.
+//
+// Concurrency is a per-connection task under one {@see \Async\TaskGroup}, so
+// the scope cannot close while a request is in flight and cancelling it
+// cancels every connection. The permit is taken BEFORE the accept: at the
+// ceiling this worker simply stops accepting and the queue stays in the
+// kernel's backlog, which is what backpressure means for a server.
 final class Server
 {
     /** Bytes asked of the socket per read. */
     private const READ_CHUNK = 8192;
 
-    /** The Async\Context key the current Request is bound under. {@see request} */
+    /**
+     * The `Async\Context` key under which the current `Request` is bound for the duration of a request
+     * (`'http.request'`). Read it with `Http\request()`.
+     */
+    // The Async\Context key the current Request is bound under. {@see request}
     public const CTX_REQUEST = 'http.request';
 
     private string $addr;
@@ -3804,6 +4676,15 @@ final class Server
     private array<int, \Closure> $stopHooks = [];
     private int $stopSeq = 0;
 
+    /**
+     * Creates a server. Nothing is bound until `serve()` is called.
+     *
+     * An address starting with `tls://` or `ssl://` makes the connections TLS; give the certificate in
+     * the stream context.
+     *
+     * @param $addr  A stream-socket address such as `tcp://0.0.0.0:8080`.
+     * @param $context  An optional stream context, for example with `ssl` options or `socket.backlog`.
+     */
     public function __construct(string $addr = 'tcp://127.0.0.1:8080', mixed $context = null)
     {
         $this->addr = $addr;
@@ -3812,13 +4693,23 @@ final class Server
     }
 
     /**
-     * Serve an ALREADY-BOUND listener.
+     * Creates a server over a listener you have already bound.
      *
-     * What socket activation needs, and what makes this testable: a case binds
-     * its own port (scanning for a free one), hands the resource over and keeps
-     * the client side in the same process. The Server does not close a listener
-     * it did not open.
+     * This is what socket activation needs, and it lets a program bind its own port (or port 0), hand
+     * the socket over and run a client in the same process. The server does not close a listener it
+     * did not open.
+     *
+     * @param $listener  A bound, listening stream socket server, in non-blocking mode.
+     * @param $secure  Whether connections accepted from it are TLS.
+     * @return Server  A new server.
+     * @example doc_http_server_basic
      */
+    // Serve an ALREADY-BOUND listener.
+    //
+    // What socket activation needs, and what makes this testable: a case binds
+    // its own port (scanning for a free one), hands the resource over and keeps
+    // the client side in the same process. The Server does not close a listener
+    // it did not open.
     public static function onListener(\Resource $listener, bool $secure = false): Server
     {
         $s = new Server('', null);
@@ -3828,27 +4719,143 @@ final class Server
         return $s;
     }
 
+    /**
+     * Serves with N forked worker processes sharing one listener.
+     *
+     * The listener is bound once, then N workers inherit it; the kernel balances accepts between them.
+     * A supervisor restarts a worker that crashes and forwards `SIGTERM` and `SIGINT` to all of them.
+     * The parent serves nothing, and `serve()` returns once every worker has exited. `0` (the default)
+     * serves in the current process. Ignored when `serve()` is called from inside an `Async` scope.
+     *
+     * @param $n  Number of workers.
+     * @return Server  This server.
+     */
     public function workers(int $n): Server { $this->workerCount = $n; return $this; }
+    /**
+     * The ceiling on simultaneous connections for this worker; default 4096 (a live connection costs
+     * about 32 KB).
+     *
+     * A permit is taken before `accept`, so at the ceiling the worker stops accepting and new
+     * connections wait in the kernel backlog. Values below 1 are raised to 1.
+     *
+     * @param $n  Connections.
+     * @return Server  This server.
+     */
     public function maxConnections(int $n): Server { $this->maxConnections = $n < 1 ? 1 : $n; return $this; }
+    /**
+     * Seeds php's superglobals for every request, so existing php code can run in a handler. Off by
+     * default.
+     *
+     * When on, `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_REQUEST`, `$_FILES` and `$_SESSION` are
+     * filled per request (and `session_start()` works), and from `serve()` on `PHP_SAPI` and
+     * `php_sapi_name()` answer `cli-server`, process-wide. The superglobals are request-bound:
+     * concurrent requests do not see each other's. A streamed body is not seeded into `$_POST` or
+     * `$_FILES`. `header()`, `setcookie()`, `http_response_code()` and `echo` work in every handler
+     * regardless of this setting.
+     *
+     * @param $on  Whether to seed the superglobals.
+     * @return Server  This server.
+     * @example doc_http_ambient
+     */
     public function compat(bool $on): Server { $this->compat = $on; return $this; }
+    /**
+     * Whether bytes a handler `echo`es become the response body. On by default.
+     *
+     * The echoed text is used only when the returned `Response` has no body and is not a stream or a
+     * file. If both exist, the explicit body wins and the echoed bytes are dropped.
+     *
+     * @param $on  Whether to capture output.
+     * @return Server  This server.
+     */
     public function captureEcho(bool $on): Server { $this->captureEcho = $on; return $this; }
+    /**
+     * How long a connection may sit silent between requests before it is closed, in seconds. Default
+     * `5.0`. A client that sent nothing is closed without a response.
+     *
+     * @param $s  Seconds; fractions are allowed.
+     * @return Server  This server.
+     */
     public function idleTimeout(float $s): Server { $this->idleTimeout = $s; return $this; }
+    /**
+     * How long the rest of a request may take to arrive once its first bytes are in, in seconds.
+     * Default `10.0`. A client that stalls past it gets `408` and the connection is closed, so a
+     * client dribbling a head cannot hold a slot open.
+     *
+     * @param $s  Seconds; fractions are allowed.
+     * @return Server  This server.
+     */
     public function headerTimeout(float $s): Server { $this->headerTimeout = $s; return $this; }
+    /**
+     * The timeout on the socket while a response is being written, in seconds. Default `30.0`. It
+     * bounds a client that stops reading.
+     *
+     * @param $s  Seconds; fractions are allowed.
+     * @return Server  This server.
+     */
     public function writeTimeout(float $s): Server { $this->writeTimeout = $s; return $this; }
+    /**
+     * The largest request head (request line plus headers) accepted, in bytes. Default `16384`. A
+     * larger head is answered with `431` and the connection is closed.
+     *
+     * @param $n  Bytes.
+     * @return Server  This server.
+     */
     public function maxHeaderBytes(int $n): Server { $this->maxHeaderBytes = $n; return $this; }
+    /**
+     * The largest number of header fields accepted in a request. Default `100`. More is answered with
+     * `431` and the connection is closed.
+     *
+     * @param $n  Fields.
+     * @return Server  This server.
+     */
     public function maxHeaderCount(int $n): Server { $this->maxHeaderCount = $n; return $this; }
+    /**
+     * The largest request body that is buffered, in bytes. Default `8388608` (8 MiB).
+     *
+     * A larger declared `Content-Length` is answered with `413`, unless `streamBodies(true)` is on, in
+     * which case the handler gets `Request::stream()`. A chunked body is always buffered, so the cap
+     * is checked against its running total and a larger one is a `413`.
+     *
+     * @param $n  Bytes.
+     * @return Server  This server.
+     */
     public function maxBodySize(int $n): Server { $this->maxBodySize = $n; return $this; }
+    /**
+     * Lets a body larger than `maxBodySize` be read incrementally instead of being refused with `413`.
+     * Off by default.
+     *
+     * The handler then reads `Request::stream()` (or `Request::multipart()` for an upload), with the
+     * declared length as its budget. Smaller bodies are still buffered. A body the handler ignores is
+     * drained before the connection is reused.
+     *
+     * @param $on  Whether to stream oversized bodies.
+     * @return Server  This server.
+     */
     public function streamBodies(bool $on): Server { $this->streamBodies = $on; return $this; }
 
     /**
-     * gzip buffered bodies of text-like types of at least `$minBytes`, to a
-     * client whose `Accept-Encoding` grants it. Off by default: the deflater is
-     * pure PHP and a program that never calls this carries none of it.
+     * Enables gzip for buffered text-like responses. Off by default.
      *
-     * A FILE is never deflated on the fly — a `<path>.gz` sibling is served
-     * instead ({@see Response::useGzSibling}). Streamed bodies are not
-     * compressed at all: `gzencode` is one-shot.
+     * A response is compressed when its `Content-Type` is textual (`text/*`, JSON, JavaScript, XML,
+     * SVG, WebAssembly or a `+json`/`+xml` type), the body is at least `$minBytes` long, the client's
+     * `Accept-Encoding` allows gzip, and no `Content-Encoding` is set. A strong `ETag` becomes weak.
+     * `Vary: Accept-Encoding` is added to every response of a compressible type, compressed or not.
+     * Streamed bodies are never compressed, and a file is never compressed on the fly: a `<path>.gz`
+     * sibling that is not older than the file is sent instead.
+     *
+     * @param $on  Whether to compress.
+     * @param $minBytes  Smallest body to compress, in bytes; negative values count as 0.
+     * @param $level  gzip level, passed to `gzencode()`.
+     * @return Server  This server.
+     * @example doc_http_compression
      */
+    // gzip buffered bodies of text-like types of at least `$minBytes`, to a
+    // client whose `Accept-Encoding` grants it. Off by default: the deflater is
+    // pure PHP and a program that never calls this carries none of it.
+    //
+    // A FILE is never deflated on the fly — a `<path>.gz` sibling is served
+    // instead ({@see Response::useGzSibling}). Streamed bodies are not
+    // compressed at all: `gzencode` is one-shot.
     public function compression(bool $on, int $minBytes = 1024, int $level = 6): Server
     {
         $this->compress = $on;
@@ -3856,34 +4863,115 @@ final class Server
         $this->compressLevel = $level;
         return $this;
     }
-    /** Close a connection after N requests; 0 (the default) never does. */
+    /**
+     * Closes a connection after this many requests. `0` (the default) never closes it for that reason.
+     *
+     * @param $n  Requests per connection.
+     * @return Server  This server.
+     */
+    // Close a connection after N requests; 0 (the default) never does.
     public function keepAliveMax(int $n): Server { $this->keepAliveMax = $n; return $this; }
-    /** The listen() queue; the kernel clamps it to somaxconn. A context's own `socket.backlog` wins. */
+    /**
+     * The length of the listen queue; default `511`. The kernel clamps it to `somaxconn`, and a full
+     * queue makes a connect fail with a reset. A `socket.backlog` option in the stream context takes
+     * precedence.
+     *
+     * @param $n  Queue length.
+     * @return Server  This server.
+     */
+    // The listen() queue; the kernel clamps it to somaxconn. A context's own `socket.backlog` wins.
     public function backlog(int $n): Server { $this->backlog = $n; return $this; }
-    /** '' omits the `Server:` header entirely. */
+    /**
+     * The value of the `Server:` response header; default `manticore`. An empty string omits the
+     * header. A handler's own `Server` header is kept.
+     *
+     * @param $s  Header value.
+     * @return Server  This server.
+     */
+    // '' omits the `Server:` header entirely.
     public function serverName(string $s): Server { $this->serverName = $s; return $this; }
+    /**
+     * How long, in seconds, an idle accept waits before the loop checks whether `stop()` was called.
+     * Default `0.25`. It bounds shutdown latency; lower it in tests.
+     *
+     * @param $s  Seconds.
+     * @return Server  This server.
+     */
     public function acceptWait(float $s): Server { $this->acceptWait = $s; return $this; }
-    /** php's `max_input_vars` for $_GET / $_POST (1000, like php.ini's default). */
+    /**
+     * php's `max_input_vars` for `queryArray()` and `postArray()` (and the superglobals): default
+     * `1000`. Pairs beyond the limit are dropped silently. Values below 1 are raised to 1.
+     *
+     * @param $n  Variables.
+     * @return Server  This server.
+     */
+    // php's `max_input_vars` for $_GET / $_POST (1000, like php.ini's default).
     public function maxInputVars(int $n): Server { $this->maxInputVars = $n < 1 ? 1 : $n; return $this; }
-    /** php's `max_file_uploads` (20). */
+    /**
+     * php's `max_file_uploads`: the most file parts kept per multipart request; default `20`. Further
+     * file parts are dropped. Negative values count as 0.
+     *
+     * @param $n  Files.
+     * @return Server  This server.
+     */
+    // php's `max_file_uploads` (20).
     public function maxFileUploads(int $n): Server { $this->maxFileUploads = $n < 0 ? 0 : $n; return $this; }
-    /** php's per-file `upload_max_filesize` (2 MiB). */
+    /**
+     * php's per-file `upload_max_filesize`, in bytes; default `2097152` (2 MiB). A larger file part is
+     * kept with `UploadedFile::ERR_INI_SIZE`, no temporary file and size 0. Negative values count as
+     * 0.
+     *
+     * @param $n  Bytes.
+     * @return Server  This server.
+     */
+    // php's per-file `upload_max_filesize` (2 MiB).
     public function uploadMaxFilesize(int $n): Server { $this->uploadMaxFilesize = $n < 0 ? 0 : $n; return $this; }
     /**
      * php's `post_max_size`. Reserved — not enforced in either mode: a
      * buffered body is already bounded by {@see maxBodySize}, and a streamed
      * one's field bytes are the handler's ({@see Part::readAll}).
+     *
+     * @param $n  Bytes.
+     * @return Server  This server.
      */
     public function postMaxSize(int $n): Server { $this->postMaxSize = $n < 0 ? 0 : $n; return $this; }
-    /** `callable(\Throwable, ?Request): Response` */
+    /**
+     * Sets the function that turns an exception thrown by a handler into a response.
+     *
+     * Without it the server answers `500 Internal Server Error` and closes the connection. If this
+     * function throws too, the same canned `500` is used. Cancellation (shutdown) is not passed to it.
+     *
+     * @param $fn  A `callable(Throwable, Request): Response`.
+     * @return Server  This server.
+     * @example doc_http_limits
+     */
+    // `callable(\Throwable, ?Request): Response`
     public function onError(callable $fn): Server { $this->onError = $fn; return $this; }
 
     /**
-     * Peers whose `X-Forwarded-*` / `Forwarded` headers are believed. Off
-     * unless called. A malformed entry throws here, at configuration time.
+     * Declares which peers are reverse proxies whose forwarded headers are believed. Off unless
+     * called, because any client can send those headers.
      *
-     * @param array<int, string> $cidrs
+     * When the connecting peer is in `$cidrs`, `X-Forwarded-For` is walked from the right to the first
+     * hop that is not itself trusted, and that hop becomes `Request::$remoteAddr`. A hop that is not
+     * an IP address (`unknown`, an obfuscated identifier) is skipped. `X-Forwarded-Proto`, `-Host` and
+     * `-Port` take their first (leftmost) value and set `Request::$secure`, the `Host` header and
+     * `Request::$forwardedPort`. Only the headers whose flag is in `$flags` are used.
+     * `Request::$peerAddr` is always the socket's own address. With `Proxy::FORWARDED`, RFC 7239
+     * `Forwarded:` is read too and wins for the fields it names.
+     *
+     * A dual-stack listener shows an IPv4 client as `::ffff:a.b.c.d`; a plain IPv4 CIDR never matches
+     * it, so list the mapped form (`::ffff:10.0.0.0/104`) or an IPv6 prefix.
+     *
+     * @param array<int, string> $cidrs  Addresses or networks such as `10.0.0.0/8`, `127.0.0.1` or `2001:db8::/32`.
+     * @param $flags  Which headers to trust: `Proxy` bits, `Proxy::ALL` by default.
+     * @return Server  This server.
+     * @throws \InvalidArgumentException  when an entry is not a valid address or CIDR
+     * @example doc_http_proxy
+     * @see Proxy
      */
+    // Peers whose `X-Forwarded-*` / `Forwarded` headers are believed. Off
+    // unless called. A malformed entry throws here, at configuration time.
     public function trustedProxies(array<int, string> $cidrs, int $flags = Proxy::ALL): Server
     {
         $parsed = [];
@@ -3900,15 +4988,32 @@ final class Server
     }
 
     /**
-     * Run until {@see stop} (or cancellation). `$handler` is
-     * `callable(Request): Response`.
+     * Runs the server until `stop()` is called or the process is told to shut down.
      *
-     * Reentrant on purpose: called from INSIDE an `Async\async()` scope it just
-     * runs the loop as a task of that scope — which is what lets one process
-     * host both the server and its client, i.e. what makes the suite offline.
-     * Called from outside it opens its own scope and installs the shutdown
-     * signals, which is what an application wants.
+     * Called from outside an `Async` scope (the normal case) it binds the address, installs `SIGTERM`
+     * and `SIGINT` handlers, and blocks until shutdown; with `workers(N)` it forks the workers
+     * instead. Called from inside an `Async` scope it runs the accept loop as a task of that scope,
+     * which lets one program host both the server and a client, as the examples do. Requests in flight
+     * at shutdown are finished, not cut.
+     *
+     * Each request runs the handler inside its own `Async\Context` scope, so `Http\request()` and
+     * values bound with `Async\Context::withValue()` are visible to tasks the handler spawns and to
+     * nothing else.
+     *
+     * @param $handler  A `callable(Request): Response`.
+     * @throws \RuntimeException  when the address cannot be bound
+     * @example doc_http_server_basic
+     * @see Request
+     * @see Response
      */
+    // Run until {@see stop} (or cancellation). `$handler` is
+    // `callable(Request): Response`.
+    //
+    // Reentrant on purpose: called from INSIDE an `Async\async()` scope it just
+    // runs the loop as a task of that scope — which is what lets one process
+    // host both the server and its client, i.e. what makes the suite offline.
+    // Called from outside it opens its own scope and installs the shutdown
+    // signals, which is what an application wants.
     public function serve(callable $handler): void
     {
         $this->handler = $handler;
@@ -3964,15 +5069,23 @@ final class Server
     }
 
     /**
-     * Run $fn once when {@see stop} is called — how a long-lived takeover
-     * (a WebSocket session) learns the server is going down. Returns an id
-     * for {@see offStop}.
+     * Registers a hook that runs once when `stop()` is called.
      *
-     * A takeover that upgrades DURING or AFTER `stop()` (dispatch was already
-     * in flight, or `stop()` raced it) registers into a hook list that will
-     * never run again — `stop()` is one-shot. $fn runs INLINE here instead,
-     * so a session that checks in late still hears the server is going down.
+     * This is how a long-lived takeover (such as a WebSocket session) learns that the server is going
+     * down. If the server is already stopped, the hook runs immediately. A hook that throws does not
+     * keep the others from running.
+     *
+     * @param $fn  The hook.
+     * @return int  An id for `offStop()`.
      */
+    // Run $fn once when {@see stop} is called — how a long-lived takeover
+    // (a WebSocket session) learns the server is going down. Returns an id
+    // for {@see offStop}.
+    //
+    // A takeover that upgrades DURING or AFTER `stop()` (dispatch was already
+    // in flight, or `stop()` raced it) registers into a hook list that will
+    // never run again — `stop()` is one-shot. $fn runs INLINE here instead,
+    // so a session that checks in late still hears the server is going down.
     public function onStop(\Closure $fn): int
     {
         $this->stopSeq = $this->stopSeq + 1;
@@ -3988,17 +5101,27 @@ final class Server
         return $this->stopSeq;
     }
 
+    /**
+     * Removes a hook registered with `onStop()`. An unknown id is ignored.
+     *
+     * @param $id  The id `onStop()` returned.
+     */
     public function offStop(int $id): void
     {
         unset($this->stopHooks[$id]);
     }
 
     /**
-     * Ask the accept loop to wind down. In-flight requests are NOT interrupted:
-     * the group joins them, which is what graceful means. Every registered
-     * {@see onStop} hook runs once, here — a live takeover's only signal that
-     * the server is going down.
+     * Asks the server to wind down.
+     *
+     * The accept loop stops taking new connections within `acceptWait()` seconds; requests already in
+     * flight are joined, not interrupted. Every `onStop()` hook runs once. Calling it again does
+     * nothing.
      */
+    // Ask the accept loop to wind down. In-flight requests are NOT interrupted:
+    // the group joins them, which is what graceful means. Every registered
+    // {@see onStop} hook runs once, here — a live takeover's only signal that
+    // the server is going down.
     public function stop(): void
     {
         if ($this->stopped) {
@@ -4017,7 +5140,18 @@ final class Server
         }
     }
 
-    /** @return array<string,int> served / open / accepted / errors / upgraded / stopped */
+    /**
+     * Counters since the server started.
+     *
+     * - `served`: responses written
+     * - `open`: connections open now
+     * - `accepted`: connections accepted
+     * - `errors`: refused requests, handler exceptions, timeouts and failed writes
+     * - `upgraded`: connections handed over by `Response::takeover()`
+     * - `stopped`: `1` after `stop()`, else `0`
+     *
+     * @return array<string,int> served / open / accepted / errors / upgraded / stopped
+     */
     public function stats(): array<string, int>
     {
         $out = [];

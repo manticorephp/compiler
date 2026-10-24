@@ -1,0 +1,1 @@
+Declaration of B::f(int $x): string must be compatible with A::f(string $x): string

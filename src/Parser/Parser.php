@@ -961,6 +961,7 @@ final class Parser
                 $typeHint,
                 $attrs,
                 $span,
+                $modifiers->isFinal,
             );
         } while ($this->match(TokenKind::Comma));
         $this->expect(TokenKind::Semicolon, "expected ';' after const");

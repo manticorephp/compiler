@@ -1,0 +1,1 @@
+Declaration of B::f(): string|int must be compatible with A::f(array|string|int|null $a = null, A|Countable|null $b = null, Traversable|array $i = []): int|bool

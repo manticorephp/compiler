@@ -5,6 +5,7 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\Add;
 use Compile\Mir\ArrayAccess_;
 use Compile\Mir\ArrayLit;
+use Compile\Mir\NullConst;
 use Compile\Mir\StringConst;
 use Compile\Mir\Walk;
 use Compile\Mir\Spread_;
@@ -2440,6 +2441,8 @@ trait InferNodes
             if ($el->key !== null) {
                 $hasKey = true;
                 $kt = $this->inferNode($el->key);
+                $el->key = $this->normalizedArrayKey($el->key, true);
+                $kt = $el->key->type;
                 // keyType tracks the first KEYED element, not the first element
                 // overall — a leading keyless spread (`[...$a, "x"=>1]`) leaves
                 // keyType null when the first real key arrives.
@@ -2574,10 +2577,23 @@ trait InferNodes
         return null;
     }
 
+    /** php's array-key cast of a statically float or null key: a float truncates to int, null is "". */
+    private function normalizedArrayKey(Node $key, bool $arrayBase): Node
+    {
+        if (!$arrayBase) { return $key; }
+        $k = $key->type->kind;
+        if ($k === Type::KIND_FLOAT) { return new Cast('int', $key, Type::int_()); }
+        if ($k === Type::KIND_NULL && $key instanceof NullConst && $key->asKey) {
+            return new StringConst('', Type::string_());
+        }
+        return $key;
+    }
+
     private function inferArrayAccess(ArrayAccess_ $node): Type
     {
         $at = $this->inferNode($node->array);
         $this->inferNode($node->index);
+        $node->index = $this->normalizedArrayKey($node->index, $at->isArray());
         // An ERASED element read is honestly a CELL: the emitter decodes the
         // word by the buffer's element hint at every read whose result is a
         // cell (docs/design/value-channels.md), so an element nobody typed
@@ -2683,6 +2699,7 @@ trait InferNodes
     {
         $at = $this->inferNode($node->array);
         $it = $this->inferNode($node->index);
+        $node->index = $this->normalizedArrayKey($node->index, $at->isArray());
         $vt = $this->inferNode($node->value);
         // A constant-key store into a SHAPED local writes one declared field:
         // the local keeps its shape (the re-narrowing arms below would drop the

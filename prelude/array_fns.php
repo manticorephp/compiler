@@ -127,6 +127,30 @@ function array_map(?callable $cb, array $arr): array
 }
 
 /**
+ * php's multi-array `array_map($cb, $a, $b, ...)` (LowerExprs rewrites the call): the
+ * callback gets one value per array, shorter arrays pad with null, the result is a
+ * list; a null callback zips into tuples.
+ * @param mixed[] $arrays
+ */
+function __mc_array_map_zip(?callable $cb, array $arrays): array
+{
+    $cols = [];
+    $n = 0;
+    foreach ($arrays as $a) {
+        $v = array_values($a);
+        $cols[] = $v;
+        if (count($v) > $n) { $n = count($v); }
+    }
+    $out = [];
+    for ($i = 0; $i < $n; $i++) {
+        $row = [];
+        foreach ($cols as $c) { $row[] = $c[$i] ?? null; }
+        $out[] = $cb === null ? $row : $cb(...$row);
+    }
+    return $out;
+}
+
+/**
  * `array_filter(arr, cb, mode)` — `$mode` selects what the callback receives:
  * ARRAY_FILTER_USE_KEY (2) the key alone, ARRAY_FILTER_USE_BOTH (1) value then
  * key, 0 (default) the value alone. Keys are preserved either way.

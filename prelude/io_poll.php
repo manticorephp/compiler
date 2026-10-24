@@ -52,6 +52,11 @@ namespace Io {
 namespace Io\Poll {
 
     // Marker interface — a pollable resource. Only internal handle types implement it.
+    /**
+     * A pollable resource that can be added to a {@see Context}.
+     *
+     * The interface has no methods. Wrap a stream in `StreamPollHandle`, or a bare file descriptor in `FdPollHandle`, and pass the wrapper to {@see Context::add}. Any other implementation is rejected with {@see InvalidHandleException}.
+     */
     interface Handle
     {
     }
@@ -59,26 +64,80 @@ namespace Io\Poll {
     // Readiness/interest events. Bit = 1 << (caseIndex) matching php's internal
     // `1 << (caseId-1)`: Read=1 Write=2 Error=4 HangUp=8 ReadHangUp=16 OneShot=32
     // EdgeTriggered=64.
+    /**
+     * A readiness event a {@see Watcher} asks for or reports.
+     *
+     * `Read`, `Write`, `Error`, `HangUp` and `ReadHangUp` are readiness conditions. `OneShot` and `EdgeTriggered` are watch modes, requested in `Context::add()` or `Watcher::modify()`.
+     */
     enum Event
     {
+        /**
+         * The handle is readable.
+         */
         case Read;
+        /**
+         * The handle is writable.
+         */
         case Write;
+        /**
+         * An error condition occurred on the handle.
+         */
         case Error;
+        /**
+         * The peer hung up.
+         */
         case HangUp;
+        /**
+         * The peer closed its writing side.
+         */
         case ReadHangUp;
+        /**
+         * Watch mode: report the handle once.
+         */
         case OneShot;
+        /**
+         * Watch mode: report changes of readiness instead of the level. Needs a backend whose `supportsEdgeTriggering()` is true.
+         */
         case EdgeTriggered;
     }
 
+    /**
+     * An I/O readiness mechanism for a {@see Context}.
+     *
+     * `Auto` chooses the platform's reactor: epoll on Linux, kqueue on Darwin and BSD. `Poll` (poll(2)) is available everywhere. `EventPorts` and `WSAPoll` are never available in this implementation.
+     */
     enum Backend
     {
+        /**
+         * Pick the best backend for the platform.
+         */
         case Auto;
+        /**
+         * poll(2); level-triggered only, always available.
+         */
         case Poll;
+        /**
+         * Linux epoll; available on Linux only.
+         */
         case Epoll;
+        /**
+         * kqueue; available on Darwin and BSD.
+         */
         case Kqueue;
+        /**
+         * Solaris event ports; not supported.
+         */
         case EventPorts;
+        /**
+         * Windows WSAPoll; not supported.
+         */
         case WSAPoll;
 
+        /**
+         * Whether this backend can be used on the current platform.
+         *
+         * @return bool  true if a {@see Context} can be created with it
+         */
         public function isAvailable(): bool
         {
             if ($this === Backend::Poll || $this === Backend::Auto) { return true; }
@@ -89,6 +148,11 @@ namespace Io\Poll {
             return false;   // EventPorts (Solaris) / WSAPoll (Windows): unsupported
         }
 
+        /**
+         * Whether the backend supports {@see Event::EdgeTriggered}.
+         *
+         * @return bool  true for `Epoll` and `Kqueue`, false for `Poll`
+         */
         public function supportsEdgeTriggering(): bool
         {
             // poll(2) is level-triggered only; epoll (EPOLLET) and kqueue (EV_CLEAR)
@@ -96,7 +160,13 @@ namespace Io\Poll {
             return $this === Backend::Epoll || $this === Backend::Kqueue;
         }
 
-        /** @return Backend[] the concrete (non-Auto) backends available on this host */
+        /**
+         * Lists the concrete backends usable on this host.
+         *
+         * `Poll` is always first; `Auto` is never included.
+         *
+         * @return Backend[] the concrete (non-Auto) backends available on this host
+         */
         public static function getAvailableBackends(): array
         {
             // php iterates {Poll,Epoll,Kqueue,EventPorts,WSAPoll} keeping the
@@ -194,6 +264,11 @@ namespace Io\Poll {
         return $out;
     }
 
+    /**
+     * A registration of one handle in a {@see Context}.
+     *
+     * Created by {@see Context::add}. It records which events are watched, which fired in the last `Context::wait()`, and the data attached when it was added. After `remove()` the watcher is inactive and its modifying methods throw {@see InactiveWatcherException}.
+     */
     final class Watcher
     {
         private int $bits;         // watched events (internal bitmask)
@@ -202,6 +277,9 @@ namespace Io\Poll {
 
         // php exposes a private ctor; ours is created only by Context::add via
         // __create (a plain ctor is the pragmatic userland equivalent).
+        /**
+         * @internal Watchers are created by {@see Context::add}.
+         */
         public function __construct(
             private Handle $handle,
             int $bits,
@@ -211,20 +289,56 @@ namespace Io\Poll {
             $this->bits = $bits;
         }
 
+        /**
+         * The watched handle.
+         *
+         * @return Handle  the handle given to `Context::add()`
+         */
         public function getHandle(): Handle { return $this->handle; }
-        /** @return Event[] */
+        /**
+         * The events this watcher currently asks for.
+         *
+         * @return Event[]  the watched events
+         */
         public function getWatchedEvents(): array { return __bits_to_events($this->bits); }
-        /** @return Event[] */
+        /**
+         * The events reported for this watcher by the last `Context::wait()`.
+         *
+         * @return Event[]  the triggered events; empty if it was not ready
+         */
         public function getTriggeredEvents(): array { return __bits_to_events($this->triggered); }
+        /**
+         * The user data attached to this watcher.
+         *
+         * @return mixed  the `$data` given to `Context::add()` or `modify()`
+         */
         public function getData(): mixed { return $this->data; }
 
+        /**
+         * Whether the given event was reported by the last `Context::wait()`.
+         *
+         * @param Event $event  the event to test
+         * @return bool  true if it fired
+         */
         public function hasTriggered(Event $event): bool
         {
             return ($this->triggered & __events_to_bits([$event])) !== 0;
         }
 
+        /**
+         * Whether the watcher is still registered in its context.
+         *
+         * @return bool  false after `remove()` or `forget()`
+         */
         public function isActive(): bool { return $this->active; }
 
+        /**
+         * Replace the watched events and the attached data.
+         *
+         * @param Event[] $events  the new events
+         * @param mixed $data  the new user data (null clears it)
+         * @throws InactiveWatcherException  if the watcher was removed
+         */
         public function modify(array $events, mixed $data = null): void
         {
             $this->requireActive();
@@ -234,6 +348,12 @@ namespace Io\Poll {
             $this->context->__resync($this, $old, $this->bits);
         }
 
+        /**
+         * Replace the watched events, keeping the attached data.
+         *
+         * @param Event[] $events  the new events
+         * @throws InactiveWatcherException  if the watcher was removed
+         */
         public function modifyEvents(array $events): void
         {
             $this->requireActive();
@@ -242,12 +362,23 @@ namespace Io\Poll {
             $this->context->__resync($this, $old, $this->bits);
         }
 
+        /**
+         * Replace the attached data, keeping the watched events.
+         *
+         * @param mixed $data  the new user data
+         * @throws InactiveWatcherException  if the watcher was removed
+         */
         public function modifyData(mixed $data): void
         {
             $this->requireActive();
             $this->data = $data;
         }
 
+        /**
+         * Stop watching the handle and deactivate the watcher.
+         *
+         * @throws InactiveWatcherException  if the watcher was already removed
+         */
         public function remove(): void
         {
             $this->requireActive();
@@ -257,10 +388,16 @@ namespace Io\Poll {
         }
 
         /**
-         * Drop this watcher from its context WITHOUT telling the kernel. For a
-         * registration another process owns: a fork's child shares the parent's
-         * epoll instance, where EPOLL_CTL_DEL would unwatch the fd for both.
+         * Deactivate the watcher without unregistering the handle from the kernel.
+         *
+         * Use it in a forked child for a registration the parent owns: a child shares the parent's epoll instance, where unregistering would stop the parent watching the handle too.
+         *
+         * @throws InactiveWatcherException  if the watcher was already removed
          */
+        // Implementation notes (previous docblock, kept verbatim):
+        // Drop this watcher from its context WITHOUT telling the kernel. For a
+        // registration another process owns: a fork's child shares the parent's
+        // epoll instance, where EPOLL_CTL_DEL would unwatch the fd for both.
         public function forget(): void
         {
             $this->requireActive();
@@ -281,6 +418,21 @@ namespace Io\Poll {
         }
     }
 
+    /**
+     * A set of watched handles that can be waited on for readiness.
+     *
+     * Create one with a {@see Backend}, register handles with {@see add}, then call {@see wait} to learn which became ready. A handle can be watched by one watcher per context.
+     *
+     * ```php
+     * $ctx = new Io\Poll\Context(Io\Poll\Backend::Poll);
+     * $watcher = $ctx->add(new StreamPollHandle($stream), [Io\Poll\Event::Read]);
+     * foreach ($ctx->wait(1) as $ready) {
+     *     // $ready->getHandle() is readable
+     * }
+     * ```
+     *
+     * @example doc_iopoll_socketpair
+     */
     final class Context
     {
         /** @var Watcher[] fd → watcher */
@@ -294,6 +446,13 @@ namespace Io\Poll {
         private int $epStride = 16;
         private int $epDataOff = 8;
 
+        /**
+         * Create a context.
+         *
+         * @param Backend $backend  the mechanism to use; `Backend::Auto` picks epoll, kqueue or poll for the platform
+         * @throws BackendUnavailableException  if the backend is not available here
+         * @throws FailedContextInitializationException  if the kernel object cannot be created
+         */
         public function __construct(private Backend $backend = Backend::Auto)
         {
             if ($this->backend === Backend::Auto) {
@@ -327,19 +486,31 @@ namespace Io\Poll {
             }
         }
 
+        /**
+         * The backend in use.
+         *
+         * @return Backend  the concrete backend; never `Backend::Auto`
+         */
         public function getBackend(): Backend { return $this->backend; }
 
         /**
-         * Watch for a SIGNAL, not an fd — kqueue's EVFILT_SIGNAL, where the ident
-         * is the signal number. Returns false when the backend has no such notion
-         * (poll and epoll: Linux answers this with signalfd, which is an ordinary
-         * fd and needs nothing here).
+         * Watch for a signal instead of a file descriptor (kqueue only).
          *
-         * The signal must be BLOCKED for the process, which is exactly the model
-         * the pcntl layer already runs (a C handler cannot be a PHP closure, so a
-         * handled signal is blocked and reaped at a dispatch point). EVFILT_SIGNAL
-         * reports it without unblocking it.
+         * The signal must be blocked for the process, as signals handled through `pcntl_signal()` are. When it fires, `wait()` returns and {@see takeSignal} answers true. Backends without this notion return false; on Linux use a `signalfd` descriptor as an ordinary handle.
+         *
+         * @param int $signo  signal number
+         * @return bool  true if the signal is being watched, false if unsupported or registration failed
          */
+        // Implementation notes (previous docblock, kept verbatim):
+        // Watch for a SIGNAL, not an fd — kqueue's EVFILT_SIGNAL, where the ident
+        // is the signal number. Returns false when the backend has no such notion
+        // (poll and epoll: Linux answers this with signalfd, which is an ordinary
+        // fd and needs nothing here).
+        //
+        // The signal must be BLOCKED for the process, which is exactly the model
+        // the pcntl layer already runs (a C handler cannot be a PHP closure, so a
+        // handled signal is blocked and reaped at a dispatch point). EVFILT_SIGNAL
+        // reports it without unblocking it.
         public function watchSignal(int $signo): bool
         {
             if ($this->backend !== Backend::Kqueue) { return false; }
@@ -353,7 +524,11 @@ namespace Io\Poll {
             return true;
         }
 
-        /** Did a watched signal fire during the last {@see wait()}? Clears the flag. */
+        /**
+         * Whether a watched signal fired during the last {@see wait}. Clears the flag.
+         *
+         * @return bool  true if a signal fired since the last call
+         */
         public function takeSignal(): bool
         {
             $f = $this->sigFired;
@@ -365,6 +540,18 @@ namespace Io\Poll {
         private array $sigWatched = [];
         private bool $sigFired = false;
 
+        /**
+         * Start watching a handle.
+         *
+         * @param Handle $handle  a `StreamPollHandle` or `FdPollHandle`
+         * @param Event[] $events  the events to watch; must not be empty
+         * @param mixed $data  user data returned by `Watcher::getData()`
+         * @return Watcher  the new watcher
+         * @throws \TypeError  if `$events` is empty
+         * @throws HandleAlreadyWatchedException  if this context already watches the handle
+         * @throws InvalidHandleException  if the handle type is not supported
+         * @throws FailedHandleAddException  if the kernel rejects the registration
+         */
         public function add(Handle $handle, array $events, mixed $data = null): Watcher
         {
             if (\count($events) === 0) {
@@ -386,7 +573,17 @@ namespace Io\Poll {
             return $w;
         }
 
-        /** @return Watcher[] the watchers whose fds became ready */
+        /**
+         * Wait until a watched handle is ready.
+         *
+         * Returns the watchers whose handles became ready, with their triggered events set. `null` timeout waits without limit, `0` polls and returns at once. A signal interrupting the wait yields an empty array. With nothing watched the call returns an empty array immediately. `$maxEvents` limits the batch the kernel returns (64 by default) on the epoll and kqueue backends; the poll backend ignores it.
+         *
+         * @param int|null $timeoutSeconds  seconds to wait, or null to wait indefinitely
+         * @param int $timeoutMicroseconds  additional microseconds
+         * @param int|null $maxEvents  maximum number of ready watchers per call
+         * @return Watcher[] the watchers whose fds became ready
+         * @throws FailedPollWaitException  if the system call fails
+         */
         public function wait(?int $timeoutSeconds = null, int $timeoutMicroseconds = 0, ?int $maxEvents = null): array
         {
             // A signal watch is work too: with no fds but a watched signal, an
@@ -646,34 +843,102 @@ namespace Io\Poll {
         return $m;
     }
 
+    /**
+     * Base class of all exceptions thrown by `Io\Poll`.
+     */
     class PollException extends \Io\IoException
     {
     }
 
+    /**
+     * Base class of exceptions for a failed poll operation.
+     *
+     * The `ERROR_*` constants name error categories.
+     */
     abstract class FailedPollOperationException extends PollException
     {
+        /**
+         * No error.
+         */
         public const ERROR_NONE = 0;
+        /**
+         * A system error.
+         */
         public const ERROR_SYSTEM = 1;
+        /**
+         * Out of memory.
+         */
         public const ERROR_NOMEM = 2;
+        /**
+         * Invalid argument.
+         */
         public const ERROR_INVALID = 3;
+        /**
+         * Already exists.
+         */
         public const ERROR_EXISTS = 4;
+        /**
+         * Not found.
+         */
         public const ERROR_NOTFOUND = 5;
+        /**
+         * Timed out.
+         */
         public const ERROR_TIMEOUT = 6;
+        /**
+         * Interrupted.
+         */
         public const ERROR_INTERRUPTED = 7;
+        /**
+         * Permission denied.
+         */
         public const ERROR_PERMISSION = 8;
+        /**
+         * Too big.
+         */
         public const ERROR_TOOBIG = 9;
+        /**
+         * Try again.
+         */
         public const ERROR_AGAIN = 10;
+        /**
+         * Not supported.
+         */
         public const ERROR_NOSUPPORT = 11;
     }
 
+    /**
+     * Thrown when the kernel polling object cannot be created.
+     */
     final class FailedContextInitializationException extends FailedPollOperationException {}
+    /**
+     * Thrown when registering a handle with the kernel fails.
+     */
     final class FailedHandleAddException extends FailedPollOperationException {}
+    /**
+     * Thrown when changing a watcher's registration fails.
+     */
     final class FailedWatcherModificationException extends FailedPollOperationException {}
+    /**
+     * Thrown when the wait system call fails.
+     */
     final class FailedPollWaitException extends FailedPollOperationException {}
 
+    /**
+     * Thrown when the requested backend is not available on this platform.
+     */
     final class BackendUnavailableException extends PollException {}
+    /**
+     * Thrown when an operation is used on a watcher that was already removed.
+     */
     final class InactiveWatcherException extends PollException {}
+    /**
+     * Thrown when a handle is added to a context that already watches it.
+     */
     final class HandleAlreadyWatchedException extends PollException {}
+    /**
+     * Thrown when a handle is not a supported type.
+     */
     final class InvalidHandleException extends PollException {}
 }
 

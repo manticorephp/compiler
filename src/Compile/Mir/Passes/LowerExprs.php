@@ -138,6 +138,24 @@ trait LowerExprs
             // gates that were already bare (func_get_args, sscanf, …) have
             // always made the same trade.
             $fnBare = $this->bareName($fn);
+            // php's ZIP form: the prelude `array_map` is single-array on purpose (a variadic
+            // pack destabilised the self-host), so N arrays go to the zip helper.
+            if ($fnBare === 'array_map' && \count($expr->args) >= 3) {
+                $zip = true;
+                foreach ($expr->args as $a) {
+                    if ($a->kind === 'NamedArg' || $a->kind === 'Spread') { $zip = false; }
+                }
+                if ($zip) {
+                    $els = [];
+                    $zi = 1;
+                    while ($zi < \count($expr->args)) {
+                        $els[] = new \Parser\Ast\ArrayElement(null, $expr->args[$zi]);
+                        $zi = $zi + 1;
+                    }
+                    return $this->lowerCallExpr(\Parser\Ast\Expr::call('__mc_array_map_zip',
+                        [$expr->args[0], \Parser\Ast\Expr::arrayLit($els, $expr->span)], $expr->span, true));
+                }
+            }
             // `__mc_raw_prop_store($obj, 'prop', $v)` — ReflectSynth's set-hook-bypassing
             // write (`ReflectionProperty::setRawValue`): the store itself, hook skipped.
             if ($fnBare === '__mc_raw_prop_store' && \count($expr->args) === 3
@@ -175,7 +193,12 @@ trait LowerExprs
             }
             if ($fn === 'isset') {
                 $ts = [];
-                foreach ($expr->args as $a) { $ts[] = $this->markProbe($this->lowerExpr($a)); }
+                foreach ($expr->args as $a) {
+                    if ($a->kind === 'Variable' && $a->name === 'this' && $this->currentLowerClass !== '' && !$this->currentLowerFnHasThis) {
+                        return new BoolConst(false, Type::bool_());
+                    }
+                    $ts[] = $this->markProbe($this->lowerExpr($a));
+                }
                 return new Isset_($ts, Type::bool_());
             }
             if ($fn === 'unset') {
@@ -624,7 +647,10 @@ trait LowerExprs
             }
             // Class::$prop → load the static-property global.
             $sp = $this->staticPropRef($saClass, $saName);
-            if ($sp !== null) { return $sp; }
+            if ($sp !== null) {
+                $den = $this->staticPropAccessError($saClass, $saName);
+                return $den !== '' ? $this->throwErrorExpr($den) : $sp;
+            }
             // Class::CONST → inline the constant's initializer. Lower it
             // with the owning class as `self` so a `self::OTHER` inside
             // the initializer (e.g. `COLOR_CLEAR_MASK = ~self::COLOR_MASK`)
@@ -632,6 +658,8 @@ trait LowerExprs
             $cname = $this->resolveStaticClass($saClass);
             $cv = $this->findClassConst($cname, $saName);
             if ($cv !== null) {
+                $den = $this->classConstAccessError($cname, $saName);
+                if ($den !== '') { return $this->throwErrorExpr($den); }
                 $this->noteDeprecatedConstUse($cname . '::' . $saName, $expr->span->line);
                 $prevC = $this->currentLowerClass;
                 $this->currentLowerClass = $cname;
@@ -694,6 +722,9 @@ trait LowerExprs
             // at the ArrayAccess above it, so reaching here means the whole array
             // was read (foreach/count) or handed to a by-ref parameter.
             if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead(); }
+            if ($expr->name === 'this' && $this->currentLowerClass !== '' && !$this->currentLowerFnHasThis) {
+                return $this->throwErrorExpr('Using $this when not in object context');
+            }
             return new LoadLocal($expr->name, Type::unknown());
         }
         if ($expr->kind === 'Assign') { return $this->lowerAssign($expr); }
@@ -709,9 +740,10 @@ trait LowerExprs
             $mn = $expr->name;
             if ($mn === '__LINE__') { return new IntConst($expr->span->line, Type::int_()); }
             if ($mn === '__CLASS__') { return new StringConst($this->currentLowerClass, Type::string_()); }
-            if ($mn === '__FUNCTION__') { return new StringConst($this->currentLowerFn, Type::string_()); }
+            if ($mn === '__FUNCTION__') { return new StringConst($this->closureMagic !== '' ? $this->closureMagic : $this->currentLowerFn, Type::string_()); }
             if ($mn === '__METHOD__') {
-                $m = $this->currentLowerClass !== ''
+                if ($this->closureMagic !== '') { return new StringConst($this->closureMagic, Type::string_()); }
+                $m = $this->currentLowerClass !== '' && $this->currentLowerFn !== ''
                     ? $this->currentLowerClass . '::' . $this->currentLowerFn
                     : $this->currentLowerFn;
                 return new StringConst($m, Type::string_());
@@ -969,6 +1001,14 @@ trait LowerExprs
      * which is parsed as one source with no path. That is also what keeps the
      * rewrite from firing on `prelude/async.php`'s own internal calls.
      */
+    private function closureMagicName(\Parser\Ast\Span $span): string
+    {
+        $scope = $this->closureMagic !== '' ? $this->closureMagic . '()'
+            : ($this->currentLowerFn === '' ? $span->file
+                : ($this->currentLowerClass !== '' ? $this->currentLowerClass . '::' : '') . $this->currentLowerFn . '()');
+        return '{closure:' . $scope . ':' . (string)$span->line . '}';
+    }
+
     private function callSite(\Parser\Ast\Span $span): string
     {
         $file = $span->file;
@@ -1084,6 +1124,8 @@ trait LowerExprs
         if ($target->kind === 'StaticAccess') {
             $ref = $this->staticPropRef($this->staticAccessClass($target), $this->staticAccessName($target));
             if ($ref !== null) {
+                $den = $this->staticPropAccessError($this->staticAccessClass($target), $this->staticAccessName($target));
+                if ($den !== '') { return $this->throwErrorExpr($den); }
                 return new StoreStaticProp_($ref->global, $value, $value->type, $ref->type);
             }
         }

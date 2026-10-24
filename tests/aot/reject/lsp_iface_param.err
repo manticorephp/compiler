@@ -1,0 +1,1 @@
+Declaration of B::f(string $a): void must be compatible with I::f(int $a): void

@@ -70,7 +70,7 @@ final class NodeClone
         if ($k === Node::KIND_FLOAT_CONST)  { $x = self::asFloat($n);  return new FloatConst($x->value, $n->type); }
         if ($k === Node::KIND_STRING_CONST) { $x = self::asStr($n);    return new StringConst($x->value, $n->type); }
         if ($k === Node::KIND_BOOL_CONST)   { $x = self::asBool($n);   return new BoolConst($x->value, $n->type); }
-        if ($k === Node::KIND_NULL_CONST)   { return new NullConst($n->type); }
+        if ($k === Node::KIND_NULL_CONST)   { $c = new NullConst($n->type); $c->asKey = $n->asKey; return $c; }
         if ($k === Node::KIND_LOAD_LOCAL) {
             $x = self::asLoadLocal($n);
             if (self::$substOn && isset(self::$subst[$x->name])) {

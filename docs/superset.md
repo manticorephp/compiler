@@ -286,7 +286,106 @@ scopes) is designed, not wired.
 
 ---
 
-## 7. Runtime knobs
+## 7. Libraries — the superset you call, not compile
+
+Everything above changes what the compiler accepts. These are plain PHP APIs: ordinary
+classes and functions that exist because a compiled, single-binary runtime wants them and
+Zend has no equivalent. All are **demand-gated** (rule 3): a program that never names the
+namespace links none of it. None has a Zend oracle, so each is tested by hand-written
+cases and specified by its guide; the generated class and function lists are in
+[builtins.md](builtins.md#beyond-php--what-manticore-adds). API reference pages are
+linked per entry.
+
+### 7.1 `Manticore\Ds` — typed arrays, `Map`, `Set`, `Vec` ([docs/ds.md](ds.md))
+
+Fixed-width arrays over one native buffer (`Int8Array` … `Int64Array`, `UInt8Array` …
+`UInt64Array`, `Float32Array`, `Float64Array`, `BitArray`), a `ByteBuffer` with typed
+reads and writes at a byte offset, and insertion-ordered `Map` / `Set` / `Vec` over
+native hash tables. They exist because a PHP array pays a tagged cell per element
+and coerces keys; here the element is stored at its width and keys are **strict**
+(`2` and `"2"` are different keys, an object can be a key). Out-of-range values throw
+instead of wrapping. A generated pure-PHP polyfill (`php tools/ds_polyfill.php`,
+Composer package `manticorephp/ds`) lets the same file run under `php` for portability,
+not speed. API:
+[reference/Manticore/Ds/](https://manticorephp.github.io/compiler/reference/Manticore/Ds/).
+
+### 7.2 `Http\` — an HTTP/1.1 server ([docs/http.md](http.md))
+
+`(new Http\Server('tcp://…'))->serve(fn(Request $r): Response => …)` — the binary *is*
+the server: no fpm, no worker pool to configure. One task per connection under an
+`Async\TaskGroup`, keep-alive, chunked and streamed bodies, multipart uploads, static
+files with `Range` / conditional requests, gzip, trusted-proxy handling, and
+`->workers(N)` to prefork under a supervisor. Inside a handler the php builtins keep
+working (`header()`, `setcookie()`, `http_response_code()`, plain `echo`), because the
+request context is switched per fiber. It exists so a PHP service can ship as one
+static binary with no separate web server. API:
+[reference/Http/](https://manticorephp.github.io/compiler/reference/Http/).
+
+### 7.3 `Http\WebSocket` — RFC 6455 server and client ([docs/websocket.md](websocket.md))
+
+WebSocket on the same `Http\Server` and port (upgrade via `takeover()`), and an outbound
+client (`Http\WebSocket\connect()`) for third-party servers. RFC 7692 permessage-deflate,
+one reader per connection, `foreach` over incoming messages, sending from any task,
+a callback layer and a `Hub` for broadcast. Checked by its own suite and by
+Autobahn|Testsuite. API:
+[reference/Http/WebSocket/](https://manticorephp.github.io/compiler/reference/Http/WebSocket/).
+
+### 7.4 `Buffer\` — cursor-based byte buffers ([docs/http.md § Buffer](http.md#buffer))
+
+`ByteBuffer` (bytes plus a read cursor, so consuming is not a quadratic `substr` of the
+remainder), `Reader` (bounded reads over a stream through a shared buffer) and `Writer`
+(buffered writes using one vectored `writev()`). `Http\` is written on them; they are
+useful for any framing protocol. `indexOf()` answers `-1`, not `false`, on purpose: a
+`int|false` return would make every call site a boxed cell. API:
+[reference/Buffer/](https://manticorephp.github.io/compiler/reference/Buffer/).
+
+### 7.5 `Manticore\Sapi` — a compiled binary *is* the SAPI
+
+The per-request seam that lets a server written in PHP reuse php's request API. Two
+calls (`requestBegin`, `requestEnd`) install the GPC arrays and collect the status line,
+headers and cookies the handler produced; with no request active the CLI answers
+exactly as php's CLI SAPI does (`headers_list()` is `[]`, `http_response_code()` is
+`false`). The state is held per `Async\Task`, so concurrent requests cannot read each
+other's `$_COOKIE`. It is the layer `Http\` stands on; use it directly only to embed
+another protocol. API:
+[reference/Manticore/Sapi/](https://manticorephp.github.io/compiler/reference/Manticore/Sapi/).
+
+### 7.6 `Process\` — fork, workers, supervision
+
+`Process\fork/pid/ppid`, `Process\workers(int)` and `Process\supervise(int, callable)`
+(restart a crashed worker, forward `SIGTERM` to the group). Described in §1.4 because it
+sits beside `Async\`; listed here for the API link:
+[reference/Process/](https://manticorephp.github.io/compiler/reference/Process/).
+`Async\`'s own API:
+[reference/Async/](https://manticorephp.github.io/compiler/reference/Async/); `Io\Poll`:
+[reference/Io/Poll/](https://manticorephp.github.io/compiler/reference/Io/Poll/).
+
+### 7.7 `Async\Pool` — a bounded object pool ([docs/async.md](async.md))
+
+`new Async\Pool($factory, $max, …)` hands objects out FIFO with `acquire` / `release` /
+`with` / `discard`, optional `reset`, `ping`, `maxLifetime` and `idleTimeout`, and
+`Pool::pdo($dsn, …)` wires the PDO session reset and ping. It exists because a
+concurrent service must bound its database connections per process. With `->workers(N)` the bound is
+per process, so the database sees up to `N × max`.
+
+### 7.8 Low-level pointer builtins ([docs/ffi.md](ffi.md))
+
+Not libraries but global functions with no PHP equivalent, the glue of an FFI binding:
+`peek_i8/i16/i32/i64/u8/u16/u32/f64`, `poke_*`, `ptr_offset`, `ptr_to_int`,
+`int_to_ptr`, `cstr_to_str`, `fn_to_ptr` (a PHP function as a C callback). They work on
+`\Ffi\Ptr` addresses and are as unchecked as the C they sit next to. See ffi.md before
+using one outside a binding. API:
+[reference/Ffi/](https://manticorephp.github.io/compiler/reference/Ffi/).
+
+Also here and not worth a section of its own: `fwrite($sock, [$head, $body])` as one
+`writev(2)` (§1.3), `Fiber::setStackSize()`, `Manticore\Overloadable` (§5.1), the
+`Resource` class ([differences.md](differences.md#resources-are-objects)), and the
+stdlib's ICU / libcurl / libz-backed extensions, which follow Zend's API and so are
+parity work rather than superset.
+
+---
+
+## 8. Runtime knobs
 
 No `php.ini`. The environment variables that exist:
 
@@ -303,7 +402,7 @@ No `php.ini`. The environment variables that exist:
 
 ---
 
-## 8. Designed, not built
+## 9. Designed, not built
 
 Kept here so the boundary stays honest:
 
@@ -332,6 +431,7 @@ Kept here so the boundary stays honest:
 | FFI / attributes | the stdlib itself is the test: every `Runtime\Libc` binding rides them |
 | operator overloading | `operator_overload`, `bcmath_operators`, `bcmath_number` — hand-written expected; `BcMath\Number` is also checkable against php 8.4 |
 | modules | `tests/aot/cases/manifest_app/` (a directory fixture, not a `-k`-selectable case) plus the compiler's own self-host build |
+| `Manticore\Ds`, `Buffer\`, `Http\`, `Http\WebSocket` | `tests/aot/cases/ds_*`, `http_*`, `ws_*` — hand-written expected; Ds also has a Zend-hosted polyfill as its oracle; WebSocket adds the Autobahn Testsuite gate |
 | everything with a Zend answer | `tools/difftest.sh` |
 
 The network-dependent check lives outside the suite:

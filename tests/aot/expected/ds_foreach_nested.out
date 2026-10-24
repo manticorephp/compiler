@@ -1,5 +1,6 @@
 aa=1 ab=2 ac=3 ba=2 bb=4 bc=6 ca=3 cb=6 cc=9 
-aa ab ac anew ba bb bc bnew ca cb cc cnew newa newb newc newnew 
+aa 
+Map modified during iteration
 4
 Map modified during iteration
 5

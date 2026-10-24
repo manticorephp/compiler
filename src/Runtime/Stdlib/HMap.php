@@ -50,7 +50,7 @@ function __mc_hmap_put(int $h, mixed $key, mixed $val): int
     $used = \count($t['k']);
     if ($used >= 8 && ($used - $t['len']) * 2 > $t['len']) { __mc_hmap_compact($t); $used = \count($t['k']); }
     $t['k'][] = $key; $t['v'][] = $t['set'] !== 0 ? null : $val; $t['alive'][] = true;
-    $t['ix'][$ek] = $used; $t['len']++;
+    $t['ix'][$ek] = $used; $t['len']++; $t['epoch']++;
     return 1;
 }
 

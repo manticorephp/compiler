@@ -1,0 +1,11 @@
+head ends at 23
+head: "GET \/ HTTP\/1.1\r\nHost: x"
+left: 4 bytes, next byte 66 (B)
+byteAt past the end: -1
+peek: BO
+read: BODY
+empty: true
+bool(true)
+bool(false)
+view: 12345
+readAll: 12345 then empty=true

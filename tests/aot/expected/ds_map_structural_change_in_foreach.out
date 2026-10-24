@@ -1,0 +1,7 @@
+{"a":10,"b":20}
+map insert: Map modified during iteration
+map remove: finished
+map clear: Map modified during iteration
+set add: Set modified during iteration
+set re-add: finished
+set remove: finished

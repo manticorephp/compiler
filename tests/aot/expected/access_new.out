@@ -1,0 +1,10 @@
+Error: Cannot instantiate abstract class Ab
+Error: Cannot instantiate interface I
+Error: Cannot instantiate enum E
+Error: Call to private P::__construct() from global scope
+Error: Call to protected Q::__construct() from global scope
+PPQQ2
+3
+Error: Cannot modify readonly property E::$name
+Error: Cannot modify readonly property V::$value
+1X

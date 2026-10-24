@@ -1,0 +1,17 @@
+404 Not Found
+299 has no phrase
+200: redirect=false body=true
+204: redirect=false body=false
+301: redirect=true body=true
+304: redirect=false body=false
+404: redirect=false body=true
+GET     safe=true idempotent=true body=false
+HEAD    safe=true idempotent=true body=false
+POST    safe=false idempotent=false body=true
+PUT     safe=false idempotent=true body=true
+PATCH   safe=false idempotent=false body=true
+DELETE  safe=false idempotent=true body=false
+OPTIONS safe=true idempotent=true body=false
+TRACE   safe=true idempotent=true body=false
+CONNECT safe=false idempotent=false body=false
+NULL

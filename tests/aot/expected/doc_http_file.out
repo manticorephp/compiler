@@ -1,0 +1,5 @@
+HTTP/1.1 200 OK | text/plain; charset=utf-8 | bytes | 0123456789
+HTTP/1.1 304 Not Modified | body: []
+HTTP/1.1 206 Partial Content | bytes 2-5/10 | 2345
+HTTP/1.1 416 Range Not Satisfiable | bytes */10
+HTTP/1.1 404 Not Found

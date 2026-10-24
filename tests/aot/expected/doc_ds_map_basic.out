@@ -1,0 +1,10 @@
+2
+4
+0
+bool(true)
+OutOfBoundsException: Key not found
+'apple' => 4
+'pear' => 5
+1 => int
+'1' => string
+{"pear":5}

@@ -1,0 +1,6 @@
+title: Quarterly report
+doc: name=q3.txt type=text/plain size=10 error=0 valid=true
+contents: revenue up
+moved: true
+valid after move: false
+on disk: revenue up

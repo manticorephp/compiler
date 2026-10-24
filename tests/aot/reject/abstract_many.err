@@ -1,0 +1,1 @@
+Class B contains 4 abstract methods and must therefore be declared abstract or implement the remaining methods (A::a, A::b, A::c, ...)

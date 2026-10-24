@@ -1,0 +1,1 @@
+Non-readonly class B cannot extend readonly class A

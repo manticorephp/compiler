@@ -1,0 +1,4 @@
+/big (gzip)       encoding=gzip vary=Accept-Encoding wire<decoded=true decoded=1200
+/big (identity)   encoding=- vary=Accept-Encoding wire<decoded=false decoded=1200
+/small (gzip)     encoding=- vary=Accept-Encoding wire<decoded=false decoded=4
+/image (gzip)     encoding=- vary=- wire<decoded=false decoded=500

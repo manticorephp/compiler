@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Manticore</title>
+<meta name="description" content="Self-hosted PHP-to-native AOT compiler. Standalone binaries, no PHP runtime.">
+<script>try{var t=localStorage.getItem("theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<meta property="og:title" content="Manticore">
+<meta property="og:description" content="Self-hosted PHP-to-native AOT compiler. Standalone binaries, no PHP runtime.">
+<meta property="og:image" content="https://manticorephp.github.io/compiler/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav><div class="w">
+  <b><i class="logo"></i>Manticore</b>
+  <a href="docs/">Docs</a>
+  <a href="reference/">Reference</a>
+  <a href="https://github.com/manticorephp/compiler/releases">Releases</a>
+  <a href="https://github.com/manticorephp/compiler">GitHub</a>
+  <button id="theme" aria-label="Toggle theme" title="Theme: auto">◐</button>
+</div></nav>
+
+<main class="w">
+<h1 class="rv">PHP in.<br><em>Native binary out.</em></h1>
+<p class="lead rv">Manticore compiles PHP 8.5+ to standalone arm64 and x86_64 binaries through LLVM. No interpreter, no <code>php.ini</code>, no extension loader. The compiler is written in PHP and compiles itself to a byte-identical fixpoint.</p>
+
+<div class="code rv"><pre><code class="lang-bash">manticore compile app.php -o app &amp;&amp; ./app</code></pre><button class="copy">Copy</button></div>
+
+<div class="cta rv">
+  <a href="docs/install.html">Install</a>
+  <a href="docs/">Read the docs</a>
+</div>
+<p class="ver rv">Latest release <a href="https://github.com/manticorephp/compiler/releases">v{{version}}</a></p>
+
+<h2 class="rv">Same bytes as Zend</h2>
+<p class="rv">The Zend interpreter is the oracle. If <code>php</code> runs a program, the native binary prints the same output. Every plain-runnable test case is diffed against it.</p>
+
+<h2 class="rv">Faster, smaller</h2>
+<table class="rv">
+<thead><tr><th>Case</th><th class="n">Native</th><th class="n">PHP</th><th class="n">Speedup</th></tr></thead>
+<tbody>
+<tr><td><code>fib</code></td><td class="n">0.13 s</td><td class="n">13.61 s</td><td class="x"><span class="bar"><i style="--w:97%"></i></span><b>104.7×</b></td></tr>
+<tr><td><code>generator_yield</code></td><td class="n">0.03 s</td><td class="n">0.91 s</td><td class="x"><span class="bar"><i style="--w:71%"></i></span><b>30.3×</b></td></tr>
+<tr><td><code>closures</code></td><td class="n">0.03 s</td><td class="n">0.79 s</td><td class="x"><span class="bar"><i style="--w:68%"></i></span><b>26.3×</b></td></tr>
+<tr><td><code>array</code></td><td class="n">0.09 s</td><td class="n">1.00 s</td><td class="x"><span class="bar"><i style="--w:50%"></i></span><b>11.1×</b></td></tr>
+<tr><td><code>json</code></td><td class="n">0.05 s</td><td class="n">0.25 s</td><td class="x"><span class="bar"><i style="--w:34%"></i></span><b>5.0×</b></td></tr>
+</tbody>
+</table>
+<p class="rv"><a href="https://github.com/manticorephp/compiler#benchmarks">Full table</a></p>
+
+<h2 class="rv">More than PHP</h2>
+<ul class="rv fx">
+  <li><a href="docs/async.html">Structured concurrency</a></li>
+  <li><a href="docs/ffi.html">FFI</a> to any C library</li>
+  <li><a href="docs/modules.html">Modules</a> and <a href="docs/attributes.html">compile-time attributes</a></li>
+  <li><a href="docs/http.html">HTTP</a>, <a href="docs/websocket.html">WebSocket</a>, <a href="docs/pdo.html">PDO</a></li>
+</ul>
+
+<h2 class="rv">Install</h2>
+<div class="code rv"><pre><code class="lang-bash">curl -fsSL https://raw.githubusercontent.com/manticorephp/compiler/main/install.sh | bash
+export PATH="$HOME/.manticore/bin:$PATH"
+manticore version</code></pre><button class="copy">Copy</button></div>
+<p class="rv">macOS and Linux (glibc and musl), arm64 and x86_64.</p>
+
+<footer>MIT licensed · <a href="https://github.com/manticorephp/compiler">manticorephp/compiler</a></footer>
+</main>
+
+<script defer src="vendor/highlight.min.js"></script>
+<script defer src="app.js"></script>
+</body>
+</html>
