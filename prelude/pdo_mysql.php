@@ -164,15 +164,22 @@ final class __McPdoMyWire
     private int $pos = 0;
     /** Offset after the last lstr(). */
     private int $lp = 0;
+    /** The socket path of a connectUnix() connection (empty for TCP). */
+    private string $unix = '';
+    /** sendQuery() was called and readQueryReply() has not run: the reply belongs to pendFiber. */
+    private bool $pending = false;
+    private ?object $pendFiber = null;
 
-    public function __construct(string $host, int $port, float $timeout)
+    /** @param string $unix a socket path: only connectUnix() passes it; $host and $port are then unused */
+    public function __construct(string $host, int $port, float $timeout, string $unix = '')
     {
         $this->host = $host;
         $this->port = $port;
-        if (\strncmp($host, 'unix:', 5) === 0) {
+        $this->unix = $unix;
+        if ($unix !== '') {
             $en = 0;
             $es = '';
-            $s = \stream_socket_client('unix://' . \substr($host, 5), $en, $es, $timeout);
+            $s = \stream_socket_client('unix://' . $unix, $en, $es, $timeout);
             if ($s === false) {
                 throw __McPdo::connectFail('HY000', 2002, $es);
             }
@@ -204,14 +211,19 @@ final class __McPdoMyWire
         $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
     }
 
-    /** A connection over a unix domain socket (the constructor reads the `unix:` host prefix). */
+    /** A connection over a unix domain socket. */
     public static function connectUnix(string $path, float $timeout): self
     {
-        return new self('unix:' . $path, 0, $timeout);
+        return new self($path, 0, $timeout, $path);
     }
 
-    /** @return resource the connection's stream, for stream_select() */
+    /**
+     * @return resource the connection's stream, for stream_select(). Bytes already read into this object's buffer (or
+     * decrypted by TLS) are invisible to stream_select: check hasBuffered() first.
+     */
     public function socket(): mixed { return $this->s; }
+
+    public function hasBuffered(): bool { return \strlen($this->buf) > $this->pos; }
 
     public function timeoutValue(): float { return $this->timeout; }
 
@@ -527,6 +539,8 @@ final class __McPdoMyWire
         }
         $this->dead = true;
         $this->openCursor = null;
+        $this->pending = false;
+        $this->pendFiber = null;
         if ($this->closed) { return; }
         $this->closed = true;
         unset(self::$pwStore[$this->kPwId]);
@@ -555,7 +569,7 @@ final class __McPdoMyWire
         $w = null;
         try {
             $t0 = \__mc_monotonic_f();
-            $w = new self($this->host, $this->port, 1.0);
+            $w = $this->unix !== '' ? self::connectUnix($this->unix, 1.0) : new self($this->host, $this->port, 1.0);
             $w->explicitTimeout = true;
             $w->noCancel = true;
             $w->handshake();
@@ -1169,11 +1183,33 @@ final class __McPdoMyWire
     public function sendQuery(string $sql): void
     {
         $this->sendCmd("\x03" . $sql);
+        $this->pending = true;
+        $this->pendFiber = \Runtime\AsyncHook::active() ? \Fiber::getCurrent() : null;
+    }
+
+    private function ownsPending(): bool
+    {
+        return !\Runtime\AsyncHook::active() || \Fiber::getCurrent() === $this->pendFiber;
+    }
+
+    private function outOfSync(): PDOException
+    {
+        $e = new __McPdoMyErr();
+        $e->no = 2014;
+        $e->state = 'HY000';
+        $e->msg = "Commands out of sync; you can't run this command now";
+        return __McPdoMy::errFrom($e);
     }
 
     public function readQueryReply(bool $stream = false): __McPdoMyResult
     {
-        return $this->readReply(false, $stream);
+        if (!$this->pending || !$this->ownsPending()) { throw $this->outOfSync(); }
+        try {
+            return $this->readReply(false, $stream);
+        } finally {
+            $this->pending = false;
+            $this->pendFiber = null;
+        }
     }
 
     /** @return ?__McPdoMyErr null on OK */
@@ -1208,25 +1244,25 @@ final class __McPdoMyWire
             $this->authDeadline = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout : 0.0;
             $auth = $this->pluginResponse($this->plugin, $pw, $this->scramble);
             $r = "\x11" . $user . "\0";
-            if (($this->cliCaps & self::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) !== 0) {
-                $r .= self::lenencInt(\strlen($auth)) . $auth;
-            } else {
-                $r .= \chr(\strlen($auth)) . $auth;
-            }
+            $r .= \chr(\strlen($auth)) . $auth;
             $r .= $db . "\0" . self::putLe($charsetNo, 2);
             if (($this->cliCaps & self::CLIENT_PLUGIN_AUTH) !== 0) { $r .= $this->plugin . "\0"; }
             $this->sendPacket($r);
             $this->awaiting = true;
             $this->respStart = true;
-            $p = $this->authExchange($pw);
+            // nothing cancellable runs here: a failure must not start a KILL QUERY connection
             $this->inflight = false;
+            $p = $this->authExchange($pw);
             if ($p !== null) { return $this->parseErr($p); }
+            $this->owed = [];
+            $this->gen = $this->gen + 1;
             $this->kUser = $user;
             self::$pwStore[$this->kPwId] = $pw;
             $this->kCs = $charsetNo;
             return null;
         } catch (\Throwable $t) {
-            if ($this->inflight) { $this->closeSock(); }
+            // half an exchange is on the wire (inflight is false, so no KILL QUERY follows)
+            $this->closeSock();
             throw $t;
         } finally {
             $this->release();
@@ -1257,6 +1293,7 @@ final class __McPdoMyWire
      */
     private function enter(): void
     {
+        if ($this->pending && !$this->dead && $this->ownsPending()) { throw $this->outOfSync(); }
         // php: any command while an unbuffered result is open is 2014. Another fiber is not the owner: it waits for the cursor to end.
         if ($this->openCursor !== null && !$this->dead && (!\Runtime\AsyncHook::active() || \Fiber::getCurrent() === $this->curFiber)) {
             $e = new __McPdoMyErr();
