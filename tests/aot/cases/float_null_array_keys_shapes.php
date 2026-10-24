@@ -1,6 +1,7 @@
 <?php
+function nul(): ?int { return null; }
 $a = [];
-$k = 1.7; $n = null; $f2 = 2.0; $t = true;
+$k = 1.7; $n = nul(); $f2 = 2.0; $t = true;
 $a[$k] = 'f'; $a[$n] = 'n'; $a[$f2] = 'two'; $a[$t] = 'T'; $a[false] = 'F';
 $a[3.9] = 'lit'; $a[null] = 'nl';
 var_dump($a);
@@ -17,7 +18,7 @@ var_dump($p);
 function g(float $x, array $arr) { return $arr[$x] ?? 'none'; }
 echo g(1.2, [1 => 'one']), "\n";
 $s = ['' => 'empty'];
-$nn = null;
+$nn = nul();
 echo $s[$nn], isset($s[$nn]) ? 'Y' : 'N', "\n";
 $cnt = [];
 foreach ([0.5, 1.5, 1.9, 2.0] as $fl) { $cnt[$fl] = ($cnt[$fl] ?? 0) + 1; }

@@ -2574,8 +2574,7 @@ trait InferNodes
         if (!$arrayBase) { return $key; }
         $k = $key->type->kind;
         if ($k === Type::KIND_FLOAT) { return new Cast('int', $key, Type::int_()); }
-        if ($k === Type::KIND_NULL
-            && (($key instanceof NullConst && $key->asKey) || $key->kind === Node::KIND_LOAD_LOCAL)) {
+        if ($k === Type::KIND_NULL && $key instanceof NullConst && $key->asKey) {
             return new StringConst('', Type::string_());
         }
         return $key;
