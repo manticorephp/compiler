@@ -1,0 +1,15 @@
+bool(true)
+int(42)
+string(2) "s1"
+NULL
+float(1.5)
+NULL
+int(43)
+array(2) {
+  [0]=>
+  string(2) "s0"
+  [1]=>
+  int(43)
+}
+string(2) "x0"
+int(1)
