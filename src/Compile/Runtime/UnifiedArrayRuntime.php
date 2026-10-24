@@ -5365,6 +5365,27 @@ final class UnifiedArrayRuntime
         $z->ret(Value::int(Type::i64(), self::CELL_NULL));
     }
 
+    /** The cell word of a double's bits: a denormal in (0xFFFF, 2^48) is or'ed with {@see MemoryAbi::FLOAT_DENORM_TAG}. */
+    private function denormEncode(Block $b, Value $w): Value
+    {
+        $risky = $b->and_(
+            $b->icmp('ugt', $w, Value::int(Type::i64(), MemoryAbi::FLOAT_DENORM_MIN_BITS)),
+            $b->icmp('ult', $w, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK + 1)),
+        );
+        return $b->select($risky, $b->or_($w, Value::int(Type::i64(), MemoryAbi::FLOAT_DENORM_TAG)), $w);
+    }
+
+    /** The double's bits of a cell word; the inverse of {@see denormEncode}, identity on any other word. */
+    private function denormDecode(Block $b, Value $w): Value
+    {
+        $lo = $b->and_($w, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK));
+        $enc = $b->and_(
+            $b->icmp('eq', $b->lshr($w, Value::int(Type::i64(), 48)), Value::int(Type::i64(), MemoryAbi::FLOAT_DENORM_TAG >> 48)),
+            $b->icmp('ugt', $lo, Value::int(Type::i64(), MemoryAbi::FLOAT_DENORM_MIN_BITS)),
+        );
+        return $b->select($enc, $lo, $w);
+    }
+
     /** NaN-box a raw pointer carrier under $tag, keeping a 0 pointer NULL. */
     private function tagPtr(Block $b, Value $val, int $tag): Value
     {
@@ -5421,7 +5442,7 @@ final class UnifiedArrayRuntime
         $dofloat->ret($dofloat->select(
             $dofloat->fcmp('uno', $fv, $fv),
             Value::int(Type::i64(), 9221120237041090560),
-            $val,
+            $this->denormEncode($dofloat, $val),
         ));
         $dobool->ret($dobool->or_(
             $dobool->and_($val, Value::int(Type::i64(), 1)),
@@ -6702,7 +6723,7 @@ final class UnifiedArrayRuntime
         $floatk->brIf($isIntCell, $floatFromInt, $floatAsIs);
         $iv = $floatFromInt->call('__mir_ckey_unbox_int', Type::i64(), [$cell]);
         $floatFromInt->ret($floatFromInt->bitcast($floatFromInt->sitofp($iv, Type::f64()), Type::i64()));
-        $floatAsIs->ret($cell);
+        $floatAsIs->ret($this->denormDecode($floatAsIs, $cell));
         $boolk->ret($boolk->and_($cell, Value::int(Type::i64(), 1)));
     }
 

@@ -251,7 +251,12 @@ trait EmitLlvmExpr
         $out .= "entry:\n";
         $out .= "  %i = bitcast double %f to i64\n";
         $out .= "  %isnan = fcmp uno double %f, %f\n";
-        $out .= "  %b = select i1 %isnan, i64 9221120237041090560, i64 %i\n";
+        $out .= "  %dlo = icmp ugt i64 %i, " . (string)\Compile\MemoryAbi::FLOAT_DENORM_MIN_BITS . "\n";
+        $out .= "  %dhi = icmp ult i64 %i, " . (string)(\Compile\MemoryAbi::CELL_PAYLOAD_MASK + 1) . "\n";
+        $out .= "  %dnm = and i1 %dlo, %dhi\n";
+        $out .= "  %dti = or i64 %i, " . (string)\Compile\MemoryAbi::FLOAT_DENORM_TAG . "\n";
+        $out .= "  %bi = select i1 %dnm, i64 %dti, i64 %i\n";
+        $out .= "  %b = select i1 %isnan, i64 9221120237041090560, i64 %bi\n";
         $out .= "  ret i64 %b\n";
         $out .= "}\n";
         // box_array: (ptrtoint(p) & PAYLOAD_MASK) | tagBits(ARRAY=7). 0 → NULL
@@ -514,7 +519,7 @@ trait EmitLlvmExpr
             . "s0:\n  %kp = phi ptr [ %kp0, %sptr ], [ " . $empty . ", %snull ]\n  br label %s\n"
             . "iint:\n  %ki0 = call i64 @__mir_ckey_unbox_int(i64 %k)\n  br label %i0\n"
             . "ibool:\n  %kb = and i64 %k, 1\n  br label %i0\n"
-            . "idbl:\n  %kf = bitcast i64 %k to double\n"
+            . "idbl:\n" . \Compile\Mir\RuntimeLibrary::denormDecodeIr('%kdec', '%k', 'dn') . "  %kf = bitcast i64 %kdec to double\n"
             . "  %klo = fcmp oge double %kf, 0xC3E0000000000000\n"
             . "  %khi = fcmp olt double %kf, 0x43E0000000000000\n"
             . "  %kin = and i1 %klo, %khi\n"
@@ -576,7 +581,7 @@ trait EmitLlvmExpr
         $out .= "  call void @__mir_out_str(ptr %p)\n";
         $out .= "  ret void\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         // PHP-formatted (echo scientific form is "1.0E+20", not C's "1e+20").
         $out .= "  call void @__mir_out_float(double %fd)\n";
         $out .= "  ret void\n";
@@ -710,7 +715,7 @@ trait EmitLlvmExpr
         $out .= "  %pptr = inttoptr i64 %pp to ptr\n";
         $out .= "  ret ptr %pptr\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         // PHP `(string)` scientific form is "1.0E+20", not C's "1e+20".
         $out .= "  %fbuf = call ptr @__mir_float_to_str(double %fd)\n";
         $out .= "  ret ptr %fbuf\n";
@@ -789,7 +794,7 @@ trait EmitLlvmExpr
         $out .= "  %sv = call i64 @__mir_str_to_int(ptr %sptr)\n";
         $out .= "  ret i64 %sv\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         $out .= "  %fi = fptosi double %fd to i64\n";
         $out .= "  ret i64 %fi\n";
         $out .= "asarray:\n";
@@ -912,7 +917,7 @@ trait EmitLlvmExpr
         $out .= "  %sv = call double @__mir_php_strtod(ptr %sptr, ptr null)\n";
         $out .= "  ret double %sv\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         $out .= "  ret double %fd\n";
         $out .= "asarray:\n";
         $out .= "  %ap = and i64 %v, 281474976710655\n";
@@ -1200,7 +1205,7 @@ trait EmitLlvmExpr
         $out .= "asint:\n";
         $out .= "  %bi = call i64 @__manticore_box_int(i64 %v)\n  ret i64 %bi\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         $out .= "  %bf = call i64 @__manticore_box_float(double %fd)\n  ret i64 %bf\n";
         $out .= "asstr:\n";
         $out .= "  %sp = inttoptr i64 %v to ptr\n";
@@ -2165,7 +2170,7 @@ trait EmitLlvmExpr
         $out .= "asnull:\n";
         $out .= "  ret i64 0\n";
         $out .= "asfloat:\n";
-        $out .= "  %fd = bitcast i64 %v to double\n";
+        $out .= \Compile\Mir\RuntimeLibrary::denormDecodeIr('%vdec', '%v', 'dn') . "  %fd = bitcast i64 %vdec to double\n";
         $out .= "  %fnz = fcmp une double %fd, 0.000000e+00\n";
         $out .= "  %fr = zext i1 %fnz to i64\n";
         $out .= "  ret i64 %fr\n";
