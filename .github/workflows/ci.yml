@@ -51,9 +51,12 @@ on:
 env:
   IMAGE: ghcr.io/${{ github.repository }}
 
+# A newer push supersedes a PR run, but never a main run: a cancelled main build
+# never saves its compiler cache, and a stale cache makes every PR rebuild the
+# compiler from scratch (two generations, ~15 min) instead of reusing it.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   version:
