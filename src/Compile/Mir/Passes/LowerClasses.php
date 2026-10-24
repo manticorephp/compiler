@@ -225,6 +225,50 @@ trait LowerClasses
         return $out;
     }
 
+    /**
+     * The instance properties php starts UNINITIALIZED: a native type hint, no
+     * default, not a promoted ctor param, no hook. Inherited from the parent; a
+     * redeclaration decides for itself. {@see ClassDef::$propertyMaybeUninit}
+     *
+     * @param array<string, array{get: ?string, set: ?string}> $propHooks
+     * @return array<string, bool>
+     */
+    private function maybeUninitProps(\Parser\Ast\ClassDecl $decl, string $parent, array $propHooks): array
+    {
+        $out = [];
+        if ($parent !== '' && isset($this->classTable[$parent])) {
+            foreach ($this->classTable[$parent]->propertyMaybeUninit as $pn => $_) { $out[$pn] = true; }
+        }
+        foreach ($decl->properties as $prop) {
+            if ($prop->isStatic) { continue; }
+            unset($out[$prop->name]);
+            if ($prop->typeHint !== null && $prop->typeHint !== '' && $prop->default === null
+                && !isset($propHooks[$prop->name])) {
+                $out[$prop->name] = true;
+            }
+        }
+        $own = [];
+        foreach ($decl->properties as $prop) { $own[$prop->name] = true; }
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
+            $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->properties as $tprop) {
+                if ($tprop->isStatic || isset($own[$tprop->name])) { continue; }
+                $own[$tprop->name] = true;
+                if ($tprop->typeHint !== null && $tprop->typeHint !== '' && $tprop->default === null) {
+                    $out[$tprop->name] = true;
+                }
+            }
+        }
+        foreach ($decl->methods as $m) {
+            if ($m->name !== '__construct') { continue; }
+            foreach ($m->params as $p) {
+                if ($p->promoted !== '') { unset($out[$p->name]); }
+            }
+        }
+        return $out;
+    }
+
     private function buildClassDef(\Parser\Ast\ClassDecl $decl, int $classId): ClassDef
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
@@ -625,6 +669,7 @@ trait LowerClasses
         $cd->propertyDocList = $docList;
         $cd->propertyReadonly = $roProps;
         $cd->propertyMeta = $propMeta;
+        $cd->propertyMaybeUninit = $this->maybeUninitProps($decl, $parent, $propHooks);
         $cd->methodMeta = $methodMeta;
         $cd->attributes = $this->attrNames($decl->attributes);
         $cd->isFinal = $decl->isFinal;

@@ -157,6 +157,12 @@ trait EmitLlvmObjects
                       . $obj . ', i64 ' . (string)$cd->bagOffset() . "\n";
                 $out .= '  store i64 0, ptr ' . $bGep . "\n";
             }
+            for ($w = 0; $w < $cd->initMapWords; $w = $w + 1) {
+                $mGep = $this->ssa->allocReg();
+                $out .= '  ' . $mGep . ' = getelementptr inbounds i8, ptr '
+                      . $obj . ', i64 ' . (string)($cd->initMapOffset + 8 * $w) . "\n";
+                $out .= '  store i64 0, ptr ' . $mGep . "\n";
+            }
         }
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
@@ -1199,6 +1205,17 @@ trait EmitLlvmObjects
             $bp = $this->ssa->allocReg();
             $out .= '  ' . $bp . ' = inttoptr i64 ' . $bv . " to ptr\n";
             $out .= '  call void @__mir_array_retain(ptr ' . $bp . ")\n";
+        }
+        // The init bitmap travels with the slots it describes.
+        for ($w = 0; $w < $cd->initMapWords; $w = $w + 1) {
+            $mo = (string)($cd->initMapOffset + 8 * $w);
+            $ms = $this->ssa->allocReg();
+            $out .= '  ' . $ms . ' = getelementptr inbounds i8, ptr ' . $src . ', i64 ' . $mo . "\n";
+            $mv = $this->ssa->allocReg();
+            $out .= '  ' . $mv . ' = load i64, ptr ' . $ms . "\n";
+            $md = $this->ssa->allocReg();
+            $out .= '  ' . $md . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . $mo . "\n";
+            $out .= '  store i64 ' . $mv . ', ptr ' . $md . "\n";
         }
         // __clone() hook on the fresh copy.
         $cloneCls = $this->resolveMethodClass($cls, '__clone');

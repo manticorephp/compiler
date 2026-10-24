@@ -70,8 +70,13 @@ final class MemoryAbi
      * {@see FLOAT_DENORM_TAG} or'ed in (a signaling-NaN word, never produced
      * otherwise — box_float canonicalizes every NaN), so a cell can never look
      * like a heap pointer. Every cell -> double read decodes it.
+     *
+     * v24: an object whose class tree declares a typed property php starts
+     * UNINITIALIZED carries an INIT BITMAP ({@see INIT_MAP_SLOT_BYTES}) at an
+     * offset agreed across the tree, past every member's properties and bag;
+     * the instance grows by its words. A v23 object of such a class is shorter.
      */
-    public const VERSION = 23;
+    public const VERSION = 24;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -419,6 +424,16 @@ final class MemoryAbi
 
     /** Non-`#[Struct]` instances reserve this much before properties. */
     public const OBJECT_HEADER_SIZE = 16;
+
+    /**
+     * Init bitmap (v24): bit `(slot_offset - OBJECT_HEADER_SIZE) / INIT_MAP_SLOT_BYTES`
+     * of the i64 words at `ClassDef::$initMapOffset` is set once the slot has been
+     * written. 0 at allocation (the instance template carries 0); `clone` copies
+     * it; `unset()` clears it. Only word-wide slots of a property php starts
+     * uninitialized are tracked. Bit `b` lives in word `b / INIT_MAP_WORD_BITS`.
+     */
+    public const INIT_MAP_SLOT_BYTES = 8;
+    public const INIT_MAP_WORD_BITS = 64;
 
     /**
      * `ptr` — the class DESCRIPTOR (`@__mir_cd_<id> = { i64 class_id,

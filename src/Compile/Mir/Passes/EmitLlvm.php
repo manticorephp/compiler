@@ -918,6 +918,7 @@ final class EmitLlvm implements EmitVisitor
         $this->clonedClasses = [];
         $this->cloneClassUnknown = false;
         $this->moduleIsLibrary = $module->isLibraryModule;
+        $this->grantInitMaps($module);
         $this->grantBagsForDynamicStores($module);
         $statT = \Compile\Stats::begin('  property scan');
         foreach ($module->functions as $fn) {
@@ -2324,6 +2325,76 @@ final class EmitLlvm implements EmitVisitor
      * which has not run when lowering ends — the same scan there matched
      * nothing at all. Layout is read during emission, which is after this.
      */
+    /**
+     * Give every class tree that declares a property php starts UNINITIALIZED
+     * one init bitmap ({@see \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES}) at ONE
+     * offset: past the deepest member's properties and bag, the rule the bag
+     * offset follows, so a base-typed pointer finds the same word in every
+     * instance. Every member this module owns gets it, so a store through any
+     * class of the tree sets the bit a read through any other one tests.
+     *
+     * Skipped where the layout is a published fact this module does not own: a
+     * library module (its layouts go into a `.sig`), an extern or prelude class
+     * (the stdlib allocates those at its own size), a `#[Struct]`, and a
+     * property such a class declares.
+     */
+    private function grantInitMaps(\Compile\Mir\Module $module): void
+    {
+        if ($module->isLibraryModule) { return; }
+        /** @var array<string, string> $rootOf */
+        $rootOf = [];
+        foreach ($this->classes as $name => $cd) {
+            $cur = $name;
+            $guard = 0;
+            while ($guard < 256) {
+                $p = isset($this->classes[$cur]) ? $this->classes[$cur]->parent : '';
+                if ($p === '' || !isset($this->classes[$p])) { break; }
+                $cur = $p;
+                $guard = $guard + 1;
+            }
+            $rootOf[$name] = $cur;
+        }
+        /** @var array<string, array<string, bool>> $props */
+        $props = [];
+        foreach ($this->classes as $name => $cd) {
+            if ($cd->isStruct || $cd->isExternClass || $cd->typeDefRepr !== '') { continue; }
+            foreach ($cd->propertyMaybeUninit as $pn => $_) {
+                if ($cd->propertyOffset($pn) < 0 || $cd->propertyWidth($pn) !== 8) { continue; }
+                if (\str_starts_with($pn, '__')) { continue; }
+                $pm = $cd->propertyMeta[$pn] ?? null;
+                if ($pm === null || $pm->isStatic) { continue; }
+                $dc = $pm->declaringClass;
+                if ($dc !== '' && isset($this->classes[$dc]) && ($this->classes[$dc]->isPreludeClass
+                    || $this->classes[$dc]->isExternClass)) { continue; }
+                $props[$rootOf[$name]][$pn] = true;
+            }
+        }
+        foreach ($props as $root => $set) {
+            $off = 0;
+            $maxBit = -1;
+            foreach ($this->classes as $name => $cd) {
+                if ($rootOf[$name] !== $root) { continue; }
+                $end = $cd->instanceSize();
+                if ($end > $off) { $off = $end; }
+                foreach ($set as $pn => $_) {
+                    $po = $cd->propertyOffset($pn);
+                    if ($po < 0) { continue; }
+                    $b = \intdiv($po - $cd->headerSize(), \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES);
+                    if ($b > $maxBit) { $maxBit = $b; }
+                }
+            }
+            if ($maxBit < 0) { continue; }
+            $words = \intdiv($maxBit, \Compile\MemoryAbi::INIT_MAP_WORD_BITS) + 1;
+            foreach ($this->classes as $name => $cd) {
+                if ($rootOf[$name] !== $root) { continue; }
+                if ($cd->isStruct || $cd->isExternClass || $cd->isPreludeClass) { continue; }
+                $cd->initMapOffset = $off;
+                $cd->initMapWords = $words;
+                $cd->initMapProps = $set;
+            }
+        }
+    }
+
     private function grantBagsForDynamicStores(\Compile\Mir\Module $module): void
     {
         if (!\Compile\Debug::$dynPropBag) { return; }
