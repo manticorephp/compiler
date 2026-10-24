@@ -229,6 +229,7 @@ trait LowerStmts
         $temps = $this->lvTemps;
         $this->lvHoist = [];
         $this->lvTemps = [];
+        $this->stmtAssign = $rewritten;
         $stmts[] = $this->lowerExpr($rewritten);
         $loads = [];
         foreach ($temps as $t) { $loads[] = new LoadLocal($t, Type::unknown()); }
@@ -436,6 +437,7 @@ trait LowerStmts
             if ($hoisted !== null) { return $hoisted; }
             $outerValueTemps = $this->valueTemps;
             $this->valueTemps = [];
+            $this->stmtAssign = $se;
             $lowered = $this->lowerExpr($se);
             $valueTemps = $this->valueTemps;
             $this->valueTemps = $outerValueTemps;

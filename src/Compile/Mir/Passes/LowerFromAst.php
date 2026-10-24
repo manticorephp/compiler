@@ -747,6 +747,8 @@ final class LowerFromAst implements Pass
     private array $lvTemps = [];
     /** @var string[] value temps of the expression statement being lowered ({@see storeToTarget}) */
     private array $valueTemps = [];
+    /** the `Assign` that is a whole expression statement: its value is discarded */
+    private ?\Parser\Ast\Expr $stmtAssign = null;
 
     /** @var array<string, \Parser\Ast\FunctionDecl> fn name → decl (defaults / named args) */
     private array $fnDecls = [];
@@ -4551,6 +4553,20 @@ final class LowerFromAst implements Pass
         }
         $h = $this->hoistLvalueExpr($expr);
         if ($h !== null) { return $h; }
+        // `$o[$k] = <computed>` as a VALUE: an ArrayAccess store has no result of its
+        // own, so park the computed value in a local and yield that.
+        if ($expr !== $this->stmtAssign && $expr->target->kind === 'ArrayAccess'
+            && $this->lvPure($expr->target->array) && !$this->lvPure($expr->value)
+            && ($expr->target->index === null || $this->lvPure($expr->target->index))) {
+            $value = $this->lowerExpr($expr->value);
+            $vtmp = '__av_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            return new Block([
+                new StoreLocal($vtmp, $value, $value->type),
+                $this->storeToTarget($expr->target, new LoadLocal($vtmp, $value->type)),
+                new LoadLocal($vtmp, $value->type),
+            ], $value->type);
+        }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
     }
 
