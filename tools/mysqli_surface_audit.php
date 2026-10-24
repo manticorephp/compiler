@@ -9,11 +9,33 @@
 // (statically built in), so the prelude cannot be declared under Zend. Then use the compiled probe:
 // compile this file with bin/manticore (prelude included), run `<probe> --live > live.json`,
 // then `php tools/mysqli_surface_audit.php --diff live.json`.
+// Comparison keys: the live side may only use Reflection methods present in prelude/reflection.php, so
+// the Zend-only data `tentative` (return came from a tentative type) and `readonly` (no
+// ReflectionProperty::isReadOnly there) are dumped but stripped from BOTH sides before diffing.
+// Defaults are compared as the evaluated value (var_export), not the constant name; types go through
+// one normaliser (typeStr: `?T` => `T|null`, union members sorted, null last).
 error_reporting(E_ALL & ~E_DEPRECATED);
 
 function typeStr(?ReflectionType $t): ?string
 {
-    return $t === null ? null : (string) $t;
+    if ($t === null) {
+        return null;
+    }
+    $s = (string) $t;
+    if ($s[0] === '?') {
+        $s = substr($s, 1) . '|null';
+    }
+    if (str_contains($s, '&')) {
+        return $s;
+    }
+    $parts = explode('|', $s);
+    $nul = in_array('null', $parts, true);
+    $parts = array_values(array_filter($parts, fn($p) => $p !== 'null'));
+    sort($parts);
+    if ($nul) {
+        $parts[] = 'null';
+    }
+    return implode('|', $parts);
 }
 
 function describeFunction(ReflectionFunctionAbstract $f): array
@@ -22,7 +44,7 @@ function describeFunction(ReflectionFunctionAbstract $f): array
     foreach ($f->getParameters() as $p) {
         $d = null;
         if ($p->isDefaultValueAvailable()) {
-            $d = $p->isDefaultValueConstant() ? 'const:' . $p->getDefaultValueConstantName() : var_export($p->getDefaultValue(), true);
+            $d = var_export($p->getDefaultValue(), true);
         }
         $params[] = [
             'name' => $p->getName(),
@@ -32,7 +54,13 @@ function describeFunction(ReflectionFunctionAbstract $f): array
             'variadic' => $p->isVariadic(),
         ];
     }
-    return ['params' => $params, 'return' => typeStr($f->getReturnType())];
+    $ret = $f->getReturnType();
+    $tentative = false;
+    if ($ret === null && method_exists($f, 'getTentativeReturnType')) {
+        $ret = $f->getTentativeReturnType();
+        $tentative = $ret !== null;
+    }
+    return ['params' => $params, 'return' => typeStr($ret), 'tentative' => $tentative];
 }
 
 function describeClass(ReflectionClass $c): array
@@ -57,7 +85,7 @@ function describeClass(ReflectionClass $c): array
         }
         $p[$prop->getName()] = [
             'type' => typeStr($prop->getType()),
-            'readonly' => $prop->isReadOnly(),
+            'readonly' => method_exists($prop, 'isReadOnly') ? $prop->isReadOnly() : null,
             'static' => $prop->isStatic(),
             'visibility' => $prop->isPublic() ? 'public' : ($prop->isProtected() ? 'protected' : 'private'),
         ];
@@ -101,7 +129,11 @@ function dumpSurface(): array
     return ['classes' => $classes, 'functions' => $functions, 'constants' => $consts];
 }
 
-/** Same shape as dumpSurface, but restricted to the names the golden lists, from the live runtime. */
+/**
+ * Same shape as dumpSurface, but restricted to the names the golden lists, from the live runtime.
+ * @param array<string,mixed> $golden
+ * @return array<string,mixed>
+ */
 function liveSurface(array $golden): array
 {
     $classes = [];
@@ -123,6 +155,19 @@ function liveSurface(array $golden): array
         }
     }
     return ['classes' => $classes, 'functions' => $functions, 'constants' => $consts];
+}
+
+/** Drop the Zend-only keys (see header) from a surface tree. */
+function strip(mixed $v): mixed
+{
+    if (!is_array($v)) {
+        return $v;
+    }
+    unset($v['tentative'], $v['readonly']);
+    foreach ($v as $k => $x) {
+        $v[$k] = strip($x);
+    }
+    return $v;
 }
 
 function diffTree(mixed $want, mixed $got, string $path, array &$out): void
@@ -158,7 +203,7 @@ if ($mode === '--live') {
 if ($mode === '--diff') {
     $golden = json_decode(file_get_contents(__DIR__ . '/../tests/mysqli_net/surface.json'), true);
     $out = [];
-    diffTree($golden, json_decode(file_get_contents($argv[2]), true), '', $out);
+    diffTree(strip($golden), strip(json_decode(file_get_contents($argv[2]), true)), '', $out);
     if ($out) {
         echo implode("\n", $out), "\n", count($out), " difference(s)\n";
         exit(1);
@@ -178,7 +223,7 @@ if ($mode === '--check') {
     $out = [];
     // the built-in extension is not the prelude: with it loaded and no files, nothing is declared
     $live = extension_loaded('mysqli') ? ['classes' => [], 'functions' => [], 'constants' => []] : liveSurface($golden);
-    diffTree($golden, $live, '', $out);
+    diffTree(strip($golden), strip($live), '', $out);
     if ($out) {
         echo implode("\n", $out), "\n", count($out), " difference(s)\n";
         exit(1);
