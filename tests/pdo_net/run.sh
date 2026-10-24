@@ -1,6 +1,7 @@
 #!/bin/bash
 # pdo_net: byte parity of compiled PDO network drivers against php, on live servers.
-#   tests/pdo_net/run.sh [-k substr] [--server mysql|mariadb] [--no-pgsql]
+#   tests/pdo_net/run.sh [-k substr] [--server mysql|mariadb] [--no-pgsql] [--shard i/n]
+# --shard i/n runs every n-th case from the i-th (CI gives each slice its own servers, so cases never share a database); the pgsql hostile run belongs to slice 1, the mysql one to slice 2 (1 when n = 1).
 # --no-pgsql leaves out every pgsql_* case and the pgsql hostile run (CI's second server row repeats nothing the first one proved).
 # --server picks the server the mysql_* cases run against (default mysql = mc-my :33060, mariadb = mc-maria :33061); the oracle is live php on THAT server.
 # A case header line `// servers: mysql` (default: both) limits a case; the other server SKIPs it with the reason.
@@ -10,12 +11,16 @@ cd "$ROOT"
 FILTER=""
 SERVER=mysql
 NOPG=0
+SHARD_I=0; SHARD_N=1
 while [ $# -gt 0 ]; do
     case "$1" in
         -k) FILTER="${2:-}"; shift 2 ;;
         --server) SERVER="${2:-}"; shift 2 ;;
         --no-pgsql) NOPG=1; shift ;;
-        *) echo "usage: run.sh [-k substr] [--server mysql|mariadb] [--no-pgsql]" >&2; exit 2 ;;
+        --shard)
+            [[ "${2:-}" =~ ^([0-9]+)/([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 1 ] && [ "${BASH_REMATCH[1]}" -le "${BASH_REMATCH[2]}" ] || { echo "--shard takes i/n with 1 <= i <= n" >&2; exit 2; }
+            SHARD_I=$((BASH_REMATCH[1] - 1)); SHARD_N=${BASH_REMATCH[2]}; shift 2 ;;
+        *) echo "usage: run.sh [-k substr] [--server mysql|mariadb] [--no-pgsql] [--shard i/n]" >&2; exit 2 ;;
     esac
 done
 case "$SERVER" in mysql) MY_PORT=33060 ;; mariadb) MY_PORT=33061 ;; *) echo "unknown --server $SERVER (mysql|mariadb)" >&2; exit 2 ;; esac
@@ -48,10 +53,12 @@ PENDING_POST=""
 run_pending_post() { local p="$PENDING_POST"; PENDING_POST=""; [ -n "$p" ] && [ -x "$p" ] && "$p"; return 0; }
 trap 'run_pending_post; rm -rf "$WORK"' EXIT
 trap 'exit 130' INT TERM
+k=0
 for f in tests/pdo_net/cases/*.php; do
     n=$(basename "$f" .php)
     [[ -n "$FILTER" && "$n" != *"$FILTER"* ]] && continue
     [[ "$NOPG" = 1 && "$n" == pgsql_* ]] && continue
+    k=$((k+1)); [ $(( (k-1) % SHARD_N )) -eq "$SHARD_I" ] || continue
     case "$n" in pgsql_*) dsn="$PDO_PG_DSN" ;; mysql_native) dsn="$PDO_MY_NATIVE_DSN" ;; mysql_*) dsn="$PDO_MY_DSN" ;; *) echo "bad case name $n: must start with pgsql_ or mysql_" >&2; exit 2 ;; esac
     # a sibling <case>.dsn names the DSN to use instead (cases that need a server of their own: mc-my-iso, :33065)
     [ -f "${f%.php}.dsn" ] && dsn=$(cat "${f%.php}.dsn") && export PDO_MY_DSN="$dsn" || export PDO_MY_DSN="${PDO_MY_DSN_DEFAULT}"
@@ -97,7 +104,7 @@ for f in tests/pdo_net/cases/*.php; do
     else echo "FAIL $n"; echo "--- diff (php < > native)"; diff <(echo "$exp") <(echo "$act") | head -n 40 | cut -c1-300; fail=$((fail+1)); fi
 done
 # Hostile-server cases: a fake server (Zend php) per mode, the compiled client, hand-written expectations.
-if [[ "$NOPG" != 1 && ( -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ) ]]; then
+if [[ "$NOPG" != 1 && "$SHARD_I" = 0 && ( -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ) ]]; then
     H=tests/pdo_net/hostile
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL pgsql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
@@ -116,7 +123,7 @@ if [[ "$NOPG" != 1 && ( -z "$FILTER" || "pgsql_hostile" == *"$FILTER"* ) ]]; the
     fi
 fi
 # The same fake-server harness speaking the MySQL protocol (server_mysql.php), one mode per connection.
-if [[ "$SERVER" = mysql && ( -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ) ]]; then
+if [[ "$SERVER" = mysql && "$SHARD_I" = "$((SHARD_N > 1 ? 1 : 0))" && ( -z "$FILTER" || "mysql_hostile" == *"$FILTER"* ) ]]; then
     H=tests/pdo_net/hostile
     bin/manticore compile $H/client.php -o "$WORK/hostile" >"$WORK/hostile.log" 2>&1 || { echo "FAIL mysql_hostile (compile)"; tail -n 20 "$WORK/hostile.log"; fail=$((fail+1)); }
     if [ -x "$WORK/hostile" ]; then
