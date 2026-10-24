@@ -169,6 +169,18 @@ final class __McPdoMyWire
     {
         $this->host = $host;
         $this->port = $port;
+        if (\strncmp($host, 'unix:', 5) === 0) {
+            $en = 0;
+            $es = '';
+            $s = \stream_socket_client('unix://' . \substr($host, 5), $en, $es, $timeout);
+            if ($s === false) {
+                throw __McPdo::connectFail('HY000', 2002, $es);
+            }
+            $this->s = $s;
+            $this->setTimeout($timeout);
+            $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
+            return;
+        }
         $ip = $host;
         if (\strpos($host, ':') === false && \ip2long($host) === false) {
             $ip = \gethostbyname($host);
@@ -191,6 +203,15 @@ final class __McPdoMyWire
         $this->setTimeout($timeout);
         $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
     }
+
+    /** A connection over a unix domain socket (the constructor reads the `unix:` host prefix). */
+    public static function connectUnix(string $path, float $timeout): self
+    {
+        return new self('unix:' . $path, 0, $timeout);
+    }
+
+    /** @return resource the connection's stream, for stream_select() */
+    public function socket(): mixed { return $this->s; }
 
     public function timeoutValue(): float { return $this->timeout; }
 
@@ -696,7 +717,16 @@ final class __McPdoMyWire
         if (($caps & self::CLIENT_CONNECT_WITH_DB) !== 0) { $r .= $db . "\0"; }
         if (($caps & self::CLIENT_PLUGIN_AUTH) !== 0) { $r .= $this->plugin . "\0"; }
         $this->sendPacket($r);
+        $e = $this->authExchange($pw);
+        if ($e !== null) { throw $this->errPacket($e); }
+    }
 
+    /**
+     * The server's side of the authentication exchange after a HandshakeResponse41 or a COM_CHANGE_USER, up to its OK
+     * (null) or its ERR packet (returned as is).
+     */
+    private function authExchange(string $pw): ?string
+    {
         $plugin = $this->plugin;
         $scramble = $this->scramble;
         $switches = 0;
@@ -715,9 +745,9 @@ final class __McPdoMyWire
             if ($t === 0x00) {
                 $this->parseOk($p, new __McPdoMyResult());
                 $this->connecting = false;
-                return;
+                return null;
             }
-            if ($t === 0xFF) { throw $this->errPacket($p); }
+            if ($t === 0xFF) { return $p; }
             if ($t === 0xFE) {
                 if (++$switches > 2) { throw $this->malformed('too many authentication switches'); }
                 if (\strlen($p) === 1) {
@@ -1097,12 +1127,123 @@ final class __McPdoMyWire
 
     private function cycle(string $cmd, bool $bin, bool $stream = false): __McPdoMyResult
     {
+        $this->sendCmd($cmd);
+        return $this->readReply($bin, $stream);
+    }
+
+    /** First half of a cycle: takes the wire and sends $cmd. The wire stays held until readReply() (or the send fails). */
+    private function sendCmd(string $cmd): void
+    {
         $this->enter();
         try {
-            return $this->queryRun($cmd, $bin, $stream);
+            if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $this->drainOwed();
+            $this->inflight = true;
+            $this->insertId = 0;
+            $this->seq = 0;
+            $this->sendPacket($cmd);
+            $this->awaiting = true;
+            $this->respStart = true;
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            $this->release();
+            throw $t;
+        }
+    }
+
+    /** Second half of a cycle: reads the whole reply of the command sendCmd() sent, then frees the wire. */
+    private function readReply(bool $bin, bool $stream): __McPdoMyResult
+    {
+        try {
+            return $this->readChain($bin, $stream);
         } catch (\Throwable $t) {
             // a cancel/timeout/protocol failure inside a cycle leaves half a response on the wire: nobody may reuse it
             if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->release();
+        }
+    }
+
+    /** Async split of query(): send now, read the reply later (the wire is held in between). */
+    public function sendQuery(string $sql): void
+    {
+        $this->sendCmd("\x03" . $sql);
+    }
+
+    public function readQueryReply(bool $stream = false): __McPdoMyResult
+    {
+        return $this->readReply(false, $stream);
+    }
+
+    /** @return ?__McPdoMyErr null on OK */
+    public function initDb(string $db): ?__McPdoMyErr { return $this->cycle("\x02" . $db, false)->err; }
+
+    public function processKill(int $id): ?__McPdoMyErr { return $this->cycle("\x0c" . self::putLe($id, 4), false)->err; }
+
+    public function refresh(int $flags): ?__McPdoMyErr { return $this->cycle("\x07" . \chr($flags & 255), false)->err; }
+
+    /**
+     * COM_CHANGE_USER: re-authenticates this connection as $user (session state is reset, the server's own plugin
+     * negotiation is answered by the same exchange as auth()). A server ERR is returned and leaves the old identity
+     * recorded; a protocol failure poisons the connection and throws.
+     */
+    public function changeUser(string $user, ?string $pw, string $db, int $charsetNo): ?__McPdoMyErr
+    {
+        $pw = $pw === null ? '' : $pw;
+        if (\strpos($user, "\0") !== false || \strpos($db, "\0") !== false) {
+            $e = new __McPdoMyErr();
+            $e->no = 2000;
+            $e->state = 'HY000';
+            $e->msg = 'invalid NUL byte in user or database name';
+            return $e;
+        }
+        $this->enter();
+        try {
+            if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $this->drainOwed();
+            $this->inflight = true;
+            $this->insertId = 0;
+            $this->seq = 0;
+            $this->authDeadline = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout : 0.0;
+            $auth = $this->pluginResponse($this->plugin, $pw, $this->scramble);
+            $r = "\x11" . $user . "\0";
+            if (($this->cliCaps & self::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) !== 0) {
+                $r .= self::lenencInt(\strlen($auth)) . $auth;
+            } else {
+                $r .= \chr(\strlen($auth)) . $auth;
+            }
+            $r .= $db . "\0" . self::putLe($charsetNo, 2);
+            if (($this->cliCaps & self::CLIENT_PLUGIN_AUTH) !== 0) { $r .= $this->plugin . "\0"; }
+            $this->sendPacket($r);
+            $this->awaiting = true;
+            $this->respStart = true;
+            $p = $this->authExchange($pw);
+            $this->inflight = false;
+            if ($p !== null) { return $this->parseErr($p); }
+            $this->kUser = $user;
+            self::$pwStore[$this->kPwId] = $pw;
+            $this->kCs = $charsetNo;
+            return null;
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->release();
+        }
+    }
+
+    /** COM_STMT_SEND_LONG_DATA: appends a chunk to parameter $param of statement $stmtId. No reply. */
+    public function sendLongData(int $stmtId, int $param, string $data): void
+    {
+        $this->enter();
+        try {
+            if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $this->drainOwed();
+            $this->seq = 0;
+            $this->sendPacket("\x18" . self::putLe($stmtId, 4) . self::putLe($param, 2) . $data);
+        } catch (\Throwable $t) {
+            $this->closeSock();
             throw $t;
         } finally {
             $this->release();
@@ -1139,19 +1280,6 @@ final class __McPdoMyWire
             }
         }
         $this->busy = true;
-    }
-
-    private function queryRun(string $cmd, bool $bin, bool $stream = false): __McPdoMyResult
-    {
-        if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
-        $this->drainOwed();
-        $this->inflight = true;
-        $this->insertId = 0;
-        $this->seq = 0;
-        $this->sendPacket($cmd);
-        $this->awaiting = true;
-        $this->respStart = true;
-        return $this->readChain($bin, $stream);
     }
 
     /**
