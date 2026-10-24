@@ -849,6 +849,11 @@ trait InferCalls
             $node->type = $this->sigs[$node->direct] ?? Type::cell();
             return $node->type;
         }
+        // `\Ffi\Ptr` members (isNull / offset) are inline address arithmetic, see emitPtrMember.
+        if ($objType->kind === Type::KIND_OBJ && $objType->class === 'Ffi\\Ptr' && !isset($this->classes['Ffi\\Ptr'])) {
+            if ($node->method === 'isNull') { $node->type = Type::bool_(); return $node->type; }
+            if ($node->method === 'offset') { $node->type = $objType; return $node->type; }
+        }
         $mcCls = $objType->class;
         if ($mcCls !== null && $mcCls !== '') {
             $this->adoptLitParamElem($node->args, $mcCls . '__' . $node->method, 1);

@@ -1230,9 +1230,40 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `\Ffi\Ptr` is its address at run time (no class is linked into a user
+     * program), so its whole surface is inline: `->address`, `->isNull()`,
+     * `->offset(n)`. A null Ptr is the word 0 (a C NULL), and this is why
+     * `isNull()` must not go through the null-receiver guard.
+     */
+    private function isPtrReceiver(Node $o): bool
+    {
+        return $o->type->kind === Type::KIND_OBJ && $o->type->class === 'Ffi\\Ptr' && !isset($this->classes['Ffi\\Ptr']);
+    }
+
+    private function emitPtrMember(\Compile\Mir\MethodCall_ $n): ?string
+    {
+        if ($n->method === 'offset' && \count($n->args) === 1) {
+            return $this->emitNode(new \Compile\Mir\Call('ptr_offset', [$n->object, $n->args[0]], $n->object->type));
+        }
+        if ($n->method !== 'isNull' || $n->args !== []) { return null; }
+        $out = $this->emitNode(new \Compile\Mir\Call('ptr_to_int', [$n->object], Type::int_()));
+        $out .= $this->coerceToI64();
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = icmp eq i64 ' . $this->lastValue . ", 0\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = zext i1 ' . $c . " to i64\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitPropertyAccess(PropertyAccess_ $n): string
     {
         $pa = $n;
+        if ($pa->property === 'address' && $this->isPtrReceiver($pa->object)) {
+            return $this->emitNode(new \Compile\Mir\Call('ptr_to_int', [$pa->object], Type::int_()));
+        }
         // `$byte->value` on a `#[TypeDef]`: the value IS the property. No load, no
         // offset — emit the receiver and stop.
         $td = $pa->object->type->typeDefClass();
@@ -8537,6 +8568,10 @@ trait EmitLlvmObjects
 
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
     {
+        if ($this->isPtrReceiver($n->object)) {
+            $pm = $this->emitPtrMember($n);
+            if ($pm !== null) { return $pm; }
+        }
         $guard = $this->nullReceiverGuard($n);
         if ($guard !== '') { return $guard . $this->emitMethodCallUnguarded($n); }
         return $this->emitMethodCallUnguarded($n);

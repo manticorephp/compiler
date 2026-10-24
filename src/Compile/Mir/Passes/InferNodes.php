@@ -2780,6 +2780,11 @@ trait InferNodes
     private function inferPropertyAccess(PropertyAccess_ $node): Type
     {
         $objType = $this->inferNode($node->object);
+        if ($objType->kind === Type::KIND_OBJ && $objType->class === 'Ffi\\Ptr' && $node->property === 'address'
+            && !isset($this->classes['Ffi\\Ptr'])) {
+            $node->type = Type::int_();
+            return $node->type;
+        }
         // `$byte->value` on a `#[TypeDef]` receiver IS `$c` — the value and its one
         // property are the same scalar. Type it as the BARE carrier: reading the
         // property is where the TypeDef ends and a plain int/float begins, which

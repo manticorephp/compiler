@@ -6779,10 +6779,26 @@ final class LowerFromAst implements Pass
         return $ndo;
     }
 
+    /**
+     * `\Ffi\Ptr` as a user program sees it: no class is linked, a Ptr IS its
+     * address (an i64). Its constructor and `null()` lower to `int_to_ptr`; the
+     * members are emitted inline ({@see EmitLlvmObjects::emitPtrMember}). False
+     * when the tree declares the class itself (the compiler's own build).
+     */
+    private function ptrIntrinsicClass(string $class): bool
+    {
+        $c = \ltrim($class, '\\');
+        return \strtolower($c) === 'ffi\\ptr' && !isset($this->classTable[$c]) && !isset($this->classDecls[$c]);
+    }
+
     private function lowerNewExpr(\Parser\Ast\NewExpr $expr): Node
     {
         // `new self` / `new static` / `new parent` → concrete class.
         $cls = $this->resolveStaticClass($expr->class);
+        // A Ptr is its address at run time ({@see ptrIntrinsicClass}): `new Ptr($a)` IS int_to_ptr($a).
+        if ($this->ptrIntrinsicClass($cls) && \count($expr->args) === 1) {
+            return new Call('int_to_ptr', [$this->lowerExpr($expr->args[0])], Type::obj('Ffi\\Ptr'));
+        }
         $params = $this->resolveMethodParams($cls, '__construct');
         if ($params !== null) {
             $args = $this->defaultFillArgs($params, $expr->args, $this->resolveMethodDeclClass($cls, '__construct'));
@@ -7180,6 +7196,10 @@ final class LowerFromAst implements Pass
             }
         } else {
             $scope = \ltrim($class, '\\');
+        }
+        // `Ptr::null()` — see {@see ptrIntrinsicClass}.
+        if ($this->ptrIntrinsicClass($class) && \strtolower($expr->method) === 'null' && $expr->args === []) {
+            return new Call('int_to_ptr', [new IntConst(0, Type::int_())], Type::obj('Ffi\\Ptr'));
         }
         // `Closure::fromCallable($c)` → the same closure a first-class callable
         // builds. A string / `C::m` / `[$o,"m"]` literal reuses coerceCallableArg;
