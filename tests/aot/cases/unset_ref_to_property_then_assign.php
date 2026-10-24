@@ -1,6 +1,5 @@
 <?php
 // `$r = &$this->p; unset($r); $r = [99];` traps instead of rebinding $r to a fresh local
-// issue: #200
 final class B
 {
     public array $a = [1 => [1]];

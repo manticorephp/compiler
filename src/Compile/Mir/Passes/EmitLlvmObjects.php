@@ -3194,6 +3194,18 @@ trait EmitLlvmObjects
             // back instead of zeroing the slot both names now share.
             $this->locals->aliasLocals[$n->target] = $this->locals->slots[$n->target] ?? '';
             $this->locals->slots[$n->target] = $this->locals->slots[$n->source];
+            // A by-ref name rebound leaves the caller's variable alone; it
+            // follows the source's binding kind from here on.
+            if ($n->target !== $n->source) {
+                if (isset($this->locals->refLocals[$n->source])) {
+                    $this->locals->refLocals[$n->target] = true;
+                    if (isset($this->locals->refParamTypes[$n->source])) {
+                        $this->locals->refParamTypes[$n->target] = $this->locals->refParamTypes[$n->source];
+                    }
+                } else {
+                    unset($this->locals->refLocals[$n->target], $this->locals->refParamTypes[$n->target]);
+                }
+            }
         }
         // The name leaves the box it was bound to, and php drops that binding
         // NOW: whatever else still holds the box keeps it, and if nothing does
@@ -6298,6 +6310,16 @@ trait EmitLlvmObjects
                     if ($owned) {
                         $out .= '  store ptr ' . $nb . ', ptr ' . $this->locals->ownedBoxes[$name] . "\n";
                     }
+                    continue;
+                }
+                // A RAW by-ref name (param, `$r = &$this->p`) holds an ADDRESS it
+                // does not own: unset breaks the binding, the name is a fresh local.
+                if (isset($this->locals->refLocals[$name]) && isset($this->locals->slots[$name])) {
+                    $fresh = $this->ssa->allocReg();
+                    $out .= '  ' . $fresh . " = alloca i64\n";
+                    $out .= '  store i64 0, ptr ' . $fresh . "\n";
+                    $this->locals->slots[$name] = $fresh;
+                    unset($this->locals->refLocals[$name], $this->locals->refParamTypes[$name]);
                     continue;
                 }
                 $flavor = $this->discardReleaseFlavor($t->type);
