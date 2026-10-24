@@ -593,6 +593,7 @@ jobs:
     permissions:
       actions: read
     strategy:
+      fail-fast: false
       matrix:
         row: [linux-arm64, linux-amd64, linux-alpine-arm64, linux-alpine-amd64, macos-arm64]
     steps:

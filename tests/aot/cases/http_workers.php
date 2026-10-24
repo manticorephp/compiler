@@ -63,6 +63,9 @@ $pids = [];
 for ($i = 0; $i < 200 && count($pids) < 2; $i = $i + 1) {
     $pid = get($port, '/');
     if ($pid !== '') { $pids[$pid] = true; }
+    // 200 back-to-back requests finish in milliseconds; a worker the loaded host has
+    // not scheduled yet would still be missing. Give it up to ~5 s to start accepting.
+    if (count($pids) < 2) { usleep(25000); }
 }
 echo 'answered by workers: ', count($pids) === 2 ? 'ok' : 'BAD(' . count($pids) . ')', "\n";
 
