@@ -80,13 +80,24 @@ final class TypeCheck
     /** @var array<string, Type> fn name → declared return type */
     private array $returnTypes = [];
 
+    /** @var array<string, Type> non-generator fn → declared int|float|string return type */
+    private array $declaredScalarReturns = [];
+
+    /** @var array<string, \Compile\Mir\ClassDef> */
+    private array $classes = [];
+
     public function run(Module $module): Module
     {
+        $this->classes = $module->classes;
         foreach ($module->functions as $fn) {
             $this->paramsByFn[$fn->name] = $fn->params;
             if ($fn->ffiSymbol !== null) { $this->ffiFns[$fn->name] = true; }
             if ($fn->claimOrigin !== '') { $this->claimFns[$fn->name] = true; }
             $this->returnTypes[$fn->name] = $module->declaredReturnTypes[$fn->name] ?? $fn->returnType;
+            $dk = ($module->declaredReturnTypes[$fn->name] ?? $fn->returnType)->kind;
+            if (!$fn->isGenerator && ($dk === Type::KIND_INT || $dk === Type::KIND_FLOAT || $dk === Type::KIND_STRING)) {
+                $this->declaredScalarReturns[$fn->name] = $module->declaredReturnTypes[$fn->name] ?? $fn->returnType;
+            }
         }
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
@@ -122,6 +133,7 @@ final class TypeCheck
                 $this->checkArgs($cls . '__' . $n->method, $cls . '->' . $n->method, $n->args, $inFn, 1, $n);
             }
         }
+        $this->coerceScalarSink($n, $inFn);
         $this->checkShapeNode($n, $inFn);
         // An arm its own guard rules out never runs: `is_array($v) ? f($v) : g($v)`
         // over a `string` $v. Checking it reported the dead arm's argument as the
@@ -160,6 +172,44 @@ final class TypeCheck
                     . ') must be of type ' . $p->type->toString() . ', null given', Type::string_()),
             ], $p->type);
         }
+    }
+
+    /**
+     * Coercive mode for a scalar SINK that is not a call: a `return` under a
+     * declared `int|float|string` return type and an assignment to a property
+     * declared so. A scalar of another kind (a numeric string out of `explode`,
+     * a float, an int bound to `string`) is converted where it lands; left alone
+     * the slot held the source's bits read at the declared width.
+     */
+    private function coerceScalarSink(Node $n, string $inFn): void
+    {
+        if ($n->kind === Node::KIND_RETURN && $n->value !== null) {
+            $want = $this->declaredScalarReturns[$inFn] ?? null;
+            if ($want !== null) { $n->value = $this->scalarCast($n->value, $want); }
+        } elseif ($n->kind === Node::KIND_STORE_PROPERTY) {
+            $cls = $n->object->type->class ?? '';
+            while ($cls !== '' && isset($this->classes[$cls])) {
+                $cd = $this->classes[$cls];
+                $pt = $cd->propertyTypes[$n->property] ?? null;
+                if ($pt !== null) {
+                    if (!isset($cd->propHooks[$n->property])) { $n->value = $this->scalarCast($n->value, $pt); }
+                    return;
+                }
+                $cls = $cd->parent;
+            }
+        }
+    }
+
+    private function scalarCast(Node $v, Type $want): Node
+    {
+        $wk = $want->kind;
+        $vk = $v->type->kind;
+        if ($wk === $vk || ($wk === Type::KIND_FLOAT && $vk === Type::KIND_INT)) { return $v; }
+        if ($wk !== Type::KIND_INT && $wk !== Type::KIND_FLOAT && $wk !== Type::KIND_STRING) { return $v; }
+        if ($vk !== Type::KIND_INT && $vk !== Type::KIND_FLOAT && $vk !== Type::KIND_STRING && $vk !== Type::KIND_BOOL) { return $v; }
+        $cast = new \Compile\Mir\Cast($wk === Type::KIND_INT ? 'int' : ($wk === Type::KIND_FLOAT ? 'float' : 'string'), $v, $want);
+        $cast->line = $v->line;
+        return $cast;
     }
 
     private function checkGuarded(Node $cond, ?Node $then, ?Node $else, string $inFn): void
@@ -280,13 +330,14 @@ final class TypeCheck
                 $site->args[$ai] = $cast;
                 continue;
             }
-            // Coercive mode: a float bound to an `int` param is converted at the
-            // call (an integral float is the int, a fractional one truncates).
+            // Coercive mode: a float or numeric string bound to an `int` param is
+            // converted at the call (an integral float is the int, a fractional one truncates).
             // Left alone, the callee read the double's IEEE bits as the int.
-            if ($p->type->kind === Type::KIND_INT && !$p->byRef && $ak === Type::KIND_FLOAT
+            if (!$p->byRef && (($p->type->kind === Type::KIND_INT && ($ak === Type::KIND_FLOAT || $ak === Type::KIND_STRING))
+                || ($p->type->kind === Type::KIND_FLOAT && $ak === Type::KIND_STRING))
                 && !isset($this->ffiFns[$fnName]) && !isset($this->claimFns[$fnName])
                 && $site->args[$ai] === $arg) {
-                $cast = new \Compile\Mir\Cast('int', $arg, Type::int_());
+                $cast = new \Compile\Mir\Cast($p->type->kind === Type::KIND_INT ? 'int' : 'float', $arg, $p->type);
                 $cast->line = $arg->line;
                 $site->args[$ai] = $cast;
                 continue;
