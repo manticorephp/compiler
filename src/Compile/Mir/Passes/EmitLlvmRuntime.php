@@ -3255,7 +3255,10 @@ end:
             . "  br label %done\n"
             . "done:\n  ret void\n}\n";
         // A `Closure|X|null` slot is a CELL holding the env as an object-tagged
-        // word; the env is told apart from an object by its header magic.
+        // word; the env is told apart from an object by its header magic. An
+        // object has an allocator magic at -8 and nothing owned below it, so -32
+        // is read only when -8 carries none (#413: an object first in its malloc
+        // region put -32 on an unmapped page).
         $cellEnv = "  %tg = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
             . '  %sh = lshr i64 %v, ' . (string)\Compile\MemoryAbi::CELL_TAG_SHIFT . "\n"
             . '  %nib = and i64 %sh, ' . (string)\Compile\MemoryAbi::CELL_TAG_MASK . "\n"
@@ -3267,6 +3270,12 @@ end:
             . "  br i1 %okp, label %hdr, label %done\n"
             . "hdr:\n"
             . "  %p = inttoptr i64 %pl to ptr\n"
+            . "  %t8p = getelementptr inbounds i8, ptr %p, i64 -8\n"
+            . "  %t8 = load i64, ptr %t8p\n"
+            . "  %t8h = lshr i64 %t8, 48\n"
+            . '  %t8m = icmp eq i64 %t8h, ' . (string)(\Compile\MemoryAbi::CLOSURE_TAG_MAGIC >> 48) . "\n"
+            . "  br i1 %t8m, label %done, label %env\n"
+            . "env:\n"
             . '  %mp = getelementptr inbounds i8, ptr %p, i64 ' . $mOff . "\n"
             . "  %m = load i64, ptr %mp\n"
             . '  %mm = and i64 %m, ' . $mask . "\n"
