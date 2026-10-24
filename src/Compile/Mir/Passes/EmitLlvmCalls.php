@@ -4850,6 +4850,7 @@ trait EmitLlvmCalls
             && $a->kind !== Node::KIND_PROPERTY_ACCESS && $this->isOmittedDefaultArg($srcArgc, $ai, $a);
         if ($boxed) {
             $out = $this->emitNode($a);
+            $out .= $this->boxOmittedDefault($a, $pt, $srcArgc, $ai, $arrayHinted);
             $out .= $this->coerceToI64();
             $out .= $this->ownRefSeed($a, $this->lastValue);
             $box = $this->ssa->allocReg();
@@ -4865,6 +4866,7 @@ trait EmitLlvmCalls
         $tmp = $this->ssa->allocReg();
         $out = '  ' . $tmp . " = alloca i64\n";
         $out .= $this->emitNode($a);
+        $out .= $this->boxOmittedDefault($a, $pt, $srcArgc, $ai, $arrayHinted);
         $out .= $this->coerceToI64();
         // An array property read through a receiver with NO static slot (`sort($o->j)`
         // on a `mixed $o`, or on a `K|H` union local) is not addressable, so it
@@ -4950,6 +4952,14 @@ trait EmitLlvmCalls
         $this->lastValue = $addr;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /** An omitted default (`mixed &$v = null`; not a closure call, whose param type is hint-only) fills a CELL param's slot: the callee reads it as a tagged word, so a raw constant is boxed. */
+    private function boxOmittedDefault(Node $a, ?Type $pt, int $srcArgc = -1, int $ai = -1, bool $arrayHinted = false): string
+    {
+        if ($a->kind !== Node::KIND_NULL_CONST || $pt !== null && $pt->isNumericCell() || $arrayHinted || $pt === null || $pt->kind !== Type::KIND_CELL || $a->type->kind === Type::KIND_CELL || $a->type->isArray()) { return ''; }
+        if ($srcArgc < 0 || !$this->isOmittedDefaultArg($srcArgc, $ai, $a)) { return ''; }
+        return $this->boxToCell($a->type);
     }
 
     /** Give back one count on REF box `$box`; the last holder drops its value by `$flavor` and frees it. */

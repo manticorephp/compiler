@@ -1,6 +1,5 @@
 <?php
 // The value of `$o[$k] = <string built at run time>` as an expression is garbage; php yields the assigned string
-// issue: #420
 class Box implements ArrayAccess {
     private array $d = [];
     public function offsetExists(mixed $o): bool { return isset($this->d[$o]); }

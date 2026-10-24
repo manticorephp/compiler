@@ -271,6 +271,7 @@ trait InferNodes
     private function inferFunctionOnce(FunctionDef $fn): void
     {
         $this->inClosureBody = \str_starts_with($fn->name, '__closure_');
+        $this->inferFnName = $fn->name;
         // Only `__main` binds a `global $x` name implicitly (no decl node) — a
         // same-named local in any other scope is an ordinary local.
         $this->inMainBody = $fn->name === '__main';
@@ -2887,7 +2888,11 @@ trait InferNodes
                     && ($cd->propertyArrayHinted[$node->property] ?? false)) {
                     $pt = Type::vec(Type::unknown());
                 }
-                $node->type = $pt;
+                // A read this scope may not make falls back to __get: its value is
+                // __get's, not the declared slot's.
+                $mt = $this->classDefinesMagic($objType->class, '__get') && $this->propReadDenied($objType->class, $node->property)
+                    ? ($this->magicReturnType($objType->class, '__get') ?? Type::cell()) : null;
+                $node->type = $mt ?? $pt;
             } elseif ($cd->usesBag()) {
                 // Undeclared property on a bag class → tagged cell.
                 $node->type = Type::cell();
@@ -2918,6 +2923,33 @@ trait InferNodes
                 ?? Type::cell();
         }
         return $node->type;
+    }
+
+    private string $inferFnName = '';
+
+    /** Mirror of EmitLlvm::propAccessError for the function being inferred: whether it may NOT read $cls::$prop. */
+    private function propReadDenied(string $cls, string $prop): bool
+    {
+        $pm = ($this->classes[$cls] ?? null)?->propertyMeta[$prop] ?? null;
+        if ($pm === null || $pm->isStatic || $pm->visibility === 'public' || $pm->declaringClass === '') { return false; }
+        $canon = fn(string $c): string => isset($this->classes[$c]) && $this->classes[$c]->originClass !== '' ? $this->classes[$c]->originClass : $c;
+        if ($pm->visibility === 'private' && $canon($pm->declaringClass) !== $canon($cls)) { return false; }
+        $nm = $this->inferFnName;
+        if ($nm === '__main') { $scope = ''; }
+        elseif (\strncmp($nm, '__', 2) === 0) { return false; }
+        else {
+            $scope = '';
+            $i = \strpos($nm, '__', 1);
+            while ($i !== false) {
+                $c = \substr($nm, 0, $i);
+                if (isset($this->classes[$c])) { $scope = $c; }
+                $i = \strpos($nm, '__', $i + 1);
+            }
+        }
+        if ($pm->visibility === 'private') { return $canon($scope) !== $canon($pm->declaringClass); }
+        if ($scope === '') { return true; }
+        return !($scope === $pm->declaringClass || $this->classExtends($scope, $pm->declaringClass)
+            || $this->classExtends($pm->declaringClass, $scope));
     }
 
     private function inferStoreProperty(StoreProperty $node): Type
