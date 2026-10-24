@@ -13,6 +13,7 @@ class Arguments
         public string $filter = '',
         public string $opt = '2',
         public ?int $customWorkers = null,
+        public string $shard = '',
     ) {
     }
 }

@@ -60,22 +60,20 @@ jobs:
         run: bash tools/check_version.sh
 
   linux:
-    name: linux-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native-runner' || format(' ({0}/4)', matrix.shard) }}
+    name: linux-${{ matrix.tag }} (${{ matrix.shard }}/4)
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     timeout-minutes: 120
-    # The native-runner row is an experiment: it reports, it never blocks.
-    continue-on-error: ${{ matrix.suite == 'native' }}
     strategy:
       fail-fast: false
       # glibc (Debian) and musl (Alpine), each on both arches. `tag` names what a
       # row reads and writes — cache key, published seed, logs — so a glibc
       # compiler never reaches a musl container: the loader would refuse it, and
       # a refusal is not a diagnosis.
-      # Each row is split into SHARDS slices of the suite (tests/aot/run.sh
-      # --shard i/N); every slice builds the compiler itself — warm, from the
+      # Each row is split into SHARDS slices of the suite (the native runner, --shard i/n;
+      # run.sh has the same flag); every slice builds the compiler itself — warm, from the
       # cache — and runs 1/N of the cases, so the wall clock is build + suite/N.
       matrix:
         row: [arm64, amd64, alpine-arm64, alpine-amd64]
@@ -101,17 +99,6 @@ jobs:
             runner: ubuntu-latest
             tag: alpine-amd64
             dockerfile: Dockerfile.alpine
-          # EXPERIMENTAL: the same arm64 build, but the suite runs through the
-          # native tests/aot/runner, streamed live — beside the run.sh row so the
-          # two can be compared for speed and readability. It reads the arm64
-          # compiler cache and never writes it, nor publishes a seed.
-          - row: arm64-native
-            shard: 0
-            arch: arm64
-            runner: ubuntu-24.04-arm
-            tag: arm64
-            dockerfile: Dockerfile
-            suite: native
     steps:
       - uses: actions/checkout@v4
 
@@ -187,8 +174,8 @@ jobs:
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_SEED_DIR=/seed \
             -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
-            -e MC_RUNNER=${{ matrix.suite || 'sh' }} \
-            -e MC_SHARD=${{ matrix.suite != 'native' && format('{0}/4', matrix.shard) || '' }} \
+            -e MC_RUNNER=native \
+            -e MC_SHARD=${{ matrix.shard }}/4 \
             -e MC_XFAIL=${{ matrix.shard == 1 && 1 || 0 }} \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
@@ -196,7 +183,7 @@ jobs:
       # A red suite on top of a good build still leaves a compiler worth keeping —
       # save before the job's result is decided, not after.
       - name: Save the compiler cache
-        if: always() && matrix.suite != 'native' && matrix.shard == 1 && hashFiles('ci-cache/bin/manticore') != ''
+        if: always() && matrix.shard == 1 && hashFiles('ci-cache/bin/manticore') != ''
         uses: actions/cache/save@v4
         with:
           path: ci-cache
@@ -205,7 +192,7 @@ jobs:
       # The compiler of shard 1 goes to the `publish` job below, which runs only
       # when every shard of every row is green.
       - name: Keep the compiler for publishing
-        if: matrix.shard == 1 && matrix.suite != 'native'
+        if: matrix.shard == 1
         uses: actions/upload-artifact@v4
         with:
           name: compiler-${{ matrix.tag }}
@@ -215,7 +202,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## linux-${{ matrix.tag }}${{ matrix.suite == 'native' && ' (native runner)' || format(' shard {0}/4', matrix.shard) }} — \`${GITHUB_SHA::12}\`"
+            echo "## linux-${{ matrix.tag }} shard ${{ matrix.shard }}/4 — \`${GITHUB_SHA::12}\`"
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
             echo '```'
@@ -229,7 +216,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native' || format('-{0}', matrix.shard) }}
+          name: logs-${{ matrix.tag }}-${{ matrix.shard }}
           path: ci-logs/
           if-no-files-found: warn
 
