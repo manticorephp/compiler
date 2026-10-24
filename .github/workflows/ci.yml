@@ -294,6 +294,27 @@ jobs:
           path: ci-logs/
           if-no-files-found: warn
 
+  # A PR runs pdo-net only when it touches what the drivers are made of; every
+  # push to main (and a manual run) runs it regardless, so a compiler change that
+  # breaks a driver is caught there. pdo-net is not a required check, so a skipped
+  # row blocks nothing.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pdo: ${{ steps.f.outputs.pdo }}
+    steps:
+      - id: f
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pdo=false
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            gh pr diff "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --name-only \
+              | grep -qE '^(prelude/pdo|tests/pdo_net/|tools/docker/gate\.sh|\.github/workflows/ci\.yml)' && pdo=true
+          fi
+          echo "pdo=$pdo" >> "$GITHUB_OUTPUT"
+
   # PDO network drivers (pgsql, mysql, mariadb) against live servers, graded
   # against php's own pdo_pgsql / pdo_mysql. The servers run on the runner via
   # tests/pdo_net/up.sh; the toolchain container shares its network (host) and
@@ -301,6 +322,8 @@ jobs:
   # cache of the `linux` rows and never writes it.
   pdo-net:
     name: pdo-net-${{ matrix.tag }}-${{ matrix.server }}
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.pdo == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
