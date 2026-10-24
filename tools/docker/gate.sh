@@ -45,6 +45,8 @@
 #   MC_SUITE=0|1     0 = build and install_smoke only, no AOT suite. What the
 #                    release asks for: CI has already run the suite against that
 #                    commit, and a second run is a slower release, not new news.
+#   MC_SMOKES=0|1    0 = skip the install/CLI smokes (default 1). CI runs them in the
+#                    build job once, not in every suite shard.
 #   MC_SHARD=<i>/<n> run only slice i of n of the suite (--shard of run.sh and of the native runner);
 #                    CI splits a row across n jobs. Unset = the whole suite.
 #   MC_XFAIL=0|1|strict  run tests/aot/xfail.sh (known-bug repros) after the suite.
@@ -339,6 +341,7 @@ if [ -n "${MC_PDO_NET:-}" ]; then
     exit "$pdo_rc"
 fi
 
+if [ "${MC_SMOKES:-1}" = "1" ]; then
 # Before the suite, because it is seconds and it covers what the suite cannot:
 # the suite always calls `bin/manticore` by path, so it never notices a compiler
 # that cannot find its own prelude when it is reached the way an installed one is.
@@ -372,6 +375,10 @@ bash tests/cli/run.sh > "$MC_LOGDIR/cli.log" 2>&1
 cli_rc=$?
 tail -5 "$MC_LOGDIR/cli.log"
 
+else
+    echo "=== smokes skipped (MC_SMOKES=0) — the build job ran them ==="
+    install_rc=0; lib_rc=0; refpack_rc=0; cli_rc=0
+fi
 echo
 suite_rc=0
 if [ "$MC_SUITE" != "1" ]; then
