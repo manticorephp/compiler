@@ -3413,6 +3413,18 @@ trait EmitLlvmObjects
             // back instead of zeroing the slot both names now share.
             $this->locals->aliasLocals[$n->target] = $this->locals->slots[$n->target] ?? '';
             $this->locals->slots[$n->target] = $this->locals->slots[$n->source];
+            // A by-ref name rebound leaves the caller's variable alone; it
+            // follows the source's binding kind from here on.
+            if ($n->target !== $n->source) {
+                if (isset($this->locals->refLocals[$n->source])) {
+                    $this->locals->refLocals[$n->target] = true;
+                    if (isset($this->locals->refParamTypes[$n->source])) {
+                        $this->locals->refParamTypes[$n->target] = $this->locals->refParamTypes[$n->source];
+                    }
+                } else {
+                    unset($this->locals->refLocals[$n->target], $this->locals->refParamTypes[$n->target]);
+                }
+            }
         }
         // The name leaves the box it was bound to, and php drops that binding
         // NOW: whatever else still holds the box keeps it, and if nothing does
@@ -4794,8 +4806,18 @@ trait EmitLlvmObjects
             $ops[] = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
         }
         $need = false;
+        $refMayBind = null;
         foreach ($ops as $o) {
             if ($o->kind === Node::KIND_LOAD_LOCAL || $o->kind === Node::KIND_STRING_CONST) { continue; }
+            // A property / element ARGUMENT held in a slot is a copy: a candidate
+            // taking a by-ref param would bind the copy, not the lvalue.
+            if ($o->kind === Node::KIND_PROPERTY_ACCESS || $o->kind === Node::KIND_ARRAY_ACCESS) {
+                if ($refMayBind === null) {
+                    $cands = $this->dynMethodCandidates($dp->object->type, $this->siteArgc($iv->args));
+                    $refMayBind = $cands !== null && $this->dynMethodHasRefParam($cands, \count($iv->args));
+                }
+                if ($refMayBind && $o !== $dp->object && $o !== $dp->name) { return false; }
+            }
             if (!$this->dynHoistableRead($o)) { return false; }
             $need = true;
         }
@@ -6517,6 +6539,16 @@ trait EmitLlvmObjects
                     if ($owned) {
                         $out .= '  store ptr ' . $nb . ', ptr ' . $this->locals->ownedBoxes[$name] . "\n";
                     }
+                    continue;
+                }
+                // A RAW by-ref name (param, `$r = &$this->p`) holds an ADDRESS it
+                // does not own: unset breaks the binding, the name is a fresh local.
+                if (isset($this->locals->refLocals[$name]) && isset($this->locals->slots[$name])) {
+                    $fresh = $this->ssa->allocReg();
+                    $out .= '  ' . $fresh . " = alloca i64\n";
+                    $out .= '  store i64 0, ptr ' . $fresh . "\n";
+                    $this->locals->slots[$name] = $fresh;
+                    unset($this->locals->refLocals[$name], $this->locals->refParamTypes[$name]);
                     continue;
                 }
                 $flavor = $this->discardReleaseFlavor($t->type);

@@ -126,6 +126,9 @@ final class VivifyRefArgs implements Pass
     /** @var array<string, true> locals handed to such a param in the current function */
     private array $holds = [];
 
+    /** @var array<string, string> placeholder `$o->m(...)` closure → method name ({@see FunctionDef::$fccMethod}) */
+    private array $fccShim = [];
+
     public function run(Module $module): Module
     {
         $this->refMasks = [];
@@ -211,8 +214,10 @@ final class VivifyRefArgs implements Pass
     {
         $this->refStoring = [];
         $this->argBase = [];
+        $this->fccShim = [];
         $any = false;
         foreach ($module->functions as $fn) {
+            if ($fn->fccMethod !== '') { $this->fccShim[$fn->name] = $fn->fccMethod; }
             $np = \count($fn->params);
             $cap = $this->closureCaptures[$fn->name] ?? -1;
             $this->argBase[$fn->name] = $cap >= 0 ? $cap : (($np > 0 && $fn->params[0]->name === 'this') ? 1 : 0);
@@ -306,8 +311,36 @@ final class VivifyRefArgs implements Pass
                 $this->storedElems = true;
                 continue;
             }
+            if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
+                $this->storeProp($this->asPropAccess($a));
+                continue;
+            }
             if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
             $this->holds[$this->asLoadLocal($a)->name] = true;
+        }
+    }
+
+    /**
+     * A property handed to a callee that keeps a reference to it is promoted to a
+     * ref cell BY NAME ({@see Module::$refStoredPropNames}). A typed property has
+     * no cell repr and keeps its copy semantics (#353).
+     */
+    private function storeProp(\Compile\Mir\PropertyAccess_ $pa): void
+    {
+        $this->storedProps[$pa->property] = true;
+    }
+
+    /** @param Node[] $args */
+    private function holdShimArgs(string $method, array $args): void
+    {
+        $ai = 0;
+        foreach ($args as $a) {
+            $slot = $ai;
+            $ai = $ai + 1;
+            if (!($this->storingByMethod[$method][$slot] ?? false) || $a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            $name = $this->asLoadLocal($a)->name;
+            $this->holds[$name] = true;
+            if (!isset($this->candidates[$name])) { $this->candidates[$name] = Type::cell(); }
         }
     }
 
@@ -453,7 +486,13 @@ final class VivifyRefArgs implements Pass
             $this->scanArgs($this->resolveMethodFn($sc->class, $sc->method), $sc->args, 0, $sc->method);
         } elseif ($k === Node::KIND_NEW_OBJ) {
             $no = $this->asNewObj($n);
-            $this->scanArgs($no->class . '____construct', $no->args, 1);
+            $cur = $no->class;
+            $ctor = $cur . '____construct';
+            for ($g = 0; $g < 64 && $cur !== '' && !isset($this->refMasks[$cur . '____construct']); $g = $g + 1) {
+                $cur = $this->classParent[$cur] ?? '';
+            }
+            if ($cur !== '' && isset($this->refMasks[$cur . '____construct'])) { $ctor = $cur . '____construct'; }
+            $this->scanArgs($ctor, $no->args, 1);
         } elseif ($k === Node::KIND_METHOD_CALL) {
             $mc = $this->asMethodCall($n);
             $recv = $mc->object->type->class ?? '';
@@ -528,7 +567,11 @@ final class VivifyRefArgs implements Pass
         } elseif ($k === Node::KIND_INVOKE) {
             $iv = $this->asInvoke($n);
             $cls = $iv->callee->type->class ?? '';
-            if ($cls !== '' && isset($this->closureCaptures[$cls])) {
+            if ($cls !== '' && isset($this->fccShim[$cls])) {
+                // `$f = $o->m(...)` before ResolveMethodFcc gives the shim its
+                // by-ref params: the invoke asks every holder of the method name.
+                $this->holdShimArgs($this->fccShim[$cls], $iv->args);
+            } elseif ($cls !== '' && isset($this->closureCaptures[$cls])) {
                 $this->scanArgs($cls, $iv->args, $this->closureCaptures[$cls]);
             } elseif ($this->closureRefUnion !== 0 && $this->isErasedCallee($iv->callee)) {
                 $this->scanErasedArgs($iv->args);
@@ -589,7 +632,7 @@ final class VivifyRefArgs implements Pass
             $ai = $ai + 1;
             if (!($mask[$pi] ?? false)) { continue; }
             if ($a->kind === Node::KIND_PROPERTY_ACCESS && $this->storesAt($fnName, $pi, $method)) {
-                $this->storedProps[$this->asPropAccess($a)->property] = true;
+                $this->storeProp($this->asPropAccess($a));
                 continue;
             }
             if ($a->kind === Node::KIND_ARRAY_ACCESS && $this->storesAt($fnName, $pi, $method)) {

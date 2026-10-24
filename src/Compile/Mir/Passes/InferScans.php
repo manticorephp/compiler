@@ -2986,7 +2986,8 @@ trait InferScans
             foreach ($fn->params as $p) {
                 $idx = $idx + 1;
                 if (!$p->byRef || $p->variadic || !$this->isByRefRetypeKind($p->type)) { continue; }
-                if (!$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)) { continue; }
+                if (!$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)
+                    && !$this->refCellOfLocal($fn->body, $p->name)) { continue; }
                 $this->retypeByRefParamCell($fn, $p);
                 $changed = true;
                 if (isset($methodOf[$fn->name])) { $retyped[$fn->name . '#' . (string)$idx] = true; }
@@ -3013,6 +3014,19 @@ trait InferScans
             }
         }
         return $changed;
+    }
+
+    /** Does `$n` store a reference to local `$name` (`[&$name]`, `$o->p = &$name`)? Such a param rides a cell so the callee can share ONE box. */
+    private function refCellOfLocal(Node $n, string $name): bool
+    {
+        $kids = \Compile\Mir\Walk::children($n);
+        if ($n->kind === Node::KIND_REF_CELL) {
+            return $kids[0]->kind === Node::KIND_LOAD_LOCAL && $kids[0]->name === $name;
+        }
+        foreach ($kids as $c) {
+            if ($this->refCellOfLocal($c, $name)) { return true; }
+        }
+        return false;
     }
 
     private function isByRefRetypeKind(Type $t): bool
