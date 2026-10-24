@@ -1,0 +1,5 @@
+client: welcome
+server: broadcast to 1
+client: said: hi
+server: closed with 4000 'bye', hub has 0
+client: peer close code 4000

@@ -8322,6 +8322,9 @@ fin:
   %l0 = call i64 @__mir_hmap_hld(i64 %h, i64 {LEN})
   %l1 = add i64 %l0, 1
   call void @__mir_hmap_hst(i64 %h, i64 {LEN}, i64 %l1)
+  %pe0 = call i64 @__mir_hmap_hld(i64 %h, i64 {EPOCH})
+  %pe1 = add i64 %pe0, 1
+  call void @__mir_hmap_hst(i64 %h, i64 {EPOCH}, i64 %pe1)
   ret i64 1
 }
 

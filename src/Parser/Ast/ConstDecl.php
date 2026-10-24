@@ -20,5 +20,6 @@ final class ConstDecl
         public readonly ?string $typeHint,
         public readonly array $attributes,
         public readonly Span $span,
+        public readonly bool $isFinal = false,
     ) {}
 }

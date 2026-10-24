@@ -1,0 +1,61 @@
+array(5) {
+  [1]=>
+  string(1) "T"
+  [""]=>
+  string(2) "nl"
+  [2]=>
+  string(3) "two"
+  [0]=>
+  string(1) "F"
+  [3]=>
+  string(3) "lit"
+}
+string(1) "T"
+string(2) "nl"
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+array(3) {
+  [0]=>
+  int(2)
+  [1]=>
+  int(0)
+  [2]=>
+  int(3)
+}
+array(3) {
+  [1]=>
+  string(1) "c"
+  [""]=>
+  string(1) "b"
+  [2]=>
+  string(1) "d"
+}
+array(2) {
+  ["x"]=>
+  int(1)
+  [""]=>
+  string(2) "5z"
+}
+int(30)
+int(30)
+array(3) {
+  [0]=>
+  int(10)
+  [1]=>
+  int(20)
+  [2]=>
+  int(99)
+}
+one
+emptyY
+array(3) {
+  [0]=>
+  int(1)
+  [1]=>
+  int(2)
+  [2]=>
+  int(1)
+}

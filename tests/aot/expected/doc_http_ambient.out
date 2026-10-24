@@ -1,0 +1,13 @@
+== /legacy
+HTTP/1.1 202 Accepted
+X-Powered-By: legacy-code
+Set-Cookie: visited=yes; path=/
+Content-Length: 12
+Connection: close
+echoed body
+== /explicit
+HTTP/1.1 201 Created
+Content-Type: text/plain; charset=utf-8
+Content-Length: 14
+Connection: close
+explicit body

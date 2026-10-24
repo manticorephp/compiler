@@ -126,6 +126,9 @@ final class NullConst extends Node
         parent::__construct(Node::KIND_NULL_CONST, $type);
     }
 
+    /** An explicit `null` array key (`$a[null]`), as against the NullConst of an append (`$a[]`). */
+    public bool $asKey = false;
+
     public function accept(EmitVisitor $v): string
     {
         return $v->visitNullConst($this);

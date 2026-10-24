@@ -351,33 +351,57 @@ namespace Process {
     // oracle for them — the pcntl_*/posix_* primitives underneath are the part
     // that difftest checks.
 
-    /** This process's pid. */
+    /**
+     * The id of the current process.
+     *
+     * @return int  the process id
+     */
     function pid(): int
     {
         return \posix_getpid();
     }
 
-    /** The parent's pid. */
+    /**
+     * The id of the parent process.
+     *
+     * @return int  the parent's process id
+     */
     function ppid(): int
     {
         return \posix_getppid();
     }
 
     /**
-     * fork(2): 0 in the child, the child's pid in the parent, -1 on failure.
-     * ⚠ Never from inside a running scheduler — see pcntl_fork().
+     * Fork the process with fork(2).
+     *
+     * Do not call it from inside a running Async scheduler; fork before any scheduler starts.
+     *
+     * @return int  0 in the child, the child's pid in the parent, -1 on failure
      */
+    // Implementation notes (previous docblock, kept verbatim):
+    // fork(2): 0 in the child, the child's pid in the parent, -1 on failure.
+    // ⚠ Never from inside a running scheduler — see pcntl_fork().
     function fork(): int
     {
         return \pcntl_fork();
     }
 
     /**
-     * Fork into $n workers and return THIS worker's index: 0 for the original
-     * process, 1..$n-1 for the forks. UNSUPERVISED — a worker that dies stays
-     * dead; {@see supervise()} is the form that restarts it. A failed fork
-     * degrades to fewer workers.
+     * Fork into `$n` workers and return this worker's index.
+     *
+     * The original process is worker 0 and the forks are 1 to `$n - 1`. The
+     * workers are unsupervised: one that dies stays dead; use {@see supervise}
+     * to restart crashed workers. If a fork fails, the program continues with
+     * fewer workers.
+     *
+     * @param int $n  number of workers, including the original process
+     * @return int  this process's worker index
      */
+    // Implementation notes (previous docblock, kept verbatim):
+    // Fork into $n workers and return THIS worker's index: 0 for the original
+    // process, 1..$n-1 for the forks. UNSUPERVISED — a worker that dies stays
+    // dead; {@see supervise()} is the form that restarts it. A failed fork
+    // degrades to fewer workers.
     function workers(int $n): int
     {
         for ($i = 1; $i < $n; $i = $i + 1) {
@@ -393,19 +417,38 @@ namespace Process {
     }
 
     /**
-     * Fork $n workers and KEEP them running: reap the dead, restart them, and
-     * forward a shutdown to the whole group. The supervisor runs no scheduler of
-     * its own — each child calls $worker($index), which is where Async\async()
-     * goes.
+     * Fork `$n` workers and keep them running.
      *
-     *   Process\supervise(8, function (int $i) {
-     *       Async\async(function () { Async\shutdownOn(SIGTERM); serve($i); });
-     *   });
+     * The supervisor reaps dead workers and restarts any that crashed (non-zero
+     * exit or killed by a signal) after a delay that doubles from 0.1 s up to 5 s;
+     * a worker that stayed up for 10 s starts over at the bottom. A clean `exit(0)`
+     * is not restarted. SIGTERM and SIGINT sent to the supervisor are forwarded to
+     * every child, and no more restarts happen. The supervisor runs no scheduler
+     * itself: each child calls `$worker($index)`, which is where `Async\async()`
+     * goes. Returns once every child has exited.
      *
-     * Returns once every child has exited. Forking happens BEFORE any scheduler
-     * exists, which is the only safe order — a fork inside a running loop hands
-     * the child a copy of the reactor fd and the run queue.
+     * ```php
+     * Process\supervise(8, function (int $i) {
+     *     Async\async(function () { Async\shutdownOn(SIGTERM); serve($i); });
+     * });
+     * ```
+     *
+     * @param int $n  number of workers (at least 1)
+     * @param callable $worker  called in each child with the worker index; the child exits when it returns
      */
+    // Implementation notes (previous docblock, kept verbatim):
+    // Fork $n workers and KEEP them running: reap the dead, restart them, and
+    // forward a shutdown to the whole group. The supervisor runs no scheduler of
+    // its own — each child calls $worker($index), which is where Async\async()
+    // goes.
+    //
+    //   Process\supervise(8, function (int $i) {
+    //       Async\async(function () { Async\shutdownOn(SIGTERM); serve($i); });
+    //   });
+    //
+    // Returns once every child has exited. Forking happens BEFORE any scheduler
+    // exists, which is the only safe order — a fork inside a running loop hands
+    // the child a copy of the reactor fd and the run queue.
     function supervise(int $n, callable $worker): void
     {
         (new Supervisor())->run($n, $worker);

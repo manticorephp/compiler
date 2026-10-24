@@ -6,24 +6,43 @@
 
 namespace Http\WebSocket {
 
+/** Frame opcodes and the handshake GUID of RFC 6455.
+ * @internal */
 final class Opcode
 {
+    /** Continuation frame. @internal */
     public const CONT = 0;
+    /** Text frame. @internal */
     public const TEXT = 1;
+    /** Binary frame. @internal */
     public const BINARY = 2;
+    /** Close frame. @internal */
     public const CLOSE = 8;
+    /** Ping frame. @internal */
     public const PING = 9;
+    /** Pong frame. @internal */
     public const PONG = 10;
+    /** Handshake GUID. @internal */
     public const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 }
 
-/** Sec-WebSocket-Accept for a client's Sec-WebSocket-Key (RFC 6455 §4.2.2). */
+/**
+ * Sec-WebSocket-Accept for a client's Sec-WebSocket-Key.
+ *
+ * @internal
+ */
+// Sec-WebSocket-Accept for a client's Sec-WebSocket-Key (RFC 6455 §4.2.2).
 function acceptKey(string $key): string
 {
     return \base64_encode(\sha1($key . Opcode::GUID, true));
 }
 
-/** XOR $data with the 4-byte $mask repeated — one string op, never a byte loop. */
+/**
+ * XOR a payload with a 4-byte mask.
+ *
+ * @internal
+ */
+// XOR $data with the 4-byte $mask repeated — one string op, never a byte loop.
 function applyMask(string $data, string $mask): string
 {
     $n = \strlen($data);
@@ -33,7 +52,12 @@ function applyMask(string $data, string $mask): string
     return $data ^ \substr(\str_repeat($mask, ($n >> 2) + 1), 0, $n);
 }
 
-/** One frame. `$mask === ''` sends it unmasked (server → client). */
+/**
+ * Encode one frame.
+ *
+ * @internal
+ */
+// One frame. `$mask === ''` sends it unmasked (server → client).
 function encodeFrame(int $opcode, string $payload, bool $fin, bool $rsv1, string $mask): string
 {
     $n = \strlen($payload);
@@ -56,44 +80,67 @@ function encodeFrame(int $opcode, string $payload, bool $fin, bool $rsv1, string
 }
 
 /**
- * A close code a peer may put on the wire (§7.4): the defined 1000–1003 and
- * 1007–1014, and the registered/private 3000–4999. 1004–1006 and 1015 are
- * reserved for local reporting and never sent.
+ * Whether a close code may appear on the wire.
+ *
+ * @internal
  */
+// A close code a peer may put on the wire (§7.4): the defined 1000–1003 and
+// 1007–1014, and the registered/private 3000–4999. 1004–1006 and 1015 are
+// reserved for local reporting and never sent.
 function closeCodeOk(int $code): bool
 {
     return ($code >= 1000 && $code <= 1003) || ($code >= 1007 && $code <= 1014)
         || ($code >= 3000 && $code <= 4999);
 }
 
+/**
+ * Whether a close code may be sent with Connection::close().
+ *
+ * @internal
+ */
 function closeCodeSendable(int $code): bool
 {
     return closeCodeOk($code);
 }
 
-/** PCRE rejects invalid UTF-8 under /u, including overlongs and surrogates. */
+/**
+ * Whether a string is valid UTF-8.
+ *
+ * @internal
+ */
+// PCRE rejects invalid UTF-8 under /u, including overlongs and surrogates.
 function utf8Ok(string $s): bool
 {
     return $s === '' || \preg_match('//u', $s) === 1;
 }
 
 /**
- * Frames out of a ByteBuffer, incrementally. parse() answers NEED (not enough
- * bytes yet), FRAME (the public fields hold it, bytes consumed), or the close
- * code for a protocol error the header alone proves (1002, 1009). The payload
- * length is checked BEFORE the payload is waited for, so a peer cannot make us
- * buffer an oversized frame.
+ * Incremental frame parser over a ByteBuffer.
+ *
+ * @internal
  */
+// Frames out of a ByteBuffer, incrementally. parse() answers NEED (not enough
+// bytes yet), FRAME (the public fields hold it, bytes consumed), or the close
+// code for a protocol error the header alone proves (1002, 1009). The payload
+// length is checked BEFORE the payload is waited for, so a peer cannot make us
+// buffer an oversized frame.
 final class FrameParser
 {
+    /** @internal */
     public const NEED = 0;
+    /** @internal */
     public const FRAME = 1;
 
+    /** @internal */
     public bool $fin = false;
+    /** @internal */
     public bool $rsv1 = false;
+    /** @internal */
     public int $opcode = 0;
+    /** @internal */
     public string $payload = '';
 
+    /** @internal */
     public function __construct(
         private \Buffer\ByteBuffer $buf,
         private bool $expectMasked,
@@ -101,6 +148,7 @@ final class FrameParser
         public bool $allowRsv1 = false,
     ) {}
 
+    /** @internal */
     public function parse(): int
     {
         $b = $this->buf;
@@ -166,59 +214,231 @@ final class FrameParser
 }
 
 
+/**
+ * One received message.
+ *
+ * `$data` is the whole message after fragments are reassembled and, when
+ * permessage-deflate is on, decompressed. A text message is guaranteed to be
+ * valid UTF-8 (otherwise the connection closes with 1007). `$binary` tells a
+ * binary message from a text one.
+ *
+ * @see Connection::receive
+ */
 final class Message
 {
+    /**
+     * Create a message. Received messages are built by the connection; this is
+     * useful for tests and fakes.
+     *
+     * @param string $data  the message payload
+     * @param bool $binary  true for a binary message, false for text
+     */
     public function __construct(
         public readonly string $data,
         public readonly bool $binary,
     ) {}
 }
 
+/**
+ * Thrown by Connection::send(), sendBinary() and ping() when the connection is
+ * already closed or closing, or when the write fails.
+ *
+ * @see Connection
+ */
 final class ConnectionClosedException extends \RuntimeException {}
 
+/**
+ * Thrown by connect() when the WebSocket opening handshake does not complete.
+ *
+ * Causes: an unsupported URL scheme (anything but `ws://` or `wss://`), an
+ * empty host, CR/LF/NUL in the URL, a failed TCP/TLS connect, a response head
+ * over 16 KiB, a timeout (see Options::$connectTimeout), a non-101 status, a
+ * missing or wrong `Sec-WebSocket-Accept`, or a subprotocol or extension the
+ * client did not offer. The message names what disagreed.
+ *
+ * @see connect
+ */
 final class HandshakeException extends \RuntimeException {}
 
+/**
+ * Settings for a WebSocket connection, server or client side.
+ *
+ * Every setting is a public property with a fluent setter of the same name that
+ * returns the same object, so options chain:
+ *
+ * ```php
+ * $o = (new Options())->protocols(['chat.v2'])->pingInterval(15.0)->compression(true);
+ * ```
+ *
+ * Durations are in seconds. An `Options` is passed to upgrade() on the server
+ * and to connect() on the client; the same object may serve many connections.
+ *
+ * @see upgrade
+ * @see connect
+ */
 final class Options
 {
+    /**
+     * Largest accepted message, in bytes, after reassembly and decompression.
+     * Default 16 MiB. A bigger message closes the connection with 1009.
+     */
     public int $maxMessageSize = 16777216;
+    /**
+     * Largest accepted single frame payload, in bytes. Default 16 MiB. Checked
+     * from the frame header before the payload is read; a bigger frame closes
+     * the connection with 1009.
+     */
     public int $maxFrameSize = 16777216;
+    /**
+     * Seconds of silence before a ping is sent; also the read timeout. Default
+     * 30. `0` turns keepalive off.
+     */
     public float $pingInterval = 30.0;
+    /**
+     * Seconds to wait for the answer to a keepalive ping before the connection
+     * is dropped (close code 1006). Default 10.
+     */
     public float $pongTimeout = 10.0;
+    /**
+     * Seconds to wait for the peer's Close frame after sending ours. Default 5.
+     */
     public float $closeTimeout = 5.0;
+    /**
+     * Seconds allowed for the TCP/TLS connect and the handshake response
+     * together, as one deadline (client only). Default 10.
+     */
     public float $connectTimeout = 10.0;
-    /** @var array<string,mixed> */
+    /**
+     * TLS options for `wss://` (client only), in the shape of a stream
+     * context's `ssl` options: `verify_peer`, `cafile`, and so on. Default
+     * empty. SNI and the peer name are filled in from the URL's host.
+     *
+     * @var array<string,mixed>
+     */
     public array<string, mixed> $sslContext = [];
-    /** @var array<int,string> */
+    /**
+     * Subprotocols, in order of preference. Default empty.
+     *
+     * Server: the first entry of the client's `Sec-WebSocket-Protocol` list that
+     * is also in this array is chosen; with no match no protocol header is sent.
+     * Client: all entries are offered, and a protocol the server answers with
+     * must be one of them.
+     *
+     * @var array<int,string>
+     */
     public array<int, string> $protocols = [];
-    /** @var array<int,string> */
+    /**
+     * Origins allowed to upgrade (server only). Default empty, which checks
+     * nothing. When non-empty, a request whose `Origin` header is not an exact
+     * member of this list (including a request with no `Origin`) gets a 403. Set it whenever the connection is
+     * privileged: a browser sends cookies on a cross-site WebSocket upgrade
+     * and CORS does not police it.
+     *
+     * @var array<int,string>
+     */
     public array<int, string> $allowedOrigins = [];
+    /**
+     * Negotiate permessage-deflate (RFC 7692) compression. Default off; turn it
+     * on at both ends.
+     */
     public bool $compression = false;
+    /**
+     * With compression on, only messages of at least this many bytes are
+     * compressed. Default 256.
+     */
     public int $compressionMinBytes = 256;
 
+    /**
+     * Set {@see $maxMessageSize}. Also lowers {@see $maxFrameSize} when that is
+     * larger than the new limit.
+     *
+     * @param int $n  limit in bytes
+     * @return Options  this object
+     */
     public function maxMessageSize(int $n): Options { $this->maxMessageSize = $n; if ($this->maxFrameSize > $n) { $this->maxFrameSize = $n; } return $this; }
+    /**
+     * Set {@see $maxFrameSize}.
+     *
+     * @param int $n  limit in bytes
+     * @return Options  this object
+     */
     public function maxFrameSize(int $n): Options { $this->maxFrameSize = $n; return $this; }
+    /**
+     * Set {@see $pingInterval}.
+     *
+     * @param float $s  seconds; 0 turns keepalive off
+     * @return Options  this object
+     */
     public function pingInterval(float $s): Options { $this->pingInterval = $s; return $this; }
+    /**
+     * Set {@see $pongTimeout}.
+     *
+     * @param float $s  seconds
+     * @return Options  this object
+     */
     public function pongTimeout(float $s): Options { $this->pongTimeout = $s; return $this; }
+    /**
+     * Set {@see $closeTimeout}.
+     *
+     * @param float $s  seconds
+     * @return Options  this object
+     */
     public function closeTimeout(float $s): Options { $this->closeTimeout = $s; return $this; }
+    /**
+     * Set {@see $connectTimeout}.
+     *
+     * @param float $s  seconds
+     * @return Options  this object
+     */
     public function connectTimeout(float $s): Options { $this->connectTimeout = $s; return $this; }
-    /** @param array<string,mixed> $ssl */
+    /**
+     * Set {@see $sslContext}.
+     *
+     * @param array<string,mixed> $ssl  `ssl` stream-context options
+     * @return Options  this object
+     */
     public function sslContext(array<string, mixed> $ssl): Options { $this->sslContext = $ssl; return $this; }
-    /** @param array<int,string> $p */
+    /**
+     * Set {@see $protocols}.
+     *
+     * @param array<int,string> $p  subprotocol names, most preferred first
+     * @return Options  this object
+     */
     public function protocols(array<int, string> $p): Options { $this->protocols = $p; return $this; }
-    /** @param array<int,string> $o */
+    /**
+     * Set {@see $allowedOrigins}.
+     *
+     * @param array<int,string> $o  allowed `Origin` values, for example `https://example.com`
+     * @return Options  this object
+     */
     public function allowedOrigins(array<int, string> $o): Options { $this->allowedOrigins = $o; return $this; }
+    /**
+     * Set {@see $compression}.
+     *
+     * @param bool $on  true to negotiate permessage-deflate
+     * @return Options  this object
+     */
     public function compression(bool $on): Options { $this->compression = $on; return $this; }
+    /**
+     * Set {@see $compressionMinBytes}.
+     *
+     * @param int $n  threshold in bytes
+     * @return Options  this object
+     */
     public function compressionMinBytes(int $n): Options { $this->compressionMinBytes = $n; return $this; }
 }
 
 /**
- * permessage-deflate (RFC 7692) for one connection. Our deflater is limited to
- * the window the peer allowed; our inflater always keeps 32 KiB, which is
- * correct for any window the peer uses (8..15). An agreement that would bind
- * OUR deflater to window 8 is declined, never answered with 9 (RFC 7692 lets a
- * peer only lower a value; zlib, and php/zlib with it, refuses a raw 256-byte
- * window): the server skips such an offer, the client fails the handshake.
+ * permessage-deflate state for one connection.
+ *
+ * @internal
  */
+// permessage-deflate (RFC 7692) for one connection. Our deflater is limited to
+// the window the peer allowed; our inflater always keeps 32 KiB, which is
+// correct for any window the peer uses (8..15). An agreement that would bind
+// OUR deflater to window 8 is declined, never answered with 9 (RFC 7692 lets a
+// peer only lower a value; zlib, and php/zlib with it, refuses a raw 256-byte
+// window): the server skips such an offer, the client fails the handshake.
 final class Pmd
 {
     public bool $serverNoCtx = false;
@@ -404,13 +624,23 @@ final class Pmd
     }
 }
 
-/** Seconds as stream_set_timeout's (int, µs) pair. */
+/**
+ * Set a stream read timeout in seconds.
+ *
+ * @internal
+ */
+// Seconds as stream_set_timeout's (int, µs) pair.
 function setTimeout(\Resource $s, float $seconds): void
 {
     $whole = (int)$seconds;
     \stream_set_timeout($s, $whole, (int)(($seconds - $whole) * 1000000.0));
 }
 
+/**
+ * Whether the last read on a stream timed out.
+ *
+ * @internal
+ */
 function timedOut(\Resource $s): bool
 {
     $meta = \stream_get_meta_data($s);
@@ -418,16 +648,51 @@ function timedOut(\Resource $s): bool
 }
 
 /**
- * One WebSocket, either end. Reads happen in whichever task calls receive()
- * (one at a time); writes may come from any task and are serialized, so a
- * broadcaster never interleaves two frames. The connection is kept alive only
- * while someone reads it: the read timeout IS the ping timer.
+ * One open WebSocket, server or client side.
  *
- * A Close started outside the reading task never reads: it sends the frame
- * and arms a closeTimeout deadline in the connection's scope. A parked reader
- * sees the peer's answer; if none comes in time, the deadline shuts the socket
- * down, which wakes that reader with EOF (or, with no reader, ends it there).
+ * Obtain one from connect() (client) or as the argument of the session callback
+ * given to upgrade() (server). Iterating it with `foreach` yields each incoming
+ * Message until the connection ends.
+ *
+ * ```php
+ * $ws = Http\WebSocket\connect('ws://127.0.0.1:8080/');
+ * $ws->send('hello');
+ * foreach ($ws as $m) {
+ *     echo $m->data, "\n";
+ * }
+ * ```
+ *
+ * **Reading.** Only one task may read at a time; a second concurrent
+ * receive() throws `LogicException`. The connection is kept alive only while
+ * something reads it: the read timeout doubles as the keepalive ping timer
+ * (see Options::$pingInterval), so a connection nobody reads is never pinged.
+ * Code that only sends must still run a reader, even one that discards the
+ * messages.
+ *
+ * **Writing.** send(), sendBinary() and ping() may be called from any task;
+ * concurrent writers are serialized, so frames never interleave on the wire.
+ * Every message goes out as a single frame.
+ *
+ * **Closing.** close() starts the closing handshake. Called from the reading
+ * task it waits for the peer's answer (up to Options::$closeTimeout); called
+ * from any other task it sends the Close frame and returns immediately, and a
+ * deadline shuts the socket down if the peer does not answer in time.
+ *
+ * @see Options
+ * @see Message
+ * @see upgrade
+ * @see connect
+ * @example doc_ws_echo
  */
+// One WebSocket, either end. Reads happen in whichever task calls receive()
+// (one at a time); writes may come from any task and are serialized, so a
+// broadcaster never interleaves two frames. The connection is kept alive only
+// while someone reads it: the read timeout IS the ping timer.
+//
+// A Close started outside the reading task never reads: it sends the frame
+// and arms a closeTimeout deadline in the connection's scope. A parked reader
+// sees the peer's answer; if none comes in time, the deadline shuts the socket
+// down, which wakes that reader with EOF (or, with no reader, ends it there).
 final class Connection implements \IteratorAggregate
 {
     private FrameParser $parser;
@@ -449,6 +714,7 @@ final class Connection implements \IteratorAggregate
     private string $maskPool = '';
     private int $maskPos = 0;
 
+    /** @internal Built by upgrade() and connect(), never by user code. */
     public function __construct(
         private \Resource $sock,
         private \Buffer\ByteBuffer $buf,
@@ -468,15 +734,52 @@ final class Connection implements \IteratorAggregate
         }
     }
 
+    /**
+     * The subprotocol negotiated in the handshake.
+     *
+     * @return string  the protocol name, or '' when none was negotiated
+     */
     public function protocol(): string { return $this->protocol; }
+    /**
+     * The HTTP upgrade request that opened this connection.
+     *
+     * @return \Http\Request|null  the request on the server side; null on a client connection
+     */
     public function request(): ?\Http\Request { return $this->request; }
+    /**
+     * The address of the peer.
+     *
+     * @return string  the client's address on the server side; `host:port` of the URL on the client side
+     */
     public function remoteAddr(): string { return $this->remoteAddr; }
+    /**
+     * Whether messages can still be sent.
+     *
+     * @return bool  false once the connection is closed or a Close frame has been sent
+     */
     public function isOpen(): bool { return !$this->closed && !$this->sentClose; }
-    /** The peer's Close code (1005 when it carried none); 1006 when no Close came. */
+    /**
+     * The peer's close code, valid once receive() has returned null.
+     *
+     * @return int  the code from the peer's Close frame; 1005 if that frame carried none; 1006 if no valid Close ever arrived (EOF, a protocol error, an unanswered ping). Never the code this side sent.
+     */
+    // The peer's Close code (1005 when it carried none); 1006 when no Close came.
     public function closeCode(): int { return $this->gotClose ? $this->peerCode : 1006; }
+    /**
+     * The reason text from the peer's Close frame.
+     *
+     * @return string  the reason, or '' when the peer sent none or no Close arrived
+     */
     public function closeReason(): string { return $this->gotClose ? $this->peerReason : ''; }
 
-    /** Messages until the connection closes. */
+    /**
+     * Iterate the incoming messages: `foreach ($ws as $m)` yields each Message
+     * until the connection ends. Equivalent to calling receive() until it
+     * returns null.
+     *
+     * @return \Generator  yields Message objects
+     */
+    // Messages until the connection closes.
     public function getIterator(): \Generator
     {
         while (($m = $this->receive()) !== null) {
@@ -484,7 +787,20 @@ final class Connection implements \IteratorAggregate
         }
     }
 
-    /** The next message, or null once closed ({@see closeCode} says why). */
+    /**
+     * Wait for the next complete message.
+     *
+     * Fragments are reassembled, compressed messages decompressed, and pings
+     * answered with a pong automatically. Returns null once the connection has
+     * ended; closeCode() and closeReason() say why. A protocol violation by the
+     * peer closes the connection with the matching code (1002 protocol error,
+     * 1007 invalid UTF-8 or corrupt compressed data, 1009 message or frame too
+     * big) and also yields null.
+     *
+     * @return Message|null  the next message, or null when the connection is over
+     * @throws \LogicException  when another task is already reading this connection
+     */
+    // The next message, or null once closed ({@see closeCode} says why).
     public function receive(): ?Message
     {
         if ($this->reading) {
@@ -505,16 +821,41 @@ final class Connection implements \IteratorAggregate
         }
     }
 
+    /**
+     * Send a text message as one frame.
+     *
+     * May be called from any task. The data must be valid UTF-8: a conforming
+     * peer closes the connection with 1007 on anything else.
+     *
+     * @param string $data  the message
+     * @throws ConnectionClosedException  when the connection is closed or closing
+     */
     public function send(string $data): void
     {
         $this->sendData(Opcode::TEXT, $data);
     }
 
+    /**
+     * Send a binary message as one frame.
+     *
+     * May be called from any task.
+     *
+     * @param string $data  the message bytes
+     * @throws ConnectionClosedException  when the connection is closed or closing
+     */
     public function sendBinary(string $data): void
     {
         $this->sendData(Opcode::BINARY, $data);
     }
 
+    /**
+     * Send a ping frame. The peer's pong is consumed by the reader and not
+     * delivered as a message.
+     *
+     * @param string $payload  up to 125 bytes echoed back in the pong
+     * @throws \ValueError  when the payload is longer than 125 bytes
+     * @throws ConnectionClosedException  when the connection is closed or closing
+     */
     public function ping(string $payload = ''): void
     {
         if (\strlen($payload) > 125) {
@@ -526,15 +867,30 @@ final class Connection implements \IteratorAggregate
     }
 
     /**
-     * Start the closing handshake. From any task but the reader (a broadcaster
-     * kicking a client), or while a read is in flight, it sends the Close and
-     * arms the closeTimeout deadline — the reader's next or current receive()
-     * sees the answer (or the deadline's EOF) and returns null. The reader with
-     * no read in flight waits here, up to closeTimeout, for the peer's Close,
-     * discarding data frames. The reader is the task that last ran receive(),
-     * or the owner until one has — so a reader parked between two receive()
-     * calls never finds its read taken.
+     * Start the closing handshake by sending a Close frame.
+     *
+     * Called from the reading task (the task that last ran receive(), or the one
+     * that opened the connection before any receive()) it then waits for the
+     * peer's Close, up to Options::$closeTimeout, discarding any data frames
+     * that arrive meanwhile. Called from any other task, or while a receive() is
+     * in flight, it returns at once; a deadline of Options::$closeTimeout shuts
+     * the socket down if the peer does not answer, and the reader's receive()
+     * returns null with closeCode() 1006. Closing an already closing or closed
+     * connection does nothing.
+     *
+     * @param int $code  1000-1003, 1007-1014 or 3000-4999
+     * @param string $reason  UTF-8 text of at most 123 bytes
+     * @throws \ValueError  for a code that cannot be sent, a reason over 123 bytes, or a reason that is not valid UTF-8; nothing is sent
+     * @example doc_ws_echo
      */
+    // Start the closing handshake. From any task but the reader (a broadcaster
+    // kicking a client), or while a read is in flight, it sends the Close and
+    // arms the closeTimeout deadline — the reader's next or current receive()
+    // sees the answer (or the deadline's EOF) and returns null. The reader with
+    // no read in flight waits here, up to closeTimeout, for the peer's Close,
+    // discarding data frames. The reader is the task that last ran receive(),
+    // or the owner until one has — so a reader parked between two receive()
+    // calls never finds its read taken.
     public function close(int $code = 1000, string $reason = ''): void
     {
         if (!closeCodeSendable($code)) {
@@ -927,7 +1283,12 @@ final class Connection implements \IteratorAggregate
     }
 }
 
-/** Header tokens (comma-separated, case-insensitive) — `Connection: keep-alive, Upgrade`. */
+/**
+ * Whether a comma-separated header value contains a token.
+ *
+ * @internal
+ */
+// Header tokens (comma-separated, case-insensitive) — `Connection: keep-alive, Upgrade`.
 function hasToken(string $value, string $token): bool
 {
     foreach (\explode(',', $value) as $t) {
@@ -939,11 +1300,47 @@ function hasToken(string $value, string $token): bool
 }
 
 /**
- * Answer a WebSocket upgrade request. A request that is not one answers an
- * ordinary 400/426/403 — hand it back from the handler like any Response.
- * $session receives the Connection and runs in the connection's own fiber;
- * when it returns, an open connection is closed with 1000.
+ * Answer a WebSocket upgrade request inside an `Http\Server` handler.
+ *
+ * Return the result from the handler. When the request is a valid upgrade, the
+ * result is a `101 Switching Protocols` response and, once it is sent,
+ * `$session` runs with the new Connection in its own fiber. When the request
+ * is not a valid upgrade, the result is an ordinary error response, not an
+ * exception:
+ *
+ * - 400: not `GET`, not HTTP/1.1, a missing or malformed `Sec-WebSocket-Key`,
+ *   no `websocket` token in `Upgrade`, or no `upgrade` token in `Connection`.
+ * - 426 with `Sec-WebSocket-Version: 13`: any other protocol version.
+ * - 403: Options::$allowedOrigins is set and the `Origin` header is not in it.
+ *
+ * When `$session` returns, a connection still open is closed with 1000. If it
+ * throws, the connection is closed with 1011 and the exception is rethrown
+ * into the server's own error path. The session holds the server's
+ * `maxConnections` permit for its whole life. `Server::stop()` closes every
+ * open session with 1001 "server shutdown".
+ *
+ * ```php
+ * (new Server('tcp://0.0.0.0:8080'))->serve(function (Request $req): Response {
+ *     return Http\WebSocket\upgrade($req, function (Connection $ws): void {
+ *         foreach ($ws as $m) {
+ *             $ws->send('echo: ' . $m->data);
+ *         }
+ *     });
+ * });
+ * ```
+ *
+ * @param \Http\Request $req  the request the handler received
+ * @param callable $session  called as `function (Connection $ws): void`
+ * @param Options|null $o  settings; defaults when null
+ * @return \Http\Response  the 101 response, or a 400, 426 or 403 error response
+ * @see connect
+ * @see handler
+ * @example doc_ws_echo
  */
+// Answer a WebSocket upgrade request. A request that is not one answers an
+// ordinary 400/426/403 — hand it back from the handler like any Response.
+// $session receives the Connection and runs in the connection's own fiber;
+// when it returns, an open connection is closed with 1000.
 function upgrade(\Http\Request $req, callable $session, ?Options $o = null): \Http\Response
 {
     $o = $o ?? new Options();
@@ -993,12 +1390,40 @@ function upgrade(\Http\Request $req, callable $session, ?Options $o = null): \Ht
 }
 
 /**
- * Open a WebSocket to ws:// or wss://. Throws HandshakeException when the
- * server does not complete the upgrade. Redirects are not followed.
- * connectTimeout bounds the connect and the handshake together.
+ * Open a WebSocket client connection to a `ws://` or `wss://` URL.
  *
- * @param array<string,string> $headers extra request headers (Origin, Authorization, …)
+ * `wss://` uses TLS with SNI and certificate verification; configure it through
+ * Options::$sslContext. The default port is 80 for `ws://` and 443 for `wss://`.
+ * The client checks the server's answer itself: the status must be 101,
+ * `Sec-WebSocket-Accept` must match, and a subprotocol or extension in the
+ * answer must be one that was offered. Redirects are not followed.
+ * Options::$connectTimeout bounds the TCP/TLS connect and the handshake
+ * response together, as one deadline.
+ *
+ * Outside `Async\async()` the call blocks the process on ordinary sockets;
+ * inside it, it suspends only the calling fiber, so many connections can run
+ * concurrently.
+ *
+ * ```php
+ * $ws = Http\WebSocket\connect('wss://example.com/feed');
+ * $ws->send('hello');
+ * foreach ($ws as $m) {
+ *     echo $m->data, "\n";
+ * }
+ * ```
+ *
+ * @param string $url  `ws://host[:port]/path?query` or `wss://...`
+ * @param Options|null $o  settings; defaults when null
+ * @param array<string,string> $headers  extra request headers (`Origin`, `Authorization`, …)
+ * @return Connection  the open connection
+ * @throws HandshakeException  for any other scheme, an empty host, CR/LF/NUL in the URL, a failed connect, a timeout, or a handshake the server refused or answered incorrectly
+ * @throws \ValueError  when a header name or value is empty-named, contains CR, LF or NUL, or names `Host`, `Upgrade`, `Connection` or a `Sec-WebSocket-*` header
+ * @see upgrade
+ * @example doc_ws_echo
  */
+// Open a WebSocket to ws:// or wss://. Throws HandshakeException when the
+// server does not complete the upgrade. Redirects are not followed.
+// connectTimeout bounds the connect and the handshake together.
 function connect(string $url, ?Options $o = null, array<string, string> $headers = []): Connection
 {
     $o = $o ?? new Options();
@@ -1046,7 +1471,12 @@ function connect(string $url, ?Options $o = null, array<string, string> $headers
     }
 }
 
-/** A user header for connect(): no CR/LF/NUL, a non-empty name without ':', never a handshake header. */
+/**
+ * Validate a user header for connect().
+ *
+ * @internal
+ */
+// A user header for connect(): no CR/LF/NUL, a non-empty name without ':', never a handshake header.
 function checkHeader(string $name, string $v): void
 {
     $arg = 'Http\\WebSocket\\connect(): Argument #3 ($headers) ';
@@ -1066,11 +1496,13 @@ function checkHeader(string $name, string $v): void
 }
 
 /**
- * The client half of the upgrade over an open socket. Throws on any failure;
- * the caller owns (and closes) the socket until a Connection is returned.
+ * The client half of the upgrade over an open socket.
  *
+ * @internal
  * @param array<string,string> $headers
  */
+// The client half of the upgrade over an open socket. Throws on any failure;
+// the caller owns (and closes) the socket until a Connection is returned.
 function handshake(\Resource $sock, Options $o, string $path, string $hostHdr, array<string, string> $headers, float $deadline, string $remote): Connection
 {
     if (\Async\Context::currentScope() !== null) {
@@ -1151,19 +1583,67 @@ function handshake(\Resource $sock, Options $o, string $path, string $hostHdr, a
     return new Connection($sock, $buf, true, $o, $proto, null, $remote, $pmd);
 }
 
+/**
+ * Event callbacks for a connection, as an alternative to a `foreach` loop.
+ *
+ * Implement it and pass it to handler() (server, as the session of upgrade())
+ * or run() (client). The calls arrive in this order: onOpen once, onMessage per
+ * message, onClose once, whichever way the connection ends.
+ *
+ * @see handler
+ * @see run
+ * @example doc_ws_handler
+ */
 interface Handler
 {
+    /**
+     * The connection is ready; called before the first message is read.
+     *
+     * @param Connection $c  the connection
+     */
     public function onOpen(Connection $c): void;
+    /**
+     * A complete message arrived.
+     *
+     * @param Connection $c  the connection
+     * @param Message $m  the message
+     */
     public function onMessage(Connection $c, Message $m): void;
+    /**
+     * The connection ended; called exactly once, after any onError.
+     *
+     * @param Connection $c  the connection
+     * @param int $code  the peer's close code (see Connection::closeCode(); 1006 if no Close arrived)
+     * @param string $reason  the peer's close reason, possibly empty
+     */
     public function onClose(Connection $c, int $code, string $reason): void;
+    /**
+     * onOpen or onMessage threw; the connection is then closed with 1011. An
+     * exception thrown by onError itself is discarded.
+     *
+     * @param Connection $c  the connection
+     * @param \Throwable $e  the exception
+     */
     public function onError(Connection $c, \Throwable $e): void;
 }
 
 /**
- * Drive a Connection through a Handler: onOpen, onMessage per message, and
- * onClose exactly once. An exception from onOpen/onMessage goes to onError and
- * closes the connection with 1011; one from onError is dropped.
+ * Drive a connection through a Handler until it ends.
+ *
+ * Calls onOpen, then onMessage for each message, then onClose exactly once,
+ * whichever way the loop ends. An exception from onOpen or onMessage goes to
+ * onError and the connection is closed with 1011; an exception from onError is
+ * discarded. A cancelled task is not reported to onError. This is the
+ * client-side counterpart of handler(); it reads, so it also keeps the
+ * connection alive.
+ *
+ * @param Connection $c  the connection to drive
+ * @param Handler $h  the callbacks
+ * @see handler
  */
+// Drive a Connection through a Handler: onOpen, onMessage per message, and
+// onClose exactly once. An exception from onOpen/onMessage goes to onError and
+// closes the connection with 1011; one from onError is dropped.
 function run(Connection $c, Handler $h): void
 {
     try {
@@ -1189,7 +1669,17 @@ function run(Connection $c, Handler $h): void
     }
 }
 
-/** A session for {@see upgrade}: runs the Handler over each accepted connection. */
+/**
+ * Turn a Handler into a session callback for upgrade().
+ *
+ * `upgrade($req, handler($h), $o)` runs run() over each accepted connection.
+ *
+ * @param Handler $h  the callbacks
+ * @return \Closure  a session for upgrade()
+ * @see run
+ * @example doc_ws_handler
+ */
+// A session for {@see upgrade}: runs the Handler over each accepted connection.
 function handler(Handler $h): \Closure
 {
     return function (Connection $c) use ($h): void {
@@ -1197,28 +1687,62 @@ function handler(Handler $h): \Closure
     };
 }
 
-/** A set of connections to broadcast to. Closed ones are skipped and dropped. */
+/**
+ * A set of connections that a message can be sent to at once.
+ *
+ * Closed connections, and ones whose send fails, are dropped from the set. The
+ * broadcast is sequential: each send returns only once that client has taken
+ * the whole frame, so a slow client delays the ones after it. It suits small
+ * rooms and small messages; for a wide or large fan-out, give each connection
+ * its own writer task fed from a bounded queue.
+ *
+ * @see Connection
+ * @example doc_ws_handler
+ */
+// A set of connections to broadcast to. Closed ones are skipped and dropped.
 final class Hub
 {
     /** @var array<int, Connection> */
     private array<int, Connection> $conns = [];
 
+    /**
+     * Add a connection to the set. Adding one already in the set changes nothing.
+     *
+     * @param Connection $c  the connection
+     */
     public function add(Connection $c): void
     {
         $this->conns[\spl_object_id($c)] = $c;
     }
 
+    /**
+     * Remove a connection from the set. Removing one that is not in it changes nothing.
+     *
+     * @param Connection $c  the connection
+     */
     public function remove(Connection $c): void
     {
         unset($this->conns[\spl_object_id($c)]);
     }
 
+    /**
+     * The number of connections in the set, closed ones not yet dropped included.
+     *
+     * @return int  the number of connections
+     */
     public function count(): int
     {
         return \count($this->conns);
     }
 
-    /** @return int how many connections the message was sent to */
+    /**
+     * Send a message to every open connection in the set.
+     *
+     * @param string $data  the message
+     * @param bool $binary  true to send it as a binary message, false for text
+     * @return int  how many connections the message was sent to
+     */
+    // @return int how many connections the message was sent to
     public function broadcast(string $data, bool $binary = false): int
     {
         $sent = 0;

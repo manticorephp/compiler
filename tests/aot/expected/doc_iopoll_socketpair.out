@@ -1,0 +1,5 @@
+ready before write: 0
+ready after write: 1
+reader triggered: Read
+payload: ping
+bool(false)

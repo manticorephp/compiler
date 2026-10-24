@@ -1,0 +1,18 @@
+Error: Call to private method A::f() from global scope
+Error: Call to protected method A::g() from global scope
+Error: Cannot access private property A::$s
+Error: Cannot access private property A::$s
+Error: Cannot access protected property A::$ps
+Error: Cannot access private constant A::Q
+Error: Cannot access protected constant B::R
+Error: Non-static method A::inst() cannot be called statically
+Error: Non-static method A::inst() cannot be called statically
+Error: Non-static method A::inst() cannot be called statically
+1
+fg23454
+9
+gg355
+instinst
+inst
+cs:secret
+cs:other

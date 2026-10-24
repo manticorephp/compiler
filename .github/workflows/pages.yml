@@ -1,0 +1,50 @@
+name: pages
+
+# The site builder (site/build.php) is compiled by the pinned bootstrap compiler:
+# the site dogfoods Manticore, and the runner needs no PHP.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'docs/**'
+      - 'prelude/**'
+      - 'src/Ffi/**'
+      - 'tests/aot/cases/doc_*.php'
+      - 'tests/aot/expected/doc_*.out'
+      - 'COMPILER_VERSION'
+      - 'BOOTSTRAP_VERSION'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host libraries
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libpcre2-dev libssl-dev zlib1g-dev
+      - name: Fetch the pinned compiler
+        run: bash tools/fetch_bootstrap.sh "$RUNNER_TEMP/mc"
+      - name: Build the site
+        run: |
+          "$RUNNER_TEMP/mc/bin/manticore" compile site/build.php -o "$RUNNER_TEMP/site-build"
+          "$RUNNER_TEMP/site-build" _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

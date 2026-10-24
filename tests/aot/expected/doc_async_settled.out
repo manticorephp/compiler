@@ -1,0 +1,5 @@
+0: ok fine
+1: error broken
+0: ok 4
+1: error zero
+2: ok 2

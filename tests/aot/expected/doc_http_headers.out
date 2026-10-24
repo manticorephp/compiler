@@ -1,0 +1,16 @@
+text/plain
+a=1, b=2
+false
+fallback
+-1
+42
+4 names
+Array
+(
+    [0] => Set-Cookie: a=1
+    [1] => Set-Cookie: b=2
+    [2] => Content-Length: 42
+    [3] => Accept: */*
+)
+Set-Cookie: a=1|Set-Cookie: b=2|Content-Length: 42|Accept: */*||
+example.com / [abc]

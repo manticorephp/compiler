@@ -1,0 +1,2 @@
+Error: Cannot access private property A::$x
+Error: Call to private method A::f() from global scope

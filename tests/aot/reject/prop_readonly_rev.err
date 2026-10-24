@@ -1,0 +1,1 @@
+Cannot redeclare non-readonly property A::$p as readonly B::$p

@@ -1,0 +1,32 @@
+== /created
+HTTP/1.1 201 Created
+X-Request-Id: r-1
+Content-Type: application/json
+Content-Length: 8
+Connection: close
+body: {"id":7}
+== /old
+HTTP/1.1 301 Moved Permanently
+Location: /new
+Content-Length: 0
+Connection: close
+body: 
+== /login
+HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Set-Cookie: sid=a%20b; path=/app; HttpOnly; SameSite=Strict
+Set-Cookie: theme=dark; Path=/
+Content-Length: 8
+Connection: close
+body: welcome
+
+== /page
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 26
+Connection: close
+body: <h1>Hi</h1><p>appended</p>
+== /none
+HTTP/1.1 204 No Content
+Connection: close
+body: 
