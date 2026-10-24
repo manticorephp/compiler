@@ -438,6 +438,30 @@ jobs:
   # `:main` as one multi-arch tag, from the two the jobs above pushed. Merged by
   # digest — nothing is rebuilt and nothing is emulated, and `docker pull
   # ghcr.io/manticorephp/compiler:main` resolves to the right architecture.
+  # One check per row, under the name the "Protected branches" ruleset requires
+  # (linux-arm64, …, macos-arm64): green only when EVERY shard of that row is. The
+  # shard count can change without touching the ruleset.
+  rows:
+    name: ${{ matrix.row }}
+    needs: [linux, macos]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    strategy:
+      matrix:
+        row: [linux-arm64, linux-amd64, linux-alpine-arm64, linux-alpine-amd64, macos-arm64]
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | startswith("${{ matrix.row }} (")) | "\(.conclusion)\t\(.name)"')"
+          echo "$jobs"
+          [ "$(echo "$jobs" | grep -c .)" = 4 ] || { echo "expected 4 shards"; exit 1; }
+          ! echo "$jobs" | grep -qv '^success'
+
   # What the suite just passed, published as the seed — once per tag, after EVERY
   # shard of every row is green: a red slice never reaches here, so what is
   # published is always a compiler that passed the whole suite.
