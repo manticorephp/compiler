@@ -6007,7 +6007,9 @@ final class LowerFromAst implements Pass
      *  buys a silent `false`. */
     private function fixedBuiltinArity(string $bare): int
     {
-        if ($bare === 'method_exists' || $bare === 'property_exists') { return 2; }
+        if ($bare === 'method_exists' || $bare === 'property_exists'
+            || $bare === 'str_repeat' || $bare === 'intdiv') { return 2; }
+        if ($bare === 'strlen' || $bare === 'ord' || $bare === 'chr') { return 1; }
         return 0;
     }
 
