@@ -110,9 +110,13 @@ final class PreludeDemand
         return isset($this->names[\strtolower($name)]);
     }
 
+    /** A string literal is exactly a mysqli name (`'mysqli'`, `'\\mysqli_connect'`, `'MYSQLI_ASSOC'`): a class/function/constant probe or dynamic use. */
+    private bool $mysqliLit = false;
+
     /** Some identifier occurring as code starts with `$prefix` (lowercase): a whole family of names, such as mysqli*. */
     public function mentionsPrefix(string $prefix): bool
     {
+        if ($prefix === 'mysqli' && $this->mysqliLit) { return true; }
         foreach ($this->names as $n => $_) {
             if (\str_starts_with(\strval($n), $prefix)) { return true; }
         }
@@ -321,6 +325,7 @@ final class PreludeDemand
                 continue;
             }
             if ($kind === TokenKind::StringLiteral) {
+                if (!$this->mysqliLit && \preg_match('/^["\']\\\\{0,2}mysqli(_\\w+)?["\']$/i', $t->lexeme) === 1) { $this->mysqliLit = true; }
                 $this->walkInterpolation($t->lexeme);
                 $i = $i + 1;
                 continue;
