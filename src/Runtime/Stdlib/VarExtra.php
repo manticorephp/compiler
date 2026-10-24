@@ -338,6 +338,22 @@ function __mc_extract_count(array $plan): int
     return (int)$plan[''];
 }
 
+/**
+ * `get_defined_vars()`: the caller's locals as name => value, limited to the ones
+ * that hold a value (a compiler expansion supplies both maps, see ExtractScope).
+ * @param array<string, mixed> $vals
+ * @param array<string, bool> $defined
+ * @return array<string, mixed>
+ */
+function __mc_gdv_filter(array $vals, array $defined): array
+{
+    $out = [];
+    foreach ($vals as $k => $v) {
+        if ($defined[$k]) { $out[$k] = $v; }
+    }
+    return $out;
+}
+
 /** `doubleval()` — the alias of floatval(). */
 function doubleval(mixed $value): float
 {

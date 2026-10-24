@@ -322,6 +322,10 @@ trait LowerExprs
                 $inl = $this->lowerScopedInclude($expr->args[0]);
                 if ($inl !== null) { return $inl; }
             }
+            if ($fnBare === 'get_defined_vars' && \count($expr->args) === 0) {
+                $this->sawExtract = true;
+                return new Block([new Call(ExtractScope::GDV_SITE, [], Type::unknown())], Type::unknown());
+            }
             if ($fnBare === 'compact' && \count($expr->args) >= 1) {
                 $names = [];
                 $litOnly = true;
