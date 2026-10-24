@@ -4332,7 +4332,7 @@ trait EmitLlvmBuiltins
     }
 
     /**
-     * `mixed ** mixed` / `int ** mixed`: no float operand is known, so the result
+     * `**` over cells, numeric strings and ints (no float operand): `"9" ** 2` is int(81), so the result
      * is php's run-time answer (int for int operands with a non-negative
      * exponent, else float); InferCalls types the call as the numeric cell.
      * @param Node[] $args
@@ -4341,8 +4341,9 @@ trait EmitLlvmBuiltins
     {
         $a = $args[0]->type->kind;
         $b = $args[1]->type->kind;
-        return ($a === Type::KIND_CELL && ($b === Type::KIND_CELL || $b === Type::KIND_INT))
-            || ($a === Type::KIND_INT && $b === Type::KIND_CELL);
+        return !($a === Type::KIND_INT && $b === Type::KIND_INT)
+            && ($a === Type::KIND_CELL || $a === Type::KIND_INT || $a === Type::KIND_STRING)
+            && ($b === Type::KIND_CELL || $b === Type::KIND_INT || $b === Type::KIND_STRING);
     }
 
     /** @param Node[] $args */

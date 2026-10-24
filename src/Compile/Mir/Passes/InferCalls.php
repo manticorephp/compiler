@@ -400,8 +400,9 @@ trait InferCalls
             if (!$bothInt) {
                 $ka = $args[0]->type->kind ?? '';
                 $kb = $args[1]->type->kind ?? '';
-                $cellPow = ($ka === Type::KIND_CELL && ($kb === Type::KIND_CELL || $kb === Type::KIND_INT))
-                    || ($ka === Type::KIND_INT && $kb === Type::KIND_CELL);
+                $cellPow = $ka !== Type::KIND_FLOAT && $kb !== Type::KIND_FLOAT
+                    && ($ka === Type::KIND_CELL || $ka === Type::KIND_INT || $ka === Type::KIND_STRING)
+                    && ($kb === Type::KIND_CELL || $kb === Type::KIND_INT || $kb === Type::KIND_STRING);
                 return $cellPow ? Type::numericCell() : Type::float_();
             }
             if (!\Compile\Mir\IntConst::isConstInt($args[1])) { return Type::numericCell(); }
