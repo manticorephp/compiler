@@ -4371,6 +4371,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $pdoMysqlSrc = prelude_src_or_empty("pdo_mysql.php");
     $pdoPgsqlOffSrc = prelude_src_or_empty("pdo_pgsql_off.php");
     $pdoMysqlOffSrc = prelude_src_or_empty("pdo_mysql_off.php");
+    // ext/mysqli: classes + constants in one file, the procedural API in the other.
+    $mysqliSrc = prelude_src_or_empty("mysqli.php");
+    $mysqliFnSrc = prelude_src_or_empty("mysqli_fn.php");
 
     // ext/tokenizer, deliberately TWO files. tokenizer.php names nothing Zend
     // owns, so it stays require-able under `php` itself and tools/tokenizer_diff.php
@@ -4848,6 +4851,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // those drivers; any other site (a variable DSN, a call, `extends PDO`) or no site at all keeps every driver.
     // A driver left out is replaced by a stand-in that answers "could not find driver" and says why.
     $usePdoSqlite = $usePdo;
+    // ext/mysqli gates on a MENTION of any `mysqli*` identifier in code: every Zend class, function and MYSQLI_* constant
+    // starts with it, so no program owns one without meaning the extension.
+    $useMysqli = $demand->mentionsPrefix('mysqli');
     $usePdoPgsql = $usePdo && $demand->opensDriver("pgsql");
     $usePdoMysql = $usePdo && $demand->opensDriver("mysql");
     // PDO::ERRMODE_WARNING routes through trigger_error, which lives in
@@ -5087,6 +5093,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         dprint("compile failed: prelude: cannot read pdo.php / pdo_sqlite.php / pdo_sql.php / pdo_pgsql.php / pdo_mysql.php");
         return null;
     }
+    if ($useMysqli && ($mysqliSrc === "" || $mysqliFnSrc === "")) {
+        dprint("compile failed: prelude: cannot read mysqli.php / mysqli_fn.php");
+        return null;
+    }
     if ($useTokenizer && ($tokenizerSrc === "" || $tokenizerApiSrc === "")) {
         dprint("compile failed: prelude: cannot read tokenizer.php / tokenizer_api.php");
         return null;
@@ -5185,6 +5195,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->pdoSqlSrc = ($usePdoPgsql || $usePdoMysql) ? $pdoSqlSrc : "";
         $lower->pdoPgsqlSrc = $usePdoPgsql ? $pdoPgsqlSrc : ($usePdo ? $pdoPgsqlOffSrc : "");
         $lower->pdoMysqlSrc = $usePdoMysql ? $pdoMysqlSrc : ($usePdo ? $pdoMysqlOffSrc : "");
+        $lower->mysqliSrc = $useMysqli ? $mysqliSrc . $mysqliFnSrc : "";
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
@@ -5726,6 +5737,9 @@ function analyze_prelude_files(): array
         "pdo_sql.php",
         "pdo_pgsql.php",
         "pdo_mysql.php",
+        // Same for mysqli / mysqli_result / mysqli_stmt type hints and the mysqli_* functions.
+        "mysqli.php",
+        "mysqli_fn.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

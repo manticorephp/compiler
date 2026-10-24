@@ -110,6 +110,15 @@ final class PreludeDemand
         return isset($this->names[\strtolower($name)]);
     }
 
+    /** Some identifier occurring as code starts with `$prefix` (lowercase): a whole family of names, such as mysqli*. */
+    public function mentionsPrefix(string $prefix): bool
+    {
+        foreach ($this->names as $n => $_) {
+            if (\str_starts_with(\strval($n), $prefix)) { return true; }
+        }
+        return false;
+    }
+
     /** True when ANY of `$names` occurs as code. @param string[] $names */
     public function mentionsAny(array $names): bool
     {

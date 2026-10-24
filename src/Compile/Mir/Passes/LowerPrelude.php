@@ -219,6 +219,10 @@ trait LowerPrelude
             $src .= $this->pdoSrc . $this->pdoSqliteSrc . $this->pdoSqlSrc
                 . $this->pdoPgsqlSrc . $this->pdoMysqlSrc;
         }
+        if ($this->mysqliSrc !== '') {
+            // After exceptions.php and spl_arrays.php (RuntimeException, IteratorAggregate).
+            $src .= $this->mysqliSrc;
+        }
         if ($this->tokenizerSrc !== '') {
             // ext/tokenizer. Core BEFORE api — classes are built in source order
             // and token_get_all() constructs __McTok.

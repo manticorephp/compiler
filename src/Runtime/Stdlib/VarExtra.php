@@ -118,7 +118,7 @@ function extension_loaded(string $extension): bool
     return $e === 'pcre' || $e === 'json' || $e === 'ctype'
         || $e === 'openssl' || $e === 'core' || $e === 'standard'
         || $e === 'tokenizer' || $e === 'mbstring' || $e === 'intl'
-        || $e === 'session'
+        || $e === 'session' || $e === 'mysqli'
         || $e === 'bcmath';
 }
 

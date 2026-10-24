@@ -7,7 +7,8 @@
 // Loader used: with no files, or when mysqli is not loaded, the prelude files are require'd directly
 // under Zend. FALLBACK (the one in force on this host): `php -n` does NOT unload mysqli here
 // (statically built in), so the prelude cannot be declared under Zend. Then use the compiled probe:
-// compile this file with bin/manticore (prelude included), run `<probe> --live > live.json`,
+// emit a probe source (`php tools/mysqli_surface_audit.php --emit-probe > probe.php`), compile THAT with bin/manticore
+// (prelude included), run `<probe> --live > live.json`,
 // then `php tools/mysqli_surface_audit.php --diff live.json`.
 // Comparison keys: the live side may only use Reflection methods present in prelude/reflection.php, so
 // the Zend-only data `tentative` (return came from a tentative type) and `readonly` (no
@@ -15,6 +16,11 @@
 // Defaults are compared as the evaluated value (var_export), not the constant name; types go through
 // one normaliser (typeStr: `?T` => `T|null`, union members sorted, null last).
 error_reporting(E_ALL & ~E_DEPRECATED);
+// only the Zend side (--dump) can ask ReflectionProperty::isReadOnly (see #434); the key is stripped before diffing anyway
+$dumping = ($argv[1] ?? '') === '--dump';
+// --emit-probe fills this with the golden's names as literals: a compiled binary resolves a dynamic defined()/constant()/
+// ReflectionFunction name only when the name also occurs as a string literal in the program.
+$literalNames = []; // @@NAMES@@
 
 function typeStr(?ReflectionType $t): ?string
 {
@@ -85,7 +91,7 @@ function describeClass(ReflectionClass $c): array
         }
         $p[$prop->getName()] = [
             'type' => typeStr($prop->getType()),
-            'readonly' => method_exists($prop, 'isReadOnly') ? $prop->isReadOnly() : null,
+            'readonly' => $GLOBALS['dumping'] ? $prop->isReadOnly() : null,
             'static' => $prop->isStatic(),
             'visibility' => $prop->isPublic() ? 'public' : ($prop->isProtected() ? 'protected' : 'private'),
         ];
@@ -136,6 +142,12 @@ function dumpSurface(): array
  */
 function liveSurface(array $golden): array
 {
+    $gate = MYSQLI_ASSOC; // a code mention of mysqli* is what links the prelude into the compiled probe
+    $lit = $GLOBALS['literalNames'];
+    if ($lit !== []) {
+        $golden['functions'] = array_flip($lit['functions']);
+        $golden['constants'] = array_flip($lit['constants']);
+    }
     $classes = [];
     foreach (array_keys($golden['classes']) as $n) {
         if (class_exists($n) || interface_exists($n)) {
@@ -193,6 +205,13 @@ function diffTree(mixed $want, mixed $got, string $path, array &$out): void
 $mode = $argv[1] ?? '';
 if ($mode === '--dump') {
     echo json_encode(dumpSurface(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";
+    exit(0);
+}
+if ($mode === '--emit-probe') {
+    $golden = json_decode(file_get_contents(__DIR__ . '/../tests/mysqli_net/surface.json'), true);
+    $list = fn(array $m): string => '[' . implode(', ', array_map(fn($n) => "'$n'", array_keys($m))) . ']';
+    $lit = "['functions' => " . $list($golden['functions']) . ", 'constants' => " . $list($golden['constants']) . ']';
+    echo str_replace('$literalNames = []; ' . '// @@NAMES@@', '$literalNames = ' . $lit . ';', file_get_contents(__FILE__));
     exit(0);
 }
 if ($mode === '--live') {
