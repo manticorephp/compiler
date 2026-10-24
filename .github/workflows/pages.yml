@@ -8,6 +8,10 @@ on:
     paths:
       - 'site/**'
       - 'docs/**'
+      - 'prelude/**'
+      - 'src/Ffi/**'
+      - 'tests/aot/cases/doc_*.php'
+      - 'tests/aot/expected/doc_*.out'
       - 'COMPILER_VERSION'
       - 'BOOTSTRAP_VERSION'
       - '.github/workflows/pages.yml'
