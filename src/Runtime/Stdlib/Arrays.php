@@ -266,15 +266,14 @@ function __mc_array_reindex(array &$arr): void
  *
  * Three shapes, as in PHP: INT when both ends and the step are integral, FLOAT
  * when any of them is not, and CHARACTER when both ends are single-character
- * non-numeric strings (`range('a','e')`). The float branch counts iterations
+ * strings (`range('a','e')`, `range("1","3")` too). The float branch counts iterations
  * up front rather than accumulating `$i += $step`, so rounding drift cannot
  * add or drop a final element.
  */
 function range(int|float|string $start, int|float|string $end, int|float $step = 1): array
 {
     if (\is_string($start) && \is_string($end)
-        && \strlen($start) === 1 && \strlen($end) === 1
-        && !\is_numeric($start) && !\is_numeric($end)) {
+        && \strlen($start) === 1 && \strlen($end) === 1) {
         return __mc_range_char($start, $end, (int)$step);
     }
     $fs = (float)$start;

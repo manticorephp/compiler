@@ -118,6 +118,9 @@ final class ReflectAnalysis
             if ($fname === '__mc_refl_find' && \count($n->args) >= 1) {
                 $this->fromArg($n->args[0]);
             }
+            if ($fname === '__mc_get_class_vars' && \count($n->args) >= 1) {
+                $this->fromArg($n->args[0]);
+            }
             if ($fname === '__mc_refl_of' && \count($n->args) >= 1) {
                 $this->fromReceiver($n->args[0]);
             }

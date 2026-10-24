@@ -2953,7 +2953,10 @@ trait EmitLlvmObjects
                     // array-hinted slot.
                     $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
                 } elseif ($propType !== null) {
+                    $pcls = $n->object->type->class ?? '';
+                    $this->unboxPropCtx = $pcls !== '' ? $pcls . '::$' . $n->property : '';
                     $out .= $this->unboxCellToType($propType);
+                    $this->unboxPropCtx = '';
                 }
             }
             $out .= $this->coerceToI64();
@@ -4686,7 +4689,7 @@ trait EmitLlvmObjects
             $out = '';
             /** @var array<string, string> $owned */
             $owned = [];
-            $recvL = $this->dynHoistOperand($dp->object, $out, $owned, false);
+            $recvL = $this->dynHoistOperand($dp->object, $out, $owned, true);
             $nameL = $this->dynHoistOperand($dp->name, $out, $owned, false);
             $args = [];
             foreach ($iv->args as $a) {
@@ -6875,6 +6878,20 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** The `$newThis` of a rebind as a raw object word: an erased (cell/unknown) object is NaN-boxed, and the `$this` slot holds the bare pointer. */
+    private function emitNewThis(Node $objNode): string
+    {
+        $out = $this->emitNode($objNode);
+        $out .= $this->coerceToI64();
+        if ($objNode->type->kind === Type::KIND_CELL || $objNode->type->kind === Type::KIND_UNKNOWN) {
+            $um = $this->ssa->allocReg();
+            $out .= '  ' . $um . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+            $this->lastValue = $um;
+            $this->lastValueType = 'i64';
+        }
+        return $out;
+    }
+
     /** Copy a closure's env struct, rebinding the `$this` slot (struct slot 1)
      *  to `$objNode`. Shared by Closure::bind / ->bindTo / ->call. The bound
      *  value carries the same fn ptr (slot 0), so an invoke dispatches through
@@ -6942,8 +6959,7 @@ trait EmitLlvmObjects
         }
         $hasThis = $this->closureHasThis[$fnName] ?? true;
         if ($hasThis && $cnt >= 1) {
-            $out .= $this->emitNode($objNode);
-            $out .= $this->coerceToI64();
+            $out .= $this->emitNewThis($objNode);
             $objV = $this->lastValue;
             $tg = $this->ssa->allocReg();
             $out .= '  ' . $tg . ' = getelementptr inbounds i64, ptr ' . $buf . ", i64 1\n";
@@ -6980,8 +6996,7 @@ trait EmitLlvmObjects
         $this->rt->needsClosureRc = true;
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $hdr = \Compile\MemoryAbi::STRING_HEADER_SIZE;
-        $out = $this->emitNode($objNode);
-        $out .= $this->coerceToI64();
+        $out = $this->emitNewThis($objNode);
         $objV = $this->lastValue;
         $srcMagic = $this->closureHdrLoad($src, \Compile\MemoryAbi::STRING_HASH_OFFSET);
         $out .= $this->closureHdrLoadOut;
@@ -8551,6 +8566,75 @@ trait EmitLlvmObjects
         return $this->emitMethodCallInner($n);
     }
 
+    /**
+     * `$r->m(...)` on an ERASED receiver when no class declares `m` but some
+     * class has `__call`. The receiver is not necessarily one of those classes:
+     * a Closure answers `__invoke` / `call`, anything else is php's Error. So
+     * the receiver is spilled once and the arm is picked at run time instead
+     * of dispatching blindly into an unrelated class's `__call`.
+     */
+    private function emitErasedMagicCall(\Compile\Mir\MethodCall_ $mc): string
+    {
+        $out = $this->emitNode($mc->object);
+        $out .= $this->coerceToI64();
+        $cellV = $this->lastValue;
+        $rawV = $this->ssa->allocReg();
+        $out .= '  ' . $rawV . ' = and i64 ' . $cellV . ", 281474976710655\n";
+        $tag = \substr($this->ssa->allocReg(), 2);
+        $cellName = '__emc' . $tag;
+        $fnName = '__emf' . $tag;
+        $cellSlot = $this->ssa->allocReg();
+        $fnSlot = $this->ssa->allocReg();
+        $out .= '  ' . $cellSlot . " = alloca i64\n";
+        $out .= '  store i64 ' . $cellV . ', ptr ' . $cellSlot . "\n";
+        $out .= '  ' . $fnSlot . " = alloca i64\n";
+        $out .= '  store i64 ' . $rawV . ', ptr ' . $fnSlot . "\n";
+        $this->locals->slots[$cellName] = $cellSlot;
+        $this->locals->slots[$fnName] = $fnSlot;
+        $cell = Type::cell();
+        $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
+        $t = fn (): Node => new \Compile\Mir\LoadLocal($cellName, $cell);
+        $fnT = fn (): Node => new \Compile\Mir\LoadLocal($fnName, Type::closure());
+        $call = fn (string $f, array $args, Type $ty): Node => new \Compile\Mir\Call($f, $args, $ty);
+        $err = fn (Node $msg): Node => new \Compile\Mir\Call('__mir_throw_error', [$msg], $cell);
+        $lm = \strtolower($mc->method);
+        if ($lm === '__invoke') {
+            $onClosure = new \Compile\Mir\Invoke_($fnT(), $mc->args, $cell);
+        } elseif ($lm === 'call' && $mc->args !== []) {
+            // rebind then invoke: the typed `call` arm answers a raw word, not a cell
+            $bound = new \Compile\Mir\MethodCall_($fnT(), 'bindTo', [$mc->args[0]], Type::closure());
+            $onClosure = new \Compile\Mir\Invoke_($bound, \array_slice($mc->args, 1), $cell);
+        } else {
+            $onClosure = $err($str('Call to undefined method Closure::' . $mc->method . '()'));
+        }
+        $elems = [];
+        foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+        $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
+        $magic = $this->anyClassDeclares('__call');
+        $isObj = $call('is_object', [$t()], Type::bool_());
+        $missing = new \Compile\Mir\Ternary($isObj,
+            new \Compile\Mir\Concat(new \Compile\Mir\Concat($str('Call to undefined method '),
+                $call('get_class', [$t()], Type::string_())), $str('::' . $mc->method . '()')),
+            new \Compile\Mir\Concat($str('Call to a member function ' . $mc->method . '() on '),
+                $call('get_debug_type', [$t()], Type::string_())),
+            Type::string_());
+        $rest = $err($missing);
+        if ($magic) {
+            $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
+            $hasMagic = new \Compile\Mir\Ternary($isObj, $call('method_exists', [$t(), $str('__call')], Type::bool_()),
+                new \Compile\Mir\BoolConst(false, Type::bool_()), Type::bool_());
+            $rest = new \Compile\Mir\Ternary($hasMagic, $viaMagic, $rest, $cell);
+        }
+        $tree = new \Compile\Mir\Ternary(new \Compile\Mir\Instanceof_($t(), 'Closure'), $onClosure,
+            $rest, $cell);
+        $out .= $this->emitNode($tree);
+        if ($mc->type->kind !== Type::KIND_CELL && $mc->type->kind !== Type::KIND_UNKNOWN
+            && $mc->type->kind !== Type::KIND_VOID) {
+            $out .= $this->unboxCellToType($mc->type);
+        }
+        return $out;
+    }
+
     private function emitMethodCallInner(\Compile\Mir\MethodCall_ $n): string
     {
         $mc = $n;
@@ -8610,7 +8694,19 @@ trait EmitLlvmObjects
         // into an unrelated class's `__call`.
         $erasedRecv = ($recvType->kind === Type::KIND_CELL || $recvType->kind === Type::KIND_UNKNOWN)
             && !$this->anyClassDeclares($mc->method);
-        if (($isClosureRecv || $erasedRecv) && $mc->method === 'bindTo' && \count($mc->args) >= 1) {
+        if ($isClosureRecv && !$this->inErasedInvokeArm &&\strtolower($mc->method) === '__invoke') {
+            // srcArgc -2: a known closure, skip the erased-callee object arm (it would rebuild this call)
+            $iv = new \Compile\Mir\Invoke_($mc->object, $mc->args, $n->type);
+            $iv->srcArgc = -2;
+            return $this->emitNode($iv);
+        }
+        // An erased receiver may be a Closure OR an invokable object. Virtual
+        // dispatch on the name alone ran the first class's `__invoke` on a closure env.
+        if (!$this->inErasedInvokeArm && \strtolower($mc->method) === '__invoke' && $this->anyClassHasMethod('__invoke')
+            && ($recvType->kind === Type::KIND_CELL || $recvType->kind === Type::KIND_UNKNOWN)) {
+            return $this->emitErasedExplicitInvoke($n, $mc);
+        }
+        if (($isClosureRecv || $erasedRecv) && $mc->method === 'bindTo'&& \count($mc->args) >= 1) {
             $out = $this->emitClosureRebind($mc->object, $mc->args[0]);
             if ($erasedRecv && ($n->type->kind === Type::KIND_CELL || $n->type->kind === Type::KIND_UNKNOWN)) {
                 $out .= $this->boxToCell(Type::closure());
@@ -8689,8 +8785,13 @@ trait EmitLlvmObjects
         // is NOT handled: the two shapes need different argument lists, so they
         // cannot share one switch, and the arg emission below is already built
         // against the resolved callee's signature. Recorded in docs/ROADMAP.md.
-        if (!isset($this->classes[$mcStatic]) && $this->anyClassDeclares('__call')
-            && !$this->anyClassDeclares($mc->method)) {
+        if (!isset($this->classes[$mcStatic]) && !$this->anyClassDeclares($mc->method)) {
+            if ($mc->object->type->kind === Type::KIND_CELL || $mc->object->type->kind === Type::KIND_UNKNOWN) {
+                return $this->emitErasedMagicCall($mc);
+            }
+        }
+        if (!isset($this->classes[$mcStatic]) && !$this->anyClassDeclares($mc->method)
+            && $this->anyClassDeclares('__call')) {
             $elems = [];
             foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
             $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec(Type::cell()));

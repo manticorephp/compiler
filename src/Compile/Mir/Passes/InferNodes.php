@@ -2435,6 +2435,7 @@ trait InferNodes
         $allStrConstKeys = true; // every element keyed by a string literal → record
         $recordFields = [];      // string key → value Type (insertion order)
         $keyKinds = [];          // distinct key KINDS, keyless counting as int
+        $erasedSpread = false;   // a spread whose source element is unknown
         foreach ($node->elements as $el) {
             if ($el->key !== null) {
                 $hasKey = true;
@@ -2464,6 +2465,7 @@ trait InferNodes
                 // A Traversable operand is drained into cells
                 // ({@see EmitLlvm::emitArraySpreadUnified}).
                 if ($st->kind === Type::KIND_OBJ) { $vt = Type::cell(); }
+                if ($vt->kind === Type::KIND_UNKNOWN) { $erasedSpread = true; }
             }
             if ($vt->kind !== Type::KIND_UNKNOWN) { $concreteKinds[$vt->kind] = true; }
             if ($vt->isArray() && $vt->element !== null
@@ -2545,7 +2547,13 @@ trait InferNodes
         // runtime tag; foreach/is_*/truthiness then dispatch by tag instead of
         // reading the raw i64. Homogeneous-unknown stays unknown (no boxing).
         $vt = $valType ?? Type::unknown();
-        if ($vt->kind === Type::KIND_UNKNOWN && count($concreteKinds) >= 2) {
+        // An erased spread beside a concrete element (`$r = [...$r, [$p, 2]]`
+        // with `$r = []` before the loop) is no less heterogeneous: the spread's
+        // words are whatever its buffer hint says, the concrete one is raw, and
+        // one unstamped buffer can hold neither. Cells, boxed by the source hint
+        // ({@see EmitLlvm::emitArraySpreadUnified}).
+        if ($vt->kind === Type::KIND_UNKNOWN
+            && (count($concreteKinds) >= 2 || ($erasedSpread && count($concreteKinds) >= 1))) {
             $vt = Type::cell();
         } elseif ($vt->kind === Type::KIND_NULL) {
             $vt = Type::cell();

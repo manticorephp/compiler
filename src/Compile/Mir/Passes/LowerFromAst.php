@@ -1488,6 +1488,7 @@ final class LowerFromAst implements Pass
             // top-level closure reading `$this` capture a non-existent local
             // instead of a late-bound placeholder).
             $this->currentLowerClass = '';
+            $this->currentLowerFn = '';
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
             // …nor parameters: a preceding function's by-ref names would
@@ -2580,23 +2581,62 @@ final class LowerFromAst implements Pass
     private function synthIfaceFactories(Module $module): array
     {
         $out = [];
+        $targets = [];
         foreach ($module->classes as $cd) {
             if ($cd->isStruct || $cd->isPreludeClass) { continue; }
-            if (!isset($this->classDecls[$cd->name])) { continue; }
-            $names = [];
-            $visited = [];
-            $this->collectInterfaceNames($cd->name, $names, $visited);
+            $targets[] = $cd->name;
+        }
+        // An interface has no ClassDef but does get a reflection row.
+        foreach ($module->interfaceNames as $in => $_) {
+            if (!isset($module->internalInterfaceNames[$in])) { $targets[] = $in; }
+        }
+        foreach ($targets as $tn) {
+            if (!isset($this->classDecls[$tn])) { continue; }
+            $names = $this->orderedInterfaceNames($tn);
             if ($names === []) { continue; }
             $sp = new \Parser\Ast\Span(0, 0);
             $elems = [];
-            foreach ($names as $iname => $_) {
+            foreach ($names as $iname) {
                 $elems[] = new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::string($iname, $sp));
             }
             $body = new \Parser\Ast\Block([
                 \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::arrayLit($elems, $sp), $sp),
             ]);
             $out[] = new \Parser\Ast\FunctionDecl(
-                \Compile\Mir\Passes\ReflectSynth::ifacesFn($cd->name), [], 'array', $body, $sp);
+                \Compile\Mir\Passes\ReflectSynth::ifacesFn($tn), [], 'array', $body, $sp);
+        }
+        return $out;
+    }
+
+    /**
+     * Interface names in Zend's `ce->interfaces` order (class_implements()):
+     * parent's list first, then the declared ones (+ Stringable), then each
+     * declared one's own list reversed; a class declaring none gets its
+     * parent's list reversed.
+     *
+     * @return string[]
+     */
+    private function orderedInterfaceNames(string $class): array
+    {
+        $decl = $this->classDecls[\ltrim($class, '\\')] ?? null;
+        if ($decl === null) { return []; }
+        $declared = [];
+        $isIface = ($decl->kind ?? 'class') === 'interface';
+        foreach ($isIface ? $decl->extends : $decl->implements as $i) { $declared[] = \ltrim($i, '\\'); }
+        $parent = !$isIface && $decl->extends !== [] ? $this->orderedInterfaceNames($decl->extends[0]) : [];
+        if (!$isIface && !\in_array('Stringable', $declared, true) && !\in_array('Stringable', $parent, true)
+                && isset($this->classDecls['Stringable']) && $this->declDeclaresToString($decl)) {
+            $declared[] = 'Stringable';
+        }
+        if ($declared === []) { return \array_reverse($parent); }
+        $out = $parent;
+        foreach ($declared as $d) {
+            if (!\in_array($d, $out, true)) { $out[] = $d; }
+        }
+        foreach ($declared as $d) {
+            foreach (\array_reverse($this->orderedInterfaceNames($d)) as $n) {
+                if (!\in_array($n, $out, true)) { $out[] = $n; }
+            }
         }
         return $out;
     }
@@ -3919,6 +3959,16 @@ final class LowerFromAst implements Pass
         $this->module->functions[\count($this->module->functions) - 1]->fccTarget = $method;
         $this->module->functions[\count($this->module->functions) - 1]->fccTargetClass = $cls;
         return $node;
+    }
+
+    /** `$recv->$name(...)` with a RUNTIME method name: a variadic closure forwarding to the dynamic call. */
+    private function synthDynMethodClosure(Node $recv, Node $name): Node
+    {
+        $mir = [new Param(name: '__fa', type: Type::vec(Type::cell()), byRef: false, variadic: true)];
+        $dyn = new DynProp_(new LoadLocal('__frecv', $recv->type), new LoadLocal('__fname', $name->type), Type::cell());
+        $dyn->scope = $this->currentLowerClass;
+        $body = new Invoke_($dyn, [new Spread_(new LoadLocal('__fa', Type::vec(Type::cell())), Type::unknown())], Type::unknown());
+        return $this->buildClosureNode($mir, ['__frecv', '__fname'], [$recv->type, $name->type], [$recv, $name], $body, Type::unknown());
     }
 
     /** A string callable `"fn"` / `"C::m"` applied to `$astArgs`. */
@@ -6277,6 +6327,7 @@ final class LowerFromAst implements Pass
     /** DynProp object/name via typed params (subclass fields, self-host offset). */
     private function dynPropObject(\Parser\Ast\DynProp $d): \Parser\Ast\Expr { return $d->object; }
     private function dynPropName(\Parser\Ast\DynProp $d): \Parser\Ast\Expr { return $d->name; }
+    private function dynPropNullsafe(\Parser\Ast\DynProp $d): bool { return $d->nullsafe; }
     /**
      * Return true/false when a declaration and all of its parent interfaces are
      * known, or null when an opaque parent prevents a sound answer.

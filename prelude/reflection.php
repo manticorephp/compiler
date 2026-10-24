@@ -116,6 +116,42 @@ function __mc_declared(int $mask, int $want): array
     return $out;
 }
 
+/**
+ * `get_class_vars($class)` — LowerExprs rewrites the call to pass the calling class (`''` outside
+ * any): instance defaults first, then statics (current values), each only if visible from that
+ * scope. A typed property without a default answers null, as php does.
+ *
+ * @return array<string, mixed>
+ */
+function __mc_get_class_vars(string $class, string $scope): array
+{
+    if (!\class_exists($class) && !\interface_exists($class) && !\enum_exists($class)) {
+        return [];
+    }
+    $rc = new ReflectionClass($class);
+    $out = [];
+    $all = $rc->getProperties();
+    $name = $rc->getName();
+    foreach ([[false, true], [false, false], [true, true], [true, false]] as $pass) {
+        // php lists the class's own properties before the inherited ones.
+        foreach ($all as $p) {
+            if ($p->isStatic() !== $pass[0] || ($p->class === $name) !== $pass[1]) { continue; }
+            $static = $pass[0];
+            $decl = $p->class;
+            $visible = $p->isPublic()
+                || ($p->isProtected() && $scope !== '' && (\is_a($scope, $decl, true) || \is_a($decl, $scope, true)))
+                || ($p->isPrivate() && $scope === $decl);
+            if (!$visible) { continue; }
+            if ($static) {
+                $out[$p->getName()] = $p->getValue();
+            } else {
+                $out[$p->getName()] = $p->hasDefaultValue() ? $p->getDefaultValue() : null;
+            }
+        }
+    }
+    return $out;
+}
+
 /** @return string[] */
 function get_declared_classes(): array
 {

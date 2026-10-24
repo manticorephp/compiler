@@ -358,6 +358,8 @@ final class EmitLlvm implements EmitVisitor
 
     /** Post-call IR releasing the slot of the latest {@see emitRefValueSlot}. */
     private string $lastRefSlotDrop = '';
+    /** True while the erased-callee object arm emits its `__invoke` call: that call must reach dispatch, not the closure rewrite. */
+    private bool $inErasedInvokeArm = false;
 
     // ── generator state (set while emitting a `$resume` function) ──
     /** Per-function generator emit state (fresh each {@see emit}). */
@@ -409,6 +411,9 @@ final class EmitLlvm implements EmitVisitor
     private array $builtinTwinParams = [];
     /** @var array<string, int> */
     private array $builtinTwinTot = [];
+    /** Every builtin twin, named in the program or not: {@see Module::$builtinTwinTot}.
+     *  @var array<string, int> */
+    private array $allTwinTot = [];
     /** @var array<string, bool> */
     private array $callableShims = [];
     /** @var array<string, string> */
@@ -754,6 +759,7 @@ final class EmitLlvm implements EmitVisitor
         // collector into the module, and its possible-root buffering delayed
         // destructors that php runs at once.
         $this->builtinTwinTot = [];
+        $this->allTwinTot = $module->builtinTwinTot;
         if ($module->builtinTwinTot !== []) {
             /** @var array<string, bool> $named */
             $named = [];
@@ -4854,6 +4860,18 @@ final class EmitLlvm implements EmitVisitor
                 $this->lastValueType = 'ptr';
                 $cellified = true;
             }
+        } elseif ($cellVals && $opT->isArray() && ($opElem === null || $opElem->kind === Type::KIND_UNKNOWN)) {
+            // An ERASED element source holds whatever its runtime hint says —
+            // raw ints, raw pointers — so into a cell-valued literal it merges
+            // as a copy boxed by that hint, like a cell operand.
+            $out .= $this->coerceToI64();
+            $word = $this->lastValue;
+            $out .= $this->coerceToPtr();
+            $cc = $this->ssa->allocReg();
+            $out .= '  ' . $cc . ' = call ptr @__mir_array_cellified_copy(ptr ' . $this->lastValue . ")\n";
+            $this->lastValue = $cc;
+            $this->lastValueType = 'ptr';
+            $cellified = true;
         }
         $out .= $this->coerceToPtr();
         $src = $this->lastValue;
