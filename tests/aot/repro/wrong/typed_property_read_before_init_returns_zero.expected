@@ -1,0 +1,2 @@
+Error: Typed property A::$x must not be accessed before initialization
+Error: Typed property A::$s must not be accessed before initialization
