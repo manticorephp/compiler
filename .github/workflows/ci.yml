@@ -463,7 +463,7 @@ jobs:
   # gate.sh stops after the build when MC_PDO_NET is set. Reads the compiler
   # cache of the `linux` rows and never writes it.
   pdo-net:
-    name: pdo-net-${{ matrix.tag }}-${{ matrix.server }}
+    name: pdo-net-${{ matrix.tag }}-${{ matrix.server }} (${{ matrix.shard }}/4)
     needs: [changes, build]
     if: github.event_name != 'pull_request' || needs.changes.outputs.pdo == 'true'
     runs-on: ${{ matrix.runner }}
@@ -473,6 +473,7 @@ jobs:
       matrix:
         tag: [arm64, amd64]
         server: [mysql, mariadb]
+        shard: [1, 2, 3, 4]
         include:
           - tag: arm64
             runner: ubuntu-24.04-arm
@@ -518,7 +519,7 @@ jobs:
             -e MC_LOGDIR=/logs \
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_PDO_NET=${{ matrix.server }} \
-            -e MC_PDO_NET_ARGS="${{ matrix.server == 'mariadb' && '--no-pgsql' || '' }}" \
+            -e MC_PDO_NET_ARGS="${{ matrix.server == 'mariadb' && '--no-pgsql' || '' }} --shard ${{ matrix.shard }}/4" \
             -e PDO_MY_SSL_CA=/pdo-net/my_ca.pem \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
@@ -527,7 +528,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-pdo-net-${{ matrix.tag }}-${{ matrix.server }}
+          name: logs-pdo-net-${{ matrix.tag }}-${{ matrix.server }}-${{ matrix.shard }}
           path: ci-logs/
           if-no-files-found: warn
 
