@@ -7273,6 +7273,7 @@ final class LowerFromAst implements Pass
             return new StaticCall_($decl !== '' ? $decl : $thisCls,
                 $expr->method, $args, Type::unknown(), $scope);
         }
+        if (\strtolower($expr->method) === 'bindto' || \strtolower($expr->method) === 'call') { $this->module->closureRebinds = true; }
         $mc = new MethodCall_($obj, $expr->method, $args, Type::unknown());
         $mc->srcArgc = \count($expr->args);
         return $mc;
@@ -7489,6 +7490,7 @@ final class LowerFromAst implements Pass
         // Sibling of the `$this->prop` half in {@see
         // EmitLlvmObjects::emitPropertyAccess}: one root, two spellings.
         $bindScope = '';
+        if (\strtolower(\ltrim($class, '\\')) === 'closure' && \strtolower($expr->method) === 'bind') { $this->module->closureRebinds = true; }
         if (\strtolower(\ltrim($class, '\\')) === 'closure' && $expr->method === 'bind'
             && \count($expr->args) >= 3) {
             $sc = $this->guardClassArgName($expr->args[2]);

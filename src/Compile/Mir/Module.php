@@ -85,6 +85,12 @@ final class Module
      *  there, so `instanceof Closure` must answer false for it */
     public array $callableShims = [];
 
+    /** @var array<string, bool> closure fn name → declared outside any class (scope: global unless rebound) */
+    public array $unscopedClosures = [];
+
+    /** Some call rebinds a closure (`bindTo` / `call` / `Closure::bind`). */
+    public bool $closureRebinds = false;
+
     /** @var array<string, int> closure fn name → number of captured values */
     public array $closureCaptures = [];
 

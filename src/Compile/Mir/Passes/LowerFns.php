@@ -594,6 +594,7 @@ trait LowerFns
         $clFn->returnArrayHinted = $forwardsErasedArray || $this->isBareArrayReturnHint($retHint);
         $this->module->addFunction($clFn);
         $this->module->closureCaptures[$fnName] = \count($capNames);
+        if ($this->currentLowerClass === '') { $this->module->unscopedClosures[$fnName] = true; }
         if ($this->includeReflection) {
             $this->module->reflClosureMeta[$fnName] = $this->closureMethodMeta($fnName, $declParams, $retHint);
             $this->queueClosureFactories($fnName, $declParams);
