@@ -10755,6 +10755,8 @@ trait EmitLlvmBuiltins
             $asI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
             $out .= '  store i64 ' . $asI . ', ptr ' . $g . "\n";
+            $out .= $this->emitInitMark($objp, $this->initMapHolder($arrNode->object, $arrNode->property),
+                $arrNode->property, $this->propertyOffsetOrNull($arrNode->object, $arrNode->property) ?? -1, $g);
             return $out;
         }
         // Nested element store (`$m[k][...] = v`): the modified inner array

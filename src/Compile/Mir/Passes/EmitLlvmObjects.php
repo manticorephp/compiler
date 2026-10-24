@@ -1243,6 +1243,7 @@ trait EmitLlvmObjects
             $dg = $this->ssa->allocReg();
             $out .= '  ' . $dg . ' = getelementptr inbounds i8, ptr ' . $new . ', i64 ' . (string)$off . "\n";
             $out .= '  store i64 ' . $pv . ', ptr ' . $dg . "\n";
+            $out .= $this->emitInitMark($new, $cd, $pair->name, $off);
         }
         $this->lastValue = $new; $this->lastValueType = 'ptr';
         return $out;
@@ -2016,11 +2017,13 @@ trait EmitLlvmObjects
         if ($fixed === []) { return null; }
         $out = $this->emitNode($objExpr);
         $out .= $this->cellToPtr();
-        return $out . $this->emitPropAddrByClassIdPtr($this->lastValue, $prop);
+        return $out . $this->emitPropAddrByClassIdPtr($this->lastValue, $prop, true);
     }
 
-    /** {@see emitPropAddrByClassId} for an object pointer already in hand. */
-    private function emitPropAddrByClassIdPtr(string $objPtr, string $prop): string
+    /** {@see emitPropAddrByClassId} for an object pointer already in hand.
+     *  `$mark`: the address is taken to WRITE through (a reference), so the
+     *  slot counts as initialized from here on. */
+    private function emitPropAddrByClassIdPtr(string $objPtr, string $prop, bool $mark = false): string
     {
         $fixed = [];
         foreach ($this->classes as $cd) {
@@ -2032,6 +2035,7 @@ trait EmitLlvmObjects
             $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
                   . ', i64 ' . (string)$fixed[0]->propertyOffset($prop) . "\n";
+            if ($mark) { $out .= $this->emitInitMark($objPtr, $fixed[0], $prop, $fixed[0]->propertyOffset($prop)); }
             $addr = $this->ssa->allocReg();
             $out .= '  ' . $addr . ' = ptrtoint ptr ' . $g . " to i64\n";
             $this->lastValue = $addr;
@@ -2053,6 +2057,7 @@ trait EmitLlvmObjects
             $g = $this->ssa->allocReg();
             $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
                      . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+            if ($mark) { $bodies .= $this->emitInitMark($objPtr, $cd, $prop, $cd->propertyOffset($prop)); }
             $gi = $this->ssa->allocReg();
             $bodies .= '  ' . $gi . ' = ptrtoint ptr ' . $g . " to i64\n";
             $bodies .= '  store i64 ' . $gi . ', ptr ' . $res . "\n";
@@ -2227,6 +2232,7 @@ trait EmitLlvmObjects
         $gep = $this->ssa->allocReg();
         $out = '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
              . ', i64 ' . (string)$off . "\n";
+        $out .= $this->emitInitMark($objPtr, $cd, $prop, $off);
         if ($this->cellPropBoxed($pt, $cd->name, $prop)) {
             return $out . $this->emitSlotStore($gep, $cd, $prop, $cellVal);
         }
@@ -3222,6 +3228,8 @@ trait EmitLlvmObjects
         if ($thruDone !== '') {
             $out .= '  br label %' . $thruDone . "\n" . $thruDone . ":\n";
         }
+        $out .= $this->emitInitMark($objPtr, $this->initMapHolder($n->object, $n->property), $n->property,
+            $this->propertyOffsetOrNull($n->object, $n->property) ?? -1, $gep);
         $this->noteCellSinkStored($val);
         $this->lastValue = $res;
         $this->lastValueType = $resTy;
@@ -3269,6 +3277,8 @@ trait EmitLlvmObjects
         $old = $this->ssa->allocReg();
         $out .= '  ' . $old . ' = load i64, ptr ' . $gep . "\n";
         $out .= '  store i64 ' . $ref . ', ptr ' . $gep . "\n";
+        $out .= $this->emitInitMark($objPtr, $this->classes[$cls], $n->property,
+            $this->propertyOffsetOrNull($n->object, $n->property) ?? -1, $gep);
         $out .= $this->rcReleaseReg($old, 'cell');
         $this->rt->needsTagged = true;
         $d = $this->ssa->allocReg();
@@ -3316,6 +3326,9 @@ trait EmitLlvmObjects
         $propType = $cd->propertyTypes[$n->property] ?? null;
         if ($propType === null || $propType->kind !== Type::KIND_STRING) { return null; }
         if ($this->cellPropBoxed($propType, $cls, $n->property)) { return null; }
+        // A slot that may still be uninitialized reads through the general path,
+        // which tests (and then sets) its init bit.
+        if ($cd->initMapBit($n->property) >= 0) { return null; }
 
         $ops = [];
         $this->flattenConcat($sv, $ops);
@@ -9786,6 +9799,8 @@ trait EmitLlvmObjects
             $offByClass[$ac] = $o;
             if ($firstOff === -1) { $firstOff = $o; }
             elseif ($firstOff !== $o) { $agree = false; }
+            // An init bit is per class tree: mark it in the class's own arm.
+            if ($cd !== null && $cd->initMapBit($n->property) >= 0) { $agree = false; }
         }
         $out = $this->emitNode($n->object);
         $out .= $this->coerceToPtr();
@@ -9823,6 +9838,7 @@ trait EmitLlvmObjects
                 $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
                          . ', i64 ' . (string)$offByClass[$ac] . "\n";
                 $bodies .= '  store i64 ' . $val . ', ptr ' . $g . "\n";
+                $bodies .= $this->emitInitMark($objPtr, $cd, $n->property, $offByClass[$ac]);
                 $bodies .= '  br label %' . $endL . "\n";
             }
         }
@@ -10040,6 +10056,120 @@ trait EmitLlvmObjects
         $t = $this->ssa->allocReg();
         return '  ' . $t . ' = trunc i64 ' . $val . ' to i' . $bits . "\n"
              . '  store i' . $bits . ' ' . $t . ', ptr ' . $gep . "\n";
+    }
+
+    /**
+     * The init-bitmap word and mask of `$prop` on `$objPtr` ({@see
+     * \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES}): `[wordPtrReg, maskReg]`, with the
+     * IR in `$out`; null when `$cd`'s tree does not track `$prop`. `$off` is the
+     * slot's static offset, or -1 to derive the bit from `$gep` at run time (a
+     * base-typed slot whose holders disagree on the offset).
+     *
+     * @return array{0:string,1:string}|null
+     */
+    private function initMapWordOf(string $objPtr, ?ClassDef $cd, string $prop, int $off, string $gep, string &$out): ?array
+    {
+        if ($cd === null || $cd->initMapOffset < 0 || !isset($cd->initMapProps[$prop])) { return null; }
+        $hdr = $cd->headerSize();
+        $stride = \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES;
+        $wbits = \Compile\MemoryAbi::INIT_MAP_WORD_BITS;
+        if ($off >= 0) {
+            if ($off < $hdr) { return null; }
+            $bit = \intdiv($off - $hdr, $stride);
+            if (\intdiv($bit, $wbits) >= $cd->initMapWords) { return null; }
+            $wp = $this->ssa->allocReg();
+            $out .= '  ' . $wp . ' = getelementptr inbounds i8, ptr ' . $objPtr . ', i64 '
+                  . (string)($cd->initMapOffset + 8 * \intdiv($bit, $wbits)) . "\n";
+            return [$wp, (string)(1 << ($bit % $wbits))];
+        }
+        if ($gep === '') { return null; }
+        $gi = $this->ssa->allocReg();
+        $oi = $this->ssa->allocReg();
+        $d = $this->ssa->allocReg();
+        $b = $this->ssa->allocReg();
+        $out .= '  ' . $gi . ' = ptrtoint ptr ' . $gep . " to i64\n";
+        $out .= '  ' . $oi . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+        $out .= '  ' . $d . ' = sub i64 ' . $gi . ', ' . $oi . "\n";
+        $out .= '  ' . $b . ' = sub i64 ' . $d . ', ' . (string)$hdr . "\n";
+        $bi = $this->ssa->allocReg();
+        $out .= '  ' . $bi . ' = udiv i64 ' . $b . ', ' . (string)$stride . "\n";
+        $wi = $this->ssa->allocReg();
+        $out .= '  ' . $wi . ' = udiv i64 ' . $bi . ', ' . (string)$wbits . "\n";
+        // A word past the map is a slot this tree never tracks: aim at word 0
+        // with an empty mask rather than out of the object.
+        $inr = $this->ssa->allocReg();
+        $out .= '  ' . $inr . ' = icmp ult i64 ' . $wi . ', ' . (string)$cd->initMapWords . "\n";
+        $wsel = $this->ssa->allocReg();
+        $out .= '  ' . $wsel . ' = select i1 ' . $inr . ', i64 ' . $wi . ", i64 0\n";
+        $wo = $this->ssa->allocReg();
+        $out .= '  ' . $wo . ' = mul i64 ' . $wsel . ", 8\n";
+        $wo2 = $this->ssa->allocReg();
+        $out .= '  ' . $wo2 . ' = add i64 ' . $wo . ', ' . (string)$cd->initMapOffset . "\n";
+        $wp = $this->ssa->allocReg();
+        $out .= '  ' . $wp . ' = getelementptr inbounds i8, ptr ' . $objPtr . ', i64 ' . $wo2 . "\n";
+        $sh = $this->ssa->allocReg();
+        $out .= '  ' . $sh . ' = urem i64 ' . $bi . ', ' . (string)$wbits . "\n";
+        $m0 = $this->ssa->allocReg();
+        $out .= '  ' . $m0 . ' = shl i64 1, ' . $sh . "\n";
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = select i1 ' . $inr . ', i64 ' . $m0 . ", i64 0\n";
+        return [$wp, $m];
+    }
+
+    /** The class whose init-map facts govern `$objExpr->$prop`: the slot holder,
+     *  else the receiver's static class (the map is one per class tree). */
+    private function initMapHolder(Node $objExpr, string $prop): ?ClassDef
+    {
+        $h = $this->slotHolder($objExpr, $prop);
+        if ($h !== null && $h->initMapOffset >= 0) { return $h; }
+        $cls = $objExpr->type->class ?? '';
+        if ($cls !== '' && isset($this->classes[$cls]) && $this->classes[$cls]->initMapOffset >= 0) {
+            return $this->classes[$cls];
+        }
+        return $h;
+    }
+
+    /** Mark `$prop` initialized on `$objPtr` — every store to a tracked slot. */
+    private function emitInitMark(string $objPtr, ?ClassDef $cd, string $prop, int $off, string $gep = ''): string
+    {
+        $out = '';
+        $wm = $this->initMapWordOf($objPtr, $cd, $prop, $off, $gep, $out);
+        if ($wm === null) { return ''; }
+        $w = $this->ssa->allocReg();
+        $w2 = $this->ssa->allocReg();
+        return $out . '  ' . $w . ' = load i64, ptr ' . $wm[0] . "\n"
+             . '  ' . $w2 . ' = or i64 ' . $w . ', ' . $wm[1] . "\n"
+             . '  store i64 ' . $w2 . ', ptr ' . $wm[0] . "\n";
+    }
+
+    /** Mark `$prop` UNinitialized again — `unset($o->p)`. */
+    private function emitInitClear(string $objPtr, ?ClassDef $cd, string $prop, int $off, string $gep = ''): string
+    {
+        $out = '';
+        $wm = $this->initMapWordOf($objPtr, $cd, $prop, $off, $gep, $out);
+        if ($wm === null) { return ''; }
+        $nm = $this->ssa->allocReg();
+        $w = $this->ssa->allocReg();
+        $w2 = $this->ssa->allocReg();
+        return $out . '  ' . $nm . ' = xor i64 ' . $wm[1] . ", -1\n"
+             . '  ' . $w . ' = load i64, ptr ' . $wm[0] . "\n"
+             . '  ' . $w2 . ' = and i64 ' . $w . ', ' . $nm . "\n"
+             . '  store i64 ' . $w2 . ', ptr ' . $wm[0] . "\n";
+    }
+
+    /** An `i1` register: is `$prop` initialized on `$objPtr`? '' (no register)
+     *  when the tree does not track it — the slot is always initialized. */
+    private function emitInitTest(string $objPtr, ?ClassDef $cd, string $prop, int $off, string $gep, string &$out): string
+    {
+        $wm = $this->initMapWordOf($objPtr, $cd, $prop, $off, $gep, $out);
+        if ($wm === null) { return ''; }
+        $w = $this->ssa->allocReg();
+        $a = $this->ssa->allocReg();
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = load i64, ptr ' . $wm[0] . "\n"
+              . '  ' . $a . ' = and i64 ' . $w . ', ' . $wm[1] . "\n"
+              . '  ' . $c . ' = icmp ne i64 ' . $a . ", 0\n";
+        return $c;
     }
 
     /**
