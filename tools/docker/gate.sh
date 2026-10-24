@@ -45,6 +45,10 @@
 #   MC_SUITE=0|1     0 = build and install_smoke only, no AOT suite. What the
 #                    release asks for: CI has already run the suite against that
 #                    commit, and a second run is a slower release, not new news.
+#   MC_SMOKES=0|1    0 = skip the install/CLI smokes (default 1). CI runs them in the
+#                    build job once, not in every suite shard.
+#   MC_SHARD=<i>/<n> run only slice i of n of the suite (--shard of run.sh and of the native runner);
+#                    CI splits a row across n jobs. Unset = the whole suite.
 #   MC_XFAIL=0|1|strict  run tests/aot/xfail.sh (known-bug repros) after the suite.
 #                    1 (default) REPORTS: an XPASS — a tracked bug that no longer
 #                    reproduces here — is printed and lands in the summary, but
@@ -337,6 +341,7 @@ if [ -n "${MC_PDO_NET:-}" ]; then
     exit "$pdo_rc"
 fi
 
+if [ "${MC_SMOKES:-1}" = "1" ]; then
 # Before the suite, because it is seconds and it covers what the suite cannot:
 # the suite always calls `bin/manticore` by path, so it never notices a compiler
 # that cannot find its own prelude when it is reached the way an installed one is.
@@ -370,6 +375,10 @@ bash tests/cli/run.sh > "$MC_LOGDIR/cli.log" 2>&1
 cli_rc=$?
 tail -5 "$MC_LOGDIR/cli.log"
 
+else
+    echo "=== smokes skipped (MC_SMOKES=0) — the build job ran them ==="
+    install_rc=0; lib_rc=0; refpack_rc=0; cli_rc=0
+fi
 echo
 suite_rc=0
 if [ "$MC_SUITE" != "1" ]; then
@@ -388,6 +397,7 @@ elif [ "$MC_RUNNER" = "native" ]; then
         rargs=()
         [ -n "${MC_FILTER:-}" ] && rargs=(-k "$MC_FILTER")
         [ "$MC_JOBS" != "0" ] && rargs+=(-j "$MC_JOBS")
+        [ -n "${MC_SHARD:-}" ] && rargs+=(--shard "$MC_SHARD")
         t0=$SECONDS
         tests/aot/runner/bin/runner ${rargs[@]+"${rargs[@]}"} 2>&1 | tee "$MC_LOGDIR/suite.log"
         suite_rc=${PIPESTATUS[0]}
@@ -405,7 +415,7 @@ elif [ -n "${MC_FILTER:-}" ]; then
 else
     echo "=== tests/aot/run.sh (full suite, -j $MC_JOBS) ==="
     t0=$SECONDS
-    MC_JOBS="$MC_JOBS" bash tests/aot/run.sh > "$MC_LOGDIR/suite.log" 2>&1
+    MC_JOBS="$MC_JOBS" bash tests/aot/run.sh ${MC_SHARD:+--shard "$MC_SHARD"} > "$MC_LOGDIR/suite.log" 2>&1
     suite_rc=$?
     tail -15 "$MC_LOGDIR/suite.log"
     echo "suite time: $((SECONDS - t0))s (run.sh)"

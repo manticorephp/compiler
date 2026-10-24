@@ -6,7 +6,13 @@
 # CI green and a local green mean the same thing. This file only supplies a
 # machine, the image, the cache and the environment.
 #
-# WARM, NOT COLD. Every job restores the compiler it built last time and
+# BUILD ONCE, TEST IN SLICES. `build-<tag>` / `macos-build` make the compiler and
+# hand it on as an artifact; the suite shards, pdo-net and the seed publication
+# unpack it (gate.sh sees an up-to-date cache and does not rebuild). Each row's
+# suite is cut into 4 shards run in parallel, and `rows` turns the shards back into
+# the one check per row that the ruleset requires.
+#
+# WARM, NOT COLD. The build job restores the compiler it built last time and
 # self-hosts from it (`bin/build`), the way a developer does. On a miss it falls
 # to the compiler `main` published, then to the PINNED release
 # (BOOTSTRAP_VERSION) — never to Zend. A stale cache costs one slow run, never a
@@ -50,9 +56,12 @@ on:
 env:
   IMAGE: ghcr.io/${{ github.repository }}
 
+# A newer push supersedes a PR run, but never a main run: a cancelled main build
+# never saves its compiler cache, and a stale cache makes every PR rebuild the
+# compiler from scratch (two generations, ~15 min) instead of reusing it.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   version:
@@ -64,15 +73,17 @@ jobs:
       - name: COMPILER_VERSION is consistent
         run: bash tools/check_version.sh
 
-  linux:
-    name: linux-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native-runner' || '' }}
+  # The compiler is built ONCE per tag. The suite shards, pdo-net and the seed
+  # publication take it from the artifact below; gate.sh sees a cache whose
+  # src.sha is this tree's and reuses it instead of rebuilding (it also runs the
+  # install/CLI smokes here, once, rather than in every shard).
+  build:
+    name: build-${{ matrix.tag }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     timeout-minutes: 120
-    # The native-runner row is an experiment: it reports, it never blocks.
-    continue-on-error: ${{ matrix.suite == 'native' }}
     strategy:
       fail-fast: false
       # glibc (Debian) and musl (Alpine), each on both arches. `tag` names what a
@@ -81,31 +92,10 @@ jobs:
       # a refusal is not a diagnosis.
       matrix:
         include:
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            tag: arm64
-            dockerfile: Dockerfile
-          - arch: amd64
-            runner: ubuntu-latest
-            tag: amd64
-            dockerfile: Dockerfile
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            tag: alpine-arm64
-            dockerfile: Dockerfile.alpine
-          - arch: amd64
-            runner: ubuntu-latest
-            tag: alpine-amd64
-            dockerfile: Dockerfile.alpine
-          # EXPERIMENTAL: the same arm64 build, but the suite runs through the
-          # native tests/aot/runner, streamed live — beside the run.sh row so the
-          # two can be compared for speed and readability. It reads the arm64
-          # compiler cache and never writes it, nor publishes a seed.
-          - arch: arm64
-            runner: ubuntu-24.04-arm
-            tag: arm64
-            dockerfile: Dockerfile
-            suite: native
+          - {tag: arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile}
+          - {tag: amd64, runner: ubuntu-latest, dockerfile: Dockerfile}
+          - {tag: alpine-arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile.alpine}
+          - {tag: alpine-amd64, runner: ubuntu-latest, dockerfile: Dockerfile.alpine}
     steps:
       - uses: actions/checkout@v4
 
@@ -163,7 +153,7 @@ jobs:
       # (uid 1000) must be able to write; /build stays inside the container (the
       # gate copies the tree into it, and that copy has no business crossing a
       # bind mount).
-      - name: Build + suite
+      - name: Build the compiler
         run: |
           # -R, not just the top directory: actions/cache restores the tree as the
           # RUNNER, and the container is uid 1000 — unlinking an entry needs write
@@ -181,44 +171,133 @@ jobs:
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_SEED_DIR=/seed \
             -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
-            -e MC_RUNNER=${{ matrix.suite || 'sh' }} \
+            -e MC_SUITE=0 \
+            -e MC_XFAIL=0 \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
 
-      # A red suite on top of a good build still leaves a compiler worth keeping —
+      # A failed smoke on top of a good build still leaves a compiler worth keeping —
       # save before the job's result is decided, not after.
       - name: Save the compiler cache
-        if: always() && matrix.suite != 'native' && hashFiles('ci-cache/bin/manticore') != ''
+        if: always() && hashFiles('ci-cache/bin/manticore') != ''
         uses: actions/cache/save@v4
         with:
           path: ci-cache
           key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-${{ github.run_id }}
 
-      # Publish what this run just built and tested, from the artifacts it
-      # already has — NOT by building a second compiler (the root Dockerfile's
-      # `runtime` target builds one from the pin), which a push must not pay
-      # twice for the same bytes.
-      #
-      # Only on main, and only after the suite: a red suite never reaches here,
-      # and what is published is therefore always a compiler that passed.
-      - name: Publish this compiler as the seed
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.suite != 'native'
+      # tar, not the directory: an artifact loses the executable bit.
+      - name: Hand the compiler to the other jobs
+        run: tar -C ci-cache -cf compiler.tar .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compiler-${{ matrix.tag }}
+          path: compiler.tar
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-build-${{ matrix.tag }}
+          path: ci-logs/
+          if-no-files-found: warn
+
+  linux:
+    name: linux-${{ matrix.tag }} (${{ matrix.shard }}/4)
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    needs: build
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      # glibc (Debian) and musl (Alpine), each on both arches. `tag` names what a
+      # row reads and writes — cache key, published seed, logs — so a glibc
+      # compiler never reaches a musl container: the loader would refuse it, and
+      # a refusal is not a diagnosis.
+      # Each row is split into SHARDS slices of the suite (the native runner, --shard i/n;
+      # run.sh has the same flag); every slice builds the compiler itself — warm, from the
+      # cache — and runs 1/N of the cases, so the wall clock is build + suite/N.
+      matrix:
+        row: [arm64, amd64, alpine-arm64, alpine-amd64]
+        shard: [1, 2, 3, 4]
+        include:
+          - row: arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            tag: arm64
+            dockerfile: Dockerfile
+          - row: amd64
+            arch: amd64
+            runner: ubuntu-latest
+            tag: amd64
+            dockerfile: Dockerfile
+          - row: alpine-arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            tag: alpine-arm64
+            dockerfile: Dockerfile.alpine
+          - row: alpine-amd64
+            arch: amd64
+            runner: ubuntu-latest
+            tag: alpine-amd64
+            dockerfile: Dockerfile.alpine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The repo's own Dockerfile, `toolchain` target — the same image an end
+      # user builds and the same one run_tests.sh builds. php 8.5 + latest clang
+      # come from it, so the toolchain is not a CI-only fiction.
+      - name: Build the toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          target: toolchain
+          tags: manticore-toolchain:${{ matrix.tag }}
+          load: true
+          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-${{ matrix.tag }}
+      - name: Unpack the compiler
+        run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
+      # /logs and /compiler-cache are mounts the unprivileged container user
+      # (uid 1000) must be able to write; /build stays inside the container (the
+      # gate copies the tree into it, and that copy has no business crossing a
+      # bind mount).
+      - name: Build + suite
         run: |
-          docker build --target base -t manticore-base:local -f ${{ matrix.dockerfile }} .
-          docker build -f tools/docker/Dockerfile.publish \
-            --build-arg BASE=manticore-base:local \
-            -t "$IMAGE:main-${{ matrix.tag }}" \
-            -t "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}" \
-            ci-cache
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$IMAGE:main-${{ matrix.tag }}"
-          docker push "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}"
+          # -R, not just the top directory: actions/cache restores the tree as the
+          # RUNNER, and the container is uid 1000 — unlinking an entry needs write
+          # permission on the directory that holds it, so a restored lib/ is
+          # unremovable from inside without this and the cache never updates.
+          mkdir -p ci-logs && chmod -R 777 ci-logs ci-cache
+          docker run --rm \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/ci-logs":/logs \
+            -v "$PWD/ci-cache":/compiler-cache \
+            -e MC_GATE=0 \
+            -e MC_JOBS=0 \
+            -e MC_LOGDIR=/logs \
+            -e MC_COMPILER_CACHE=/compiler-cache \
+            -e MC_SMOKES=0 \
+            -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
+            -e MC_RUNNER=native \
+            -e MC_SHARD=${{ matrix.shard }}/4 \
+            -e MC_XFAIL=${{ matrix.shard == 1 && 1 || 0 }} \
+            manticore-toolchain:${{ matrix.tag }} \
+            /bin/bash /repo/tools/docker/gate.sh
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "## linux-${{ matrix.tag }}${{ matrix.suite == 'native' && ' (native runner)' || '' }} — \`${GITHUB_SHA::12}\`"
+            echo "## linux-${{ matrix.tag }} shard ${{ matrix.shard }}/4 — \`${GITHUB_SHA::12}\`"
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
             echo '```'
@@ -232,12 +311,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-${{ matrix.tag }}${{ matrix.suite == 'native' && '-native' || '' }}
+          name: logs-${{ matrix.tag }}-${{ matrix.shard }}
           path: ci-logs/
           if-no-files-found: warn
 
-  macos:
-    name: macos-arm64
+  macos-build:
+    name: macos-build
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -262,11 +341,12 @@ jobs:
       # The same gate.sh, run bare: it copies the checkout to a scratch tree
       # (RUNNER_TEMP, never the checkout itself — the build writes bin/ and lib/
       # into whatever it is pointed at) and does the same steps the container does.
-      - name: Build + suite
+      - name: Build the compiler
         run: |
           mkdir -p ci-logs ci-cache
           MC_GATE=0 \
-          MC_JOBS=0 \
+          MC_SUITE=0 \
+          MC_XFAIL=0 \
           MC_REPO="$PWD" \
           MC_WORK="$RUNNER_TEMP/build" \
           MC_LOGDIR="$PWD/ci-logs" \
@@ -281,11 +361,72 @@ jobs:
           path: ci-cache
           key: mc-compiler-macos-arm64-${{ github.run_id }}
 
+      - name: Hand the compiler to the shards
+        run: tar -C ci-cache -cf compiler.tar .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compiler-macos-arm64
+          path: compiler.tar
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-build-macos-arm64
+          path: ci-logs/
+          if-no-files-found: warn
+
+  macos:
+    name: macos-arm64 (${{ matrix.shard }}/4)
+    runs-on: macos-15
+    needs: macos-build
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Homebrew's `php` is the difftest oracle; the build never touches it — a
+      # cache miss starts from the pinned release (BOOTSTRAP_VERSION).
+      - name: Toolchain
+        run: |
+          brew install php pcre2 openssl@3 sqlite icu4c
+          php -v
+          clang --version | head -1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-macos-arm64
+      - name: Unpack the compiler
+        run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
+      # The same gate.sh, run bare: it copies the checkout to a scratch tree
+      # (RUNNER_TEMP, never the checkout itself — the build writes bin/ and lib/
+      # into whatever it is pointed at) and does the same steps the container does.
+      - name: Build + suite
+        run: |
+          mkdir -p ci-logs
+          MC_GATE=0 \
+          MC_JOBS=0 \
+          MC_SMOKES=0 \
+          MC_RUNNER=native \
+          MC_SHARD="${{ matrix.shard }}/4" \
+          MC_XFAIL="${{ matrix.shard == 1 && 1 || 0 }}" \
+          MC_REPO="$PWD" \
+          MC_WORK="$RUNNER_TEMP/build" \
+          MC_LOGDIR="$PWD/ci-logs" \
+          MC_COMPILER_CACHE="$PWD/ci-cache" \
+          MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
+          bash tools/docker/gate.sh
+
       - name: Summary
         if: always()
         run: |
           {
-            echo "## macos-arm64 — \`${GITHUB_SHA::12}\`"
+            echo "## macos-arm64 shard ${{ matrix.shard }}/4 — \`${GITHUB_SHA::12}\`"
             echo '```'
             tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
             echo '```'
@@ -299,9 +440,30 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-macos-arm64
+          name: logs-macos-arm64-${{ matrix.shard }}
           path: ci-logs/
           if-no-files-found: warn
+
+  # A PR runs pdo-net only when it touches what the drivers are made of; every
+  # push to main (and a manual run) runs it regardless, so a compiler change that
+  # breaks a driver is caught there. pdo-net is not a required check, so a skipped
+  # row blocks nothing.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      pdo: ${{ steps.f.outputs.pdo }}
+    steps:
+      - id: f
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pdo=false
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            files="$(gh pr diff "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --name-only)"
+            if echo "$files" | grep -qE '^(prelude/pdo|tests/pdo_net/|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then pdo=true; fi
+          fi
+          echo "pdo=$pdo" >> "$GITHUB_OUTPUT"
 
   # PDO network drivers (pgsql, mysql, mariadb) against live servers, graded
   # against php's own pdo_pgsql / pdo_mysql. The servers run on the runner via
@@ -309,7 +471,9 @@ jobs:
   # gate.sh stops after the build when MC_PDO_NET is set. Reads the compiler
   # cache of the `linux` rows and never writes it.
   pdo-net:
-    name: pdo-net-${{ matrix.tag }}-${{ matrix.server }}
+    name: pdo-net-${{ matrix.tag }}-${{ matrix.server }} (${{ matrix.shard }}/4)
+    needs: [changes, build]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.pdo == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -317,6 +481,7 @@ jobs:
       matrix:
         tag: [arm64, amd64]
         server: [mysql, mariadb]
+        shard: [1, 2, 3, 4]
         include:
           - tag: arm64
             runner: ubuntu-24.04-arm
@@ -337,14 +502,11 @@ jobs:
           load: true
           cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
 
-      - name: Restore the compiler cache
-        id: cache
-        uses: actions/cache/restore@v4
+      - uses: actions/download-artifact@v4
         with:
-          path: ci-cache
-          key: mc-compiler-${{ matrix.tag }}-${{ hashFiles('Dockerfile') }}-${{ github.run_id }}
-          restore-keys: |
-            mc-compiler-${{ matrix.tag }}-${{ hashFiles('Dockerfile') }}-
+          name: compiler-${{ matrix.tag }}
+      - name: Unpack the compiler
+        run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
 
       # postgres 16, mysql 8.4 (plain, TLS, native-password, isolated) and mariadb 11,
       # with the throwaway TLS certificates; then the CA mysql made for itself.
@@ -355,7 +517,7 @@ jobs:
 
       - name: Build + pdo_net
         run: |
-          mkdir -p ci-logs ci-cache && chmod -R 777 ci-logs ci-cache
+          mkdir -p ci-logs && chmod -R 777 ci-logs ci-cache
           docker run --rm --network host \
             -v "$PWD":/repo:ro \
             -v "$PWD/ci-logs":/logs \
@@ -365,7 +527,7 @@ jobs:
             -e MC_LOGDIR=/logs \
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_PDO_NET=${{ matrix.server }} \
-            -e MC_PDO_NET_ARGS="${{ matrix.server == 'mariadb' && '--no-pgsql' || '' }}" \
+            -e MC_PDO_NET_ARGS="${{ matrix.server == 'mariadb' && '--no-pgsql' || '' }} --shard ${{ matrix.shard }}/4" \
             -e PDO_MY_SSL_CA=/pdo-net/my_ca.pem \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
@@ -374,7 +536,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-pdo-net-${{ matrix.tag }}-${{ matrix.server }}
+          name: logs-pdo-net-${{ matrix.tag }}-${{ matrix.server }}-${{ matrix.shard }}
           path: ci-logs/
           if-no-files-found: warn
 
@@ -424,8 +586,72 @@ jobs:
   # `:main` as one multi-arch tag, from the two the jobs above pushed. Merged by
   # digest — nothing is rebuilt and nothing is emulated, and `docker pull
   # ghcr.io/manticorephp/compiler:main` resolves to the right architecture.
-  seed-manifest:
+  # One check per row, under the name the "Protected branches" ruleset requires
+  # (linux-arm64, …, macos-arm64): green only when EVERY shard of that row is. The
+  # shard count can change without touching the ruleset.
+  rows:
+    name: ${{ matrix.row }}
+    needs: [linux, macos]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        row: [linux-arm64, linux-amd64, linux-alpine-arm64, linux-alpine-amd64, macos-arm64]
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | startswith("${{ matrix.row }} (")) | "\(.conclusion)\t\(.name)"')"
+          echo "$jobs"
+          [ "$(echo "$jobs" | grep -c .)" = 4 ] || { echo "expected 4 shards"; exit 1; }
+          ! echo "$jobs" | grep -qv '^success'
+
+  # What the suite just passed, published as the seed — once per tag, after EVERY
+  # shard of every row is green: a red slice never reaches here, so what is
+  # published is always a compiler that passed the whole suite.
+  publish:
     needs: linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: publish-${{ matrix.tag }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - {tag: arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile}
+          - {tag: amd64, runner: ubuntu-latest, dockerfile: Dockerfile}
+          - {tag: alpine-arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile.alpine}
+          - {tag: alpine-amd64, runner: ubuntu-latest, dockerfile: Dockerfile.alpine}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-${{ matrix.tag }}
+      - run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
+      # From the artifacts the shards already have — NOT a second compiler built
+      # from the pin (the root Dockerfile's `runtime` target).
+      - name: Publish this compiler as the seed
+        run: |
+          docker build --target base -t manticore-base:local -f ${{ matrix.dockerfile }} .
+          docker build -f tools/docker/Dockerfile.publish \
+            --build-arg BASE=manticore-base:local \
+            -t "$IMAGE:main-${{ matrix.tag }}" \
+            -t "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}" \
+            ci-cache
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:main-${{ matrix.tag }}"
+          docker push "$IMAGE:${GITHUB_SHA::12}-${{ matrix.tag }}"
+
+  seed-manifest:
+    needs: publish
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

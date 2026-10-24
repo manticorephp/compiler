@@ -1,7 +1,8 @@
 <?php
 
 // sleep()/usleep()/time_nanosleep() must suspend the FIBER under a scheduler, not
-// the process: three tasks sleeping 60 ms each finish in ~60 ms, not 180 ms. Any
+// the process: three tasks sleeping 300/100/200 ms finish in ~300 ms, not 600 ms (long sleeps: a loaded CI host adds
+// tens of ms of scheduling, which must not turn an overlap into a verdict of 'no'). Any
 // third-party retry/backoff loop is written with these, so a blocking one froze
 // every other task.
 
@@ -14,15 +15,15 @@ $t0 = microtime(true);
 $order = async(function (): array {
     $log = [];
     $a = spawn(function () use (&$log): string {
-        usleep(60000);
+        usleep(300000);
         return 'a';
     });
     $b = spawn(function () use (&$log): string {
-        usleep(20000);
+        usleep(100000);
         return 'b';
     });
     $c = spawn(function () use (&$log): string {
-        time_nanosleep(0, 40000000);
+        time_nanosleep(0, 200000000);
         return 'c';
     });
     /** @var string[] $res */
@@ -33,7 +34,7 @@ $order = async(function (): array {
 $elapsed = microtime(true) - $t0;
 
 echo "results: ", implode(',', $order), "\n";
-echo "overlapped: ", ($elapsed < 0.15 ? 'yes' : 'no'), "\n";
+echo "overlapped: ", ($elapsed < 0.5 ? 'yes' : 'no'), "\n";
 
 // The completion ORDER proves interleaving: the shortest sleep returns first.
 // (A string accumulator, not an array: appending a literal into an array captured

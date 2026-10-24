@@ -61,6 +61,14 @@ final class Runner
         return $rc === 0;
     }
 
+    /** `@split` builds the case as a 4-part split module (run.sh's rule). */
+    private function isSplit(string $src): bool
+    {
+        $rc = 1;
+        system('grep -rqs @split ' . escapeshellarg($src), $rc);
+        return $rc === 0;
+    }
+
     public function execute(): int
     {
         $args = $this->parseArguments();
@@ -434,7 +442,8 @@ final class Runner
         // 1. Compile test case
         $compileLog = $workDir . '/' . $safeName . '_' . $uniqueSuffix . '.compile.log';
         $compileCmd = $this->limited($this->compileTimeout, sprintf(
-            '%s compile -O%s %s -o %s',
+            '%s%s compile -O%s %s -o %s',
+            $this->isSplit($srcPath) ? 'env MANTICORE_SPLIT_JOBS=4 ' : '',
             escapeshellarg($compiler),
             escapeshellarg($opt),
             escapeshellarg($srcPath),
@@ -516,6 +525,7 @@ final class Runner
     private function parseArguments(): Arguments
     {
         $arguments = new Arguments();
+        $arguments->shard = (string)(getenv('MC_SHARD') ?: '');
 
         $argv = $_SERVER['argv'] ?? ($GLOBALS['argv'] ?? []);
         if (is_array($argv)) {
@@ -532,6 +542,9 @@ final class Runner
                 } elseif ($arg === '-j' || $arg === '--jobs') {
                     ++$i;
                     $arguments->customWorkers = (int)($argv[$i] ?? 0);
+                } elseif ($arg === '--shard') {
+                    ++$i;
+                    $arguments->shard = (string)($argv[$i] ?? '');
                 } elseif (str_starts_with($arg, '-k')) {
                     $arguments->filter = substr($arg, 2);
                 } elseif (str_starts_with($arg, '-O')) {
@@ -567,6 +580,16 @@ final class Runner
         // Apply filter if specified
         if ($args->filter !== '') {
             $cases = array_values(array_filter($cases, fn(array $c) => str_contains($c['name'], $args->filter)));
+        }
+        if ($args->shard !== '') {
+            // i/n: cases i, i+n, i+2n … of the sorted list (run.sh --shard's rule).
+            if (preg_match('~^(\d+)/(\d+)$~', $args->shard, $m) !== 1 || (int)$m[1] < 1 || (int)$m[1] > (int)$m[2]) {
+                fwrite(STDERR, "fatal: --shard takes i/n with 1 <= i <= n (got '{$args->shard}')\n");
+                exit(2);
+            }
+            $n = (int)$m[2];
+            $i = (int)$m[1] - 1;
+            $cases = array_values(array_filter($cases, fn(int $k) => $k % $n === $i, ARRAY_FILTER_USE_KEY));
         }
         return $cases;
     }
