@@ -3259,7 +3259,19 @@ trait EmitLlvmExpr
             $out = $this->emitNode($nc->right);
             return $out . $this->armRetainLast($n, $nc->right);
         }
-        if ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) {
+        // `$o->p ?? d` on a typed property php may leave uninitialized: the
+        // default also wins while the property was never written.
+        $initHolder = null;
+        if ($nc->left->kind === Node::KIND_PROPERTY_ACCESS
+            && $nc->left->object->kind === Node::KIND_LOAD_LOCAL
+            && $nc->left->object->type->kind === Type::KIND_OBJ) {
+            $ih = $this->slotHolder($nc->left->object, $nc->left->property);
+            if ($ih !== null && $ih->initChecked($nc->left->property)
+                && $this->propertyOffsetOrNull($nc->left->object, $nc->left->property) !== null) {
+                $initHolder = $ih;
+            }
+        }
+        if (($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) && $initHolder === null) {
             // A raw int/float/bool is never null, so the left always wins. But if
             // the node is typed a CELL (the fallback carries a different repr,
             // e.g. `$obj->intProp ?? "str"`), the consumer expects a tagged value
@@ -3285,6 +3297,24 @@ trait EmitLlvmExpr
         $out .= '  ' . $nnul . ' = icmp ne i64 ' . $lv . ", -3659174697238528\n";
         $bit = $this->ssa->allocReg();
         $out .= '  ' . $bit . ' = and i1 ' . $nz . ', ' . $nnul . "\n";
+        if ($initHolder !== null) {
+            // The receiver is a plain local, read again for its pointer; the
+            // property read above already threw for a null one.
+            $lpa = $nc->left;
+            $out .= $this->emitNode($lpa->object);
+            $out .= $this->coerceToPtr();
+            $ini = $this->emitInitTest($this->lastValue, $initHolder, $lpa->property,
+                (int)$this->propertyOffsetOrNull($lpa->object, $lpa->property), '', $out);
+            if ($ini !== '') {
+                if ($lk === Type::KIND_INT || $lk === Type::KIND_FLOAT || $lk === Type::KIND_BOOL) {
+                    $bit = $ini;
+                } else {
+                    $b2 = $this->ssa->allocReg();
+                    $out .= '  ' . $b2 . ' = and i1 ' . $bit . ', ' . $ini . "\n";
+                    $bit = $b2;
+                }
+            }
+        }
         // A cell result (arms of differing repr) boxes BOTH arms so a consumer
         // (echo / var_dump) dispatches on the arm actually taken.
         $wantCell = $n->type->kind === Type::KIND_CELL;
@@ -3380,6 +3410,15 @@ trait EmitLlvmExpr
             $out .= $cont . ":\n";
             $op = $this->ssa->allocReg();
             $out .= '  ' . $op . ' = inttoptr i64 ' . $cur . " to ptr\n";
+            // An uninitialized typed property is not set: take the default.
+            $ch = $this->slotHolder($hop->object, $hop->property);
+            if ($ch !== null && $ch->initChecked($hop->property)) {
+                $ini = $this->emitInitTest($op, $ch, $hop->property, $hoff, '', $out);
+                if ($ini !== '') {
+                    $hin = $this->ssa->allocLabel('ncc.init');
+                    $out .= '  br i1 ' . $ini . ', label %' . $hin . ', label %' . $useR . "\n" . $hin . ":\n";
+                }
+            }
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $op . ', i64 ' . (string)$hoff . "\n";
             $nx = $this->ssa->allocReg();

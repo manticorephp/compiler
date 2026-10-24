@@ -918,7 +918,18 @@ final class EmitLlvm implements EmitVisitor
         $this->clonedClasses = [];
         $this->cloneClassUnknown = false;
         $this->moduleIsLibrary = $module->isLibraryModule;
+        $this->grantInitMaps($module);
         $this->grantBagsForDynamicStores($module);
+        $anyInitMap = false;
+        foreach ($this->classes as $cd) {
+            if ($cd->initMapOffset >= 0) { $anyInitMap = true; break; }
+        }
+        if ($anyInitMap) {
+            foreach ($module->functions as $fn) {
+                if ($fn->isExtern || $this->initReadsExempt($fn->name)) { continue; }
+                $this->markInitReads($fn->body);
+            }
+        }
         $statT = \Compile\Stats::begin('  property scan');
         foreach ($module->functions as $fn) {
             $this->scanCellPropStores($fn->body);
@@ -2324,6 +2335,129 @@ final class EmitLlvm implements EmitVisitor
      * which has not run when lowering ends — the same scan there matched
      * nothing at all. Layout is read during emission, which is after this.
      */
+    /**
+     * Give every class tree that declares a property php starts UNINITIALIZED
+     * one init bitmap ({@see \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES}) at ONE
+     * offset: past the deepest member's properties and bag, the rule the bag
+     * offset follows, so a base-typed pointer finds the same word in every
+     * instance. Every member this module owns gets it, so a store through any
+     * class of the tree sets the bit a read through any other one tests.
+     *
+     * Skipped where the layout is a published fact this module does not own: a
+     * library module (its layouts go into a `.sig`), an extern or prelude class
+     * (the stdlib allocates those at its own size), a `#[Struct]`, and a
+     * property such a class declares.
+     */
+    private function grantInitMaps(\Compile\Mir\Module $module): void
+    {
+        if ($module->isLibraryModule) { return; }
+        // `unset()` leaves ANY typed property uninitialized, a defaulted one too.
+        /** @var array<string, bool> $unsetProps */
+        $unsetProps = [];
+        foreach ($module->functions as $fn) {
+            if (!$fn->isExtern) { $this->scanUnsetProps($fn->body, $unsetProps); }
+        }
+        if ($unsetProps !== []) {
+            foreach ($this->classes as $cd) {
+                foreach ($unsetProps as $pn => $_) {
+                    $pm = $cd->propertyMeta[$pn] ?? null;
+                    if ($pm !== null && !$pm->isStatic && $pm->typeHint !== '') {
+                        $cd->propertyMaybeUninit[$pn] = true;
+                    }
+                }
+            }
+        }
+        // A read through a base type sees every subclass's instances: a property
+        // a subclass's own constructor may leave unwritten is checked on the
+        // ancestors that declare it too.
+        foreach ($this->classes as $name => $cd) {
+            foreach ($cd->propertyMaybeUninit as $pn => $_) {
+                $cur = $cd->parent;
+                $guard = 0;
+                while ($cur !== '' && isset($this->classes[$cur]) && $guard < 256) {
+                    $acd = $this->classes[$cur];
+                    if ($acd->propertyOffset($pn) < 0) { break; }
+                    $acd->propertyMaybeUninit[$pn] = true;
+                    $cur = $acd->parent;
+                    $guard = $guard + 1;
+                }
+            }
+        }
+        /** @var array<string, string> $rootOf */
+        $rootOf = [];
+        foreach ($this->classes as $name => $cd) {
+            $cur = $name;
+            $guard = 0;
+            while ($guard < 256) {
+                $p = isset($this->classes[$cur]) ? $this->classes[$cur]->parent : '';
+                if ($p === '' || !isset($this->classes[$p])) { break; }
+                $cur = $p;
+                $guard = $guard + 1;
+            }
+            $rootOf[$name] = $cur;
+        }
+        /** @var array<string, array<string, bool>> $props */
+        $props = [];
+        foreach ($this->classes as $name => $cd) {
+            if ($cd->isStruct || $cd->isExternClass || $cd->typeDefRepr !== '') { continue; }
+            foreach ($cd->propertyMaybeUninit as $pn => $_) {
+                if ($cd->propertyOffset($pn) < 0 || $cd->propertyWidth($pn) !== 8) { continue; }
+                if (\str_starts_with($pn, '__')) { continue; }
+                $pm = $cd->propertyMeta[$pn] ?? null;
+                if ($pm === null || $pm->isStatic) { continue; }
+                $dc = $pm->declaringClass;
+                if ($dc !== '' && isset($this->classes[$dc]) && ($this->classes[$dc]->isPreludeClass
+                    || $this->classes[$dc]->isExternClass)) { continue; }
+                $props[$rootOf[$name]][$pn] = true;
+            }
+        }
+        foreach ($props as $root => $set) {
+            $off = 0;
+            $maxBit = -1;
+            foreach ($this->classes as $name => $cd) {
+                if ($rootOf[$name] !== $root) { continue; }
+                $end = $cd->instanceSize();
+                if ($end > $off) { $off = $end; }
+                foreach ($set as $pn => $_) {
+                    $po = $cd->propertyOffset($pn);
+                    if ($po < 0) { continue; }
+                    $b = \intdiv($po - $cd->headerSize(), \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES);
+                    if ($b > $maxBit) { $maxBit = $b; }
+                }
+            }
+            if ($maxBit < 0) { continue; }
+            $words = \intdiv($maxBit, \Compile\MemoryAbi::INIT_MAP_WORD_BITS) + 1;
+            foreach ($this->classes as $name => $cd) {
+                if ($rootOf[$name] !== $root) { continue; }
+                if ($cd->isStruct || $cd->isExternClass || $cd->isPreludeClass) { continue; }
+                $cd->initMapOffset = $off;
+                $cd->initMapWords = $words;
+                $cd->initMapProps = $set;
+            }
+        }
+    }
+
+    /** Names of the properties some `unset($x->p)` in `$n` targets.
+     *  @param array<string, bool> $out */
+    private function scanUnsetProps(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_UNSET) {
+            foreach (\Compile\Mir\Walk::children($n) as $t) {
+                if ($t->kind === Node::KIND_PROPERTY_ACCESS) { $out[$t->property] = true; }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) { $this->scanUnsetProps($c, $out); }
+    }
+
+    /** Compiler-generated walkers (`__mir_*`, `__mc_*`: var_dump, serialize,
+     *  unserialize, …) read slots to SHOW them, never as a php-level read; the
+     *  reflection getter `__mc_pget_*` is `getValue()`, which php checks. */
+    private function initReadsExempt(string $name): bool
+    {
+        if (\str_starts_with($name, '__mc_pget_')) { return false; }
+        return \str_starts_with($name, '__mir_') || \str_starts_with($name, '__mc_');
+    }
+
     private function grantBagsForDynamicStores(\Compile\Mir\Module $module): void
     {
         if (!\Compile\Debug::$dynPropBag) { return; }

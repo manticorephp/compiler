@@ -1,0 +1,26 @@
+1b1
+Typed property P::$late must not be accessed before initialization
+3b3
+Typed property P::$a must not be accessed before initialization
+Typed property P::$b must not be accessed before initialization
+Typed property P::$a must not be accessed before initialization
+7
+object(C2)#2 (0) {
+  ["a"]=>
+  uninitialized(int)
+  ["b"]=>
+  uninitialized(string)
+  ["late"]=>
+  uninitialized(int)
+}
+object(C1)#3 (3) {
+  ["a"]=>
+  int(3)
+  ["b"]=>
+  string(2) "b3"
+  ["late"]=>
+  uninitialized(int)
+  ["c"]=>
+  int(1)
+}
+Typed property Q::$x must not be accessed before initialization

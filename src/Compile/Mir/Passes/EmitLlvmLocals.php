@@ -1784,6 +1784,8 @@ trait EmitLlvmLocals
             $g = $this->ssa->allocReg();
             $out .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp
                   . ', i64 ' . (string)$off . "\n";
+            // A reference may write the slot: it counts as initialized from here.
+            $out .= $this->emitInitMark($objp, $this->initMapHolder($pa->object, $pa->property), $pa->property, $off);
             // A property some `[&$o->p]` in this module stores a reference to is
             // PROMOTED here, for every `&` to it alike (a storable reference, a
             // `$r = &$o->p`, a by-ref argument): the slot's address dies with the

@@ -1601,10 +1601,16 @@ class ReflectionProperty
         $this->setRawValue($object, $value);
     }
 
-    /** Manticore has no per-object uninitialized-slot tracking; typed slots
-     *  carry their declared default, so a property always reads as set. */
+    /** A typed property php starts uninitialized reads through the getter only
+     *  once written ({@see getValue}); the getter's Error is the answer. */
     public function isInitialized(?object $object = null): bool
     {
+        if ($this->getter === 0) { return true; }
+        try {
+            __mc_refl_call1($this->getter, $object);
+        } catch (\Error $e) {
+            return false;
+        }
         return true;
     }
 }

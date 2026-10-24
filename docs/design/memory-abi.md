@@ -9,7 +9,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **23** (v23: a risky DENORMAL float (bits in (0xFFFF, 2^48)) is boxed or'ed with `FLOAT_DENORM_TAG` (0x7FF0<<48), so no cell can look like a heap pointer; every cell->double read decodes it; v22: a PACKED array's `buckets@48` word is its head gap, §4.1; v21: a closure DROP fn takes a mode; v20: `Manticore\Ds` hash table block and the cell object-tag constants; v19: descriptor grew `visit_fn@64` — the json encoders walk public props without a temporary array; v18: v17 AND the native-buffer lineage — the `BUF_*` block, §7c, the descriptor's `json_fn@56`, buffer kind 12 (`U64`); v17: a Generator frame OWNS every cell of its header and `__mir_str_reclaim` destroys a frame it frees — v17 and v18 each merged two lineages that both called themselves v17, so neither links with the other, see the comments at the top of `MemoryAbi`; v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **24** (v24: a class tree with a typed property php starts UNINITIALIZED carries a per-object INIT BITMAP, §3.3; v23: a risky DENORMAL float (bits in (0xFFFF, 2^48)) is boxed or'ed with `FLOAT_DENORM_TAG` (0x7FF0<<48), so no cell can look like a heap pointer; every cell->double read decodes it; v22: a PACKED array's `buckets@48` word is its head gap, §4.1; v21: a closure DROP fn takes a mode; v20: `Manticore\Ds` hash table block and the cell object-tag constants; v19: descriptor grew `visit_fn@64` — the json encoders walk public props without a temporary array; v18: v17 AND the native-buffer lineage — the `BUF_*` block, §7c, the descriptor's `json_fn@56`, buffer kind 12 (`U64`); v17: a Generator frame OWNS every cell of its header and `__mir_str_reclaim` destroys a frame it frees — v17 and v18 each merged two lineages that both called themselves v17, so neither links with the other, see the comments at the top of `MemoryAbi`; v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -147,6 +147,30 @@ refcounted form.
 There is **no** `#[NoRefcount]` attribute. `AllocationKind::NoRefcount` exists but is an
 escape-analysis verdict produced by `InferAllocKind`, not a user-facing marker — do not
 confuse the two.
+
+### 3.3 Init bitmap (v24)
+
+php starts a typed property with no default (not promoted, not hooked) UNINITIALIZED: a read
+throws `Error: Typed property C::$p must not be accessed before initialization`, and
+`isset` / `json_encode` / `get_object_vars` / `var_dump` skip it. An int / float / bool slot
+has no spare value to mark that, so a class tree that declares such a property carries
+`ClassDef::$initMapWords` i64 words at `ClassDef::$initMapOffset`:
+
+```
+bit b = (slot_offset - OBJECT_HEADER_SIZE) / INIT_MAP_SLOT_BYTES   -- word b / 64, bit b % 64
+```
+
+- **One offset per class tree** (topmost ancestor down), past every member's properties and
+  bag, chosen like the bag's (`EmitLlvm::grantInitMaps`), so a base-typed pointer finds it in
+  every instance. The bag of a tree that also gets one is placed after it.
+- Every member the module owns carries it; a store to any property in the tree's set
+  (`ClassDef::$initMapProps`) sets its bit through any class. A read tests it only where the
+  static class says the property may be uninitialized (`ClassDef::initChecked`).
+- 0 at allocation (the constant instance template already carries 0), copied by `clone`,
+  cleared by `unset()`.
+- Never in a library module, an extern or prelude class, a `#[Struct]`, or a narrow
+  (`#[TypeDef]`) slot: those layouts are published facts, so their tracked set is empty and
+  they read as before.
 
 ## 4. Arrays
 
