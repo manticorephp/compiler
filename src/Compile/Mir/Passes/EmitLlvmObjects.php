@@ -4587,8 +4587,18 @@ trait EmitLlvmObjects
             $ops[] = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
         }
         $need = false;
+        $refMayBind = null;
         foreach ($ops as $o) {
             if ($o->kind === Node::KIND_LOAD_LOCAL || $o->kind === Node::KIND_STRING_CONST) { continue; }
+            // A property / element ARGUMENT held in a slot is a copy: a candidate
+            // taking a by-ref param would bind the copy, not the lvalue.
+            if ($o->kind === Node::KIND_PROPERTY_ACCESS || $o->kind === Node::KIND_ARRAY_ACCESS) {
+                if ($refMayBind === null) {
+                    $cands = $this->dynMethodCandidates($dp->object->type, $this->siteArgc($iv->args));
+                    $refMayBind = $cands !== null && $this->dynMethodHasRefParam($cands, \count($iv->args));
+                }
+                if ($refMayBind && $o !== $dp->object && $o !== $dp->name) { return false; }
+            }
             if (!$this->dynHoistableRead($o)) { return false; }
             $need = true;
         }
