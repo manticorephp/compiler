@@ -4559,6 +4559,11 @@ final class LowerFromAst implements Pass
             && $this->lvPure($expr->target->array) && !$this->lvPure($expr->value)
             && ($expr->target->index === null || $this->lvPure($expr->target->index))) {
             $value = $this->lowerExpr($expr->value);
+            // A BORROWED read (`$a[i]`, `$o->p`) is not a freshly built value: it already
+            // round-trips through the plain store, while parking it in a temp made `===`
+            // against the object it was assigned come out false (widened-global elements).
+            $vk = $expr->value->kind;
+            if ($vk === 'ArrayAccess' || $vk === 'PropertyAccess') { return $this->storeToTarget($expr->target, $value); }
             $vtmp = '__av_' . (string)$this->destrCounter;
             $this->destrCounter = $this->destrCounter + 1;
             return new Block([

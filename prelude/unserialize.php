@@ -28,8 +28,6 @@ final class __McUnSt
     public int $n = 0;
     /** @var array<int,mixed> value slot -> the value it held */
     public array $vars = [];
-    /** @var array<int,bool> slots holding an enum case: php refuses `r:` to them */
-    public array $enums = [];
     /** false when the input has no `R:`: only objects can then be named by a later `r:` */
     public bool $keepAll = true;
     public bool $allowAll = true;
@@ -307,17 +305,16 @@ function __mc_unser_val(\__McUnSt $st): mixed
         $e = __mc_unser_enum($spec, $st);
         if (!$st->ok) { return null; }
         $st->vars[$slot] = $e;
-        $st->enums[$slot] = true;
         return $e;
     }
     if ($t === 29242 || $t === 21050) {
         $st->p = $st->p + 2;
         $k = __mc_un_num($st, 59, false);
         if (!$st->ok) { return null; }
-        // php: `r:` names a non-enum object only; `R:` (a reference) is not a value slot.
+        // php: `r:` names an object (an enum case included); `R:` (a reference) is not a value slot.
         if ($t === 21050) { $st->n = $slot - 1; }
         if (!array_key_exists($k, $st->vars)) { $st->ok = false; return null; }
-        if ($t === 29242 && (!is_object($st->vars[$k]) || isset($st->enums[$k]))) { $st->ok = false; return null; }
+        if ($t === 29242 && (!is_object($st->vars[$k]))) { $st->ok = false; return null; }
         return $st->vars[$k];
     }
     $st->ok = false;
