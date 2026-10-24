@@ -173,6 +173,24 @@ trait LowerExprs
                 $spreadArg = new \Parser\Ast\Spread($expr->args[1], $expr->span);
                 return $this->lowerInvoke(new \Parser\Ast\Invoke($expr->args[0], [$spreadArg], $expr->span));
             }
+            // `array_map($cb, $a, $b, ...)` — the zip form; the prelude array_map
+            // takes one array only.
+            if ($fnBare === 'array_map' && \count($expr->args) >= 3) {
+                $plainMap = true;
+                foreach ($expr->args as $a) {
+                    if ($a->kind === 'NamedArg' || $a->kind === 'Spread') { $plainMap = false; }
+                }
+                if ($plainMap) {
+                    $packed = [];
+                    $mi = 1;
+                    while ($mi < \count($expr->args)) {
+                        $packed[] = new \Parser\Ast\ArrayElement(null, $expr->args[$mi]);
+                        $mi = $mi + 1;
+                    }
+                    return $this->lowerExpr(\Parser\Ast\Expr::call('__mc_array_map_zip',
+                        [$expr->args[0], \Parser\Ast\Expr::arrayLit($packed, $expr->span)], $expr->span));
+                }
+            }
             if ($fn === 'isset') {
                 $ts = [];
                 foreach ($expr->args as $a) { $ts[] = $this->markProbe($this->lowerExpr($a)); }

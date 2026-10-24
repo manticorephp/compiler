@@ -127,6 +127,31 @@ function array_map(?callable $cb, array $arr): array
 }
 
 /**
+ * ZIP form of `array_map($cb, $a, $b, ...)`; the call site (LowerExprs) passes
+ * the arrays packed in one list. Result is a re-indexed list, short arrays are
+ * padded with null, a null callback zips the rows.
+ *
+ * @param mixed[] $arrays
+ */
+function __mc_array_map_zip(?callable $cb, array $arrays): array
+{
+    $cols = [];
+    $n = 0;
+    foreach ($arrays as $a) {
+        $v = array_values($a);
+        $cols[] = $v;
+        if (count($v) > $n) { $n = count($v); }
+    }
+    $out = [];
+    for ($i = 0; $i < $n; $i++) {
+        $row = [];
+        foreach ($cols as $c) { $row[] = $i < count($c) ? $c[$i] : null; }
+        $out[] = $cb === null ? $row : call_user_func_array($cb, $row);
+    }
+    return $out;
+}
+
+/**
  * `array_filter(arr, cb, mode)` — `$mode` selects what the callback receives:
  * ARRAY_FILTER_USE_KEY (2) the key alone, ARRAY_FILTER_USE_BOTH (1) value then
  * key, 0 (default) the value alone. Keys are preserved either way.

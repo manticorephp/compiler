@@ -60,6 +60,8 @@ final class ArgCount
         if (!$this->countable($e->args)) { return; }
         $fn = $idx->resolveFunction($e->function);
         if ($fn === null) { return; }
+        // the prelude array_map takes one array; the call site lowers the zip form (LowerExprs)
+        if (\strtolower(\ltrim($e->function, '\\')) === 'array_map') { return; }
         $this->verify($pf, $e, $e->function . '()', $fn->params, \count($e->args));
     }
 
