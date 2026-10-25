@@ -1,0 +1,16 @@
+Program
+  Stmt:Error @2:1-6:2
+    skipped: 20
+  Stmt:Expression @7:1-7:8
+    expr:
+      Expr:Assign @7:1-7:7
+        target:
+          Expr:Variable @7:1-7:3
+            name: "z"
+        value:
+          Expr:IntLiteral @7:6-7:7
+            value: 1
+    docComment: null
+    attributes: [0]
+error 5:3-5:10 expected '=>' in match arm
+

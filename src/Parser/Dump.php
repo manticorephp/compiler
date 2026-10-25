@@ -29,12 +29,12 @@ final class Dump
 {
     private int $indent = 0;
     private string $out = '';
-    private bool $ranges = false;
+    private int $ranges = 0;
 
     public static function program(Program $program, bool $ranges = false): string
     {
         $d = new self();
-        $d->ranges = $ranges;
+        $d->ranges = $ranges ? 1 : 0;
         $d->program_($program);
         return $d->out;
     }
@@ -85,7 +85,7 @@ final class Dump
     private function payload(object $node): void
     {
         foreach (get_object_vars($node) as $key => $value) {
-            if ($key === 'kind' || $key === 'span' || $key === 'endSpan') { continue; }
+            if ($key === 'kind' || $key === 'span') { continue; }
             $this->field((string)$key, $value);
         }
     }
@@ -114,7 +114,7 @@ final class Dump
             return;
         }
         if ($value instanceof Block) {
-            $this->line($name . ': Block' . ($this->ranges && $value->span !== null && $value->span->endLine() !== 0 ? ' ' . $this->spanStr($value->span) : ''));
+            $this->line($name . ': Block' . ($this->ranges === 1 && $value->span !== null && $value->span->endLine() !== 0 ? ' ' . $this->spanStr($value->span) : ''));
             $this->indent = $this->indent + 1;
             foreach ($value->statements as $s) {
                 $this->stmt($s);
@@ -153,7 +153,7 @@ final class Dump
             }
             foreach ($value->attributes as $a) { $this->attribute($a); }
             foreach ($value->cases as $c) {
-                $this->line('Case ' . $c->name . ($this->ranges ? ' ' . $this->spanStr($c->span) : ''));
+                $this->line('Case ' . $c->name . ($this->ranges === 1 ? ' ' . $this->spanStr($c->span) : ''));
                 if ($c->value !== null) {
                     $this->indent = $this->indent + 1;
                     $this->field('value', $c->value);
@@ -163,7 +163,7 @@ final class Dump
             foreach ($value->consts as $cd) { $this->constDecl($cd); }
             foreach ($value->properties as $pd) { $this->propertyDecl($pd); }
             foreach ($value->methods as $md) { $this->methodDecl($md); }
-            if ($this->ranges) {
+            if ($this->ranges === 1) {
                 foreach ($value->traitAdaptations as $ta) {
                     $this->line('Adapt ' . $ta->kind . ' ' . $ta->trait . '::' . $ta->method . ' ' . $this->spanStr($ta->span));
                 }
@@ -286,7 +286,7 @@ final class Dump
         if ($p->default !== null) {
             $this->field('default', $p->default);
         }
-        if ($this->ranges) {
+        if ($this->ranges === 1) {
             foreach ($p->hooks as $h) {
                 $this->line('Hook ' . $h->kind . ' ' . $this->spanStr($h->span));
                 $this->indent = $this->indent + 1;
@@ -358,13 +358,13 @@ final class Dump
     /** ' @L:C-L:C' for a node whose range is set, '' otherwise (and always outside --ranges). */
     private function itemSpan(?Span $s): string
     {
-        if (!$this->ranges || $s === null || $s->endLine() === 0) { return ''; }
+        if ($this->ranges !== 1 || $s === null || $s->endLine() === 0) { return ''; }
         return ' ' . $this->spanStr($s);
     }
 
     private function spanStr(Span $s): string
     {
-        if ($this->ranges && $s->endLine() !== 0) {
+        if ($this->ranges === 1 && $s->endLine() !== 0) {
             return '@' . (string)$s->startLine() . ':' . (string)$s->startColumn()
                 . '-' . (string)$s->endLine() . ':' . (string)$s->endColumn();
         }

@@ -213,6 +213,43 @@ flood lexer_errors < <({ printf '<?php\n'; rep '\001' 300; })
 flood mixed_errors < <({ printf '<?php\n'; rep 'foo(;\n\001\n' 400; })
 flood lexer_fills_cap < <({ printf '<?php\n'; rep '\001' 150; rep 'foo(;\n' 50; })
 
+# Valid deep input is valid: no error from --tolerant nor from analyze (the nesting cap sits far above real code).
+clean() {
+    local name="$1" f="$WORK/clean_$1.php"
+    [[ -n "$FILTER" && "clean_$name" != *"$FILTER"* ]] && return
+    cat > "$f"
+    run_limited "$MANTICORE" dump-ast --tolerant "$f" > "$WORK/clean_$name.out" 2>&1
+    local rc=$? n
+    n="$(/usr/bin/grep -c '^error ' "$WORK/clean_$name.out")"
+    run_limited "$MANTICORE" analyze --only parse.error "$f" > "$WORK/clean_$name.an" 2>&1
+    if [[ $rc -eq 0 && $n -eq 0 ]] && ! /usr/bin/grep -q 'parse.error' "$WORK/clean_$name.an"; then passed=$((passed + 1)); printf 'PASS clean_%s\n' "$name"
+    else failed=$((failed + 1)); failed_names+=("clean_$name"); printf 'FAIL clean_%s  (exit %d, %d errors)\n' "$name" "$rc" "$n"; /usr/bin/grep '^error ' "$WORK/clean_$name.out" | head -n 2 | sed 's/^/      /'; fi
+    rm -f "$f" "$WORK/clean_$name.out" "$WORK/clean_$name.an"
+}
+clean arrays_85 < <({ printf '<?php\n$a = '; rep '[' 85; printf '1'; rep ']' 85; printf ';\n'; })
+clean arrays_200 < <({ printf '<?php\n$a = '; rep '[' 200; printf '1'; rep ']' 200; printf ';\n'; })
+clean else_if_300 < <({ printf '<?php\nif (1) {}'; rep ' else if (1) {}' 300; printf '\n'; })
+clean coalesce_300 < <({ printf '<?php\n$a = 1'; rep ' ?? 1' 300; printf ';\n'; })
+clean concat_300 < <({ printf '<?php\n$a = 1'; rep ' . 1' 300; printf ';\n'; })
+clean calls_150 < <({ printf '<?php\n$a = '; rep 'f(' 150; printf '1'; rep ')' 150; printf ';\n'; })
+clean parens_150 < <({ printf '<?php\n$a = '; rep '(' 150; printf '1'; rep ')' 150; printf ';\n'; })
+
+# Past the cap exactly ONE error is recorded and the rest of the statement is skipped.
+onecap() {
+    local name="$1" f="$WORK/onecap_$1.php"
+    [[ -n "$FILTER" && "onecap_$name" != *"$FILTER"* ]] && return
+    cat > "$f"
+    run_limited "$MANTICORE" dump-ast --tolerant "$f" > "$WORK/onecap_$name.out" 2>&1
+    local rc=$? n
+    n="$(/usr/bin/grep -c '^error ' "$WORK/onecap_$name.out")"
+    if [[ $rc -eq 0 && $n -eq 1 ]]; then passed=$((passed + 1)); printf 'PASS onecap_%s\n' "$name"
+    else failed=$((failed + 1)); failed_names+=("onecap_$name"); printf 'FAIL onecap_%s  (exit %d, %d errors)\n' "$name" "$rc" "$n"; fi
+    rm -f "$f" "$WORK/onecap_$name.out"
+}
+onecap arrays < <({ printf '<?php\n$a = '; rep '[' 5000; printf '1'; rep ']' 5000; printf ';\n$b = 1;\n'; })
+onecap parens < <({ printf '<?php\n$a = '; rep '(' 5000; printf '1'; rep ')' 5000; printf ';\n$b = 1;\n'; })
+onecap blocks < <({ printf '<?php\n'; rep '{' 5000; rep '}' 5000; printf '\n$b = 1;\n'; })
+
 # Strict (non-tolerant) parse with ranges: the end()/endFrom() clamps must never need to fire.
 for f in "$ROOT/src/Parser/Parser.php" "$ROOT/src/Parser/Dump.php" "$CASES"/*.strict.php; do
     [[ "$(basename "$f")" == error_* ]] && continue   # a syntax-error file has no tree to check

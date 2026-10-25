@@ -1,0 +1,45 @@
+Program
+  Stmt:Function @2:1-5:2
+    decl: FunctionDecl f
+      return: (none)
+      params: 0
+      body: Block @2:14-5:2
+        Stmt:Expression @3:3-3:45
+          expr:
+            Expr:Call @3:3-3:44
+              function: "g"
+              args: [3]
+                Expr:IntLiteral @3:5-3:6
+                  value: 1
+                Expr:Closure @3:8-3:40
+                  isStatic: false
+                  params: [0]
+                  uses: [0]
+                  returnType: null
+                  body: Block @3:20-3:40
+                    Stmt:Expression @3:22-3:28
+                      expr:
+                        Expr:Assign @3:22-3:27
+                          target:
+                            Expr:Variable @3:22-3:24
+                              name: "a"
+                          value:
+                            Expr:Error @3:27-3:27
+                      docComment: null
+                      attributes: [0]
+                    Stmt:Return @3:29-3:38
+                      value:
+                        Expr:IntLiteral @3:36-3:37
+                          value: 2
+                  returnsByRef: false
+                Expr:IntLiteral @3:42-3:43
+                  value: 3
+              qualified: false
+          docComment: null
+          attributes: [0]
+        Stmt:Return @4:3-4:12
+          value:
+            Expr:IntLiteral @4:10-4:11
+              value: 4
+error 3:27-3:28 unexpected token in expression: Semicolon
+

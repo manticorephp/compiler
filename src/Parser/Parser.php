@@ -87,7 +87,7 @@ final class Parser
     private int $depth = 0;
 
     /** Tolerant mode: an error beyond the 100th was dropped; parseTolerant appends the one "too many errors" entry. */
-    private bool $capped = false;
+    private int $capped = 0;
 
     /** record() calls so far, dropped duplicates included: a loop sees whether an iteration reported anything. */
     private int $recorded = 0;
@@ -171,7 +171,7 @@ final class Parser
         // parseProgram() lifetime: on large files it otherwise retains every
         // token alongside the parser's filtered array and the AST being built.
         $p = new self((new Lexer())->scan($source, false, false, $ranges || $names), $source, $file, $lazyBodies);
-        $p->ranges = $ranges;
+        $p->ranges = $ranges ? 1 : 0;
         $p->ends = ($ranges || $names) ? 1 : 0;
         $p->collectNames = $names ? 1 : 0;
         return $p->parseProgram();
@@ -183,10 +183,11 @@ final class Parser
         $errors = [];
         $program = new Program([]);
         $p = null;
+        $thrown = null;
         try {
             $tokens = $lexer->scan($source, false, true, $ranges || $names);
             $p = new self($tokens, $source, $file, false);
-            $p->ranges = $ranges;
+            $p->ranges = $ranges ? 1 : 0;
             $p->ends = ($ranges || $names) ? 1 : 0;
             $p->tolerant = 1;
             $p->collectNames = $names ? 1 : 0;
@@ -197,10 +198,11 @@ final class Parser
             if ($p !== null) { $p->record($e); }
             else { $errors[] = $e; }
         } catch (\Throwable $e) {
-            $errors[] = new ParseError($e->getMessage(), 1, 1, 1, 1);
+            $thrown = new ParseError($e->getMessage(), 1, 1, 1, 1);
         }
         if ($p !== null) { $errors = $p->errors; }
-        $capped = $p !== null && $p->capped;
+        if ($thrown !== null) { $errors[] = $thrown; }
+        $capped = $p !== null && $p->capped === 1;
         for ($i = 1; $i < \count($errors); $i = $i + 1) {
             $e = $errors[$i];
             $j = $i - 1;
@@ -1484,7 +1486,7 @@ final class Parser
             $stmts[] = $this->tolerant === 1 ? $this->parseStatementOrRecover() : $this->parseStatement();
         }
         $this->expect(TokenKind::CloseBrace, "expected '}'");
-        return new Block($stmts, $this->ranges ? $this->endFrom($anchor, $open) : null);
+        return new Block($stmts, $this->ranges === 1 ? $this->endFrom($anchor, $open) : null);
     }
 
     /**
@@ -1506,7 +1508,7 @@ final class Parser
         $this->depth = $this->depth - ($this->tolerant === 1 ? 1 : 0);
         $el = $this->prevEndLine;
         $ec = $this->prevEndColumn;
-        if ($this->tolerant === 1 && $this->ranges) {
+        if ($this->tolerant === 1 && $this->ranges === 1) {
             // an Error-only statement consumes nothing: its zero-width point still lies in the body
             $se = $stmt->span;
             if ($se->endLine() > $el || ($se->endLine() === $el && $se->endColumn() > $ec)) { $el = $se->endLine(); $ec = $se->endColumn(); }
@@ -1542,7 +1544,7 @@ final class Parser
             $stmts[] = $this->tolerant === 1 ? $this->parseStatementOrRecover() : $this->parseStatement();
             $el = $this->prevEndLine;
             $ec = $this->prevEndColumn;
-            if ($this->tolerant === 1 && $this->ranges) {
+            if ($this->tolerant === 1 && $this->ranges === 1) {
                 $se = $stmts[\count($stmts) - 1]->span;
                 if ($se->endLine() > $el || ($se->endLine() === $el && $se->endColumn() > $ec)) { $el = $se->endLine(); $ec = $se->endColumn(); }
             }
@@ -1676,7 +1678,7 @@ final class Parser
             return Stmt::if_(Expr::bool(true, $this->emptyAt($span)), $block, [], null, $this->end($span));
         }
         if ($this->check(TokenKind::Semicolon)) { $this->advance(); }
-        return Stmt::if_(Expr::bool(false, $this->emptyAt($span)), new Block([], $this->ranges ? $this->emptyAt($span) : null), [], null, $this->end($span));
+        return Stmt::if_(Expr::bool(false, $this->emptyAt($span)), new Block([], $this->ranges === 1 ? $this->emptyAt($span) : null), [], null, $this->end($span));
     }
 
     private function parseWhile(): Stmt
@@ -1873,7 +1875,7 @@ final class Parser
             $this->end($span),
         );
         $stmtSpan = $this->end($span);
-        if ($this->ranges && $attrs !== []) {
+        if ($this->ranges === 1 && $attrs !== []) {
             $first = $attrs[0]->span;
             $stmtSpan = new RangedSpan($span->line, $span->column, $span->file, $stmtSpan->endLine(), $stmtSpan->endColumn(), $first->line, $first->column);
         }
@@ -1968,13 +1970,6 @@ final class Parser
 
     public function parseExpression(): Expr
     {
-        if ($this->tolerant === 1) {
-            if ($this->depth > self::MAX_DEPTH) { return $this->nestingError(); }
-            $this->depth = $this->depth + 1;
-            $e = $this->parseWordOr();
-            $this->depth = $this->depth - 1;
-            return $e;
-        }
         return $this->parseWordOr();
     }
 
@@ -2067,7 +2062,7 @@ final class Parser
     private function parseAssign(): Expr
     {
         if ($this->tolerant !== 1) { return $this->parseAssignInner(); }
-        if ($this->depth > self::MAX_DEPTH) { return $this->nestingError(); }
+        if ($this->depth > self::MAX_DEPTH) { throw $this->error('nesting too deep'); }
         $this->depth = $this->depth + 1;
         $e = $this->parseAssignInner();
         $this->depth = $this->depth - 1;
@@ -2494,7 +2489,7 @@ final class Parser
     private function parseInstanceof(): Expr
     {
         if ($this->tolerant !== 1 || !$this->check(TokenKind::Bang)) { return $this->parseInstanceofInner(); }
-        if ($this->depth > self::MAX_DEPTH) { return $this->nestingError(); }
+        if ($this->depth > self::MAX_DEPTH) { throw $this->error('nesting too deep'); }
         $this->depth = $this->depth + 1;
         $e = $this->parseInstanceofInner();
         $this->depth = $this->depth - 1;
@@ -2535,7 +2530,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             // Right-associative, and the exponent may itself be signed: `2 ** -1`.
-            $right = $this->parseUnary();
+            $right = $this->parseUnaryNested();
             return Expr::binary('**', $left, $right, $this->end($span, $left));
         }
         return $left;
@@ -2543,8 +2538,14 @@ final class Parser
 
     private function parseUnary(): Expr
     {
+        return $this->parseUnaryInner();
+    }
+
+    /** A prefix operator's operand (and `**`'s right side): the self-recursive edge, counted so a chain of operators cannot exhaust the stack. */
+    private function parseUnaryNested(): Expr
+    {
         if ($this->tolerant !== 1) { return $this->parseUnaryInner(); }
-        if ($this->depth > self::MAX_DEPTH) { return $this->nestingError(); }
+        if ($this->depth > self::MAX_DEPTH) { throw $this->error('nesting too deep'); }
         $this->depth = $this->depth + 1;
         $e = $this->parseUnaryInner();
         $this->depth = $this->depth - 1;
@@ -2557,12 +2558,12 @@ final class Parser
         if ($tok->kind === TokenKind::Minus) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('-', $this->parseUnary(), $this->end($span));
+            return Expr::unary('-', $this->parseUnaryNested(), $this->end($span));
         }
         if ($tok->kind === TokenKind::Plus) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('+', $this->parseUnary(), $this->end($span));
+            return Expr::unary('+', $this->parseUnaryNested(), $this->end($span));
         }
         if ($tok->kind === TokenKind::Bang) {
             $span = $this->span();
@@ -2572,7 +2573,7 @@ final class Parser
         if ($tok->kind === TokenKind::Tilde) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('~', $this->parseUnary(), $this->end($span));
+            return Expr::unary('~', $this->parseUnaryNested(), $this->end($span));
         }
         // `@expr` error suppression. Kept as a real node: `trigger_error` now
         // PRINTS, and `@trigger_error(…)` — every symfony deprecation — must
@@ -2583,17 +2584,17 @@ final class Parser
         if ($tok->kind === TokenKind::AtSign) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('@', $this->parseUnary(), $this->end($span));
+            return Expr::unary('@', $this->parseUnaryNested(), $this->end($span));
         }
         if ($tok->kind === TokenKind::PlusPlus) {
             $span = $this->span();
             $this->advance();
-            return Expr::incDec('++', true, $this->parseUnary(), $this->end($span));
+            return Expr::incDec('++', true, $this->parseUnaryNested(), $this->end($span));
         }
         if ($tok->kind === TokenKind::MinusMinus) {
             $span = $this->span();
             $this->advance();
-            return Expr::incDec('--', true, $this->parseUnary(), $this->end($span));
+            return Expr::incDec('--', true, $this->parseUnaryNested(), $this->end($span));
         }
         // Cast: `(int)`, `(float)`, `(bool)`, `(string)`, `(array)`, `(object)`.
         if ($tok->kind === TokenKind::OpenParen && $this->looksLikeCast()) {
@@ -2601,7 +2602,7 @@ final class Parser
             $this->advance(); // '('
             $castTok = $this->advance();
             $this->expect(TokenKind::CloseParen, "expected ')' after cast");
-            return Expr::cast(strtolower($castTok->lexeme), $this->parseUnary(), $this->end($span));
+            return Expr::cast(strtolower($castTok->lexeme), $this->parseUnaryNested(), $this->end($span));
         }
         return $this->parsePower();
     }
@@ -3018,7 +3019,7 @@ final class Parser
                     $cwith = \count($cargs) > 1 ? $cargs[1] : null;
                     return Expr::clone_($cobj, $cwith, $this->end($span));
                 }
-                return Expr::clone_($this->parseUnary(), null, $this->end($span));
+                return Expr::clone_($this->parseUnaryNested(), null, $this->end($span));
             }
             if ($lower === 'fn')    { return $this->parseArrowFn(false, $span); }
             if ($lower === 'function') { return $this->parseClosure(false, $span); }
@@ -3238,6 +3239,8 @@ final class Parser
                     $conds[] = $this->parseExpression();
                 }
             }
+            // a missing arrow cannot recover in place: the arm's body would be read from the wrong token
+            if ($this->tolerant === 1 && !$this->check(TokenKind::DoubleArrow)) { throw $this->error("expected '=>' in match arm"); }
             $this->expect(TokenKind::DoubleArrow, "expected '=>' in match arm");
             $body = $this->parseExpression();
             $arms[] = new MatchArm($conds, $body);
@@ -3840,10 +3843,10 @@ final class Parser
     /** Sub-lex + parse an interpolation `{$expr}` body into a (string)-cast expression. */
     private function parseSubExpr(string $src, Span $span): Expr
     {
-        $tokens = (new Lexer())->scan($src, true, false, $this->ranges);
+        $tokens = (new Lexer())->scan($src, true, false, $this->ranges === 1);
         $sub = new self($tokens);
         $sub->ranges = $this->ranges;
-        $sub->ends = $this->ranges ? 1 : 0;
+        $sub->ends = $this->ranges;
         $sub->rangeOverride = $span;
         if ($this->tolerant === 1) {
             $sub->tolerant = 1;
@@ -3921,7 +3924,7 @@ final class Parser
             if ($this->tolerant === 1) {
                 $this->record($this->error($message));
                 $t = $this->tokens[$this->pos];
-                if ($this->ranges && ($kind === TokenKind::Variable || $kind === TokenKind::Identifier)) {
+                if ($this->ranges === 1 && ($kind === TokenKind::Variable || $kind === TokenKind::Identifier)) {
                     // a missing NAME becomes a node's content (Param, class, function): enclosing ranges must cover its point
                     $this->synthLine = $t->line;
                     $this->synthColumn = $t->column;
@@ -3943,7 +3946,7 @@ final class Parser
             if ($this->errors[$i]->errLine === $e->errLine && $this->errors[$i]->column === $e->column) { return; }
         }
         if ($n >= 100) {
-            $this->capped = true;
+            $this->capped = 1;
             return;
         }
         $this->errors[] = $e;
@@ -3958,15 +3961,8 @@ final class Parser
         return $k === TokenKind::Semicolon || $k === TokenKind::CloseBrace || $k === TokenKind::Eof;
     }
 
-    /** Nesting cap (statements + expressions) in tolerant mode; deeper input is reported, not recursed into. */
-    private const MAX_DEPTH = 256;
-
-    /** Tolerant mode, nesting cap hit: one recorded error, an ErrorExpr, nothing consumed. */
-    private function nestingError(): Expr
-    {
-        $this->record($this->error('nesting too deep'));
-        return new \Parser\Ast\ErrorExpr($this->missingAt($this->span()));
-    }
+    /** Nesting cap in tolerant mode, one unit per level (a statement, a block-or-statement body, an else-if arm, an expression re-entering the operator ladder, a prefix-operator operand, a DNF group). Deeper input throws ONE ParseError, which unwinds to the nearest statement boundary and is skipped from there. */
+    private const MAX_DEPTH = 1000;
 
     /**
      * Tolerant statement boundary. A ParseError (a construct that cannot recover
@@ -4009,34 +4005,53 @@ final class Parser
     }
 
     /**
-     * Skip from the failure point to a synchronisation point. Braces are
-     * counted, parentheses and brackets are not: `;` at brace depth 0 ends the
-     * range and is consumed; `}` at depth 0 is the enclosing body's closer and
-     * stays; a `}` that closes a `{` opened inside the range ends it, consumed;
-     * a statement keyword (member keyword when $member) at depth 0 stays. At
-     * least one token is consumed when nothing was since $start.
+     * Skip from the failure point to a synchronisation point. Braces opened
+     * between $start and the failure point (a match, a closure body, a use group)
+     * are still open: the skip runs until they close, and a `}` that closes one
+     * ends the range, consumed. Past the failure point, parentheses and brackets
+     * are counted too, so a `;` inside `for (;;)` or an argument list does not end
+     * it. At brace depth 0 and outside any paren, `;` ends the range and is
+     * consumed; `}` is the enclosing body's closer and stays; a statement keyword
+     * (member keyword when $member) stays. At least one token is consumed when
+     * nothing was since $start.
      */
     private function skipToSync(int $start, bool $member): void
     {
         if ($this->pos === $start) { $this->advance(); }
         $depth = 0;
+        for ($i = $start; $i < $this->pos; $i = $i + 1) {
+            $bk = $this->tokens[$i]->kind;
+            if ($bk === TokenKind::OpenBrace && !$this->opensUseGroup($i)) { $depth = $depth + 1; }
+            elseif ($bk === TokenKind::CloseBrace && $depth > 0) { $depth = $depth - 1; }
+        }
+        $nest = 0;
         while (!$this->isAtEnd()) {
             $t = $this->tokens[$this->pos];
             $k = $t->kind;
-            if ($k === TokenKind::OpenBrace) {
-                $depth = $depth + 1;
+            if ($k === TokenKind::OpenParen || $k === TokenKind::OpenBracket || $k === TokenKind::AttributeStart) {
+                $nest = $nest + 1;
+            } elseif (($k === TokenKind::CloseParen || $k === TokenKind::CloseBracket) && $nest > 0) {
+                $nest = $nest - 1;
+            } elseif ($k === TokenKind::OpenBrace) {
+                if (!$this->opensUseGroup($this->pos)) { $depth = $depth + 1; }
             } elseif ($k === TokenKind::CloseBrace) {
                 if ($depth === 0) { return; }
                 $depth = $depth - 1;
                 $this->advance();
                 if ($depth === 0) { return; }
                 continue;
-            } elseif ($depth === 0) {
+            } elseif ($depth === 0 && $nest === 0) {
                 if ($k === TokenKind::Semicolon) { $this->advance(); return; }
                 if ($k === TokenKind::Keyword && $this->isSyncKeyword(\strtolower($t->lexeme), $member)) { return; }
             }
             $this->advance();
         }
+    }
+
+    /** Whether the `{` at token index $i opens a use group (`use A\{B, C}`): a bad group is ended by its `;`, not by a closer. */
+    private function opensUseGroup(int $i): bool
+    {
+        return $i > 0 && $this->tokens[$i - 1]->kind === TokenKind::Backslash;
     }
 
     private function isSyncKeyword(string $kw, bool $member): bool
@@ -4060,7 +4075,7 @@ final class Parser
      */
     private function missingAt(Span $anchor): Span
     {
-        if (!$this->ranges) { return $anchor; }
+        if ($this->ranges !== 1) { return $anchor; }
         $t = $this->tokens[$this->pos];
         $this->synthLine = $t->line;
         $this->synthColumn = $t->column;
@@ -4133,7 +4148,7 @@ final class Parser
     private ?Span $rangeOverride = null;
 
     /** Whether nodes get real ranges; off (the compiler's path) every helper hands back the anchor untouched. */
-    private bool $ranges = false;
+    private int $ranges = 0;
 
     /**
      * $anchor closed at the last consumed token. $from is the leftmost operand
@@ -4143,7 +4158,7 @@ final class Parser
      */
     private function end(Span $anchor, ?Expr $from = null): Span
     {
-        if (!$this->ranges) { return $anchor; }
+        if ($this->ranges !== 1) { return $anchor; }
         $o = $this->rangeOverride;
         if ($o !== null) {
             return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $o->endLine(), $o->endColumn(), $o->startLine(), $o->startColumn());
@@ -4169,7 +4184,7 @@ final class Parser
     /** $anchor closed at the last consumed token, with the range starting at token $first. */
     private function endFrom(Span $anchor, Token $first): Span
     {
-        if (!$this->ranges) { return $anchor; }
+        if ($this->ranges !== 1) { return $anchor; }
         $o = $this->rangeOverride;
         if ($o !== null) {
             return $this->end($anchor);
@@ -4187,7 +4202,7 @@ final class Parser
     /** Range of the single token $t under another node's anchor (dump-ast keeps the anchor). */
     private function tokSpan(Span $anchor, Token $t): Span
     {
-        if (!$this->ranges) { return $anchor; }
+        if ($this->ranges !== 1) { return $anchor; }
         $o = $this->rangeOverride;
         if ($o !== null) {
             return $this->end($anchor);
@@ -4198,7 +4213,7 @@ final class Parser
     /** Range of the synthesized node standing for exactly $child's text. */
     private function wrapSpan(Span $anchor, Expr $child): Span
     {
-        if (!$this->ranges) { return $anchor; }
+        if ($this->ranges !== 1) { return $anchor; }
         $c = $child->span;
         return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $c->endLine(), $c->endColumn(), $c->startLine(), $c->startColumn());
     }
@@ -4206,21 +4221,21 @@ final class Parser
     /** Zero-width range at the start of $anchor, for synthesized nodes that stand for no source text. */
     private function emptyAt(Span $anchor): Span
     {
-        if (!$this->ranges) { return $anchor; }
+        if ($this->ranges !== 1) { return $anchor; }
         return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $anchor->line, $anchor->column);
     }
 
     /** Zero-width range at token $at under another node's anchor (a destructuring hole). */
     private function emptyAtTok(Span $anchor, Token $at): Span
     {
-        if (!$this->ranges) { return $anchor; }
+        if ($this->ranges !== 1) { return $anchor; }
         return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $at->line, $at->column, $at->line, $at->column);
     }
 
     /** Range of an alternative-syntax or single-statement body: from token $first to the end ($el, $ec) of its last statement; a zero-width point at ($el, $ec) when there is none. */
     private function listSpan(?Token $first, int $el, int $ec): ?Span
     {
-        if (!$this->ranges) { return null; }
+        if ($this->ranges !== 1) { return null; }
         $file = $this->sourceFile;
         if ($first === null) {
             return new RangedSpan($el, $ec, $file, $el, $ec);
@@ -4234,7 +4249,7 @@ final class Parser
     /** Range of the synthesized body holding only statement $s. */
     private function wrapStmtSpan(Stmt $s): ?Span
     {
-        if (!$this->ranges) { return null; }
+        if ($this->ranges !== 1) { return null; }
         $c = $s->span;
         return new RangedSpan($c->startLine(), $c->startColumn(), $c->file, $c->endLine(), $c->endColumn());
     }

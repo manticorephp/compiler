@@ -72,7 +72,7 @@ final class RangeCheck
         }
         $kids = [];
         foreach ($vars as $key => $value) {
-            if ($key === 'span' || $key === 'endSpan' || $key === 'kind') { continue; }
+            if ($key === 'span' || $key === 'kind') { continue; }
             foreach ($this->walk($value) as $n) { $kids[] = $n; }
         }
         if (!($span instanceof Span)) {
