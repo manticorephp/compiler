@@ -1890,7 +1890,7 @@ trait EmitLlvmBuiltins
      *  by-ref sink promoted, a by-value param converted at entry). */
     private function needsForwardCellify(Type $slotType, Type $valueType): bool
     {
-        return \Compile\Mir\Ownership::forwardCellifies($slotType, $valueType, $this->enums);
+        return \Compile\Mir\Ownership::forwardCellifies($slotType, $valueType);
     }
 
     /** A concrete OBJECT-element array being written back through a by-ref

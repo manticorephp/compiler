@@ -3380,7 +3380,7 @@ trait InferScans
      *  rebuilds ({@see \Compile\Mir\Ownership::forwardCellifies}). */
     private function isTypedElemArray(Type $t): bool
     {
-        return \Compile\Mir\Ownership::forwardCellifies(Type::vec(Type::cell()), $t, $this->enums);
+        return \Compile\Mir\Ownership::forwardCellifies(Type::vec(Type::cell()), $t);
     }
 
     /** `Class::prop` → its array element channel becomes a cell; true when it changed. */

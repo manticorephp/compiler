@@ -1196,7 +1196,7 @@ final class OwnershipFlow implements Pass
             return;
         }
         if ($v->kind === Node::KIND_LOAD_LOCAL && self::asLoadLocal($v)->name === $name
-            && Ownership::forwardCellifies($sl->type, $v->type, $this->enums)) {
+            && Ownership::forwardCellifies($sl->type, $v->type)) {
             $lat->storeMode[$id] = OwnLattice::SELF_REBUILD;
             $this->skipLoad[\spl_object_id($v)] = true;
             $this->noteOwnKey($name, $key);
