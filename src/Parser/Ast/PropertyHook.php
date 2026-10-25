@@ -16,5 +16,6 @@ final class PropertyHook
         public readonly ?string $paramType,  // set value-param type hint
         public readonly ?Expr $exprBody,     // `=> expr`
         public readonly ?Block $blockBody,   // `{ ... }`
+        public readonly ?Span $span = null,
     ) {}
 }

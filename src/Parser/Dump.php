@@ -5,6 +5,7 @@ namespace Parser;
 use Parser\Ast\AttributeNode;
 use Parser\Ast\Block;
 use Parser\Ast\ClassDecl;
+use Parser\Ast\ClosureUse;
 use Parser\Ast\ConstDecl;
 use Parser\Ast\Expr;
 use Parser\Ast\FunctionDecl;
@@ -140,6 +141,15 @@ final class Dump
             }
             foreach ($value->attributes as $a) { $this->attribute($a); }
             foreach ($value->cases as $c) {
+                if ($this->ranges) {
+                    $this->line('Case ' . $c->name . ' ' . $this->spanStr($c->span));
+                    if ($c->value !== null) {
+                        $this->indent = $this->indent + 1;
+                        $this->field('value', $c->value);
+                        $this->indent = $this->indent - 1;
+                    }
+                    continue;
+                }
                 $this->line('Case ' . $c[0]);
                 if ($c[1] !== null) {
                     $this->indent = $this->indent + 1;
@@ -150,6 +160,11 @@ final class Dump
             foreach ($value->consts as $cd) { $this->constDecl($cd); }
             foreach ($value->properties as $pd) { $this->propertyDecl($pd); }
             foreach ($value->methods as $md) { $this->methodDecl($md); }
+            if ($this->ranges) {
+                foreach ($value->traitAdaptations as $ta) {
+                    $this->line('Adapt ' . $ta->kind . ' ' . $ta->trait . '::' . $ta->method . ' ' . $this->spanStr($ta->span));
+                }
+            }
             $this->indent = $this->indent - 1;
             return;
         }
@@ -167,7 +182,7 @@ final class Dump
         }
         if ($value instanceof UseItem) {
             $alias = $value->alias === null ? '' : ' as ' . $value->alias;
-            $this->line('UseItem ' . $value->kind . ' ' . $value->fqn . $alias);
+            $this->line('UseItem ' . $value->kind . ' ' . $value->fqn . $alias . $this->itemSpan($value->span));
             return;
         }
         if ($value instanceof AttributeNode) {
@@ -194,7 +209,7 @@ final class Dump
                     $this->param($item);
                 } elseif ($item instanceof UseItem) {
                     $alias = $item->alias === null ? '' : ' as ' . $item->alias;
-                    $this->line('UseItem ' . $item->kind . ' ' . $item->fqn . $alias);
+                    $this->line('UseItem ' . $item->kind . ' ' . $item->fqn . $alias . $this->itemSpan($item->span));
                 } elseif ($item instanceof AttributeNode) {
                     $this->attribute($item);
                 } elseif (is_object($item)) {
@@ -202,9 +217,11 @@ final class Dump
                     // CatchClause, MatchArm, ArrayElement, ClosureUse,
                     // StaticLocalDecl) — dump as anonymous "Item N"
                     // with their public properties.
-                    $this->line('[' . (string)$i . '] ' . $this->shortClass($item));
+                    $this->line('[' . (string)$i . '] ' . $this->shortClass($item)
+                        . ($item instanceof ClosureUse ? $this->itemSpan($item->span) : ''));
                     $this->indent = $this->indent + 1;
                     foreach (get_object_vars($item) as $k => $v) {
+                        if ($k === 'span') { continue; }
                         $this->field($k, $v);
                     }
                     $this->indent = $this->indent - 1;
@@ -266,6 +283,15 @@ final class Dump
         if ($p->default !== null) {
             $this->field('default', $p->default);
         }
+        if ($this->ranges) {
+            foreach ($p->hooks as $h) {
+                $this->line('Hook ' . $h->kind . ' ' . $this->spanStr($h->span));
+                $this->indent = $this->indent + 1;
+                if ($h->exprBody !== null) { $this->field('body', $h->exprBody); }
+                if ($h->blockBody !== null) { $this->field('body', $h->blockBody); }
+                $this->indent = $this->indent - 1;
+            }
+        }
         $this->indent = $this->indent - 1;
     }
 
@@ -324,6 +350,13 @@ final class Dump
             return '"' . addslashes($value) . '"';
         }
         return get_debug_type($value);
+    }
+
+    /** ' @L:C-L:C' for a node whose range is set, '' otherwise (and always outside --ranges). */
+    private function itemSpan(?Span $s): string
+    {
+        if (!$this->ranges || $s === null || $s->endLine === 0) { return ''; }
+        return ' ' . $this->spanStr($s);
     }
 
     private function spanStr(Span $s): string

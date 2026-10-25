@@ -20,5 +20,6 @@ final class TraitAdaptation
         public readonly array $exclude,
         public readonly string $visibility,
         public readonly string $alias,
+        public readonly ?Span $span = null,
     ) {}
 }

@@ -620,6 +620,7 @@ final class ClosureUse
     public function __construct(
         public readonly string $name,
         public readonly bool $byRef,
+        public readonly ?Span $span = null,
     ) {}
 }
 

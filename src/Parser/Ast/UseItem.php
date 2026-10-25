@@ -12,5 +12,6 @@ final class UseItem
         public readonly ?string $alias,
         /** 'class' | 'function' | 'const' */
         public readonly string $kind,
+        public readonly ?Span $span = null,
     ) {}
 }

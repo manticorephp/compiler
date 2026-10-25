@@ -55,4 +55,19 @@ expect('unset-descends', RangeCheck::verify(new Program([Stmt::expression(bin($u
 // requireEnds makes unset a violation
 expect('require-ends', RangeCheck::verify(prog($unset), true), ['no end position', 'no end position']);
 
+// requireEnds on a fully ended declaration tree is clean; the attribute node
+// hanging off two sibling params (`#[A] int $a, $b` style sharing) counts once
+function par(string $n, int $c1, int $c2, array $attrs): Parser\Ast\Param
+{
+    return new Parser\Ast\Param($n, null, null, false, false, '', false, $attrs, new Span(1, $c1, 'f', 1, $c2));
+}
+$sp = fn(int $c1, int $c2) => new Span(1, $c1, 'f', 1, $c2);
+$attr = new Parser\Ast\AttributeNode('A', [], $sp(3, 10));
+$decl = new Parser\Ast\FunctionDecl('f', [par('a', 1, 20, [$attr]), par('b', 22, 40, [$attr])], null, null, $sp(1, 41));
+expect('decl-require-ends', RangeCheck::verify(new Program([Stmt::function_($decl, $sp(1, 41))]), true), []);
+// the same tree with the second param's end unset is reported under requireEnds only
+$decl2 = new Parser\Ast\FunctionDecl('f', [par('a', 1, 20, [$attr]), new Parser\Ast\Param('b', null, null, false, false, '', false, [], new Span(1, 22, 'f'))], null, null, $sp(1, 41));
+expect('decl-missing-end', RangeCheck::verify(new Program([Stmt::function_($decl2, $sp(1, 41))]), true), ['no end position']);
+expect('decl-missing-end-lenient', RangeCheck::verify(new Program([Stmt::function_($decl2, $sp(1, 41))])), []);
+
 exit($fail === 0 ? 0 : 1);

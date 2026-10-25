@@ -1,10 +1,10 @@
 Program
-  Stmt:Function @3:1
+  Stmt:Function @3:1-6:2
     decl: FunctionDecl add
       return: int
       params: 2
-      Param $a : int @3:14
-      Param $b : int @3:22
+      Param $a : int @3:14-3:20
+      Param $b : int @3:22-3:28
       body: Block @4:1-6:2
         Stmt:Return @5:5-5:20
           value:
@@ -16,13 +16,13 @@ Program
               right:
                 Expr:Variable @5:17-5:19
                   name: "b"
-  Stmt:Class @8:1
+  Stmt:Class @8:1-16:2
     decl: class Counter
-      Property $n : int [private] @10:5
+      Property $n : int [private] @10:5-10:24
         default:
           Expr:IntLiteral @10:22-10:23
             value: 0
-      Method bump [public] -> int @12:5
+      Method bump [public] -> int @12:5-15:6
         params: 0
         body: Block @13:5-15:6
           Stmt:Return @14:9-14:27

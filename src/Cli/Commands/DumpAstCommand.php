@@ -73,7 +73,7 @@ final class DumpAstCommand extends Command
             \Manticore\dprint("parse failed: " . $e->getMessage());
             return 65;
         }
-        $violations = \Parser\RangeCheck::verify($program, false, $file);
+        $violations = \Parser\RangeCheck::verify($program, true, $file);
         if (\count($violations) === 0) {
             return 0;
         }

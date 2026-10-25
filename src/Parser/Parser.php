@@ -300,6 +300,7 @@ final class Parser
         // Collect leading attributes; they apply to whatever declaration
         // follows (function, class, or property at the head of a class
         // body — but here only function and class apply).
+        $firstTok = $this->peek();
         $attrs = $this->collectAttributes();
 
         $tok = $this->peek();
@@ -310,13 +311,13 @@ final class Parser
             if ($kw === 'use')       return $this->parseUseDecl();
             if ($kw === 'class' || $kw === 'final' || $kw === 'abstract' || $kw === 'readonly') {
                 if ($kw === 'class' || $this->isClassModifierFollowedByClass()) {
-                    return $this->parseClass($attrs, $stmtDoc);
+                    return $this->parseClass($attrs, $stmtDoc, $firstTok);
                 }
             }
-            if ($kw === 'interface') return $this->parseClass($attrs, $stmtDoc);
-            if ($kw === 'trait')     return $this->parseClass($attrs, $stmtDoc);
-            if ($kw === 'enum')      return $this->parseClass($attrs, $stmtDoc);
-            if ($kw === 'function')  return $this->parseFunctionDecl($attrs);
+            if ($kw === 'interface') return $this->parseClass($attrs, $stmtDoc, $firstTok);
+            if ($kw === 'trait')     return $this->parseClass($attrs, $stmtDoc, $firstTok);
+            if ($kw === 'enum')      return $this->parseClass($attrs, $stmtDoc, $firstTok);
+            if ($kw === 'function')  return $this->parseFunctionDecl($attrs, $firstTok);
             if ($kw === 'return')    return $this->parseReturn();
             if ($kw === 'echo')      return $this->parseEcho();
             if ($kw === 'if')        return $this->parseIf();
@@ -403,12 +404,13 @@ final class Parser
             $span = $this->span();
             $this->advance();
             while (true) {
+                $nameTok = $this->peek();
                 $name = $this->parseClassName();
                 $args = [];
                 if ($this->check(TokenKind::OpenParen)) {
                     $args = $this->parseArgList();
                 }
-                $out[] = new AttributeNode($name, $args, $span);
+                $out[] = new AttributeNode($name, $args, $this->endFrom($span, $nameTok));
                 if (!$this->match(TokenKind::Comma)) {
                     break;
                 }
@@ -469,6 +471,7 @@ final class Parser
         // grabbing the prefix path piece-by-piece and watching for a
         // trailing `\{`. Falls back to the regular single-item path
         // when no brace follows.
+        $firstItem = $this->peek();
         $prefix = $this->parseUseGroupPrefix();
         if ($prefix !== null && $this->match(TokenKind::OpenBrace)) {
             $items[] = $this->parseUseGroupItem($prefix, $kind);
@@ -479,7 +482,7 @@ final class Parser
             $this->expect(TokenKind::CloseBrace, "expected '}' to close use group");
         } else {
             // No group → first FQN already consumed becomes a regular item.
-            $items[] = $this->finishUseItem($prefix ?? '', $kind);
+            $items[] = $this->finishUseItem($prefix ?? '', $kind, $firstItem);
             while ($this->match(TokenKind::Comma)) {
                 $items[] = $this->parseUseItem($kind);
             }
@@ -536,7 +539,7 @@ final class Parser
      * Build a UseItem from a fully-resolved FQN string already in
      * hand. Mirrors parseUseItem's `as`-alias + alias-table wiring.
      */
-    private function finishUseItem(string $fqn, string $kind): UseItem
+    private function finishUseItem(string $fqn, string $kind, Token $first): UseItem
     {
         $fqn = \ltrim($fqn, '\\');
         $alias = null;
@@ -553,7 +556,7 @@ final class Parser
         } elseif ($kind === "function") {
             $this->useFnAliases[\strtolower($alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1)))] = $fqn;
         }
-        return new UseItem($fqn, $alias, $kind);
+        return new UseItem($fqn, $alias, $kind, $this->listSpan($first, $this->prevEndLine, $this->prevEndColumn));
     }
 
     /**
@@ -564,14 +567,16 @@ final class Parser
      */
     private function parseUseGroupItem(string $prefix, string $kind): UseItem
     {
+        $first = $this->peek();
         $tail = $this->parseClassNameLiteral();
         $tail = \ltrim($tail, '\\');
         $fqn = $prefix === '' ? $tail : ($prefix . '\\' . $tail);
-        return $this->finishUseItem($fqn, $kind);
+        return $this->finishUseItem($fqn, $kind, $first);
     }
 
     private function parseUseItem(string $kind): UseItem
     {
+        $first = $this->peek();
         $fqn = ltrim($this->parseClassNameLiteral(), '\\');
         $alias = null;
         if ($this->checkKeyword('as')) {
@@ -588,7 +593,7 @@ final class Parser
         } elseif ($kind === "function") {
             $this->useFnAliases[\strtolower($alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1)))] = $fqn;
         }
-        return new UseItem($fqn, $alias, $kind);
+        return new UseItem($fqn, $alias, $kind, $this->listSpan($first, $this->prevEndLine, $this->prevEndColumn));
     }
 
     // ── Class / interface / trait / enum ─────────────────────────────────────
@@ -596,7 +601,7 @@ final class Parser
     /**
      * @param AttributeNode[] $attributes
      */
-    private function parseClass(array $attributes, ?string $docComment = null): Stmt
+    private function parseClass(array $attributes, ?string $docComment = null, ?Token $first = null): Stmt
     {
         $span = $this->span();
         $isFinal = false;
@@ -626,8 +631,8 @@ final class Parser
             $name = $this->currentNamespace . '\\' . $name;
         }
 
-        $decl = $this->finishClassDecl($kindKw, $name, $attributes, $isFinal, $isAbstract, $isReadonly, $span, $docComment);
-        return Stmt::class_($decl, $span);
+        $decl = $this->finishClassDecl($kindKw, $name, $attributes, $isFinal, $isAbstract, $isReadonly, $span, $docComment, $first);
+        return Stmt::class_($decl, $decl->span);
     }
 
     /**
@@ -637,7 +642,7 @@ final class Parser
      *
      * @param AttributeNode[] $attributes
      */
-    private function finishClassDecl(string $kindKw, string $name, array $attributes, bool $isFinal, bool $isAbstract, bool $isReadonly, Span $span, ?string $docComment = null): ClassDecl
+    private function finishClassDecl(string $kindKw, string $name, array $attributes, bool $isFinal, bool $isAbstract, bool $isReadonly, Span $span, ?string $docComment = null, ?Token $first = null): ClassDecl
     {
         $enumBacking = null;
         if ($kindKw === 'enum' && $this->check(TokenKind::Colon)) {
@@ -683,6 +688,7 @@ final class Parser
             $memberDoc = isset($this->docCommentByPos[(string)$this->pos])
                 ? $this->docCommentByPos[(string)$this->pos]
                 : null;
+            $memberFirst = $this->peek();
             $memberAttrs = $this->collectAttributes();
             $memberSpan = $this->span();
             $modifiers = $this->parseMemberModifiers();
@@ -719,26 +725,26 @@ final class Parser
                 }
                 $this->expect(TokenKind::Semicolon, "expected ';' after enum case");
                 $cases[] = new \Parser\Ast\EnumCase($caseNameTok->lexeme, $value,
-                    $memberAttrs, $memberSpan);
+                    $memberAttrs, $this->endFrom($memberSpan, $memberFirst));
                 continue;
             }
 
             if ($this->checkKeyword('const')) {
-                foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan) as $const) {
+                foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan, $memberFirst) as $const) {
                     $consts[] = $const;
                 }
                 continue;
             }
 
             if ($this->checkKeyword('function')) {
-                $methods[] = $this->parseMethod($modifiers, $memberAttrs, $memberSpan, $memberDoc);
+                $methods[] = $this->parseMethod($modifiers, $memberAttrs, $memberSpan, $memberDoc, $memberFirst);
                 continue;
             }
 
             // Property declaration: optional type hint, then $var [, $var ...]
             $properties = array_merge(
                 $properties,
-                $this->parseProperty($modifiers, $memberAttrs, $memberSpan, $memberDoc),
+                $this->parseProperty($modifiers, $memberAttrs, $memberSpan, $memberDoc, $memberFirst),
             );
         }
 
@@ -758,7 +764,7 @@ final class Parser
             $isAbstract,
             $isReadonly,
             $enumBacking,
-            $span,
+            $first === null ? $this->end($span) : $this->endFrom($span, $first),
             $uses,
             $traitAdaptations,
             $docComment,
@@ -785,7 +791,8 @@ final class Parser
             // `Symfony\Component\Cache\Adapter\doClear`, so no trait ever matched
             // it and the alias got no body — an undefined symbol at link time.
             // Invisible from a global-namespace test, which is why it survived.
-            $rawFirst = $this->peek()->lexeme;
+            $adaptFirst = $this->peek();
+            $rawFirst = $adaptFirst->lexeme;
             $first = $this->parseClassName();
             $trait = '';
             $method = $rawFirst;
@@ -797,7 +804,10 @@ final class Parser
                 $this->advance();
                 $exclude = [$this->parseClassName()];
                 while ($this->match(TokenKind::Comma)) { $exclude[] = $this->parseClassName(); }
-                $out[] = new \Parser\Ast\TraitAdaptation('insteadof', $trait, $method, $exclude, '', '');
+                $adaptKind = 'insteadof';
+                $adaptExclude = $exclude;
+                $adaptVis = '';
+                $adaptAlias = '';
             } elseif ($this->checkKeyword('as')) {
                 $this->advance();
                 $visibility = '';
@@ -808,11 +818,15 @@ final class Parser
                 if (!$this->check(TokenKind::Semicolon)) {
                     $alias = $this->advance()->lexeme;
                 }
-                $out[] = new \Parser\Ast\TraitAdaptation('as', $trait, $method, [], $visibility, $alias);
+                $adaptKind = 'as';
+                $adaptExclude = [];
+                $adaptVis = $visibility;
+                $adaptAlias = $alias;
             } else {
                 throw $this->error("expected 'insteadof' or 'as' in trait adaptation");
             }
             $this->expect(TokenKind::Semicolon, "expected ';' after trait adaptation");
+            $out[] = new \Parser\Ast\TraitAdaptation($adaptKind, $trait, $method, $adaptExclude, $adaptVis, $adaptAlias, $this->listSpan($adaptFirst, $this->prevEndLine, $this->prevEndColumn));
         }
         $this->expect(TokenKind::CloseBrace, "expected '}' to close trait adaptations");
         return $out;
@@ -858,7 +872,7 @@ final class Parser
      * @param AttributeNode[] $attrs
      * @return PropertyDecl[]
      */
-    private function parseProperty(MemberModifiers $modifiers, array $attrs, Span $span, ?string $docComment = null): array
+    private function parseProperty(MemberModifiers $modifiers, array $attrs, Span $span, ?string $docComment = null, ?Token $first = null): array
     {
         $typeHint = null;
         // Look ahead: if next is a Variable, there is no type hint.
@@ -880,6 +894,10 @@ final class Parser
             if ($this->check(TokenKind::OpenBrace)) {
                 $hooks = $this->parsePropertyHooks();
             }
+            $last = $hooks !== [] || !$this->check(TokenKind::Comma);
+            if ($last && $hooks === []) {
+                $this->expect(TokenKind::Semicolon, "expected ';' after property declaration");
+            }
             $out[] = new PropertyDecl(
                 $name,
                 $modifiers->visibility,
@@ -888,15 +906,13 @@ final class Parser
                 $typeHint,
                 $default,
                 $attrs,
-                $span,
+                $out === [] && $first !== null ? $this->endFrom($span, $first) : $this->endFrom($span, $varTok),
                 $docComment,
                 $hooks,
             );
-            if ($hooks !== []) { return $out; }
-            if (!$this->match(TokenKind::Comma)) { break; }
+            if ($last) { return $out; }
+            $this->advance(); // ','
         }
-        $this->expect(TokenKind::Semicolon, "expected ';' after property declaration");
-        return $out;
     }
 
     /**
@@ -912,6 +928,7 @@ final class Parser
         $this->expect(TokenKind::OpenBrace, "expected '{' to open property hooks");
         $hooks = [];
         while (!$this->check(TokenKind::CloseBrace)) {
+            $hookFirst = $this->peek();
             if ($this->checkKeyword('final')) { $this->advance(); }
             $this->match(TokenKind::Ampersand); // by-ref get: accepted, not modelled
             $kwTok = $this->advance();
@@ -938,7 +955,7 @@ final class Parser
             } else {
                 $blockBody = $this->parseBlock();
             }
-            $hooks[] = new \Parser\Ast\PropertyHook($kind, $paramName, $paramType, $exprBody, $blockBody);
+            $hooks[] = new \Parser\Ast\PropertyHook($kind, $paramName, $paramType, $exprBody, $blockBody, $this->listSpan($hookFirst, $this->prevEndLine, $this->prevEndColumn));
         }
         $this->expect(TokenKind::CloseBrace, "expected '}' to close property hooks");
         return $hooks;
@@ -953,7 +970,7 @@ final class Parser
      * @param AttributeNode[] $attrs
      * @return ConstDecl[]
      */
-    private function parseClassConsts(MemberModifiers $modifiers, array $attrs, Span $span): array
+    private function parseClassConsts(MemberModifiers $modifiers, array $attrs, Span $span, ?Token $first = null): array
     {
         $this->advance(); // 'const'
         $typeHint = null;
@@ -970,28 +987,32 @@ final class Parser
             }
         }
         $consts = [];
-        do {
+        while (true) {
             $nameTok = $this->expectMemberName('expected const name');
             $this->expect(TokenKind::Equals, "expected '=' in const");
             $value = $this->parseExpression();
+            $last = !$this->check(TokenKind::Comma);
+            if ($last) {
+                $this->expect(TokenKind::Semicolon, "expected ';' after const");
+            }
             $consts[] = new ConstDecl(
                 $nameTok->lexeme,
                 $value,
                 $modifiers->visibility,
                 $typeHint,
                 $attrs,
-                $span,
+                $consts === [] && $first !== null ? $this->endFrom($span, $first) : $this->endFrom($span, $nameTok),
                 $modifiers->isFinal,
             );
-        } while ($this->match(TokenKind::Comma));
-        $this->expect(TokenKind::Semicolon, "expected ';' after const");
-        return $consts;
+            if ($last) { return $consts; }
+            $this->advance(); // ','
+        }
     }
 
     /**
      * @param AttributeNode[] $attrs
      */
-    private function parseMethod(MemberModifiers $modifiers, array $attrs, Span $span, ?string $docComment = null): MethodDecl
+    private function parseMethod(MemberModifiers $modifiers, array $attrs, Span $span, ?string $docComment = null, ?Token $first = null): MethodDecl
     {
         $this->advance(); // 'function'
         $returnsByRef = $this->match(TokenKind::Ampersand);
@@ -1036,7 +1057,7 @@ final class Parser
             $returnType,
             $body,
             $attrs,
-            $span,
+            $first === null ? $this->end($span) : $this->endFrom($span, $first),
             $returnsByRef,
             $docComment,
             $lazyBody,
@@ -1044,7 +1065,7 @@ final class Parser
     }
 
     /** @param AttributeNode[] $attrs */
-    private function parseFunctionDecl(array $attrs = []): Stmt
+    private function parseFunctionDecl(array $attrs = [], ?Token $first = null): Stmt
     {
         $startSpan = $this->span();
         $docComment = isset($this->docCommentByPos[(string)$this->pos])
@@ -1089,6 +1110,7 @@ final class Parser
         if ($this->currentNamespace !== '' && !str_contains($fnName, '\\')) {
             $fnName = $this->currentNamespace . '\\' . $fnName;
         }
+        $startSpan = $first === null ? $this->end($startSpan) : $this->endFrom($startSpan, $first);
         $decl = new FunctionDecl(
             $fnName,
             $params,
@@ -1166,7 +1188,7 @@ final class Parser
             $promoted,
             $promotedReadonly,
             $attrs,
-            $startSpan,
+            $this->end($startSpan),
         );
     }
 
@@ -2865,9 +2887,10 @@ final class Parser
 
     private function parseClosureUse(): ClosureUse
     {
+        $first = $this->peek();
         $byRef = $this->match(TokenKind::Ampersand);
         $varTok = $this->expect(TokenKind::Variable, 'expected $variable in use list');
-        return new ClosureUse(substr($varTok->lexeme, 1), $byRef);
+        return new ClosureUse(substr($varTok->lexeme, 1), $byRef, $this->listSpan($first, $this->prevEndLine, $this->prevEndColumn));
     }
 
     /**
