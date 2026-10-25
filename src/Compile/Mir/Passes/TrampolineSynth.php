@@ -290,9 +290,6 @@ final class TrampolineSynth
      */
     private static function arms(int $req, int $tot, callable $mk, bool $void): string
     {
-        // An arm reads $a[0..k) by position; a string key (a named argument) can only be
-        // bound against the signature, which the spread expansion does.
-        if (self::$bindByName) { return self::spreadBody($mk, $void); }
         $stmt = function (string $call) use ($void): string {
             return $void ? ('  ' . $call . "; return null;\n") : ('  return ' . $call . ";\n");
         };
