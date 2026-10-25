@@ -157,6 +157,7 @@ final class Parser
             $p = new self($tokens, $source, $file, false);
             $p->ranges = true;
             $p->tolerant = 1;
+            // Lexer errors are recorded first: the cap keeps the first 100 in discovery order (not by position), so lexer errors alone can fill it and drop the parser errors.
             foreach ($lexer->errors as $le) { $p->record($le); }
             $program = $p->parseProgram();
         } catch (ParseError $e) {
@@ -177,6 +178,7 @@ final class Parser
             }
             $errors[$j + 1] = $e;
         }
+        // The final "too many errors" entry carries the last kept error's position.
         if ($capped) {
             $l = $errors[\count($errors) - 1];
             $errors[] = new ParseError('too many errors', $l->errLine, $l->column, $l->endLine, $l->endColumn);

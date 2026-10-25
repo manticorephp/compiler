@@ -208,6 +208,7 @@ flood() {
 flood parser_errors < <({ printf '<?php\n'; rep 'foo(;\n' 300; })
 flood lexer_errors < <({ printf '<?php\n'; rep '\001' 300; })
 flood mixed_errors < <({ printf '<?php\n'; rep 'foo(;\n\001\n' 400; })
+flood lexer_fills_cap < <({ printf '<?php\n'; rep '\001' 150; rep 'foo(;\n' 50; })
 
 # Strict (non-tolerant) parse with ranges: the end()/endFrom() clamps must never need to fire.
 for f in "$ROOT/src/Parser/Parser.php" "$ROOT/src/Parser/Dump.php" "$CASES"/*.strict.php; do

@@ -12,12 +12,17 @@
 #    legitimately complete (ends in `;` `}` `?>`, sits in a `//`/`#` comment line, or is
 #    inline HTML after the last `?>`, or nothing follows the last `<?php`).
 # 2. prefix property: top-level statements (dump lines indented exactly 2 spaces) of the
-#    cut, up to its first top-level Stmt:Error and excluding its LAST top-level statement
-#    (the one the cut interrupted may be legitimately reshaped), must be byte-identical
-#    to the same-index statements of the full file's dump.
+#    cut dump that precede its first top-level Stmt:Error must be byte-identical to the
+#    same-index statements of the full file's dump. A cut dump with no Stmt:Error excludes
+#    its LAST top-level statement (the one the cut interrupted may be reshaped, e.g. a
+#    class swallowing the rest). The full dump must exit 0 and be non-empty; the run fails
+#    if fewer than 10 statements per 100 cuts were compared (the check cannot pass vacuously;
+#    a normal run compares ~7 per cut), or if any worker died without reporting.
 # 3. garbage: fixed-seed random byte strings, token-pool shuffles and word shuffles of real
 #    files terminate, exit 0 and are --check-ranges clean.
 # 4. deep nesting (10000 `(`) and error flood (>100 errors: parser, lexer, mixed).
+#
+# Failing garbage inputs are kept as $TMPDIR/mcfuzz-fail-<name>.php (path printed).
 
 set -uo pipefail
 
@@ -28,21 +33,29 @@ LIMIT=20
 CUTS=8
 FILTER=""
 
+_pid=""
+_wd=""
+reap() {
+    [[ -n "$_pid" ]] && kill -9 "$_pid" 2>/dev/null
+    if [[ -n "$_wd" ]]; then pkill -P "$_wd" 2>/dev/null; kill "$_wd" 2>/dev/null; fi
+}
 run_limited() {
     "$@" &
-    local pid=$!
-    ( sleep "$LIMIT"; kill -9 "$pid" 2>/dev/null ) &
-    local wd=$!
-    wait "$pid" 2>/dev/null
+    _pid=$!
+    ( sleep "$LIMIT"; kill -9 "$_pid" 2>/dev/null ) 2>/dev/null &
+    _wd=$!
+    wait "$_pid" 2>/dev/null
     local rc=$?
-    kill "$wd" 2>/dev/null
-    wait "$wd" 2>/dev/null
+    pkill -P "$_wd" 2>/dev/null
+    kill "$_wd" 2>/dev/null
+    wait "$_wd" 2>/dev/null
+    _pid=""; _wd=""
     return $rc
 }
 
 # top-level statement blocks, one line each (lines joined by \001), up to the first non-indented line
 blocks() {
-    awk '
+    LC_ALL=C awk '
         /^Program/ { next }
         /^  Stmt:/ { if (b != "") print b; b = $0; next }
         /^   / { if (b != "") b = b "\001" $0; next }
@@ -55,9 +68,17 @@ check_one() {
     local f="$1" n="$2" size off i out full tmp
     size=$(wc -c < "$f" | tr -d ' ')
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/mcfuzz.XXXXXX")"
-    trap 'rm -rf "$tmp"' RETURN
+    trap 'reap; rm -rf "$tmp"' EXIT
+    trap 'exit 143' INT TERM
+    local compared=0 frc
     run_limited "$MANTICORE" dump-ast --tolerant "$f" > "$tmp/full.txt" 2>&1
+    frc=$?
     blocks "$tmp/full.txt" > "$tmp/full.blocks"
+    if [[ $frc -ne 0 || ! -s "$tmp/full.blocks" ]]; then
+        echo "FAIL $f: full dump unusable (exit $frc, $(wc -l < "$tmp/full.blocks" | tr -d ' ') statements)"
+        echo "STAT $n 0"
+        return
+    fi
     for ((i = 1; i <= n; i++)); do
         off=$((size * i / (n + 1)))
         head -c "$off" "$f" > "$tmp/cut.php"
@@ -85,19 +106,24 @@ check_one() {
             esac
         fi
         blocks "$tmp/cut.txt" > "$tmp/cut.blocks"
-        out=$(awk '
-            FNR == NR { full[FNR] = $0; nf = FNR; next }
+        out=$(LC_ALL=C awk '
+            FILENAME == ARGV[1] { full[FNR] = $0; nf = FNR; next }
             { cut[FNR] = $0; nc = FNR }
             END {
                 for (i = 1; i <= nc; i++) if (cut[i] ~ /^  Stmt:Error/) { e = i; break }
                 last = (e ? e - 1 : nc - 1)
                 for (i = 1; i <= last; i++) {
-                    if (i > nf || cut[i] != full[i]) { print "statement " i " differs"; exit }
+                    if (i > nf || cut[i] != full[i]) { print "DIFF statement " i " differs"; exit }
                 }
+                print "CMP " (last > 0 ? last : 0)
             }' "$tmp/full.blocks" "$tmp/cut.blocks")
-        if [[ -n "$out" ]]; then echo "FAIL $f @$off: prefix property: $out"; fi
+        case "$out" in
+            DIFF*) echo "FAIL $f @$off: prefix property: ${out#DIFF }" ;;
+            CMP*) compared=$((compared + ${out#CMP })) ;;
+            *) echo "FAIL $f @$off: prefix check printed nothing" ;;
+        esac
     done
-    echo "STAT $n"
+    echo "STAT $n $compared"
 }
 
 if [[ "${1:-}" == "--one" ]]; then
@@ -116,7 +142,8 @@ done
 [[ -x "$MANTICORE" ]] || { echo "fatal: $MANTICORE not built; run bin/build first" >&2; exit 1; }
 
 RES="$(mktemp -d "${TMPDIR:-/tmp}/mcfuzz-run.XXXXXX")"
-trap 'rm -rf "$RES"' EXIT
+trap 'reap; pkill -P $$ 2>/dev/null; rm -rf "$RES"' EXIT
+trap 'exit 130' INT TERM
 fails=0
 
 # ---- 1+2: truncation and prefix property
@@ -127,10 +154,14 @@ fails=0
 nfiles=$(wc -l < "$RES/files" | tr -d ' ')
 xargs -P 8 -I{} bash "$0" --one {} "$CUTS" < "$RES/files" > "$RES/trunc.out" 2>&1
 cuts=$(/usr/bin/grep '^STAT ' "$RES/trunc.out" | awk '{ s += $2 } END { print s + 0 }')
+compared=$(/usr/bin/grep '^STAT ' "$RES/trunc.out" | awk '{ s += $3 } END { print s + 0 }')
+nstat=$(/usr/bin/grep -c '^STAT ' "$RES/trunc.out")
 tfail=$(/usr/bin/grep -c '^FAIL ' "$RES/trunc.out")
-echo "truncation+prefix: $nfiles files, $cuts cuts, $tfail failures"
+echo "truncation+prefix: $nfiles files, $cuts cuts, $compared statements compared, $tfail failures"
 /usr/bin/grep '^FAIL ' "$RES/trunc.out" | head -n 30
 fails=$((fails + tfail))
+if [[ $nstat -ne $nfiles ]]; then echo "FAIL $((nfiles - nstat)) worker(s) died without reporting"; /usr/bin/grep -v '^STAT \|^FAIL ' "$RES/trunc.out" | head -n 5; fails=$((fails + 1)); fi
+if [[ $nfiles -gt 0 && $((compared * 100)) -lt $((cuts * 10)) ]]; then echo "FAIL prefix check compared only $compared statements over $cuts cuts"; fails=$((fails + 1)); fi
 
 # ---- 3: garbage (fixed seed)
 gfail=0
@@ -142,20 +173,20 @@ garbage() {
     run_limited "$MANTICORE" dump-ast --tolerant --check-ranges "$f" > "$RES/g.chk" 2>&1
     if [[ $rc -ne 0 || $? -ne 0 || -s "$RES/g.chk" ]]; then
         gfail=$((gfail + 1)); echo "FAIL garbage $name: exit $rc $(head -n 1 "$RES/g.chk" | head -c 200)"
-        cp "$f" "${TMPDIR:-/tmp}/mcfuzz-fail-$name.php" 2>/dev/null
+        cp "$f" "${TMPDIR:-/tmp}/mcfuzz-fail-$name.php" 2>/dev/null && echo "     kept ${TMPDIR:-/tmp}/mcfuzz-fail-$name.php"
     fi
     rm -f "$f" "$RES/g.out" "$RES/g.chk"
 }
 for s in $(seq 1 40); do
-    garbage "bytes$s" < <(LC_ALL=C awk -v s="$s" 'BEGIN { srand(s); printf "<?php\n"; for (i = 0; i < 3000; i++) printf "%c", 1 + int(rand() * 126) }')
-    garbage "pool$s" < <(awk -v s="$s" 'BEGIN {
-        srand(1000 + s); n = split("<?php ?> { } ( ) [ ] ; , => -> :: ? : = == . + - * / $a $b foo bar 1 2.5 \"x\" '"'"'y'"'"' if else while for foreach function class fn match new return static public private use namespace try catch finally switch case default echo #[A] @ & | ^ ~ ! ... <<<X \\ ??", t, " ")
-        printf "<?php "; for (i = 0; i < 1500; i++) printf "%s ", t[1 + int(rand() * n)] }')
+    garbage "bytes$s" < <(LC_ALL=C awk -v s="$s" 'BEGIN { x = s; printf "<?php\n"; for (i = 0; i < 3000; i++) { x = (x * 48271) % 2147483647; printf "%c", 1 + int(x / 7) % 126 } }')
+    garbage "pool$s" < <(LC_ALL=C awk -v s="$s" 'BEGIN {
+        x = 1000 + s; n = split("<?php ?> { } ( ) [ ] ; , => -> :: ? : = == . + - * / $a $b foo bar 1 2.5 \"x\" '"'"'y'"'"' if else while for foreach function class fn match new return static public private use namespace try catch finally switch case default echo #[A] @ & | ^ ~ ! ... <<<X \\ ??", t, " ")
+        printf "<?php "; for (i = 0; i < 1500; i++) { x = (x * 48271) % 2147483647; printf "%s ", t[1 + int(x / 7) % n] } }')
 done
 k=0
 for src in $(awk 'NR % 20 == 0' "$RES/files" | head -n 20); do
     k=$((k + 1))
-    garbage "words$k" < <(awk -v s="$k" 'BEGIN { srand(5000 + s) } { for (i = 1; i <= NF; i++) w[++n] = $i } END { printf "<?php "; m = (n < 2000 ? n : 2000); for (i = 0; i < m; i++) printf "%s ", w[1 + int(rand() * n)] }' "$src")
+    garbage "words$k" < <(LC_ALL=C awk -v s="$k" 'BEGIN { x = 5000 + s } { for (i = 1; i <= NF; i++) w[++n] = $i } END { printf "<?php "; m = (n < 2000 ? n : 2000); for (i = 0; i < m; i++) { x = (x * 48271) % 2147483647; printf "%s ", w[1 + int(x / 7) % n] } }' "$src")
 done
 echo "garbage: $((80 + k)) inputs, $gfail failures"
 fails=$((fails + gfail))
