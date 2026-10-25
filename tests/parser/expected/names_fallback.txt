@@ -1,0 +1,16 @@
+names:
+  @3:10-3:16 function strlen -> strlen
+  @3:17-3:24 constant PHP_EOL -> PHP_EOL
+  @5:11-5:12 namespace N -> N
+  @6:9-6:17 use Lib\Tool -> Lib\Tool
+  @7:18-7:24 use Lib\fa -> Lib\fa
+  @8:15-8:21 use Lib\KK -> Lib\KK
+  @9:5-9:9 function Tool -> N\Tool [global-fallback]
+  @10:10-10:14 constant Tool -> N\Tool [global-fallback]
+  @10:17-10:21 class Tool -> Lib\Tool
+  @11:5-11:7 function fb -> Lib\fa
+  @11:8-11:14 function Tool\g -> Lib\Tool\g
+  @12:10-12:12 constant K2 -> Lib\KK
+  @12:15-12:18 constant \KK -> KK
+  @12:21-12:22 constant Q -> N\Q [global-fallback]
+

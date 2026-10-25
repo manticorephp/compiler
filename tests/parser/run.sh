@@ -85,7 +85,7 @@ for name in "${cases[@]}"; do
 
     flags="--tolerant --ranges"
     [[ "$name" == *.strict ]] && flags=""
-    [[ "$name" == names ]] && flags="--tolerant --names"
+    [[ "$name" == names* ]] && flags="--tolerant --names"
 
     run_limited "$MANTICORE" dump-ast $flags "$rel" > "$actual" 2>&1
     rc=$?

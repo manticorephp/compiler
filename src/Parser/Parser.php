@@ -2864,20 +2864,27 @@ final class Parser
             $this->noteName($literal, $resolved, 'class', false);
             return;
         }
+        // An unqualified function/constant name never goes through the class `use` aliases.
         $unqualified = !str_contains($literal, '\\');
+        $ns = $this->currentNamespace;
+        $local = $ns !== '' ? $ns . '\\' . $literal : $literal;
         if ($next->kind === TokenKind::OpenParen) {
             $fl = strtolower($literal);
-            if ($unqualified && isset($this->useFnAliases[$fl])) {
+            if (!$unqualified) {
+                $this->noteName($literal, $resolved, 'function', false);
+            } elseif (isset($this->useFnAliases[$fl])) {
                 $this->noteName($literal, $this->useFnAliases[$fl], 'function', false);
             } else {
-                $this->noteName($literal, $resolved, 'function', $unqualified);
+                $this->noteName($literal, $local, 'function', $ns !== '');
             }
             return;
         }
-        if ($unqualified && isset($this->useConstAliases[$literal])) {
+        if (!$unqualified) {
+            $this->noteName($literal, $resolved, 'constant', false);
+        } elseif (isset($this->useConstAliases[$literal])) {
             $this->noteName($literal, $this->useConstAliases[$literal], 'constant', false);
         } else {
-            $this->noteName($literal, $resolved, 'constant', $unqualified);
+            $this->noteName($literal, $local, 'constant', $ns !== '');
         }
     }
 
