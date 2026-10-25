@@ -105,6 +105,8 @@ final class TokenKind
     public const AtSign         = 'AtSign';
     public const DocComment     = 'DocComment';
     public const Eof            = 'Eof';
+    /** Tolerant mode only: one byte the lexer does not know. */
+    public const Error          = 'Error';
 
     private function __construct() {}
 }

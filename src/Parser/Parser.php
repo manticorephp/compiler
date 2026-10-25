@@ -133,13 +133,31 @@ final class Parser
 
     public static function parseTolerant(string $source, string $file = ''): ParseResult
     {
+        $lexer = new Lexer();
+        $errors = [];
+        $program = new Program([]);
         try {
-            return new ParseResult(self::parseSource($source, $file, false, true), []);
+            $tokens = $lexer->scan($source, false, true);
+            $errors = $lexer->errors;
+            $p = new self($tokens, $source, $file, false);
+            $p->ranges = true;
+            $program = $p->parseProgram();
         } catch (ParseError $e) {
-            return new ParseResult(new Program([]), [$e]);
+            $errors[] = $e;
         } catch (\Throwable $e) {
-            return new ParseResult(new Program([]), [new ParseError($e->getMessage(), 1, 1, 1, 1)]);
+            $errors[] = new ParseError($e->getMessage(), 1, 1, 1, 1);
         }
+        for ($i = 1; $i < \count($errors); $i = $i + 1) {
+            $e = $errors[$i];
+            $j = $i - 1;
+            while ($j >= 0 && ($errors[$j]->errLine > $e->errLine
+                || ($errors[$j]->errLine === $e->errLine && $errors[$j]->column > $e->column))) {
+                $errors[$j + 1] = $errors[$j];
+                $j = $j - 1;
+            }
+            $errors[$j + 1] = $e;
+        }
+        return new ParseResult($program, $errors);
     }
 
     /** Materialize one deferred function/method body and release its source copy. */

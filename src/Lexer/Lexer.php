@@ -35,6 +35,12 @@ final class Lexer
     /** @var Token[] */
     private array $tokens = [];
 
+    /** @var \Parser\ParseError[] */
+    public array $errors = [];
+
+    /** 1 when scan() runs in tolerant mode; an int, not a bool (see scan()). */
+    private int $tolerant = 0;
+
     /**
      * Token lexeme - no need for kind narrowing; the keyword text is the
      * lookup. Keywords are recognised by exact lowercase match.
@@ -74,7 +80,7 @@ final class Lexer
      *
      * @return Token[]
      */
-    public function scan(string $source, bool $startInPhp = false): array
+    public function scan(string $source, bool $startInPhp = false, bool $tolerant = false): array
     {
         $this->src = $source;
         $this->len = strlen($source);
@@ -82,6 +88,8 @@ final class Lexer
         $this->line = 1;
         $this->col = 1;
         $this->tokens = [];
+        $this->errors = [];
+        $this->tolerant = $tolerant ? 1 : 0;
         $inPhp = $startInPhp;
 
         while ($this->pos < $this->len) {
@@ -312,6 +320,7 @@ final class Lexer
         $bodyStart = $this->pos;
         $labelLen = \strlen($label);
         $closeIndent = 0;
+        $closed = false;
         $bodyEnd = $this->pos;
         while ($this->pos < $this->len) {
             $lineStart = $this->pos;
@@ -325,6 +334,7 @@ final class Lexer
                 $isEnd = ($after >= $this->len) || !$this->isIdentPart(\ord($this->src[$after]));
                 if ($isEnd) {
                     $closeIndent = $indent;
+                    $closed = true;
                     $bodyEnd = $lineStart;
                     $this->consume($labelLen);
                     break;
@@ -333,6 +343,7 @@ final class Lexer
             while ($this->pos < $this->len && \ord($this->src[$this->pos]) !== 0x0A) { $this->advance(); }
             if ($this->pos < $this->len) { $this->advance(); }
         }
+        if (!$closed && $this->tolerant === 1) { $this->unterminated($nowdoc ? 'nowdoc' : 'heredoc', $line, $col); }
         $rawLen = $bodyEnd - $bodyStart;
         if ($rawLen < 0) { $rawLen = 0; }
         $raw = \substr($this->src, $bodyStart, $rawLen);
@@ -586,6 +597,7 @@ final class Lexer
         // that integer as a ptr. ord() round-trips cleanly here.
         $quoteOrd = \ord($quote);
         $bs = \ord('\\');
+        $closed = false;
         $this->advance(); // opening quote
         while ($this->pos < $this->len) {
             $c = \ord($this->src[$this->pos]);
@@ -598,10 +610,12 @@ final class Lexer
             }
             if ($c === $quoteOrd) {
                 $this->advance();
+                $closed = true;
                 break;
             }
             $this->advance();
         }
+        if (!$closed && $this->tolerant === 1) { $this->unterminated('string', $line, $col); }
         $lex = substr($this->src, $start, $this->pos - $start);
         $this->tokens[] = new Token(TokenKind::StringLiteral, $lex, $line, $col, $this->line, $this->col);
     }
@@ -686,6 +700,11 @@ final class Lexer
         }
 
         // Unknown — skip the byte so the lexer doesn't loop.
+        if ($this->tolerant === 1) {
+            $this->emit(TokenKind::Error, $this->src[$this->pos], 1, $line, $col);
+            $this->errors[] = new \Parser\ParseError('unexpected character', $line, $col, $line, $col + 1);
+            return;
+        }
         $this->advance();
     }
 
@@ -717,9 +736,16 @@ final class Lexer
             }
             $this->advance();
         }
+        if ($this->tolerant === 1) { $this->unterminated('comment', $line, $col); }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /** Record an unterminated literal: opening delimiter to EOF. */
+    private function unterminated(string $what, int $line, int $col): void
+    {
+        $this->errors[] = new \Parser\ParseError('unterminated ' . $what, $line, $col, $this->line, $this->col);
+    }
 
     private function emit(string $kind, string $lex, int $len, int $line, int $col): void
     {

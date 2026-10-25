@@ -1,0 +1,14 @@
+Program
+  Stmt:Expression @2:1-2:8
+    expr:
+      Expr:Assign @2:1-2:7
+        target:
+          Expr:Variable @2:1-2:3
+            name: "a"
+        value:
+          Expr:IntLiteral @2:6-2:7
+            value: 1
+    docComment: null
+    attributes: [0]
+error 3:1-5:1 unterminated comment
+
