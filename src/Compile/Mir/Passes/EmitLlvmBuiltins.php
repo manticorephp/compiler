@@ -10887,6 +10887,18 @@ trait EmitLlvmBuiltins
                     && $arrNode->array->type->element->kind === Type::KIND_CELL);
             $valI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $valI, $innerCell);
+            // An ERASED parent (`array $c` taking a typed array from one caller and a
+            // json_decode cell array from another) is described only by its runtime
+            // hint: the inner array goes in boxed when the buffer is CELL-hinted and
+            // raw otherwise, as a plain raw element store does ({@see emitElemEncodeRaw}).
+            $erasedParent = !$innerCell && $arrNode->array->type->kind === Type::KIND_UNKNOWN;
+            if ($erasedParent) {
+                $encRaw = $this->ssa->allocReg();
+                $out .= '  ' . $encRaw . ' = call i64 @__mir_elem_encode_raw(ptr ' . $parentPtr . ', i64 ' . $valI . ', i64 '
+                      . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR . ")\n";
+                $this->markCellProbed($encRaw);
+                $valI = $encRaw;
+            }
             // A boxed inner array lands in the parent through a bare set: describe
             // the parent as a CELL buffer first, as a plain element store does
             // ({@see emitElemEncode}). Left undescribed (hint 0, repr 0), a runtime
@@ -10954,9 +10966,10 @@ trait EmitLlvmBuiltins
             // A RAW inner array written back into an ERASED parent: describe it
             // the way the plain erased store of an array value does, or a
             // reader of the unstamped buffer takes the pointer for an int.
-            if (!$innerCell && !$parentCell && $arrNode->array->type->isArray()
-                && ($arrNode->array->type->element === null
-                    || $arrNode->array->type->element->kind === Type::KIND_UNKNOWN)) {
+            if (!$innerCell && !$parentCell
+                && ($erasedParent || ($arrNode->array->type->isArray()
+                    && ($arrNode->array->type->element === null
+                        || $arrNode->array->type->element->kind === Type::KIND_UNKNOWN)))) {
                 $out .= '  call void @__mir_elem_stamp_raw(ptr ' . $parent2 . ', i64 '
                       . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR . ', i64 '
                       . (string)\Compile\MemoryAbi::ARRAY_REPR_ARR . ")\n";
