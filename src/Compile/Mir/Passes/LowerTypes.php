@@ -936,6 +936,10 @@ trait LowerTypes
         // body could not tell it from an array (php-cs-fixer's
         // `@param _PhpTokenPrototype $token` on Token::__construct).
         if ($hint === null && $docType !== null && $docType !== '') {
+            // `resource` is documentation only, and what an untyped slot holds in
+            // its place is routinely `false` (a failed fopen): an obj<Resource>
+            // slot took that cell's bits as a pointer and `$this->os ?? …` crashed.
+            if (\preg_match('/(^|[|?<,\s])resource($|[|>,\s\[])/i', $docType) === 1) { return null; }
             if ($this->lowerTypeHint($docType)->kind === Type::KIND_UNKNOWN
                 && !$this->isBareArrayHint($docType)
                 && !$this->looksLikeArrayElemType($docType)

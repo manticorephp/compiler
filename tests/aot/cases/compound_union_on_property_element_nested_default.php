@@ -1,6 +1,5 @@
 <?php
 // `$this->m[$k] += $arr` on a property whose default is a nested array literal reads the element as int and prints an address
-// issue: #194
 class B
 {
     public array $m = ['F' => ['a' => 1]];

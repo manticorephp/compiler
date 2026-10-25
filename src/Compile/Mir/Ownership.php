@@ -553,11 +553,10 @@ final class Ownership
      * even when it is the slot's own value (a by-value param converted at
      * entry). One predicate for the emitter ({@see
      * Passes\EmitLlvmBuiltins::needsForwardCellify}) and {@see Passes\OwnershipFlow}.
-     * An enum element is an ordinal no cell describes, so it is never rebuilt.
-     *
-     * @param array<string, EnumDef> $enums
+     * An enum element is an ordinal: the rebuild boxes it as the case singleton
+     * ({@see Passes\EmitLlvmBuiltins::cellifyLoopIr}).
      */
-    public static function forwardCellifies(Type $slot, Type $value, array $enums): bool
+    public static function forwardCellifies(Type $slot, Type $value): bool
     {
         if (!$slot->isArray() || !$value->isArray()) { return false; }
         if ($slot->isShape() || $value->isShape()) { return false; }
@@ -565,7 +564,7 @@ final class Ownership
         $ve = $value->element;
         if ($se === null || $ve === null || $se->kind !== Type::KIND_CELL) { return false; }
         $vk = $ve->kind;
-        if ($vk === Type::KIND_OBJ) { return $ve->class === null || !isset($enums[$ve->class]); }
+        if ($vk === Type::KIND_OBJ) { return true; }
         return $vk === Type::KIND_INT || $vk === Type::KIND_FLOAT
             || $vk === Type::KIND_STRING || $vk === Type::KIND_BOOL || $vk === Type::KIND_ARRAY;
     }
