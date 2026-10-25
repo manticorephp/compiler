@@ -462,13 +462,17 @@ trait LowerClasses
                 // (only it may write the slot).
             }
         }
+        /** @var string[] $promNew */
+        $promNew = [];
+        $ctorSpan = null;
         foreach ($decl->methods as $m) {
             if ($m->name === '__construct') {
+                $ctorSpan = $m->span;
                 foreach ($m->params as $p) {
                     if ($p->promoted !== '') {
                         // A promoted param that REDECLARES an inherited property
                         // keeps the parent's slot — see the note below.
-                        if (!isset($types[$p->name])) { $names[] = $p->name; }
+                        if (!isset($types[$p->name])) { $names[] = $p->name; $promNew[] = $p->name; }
                         $pdoc = $this->docTagType($m->docComment, '@param', $p->name);
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
@@ -484,7 +488,15 @@ trait LowerClasses
         }
         $spNames = [];
         $spTypes = [];
+        // php slots a promoted param where the constructor sits in the class
+        // body: after the instance properties declared before it, ahead of the rest.
+        $promBefore = '';
         foreach ($decl->properties as $prop) {
+            if ($promBefore === '' && $ctorSpan !== null && !$prop->isStatic && !isset($types[$prop->name])
+                && ($prop->span->line > $ctorSpan->line
+                    || ($prop->span->line === $ctorSpan->line && $prop->span->column > $ctorSpan->column))) {
+                $promBefore = $prop->name;
+            }
             $vdoc = $this->docTagType($prop->docComment, '@var', '');
             $veff = $this->effectiveHint($prop->typeHint, $vdoc);
             // `@var T[]` erases in the shared body (as it did before generics);
@@ -554,6 +566,20 @@ trait LowerClasses
             $neverObj[$prop->name] = $this->hintNeverObject($veff);
             $docList[$prop->name] = $this->isElemOnlyArrayDoc($veff);
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
+        }
+        if ($promNew !== []) {
+            $kept = [];
+            foreach ($names as $n) {
+                if (\in_array($n, $promNew, true)) { continue; }
+                if ($n === $promBefore) {
+                    foreach ($promNew as $pn) { $kept[] = $pn; }
+                }
+                $kept[] = $n;
+            }
+            if ($promBefore === '') {
+                foreach ($promNew as $pn) { $kept[] = $pn; }
+            }
+            $names = $kept;
         }
         // STATIC trait properties, mixed in the same way. php gives every using
         // class its OWN slot for a trait's static — the trait is a compile-time
