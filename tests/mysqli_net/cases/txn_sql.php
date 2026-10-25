@@ -1,11 +1,18 @@
 <?php
 // The exact SQL text mysqlnd sends for autocommit / begin_transaction / commit / rollback / savepoint / release_savepoint,
 // read back from the server's general log (a root connection turns it on for the length of the case and restores it).
+// The case refuses to run when the log is already on; a log stuck on by a killed run is reset with SET GLOBAL general_log=0.
 error_reporting(0);
 mysqli_report(MYSQLI_REPORT_OFF);
 $root = new mysqli(getenv('MYSQLI_HOST'), 'root', getenv('MYSQLI_ROOT_PASS') ?: 'pw', getenv('MYSQLI_DB'), (int) getenv('MYSQLI_PORT'));
-if ($root->connect_errno) { echo "no root: ", $root->connect_error, "\n"; exit(0); }
+if ($root->connect_errno) { echo "ASSERTION FAILED: no root: ", $root->connect_error, "\n"; exit(1); }
 $old = $root->query('SELECT @@global.general_log, @@global.log_output')->fetch_row();
+if ((int) $old[0] === 1) { echo "ASSERTION FAILED: general_log is already on (stuck or in use); reset it with SET GLOBAL general_log=0\n"; exit(1); }
+register_shutdown_function(function () use ($old) {
+    $r = new mysqli(getenv('MYSQLI_HOST'), 'root', getenv('MYSQLI_ROOT_PASS') ?: 'pw', getenv('MYSQLI_DB'), (int) getenv('MYSQLI_PORT'));
+    $r->query("SET GLOBAL log_output='" . $old[1] . "'");
+    $r->query('SET GLOBAL general_log=' . (int) $old[0]);
+});
 $root->query("SET GLOBAL log_output='TABLE'");
 $root->query('SET GLOBAL general_log=1');
 function conn(): mysqli

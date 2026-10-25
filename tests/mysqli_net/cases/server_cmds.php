@@ -30,7 +30,7 @@ function t(string $label, callable $f): void
     }
 }
 $root = new mysqli($host, 'root', getenv('MYSQLI_ROOT_PASS') ?: 'pw', $db, $port);
-if ($root->connect_errno) { echo "no root: ", $root->connect_error, "\n"; exit(0); }
+if ($root->connect_errno) { echo "ASSERTION FAILED: no root: ", $root->connect_error, "\n"; exit(1); }
 $root->query("DROP USER IF EXISTS 'mcu8'@'%'");
 $root->query("CREATE USER 'mcu8'@'%' IDENTIFIED BY 'pw2'");
 $root->query("GRANT ALL ON `$db`.* TO 'mcu8'@'%'");
@@ -77,6 +77,29 @@ try {
     mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
     t('change_user wrong password (strict)', fn() => $m->change_user('mcu8', 'wrong', $db));
     mysqli_report(MYSQLI_REPORT_OFF);
+    echo "-- change_user with a result pending, and after NO_BACKSLASH_ESCAPES\n";
+    $m = conn();
+    $m->real_query('SELECT 1, 2');
+    t('change_user, unbuffered result pending', fn() => $m->change_user('mcu8', 'pw2', $db));
+    echo st($m, false), "\n";
+    t('query after', fn() => $m->query('SELECT 1') ? 'answered' : $m->errno . ' ' . $m->error);
+    $m = conn();
+    $m->real_query('SELECT 1, 2');
+    $m->store_result();
+    t('change_user, result stored', fn() => $m->change_user('mcu8', 'pw2', $db));
+    echo st($m), "\n", who($m), "\n";
+    $m = conn();
+    $m->real_query('SELECT 1, 2');
+    $r = $m->use_result();
+    t('change_user, use_result open', fn() => $m->change_user('mcu8', 'pw2', $db));
+    echo st($m, false), "\n";
+    t('query after', fn() => $m->query('SELECT 1') ? 'answered' : $m->errno . ' ' . $m->error);
+    $m = conn();
+    $m->query("SET SESSION sql_mode='NO_BACKSLASH_ESCAPES'");
+    t('escape before change_user', fn() => bin2hex($m->real_escape_string("a'b\\c")));
+    t('change_user after NO_BACKSLASH_ESCAPES', fn() => $m->change_user('mcu8', 'pw2', $db));
+    t('escape after change_user', fn() => bin2hex($m->real_escape_string("a'b\\c")));
+    t('sql_mode after', fn() => $m->query('SELECT @@sql_mode')->fetch_row()[0]);
     $c = conn();
     $c->close();
     t('closed change_user', fn() => $c->change_user('a', 'b', 'c'));
@@ -101,7 +124,10 @@ try {
     $vid = $victim->thread_id;
     t('kill another connection', fn() => $m->kill($vid));
     echo st($m), "\n";
-    usleep(300000);
+    for ($i = 0; $i < 40; $i++) {
+        if ($root->query("SELECT COUNT(*) FROM information_schema.processlist WHERE id=$vid")->fetch_row()[0] == 0) { break; }
+        usleep(50000);
+    }
     t('victim query', fn() => $victim->query('SELECT 1') ? 'answered' : $victim->errno . ' ' . $victim->error);
     echo st($victim, false), "\n";
     t('victim ping', fn() => $victim->ping());

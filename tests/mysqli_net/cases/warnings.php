@@ -89,7 +89,7 @@ $rc = new ReflectionClass('mysqli_warning');
 foreach ($rc->getProperties(ReflectionProperty::IS_PUBLIC) as $p) { echo $p->getName(), ' ', $p->getType(), ' ', $p->isPublic() ? 'public' : 'other', "\n"; }
 t('final', fn() => $rc->isFinal());
 t('constructor private', fn() => $rc->getConstructor()->isPrivate());
-t('methods', fn() => array_values(array_filter(array_map(fn($x) => $x->getName(), $rc->getMethods()), fn($n) => !str_starts_with($n, '__mc') && $n !== '__debugInfo')));
+t('methods', fn() => array_values(array_filter(array_map(fn($x) => $x->getName(), $rc->getMethods()), fn($n) => !str_starts_with($n, '__mc') && $n !== '__debugInfo' && $n !== '__clone')));
 $m->query('SELECT 1/0');
 $w = $m->get_warnings();
 foreach (['message', 'sqlstate', 'errno'] as $p) {
@@ -98,6 +98,7 @@ foreach (['message', 'sqlstate', 'errno'] as $p) {
 t('isset message', fn() => isset($w->message));
 t('isset errno', fn() => isset($w->errno));
 t('property_exists', fn() => [property_exists($w, 'message'), property_exists($w, 'errno'), property_exists($w, 'nope')]);
+t('clone', function () use ($w) { $x = clone $w; return 'cloned'; });
 t('instanceof', fn() => [$w instanceof mysqli_warning, $w instanceof Traversable]);
 
 echo "-- a result in flight\n";

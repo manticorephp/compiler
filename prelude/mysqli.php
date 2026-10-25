@@ -858,6 +858,14 @@ class mysqli
     {
         $c = __McMysqliConn::of($this);
         $w = $c->liveWire();
+        // mysqlnd sends the command into the half-read result and loses the connection (2006); no out-of-sync check here
+        if ($c->busy()) {
+            $c->clear();
+            $c->affectedRows = -1;
+            $c->dropResults();
+            $w->close();
+            return $c->fail(2006, 'HY000', 'MySQL server has gone away');
+        }
         if (!$c->begin()) { return false; }
         // a success is an OK that leaves field_count alone; user and database are C strings (they end at a NUL)
         $db = $database === null ? '' : __McMysqliConn::cutNul($database);
@@ -1946,6 +1954,11 @@ final class mysqli_warning
     public function __debugInfo(): array
     {
         return ['message' => $this->message, 'sqlstate' => $this->sqlstate, 'errno' => $this->errno];
+    }
+
+    public function __clone()
+    {
+        throw new Error('Trying to clone an uncloneable object of class mysqli_warning');
     }
 
     public function next(): bool
