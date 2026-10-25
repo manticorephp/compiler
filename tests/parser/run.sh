@@ -178,6 +178,19 @@ stress xor_chain < <({ printf '<?php\n$a = 1 '; rep 'xor ' 100000; })
 stress coalesce_chain < <({ printf '<?php\n$a = 1 '; rep '?? ' 100000; })
 stress call_chain < <({ printf '<?php\n$a = '; rep '()' 100000; })
 
+stress else_if_chain < <({ printf '<?php\nif (1) {}'; rep ' else if (1) {}' 100000; })
+stress anon_class_nest < <({ printf '<?php\n$a = '; rep 'new class { function f() { return ' 20000; })
+stress switch_nest < <({ printf '<?php\n'; rep 'switch (1) { case 1: ' 50000; })
+stress try_nest < <({ printf '<?php\n'; rep 'try { ' 50000; })
+stress match_nest < <({ printf '<?php\n$a = '; rep 'match (1) { 1 => ' 50000; })
+stress attribute_nest < <({ printf '<?php\n'; rep '#[A(' 50000; })
+stress namespace_nest < <({ printf '<?php\n'; rep 'namespace A { ' 50000; })
+stress alt_if_nest < <({ printf '<?php\n'; rep 'if (1): ' 50000; })
+stress alt_foreach_else < <({ printf '<?php\n'; rep 'foreach ($a as $b): if (1): else: ' 30000; })
+stress elseif_chain < <({ printf '<?php\nif (1) {}'; rep ' elseif (1) {}' 100000; })
+stress property_hook_nest < <({ printf '<?php\nclass A { public $p { get { '; rep 'class B { public $q { get { ' 20000; })
+stress do_while_nest < <({ printf '<?php\n'; rep 'do ' 100000; })
+
 # Strict (non-tolerant) parse with ranges: the end()/endFrom() clamps must never need to fire.
 for f in "$ROOT/src/Parser/Parser.php" "$ROOT/src/Parser/Dump.php" "$CASES"/*.strict.php; do
     [[ "$(basename "$f")" == error_* ]] && continue   # a syntax-error file has no tree to check

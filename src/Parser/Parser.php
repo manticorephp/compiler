@@ -1569,7 +1569,12 @@ final class Parser
             $this->advance();
             // `else if` and `else { ... }` and `else statement;` all valid.
             if ($this->checkKeyword('if')) {
+                if ($this->tolerant === 1) {
+                    if ($this->depth > self::MAX_DEPTH) { throw $this->error('nesting too deep'); }
+                    $this->depth = $this->depth + 1;
+                }
                 $nested = $this->parseIf();
+                if ($this->tolerant === 1) { $this->depth = $this->depth - 1; }
                 $else = new Block([$nested], $this->wrapStmtSpan($nested));
             } else {
                 $else = $this->parseBlockOrStatement();
