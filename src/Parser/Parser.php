@@ -2343,7 +2343,7 @@ final class Parser
         $next = $this->tokens[$this->pos + 1] ?? null;
         $after = $this->tokens[$this->pos + 2] ?? null;
         if ($next === null || $after === null) { return false; }
-        if ($next->kind !== TokenKind::Keyword) { return false; }
+        if ($next->kind !== TokenKind::Keyword && !($next->kind === TokenKind::Identifier && strtolower($next->lexeme) === 'object')) { return false; }
         if ($after->kind !== TokenKind::CloseParen) { return false; }
         $kw = strtolower($next->lexeme);
         return $kw === 'int' || $kw === 'integer'
