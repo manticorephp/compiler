@@ -96,6 +96,33 @@ t('get_result chain', function () use ($c) {
 t('p more/next', function () use ($c) { $c->execute(); $c->store_result(); return [mysqli_stmt_more_results($c), mysqli_stmt_next_result($c), mysqli_stmt_more_results($c)]; });
 $c->close();
 t('re-execute closed chain', fn() => $m->query('SELECT 2')->fetch_row());
+// an OUT parameter: the server sends its values as an extra result set (SERVER_PS_OUT_PARAMS) that mysqlnd skips
+$m->query('DROP PROCEDURE IF EXISTS dcp9');
+$m->query('CREATE PROCEDURE dcp9(IN a INT, OUT b INT) BEGIN SET b = a * 2; SELECT a AS x; END');
+$o = $m->prepare('CALL dcp9(?, ?)');
+$ia = 21; $ob = 0;
+$o->bind_param('ii', $ia, $ob);
+t('out params', function () use ($o, $m) {
+    $out = [];
+    $o->execute();
+    $k = 0;
+    do {
+        $r = $o->get_result();
+        $out[] = 'set ' . $k++ . ' ' . json_encode($r === false ? [false, $o->errno, $o->error] : $r->fetch_all(MYSQLI_ASSOC)) . ' fc=' . $o->field_count;
+    } while ($o->more_results() && $o->next_result());
+    $out[] = 'conn ' . json_encode($m->query('SELECT 3')->fetch_row());
+    return $out;
+});
+t('out params store', function () use ($o) {
+    $o->execute();
+    $o->bind_result($x);
+    $o->fetch();
+    $out = [$x, $o->more_results()];
+    while ($o->more_results() && $o->next_result()) { $out[] = [$o->field_count, $o->store_result(), $o->num_rows]; }
+    return $out;
+});
+$o->close();
+$m->query('DROP PROCEDURE dcp9');
 
 echo "== connection closed\n";
 $m2 = conn();

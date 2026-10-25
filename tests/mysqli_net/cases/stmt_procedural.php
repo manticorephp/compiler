@@ -61,3 +61,31 @@ for ($i = 0; $i < 100; $i++) {
     $t->close();
 }
 echo 'prepared/closed 100: ', json_encode($m->query("SHOW SESSION STATUS LIKE 'Com_stmt_close'")->fetch_row()[1] >= 100), "\n";
+
+echo "== memory\n";
+// a full statement cycle repeated: peak memory (peak RSS natively) must not grow with the iterations
+$m->query('CREATE TEMPORARY TABLE mem9 (id INT PRIMARY KEY, v VARCHAR(40), d DOUBLE)');
+for ($i = 0; $i < 50; $i++) { $m->query("INSERT INTO mem9 VALUES ($i, REPEAT('x', $i % 40), $i / 3)"); }
+function cycle9(mysqli $m, int $k): int
+{
+    $s = $m->prepare('SELECT id, v, d FROM mem9 WHERE id >= ? ORDER BY id LIMIT 20');
+    $from = $k % 30;
+    $s->bind_param('i', $from);
+    $s->execute();
+    $s->bind_result($a, $b, $c);
+    $n = 0;
+    while ($s->fetch()) { $n += $a + strlen($b); }
+    $s->execute();
+    $s->store_result();
+    while ($s->fetch()) { $n++; }
+    $s->execute();
+    foreach ($s->get_result()->fetch_all(MYSQLI_ASSOC) as $row) { $n += $row['id']; }
+    $s->close();
+    return $n + (int) $m->execute_query('SELECT ?, ?', [$k, 'p' . $k])->fetch_row()[0];
+}
+$t = 0;
+for ($i = 1; $i <= 300; $i++) { $t += cycle9($m, $i); }
+$m0 = memory_get_peak_usage();
+for ($i = 1; $i <= 3000; $i++) { $t += cycle9($m, $i); }
+$mb = (memory_get_peak_usage() - $m0) >> 20;
+echo $t > 0 && $mb < 4 ? "flat\n" : "LEAK\n";

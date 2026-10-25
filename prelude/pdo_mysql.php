@@ -1452,11 +1452,14 @@ final class __McPdoMyWire
             $t = \ord($p[0]);
             if ($t === 0xFE && $bl < 9) {
                 if ($bl < 5) { throw $this->malformed('EOF packet'); }
+                // MySQL closes the OUT-parameter set of a CALL (SERVER_PS_OUT_PARAMS on its metadata) without MORE_RESULTS,
+                // yet the closing OK of the CALL still follows: it is read like any next result
+                $out = ($r->status & 4096) !== 0;
                 $r->warnings = self::le16($p, 1);
                 $r->status = self::le16($p, 3);
                 $this->status = $r->status;
                 $r->done = true;
-                if (($r->status & 8) !== 0) {
+                if (($r->status & 8) !== 0 || $out) {
                     $r->more = true;
                 } else {
                     $this->openCursor = null;

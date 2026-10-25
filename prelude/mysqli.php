@@ -952,7 +952,7 @@ class mysqli
         $st->link = $this;
         if (!$st->prepare($query)) {
             $ex = $st->reportEx();
-            self::__mcCloseCopy($st, $c);
+            $st->closeKeepingError(true);
             if ($ex !== null) { throw $ex; }
             return false;
         }
@@ -963,61 +963,33 @@ class mysqli
                 if (!\array_is_list($params)) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($params) must be a list array'); }
                 throw new ValueError($fn . '(): Argument #' . $arg . ' ($params) must consist of exactly ' . $st->paramCount . ' elements, ' . $n . ' present');
             }
-            if (!$st->bindParams()) {
-                self::__mcCloseCopy($st, $c);
+            if (!$st->bindArray($params)) {
+                $st->closeKeepingError(true);
                 return false;
-            }
-            if ($n > 0) {
-                /** @var array<int,mixed> */
-                $vals = [];
-                /** @var array<int,int> */
-                $tys = [];
-                foreach ($params as $v) {
-                    $vals[] = $v;
-                    $tys[] = 253;
-                }
-                $st->pv = $vals;
-                $st->ptype = $tys;
-                $st->pbound = true;
             }
         }
         if (!$st->execute()) {
             $ex = $st->reportEx();
-            self::__mcCloseCopy($st, $c);
+            $st->closeKeepingError(true);
             if ($ex !== null) { throw $ex; }
             return false;
         }
         if ($st->fieldCount === 0) {
-            self::__mcCloseCopy($st, $c);
+            $st->closeKeepingError(true);
             return true;
         }
         $rs = $st->getResult();
         if ($rs === null) {
             $ex = $st->reportEx();
-            self::__mcCloseCopy($st, $c);
+            $st->closeKeepingError(true);
             if ($ex !== null) { throw $ex; }
             return false;
         }
         $res = __McMysqliRs::wrap($rs, $this);
-        self::__mcCloseCopy($st, $c);
+        $st->closeKeepingError(true);
         return $res;
     }
 
-    /** close_stmt_and_copy_errors: the statement goes, its error (and the connection's affected_rows) stay on the connection. */
-    private static function __mcCloseCopy(__McMysqliStmt $st, __McMysqliConn $c): void
-    {
-        $no = $st->errno;
-        $msg = $st->error;
-        $state = $st->sqlstate;
-        $list = $st->errorList;
-        $ar = $c->affectedRows;
-        $st->close();
-        $c->errno = $no;
-        $c->error = $msg;
-        $c->sqlstate = $state;
-        $c->errorList = $list;
-        $c->affectedRows = $ar;
-    }
 
     public function get_charset(): ?object
     {
@@ -1118,17 +1090,8 @@ class mysqli
         $st = $s->__mcSt();
         if ($st === null) { return false; }
         if (!$st->prepare($query)) {
-            // mysqli_stmt_close() clears the errors: they are kept across it, on the connection
-            $no = $c->errno;
-            $msg = $c->error;
-            $state = $c->sqlstate;
-            $list = $c->errorList;
-            $st->close();
+            $st->closeKeepingError(false);
             $s->__mcDetach();
-            $c->errno = $no;
-            $c->error = $msg;
-            $c->sqlstate = $state;
-            $c->errorList = $list;
             $c->report();
             return false;
         }
@@ -1348,9 +1311,8 @@ final class __McMysqliRs
     public static ?__McMysqliRs $next = null;
 
     /** A mysqli_result over $rs: constructed against $link, the constructor takes $rs instead of the connection's pending result. */
-    public static function wrap(__McMysqliRs $rs, ?mysqli $link): mysqli_result
+    public static function wrap(__McMysqliRs $rs, mysqli $link): mysqli_result
     {
-        if ($link === null) { $link = new mysqli(); }
         self::$next = $rs;
         try {
             return new mysqli_result($link);
@@ -2263,6 +2225,48 @@ final class __McMysqliStmt
         return true;
     }
 
+    /** bind-in-execute: every value of the list bound as a string, a copy (mysqli binds VAR_STRING values, not references). */
+    public function bindArray(array $params): bool
+    {
+        if (!$this->bindParams()) { return false; }
+        if (\count($params) === 0) { return true; }
+        /** @var array<int,mixed> */
+        $vals = [];
+        /** @var array<int,int> */
+        $tys = [];
+        foreach ($params as $v) {
+            $vals[] = $v;
+            $tys[] = 253;
+        }
+        $this->pv = $vals;
+        $this->ptype = $tys;
+        $this->blobUsed = [];
+        $this->pbound = true;
+        return true;
+    }
+
+    /**
+     * Closes the statement and leaves an error on the connection, which the close itself would clear: the statement's own
+     * ($fromStmt, mysqli's close_stmt_and_copy_errors, which keeps the connection's affected_rows too) or the connection's
+     * (mysqli_prepare's failure path).
+     */
+    public function closeKeepingError(bool $fromStmt): void
+    {
+        $c = $this->c;
+        if ($c === null) { return; }
+        $no = $fromStmt ? $this->errno : $c->errno;
+        $msg = $fromStmt ? $this->error : $c->error;
+        $state = $fromStmt ? $this->sqlstate : $c->sqlstate;
+        $list = $fromStmt ? $this->errorList : $c->errorList;
+        $ar = $c->affectedRows;
+        $this->close();
+        $c->errno = $no;
+        $c->error = $msg;
+        $c->sqlstate = $state;
+        $c->errorList = $list;
+        $c->affectedRows = $ar;
+    }
+
     public function bindResults(): bool
     {
         if ($this->state < self::PREPARED) {
@@ -2376,6 +2380,20 @@ final class __McMysqliStmt
     {
         $c = $this->c;
         if ($r === null || $c === null) { return false; }
+        // SERVER_PS_OUT_PARAMS: the OUT parameters of a CALL travel as a result set of their own, which mysqlnd skips
+        if ($r->err === null && $r->isSet && ($r->status & 4096) !== 0 && $c->wire !== null) {
+            $w = $c->wire;
+            try {
+                if ($r->stream) {
+                    while (\count($w->cursorRow($r, true)) > 0) {
+                    }
+                }
+                if ($r->err === null && $r->more) { $w->cursorNext($r); }
+            } catch (PDOException $e) {
+                return $this->wireErr($e);
+            }
+            if ($r->err === null) { return $this->parseResponse($r->next, true); }
+        }
         $this->cur = $r;
         $c->affectedRows = -1;
         if ($r->err !== null) {
@@ -3139,22 +3157,7 @@ class mysqli_stmt
             if ($n !== $st->paramCount) {
                 throw new ValueError($fn . '(): Argument #' . $arg . ' ($params) must consist of exactly ' . $st->paramCount . ' elements, ' . $n . ' present');
             }
-            if ($st->bindParams()) {
-                if ($n > 0) {
-                    /** @var array<int,mixed> */
-                    $vals = [];
-                    /** @var array<int,int> */
-                    $tys = [];
-                    foreach ($params as $v) {
-                        $vals[] = $v;
-                        $tys[] = 253;
-                    }
-                    $st->pv = $vals;
-                    $st->ptype = $tys;
-                    $st->blobUsed = [];
-                    $st->pbound = true;
-                }
-            } else {
+            if (!$st->bindArray($params)) {
                 $st->report();
                 $ret = false;
             }

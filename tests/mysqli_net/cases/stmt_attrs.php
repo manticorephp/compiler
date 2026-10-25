@@ -17,8 +17,7 @@ function sst(mysqli_stmt $s): string
 }
 mysqli_report(MYSQLI_REPORT_OFF);
 $m = new mysqli(getenv('MYSQLI_HOST'), getenv('MYSQLI_USER'), getenv('MYSQLI_PASS'), getenv('MYSQLI_DB'), (int) getenv('MYSQLI_PORT'));
-$m->query('CREATE TABLE IF NOT EXISTS a9 (id INT PRIMARY KEY, v VARCHAR(10))');
-$m->query('DELETE FROM a9');
+$m->query('CREATE TEMPORARY TABLE a9 (id INT PRIMARY KEY, v VARCHAR(10))');
 $m->query("INSERT INTO a9 VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')");
 $s = $m->prepare('SELECT id, v FROM a9 ORDER BY id');
 t('defaults', fn() => [$s->attr_get(MYSQLI_STMT_ATTR_UPDATE_MAX_LENGTH), $s->attr_get(MYSQLI_STMT_ATTR_CURSOR_TYPE)]);
@@ -87,4 +86,3 @@ t('close mid cursor', function () use ($m) {
     return $m->query('SELECT 3')->fetch_row();
 });
 t('attrs after re-prepare', fn() => [$s->prepare('SELECT 1'), $s->attr_get(MYSQLI_STMT_ATTR_CURSOR_TYPE), $s->attr_get(MYSQLI_STMT_ATTR_UPDATE_MAX_LENGTH)]);
-$m->query('DROP TABLE a9');
