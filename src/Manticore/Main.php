@@ -4454,6 +4454,12 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'SplMaxHeap',
             'SplPriorityQueue',
         ]) || $demand->usesYieldFrom();
+    // `class_exists($n)` / `new ReflectionClass($n)` with a computed name: any
+    // built-in class may be asked for, so the gated families must exist (not in
+    // a library build: the stdlib has its own `new $cls`, and no prelude classes).
+    if (($demand->dynClassLookup() && !CompileArgs::$emitLibrary)) {
+        $useSplIterators = true;
+    }
     $useArrayClasses = $useSplIterators || $demand->mentionsAny(['ArrayIterator', 'ArrayObject'])
         // iterator_to_array / _count / _apply are plain FUNCTIONS in the same
         // file (they drain a Traversable, so they cannot live in the stdlib).
@@ -4666,7 +4672,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // classes. It can be gated at all only because NO stdlib signature names a
     // DateTime* class — the whole family talks to the stdlib through scalars —
     // so a program that only calls date()/strtotime() carries none of it.
-    $useDateTime = $demand->mentionsAny([
+    $useDateTime = ($demand->dynClassLookup() && !CompileArgs::$emitLibrary) || $demand->mentionsAny([
             'DateTime',
             'DateTimeImmutable',
             'DateTimeZone',

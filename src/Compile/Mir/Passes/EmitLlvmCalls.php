@@ -4538,6 +4538,11 @@ trait EmitLlvmCalls
         return $out . ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN ? $this->cellToPtr() : $this->coerceToPtr());
     }
 
+    private function isScalarKind(string $k): bool
+    {
+        return $k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL || $k === Type::KIND_STRING;
+    }
+
     /**
      * Fixed-arity spread expansion for a KNOWN callee: read the elements of the
      * runtime array `$arrReg` filling the callee's params `[$firstParam ..
@@ -4645,6 +4650,14 @@ trait EmitLlvmCalls
                 $out .= $this->coerceToI64();
                 $ev = $this->lastValue;
             }
+            // A raw scalar element bound to a scalar param of ANOTHER kind
+            // (`new $c(...[1, 2])` into `string $a`): the callee reads the raw
+            // word as its own representation (a char* of 1). Coerced through the
+            // cell below, once the element is known to exist.
+            $coerce = !$needBox && $pt !== null && $elemType !== null
+                && $elemType->kind !== $pt->kind
+                && $this->isScalarKind($elemType->kind) && $this->isScalarKind($pt->kind)
+                && !($fnKey !== '' && ($this->sigs->refParams[$fnKey][$k] ?? false));
             $def = $pdefs[$k] ?? null;
             if ($def === null && $fnKey !== '' && !($vmask[$k] ?? false)) {
                 // A required parameter the pack is too short for: php's ArgumentCountError.
@@ -4667,6 +4680,23 @@ trait EmitLlvmCalls
                 $has = $this->ssa->allocReg();
                 $out .= '  ' . $has . ' = icmp ugt i64 ' . $cnt . ', '
                       . (string)($k - $firstParam) . "\n";
+                if ($coerce) {
+                    // Past the end of the pack `$ev` is a stray word: coerce only a real element.
+                    $cs = $this->ssa->allocReg();
+                    $cL = $this->ssa->allocLabel('spread.coerce');
+                    $eL = $this->ssa->allocLabel('spread.coerce.end');
+                    $out .= '  ' . $cs . " = alloca i64\n  store i64 0, ptr " . $cs . "\n";
+                    $out .= '  br i1 ' . $has . ', label %' . $cL . ', label %' . $eL . "\n" . $cL . ":\n";
+                    $this->lastValue = $ev;
+                    $this->lastValueType = 'i64';
+                    $out .= $this->boxToCell($elemType);
+                    $out .= $this->unboxCellToType($pt);
+                    $out .= $this->coerceToI64();
+                    $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $cs . "\n  br label %" . $eL . "\n" . $eL . ":\n";
+                    $ev = $this->ssa->allocReg();
+                    $out .= '  ' . $ev . ' = load i64, ptr ' . $cs . "\n";
+                    $coerce = false;
+                }
                 $sel = $this->ssa->allocReg();
                 $out .= '  ' . $sel . ' = select i1 ' . $has . ', i64 ' . $ev
                       . ', i64 ' . $dv . "\n";
@@ -4681,6 +4711,14 @@ trait EmitLlvmCalls
                 $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
                 $out .= $this->emitThrowIf($short, 'ArgumentCountError',
                     'Too few arguments to function ' . $fnKey . '()');
+            }
+            if ($coerce) {
+                $this->lastValue = $ev;
+                $this->lastValueType = 'i64';
+                $out .= $this->boxToCell($elemType);
+                $out .= $this->unboxCellToType($pt);
+                $out .= $this->coerceToI64();
+                $ev = $this->lastValue;
             }
             // A BY-REF parameter dereferences what it is handed: a VALUE from
             // the pack crashed it. php binds the pack's element, a temporary

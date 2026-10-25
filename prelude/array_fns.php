@@ -907,6 +907,7 @@ function array_chunk(array $arr, int $size, bool $preserve_keys = false): array
  */
 function array_replace(array $arr, array ...$others): array
 {
+    /** @var array<array-key, mixed> $out */
     $out = [];
     foreach ($arr as $k => $v) { $out[$k] = $v; }
     foreach ($others as $o) {

@@ -4278,7 +4278,14 @@ trait EmitLlvmExpr
                 $objp = $this->lastValue;
                 $cls = $c->operand->type->class ?? '';
                 $cd = $cls !== '' ? ($this->classes[$cls] ?? null) : null;
-                $declared = $cd !== null && $cd->propertyNames !== [];
+                // An interface (no ClassDef), an abstract class or a class with
+                // subclasses names no layout: the runtime class decides, as for
+                // an erased receiver.
+                if ($cd === null || $cd->isAbstract || (!$cd->isFinal && $this->classHasSubclass($cls))) {
+                    $out .= $this->emitObjectVarsOfPtr($objp, true);
+                    return $out;
+                }
+                $declared = $cd->propertyNames !== [];
                 $decl = '';
                 if ($declared) {
                     $out .= $this->emitDeclaredPropsArray($objp, $cls, false, false, true);

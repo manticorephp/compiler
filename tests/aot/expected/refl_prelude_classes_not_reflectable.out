@@ -1,0 +1,4 @@
+ArrayObject: ArrayObject
+SplObjectStorage: SplObjectStorage
+DateTimeImmutable: DateTimeImmutable
+message,string,code,file,line,trace,previous

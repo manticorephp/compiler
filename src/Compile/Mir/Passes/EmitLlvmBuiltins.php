@@ -456,6 +456,9 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_prop_setter')        { return $this->emitReflFieldI64($args, 16, true); }
         if ($name === '__mc_refl_call1')              { return $this->biMcReflCall1($args); }
         if ($name === '__mc_refl_prop_set')           { return $this->biMcReflPropSet($args); }
+        if ($name === '__mc_refl_row_at')            { return $this->biMcReflRowAt($args); }
+        if ($name === '__mc_refl_nconsts')            { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_NCONSTS_OFFSET, false); }
+        if ($name === '__mc_refl_consts_base')        { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_CONSTS_OFFSET, true); }
         if ($name === '__mc_refl_nprops')             { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_NPROPS_OFFSET, false); }
         if ($name === '__mc_refl_props_base')         { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_PROPS_OFFSET, true); }
         if ($name === '__mc_refl_nmethods')           { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_NMETHODS_OFFSET, false); }
@@ -7252,6 +7255,21 @@ trait EmitLlvmBuiltins
      *
      * @param Node[] $args
      */
+    /** `__mc_refl_row_at($base, $i)` — the address of row `i` of a method/property/constant table. */
+    private function biMcReflRowAt(array $args): string
+    {
+        $out = $this->emitNode($args[0]);
+        $base = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $off = $this->ssa->allocReg();
+        $out .= '  ' . $off . ' = mul i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::RMETA_ROW_SIZE . "\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . ' = add i64 ' . $base . ', ' . $off . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     private function emitReflFieldI64(array $args, int $off, bool $isPtr): string
     {
         $out = $this->emitNode($args[0]);
