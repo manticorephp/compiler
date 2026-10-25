@@ -4933,8 +4933,16 @@ trait EmitLlvmObjects
     {
         /** @var Node[] $ops */
         $ops = [$dp->object, $dp->name];
+        /** @var Node[] $packOps */
+        $packOps = [];
         foreach ($iv->args as $a) {
-            $ops[] = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
+            if ($a->kind === Node::KIND_SPREAD) {
+                $po = $this->asSpreadNode($a)->operand;
+                $packOps[] = $po;
+                $ops[] = $po;
+            } else {
+                $ops[] = $a;
+            }
         }
         $need = false;
         $refMayBind = null;
@@ -4947,7 +4955,9 @@ trait EmitLlvmObjects
                     $cands = $this->dynMethodCandidates($dp->object->type, $this->siteArgc($iv->args));
                     $refMayBind = $cands !== null && $this->dynMethodHasRefParam($cands, \count($iv->args));
                 }
-                if ($refMayBind && $o !== $dp->object && $o !== $dp->name) { return false; }
+                // An unpacked array is read by value: the dispatch hands the callee its elements
+                // as a pack, so a copy of the array held in a slot binds nothing a by-ref arm could see.
+                if ($refMayBind && $o !== $dp->object && $o !== $dp->name && !\in_array($o, $packOps, true)) { return false; }
             }
             if (!$this->dynHoistableRead($o)) { return false; }
             $need = true;
@@ -4982,6 +4992,8 @@ trait EmitLlvmObjects
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
         if ($n->kind === Node::KIND_ARRAY_ACCESS) { return $this->dynHoistableElem($n); }
+        // `static::$dispatcher->$method(...)`: a static property read runs no user code.
+        if ($n->kind === Node::KIND_STATIC_PROP) { return true; }
         return false;
     }
 
@@ -5598,7 +5610,9 @@ trait EmitLlvmObjects
             if ($needsNodes ? !$this->dynOperandsPlain($dp, $iv)
                             : !($this->dynPureRead($dp->object)
                                 && ($dp->name->kind === Node::KIND_STRING_CONST || $this->dynPureRead($dp->name)))) {
-                $this->dynRejectWhy = 'operands'; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.operands', 1); }
+                $whyArgs = '';
+                foreach ($iv->args as $wa) { $whyArgs .= $wa->kind . ','; }
+                $this->dynRejectWhy = 'operands obj=' . $dp->object->kind . ' name=' . $dp->name->kind . ' args=' . $whyArgs; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.operands', 1); }
                 return null;
             }
         }
