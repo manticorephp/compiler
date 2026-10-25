@@ -1,0 +1,96 @@
+Program
+  Stmt:Function @3:1
+    decl: FunctionDecl add
+      return: int
+      params: 2
+      Param $a : int @3:14
+      Param $b : int @3:22
+      body: Block
+        Stmt:Return @5:5
+          value:
+            Expr:BinaryOp @5:15
+              op: "+"
+              left:
+                Expr:Variable @5:12
+                  name: "a"
+              right:
+                Expr:Variable @5:17
+                  name: "b"
+  Stmt:Class @8:1
+    decl: class Counter
+      Property $n : int [private] @10:5
+        default:
+          Expr:IntLiteral @10:22
+            value: 0
+      Method bump [public] -> int @12:5
+        params: 0
+        body: Block
+          Stmt:Return @14:9
+            value:
+              Expr:IncDec @14:16
+                op: "++"
+                prefix: true
+                operand:
+                  Expr:PropertyAccess @14:23
+                    object:
+                      Expr:Variable @14:18
+                        name: "this"
+                    property: "n"
+                    nullsafe: false
+  Stmt:Expression @18:1
+    expr:
+      Expr:Assign @18:4
+        target:
+          Expr:Variable @18:1
+            name: "c"
+        value:
+          Expr:New @18:6
+            class: "Counter"
+            args: [0]
+    docComment: null
+    attributes: [0]
+  Stmt:For @19:1
+    init: [1]
+      Expr:Assign @19:9
+        target:
+          Expr:Variable @19:6
+            name: "i"
+        value:
+          Expr:IntLiteral @19:11
+            value: 0
+    condition:
+      Expr:BinaryOp @19:17
+        op: "<"
+        left:
+          Expr:Variable @19:14
+            name: "i"
+        right:
+          Expr:IntLiteral @19:19
+            value: 3
+    update: [1]
+      Expr:IncDec @19:24
+        op: "++"
+        prefix: false
+        operand:
+          Expr:Variable @19:22
+            name: "i"
+    body: Block
+      Stmt:Echo @20:5
+        exprs: [2]
+          Expr:Call @20:10
+            function: "add"
+            args: [2]
+              Expr:MethodCall @20:16
+                object:
+                  Expr:Variable @20:14
+                    name: "c"
+                method: "bump"
+                args: [0]
+                nullsafe: false
+              Expr:Variable @20:26
+                name: "i"
+            qualified: false
+          Expr:StringLiteral @20:31
+            value: "
+"
+

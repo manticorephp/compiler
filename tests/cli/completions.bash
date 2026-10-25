@@ -54,7 +54,7 @@ _manticore() {
                 --memory|--backend|-O|-j) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --tolerant --ranges" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi

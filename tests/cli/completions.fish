@@ -77,6 +77,8 @@ complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l runtime -d 'W
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l allow-undefined-traps -d 'Do not refuse a library that contains undefined-function traps'
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l keep-ir -d 'Keep the intermediate .ll files'
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -s j -r -f -d 'Parallel clang jobs; 0 = one per core'
+complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l tolerant -d 'Recover from syntax errors; print the tree and every error'
+complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l ranges -d 'Print spans as start-end ranges'
 complete -c manticore -n '__fish_seen_subcommand_from analyze' -l help -d 'Show this help text'
 complete -c manticore -n '__fish_seen_subcommand_from analyze' -s o -r -F -d 'Output path (default a.out)'
 complete -c manticore -n '__fish_seen_subcommand_from analyze' -l memory -r -f -d 'Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)'

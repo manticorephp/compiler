@@ -124,6 +124,8 @@ Options:
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
   -j <n>                   Parallel clang jobs; 0 = one per core
+  --tolerant               Recover from syntax errors; print the tree and every error
+  --ranges                 Print spans as start-end ranges
 == help dump-mir
 dump-mir — Parse PHP, lower to MIR, print the typed IR
 

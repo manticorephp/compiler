@@ -129,6 +129,14 @@ final class Parser
         return $p->parseProgram();
     }
 
+    public static function parseTolerant(string $source, string $file = ''): ParseResult
+    {
+        try {
+            return new ParseResult(self::parseSource($source, $file), []);
+        } catch (ParseError $e) {
+            return new ParseResult(new Program([]), [$e]);
+        }
+    }
     /** Materialize one deferred function/method body and release its source copy. */
     public static function materializeLazyBody(LazyBody $lazy): Block
     {
@@ -3601,6 +3609,15 @@ final class Parser
     private function error(string $message): ParseError
     {
         $tok = $this->tokens[$this->pos];
-        return new ParseError($message, $tok->line, $tok->column);
+        $lex = $tok->lexeme;
+        $nl = \substr_count($lex, "\n");
+        if ($nl === 0) {
+            $endLine = $tok->line;
+            $endColumn = $tok->column + \mb_strlen($lex);
+        } else {
+            $endLine = $tok->line + $nl;
+            $endColumn = \mb_strlen(\substr($lex, \strrpos($lex, "\n") + 1)) + 1;
+        }
+        return new ParseError($message, $tok->line, $tok->column, $endLine, $endColumn);
     }
 }

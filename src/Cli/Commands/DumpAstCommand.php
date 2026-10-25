@@ -3,6 +3,7 @@
 namespace Cli\Commands;
 
 use Cli\Command;
+use Cli\Option;
 use Cli\ParsedArgs;
 
 final class DumpAstCommand extends Command
@@ -14,7 +15,13 @@ final class DumpAstCommand extends Command
     public function usage(): string { return '[options] [files…]'; }
 
     /** @return \Cli\Option[] */
-    public function options(): array { return CompileOptions::shared(); }
+    public function options(): array
+    {
+        return \array_merge(CompileOptions::shared(), [
+            new Option('tolerant', \Cli\ArgParse::FLAG, 'Recover from syntax errors; print the tree and every error'),
+            new Option('ranges', \Cli\ArgParse::FLAG, 'Print spans as start-end ranges'),
+        ]);
+    }
 
     public function run(ParsedArgs $args): int
     {
@@ -27,6 +34,16 @@ final class DumpAstCommand extends Command
         }
         if (\count($sources) === 0) {
             return 66;
+        }
+        if ($args->flag('tolerant')) {
+            $r = \Parser\Parser::parseTolerant($sources[0]);
+            $out = \Parser\Dump::program($r->program);
+            foreach ($r->errors as $e) {
+                $out .= 'error ' . (string)$e->errLine . ':' . (string)$e->column . '-'
+                    . (string)$e->endLine . ':' . (string)$e->endColumn . ' ' . $e->getMessage() . "\n";
+            }
+            \Manticore\puts($out);
+            return 0;
         }
         try {
             $program = \Parser\Parser::parseSource($sources[0]);

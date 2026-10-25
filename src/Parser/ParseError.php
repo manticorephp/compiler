@@ -13,13 +13,17 @@ final class ParseError extends \RuntimeException
 {
     public int $column;
     public int $errLine;
+    public int $endLine;
+    public int $endColumn;
 
-    public function __construct(string $message, int $line, int $column)
+    public function __construct(string $message, int $line, int $column, int $endLine = 0, int $endColumn = 0)
     {
         parent::__construct(
             $message . ' at line ' . (string)$line . ', column ' . (string)$column
         );
         $this->errLine = $line;
         $this->column = $column;
+        $this->endLine = $endLine;
+        $this->endColumn = $endColumn;
     }
 }
