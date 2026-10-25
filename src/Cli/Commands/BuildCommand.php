@@ -99,7 +99,19 @@ final class BuildCommand extends Command
         $apps = isset($manifest["applications"]) ? $manifest["applications"] : [];
         foreach ($apps as $app) {
             $name = (string)$app["name"];
-            $srcDir = (string)$app["src"];
+            // `src` is a directory, or a list of them for a project whose code sits in several
+            // roots (a Laravel app: app/, bootstrap/, routes/, config/). The first names the target.
+            /** @var string[] $srcDirs */
+            $srcDirs = [];
+            $srcField = $app["src"];
+            if (\is_array($srcField)) {
+                foreach ($srcField as $sd) {
+                    $srcDirs[] = (string)$sd;
+                }
+            } else {
+                $srcDirs[] = (string)$srcField;
+            }
+            $srcDir = $srcDirs[0];
             $output = (string)$app["output"];
             /** @var string[] $excludes */
             $excludes = [];
@@ -137,13 +149,18 @@ final class BuildCommand extends Command
             // whose autoload roots nest hits it.
             /** @var array<string,bool> $seenPath */
             $seenPath = [];
-            foreach (\Manticore\collect_php_source_files($srcDir, $moduleExcludes) as $sf) {
-                if (isset($seenPath[\Manticore\__mc_source_path($sf)])) {
-                    continue;
+            foreach ($srcDirs as $sdir) {
+                foreach (\Manticore\collect_php_source_files($sdir, $moduleExcludes) as $sf) {
+                    if (isset($seenPath[\Manticore\__mc_source_path($sf)])) {
+                        continue;
+                    }
+                    $seenPath[\Manticore\__mc_source_path($sf)] = true;
+                    $sources[] = \Manticore\__mc_source_contents($sf);
+                    $paths[] = \Manticore\__mc_source_path($sf);
+                    if ($entry !== "") {
+                        \Manticore\CompileArgs::$lazyUnitPaths[\rtrim(\Manticore\__mc_source_path($sf), "/")] = true;
+                    }
                 }
-                $seenPath[\Manticore\__mc_source_path($sf)] = true;
-                $sources[] = \Manticore\__mc_source_contents($sf);
-                $paths[] = \Manticore\__mc_source_path($sf);
             }
             // Composer discovery. "composer": true builds the project the way Composer
             // sees it — its own composer.json autoload (psr-4/psr-0 + classmap dirs)
@@ -177,7 +194,9 @@ final class BuildCommand extends Command
                 );
                 /** @var array<string,bool> $covered */
                 $covered = [];
-                $covered[\rtrim($srcDir, "/")] = true;
+                foreach ($srcDirs as $sdir) {
+                    $covered[\rtrim($sdir, "/")] = true;
+                }
                 // composer's BOOTSTRAP set. Everything else it autoloads is
                 // demand-driven, so a file there that declares nothing is not a
                 // compile unit at all ({@see __mc_source_may_declare}).

@@ -2326,6 +2326,16 @@ final class CompileArgs
     /** A `composer: true` build: `vendor/autoload.php` and composer's generated files are built in ({@see \Parser\IncludePath::isComposerGenerated}). */
     public static bool $composerBuild = false;
 
+    /**
+     * Files of an entry-mode application's own `src` roots. Their top-level
+     * side effects run when the program `require`s them, not at startup:
+     * a Laravel `routes/web.php` calls `Route::get()` on a facade nothing has
+     * set yet when the eager model runs it ahead of the entry.
+     *
+     * @var array<string,bool>
+     */
+    public static array $lazyUnitPaths = [];
+
     /** @var array<string, \Parser\Ast\Expr> */
     public static array $externConstants = [];
 
@@ -4082,6 +4092,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $lastIdx = \count($sources) - 1;
     /** @var array<string, string> resolved path → value-slot global name */
     $includeSlots = [];
+    /** @var array<string, string> resolved path → function that runs the file on its first `require` */
+    $includeUnits = [];
     // Compute all source-wide lexical metadata before releasing raw source
     // strings during the parse loop. lower_module receives a copy-on-write
     // source array, so clearing an element releases its bytes here without
@@ -4245,6 +4257,72 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // require …`. Nested in an `if`, those used to silently kill the whole
         // program — a composer application compiled and then did nothing.
         $retKind = $isEntry ? 0 : __mc_file_return_kind($topStmts);
+        if (!$isEntry && $incSlot !== '' && $srcPath !== '' && isset(CompileArgs::$lazyUnitPaths[$srcPath])) {
+            $effects = false;
+            foreach ($topStmts as $s) {
+                if (!__mc_stmt_declares($s) && !__mc_stmt_is_pure_return($s)) {
+                    $effects = true;
+                    break;
+                }
+            }
+            if ($effects) {
+                $unitName = '__mc_unit_' . (string)$i;
+                $includeSlots[$incAbs] = $incSlot;
+                $includeUnits[$incAbs] = $unitName;
+                $span0 = $topStmts[0]->span;
+                $doneKey = $incSlot . '_d';
+                $slotRef = function (string $key) use ($span0): \Parser\Ast\Expr {
+                    return \Parser\Ast\Expr::arrayAccess(
+                        \Parser\Ast\Expr::variable('GLOBALS', $span0),
+                        \Parser\Ast\Expr::string($key, $span0),
+                        $span0,
+                    );
+                };
+                /** @var \Parser\Ast\Stmt[] $body */
+                $body = [];
+                $body[] = \Parser\Ast\Stmt::if_(
+                    $slotRef($doneKey),
+                    new \Parser\Ast\Block([\Parser\Ast\Stmt::return_($slotRef($incSlot), $span0)]),
+                    [],
+                    null,
+                    $span0,
+                );
+                $body[] = \Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign($slotRef($doneKey), \Parser\Ast\Expr::call('__mir_to_cell', [\Parser\Ast\Expr::int(1, $span0)], $span0), $span0),
+                    $span0,
+                );
+                $body[] = \Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign($slotRef($incSlot), \Parser\Ast\Expr::call('__mir_to_cell', [\Parser\Ast\Expr::int(1, $span0)], $span0), $span0),
+                    $span0,
+                );
+                $eofLabel = '__mc_eof_' . (string)$i;
+                /** @var \Parser\Ast\Stmt[] $effectStmts */
+                $effectStmts = [];
+                foreach ($topStmts as $s) {
+                    if (__mc_stmt_declares($s)) {
+                        $stmts[] = $s;
+                    } else {
+                        $effectStmts[] = $s;
+                    }
+                }
+                foreach (__mc_rewrite_file_returns($effectStmts, $incSlot, $eofLabel) as $s) {
+                    $body[] = $s;
+                }
+                $body[] = new \Parser\Ast\LabelStmt($eofLabel, $span0);
+                $body[] = \Parser\Ast\Stmt::return_($slotRef($incSlot), $span0);
+                $stmts[] = \Parser\Ast\Stmt::function_(
+                    new \Parser\Ast\FunctionDecl($unitName, [], null, new \Parser\Ast\Block($body), $span0),
+                    $span0,
+                );
+                foreach ($program->useAliases as $short => $fqn) {
+                    $aliases[$short] = $fqn;
+                }
+                foreach ($program->docComments as $d) {
+                    $docs[] = $d;
+                }
+                continue;
+            }
+        }
         if ($retKind > 0) {
             // Any return claims the slot, valued or not — a bare `return`
             // stores NULL, which is what php's `require` of it evaluates to.
@@ -5315,6 +5393,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // parse-merge time, the only point that still knows which file each
         // top-level statement came from.
         $module->includeSlots = $includeSlots;
+        $module->includeUnits = $includeUnits;
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         // `if (is_int($x))` reads an unboxed copy of a cell $x ({@see NarrowScalarGuards}).
         $module = (new \Compile\Mir\Passes\NarrowScalarGuards())->run($module);

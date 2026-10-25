@@ -397,6 +397,8 @@ final class EmitLlvm implements EmitVisitor
      *  `return` value ({@see Module::$includeSlots}). Read by the
      *  `require`/`include` builtin. @var array<string, string> */
     private array $includeSlots = [];
+    /** @var array<string, string> */
+    private array $includeUnits = [];
     /**
      * String literals of `$n` that name a builtin twin.
      * @param array<string, int> $twins
@@ -760,6 +762,7 @@ final class EmitLlvm implements EmitVisitor
         $this->globalVarNames = $module->globalVarNames;
         $this->globalsViewNames = $module->globalsViewNames;
         $this->includeSlots = $module->includeSlots;
+        $this->includeUnits = $module->includeUnits;
         $this->builtinTwinReq = $module->builtinTwinReq;
         $this->builtinTwinRet = $module->builtinTwinRet;
         $this->builtinTwinParams = $module->builtinTwinParams;

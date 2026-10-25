@@ -2716,6 +2716,11 @@ trait EmitLlvmBuiltins
                 $one = $this->ssa->allocReg();
                 $out .= '  ' . $one . " = call i64 @__manticore_box_int(i64 1)\n";
                 $out .= '  store i64 ' . $one . ', ptr ' . $res . "\n";
+            } elseif (isset($this->includeUnits[$absPath]) && isset($this->definedFns[$this->mangle($this->includeUnits[$absPath])])) {
+                // A file whose top level runs when it is first required.
+                $v = $this->ssa->allocReg();
+                $out .= '  ' . $v . ' = call i64 @manticore_' . $this->mangle($this->includeUnits[$absPath]) . "()\n";
+                $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
             } else {
                 $v = $this->ssa->allocReg();
                 $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";

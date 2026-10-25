@@ -72,6 +72,8 @@ final class Module
      *  php's `int(1)`.
      *  @var array<string, string> */
     public array $includeSlots = [];
+    /** @var array<string, string> resolved path → function running that file on its first `require` */
+    public array $includeUnits = [];
 
     /** Every function name `function_exists()` should answer true for, for a
      *  program that asks with a NON-literal argument. Filtered through the same
