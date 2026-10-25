@@ -4012,6 +4012,22 @@ final class UnifiedArrayRuntime
         $inc->br($done);
         $done->retVoid();
 
+        // `__mir_ref_shared(p) -> i1`: does a binding other than this holder
+        // still name the box? php keeps an element's reference through a copy
+        // (`[...$refs]`) only then. A non-box address is someone else's
+        // storage, so it is shared by definition.
+        $fn = $this->module->func('__mir_ref_shared', Type::i1());
+        $fn->attrs = 'noinline';
+        $p = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $box = $fn->block('box');
+        $yes = $fn->block('yes');
+        $e->brIf($e->icmp('eq', $p, Value::null()), $yes, $chk);
+        $chk->brIf($chk->icmp('eq', $chk->load($i64, $chk->gep(Type::i8(), $p, [$hdrOff])), $magic), $box, $yes);
+        $box->ret($box->icmp('sgt', $box->load($i64, $box->gep(Type::i8(), $p, [$rcOff])), Value::int($i64, 1)));
+        $yes->ret(Value::int(Type::i1(), 1));
+
         $fn = $this->module->func('__mir_ref_unref', Type::i1());
         $fn->attrs = 'noinline';
         $p = $fn->param(Type::ptr(), 'p');
@@ -4407,7 +4423,15 @@ final class UnifiedArrayRuntime
      */
     private function emitValueAt(): void
     {
-        $fn = $this->module->func('__mir_array_value_at', Type::i64());
+        $this->emitValueAtVariant('__mir_array_value_at', true);
+        // The STORED word, a REF cell included — what a copy that keeps
+        // references reads ({@see emitSpreadInto}).
+        $this->emitValueAtVariant('__mir_array_raw_value_at', false);
+    }
+
+    private function emitValueAtVariant(string $name, bool $deref): void
+    {
+        $fn = $this->module->func($name, Type::i64());
         $arr = $fn->param(Type::ptr(), 'arr');
         $i = $fn->param(Type::i64(), 'i');
         $e = $fn->block('entry');
@@ -4434,7 +4458,7 @@ final class UnifiedArrayRuntime
         $phi = $chk->phi(Type::i64());
         $phi->addIncoming($pv, $packed);
         $phi->addIncoming($hv, $hashed);
-        $chk->ret($chk->call('__mir_deref_cell', Type::i64(), [$phi->value()]));
+        $chk->ret($deref ? $chk->call('__mir_deref_cell', Type::i64(), [$phi->value()]) : $phi->value());
     }
 
     /**
@@ -4697,6 +4721,24 @@ final class UnifiedArrayRuntime
         $cond->brIf($cond->icmp('sge', $i, $len), $end, $body);
         $iv = $body->load(Type::i64(), $iSlot);
         $val = $body->call('__mir_array_value_at', Type::i64(), [$src, $iv]);
+        // A REF element another binding still names stays a REF in the copy, as
+        // php's spread keeps it (`[...$refs]`); one only the source holds is the value.
+        $raw = $body->call('__mir_array_raw_value_at', Type::i64(), [$src, $iv]);
+        $nib = $body->and_($body->lshr($raw, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isRef = $body->and_($body->icmp('ugt', $raw, Value::int(Type::i64(), -4503599627370496)),
+            $body->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)));
+        $refChk = $fn->block('sp_refchk');
+        $refJoin = $fn->block('sp_refjoin');
+        $body->brIf($isRef, $refChk, $refJoin);
+        $shared = $refChk->call('__mir_ref_shared', Type::i1(), [
+            $refChk->inttoptr($refChk->and_($raw, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr())]);
+        $kept = $refChk->select($shared, $raw, $val);
+        $refChk->br($refJoin);
+        $vphi = $refJoin->phi(Type::i64());
+        $vphi->addIncoming($val, $body);
+        $vphi->addIncoming($kept, $refChk);
+        $body = $refJoin;
+        $val = $vphi->value();
         // The destination is a buffer of its own and owns what lands in it
         // ({@see Debug::$rcBufferOnly}); the words were copied, not their
         // counts. The spread's result released every element it never took.

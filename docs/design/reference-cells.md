@@ -4,7 +4,9 @@ Status: **implemented (as of 2026-09-14).** `[&$a]`, `[&$this->p]`,
 `[&$a[$k]]`, `[$v, &$v]`, `$a[$k] = &$v`, cell-alias ownership, `unset` breaking the
 binding and a mutated `mixed` by-ref param all match php; the deepclone witness is
 byte-identical. Still open: a `PropertyAccess` as the TARGET of `=&` (a copy), the
-static-property source, `&...$vars`, `R:` in `serialize` and the var_dump `&` marker.
+static-property source, `R:` in `serialize` and the var_dump `&` marker. `$a = &$b` on two locals
+binds through a shared box (`LocalSlots::aliasBoxNames`), and `...$xs` into a by-ref
+parameter passes references (`LowerFns::lowerRefSpread`) since 2026-10-25.
 The box is counted and a property is promoted in place since 2026-09-23,
 so `clone` now shares the BINDING as php does. The refusal this replaced
 (`LowerFromAst::lowerArrayLit`, "an array literal cannot bind an element by
