@@ -4,7 +4,7 @@
 
 function mysqli_affected_rows(mysqli $mysql): int|string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->affectedRows;
 }
 
 function mysqli_autocommit(mysqli $mysql, bool $enable): bool
@@ -24,12 +24,12 @@ function mysqli_change_user(mysqli $mysql, string $username, #[\SensitiveParamet
 
 function mysqli_character_set_name(mysqli $mysql): string
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->character_set_name();
 }
 
 function mysqli_close(mysqli $mysql): true
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->close();
 }
 
 function mysqli_commit(mysqli $mysql, int $flags = 0, ?string $name = null): bool
@@ -39,17 +39,18 @@ function mysqli_commit(mysqli $mysql, int $flags = 0, ?string $name = null): boo
 
 function mysqli_connect(?string $hostname = null, ?string $username = null, #[\SensitiveParameter] ?string $password = null, ?string $database = null, ?int $port = null, ?string $socket = null): false|mysqli
 {
-    throw new Error('mysqli: not implemented');
+    $m = new mysqli();
+    return __McMysqliConn::of($m)->connect($hostname, $username, $password, $database, $port, $socket, 0, false) ? $m : false;
 }
 
 function mysqli_connect_errno(): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::$connErrno;
 }
 
 function mysqli_connect_error(): ?string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::$connError;
 }
 
 function mysqli_data_seek(mysqli_result $result, int $offset): bool
@@ -69,22 +70,22 @@ function mysqli_dump_debug_info(mysqli $mysql): bool
 
 function mysqli_errno(mysqli $mysql): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->errno;
 }
 
 function mysqli_error(mysqli $mysql): string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->error;
 }
 
 function mysqli_error_list(mysqli $mysql): array
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->errorList;
 }
 
 function mysqli_escape_string(mysqli $mysql, string $string): string
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->real_escape_string($string);
 }
 
 function mysqli_execute(mysqli_stmt $statement, ?array $params = null): bool
@@ -149,7 +150,7 @@ function mysqli_fetch_row(mysqli_result $result): array|false|null
 
 function mysqli_field_count(mysqli $mysql): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->fieldCount;
 }
 
 function mysqli_field_seek(mysqli_result $result, int $index): true
@@ -169,12 +170,12 @@ function mysqli_free_result(mysqli_result $result): void
 
 function mysqli_get_charset(mysqli $mysql): ?object
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->get_charset();
 }
 
 function mysqli_get_client_info(?mysqli $mysql = null): string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::clientInfo();
 }
 
 function mysqli_get_client_stats(): array
@@ -184,7 +185,7 @@ function mysqli_get_client_stats(): array
 
 function mysqli_get_client_version(): int
 {
-    throw new Error('mysqli: not implemented');
+    return \PHP_VERSION_ID;
 }
 
 function mysqli_get_connection_stats(mysqli $mysql): array
@@ -194,7 +195,7 @@ function mysqli_get_connection_stats(mysqli $mysql): array
 
 function mysqli_get_host_info(mysqli $mysql): string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->hostInfo;
 }
 
 function mysqli_get_links_stats(): array
@@ -204,17 +205,17 @@ function mysqli_get_links_stats(): array
 
 function mysqli_get_proto_info(mysqli $mysql): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->protocolVersion;
 }
 
 function mysqli_get_server_info(mysqli $mysql): string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->serverInfo;
 }
 
 function mysqli_get_server_version(mysqli $mysql): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->serverVersion;
 }
 
 function mysqli_get_warnings(mysqli $mysql): false|mysqli_warning
@@ -224,17 +225,17 @@ function mysqli_get_warnings(mysqli $mysql): false|mysqli_warning
 
 function mysqli_info(mysqli $mysql): ?string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->info;
 }
 
 function mysqli_init(): false|mysqli
 {
-    throw new Error('mysqli: not implemented');
+    return new mysqli();
 }
 
 function mysqli_insert_id(mysqli $mysql): int|string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->insertId;
 }
 
 function mysqli_kill(mysqli $mysql, int $process_id): bool
@@ -269,12 +270,12 @@ function mysqli_num_rows(mysqli_result $result): int|string
 
 function mysqli_options(mysqli $mysql, int $option, $value): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->options($option, $value);
 }
 
 function mysqli_ping(mysqli $mysql): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->ping();
 }
 
 function mysqli_poll(?array &$read, ?array &$error, array &$reject, int $seconds, int $microseconds = 0): false|int
@@ -294,12 +295,12 @@ function mysqli_query(mysqli $mysql, string $query, int $result_mode = 0): bool|
 
 function mysqli_real_connect(mysqli $mysql, ?string $hostname = null, ?string $username = null, #[\SensitiveParameter] ?string $password = null, ?string $database = null, ?int $port = null, ?string $socket = null, int $flags = 0): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->real_connect($hostname, $username, $password, $database, $port, $socket, $flags);
 }
 
 function mysqli_real_escape_string(mysqli $mysql, string $string): string
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->real_escape_string($string);
 }
 
 function mysqli_real_query(mysqli $mysql, string $query): bool
@@ -324,7 +325,8 @@ function mysqli_release_savepoint(mysqli $mysql, string $name): bool
 
 function mysqli_report(int $flags): true
 {
-    throw new Error('mysqli: not implemented');
+    __McMysqliConn::$mode = $flags;
+    return true;
 }
 
 function mysqli_rollback(mysqli $mysql, int $flags = 0, ?string $name = null): bool
@@ -339,27 +341,27 @@ function mysqli_savepoint(mysqli $mysql, string $name): bool
 
 function mysqli_select_db(mysqli $mysql, string $database): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->select_db($database);
 }
 
 function mysqli_set_charset(mysqli $mysql, string $charset): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->set_charset($charset);
 }
 
 function mysqli_set_opt(mysqli $mysql, int $option, $value): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->options($option, $value);
 }
 
 function mysqli_sqlstate(mysqli $mysql): string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->sqlstate;
 }
 
 function mysqli_ssl_set(mysqli $mysql, ?string $key, ?string $certificate, ?string $ca_certificate, ?string $ca_path, ?string $cipher_algos): true
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->ssl_set($key, $certificate, $ca_certificate, $ca_path, $cipher_algos);
 }
 
 function mysqli_stat(mysqli $mysql): false|string
@@ -514,12 +516,12 @@ function mysqli_store_result(mysqli $mysql, int $mode = 0): false|mysqli_result
 
 function mysqli_thread_id(mysqli $mysql): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->threadId;
 }
 
 function mysqli_thread_safe(): bool
 {
-    throw new Error('mysqli: not implemented');
+    return true;
 }
 
 function mysqli_use_result(mysqli $mysql): false|mysqli_result
@@ -529,5 +531,5 @@ function mysqli_use_result(mysqli $mysql): false|mysqli_result
 
 function mysqli_warning_count(mysqli $mysql): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::of($mysql)->link()->warningCount;
 }

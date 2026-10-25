@@ -69,11 +69,17 @@ function describeFunction(ReflectionFunctionAbstract $f): array
     return ['params' => $params, 'return' => typeStr($ret), 'tentative' => $tentative];
 }
 
+/** Manticore's own members, never Zend surface: `__mc*` internals and the `__debugInfo` that shapes var_dump. */
+function internalMember(string $n): bool
+{
+    return strncasecmp($n, '__mc', 4) === 0 || strcasecmp($n, '__debugInfo') === 0;
+}
+
 function describeClass(ReflectionClass $c): array
 {
     $m = [];
     foreach ($c->getMethods() as $meth) {
-        if ($meth->getDeclaringClass()->getName() !== $c->getName()) {
+        if ($meth->getDeclaringClass()->getName() !== $c->getName() || internalMember($meth->getName())) {
             continue;
         }
         $m[$meth->getName()] = describeFunction($meth) + [
@@ -86,7 +92,7 @@ function describeClass(ReflectionClass $c): array
     ksort($m);
     $p = [];
     foreach ($c->getProperties() as $prop) {
-        if ($prop->getDeclaringClass()->getName() !== $c->getName()) {
+        if ($prop->getDeclaringClass()->getName() !== $c->getName() || internalMember($prop->getName())) {
             continue;
         }
         $p[$prop->getName()] = [

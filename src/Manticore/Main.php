@@ -4371,6 +4371,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $pdoMysqlSrc = prelude_src_or_empty("pdo_mysql.php");
     $pdoPgsqlOffSrc = prelude_src_or_empty("pdo_pgsql_off.php");
     $pdoMysqlOffSrc = prelude_src_or_empty("pdo_mysql_off.php");
+    $pdoSqliteOffSrc = prelude_src_or_empty("pdo_sqlite_off.php");
     // ext/mysqli: classes + constants in one file, the procedural API in the other.
     $mysqliSrc = prelude_src_or_empty("mysqli.php");
     $mysqliFnSrc = prelude_src_or_empty("mysqli_fn.php");
@@ -4855,11 +4856,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // starts with it, so no program owns one without meaning the extension.
     $useMysqli = $demand->mentionsPrefix('mysqli');
     $usePdoPgsql = $usePdo && $demand->opensDriver("pgsql");
-    $usePdoMysql = $usePdo && $demand->opensDriver("mysql");
+    // mysqli rides the pdo_mysql wire (__McPdoMyWire), which throws PDOException and leans on __McPdo and the TLS layer:
+    // a mysqli program links the PDO facade and the mysql driver, never sqlite (FFI, -lsqlite3): a stand-in answers its open.
+    $usePdoMysql = ($usePdo && $demand->opensDriver("mysql")) || $useMysqli;
+    $usePdoCore = $usePdo || $useMysqli;
     // PDO::ERRMODE_WARNING routes through trigger_error, which lives in
     // errors.php — and the demand gate cannot see a call made from the prelude
     // itself, only one made from user code.
-    if ($usePdo) {
+    if ($usePdoCore) {
         $useErrors = true;
     }
 
@@ -5089,7 +5093,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         dprint("compile failed: prelude: cannot read curl_multi.php");
         return null;
     }
-    if ($usePdo && ($pdoSrc === "" || $pdoSqliteSrc === "" || $pdoSqlSrc === "" || $pdoPgsqlSrc === "" || $pdoMysqlSrc === "" || $pdoPgsqlOffSrc === "" || $pdoMysqlOffSrc === "")) {
+    if ($usePdoCore && ($pdoSrc === "" || $pdoSqliteSrc === "" || $pdoSqliteOffSrc === "" || $pdoSqlSrc === "" || $pdoPgsqlSrc === "" || $pdoMysqlSrc === "" || $pdoPgsqlOffSrc === "" || $pdoMysqlOffSrc === "")) {
         dprint("compile failed: prelude: cannot read pdo.php / pdo_sqlite.php / pdo_sql.php / pdo_pgsql.php / pdo_mysql.php");
         return null;
     }
@@ -5190,11 +5194,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
         $lower->curlSrc = $useCurl ? $curlSrc : "";
         $lower->curlMultiSrc = $useCurlMulti ? $curlMultiSrc : "";
-        $lower->pdoSrc = $usePdo ? $pdoSrc : "";
-        $lower->pdoSqliteSrc = $usePdoSqlite ? $pdoSqliteSrc : "";
+        $lower->pdoSrc = $usePdoCore ? $pdoSrc : "";
+        $lower->pdoSqliteSrc = $usePdoSqlite ? $pdoSqliteSrc : ($usePdoCore ? $pdoSqliteOffSrc : "");
         $lower->pdoSqlSrc = ($usePdoPgsql || $usePdoMysql) ? $pdoSqlSrc : "";
-        $lower->pdoPgsqlSrc = $usePdoPgsql ? $pdoPgsqlSrc : ($usePdo ? $pdoPgsqlOffSrc : "");
-        $lower->pdoMysqlSrc = $usePdoMysql ? $pdoMysqlSrc : ($usePdo ? $pdoMysqlOffSrc : "");
+        $lower->pdoPgsqlSrc = $usePdoPgsql ? $pdoPgsqlSrc : ($usePdoCore ? $pdoPgsqlOffSrc : "");
+        $lower->pdoMysqlSrc = $usePdoMysql ? $pdoMysqlSrc : ($usePdoCore ? $pdoMysqlOffSrc : "");
         $lower->mysqliSrc = $useMysqli ? $mysqliSrc . $mysqliFnSrc : "";
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
