@@ -4150,9 +4150,11 @@ trait EmitLlvmCalls
             $out .= $caseL[$k] . ":\n";
             $argList = 'ptr ' . $struct;
             $argTypes = 'ptr';
+            $armRegs = [];
             for ($f = 0; $f < $numFixed; $f = $f + 1) {
                 $argList .= ', i64 ' . $fixedRegs[$f];
                 $argTypes .= ', i64';
+                $armRegs[] = $fixedRegs[$f];
             }
             for ($e = 0; $e < $k - $numFixed; $e = $e + 1) {
                 $ev = $this->ssa->allocReg();
@@ -4166,7 +4168,10 @@ trait EmitLlvmCalls
                 }
                 $argList .= ', i64 ' . $ev;
                 $argTypes .= ', i64';
+                $armRegs[] = $ev;
             }
+            // A variadic closure takes its trailing arguments as ONE pack, not positionally.
+            $out .= $this->emitDynVariadicPackCalls($fpi, $struct, $armRegs, $res, $endL);
             // The arity pair, so a parameter this arm leaves out takes its default.
             $out .= $this->cloArityStore($fpi, $k);
             $rk = $this->ssa->allocReg();
