@@ -11,7 +11,7 @@
 # files whose two dumps differ (listed in DIR/unstable.txt: dump-ast prints
 # uninitialised memory for some inputs). --check re-runs the CURRENT bin/manticore
 # on the frozen corpus (or --corpus DIR2, e.g. the live tree).
-# The base commit is $STRICT_BASE, default `git merge-base main HEAD`.
+# The base commit is $STRICT_BASE, default `git merge-base main HEAD`; --record dumps with $MANTICORE_BIN (a compiler built from that commit), default bin/manticore.
 
 set -uo pipefail
 
@@ -36,7 +36,7 @@ fi
 if [[ -z "$CORPUS" ]]; then CORPUS="$DIR/corpus"; fi
 
 dump_sha() {
-    "$ROOT/bin/manticore" dump-ast "$1" 2>&1 | shasum | cut -d' ' -f1
+    "${MANTICORE_BIN:-$ROOT/bin/manticore}" dump-ast "$1" 2>&1 | shasum | cut -d' ' -f1
 }
 
 out="$DIR/shas.txt"
@@ -48,6 +48,11 @@ cd "$CORPUS"
 while IFS= read -r f; do
     sha="$(dump_sha "$f")"
     if [[ "$MODE" == "--record" && "$sha" != "$(dump_sha "$f")" ]]; then
+        echo "$f" >> "$DIR/unstable.txt"
+        continue
+    fi
+    # a base compiler that reads an enum case through offset access dumps its ADDRESS as the name
+    if [[ "$MODE" == "--record" ]] && grep -q 'enum ' "$f" && "${MANTICORE_BIN:-$ROOT/bin/manticore}" dump-ast "$f" 2>&1 | grep -qE 'Case [0-9]{8,}'; then
         echo "$f" >> "$DIR/unstable.txt"
         continue
     fi
