@@ -34,7 +34,7 @@ Program
             exprs: [1]
               Expr:StringLiteral @5:1-5:7
                 value: "  <li>"
-          Stmt:Echo @5:7-5:13
+          Stmt:Echo @5:7-5:14
             exprs: [1]
               Expr:Variable @5:11-5:13
                 name: "v"

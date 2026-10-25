@@ -13,9 +13,10 @@
 #    inline HTML after the last `?>`, or nothing follows the last `<?php`).
 # 2. prefix property: top-level statements (dump lines indented exactly 2 spaces) of the
 #    cut dump that precede its first top-level Stmt:Error must be byte-identical to the
-#    same-index statements of the full file's dump. A cut dump with no Stmt:Error excludes
-#    its LAST top-level statement (the one the cut interrupted may be reshaped, e.g. a
-#    class swallowing the rest). The full dump must exit 0 and be non-empty; the run fails
+#    same-index statements of the full file's dump, except the statement right before that
+#    Stmt:Error (or the last two when there is none): the one the cut interrupted may be
+#    reshaped or split in two, e.g. a class swallowing the rest. A tail that is a goto label
+#    (`K:`) is a complete statement. The full dump must exit 0 and be non-empty; the run fails
 #    if fewer than 10 statements per 100 cuts were compared (the check cannot pass vacuously;
 #    a normal run compares ~7 per cut), or if any worker died without reporting.
 # 3. garbage: fixed-seed random byte strings, token-pool shuffles and word shuffles of real
@@ -99,7 +100,7 @@ check_one() {
             [[ -n "$lastopen" ]] && after="$(tail -n +"$lastopen" "$tmp/cut.php" | sed '1s/.*<?php//' | tr -d ' \t\r\n' | head -c 1)"
             case "$tail1" in
                 *';'|*'}'|'?>') ;;
-                *) if [[ -n "$after" && "$lastline" != *'//'* && "$lastline" != '#'* && "$lastline" != *'*/'* \
+                *) if [[ -n "$after" && "$lastline" != *'//'* && "$lastline" != '#'* && "$lastline" != *'*/'* && ! "$lastline" =~ ^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:$ \
                         && ! ( -n "$lastclose" && ( -z "$lastopen" || $lastclose -ge $lastopen ) ) ]]; then
                        echo "FAIL $f @$off: no error for a mid-construct cut (tail: $(tail -c 40 "$tmp/cut.php" | tr '\n' ' '))"
                    fi ;;
@@ -111,7 +112,9 @@ check_one() {
             { cut[FNR] = $0; nc = FNR }
             END {
                 for (i = 1; i <= nc; i++) if (cut[i] ~ /^  Stmt:Error/) { e = i; break }
-                last = (e ? e - 1 : nc - 1)
+                # the interrupted statement may be reshaped, or split in two (`f($a ins` -> `f($a)` and `ins`; `try {} cat`):
+                # the statement before the first Stmt:Error (or the last one) is excluded as well
+                last = (e ? e - 1 : nc - 1) - 1
                 for (i = 1; i <= last; i++) {
                     if (i > nf || cut[i] != full[i]) { print "DIFF statement " i " differs"; exit }
                 }
