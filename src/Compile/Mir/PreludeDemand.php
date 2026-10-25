@@ -29,6 +29,8 @@ final class PreludeDemand
     private array $methods = [];
     /** @var array<string,bool> lowercased identifiers appearing anywhere in code */
     private array $names = [];
+    /** @var array<string,bool> the same minus member names (`->name`, `?->name`, `::name`): what a name family (mentionsPrefix) matches */
+    private array $globalNames = [];
     /** @var array<string,bool> PDO driver schemes (pgsql, mysql, sqlite) a `new PDO('<scheme>:..')` / `PDO::connect(..)` site spells literally */
     private array $dsnSchemes = [];
     /** A construction site whose first argument does not start with a literal `<driver>:` (or a subclass of PDO): the driver is a run-time matter. */
@@ -110,14 +112,34 @@ final class PreludeDemand
         return isset($this->names[\strtolower($name)]);
     }
 
-    /** A string literal is exactly a mysqli name (`'mysqli'`, `'\\mysqli_connect'`, `'MYSQLI_ASSOC'`): a class/function/constant probe or dynamic use. */
+    /**
+     * A string literal that is exactly a mysqli name (`'mysqli'`, `'\\mysqli_connect'`, `'MYSQLI_ASSOC'`) USED as a name:
+     * the first argument of a name probe (`class_exists('mysqli')`, `new ReflectionClass('mysqli')`) or the value of an
+     * assignment (`$cls = 'mysqli'; new $cls`). A literal compared against (`$ext === 'mysqli'`) or handed to any other
+     * call is data, not a use: the compiler's own source spells 'mysqli' that way and must not link the extension.
+     */
     private bool $mysqliLit = false;
 
-    /** Some identifier occurring as code starts with `$prefix` (lowercase): a whole family of names, such as mysqli*. */
+    private const NAME_PROBES = ['class_exists' => true, 'interface_exists' => true, 'enum_exists' => true, 'function_exists' => true,
+        'is_callable' => true, 'defined' => true, 'constant' => true, 'method_exists' => true, 'property_exists' => true,
+        'is_a' => true, 'is_subclass_of' => true, 'class_implements' => true, 'class_parents' => true, 'get_class_methods' => true];
+
+    /** @param Token[] $toks */
+    private static function literalUsedAsName(array $toks, int $i): bool
+    {
+        if ($i < 1) { return false; }
+        $p = $toks[$i - 1]->kind;
+        if ($p === TokenKind::Equals) { return true; }
+        if ($p !== TokenKind::OpenParen || $i < 2 || $toks[$i - 2]->kind !== TokenKind::Identifier) { return false; }
+        $f = \strtolower($toks[$i - 2]->lexeme);
+        return isset(self::NAME_PROBES[$f]) || \str_starts_with($f, 'reflection');
+    }
+
+    /** Some class / function / constant name occurring as code starts with `$prefix` (lowercase): a whole family of names, such as mysqli*. A member name (`$x->mysqliSrc`) is not one. */
     public function mentionsPrefix(string $prefix): bool
     {
         if ($prefix === 'mysqli' && $this->mysqliLit) { return true; }
-        foreach ($this->names as $n => $_) {
+        foreach ($this->globalNames as $n => $_) {
             if (\str_starts_with(\strval($n), $prefix)) { return true; }
         }
         return false;
@@ -325,7 +347,9 @@ final class PreludeDemand
                 continue;
             }
             if ($kind === TokenKind::StringLiteral) {
-                if (!$this->mysqliLit && \preg_match('/^["\']\\\\{0,2}mysqli(_\\w+)?["\']$/i', $t->lexeme) === 1) { $this->mysqliLit = true; }
+                if (!$this->mysqliLit && \preg_match('/^["\']\\\\{0,2}mysqli(_\\w+)?["\']$/i', $t->lexeme) === 1 && self::literalUsedAsName($toks, $i)) {
+                    $this->mysqliLit = true;
+                }
                 $this->walkInterpolation($t->lexeme);
                 $i = $i + 1;
                 continue;
@@ -348,6 +372,8 @@ final class PreludeDemand
             }
             $lower = \strtolower($t->lexeme);
             $this->names[$lower] = true;
+            $pm = $i > 0 ? $toks[$i - 1]->kind : '';
+            if ($pm !== TokenKind::Arrow && $pm !== TokenKind::NullsafeArrow && $pm !== TokenKind::DoubleColon) { $this->globalNames[$lower] = true; }
             if ($lower === 'pdo') { $this->noteDsnSite($toks, $i, $n); }
             if ($i + 1 >= $n || $toks[$i + 1]->kind !== TokenKind::OpenParen) {
                 $i = $i + 1;
