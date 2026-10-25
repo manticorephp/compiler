@@ -12,3 +12,5 @@ echo $q->w(...['a', '=', 3], boolean: 'or'), "\n";
 echo $q->{$m}(...['a', '=', 3], boolean: 'or'), "\n";
 echo $q->{$m}('a', boolean: 'or'), "\n";
 echo $q->{$m}(...['a'], op: '>', boolean: 'or'), "\n";
+echo (new ReflectionFunction('strrev'))->invoke('abc'), "\n";
+echo (new ReflectionMethod('Q', 'w'))->invoke($q, 'a', 'b'), "\n";

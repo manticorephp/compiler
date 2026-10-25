@@ -249,7 +249,8 @@ final class TrampolineSynth
         $req = $ctor === null ? 0 : $ctor->requiredParams();
         $tot = $ctor === null ? 0 : \count($ctor->params);
         $name = self::symBase($class, '__construct');
-        $body = self::arms($req, $tot, fn (string $args): string => 'new ' . $fqn . '(' . $args . ')', false);
+        $mk = fn (string $args): string => 'new ' . $fqn . '(' . $args . ')';
+        $body = self::$bindByName ? self::spreadBody($mk, false) : self::arms($req, $tot, $mk, false);
         return self::ARGS_HINT . 'function ' . $name . "(int \$t, array \$a): mixed {\n" . $body . "}\n";
     }
 
@@ -269,7 +270,7 @@ final class TrampolineSynth
         }
         $name = self::symBase($class, $method);
         $variadic = $tot > 0 && $mm->params[$tot - 1]->variadic;
-        $body = $variadic ? self::spreadBody($mk, $void) : self::arms($req, $tot, $mk, $void);
+        $body = ($variadic || self::$bindByName) ? self::spreadBody($mk, $void) : self::arms($req, $tot, $mk, $void);
         return self::ARGS_HINT . 'function ' . $name . '(' . $recv . ", array \$a): mixed {\n" . $body . "}\n";
     }
 
@@ -289,9 +290,6 @@ final class TrampolineSynth
      */
     private static function arms(int $req, int $tot, callable $mk, bool $void): string
     {
-        // An arm reads $a[0..k) by position; a string key (a named argument) can only be
-        // bound against the signature, which the spread expansion does.
-        if (self::$bindByName) { return self::spreadBody($mk, $void); }
         $stmt = function (string $call) use ($void): string {
             return $void ? ('  ' . $call . "; return null;\n") : ('  return ' . $call . ";\n");
         };

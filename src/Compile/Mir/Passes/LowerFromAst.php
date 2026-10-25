@@ -1243,6 +1243,7 @@ final class LowerFromAst implements Pass
             }
         }
 
+        if (\Parser\Parser::$sawNamedSpread) { $module->namedSpread = true; }
         // Reflection Ф2: an invoke trampoline per (user class, method) + ctor,
         // synthesized from the now-complete class table (same point + pattern as
         // __mir_dump_object). Gated on the program reflecting at all; a

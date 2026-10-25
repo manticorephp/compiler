@@ -4673,6 +4673,13 @@ trait EmitLlvmCalls
                 $out .= '  ' . $pick . ' = select i1 ' . $posHas . ', i64 ' . $ev . ', i64 ' . $byName . "\n";
                 $ev = $pick;
             }
+            if ($elemType === null || $elemType->kind === Type::KIND_CELL || $elemType->kind === Type::KIND_UNKNOWN) {
+                // An erased pack may hold a raw-hinted buffer (a variadic `string ...$args`): its words are
+                // untagged payloads, which only the buffer's own hint can say.
+                $dec = $this->ssa->allocReg();
+                $out .= '  ' . $dec . ' = call i64 @__mir_elem_decode(ptr ' . $arrReg . ', i64 ' . $ev . ")\n";
+                $ev = $dec;
+            }
             $pt = $ptypes[$k] ?? null;
             $needBox = ($tmask[$k] ?? false)
                 || ($pt !== null && $pt->kind === Type::KIND_CELL);
