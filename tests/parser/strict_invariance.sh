@@ -51,7 +51,7 @@ while IFS= read -r f; do
         echo "$f" >> "$DIR/unstable.txt"
         continue
     fi
-    if [[ "$MODE" == "--check" ]] && /usr/bin/grep -qxF "$f" "$DIR/unstable.txt"; then
+    if [[ "$MODE" == "--check" ]] && grep -qxF "$f" "$DIR/unstable.txt"; then
         continue
     fi
     printf '%s  %s\n' "$sha" "$f" >> "$out"

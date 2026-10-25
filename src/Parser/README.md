@@ -102,9 +102,17 @@ error as a `parse.error` diagnostic; a file with errors is **not** given to the 
 because the Analyze walkers are not `Error`-node aware. Compile paths (lowering) throw
 on an `Error` node and only ever see strict trees.
 
-**Ranges.** With ranges on, every node's `Span` carries `endLine`/`endColumn` (just past
-its last byte) and `beginLine`/`beginColumn` (first byte, when it differs from the anchor
-that `dump-ast` prints); read them via `Span::startLine()/startColumn()`. Columns are
+**Recovery.** A construct that cannot recover in place throws; the nearest statement (or
+member) boundary records the error and skips tokens to a sync point. Braces opened before
+the failure point (a `match`, a closure body) are still open: the skip runs until they
+close. Past the failure point `(`/`[` are counted so `;` inside them does not end the skip.
+Nesting is capped at 1000 levels (statements, expression re-entries, prefix-operator
+operands): deeper input records ONE `nesting too deep` error and the statement is skipped.
+
+**Ranges.** With ranges on, every node's `Span` is a `RangedSpan` (`Span` itself has no
+end): `endLine()`/`endColumn()` (just past its last byte) and `startLine()/startColumn()`
+(first byte, when it differs from the anchor that `dump-ast` prints). Tokens are
+`RangedToken`s only then, so the strict path pays no memory for ends. Columns are
 **byte** columns, 1-based, not characters. Ranges nest: a child lies inside its parent.
 
 **Names.** With names on, `Program::$names` lists every `NameRef` (class / function /

@@ -202,8 +202,8 @@ flood() {
     run_limited "$MANTICORE" dump-ast --tolerant "$f" > "$WORK/flood_$name.out" 2>&1
     local rc=$?
     local n last
-    n="$(/usr/bin/grep -c '^error ' "$WORK/flood_$name.out")"
-    last="$(/usr/bin/grep '^error ' "$WORK/flood_$name.out" | tail -n 1)"
+    n="$(grep -c '^error ' "$WORK/flood_$name.out")"
+    last="$(grep '^error ' "$WORK/flood_$name.out" | tail -n 1)"
     if [[ $rc -eq 0 && $n -eq 101 && "$last" == *"too many errors" ]]; then passed=$((passed + 1)); printf 'PASS flood_%s\n' "$name"
     else failed=$((failed + 1)); failed_names+=("flood_$name"); printf 'FAIL flood_%s  (exit %d, %d errors, last: %s)\n' "$name" "$rc" "$n" "$last"; fi
     rm -f "$f" "$WORK/flood_$name.out"
@@ -220,10 +220,10 @@ clean() {
     cat > "$f"
     run_limited "$MANTICORE" dump-ast --tolerant "$f" > "$WORK/clean_$name.out" 2>&1
     local rc=$? n
-    n="$(/usr/bin/grep -c '^error ' "$WORK/clean_$name.out")"
+    n="$(grep -c '^error ' "$WORK/clean_$name.out")"
     run_limited "$MANTICORE" analyze --only parse.error "$f" > "$WORK/clean_$name.an" 2>&1
-    if [[ $rc -eq 0 && $n -eq 0 ]] && ! /usr/bin/grep -q 'parse.error' "$WORK/clean_$name.an"; then passed=$((passed + 1)); printf 'PASS clean_%s\n' "$name"
-    else failed=$((failed + 1)); failed_names+=("clean_$name"); printf 'FAIL clean_%s  (exit %d, %d errors)\n' "$name" "$rc" "$n"; /usr/bin/grep '^error ' "$WORK/clean_$name.out" | head -n 2 | sed 's/^/      /'; fi
+    if [[ $rc -eq 0 && $n -eq 0 ]] && ! grep -q 'parse.error' "$WORK/clean_$name.an"; then passed=$((passed + 1)); printf 'PASS clean_%s\n' "$name"
+    else failed=$((failed + 1)); failed_names+=("clean_$name"); printf 'FAIL clean_%s  (exit %d, %d errors)\n' "$name" "$rc" "$n"; grep '^error ' "$WORK/clean_$name.out" | head -n 2 | sed 's/^/      /'; fi
     rm -f "$f" "$WORK/clean_$name.out" "$WORK/clean_$name.an"
 }
 clean arrays_85 < <({ printf '<?php\n$a = '; rep '[' 85; printf '1'; rep ']' 85; printf ';\n'; })
@@ -241,7 +241,7 @@ onecap() {
     cat > "$f"
     run_limited "$MANTICORE" dump-ast --tolerant "$f" > "$WORK/onecap_$name.out" 2>&1
     local rc=$? n
-    n="$(/usr/bin/grep -c '^error ' "$WORK/onecap_$name.out")"
+    n="$(grep -c '^error ' "$WORK/onecap_$name.out")"
     if [[ $rc -eq 0 && $n -eq 1 ]]; then passed=$((passed + 1)); printf 'PASS onecap_%s\n' "$name"
     else failed=$((failed + 1)); failed_names+=("onecap_$name"); printf 'FAIL onecap_%s  (exit %d, %d errors)\n' "$name" "$rc" "$n"; fi
     rm -f "$f" "$WORK/onecap_$name.out"

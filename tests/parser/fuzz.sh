@@ -88,14 +88,14 @@ check_one() {
         run_limited "$MANTICORE" dump-ast --tolerant --check-ranges "$tmp/cut.php" > "$tmp/chk.txt" 2>&1
         if [[ $? -ne 0 || -s "$tmp/chk.txt" ]]; then echo "FAIL $f @$off: ranges: $(head -n 1 "$tmp/chk.txt" | head -c 200)"; fi
         local errs
-        errs=$(/usr/bin/grep -c '^error ' "$tmp/cut.txt")
+        errs=$(grep -c '^error ' "$tmp/cut.txt")
         if [[ $errs -eq 0 ]]; then
             local tail1 lastline
             tail1="$(tail -c 400 "$tmp/cut.php" | tr -d ' \t\r\n' | tail -c 2)"
-            lastline="$(/usr/bin/grep -v "^[[:space:]]*$" "$tmp/cut.php" | tail -n 1)"
+            lastline="$(grep -v "^[[:space:]]*$" "$tmp/cut.php" | tail -n 1)"
             local lastclose lastopen after=""
-            lastclose=$(/usr/bin/grep -n '?>' "$tmp/cut.php" | tail -n 1 | cut -d: -f1)
-            lastopen=$(/usr/bin/grep -n '<?php' "$tmp/cut.php" | tail -n 1 | cut -d: -f1)
+            lastclose=$(grep -n '?>' "$tmp/cut.php" | tail -n 1 | cut -d: -f1)
+            lastopen=$(grep -n '<?php' "$tmp/cut.php" | tail -n 1 | cut -d: -f1)
             [[ -n "$lastopen" ]] && after="$(tail -n +"$lastopen" "$tmp/cut.php" | sed '1s/.*<?php//' | tr -d ' \t\r\n' | head -c 1)"
             case "$tail1" in
                 *';'|*'}'|'?>') ;;
@@ -150,17 +150,17 @@ fails=0
 {
     find src -name '*.php' | sort | awk 'NR % 3 == 0'
     find tests/aot/cases -name '*.php' | sort | awk 'NR % 25 == 0'
-} | { if [[ -n "$FILTER" ]]; then /usr/bin/grep -F -- "$FILTER"; else cat; fi; } > "$RES/files"
+} | { if [[ -n "$FILTER" ]]; then grep -F -- "$FILTER"; else cat; fi; } > "$RES/files"
 nfiles=$(wc -l < "$RES/files" | tr -d ' ')
 xargs -P 8 -I{} bash "$0" --one {} "$CUTS" < "$RES/files" > "$RES/trunc.out" 2>&1
-cuts=$(/usr/bin/grep '^STAT ' "$RES/trunc.out" | awk '{ s += $2 } END { print s + 0 }')
-compared=$(/usr/bin/grep '^STAT ' "$RES/trunc.out" | awk '{ s += $3 } END { print s + 0 }')
-nstat=$(/usr/bin/grep -c '^STAT ' "$RES/trunc.out")
-tfail=$(/usr/bin/grep -c '^FAIL ' "$RES/trunc.out")
+cuts=$(grep '^STAT ' "$RES/trunc.out" | awk '{ s += $2 } END { print s + 0 }')
+compared=$(grep '^STAT ' "$RES/trunc.out" | awk '{ s += $3 } END { print s + 0 }')
+nstat=$(grep -c '^STAT ' "$RES/trunc.out")
+tfail=$(grep -c '^FAIL ' "$RES/trunc.out")
 echo "truncation+prefix: $nfiles files, $cuts cuts, $compared statements compared, $tfail failures"
-/usr/bin/grep '^FAIL ' "$RES/trunc.out" | head -n 30
+grep '^FAIL ' "$RES/trunc.out" | head -n 30
 fails=$((fails + tfail))
-if [[ $nstat -ne $nfiles ]]; then echo "FAIL $((nfiles - nstat)) worker(s) died without reporting"; /usr/bin/grep -v '^STAT \|^FAIL ' "$RES/trunc.out" | head -n 5; fails=$((fails + 1)); fi
+if [[ $nstat -ne $nfiles ]]; then echo "FAIL $((nfiles - nstat)) worker(s) died without reporting"; grep -v '^STAT \|^FAIL ' "$RES/trunc.out" | head -n 5; fails=$((fails + 1)); fi
 if [[ $nfiles -gt 0 && $((compared * 100)) -lt $((cuts * 10)) ]]; then echo "FAIL prefix check compared only $compared statements over $cuts cuts"; fails=$((fails + 1)); fi
 
 # ---- 3: garbage (fixed seed)
@@ -197,14 +197,14 @@ dfail=0
 { printf '<?php\n$a = '; rep '(' 10000; } > "$RES/deep.php"
 run_limited "$MANTICORE" dump-ast --tolerant "$RES/deep.php" > "$RES/deep.out" 2>&1
 rc=$?
-if [[ $rc -ne 0 ]] || ! /usr/bin/grep -q 'nesting too deep' "$RES/deep.out"; then dfail=$((dfail + 1)); echo "FAIL deep_parens: exit $rc"; fi
+if [[ $rc -ne 0 ]] || ! grep -q 'nesting too deep' "$RES/deep.out"; then dfail=$((dfail + 1)); echo "FAIL deep_parens: exit $rc"; fi
 for spec in "parser:foo(;\n:300" "lexer:\001:300" "mixed:foo(;\n\001\n:400"; do
     name="${spec%%:*}"; rest="${spec#*:}"; unit="${rest%:*}"; cnt="${rest##*:}"
     { printf '<?php\n'; rep "$unit" "$cnt"; } > "$RES/flood.php"
     run_limited "$MANTICORE" dump-ast --tolerant "$RES/flood.php" > "$RES/flood.out" 2>&1
     rc=$?
-    n=$(/usr/bin/grep -c '^error ' "$RES/flood.out")
-    last=$(/usr/bin/grep '^error ' "$RES/flood.out" | tail -n 1)
+    n=$(grep -c '^error ' "$RES/flood.out")
+    last=$(grep '^error ' "$RES/flood.out" | tail -n 1)
     if [[ $rc -ne 0 || $n -ne 101 || "$last" != *"too many errors" ]]; then dfail=$((dfail + 1)); echo "FAIL flood_$name: exit $rc, $n errors"; fi
 done
 echo "deep+flood: $dfail failures"
