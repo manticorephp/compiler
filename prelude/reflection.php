@@ -1375,7 +1375,7 @@ class ReflectionProperty
     {
         $out = 'Property [ ' . ($this->isPublic() ? 'public' : ($this->isProtected() ? 'protected' : 'private'));
         if ($this->isStatic()) { $out .= ' static'; }
-        if ($this->isReadonly()) { $out .= ' readonly'; }
+        if ($this->isReadOnly()) { $out .= ' readonly'; }
         if ($this->hasType()) { $out .= ' ' . (string) $this->getType(); }
         $out .= ' $' . $this->name;
         if ($this->hasDefaultValue() && !$this->isPromoted()) {
@@ -1420,7 +1420,7 @@ class ReflectionProperty
         return ($this->flags & 4) !== 0;
     }
 
-    public function isReadonly(): bool
+    public function isReadOnly(): bool
     {
         return ($this->flags & 32) !== 0;
     }
