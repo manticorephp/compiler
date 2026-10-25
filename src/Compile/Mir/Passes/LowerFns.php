@@ -1105,6 +1105,24 @@ trait LowerFns
     }
 
     /**
+     * `f($this->$name)` into a by-ref parameter: the argument must be the property
+     * SLOT, which a computed name only has once it selects a declared property.
+     * Bind a temp reference first ({@see lowerDynPropRef}, queued ahead of the
+     * statement) and pass the temp; null when the argument is no such shape.
+     */
+    private function lowerDynPropByRefArg(\Parser\Ast\Param $p, \Parser\Ast\Expr $a): ?Node
+    {
+        if ($a->kind !== 'DynProp' || !$this->paramByRefDecl($p) || !$this->isBareArrayHint($this->paramTypeHint($p))) { return null; }
+        $dp = $this->dynPropBase($a);
+        if ($dp === null) { return null; }
+        $tmp = '__dynr' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $tv = \Parser\Ast\Expr::variable($tmp, $a->span);
+        $this->pendingCallInits[] = $this->lowerDynPropRef($dp, new \Parser\Ast\RefAssign($tv, $a, $a->span));
+        return $this->lowerExpr($tv);
+    }
+
+    /**
      * Lower one argument, converting a callable LITERAL into a closure when the
      * parameter at this position is `callable`-typed. lowerCallArgs does this on
      * its fast positional path, but every call that omits a DEFAULTED parameter
@@ -1117,6 +1135,8 @@ trait LowerFns
     private function lowerArgForParam(?\Parser\Ast\Param $p, \Parser\Ast\Expr $a): Node
     {
         if ($p !== null) {
+            $dyn = $this->lowerDynPropByRefArg($p, $a);
+            if ($dyn !== null) { return $dyn; }
             $conv = $this->coerceCallableShim($this->lowerParamType($this->paramTypeHint($p)), $a);
             if ($conv !== null) { return $conv; }
         }

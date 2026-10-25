@@ -6109,6 +6109,7 @@ final class LowerFromAst implements Pass
             foreach ($astArgs as $a) {
                 $conv = $i < $np ? $this->coerceCallableShim($this->lowerParamType($this->paramTypeHint($params[$i])), $a) : null;
                 $conv = $conv ?? $this->lowerSpreadArg($params, $i, $a);
+                if ($conv === null && $i < $np) { $conv = $this->lowerDynPropByRefArg($params[$i], $a); }
                 $out[] = $conv !== null ? $conv : $this->lowerExpr($a);
                 $i = $i + 1;
             }
