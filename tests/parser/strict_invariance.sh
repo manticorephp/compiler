@@ -11,11 +11,12 @@
 # files whose two dumps differ (listed in DIR/unstable.txt: dump-ast prints
 # uninitialised memory for some inputs). --check re-runs the CURRENT bin/manticore
 # on the frozen corpus (or --corpus DIR2, e.g. the live tree).
+# The base commit is $STRICT_BASE, default `git merge-base main HEAD`.
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-BASE=579840ed
+BASE="${STRICT_BASE:-$(git -C "$ROOT" merge-base main HEAD)}"
 
 MODE="${1:-}"
 DIR="${2:-}"
@@ -33,7 +34,6 @@ if [[ "$MODE" == "--record" ]]; then
     (cd "$ROOT" && git archive "$BASE" src prelude tests/aot/cases) | tar -x -C "$DIR/corpus"
 fi
 if [[ -z "$CORPUS" ]]; then CORPUS="$DIR/corpus"; fi
-[[ "$CORPUS" == "$ROOT" ]] && CORPUS="$ROOT"
 
 dump_sha() {
     "$ROOT/bin/manticore" dump-ast "$1" 2>&1 | shasum | cut -d' ' -f1

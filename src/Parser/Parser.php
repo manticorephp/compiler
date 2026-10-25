@@ -4276,7 +4276,8 @@ final class Parser
         $el = $tok->endLine();
         $ec = $tok->endColumn();
         if ($el === 0 && $this->tolerant === 1) {
-            // unranged lexer: the end follows from the lexeme, single-line or last-line length
+            // unranged lexer: the end follows from the lexeme (single-line: start + length, multi-line: last-line
+            // length). Approximate for a heredoc/comment lexeme the lexer normalised; only analyze lands here and prints no end.
             $nl = \substr_count($tok->lexeme, "\n");
             $el = $tok->line + $nl;
             $ec = $nl === 0 ? $tok->column + \strlen($tok->lexeme) : \strlen($tok->lexeme) - (int)\strrpos($tok->lexeme, "\n");

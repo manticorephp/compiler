@@ -4,6 +4,7 @@
 #
 # Usage: tests/parser/mem_check.sh --base PATH_TO_BASE_COMPILER [-n RUNS]
 # The tree's compiler is bin/manticore. Targets: delta RSS within 1%.
+# macOS only: it reads BSD `/usr/bin/time -l` (bytes) output.
 
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -23,10 +24,9 @@ trap 'rm -rf "$W"' EXIT
 # run COMPILER ARGS... -> "rssMB wall" of one run
 one() {
     local c="$1"; shift
-    /usr/bin/time -l "$c" "$@" >/dev/null 2>"$W/t"
+    /usr/bin/time -l "$c" "$@" >/dev/null 2>"$W/t" || { echo "run failed: $c $*" >&2; echo "nan nan"; return; }
     awk '/maximum resident/ {r=$1/1048576} /real/ {w=$1} END {printf "%.2f %.2f\n", r, w}' "$W/t"
 }
-# the tree's own flag-less dump-ast is the strict run
 median() { sort -n | awk '{a[NR]=$1} END {print a[int((NR+1)/2)]}'; }
 measure() {
     local c="$1"; shift

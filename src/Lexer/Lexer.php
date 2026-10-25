@@ -79,7 +79,10 @@ final class Lexer
      * fields were tried first and the Zend-run lexer was byte-identical on every
      * source in the tree while the NATIVELY BUILT one silently lost prelude
      * demand — `ob_get_contents()` undefined at runtime with no diagnostic
-     * anywhere. Keep new state out of this class.
+     * anywhere. Keep new state out of this class: the only fields added since
+     * are ints (`tolerant`, `ranged`, never bool) and the `errors` object array,
+     * and the self-built compiler was verified with them (build + tests/parser).
+     * `startInPhp` stays a parameter.
      *
      * @return Token[]
      */

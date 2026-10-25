@@ -135,7 +135,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -n) CUTS="$2"; shift 2 ;;
         -k) FILTER="$2"; shift 2 ;;
-        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) echo "unknown arg $1" >&2; exit 2 ;;
     esac
 done
