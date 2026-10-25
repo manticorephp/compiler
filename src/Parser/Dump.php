@@ -28,10 +28,12 @@ final class Dump
 {
     private int $indent = 0;
     private string $out = '';
+    private bool $ranges = false;
 
-    public static function program(Program $program): string
+    public static function program(Program $program, bool $ranges = false): string
     {
         $d = new self();
+        $d->ranges = $ranges;
         $d->program_($program);
         return $d->out;
     }
@@ -70,7 +72,7 @@ final class Dump
     private function payload(object $node): void
     {
         foreach (get_object_vars($node) as $key => $value) {
-            if ($key === 'kind' || $key === 'span') { continue; }
+            if ($key === 'kind' || $key === 'span' || $key === 'endSpan') { continue; }
             $this->field((string)$key, $value);
         }
     }
@@ -326,6 +328,10 @@ final class Dump
 
     private function spanStr(Span $s): string
     {
+        if ($this->ranges && $s->endLine !== 0) {
+            return '@' . (string)$s->startLine() . ':' . (string)$s->startColumn()
+                . '-' . (string)$s->endLine . ':' . (string)$s->endColumn;
+        }
         return '@' . (string)$s->line . ':' . (string)$s->column;
     }
 

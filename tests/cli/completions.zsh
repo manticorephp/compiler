@@ -105,6 +105,7 @@ _manticore() {
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '--tolerant[Recover from syntax errors; print the tree and every error]' \
         '--ranges[Print spans as start-end ranges]' \
+        '--check-ranges[Verify the range invariants; print each violation, exit 1 if any]' \
         '*:file:_files'
       ;;
     analyze)

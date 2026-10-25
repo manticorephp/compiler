@@ -8,89 +8,89 @@ Program
       body: Block
         Stmt:Return @5:5
           value:
-            Expr:BinaryOp @5:15
+            Expr:BinaryOp @5:12-5:19
               op: "+"
               left:
-                Expr:Variable @5:12
+                Expr:Variable @5:12-5:14
                   name: "a"
               right:
-                Expr:Variable @5:17
+                Expr:Variable @5:17-5:19
                   name: "b"
   Stmt:Class @8:1
     decl: class Counter
       Property $n : int [private] @10:5
         default:
-          Expr:IntLiteral @10:22
+          Expr:IntLiteral @10:22-10:23
             value: 0
       Method bump [public] -> int @12:5
         params: 0
         body: Block
           Stmt:Return @14:9
             value:
-              Expr:IncDec @14:16
+              Expr:IncDec @14:16-14:26
                 op: "++"
                 prefix: true
                 operand:
-                  Expr:PropertyAccess @14:23
+                  Expr:PropertyAccess @14:18-14:26
                     object:
-                      Expr:Variable @14:18
+                      Expr:Variable @14:18-14:23
                         name: "this"
                     property: "n"
                     nullsafe: false
   Stmt:Expression @18:1
     expr:
-      Expr:Assign @18:4
+      Expr:Assign @18:1-18:19
         target:
-          Expr:Variable @18:1
+          Expr:Variable @18:1-18:3
             name: "c"
         value:
-          Expr:New @18:6
+          Expr:New @18:6-18:19
             class: "Counter"
             args: [0]
     docComment: null
     attributes: [0]
   Stmt:For @19:1
     init: [1]
-      Expr:Assign @19:9
+      Expr:Assign @19:6-19:12
         target:
-          Expr:Variable @19:6
+          Expr:Variable @19:6-19:8
             name: "i"
         value:
-          Expr:IntLiteral @19:11
+          Expr:IntLiteral @19:11-19:12
             value: 0
     condition:
-      Expr:BinaryOp @19:17
+      Expr:BinaryOp @19:14-19:20
         op: "<"
         left:
-          Expr:Variable @19:14
+          Expr:Variable @19:14-19:16
             name: "i"
         right:
-          Expr:IntLiteral @19:19
+          Expr:IntLiteral @19:19-19:20
             value: 3
     update: [1]
-      Expr:IncDec @19:24
+      Expr:IncDec @19:22-19:26
         op: "++"
         prefix: false
         operand:
-          Expr:Variable @19:22
+          Expr:Variable @19:22-19:24
             name: "i"
     body: Block
       Stmt:Echo @20:5
         exprs: [2]
-          Expr:Call @20:10
+          Expr:Call @20:10-20:29
             function: "add"
             args: [2]
-              Expr:MethodCall @20:16
+              Expr:MethodCall @20:14-20:24
                 object:
-                  Expr:Variable @20:14
+                  Expr:Variable @20:14-20:16
                     name: "c"
                 method: "bump"
                 args: [0]
                 nullsafe: false
-              Expr:Variable @20:26
+              Expr:Variable @20:26-20:28
                 name: "i"
             qualified: false
-          Expr:StringLiteral @20:31
+          Expr:StringLiteral @20:31-20:35
             value: "
 "
 

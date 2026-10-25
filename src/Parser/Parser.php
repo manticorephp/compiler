@@ -267,7 +267,7 @@ final class Parser
             $tok = $this->advance();
             // php echoes it verbatim: one echo of one string constant, and no
             // escape processing of any kind applies to it.
-            return Stmt::echo_([Expr::string($tok->lexeme, $span)], $span);
+            return Stmt::echo_([Expr::string($tok->lexeme, $this->end($span))], $span);
         }
         if ($this->check(TokenKind::OpenTagEcho)) {
             $span = $this->span();
@@ -353,7 +353,7 @@ final class Parser
         if ($this->check(TokenKind::OpenBrace)) {
             $span = $this->span();
             $block = $this->parseBlock();
-            return Stmt::if_(Expr::bool(true, $span), $block, [], null, $span);
+            return Stmt::if_(Expr::bool(true, $this->emptyAt($span)), $block, [], null, $span);
         }
 
         if ($attrs !== []) {
@@ -1476,10 +1476,10 @@ final class Parser
         }
         if ($this->check(TokenKind::OpenBrace)) {
             $block = $this->parseBlock();
-            return Stmt::if_(Expr::bool(true, $span), $block, [], null, $span);
+            return Stmt::if_(Expr::bool(true, $this->emptyAt($span)), $block, [], null, $span);
         }
         if ($this->check(TokenKind::Semicolon)) { $this->advance(); }
-        return Stmt::if_(Expr::bool(false, $span), new Block([]), [], null, $span);
+        return Stmt::if_(Expr::bool(false, $this->emptyAt($span)), new Block([]), [], null, $span);
     }
 
     private function parseWhile(): Stmt
@@ -1672,8 +1672,8 @@ final class Parser
         $this->expect(TokenKind::Semicolon, "expected ';' after const declaration");
         $call = new \Parser\Ast\CallExpr(
             'define',
-            [new \Parser\Ast\StringLiteral($nameTok->lexeme, $span), $value],
-            $span,
+            [new \Parser\Ast\StringLiteral($nameTok->lexeme, $this->tokSpan($span, $nameTok)), $value],
+            $this->end($span),
         );
         return new \Parser\Ast\ExpressionStmt($call, $span, null, $attrs);
     }
@@ -1787,7 +1787,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseWordXor();
-            $left = Expr::binary('||', $left, $right, $span);
+            $left = Expr::binary('||', $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -1805,9 +1805,9 @@ final class Parser
             // needs no new node kind, no new lowering, and no new inference.
             $left = Expr::binary(
                 '!==',
-                Expr::unary('!', $left, $span),
-                Expr::unary('!', $right, $span),
-                $span,
+                Expr::unary('!', $left, $this->wrapSpan($span, $left)),
+                Expr::unary('!', $right, $this->wrapSpan($span, $right)),
+                $this->end($span, $left),
             );
         }
         return $left;
@@ -1820,7 +1820,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseAssign();
-            $left = Expr::binary('&&', $left, $right, $span);
+            $left = Expr::binary('&&', $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -1893,7 +1893,7 @@ final class Parser
                 $target->op,
                 $target->left,
                 $this->buildAssign($op, $target->right, $value, $span),
-                $target->span,
+                $this->end($target->span, $target->left),
             );
         }
         // A prefix unary binds tighter than `=` too, so `!$x = foo()` is
@@ -1905,12 +1905,12 @@ final class Parser
             return Expr::unary(
                 $target->op,
                 $this->buildAssign($op, $target->operand, $value, $span),
-                $target->span,
+                $this->end($target->span),
             );
         }
-        if ($op === '=')  { return Expr::assign($target, $value, $span); }
-        if ($op === '=&') { return Expr::refAssign($target, $value, $span); }
-        return Expr::compoundAssign($op, $target, $value, $span);
+        if ($op === '=')  { return Expr::assign($target, $value, $this->end($span, $target)); }
+        if ($op === '=&') { return Expr::refAssign($target, $value, $this->end($span, $target)); }
+        return Expr::compoundAssign($op, $target, $value, $this->end($span, $target));
     }
 
     /**
@@ -1928,17 +1928,17 @@ final class Parser
         if ($this->peek()->kind === TokenKind::Identifier
             && \strtolower($this->peek()->lexeme) === 'from') {
             $this->advance();
-            return Expr::yield_(null, $this->parseAssign(), true, $span);
+            return Expr::yield_(null, $this->parseAssign(), true, $this->end($span));
         }
         if ($this->yieldHasNoOperand()) {
-            return Expr::yield_(null, null, false, $span);
+            return Expr::yield_(null, null, false, $this->end($span));
         }
         $value = $this->parseAssign();
         if ($this->peek()->kind === TokenKind::DoubleArrow) {
             $this->advance();
-            return Expr::yield_($value, $this->parseAssign(), false, $span);
+            return Expr::yield_($value, $this->parseAssign(), false, $this->end($span));
         }
-        return Expr::yield_(null, $value, false, $span);
+        return Expr::yield_(null, $value, false, $this->end($span));
     }
 
     /** A bare `yield` is one followed by an expression terminator. */
@@ -1960,12 +1960,12 @@ final class Parser
             if ($this->check(TokenKind::Colon)) {
                 $this->advance();
                 $else = $this->parseAssign();
-                return Expr::ternary($cond, null, $else, $span);
+                return Expr::ternary($cond, null, $else, $this->end($span, $cond));
             }
             $then = $this->parseExpression();
             $this->expect(TokenKind::Colon, "expected ':' in ternary");
             $else = $this->parseAssign();
-            return Expr::ternary($cond, $then, $else, $span);
+            return Expr::ternary($cond, $then, $else, $this->end($span, $cond));
         }
         return $cond;
     }
@@ -1983,7 +1983,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseNullCoalesce();
-            $left = $this->buildPipe($left, $right, $span);
+            $left = $this->buildPipe($left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2090,7 +2090,7 @@ final class Parser
             // parseAssign, not parseExpression: `and` / `or` / `xor` bind looser
             // than this, so `$a ?? $b and $c` must stay `($a ?? $b) and $c`.
             $right = $this->parseAssign();
-            return Expr::nullCoalesce($left, $right, $span);
+            return Expr::nullCoalesce($left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2102,7 +2102,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseAnd();
-            $left = Expr::binary('||', $left, $right, $span);
+            $left = Expr::binary('||', $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2114,7 +2114,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseBitOr();
-            $left = Expr::binary('&&', $left, $right, $span);
+            $left = Expr::binary('&&', $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2126,7 +2126,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseBitXor();
-            $left = Expr::binary('|', $left, $right, $span);
+            $left = Expr::binary('|', $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2138,7 +2138,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseBitAnd();
-            $left = Expr::binary('^', $left, $right, $span);
+            $left = Expr::binary('^', $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2150,7 +2150,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseEquality();
-            $left = Expr::binary('&', $left, $right, $span);
+            $left = Expr::binary('&', $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2170,7 +2170,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseComparison();
-            $left = Expr::binary($op, $left, $right, $span);
+            $left = Expr::binary($op, $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2189,7 +2189,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseShift();
-            $left = Expr::binary($op, $left, $right, $span);
+            $left = Expr::binary($op, $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2206,7 +2206,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseAddition();
-            $left = Expr::binary($op, $left, $right, $span);
+            $left = Expr::binary($op, $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2224,7 +2224,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseMultiplication();
-            $left = Expr::binary($op, $left, $right, $span);
+            $left = Expr::binary($op, $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2242,7 +2242,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $right = $this->parseInstanceof();
-            $left = Expr::binary($op, $left, $right, $span);
+            $left = Expr::binary($op, $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2258,7 +2258,7 @@ final class Parser
         if ($this->check(TokenKind::Bang)) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('!', $this->parseInstanceof(), $span);
+            return Expr::unary('!', $this->parseInstanceof(), $this->end($span));
         }
         $left = $this->parseUnary();
         if ($this->checkKeyword('instanceof')) {
@@ -2272,10 +2272,10 @@ final class Parser
             // `$x instanceof $arg->typeName` (symfony) or `$x instanceof $a[0]`.
             if ($this->check(TokenKind::Variable) || $this->check(TokenKind::OpenParen)) {
                 $classExpr = $this->parsePostfix($this->parsePrimary());
-                return Expr::call('is_a', [$left, $classExpr], $span);
+                return Expr::call('is_a', [$left, $classExpr], $this->end($span, $left));
             }
             $class = $this->parseClassName();
-            return Expr::instanceof_($left, $class, $span);
+            return Expr::instanceof_($left, $class, $this->end($span, $left));
         }
         return $left;
     }
@@ -2288,7 +2288,7 @@ final class Parser
             $this->advance();
             // Right-associative, and the exponent may itself be signed: `2 ** -1`.
             $right = $this->parseUnary();
-            return Expr::binary('**', $left, $right, $span);
+            return Expr::binary('**', $left, $right, $this->end($span, $left));
         }
         return $left;
     }
@@ -2299,22 +2299,22 @@ final class Parser
         if ($tok->kind === TokenKind::Minus) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('-', $this->parseUnary(), $span);
+            return Expr::unary('-', $this->parseUnary(), $this->end($span));
         }
         if ($tok->kind === TokenKind::Plus) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('+', $this->parseUnary(), $span);
+            return Expr::unary('+', $this->parseUnary(), $this->end($span));
         }
         if ($tok->kind === TokenKind::Bang) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('!', $this->parseInstanceof(), $span);
+            return Expr::unary('!', $this->parseInstanceof(), $this->end($span));
         }
         if ($tok->kind === TokenKind::Tilde) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('~', $this->parseUnary(), $span);
+            return Expr::unary('~', $this->parseUnary(), $this->end($span));
         }
         // `@expr` error suppression. Kept as a real node: `trigger_error` now
         // PRINTS, and `@trigger_error(…)` — every symfony deprecation — must
@@ -2325,17 +2325,17 @@ final class Parser
         if ($tok->kind === TokenKind::AtSign) {
             $span = $this->span();
             $this->advance();
-            return Expr::unary('@', $this->parseUnary(), $span);
+            return Expr::unary('@', $this->parseUnary(), $this->end($span));
         }
         if ($tok->kind === TokenKind::PlusPlus) {
             $span = $this->span();
             $this->advance();
-            return Expr::incDec('++', true, $this->parseUnary(), $span);
+            return Expr::incDec('++', true, $this->parseUnary(), $this->end($span));
         }
         if ($tok->kind === TokenKind::MinusMinus) {
             $span = $this->span();
             $this->advance();
-            return Expr::incDec('--', true, $this->parseUnary(), $span);
+            return Expr::incDec('--', true, $this->parseUnary(), $this->end($span));
         }
         // Cast: `(int)`, `(float)`, `(bool)`, `(string)`, `(array)`, `(object)`.
         if ($tok->kind === TokenKind::OpenParen && $this->looksLikeCast()) {
@@ -2343,7 +2343,7 @@ final class Parser
             $this->advance(); // '('
             $castTok = $this->advance();
             $this->expect(TokenKind::CloseParen, "expected ')' after cast");
-            return Expr::cast(strtolower($castTok->lexeme), $this->parseUnary(), $span);
+            return Expr::cast(strtolower($castTok->lexeme), $this->parseUnary(), $this->end($span));
         }
         return $this->parsePower();
     }
@@ -2388,9 +2388,9 @@ final class Parser
                         $this->expect(TokenKind::CloseBrace, "expected '}' after dynamic member");
                     } else {
                         $vt = $this->advance();
-                        $nameExpr = Expr::variable(\ltrim($vt->lexeme, '$'), $span);
+                        $nameExpr = Expr::variable(\ltrim($vt->lexeme, '$'), $this->tokSpan($span, $vt));
                     }
-                    $left = Expr::dynProp($left, $nameExpr, $nullsafe, $span);
+                    $left = Expr::dynProp($left, $nameExpr, $nullsafe, $this->end($span, $left));
                     continue;
                 }
                 $nameTok = $this->advance();
@@ -2400,9 +2400,9 @@ final class Parser
                 $name = $nameTok->lexeme;
                 if ($this->check(TokenKind::OpenParen)) {
                     $args = $this->parseArgList();
-                    $left = Expr::methodCall($left, $name, $args, $nullsafe, $span);
+                    $left = Expr::methodCall($left, $name, $args, $nullsafe, $this->end($span, $left));
                 } else {
-                    $left = Expr::propertyAccess($left, $name, $nullsafe, $span);
+                    $left = Expr::propertyAccess($left, $name, $nullsafe, $this->end($span, $left));
                 }
                 continue;
             }
@@ -2414,14 +2414,14 @@ final class Parser
                     $index = $this->parseExpression();
                 }
                 $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
-                $left = Expr::arrayAccess($left, $index, $span);
+                $left = Expr::arrayAccess($left, $index, $this->end($span, $left));
                 continue;
             }
             // Indirect call: `$callable(args)` or `($expr)(args)`.
             if ($tok->kind === TokenKind::OpenParen) {
                 $span = $this->span();
                 $args = $this->parseArgList();
-                $left = Expr::invoke($left, $args, $span);
+                $left = Expr::invoke($left, $args, $this->end($span, $left));
                 continue;
             }
             // `$expr::class` / `$expr::method(...)` — dynamic class
@@ -2436,22 +2436,22 @@ final class Parser
                 $memberName = $memberTok->lexeme;
                 if ($this->check(TokenKind::OpenParen)) {
                     $args = $this->parseArgList();
-                    $left = new \Parser\Ast\DynamicStaticCall($left, $memberName, $args, $span);
+                    $left = new \Parser\Ast\DynamicStaticCall($left, $memberName, $args, $this->end($span, $left));
                 } else {
-                    $left = new \Parser\Ast\DynamicStaticAccess($left, $memberName, $span);
+                    $left = new \Parser\Ast\DynamicStaticAccess($left, $memberName, $this->end($span, $left));
                 }
                 continue;
             }
             if ($tok->kind === TokenKind::PlusPlus) {
                 $span = $this->span();
                 $this->advance();
-                $left = Expr::incDec('++', false, $left, $span);
+                $left = Expr::incDec('++', false, $left, $this->end($span, $left));
                 continue;
             }
             if ($tok->kind === TokenKind::MinusMinus) {
                 $span = $this->span();
                 $this->advance();
-                $left = Expr::incDec('--', false, $left, $span);
+                $left = Expr::incDec('--', false, $left, $this->end($span, $left));
                 continue;
             }
             break;
@@ -2472,7 +2472,7 @@ final class Parser
                 $span = $this->span();
                 $this->advance(); // ...
                 $this->advance(); // )
-                return [Expr::ellipsis($span)];
+                return [Expr::ellipsis($this->end($span))];
             }
         }
         $args = [];
@@ -2502,7 +2502,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $value = $this->parseExpression();
-            return Expr::spread($value, $span);
+            return Expr::spread($value, $this->end($span));
         }
         $head = $this->peek();
         if ($head->kind === TokenKind::Identifier || $head->kind === TokenKind::Keyword) {
@@ -2516,7 +2516,7 @@ final class Parser
                 $name = $this->advance()->lexeme;
                 $this->advance(); // ':'
                 $value = $this->parseExpression();
-                return Expr::namedArg($name, $value, $span);
+                return Expr::namedArg($name, $value, $this->end($span));
             }
         }
         return $this->parseExpression();
@@ -2631,22 +2631,22 @@ final class Parser
 
         if ($tok->kind === TokenKind::IntLiteral) {
             $this->advance();
-            return Expr::int($this->parseIntLiteral($tok->lexeme), $span);
+            return Expr::int($this->parseIntLiteral($tok->lexeme), $this->end($span));
         }
         if ($tok->kind === TokenKind::FloatLiteral) {
             $this->advance();
-            return Expr::float((float)str_replace('_', '', $tok->lexeme), $span);
+            return Expr::float((float)str_replace('_', '', $tok->lexeme), $this->end($span));
         }
         if ($tok->kind === TokenKind::StringLiteral) {
             $this->advance();
             if ($this->needsInterp($tok->lexeme)) {
-                return $this->parseInterpolated($tok->lexeme, $span);
+                return $this->parseInterpolated($tok->lexeme, $this->end($span));
             }
-            return Expr::string($this->unquoteString($tok->lexeme), $span);
+            return Expr::string($this->unquoteString($tok->lexeme), $this->end($span));
         }
         if ($tok->kind === TokenKind::Variable) {
             $this->advance();
-            return Expr::variable(substr($tok->lexeme, 1), $span);
+            return Expr::variable(substr($tok->lexeme, 1), $this->end($span));
         }
         if ($tok->kind === TokenKind::MagicConstant) {
             $this->advance();
@@ -2654,20 +2654,20 @@ final class Parser
             // magic constants whose value is the FILE, and lowering only ever sees a
             // flattened statement list with no per-file identity left.
             $mn = \strtoupper($tok->lexeme);
-            if ($mn === '__FILE__') { return Expr::string($this->sourceFile, $span); }
-            if ($mn === '__DIR__')  { return Expr::string($this->sourceDir(), $span); }
+            if ($mn === '__FILE__') { return Expr::string($this->sourceFile, $this->end($span)); }
+            if ($mn === '__DIR__')  { return Expr::string($this->sourceDir(), $this->end($span)); }
             // …and __NAMESPACE__, whose value is the PARSE context: lowering has
             // no namespace left, so it answered '' — symfony-style discovery
             // (`sprintf('%s\%s', __NAMESPACE__, $base)` then `new $class()`)
             // built a global name and instantiated nothing.
-            if ($mn === '__NAMESPACE__') { return Expr::string($this->currentNamespace, $span); }
-            return Expr::magicConstant($tok->lexeme, $span);
+            if ($mn === '__NAMESPACE__') { return Expr::string($this->currentNamespace, $this->end($span)); }
+            return Expr::magicConstant($tok->lexeme, $this->end($span));
         }
         if ($tok->kind === TokenKind::Keyword) {
             $lower = strtolower($tok->lexeme);
-            if ($lower === 'true')  { $this->advance(); return Expr::bool(true,  $span); }
-            if ($lower === 'false') { $this->advance(); return Expr::bool(false, $span); }
-            if ($lower === 'null')  { $this->advance(); return Expr::null($span); }
+            if ($lower === 'true')  { $this->advance(); return Expr::bool(true,  $this->end($span)); }
+            if ($lower === 'false') { $this->advance(); return Expr::bool(false, $this->end($span)); }
+            if ($lower === 'null')  { $this->advance(); return Expr::null($this->end($span)); }
             if ($lower === 'new')   { return $this->parseNew($span); }
             if ($lower === 'clone') {
                 $this->advance();
@@ -2677,9 +2677,9 @@ final class Parser
                     $cargs = $this->parseArgList();
                     $cobj = $cargs[0];
                     $cwith = \count($cargs) > 1 ? $cargs[1] : null;
-                    return Expr::clone_($cobj, $cwith, $span);
+                    return Expr::clone_($cobj, $cwith, $this->end($span));
                 }
-                return Expr::clone_($this->parseUnary(), null, $span);
+                return Expr::clone_($this->parseUnary(), null, $this->end($span));
             }
             if ($lower === 'fn')    { return $this->parseArrowFn(false, $span); }
             if ($lower === 'function') { return $this->parseClosure(false, $span); }
@@ -2691,7 +2691,7 @@ final class Parser
             if ($lower === 'isset' || $lower === 'empty' || $lower === 'unset') {
                 $this->advance();
                 $args = $this->parseArgList();
-                return Expr::call($lower, $args, $span);
+                return Expr::call($lower, $args, $this->end($span));
             }
             // `list($a, , $c)` is just the parenthesised spelling of the `[$a, , $c]`
             // destructuring target — same elements, same holes, same keyed form
@@ -2721,7 +2721,7 @@ final class Parser
             if ($lower === 'require' || $lower === 'require_once'
                     || $lower === 'include' || $lower === 'include_once') {
                 $this->advance();
-                return Expr::call('__mc_require_value', [$this->parseExpression()], $span);
+                return Expr::call('__mc_require_value', [$this->parseExpression()], $this->end($span));
             }
             // Legacy long-array syntax `array(a, b, k => v)` — identical to
             // `[a, b, k => v]`; still common in generated / data files.
@@ -2738,7 +2738,7 @@ final class Parser
             if ($lower === 'throw') {
                 $this->advance();
                 $inner = $this->parseExpression();
-                return Expr::unary('throw', $inner, $span);
+                return Expr::unary('throw', $inner, $this->end($span));
             }
             // `print` is an EXPRESSION, not a statement: it prints one operand
             // and yields int 1, so `$ok = print "x";` and `$c and print "y";`
@@ -2753,7 +2753,7 @@ final class Parser
                 // the word operators, so `print $a and $b` is `(print $a) and $b`.
                 // Taking a full expression here would swallow the `and`.
                 $inner = $this->parseAssign();
-                return Expr::unary('print', $inner, $span);
+                return Expr::unary('print', $inner, $this->end($span));
             }
             if ($lower === 'namespace' && $this->namespaceRelativeAhead()) {
                 return $this->parseNameOrCall($span);
@@ -2813,7 +2813,7 @@ final class Parser
         }
         $this->expect(TokenKind::DoubleArrow, "expected '=>' in arrow function");
         $body = $this->parseExpression();
-        return Expr::arrowFn($isStatic, $params, $returnType, $body, $span, $returnsByRef);
+        return Expr::arrowFn($isStatic, $params, $returnType, $body, $this->end($span), $returnsByRef);
     }
 
     private function parseClosure(bool $isStatic, Span $span): Expr
@@ -2840,7 +2840,7 @@ final class Parser
             $returnType = $this->parseTypeHint();
         }
         $body = $this->parseBlock();
-        return Expr::closure($isStatic, $params, $uses, $returnType, $body, $span, $returnsByRef);
+        return Expr::closure($isStatic, $params, $uses, $returnType, $body, $this->end($span), $returnsByRef);
     }
 
     private function parseClosureUse(): ClosureUse
@@ -2902,7 +2902,7 @@ final class Parser
             }
         }
         $this->expect(TokenKind::CloseBrace, "expected '}' to close match");
-        return Expr::match_($subject, $arms, $span);
+        return Expr::match_($subject, $arms, $this->end($span));
     }
 
     private function parseNew(Span $span): Expr
@@ -2922,7 +2922,7 @@ final class Parser
             if ($this->check(TokenKind::OpenParen)) {
                 $dargs = $this->parseArgList();
             }
-            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $span);
+            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $this->end($span));
         }
         // `new $cls(args)` — the class is named by a value, not written in the
         // source. Only the variable form: `new ($expr)(args)` would make the
@@ -2945,16 +2945,16 @@ final class Parser
                             $this->expect(TokenKind::CloseBrace, "expected '}' after dynamic member");
                         } else {
                             $vt = $this->advance();
-                            $nameExpr = Expr::variable(\ltrim($vt->lexeme, '$'), $mspan);
+                            $nameExpr = Expr::variable(\ltrim($vt->lexeme, '$'), $this->tokSpan($mspan, $vt));
                         }
-                        $classExpr = Expr::dynProp($classExpr, $nameExpr, $nullsafe, $mspan);
+                        $classExpr = Expr::dynProp($classExpr, $nameExpr, $nullsafe, $this->end($mspan, $classExpr));
                         continue;
                     }
                     $nameTok = $this->advance();
                     if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword && $nameTok->kind !== TokenKind::MagicConstant) {
                         throw $this->error('expected member name after ->');
                     }
-                    $classExpr = Expr::propertyAccess($classExpr, $nameTok->lexeme, $nullsafe, $mspan);
+                    $classExpr = Expr::propertyAccess($classExpr, $nameTok->lexeme, $nullsafe, $this->end($mspan, $classExpr));
                     continue;
                 }
                 if ($tok->kind === TokenKind::OpenBracket) {
@@ -2962,7 +2962,7 @@ final class Parser
                     $this->advance();
                     $index = $this->parseExpression();
                     $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
-                    $classExpr = Expr::arrayAccess($classExpr, $index, $mspan);
+                    $classExpr = Expr::arrayAccess($classExpr, $index, $this->end($mspan, $classExpr));
                     continue;
                 }
                 break;
@@ -2971,7 +2971,7 @@ final class Parser
             if ($this->check(TokenKind::OpenParen)) {
                 $dargs = $this->parseArgList();
             }
-            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $span);
+            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $this->end($span));
         }
         // `new static::$cls(args)` / `new Foo::$cls(args)` — the class is the VALUE
         // of a static property (PHP's new_variable). Left to parseClassName it
@@ -2983,12 +2983,12 @@ final class Parser
         if ($dc->kind === TokenKind::DoubleColon && $pv !== null && $pv->kind === TokenKind::Variable && $pv->lexeme !== '$') {
             $this->advance();
             $this->advance();
-            $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $span);
+            $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
             $dargs = [];
             if ($this->check(TokenKind::OpenParen)) {
                 $dargs = $this->parseArgList();
             }
-            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $span);
+            return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $this->end($span));
         }
         $this->pos = $save;
         $class = $this->parseClassName();
@@ -2996,7 +2996,7 @@ final class Parser
         if ($this->check(TokenKind::OpenParen)) {
             $args = $this->parseArgList();
         }
-        return Expr::new_($class, $args, $span);
+        return Expr::new_($class, $args, $this->end($span));
     }
 
     /**
@@ -3021,7 +3021,7 @@ final class Parser
         }
         $decl = $this->finishClassDecl('class', $name, [], false, false, false, $span);
         $this->hoistedClasses[] = $decl;
-        return Expr::new_($name, $args, $span);
+        return Expr::new_($name, $args, $this->end($span));
     }
 
     private function parseArrayLiteral(Span $span): Expr
@@ -3048,7 +3048,7 @@ final class Parser
             }
         }
         $this->expect($closeKind, $closeMsg);
-        return Expr::arrayLit($elements, $span);
+        return Expr::arrayLit($elements, $this->end($span));
     }
 
     /**
@@ -3061,7 +3061,8 @@ final class Parser
     private function parseArrayElementOrHole(Span $span): ArrayElement
     {
         if ($this->check(TokenKind::Comma)) {
-            return new ArrayElement(null, Expr::variable('__mc_destructure_skip', $span));
+            $at = $this->peek();
+            return new ArrayElement(null, Expr::variable('__mc_destructure_skip', new Span($span->line, $span->column, $span->file, $at->line, $at->column, $at->line, $at->column)));
         }
         return $this->parseArrayElement();
     }
@@ -3075,7 +3076,7 @@ final class Parser
             $span = $this->span();
             $this->advance();
             $value = $this->parseExpression();
-            return new ArrayElement(null, Expr::spread($value, $span));
+            return new ArrayElement(null, Expr::spread($value, $this->end($span)));
         }
         // `[&$a[$k], $v]` and `['k' => &$v]`. Accepting the `&` here replaces a
         // bare "unexpected token: Ampersand" — which points at the character and
@@ -3126,12 +3127,12 @@ final class Parser
                 if ($this->match(TokenKind::OpenBrace)) {
                     $nameExpr = $this->parseExpression();
                     $this->expect(TokenKind::CloseBrace, "expected '}' after a dynamic static property name");
-                    return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $span);
+                    return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $this->end($span));
                 }
                 if ($this->check(TokenKind::Variable)) {
                     $inner = $this->advance();
-                    $nameExpr = Expr::variable(\substr($inner->lexeme, 1), $span);
-                    return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $span);
+                    $nameExpr = Expr::variable(\substr($inner->lexeme, 1), $this->tokSpan($span, $inner));
+                    return new \Parser\Ast\DynamicStaticProp($name, $nameExpr, $this->end($span));
                 }
             }
             // `Class::{expr}(...)` / `Class::$name(...)` — the METHOD name is
@@ -3142,22 +3143,22 @@ final class Parser
                 if (!$this->check(TokenKind::OpenParen)) {
                     throw $this->error("expected '(' after a dynamic static method name");
                 }
-                return new \Parser\Ast\DynamicStaticMethodCall($name, $nameExpr, $this->parseArgList(), $span);
+                return new \Parser\Ast\DynamicStaticMethodCall($name, $nameExpr, $this->parseArgList(), $this->end($span));
             }
             if ($member->kind === TokenKind::Variable && $this->check(TokenKind::OpenParen)) {
-                $nameExpr = Expr::variable(\substr($member->lexeme, 1), $span);
-                return new \Parser\Ast\DynamicStaticMethodCall($name, $nameExpr, $this->parseArgList(), $span);
+                $nameExpr = Expr::variable(\substr($member->lexeme, 1), $this->tokSpan($span, $member));
+                return new \Parser\Ast\DynamicStaticMethodCall($name, $nameExpr, $this->parseArgList(), $this->end($span));
             }
             // `Class::method(...)`
             if ($this->check(TokenKind::OpenParen)) {
                 $args = $this->parseArgList();
-                return Expr::staticCall($name, $member->lexeme, $args, $span);
+                return Expr::staticCall($name, $member->lexeme, $args, $this->end($span));
             }
             // `Class::$prop` or `Class::CONST` or `Class::class`
             if ($member->kind === TokenKind::Variable) {
-                return Expr::staticAccess($name, $member->lexeme, $span);
+                return Expr::staticAccess($name, $member->lexeme, $this->end($span));
             }
-            return Expr::staticAccess($name, $member->lexeme, $span);
+            return Expr::staticAccess($name, $member->lexeme, $this->end($span));
         }
 
         // `name(args)` — only for unqualified names; qualified function calls
@@ -3167,10 +3168,10 @@ final class Parser
             $fl = \strtolower($literal);
             $qualified = \str_contains($literal, '\\');
             if (isset($this->useFnAliases[$fl]) && !$qualified) { $name = $this->useFnAliases[$fl]; }
-            return Expr::call($name, $args, $span, $qualified);
+            return Expr::call($name, $args, $this->end($span), $qualified);
         }
 
-        return Expr::identifier($name, $span);
+        return Expr::identifier($name, $this->end($span));
     }
 
     private function parseIntLiteral(string $lex): int
@@ -3495,6 +3496,7 @@ final class Parser
     {
         $tokens = (new Lexer())->scan($src, true);
         $sub = new self($tokens);
+        $sub->rangeOverride = $span;
         return Expr::cast('string', $sub->parseExpression(), $span);
     }
 
@@ -3523,6 +3525,8 @@ final class Parser
         $tok = $this->tokens[$this->pos];
         if (!$this->isAtEnd()) {
             $this->pos = $this->pos + 1;
+            $this->prevEndLine = $tok->endLine;
+            $this->prevEndColumn = $tok->endColumn;
         }
         return $tok;
     }
@@ -3607,6 +3611,72 @@ final class Parser
         $this->spanPos = $this->pos;
         $this->spanMemo = $s;
         return $s;
+    }
+
+    /** End of the last consumed token: where a node completing now ends. */
+    private int $prevEndLine = 0;
+    private int $prevEndColumn = 0;
+
+    /**
+     * Range of an interpolated-string sub-expression: its tokens are lexed from
+     * the string BODY, so their positions are meaningless in the file. Every node
+     * the sub-parser builds carries the whole string's range instead (the anchor
+     * line/column stay as lexed — `dump-ast` prints them).
+     */
+    private ?Span $rangeOverride = null;
+
+    /**
+     * $anchor closed at the last consumed token. $from is the leftmost operand
+     * when the anchor is an operator or bracket (binary, ternary, assignment,
+     * postfix): the range then starts at the operand, the anchor stays what
+     * `dump-ast` prints.
+     */
+    private function end(Span $anchor, ?Expr $from = null): Span
+    {
+        $o = $this->rangeOverride;
+        if ($o !== null) {
+            return new Span($anchor->line, $anchor->column, $anchor->file, $o->endLine, $o->endColumn, $o->startLine(), $o->startColumn());
+        }
+        $bl = 0;
+        $bc = 0;
+        if ($from !== null) {
+            $bl = $from->span->startLine();
+            $bc = $from->span->startColumn();
+        }
+        return new Span($anchor->line, $anchor->column, $anchor->file, $this->prevEndLine, $this->prevEndColumn, $bl, $bc);
+    }
+
+    /** $anchor closed at the last consumed token, with the range starting at token $first. */
+    private function endFrom(Span $anchor, Token $first): Span
+    {
+        $o = $this->rangeOverride;
+        if ($o !== null) {
+            return $this->end($anchor);
+        }
+        return new Span($anchor->line, $anchor->column, $anchor->file, $this->prevEndLine, $this->prevEndColumn, $first->line, $first->column);
+    }
+
+    /** Range of the single token $t under another node's anchor (dump-ast keeps the anchor). */
+    private function tokSpan(Span $anchor, Token $t): Span
+    {
+        $o = $this->rangeOverride;
+        if ($o !== null) {
+            return $this->end($anchor);
+        }
+        return new Span($anchor->line, $anchor->column, $anchor->file, $t->endLine, $t->endColumn, $t->line, $t->column);
+    }
+
+    /** Zero-width range at the start of $anchor, for synthesized nodes that stand for no source text. */
+    /** Range of the synthesized node standing for exactly $child's text. */
+    private function wrapSpan(Span $anchor, Expr $child): Span
+    {
+        $c = $child->span;
+        return new Span($anchor->line, $anchor->column, $anchor->file, $c->endLine, $c->endColumn, $c->startLine(), $c->startColumn());
+    }
+
+    private function emptyAt(Span $anchor): Span
+    {
+        return new Span($anchor->line, $anchor->column, $anchor->file, $anchor->line, $anchor->column);
     }
 
     private function error(string $message): ParseError

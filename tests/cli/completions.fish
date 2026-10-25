@@ -79,6 +79,7 @@ complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l keep-ir -d 'K
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -s j -r -f -d 'Parallel clang jobs; 0 = one per core'
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l tolerant -d 'Recover from syntax errors; print the tree and every error'
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l ranges -d 'Print spans as start-end ranges'
+complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l check-ranges -d 'Verify the range invariants; print each violation, exit 1 if any'
 complete -c manticore -n '__fish_seen_subcommand_from analyze' -l help -d 'Show this help text'
 complete -c manticore -n '__fish_seen_subcommand_from analyze' -s o -r -F -d 'Output path (default a.out)'
 complete -c manticore -n '__fish_seen_subcommand_from analyze' -l memory -r -f -d 'Memory mode: rc|arena|hybrid (default: $MANTICORE_MEMORY)'
