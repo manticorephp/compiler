@@ -12,9 +12,9 @@ use Parser\Ast\Span;
  *   - a node whose end precedes its start;
  *   - a child range that is not inside its parent's range;
  *   - two siblings that overlap (checked after sorting by start, so a desugared
- *     node whose fields are not in source order is fine; siblings with an
- *     IDENTICAL range are exempt — the parts of an interpolated string share
- *     the whole string's range);
+ *     node whose fields are not in source order is fine). The one exemption:
+ *     two siblings that BOTH have exactly the parent's range — the parser gives
+ *     every node of an interpolated string the whole string's range;
  *   - with $requireEnds, a node with no end at all.
  *
  * A node with endLine === 0 is "unset": skipped, but its descendants are still
@@ -107,7 +107,7 @@ final class RangeCheck
         for ($i = 1; $i < $n; $i = $i + 1) {
             $a = $kids[$order[$i - 1]];
             $b = $kids[$order[$i]];
-            if ($this->str($a) === $this->str($b)) { continue; }
+            if ($this->str($a) === $this->str($parent) && $this->str($b) === $this->str($parent)) { continue; }
             if ($this->before($b->startLine(), $b->startColumn(), $a->endLine, $a->endColumn)) {
                 $this->report($b, 'sibling range ' . $this->str($b) . ' overlaps ' . $this->str($a));
             }

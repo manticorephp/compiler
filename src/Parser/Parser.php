@@ -120,19 +120,21 @@ final class Parser
         string $source,
         string $file = '',
         bool $lazyBodies = false,
+        bool $ranges = false,
     ): Program {
         // Constructing the parser consumes the lexer array into its filtered
         // stream. Keep the original token-array temporary out of the
         // parseProgram() lifetime: on large files it otherwise retains every
         // token alongside the parser's filtered array and the AST being built.
         $p = new self((new Lexer())->scan($source), $source, $file, $lazyBodies);
+        $p->ranges = $ranges;
         return $p->parseProgram();
     }
 
     public static function parseTolerant(string $source, string $file = ''): ParseResult
     {
         try {
-            return new ParseResult(self::parseSource($source, $file), []);
+            return new ParseResult(self::parseSource($source, $file, false, true), []);
         } catch (ParseError $e) {
             return new ParseResult(new Program([]), [$e]);
         } catch (\Throwable $e) {
@@ -520,7 +522,7 @@ final class Parser
             if ($next->kind !== TokenKind::Identifier && $next->kind !== TokenKind::Keyword) {
                 // Restore so the higher-level error path surfaces the
                 // bad token in context.
-                $this->pos = $saved;
+                $this->rewind($saved);
                 throw $this->error('expected name after \\');
             }
             $this->advance();
@@ -2990,7 +2992,7 @@ final class Parser
             }
             return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $this->end($span));
         }
-        $this->pos = $save;
+        $this->rewind($save);
         $class = $this->parseClassName();
         $args = [];
         if ($this->check(TokenKind::OpenParen)) {
@@ -3062,7 +3064,7 @@ final class Parser
     {
         if ($this->check(TokenKind::Comma)) {
             $at = $this->peek();
-            return new ArrayElement(null, Expr::variable('__mc_destructure_skip', new Span($span->line, $span->column, $span->file, $at->line, $at->column, $at->line, $at->column)));
+            return new ArrayElement(null, Expr::variable('__mc_destructure_skip', $this->emptyAtTok($span, $at)));
         }
         return $this->parseArrayElement();
     }
@@ -3496,6 +3498,7 @@ final class Parser
     {
         $tokens = (new Lexer())->scan($src, true);
         $sub = new self($tokens);
+        $sub->ranges = $this->ranges;
         $sub->rangeOverride = $span;
         return Expr::cast('string', $sub->parseExpression(), $span);
     }
@@ -3625,6 +3628,9 @@ final class Parser
      */
     private ?Span $rangeOverride = null;
 
+    /** Whether nodes get real ranges; off (the compiler's path) every helper hands back the anchor untouched. */
+    private bool $ranges = false;
+
     /**
      * $anchor closed at the last consumed token. $from is the leftmost operand
      * when the anchor is an operator or bracket (binary, ternary, assignment,
@@ -3633,6 +3639,7 @@ final class Parser
      */
     private function end(Span $anchor, ?Expr $from = null): Span
     {
+        if (!$this->ranges) { return $anchor; }
         $o = $this->rangeOverride;
         if ($o !== null) {
             return new Span($anchor->line, $anchor->column, $anchor->file, $o->endLine, $o->endColumn, $o->startLine(), $o->startColumn());
@@ -3649,6 +3656,7 @@ final class Parser
     /** $anchor closed at the last consumed token, with the range starting at token $first. */
     private function endFrom(Span $anchor, Token $first): Span
     {
+        if (!$this->ranges) { return $anchor; }
         $o = $this->rangeOverride;
         if ($o !== null) {
             return $this->end($anchor);
@@ -3659,6 +3667,7 @@ final class Parser
     /** Range of the single token $t under another node's anchor (dump-ast keeps the anchor). */
     private function tokSpan(Span $anchor, Token $t): Span
     {
+        if (!$this->ranges) { return $anchor; }
         $o = $this->rangeOverride;
         if ($o !== null) {
             return $this->end($anchor);
@@ -3666,17 +3675,35 @@ final class Parser
         return new Span($anchor->line, $anchor->column, $anchor->file, $t->endLine, $t->endColumn, $t->line, $t->column);
     }
 
-    /** Zero-width range at the start of $anchor, for synthesized nodes that stand for no source text. */
     /** Range of the synthesized node standing for exactly $child's text. */
     private function wrapSpan(Span $anchor, Expr $child): Span
     {
+        if (!$this->ranges) { return $anchor; }
         $c = $child->span;
         return new Span($anchor->line, $anchor->column, $anchor->file, $c->endLine, $c->endColumn, $c->startLine(), $c->startColumn());
     }
 
+    /** Zero-width range at the start of $anchor, for synthesized nodes that stand for no source text. */
     private function emptyAt(Span $anchor): Span
     {
+        if (!$this->ranges) { return $anchor; }
         return new Span($anchor->line, $anchor->column, $anchor->file, $anchor->line, $anchor->column);
+    }
+
+    /** Zero-width range at token $at under another node's anchor (a destructuring hole). */
+    private function emptyAtTok(Span $anchor, Token $at): Span
+    {
+        if (!$this->ranges) { return $anchor; }
+        return new Span($anchor->line, $anchor->column, $anchor->file, $at->line, $at->column, $at->line, $at->column);
+    }
+
+    /** Move the cursor back to token index $p, keeping the previous-token end consistent. */
+    private function rewind(int $p): void
+    {
+        $this->pos = $p;
+        $prev = $p > 0 ? $this->tokens[$p - 1] : null;
+        $this->prevEndLine = $prev !== null ? $prev->endLine : 0;
+        $this->prevEndColumn = $prev !== null ? $prev->endColumn : 0;
     }
 
     private function error(string $message): ParseError

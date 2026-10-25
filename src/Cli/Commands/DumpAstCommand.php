@@ -38,7 +38,8 @@ final class DumpAstCommand extends Command
         }
         $ranges = $args->flag('ranges');
         if ($args->flag('check-ranges')) {
-            return $this->checkRanges($sources[0]);
+            $file = \count(\Manticore\CompileArgs::$files) === \count($sources) ? \Manticore\CompileArgs::$files[0] : '';
+            return $this->checkRanges($sources[0], $file, $args->flag('tolerant'));
         }
         if ($args->flag('tolerant')) {
             $r = \Parser\Parser::parseTolerant($sources[0]);
@@ -51,7 +52,7 @@ final class DumpAstCommand extends Command
             return 0;
         }
         try {
-            $program = \Parser\Parser::parseSource($sources[0]);
+            $program = \Parser\Parser::parseSource($sources[0], '', false, $ranges);
         } catch (\Throwable $e) {
             \Manticore\dprint("parse failed: " . $e->getMessage());
             return 65;
@@ -60,15 +61,18 @@ final class DumpAstCommand extends Command
         return 0;
     }
 
-    private function checkRanges(string $source): int
+    private function checkRanges(string $source, string $file, bool $tolerant): int
     {
         try {
-            $program = \Parser\Parser::parseSource($source);
+            if ($tolerant) {
+                $program = \Parser\Parser::parseTolerant($source)->program;
+            } else {
+                $program = \Parser\Parser::parseSource($source, '', false, true);
+            }
         } catch (\Throwable $e) {
             \Manticore\dprint("parse failed: " . $e->getMessage());
             return 65;
         }
-        $file = \count(\Manticore\CompileArgs::$files) > 0 ? \Manticore\CompileArgs::$files[0] : '';
         $violations = \Parser\RangeCheck::verify($program, false, $file);
         if (\count($violations) === 0) {
             return 0;

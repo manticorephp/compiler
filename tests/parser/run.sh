@@ -89,9 +89,22 @@ for name in "${cases[@]}"; do
     # exit code ignored: only the printed text is compared
     run_limited "$MANTICORE" dump-ast $flags "$rel" > "$actual" 2>&1
 
-    if diff -q "$expected" "$actual" > /dev/null 2>&1; then
+    # range invariants: --check-ranges must print nothing and exit 0
+    range_bad=0
+    if [[ "$name" != *.strict ]]; then
+        chk="$WORK/$name.check"
+        run_limited "$MANTICORE" dump-ast --tolerant --check-ranges "$rel" > "$chk" 2>&1
+        [[ $? -ne 0 || -s "$chk" ]] && range_bad=1
+    fi
+
+    if diff -q "$expected" "$actual" > /dev/null 2>&1 && [[ $range_bad -eq 0 ]]; then
         passed=$((passed + 1))
         printf 'PASS %s\n' "$name"
+    elif [[ $range_bad -eq 1 ]] && diff -q "$expected" "$actual" > /dev/null 2>&1; then
+        failed=$((failed + 1))
+        failed_names+=("$name")
+        printf 'FAIL %s  (--check-ranges not clean)\n' "$name"
+        head -n 6 "$WORK/$name.check" | sed 's/^/      /'
     else
         failed=$((failed + 1))
         failed_names+=("$name")
@@ -105,8 +118,22 @@ for name in "${cases[@]}"; do
     fi
 done
 
+# RangeCheck self-test on hand-built trees (needs the Zend php; SKIP without it)
+if command -v php > /dev/null 2>&1; then
+    if [[ -z "$FILTER" || "rangecheck_selftest" == *"$FILTER"* ]]; then
+        if php -d xdebug.mode=off "$ROOT/tests/parser/rangecheck_selftest.php" > "$WORK/selftest.txt" 2>&1; then
+            passed=$((passed + 1)); printf 'PASS rangecheck_selftest\n'
+        else
+            failed=$((failed + 1)); failed_names+=("rangecheck_selftest")
+            printf 'FAIL rangecheck_selftest\n'; head -n 10 "$WORK/selftest.txt" | sed 's/^/      /'
+        fi
+    fi
+else
+    echo "SKIP rangecheck_selftest (php not found)"
+fi
+
 echo "---"
-printf 'passed: %d  failed: %d  total: %d\n' "$passed" "$failed" "${#cases[@]}"
+printf 'passed: %d  failed: %d  total: %d\n' "$passed" "$failed" "$((passed + failed))"
 if [[ $failed -gt 0 ]]; then
     printf 'failures: %s\n' "${failed_names[*]}"
     exit 1
