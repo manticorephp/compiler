@@ -1,6 +1,5 @@
 <?php
 // An untyped property documented `@var resource|null` that is assigned false crashes the next `$this->os ?? $this->ld` read
-// issue: #240
 class A
 {
     /** @var callable|null */
