@@ -1352,6 +1352,25 @@ final class InferTypes implements Pass
                 $this->cellElemPropsFound[$rcls . '::' . $n->property] = $n->value->type;
             }
         }
+        // A whole-property store whose elements are of ANOTHER representation than
+        // the slot's concrete element (a nested-array default `['F' => ['a' => 1]]`
+        // over a slot an earlier, still-erased `$this->m[$k] += $arr` typed
+        // `assoc[string,int]`): no single raw repr describes both, so the slot is
+        // a cell channel, as for two differing element stores below.
+        if ($n->kind === Node::KIND_STORE_PROPERTY && $n->value->type->isArray()) {
+            $ve = $n->value->type->element;
+            $rcls = ($n->object->kind === Node::KIND_LOAD_LOCAL && $n->object->name === 'this')
+                ? $cls
+                : ($n->object->type->kind === Type::KIND_OBJ ? ($n->object->type->class ?? '') : '');
+            $cd = $rcls === '' ? null : ($this->classes[$rcls] ?? null);
+            $pt = $cd === null ? null : ($cd->propertyTypes[$n->property] ?? null);
+            if ($ve !== null && $pt !== null && $pt->isArray() && $pt->element !== null
+                && $pt->element->kind !== Type::KIND_CELL && $pt->element->kind !== Type::KIND_UNKNOWN
+                && $ve->kind !== Type::KIND_CELL && $ve->kind !== Type::KIND_UNKNOWN
+                && $this->elemStoreCategory($ve) !== $this->elemStoreCategory($pt->element)) {
+                $this->cellElemPropsFound[$rcls . '::' . $n->property] = true;
+            }
+        }
         if ($n->kind === Node::KIND_STORE_ELEMENT) {
             $se = $n;
             if ($se->array->kind === Node::KIND_PROPERTY_ACCESS
