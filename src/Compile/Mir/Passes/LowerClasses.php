@@ -874,6 +874,9 @@ trait LowerClasses
         $cd->virtualProps = $this->virtualHookProps($decl, $parent);
         $cd->methodMeta = $methodMeta;
         $cd->attributes = $this->attrNames($decl->attributes);
+        foreach ($decl->consts as $const) {
+            if ($const->attributes !== []) { $cd->constAttributes[$const->name] = $this->attrNames($const->attributes); }
+        }
         $cd->isFinal = $decl->isFinal;
         $cd->isReadonlyClass = $decl->isReadonly;
         $cd->isAbstract = $decl->isAbstract;

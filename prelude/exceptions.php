@@ -34,15 +34,19 @@ interface Throwable extends Stringable
 
 class Exception implements Throwable
 {
+    // Declared in php's order (reflection lists them so); traceNames / traceLines are ours and
+    // are left out of the reflection tables (EmitLlvmRuntime::rmetaPropTable).
     public string $message;
+    /** php's __toString cache; unused here, declared so reflection lists it. */
+    private string $string = "";
     public int $code;
-    public ?Throwable $previous;
-    public int $line = 0;
     public string $file = "";
+    public int $line = 0;
     /** @var string[] */ public array $traceNames = [];
     /** @var int[] */ public array $traceLines = [];
     /** php keeps the frames here; ours live in traceNames/traceLines. Declared so reflection (symfony/polyfill-deepclone resets it on a prototype) finds it. */
     private array $trace = [];
+    public ?Throwable $previous;
 
     public function __construct(string $message = "", int $code = 0, ?Throwable $previous = null)
     {
@@ -74,15 +78,19 @@ class Exception implements Throwable
 
 class Error implements Throwable
 {
+    // Declared in php's order (reflection lists them so); traceNames / traceLines are ours and
+    // are left out of the reflection tables (EmitLlvmRuntime::rmetaPropTable).
     public string $message;
+    /** php's __toString cache; unused here, declared so reflection lists it. */
+    private string $string = "";
     public int $code;
-    public ?Throwable $previous;
-    public int $line = 0;
     public string $file = "";
+    public int $line = 0;
     /** @var string[] */ public array $traceNames = [];
     /** @var int[] */ public array $traceLines = [];
     /** php keeps the frames here; ours live in traceNames/traceLines. Declared so reflection (symfony/polyfill-deepclone resets it on a prototype) finds it. */
     private array $trace = [];
+    public ?Throwable $previous;
 
     public function __construct(string $message = "", int $code = 0, ?Throwable $previous = null)
     {

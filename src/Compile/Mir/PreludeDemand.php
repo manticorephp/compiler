@@ -168,6 +168,39 @@ final class PreludeDemand
         $this->dsnDynamic = true;
     }
 
+    /** A class-name lookup (`class_exists`, `new ReflectionClass`, …) whose name is computed at run time. */
+    private bool $dynClassLookup = false;
+
+    /**
+     * Any built-in class may be asked for by a name the source never spells, so
+     * the demand-gated class families (array / SPL / DateTime) must all exist.
+     */
+    public function dynClassLookup(): bool
+    {
+        return $this->dynClassLookup;
+    }
+
+    /**
+     * The class-name argument of a lookup call: a literal names its class (a
+     * string is otherwise not code, so the prelude gates would never see it);
+     * anything else is a run-time name.
+     *
+     * @param Token[] $toks
+     */
+    private function noteClassNameArg(array $toks, int $at, int $n): void
+    {
+        if ($at < $n && $toks[$at]->kind === TokenKind::StringLiteral) {
+            $lx = $toks[$at]->lexeme;
+            $q = \substr($lx, 0, 1);
+            if (($q === "'" || $q === '"') && \substr($lx, -1) === $q && \strpos($lx, '$') === false) {
+                $name = \strtolower(\ltrim(\str_replace('\\\\', '\\', \substr($lx, 1, \strlen($lx) - 2)), '\\'));
+                $this->names[$name] = true;
+                return;
+            }
+        }
+        $this->dynClassLookup = true;
+    }
+
     /** The variable `$name` occurs (pass the bare name, no `$`). */
     public function usesVar(string $name): bool
     {
@@ -290,6 +323,11 @@ final class PreludeDemand
                 }
             }
             if ($kind === TokenKind::Ellipsis) { $this->ellipsis = true; }
+            // `new $cls(...)` / `new ($expr)`: the class is a run-time name.
+            if ($kind === TokenKind::Keyword && \strtolower($t->lexeme) === 'new' && $i + 1 < $n
+                && ($toks[$i + 1]->kind === TokenKind::Variable || $toks[$i + 1]->kind === TokenKind::OpenParen)) {
+                $this->dynClassLookup = true;
+            }
             if ($kind !== TokenKind::Identifier) {
                 $i = $i + 1;
                 continue;
@@ -305,6 +343,16 @@ final class PreludeDemand
             $prev = $i > 0 ? $toks[$i - 1] : null;
             $pk = $prev === null ? '' : $prev->kind;
             $pw = $prev === null ? '' : \strtolower($prev->lexeme);
+            if ($pk === TokenKind::Keyword && $pw === 'new') {
+                if ($lower === 'reflectionclass' || $lower === 'reflectionmethod'
+                    || $lower === 'reflectionproperty' || $lower === 'reflectionclassconstant') {
+                    $this->noteClassNameArg($toks, $i + 2, $n);
+                }
+            } elseif ($pk !== TokenKind::Arrow && $pk !== TokenKind::NullsafeArrow && $pk !== TokenKind::DoubleColon && !($pk === TokenKind::Keyword && $pw === 'function')
+                && ($lower === 'class_exists' || $lower === 'interface_exists' || $lower === 'enum_exists'
+                    || $lower === 'trait_exists' || $lower === 'class_alias')) {
+                $this->noteClassNameArg($toks, $i + 2, $n);
+            }
             if ($pk === TokenKind::Arrow || $pk === TokenKind::NullsafeArrow) {
                 $this->methods[$lower] = true;
             } elseif ($pk === TokenKind::DoubleColon) {

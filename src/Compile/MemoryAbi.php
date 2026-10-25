@@ -620,7 +620,13 @@ final class MemoryAbi
 
     /** Bytes. Grows as fields are appended; readers must use the named
      *  offsets, never arithmetic on this. */
-    public const RMETA_SIZE = 120;
+    public const RMETA_SIZE = 136;
+
+    /** `i64` / `ptr` — the class-CONSTANT table: count, then one row per own
+     *  constant that carries attributes (`name` + `nattrs`/`attrs` at the
+     *  RMETA_ROW_* offsets). ReflectionClassConstant::getAttributes() reads it. */
+    public const RMETA_NCONSTS_OFFSET = 120;
+    public const RMETA_CONSTS_OFFSET  = 128;
 
     /** One row of the method / property tables:
      *  `{ ptr name, i64 flags, ptr tramp, i64 arity, i64 nparams, ptr params,

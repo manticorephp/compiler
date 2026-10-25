@@ -100,6 +100,10 @@ final class ClassDef
      *  @var string[] */
     public array $attributes = [];
 
+    /** Own class-constant `#[Attr]` names by constant name (same form as {@see $attributes}).
+     *  @var array<string, string[]> */
+    public array $constAttributes = [];
+
     /** `final class` / `abstract class` — PHP reports these, and nothing in MIR
      *  recorded them because dispatch never needed to ask. */
     public bool $isFinal = false;

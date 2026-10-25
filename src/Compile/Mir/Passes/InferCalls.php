@@ -325,7 +325,7 @@ trait InferCalls
             || $n === '__mc_refl_row_params' || $n === '__mc_refl_row_arity'
             || $n === '__mc_refl_prow' || $n === '__mc_refl_prop_getter'
             || $n === '__mc_refl_prop_setter'
-            || $n === '__mc_refl_nprops' || $n === '__mc_refl_props_base'
+            || $n === '__mc_refl_row_at' || $n === '__mc_refl_nconsts' || $n === '__mc_refl_consts_base' || $n === '__mc_refl_nprops' || $n === '__mc_refl_props_base'
             || $n === '__mc_refl_nmethods' || $n === '__mc_refl_methods_base'
             || $n === '__mc_refl_class_nattrs' || $n === '__mc_refl_class_attrs'
             || $n === '__mc_refl_row_nattrs' || $n === '__mc_refl_row_attrs'
