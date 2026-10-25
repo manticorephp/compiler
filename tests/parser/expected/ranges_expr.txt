@@ -1,5 +1,5 @@
 Program
-  Stmt:Expression @2:1
+  Stmt:Expression @2:1-2:112
     expr:
       Expr:Assign @2:1-2:111
         target:
@@ -49,8 +49,8 @@ Program
                   Param $q : (untyped) @2:51
                 uses: [0]
                 returnType: null
-                body: Block
-                  Stmt:Return @2:57
+                body: Block @2:55-2:69
+                  Stmt:Return @2:57-2:67
                     value:
                       Expr:Variable @2:64-2:66
                         name: "q"

@@ -5,8 +5,8 @@ Program
       params: 2
       Param $a : int @3:14
       Param $b : int @3:22
-      body: Block
-        Stmt:Return @5:5
+      body: Block @4:1-6:2
+        Stmt:Return @5:5-5:20
           value:
             Expr:BinaryOp @5:12-5:19
               op: "+"
@@ -24,8 +24,8 @@ Program
             value: 0
       Method bump [public] -> int @12:5
         params: 0
-        body: Block
-          Stmt:Return @14:9
+        body: Block @13:5-15:6
+          Stmt:Return @14:9-14:27
             value:
               Expr:IncDec @14:16-14:26
                 op: "++"
@@ -37,7 +37,7 @@ Program
                         name: "this"
                     property: "n"
                     nullsafe: false
-  Stmt:Expression @18:1
+  Stmt:Expression @18:1-18:20
     expr:
       Expr:Assign @18:1-18:19
         target:
@@ -49,7 +49,7 @@ Program
             args: [0]
     docComment: null
     attributes: [0]
-  Stmt:For @19:1
+  Stmt:For @19:1-21:2
     init: [1]
       Expr:Assign @19:6-19:12
         target:
@@ -74,8 +74,8 @@ Program
         operand:
           Expr:Variable @19:22-19:24
             name: "i"
-    body: Block
-      Stmt:Echo @20:5
+    body: Block @19:28-21:2
+      Stmt:Echo @20:5-20:36
         exprs: [2]
           Expr:Call @20:10-20:29
             function: "add"

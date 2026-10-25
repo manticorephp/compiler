@@ -101,7 +101,7 @@ final class Dump
             return;
         }
         if ($value instanceof Block) {
-            $this->line($name . ': Block');
+            $this->line($name . ': Block' . ($this->ranges && $value->span !== null && $value->span->endLine !== 0 ? ' ' . $this->spanStr($value->span) : ''));
             $this->indent = $this->indent + 1;
             foreach ($value->statements as $s) {
                 $this->stmt($s);

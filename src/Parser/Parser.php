@@ -269,7 +269,8 @@ final class Parser
             $tok = $this->advance();
             // php echoes it verbatim: one echo of one string constant, and no
             // escape processing of any kind applies to it.
-            return Stmt::echo_([Expr::string($tok->lexeme, $this->end($span))], $span);
+            $end = $this->end($span);
+            return Stmt::echo_([Expr::string($tok->lexeme, $end)], $end);
         }
         if ($this->check(TokenKind::OpenTagEcho)) {
             $span = $this->span();
@@ -279,7 +280,7 @@ final class Parser
             $args = [$this->parseExpression()];
             while ($this->match(TokenKind::Comma)) { $args[] = $this->parseExpression(); }
             $this->match(TokenKind::Semicolon);
-            return Stmt::echo_($args, $span);
+            return Stmt::echo_($args, $this->end($span));
         }
         // A tag straddling a statement boundary carries no statement of its own;
         // a close tag also ends a statement, the way a `;` does. There is no
@@ -288,7 +289,7 @@ final class Parser
         if ($this->check(TokenKind::CloseTag) || $this->check(TokenKind::OpenTag)) {
             $span = $this->span();
             $this->advance();
-            return Stmt::echo_([], $span);
+            return Stmt::echo_([], $this->end($span));
         }
         // A doc comment at the head of a statement (inline `/** @var T $x */`
         // before an assignment) — captured before anything advances so an
@@ -347,7 +348,7 @@ final class Parser
                 $span = $this->span();
                 $name = $this->advance()->lexeme;   // the label name
                 $this->advance();                    // ':'
-                return new \Parser\Ast\LabelStmt($name, $span);
+                return new \Parser\Ast\LabelStmt($name, $this->end($span));
             }
         }
 
@@ -355,7 +356,7 @@ final class Parser
         if ($this->check(TokenKind::OpenBrace)) {
             $span = $this->span();
             $block = $this->parseBlock();
-            return Stmt::if_(Expr::bool(true, $this->emptyAt($span)), $block, [], null, $span);
+            return Stmt::if_(Expr::bool(true, $this->emptyAt($span)), $block, [], null, $this->end($span));
         }
 
         if ($attrs !== []) {
@@ -442,7 +443,7 @@ final class Parser
                 $this->useAliases = $prevUses;
                 $this->useFnAliases = $prevFnUses;
             }
-            return Stmt::namespace_($name, $body, $span);
+            return Stmt::namespace_($name, $body, $this->end($span));
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after namespace name");
         // Non-braced namespace declaration owns everything until the
@@ -451,7 +452,7 @@ final class Parser
         $this->currentNamespace = $name;
         $this->useAliases = [];
         $this->useFnAliases = [];
-        return Stmt::namespace_($name, null, $span);
+        return Stmt::namespace_($name, null, $this->end($span));
     }
 
     private function parseUseDecl(): Stmt
@@ -484,7 +485,7 @@ final class Parser
             }
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after use");
-        return Stmt::useDecl($items, $span);
+        return Stmt::useDecl($items, $this->end($span));
     }
 
     /**
@@ -1315,6 +1316,8 @@ final class Parser
 
     private function parseBlock(): Block
     {
+        $open = $this->peek();
+        $anchor = $this->span();
         $this->expect(TokenKind::OpenBrace, "expected '{'");
         $stmts = [];
         while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
@@ -1322,7 +1325,7 @@ final class Parser
             $stmts[] = $this->parseStatement();
         }
         $this->expect(TokenKind::CloseBrace, "expected '}'");
-        return new Block($stmts);
+        return new Block($stmts, $this->ranges ? $this->endFrom($anchor, $open) : null);
     }
 
     /**
@@ -1334,8 +1337,12 @@ final class Parser
         if ($this->check(TokenKind::OpenBrace)) {
             return $this->parseBlock();
         }
-        if ($this->match(TokenKind::Semicolon)) { return new Block([]); }   // `for (…);`
-        return new Block([$this->parseStatement()]);
+        $el = $this->prevEndLine;
+        $ec = $this->prevEndColumn;
+        if ($this->match(TokenKind::Semicolon)) { return new Block([], $this->listSpan(null, $el, $ec)); }   // `for (…);`
+        $first = $this->peek();
+        $stmt = $this->parseStatement();
+        return new Block([$stmt], $this->listSpan($first, $this->prevEndLine, $this->prevEndColumn));
     }
 
     /**
@@ -1352,6 +1359,9 @@ final class Parser
     private function parseAltBody(array $stops): Block
     {
         $stmts = [];
+        $first = null;
+        $el = $this->prevEndLine;
+        $ec = $this->prevEndColumn;
         while (!$this->isAtEnd()) {
             $stop = false;
             foreach ($stops as $kw) {
@@ -1359,9 +1369,12 @@ final class Parser
             }
             if ($stop) { break; }
             if ($this->match(TokenKind::Semicolon)) { continue; }   // empty statement
+            if ($first === null) { $first = $this->peek(); }
             $stmts[] = $this->parseStatement();
+            $el = $this->prevEndLine;
+            $ec = $this->prevEndColumn;
         }
-        return new Block($stmts);
+        return new Block($stmts, $this->listSpan($first, $el, $ec));
     }
 
     /**
@@ -1387,7 +1400,7 @@ final class Parser
             $value = $this->parseExpression();
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after return");
-        return Stmt::return_($value, $span);
+        return Stmt::return_($value, $this->end($span));
     }
 
     private function parseEcho(): Stmt
@@ -1399,7 +1412,7 @@ final class Parser
             $exprs[] = $this->parseExpression();
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after echo");
-        return Stmt::echo_($exprs, $span);
+        return Stmt::echo_($exprs, $this->end($span));
     }
 
     private function parseIf(): Stmt
@@ -1430,7 +1443,7 @@ final class Parser
                 $else = $this->parseAltBody(['endif']);
             }
             $this->endAltBody('endif');
-            return Stmt::if_($cond, $then, $elseifs, $else, $span);
+            return Stmt::if_($cond, $then, $elseifs, $else, $this->end($span));
         }
 
         $then = $this->parseBlockOrStatement();
@@ -1449,12 +1462,12 @@ final class Parser
             // `else if` and `else { ... }` and `else statement;` all valid.
             if ($this->checkKeyword('if')) {
                 $nested = $this->parseIf();
-                $else = new Block([$nested]);
+                $else = new Block([$nested], $this->wrapStmtSpan($nested));
             } else {
                 $else = $this->parseBlockOrStatement();
             }
         }
-        return Stmt::if_($cond, $then, $elseifs, $else, $span);
+        return Stmt::if_($cond, $then, $elseifs, $else, $this->end($span));
     }
 
     /**
@@ -1478,10 +1491,10 @@ final class Parser
         }
         if ($this->check(TokenKind::OpenBrace)) {
             $block = $this->parseBlock();
-            return Stmt::if_(Expr::bool(true, $this->emptyAt($span)), $block, [], null, $span);
+            return Stmt::if_(Expr::bool(true, $this->emptyAt($span)), $block, [], null, $this->end($span));
         }
         if ($this->check(TokenKind::Semicolon)) { $this->advance(); }
-        return Stmt::if_(Expr::bool(false, $this->emptyAt($span)), new Block([]), [], null, $span);
+        return Stmt::if_(Expr::bool(false, $this->emptyAt($span)), new Block([], $this->ranges ? $this->emptyAt($span) : null), [], null, $this->end($span));
     }
 
     private function parseWhile(): Stmt
@@ -1494,10 +1507,10 @@ final class Parser
         if ($this->match(TokenKind::Colon)) {
             $body = $this->parseAltBody(['endwhile']);
             $this->endAltBody('endwhile');
-            return Stmt::while_($cond, $body, $span);
+            return Stmt::while_($cond, $body, $this->end($span));
         }
         $body = $this->parseBlockOrStatement();
-        return Stmt::while_($cond, $body, $span);
+        return Stmt::while_($cond, $body, $this->end($span));
     }
 
     private function parseExpressionStatement(?string $docComment = null): Stmt
@@ -1505,7 +1518,7 @@ final class Parser
         $span = $this->span();
         $expr = $this->parseExpression();
         $this->expect(TokenKind::Semicolon, "expected ';' after expression");
-        return Stmt::expression($expr, $span, $docComment);
+        return Stmt::expression($expr, $this->end($span), $docComment);
     }
 
     private function parseDoWhile(): Stmt
@@ -1521,7 +1534,7 @@ final class Parser
         $cond = $this->parseExpression();
         $this->expect(TokenKind::CloseParen, "expected ')' after condition");
         $this->expect(TokenKind::Semicolon, "expected ';' after do-while");
-        return Stmt::doWhile($body, $cond, $span);
+        return Stmt::doWhile($body, $cond, $this->end($span));
     }
 
     private function parseFor(): Stmt
@@ -1539,10 +1552,10 @@ final class Parser
         if ($this->match(TokenKind::Colon)) {
             $body = $this->parseAltBody(['endfor']);
             $this->endAltBody('endfor');
-            return Stmt::for_($init, $cond, $update, $body, $span);
+            return Stmt::for_($init, $cond, $update, $body, $this->end($span));
         }
         $body = $this->parseBlockOrStatement();
-        return Stmt::for_($init, $cond, $update, $body, $span);
+        return Stmt::for_($init, $cond, $update, $body, $this->end($span));
     }
 
     /**
@@ -1583,10 +1596,10 @@ final class Parser
         if ($this->match(TokenKind::Colon)) {
             $body = $this->parseAltBody(['endforeach']);
             $this->endAltBody('endforeach');
-            return Stmt::foreach_($expr, $key, $value, $valueByRef, $body, $span);
+            return Stmt::foreach_($expr, $key, $value, $valueByRef, $body, $this->end($span));
         }
         $body = $this->parseBlockOrStatement();
-        return Stmt::foreach_($expr, $key, $value, $valueByRef, $body, $span);
+        return Stmt::foreach_($expr, $key, $value, $valueByRef, $body, $this->end($span));
     }
 
     private function parseBreakContinue(string $kind): Stmt
@@ -1599,8 +1612,8 @@ final class Parser
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after " . strtolower($kind));
         return $kind === 'Break'
-            ? Stmt::break_($level, $span)
-            : Stmt::continue_($level, $span);
+            ? Stmt::break_($level, $this->end($span))
+            : Stmt::continue_($level, $this->end($span));
     }
 
     private function parseThrow(): Stmt
@@ -1609,7 +1622,7 @@ final class Parser
         $this->advance(); // 'throw'
         $expr = $this->parseExpression();
         $this->expect(TokenKind::Semicolon, "expected ';' after throw");
-        return Stmt::throw_($expr, $span);
+        return Stmt::throw_($expr, $this->end($span));
     }
 
     /**
@@ -1642,7 +1655,7 @@ final class Parser
             if (!$this->match(TokenKind::Comma)) { break; }
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after static declaration");
-        return Stmt::staticLocal($decls, $span);
+        return Stmt::staticLocal($decls, $this->end($span));
     }
 
     /**
@@ -1654,7 +1667,7 @@ final class Parser
         $this->advance(); // 'goto'
         $tok = $this->expect(TokenKind::Identifier, "expected label after 'goto'");
         $this->expect(TokenKind::Semicolon, "expected ';' after goto label");
-        return new \Parser\Ast\GotoStmt($tok->lexeme, $span);
+        return new \Parser\Ast\GotoStmt($tok->lexeme, $this->end($span));
     }
 
     /**
@@ -1677,7 +1690,12 @@ final class Parser
             [new \Parser\Ast\StringLiteral($nameTok->lexeme, $this->tokSpan($span, $nameTok)), $value],
             $this->end($span),
         );
-        return new \Parser\Ast\ExpressionStmt($call, $span, null, $attrs);
+        $stmtSpan = $this->end($span);
+        if ($this->ranges && $attrs !== []) {
+            $first = $attrs[0]->span;
+            $stmtSpan = new Span($span->line, $span->column, $span->file, $stmtSpan->endLine, $stmtSpan->endColumn, $first->line, $first->column);
+        }
+        return new \Parser\Ast\ExpressionStmt($call, $stmtSpan, null, $attrs);
     }
 
     private function parseGlobal(): Stmt
@@ -1691,7 +1709,7 @@ final class Parser
             if (!$this->match(TokenKind::Comma)) { break; }
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after global declaration");
-        return Stmt::global_($names, $span);
+        return Stmt::global_($names, $this->end($span));
     }
 
     private function parseTry(): Stmt
@@ -1720,7 +1738,7 @@ final class Parser
             $this->advance();
             $finally = $this->parseBlock();
         }
-        return Stmt::tryCatch($try, $catches, $finally, $span);
+        return Stmt::tryCatch($try, $catches, $finally, $this->end($span));
     }
 
     private function parseSwitch(): Stmt
@@ -1756,7 +1774,7 @@ final class Parser
             $cases[] = new SwitchArm($value, $body);
         }
         $this->expect(TokenKind::CloseBrace, "expected '}' to close switch");
-        return Stmt::switch_($expr, $cases, $span);
+        return Stmt::switch_($expr, $cases, $this->end($span));
     }
 
     // ── Expressions (Pratt) ──────────────────────────────────────────────────
@@ -3695,6 +3713,25 @@ final class Parser
     {
         if (!$this->ranges) { return $anchor; }
         return new Span($anchor->line, $anchor->column, $anchor->file, $at->line, $at->column, $at->line, $at->column);
+    }
+
+    /** Range of an alternative-syntax or single-statement body: from token $first to the end ($el, $ec) of its last statement; a zero-width point at ($el, $ec) when there is none. */
+    private function listSpan(?Token $first, int $el, int $ec): ?Span
+    {
+        if (!$this->ranges) { return null; }
+        $file = $this->sourceFile;
+        if ($first === null) {
+            return new Span($el, $ec, $file, $el, $ec);
+        }
+        return new Span($first->line, $first->column, $file, $el, $ec);
+    }
+
+    /** Range of the synthesized body holding only statement $s. */
+    private function wrapStmtSpan(Stmt $s): ?Span
+    {
+        if (!$this->ranges) { return null; }
+        $c = $s->span;
+        return new Span($c->startLine(), $c->startColumn(), $c->file, $c->endLine, $c->endColumn);
     }
 
     /** Move the cursor back to token index $p, keeping the previous-token end consistent. */

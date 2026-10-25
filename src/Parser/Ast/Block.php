@@ -13,5 +13,6 @@ final class Block
      */
     public function __construct(
         public readonly array $statements,
+        public readonly ?Span $span = null,
     ) {}
 }

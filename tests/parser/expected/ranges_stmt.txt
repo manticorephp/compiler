@@ -1,0 +1,195 @@
+Program
+  Stmt:If @2:1-2:57
+    condition:
+      Expr:Variable @2:5-2:7
+        name: "a"
+    then: Block @2:9-2:20
+      Stmt:Echo @2:11-2:18
+        exprs: [1]
+          Expr:IntLiteral @2:16-2:17
+            value: 1
+    elseifs: [1]
+      [0] ElseIfArm
+        condition:
+          Expr:Variable @2:29-2:31
+            name: "b"
+        body: Block @2:33-2:40
+          Stmt:Echo @2:33-2:40
+            exprs: [1]
+              Expr:IntLiteral @2:38-2:39
+                value: 2
+    else: Block @2:46-2:57
+      Stmt:Return @2:48-2:55
+        value: null
+  Stmt:While @3:1-3:28
+    condition:
+      Expr:Variable @3:8-3:10
+        name: "x"
+    body: Block @3:13-3:18
+      Stmt:Expression @3:13-3:18
+        expr:
+          Expr:IncDec @3:13-3:17
+            op: "--"
+            prefix: false
+            operand:
+              Expr:Variable @3:13-3:15
+                name: "x"
+        docComment: null
+        attributes: [0]
+  Stmt:For @4:1-4:28
+    init: [1]
+      Expr:Assign @4:6-4:12
+        target:
+          Expr:Variable @4:6-4:8
+            name: "i"
+        value:
+          Expr:IntLiteral @4:11-4:12
+            value: 0
+    condition:
+      Expr:BinaryOp @4:14-4:20
+        op: "<"
+        left:
+          Expr:Variable @4:14-4:16
+            name: "i"
+        right:
+          Expr:IntLiteral @4:19-4:20
+            value: 3
+    update: [1]
+      Expr:IncDec @4:22-4:26
+        op: "++"
+        prefix: false
+        operand:
+          Expr:Variable @4:22-4:24
+            name: "i"
+    body: Block @4:27-4:27
+  Stmt:Foreach @5:1-5:41
+    expr:
+      Expr:Variable @5:10-5:12
+        name: "l"
+    key:
+      Expr:Variable @5:16-5:18
+        name: "k"
+    value:
+      Expr:Variable @5:22-5:24
+        name: "v"
+    valueByRef: false
+    body: Block @5:26-5:41
+      Stmt:Continue @5:28-5:39
+        level: 2
+  Stmt:DoWhile @6:1-6:25
+    body: Block @6:4-6:14
+      Stmt:Break @6:6-6:12
+        level: 1
+    condition:
+      Expr:IntLiteral @6:22-6:23
+        value: 0
+  Stmt:StaticLocal @7:1-7:15
+    decls: [1]
+      [0] StaticLocalDecl
+        name: "s"
+        default:
+          Expr:IntLiteral @7:13-7:14
+            value: 1
+  Stmt:Global @8:1-8:15
+    names: [2]
+      [0] "g"
+      [1] "h"
+  Stmt:Throw @9:1-9:10
+    expr:
+      Expr:Variable @9:7-9:9
+        name: "e"
+  Stmt:Goto @10:1-10:10
+    label: "end"
+  Stmt:Label @11:1-11:5
+    name: "end"
+  Stmt:If @12:1-12:18
+    condition:
+      Expr:BoolLiteral @12:1-12:1
+        value: false
+    then: Block @12:1-12:1
+    elseifs: [0]
+    else: null
+  Stmt:Switch @13:1-13:48
+    expr:
+      Expr:Variable @13:9-13:11
+        name: "n"
+    cases: [2]
+      [0] SwitchArm
+        value:
+          Expr:IntLiteral @13:20-13:21
+            value: 1
+        body: [2]
+          Stmt:Echo @13:23-13:30
+            exprs: [1]
+              Expr:IntLiteral @13:28-13:29
+                value: 1
+          Stmt:Break @13:31-13:37
+            level: 1
+      [1] SwitchArm
+        value: null
+        body: [0]
+  Stmt:TryCatch @14:1-14:54
+    try: Block @14:5-14:13
+      Stmt:Expression @14:7-14:11
+        expr:
+          Expr:Call @14:7-14:10
+            function: "f"
+            args: [0]
+            qualified: false
+        docComment: null
+        attributes: [0]
+    catches: [1]
+      [0] CatchClause
+        types: [2]
+          [0] "A"
+          [1] "B"
+        name: "e"
+        body: Block @14:29-14:37
+          Stmt:Expression @14:31-14:35
+            expr:
+              Expr:Call @14:31-14:34
+                function: "g"
+                args: [0]
+                qualified: false
+            docComment: null
+            attributes: [0]
+    finally: Block @14:46-14:54
+      Stmt:Expression @14:48-14:52
+        expr:
+          Expr:Call @14:48-14:51
+            function: "h"
+            args: [0]
+            qualified: false
+        docComment: null
+        attributes: [0]
+  Stmt:If @15:1-15:38
+    condition:
+      Expr:Variable @15:5-15:7
+        name: "c"
+    then: Block @15:10-15:17
+      Stmt:Echo @15:10-15:17
+        exprs: [1]
+          Expr:IntLiteral @15:15-15:16
+            value: 3
+    elseifs: [0]
+    else: Block @15:24-15:31
+      Stmt:Echo @15:24-15:31
+        exprs: [1]
+          Expr:IntLiteral @15:29-15:30
+            value: 4
+  Stmt:Echo @17:1-18:1
+    exprs: [1]
+      Expr:StringLiteral @17:1-18:1
+        value: "hi
+"
+  Stmt:Expression @19:1-19:11
+    expr:
+      Expr:Call @19:1-19:10
+        function: "unset"
+        args: [1]
+          Expr:Variable @19:7-19:9
+            name: "u"
+        qualified: false
+    docComment: null
+    attributes: [0]
+
