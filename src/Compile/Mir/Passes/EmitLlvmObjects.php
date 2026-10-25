@@ -1347,8 +1347,8 @@ trait EmitLlvmObjects
             $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
             $kid = $this->pool->intern($pa->property);
             $reg = $this->ssa->allocReg();
-                        $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
-                  . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
+                        $out .= '  ' . $reg . ' = call i64 @__mir_bag_get_str(ptr ' . $bagP
+                  . ', ptr ' . $this->strLitId($kid) . ")\n";
             $this->lastValue = $reg;
             $this->lastValueType = 'i64';
             return $out;
@@ -1883,8 +1883,8 @@ trait EmitLlvmObjects
             $bp = $this->ssa->allocReg();
             $bodyChunks[] = '  ' . $bp . ' = inttoptr i64 ' . $bi . " to ptr\n";
             $rv = $this->ssa->allocReg();
-            $bodyChunks[] = '  ' . $rv . ' = call i64 @__mir_array_get_str(ptr ' . $bp
-                           . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
+            $bodyChunks[] = '  ' . $rv . ' = call i64 @__mir_bag_get_str(ptr ' . $bp
+                           . ', ptr ' . $this->strLitId($kid) . ")\n";
             $bodyChunks[] = '  store i64 ' . $rv . ', ptr ' . $res . "\n";
             $bodyChunks[] = '  br label %' . $end . "\n";
         }
@@ -1915,8 +1915,8 @@ trait EmitLlvmObjects
         $bagP = $this->bagPtrReg;
         $kid = $this->pool->intern($pa->property);
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $bagP
-              . ', ptr ' . $this->strLitId($kid) . ", i64 0, i64 0)\n";
+        $out .= '  ' . $reg . ' = call i64 @__mir_bag_get_str(ptr ' . $bagP
+              . ', ptr ' . $this->strLitId($kid) . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
         return $out;
@@ -2332,8 +2332,8 @@ trait EmitLlvmObjects
         $bg = $this->bagSlotReg;
         $kid = $this->pool->intern($prop);
         $nb = $this->ssa->allocReg();
-        $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
-              . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
+        $out .= '  ' . $nb . ' = call ptr @__mir_bag_set_str(ptr ' . $bagP
+              . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $cellVal . ")\n";
         $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
         $nbI = $this->ssa->allocReg();
         $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
@@ -2958,7 +2958,14 @@ trait EmitLlvmObjects
 
     private function emitStorePropertyAllowed(\Compile\Mir\StoreProperty $n): string
     {
-        if ($n->value->kind === Node::KIND_REF_CELL) {
+        // A DYNAMIC property of a bag class takes the REF cell as its value: the
+        // bag store binds it ({@see UnifiedArrayRuntime::emitBagSetStr}).
+        $rcls = $n->object->type->class ?? '';
+        $bagRef = $n->value->kind === Node::KIND_REF_CELL && $rcls !== '' && isset($this->classes[$rcls])
+            && $n->object->type->kind === Type::KIND_OBJ
+            && $this->classes[$rcls]->usesBag() && $this->classes[$rcls]->propertyOffset($n->property) < 0
+            && !isset($this->classes[$rcls]->propHooks[$n->property]);
+        if ($n->value->kind === Node::KIND_REF_CELL && !$bagRef) {
             return $this->emitRebindProperty($n);
         }
         // A UNION receiver has no single layout: dispatch the store on the runtime
@@ -3052,8 +3059,8 @@ trait EmitLlvmObjects
             $val = $this->lastValue;
             $kid = $this->pool->intern($n->property);
             $nb = $this->ssa->allocReg();
-                        $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
-                  . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $val . ", i64 0, i64 0)\n";
+                        $out .= '  ' . $nb . ' = call ptr @__mir_bag_set_str(ptr ' . $bagP
+                  . ', ptr ' . $this->strLitId($kid) . ', i64 ' . $val . ")\n";
         $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
             $nbI = $this->ssa->allocReg();
             $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
@@ -4009,8 +4016,8 @@ trait EmitLlvmObjects
         if ($bagCd !== null && $bagCd->usesBag()) {
             $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $this->bagPtrReg
-                  . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
+            $out .= '  ' . $reg . ' = call i64 @__mir_bag_get_str(ptr ' . $this->bagPtrReg
+                  . ', ptr ' . $keyP . ")\n";
             $out .= '  store i64 ' . $reg . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $endL . "\n";
@@ -4280,8 +4287,8 @@ trait EmitLlvmObjects
             $objPtr = $this->lastValue;
             $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
             $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i64 @__mir_array_get_str(ptr ' . $this->bagPtrReg
-                  . ', ptr ' . $keyP . ", i64 0, i64 0)\n";
+            $out .= '  ' . $reg . ' = call i64 @__mir_bag_get_str(ptr ' . $this->bagPtrReg
+                  . ', ptr ' . $keyP . ")\n";
             $out .= '  store i64 ' . $reg . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $endL . "\n";
@@ -5977,8 +5984,8 @@ trait EmitLlvmObjects
             $bagP = $this->bagPtrReg;
             $bg = $this->bagSlotReg;
             $nb = $this->ssa->allocReg();
-            $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
-                  . ', ptr ' . $keyP . ', i64 ' . $cellVal . ", i64 0, i64 0)\n";
+            $out .= '  ' . $nb . ' = call ptr @__mir_bag_set_str(ptr ' . $bagP
+                  . ', ptr ' . $keyP . ', i64 ' . $cellVal . ")\n";
             $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
             $nbI = $this->ssa->allocReg();
             $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
@@ -6031,8 +6038,8 @@ trait EmitLlvmObjects
             $out .= $this->emitBagStoreValue($n->value);
             $val = $this->lastValue;
             $nb = $this->ssa->allocReg();
-            $out .= '  ' . $nb . ' = call ptr @__mir_array_set_str(ptr ' . $bagP
-                  . ', ptr ' . $keyP . ', i64 ' . $val . ", i64 0, i64 0)\n";
+            $out .= '  ' . $nb . ' = call ptr @__mir_bag_set_str(ptr ' . $bagP
+                  . ', ptr ' . $keyP . ', i64 ' . $val . ")\n";
         $out .= $this->emitReprStamp($nb, \Compile\MemoryAbi::ARRAY_REPR_CELL);
             $nbI = $this->ssa->allocReg();
             $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";

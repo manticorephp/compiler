@@ -135,6 +135,7 @@ final class UnifiedArrayRuntime
         $this->emitPtrSet();
         $this->emitPtrSeek();
         $this->emitSpreadInto();
+        $this->emitBagSetStr();
         $this->emitPop();
         $this->emitShift();
         $this->emitBoxByRepr();
@@ -4667,6 +4668,47 @@ final class UnifiedArrayRuntime
         $inl->raw('  %s2 = shl i64 %v, 16');
         $inl->raw('  %r = ashr i64 %s2, 16');
         $inl->raw('  ret i64 %r');
+    }
+
+    /**
+     * `__mir_bag_set_str(bag, key, v) -> ptr` — a dynamic-property store. A
+     * REF cell (`$o->{$k} = &$x`) replaces the binding; any other value
+     * writes THROUGH a reference the property already holds, dropping what the
+     * box held, as an element store does. Otherwise `__mir_array_set_str`.
+     */
+    private function emitBagSetStr(): void
+    {
+        $i64 = Type::i64();
+        $fn = $this->module->func('__mir_bag_set_str', Type::ptr());
+        $bag = $fn->param(Type::ptr(), 'bag');
+        $key = $fn->param(Type::ptr(), 'key');
+        $v = $fn->param($i64, 'v');
+        $e = $fn->block('entry');
+        $look = $fn->block('look');
+        $hit = $fn->block('hit');
+        $thru = $fn->block('thru');
+        $set = $fn->block('set');
+        $e->brIf($this->isRefCellIr($e, $v), $set, $look);
+        $pos = $look->call('__mir_array_pos_str', $i64, [$bag, $key, Value::int($i64, 0), Value::int($i64, 0)]);
+        $look->brIf($look->icmp('sge', $pos, Value::int($i64, 0)), $hit, $set);
+        $w = $hit->call('__mir_array_raw_value_at', $i64, [$bag, $pos]);
+        $hit->brIf($this->isRefCellIr($hit, $w), $thru, $set);
+        $bp = $thru->inttoptr($thru->and_($w, Value::int($i64, MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $old = $thru->load($i64, $bp);
+        $thru->store($v, $bp);
+        $thru->call('__mir_cell_drop', Type::void(), [$old]);
+        $thru->ret($bag);
+        $set->ret($set->call('__mir_array_set_str', Type::ptr(),
+            [$bag, $key, $v, Value::int($i64, 0), Value::int($i64, 0)]));
+
+        // `__mir_bag_get_str(bag, key) -> i64` — a dynamic-property read: the
+        // value, through a reference the property holds.
+        $fn = $this->module->func('__mir_bag_get_str', $i64);
+        $bag = $fn->param(Type::ptr(), 'bag');
+        $key = $fn->param(Type::ptr(), 'key');
+        $e = $fn->block('entry');
+        $w = $e->call('__mir_array_get_str', $i64, [$bag, $key, Value::int($i64, 0), Value::int($i64, 0)]);
+        $e->ret($e->call('__mir_deref_cell', $i64, [$w]));
     }
 
     /**

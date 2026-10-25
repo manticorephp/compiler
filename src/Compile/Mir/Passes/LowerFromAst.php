@@ -4560,7 +4560,7 @@ final class LowerFromAst implements Pass
         // the same node `[&$v]` stores, and the emitter REPLACES the slot's
         // binding rather than writing through whatever reference it held —
         // which is the whole point of that line.
-        if (($expr->target->kind === 'ArrayAccess'
+        if (($expr->target->kind === 'ArrayAccess' || $expr->target->kind === 'DynProp'
                 || ($expr->target->kind === 'PropertyAccess'
                     && $this->propSlotMayHoldRef($this->asPropertyAccessAst($expr->target))))
             && \Compile\Debug::$refCells
