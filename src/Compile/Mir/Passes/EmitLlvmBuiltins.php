@@ -9823,7 +9823,7 @@ trait EmitLlvmBuiltins
                     $lJoin = $this->ssa->allocLabel('pv.join');
                     $out .= '  br i1 ' . $ini . ', label %' . $lSet . ', label %' . $lSkip . "\n" . $lSet . ":\n";
                 }
-                $out .= $this->emitDeclaredPropCell($objp, $cd, $pn, $pt, !$mangle && !$forCompare && !$publicOnly);
+                $out .= $this->emitDeclaredPropCell($objp, $cd, $pn, $pt, !$mangle && !$forCompare);
                 $boxed = $this->lastValue;
                 // ⚠ THE MAP OWNS ITS ELEMENTS. A cell that BORROWS the slot's
                 // reference — a cell, a string, an object, an already-cell-repr
@@ -9970,7 +9970,7 @@ trait EmitLlvmBuiltins
                 $lSkip = $this->ssa->allocLabel('pw.skip');
                 $out .= '  br i1 ' . $ini . ', label %' . $lSet . ', label %' . $lSkip . "\n" . $lSet . ":\n";
             }
-            $out .= $this->emitDeclaredPropCell('%o', $cd, $pn, $pt);
+            $out .= $this->emitDeclaredPropCell('%o', $cd, $pn, $pt, true);
             $boxed = $this->lastValue;
             $out .= '  call void %cb(ptr %ctx, ptr ' . $this->litStr($pn) . ', i64 ' . $boxed . ")\n";
             if ($this->propCellMode === 2) {
