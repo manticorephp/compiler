@@ -310,6 +310,7 @@ final class EmitLlvm implements EmitVisitor
 
     /** Compiler-owned lightweight method tables for erased dynamic calls. */
     private bool $dynamicMethodMeta = false;
+    private string $dynRejectWhy = '';
     /** @var array<string, array<int, bool>> fn name => by-ref param index a closure captures by reference */
     private array $escapingRefParams = [];
 
