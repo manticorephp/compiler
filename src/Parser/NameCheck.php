@@ -22,9 +22,9 @@ final class NameCheck
         foreach ($program->names as $r) {
             $s = $r->span;
             $got = '';
-            if ($s->line >= 1 && $s->endLine === $s->line && $s->line <= \count($offsets)) {
+            if ($s->line >= 1 && $s->endLine() === $s->line && $s->line <= \count($offsets)) {
                 $base = $offsets[$s->line - 1];
-                $got = \substr($source, $base + $s->column - 1, $s->endColumn - $s->column);
+                $got = \substr($source, $base + $s->column - 1, $s->endColumn() - $s->column);
             }
             if ($got !== $r->written) {
                 $out[] = $file . ':' . (string)$s->line . ':' . (string)$s->column

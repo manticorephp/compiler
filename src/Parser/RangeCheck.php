@@ -78,11 +78,11 @@ final class RangeCheck
         if (!($span instanceof Span)) {
             return $kids;
         }
-        if ($span->endLine === 0) {
+        if ($span->endLine() === 0) {
             if ($this->requireEnds) { $this->report($span, 'node has no end position'); }
             return $kids;
         }
-        if ($this->before($span->endLine, $span->endColumn, $span->startLine(), $span->startColumn())) {
+        if ($this->before($span->endLine(), $span->endColumn(), $span->startLine(), $span->startColumn())) {
             $this->report($span, 'end precedes start');
         }
         $this->checkKids($span, $kids);
@@ -97,7 +97,7 @@ final class RangeCheck
         for ($i = 0; $i < $n; $i = $i + 1) {
             $s = $kids[$i];
             if ($this->before($s->startLine(), $s->startColumn(), $parent->startLine(), $parent->startColumn())
-                || $this->before($parent->endLine, $parent->endColumn, $s->endLine, $s->endColumn)) {
+                || $this->before($parent->endLine(), $parent->endColumn(), $s->endLine(), $s->endColumn())) {
                 $this->report($s, 'child range ' . $this->str($s) . ' outside parent ' . $this->str($parent));
             }
         }
@@ -120,7 +120,7 @@ final class RangeCheck
             $a = $kids[$order[$i - 1]];
             $b = $kids[$order[$i]];
             if ($this->str($a) === $this->str($parent) && $this->str($b) === $this->str($parent)) { continue; }
-            if ($this->before($b->startLine(), $b->startColumn(), $a->endLine, $a->endColumn)) {
+            if ($this->before($b->startLine(), $b->startColumn(), $a->endLine(), $a->endColumn())) {
                 $this->report($b, 'sibling range ' . $this->str($b) . ' overlaps ' . $this->str($a));
             }
         }
@@ -134,7 +134,7 @@ final class RangeCheck
     private function str(Span $s): string
     {
         return (string)$s->startLine() . ':' . (string)$s->startColumn()
-            . '-' . (string)$s->endLine . ':' . (string)$s->endColumn;
+            . '-' . (string)$s->endLine() . ':' . (string)$s->endColumn();
     }
 
     private function report(Span $at, string $message): void

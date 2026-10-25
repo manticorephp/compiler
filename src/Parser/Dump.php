@@ -45,7 +45,7 @@ final class Dump
         $out = "names:\n";
         foreach ($program->names as $r) {
             $s = $r->span;
-            $out .= '  @' . (string)$s->line . ':' . (string)$s->column . '-' . (string)$s->endLine . ':' . (string)$s->endColumn
+            $out .= '  @' . (string)$s->line . ':' . (string)$s->column . '-' . (string)$s->endLine() . ':' . (string)$s->endColumn()
                 . ' ' . $r->kind . ' ' . $r->written . ' -> ' . $r->resolved . ($r->globalFallback ? ' [global-fallback]' : '') . "\n";
         }
         return $out;
@@ -114,7 +114,7 @@ final class Dump
             return;
         }
         if ($value instanceof Block) {
-            $this->line($name . ': Block' . ($this->ranges && $value->span !== null && $value->span->endLine !== 0 ? ' ' . $this->spanStr($value->span) : ''));
+            $this->line($name . ': Block' . ($this->ranges && $value->span !== null && $value->span->endLine() !== 0 ? ' ' . $this->spanStr($value->span) : ''));
             $this->indent = $this->indent + 1;
             foreach ($value->statements as $s) {
                 $this->stmt($s);
@@ -358,15 +358,15 @@ final class Dump
     /** ' @L:C-L:C' for a node whose range is set, '' otherwise (and always outside --ranges). */
     private function itemSpan(?Span $s): string
     {
-        if (!$this->ranges || $s === null || $s->endLine === 0) { return ''; }
+        if (!$this->ranges || $s === null || $s->endLine() === 0) { return ''; }
         return ' ' . $this->spanStr($s);
     }
 
     private function spanStr(Span $s): string
     {
-        if ($this->ranges && $s->endLine !== 0) {
+        if ($this->ranges && $s->endLine() !== 0) {
             return '@' . (string)$s->startLine() . ':' . (string)$s->startColumn()
-                . '-' . (string)$s->endLine . ':' . (string)$s->endColumn;
+                . '-' . (string)$s->endLine() . ':' . (string)$s->endColumn();
         }
         return '@' . (string)$s->line . ':' . (string)$s->column;
     }

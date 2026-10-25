@@ -14,30 +14,36 @@ namespace Parser\Ast;
  * why `__FILE__`/`__DIR__` fold at parse time). '' when the source has no file
  * of its own — stdin, the prelude blob, a synthesized node.
  *
- * Range: ($endLine, $endColumn) is just past the node's last byte (0 = not
- * set). ($beginLine, $beginColumn) is the first byte of the range when it
- * differs from the anchor (0 = same as line/column); use {@see startLine()} /
- * {@see startColumn()}. Columns are bytes.
+ * Range: {@see startLine()}/{@see startColumn()} is the first byte of the
+ * node, {@see endLine()}/{@see endColumn()} just past its last (0 = not set).
+ * This class has none of it (start = anchor, end = 0); {@see RangedSpan}
+ * carries it. Columns are bytes.
  */
-final class Span
+class Span
 {
     public function __construct(
         public readonly int $line,
         public readonly int $column,
         public readonly string $file = '',
-        public readonly int $endLine = 0,
-        public readonly int $endColumn = 0,
-        public readonly int $beginLine = 0,
-        public readonly int $beginColumn = 0,
     ) {}
 
     public function startLine(): int
     {
-        return $this->beginLine !== 0 ? $this->beginLine : $this->line;
+        return $this->line;
     }
 
     public function startColumn(): int
     {
-        return $this->beginLine !== 0 ? $this->beginColumn : $this->column;
+        return $this->column;
+    }
+
+    public function endLine(): int
+    {
+        return 0;
+    }
+
+    public function endColumn(): int
+    {
+        return 0;
     }
 }

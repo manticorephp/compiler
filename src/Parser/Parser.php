@@ -3,6 +3,7 @@
 namespace Parser;
 
 use Lexer\Lexer;
+use Lexer\RangedToken;
 use Lexer\Token;
 use Lexer\TokenKind;
 use Parser\Ast\AttributeNode;
@@ -16,6 +17,7 @@ use Parser\Ast\NameRef;
 use Parser\Ast\Param;
 use Parser\Ast\Program;
 use Parser\Ast\PropertyDecl;
+use Parser\Ast\RangedSpan;
 use Parser\Ast\Span;
 use Parser\Ast\ArrayElement;
 use Parser\Ast\CatchClause;
@@ -62,6 +64,9 @@ final class Parser
 
     /** 1 when the written-name table is collected (an int, not a bool: see Lexer::scan()). */
     private int $collectNames = 0;
+
+    /** 1 when the tokens are RangedTokens (ranges or names on); only then are token ends read. */
+    private int $ends = 0;
 
     /**
      * Written names by "line:column:kind" (a rewound re-parse overwrites its own entry).
@@ -165,8 +170,9 @@ final class Parser
         // stream. Keep the original token-array temporary out of the
         // parseProgram() lifetime: on large files it otherwise retains every
         // token alongside the parser's filtered array and the AST being built.
-        $p = new self((new Lexer())->scan($source), $source, $file, $lazyBodies);
+        $p = new self((new Lexer())->scan($source, false, false, $ranges || $names), $source, $file, $lazyBodies);
         $p->ranges = $ranges;
+        $p->ends = ($ranges || $names) ? 1 : 0;
         $p->collectNames = $names ? 1 : 0;
         return $p->parseProgram();
     }
@@ -178,9 +184,10 @@ final class Parser
         $program = new Program([]);
         $p = null;
         try {
-            $tokens = $lexer->scan($source, false, true);
+            $tokens = $lexer->scan($source, false, true, $ranges || $names);
             $p = new self($tokens, $source, $file, false);
             $p->ranges = $ranges;
+            $p->ends = ($ranges || $names) ? 1 : 0;
             $p->tolerant = 1;
             $p->collectNames = $names ? 1 : 0;
             // Lexer errors are recorded first: the cap keeps the first 100 in discovery order (not by position), so lexer errors alone can fill it and drop the parser errors.
@@ -1502,7 +1509,7 @@ final class Parser
         if ($this->tolerant === 1 && $this->ranges) {
             // an Error-only statement consumes nothing: its zero-width point still lies in the body
             $se = $stmt->span;
-            if ($se->endLine > $el || ($se->endLine === $el && $se->endColumn > $ec)) { $el = $se->endLine; $ec = $se->endColumn; }
+            if ($se->endLine() > $el || ($se->endLine() === $el && $se->endColumn() > $ec)) { $el = $se->endLine(); $ec = $se->endColumn(); }
         }
         return new Block([$stmt], $this->listSpan($first, $el, $ec));
     }
@@ -1537,7 +1544,7 @@ final class Parser
             $ec = $this->prevEndColumn;
             if ($this->tolerant === 1 && $this->ranges) {
                 $se = $stmts[\count($stmts) - 1]->span;
-                if ($se->endLine > $el || ($se->endLine === $el && $se->endColumn > $ec)) { $el = $se->endLine; $ec = $se->endColumn; }
+                if ($se->endLine() > $el || ($se->endLine() === $el && $se->endColumn() > $ec)) { $el = $se->endLine(); $ec = $se->endColumn(); }
             }
         }
         return new Block($stmts, $this->listSpan($first, $el, $ec));
@@ -1868,7 +1875,7 @@ final class Parser
         $stmtSpan = $this->end($span);
         if ($this->ranges && $attrs !== []) {
             $first = $attrs[0]->span;
-            $stmtSpan = new Span($span->line, $span->column, $span->file, $stmtSpan->endLine, $stmtSpan->endColumn, $first->line, $first->column);
+            $stmtSpan = new RangedSpan($span->line, $span->column, $span->file, $stmtSpan->endLine(), $stmtSpan->endColumn(), $first->line, $first->column);
         }
         return new \Parser\Ast\ExpressionStmt($call, $stmtSpan, null, $attrs);
     }
@@ -2834,7 +2841,7 @@ final class Parser
     private function noteName(string $written, string $resolved, string $kind, bool $globalFallback): void
     {
         $this->names[(string)$this->nmLine . ':' . (string)$this->nmColumn . ':' . $kind] = new NameRef(
-            new Span($this->nmLine, $this->nmColumn, $this->sourceFile, $this->nmEndLine, $this->nmEndColumn),
+            new RangedSpan($this->nmLine, $this->nmColumn, $this->sourceFile, $this->nmEndLine, $this->nmEndColumn),
             $written,
             $resolved,
             $kind,
@@ -3833,9 +3840,10 @@ final class Parser
     /** Sub-lex + parse an interpolation `{$expr}` body into a (string)-cast expression. */
     private function parseSubExpr(string $src, Span $span): Expr
     {
-        $tokens = (new Lexer())->scan($src, true);
+        $tokens = (new Lexer())->scan($src, true, false, $this->ranges);
         $sub = new self($tokens);
         $sub->ranges = $this->ranges;
+        $sub->ends = $this->ranges ? 1 : 0;
         $sub->rangeOverride = $span;
         if ($this->tolerant === 1) {
             $sub->tolerant = 1;
@@ -3874,8 +3882,10 @@ final class Parser
         $tok = $this->tokens[$this->pos];
         if (!$this->isAtEnd()) {
             $this->pos = $this->pos + 1;
-            $this->prevEndLine = $tok->endLine;
-            $this->prevEndColumn = $tok->endColumn;
+            if ($this->ends === 1) {
+                $this->prevEndLine = $tok->endLine();
+                $this->prevEndColumn = $tok->endColumn();
+            }
         }
         return $tok;
     }
@@ -3916,7 +3926,8 @@ final class Parser
                     $this->synthLine = $t->line;
                     $this->synthColumn = $t->column;
                 }
-                return new Token($kind, '', $t->line, $t->column, $t->line, $t->column);
+                if ($this->ends === 1) { return new RangedToken($kind, '', $t->line, $t->column, $t->line, $t->column); }
+                return new Token($kind, '', $t->line, $t->column);
             }
             throw $this->error($message);
         }
@@ -4053,7 +4064,7 @@ final class Parser
         $t = $this->tokens[$this->pos];
         $this->synthLine = $t->line;
         $this->synthColumn = $t->column;
-        return new Span($anchor->line, $anchor->column, $anchor->file, $t->line, $t->column, $t->line, $t->column);
+        return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $t->line, $t->column, $t->line, $t->column);
     }
 
     /**
@@ -4135,7 +4146,7 @@ final class Parser
         if (!$this->ranges) { return $anchor; }
         $o = $this->rangeOverride;
         if ($o !== null) {
-            return new Span($anchor->line, $anchor->column, $anchor->file, $o->endLine, $o->endColumn, $o->startLine(), $o->startColumn());
+            return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $o->endLine(), $o->endColumn(), $o->startLine(), $o->startColumn());
         }
         $bl = 0;
         $bc = 0;
@@ -4152,7 +4163,7 @@ final class Parser
         $sl = $bl > 0 ? $bl : $anchor->line;
         $sc = $bl > 0 ? $bc : $anchor->column;
         if ($el < $sl || ($el === $sl && $ec < $sc)) { $el = $sl; $ec = $sc; }   // consumed nothing: zero-width at its start
-        return new Span($anchor->line, $anchor->column, $anchor->file, $el, $ec, $bl, $bc);
+        return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $el, $ec, $bl, $bc);
     }
 
     /** $anchor closed at the last consumed token, with the range starting at token $first. */
@@ -4170,7 +4181,7 @@ final class Parser
             $ec = $this->synthColumn;
         }
         if ($el < $first->line || ($el === $first->line && $ec < $first->column)) { $el = $first->line; $ec = $first->column; }
-        return new Span($anchor->line, $anchor->column, $anchor->file, $el, $ec, $first->line, $first->column);
+        return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $el, $ec, $first->line, $first->column);
     }
 
     /** Range of the single token $t under another node's anchor (dump-ast keeps the anchor). */
@@ -4181,7 +4192,7 @@ final class Parser
         if ($o !== null) {
             return $this->end($anchor);
         }
-        return new Span($anchor->line, $anchor->column, $anchor->file, $t->endLine, $t->endColumn, $t->line, $t->column);
+        return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $t->endLine(), $t->endColumn(), $t->line, $t->column);
     }
 
     /** Range of the synthesized node standing for exactly $child's text. */
@@ -4189,21 +4200,21 @@ final class Parser
     {
         if (!$this->ranges) { return $anchor; }
         $c = $child->span;
-        return new Span($anchor->line, $anchor->column, $anchor->file, $c->endLine, $c->endColumn, $c->startLine(), $c->startColumn());
+        return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $c->endLine(), $c->endColumn(), $c->startLine(), $c->startColumn());
     }
 
     /** Zero-width range at the start of $anchor, for synthesized nodes that stand for no source text. */
     private function emptyAt(Span $anchor): Span
     {
         if (!$this->ranges) { return $anchor; }
-        return new Span($anchor->line, $anchor->column, $anchor->file, $anchor->line, $anchor->column);
+        return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $anchor->line, $anchor->column);
     }
 
     /** Zero-width range at token $at under another node's anchor (a destructuring hole). */
     private function emptyAtTok(Span $anchor, Token $at): Span
     {
         if (!$this->ranges) { return $anchor; }
-        return new Span($anchor->line, $anchor->column, $anchor->file, $at->line, $at->column, $at->line, $at->column);
+        return new RangedSpan($anchor->line, $anchor->column, $anchor->file, $at->line, $at->column, $at->line, $at->column);
     }
 
     /** Range of an alternative-syntax or single-statement body: from token $first to the end ($el, $ec) of its last statement; a zero-width point at ($el, $ec) when there is none. */
@@ -4212,12 +4223,12 @@ final class Parser
         if (!$this->ranges) { return null; }
         $file = $this->sourceFile;
         if ($first === null) {
-            return new Span($el, $ec, $file, $el, $ec);
+            return new RangedSpan($el, $ec, $file, $el, $ec);
         }
         if ($el < $first->line || ($el === $first->line && $ec < $first->column)) {
-            return new Span($el, $ec, $file, $el, $ec);
+            return new RangedSpan($el, $ec, $file, $el, $ec);
         }
-        return new Span($first->line, $first->column, $file, $el, $ec);
+        return new RangedSpan($first->line, $first->column, $file, $el, $ec);
     }
 
     /** Range of the synthesized body holding only statement $s. */
@@ -4225,7 +4236,7 @@ final class Parser
     {
         if (!$this->ranges) { return null; }
         $c = $s->span;
-        return new Span($c->startLine(), $c->startColumn(), $c->file, $c->endLine, $c->endColumn);
+        return new RangedSpan($c->startLine(), $c->startColumn(), $c->file, $c->endLine(), $c->endColumn());
     }
 
     /** Move the cursor back to token index $p, keeping the previous-token end consistent and any synthetic point at or before it. */
@@ -4238,13 +4249,23 @@ final class Parser
             $this->synthColumn = 0;
         }
         $prev = $p > 0 ? $this->tokens[$p - 1] : null;
-        $this->prevEndLine = $prev !== null ? $prev->endLine : 0;
-        $this->prevEndColumn = $prev !== null ? $prev->endColumn : 0;
+        if ($this->ends === 1) {
+            $this->prevEndLine = $prev !== null ? $prev->endLine() : 0;
+            $this->prevEndColumn = $prev !== null ? $prev->endColumn() : 0;
+        }
     }
 
     private function error(string $message): ParseError
     {
         $tok = $this->tokens[$this->pos];
-        return new ParseError($message, $tok->line, $tok->column, $tok->endLine, $tok->endColumn);
+        $el = $tok->endLine();
+        $ec = $tok->endColumn();
+        if ($el === 0 && $this->tolerant === 1) {
+            // unranged lexer: the end follows from the lexeme, single-line or last-line length
+            $nl = \substr_count($tok->lexeme, "\n");
+            $el = $tok->line + $nl;
+            $ec = $nl === 0 ? $tok->column + \strlen($tok->lexeme) : \strlen($tok->lexeme) - (int)\strrpos($tok->lexeme, "\n");
+        }
+        return new ParseError($message, $tok->line, $tok->column, $el, $ec);
     }
 }

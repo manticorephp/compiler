@@ -8,12 +8,13 @@ spl_autoload_register(function ($c) {
 
 use Parser\Ast\Expr;
 use Parser\Ast\Program;
+use Parser\Ast\RangedSpan;
 use Parser\Ast\Span;
 use Parser\Ast\Stmt;
 use Parser\RangeCheck;
 
-function lit(int $v, int $c1, int $c2): Expr { return Expr::int($v, new Span(1, $c1, 'f', 1, $c2)); }
-function bin(Expr $l, Expr $r, int $c1, int $c2): Expr { return Expr::binary('+', $l, $r, new Span(1, $c1, 'f', 1, $c2)); }
+function lit(int $v, int $c1, int $c2): Expr { return Expr::int($v, new RangedSpan(1, $c1, 'f', 1, $c2)); }
+function bin(Expr $l, Expr $r, int $c1, int $c2): Expr { return Expr::binary('+', $l, $r, new RangedSpan(1, $c1, 'f', 1, $c2)); }
 function prog(Expr $e): Program { return new Program([Stmt::expression($e, new Span(1, 1, 'f'))]); }
 
 $fail = 0;
@@ -59,9 +60,9 @@ expect('require-ends', RangeCheck::verify(prog($unset), true), ['no end position
 // hanging off two sibling params (`#[A] int $a, $b` style sharing) counts once
 function par(string $n, int $c1, int $c2, array $attrs): Parser\Ast\Param
 {
-    return new Parser\Ast\Param($n, null, null, false, false, '', false, $attrs, new Span(1, $c1, 'f', 1, $c2));
+    return new Parser\Ast\Param($n, null, null, false, false, '', false, $attrs, new RangedSpan(1, $c1, 'f', 1, $c2));
 }
-$sp = fn(int $c1, int $c2) => new Span(1, $c1, 'f', 1, $c2);
+$sp = fn(int $c1, int $c2) => new RangedSpan(1, $c1, 'f', 1, $c2);
 $attr = new Parser\Ast\AttributeNode('A', [], $sp(3, 10));
 $decl = new Parser\Ast\FunctionDecl('f', [par('a', 1, 20, [$attr]), par('b', 22, 40, [$attr])], null, null, $sp(1, 41));
 expect('decl-require-ends', RangeCheck::verify(new Program([Stmt::function_($decl, $sp(1, 41))]), true), []);
