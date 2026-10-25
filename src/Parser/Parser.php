@@ -143,11 +143,10 @@ final class Parser
     /**
      * Anonymous-class declarations (`new class { … }`) parsed inline, hoisted
      * to the program's top-level statement list so they register + lower like
-     * any class. `$anonClassCounter` makes each synthetic name unique.
+     * any class. Each synthetic name is unique per file and position.
      * @var ClassDecl[]
      */
     private array $hoistedClasses = [];
-    private int $anonClassCounter = 0;
 
     /**
      * Convenience entry point. Lexes the source and parses it in one call.
@@ -3406,9 +3405,10 @@ final class Parser
         }
         // A valid identifier (LLVM symbol-safe) — PHP's `class@anonymous` form
         // carries an `@` that the mangler can't emit.
-        // The counter is per file: a file hash keeps the symbol unique across files.
-        $name = '__anon_class_' . ($this->sourceFile === '' ? '' : \dechex(\crc32($this->sourceFile)) . '_') . (string)$this->anonClassCounter;
-        $this->anonClassCounter = $this->anonClassCounter + 1;
+        // File + position, not a per-parse counter: two files of one namespace (or a
+        // lazily materialized body, parsed by a fresh Parser) would both start at 0.
+        $name = '__anon_class_' . \dechex(\crc32($span->file !== '' ? $span->file : $this->sourceFile))
+            . '_' . (string)$span->line . '_' . (string)$span->column;
         if ($this->currentNamespace !== '') {
             $name = $this->currentNamespace . '\\' . $name;
         }
