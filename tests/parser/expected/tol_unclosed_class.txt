@@ -1,0 +1,16 @@
+Program
+  Stmt:Class @2:1-4:38
+    decl: class A
+      Property $p : (untyped) [public] @3:5-3:19
+        default:
+          Expr:IntLiteral @3:17-3:18
+            value: 1
+      Method f [public] -> (none) @4:5-4:38
+        params: 0
+        body: Block @4:25-4:38
+          Stmt:Return @4:27-4:36
+            value:
+              Expr:IntLiteral @4:34-4:35
+                value: 1
+error 5:1-5:1 expected '}' to close class body
+

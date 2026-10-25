@@ -1,15 +1,13 @@
 Program
   Stmt:Expression @2:1-2:10
     expr:
-      Expr:Call @2:1-2:9
+      Expr:Call @2:1-2:8
         function: "foo"
-        args: [2]
+        args: [1]
           Expr:Variable @2:5-2:7
             name: "a"
-          Expr:Error @2:9-2:9
         qualified: false
     docComment: null
     attributes: [0]
-error 2:9-2:10 unexpected token in expression: Semicolon
 error 2:9-2:10 expected ')' after arguments
 

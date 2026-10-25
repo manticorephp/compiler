@@ -1,0 +1,9 @@
+Program
+  Stmt:Function @4:1-4:36
+    decl: FunctionDecl dbl_each
+      return: array
+      params: 1
+      Param $a : array @4:19-4:27
+      body: Block @4:36-4:36
+error 4:36-4:36 expected '{'
+

@@ -1,0 +1,72 @@
+Program
+  Stmt:Echo @1:1-2:1
+    exprs: [1]
+      Expr:StringLiteral @1:1-2:1
+        value: "<html>
+"
+  Stmt:If @2:7-7:31
+    condition:
+      Expr:Variable @2:11-2:13
+        name: "x"
+    then: Block @2:16-7:31
+      Stmt:Echo @2:16-2:18
+        exprs: [0]
+      Stmt:Echo @3:1-4:1
+        exprs: [1]
+          Expr:StringLiteral @3:1-4:1
+            value: "  <p>yes</p>
+"
+      Stmt:Echo @4:1-4:6
+        exprs: [0]
+      Stmt:Foreach @4:7-6:18
+        expr:
+          Expr:Variable @4:16-4:19
+            name: "xs"
+        key: null
+        value:
+          Expr:Variable @4:23-4:25
+            name: "v"
+        valueByRef: false
+        body: Block @4:28-6:6
+          Stmt:Echo @4:28-4:30
+            exprs: [0]
+          Stmt:Echo @5:1-5:7
+            exprs: [1]
+              Expr:StringLiteral @5:1-5:7
+                value: "  <li>"
+          Stmt:Echo @5:7-5:13
+            exprs: [1]
+              Expr:Variable @5:11-5:13
+                name: "v"
+          Stmt:Echo @5:14-5:16
+            exprs: [0]
+          Stmt:Echo @5:16-6:1
+            exprs: [1]
+              Expr:StringLiteral @5:16-6:1
+                value: "</li>
+"
+          Stmt:Echo @6:1-6:6
+            exprs: [0]
+      Stmt:Echo @6:19-6:21
+        exprs: [0]
+      Stmt:Echo @7:1-7:6
+        exprs: [0]
+      Stmt:Expression @7:7-7:18
+        expr:
+          Expr:Assign @7:7-7:17
+            target:
+              Expr:Variable @7:7-7:13
+                name: "after"
+            value:
+              Expr:IntLiteral @7:16-7:17
+                value: 1
+        docComment: null
+        attributes: [0]
+      Stmt:Echo @7:19-7:31
+        exprs: [1]
+          Expr:Variable @7:24-7:30
+            name: "after"
+    elseifs: [0]
+    else: null
+error 8:1-8:1 expected 'endif'
+

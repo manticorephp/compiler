@@ -1,0 +1,57 @@
+Program
+  Stmt:Class @2:1-10:2
+    decl: class A
+      Method ok1 [public] -> (none) @3:5-3:40
+        params: 0
+        body: Block @3:27-3:40
+          Stmt:Return @3:29-3:38
+            value:
+              Expr:IntLiteral @3:36-3:37
+                value: 1
+      Method bad [public] -> (none) @4:5-8:6
+        params: 0
+        body: Block @4:27-8:6
+          Stmt:Expression @5:9-5:16
+            expr:
+              Expr:Assign @5:9-5:15
+                target:
+                  Expr:Variable @5:9-5:11
+                    name: "x"
+                value:
+                  Expr:IntLiteral @5:14-5:15
+                    value: 1
+            docComment: null
+            attributes: [0]
+          Stmt:Error @6:9-6:34
+            skipped: 10
+          Stmt:Expression @7:9-7:16
+            expr:
+              Expr:Assign @7:9-7:15
+                target:
+                  Expr:Variable @7:9-7:11
+                    name: "y"
+                value:
+                  Expr:IntLiteral @7:14-7:15
+                    value: 2
+            docComment: null
+            attributes: [0]
+      Method ok2 [public] -> (none) @9:5-9:40
+        params: 0
+        body: Block @9:27-9:40
+          Stmt:Return @9:29-9:38
+            value:
+              Expr:IntLiteral @9:36-9:37
+                value: 2
+  Stmt:Expression @11:1-11:12
+    expr:
+      Expr:Assign @11:1-11:11
+        target:
+          Expr:Variable @11:1-11:7
+            name: "after"
+        value:
+          Expr:IntLiteral @11:10-11:11
+            value: 3
+    docComment: null
+    attributes: [0]
+error 6:21-6:22 expected 'as' in foreach
+

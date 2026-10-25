@@ -15,17 +15,8 @@ Program
         value: "ab"
     docComment: null
     attributes: [0]
-  Stmt:Expression @5:1-5:1
-    expr:
-      Expr:Error @5:1-5:1
-    docComment: null
-    attributes: [0]
   Stmt:Error @5:1-5:2
     skipped: 1
 error 2:7-4:4 expected ')' after arguments
-error 2:7-4:4 expected ';' after expression
 error 5:1-5:2 expected ';' after expression
-error 5:1-5:2 unexpected token in expression: CloseParen
-error 5:1-5:2 expected ';' after expression
-error 5:1-5:2 unexpected token: CloseParen
 

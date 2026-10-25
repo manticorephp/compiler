@@ -1,0 +1,39 @@
+Program
+  Stmt:Function @2:1-4:21
+    decl: FunctionDecl build
+      return: array
+      params: 0
+      body: Block @2:25-4:21
+        Stmt:Expression @3:5-3:13
+          expr:
+            Expr:Assign @3:5-3:12
+              target:
+                Expr:Variable @3:5-3:7
+                  name: "m"
+              value:
+                Expr:ArrayLit @3:10-3:12
+                  elements: [0]
+          docComment: null
+          attributes: [0]
+        Stmt:For @4:5-4:21
+          init: [1]
+            Expr:Assign @4:10-4:16
+              target:
+                Expr:Variable @4:10-4:12
+                  name: "i"
+              value:
+                Expr:IntLiteral @4:15-4:16
+                  value: 0
+          condition:
+            Expr:Variable @4:18-4:20
+              name: "i"
+          update: [1]
+            Expr:Error @4:21-4:21
+          body: Block @4:21-4:21
+            Stmt:Expression @4:21-4:21
+              expr:
+                Expr:Error @4:21-4:21
+              docComment: null
+              attributes: [0]
+error 4:21-4:21 expected ';' in for
+

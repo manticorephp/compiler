@@ -1,0 +1,55 @@
+Program
+  Stmt:Expression @2:1-2:8
+    expr:
+      Expr:Assign @2:1-2:7
+        target:
+          Expr:Variable @2:1-2:3
+            name: "a"
+        value:
+          Expr:IntLiteral @2:6-2:7
+            value: 1
+    docComment: null
+    attributes: [0]
+  Stmt:Error @3:1-3:2
+    skipped: 1
+  Stmt:Expression @4:1-4:8
+    expr:
+      Expr:Assign @4:1-4:7
+        target:
+          Expr:Variable @4:1-4:3
+            name: "b"
+        value:
+          Expr:IntLiteral @4:6-4:7
+            value: 2
+    docComment: null
+    attributes: [0]
+  Stmt:Error @5:1-5:2
+    skipped: 1
+  Stmt:Expression @6:1-6:8
+    expr:
+      Expr:Assign @6:1-6:7
+        target:
+          Expr:Variable @6:1-6:3
+            name: "c"
+        value:
+          Expr:IntLiteral @6:6-6:7
+            value: 3
+    docComment: null
+    attributes: [0]
+  Stmt:Error @7:1-7:2
+    skipped: 1
+  Stmt:Expression @8:1-8:8
+    expr:
+      Expr:Assign @8:1-8:7
+        target:
+          Expr:Variable @8:1-8:3
+            name: "d"
+        value:
+          Expr:IntLiteral @8:6-8:7
+            value: 4
+    docComment: null
+    attributes: [0]
+error 3:1-3:2 unexpected token in expression: CloseParen
+error 5:1-5:2 unexpected token in expression: CloseBrace
+error 7:1-7:2 unexpected token in expression: CloseBracket
+

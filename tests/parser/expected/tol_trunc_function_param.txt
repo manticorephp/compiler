@@ -1,0 +1,9 @@
+Program
+  Stmt:Function @2:1-2:10
+    decl: FunctionDecl 
+      return: (none)
+      params: 1
+      Param $ : (untyped) @2:10-2:10
+      body: Block @2:10-2:10
+error 2:10-2:10 expected function name
+

@@ -86,8 +86,8 @@ for name in "${cases[@]}"; do
     flags="--tolerant --ranges"
     [[ "$name" == *.strict ]] && flags=""
 
-    # exit code ignored: only the printed text is compared
     run_limited "$MANTICORE" dump-ast $flags "$rel" > "$actual" 2>&1
+    rc=$?
 
     # range invariants: --check-ranges must print nothing and exit 0
     range_bad=0
@@ -95,6 +95,14 @@ for name in "${cases[@]}"; do
         chk="$WORK/$name.check"
         run_limited "$MANTICORE" dump-ast --tolerant --check-ranges "$rel" > "$chk" 2>&1
         [[ $? -ne 0 || -s "$chk" ]] && range_bad=1
+    fi
+
+    # a tolerant case must terminate (the watchdog kill is 137) and exit 0
+    if [[ "$name" != *.strict && $rc -ne 0 ]]; then
+        failed=$((failed + 1))
+        failed_names+=("$name")
+        printf 'FAIL %s  (exit %d)\n' "$name" "$rc"
+        continue
     fi
 
     if diff -q "$expected" "$actual" > /dev/null 2>&1 && [[ $range_bad -eq 0 ]]; then
@@ -118,6 +126,30 @@ for name in "${cases[@]}"; do
     fi
 done
 
+# Stress: adversarial inputs must terminate (watchdog) and exit 0 in tolerant mode.
+rep() { local i; for ((i = 0; i < $2; i++)); do printf '%s' "$1"; done; }
+stress() {
+    local name="$1" f="$WORK/stress_$1.php"
+    [[ -n "$FILTER" && "stress_$name" != *"$FILTER"* ]] && return
+    cat > "$f"
+    run_limited "$MANTICORE" dump-ast --tolerant "$f" > "$WORK/stress_$name.out" 2>&1
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then passed=$((passed + 1)); printf 'PASS stress_%s\n' "$name"
+    else failed=$((failed + 1)); failed_names+=("stress_$name"); printf 'FAIL stress_%s  (exit %d)\n' "$name" "$rc"; fi
+    rm -f "$f" "$WORK/stress_$name.out"
+}
+stress deep_parens < <({ printf '<?php\n$a = '; rep '(' 5000; })
+stress deep_braces < <({ printf '<?php\n'; rep '{' 5000; })
+stress deep_brackets < <({ printf '<?php\n$a = '; rep '[' 5000; })
+stress deep_if < <({ printf '<?php\n'; rep 'if (1) ' 3000; })
+stress stray_run < <({ printf '<?php\n'; rep ') } ] ; , ' 3000; })
+stress class_garbage < <({ printf '<?php\nclass A {\n'; rep 'public function f( { ) ' 500; })
+stress switch_garbage < <({ printf '<?php\nswitch ($a) {\n'; rep ') case 1: } ' 500; })
+stress match_garbage < <({ printf '<?php\n'; rep 'match(1){ 1 => , ' 500; })
+stress params_garbage < <({ printf '<?php\n'; rep 'function f(,, $a = , ' 500; })
+stress array_garbage < <({ printf '<?php\n$x = [1,'; rep ',, => & ... ' 500; })
+stress trait_garbage < <({ printf '<?php\nclass A { use T { '; rep 'a insteadof ; as ' 300; })
+stress template_garbage < <({ printf '<html>\n<?php if ($a): ?>\n'; rep '<?php foreach ($b): else: endwhile; ?> x ' 300; })
 # RangeCheck self-test on hand-built trees (needs the Zend php; SKIP without it)
 if command -v php > /dev/null 2>&1; then
     if [[ -z "$FILTER" || "rangecheck_selftest" == *"$FILTER"* ]]; then

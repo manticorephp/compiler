@@ -21,17 +21,8 @@ Program
 b"
     docComment: null
     attributes: [0]
-  Stmt:Expression @3:3-3:3
-    expr:
-      Expr:Error @3:3-3:3
-    docComment: null
-    attributes: [0]
   Stmt:Error @3:3-3:4
     skipped: 1
 error 2:16-3:3 expected ')' after arguments
-error 2:16-3:3 expected ';' after expression
 error 3:3-3:4 expected ';' after expression
-error 3:3-3:4 unexpected token in expression: CloseParen
-error 3:3-3:4 expected ';' after expression
-error 3:3-3:4 unexpected token: CloseParen
 
