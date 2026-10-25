@@ -1,6 +1,7 @@
 <?php
+// requires-env: MYSQLI_SOCKET
 // Host `localhost` is the unix socket: the $socket argument, else ini mysqli.default_socket. Needs MYSQLI_SOCKET (a
-// path that reaches the server); without it the case prints one line on both sides and proves nothing.
+// path that reaches the server); run.sh SKIPs the case without it.
 $s = (string) getenv('MYSQLI_SOCKET');
 if ($s === '') {
     echo "no MYSQLI_SOCKET\n";

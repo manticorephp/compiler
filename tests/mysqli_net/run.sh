@@ -3,6 +3,7 @@
 #   tests/mysqli_net/run.sh [-k substr] [--server mysql|mariadb] [--shard i/n]
 # --server picks the server every case talks to (mysql = mc-my :33060, default; mariadb = mc-maria :33061); the oracle is
 # live php on THAT server. A case header line `// servers: mysql` (default: both) limits a case; the other server SKIPs it.
+# A header `// requires-env: VAR` SKIPs the case unless VAR is set (socket.php needs MYSQLI_SOCKET).
 # Cases read MYSQLI_HOST / MYSQLI_PORT / MYSQLI_USER / MYSQLI_PASS / MYSQLI_DB. SKIP when the server is unreachable.
 # The exit status is part of the behaviour: php's and the binary's must agree.
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -37,6 +38,8 @@ for f in tests/mysqli_net/cases/*.php; do
     k=$((k+1)); [ $(( (k-1) % SHARD_N )) -eq "$SHARD_I" ] || continue
     only=$(head -n 6 "$f" | sed -n 's|^// servers: *||p' | tr -d ' ')
     if [ -n "$only" ] && [[ ",$only," != *",$SERVER,"* ]]; then echo "SKIP $n (servers: $only, running $SERVER)"; skip=$((skip+1)); continue; fi
+    need=$(head -n 6 "$f" | sed -n 's|^// requires-env: *||p' | tr -d ' ')
+    if [ -n "$need" ] && [ -z "${!need:-}" ]; then echo "SKIP $n (requires-env: $need is not set)"; skip=$((skip+1)); continue; fi
     if ! reachable; then echo "SKIP $n (server $MYSQLI_HOST:$MYSQLI_PORT unreachable)"; skip=$((skip+1)); unreach=$((unreach+1)); continue; fi
     exp=$(php -d xdebug.mode=off "$f" 2>&1 | head -c 1000000); prc=${PIPESTATUS[0]}
     if ! bin/manticore compile "$f" -o "$WORK/$n" >"$WORK/$n.log" 2>&1; then
