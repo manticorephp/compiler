@@ -127,7 +127,7 @@ for name in "${cases[@]}"; do
 done
 
 # Stress: adversarial inputs must terminate (watchdog) and exit 0 in tolerant mode.
-rep() { local i; for ((i = 0; i < $2; i++)); do printf '%s' "$1"; done; }
+rep() { awk -v s="$1" -v n="$2" 'BEGIN { for (i = 0; i < n; i++) printf "%s", s }'; }
 stress() {
     local name="$1" f="$WORK/stress_$1.php"
     [[ -n "$FILTER" && "stress_$name" != *"$FILTER"* ]] && return
@@ -150,6 +150,45 @@ stress params_garbage < <({ printf '<?php\n'; rep 'function f(,, $a = , ' 500; }
 stress array_garbage < <({ printf '<?php\n$x = [1,'; rep ',, => & ... ' 500; })
 stress trait_garbage < <({ printf '<?php\nclass A { use T { '; rep 'a insteadof ; as ' 300; })
 stress template_garbage < <({ printf '<html>\n<?php if ($a): ?>\n'; rep '<?php foreach ($b): else: endwhile; ?> x ' 300; })
+stress at_chain < <({ printf '<?php\n$a = '; rep '@' 200000; })
+stress tilde_chain < <({ printf '<?php\n$a = '; rep '~' 200000; })
+stress cast_chain < <({ printf '<?php\n$a = '; rep '(int)' 100000; })
+stress minus_chain < <({ printf '<?php\n$a = '; rep '-' 100000; })
+stress assign_chain < <({ printf '<?php\n'; rep '$a = ' 50000; printf '1;\n'; })
+stress pow_chain < <({ printf '<?php\n$a = '; rep '1 ** ' 50000; printf '1;\n'; })
+stress ternary_chain < <({ printf '<?php\n$a = '; rep '1 ? ' 50000; })
+stress arrow_chain < <({ printf '<?php\n$a = '; rep 'fn() => ' 20000; })
+stress array_open < <({ printf '<?php\n$a = '; rep '[' 100000; })
+stress new_chain < <({ printf '<?php\n$a = '; rep 'new ' 50000; })
+stress closure_chain < <({ printf '<?php\n$a = '; rep 'function(){' 20000; })
+stress yield_chain < <({ printf '<?php\nfunction f() { '; rep 'yield ' 50000; })
+stress throw_print_clone < <({ printf '<?php\n$a = '; rep 'clone print throw ' 20000; })
+stress heredoc_interp < <(printf '<?php\n$a = <<<X\n{$a')
+stress string_interp_open < <(printf '<?php\n$a = "{$a->b[')
+stress string_interp_deep < <({ printf '<?php\n$a = "{$a'; rep '[' 20000; })
+stress type_nesting < <({ printf '<?php\nfunction f('; rep '(' 50000; })
+stress stmt_nesting < <({ printf '<?php\n'; rep 'while (1) ' 100000; })
+stress try_garbage < <({ printf '<?php\n'; rep 'try { catch (' 2000; })
+stress declare_garbage < <({ printf '<?php\n'; rep 'declare( ' 2000; })
+
+stress paren_open < <({ printf '<?php\n$a = '; rep '(' 100000; })
+stress bang_chain < <({ printf '<?php\n$a = '; rep '!' 100000; })
+stress star_chain < <({ printf '<?php\n$a = 1 '; rep '* ' 100000; })
+stress xor_chain < <({ printf '<?php\n$a = 1 '; rep 'xor ' 100000; })
+stress coalesce_chain < <({ printf '<?php\n$a = 1 '; rep '?? ' 100000; })
+stress call_chain < <({ printf '<?php\n$a = '; rep '()' 100000; })
+
+# Strict (non-tolerant) parse with ranges: the end()/endFrom() clamps must never need to fire.
+for f in "$ROOT/src/Parser/Parser.php" "$ROOT/src/Parser/Dump.php" "$CASES"/*.strict.php; do
+    [[ "$(basename "$f")" == error_* ]] && continue   # a syntax-error file has no tree to check
+    [[ -f "$f" ]] || continue
+    [[ -n "$FILTER" && "strict_ranges" != *"$FILTER"* ]] && continue
+    run_limited "$MANTICORE" dump-ast --check-ranges "$f" > "$WORK/strict_ranges.out" 2>&1
+    if [[ $? -eq 0 && ! -s "$WORK/strict_ranges.out" ]]; then passed=$((passed + 1)); printf 'PASS strict_ranges %s\n' "$(basename "$f")"
+    else failed=$((failed + 1)); failed_names+=("strict_ranges:$(basename "$f")"); printf 'FAIL strict_ranges %s\n' "$(basename "$f")"; head -n 3 "$WORK/strict_ranges.out" | sed 's/^/      /'; fi
+done
+rm -f "$WORK/strict_ranges.out"
+
 # RangeCheck self-test on hand-built trees (needs the Zend php; SKIP without it)
 if command -v php > /dev/null 2>&1; then
     if [[ -z "$FILTER" || "rangecheck_selftest" == *"$FILTER"* ]]; then

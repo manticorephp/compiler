@@ -65,6 +65,9 @@ final class Parser
     /** Current statement + expression nesting (tolerant mode; see MAX_DEPTH). */
     private int $depth = 0;
 
+    /** record() calls so far, dropped duplicates included: a loop sees whether an iteration reported anything. */
+    private int $recorded = 0;
+
     /**
      * Active PHP namespace; '' means the global namespace. Updated as
      * we see `namespace Foo\Bar;` statements during parsing.
@@ -700,100 +703,12 @@ final class Parser
 
         $this->expect(TokenKind::OpenBrace, "expected '{' to start class body");
 
-        $properties = [];
-        $methods = [];
-        $consts = [];
-        $cases = [];
-        $uses = [];
-        /** @var array<string,string> trait name → the docblock on its `use` line
-         *  (carries `@use Items<string>`, the binding for a generic trait). */
-        $useDocs = [];
-        $traitAdaptations = [];
-
-        $iterPos = -1;
-        while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
-            if ($this->tolerant === 1) {
-                if ($this->pos === $iterPos) {
-                    $this->record($this->error('unexpected token: ' . $this->tokens[$this->pos]->kind));
-                    $this->advance();
-                    continue;
-                }
-                $iterPos = $this->pos;
-            }
-            $memberStart = $this->pos;
-            $memberDepth = $this->depth;
-            try {
-                // `$vec[$i] ?? null` doesn't shield against OOB reads on
-                // an int-keyed vec: missing entries hand back whatever
-                // happens to sit in the slot (or past the buffer). isset
-                // checks bounds first, which is the actual semantic we
-                // want — "doc comment recorded at this position?".
-                $memberDoc = isset($this->docCommentByPos[(string)$this->pos])
-                    ? $this->docCommentByPos[(string)$this->pos]
-                    : null;
-                $memberFirst = $this->peek();
-                $memberAttrs = $this->collectAttributes();
-                $memberSpan = $this->span();
-                $modifiers = $this->parseMemberModifiers();
-
-                if ($this->checkKeyword('use')) {
-                    // `use Trait1, Trait2;` — record the trait names so the
-                    // class declaration carries them; conflict-resolution
-                    // braces (`use Foo { Foo::m insteadof Bar; }`) are not
-                    // yet supported.
-                    $this->advance();
-                    $tn = $this->parseClassName();
-                    $uses[] = $tn;
-                    if ($memberDoc !== null) { $useDocs[$tn] = $memberDoc; }
-                    while ($this->match(TokenKind::Comma)) {
-                        $tn = $this->parseClassName();
-                        $uses[] = $tn;
-                        if ($memberDoc !== null) { $useDocs[$tn] = $memberDoc; }
-                    }
-                    // `use A, B { A::m insteadof B; m as x; }` conflict resolution.
-                    if ($this->check(TokenKind::OpenBrace)) {
-                        foreach ($this->parseTraitAdaptations() as $a) { $traitAdaptations[] = $a; }
-                    } else {
-                        $this->expect(TokenKind::Semicolon, "expected ';' after `use` in class body");
-                    }
-                    continue;
-                }
-
-                if ($this->checkKeyword('case') && $kindKw === 'enum') {
-                    $this->advance();
-                    $caseNameTok = $this->expectMemberName('expected enum case name');
-                    $value = null;
-                    if ($this->match(TokenKind::Equals)) {
-                        $value = $this->parseExpression();
-                    }
-                    $this->expect(TokenKind::Semicolon, "expected ';' after enum case");
-                    $cases[] = new \Parser\Ast\EnumCase($caseNameTok->lexeme, $value,
-                        $memberAttrs, $this->endFrom($memberSpan, $memberFirst));
-                    continue;
-                }
-
-                if ($this->checkKeyword('const')) {
-                    foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan, $memberFirst) as $const) {
-                        $consts[] = $const;
-                    }
-                    continue;
-                }
-
-                if ($this->checkKeyword('function')) {
-                    $methods[] = $this->parseMethod($modifiers, $memberAttrs, $memberSpan, $memberDoc, $memberFirst);
-                    continue;
-                }
-
-                // Property declaration: optional type hint, then $var [, $var ...]
-                $properties = array_merge(
-                    $properties,
-                    $this->parseProperty($modifiers, $memberAttrs, $memberSpan, $memberDoc, $memberFirst),
-                );
-            } catch (ParseError $e) {
-                if ($this->tolerant !== 1) { throw $e; }
-                $this->depth = $memberDepth;
-                $this->record($e);
-                $this->skipToSync($memberStart, true);
+        $acc = new ClassMembers();
+        if ($this->tolerant === 1) {
+            $this->parseClassMembersTolerant($kindKw, $acc);
+        } else {
+            while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
+                $this->parseClassMember($kindKw, $acc);
             }
         }
 
@@ -805,20 +720,118 @@ final class Parser
             $extends,
             $implements,
             $attributes,
-            $properties,
-            $methods,
-            $consts,
-            $cases,
+            $acc->properties,
+            $acc->methods,
+            $acc->consts,
+            $acc->cases,
             $isFinal,
             $isAbstract,
             $isReadonly,
             $enumBacking,
             $first === null ? $this->end($span) : $this->endFrom($span, $first),
-            $uses,
-            $traitAdaptations,
+            $acc->uses,
+            $acc->traitAdaptations,
             $docComment,
-            $useDocs,
+            $acc->useDocs,
         );
+    }
+
+    /** Parse one class member into $acc (strict and tolerant share it). */
+    private function parseClassMember(string $kindKw, ClassMembers $acc): void
+    {
+        // `$vec[$i] ?? null` doesn't shield against OOB reads on
+        // an int-keyed vec: missing entries hand back whatever
+        // happens to sit in the slot (or past the buffer). isset
+        // checks bounds first, which is the actual semantic we
+        // want — "doc comment recorded at this position?".
+        $memberDoc = isset($this->docCommentByPos[(string)$this->pos])
+            ? $this->docCommentByPos[(string)$this->pos]
+            : null;
+        $memberFirst = $this->peek();
+        $memberAttrs = $this->collectAttributes();
+        $memberSpan = $this->span();
+        $modifiers = $this->parseMemberModifiers();
+
+        if ($this->checkKeyword('use')) {
+            // `use Trait1, Trait2;` — record the trait names so the
+            // class declaration carries them; conflict-resolution
+            // braces (`use Foo { Foo::m insteadof Bar; }`) are not
+            // yet supported.
+            $this->advance();
+            $tn = $this->parseClassName();
+            $acc->uses[] = $tn;
+            if ($memberDoc !== null) { $acc->useDocs[$tn] = $memberDoc; }
+            while ($this->match(TokenKind::Comma)) {
+                $tn = $this->parseClassName();
+                $acc->uses[] = $tn;
+                if ($memberDoc !== null) { $acc->useDocs[$tn] = $memberDoc; }
+            }
+            // `use A, B { A::m insteadof B; m as x; }` conflict resolution.
+            if ($this->check(TokenKind::OpenBrace)) {
+                foreach ($this->parseTraitAdaptations() as $a) { $acc->traitAdaptations[] = $a; }
+            } else {
+                $this->expect(TokenKind::Semicolon, "expected ';' after `use` in class body");
+            }
+            return;
+        }
+
+        if ($this->checkKeyword('case') && $kindKw === 'enum') {
+            $this->advance();
+            $caseNameTok = $this->expectMemberName('expected enum case name');
+            $value = null;
+            if ($this->match(TokenKind::Equals)) {
+                $value = $this->parseExpression();
+            }
+            $this->expect(TokenKind::Semicolon, "expected ';' after enum case");
+            $acc->cases[] = new \Parser\Ast\EnumCase($caseNameTok->lexeme, $value,
+                $memberAttrs, $this->endFrom($memberSpan, $memberFirst));
+            return;
+        }
+
+        if ($this->checkKeyword('const')) {
+            foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan, $memberFirst) as $const) {
+                $acc->consts[] = $const;
+            }
+            return;
+        }
+
+        if ($this->checkKeyword('function')) {
+            $acc->methods[] = $this->parseMethod($modifiers, $memberAttrs, $memberSpan, $memberDoc, $memberFirst);
+            return;
+        }
+
+        // Property declaration: optional type hint, then $var [, $var ...]
+        $acc->properties = array_merge(
+            $acc->properties,
+            $this->parseProperty($modifiers, $memberAttrs, $memberSpan, $memberDoc, $memberFirst),
+        );
+    }
+
+    /**
+     * Tolerant member loop: a member that cannot be parsed is recorded and
+     * skipped to the next member keyword, `;` or the body's `}`; the member is
+     * omitted (the member lists are typed, there is no placeholder).
+     */
+    private function parseClassMembersTolerant(string $kindKw, ClassMembers $acc): void
+    {
+        $iterPos = -1;
+        while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
+            if ($this->pos === $iterPos) {
+                $this->record($this->error('unexpected token: ' . $this->tokens[$this->pos]->kind));
+                $this->advance();
+                continue;
+            }
+            $iterPos = $this->pos;
+            $memberStart = $this->pos;
+            $memberDepth = $this->depth;
+            try {
+                $this->parseClassMember($kindKw, $acc);
+            } catch (ParseError $e) {
+                $this->depth = $memberDepth;
+                $this->record($e);
+                $this->skipToSync($memberStart, true);
+            }
+        }
     }
 
     /**
@@ -1288,7 +1301,10 @@ final class Parser
         // parens in the hint string (lowerTypeHint strips them).
         if ($this->check(TokenKind::OpenParen)) {
             $this->advance();
+            if ($this->tolerant === 1 && $this->depth > self::MAX_DEPTH) { throw $this->error('nesting too deep'); }
+            $this->depth = $this->depth + ($this->tolerant === 1 ? 1 : 0);
             $inner = $this->parseTypeHint();
+            $this->depth = $this->depth - ($this->tolerant === 1 ? 1 : 0);
             $this->expect(TokenKind::CloseParen, "expected ')' to close a DNF type group");
             return '(' . $inner . ')';
         }
@@ -1415,7 +1431,10 @@ final class Parser
         $ec = $this->prevEndColumn;
         if ($this->match(TokenKind::Semicolon)) { return new Block([], $this->listSpan(null, $el, $ec)); }   // `for (…);`
         $first = $this->peek();
+        if ($this->tolerant === 1 && $this->depth > self::MAX_DEPTH) { throw $this->error('nesting too deep'); }
+        $this->depth = $this->depth + ($this->tolerant === 1 ? 1 : 0);
         $stmt = $this->parseStatement();
+        $this->depth = $this->depth - ($this->tolerant === 1 ? 1 : 0);
         $el = $this->prevEndLine;
         $ec = $this->prevEndColumn;
         if ($this->tolerant === 1 && $this->ranges) {
@@ -1876,10 +1895,7 @@ final class Parser
     public function parseExpression(): Expr
     {
         if ($this->tolerant === 1) {
-            if ($this->depth > self::MAX_DEPTH) {
-                $this->record($this->error('nesting too deep'));
-                return new \Parser\Ast\ErrorExpr($this->missingAt($this->span()));
-            }
+            if ($this->depth > self::MAX_DEPTH) { return $this->nestingError(); }
             $this->depth = $this->depth + 1;
             $e = $this->parseWordOr();
             $this->depth = $this->depth - 1;
@@ -1912,6 +1928,7 @@ final class Parser
             $this->advance();
             $right = $this->parseWordXor();
             $left = Expr::binary('||', $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -1933,6 +1950,7 @@ final class Parser
                 Expr::unary('!', $right, $this->wrapSpan($span, $right)),
                 $this->end($span, $left),
             );
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -1945,6 +1963,7 @@ final class Parser
             $this->advance();
             $right = $this->parseAssign();
             $left = Expr::binary('&&', $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -1972,6 +1991,16 @@ final class Parser
     }
 
     private function parseAssign(): Expr
+    {
+        if ($this->tolerant !== 1) { return $this->parseAssignInner(); }
+        if ($this->depth > self::MAX_DEPTH) { return $this->nestingError(); }
+        $this->depth = $this->depth + 1;
+        $e = $this->parseAssignInner();
+        $this->depth = $this->depth - 1;
+        return $e;
+    }
+
+    private function parseAssignInner(): Expr
     {
         if ($this->peek()->kind === TokenKind::Keyword
             && \strtolower($this->peek()->lexeme) === 'yield') {
@@ -2108,6 +2137,7 @@ final class Parser
             $this->advance();
             $right = $this->parseNullCoalesce();
             $left = $this->buildPipe($left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2227,6 +2257,7 @@ final class Parser
             $this->advance();
             $right = $this->parseAnd();
             $left = Expr::binary('||', $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2239,6 +2270,7 @@ final class Parser
             $this->advance();
             $right = $this->parseBitOr();
             $left = Expr::binary('&&', $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2251,6 +2283,7 @@ final class Parser
             $this->advance();
             $right = $this->parseBitXor();
             $left = Expr::binary('|', $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2263,6 +2296,7 @@ final class Parser
             $this->advance();
             $right = $this->parseBitAnd();
             $left = Expr::binary('^', $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2275,6 +2309,7 @@ final class Parser
             $this->advance();
             $right = $this->parseEquality();
             $left = Expr::binary('&', $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2295,6 +2330,7 @@ final class Parser
             $this->advance();
             $right = $this->parseComparison();
             $left = Expr::binary($op, $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2314,6 +2350,7 @@ final class Parser
             $this->advance();
             $right = $this->parseShift();
             $left = Expr::binary($op, $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2331,6 +2368,7 @@ final class Parser
             $this->advance();
             $right = $this->parseAddition();
             $left = Expr::binary($op, $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2349,6 +2387,7 @@ final class Parser
             $this->advance();
             $right = $this->parseMultiplication();
             $left = Expr::binary($op, $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2367,6 +2406,7 @@ final class Parser
             $this->advance();
             $right = $this->parseInstanceof();
             $left = Expr::binary($op, $left, $right, $this->end($span, $left));
+            if ($this->tolerant === 1 && $right->kind === 'Error') { break; }   // no operator chains over missing operands
         }
         return $left;
     }
@@ -2378,6 +2418,16 @@ final class Parser
      * `(!$o) instanceof A` and answered the opposite — and `-2 ** 2` is -4.
      */
     private function parseInstanceof(): Expr
+    {
+        if ($this->tolerant !== 1 || !$this->check(TokenKind::Bang)) { return $this->parseInstanceofInner(); }
+        if ($this->depth > self::MAX_DEPTH) { return $this->nestingError(); }
+        $this->depth = $this->depth + 1;
+        $e = $this->parseInstanceofInner();
+        $this->depth = $this->depth - 1;
+        return $e;
+    }
+
+    private function parseInstanceofInner(): Expr
     {
         if ($this->check(TokenKind::Bang)) {
             $span = $this->span();
@@ -2418,6 +2468,16 @@ final class Parser
     }
 
     private function parseUnary(): Expr
+    {
+        if ($this->tolerant !== 1) { return $this->parseUnaryInner(); }
+        if ($this->depth > self::MAX_DEPTH) { return $this->nestingError(); }
+        $this->depth = $this->depth + 1;
+        $e = $this->parseUnaryInner();
+        $this->depth = $this->depth - 1;
+        return $e;
+    }
+
+    private function parseUnaryInner(): Expr
     {
         $tok = $this->peek();
         if ($tok->kind === TokenKind::Minus) {
@@ -2498,7 +2558,10 @@ final class Parser
      */
     private function parsePostfix(Expr $left): Expr
     {
+        if ($this->tolerant === 1 && $left->kind === 'Error') { return $left; }   // a missing primary takes no suffix chain
+        $mark = $this->recorded;
         while (true) {
+            if ($this->tolerant === 1 && $this->recorded !== $mark) { return $left; }   // a suffix that reported an error ends the chain
             $tok = $this->peek();
             if ($tok->kind === TokenKind::Arrow || $tok->kind === TokenKind::NullsafeArrow) {
                 $nullsafe = $tok->kind === TokenKind::NullsafeArrow;
@@ -3635,7 +3698,16 @@ final class Parser
         $sub = new self($tokens);
         $sub->ranges = $this->ranges;
         $sub->rangeOverride = $span;
-        return Expr::cast('string', $sub->parseExpression(), $span);
+        if ($this->tolerant === 1) {
+            $sub->tolerant = 1;
+            $sub->depth = $this->depth;
+        }
+        $inner = $sub->parseExpression();
+        // sub-parser positions are relative to the string body: report them at the string
+        foreach ($sub->errors as $e) {
+            $this->record(new ParseError($e->reason, $span->line, $span->column, $span->line, $span->column));
+        }
+        return Expr::cast('string', $inner, $span);
     }
 
     // ── Token helpers ────────────────────────────────────────────────────────
@@ -3715,6 +3787,7 @@ final class Parser
     /** Tolerant mode: append $e to the error list; the 101st entry is the one "too many errors" and later ones are dropped. */
     private function record(ParseError $e): void
     {
+        $this->recorded = $this->recorded + 1;
         $n = \count($this->errors);
         if ($n > 100) { return; }
         for ($i = 0; $i < $n; $i = $i + 1) {
@@ -3738,6 +3811,13 @@ final class Parser
 
     /** Nesting cap (statements + expressions) in tolerant mode; deeper input is reported, not recursed into. */
     private const MAX_DEPTH = 256;
+
+    /** Tolerant mode, nesting cap hit: one recorded error, an ErrorExpr, nothing consumed. */
+    private function nestingError(): Expr
+    {
+        $this->record($this->error('nesting too deep'));
+        return new \Parser\Ast\ErrorExpr($this->missingAt($this->span()));
+    }
 
     /**
      * Tolerant statement boundary. A ParseError (a construct that cannot recover
