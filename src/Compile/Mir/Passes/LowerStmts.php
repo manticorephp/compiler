@@ -683,7 +683,7 @@ trait LowerStmts
             $body = new Block($stmts, Type::void());
         }
         if ($stmt->valueByRef) {
-            $bound = $this->foreachBindingCapturedRef($array, $stmt->expr, $keyVar, $valueVar, $body);
+            $bound = $this->foreachBindingCapturedRef($array, $keyVar, $valueVar, $body);
             if ($bound !== null) { return $bound; }
         }
         // `foreach ($config as $name => $config)`: php iterates the array the
@@ -723,19 +723,28 @@ trait LowerStmts
      * ponytail: a property / element subject is re-evaluated for the binding;
      * an index with side effects would run twice.
      */
-    private function foreachBindingCapturedRef(Node $array, \Parser\Ast\Expr $subject, ?string $keyVar, string $valueVar, Block $body): ?Node
+    private function foreachBindingCapturedRef(Node $array, ?string $keyVar, string $valueVar, Block $body): ?Node
     {
         $ls = new \Compile\Mir\LocalSlots();
         $ls->collectByRefCaptured($body);
         if (!isset($ls->byRefCaptured[$valueVar])) { return null; }
+        return $this->foreachBindRef($array, $keyVar, $valueVar, $body);
+    }
+
+    /**
+     * The `$v = &$xs[$k]` form of a by-ref foreach ({@see foreachBindingCapturedRef}),
+     * built from the LOWERED subject: also applied after lowering to a loop
+     * whose value variable a reference is taken to anywhere in the function
+     * ({@see LowerFromAst::bindRefTakenForeachVars}).
+     */
+    private function foreachBindRef(Node $array, ?string $keyVar, string $valueVar, Block $body): Node
+    {
         $n = (string)$this->destrCounter;
         $this->destrCounter = $this->destrCounter + 1;
         $pre = [];
-        $sk = $subject->kind;
-        if ($sk === 'Variable') {
-            $base = new LoadLocal($this->varName($subject), Type::unknown());
-        } elseif ($sk === 'PropertyAccess' || $sk === 'ArrayAccess') {
-            $base = $this->lowerExpr($subject);
+        $sk = $array->kind;
+        if ($sk === Node::KIND_LOAD_LOCAL || $sk === Node::KIND_PROPERTY_ACCESS || $sk === Node::KIND_ARRAY_ACCESS) {
+            $base = \Compile\Mir\NodeClone::node($array);
         } else {
             $tmp = '__fe_rb_' . $n;
             $pre[] = new StoreLocal($tmp, $array, Type::void());

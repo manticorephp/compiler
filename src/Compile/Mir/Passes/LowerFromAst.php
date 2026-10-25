@@ -1771,9 +1771,69 @@ final class LowerFromAst implements Pass
         if ($this->sawExtract) {
             ExtractScope::expand($module);
         }
+        $this->bindRefTakenForeachVars($module);
         $module->markPassApplied(self::NAME);
         return $module;
     }
+
+    /**
+     * A by-ref `foreach` whose value variable a reference is taken to ANYWHERE in
+     * the function (`[&$v]`, `$w = &$v`, `$out[$k] = &$v`, before or after the
+     * loop) binds `$v = &$xs[$k]` per iteration ({@see foreachBindRef}), as php
+     * does. The copy-and-write-back form handed every such reference the loop's
+     * one copy, and a boxed `$v` wrote its box ADDRESS back into the element.
+     */
+    private function bindRefTakenForeachVars(Module $module): void
+    {
+        foreach ($module->functions as $fd) {
+            /** @var array<string, true> $taken */
+            $taken = [];
+            self::collectRefTakenNames($fd->body, $taken);
+            if ($taken !== []) { $this->rebindRefTakenForeach($fd->body, $taken); }
+        }
+    }
+
+    /** @param array<string, true> $out */
+    private static function collectRefTakenNames(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            $ra = self::asRefAliasNode($n);
+            $out[$ra->target] = true;
+            $out[$ra->source] = true;
+            return;
+        }
+        if ($n->kind === Node::KIND_REF_CELL) {
+            $src = Walk::children($n)[0];
+            if ($src->kind === Node::KIND_LOAD_LOCAL) { $out[self::asLoadLocalNode($src)->name] = true; }
+        }
+        foreach (Walk::children($n) as $c) { self::collectRefTakenNames($c, $out); }
+    }
+
+    /** @param array<string, true> $taken */
+    private function rebindRefTakenForeach(Node $n, array $taken): void
+    {
+        if ($n->kind === Node::KIND_BLOCK) {
+            $b = self::asBlockNode($n);
+            $cnt = \count($b->stmts);
+            for ($i = 0; $i < $cnt; $i++) {
+                $s = $b->stmts[$i];
+                if ($s->kind === Node::KIND_FOREACH) {
+                    $fe = self::asForeachNode($s);
+                    if ($fe->byRef && !$fe->bindRef && $fe->genSlotBase < 0 && isset($taken[$fe->valueVar])) {
+                        $b->stmts[$i] = $this->foreachBindRef($fe->array, $fe->keyVar, $fe->valueVar, $fe->body);
+                    }
+                }
+                $this->rebindRefTakenForeach($b->stmts[$i], $taken);
+            }
+            return;
+        }
+        foreach (Walk::children($n) as $c) { $this->rebindRefTakenForeach($c, $taken); }
+    }
+
+    private static function asRefAliasNode(Node $n): \Compile\Mir\RefAlias_ { return $n; }
+    private static function asLoadLocalNode(Node $n): LoadLocal { return $n; }
+    private static function asBlockNode(Node $n): Block { return $n; }
+    private static function asForeachNode(Node $n): \Compile\Mir\Foreach_ { return $n; }
     /** Whether a lowered module contains `$object->$name(...)`. */
     /**
      * Method names a would-be CALLABLE ARRAY literal (`[$obj, 'method']`) names,
