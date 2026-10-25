@@ -427,6 +427,55 @@ final class __McMysqliConn
         return $this->take($x);
     }
 
+    /** mysqlnd copies a name into a C string: it ends at the first NUL. */
+    public static function cutNul(string $s): string
+    {
+        $z = \strpos($s, "\0");
+        return $z === false ? $s : \substr($s, 0, $z);
+    }
+
+    /** A transaction name as it goes into the comment after the verb: only A-Z a-z 0-9 space - _ = survive. */
+    public static function txName(string $name): string
+    {
+        $name = self::cutNul($name);
+        $o = '';
+        $n = \strlen($name);
+        for ($i = 0; $i < $n; $i++) {
+            $c = \ord($name[$i]);
+            if (($c >= 48 && $c <= 57) || ($c >= 65 && $c <= 90) || ($c >= 97 && $c <= 122) || $c === 32 || $c === 45 || $c === 61 || $c === 95) { $o .= $name[$i]; }
+        }
+        return $o;
+    }
+
+    /**
+     * get_warnings(): SHOW WARNINGS read as an unbuffered result to its end, as mysqli does (so the connection ends up with
+     * affected_rows 0, the SHOW's field count and its warning count). The command's own failure is recorded, never thrown.
+     */
+    public function warnings(): false|mysqli_warning
+    {
+        $mode = self::$mode;
+        self::$mode = 0;
+        try {
+            if (!$this->send('SHOW WARNINGS', true)) { return false; }
+            $rs = $this->takeUsed();
+            if ($rs === null) { return false; }
+            /** @var array<int,string> */
+            $msgs = [];
+            /** @var array<int,int> */
+            $nos = [];
+            while (true) {
+                $row = $rs->row();
+                if ($row === null) { break; }
+                $nos[] = (int) $row[1];
+                $msgs[] = (string) $row[2];
+            }
+            $rs->free();
+            return \count($msgs) === 0 ? false : mysqli_warning::__mcNew($msgs, $nos);
+        } finally {
+            self::$mode = $mode;
+        }
+    }
+
     /** @return ?string the packed table row, null for a name mysqlnd does not know */
     public static function charsetRow(string $name): ?string
     {
@@ -452,6 +501,7 @@ final class __McMysqliConn
     public function setCharset(string $cs): bool
     {
         $this->link();
+        $cs = self::cutNul($cs);
         $row = self::charsetRow($cs);
         if ($row === null) { return $this->fail(2019, 'HY000', 'Invalid character set was provided'); }
         if (!$this->send('SET NAMES ' . $cs, false)) { return false; }
@@ -759,17 +809,69 @@ class mysqli
 
     public function autocommit(bool $enable): bool
     {
-        throw new Error('mysqli: not implemented');
+        return __McMysqliConn::of($this)->link()->send($enable ? 'SET AUTOCOMMIT=1' : 'SET AUTOCOMMIT=0', false);
     }
 
     public function begin_transaction(int $flags = 0, ?string $name = null): bool
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcBeginTx($flags, $name, 'mysqli::begin_transaction', 1);
+    }
+
+    /** begin_transaction() and mysqli_begin_transaction(): $fn and $arg (the flags' argument position) word the argument errors. */
+    public function __mcBeginTx(int $flags, ?string $name, string $fn, int $arg): bool
+    {
+        $c = __McMysqliConn::of($this)->link();
+        if ($flags < 0) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($flags) must be one of the MYSQLI_TRANS_* constants'); }
+        if ($name === '') { throw new ValueError($fn . '(): Argument #' . ($arg + 1) . ' ($name) must not be empty'); }
+        $sql = 'START TRANSACTION';
+        if ($name !== null) { $sql .= ' /*' . __McMysqliConn::txName($name) . '*/'; }
+        $opt = '';
+        if (($flags & 1) !== 0) { $opt = 'WITH CONSISTENT SNAPSHOT'; }
+        if (($flags & 2) !== 0) { $opt .= ($opt === '' ? '' : ', ') . 'READ WRITE'; }
+        elseif (($flags & 4) !== 0) { $opt .= ($opt === '' ? '' : ', ') . 'READ ONLY'; }
+        if ($opt !== '') { $sql .= ' ' . $opt; }
+        return $c->send($sql, false);
+    }
+
+    /** commit() and rollback(): chain and release follow mysqlnd (both bits of a pair cancel out). */
+    public function __mcEndTx(string $verb, int $flags, ?string $name): bool
+    {
+        $c = __McMysqliConn::of($this)->link();
+        $sql = $verb;
+        if ($name !== null) { $sql .= ' /*' . __McMysqliConn::txName($name) . '*/'; }
+        if (($flags & 1) !== 0 && ($flags & 2) === 0) { $sql .= ' AND CHAIN'; }
+        elseif (($flags & 2) !== 0 && ($flags & 1) === 0) { $sql .= ' AND NO CHAIN'; }
+        if (($flags & 4) !== 0 && ($flags & 8) === 0) { $sql .= ' RELEASE'; }
+        elseif (($flags & 8) !== 0 && ($flags & 4) === 0) { $sql .= ' NO RELEASE'; }
+        return $c->send($sql, false);
+    }
+
+    /** savepoint() and release_savepoint(). */
+    public function __mcSavepoint(string $verb, string $name, string $fn, int $arg): bool
+    {
+        $c = __McMysqliConn::of($this)->link();
+        if ($name === '') { throw new ValueError($fn . '(): Argument #' . $arg . ' ($name) must not be empty'); }
+        return $c->send($verb . ' `' . __McMysqliConn::cutNul($name) . '`', false);
     }
 
     public function change_user(string $username, #[\SensitiveParameter] string $password, ?string $database): bool
     {
-        throw new Error('mysqli: not implemented');
+        $c = __McMysqliConn::of($this);
+        $w = $c->liveWire();
+        if (!$c->begin()) { return false; }
+        // a success is an OK that leaves field_count alone; user and database are C strings (they end at a NUL)
+        $db = $database === null ? '' : __McMysqliConn::cutNul($database);
+        try {
+            $e = $w->changeUser(__McMysqliConn::cutNul($username), $password, $db, (int) \explode('|', $c->csRow)[0]);
+        } catch (PDOException $x) {
+            return $c->wireFail($x);
+        }
+        if ($e !== null) { return $c->cmd($e); }
+        $c->affectedRows = 0;
+        $c->insertId = 0;
+        $c->info = null;
+        $c->warningCount = 0;
+        return true;
     }
 
     public function character_set_name(): string
@@ -785,7 +887,7 @@ class mysqli
 
     public function commit(int $flags = 0, ?string $name = null): bool
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcEndTx('COMMIT', $flags, $name);
     }
 
     public function connect(?string $hostname = null, ?string $username = null, #[\SensitiveParameter] ?string $password = null, ?string $database = null, ?int $port = null, ?string $socket = null): bool
@@ -835,7 +937,8 @@ class mysqli
 
     public function get_warnings(): false|mysqli_warning
     {
-        throw new Error('mysqli: not implemented');
+        $c = __McMysqliConn::of($this)->link();
+        return $c->warningCount === 0 ? false : $c->warnings();
     }
 
     public function init()
@@ -846,7 +949,27 @@ class mysqli
 
     public function kill(int $process_id): bool
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcKill($process_id, 'mysqli::kill', 1);
+    }
+
+    /** kill() and mysqli_kill(). Killing the connection's own thread just closes it, as mysqlnd does. */
+    public function __mcKill(int $id, string $fn, int $arg): bool
+    {
+        if ($id <= 0) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($process_id) must be greater than 0'); }
+        $c = __McMysqliConn::of($this);
+        $w = $c->liveWire();
+        if (!$c->begin()) { return false; }
+        if ($id === $c->threadId) {
+            $w->close();
+            return true;
+        }
+        try {
+            $e = $w->processKill($id);
+        } catch (PDOException $x) {
+            return $c->wireFail($x);
+        }
+        if ($e === null) { $c->info = null; }
+        return $c->cmd($e);
     }
 
     public function more_results(): bool
@@ -931,22 +1054,39 @@ class mysqli
 
     public function refresh(int $flags): bool
     {
-        throw new Error('mysqli: not implemented');
+        $c = __McMysqliConn::of($this);
+        // mysqli never reports a failed refresh: it is recorded, not thrown (an unconnected handle answers out of sync)
+        $mode = __McMysqliConn::$mode;
+        __McMysqliConn::$mode = 0;
+        try {
+            if ($c->st === __McMysqliConn::INIT) { return $c->fail(2014, 'HY000', __McMysqliConn::OOS); }
+            $w = $c->liveWire();
+            if (!$c->begin()) { return false; }
+            try {
+                $e = $w->refresh($flags);
+            } catch (PDOException $x) {
+                return $c->wireFail($x);
+            }
+            if ($e === null) { $c->info = null; }
+            return $c->cmd($e);
+        } finally {
+            __McMysqliConn::$mode = $mode;
+        }
     }
 
     public function release_savepoint(string $name): bool
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcSavepoint('RELEASE SAVEPOINT', $name, 'mysqli::release_savepoint', 1);
     }
 
     public function rollback(int $flags = 0, ?string $name = null): bool
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcEndTx('ROLLBACK', $flags, $name);
     }
 
     public function savepoint(string $name): bool
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcSavepoint('SAVEPOINT', $name, 'mysqli::savepoint', 1);
     }
 
     public function select_db(string $database): bool
@@ -981,7 +1121,21 @@ class mysqli
 
     public function stat(): false|string
     {
-        throw new Error('mysqli: not implemented');
+        $c = __McMysqliConn::of($this);
+        $w = $c->liveWire();
+        // mysqli never reports a failed stat: it is recorded, not thrown
+        $mode = __McMysqliConn::$mode;
+        __McMysqliConn::$mode = 0;
+        try {
+            if (!$c->begin()) { return false; }
+            try {
+                return $w->statistics();
+            } catch (PDOException $x) {
+                return $c->wireFail($x);
+            }
+        } finally {
+            __McMysqliConn::$mode = $mode;
+        }
     }
 
     public function stmt_init(): false|mysqli_stmt
@@ -1765,17 +1919,39 @@ class mysqli_stmt
 
 final class mysqli_warning
 {
-    public int $errno;
-    public string $message;
-    public string $sqlstate;
+    public string $message { get => $this->__msg[$this->__i]; set(mixed $v) { __McMysqliConn::ro($this, 'message'); } }
+    public string $sqlstate { get => 'HY000'; set(mixed $v) { __McMysqliConn::ro($this, 'sqlstate'); } }
+    public int $errno { get => $this->__no[$this->__i]; set(mixed $v) { __McMysqliConn::ro($this, 'errno'); } }
+
+    /** @var array<int,string> */
+    private array $__msg = [];
+    /** @var array<int,int> */
+    private array $__no = [];
+    private int $__i = 0;
 
     private function __construct()
     {
-        throw new Error('mysqli: not implemented');
+    }
+
+    /** Internal factory (the surface audit skips `__mc*`): the rows of one SHOW WARNINGS, at least one. */
+    public static function __mcNew(array $msgs, array $nos): self
+    {
+        $w = new self();
+        $w->__msg = $msgs;
+        $w->__no = $nos;
+        return $w;
+    }
+
+    /** @return array<string,mixed> */
+    public function __debugInfo(): array
+    {
+        return ['message' => $this->message, 'sqlstate' => $this->sqlstate, 'errno' => $this->errno];
     }
 
     public function next(): bool
     {
-        throw new Error('mysqli: not implemented');
+        if ($this->__i + 1 >= \count($this->__msg)) { return false; }
+        $this->__i++;
+        return true;
     }
 }

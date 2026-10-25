@@ -9,17 +9,17 @@ function mysqli_affected_rows(mysqli $mysql): int|string
 
 function mysqli_autocommit(mysqli $mysql, bool $enable): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->autocommit($enable);
 }
 
 function mysqli_begin_transaction(mysqli $mysql, int $flags = 0, ?string $name = null): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->__mcBeginTx($flags, $name, 'mysqli_begin_transaction', 2);
 }
 
 function mysqli_change_user(mysqli $mysql, string $username, #[\SensitiveParameter] string $password, ?string $database): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->change_user($username, $password, $database);
 }
 
 function mysqli_character_set_name(mysqli $mysql): string
@@ -34,7 +34,7 @@ function mysqli_close(mysqli $mysql): true
 
 function mysqli_commit(mysqli $mysql, int $flags = 0, ?string $name = null): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->commit($flags, $name);
 }
 
 function mysqli_connect(?string $hostname = null, ?string $username = null, #[\SensitiveParameter] ?string $password = null, ?string $database = null, ?int $port = null, ?string $socket = null): false|mysqli
@@ -223,7 +223,7 @@ function mysqli_get_server_version(mysqli $mysql): int
 
 function mysqli_get_warnings(mysqli $mysql): false|mysqli_warning
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->get_warnings();
 }
 
 function mysqli_info(mysqli $mysql): ?string
@@ -243,7 +243,7 @@ function mysqli_insert_id(mysqli $mysql): int|string
 
 function mysqli_kill(mysqli $mysql, int $process_id): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->__mcKill($process_id, 'mysqli_kill', 2);
 }
 
 function mysqli_more_results(mysqli $mysql): bool
@@ -320,12 +320,12 @@ function mysqli_reap_async_query(mysqli $mysql): bool|mysqli_result
 
 function mysqli_refresh(mysqli $mysql, int $flags): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->refresh($flags);
 }
 
 function mysqli_release_savepoint(mysqli $mysql, string $name): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->__mcSavepoint('RELEASE SAVEPOINT', $name, 'mysqli_release_savepoint', 2);
 }
 
 function mysqli_report(int $flags): true
@@ -336,12 +336,12 @@ function mysqli_report(int $flags): true
 
 function mysqli_rollback(mysqli $mysql, int $flags = 0, ?string $name = null): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->rollback($flags, $name);
 }
 
 function mysqli_savepoint(mysqli $mysql, string $name): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->__mcSavepoint('SAVEPOINT', $name, 'mysqli_savepoint', 2);
 }
 
 function mysqli_select_db(mysqli $mysql, string $database): bool
@@ -371,7 +371,7 @@ function mysqli_ssl_set(mysqli $mysql, ?string $key, ?string $certificate, ?stri
 
 function mysqli_stat(mysqli $mysql): false|string
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->stat();
 }
 
 function mysqli_stmt_affected_rows(mysqli_stmt $statement): int|string
