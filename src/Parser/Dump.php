@@ -141,19 +141,10 @@ final class Dump
             }
             foreach ($value->attributes as $a) { $this->attribute($a); }
             foreach ($value->cases as $c) {
-                if ($this->ranges) {
-                    $this->line('Case ' . $c->name . ' ' . $this->spanStr($c->span));
-                    if ($c->value !== null) {
-                        $this->indent = $this->indent + 1;
-                        $this->field('value', $c->value);
-                        $this->indent = $this->indent - 1;
-                    }
-                    continue;
-                }
-                $this->line('Case ' . $c[0]);
-                if ($c[1] !== null) {
+                $this->line('Case ' . $c->name . ($this->ranges ? ' ' . $this->spanStr($c->span) : ''));
+                if ($c->value !== null) {
                     $this->indent = $this->indent + 1;
-                    $this->field('value', $c[1]);
+                    $this->field('value', $c->value);
                     $this->indent = $this->indent - 1;
                 }
             }

@@ -2,6 +2,7 @@
 
 namespace Parser;
 
+use Parser\Ast\AttributeNode;
 use Parser\Ast\Program;
 use Parser\Ast\Span;
 
@@ -17,8 +18,9 @@ use Parser\Ast\Span;
  *     every node of an interpolated string the whole string's range;
  *   - with $requireEnds, a node with no end at all.
  *
- * A ranged node reachable twice (the attributes of `public #[A] $a, $b;` hang
- * off both declarators) is checked once, under the first parent that reaches it.
+ * An AttributeNode reachable twice (the attributes of `#[A] public $a, $b;` hang
+ * off both declarators) is checked once, under the first parent that reaches it;
+ * any other node placed twice is reported like any overlap.
  *
  * A node with endLine === 0 is "unset": skipped, but its descendants are still
  * checked against the nearest ranged ancestor. Objects without a `span` (Block,
@@ -30,7 +32,7 @@ final class RangeCheck
     private array $out = [];
     private bool $requireEnds = false;
     private string $defaultFile = '';
-    /** @var array<int,bool> ranged nodes already checked (a node shared by sibling declarators, like their attributes, counts once) */
+    /** @var array<int,bool> AttributeNodes already checked (shared by sibling declarators) */
     private array $seen = [];
 
     /** @return string[] */
@@ -63,7 +65,7 @@ final class RangeCheck
         }
         $vars = \get_object_vars($v);
         $span = $vars['span'] ?? null;
-        if ($span instanceof Span) {
+        if ($v instanceof AttributeNode && $span instanceof Span) {
             $id = \spl_object_id($v);
             if (isset($this->seen[$id])) { return $found; }
             $this->seen[$id] = true;

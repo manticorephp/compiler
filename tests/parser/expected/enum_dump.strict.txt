@@ -1,0 +1,28 @@
+Program
+  Stmt:Class @2:1
+    decl: enum Suit
+      backing: string
+      Case H
+        value:
+          Expr:StringLiteral @2:30
+            value: "h"
+      Case S
+        value:
+          Expr:StringLiteral @2:44
+            value: "s"
+  Stmt:Class @3:1
+    decl: enum Level
+      backing: int
+      Case Low
+        value:
+          Expr:IntLiteral @3:30
+            value: 1
+      Case High
+        value:
+          Expr:IntLiteral @3:45
+            value: 10
+  Stmt:Class @4:1
+    decl: enum Plain
+      Case A
+      Case B
+

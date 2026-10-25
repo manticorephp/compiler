@@ -10,8 +10,7 @@
 # into DIR/corpus (DIR must be outside the repo), dumps every file twice and drops
 # files whose two dumps differ (listed in DIR/unstable.txt: dump-ast prints
 # uninitialised memory for some inputs). --check re-runs the CURRENT bin/manticore
-# on the frozen corpus (or --corpus DIR2, e.g. the live tree). Numeric enum-case
-# name/value lines are masked.
+# on the frozen corpus (or --corpus DIR2, e.g. the live tree).
 
 set -uo pipefail
 
@@ -37,7 +36,7 @@ if [[ -z "$CORPUS" ]]; then CORPUS="$DIR/corpus"; fi
 [[ "$CORPUS" == "$ROOT" ]] && CORPUS="$ROOT"
 
 dump_sha() {
-    "$ROOT/bin/manticore" dump-ast "$1" 2>&1 | LC_ALL=C awk '/^ *Case -?[0-9]+$/ {print "Case N"; m=1; next} m && /^ *value: -?[0-9]+$/ {print "value N"; m=0; next} {m=0; print}' | shasum | cut -d' ' -f1
+    "$ROOT/bin/manticore" dump-ast "$1" 2>&1 | shasum | cut -d' ' -f1
 }
 
 out="$DIR/shas.txt"

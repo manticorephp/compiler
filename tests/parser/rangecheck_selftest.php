@@ -70,4 +70,9 @@ $decl2 = new Parser\Ast\FunctionDecl('f', [par('a', 1, 20, [$attr]), new Parser\
 expect('decl-missing-end', RangeCheck::verify(new Program([Stmt::function_($decl2, $sp(1, 41))]), true), ['no end position']);
 expect('decl-missing-end-lenient', RangeCheck::verify(new Program([Stmt::function_($decl2, $sp(1, 41))])), []);
 
+// a non-attribute node placed twice under one parent is still an overlap
+$twice = par('a', 1, 20, []);
+$decl3 = new Parser\Ast\FunctionDecl('f', [$twice, $twice], null, null, $sp(1, 41));
+expect('node-twice', RangeCheck::verify(new Program([Stmt::function_($decl3, $sp(1, 41))]), true), ['sibling range 1:1-1:20 overlaps 1:1-1:20']);
+
 exit($fail === 0 ? 0 : 1);
