@@ -140,6 +140,7 @@ trait EmitLlvmGenerator
         // the box's address from creation on, so every holder — the REF cell,
         // the frame — shares one storage that outlives a scratch slot. The frame
         // never gives its count back: the residual frame-local leak noted below.
+        $this->locals->aliasBoxNames = [];
         $this->locals->refCellTargets = [];
         $this->locals->collectRefCellTargets($fn->body);
         $this->locals->refCellTargets = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->locals->refCellTargets);

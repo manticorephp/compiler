@@ -1,6 +1,5 @@
 <?php
 // A referenced local whose type changes reads a stale/raw word (`use (&$d)`, `$r = &$d`)
-// issue: #59
 $d = 1;
 $f = function () use (&$d): void { $d = $d * 2; };
 $d = 2.0;

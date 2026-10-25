@@ -3484,6 +3484,11 @@ trait EmitLlvmObjects
     /** `$y = &$x` — point the target's slot at the source's slot. */
     private function emitRefAlias(RefAlias_ $n): string
     {
+        if (isset($this->locals->aliasBoxNames[$n->target]) && !$this->gen->inGenerator
+            && isset($this->locals->ownedBoxes[$n->target]) && isset($this->locals->slots[$n->source])
+            && isset($this->locals->refLocals[$n->source])) {
+            return $this->emitRefAliasBox($n);
+        }
         if (isset($this->locals->globalBacked[$n->source])) {
             // The source is not a stack slot at all: a `global $x` name — and a
             // SUPERGLOBAL is only an implicit one — is backed by a module cell
@@ -3531,6 +3536,36 @@ trait EmitLlvmObjects
             $out .= $this->ownedBoxReleaseIr($n->target, false);
             $out .= '  store ptr null, ptr ' . $this->locals->ownedBoxes[$n->target] . "\n";
         }
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
+     * `$y = &$x` over two boxed names ({@see LocalSlots::aliasBoxNames}): `$y`
+     * takes a count on the box `$x`'s slot points at and gives back the one it
+     * held, so the binding is a run-time value that follows control flow. The
+     * box `$x` points at may be an element's, which `$x` co-owns.
+     */
+    private function emitRefAliasBox(RefAlias_ $n): string
+    {
+        $sv = $this->ssa->allocReg();
+        $out = '  ' . $sv . ' = load i64, ptr ' . $this->locals->slots[$n->source] . "\n";
+        $sp = $this->ssa->allocReg();
+        $out .= '  ' . $sp . ' = inttoptr i64 ' . $sv . " to ptr\n";
+        $out .= '  call void @__mir_ref_retain(ptr ' . $sp . ")\n";
+        if (isset($this->locals->elemRefBoxes[$n->target])) {
+            $eo = $this->locals->elemRefBoxes[$n->target];
+            $eb = $this->ssa->allocReg();
+            $out .= '  ' . $eb . ' = load ptr, ptr ' . $eo . "\n";
+            $out .= '  call void @__mir_ref_release(ptr ' . $eb . ")\n";
+            $out .= '  store ptr null, ptr ' . $eo . "\n";
+        }
+        $out .= $this->ownedBoxReleaseIr($n->target, false);
+        $out .= '  store ptr ' . $sp . ', ptr ' . $this->locals->ownedBoxes[$n->target] . "\n";
+        $out .= '  store i64 ' . $sv . ', ptr ' . $this->locals->slots[$n->target] . "\n";
+        $this->locals->refParamTypes[$n->target] = Type::cell();
+        $this->rt->needsRefCells = true;
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;

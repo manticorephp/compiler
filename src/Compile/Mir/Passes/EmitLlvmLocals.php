@@ -120,6 +120,20 @@ trait EmitLlvmLocals
         return $this->localSlotAlloca($slot) . '  store i64 0, ptr ' . $slot . "\n";
     }
 
+    private function preallocateRefAlias(RefAlias_ $n): string
+    {
+        $out = '';
+        foreach ([$n->target, $n->source] as $an) {
+            if (isset($this->locals->aliasBoxNames[$an]) && !isset($this->locals->globalBacked[$an])
+                && !isset($this->locals->slots[$an])) {
+                $slot = $this->ssa->allocReg();
+                $this->locals->slots[$an] = $slot;
+                $out .= $this->localVarSlot($slot);
+            }
+        }
+        return $out;
+    }
+
     private function preallocateRefAddr(\Compile\Mir\RefAddr_ $n): string
     {
         $out = '';
@@ -369,6 +383,11 @@ trait EmitLlvmLocals
         // the array's death and read freed memory.
         if ($k === Node::KIND_REF_ADDR) {
             return $this->preallocateRefAddr($n);
+        }
+        // A boxed alias pair needs both slots to box ({@see LocalSlots::aliasBoxNames}):
+        // `$p = &$x` vivifies `$x`, and `$p` may have no store of its own.
+        if ($k === Node::KIND_REF_ALIAS) {
+            return $this->preallocateRefAlias($n);
         }
         // Every kind NOT special-cased above recurses over its children
         // generically, so the walk is exhaustive by construction. It was a

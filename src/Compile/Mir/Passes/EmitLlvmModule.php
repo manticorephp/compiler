@@ -994,6 +994,7 @@ trait EmitLlvmModule
                 $this->locals->globalBacked[$gname] = '@g_' . $gname;
             }
         }
+        $this->locals->aliasBoxNames = LocalSlots::aliasBoxNames($fn, $this->globalVarNames);
         $this->cf->reset();
         // By-ref params: the slot holds the caller's variable address;
         // loads/stores deref it.
@@ -1231,9 +1232,8 @@ trait EmitLlvmModule
         $this->locals->collectByRefCaptured($fn->body);
         $refCellNames = [];
         if ($this->locals->byRefCaptured !== [] && !$this->frame->returnsByRef) {
-            $this->locals->refCellTargets = [];
-            $this->locals->collectRefCellTargets($fn->body);
-            $refCellNames = LocalSlots::closeRefCellsOverAliases($fn->body, $this->locals->refCellTargets);
+            $this->locals->collectRefCellSet($fn->body);
+            $refCellNames = $this->locals->refCellTargets;
         }
         foreach ($this->locals->byRefCaptured as $bname => $_) {
             if (!isset($this->locals->slots[$bname])) { continue; }
@@ -1839,9 +1839,7 @@ trait EmitLlvmModule
     /** @param array<string, bool> $paramNames @param array<string, Type> $paramTypes */
     private function emitRefCellBoxes(Node $body, array $paramNames, array $paramTypes = []): string
     {
-        $this->locals->refCellTargets = [];
-        $this->locals->collectRefCellTargets($body);
-        $this->locals->refCellTargets = LocalSlots::closeRefCellsOverAliases($body, $this->locals->refCellTargets);
+        $this->locals->collectRefCellSet($body);
         $out = '';
         foreach ($this->locals->refCellTargets as $rname => $_) {
             if (isset($this->locals->refLocals[$rname]) && isset($paramNames[$rname])) {

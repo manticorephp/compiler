@@ -156,6 +156,79 @@ final class LocalSlots
 
     private static function asRefAlias(Node $n): RefAlias_ { return $n; }
 
+    /**
+     * The locals a `$a = &$b` binds through a shared BOX rather than a shared
+     * alloca. Sharing the alloca is decided once, at emit time, so it cannot
+     * follow control flow: `if ($c) { $p = &$x; } $p = 5;` wrote `$x` on the
+     * path that never bound it, and `$w = &$a[0]; $w = &$x;` kept the element
+     * box's tag in `$x`. A box makes the binding a run-time value: both names
+     * are ref-cell targets (cell-typed, frame-boxed) and the alias copies the
+     * box pointer. Both collectors (the emitter, InferNodes) call this, so they
+     * agree on every name.
+     *
+     * Left to the shared alloca: a by-ref parameter (its slot is the caller's
+     * address, whose representation the caller chose), a `static` / `global`
+     * name and a superglobal (a module cell), `$this`, and every name of a
+     * generator or a by-ref-returning frame (neither releases frame boxes).
+     *
+     * @param string[] $globalNames
+     * @return array<string, true>
+     */
+    public static function aliasBoxNames(FunctionDef $fn, array $globalNames): array
+    {
+        if ($fn->returnsByRef || $fn->isGenerator) { return []; }
+        /** @var array<int, array<int, string>> $pairs */
+        $pairs = [];
+        self::collectAliasPairs($fn->body, $pairs);
+        if ($pairs === []) { return []; }
+        /** @var array<string, true> $skip */
+        $skip = ['this' => true, 'GLOBALS' => true, '_SERVER' => true, '_GET' => true, '_POST' => true,
+            '_FILES' => true, '_COOKIE' => true, '_SESSION' => true, '_REQUEST' => true, '_ENV' => true];
+        foreach ($fn->params as $p) {
+            if ($p->byRef) { $skip[$p->name] = true; }
+        }
+        if ($fn->name === '__main') {
+            foreach ($globalNames as $g) { $skip[$g] = true; }
+        }
+        self::collectStaticDeclNames($fn->body, $skip);
+        // One binding, one representation: a chain through a left-alone name
+        // (`$s = &$_SESSION; $t = &$s;`) is left alone as a whole.
+        $grew = true;
+        while ($grew) {
+            $grew = false;
+            foreach ($pairs as $p) {
+                if (isset($skip[$p[0]]) !== isset($skip[$p[1]])) {
+                    $skip[$p[0]] = true;
+                    $skip[$p[1]] = true;
+                    $grew = true;
+                }
+            }
+        }
+        /** @var array<string, true> $out */
+        $out = [];
+        foreach ($pairs as $p) {
+            $a = $p[0];
+            $b = $p[1];
+            if ($a === $b || isset($skip[$a]) || isset($skip[$b])) { continue; }
+            $out[$a] = true;
+            $out[$b] = true;
+        }
+        return $out;
+    }
+
+    /** @param array<string, true> $out */
+    private static function collectStaticDeclNames(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
+            $out[$n->name] = true;
+            return;
+        }
+        if ($n->kind === Node::KIND_CLOSURE) { return; }
+        foreach (Walk::children($n) as $c) {
+            self::collectStaticDeclNames($c, $out);
+        }
+    }
+
     public function collectRefCellTargets(Node $n): void
     {
         if ($n->kind === Node::KIND_REF_CELL) {
@@ -292,5 +365,18 @@ final class LocalSlots
             $this->elemRefTargets[$n->target] = true;
         }
         foreach (Walk::children($n) as $c) { $this->collectElemRefTargets($c); }
+    }
+
+    /** @var array<string, true> {@see aliasBoxNames} of the function being
+     *  emitted. Declared LAST. */
+    public array $aliasBoxNames = [];
+
+    /** {@see collectRefCellTargets} plus {@see $aliasBoxNames}, closed over aliases. */
+    public function collectRefCellSet(Node $body): void
+    {
+        $this->refCellTargets = [];
+        $this->collectRefCellTargets($body);
+        foreach ($this->aliasBoxNames as $an => $_) { $this->refCellTargets[$an] = true; }
+        $this->refCellTargets = self::closeRefCellsOverAliases($body, $this->refCellTargets);
     }
 }
