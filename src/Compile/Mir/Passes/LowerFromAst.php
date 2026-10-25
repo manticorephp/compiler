@@ -5620,6 +5620,7 @@ final class LowerFromAst implements Pass
                 || $fn === 'trait_exists' || $fn === 'enum_exists') {
                 $cn = $this->guardClassArgName($a0);
                 if ($cn === null) { return self::GUARD_UNKNOWN; }
+                $cn = $this->declaredClassCase($cn);
                 if (isset($this->foldHiddenTypes[$cn])) { return self::GUARD_FALSE; }
                 $decl = $this->classDecls[$cn] ?? ($this->traitTable[$cn] ?? null);
                 if ($decl !== null) {
@@ -5732,6 +5733,18 @@ final class LowerFromAst implements Pass
     /** The class name a `class_exists(...)`-style guard tests: a string literal
      *  or a `X::class` constant (already namespace-resolved), else null for a
      *  runtime-only name. */
+    /** php resolves class names case-insensitively: the declared spelling of `$cn`, else `$cn`. */
+    private function declaredClassCase(string $cn): string
+    {
+        if (isset($this->knownClassNames[$cn]) || isset($this->classDecls[$cn]) || isset($this->traitTable[$cn])) { return $cn; }
+        foreach ([$this->knownClassNames, $this->classDecls, $this->traitTable] as $tbl) {
+            foreach ($tbl as $k => $unused) {
+                if (\strcasecmp((string)$k, $cn) === 0) { return (string)$k; }
+            }
+        }
+        return $cn;
+    }
+
     private function guardClassArgName(\Parser\Ast\Expr $a): ?string
     {
         if ($a->kind === 'StringLiteral') { return \ltrim($this->stringLitValue($a), '\\'); }

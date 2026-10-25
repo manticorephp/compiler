@@ -8279,6 +8279,20 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /** php resolves class names case-insensitively: the declared spelling of `$name`, else `$name`. */
+    private function declaredTypeCase(string $name): string
+    {
+        foreach ([$this->classes, $this->enums, $this->interfaceNames, $this->traitNames] as $tbl) {
+            if (isset($tbl[$name])) { return $name; }
+        }
+        foreach ([$this->classes, $this->enums, $this->interfaceNames, $this->traitNames] as $tbl) {
+            foreach ($tbl as $k => $unused) {
+                if (\strcasecmp((string)$k, $name) === 0) { return (string)$k; }
+            }
+        }
+        return $name;
+    }
+
     private function biClassExists(array $args, string $kind): string
     {
         $name = $this->reflClassName($args[0]);
@@ -8300,6 +8314,7 @@ trait EmitLlvmBuiltins
             && !isset($this->traitNames[$name])) {
             return $this->biExistsDynamic($args[0], $kind);
         }
+        $name = $this->declaredTypeCase($name);
         $out = $this->reflEvalArgs($args);
         $exists = false;
         if ($kind === 'enum') { $exists = isset($this->enums[$name]); }
