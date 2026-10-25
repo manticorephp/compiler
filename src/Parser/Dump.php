@@ -39,6 +39,18 @@ final class Dump
         return $d->out;
     }
 
+    /** The name table alone: `names:` and one `  @L:C-L:C kind written -> resolved [global-fallback]` line per NameRef. */
+    public static function names(Program $program): string
+    {
+        $out = "names:\n";
+        foreach ($program->names as $r) {
+            $s = $r->span;
+            $out .= '  @' . (string)$s->line . ':' . (string)$s->column . '-' . (string)$s->endLine . ':' . (string)$s->endColumn
+                . ' ' . $r->kind . ' ' . $r->written . ' -> ' . $r->resolved . ($r->globalFallback ? ' [global-fallback]' : '') . "\n";
+        }
+        return $out;
+    }
+
     private function program_(Program $p): void
     {
         $this->line('Program');

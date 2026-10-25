@@ -1,0 +1,39 @@
+names:
+  @2:11-2:19 namespace App\Core -> App\Core
+  @4:5-4:13 use Lib\Util -> Lib\Util
+  @5:5-5:13 use Lib\Tool -> Lib\Tool
+  @6:14-6:24 use Lib\helper -> Lib\helper
+  @7:14-7:23 use Lib\other -> Lib\other
+  @8:11-8:20 use Lib\LIMIT -> Lib\LIMIT
+  @9:5-9:14 namespace Lib\Group -> Lib\Group
+  @9:16-9:21 use Alpha -> Lib\Group\Alpha
+  @9:23-9:27 use Beta -> Lib\Group\Beta
+  @11:3-11:7 class Tool -> Lib\Tool
+  @12:25-12:26 class U -> Lib\Util
+  @12:38-12:47 class \Fq\Iface -> Fq\Iface
+  @12:49-12:54 class Alpha -> Lib\Group\Alpha
+  @14:9-14:13 class Tool -> Lib\Tool
+  @16:26-16:30 class Beta -> App\Core\Beta
+  @16:39-16:43 class Tool -> Lib\Tool
+  @16:49-16:54 class Alpha -> Lib\Group\Alpha
+  @16:55-16:56 class B -> Lib\Group\Beta
+  @16:68-16:74 class static -> static
+  @19:22-19:26 class self -> self
+  @20:18-20:24 class static -> static
+  @20:31-20:37 class parent -> parent
+  @20:45-20:53 class \Fq\Name -> Fq\Name
+  @21:31-21:38 class Missing -> App\Core\Missing
+  @22:24-22:25 function h -> Lib\helper
+  @22:26-22:32 function strlen -> App\Core\strlen [global-fallback]
+  @22:39-22:44 function other -> Lib\other
+  @22:48-22:55 function \Fq\fn1 -> Fq\fn1
+  @22:59-22:65 function Ns\fn2 -> App\Core\Ns\fn2
+  @24:20-24:27 constant PHP_EOL -> App\Core\PHP_EOL [global-fallback]
+  @24:30-24:35 constant LIMIT -> Lib\LIMIT
+  @24:38-24:42 constant \FOO -> FOO
+  @24:45-24:51 constant Ns\BAR -> App\Core\Ns\BAR
+  @24:65-24:68 class Box -> App\Core\Box
+  @24:74-24:87 constant namespace\BAZ -> App\Core\BAZ
+  @25:18-25:35 class \RuntimeException -> RuntimeException
+  @25:38-25:39 class B -> Lib\Group\Beta
+

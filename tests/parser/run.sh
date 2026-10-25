@@ -85,15 +85,18 @@ for name in "${cases[@]}"; do
 
     flags="--tolerant --ranges"
     [[ "$name" == *.strict ]] && flags=""
+    [[ "$name" == names ]] && flags="--tolerant --names"
 
     run_limited "$MANTICORE" dump-ast $flags "$rel" > "$actual" 2>&1
     rc=$?
 
-    # range invariants: --check-ranges must print nothing and exit 0
+    # range invariants + name table: --check-ranges and --check-names must print nothing and exit 0
     range_bad=0
     if [[ "$name" != *.strict ]]; then
         chk="$WORK/$name.check"
         run_limited "$MANTICORE" dump-ast --tolerant --check-ranges "$rel" > "$chk" 2>&1
+        [[ $? -ne 0 || -s "$chk" ]] && range_bad=1
+        run_limited "$MANTICORE" dump-ast --tolerant --check-names "$rel" > "$chk" 2>&1
         [[ $? -ne 0 || -s "$chk" ]] && range_bad=1
     fi
 
@@ -111,7 +114,7 @@ for name in "${cases[@]}"; do
     elif [[ $range_bad -eq 1 ]] && diff -q "$expected" "$actual" > /dev/null 2>&1; then
         failed=$((failed + 1))
         failed_names+=("$name")
-        printf 'FAIL %s  (--check-ranges not clean)\n' "$name"
+        printf 'FAIL %s  (--check-ranges or --check-names not clean)\n' "$name"
         head -n 6 "$WORK/$name.check" | sed 's/^/      /'
     else
         failed=$((failed + 1))

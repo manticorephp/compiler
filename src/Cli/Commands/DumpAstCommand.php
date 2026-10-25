@@ -20,6 +20,8 @@ final class DumpAstCommand extends Command
         return \array_merge(CompileOptions::shared(), [
             new Option('tolerant', \Cli\ArgParse::FLAG, 'Recover from syntax errors; print the tree and every error'),
             new Option('ranges', \Cli\ArgParse::FLAG, 'Print spans as start-end ranges'),
+            new Option('names', \Cli\ArgParse::FLAG, 'Print the written-name table instead of the tree'),
+            new Option('check-names', \Cli\ArgParse::FLAG, 'Verify every name span slices to its written text; print each mismatch, exit 1 if any'),
             new Option('check-ranges', \Cli\ArgParse::FLAG, 'Verify the range invariants; print each violation, exit 1 if any'),
         ]);
     }
@@ -41,6 +43,16 @@ final class DumpAstCommand extends Command
             $file = \count(\Manticore\CompileArgs::$files) === \count($sources) ? \Manticore\CompileArgs::$files[0] : '';
             return $this->checkRanges($sources[0], $file, $args->flag('tolerant'));
         }
+        if ($args->flag('check-names')) {
+            $file = \count(\Manticore\CompileArgs::$files) === \count($sources) ? \Manticore\CompileArgs::$files[0] : '';
+            return $this->checkNames($sources[0], $file, $args->flag('tolerant'));
+        }
+        if ($args->flag('names')) {
+            $program = $this->parseForNames($sources[0]);
+            if ($program === null) { return 65; }
+            \Manticore\puts(\Parser\Dump::names($program));
+            return 0;
+        }
         if ($args->flag('tolerant')) {
             $r = \Parser\Parser::parseTolerant($sources[0]);
             $out = \Parser\Dump::program($r->program, $ranges);
@@ -59,6 +71,31 @@ final class DumpAstCommand extends Command
         }
         \Manticore\puts(\Parser\Dump::program($program, $ranges));
         return 0;
+    }
+
+    private function parseForNames(string $source, bool $tolerant = true): ?\Parser\Ast\Program
+    {
+        try {
+            if ($tolerant) {
+                return \Parser\Parser::parseTolerant($source)->program;
+            }
+            return \Parser\Parser::parseSource($source, '', false, false, true);
+        } catch (\Throwable $e) {
+            \Manticore\dprint("parse failed: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    private function checkNames(string $source, string $file, bool $tolerant): int
+    {
+        $program = $this->parseForNames($source, $tolerant);
+        if ($program === null) { return 65; }
+        $violations = \Parser\NameCheck::verify($program, $source, $file);
+        if (\count($violations) === 0) {
+            return 0;
+        }
+        \Manticore\puts(\implode("\n", $violations) . "\n");
+        return 1;
     }
 
     private function checkRanges(string $source, string $file, bool $tolerant): int

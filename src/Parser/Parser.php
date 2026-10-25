@@ -12,6 +12,7 @@ use Parser\Ast\ConstDecl;
 use Parser\Ast\Expr;
 use Parser\Ast\FunctionDecl;
 use Parser\Ast\MethodDecl;
+use Parser\Ast\NameRef;
 use Parser\Ast\Param;
 use Parser\Ast\Program;
 use Parser\Ast\PropertyDecl;
@@ -59,6 +60,21 @@ final class Parser
     /** 1 in tolerant mode (an int, not a bool: see Lexer::scan()). */
     private int $tolerant = 0;
 
+    /** 1 when the written-name table is collected (an int, not a bool: see Lexer::scan()). */
+    private int $collectNames = 0;
+
+    /**
+     * Written names by "line:column:kind" (a rewound re-parse overwrites its own entry).
+     * @var array<string, NameRef>
+     */
+    private array $names = [];
+
+    /** Range of the name parseClassNameLiteral() read last (collectNames only). */
+    private int $nmLine = 0;
+    private int $nmColumn = 0;
+    private int $nmEndLine = 0;
+    private int $nmEndColumn = 0;
+
     /** @var ParseError[] errors recorded while recovering (tolerant mode) */
     private array $errors = [];
 
@@ -92,6 +108,13 @@ final class Parser
      * @var array<string, string>
      */
     private array $useFnAliases = [];
+
+    /**
+     * `use const X\Y as Z` aliases (case-sensitive). Only the name table reads it.
+     *
+     * @var array<string, string>
+     */
+    private array $useConstAliases = [];
 
     /**
      * Map: index of the token at which a doc-comment is "attached"
@@ -136,6 +159,7 @@ final class Parser
         string $file = '',
         bool $lazyBodies = false,
         bool $ranges = false,
+        bool $names = false,
     ): Program {
         // Constructing the parser consumes the lexer array into its filtered
         // stream. Keep the original token-array temporary out of the
@@ -143,6 +167,7 @@ final class Parser
         // token alongside the parser's filtered array and the AST being built.
         $p = new self((new Lexer())->scan($source), $source, $file, $lazyBodies);
         $p->ranges = $ranges;
+        $p->collectNames = $names ? 1 : 0;
         return $p->parseProgram();
     }
 
@@ -157,6 +182,7 @@ final class Parser
             $p = new self($tokens, $source, $file, false);
             $p->ranges = true;
             $p->tolerant = 1;
+            $p->collectNames = 1;
             // Lexer errors are recorded first: the cap keeps the first 100 in discovery order (not by position), so lexer errors alone can fill it and drop the parser errors.
             foreach ($lexer->errors as $le) { $p->record($le); }
             $program = $p->parseProgram();
@@ -295,7 +321,7 @@ final class Parser
         }
         // Capture the file's final namespace + use-aliases context so
         // compile-time short-name resolution can map `Foo` → `Use\Foo`.
-        return new Program($stmts, $this->currentNamespace, $this->useAliases, $this->allDocComments);
+        return new Program($stmts, $this->currentNamespace, $this->useAliases, $this->allDocComments, $this->collectNames === 1 ? \array_values($this->names) : []);
     }
 
     // ── Statements ───────────────────────────────────────────────────────────
@@ -473,21 +499,25 @@ final class Parser
         $name = '';
         if (!$this->check(TokenKind::OpenBrace) && !$this->check(TokenKind::Semicolon)) {
             $name = $this->parseClassNameLiteral();
+            if ($this->collectNames === 1) { $this->noteName($name, ltrim($name, '\\'), 'namespace', false); }
         }
         $name = ltrim($name, '\\');
         if ($this->check(TokenKind::OpenBrace)) {
             $prevNs = $this->currentNamespace;
             $prevUses = $this->useAliases;
             $prevFnUses = $this->useFnAliases;
+            $prevConstUses = $this->useConstAliases;
             $this->currentNamespace = $name;
             $this->useAliases = [];
             $this->useFnAliases = [];
+            $this->useConstAliases = [];
             try {
                 $body = $this->parseBlock();
             } finally {
                 $this->currentNamespace = $prevNs;
                 $this->useAliases = $prevUses;
                 $this->useFnAliases = $prevFnUses;
+                $this->useConstAliases = $prevConstUses;
             }
             return Stmt::namespace_($name, $body, $this->end($span));
         }
@@ -498,6 +528,7 @@ final class Parser
         $this->currentNamespace = $name;
         $this->useAliases = [];
         $this->useFnAliases = [];
+        $this->useConstAliases = [];
         return Stmt::namespace_($name, null, $this->end($span));
     }
 
@@ -545,6 +576,7 @@ final class Parser
     private function parseUseGroupPrefix(): ?string
     {
         $parts = [];
+        $startTok = $this->peek();
         if ($this->check(TokenKind::Backslash)) {
             $this->advance();
             $parts[] = '';
@@ -561,10 +593,17 @@ final class Parser
             // backslash in the group case so the caller's match() sees
             // `{` as the very next token.
             $saved = $this->pos;
+            $endLine = $this->prevEndLine;
+            $endColumn = $this->prevEndColumn;
             $this->advance(); // consume `\`
             if ($this->check(TokenKind::OpenBrace)) {
                 // Group form. Don't include the trailing `\` in the prefix.
-                return implode('\\', $parts);
+                $prefix = implode('\\', $parts);
+                if ($this->collectNames === 1) {
+                    $this->setNameRange($startTok, $endLine, $endColumn);
+                    $this->noteName($prefix, ltrim($prefix, '\\'), 'namespace', false);
+                }
+                return $prefix;
             }
             $next = $this->peek();
             if ($next->kind !== TokenKind::Identifier && $next->kind !== TokenKind::Keyword) {
@@ -583,8 +622,12 @@ final class Parser
      * Build a UseItem from a fully-resolved FQN string already in
      * hand. Mirrors parseUseItem's `as`-alias + alias-table wiring.
      */
-    private function finishUseItem(string $fqn, string $kind, Token $first): UseItem
+    private function finishUseItem(string $fqn, string $kind, Token $first, ?string $written = null): UseItem
     {
+        if ($this->collectNames === 1 && $fqn !== '') {
+            $this->setNameRange($first, $this->prevEndLine, $this->prevEndColumn);
+            $this->noteName($written ?? $fqn, \ltrim($fqn, '\\'), 'use', false);
+        }
         $fqn = \ltrim($fqn, '\\');
         $alias = null;
         if ($this->checkKeyword('as')) {
@@ -599,6 +642,8 @@ final class Parser
             $this->useAliases[$short] = $fqn;
         } elseif ($kind === "function") {
             $this->useFnAliases[\strtolower($alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1)))] = $fqn;
+        } elseif ($kind === 'const') {
+            $this->useConstAliases[$alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1))] = $fqn;
         }
         return new UseItem($fqn, $alias, $kind, $this->listSpan($first, $this->prevEndLine, $this->prevEndColumn));
     }
@@ -613,15 +658,18 @@ final class Parser
     {
         $first = $this->peek();
         $tail = $this->parseClassNameLiteral();
+        $written = $tail;
         $tail = \ltrim($tail, '\\');
         $fqn = $prefix === '' ? $tail : ($prefix . '\\' . $tail);
-        return $this->finishUseItem($fqn, $kind, $first);
+        return $this->finishUseItem($fqn, $kind, $first, $written);
     }
 
     private function parseUseItem(string $kind): UseItem
     {
         $first = $this->peek();
-        $fqn = ltrim($this->parseClassNameLiteral(), '\\');
+        $written = $this->parseClassNameLiteral();
+        if ($this->collectNames === 1) { $this->noteName($written, ltrim($written, '\\'), 'use', false); }
+        $fqn = ltrim($written, '\\');
         $alias = null;
         if ($this->checkKeyword('as')) {
             $this->advance();
@@ -636,6 +684,8 @@ final class Parser
             $this->useAliases[$short] = $fqn;
         } elseif ($kind === "function") {
             $this->useFnAliases[\strtolower($alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1)))] = $fqn;
+        } elseif ($kind === 'const') {
+            $this->useConstAliases[$alias ?? (\strpos($fqn, "\\") === false ? $fqn : \substr($fqn, \strrpos($fqn, "\\") + 1))] = $fqn;
         }
         return new UseItem($fqn, $alias, $kind, $this->listSpan($first, $this->prevEndLine, $this->prevEndColumn));
     }
@@ -866,10 +916,12 @@ final class Parser
             // Invisible from a global-namespace test, which is why it survived.
             $adaptFirst = $this->peek();
             $rawFirst = $adaptFirst->lexeme;
-            $first = $this->parseClassName();
+            $firstLiteral = $this->parseClassNameLiteral();
+            $first = $this->resolveClassName($firstLiteral);
             $trait = '';
             $method = $rawFirst;
             if ($this->match(TokenKind::DoubleColon)) {
+                if ($this->collectNames === 1) { $this->noteClass($firstLiteral, $first); }
                 $trait = $first;
                 $method = $this->advance()->lexeme;
             }
@@ -2745,6 +2797,7 @@ final class Parser
     private function parseClassNameLiteral(): string
     {
         $parts = [];
+        $startTok = $this->tokens[$this->pos];
         if ($this->check(TokenKind::Backslash)) {
             $this->advance();
             $parts[] = '';
@@ -2765,7 +2818,67 @@ final class Parser
             $this->advance();
             $parts[] = $next->lexeme;
         }
+        if ($this->collectNames === 1) { $this->setNameRange($startTok, $this->prevEndLine, $this->prevEndColumn); }
         return implode('\\', $parts);
+    }
+
+    private function setNameRange(Token $start, int $endLine, int $endColumn): void
+    {
+        $this->nmLine = $start->line;
+        $this->nmColumn = $start->column;
+        $this->nmEndLine = $endLine;
+        $this->nmEndColumn = $endColumn;
+    }
+
+    /** Record the name parseClassNameLiteral() read last (call before anything else is consumed). */
+    private function noteName(string $written, string $resolved, string $kind, bool $globalFallback): void
+    {
+        $this->names[(string)$this->nmLine . ':' . (string)$this->nmColumn . ':' . $kind] = new NameRef(
+            new Span($this->nmLine, $this->nmColumn, $this->sourceFile, $this->nmEndLine, $this->nmEndColumn),
+            $written,
+            $resolved,
+            $kind,
+            $globalFallback,
+        );
+    }
+
+    /** A class reference: scalar / pseudo type names are not names. */
+    private function noteClass(string $literal, string $resolved): void
+    {
+        $low = strtolower($literal);
+        if ($low === 'int' || $low === 'integer' || $low === 'bool' || $low === 'boolean'
+            || $low === 'float' || $low === 'double' || $low === 'string' || $low === 'array'
+            || $low === 'mixed' || $low === 'void' || $low === 'null' || $low === 'callable'
+            || $low === 'iterable' || $low === 'object' || $low === 'never' || $low === 'false'
+            || $low === 'true' || $low === 'numeric'
+        ) {
+            return;
+        }
+        $this->noteName($literal, $resolved, 'class', false);
+    }
+
+    /** What a name read by parseNameOrCall() is, from the token after it. */
+    private function noteNameOrCall(string $literal, string $resolved, Token $next): void
+    {
+        if ($next->kind === TokenKind::DoubleColon) {
+            $this->noteName($literal, $resolved, 'class', false);
+            return;
+        }
+        $unqualified = !str_contains($literal, '\\');
+        if ($next->kind === TokenKind::OpenParen) {
+            $fl = strtolower($literal);
+            if ($unqualified && isset($this->useFnAliases[$fl])) {
+                $this->noteName($literal, $this->useFnAliases[$fl], 'function', false);
+            } else {
+                $this->noteName($literal, $resolved, 'function', $unqualified);
+            }
+            return;
+        }
+        if ($unqualified && isset($this->useConstAliases[$literal])) {
+            $this->noteName($literal, $this->useConstAliases[$literal], 'constant', false);
+        } else {
+            $this->noteName($literal, $resolved, 'constant', $unqualified);
+        }
     }
 
     /**
@@ -2781,7 +2894,9 @@ final class Parser
     private function parseClassName(): string
     {
         $literal = $this->parseClassNameLiteral();
-        return $this->resolveClassName($literal);
+        $resolved = $this->resolveClassName($literal);
+        if ($this->collectNames === 1) { $this->noteClass($literal, $resolved); }
+        return $resolved;
     }
 
     private function resolveClassName(string $literal): string
@@ -3196,6 +3311,7 @@ final class Parser
         $dc = $this->peek();
         $pv = $this->tokens[$this->pos + 1] ?? null;
         if ($dc->kind === TokenKind::DoubleColon && $pv !== null && $pv->kind === TokenKind::Variable && $pv->lexeme !== '$') {
+            if ($this->collectNames === 1) { $this->noteClass($literal, $this->resolveClassName($literal)); }
             $this->advance();
             $this->advance();
             $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
@@ -3328,6 +3444,7 @@ final class Parser
         $literal = $this->parseClassNameLiteral();
         $name = $this->resolveClassName($literal);
         $tok = $this->peek();
+        if ($this->collectNames === 1) { $this->noteNameOrCall($literal, $name, $tok); }
 
         if ($tok->kind === TokenKind::DoubleColon) {
             $this->advance();
