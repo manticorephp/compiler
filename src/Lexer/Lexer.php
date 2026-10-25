@@ -127,7 +127,7 @@ final class Lexer
         }
         if ($this->pos > $start) {
             $this->tokens[] = new Token(
-                TokenKind::InlineHtml, \substr($this->src, $start, $this->pos - $start), $line, $col);
+                TokenKind::InlineHtml, \substr($this->src, $start, $this->pos - $start), $line, $col, $this->line, $this->col);
         }
         if (!$found) { return; }   // ran to EOF with no tag
         $tline = $this->line;
@@ -137,10 +137,10 @@ final class Lexer
         // is the one field every later pass switches on.
         if ($isEcho) {
             $this->consume(3);
-            $this->tokens[] = new Token(TokenKind::OpenTagEcho, '<?=', $tline, $tcol);
+            $this->tokens[] = new Token(TokenKind::OpenTagEcho, '<?=', $tline, $tcol, $this->line, $this->col);
         } else {
             $this->consume(5);
-            $this->tokens[] = new Token(TokenKind::OpenTag, '<?php', $tline, $tcol);
+            $this->tokens[] = new Token(TokenKind::OpenTag, '<?php', $tline, $tcol, $this->line, $this->col);
         }
     }
 
@@ -159,7 +159,7 @@ final class Lexer
             $line = $this->line;
             $col = $this->col;
             $this->consume(5);
-            $this->tokens[] = new Token(TokenKind::OpenTag, '<?php', $line, $col);
+            $this->tokens[] = new Token(TokenKind::OpenTag, '<?php', $line, $col, $this->line, $this->col);
             return;
         }
 
@@ -177,9 +177,9 @@ final class Lexer
                 && $prev !== TokenKind::CloseBrace && $prev !== TokenKind::Colon
                 && $prev !== TokenKind::OpenTag && $prev !== TokenKind::OpenTagEcho
                 && $prev !== TokenKind::CloseTag && $prev !== TokenKind::DocComment) {
-                $this->tokens[] = new Token(TokenKind::Semicolon, ';', $line, $col);
+                $this->tokens[] = new Token(TokenKind::Semicolon, ';', $line, $col, $line, $col);
             }
-            $this->tokens[] = new Token(TokenKind::CloseTag, '?>', $line, $col);
+            $this->tokens[] = new Token(TokenKind::CloseTag, '?>', $line, $col, $this->line, $this->col);
             if ($this->pos < $this->len && $this->src[$this->pos] === "\r") { $this->advance(); }
             if ($this->pos < $this->len && $this->src[$this->pos] === "\n") { $this->advance(); }
             return;
@@ -190,7 +190,7 @@ final class Lexer
             $line = $this->line;
             $col = $this->col;
             $this->consume(2);
-            $this->tokens[] = new Token(TokenKind::AttributeStart, '#[', $line, $col);
+            $this->tokens[] = new Token(TokenKind::AttributeStart, '#[', $line, $col, $this->line, $this->col);
             return;
         }
 
@@ -344,7 +344,7 @@ final class Lexer
         } else {
             $lex = '"' . $raw . '"';
         }
-        $this->tokens[] = new Token(TokenKind::StringLiteral, $lex, $line, $col);
+        $this->tokens[] = new Token(TokenKind::StringLiteral, $lex, $line, $col, $this->line, $this->col);
     }
 
     /** Strip a single trailing newline (`\n` or `\r\n`) from a heredoc body. */
@@ -398,7 +398,7 @@ final class Lexer
         // Magic constants are matched case-insensitively per PHP spec.
         $upper = strtoupper($lex);
         if (in_array($upper, self::MAGIC_CONSTANTS, true)) {
-            $this->tokens[] = new Token(TokenKind::MagicConstant, $lex, $line, $col);
+            $this->tokens[] = new Token(TokenKind::MagicConstant, $lex, $line, $col, $this->line, $this->col);
             return;
         }
 
@@ -421,7 +421,7 @@ final class Lexer
             && $this->isIdentStart(\ord($this->src[$this->pos + 1]))) {
             $kind = TokenKind::Identifier;
         }
-        $this->tokens[] = new Token($kind, $lex, $line, $col);
+        $this->tokens[] = new Token($kind, $lex, $line, $col, $this->line, $this->col);
     }
 
     private function scanVariable(): void
@@ -434,7 +434,7 @@ final class Lexer
             $this->advance();
         }
         $lex = substr($this->src, $start, $this->pos - $start);
-        $this->tokens[] = new Token(TokenKind::Variable, $lex, $line, $col);
+        $this->tokens[] = new Token(TokenKind::Variable, $lex, $line, $col, $this->line, $this->col);
     }
 
     private function scanNumber(): void
@@ -468,7 +468,7 @@ final class Lexer
                     $this->advance();
                 }
                 $lex = substr($this->src, $start, $this->pos - $start);
-                $this->tokens[] = new Token(TokenKind::IntLiteral, $lex, $line, $col);
+                $this->tokens[] = new Token(TokenKind::IntLiteral, $lex, $line, $col, $this->line, $this->col);
                 return;
             }
             // 0o… / 0O…
@@ -480,7 +480,7 @@ final class Lexer
                     $this->advance();
                 }
                 $lex = substr($this->src, $start, $this->pos - $start);
-                $this->tokens[] = new Token(TokenKind::IntLiteral, $lex, $line, $col);
+                $this->tokens[] = new Token(TokenKind::IntLiteral, $lex, $line, $col, $this->line, $this->col);
                 return;
             }
             // 0b… / 0B…
@@ -492,7 +492,7 @@ final class Lexer
                     $this->advance();
                 }
                 $lex = substr($this->src, $start, $this->pos - $start);
-                $this->tokens[] = new Token(TokenKind::IntLiteral, $lex, $line, $col);
+                $this->tokens[] = new Token(TokenKind::IntLiteral, $lex, $line, $col, $this->line, $this->col);
                 return;
             }
         }
@@ -572,7 +572,7 @@ final class Lexer
 
         $lex = substr($this->src, $start, $this->pos - $start);
         $kind = $isFloat ? TokenKind::FloatLiteral : TokenKind::IntLiteral;
-        $this->tokens[] = new Token($kind, $lex, $line, $col);
+        $this->tokens[] = new Token($kind, $lex, $line, $col, $this->line, $this->col);
     }
 
     private function scanString(string $quote): void
@@ -603,7 +603,7 @@ final class Lexer
             $this->advance();
         }
         $lex = substr($this->src, $start, $this->pos - $start);
-        $this->tokens[] = new Token(TokenKind::StringLiteral, $lex, $line, $col);
+        $this->tokens[] = new Token(TokenKind::StringLiteral, $lex, $line, $col, $this->line, $this->col);
     }
 
     private function scanOperator(): void
@@ -711,7 +711,7 @@ final class Lexer
                 $this->advance();
                 if ($isDoc) {
                     $text = substr($this->src, $start, $this->pos - $start);
-                    $this->tokens[] = new Token(TokenKind::DocComment, $text, $line, $col);
+                    $this->tokens[] = new Token(TokenKind::DocComment, $text, $line, $col, $this->line, $this->col);
                 }
                 return;
             }
@@ -724,12 +724,12 @@ final class Lexer
     private function emit(string $kind, string $lex, int $len, int $line, int $col): void
     {
         $this->consume($len);
-        $this->tokens[] = new Token($kind, $lex, $line, $col);
+        $this->tokens[] = new Token($kind, $lex, $line, $col, $this->line, $this->col);
     }
 
     private function push(string $kind, string $lex): void
     {
-        $this->tokens[] = new Token($kind, $lex, $this->line, $this->col);
+        $this->tokens[] = new Token($kind, $lex, $this->line, $this->col, $this->line, $this->col);
     }
 
     private function advance(): void

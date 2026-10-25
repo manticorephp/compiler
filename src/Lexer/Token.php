@@ -10,6 +10,7 @@ namespace Lexer;
  *   - lexeme exact source text the token spans
  *   - line   1-based source line of the first byte
  *   - column 1-based column of the first byte
+ *   - endLine/endColumn position just past the last byte (0 when unknown)
  *
  * Immutable. No enum is used so parser code can compare kinds with plain
  * `===` against TokenKind constants without tripping the current AOT
@@ -22,6 +23,8 @@ final class Token
         public readonly string $lexeme,
         public readonly int $line,
         public readonly int $column,
+        public readonly int $endLine = 0,
+        public readonly int $endColumn = 0,
     ) {}
 
     public function describe(): string

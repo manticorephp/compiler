@@ -3612,15 +3612,6 @@ final class Parser
     private function error(string $message): ParseError
     {
         $tok = $this->tokens[$this->pos];
-        $lex = $tok->lexeme;
-        $nl = \substr_count($lex, "\n");
-        if ($nl === 0) {
-            $endLine = $tok->line;
-            $endColumn = $tok->column + \mb_strlen($lex);
-        } else {
-            $endLine = $tok->line + $nl;
-            $endColumn = \mb_strlen(\substr($lex, \strrpos($lex, "\n") + 1)) + 1;
-        }
-        return new ParseError($message, $tok->line, $tok->column, $endLine, $endColumn);
+        return new ParseError($message, $tok->line, $tok->column, $tok->endLine, $tok->endColumn);
     }
 }
