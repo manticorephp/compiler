@@ -42,6 +42,9 @@ final class TrampolineSynth
      * the prelude passes with a body-usage guess — the param must be pinned to the
      * universal boxed repr, and the prelude must pass a boxed array.
      */
+    /** The module spreads a string-keyed array into a call ({@see \Compile\Mir\Module::$namedSpread}). */
+    public static bool $bindByName = false;
+
     private const ARGS_HINT = "/** @param mixed[] \$a */\n";
 
     /**
@@ -286,6 +289,9 @@ final class TrampolineSynth
      */
     private static function arms(int $req, int $tot, callable $mk, bool $void): string
     {
+        // An arm reads $a[0..k) by position; a string key (a named argument) can only be
+        // bound against the signature, which the spread expansion does.
+        if (self::$bindByName) { return self::spreadBody($mk, $void); }
         $stmt = function (string $call) use ($void): string {
             return $void ? ('  ' . $call . "; return null;\n") : ('  return ' . $call . ";\n");
         };

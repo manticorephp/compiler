@@ -800,6 +800,7 @@ final class EmitLlvm implements EmitVisitor
         $this->externFnNames = [];
         $this->dynfExportFns = [];
         $this->dynfExports = [];
+        $this->sigs->namedSpread = $module->namedSpread;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) {
@@ -814,7 +815,9 @@ final class EmitLlvm implements EmitVisitor
             $vmask = [];
             $ptypes = [];
             $pdefs = [];
+            $pnames = [];
             foreach ($fn->params as $p) {
+                $pnames[] = $p->name;
                 $mask[] = $p->byRef;
                 $tmask[] = ($p->type->kind === Type::KIND_CELL);
                 $camask[] = $p->cellArg;
@@ -830,6 +833,7 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->variadicParams[$fn->name] = $vmask;
             $this->sigs->paramTypes[$fn->name] = $ptypes;
             $this->sigs->paramDefaults[$fn->name] = $pdefs;
+            if ($module->namedSpread) { $this->sigs->paramNames[$fn->name] = $pnames; }
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
             $this->sigs->returnType[$fn->name] = $fn->returnType;
             $this->sigs->usesFuncArgs[$fn->name] = $fn->usesFuncArgs;

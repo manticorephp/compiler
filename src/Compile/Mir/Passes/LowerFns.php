@@ -778,6 +778,43 @@ trait LowerFns
         return false;
     }
 
+    /**
+     * `f(a, ...$p, name: v)` is `f(a, ...[...$p, 'name' => v])`: php binds a string key of
+     * an unpacked array by parameter name, and a named argument may follow a spread. Folded
+     * to one trailing spread so every call path sees the shape it already expands; the
+     * emitter binds the string keys ({@see EmitLlvmCalls::emitSpreadFill}). Anything else
+     * comes back as given. `$all` folds a spread-free list too, for a callee only known at run time
+     * (`$o->{$m}('a', boolean: 'or')`).
+     *
+     * @param \Parser\Ast\Expr[] $args
+     * @return \Parser\Ast\Expr[]
+     */
+    private function foldSpreadNamed(array $args, ?\Parser\Ast\Span $span, bool $all = false): array
+    {
+        $first = -1;
+        $named = false;
+        foreach ($args as $i => $a) {
+            if ($a->kind === 'Spread' && $first < 0) { $first = (int)$i; }
+            if ($a->kind === 'NamedArg') { $named = true; }
+        }
+        if ($all) { $first = 0; }
+        if ($first < 0 || !$named) { return $args; }
+        $sp = $span ?? $args[$first]->span;
+        $out = [];
+        $els = [];
+        foreach ($args as $i => $a) {
+            if ($i < $first) { $out[] = $a; continue; }
+            if ($a->kind === 'NamedArg') {
+                $els[] = new \Parser\Ast\ArrayElement(\Parser\Ast\Expr::string($this->namedArgName($a), $sp), $this->namedArgValue($a));
+            } else {
+                $els[] = new \Parser\Ast\ArrayElement(null, $a);
+            }
+        }
+        $out[] = \Parser\Ast\Expr::spread(\Parser\Ast\Expr::arrayLit($els, $sp), $sp);
+        $this->module->namedSpread = true;
+        return $out;
+    }
+
     private function lowerInvoke(\Parser\Ast\Invoke $expr): Node
     {
         // `$f($a, ...$b, $c)` / `$f(...$a, ...$b)`: the call paths take ONE trailing spread, so fold the
@@ -789,7 +826,9 @@ trait LowerFns
             if ($a->kind === 'Spread') { $nSpread = $nSpread + 1; $lastSpread = $i; }
             if ($a->kind === 'NamedArg') { $named = true; }
         }
-        if (!$named && ($nSpread > 1 || ($nSpread === 1 && $lastSpread !== \count($expr->args) - 1))) {
+        if (($nSpread > 0 || $expr->callee->kind === 'DynProp') && $named) {
+            $expr = new \Parser\Ast\Invoke($expr->callee, $this->foldSpreadNamed($expr->args, $expr->span, $nSpread === 0), $expr->span);
+        } elseif ($nSpread > 1 || ($nSpread === 1 && $lastSpread !== \count($expr->args) - 1)) {
             $els = [];
             foreach ($expr->args as $a) { $els[] = new \Parser\Ast\ArrayElement(null, $a); }
             $expr = new \Parser\Ast\Invoke($expr->callee, [\Parser\Ast\Expr::spread(\Parser\Ast\Expr::arrayLit($els, $expr->span), $expr->span)], $expr->span);
@@ -1264,6 +1303,7 @@ trait LowerFns
      */
     private function defaultFillArgs(array $params, array $astArgs, string $selfClass = ''): array
     {
+        $astArgs = $this->foldSpreadNamed($astArgs, null);
         $hasNamed = false;
         foreach ($astArgs as $a) {
             if ($a->kind === 'NamedArg') { $hasNamed = true; break; }

@@ -1265,6 +1265,7 @@ final class LowerFromAst implements Pass
                 $afn->isPrelude = true;
                 $module->addFunction($afn);
             }
+            \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
@@ -1619,6 +1620,7 @@ final class LowerFromAst implements Pass
                     $module->addFunction($this->lowerFunction($rfd));
                 }
             }
+            \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
             $fnTrampSrc = '';
             foreach ($module->reflFnMeta as $fn => $mm) {
                 $variadic = false; $byRef = false;
@@ -1743,6 +1745,7 @@ final class LowerFromAst implements Pass
             // here would define every constructor/method twice. Non-reflection
             // modules still need the dynamic ABI trampolines here.
             if (!$this->includeReflection) {
+                \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
                 $dynamicTrampSrc = '';
                 foreach ($module->classes as $cd) {
                     $dynamicTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);

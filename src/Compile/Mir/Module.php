@@ -96,6 +96,8 @@ final class Module
 
     /** Some `$callable(name: …)` call carries named arguments to bind. */
     public bool $namedInvokes = false;
+    /** A call spread an array that carries string keys (`f(...$p, name: v)`): spread expansion binds them by name. */
+    public bool $namedSpread = false;
 
     /** @var array<string, bool> closure fn name → capture slot 0 is `$this`
      *  (struct slot 1) — where Closure::bind/->bindTo/->call inject the object. */

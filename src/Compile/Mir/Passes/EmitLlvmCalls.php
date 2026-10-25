@@ -4613,6 +4613,35 @@ trait EmitLlvmCalls
             }
         }
         $cnt = '';
+        // php binds a string key of an unpacked array to the parameter of that name
+        // (`f(...$pos, name: v)` is folded to such an array, {@see LowerFns::foldSpreadNamed}).
+        // The positional run is every entry that is not a name hit; a param takes its
+        // positional element, else its named one, else its default.
+        $pnames = ($this->sigs->namedSpread && $fnKey !== '') ? ($this->sigs->paramNames[$fnKey] ?? []) : [];
+        $hit = [];
+        $npos = '';
+        if ($pnames !== []) {
+            $out .= $this->arrayCountFromPtrIr($arrReg);
+            $cnt = $this->lastValue;
+            $npos = $cnt;
+            $nullA = $this->ssa->allocReg();
+            $out .= '  ' . $nullA . ' = icmp eq ptr ' . $arrReg . ", null\n";
+            for ($k = $firstParam; $k < $n; $k = $k + 1) {
+                $pn = $pnames[$k] ?? '';
+                if ($pn === '' || ($vmask[$k] ?? false)) { continue; }
+                $lp = $this->ssa->allocReg();
+                $out .= '  ' . $lp . ' = call ptr @__mir_array_lookup_str(ptr ' . $arrReg . ', ptr '
+                      . $this->litStr($pn) . ", i64 0, i64 0)\n";
+                $isHit = $this->ssa->allocReg();
+                $out .= '  ' . $isHit . ' = icmp ne ptr ' . $lp . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
+                $hi = $this->ssa->allocReg();
+                $out .= '  ' . $hi . ' = zext i1 ' . $isHit . " to i64\n";
+                $left = $this->ssa->allocReg();
+                $out .= '  ' . $left . ' = sub i64 ' . $npos . ', ' . $hi . "\n";
+                $npos = $left;
+                $hit[$k] = [$isHit, $lp];
+            }
+        }
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
             if ($k > $firstParam && ($vmask[$k] ?? false)) {
                 // Fixed params first, then the variadic: the rest of the pack, renumbered,
@@ -4630,6 +4659,20 @@ trait EmitLlvmCalls
             $ev = $this->ssa->allocReg();
             $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arrReg
                   . ', i64 ' . (string)($k - $firstParam) . ")\n";
+            $posHas = '';
+            if (isset($hit[$k])) {
+                $posHas = $this->ssa->allocReg();
+                $out .= '  ' . $posHas . ' = icmp ugt i64 ' . $npos . ', ' . (string)($k - $firstParam) . "\n";
+                $nw = $this->ssa->allocReg();
+                $out .= '  ' . $nw . ' = load i64, ptr ' . $hit[$k][1] . "\n";
+                // A miss word is the boxed NULL, which a typed unbox below would refuse before the
+                // default is chosen; a param nothing supplies keeps the past-the-end element word.
+                $byName = $this->ssa->allocReg();
+                $out .= '  ' . $byName . ' = select i1 ' . $hit[$k][0] . ', i64 ' . $nw . ', i64 ' . $ev . "\n";
+                $pick = $this->ssa->allocReg();
+                $out .= '  ' . $pick . ' = select i1 ' . $posHas . ', i64 ' . $ev . ', i64 ' . $byName . "\n";
+                $ev = $pick;
+            }
             $pt = $ptypes[$k] ?? null;
             $needBox = ($tmask[$k] ?? false)
                 || ($pt !== null && $pt->kind === Type::KIND_CELL);
@@ -4664,6 +4707,11 @@ trait EmitLlvmCalls
                 && $this->isScalarKind($elemType->kind) && $this->isScalarKind($pt->kind)
                 && !($fnKey !== '' && ($this->sigs->refParams[$fnKey][$k] ?? false));
             $def = $pdefs[$k] ?? null;
+            $has = '';
+            if ($posHas !== '') {
+                $has = $this->ssa->allocReg();
+                $out .= '  ' . $has . ' = or i1 ' . $posHas . ', ' . $hit[$k][0] . "\n";
+            }
             if ($def === null && $fnKey !== '' && !($vmask[$k] ?? false)) {
                 // A required parameter the pack is too short for: php's ArgumentCountError.
                 if ($cnt === '') {
@@ -4671,7 +4719,11 @@ trait EmitLlvmCalls
                     $cnt = $this->lastValue;
                 }
                 $short = $this->ssa->allocReg();
-                $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                if ($has !== '') {
+                    $out .= '  ' . $short . ' = xor i1 ' . $has . ", true\n";
+                } else {
+                    $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                }
                 $out .= $this->emitThrowIf($short, 'ArgumentCountError',
                     'Too few arguments to function ' . \str_replace('__', '::', $fnKey) . '()');
             }
@@ -4682,9 +4734,11 @@ trait EmitLlvmCalls
                 }
                 $out .= $this->emitParamDefault($def, $pt, $tmask[$k] ?? false);
                 $dv = $this->lastValue;
-                $has = $this->ssa->allocReg();
-                $out .= '  ' . $has . ' = icmp ugt i64 ' . $cnt . ', '
-                      . (string)($k - $firstParam) . "\n";
+                if ($has === '') {
+                    $has = $this->ssa->allocReg();
+                    $out .= '  ' . $has . ' = icmp ugt i64 ' . $cnt . ', '
+                          . (string)($k - $firstParam) . "\n";
+                }
                 if ($coerce) {
                     // Past the end of the pack `$ev` is a stray word: coerce only a real element.
                     $cs = $this->ssa->allocReg();
@@ -4713,7 +4767,11 @@ trait EmitLlvmCalls
                     $cnt = $this->lastValue;
                 }
                 $short = $this->ssa->allocReg();
-                $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                if ($has !== '') {
+                    $out .= '  ' . $short . ' = xor i1 ' . $has . ", true\n";
+                } else {
+                    $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                }
                 $out .= $this->emitThrowIf($short, 'ArgumentCountError',
                     'Too few arguments to function ' . $fnKey . '()');
             }
