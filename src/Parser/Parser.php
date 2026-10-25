@@ -135,8 +135,11 @@ final class Parser
             return new ParseResult(self::parseSource($source, $file), []);
         } catch (ParseError $e) {
             return new ParseResult(new Program([]), [$e]);
+        } catch (\Throwable $e) {
+            return new ParseResult(new Program([]), [new ParseError($e->getMessage(), 1, 1, 1, 1)]);
         }
     }
+
     /** Materialize one deferred function/method body and release its source copy. */
     public static function materializeLazyBody(LazyBody $lazy): Block
     {

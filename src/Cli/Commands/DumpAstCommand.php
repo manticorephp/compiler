@@ -40,7 +40,7 @@ final class DumpAstCommand extends Command
             $out = \Parser\Dump::program($r->program);
             foreach ($r->errors as $e) {
                 $out .= 'error ' . (string)$e->errLine . ':' . (string)$e->column . '-'
-                    . (string)$e->endLine . ':' . (string)$e->endColumn . ' ' . $e->getMessage() . "\n";
+                    . (string)$e->endLine . ':' . (string)$e->endColumn . ' ' . $e->reason . "\n";
             }
             \Manticore\puts($out);
             return 0;
