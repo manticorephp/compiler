@@ -113,8 +113,16 @@ final class ReflectAnalysis
                 }
             }
         }
+        // mysqli_result::fetch_object($class) / mysqli_fetch_object($result, $class) reflect on the class the USER names
+        // (the prelude body that does it is skipped above): the class argument is the root, a computed one escapes to all.
+        if ($n instanceof \Compile\Mir\MethodCall_ && \strtolower($n->method) === 'fetch_object' && \count($n->args) >= 1) {
+            $this->fromArg($n->args[0]);
+        }
         if ($n instanceof \Compile\Mir\Call) {
             $fname = \ltrim($n->function, '\\');
+            if (($fname === 'mysqli_fetch_object' || \str_ends_with($fname, 'mysqli_result__fetch_object')) && \count($n->args) >= 2) {
+                $this->fromArg($n->args[1]);
+            }
             if ($fname === '__mc_refl_find' && \count($n->args) >= 1) {
                 $this->fromArg($n->args[0]);
             }

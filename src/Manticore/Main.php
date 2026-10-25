@@ -4084,6 +4084,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             // PDO's FETCH_CLASS / fetchObject instantiate the class named by a run-time string
             // (`new $cls` in the pdo prelude, which this scan never reads).
             || preg_match("/FETCH_CLASS|fetchObject/", $source)
+            // mysqli's fetch_object allocates (without its constructor) an object of the class the program names
+            || preg_match("/fetch_object\\s*\\(/", $source)
             || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
             $walkerDynamic = true;
         }
@@ -4652,7 +4654,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'get_mangled_object_vars',
             'get_class_vars',
             'get_defined_constants',
-        ]);
+        ])
+        // mysqli's fetch_object builds an object of the class the program names, through ReflectionClass in the prelude.
+        || $demand->callsAny(['mysqli_fetch_object'])
+        || ($demand->callsMethod('fetch_object') && $demand->mentionsPrefix('mysqli'));
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
     // #[Deprecated] / #[NoDiscard] diagnostics, target validation) are entirely
     // compiler-side — the declarations matter only so reflection can hand back a

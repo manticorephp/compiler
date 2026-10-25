@@ -55,7 +55,7 @@ function mysqli_connect_error(): ?string
 
 function mysqli_data_seek(mysqli_result $result, int $offset): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $result->__mcDataSeek($offset, 'mysqli_data_seek', 2);
 }
 
 function mysqli_debug(string $options): true
@@ -100,22 +100,22 @@ function mysqli_execute_query(mysqli $mysql, string $query, ?array $params = nul
 
 function mysqli_fetch_all(mysqli_result $result, int $mode = 2): array
 {
-    throw new Error('mysqli: not implemented');
+    return $result->__mcFetchAll($mode, 'mysqli_fetch_all', 2);
 }
 
 function mysqli_fetch_array(mysqli_result $result, int $mode = 3): array|false|null
 {
-    throw new Error('mysqli: not implemented');
+    return $result->__mcFetchArray($mode, 'mysqli_fetch_array', 2);
 }
 
 function mysqli_fetch_assoc(mysqli_result $result): array|false|null
 {
-    throw new Error('mysqli: not implemented');
+    return $result->fetch_assoc();
 }
 
 function mysqli_fetch_column(mysqli_result $result, int $column = 0): false|float|int|string|null
 {
-    throw new Error('mysqli: not implemented');
+    return $result->__mcFetchColumn($column, 'mysqli_fetch_column', 2);
 }
 
 function mysqli_fetch_field(mysqli_result $result): false|object
@@ -135,17 +135,19 @@ function mysqli_fetch_fields(mysqli_result $result): array
 
 function mysqli_fetch_lengths(mysqli_result $result): array|false
 {
-    throw new Error('mysqli: not implemented');
+    $rs = __McMysqliRs::of($result);
+    $l = $rs->lengths();
+    return $l === null ? false : $l;
 }
 
 function mysqli_fetch_object(mysqli_result $result, string $class = 'stdClass', array $constructor_args = []): false|object|null
 {
-    throw new Error('mysqli: not implemented');
+    return $result->__mcFetchObject($class, $constructor_args, 'mysqli_fetch_object', 2);
 }
 
 function mysqli_fetch_row(mysqli_result $result): array|false|null
 {
-    throw new Error('mysqli: not implemented');
+    return $result->fetch_row();
 }
 
 function mysqli_field_count(mysqli $mysql): int
@@ -155,17 +157,17 @@ function mysqli_field_count(mysqli $mysql): int
 
 function mysqli_field_seek(mysqli_result $result, int $index): true
 {
-    throw new Error('mysqli: not implemented');
+    return $result->__mcFieldSeek($index, 'mysqli_field_seek', 2);
 }
 
 function mysqli_field_tell(mysqli_result $result): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliRs::of($result)->field;
 }
 
 function mysqli_free_result(mysqli_result $result): void
 {
-    throw new Error('mysqli: not implemented');
+    $result->free();
 }
 
 function mysqli_get_charset(mysqli $mysql): ?object
@@ -245,7 +247,7 @@ function mysqli_kill(mysqli $mysql, int $process_id): bool
 
 function mysqli_more_results(mysqli $mysql): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->more_results();
 }
 
 function mysqli_multi_query(mysqli $mysql, string $query): bool
@@ -255,17 +257,19 @@ function mysqli_multi_query(mysqli $mysql, string $query): bool
 
 function mysqli_next_result(mysqli $mysql): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->next_result();
 }
 
 function mysqli_num_fields(mysqli_result $result): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliRs::of($result)->fields();
 }
 
 function mysqli_num_rows(mysqli_result $result): int|string
 {
-    throw new Error('mysqli: not implemented');
+    $rs = __McMysqliRs::of($result);
+    if ($rs->unbuf) { throw new Error('mysqli_num_rows() cannot be used in MYSQLI_USE_RESULT mode'); }
+    return $rs->numRows();
 }
 
 function mysqli_options(mysqli $mysql, int $option, $value): bool
@@ -290,7 +294,7 @@ function mysqli_prepare(mysqli $mysql, string $query): false|mysqli_stmt
 
 function mysqli_query(mysqli $mysql, string $query, int $result_mode = 0): bool|mysqli_result
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->__mcQuery($query, $result_mode, 'mysqli_query', 2);
 }
 
 function mysqli_real_connect(mysqli $mysql, ?string $hostname = null, ?string $username = null, #[\SensitiveParameter] ?string $password = null, ?string $database = null, ?int $port = null, ?string $socket = null, int $flags = 0): bool
@@ -305,7 +309,7 @@ function mysqli_real_escape_string(mysqli $mysql, string $string): string
 
 function mysqli_real_query(mysqli $mysql, string $query): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->real_query($query);
 }
 
 function mysqli_reap_async_query(mysqli $mysql): bool|mysqli_result
@@ -511,7 +515,7 @@ function mysqli_stmt_store_result(mysqli_stmt $statement): bool
 
 function mysqli_store_result(mysqli $mysql, int $mode = 0): false|mysqli_result
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->store_result($mode);
 }
 
 function mysqli_thread_id(mysqli $mysql): int
@@ -526,7 +530,7 @@ function mysqli_thread_safe(): bool
 
 function mysqli_use_result(mysqli $mysql): false|mysqli_result
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->use_result();
 }
 
 function mysqli_warning_count(mysqli $mysql): int
