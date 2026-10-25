@@ -1057,6 +1057,13 @@ final class __McMysqliRs
     public int $field = 0;
     /** numRows()'s answer, held in a union slot so it crosses the property hook tagged. */
     public int|string $rows = 0;
+    /** @var array<int,int> per column: 0 string as sent, 1 integer, 2 float, 3 BIT (see typed()) */
+    public array $kinds = [];
+    /** MYSQLI_OPT_INT_AND_FLOAT_NATIVE as the connection had it at the last row fetch (mysqlnd reads it per fetch). */
+    public bool $native = false;
+    /** Some column is not handed out as the string the wire carries. */
+    public bool $conv = false;
+    public bool $bit = false;
 
     public static function make(__McMysqliConn $c, __McPdoMyResult $r, bool $unbuf): self
     {
@@ -1065,6 +1072,21 @@ final class __McMysqliRs
         $rs->r = $r;
         $rs->unbuf = $unbuf;
         $rs->mem = !$r->stream || $r->done;
+        $native = $c->intAndFloatNative;
+        $rs->native = $native;
+        $n = \count($r->types);
+        for ($i = 0; $i < $n; $i++) {
+            $t = $r->types[$i];
+            $k = 0;
+            if ($t === 16) { $k = 3; }
+            elseif (($r->flags[$i] & 64) === 0) {
+                if ($t === 1 || $t === 2 || $t === 3 || $t === 8 || $t === 9) { $k = 1; }
+                elseif ($t === 4 || $t === 5) { $k = 2; }
+            }
+            $rs->kinds[] = $k;
+            if ($k !== 0) { $rs->conv = true; }
+            if ($k === 3) { $rs->bit = true; }
+        }
         return $rs;
     }
 
@@ -1090,6 +1112,39 @@ final class __McMysqliRs
         return $r === null ? 0 : \count($r->names);
     }
 
+    /** The column definition as mysqli's field object (Zend's property order). */
+    public function fieldObject(int $i): object
+    {
+        $r = $this->r;
+        $o = new \stdClass();
+        if ($r === null) { return $o; }
+        $o->name = $r->names[$i];
+        $o->orgname = $r->orgNames[$i];
+        $o->table = $r->tables[$i];
+        $o->orgtable = $r->orgTables[$i];
+        $o->def = '';
+        $o->db = $r->dbs[$i];
+        $o->catalog = $r->cats[$i];
+        $o->max_length = 0;
+        $o->length = $r->lens[$i];
+        $o->charsetnr = $r->charsets[$i];
+        $t = $r->types[$i];
+        // mysqlnd adds NUM_FLAG to the numeric types (not DECIMAL, not TIMESTAMP)
+        $o->flags = $r->flags[$i] | (($t >= 1 && $t <= 9 && $t !== 7) || $t === 13 ? 32768 : 0);
+        $o->type = $t;
+        $o->decimals = $r->decs[$i];
+        return $o;
+    }
+
+    /** fetch_field(): the field under the cursor, then the cursor moves; false past the last one. */
+    public function nextField(): false|object
+    {
+        if ($this->field >= $this->fields()) { return false; }
+        $o = $this->fieldObject($this->field);
+        $this->field++;
+        return $o;
+    }
+
     public function numRows(): int|string
     {
         $r = $this->r;
@@ -1105,16 +1160,47 @@ final class __McMysqliRs
         $row = $this->cur;
         if ($row === null) { return null; }
         $o = [];
-        foreach ($row as $v) { $o[] = $v === null ? 0 : \strlen($v); }
+        foreach ($row as $v) { $o[] = \is_string($v) ? \strlen($v) : 0; }
         return $o;
     }
 
-    /** @return ?array<int,?string> the next row; null at the end (the connection is released when an unbuffered result ends). Any fetch forgets the connection's last error, as mysqlnd's does. */
+    /**
+     * The values of a row as mysqlnd hands them out: BIT as the number it holds (a string past the integer range), and with
+     * MYSQLI_OPT_INT_AND_FLOAT_NATIVE integers and floats (a value outside the integer range stays the string the server sent;
+     * ZEROFILL, DECIMAL, YEAR and the date types stay strings).
+     *
+     * @param array<int,?string> $row
+     * @return array<int,mixed>
+     */
+    public function typed(array $row): array
+    {
+        /** @var array<int,mixed> */
+        $o = [];
+        foreach ($row as $i => $v) {
+            $k = $this->kinds[$i];
+            if ($v === null || $k === 0 || ($k !== 3 && !$this->native)) { $o[] = $v; }
+            elseif ($k === 1) {
+                $n = (int) $v;
+                if ((string) $n === $v) { $o[] = $n; } else { $o[] = $v; }
+            }
+            elseif ($k === 2) { $o[] = (float) $v; }
+            else {
+                $n = 0;
+                $l = \strlen($v);
+                for ($j = 0; $j < $l; $j++) { $n = ($n << 8) | \ord($v[$j]); }
+                if ($n >= 0) { if ($this->native) { $o[] = $n; } else { $o[] = (string) $n; } }
+                else { $o[] = \sprintf('%u', $n); }
+            }
+        }
+        return $o;
+    }
+
+    /** @return ?array<int,mixed> the next row; null at the end (the connection is released when an unbuffered result ends). Any fetch forgets the connection's last error, as mysqlnd's does. */
     public function row(): ?array
     {
         $r = $this->r;
         if ($r === null) { return null; }
-        if ($this->c !== null) { $this->c->clear(); }
+        if ($this->c !== null) { $this->c->clear(); $this->native = $this->c->intAndFloatNative; }
         if ($this->mem) {
             if ($this->pos >= \count($r->rows)) {
                 if ($this->unbuf) { $this->end(); } else { $this->cur = null; }
@@ -1123,6 +1209,7 @@ final class __McMysqliRs
             $row = $r->rows[$this->pos];
             $this->pos++;
             $this->seen++;
+            if ($this->conv && ($this->bit || $this->native)) { $tr = $this->typed($row); $this->cur = $tr; return $tr; }
             $this->cur = $row;
             return $row;
         }
@@ -1146,6 +1233,7 @@ final class __McMysqliRs
             return null;
         }
         $this->seen++;
+        if ($this->conv && ($this->bit || $this->native)) { $tr = $this->typed($row); $this->cur = $tr; return $tr; }
         $this->cur = $row;
         return $row;
     }
@@ -1205,11 +1293,11 @@ final class __McMysqliRs
         $this->c = null;
     }
 
-    /** @return array<string,?string> the row under its column names; a repeated name keeps the last value at the first place */
+    /** @return array<string,mixed> the row under its column names; a repeated name keeps the last value at the first place */
     public function assoc(array $row): array
     {
         $r = $this->r;
-        /** @var array<string,?string> */
+        /** @var array<string,mixed> */
         $a = [];
         if ($r === null) { return $a; }
         $n = \count($r->names);
@@ -1430,17 +1518,31 @@ class mysqli_result implements IteratorAggregate
 
     public function fetch_field(): false|object
     {
-        throw new Error('mysqli: not implemented');
+        return __McMysqliRs::of($this)->nextField();
     }
 
     public function fetch_field_direct(int $index): false|object
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcFieldDirect($index, 'mysqli_result::fetch_field_direct', 1);
     }
 
+    public function __mcFieldDirect(int $index, string $fn, int $arg): object
+    {
+        $rs = __McMysqliRs::of($this);
+        if ($index < 0) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($index) must be greater than or equal to 0'); }
+        if ($index >= $rs->fields()) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($index) must be less than the number of fields for this result set'); }
+        return $rs->fieldObject($index);
+    }
+
+    /** @return array<int,object> */
     public function fetch_fields(): array
     {
-        throw new Error('mysqli: not implemented');
+        $rs = __McMysqliRs::of($this);
+        $n = $rs->fields();
+        /** @var array<int,object> */
+        $out = [];
+        for ($i = 0; $i < $n; $i++) { $out[] = $rs->fieldObject($i); }
+        return $out;
     }
 
     /** @param mixed[] $constructor_args */

@@ -4090,9 +4090,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
         // mysqli's fetch_object allocates (without its constructor) an object of the class the program names: a literal class
         // roots just that class, no class argument needs nothing (stdClass), anything else leaves reachability open.
-        $nFo = preg_match_all("/fetch_object\\s*\\(/", $source);
+        $nFo = preg_match_all("/fetch_object\\s*\\(/i", $source);
         if ($nFo > 0) {
-            preg_match_all("/(->|_)?fetch_object\\s*\\(([^()]*)\\)/", $source, $fo);
+            preg_match_all("/(->|_)?fetch_object\\s*\\(([^()]*)\\)/i", $source, $fo);
             if ($nFo > count($fo[0])) { $walkerDynamic = true; $fetchObjectClass = true; }
             foreach ($fo[2] as $foi => $foText) {
                 $foArgs = explode(',', $foText);
@@ -4102,6 +4102,17 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 if (preg_match("/^['\"]\\\\?([A-Za-z_][A-Za-z0-9_\\\\\\\\]*)['\"]$/", $foCls, $fm) || preg_match("/^\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)::class$/", $foCls, $fm)) {
                     $foName = str_replace('\\\\', '\\', $fm[1]);
                     if (strcasecmp($foName, 'stdClass') === 0) { continue; }
+                    // self/static/parent::class and a name a `use` alias stands for name a class this scan cannot resolve
+                    $foHead = strpos($foName, '\\') === false ? $foName : substr($foName, 0, (int)strpos($foName, '\\'));
+                    $foAlias = false;
+                    foreach ($program->useAliases as $foShort => $foFull) {
+                        if (strcasecmp((string)$foShort, $foHead) === 0) { $foAlias = true; }
+                    }
+                    if ($foAlias || preg_match('/^(self|static|parent)$/i', $foName)) {
+                        $walkerDynamic = true;
+                        $fetchObjectClass = true;
+                        continue;
+                    }
                     $fetchObjectClass = true;
                     $walkerRoots[$foName] = true;
                     $foSeg = strrpos($foName, '\\');

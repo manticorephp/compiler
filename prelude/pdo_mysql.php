@@ -44,6 +44,16 @@ final class __McPdoMyResult
     public array $lens = [];
     /** @var array<int,int> decimals */
     public array $decs = [];
+    /** @var array<int,string> column definition: catalog, schema, original table, original column name */
+    public array $cats = [];
+    /** @var array<int,string> */
+    public array $dbs = [];
+    /** @var array<int,string> */
+    public array $orgTables = [];
+    /** @var array<int,string> */
+    public array $orgNames = [];
+    /** @var array<int,int> character set number of the column */
+    public array $charsets = [];
     /** @var array<int,array<int,?string>> */
     public array $rows = [];
     public bool $isSet = false;
@@ -908,16 +918,21 @@ final class __McPdoMyWire
 
     private function parseCol(string $b, __McPdoMyResult $r): void
     {
-        $this->lstr($b, 0);                   // catalog
-        $this->lstr($b, $this->lp);           // schema
+        $cat = $this->lstr($b, 0);
+        $db = $this->lstr($b, $this->lp);
         $tbl = $this->lstr($b, $this->lp);    // table (alias)
-        $this->lstr($b, $this->lp);           // org_table
+        $orgTbl = $this->lstr($b, $this->lp);
         $name = $this->lstr($b, $this->lp);
-        $this->lstr($b, $this->lp);           // org_name
+        $orgName = $this->lstr($b, $this->lp);
         $o = $this->lp;
         if ($o + 13 > \strlen($b) || \ord($b[$o]) !== 0x0c) { throw $this->malformed('column definition'); }
         $r->names[] = $name;
         $r->tables[] = $tbl;
+        $r->cats[] = $cat;
+        $r->dbs[] = $db;
+        $r->orgTables[] = $orgTbl;
+        $r->orgNames[] = $orgName;
+        $r->charsets[] = self::le16($b, $o + 1);
         $r->lens[] = self::le32($b, $o + 3);
         $r->types[] = \ord($b[$o + 7]);
         $r->flags[] = self::le16($b, $o + 8);

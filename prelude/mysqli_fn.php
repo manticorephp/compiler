@@ -120,17 +120,18 @@ function mysqli_fetch_column(mysqli_result $result, int $column = 0): false|floa
 
 function mysqli_fetch_field(mysqli_result $result): false|object
 {
-    throw new Error('mysqli: not implemented');
+    return $result->fetch_field();
 }
 
 function mysqli_fetch_field_direct(mysqli_result $result, int $index): false|object
 {
-    throw new Error('mysqli: not implemented');
+    return $result->__mcFieldDirect($index, 'mysqli_fetch_field_direct', 2);
 }
 
+/** @return array<int,object> */
 function mysqli_fetch_fields(mysqli_result $result): array
 {
-    throw new Error('mysqli: not implemented');
+    return $result->fetch_fields();
 }
 
 function mysqli_fetch_lengths(mysqli_result $result): array|false
