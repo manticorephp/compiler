@@ -453,7 +453,7 @@ trait LowerPrelude
         $arm = 0;
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
-            $props = $cd->propertyNames;
+            $props = $this->visibleProps($cd);
             $pc = (string)\count($props);
             $helper = '__mir_dump_object_arm_' . (string)$arm;
             $body .= "function " . $helper . "(mixed \$v, int \$indent, string \$pad): void {\n"
@@ -567,6 +567,21 @@ trait LowerPrelude
      *
      * @return array<string, bool>
      */
+    /**
+     * The properties a dump / serialize walk prints: every slot except the
+     * VIRTUAL hooked ones, which php leaves out of all of them.
+     *
+     * @return string[]
+     */
+    private function visibleProps(\Compile\Mir\ClassDef $cd): array
+    {
+        $out = [];
+        foreach ($cd->propertyNames as $p) {
+            if (!isset($cd->virtualProps[$p])) { $out[] = $p; }
+        }
+        return $out;
+    }
+
     private function maybeUninitIn(\Compile\Mir\ClassDef $cd): array
     {
         if ($cd->isPreludeClass || $cd->isExternClass || $cd->isStruct) { return []; }
@@ -786,7 +801,7 @@ trait LowerPrelude
             $labels = '';
             foreach ($members as $cname) {
                 $cd = $this->classTable[$cname];
-                $props = $cd->propertyNames;
+                $props = $this->visibleProps($cd);
                 $disp = $cd->display();
                 $head = 'O:' . (string)strlen($disp) . ':"' . $disp . '":';
                 $entries = '';
@@ -880,7 +895,7 @@ trait LowerPrelude
         $arm = 0;
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
-            $props = $cd->propertyNames;
+            $props = $this->visibleProps($cd);
             $disp = $cd->display();
             $helper = '__mc_ser_object_arm_' . (string)$arm;
             $head = 'O:' . (string)strlen($disp) . ':"' . $disp . '":';
@@ -961,7 +976,7 @@ trait LowerPrelude
             . "  }\n";
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
-            $props = $cd->propertyNames;
+            $props = $this->visibleProps($cd);
             $disp = $cd->display();
             $head = 'O:' . (string)\strlen($disp) . ':"' . $disp . '":';
             $entries = '';
@@ -1079,7 +1094,7 @@ trait LowerPrelude
                     . "    return __mir_print_r_obj_map(\"" . $head . "\", \$d, \$indent, \$pad);\n";
             } else {
                 $body .= "    \$out = \"" . $head . "\\n\" . \$pad . \"(\\n\";\n";
-                foreach ($cd->propertyNames as $p) {
+                foreach ($this->visibleProps($cd) as $p) {
                     $key = $p;
                     if (isset($cd->propertyMeta[$p])) {
                         $pm = $cd->propertyMeta[$p];

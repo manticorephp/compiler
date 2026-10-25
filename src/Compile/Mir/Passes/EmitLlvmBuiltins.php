@@ -9742,6 +9742,7 @@ trait EmitLlvmBuiltins
             foreach ($cd->propertyNames as $pn) {
                 if (($cd->propertyTypes[$pn] ?? null) === null) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
+                if ($mangle && isset($cd->virtualProps[$pn])) { continue; }
                 if ($this->isBufSlot($cd, $pn)) { continue; }
                 if ($publicOnly && !$forCompare) {
                     $pm = $cd->propertyMeta[$pn] ?? null;
@@ -9762,6 +9763,7 @@ trait EmitLlvmBuiltins
                 $pt = $cd->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
+                if ($mangle && isset($cd->virtualProps[$pn])) { continue; }
                 if ($this->isBufSlot($cd, $pn)) { continue; }
                 // php serializes ONLY public properties from an object; a
                 // missing meta entry is a compiler-synthesised slot, which is
@@ -9788,7 +9790,7 @@ trait EmitLlvmBuiltins
                     $lJoin = $this->ssa->allocLabel('pv.join');
                     $out .= '  br i1 ' . $ini . ', label %' . $lSet . ', label %' . $lSkip . "\n" . $lSet . ":\n";
                 }
-                $out .= $this->emitDeclaredPropCell($objp, $cd, $pn, $pt);
+                $out .= $this->emitDeclaredPropCell($objp, $cd, $pn, $pt, !$mangle && !$forCompare && !$publicOnly);
                 $boxed = $this->lastValue;
                 // ⚠ THE MAP OWNS ITS ELEMENTS. A cell that BORROWS the slot's
                 // reference — a cell, a string, an object, an already-cell-repr
@@ -9856,8 +9858,20 @@ trait EmitLlvmBuiltins
      * the raw-slot → cell converter the property READ path already uses
      * ({@see EmitLlvmObjects::emitFixedPropLoad}).
      */
-    private function emitDeclaredPropCell(string $objp, \Compile\Mir\ClassDef $cd, string $pn, Type $pt): string
+    private function emitDeclaredPropCell(string $objp, \Compile\Mir\ClassDef $cd, string $pn, Type $pt, bool $viaHook = false): string
     {
+        $hookGet = $viaHook ? ($cd->propHooks[$pn]['get'] ?? '') : '';
+        if ($hookGet !== '') {
+            // get_object_vars() reads through the get hook, as php does. The hook
+            // returns a fresh value, so the map owns the minted cell outright.
+            $ti = $this->ssa->allocReg();
+            $hv = $this->ssa->allocReg();
+            $out = '  ' . $ti . ' = ptrtoint ptr ' . $objp . " to i64\n";
+            $out .= '  ' . $hv . ' = call i64 @manticore_' . $this->mangle($hookGet) . '(i64 ' . $ti . ")\n";
+            $out .= $this->boxRawValue($hv, $pt);
+            $this->propCellMode = 2;
+            return $out;
+        }
         $off = (string)$cd->propertyOffset($pn);
         $g = $this->ssa->allocReg();
         $out = '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . $off . "\n";
