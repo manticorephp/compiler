@@ -4179,7 +4179,14 @@ trait EmitLlvmCalls
     private function emitDynClosureSpread(string $struct, array $args, int $spreadPos, Type $retType): string
     {
         if ($spreadPos !== \count($args) - 1) {
-            throw new \RuntimeException('only a single trailing spread into a dynamic closure is supported');
+            $shape = [];
+            $line = 0;
+            foreach ($args as $a) {
+                $shape[] = $a->kind === Node::KIND_SPREAD ? '...' : '_';
+                if ($line === 0) { $line = $a->line; }
+            }
+            throw new \RuntimeException('only a single trailing spread into a dynamic closure is supported (args '
+                . \implode(',', $shape) . ', line ' . (string)$line . ')');
         }
         // A spread builds each arity arm's argument list directly, so the
         // by-ref `select` the fixed-arity path uses has nowhere to go — and the
