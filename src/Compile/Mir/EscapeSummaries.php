@@ -301,10 +301,20 @@ final class EscapeSummaries
                     if ((!$this->parkFree[$c] || $this->writesAny[$c]) && $why === '') { $why = 'via ' . $c; }
                     if (!$this->parkFree[$c]) { $park = false; }
                     if ($this->writesAny[$c]) { $any = true; }
-                    foreach ($this->writes[$c] as $wk => $unused) { $writes[$wk] = true; }
+                    // First set adopted whole (shared, not copied); later ones add only what is missing.
+                    if ($writes === []) { $writes = $this->writes[$c]; continue; }
+                    foreach ($this->writes[$c] as $wk => $unused) { if (!isset($writes[$wk])) { $writes[$wk] = true; } }
                 }
             }
-            $pooledWrites = $this->pooled($writes);
+            // The union only grows from its parts: a callee set of the same size IS the union.
+            $pooledWrites = null;
+            $total = \count($writes);
+            foreach ($scc as $m) {
+                foreach ($callees[$m] as $c) {
+                    if (!isset($inScc[$c]) && \count($this->writes[$c]) === $total) { $pooledWrites = $this->writes[$c]; break 2; }
+                }
+            }
+            if ($pooledWrites === null) { $pooledWrites = $this->pooled($writes); }
             foreach ($scc as $m) {
                 $this->parkFree[$m] = $park;
                 $this->writesAny[$m] = $any;

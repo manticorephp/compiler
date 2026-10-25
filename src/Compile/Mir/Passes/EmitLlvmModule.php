@@ -967,6 +967,8 @@ trait EmitLlvmModule
         try {
             return $this->emitFunctionBody($fn);
         } catch (\Throwable $e) {
+            $want = \getenv('MANTICORE_DUMP_FN');
+            if (\is_string($want) && $want !== '' && \str_contains($fn->name, $want)) { \error_log(\Compile\Mir\Dump::fn($fn)); }
             throw new \RuntimeException($e->getMessage() . ' (in ' . $fn->name . ')');
         }
     }
