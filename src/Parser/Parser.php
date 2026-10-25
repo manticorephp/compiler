@@ -56,6 +56,12 @@ final class Parser
     private array $lineOffsets = [];
     private bool $lazyBodies = false;
 
+    /** 1 in tolerant mode (an int, not a bool: see Lexer::scan()). */
+    private int $tolerant = 0;
+
+    /** @var ParseError[] errors recorded while recovering (tolerant mode) */
+    private array $errors = [];
+
     /**
      * Active PHP namespace; '' means the global namespace. Updated as
      * we see `namespace Foo\Bar;` statements during parsing.
@@ -136,17 +142,21 @@ final class Parser
         $lexer = new Lexer();
         $errors = [];
         $program = new Program([]);
+        $p = null;
         try {
             $tokens = $lexer->scan($source, false, true);
-            $errors = $lexer->errors;
             $p = new self($tokens, $source, $file, false);
             $p->ranges = true;
+            $p->tolerant = 1;
+            $p->errors = $lexer->errors;
             $program = $p->parseProgram();
         } catch (ParseError $e) {
-            $errors[] = $e;
+            if ($p !== null) { $p->record($e); }
+            else { $errors[] = $e; }
         } catch (\Throwable $e) {
             $errors[] = new ParseError($e->getMessage(), 1, 1, 1, 1);
         }
+        if ($p !== null) { $errors = $p->errors; }
         for ($i = 1; $i < \count($errors); $i = $i + 1) {
             $e = $errors[$i];
             $j = $i - 1;
@@ -260,7 +270,14 @@ final class Parser
                 continue;
             }
             if ($this->match(TokenKind::Semicolon)) { continue; }   // empty statement
+            $before = $this->pos;
             $stmts[] = $this->parseStatement();
+            if ($this->tolerant === 1 && $this->pos === $before) {
+                // ponytail: progress guard only; Task 8's statement-level recovery replaces it
+                $this->record($this->error('unexpected token: ' . $this->tokens[$this->pos]->kind));
+                $bad = $this->advance();
+                $stmts[] = new \Parser\Ast\ErrorStmt($this->tokSpan($this->span(), $bad), 1);
+            }
         }
         // Append hoisted anonymous classes as top-level declarations (order is
         // irrelevant — the class pre-pass scans every class statement).
@@ -2453,6 +2470,14 @@ final class Parser
                     $left = Expr::dynProp($left, $nameExpr, $nullsafe, $this->end($span, $left));
                     continue;
                 }
+                if ($this->tolerant === 1) {
+                    $nk = $this->peek()->kind;
+                    if ($nk !== TokenKind::Identifier && $nk !== TokenKind::Keyword && $nk !== TokenKind::MagicConstant) {
+                        $this->record($this->error('expected member name after ->'));
+                        $left = Expr::propertyAccess($left, '', $nullsafe, $this->end($span, $left));
+                        continue;
+                    }
+                }
                 $nameTok = $this->advance();
                 if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword && $nameTok->kind !== TokenKind::MagicConstant) {
                     throw $this->error('expected member name after ->');
@@ -2854,6 +2879,10 @@ final class Parser
             return $inner;
         }
 
+        if ($this->tolerant === 1) {
+            $this->record($this->error('unexpected token in expression: ' . $tok->kind));
+            return new \Parser\Ast\ErrorExpr($this->missingAt($span));
+        }
         throw $this->error('unexpected token in expression: ' . $tok->kind);
     }
 
@@ -3621,9 +3650,39 @@ final class Parser
     private function expect(string $kind, string $message): Token
     {
         if (!$this->check($kind)) {
+            if ($this->tolerant === 1) {
+                $this->record($this->error($message));
+                $t = $this->tokens[$this->pos];
+                return new Token($kind, '', $t->line, $t->column, $t->line, $t->column);
+            }
             throw $this->error($message);
         }
         return $this->advance();
+    }
+
+    /** Tolerant mode: append $e to the error list; the 101st entry is the one "too many errors" and later ones are dropped. */
+    private function record(ParseError $e): void
+    {
+        $n = \count($this->errors);
+        if ($n > 100) { return; }
+        if ($n === 100) {
+            $this->errors[] = new ParseError('too many errors', $e->errLine, $e->column, $e->endLine, $e->endColumn);
+            return;
+        }
+        $this->errors[] = $e;
+    }
+
+    /**
+     * Zero-width range at the current token's start for a node standing for
+     * missing text. Records the point so every enclosing range grows to cover it.
+     */
+    private function missingAt(Span $anchor): Span
+    {
+        if (!$this->ranges) { return $anchor; }
+        $t = $this->tokens[$this->pos];
+        $this->synthLine = $t->line;
+        $this->synthColumn = $t->column;
+        return new Span($anchor->line, $anchor->column, $anchor->file, $t->line, $t->column, $t->line, $t->column);
     }
 
     /**
@@ -3679,6 +3738,10 @@ final class Parser
     private int $prevEndLine = 0;
     private int $prevEndColumn = 0;
 
+    /** Position of the latest zero-width Error node; an enclosing range ends no earlier than it (ranges + tolerant). */
+    private int $synthLine = 0;
+    private int $synthColumn = 0;
+
     /**
      * Range of an interpolated-string sub-expression: its tokens are lexed from
      * the string BODY, so their positions are meaningless in the file. Every node
@@ -3709,7 +3772,13 @@ final class Parser
             $bl = $from->span->startLine();
             $bc = $from->span->startColumn();
         }
-        return new Span($anchor->line, $anchor->column, $anchor->file, $this->prevEndLine, $this->prevEndColumn, $bl, $bc);
+        $el = $this->prevEndLine;
+        $ec = $this->prevEndColumn;
+        if ($this->synthLine > $el || ($this->synthLine === $el && $this->synthColumn > $ec)) {
+            $el = $this->synthLine;
+            $ec = $this->synthColumn;
+        }
+        return new Span($anchor->line, $anchor->column, $anchor->file, $el, $ec, $bl, $bc);
     }
 
     /** $anchor closed at the last consumed token, with the range starting at token $first. */
@@ -3720,7 +3789,13 @@ final class Parser
         if ($o !== null) {
             return $this->end($anchor);
         }
-        return new Span($anchor->line, $anchor->column, $anchor->file, $this->prevEndLine, $this->prevEndColumn, $first->line, $first->column);
+        $el = $this->prevEndLine;
+        $ec = $this->prevEndColumn;
+        if ($this->synthLine > $el || ($this->synthLine === $el && $this->synthColumn > $ec)) {
+            $el = $this->synthLine;
+            $ec = $this->synthColumn;
+        }
+        return new Span($anchor->line, $anchor->column, $anchor->file, $el, $ec, $first->line, $first->column);
     }
 
     /** Range of the single token $t under another node's anchor (dump-ast keeps the anchor). */
@@ -3779,6 +3854,8 @@ final class Parser
     private function rewind(int $p): void
     {
         $this->pos = $p;
+        $this->synthLine = 0;
+        $this->synthColumn = 0;
         $prev = $p > 0 ? $this->tokens[$p - 1] : null;
         $this->prevEndLine = $prev !== null ? $prev->endLine : 0;
         $this->prevEndColumn = $prev !== null ? $prev->endColumn : 0;

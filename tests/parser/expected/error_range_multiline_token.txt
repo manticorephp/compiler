@@ -1,3 +1,31 @@
 Program
+  Stmt:Expression @2:1-2:6
+    expr:
+      Expr:Call @2:1-2:6
+        function: "foo"
+        args: [1]
+          Expr:IntLiteral @2:5-2:6
+            value: 1
+        qualified: false
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @2:7-4:4
+    expr:
+      Expr:StringLiteral @2:7-4:4
+        value: "ab"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @5:1-5:1
+    expr:
+      Expr:Error @5:1-5:1
+    docComment: null
+    attributes: [0]
+  Stmt:Error @5:1-5:2
+    skipped: 1
 error 2:7-4:4 expected ')' after arguments
+error 2:7-4:4 expected ';' after expression
+error 5:1-5:2 expected ';' after expression
+error 5:1-5:2 unexpected token in expression: CloseParen
+error 5:1-5:2 expected ';' after expression
+error 5:1-5:2 unexpected token: CloseParen
 

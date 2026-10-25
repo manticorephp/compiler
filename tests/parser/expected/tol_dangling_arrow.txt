@@ -1,0 +1,24 @@
+Program
+  Stmt:Expression @2:1-2:6
+    expr:
+      Expr:PropertyAccess @2:1-2:5
+        object:
+          Expr:Variable @2:1-2:3
+            name: "o"
+        property: ""
+        nullsafe: false
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @3:1-3:8
+    expr:
+      Expr:Assign @3:1-3:7
+        target:
+          Expr:Variable @3:1-3:3
+            name: "b"
+        value:
+          Expr:IntLiteral @3:6-3:7
+            value: 2
+    docComment: null
+    attributes: [0]
+error 2:5-2:6 expected member name after ->
+

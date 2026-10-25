@@ -1,4 +1,42 @@
 Program
+  Stmt:Expression @2:1-2:8
+    expr:
+      Expr:Assign @2:1-2:7
+        target:
+          Expr:Variable @2:1-2:3
+            name: "a"
+        value:
+          Expr:IntLiteral @2:6-2:7
+            value: 1
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @3:1-5:1
+    expr:
+      Expr:Assign @3:1-5:1
+        target:
+          Expr:Variable @3:1-3:3
+            name: "s"
+        value:
+          Expr:BinaryOp @3:6-5:1
+            op: "."
+            left:
+              Expr:BinaryOp @3:6-5:1
+                op: "."
+                left:
+                  Expr:StringLiteral @3:6-5:1
+                    value: "abc
+"
+                right:
+                  Expr:Cast @3:6-5:1
+                    cast: "string"
+                    operand:
+                      Expr:Variable @3:6-5:1
+                        name: "t"
+            right:
+              Expr:StringLiteral @3:6-5:1
+                value: " = 2;"
+    docComment: null
+    attributes: [0]
 error 3:6-5:1 unterminated string
 error 5:1-5:1 expected ';' after expression
 

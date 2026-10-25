@@ -1,0 +1,69 @@
+Program
+  Stmt:Expression @2:1-2:1
+    expr:
+      Expr:Error @2:1-2:1
+    docComment: null
+    attributes: [0]
+  Stmt:Error @2:1-2:2
+    skipped: 1
+  Stmt:Expression @2:2-2:2
+    expr:
+      Expr:Error @2:2-2:2
+    docComment: null
+    attributes: [0]
+  Stmt:Error @2:2-2:3
+    skipped: 1
+  Stmt:Expression @2:4-2:9
+    expr:
+      Expr:Assign @2:4-2:9
+        target:
+          Expr:Variable @2:4-2:6
+            name: "a"
+        value:
+          Expr:Error @2:9-2:9
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @2:9-2:9
+    expr:
+      Expr:Error @2:9-2:9
+    docComment: null
+    attributes: [0]
+  Stmt:Error @2:9-2:10
+    skipped: 1
+  Stmt:Expression @2:10-2:10
+    expr:
+      Expr:Error @2:10-2:10
+    docComment: null
+    attributes: [0]
+  Stmt:Error @2:10-2:11
+    skipped: 1
+  Stmt:Expression @3:1-3:1
+    expr:
+      Expr:Error @3:1-3:1
+    docComment: null
+    attributes: [0]
+  Stmt:Error @3:1-3:2
+    skipped: 1
+error 2:1-2:2 unexpected character
+error 2:1-2:2 unexpected token in expression: Error
+error 2:1-2:2 expected ';' after expression
+error 2:1-2:2 unexpected token: Error
+error 2:2-2:3 unexpected character
+error 2:2-2:3 unexpected token in expression: Error
+error 2:2-2:3 expected ';' after expression
+error 2:2-2:3 unexpected token: Error
+error 2:9-2:10 unexpected character
+error 2:9-2:10 unexpected token in expression: Error
+error 2:9-2:10 expected ';' after expression
+error 2:9-2:10 unexpected token in expression: Error
+error 2:9-2:10 expected ';' after expression
+error 2:9-2:10 unexpected token: Error
+error 2:10-2:11 unexpected character
+error 2:10-2:11 unexpected token in expression: Error
+error 2:10-2:11 expected ';' after expression
+error 2:10-2:11 unexpected token: Error
+error 3:1-3:2 unexpected character
+error 3:1-3:2 unexpected token in expression: Error
+error 3:1-3:2 expected ';' after expression
+error 3:1-3:2 unexpected token: Error
+

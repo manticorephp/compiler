@@ -1,0 +1,6 @@
+Program
+  Stmt:Echo @1:1-1:4
+    exprs: [1]
+      Expr:StringLiteral @1:1-1:4
+        value: "﻿"
+

@@ -773,3 +773,12 @@ final class DynamicStaticCall extends Expr
         parent::__construct('DynamicStaticCall', $span);
     }
 }
+
+/** Tolerant mode only: stands for an expression that is missing or unparseable. Never reaches lowering. */
+final class ErrorExpr extends Expr
+{
+    public function __construct(Span $span)
+    {
+        parent::__construct('Error', $span);
+    }
+}

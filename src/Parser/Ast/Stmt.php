@@ -418,3 +418,14 @@ final class LabelStmt extends Stmt
         parent::__construct('Label', $span);
     }
 }
+
+/** Tolerant mode only: tokens the parser could not use, skipped to resynchronise. Never reaches lowering. */
+final class ErrorStmt extends Stmt
+{
+    public function __construct(
+        Span $span,
+        public readonly int $skipped = 0,
+    ) {
+        parent::__construct('Error', $span);
+    }
+}
