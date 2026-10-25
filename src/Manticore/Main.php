@@ -5871,25 +5871,23 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array
     $diags = [];
     /** @var \Analyze\ParsedFile[] $parsed */
     $parsed = [];
+    // Tolerant parse reports EVERY syntax error of a file. A file with errors is not
+    // handed to the Analyzer: its walkers are not Error-node aware yet.
     foreach ($files as $sf) {
         try {
-            $program = \Parser\Parser::parseSource(__mc_source_contents($sf));
-            $parsed[] = new \Analyze\ParsedFile(__mc_source_path($sf), $program);
-        } catch (\Parser\ParseError $pe) {
-            // ParseError appends ` at line N, column C`; the diagnostic already
-            // prints that location, so strip the redundant tail.
-            $msg = $pe->getMessage();
-            $suffix = ' at line ' . (string)$pe->errLine . ', column ' . (string)$pe->column;
-            if (\str_ends_with($msg, $suffix)) {
-                $msg = \substr($msg, 0, \strlen($msg) - \strlen($suffix));
+            $r = \Parser\Parser::parseTolerant(__mc_source_contents($sf), '', false, false);
+            if (\count($r->errors) === 0) {
+                $parsed[] = new \Analyze\ParsedFile(__mc_source_path($sf), $r->program);
             }
-            $diags[] = \Analyze\Diagnostic::error(
-                __mc_source_path($sf),
-                $pe->errLine,
-                $pe->column,
-                'parse.error',
-                $msg
-            );
+            foreach ($r->errors as $pe) {
+                $diags[] = \Analyze\Diagnostic::error(
+                    __mc_source_path($sf),
+                    $pe->errLine,
+                    $pe->column,
+                    'parse.error',
+                    $pe->reason
+                );
+            }
         } catch (\Throwable $e) {
             $diags[] = \Analyze\Diagnostic::error(__mc_source_path($sf), 0, 0, 'parse.error', $e->getMessage());
         }

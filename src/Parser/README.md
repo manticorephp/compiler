@@ -83,3 +83,49 @@ Parser coverage is exercised through the AOT suite:
 ```
 bash tests/aot/run.sh -k parse
 ```
+
+## Tolerant mode, ranges, names
+
+`Parser::parseSource` is **strict**: the first syntax error throws `ParseError`.
+Everything below is opt-in and leaves the strict path (output, speed, RSS)
+untouched.
+
+`Parser::parseTolerant(string $source, string $file = '', bool $ranges = true, bool $names = true): ParseResult`
+never throws. It returns the tree plus every syntax error (`ParseResult::$errors`,
+sorted by position, at most 100, then one `too many errors` entry). Lexer errors are
+recorded too. Broken parts become `Stmt:Error` (`skipped` = tokens dropped) /
+`Expr:Error` nodes; a missing token is a zero-width synthetic token at the current
+token start. Each `ParseError` carries `errLine`/`column` and `endLine`/`endColumn`
+(the error range) and `reason` (the message without the ` at line N, column C` suffix).
+`Analyze` calls it with `$ranges = $names = false` (`perform_analysis`) and reports each
+error as a `parse.error` diagnostic; a file with errors is **not** given to the rules,
+because the Analyze walkers are not `Error`-node aware. Compile paths (lowering) throw
+on an `Error` node and only ever see strict trees.
+
+**Ranges.** With ranges on, every node's `Span` carries `endLine`/`endColumn` (just past
+its last byte) and `beginLine`/`beginColumn` (first byte, when it differs from the anchor
+that `dump-ast` prints); read them via `Span::startLine()/startColumn()`. Columns are
+**byte** columns, 1-based, not characters. Ranges nest: a child lies inside its parent.
+
+**Names.** With names on, `Program::$names` lists every `NameRef` (class / function /
+constant / namespace / use occurrence): written spelling, statically resolved name, and
+`globalFallback` for unqualified function/constant names.
+
+**Guarantees.** Strict: plain `dump-ast` output is byte-identical to before this feature
+(`strict_invariance.sh`). Tolerant: on valid input the tree equals the strict tree; on
+truncated input the statements before the first error equal the full file's prefix
+(`fuzz.sh`), and range invariants hold (`--check-ranges`).
+
+`dump-ast` flags: `--tolerant` (append `error L:C-L:C reason` lines), `--ranges` (print
+ranges), `--names` (print the name table), `--check-ranges` / `--check-names` (verify
+invariants, print violations, exit 1; add `--tolerant` to check the tolerant tree).
+
+### Tests
+
+```
+bash tests/parser/run.sh [-k substr] [-v]      # golden cases: tests/parser/cases + expected
+bash tests/parser/fuzz.sh [-n CUTS] [-k substr] # truncation / prefix / garbage / nesting / error flood
+bash tests/parser/strict_invariance.sh --record DIR   # freeze base corpus + dump hashes (DIR outside the repo)
+bash tests/parser/strict_invariance.sh --check DIR    # strict dump-ast unchanged vs the recording
+bash tests/analyze/run.sh -k parse_error       # analyze reports every syntax error
+```

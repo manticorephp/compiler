@@ -171,7 +171,7 @@ final class Parser
         return $p->parseProgram();
     }
 
-    public static function parseTolerant(string $source, string $file = ''): ParseResult
+    public static function parseTolerant(string $source, string $file = '', bool $ranges = true, bool $names = true): ParseResult
     {
         $lexer = new Lexer();
         $errors = [];
@@ -180,9 +180,9 @@ final class Parser
         try {
             $tokens = $lexer->scan($source, false, true);
             $p = new self($tokens, $source, $file, false);
-            $p->ranges = true;
+            $p->ranges = $ranges;
             $p->tolerant = 1;
-            $p->collectNames = 1;
+            $p->collectNames = $names ? 1 : 0;
             // Lexer errors are recorded first: the cap keeps the first 100 in discovery order (not by position), so lexer errors alone can fill it and drop the parser errors.
             foreach ($lexer->errors as $le) { $p->record($le); }
             $program = $p->parseProgram();

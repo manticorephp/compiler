@@ -92,7 +92,7 @@ check_one() {
         if [[ $errs -eq 0 ]]; then
             local tail1 lastline
             tail1="$(tail -c 400 "$tmp/cut.php" | tr -d ' \t\r\n' | tail -c 2)"
-            lastline="$(tail -n 1 "$tmp/cut.php")"
+            lastline="$(/usr/bin/grep -v "^[[:space:]]*$" "$tmp/cut.php" | tail -n 1)"
             local lastclose lastopen after=""
             lastclose=$(/usr/bin/grep -n '?>' "$tmp/cut.php" | tail -n 1 | cut -d: -f1)
             lastopen=$(/usr/bin/grep -n '<?php' "$tmp/cut.php" | tail -n 1 | cut -d: -f1)
