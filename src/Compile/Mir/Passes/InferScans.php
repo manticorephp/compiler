@@ -3501,6 +3501,21 @@ trait InferScans
                         $this->refArrayArgSink($a, $elems, $props, $statics);
                         continue;
                     }
+                    // An in-out array the callee REASSIGNS whole
+                    // (`array_splice`: `$input = $out`) and is handed a `mixed`
+                    // value of another kind (`$replacement`) comes back holding
+                    // that kind too, so the caller's array holds cells.
+                    if ($a->kind === Node::KIND_LOAD_LOCAL && $a->type->isArray()
+                        && ($a->type->element->kind ?? Type::KIND_CELL) !== Type::KIND_CELL
+                        && ($p->type->kind === Type::KIND_UNKNOWN || $p->type->isArray())) {
+                        $whole = [];
+                        $this->collectWholeStores($callee->body, $whole);
+                        if (isset($whole[$p->name])
+                            && $this->mixedArgForeignTo($callee, $offset, $n, $a->type->element->kind)) {
+                            $elems[$a->name] = true;
+                            continue;
+                        }
+                    }
                     $this->refArgSlotSink($p, $a, $names, $elems, $props, $statics);
                 }
             }
@@ -3657,6 +3672,18 @@ trait InferScans
         } elseif ($a->kind === Node::KIND_STATIC_PROP) {
             $statics[$a->global] = true;
         }
+    }
+
+    /** Does a call pass a `mixed` (cell) parameter an array or scalar whose element/own kind is not `$kind`? */
+    private function mixedArgForeignTo(\Compile\Mir\FunctionDef $callee, int $offset, Node $call, string $kind): bool
+    {
+        foreach ($this->refCallArgs($call) as $i => $arg) {
+            $q = $callee->params[$offset + $i] ?? null;
+            if ($q === null || $q->byRef || $q->type->kind !== Type::KIND_CELL) { continue; }
+            $ak = $arg->type->isArray() ? ($arg->type->element->kind ?? Type::KIND_CELL) : $arg->type->kind;
+            if ($ak !== $kind) { return true; }
+        }
+        return false;
     }
 
     /**
