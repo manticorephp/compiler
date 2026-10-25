@@ -4053,6 +4053,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $ownFns = [];
     $walkerRoots = [];
     $walkerDynamic = false;
+    $fetchObjectClass = false;
     foreach ($sources as $i => $source) {
         try {
             // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
@@ -4084,10 +4085,32 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             // PDO's FETCH_CLASS / fetchObject instantiate the class named by a run-time string
             // (`new $cls` in the pdo prelude, which this scan never reads).
             || preg_match("/FETCH_CLASS|fetchObject/", $source)
-            // mysqli's fetch_object allocates (without its constructor) an object of the class the program names
-            || preg_match("/fetch_object\\s*\\(/", $source)
             || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
             $walkerDynamic = true;
+        }
+        // mysqli's fetch_object allocates (without its constructor) an object of the class the program names: a literal class
+        // roots just that class, no class argument needs nothing (stdClass), anything else leaves reachability open.
+        $nFo = preg_match_all("/fetch_object\\s*\\(/", $source);
+        if ($nFo > 0) {
+            preg_match_all("/(->|_)?fetch_object\\s*\\(([^()]*)\\)/", $source, $fo);
+            if ($nFo > count($fo[0])) { $walkerDynamic = true; $fetchObjectClass = true; }
+            foreach ($fo[2] as $foi => $foText) {
+                $foArgs = explode(',', $foText);
+                $foArg = $fo[1][$foi] === '->' ? 0 : 1;
+                $foCls = isset($foArgs[$foArg]) ? trim($foArgs[$foArg]) : '';
+                if ($foCls === '') { continue; }
+                if (preg_match("/^['\"]\\\\?([A-Za-z_][A-Za-z0-9_\\\\\\\\]*)['\"]$/", $foCls, $fm) || preg_match("/^\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)::class$/", $foCls, $fm)) {
+                    $foName = str_replace('\\\\', '\\', $fm[1]);
+                    if (strcasecmp($foName, 'stdClass') === 0) { continue; }
+                    $fetchObjectClass = true;
+                    $walkerRoots[$foName] = true;
+                    $foSeg = strrpos($foName, '\\');
+                    if ($foSeg !== false) { $walkerRoots[substr($foName, $foSeg + 1)] = true; }
+                } else {
+                    $walkerDynamic = true;
+                    $fetchObjectClass = true;
+                }
+            }
         }
         preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m1);
         preg_match_all("/\\binstanceof\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m2);
@@ -4656,8 +4679,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'get_defined_constants',
         ])
         // mysqli's fetch_object builds an object of the class the program names, through ReflectionClass in the prelude.
-        || $demand->callsAny(['mysqli_fetch_object'])
-        || ($demand->callsMethod('fetch_object') && $demand->mentionsPrefix('mysqli'));
+        || ($fetchObjectClass && $demand->mentionsPrefix('mysqli'));
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
     // #[Deprecated] / #[NoDiscard] diagnostics, target validation) are entirely
     // compiler-side — the declarations matter only so reflection can hand back a

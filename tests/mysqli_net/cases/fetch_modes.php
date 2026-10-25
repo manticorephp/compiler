@@ -106,16 +106,22 @@ $r->data_seek(0);
 t('numkey obj', fn() => $r->fetch_object());
 $r = $m->query('SELECT 5 `` , 6 `x`');
 t('empty name', function () use ($r) { ob_start(); var_dump($r->fetch_assoc()); return ob_get_clean(); });
-echo "--- fetch_object: property order, magic, typed, readonly\n";
+echo "--- fetch_object: property order, magic, visibility, typed, readonly\n";
 class W2 { public $x = 'default'; public $arg; public function __construct($arg = null) { $this->arg = $arg; echo 'ctor sees x=', var_export($this->x, true), "\n"; } }
 $r = $m->query("SELECT 'a' x");
 t('W2', fn() => $r->fetch_object('W2', ['k']));
-$r = $m->query("SELECT 'a' x");
 class Ws { public $z = 'dz'; public function __set($k, $v) { echo "set $k\n"; } }
 $r = $m->query("SELECT 'a' x");
 t('Ws magic set', fn() => $r->fetch_object('Ws'));
-$r = $m->query("SELECT 'a' x");
+class Vis { private $a = 'pa'; protected $b = 'pb'; public int $c = 0; private int $e = 0; public function dump() { return [$this->a, $this->b, $this->c, $this->e]; } }
+$r = $m->query("SELECT 'A' a, 'B' b, '5' c, '7' e");
+t('Vis', fn() => $r->fetch_object('Vis')->dump());
 class Tp { public int $x = 0; }
-$r = $m->query("SELECT 'a' x");
 $r = $m->query("SELECT '5' x");
 t('Tp coerce', fn() => $r->fetch_object('Tp'));
+class Rn { public readonly string $x; public function get() { return $this->x; } }
+$r = $m->query("SELECT 'a' x");
+t('Rn', fn() => $r->fetch_object('Rn')->get());
+class Nm { public $x = 'd'; public $arg; public $o; function __construct($arg = null, $o = 'od') { $this->arg = $arg; $this->o = $o; } }
+$r = $m->query("SELECT 'a' x");
+t('Nm positional', fn() => $r->fetch_object('Nm', ['p1', 'p2']));

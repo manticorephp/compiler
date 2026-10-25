@@ -1020,6 +1020,23 @@ final class mysqli_driver
 }
 
 /**
+ * Zend writes the columns of a fetch_object row regardless of visibility: the writes run in the object's own class scope.
+ * A FUNCTION, not a method: a closure made inside a method keeps that method's $this when bound to another object
+ * (tests/aot/repro/wrong/closure_bind_in_method_keeps_this.php).
+ */
+function __mc_mysqli_hydrate(object $o, __McPdoMyResult $r, array $row): void
+{
+    $set = \Closure::bind(function (__McPdoMyResult $r, array $row): void {
+        $n = \count($r->names);
+        for ($i = 0; $i < $n; $i++) {
+            $k = $r->names[$i];
+            $this->$k = $row[$i];
+        }
+    }, $o, \get_class($o));
+    $set($r, $row);
+}
+
+/**
  * The state behind one mysqli_result: the wire result, the read position and the open-ness. Buffered (store_result):
  * every row is in $r->rows and data_seek() moves $pos. Unbuffered (use_result): rows are read off the wire one at a
  * time (or, for a result the chain already buffered, off $r->rows) and the connection stays busy until the last one.
@@ -1463,10 +1480,7 @@ class mysqli_result implements IteratorAggregate
         $ref = new \ReflectionClass($class);
         if ($ref->isAbstract() || $ref->isInterface()) { throw new Error('Class ' . $ref->getName() . ' cannot be instantiated'); }
         $o = $ref->newInstanceWithoutConstructor();
-        for ($i = 0; $i < $n; $i++) {
-            $k = $r->names[$i];
-            $o->$k = $row[$i];
-        }
+        __mc_mysqli_hydrate($o, $r, $row);
         if (\method_exists($o, '__construct')) {
             // an array that reaches the prelude has erased elements, and spreading it into a constructor hands that raw words:
             // copy it element by element into cells first (tests/aot/repro/wrong/spread_erased_array_into_dynamic_ctor.php)
