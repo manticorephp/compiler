@@ -233,6 +233,44 @@ trait LowerClasses
      * @param array<string, array{get: ?string, set: ?string}> $propHooks
      * @return array<string, bool>
      */
+    /**
+     * php's VIRTUAL hooked properties: every hook has a body and none touches
+     * `$this->name`, so the property has no backing store and var_dump / (array) /
+     * serialize leave it out. Inherited from the parent unless redeclared.
+     *
+     * @return array<string, bool>
+     */
+    private function virtualHookProps(\Parser\Ast\ClassDecl $decl, string $parent): array
+    {
+        $out = [];
+        if ($parent !== '' && isset($this->classTable[$parent])) {
+            $out = $this->classTable[$parent]->virtualProps;
+        }
+        foreach ($decl->properties as $prop) {
+            if ($prop->isStatic) { continue; }
+            unset($out[$prop->name]);
+            if ($prop->hooks === []) { continue; }
+            $virtual = true;
+            foreach ($prop->hooks as $hook) {
+                // `set => expr` is shorthand for `$this->prop = expr`: it writes the backing slot.
+                if ($hook->kind === 'set' && $hook->exprBody !== null) { $virtual = false; break; }
+                $w = new \Analyze\AstWalk(false);
+                if ($hook->blockBody !== null) { $w->stmts($hook->blockBody->statements); }
+                elseif ($hook->exprBody !== null) { $w->exprTree($hook->exprBody); }
+                else { $virtual = false; break; }
+                foreach ($w->exprs as $e) {
+                    if ($e instanceof \Parser\Ast\PropertyAccess && $e->property === $prop->name
+                        && $e->object instanceof \Parser\Ast\Variable && $e->object->name === 'this') {
+                        $virtual = false;
+                        break 2;
+                    }
+                }
+            }
+            if ($virtual) { $out[$prop->name] = true; }
+        }
+        return $out;
+    }
+
     private function maybeUninitProps(\Parser\Ast\ClassDecl $decl, string $parent, array $propHooks): array
     {
         $out = [];
@@ -833,6 +871,7 @@ trait LowerClasses
         $cd->propertyReadonly = $roProps;
         $cd->propertyMeta = $propMeta;
         $cd->propertyMaybeUninit = $this->maybeUninitProps($decl, $parent, $propHooks);
+        $cd->virtualProps = $this->virtualHookProps($decl, $parent);
         $cd->methodMeta = $methodMeta;
         $cd->attributes = $this->attrNames($decl->attributes);
         $cd->isFinal = $decl->isFinal;

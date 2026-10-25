@@ -2204,6 +2204,29 @@ trait EmitLlvmObjects
      */
     private function emitCellSlotStoreDropping(string $obj, ClassDef $cd, string $prop, string $cellVal, bool $dropRaw, bool $dropBoxed): string
     {
+        // A user-level store ($dropBoxed) into a property with a set hook runs the
+        // hook, as the class-typed path does; the caller's retain of the value
+        // goes back, since the hook borrows its argument.
+        $setHook = $dropBoxed ? ($cd->propHooks[$prop]['set'] ?? '') : '';
+        if ($setHook !== '') {
+            $this->rt->needsRc = true;
+            $pt = $this->sigs->paramTypes[$setHook][1] ?? ($cd->propertyTypes[$prop] ?? Type::cell());
+            $this->lastValue = $cellVal;
+            $this->lastValueType = 'i64';
+            $out = $this->unboxCellToType($pt);
+            $arg = $this->lastValue;
+            if ($this->lastValueType === 'double') {
+                $bits = $this->ssa->allocReg();
+                $out .= '  ' . $bits . ' = bitcast double ' . $arg . " to i64\n";
+                $arg = $bits;
+            }
+            $thisI = $this->ssa->allocReg();
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $thisI . ' = ptrtoint ptr ' . $obj . " to i64\n";
+            $out .= '  ' . $res . ' = call i64 @manticore_' . $this->mangle($setHook)
+                   . '(i64 ' . $thisI . ', i64 ' . $arg . ")\n";
+            return $out . '  call void @__mir_cell_drop(i64 ' . $cellVal . ")\n";
+        }
         $oldSlot = '';
         $oldFlavor = '';
         $spt = $cd->propertyTypes[$prop] ?? null;
@@ -9810,6 +9833,14 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** The set-hook symbol class `$cls` runs for a union store, or ''. */
+    private function unionSetHook(string $cls, \Compile\Mir\StoreProperty $n): string
+    {
+        if ($n->bypassHook || !isset($this->classes[$cls]->propHooks[$n->property])) { return ''; }
+        $hk = $this->classes[$cls]->propHooks[$n->property];
+        return ($hk['set'] !== '' && !$this->insideOwnHook($hk)) ? $hk['set'] : '';
+    }
+
     /** `$union->prop = v` — the store analogue of {@see emitUnionPropertyAccess}.
      *  Writes the value to the correct slot: one offset when every atom agrees,
      *  else a runtime class_id switch to each atom's offset. The value is co-owned
@@ -9830,6 +9861,10 @@ trait EmitLlvmObjects
             elseif ($firstOff !== $o) { $agree = false; }
             // An init bit is per class tree: mark it in the class's own arm.
             if ($cd !== null && $cd->initMapBit($n->property) >= 0) { $agree = false; }
+            // A set hook replaces the write: that class takes its own arm.
+            foreach ($this->selfAndDescendants($ac) as $hc) {
+                if ($this->unionSetHook($hc, $n) !== '') { $agree = false; }
+            }
         }
         $out = $this->emitNode($n->object);
         $out .= $this->coerceToPtr();
@@ -9837,8 +9872,10 @@ trait EmitLlvmObjects
         $out .= $this->emitNode($n->value);
         $out .= $this->coerceToI64();
         $val = $this->lastValue;
-        $out .= $this->rcRetainByType($n->value, $val, $n->type, 4);
+        // The object co-owns the value once it is stored: a retain per STORING
+        // arm (a hook arm hands the value to the hook, which borrows it).
         if ($agree) {
+            $out .= $this->rcRetainByType($n->value, $val, $n->type, 4);
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
                   . ', i64 ' . (string)$firstOff . "\n";
@@ -9862,8 +9899,19 @@ trait EmitLlvmObjects
                 $seen[$c] = true;
                 $caseL = $this->ssa->allocLabel('us.case');
                 $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
-                $g = $this->ssa->allocReg();
                 $bodies .= $caseL . ":\n";
+                $hookSym = $this->unionSetHook($c, $n);
+                if ($hookSym !== '') {
+                    $hi = $this->ssa->allocReg();
+                    $hr = $this->ssa->allocReg();
+                    $bodies .= '  ' . $hi . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+                    $bodies .= '  ' . $hr . ' = call i64 @manticore_' . $this->mangle($hookSym)
+                              . '(i64 ' . $hi . ', i64 ' . $val . ")\n";
+                    $bodies .= '  br label %' . $endL . "\n";
+                    continue;
+                }
+                $bodies .= $this->rcRetainByType($n->value, $val, $n->type, 4);
+                $g = $this->ssa->allocReg();
                 $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
                          . ', i64 ' . (string)$offByClass[$ac] . "\n";
                 $bodies .= '  store i64 ' . $val . ', ptr ' . $g . "\n";
@@ -9875,6 +9923,7 @@ trait EmitLlvmObjects
         $out .= $switch . $bodies;
         $gd = $this->ssa->allocReg();
         $out .= $defL . ":\n";
+        $out .= $this->rcRetainByType($n->value, $val, $n->type, 4);
         $out .= '  ' . $gd . ' = getelementptr inbounds i8, ptr ' . $objPtr
               . ', i64 ' . (string)$firstOff . "\n";
         $out .= '  store i64 ' . $val . ', ptr ' . $gd . "\n";
