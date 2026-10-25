@@ -107,6 +107,7 @@ trait InferScans
         $cur = $cd->propertyTypes[$prop] ?? null;
         if ($cur !== null && $cur->exactString() === $t->exactString()) { return false; }
         $cd->propertyTypes[$prop] = $t;
+        $this->retypedProps[$prop] = true;
         $this->setInheritedPropType($cd, $prop, $t);
         if ($this->ctx !== null) { $this->ctx->changes->addProp($prop); }
         return true;

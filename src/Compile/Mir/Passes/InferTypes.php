@@ -297,6 +297,8 @@ final class InferTypes implements Pass
      * @var array<string, bool>
      */
     private array $rescanTouched = [];
+    /** @var array<string, bool> properties {@see setPropType} retyped since the last {@see inferAfterPropScan} */
+    private array $retypedProps = [];
     /** @var array<string, string[]> "fn#idx" → caller candidate params its erased sites forward */
     private array $callArgForward = [];
     private string $callArgScanFn = '';
@@ -312,6 +314,26 @@ final class InferTypes implements Pass
      * graph is one walk against the twelve full re-inferences it replaces.
      * @return array<string, bool>|null
      */
+    /**
+     * Re-infer after a property scan: the readers of what it retyped, following a change only as far
+     * as types keep moving. A scan that changed something without naming a property re-infers all.
+     */
+    private function inferAfterPropScan(Module $module, string $reason): void
+    {
+        $props = $this->retypedProps;
+        $this->retypedProps = [];
+        if ($props === []) {
+            $this->inferFunctionsForScope($module, $reason);
+            return;
+        }
+        $seed = [];
+        $graph = $this->depGraph($module);
+        foreach ($props as $p => $_) {
+            foreach ($graph->usersOfProp((string)$p) as $u => $__) { $seed[$u] = true; }
+        }
+        $this->inferPropagating($module, $reason, $seed);
+    }
+
     private function rescanScope(Module $module): ?array
     {
         if ($this->rescanTouched === []) { return null; }
@@ -874,6 +896,7 @@ final class InferTypes implements Pass
 
     public function run(Module $module): Module
     {
+        $tRun = \Compile\Stats::now();
         $this->sigs = [];
         $this->callGraph = null;
         $this->rescanTouched = [];
@@ -962,6 +985,7 @@ final class InferTypes implements Pass
         // rule the local promotion follows, and the same reason it is computed
         // up front rather than forced afterwards.
         $this->scanRefCellProps($module);
+        $tWalk = \Compile\Stats::now();
         if ($this->scopeNames === null || $this->ctx === null) {
             foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
@@ -970,6 +994,7 @@ final class InferTypes implements Pass
         } else {
             $this->inferScopedWorklist($module);
         }
+        $tPost = \Compile\Stats::now();
         // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
         // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
         // MIXED array: left alone, the callee is narrowed to the caller's
@@ -1013,8 +1038,9 @@ final class InferTypes implements Pass
         // the DECLARED property type so a later `$this->p[$i]` / foreach reads a
         // tagged cell instead of a raw i64 (the property analogue of a typed
         // local literal). Runs before the element scan so the shape is set first.
+        $this->retypedProps = [];
         if ($this->scanPropTypeFromArrayAssign($module)) {
-            $this->inferFunctionsForScope($module, 'prop_type');
+            $this->inferAfterPropScan($module, 'prop_type');
         }
         // Property-element inference from stores: a bare-`array` property that
         // only ever receives element stores of ONE concrete scalar/object type
@@ -1023,14 +1049,16 @@ final class InferTypes implements Pass
         // sourced from a now-typed param is seen concrete, not unknown. Without
         // it the property element stays erased and a read-back bitcasts each raw
         // i64 to a garbage double.
+        $this->retypedProps = [];
         if ($this->scanPropElemFromStores($module)) {
-            $this->inferFunctionsForScope($module, 'prop_elem');
+            $this->inferAfterPropScan($module, 'prop_elem');
         }
         // The same, for a STATIC property. Its stores mostly sit outside the
         // declaring class, so neither the lowering-time AST scan nor the
         // instance scan above can reach them.
+        $this->retypedProps = [];
         if ($this->scanStaticPropElemFromStores($module)) {
-            $this->inferFunctionsForScope($module, 'static_prop_elem');
+            $this->inferAfterPropScan($module, 'static_prop_elem');
         }
         // By-ref param type inference: an UNTYPED (`cell`) `&$p` holds the
         // caller's RAW slot value (a string/array pointer), but a cell type
@@ -1275,6 +1303,12 @@ final class InferTypes implements Pass
         $module->inferGlobalVarTypes = $this->globalVarTypes;
         $module->inferByRefCaptureElemLocals = $this->byRefCaptureElemLocals;
         $module->markPassApplied(self::NAME);
+        if (\Compile\Stats::$on) {
+            \Compile\Stats::bump('infer.t.pre_scans_ms', \intdiv($tWalk - $tRun, 1000000));
+            \Compile\Stats::bump('infer.t.walk_ms', \intdiv($tPost - $tWalk, 1000000));
+            \Compile\Stats::bump('infer.t.post_ms', \intdiv(\Compile\Stats::now() - $tPost, 1000000));
+            \Compile\Stats::bump('infer.t.runs', 1);
+        }
         return $module;
     }
 
