@@ -135,6 +135,7 @@ final class UnifiedArrayRuntime
         $this->emitPtrSet();
         $this->emitPtrSeek();
         $this->emitSpreadInto();
+        $this->emitBagSetStr();
         $this->emitPop();
         $this->emitShift();
         $this->emitBoxByRepr();
@@ -4012,6 +4013,22 @@ final class UnifiedArrayRuntime
         $inc->br($done);
         $done->retVoid();
 
+        // `__mir_ref_shared(p) -> i1`: does a binding other than this holder
+        // still name the box? php keeps an element's reference through a copy
+        // (`[...$refs]`) only then. A non-box address is someone else's
+        // storage, so it is shared by definition.
+        $fn = $this->module->func('__mir_ref_shared', Type::i1());
+        $fn->attrs = 'noinline';
+        $p = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        $chk = $fn->block('chk');
+        $box = $fn->block('box');
+        $yes = $fn->block('yes');
+        $e->brIf($e->icmp('eq', $p, Value::null()), $yes, $chk);
+        $chk->brIf($chk->icmp('eq', $chk->load($i64, $chk->gep(Type::i8(), $p, [$hdrOff])), $magic), $box, $yes);
+        $box->ret($box->icmp('sgt', $box->load($i64, $box->gep(Type::i8(), $p, [$rcOff])), Value::int($i64, 1)));
+        $yes->ret(Value::int(Type::i1(), 1));
+
         $fn = $this->module->func('__mir_ref_unref', Type::i1());
         $fn->attrs = 'noinline';
         $p = $fn->param(Type::ptr(), 'p');
@@ -4407,7 +4424,15 @@ final class UnifiedArrayRuntime
      */
     private function emitValueAt(): void
     {
-        $fn = $this->module->func('__mir_array_value_at', Type::i64());
+        $this->emitValueAtVariant('__mir_array_value_at', true);
+        // The STORED word, a REF cell included — what a copy that keeps
+        // references reads ({@see emitSpreadInto}).
+        $this->emitValueAtVariant('__mir_array_raw_value_at', false);
+    }
+
+    private function emitValueAtVariant(string $name, bool $deref): void
+    {
+        $fn = $this->module->func($name, Type::i64());
         $arr = $fn->param(Type::ptr(), 'arr');
         $i = $fn->param(Type::i64(), 'i');
         $e = $fn->block('entry');
@@ -4434,7 +4459,7 @@ final class UnifiedArrayRuntime
         $phi = $chk->phi(Type::i64());
         $phi->addIncoming($pv, $packed);
         $phi->addIncoming($hv, $hashed);
-        $chk->ret($chk->call('__mir_deref_cell', Type::i64(), [$phi->value()]));
+        $chk->ret($deref ? $chk->call('__mir_deref_cell', Type::i64(), [$phi->value()]) : $phi->value());
     }
 
     /**
@@ -4646,6 +4671,47 @@ final class UnifiedArrayRuntime
     }
 
     /**
+     * `__mir_bag_set_str(bag, key, v) -> ptr` — a dynamic-property store. A
+     * REF cell (`$o->{$k} = &$x`) replaces the binding; any other value
+     * writes THROUGH a reference the property already holds, dropping what the
+     * box held, as an element store does. Otherwise `__mir_array_set_str`.
+     */
+    private function emitBagSetStr(): void
+    {
+        $i64 = Type::i64();
+        $fn = $this->module->func('__mir_bag_set_str', Type::ptr());
+        $bag = $fn->param(Type::ptr(), 'bag');
+        $key = $fn->param(Type::ptr(), 'key');
+        $v = $fn->param($i64, 'v');
+        $e = $fn->block('entry');
+        $look = $fn->block('look');
+        $hit = $fn->block('hit');
+        $thru = $fn->block('thru');
+        $set = $fn->block('set');
+        $e->brIf($this->isRefCellIr($e, $v), $set, $look);
+        $pos = $look->call('__mir_array_pos_str', $i64, [$bag, $key, Value::int($i64, 0), Value::int($i64, 0)]);
+        $look->brIf($look->icmp('sge', $pos, Value::int($i64, 0)), $hit, $set);
+        $w = $hit->call('__mir_array_raw_value_at', $i64, [$bag, $pos]);
+        $hit->brIf($this->isRefCellIr($hit, $w), $thru, $set);
+        $bp = $thru->inttoptr($thru->and_($w, Value::int($i64, MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $old = $thru->load($i64, $bp);
+        $thru->store($v, $bp);
+        $thru->call('__mir_cell_drop', Type::void(), [$old]);
+        $thru->ret($bag);
+        $set->ret($set->call('__mir_array_set_str', Type::ptr(),
+            [$bag, $key, $v, Value::int($i64, 0), Value::int($i64, 0)]));
+
+        // `__mir_bag_get_str(bag, key) -> i64` — a dynamic-property read: the
+        // value, through a reference the property holds.
+        $fn = $this->module->func('__mir_bag_get_str', $i64);
+        $bag = $fn->param(Type::ptr(), 'bag');
+        $key = $fn->param(Type::ptr(), 'key');
+        $e = $fn->block('entry');
+        $w = $e->call('__mir_array_get_str', $i64, [$bag, $key, Value::int($i64, 0), Value::int($i64, 0)]);
+        $e->ret($e->call('__mir_deref_cell', $i64, [$w]));
+    }
+
+    /**
      * `__mir_array_spread_into(dst, src) -> ptr` — merge every entry of `src`
      * into `dst` with PHP array-spread key semantics (8.1+): STRING keys are
      * preserved (a later duplicate overwrites), INTEGER keys are renumbered
@@ -4697,6 +4763,24 @@ final class UnifiedArrayRuntime
         $cond->brIf($cond->icmp('sge', $i, $len), $end, $body);
         $iv = $body->load(Type::i64(), $iSlot);
         $val = $body->call('__mir_array_value_at', Type::i64(), [$src, $iv]);
+        // A REF element another binding still names stays a REF in the copy, as
+        // php's spread keeps it (`[...$refs]`); one only the source holds is the value.
+        $raw = $body->call('__mir_array_raw_value_at', Type::i64(), [$src, $iv]);
+        $nib = $body->and_($body->lshr($raw, Value::int(Type::i64(), 48)), Value::int(Type::i64(), 15));
+        $isRef = $body->and_($body->icmp('ugt', $raw, Value::int(Type::i64(), -4503599627370496)),
+            $body->icmp('eq', $nib, Value::int(Type::i64(), MemoryAbi::CELL_TAG_REF)));
+        $refChk = $fn->block('sp_refchk');
+        $refJoin = $fn->block('sp_refjoin');
+        $body->brIf($isRef, $refChk, $refJoin);
+        $shared = $refChk->call('__mir_ref_shared', Type::i1(), [
+            $refChk->inttoptr($refChk->and_($raw, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr())]);
+        $kept = $refChk->select($shared, $raw, $val);
+        $refChk->br($refJoin);
+        $vphi = $refJoin->phi(Type::i64());
+        $vphi->addIncoming($val, $body);
+        $vphi->addIncoming($kept, $refChk);
+        $body = $refJoin;
+        $val = $vphi->value();
         // The destination is a buffer of its own and owns what lands in it
         // ({@see Debug::$rcBufferOnly}); the words were copied, not their
         // counts. The spread's result released every element it never took.

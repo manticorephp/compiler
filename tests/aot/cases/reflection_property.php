@@ -23,7 +23,7 @@ foreach ($rc->getProperties() as $rp) {
     $null = ($rp->hasType() && $rp->getType()->allowsNull()) ? '1' : '0';
     echo $rp->getName(), ' vis=', $vis,
          ' static=', $rp->isStatic() ? '1' : '0',
-         ' ro=', $rp->isReadonly() ? '1' : '0',
+         ' ro=', $rp->isReadOnly() ? '1' : '0',
          ' type=', $type, ' null=', $null, "\n";
 }
 
@@ -44,7 +44,7 @@ $rl->setValue($p, 'hi');
 echo "label'=", $rl->getValue($p), "\n";
 
 $rid = $rc->getProperty('id');
-echo 'id=', $rid->getValue($p), ' ro=', $rid->isReadonly() ? '1' : '0', "\n";
+echo 'id=', $rid->getValue($p), ' ro=', $rid->isReadOnly() ? '1' : '0', "\n";
 
 $rcount = $rc->getProperty('count');
 echo 'count static=', $rcount->isStatic() ? '1' : '0', ' val=', $rcount->getValue(), "\n";

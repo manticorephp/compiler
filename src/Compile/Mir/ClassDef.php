@@ -351,6 +351,11 @@ final class ClassDef
      *  @var array<string, bool> */
     public array $propertyMaybeUninit = [];
 
+    /** Hooked properties with no backing store (name => true); php omits them
+     *  from var_dump, print_r, var_export, serialize and `(array)`.
+     *  @var array<string, bool> */
+    public array $virtualProps = [];
+
     /** Byte offset of the per-object init bitmap, or -1 (no bitmap). AGREED
      *  across the whole class tree, like {@see $bagOffsetFixed}; set by
      *  {@see Passes\EmitLlvm::grantInitMaps}. {@see \Compile\MemoryAbi::INIT_MAP_SLOT_BYTES} */

@@ -319,7 +319,12 @@ trait InferNodes
         if ($this->bodyHas($fn, Node::KIND_STATIC_LOCAL_DECL)) {
             $this->collectCellStaticLocals($fn->body, $this->refCellLocalsCur);
         }
-        $this->refCellLocalsCur = \Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
+        if ($this->bodyHas($fn, Node::KIND_REF_ALIAS)) {
+            foreach (\Compile\Mir\LocalSlots::aliasBoxNames($fn, \array_keys($this->mainGlobalNames)) as $an => $_) {
+                $this->refCellLocalsCur[$an] = true;
+            }
+        }
+        $this->refCellLocalsCur =\Compile\Mir\LocalSlots::closeRefCellsOverAliases($fn->body, $this->refCellLocalsCur);
         // A local bound to an element's reference BOX (`$r = &$a[$k]` on a cell
         // channel, {@see EmitLlvmObjects::emitRefAddr}) reads and writes that
         // box — a cell — whatever it is later assigned.

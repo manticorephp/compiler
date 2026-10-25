@@ -337,7 +337,18 @@ final class VivifyRefArgs implements Pass
         foreach ($args as $a) {
             $slot = $ai;
             $ai = $ai + 1;
-            if (!($this->storingByMethod[$method][$slot] ?? false) || $a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            if (!($this->storingByMethod[$method][$slot] ?? false)) { continue; }
+            // The same argument shapes {@see holdAnyStoring} hands over boxed.
+            if ($a->kind === Node::KIND_ARRAY_ACCESS) {
+                $this->asArrayAccess($a)->refStored = true;
+                $this->storedElems = true;
+                continue;
+            }
+            if ($a->kind === Node::KIND_PROPERTY_ACCESS) {
+                $this->storeProp($this->asPropAccess($a));
+                continue;
+            }
+            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
             $name = $this->asLoadLocal($a)->name;
             $this->holds[$name] = true;
             if (!isset($this->candidates[$name])) { $this->candidates[$name] = Type::cell(); }

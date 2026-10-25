@@ -1,0 +1,26 @@
+object(K)#1 (2) {
+  ["real"]=>
+  int(1)
+  ["back"]=>
+  string(1) "X"
+}
+array(2) {
+  ["real"]=>
+  int(1)
+  ["back"]=>
+  string(1) "X"
+}
+K Object
+(
+    [real] => 1
+    [back] => X
+)
+O:1:"K":2:{s:4:"real";i:1;s:4:"back";s:1:"X";}
+\K::__set_state(array(
+   'real' => 1,
+   'virt' => 42,
+   'back' => 'X',
+))
+real
+virt
+back

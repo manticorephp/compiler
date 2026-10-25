@@ -1,0 +1,24 @@
+bool(true)
+int(100)
+string(2) "v1"
+string(2) "f0"
+string(2) "f1"
+string(2) "f2"
+array(2) {
+  [0]=>
+  string(2) "p0"
+  [1]=>
+  string(2) "p1"
+}
+array(2) {
+  [0]=>
+  string(2) "p0"
+  [1]=>
+  string(2) "p1"
+}
+array(2) {
+  [0]=>
+  string(1) "x"
+  [1]=>
+  string(1) "y"
+}

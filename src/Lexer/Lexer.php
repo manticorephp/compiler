@@ -54,7 +54,7 @@ final class Lexer
         'yield',
         // Type-name keywords that PHP treats specially in declarations.
         'int', 'float', 'string', 'bool', 'void', 'never', 'mixed', 'true',
-        'false', 'null', 'object',
+        'false', 'null',
     ];
 
     /**
@@ -170,6 +170,15 @@ final class Lexer
             $line = $this->line;
             $col = $this->col;
             $this->consume(2);
+            // A close tag implies `;` — unless the statement already ended or opened a block.
+            $n = \count($this->tokens);
+            $prev = $n > 0 ? $this->tokens[$n - 1]->kind : TokenKind::OpenTag;
+            if ($prev !== TokenKind::Semicolon && $prev !== TokenKind::OpenBrace
+                && $prev !== TokenKind::CloseBrace && $prev !== TokenKind::Colon
+                && $prev !== TokenKind::OpenTag && $prev !== TokenKind::OpenTagEcho
+                && $prev !== TokenKind::CloseTag && $prev !== TokenKind::DocComment) {
+                $this->tokens[] = new Token(TokenKind::Semicolon, ';', $line, $col);
+            }
             $this->tokens[] = new Token(TokenKind::CloseTag, '?>', $line, $col);
             if ($this->pos < $this->len && $this->src[$this->pos] === "\r") { $this->advance(); }
             if ($this->pos < $this->len && $this->src[$this->pos] === "\n") { $this->advance(); }
@@ -397,6 +406,13 @@ final class Lexer
         $kind = in_array($lower, self::KEYWORDS, true)
             ? TokenKind::Keyword
             : TokenKind::Identifier;
+        // php lexes `readonly` followed by `(` as a plain name (a function called
+        // `readonly`), not as the modifier.
+        if ($lower === 'readonly') {
+            $p = $this->pos;
+            while ($p < $this->len && ($this->src[$p] === ' ' || $this->src[$p] === "\t")) { $p++; }
+            if ($p < $this->len && $this->src[$p] === '(') { $kind = TokenKind::Identifier; }
+        }
         // A label glued to `\Name` is ONE qualified name to php, a reserved word
         // included: `echo\A\f()` calls `A\echo\A\f`, `new\X` reads a constant.
         // Only `namespace\X` stays the keyword — the relative-name prefix.
@@ -675,7 +691,8 @@ final class Lexer
 
     private function skipLineComment(): void
     {
-        while ($this->pos < $this->len && $this->src[$this->pos] !== "\n") {
+        while ($this->pos < $this->len && $this->src[$this->pos] !== "\n"
+            && !($this->src[$this->pos] === '?' && $this->peekAt(1) === '>')) {
             $this->advance();
         }
     }

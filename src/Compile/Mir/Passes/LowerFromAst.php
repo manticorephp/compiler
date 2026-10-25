@@ -1771,9 +1771,69 @@ final class LowerFromAst implements Pass
         if ($this->sawExtract) {
             ExtractScope::expand($module);
         }
+        $this->bindRefTakenForeachVars($module);
         $module->markPassApplied(self::NAME);
         return $module;
     }
+
+    /**
+     * A by-ref `foreach` whose value variable a reference is taken to ANYWHERE in
+     * the function (`[&$v]`, `$w = &$v`, `$out[$k] = &$v`, before or after the
+     * loop) binds `$v = &$xs[$k]` per iteration ({@see foreachBindRef}), as php
+     * does. The copy-and-write-back form handed every such reference the loop's
+     * one copy, and a boxed `$v` wrote its box ADDRESS back into the element.
+     */
+    private function bindRefTakenForeachVars(Module $module): void
+    {
+        foreach ($module->functions as $fd) {
+            /** @var array<string, true> $taken */
+            $taken = [];
+            self::collectRefTakenNames($fd->body, $taken);
+            if ($taken !== []) { $this->rebindRefTakenForeach($fd->body, $taken); }
+        }
+    }
+
+    /** @param array<string, true> $out */
+    private static function collectRefTakenNames(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_REF_ALIAS) {
+            $ra = self::asRefAliasNode($n);
+            $out[$ra->target] = true;
+            $out[$ra->source] = true;
+            return;
+        }
+        if ($n->kind === Node::KIND_REF_CELL) {
+            $src = Walk::children($n)[0];
+            if ($src->kind === Node::KIND_LOAD_LOCAL) { $out[self::asLoadLocalNode($src)->name] = true; }
+        }
+        foreach (Walk::children($n) as $c) { self::collectRefTakenNames($c, $out); }
+    }
+
+    /** @param array<string, true> $taken */
+    private function rebindRefTakenForeach(Node $n, array $taken): void
+    {
+        if ($n->kind === Node::KIND_BLOCK) {
+            $b = self::asBlockNode($n);
+            $cnt = \count($b->stmts);
+            for ($i = 0; $i < $cnt; $i++) {
+                $s = $b->stmts[$i];
+                if ($s->kind === Node::KIND_FOREACH) {
+                    $fe = self::asForeachNode($s);
+                    if ($fe->byRef && !$fe->bindRef && $fe->genSlotBase < 0 && isset($taken[$fe->valueVar])) {
+                        $b->stmts[$i] = $this->foreachBindRef($fe->array, $fe->keyVar, $fe->valueVar, $fe->body);
+                    }
+                }
+                $this->rebindRefTakenForeach($b->stmts[$i], $taken);
+            }
+            return;
+        }
+        foreach (Walk::children($n) as $c) { $this->rebindRefTakenForeach($c, $taken); }
+    }
+
+    private static function asRefAliasNode(Node $n): \Compile\Mir\RefAlias_ { return $n; }
+    private static function asLoadLocalNode(Node $n): LoadLocal { return $n; }
+    private static function asBlockNode(Node $n): Block { return $n; }
+    private static function asForeachNode(Node $n): \Compile\Mir\Foreach_ { return $n; }
     /** Whether a lowered module contains `$object->$name(...)`. */
     /**
      * Method names a would-be CALLABLE ARRAY literal (`[$obj, 'method']`) names,
@@ -4500,7 +4560,7 @@ final class LowerFromAst implements Pass
         // the same node `[&$v]` stores, and the emitter REPLACES the slot's
         // binding rather than writing through whatever reference it held —
         // which is the whole point of that line.
-        if (($expr->target->kind === 'ArrayAccess'
+        if (($expr->target->kind === 'ArrayAccess' || $expr->target->kind === 'DynProp'
                 || ($expr->target->kind === 'PropertyAccess'
                     && $this->propSlotMayHoldRef($this->asPropertyAccessAst($expr->target))))
             && \Compile\Debug::$refCells
@@ -5620,6 +5680,7 @@ final class LowerFromAst implements Pass
                 || $fn === 'trait_exists' || $fn === 'enum_exists') {
                 $cn = $this->guardClassArgName($a0);
                 if ($cn === null) { return self::GUARD_UNKNOWN; }
+                $cn = $this->declaredClassCase($cn);
                 if (isset($this->foldHiddenTypes[$cn])) { return self::GUARD_FALSE; }
                 $decl = $this->classDecls[$cn] ?? ($this->traitTable[$cn] ?? null);
                 if ($decl !== null) {
@@ -5732,6 +5793,18 @@ final class LowerFromAst implements Pass
     /** The class name a `class_exists(...)`-style guard tests: a string literal
      *  or a `X::class` constant (already namespace-resolved), else null for a
      *  runtime-only name. */
+    /** php resolves class names case-insensitively: the declared spelling of `$cn`, else `$cn`. */
+    private function declaredClassCase(string $cn): string
+    {
+        if (isset($this->knownClassNames[$cn]) || isset($this->classDecls[$cn]) || isset($this->traitTable[$cn])) { return $cn; }
+        foreach ([$this->knownClassNames, $this->classDecls, $this->traitTable] as $tbl) {
+            foreach ($tbl as $k => $unused) {
+                if (\strcasecmp((string)$k, $cn) === 0) { return (string)$k; }
+            }
+        }
+        return $cn;
+    }
+
     private function guardClassArgName(\Parser\Ast\Expr $a): ?string
     {
         if ($a->kind === 'StringLiteral') { return \ltrim($this->stringLitValue($a), '\\'); }
@@ -6032,6 +6105,7 @@ final class LowerFromAst implements Pass
             $i = 0;
             foreach ($astArgs as $a) {
                 $conv = $i < $np ? $this->coerceCallableShim($this->lowerParamType($this->paramTypeHint($params[$i])), $a) : null;
+                $conv = $conv ?? $this->lowerSpreadArg($params, $i, $a);
                 $out[] = $conv !== null ? $conv : $this->lowerExpr($a);
                 $i = $i + 1;
             }

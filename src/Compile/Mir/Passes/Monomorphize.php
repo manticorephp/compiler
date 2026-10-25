@@ -348,6 +348,12 @@ final class Monomorphize implements Pass
             // array, or a bare `callable` param receiving a concrete closure at
             // >=1 site. Retyping the callable param to the closure's obj type
             // makes its internal invoke KNOWN (the milestone cellify then fires).
+            // An IN-OUT by-ref array the body REASSIGNS whole (`$input = $out`)
+            // and that is handed a `mixed` value (`array_splice`'s replacement)
+            // may come back with a wider element than the call site passed: a
+            // clone pinned to the site's type coerces the new value into it
+            // (TypeError). Such a param stays erased.
+            if ($p->byRef && $this->hasMixedValueParam($fn) && $this->bodyStoresLocal($fn->body, $p->name)) { continue; }
             if ($this->isErasedArrayParam($p->type)) {
                 foreach ($calls as $call) {
                     if ($idx < \count($call->args)
@@ -609,6 +615,26 @@ final class Monomorphize implements Pass
         );
         $clone->returnArrayHinted = $fn->returnArrayHinted;
         return $clone;
+    }
+
+    private function hasMixedValueParam(FunctionDef $fn): bool
+    {
+        foreach ($fn->params as $q) {
+            if (!$q->byRef && $q->type->kind === Type::KIND_CELL) { return true; }
+        }
+        return false;
+    }
+
+    /** Does `$n` assign local `$name` as a whole (`$name = v`)? */
+    private function bodyStoresLocal(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) {
+            return true;
+        }
+        foreach (Walk::children($n) as $c) {
+            if ($this->bodyStoresLocal($c, $name)) { return true; }
+        }
+        return false;
     }
 
     /** Does `$n` write an element of local `$name` (`$name[k] = v`, `$name[] = v`)? */

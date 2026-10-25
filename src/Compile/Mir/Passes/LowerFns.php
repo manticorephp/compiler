@@ -1051,7 +1051,57 @@ trait LowerFns
             $this->module->hasRefCells = true;
             return new \Compile\Mir\RefCell_($lv, Type::cell());
         }
+        if ($k === 'Spread') {
+            $rs = $this->lowerRefSpread($a);
+            if ($rs !== null) { return $rs; }
+        }
         return $this->lowerExpr($a);
+    }
+
+    /**
+     * `...$xs` into a by-ref parameter: php makes every element of `$xs` a
+     * reference and passes those, so the callee's writes land in `$xs`. Lowered
+     * as `$t = []; foreach ($xs as $k => &$v) { $t[$k] = &$v; }` and `...$t`:
+     * the spread keeps a reference another binding still names. Only a plain
+     * variable is unpacked by reference — php passes any other operand's values.
+     */
+    private function lowerRefSpread(\Parser\Ast\Expr $a): ?Node
+    {
+        if (!\Compile\Debug::$refCells) { return null; }
+        $sv = $this->spreadValueOf($a);
+        if ($sv->kind !== 'Variable' || $this->varName($sv) === 'this') { return null; }
+        $id = (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $span = $a->span;
+        $t = \Parser\Ast\Expr::variable('__rsp_' . $id, $span);
+        $kn = '__rspk_' . $id;
+        $vn = '__rspv_' . $id;
+        $bind = $this->lowerExpr(new \Parser\Ast\RefAssign(
+            \Parser\Ast\Expr::arrayAccess($t, \Parser\Ast\Expr::variable($kn, $span), $span),
+            \Parser\Ast\Expr::variable($vn, $span), $span));
+        $loop = $this->foreachBindRef($this->lowerExpr($sv), $kn, $vn, new Block([$bind], Type::void()));
+        $this->module->hasRefCells = true;
+        return new \Compile\Mir\Spread_(new Block([
+            $this->lowerExpr(\Parser\Ast\Expr::assign($t, \Parser\Ast\Expr::arrayLit([], $span), $span)),
+            $loop,
+            $this->lowerExpr($t),
+        ], Type::unknown()), Type::unknown());
+    }
+
+    /**
+     * An argument against its parameter list: a spread that reaches a by-ref
+     * parameter ({@see lowerRefSpread}) or the plain lowering.
+     *
+     * @param \Parser\Ast\Param[] $params
+     */
+    private function lowerSpreadArg(array $params, int $from, \Parser\Ast\Expr $a): ?Node
+    {
+        if ($a->kind !== 'Spread') { return null; }
+        $n = \count($params);
+        for ($j = $from; $j < $n; $j = $j + 1) {
+            if ($this->paramByRefDecl($params[$j])) { return $this->lowerRefSpread($a); }
+        }
+        return null;
     }
 
     /**
@@ -1215,7 +1265,7 @@ trait LowerFns
                 $out = [];
                 $i = 0;
                 foreach ($astArgs as $x) {
-                    $out[] = $this->lowerArgForParam($params[$i] ?? null, $x);
+                    $out[] = $this->lowerSpreadArg($params, $i, $x) ?? $this->lowerArgForParam($params[$i] ?? null, $x);
                     $i = $i + 1;
                 }
                 return $out;

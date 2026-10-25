@@ -233,6 +233,44 @@ trait LowerClasses
      * @param array<string, array{get: ?string, set: ?string}> $propHooks
      * @return array<string, bool>
      */
+    /**
+     * php's VIRTUAL hooked properties: every hook has a body and none touches
+     * `$this->name`, so the property has no backing store and var_dump / (array) /
+     * serialize leave it out. Inherited from the parent unless redeclared.
+     *
+     * @return array<string, bool>
+     */
+    private function virtualHookProps(\Parser\Ast\ClassDecl $decl, string $parent): array
+    {
+        $out = [];
+        if ($parent !== '' && isset($this->classTable[$parent])) {
+            $out = $this->classTable[$parent]->virtualProps;
+        }
+        foreach ($decl->properties as $prop) {
+            if ($prop->isStatic) { continue; }
+            unset($out[$prop->name]);
+            if ($prop->hooks === []) { continue; }
+            $virtual = true;
+            foreach ($prop->hooks as $hook) {
+                // `set => expr` is shorthand for `$this->prop = expr`: it writes the backing slot.
+                if ($hook->kind === 'set' && $hook->exprBody !== null) { $virtual = false; break; }
+                $w = new \Analyze\AstWalk(false);
+                if ($hook->blockBody !== null) { $w->stmts($hook->blockBody->statements); }
+                elseif ($hook->exprBody !== null) { $w->exprTree($hook->exprBody); }
+                else { $virtual = false; break; }
+                foreach ($w->exprs as $e) {
+                    if ($e instanceof \Parser\Ast\PropertyAccess && $e->property === $prop->name
+                        && $e->object instanceof \Parser\Ast\Variable && $e->object->name === 'this') {
+                        $virtual = false;
+                        break 2;
+                    }
+                }
+            }
+            if ($virtual) { $out[$prop->name] = true; }
+        }
+        return $out;
+    }
+
     private function maybeUninitProps(\Parser\Ast\ClassDecl $decl, string $parent, array $propHooks): array
     {
         $out = [];
@@ -462,13 +500,17 @@ trait LowerClasses
                 // (only it may write the slot).
             }
         }
+        /** @var string[] $promNew */
+        $promNew = [];
+        $ctorSpan = null;
         foreach ($decl->methods as $m) {
             if ($m->name === '__construct') {
+                $ctorSpan = $m->span;
                 foreach ($m->params as $p) {
                     if ($p->promoted !== '') {
                         // A promoted param that REDECLARES an inherited property
                         // keeps the parent's slot — see the note below.
-                        if (!isset($types[$p->name])) { $names[] = $p->name; }
+                        if (!isset($types[$p->name])) { $names[] = $p->name; $promNew[] = $p->name; }
                         $pdoc = $this->docTagType($m->docComment, '@param', $p->name);
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
@@ -484,7 +526,15 @@ trait LowerClasses
         }
         $spNames = [];
         $spTypes = [];
+        // php slots a promoted param where the constructor sits in the class
+        // body: after the instance properties declared before it, ahead of the rest.
+        $promBefore = '';
         foreach ($decl->properties as $prop) {
+            if ($promBefore === '' && $ctorSpan !== null && !$prop->isStatic && !isset($types[$prop->name])
+                && ($prop->span->line > $ctorSpan->line
+                    || ($prop->span->line === $ctorSpan->line && $prop->span->column > $ctorSpan->column))) {
+                $promBefore = $prop->name;
+            }
             $vdoc = $this->docTagType($prop->docComment, '@var', '');
             $veff = $this->effectiveHint($prop->typeHint, $vdoc);
             // `@var T[]` erases in the shared body (as it did before generics);
@@ -554,6 +604,20 @@ trait LowerClasses
             $neverObj[$prop->name] = $this->hintNeverObject($veff);
             $docList[$prop->name] = $this->isElemOnlyArrayDoc($veff);
             if ($prop->isReadonly || $decl->isReadonly) { $roProps[$prop->name] = true; }
+        }
+        if ($promNew !== []) {
+            $kept = [];
+            foreach ($names as $n) {
+                if (\in_array($n, $promNew, true)) { continue; }
+                if ($n === $promBefore) {
+                    foreach ($promNew as $pn) { $kept[] = $pn; }
+                }
+                $kept[] = $n;
+            }
+            if ($promBefore === '') {
+                foreach ($promNew as $pn) { $kept[] = $pn; }
+            }
+            $names = $kept;
         }
         // STATIC trait properties, mixed in the same way. php gives every using
         // class its OWN slot for a trait's static — the trait is a compile-time
@@ -807,6 +871,7 @@ trait LowerClasses
         $cd->propertyReadonly = $roProps;
         $cd->propertyMeta = $propMeta;
         $cd->propertyMaybeUninit = $this->maybeUninitProps($decl, $parent, $propHooks);
+        $cd->virtualProps = $this->virtualHookProps($decl, $parent);
         $cd->methodMeta = $methodMeta;
         $cd->attributes = $this->attrNames($decl->attributes);
         $cd->isFinal = $decl->isFinal;

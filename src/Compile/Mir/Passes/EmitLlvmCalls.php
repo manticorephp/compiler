@@ -4692,6 +4692,24 @@ trait EmitLlvmCalls
                 $ra = $this->ssa->allocReg();
                 $out .= '  ' . $ra . ' = ptrtoint ptr ' . $rs . " to i64\n";
                 $ev = $ra;
+                // An element that IS a reference (`...$xs` into a by-ref
+                // parameter makes every element one, {@see LowerFns::lowerRefSpread})
+                // binds the parameter to its box: a cell slot, so only a cell
+                // parameter takes it.
+                if ($pt === null || $pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN) {
+                    $rw = $this->ssa->allocReg();
+                    $out .= '  ' . $rw . ' = call i64 @__mir_array_raw_value_at(ptr ' . $arrReg
+                          . ', i64 ' . (string)($k - $firstParam) . ")\n";
+                    $tg = $this->ssa->allocReg();
+                    $out .= '  ' . $tg . ' = and i64 ' . $rw . ', ' . (string)(~\Compile\MemoryAbi::CELL_PAYLOAD_MASK) . "\n";
+                    $isr = $this->ssa->allocReg();
+                    $out .= '  ' . $isr . ' = icmp eq i64 ' . $tg . ', ' . (string)\Compile\MemoryAbi::CELL_REF_TAG_BITS . "\n";
+                    $bx = $this->ssa->allocReg();
+                    $out .= '  ' . $bx . ' = and i64 ' . $rw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                    $sel = $this->ssa->allocReg();
+                    $out .= '  ' . $sel . ' = select i1 ' . $isr . ', i64 ' . $bx . ', i64 ' . $ra . "\n";
+                    $ev = $sel;
+                }
             }
             $regs[] = $ev;
         }
