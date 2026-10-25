@@ -53,6 +53,8 @@ final class __McPdoMyResult
     public int $insertId = 0;
     public int $status = 0;
     public int $warnings = 0;
+    /** The OK packet's human-readable message (mysql_info()), '' when it has none. */
+    public string $info = '';
     public ?__McPdoMyErr $err = null;
     public ?__McPdoMyResult $next = null;
     /** Unbuffered: only the header was read, the rows are still on the wire (see __McPdoMyWire::cursorRow). */
@@ -105,6 +107,8 @@ final class __McPdoMyWire
     public int $connId = 0;
     /** The status flags of the latest OK/EOF packet (SERVER_STATUS_*). */
     public int $status = 0;
+    /** The latest OK packet's message, the authentication one included (MariaDB puts its certificate digest there). */
+    public string $okInfo = '';
     /** The last OK packet's AUTO_INCREMENT id; 0 after any other command, as mysql_insert_id(). */
     public int $insertId = 0;
     /** The endpoint, for ATTR_CONNECTION_STATUS. */
@@ -879,6 +883,16 @@ final class __McPdoMyWire
         $r->status = self::le16($p, $o);
         $r->warnings = self::le16($p, $o + 2);
         $this->status = $r->status;
+        // mysqlnd reads the message as a length-encoded string, clipped to the packet, whether or not session tracking is on
+        $o += 4;
+        $info = '';
+        $l = self::lenencAt($p, $o, \PHP_INT_MAX);
+        if ($l > 0) {
+            $s = $o + self::lenencSize($p, $o);
+            $info = \substr($p, $s, \min($l, $n - $s));
+        }
+        $r->info = $info;
+        $this->okInfo = $info;
     }
 
     /** A length-encoded string at $o; sets $this->lp past it. A bad length is a malformed packet. */
