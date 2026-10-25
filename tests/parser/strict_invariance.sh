@@ -7,7 +7,8 @@
 #   tests/parser/strict_invariance.sh --check DIR    # compare against it
 #
 # One sha1 per .php under src/, prelude/ and tests/aot/cases/. DIR must be
-# outside the repo.
+# outside the repo. Numeric enum-case name/value lines are masked: dump-ast prints
+# uninitialised memory there, differing run to run (pre-existing bug).
 
 set -uo pipefail
 
@@ -27,7 +28,7 @@ out="$DIR/shas.txt"
 
 : > "$out"
 while IFS= read -r f; do
-    sha="$(bin/manticore dump-ast "$f" 2>&1 | shasum | cut -d' ' -f1)"
+    sha="$(bin/manticore dump-ast "$f" 2>&1 | LC_ALL=C awk '/^ *Case -?[0-9]+$/ {print "Case N"; m=1; next} m && /^ *value: -?[0-9]+$/ {print "value N"; m=0; next} {m=0; print}' | shasum | cut -d' ' -f1)"
     printf '%s  %s\n' "$sha" "$f" >> "$out"
 done < <(find src prelude tests/aot/cases -name '*.php' | LC_ALL=C sort)
 
