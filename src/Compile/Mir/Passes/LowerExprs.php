@@ -442,6 +442,18 @@ trait LowerExprs
             // `define("NAME", v)` — registered in the run() pre-pass; the call
             // itself is a no-op yielding true (define's bool return).
             if ($fnBare === 'define') {
+                $d0 = $expr->args[0] ?? null;
+                if ($d0 !== null && $d0->kind === 'StringLiteral' && \count($expr->args) >= 2) {
+                    $dn = $this->constBareName($this->stringLitValue($d0));
+                    if (isset($this->runtimeConstants[$dn])) {
+                        $dv = $this->lowerExpr($expr->args[1]);
+                        $cell = $this->runtimeConstants[$dn];
+                        return new Block([
+                            new StoreStaticProp_($cell . '_set', new IntConst(1, Type::int_()), Type::int_(), Type::int_()),
+                            new StoreStaticProp_($cell, $dv, $dv->type, Type::cell()),
+                        ], Type::bool_());
+                    }
+                }
                 return new BoolConst(true, Type::bool_());
             }
             // `defined("NAME")` → compile-time bool against predefined +
@@ -454,6 +466,9 @@ trait LowerExprs
                     return new Call('__mc_defined', [$this->lowerExpr($a0)], Type::bool_());
                 }
                 $nm = $this->constBareName($this->stringLitValue($a0));
+                if (isset($this->runtimeConstants[$nm])) {
+                    return new Cmp(new StaticProp_($this->runtimeConstants[$nm] . '_set', Type::int_()), new IntConst(0, Type::int_()), '!=');
+                }
                 $known = $this->predefinedConstant($nm) !== null
                     || isset($this->userConstants[$nm]);
                 return new BoolConst($known, Type::bool_());
@@ -472,6 +487,7 @@ trait LowerExprs
                     $nm = $this->constBareName($this->stringLitValue($a0));
                     $pre = $this->predefinedConstant($nm);
                     if ($pre !== null) { return $pre; }
+                    if (isset($this->runtimeConstants[$nm])) { return new StaticProp_($this->runtimeConstants[$nm], Type::cell()); }
                     if (isset($this->userConstants[$nm])) {
                         return $this->lowerExpr($this->userConstants[$nm]);
                     }

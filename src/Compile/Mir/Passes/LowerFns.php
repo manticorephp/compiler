@@ -768,6 +768,16 @@ trait LowerFns
         return $conv;
     }
 
+    private function closureBodyYields(\Parser\Ast\Closure $c): bool
+    {
+        $w = new \Analyze\AstWalk(true);
+        $w->stmts($c->body->statements);
+        foreach ($w->exprs as $e) {
+            if ($e instanceof \Parser\Ast\YieldExpr) { return true; }
+        }
+        return false;
+    }
+
     private function lowerInvoke(\Parser\Ast\Invoke $expr): Node
     {
         // Literal string / array callable invoked directly: `"fn"(x)`,
@@ -844,6 +854,15 @@ trait LowerFns
             return new Ternary($cond, new NullConst(Type::null_()), new Invoke_($dyn, $nsArgs, Type::unknown()), Type::unknown());
         }
         $callee = $this->lowerExpr($calleeAst);
+        // A closure LITERAL invoked in place: bind its env to a hidden local, so the
+        // frame owns it and an unwind out of the call drops it like any local's.
+        // A generator closure stays unbound — the Generator borrows the env.
+        if ($callee->kind === Node::KIND_CLOSURE && $calleeAst instanceof \Parser\Ast\Closure
+            && !$this->closureBodyYields($calleeAst)) {
+            $tmp = '__iife_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $callee = new StoreLocal($tmp, $callee, $callee->type);
+        }
         $args = [];
         $names = [];
         $anyNamed = false;

@@ -1,6 +1,5 @@
 <?php
 // A closure literal invoked in place and thrown through leaks its env on the unwind path.
-// issue: #260
 function t(string $p): int {
     try { (function () use ($p) { throw new \RuntimeException("nf $p"); })(); } catch (\RuntimeException $e) { return 1; }
     return 0;
