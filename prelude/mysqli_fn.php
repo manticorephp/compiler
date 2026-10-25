@@ -90,12 +90,12 @@ function mysqli_escape_string(mysqli $mysql, string $string): string
 
 function mysqli_execute(mysqli_stmt $statement, ?array $params = null): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->__mcExecute($params, 'mysqli_execute', 2);
 }
 
 function mysqli_execute_query(mysqli $mysql, string $query, ?array $params = null): bool|mysqli_result
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->__mcExecuteQuery($query, $params, 'mysqli_execute_query', 3);
 }
 
 function mysqli_fetch_all(mysqli_result $result, int $mode = 2): array
@@ -290,7 +290,7 @@ function mysqli_poll(?array &$read, ?array &$error, array &$reject, int $seconds
 
 function mysqli_prepare(mysqli $mysql, string $query): false|mysqli_stmt
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->prepare($query);
 }
 
 function mysqli_query(mysqli $mysql, string $query, int $result_mode = 0): bool|mysqli_result
@@ -376,142 +376,142 @@ function mysqli_stat(mysqli $mysql): false|string
 
 function mysqli_stmt_affected_rows(mysqli_stmt $statement): int|string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliStmt::of($statement, __McMysqliConn::VALID)->affected;
 }
 
 function mysqli_stmt_attr_get(mysqli_stmt $statement, int $attribute): int
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->__mcAttrGet($attribute, 'mysqli_stmt_attr_get', 2);
 }
 
 function mysqli_stmt_attr_set(mysqli_stmt $statement, int $attribute, int $value): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->__mcAttrSet($attribute, $value, 'mysqli_stmt_attr_set', 2);
 }
 
 function mysqli_stmt_bind_param(mysqli_stmt $statement, string $types, mixed &...$vars): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->__mcBindParam($types, 'mysqli_stmt_bind_param', 2, ...$vars);
 }
 
 function mysqli_stmt_bind_result(mysqli_stmt $statement, mixed &...$vars): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->bind_result(...$vars);
 }
 
 function mysqli_stmt_close(mysqli_stmt $statement): true
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->close();
 }
 
 function mysqli_stmt_data_seek(mysqli_stmt $statement, int $offset): void
 {
-    throw new Error('mysqli: not implemented');
+    $statement->__mcDataSeek($offset, 'mysqli_stmt_data_seek', 2);
 }
 
 function mysqli_stmt_errno(mysqli_stmt $statement): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliStmt::of($statement, __McMysqliConn::INIT)->errno;
 }
 
 function mysqli_stmt_error(mysqli_stmt $statement): string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliStmt::of($statement, __McMysqliConn::INIT)->error;
 }
 
 function mysqli_stmt_error_list(mysqli_stmt $statement): array
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliStmt::of($statement, __McMysqliConn::INIT)->errorList;
 }
 
 function mysqli_stmt_execute(mysqli_stmt $statement, ?array $params = null): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->__mcExecute($params, 'mysqli_stmt_execute', 2);
 }
 
 function mysqli_stmt_fetch(mysqli_stmt $statement): ?bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->fetch();
 }
 
 function mysqli_stmt_field_count(mysqli_stmt $statement): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliStmt::of($statement, __McMysqliConn::VALID)->fieldCount;
 }
 
 function mysqli_stmt_free_result(mysqli_stmt $statement): void
 {
-    throw new Error('mysqli: not implemented');
+    $statement->free_result();
 }
 
 function mysqli_stmt_get_result(mysqli_stmt $statement): false|mysqli_result
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->get_result();
 }
 
 function mysqli_stmt_get_warnings(mysqli_stmt $statement): false|mysqli_warning
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->get_warnings();
 }
 
 function mysqli_stmt_init(mysqli $mysql): false|mysqli_stmt
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->stmt_init();
 }
 
 function mysqli_stmt_insert_id(mysqli_stmt $statement): int|string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliStmt::of($statement, __McMysqliConn::VALID)->insertId;
 }
 
 function mysqli_stmt_more_results(mysqli_stmt $statement): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->more_results();
 }
 
 function mysqli_stmt_next_result(mysqli_stmt $statement): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->next_result();
 }
 
 function mysqli_stmt_num_rows(mysqli_stmt $statement): int|string
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->num_rows();
 }
 
 function mysqli_stmt_param_count(mysqli_stmt $statement): int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliStmt::of($statement, __McMysqliConn::VALID)->paramCount;
 }
 
 function mysqli_stmt_prepare(mysqli_stmt $statement, string $query): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->prepare($query);
 }
 
 function mysqli_stmt_reset(mysqli_stmt $statement): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->reset();
 }
 
 function mysqli_stmt_result_metadata(mysqli_stmt $statement): false|mysqli_result
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->result_metadata();
 }
 
 function mysqli_stmt_send_long_data(mysqli_stmt $statement, int $param_num, string $data): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->__mcSendLongData($param_num, $data, 'mysqli_stmt_send_long_data', 2);
 }
 
 function mysqli_stmt_sqlstate(mysqli_stmt $statement): string
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliStmt::of($statement, __McMysqliConn::VALID)->sqlstate;
 }
 
 function mysqli_stmt_store_result(mysqli_stmt $statement): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $statement->store_result();
 }
 
 function mysqli_store_result(mysqli $mysql, int $mode = 0): false|mysqli_result

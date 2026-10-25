@@ -195,6 +195,9 @@ final class __McMysqliConn
     public ?__McPdoMyResult $chain = null;
     /** The unbuffered result being read: the wire is mid-result until it ends or is freed. */
     public ?__McMysqliRs $open = null;
+    /** The prepared statement whose result holds the wire: rows still on it, or ($psNext) more results promised behind it. */
+    public ?__McMysqliStmt $ps = null;
+    public bool $psNext = false;
 
     /** options() / ssl_set(), applied by the next connect */
     public int $connectTimeout = 0;
@@ -266,13 +269,25 @@ final class __McMysqliConn
         $this->errorList = [];
     }
 
-    /** Records an error; throws mysqli_sql_exception iff the report mode has both ERROR and STRICT, else returns false. */
-    public function fail(int $no, string $state, string $msg): false
+    /** Records an error (mysqlnd's SET_CLIENT_ERROR / COPY_CLIENT_ERROR on the connection), nothing thrown. */
+    public function record(int $no, string $state, string $msg): void
     {
         $this->errno = $no;
         $this->error = $msg;
         $this->sqlstate = $state;
         $this->errorList[] = ['errno' => $no, 'sqlstate' => $state, 'error' => $msg];
+    }
+
+    /** MYSQLI_REPORT_MYSQL_ERROR: the connection's recorded error is thrown when the report mode has ERROR and STRICT. */
+    public function report(): void
+    {
+        if ($this->errno !== 0 && (self::$mode & 3) === 3) { throw mysqli_sql_exception::__mcNew($this->error, $this->errno, $this->sqlstate); }
+    }
+
+    /** Records an error; throws mysqli_sql_exception iff the report mode has both ERROR and STRICT, else returns false. */
+    public function fail(int $no, string $state, string $msg): false
+    {
+        $this->record($no, $state, $msg);
         if ((self::$mode & 3) === 3) { throw mysqli_sql_exception::__mcNew($msg, $no, $state); }
         return false;
     }
@@ -292,7 +307,7 @@ final class __McMysqliConn
     /** A result is waiting to be taken, read or advanced: no command may start (mysqlnd's state != READY). */
     public function busy(): bool
     {
-        return $this->pend !== null || $this->open !== null || $this->chain !== null;
+        return $this->pend !== null || $this->open !== null || $this->chain !== null || $this->ps !== null;
     }
 
     /** Forgets every result in flight (the connection is going away). */
@@ -302,6 +317,8 @@ final class __McMysqliConn
         $this->open = null;
         $this->pend = null;
         $this->chain = null;
+        $this->ps = null;
+        $this->psNext = false;
         if ($o !== null) { $o->c = null; }
     }
 
@@ -920,7 +937,86 @@ class mysqli
 
     public function execute_query(string $query, ?array $params = null): bool|mysqli_result
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcExecuteQuery($query, $params, 'mysqli::execute_query', 2);
+    }
+
+    /**
+     * execute_query() and mysqli_execute_query() ($arg: the params' position): prepare, bind every value as a string,
+     * execute, get_result, close; the statement's error and the affected_rows of the last step end up on the connection.
+     */
+    public function __mcExecuteQuery(string $query, ?array $params, string $fn, int $arg): bool|mysqli_result
+    {
+        $c = __McMysqliConn::of($this)->link();
+        $st = new __McMysqliStmt();
+        $st->c = $c;
+        $st->link = $this;
+        if (!$st->prepare($query)) {
+            $ex = $st->reportEx();
+            self::__mcCloseCopy($st, $c);
+            if ($ex !== null) { throw $ex; }
+            return false;
+        }
+        if ($params !== null) {
+            $n = \count($params);
+            if (!\array_is_list($params) || $n !== $st->paramCount) {
+                $st->close();
+                if (!\array_is_list($params)) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($params) must be a list array'); }
+                throw new ValueError($fn . '(): Argument #' . $arg . ' ($params) must consist of exactly ' . $st->paramCount . ' elements, ' . $n . ' present');
+            }
+            if (!$st->bindParams()) {
+                self::__mcCloseCopy($st, $c);
+                return false;
+            }
+            if ($n > 0) {
+                /** @var array<int,mixed> */
+                $vals = [];
+                /** @var array<int,int> */
+                $tys = [];
+                foreach ($params as $v) {
+                    $vals[] = $v;
+                    $tys[] = 253;
+                }
+                $st->pv = $vals;
+                $st->ptype = $tys;
+                $st->pbound = true;
+            }
+        }
+        if (!$st->execute()) {
+            $ex = $st->reportEx();
+            self::__mcCloseCopy($st, $c);
+            if ($ex !== null) { throw $ex; }
+            return false;
+        }
+        if ($st->fieldCount === 0) {
+            self::__mcCloseCopy($st, $c);
+            return true;
+        }
+        $rs = $st->getResult();
+        if ($rs === null) {
+            $ex = $st->reportEx();
+            self::__mcCloseCopy($st, $c);
+            if ($ex !== null) { throw $ex; }
+            return false;
+        }
+        $res = __McMysqliRs::wrap($rs, $this);
+        self::__mcCloseCopy($st, $c);
+        return $res;
+    }
+
+    /** close_stmt_and_copy_errors: the statement goes, its error (and the connection's affected_rows) stay on the connection. */
+    private static function __mcCloseCopy(__McMysqliStmt $st, __McMysqliConn $c): void
+    {
+        $no = $st->errno;
+        $msg = $st->error;
+        $state = $st->sqlstate;
+        $list = $st->errorList;
+        $ar = $c->affectedRows;
+        $st->close();
+        $c->errno = $no;
+        $c->error = $msg;
+        $c->sqlstate = $state;
+        $c->errorList = $list;
+        $c->affectedRows = $ar;
     }
 
     public function get_charset(): ?object
@@ -1017,7 +1113,27 @@ class mysqli
 
     public function prepare(string $query): false|mysqli_stmt
     {
-        throw new Error('mysqli: not implemented');
+        $c = __McMysqliConn::of($this)->link();
+        $s = new mysqli_stmt($this);
+        $st = $s->__mcSt();
+        if ($st === null) { return false; }
+        if (!$st->prepare($query)) {
+            // mysqli_stmt_close() clears the errors: they are kept across it, on the connection
+            $no = $c->errno;
+            $msg = $c->error;
+            $state = $c->sqlstate;
+            $list = $c->errorList;
+            $st->close();
+            $s->__mcDetach();
+            $c->errno = $no;
+            $c->error = $msg;
+            $c->sqlstate = $state;
+            $c->errorList = $list;
+            $c->report();
+            return false;
+        }
+        $st->rst = __McMysqliConn::VALID;
+        return $s;
     }
 
     public function query(string $query, int $result_mode = 0): bool|mysqli_result
@@ -1148,7 +1264,7 @@ class mysqli
 
     public function stmt_init(): false|mysqli_stmt
     {
-        throw new Error('mysqli: not implemented');
+        return new mysqli_stmt($this);
     }
 
     public function store_result(int $mode = 0): false|mysqli_result
@@ -1226,6 +1342,22 @@ final class __McMysqliRs
     /** Some column is not handed out as the string the wire carries. */
     public bool $conv = false;
     public bool $bit = false;
+    /** Binary-protocol rows (get_result, result_metadata): cells decoded by __McMysqliStmt::decode, no lengths (mysqlnd keeps none). */
+    public bool $bin = false;
+    /** The state the next mysqli_result constructor takes instead of a connection's result (see wrap()). */
+    public static ?__McMysqliRs $next = null;
+
+    /** A mysqli_result over $rs: constructed against $link, the constructor takes $rs instead of the connection's pending result. */
+    public static function wrap(__McMysqliRs $rs, ?mysqli $link): mysqli_result
+    {
+        if ($link === null) { $link = new mysqli(); }
+        self::$next = $rs;
+        try {
+            return new mysqli_result($link);
+        } finally {
+            self::$next = null;
+        }
+    }
 
     public static function make(__McMysqliConn $c, __McPdoMyResult $r, bool $unbuf): self
     {
@@ -1234,6 +1366,7 @@ final class __McMysqliRs
         $rs->r = $r;
         $rs->unbuf = $unbuf;
         $rs->mem = !$r->stream || $r->done;
+        $rs->bin = $r->bin;
         $native = $c->intAndFloatNative;
         $rs->native = $native;
         $n = \count($r->types);
@@ -1320,7 +1453,7 @@ final class __McMysqliRs
     public function lengths(): ?array
     {
         $row = $this->cur;
-        if ($row === null) { return null; }
+        if ($row === null || $this->bin) { return null; }
         $o = [];
         foreach ($row as $v) { $o[] = \is_string($v) ? \strlen($v) : 0; }
         return $o;
@@ -1371,6 +1504,7 @@ final class __McMysqliRs
             $row = $r->rows[$this->pos];
             $this->pos++;
             $this->seen++;
+            if ($this->bin) { $tr = __McMysqliStmt::decode($r, $row); $this->cur = $tr; return $tr; }
             if ($this->conv && ($this->bit || $this->native)) { $tr = $this->typed($row); $this->cur = $tr; return $tr; }
             $this->cur = $row;
             return $row;
@@ -1584,6 +1718,12 @@ class mysqli_result implements IteratorAggregate
 
     public function __construct(mysqli $mysql, int $result_mode = 0)
     {
+        $pre = __McMysqliRs::$next;
+        if ($pre !== null) {
+            __McMysqliRs::$next = null;
+            $this->__mc = $pre;
+            return;
+        }
         $c = __McMysqliConn::of($mysql)->link();
         if ($result_mode !== 0 && $result_mode !== 1) {
             throw new ValueError('mysqli_result::__construct(): Argument #2 ($result_mode) must be either MYSQLI_STORE_RESULT or MYSQLI_USE_RESULT');
@@ -1811,117 +1951,1318 @@ final class mysqli_sql_exception extends RuntimeException
     }
 }
 
-class mysqli_stmt
+/**
+ * The state behind one mysqli_stmt: mysqlnd's statement (mysqlnd_ps.c) ported over the pdo_mysql wire. $state is mysqlnd's
+ * MYSQLND_STMT_STATE, $rst mysqli's resource status. The connection is "held" by a statement ($c->ps) while rows of its
+ * result are still on the wire (CONN_FETCHING_DATA) or the server promised another result (CONN_NEXT_RESULT_PENDING); no
+ * other command may start then. The bound variables are references kept in $pv (parameters) and $rv (results).
+ */
+final class __McMysqliStmt
 {
-    public int|string $affected_rows;
-    public int $errno;
-    public string $error;
-    public array $error_list;
-    public int $field_count;
-    public int $id;
-    public int|string $insert_id;
-    public int|string $num_rows;
-    public int $param_count;
-    public string $sqlstate;
+    public const INITTED = 1;
+    public const PREPARED = 2;
+    public const EXECUTED = 3;
+    public const WAITING = 4;
+    public const USED = 5;
+    public const FETCHING = 6;
 
-    public function __construct(mysqli $mysql, ?string $query = null)
+    /** The connection, null once the statement is closed. */
+    public ?__McMysqliConn $c = null;
+    /** The mysqli the statement was made on (a mysqli_result made from the statement is constructed against it). */
+    public ?mysqli $link = null;
+    /** mysqli's MYSQLI_STATUS_*: INITIALIZED until a prepare succeeded, then VALID. */
+    public int $rst = __McMysqliConn::INIT;
+    public int $state = self::INITTED;
+    public int $id = 0;
+    public int $gen = 0;
+    public int $paramCount = 0;
+    public int $fieldCount = 0;
+    /** mysqlnd's stmt->result exists (it holds the metadata and the row source of the current result set). */
+    public bool $hasRes = false;
+    public ?__McPdoMyResult $meta = null;
+    /** The row source of stmt->result: 0 none, 1 unbuffered (the wire or the server cursor), 2 stored. */
+    public int $rmode = 0;
+    /** The result of the wire chain the statement reads now. */
+    public ?__McPdoMyResult $cur = null;
+    /** @var array<int,array<int,?string>> the stored rows */
+    public array $rows = [];
+    public int $pos = 0;
+    public int $rowCount = 0;
+    public bool $eof = false;
+    public bool $cursor = false;
+    /** default_rset_handler: store_result (a cursor was asked for and none opened), else use_result. */
+    public bool $storeDefault = false;
+    public int|string $affected = 0;
+    public int|string $insertId = 0;
+    public int $warnings = 0;
+    public int|string $nr = 0;
+    public int $errno = 0;
+    public string $error = '';
+    public string $sqlstate = '00000';
+    /** @var array<int,array<string,mixed>> */
+    public array $errorList = [];
+    /** STMT_ATTR_CURSOR_TYPE (sent as the COM_STMT_EXECUTE flags) and STMT_ATTR_UPDATE_MAX_LENGTH. */
+    public int $flags = 0;
+    public bool $updateMaxLength = false;
+    public bool $pbound = false;
+    /** @var array<int,mixed> */
+    public array $pv = [];
+    /** @var array<int,int> per parameter: MYSQL_TYPE_LONGLONG (i), DOUBLE (d), VAR_STRING (s), LONG_BLOB (b) */
+    public array $ptype = [];
+    /** @var array<int,bool> long data was sent for the parameter since the last execute */
+    public array $blobUsed = [];
+    /** The next COM_STMT_EXECUTE carries the parameter types (new-params-bound flag). */
+    public bool $sendTypes = false;
+    /** The number of result columns bound (0: no bind_result). */
+    public int $rbn = 0;
+    /** @var array<int,mixed> */
+    public array $rv = [];
+
+    public const NOT_PREPARED = 'Statement not prepared';
+
+    /** The state of a statement for a method; closed or not yet prepared is the Error mysqli throws. */
+    public static function of(mysqli_stmt $s, int $need): self
     {
-        throw new Error('mysqli: not implemented');
+        $st = $s->__mcSt();
+        if ($st === null) { throw new Error(\get_class($s) . ' object is already closed'); }
+        if ($st->rst < $need) { throw new Error(\get_class($s) . ' object is not fully initialized'); }
+        return $st;
     }
 
-    public function attr_get(int $attribute): int
+    /**
+     * The state of a statement for a property read. $k: 0 affected_rows / id (closed reads as not allowed yet), 1 the
+     * counters (VALID), 2 errno / error / sqlstate (any open statement), 3 error_list (closed reads as not allowed yet).
+     */
+    public static function prop(mysqli_stmt $s, int $k): self
     {
-        throw new Error('mysqli: not implemented');
+        $st = $s->__mcSt();
+        if ($st === null) {
+            if ($k === 0 || $k === 3) { throw new Error('Property access is not allowed yet'); }
+            throw new Error(\get_class($s) . ' object is already closed');
+        }
+        if ($k < 2 && $st->rst < __McMysqliConn::VALID) { throw new Error('Property access is not allowed yet'); }
+        return $st;
     }
 
-    public function attr_set(int $attribute, int $value): bool
+    public function clearErr(): void
     {
-        throw new Error('mysqli: not implemented');
+        $this->errno = 0;
+        $this->error = '';
+        $this->sqlstate = '00000';
+        $this->errorList = [];
     }
 
-    public function bind_param(string $types, mixed &...$vars): bool
+    public function setErr(int $no, string $state, string $msg): void
     {
-        throw new Error('mysqli: not implemented');
+        $this->errno = $no;
+        $this->error = $msg;
+        $this->sqlstate = $state;
+        $this->errorList[] = ['errno' => $no, 'sqlstate' => $state, 'error' => $msg];
     }
 
-    public function bind_result(mixed &...$vars): bool
+    /** COPY_CLIENT_ERROR(stmt, conn): the connection's error becomes the statement's. */
+    private function copyConnErr(): void
     {
-        throw new Error('mysqli: not implemented');
+        $c = $this->c;
+        if ($c !== null && $c->errno !== 0) { $this->setErr($c->errno, $c->sqlstate, $c->error); }
     }
 
-    public function close(): true
+    /** MYSQLI_REPORT_STMT_ERROR: a recorded error is thrown when the report mode has ERROR and STRICT. */
+    public function report(): void
     {
-        throw new Error('mysqli: not implemented');
+        $e = $this->reportEx();
+        if ($e !== null) { throw $e; }
     }
 
-    public function data_seek(int $offset): void
+    public function reportEx(): ?mysqli_sql_exception
     {
-        throw new Error('mysqli: not implemented');
+        if ($this->errno === 0 || (__McMysqliConn::$mode & 3) !== 3) { return null; }
+        return mysqli_sql_exception::__mcNew($this->error, $this->errno, $this->sqlstate);
     }
 
-    public function execute(?array $params = null): bool
+    private function emptyErrors(): void
     {
-        throw new Error('mysqli: not implemented');
+        $this->clearErr();
+        if ($this->c !== null) { $this->c->clear(); }
     }
 
-    public function fetch(): ?bool
+    /** The wire, when the connection is READY; otherwise mysqlnd's send_command refusal is recorded on the connection. */
+    private function ready(): ?__McPdoMyWire
     {
-        throw new Error('mysqli: not implemented');
+        $c = $this->c;
+        if ($c === null) { return null; }
+        $w = $c->wire;
+        if ($w === null || $c->st !== __McMysqliConn::VALID || $w->dead) {
+            $c->record(2006, 'HY000', 'MySQL server has gone away');
+            return null;
+        }
+        if ($c->busy()) {
+            $c->record(2014, 'HY000', __McMysqliConn::OOS);
+            return null;
+        }
+        $c->clear();
+        $c->affectedRows = -1;
+        return $w;
     }
 
-    public function free_result(): void
+    private function isReady(): bool
     {
-        throw new Error('mysqli: not implemented');
+        $c = $this->c;
+        return $c !== null && $c->wire !== null && $c->st === __McMysqliConn::VALID && !$c->wire->dead && !$c->busy();
     }
 
-    public function get_result(): false|mysqli_result
+    /** CONN_FETCHING_DATA for this statement's result. */
+    private function fetching(): bool
     {
-        throw new Error('mysqli: not implemented');
+        $c = $this->c;
+        return $c !== null && $c->ps === $this && !$c->psNext && $c->wire !== null;
     }
 
-    public function get_warnings(): false|mysqli_warning
+    /** mysqlnd_stmt_check_state: an executed result set nobody took yet, the connection on it (or READY over a cursor). */
+    private function checkState(): bool
     {
-        throw new Error('mysqli: not implemented');
+        if ($this->state !== self::WAITING) { return false; }
+        return $this->cursor ? $this->isReady() : $this->fetching();
     }
 
-    public function more_results(): bool
+    /** The connection's state after what the statement read: held while rows are on the wire or more results follow. */
+    private function settle(): void
     {
-        throw new Error('mysqli: not implemented');
+        $c = $this->c;
+        if ($c === null) { return; }
+        $r = $this->cur;
+        if ($r !== null && $r->err === null && $r->stream && !$r->done) {
+            $c->ps = $this;
+            $c->psNext = false;
+            return;
+        }
+        if ($r !== null && $r->err === null && ($r->more || $r->next !== null)) {
+            $c->ps = $this;
+            $c->psNext = true;
+            return;
+        }
+        if ($c->ps === $this) {
+            $c->ps = null;
+            $c->psNext = false;
+        }
     }
 
-    public function next_result(): bool
+    /** A wire failure: recorded on the connection (and copied to the statement); the wire is unusable. */
+    private function wireErr(PDOException $e): false
     {
-        throw new Error('mysqli: not implemented');
+        $c = $this->c;
+        if ($c !== null) {
+            $c->record($e->driverCode, $e->sqlstate === '' ? 'HY000' : $e->sqlstate, $e->driverMsg);
+            $this->copyConnErr();
+            if ($c->ps === $this) {
+                $c->ps = null;
+                $c->psNext = false;
+            }
+        }
+        $this->eof = true;
+        return false;
     }
 
-    public function num_rows(): int|string
+    /** A server ERR: on the connection and on the statement. */
+    private function serverErr(__McPdoMyErr $e): void
     {
-        throw new Error('mysqli: not implemented');
+        if ($this->c !== null) { $this->c->record($e->no, $e->state, $e->msg); }
+        $this->setErr($e->no, $e->state, $e->msg);
+    }
+
+    /** Everything a new prepare starts from (mysqlnd swaps in a fresh statement): attributes and bindings included. */
+    private function fresh(): void
+    {
+        $this->state = self::INITTED;
+        $this->id = 0;
+        $this->paramCount = 0;
+        $this->fieldCount = 0;
+        $this->hasRes = false;
+        $this->meta = null;
+        $this->rmode = 0;
+        $this->cur = null;
+        $this->rows = [];
+        $this->pos = 0;
+        $this->rowCount = 0;
+        $this->eof = false;
+        $this->cursor = false;
+        $this->storeDefault = false;
+        $this->affected = 0;
+        $this->insertId = 0;
+        $this->warnings = 0;
+        $this->clearErr();
+        $this->flags = 0;
+        $this->updateMaxLength = false;
+        $this->unbindParams();
+        $this->unbindResults();
+    }
+
+    private function unbindParams(): void
+    {
+        $this->pbound = false;
+        $this->pv = [];
+        $this->ptype = [];
+        $this->blobUsed = [];
+    }
+
+    private function unbindResults(): void
+    {
+        $this->rbn = 0;
+        $this->rv = [];
     }
 
     public function prepare(string $query): bool
     {
-        throw new Error('mysqli: not implemented');
+        $c = $this->c;
+        $this->affected = -1;
+        if ($c !== null) { $c->affectedRows = -1; }
+        $this->emptyErrors();
+        if ($this->state > self::INITTED) {
+            $this->closeOnServer();
+            $this->fresh();
+        }
+        $w = $this->ready();
+        if ($w === null || $c === null) {
+            $this->copyConnErr();
+            return false;
+        }
+        $c->clear();
+        try {
+            $p = $w->prepare($query);
+        } catch (PDOException $e) {
+            return $this->wireErr($e);
+        }
+        if ($p->err !== null) {
+            $this->serverErr($p->err);
+            return false;
+        }
+        $this->id = $p->id;
+        $this->gen = $w->gen;
+        $c->warningCount = $p->warnings;
+        $this->affected = 0;
+        $this->fieldCount = $p->cols;
+        $c->fieldCount = $p->cols;
+        $this->paramCount = $p->params;
+        if ($p->cols > 0) {
+            $this->hasRes = true;
+            $this->meta = $p->meta;
+        }
+        $this->state = self::PREPARED;
+        return true;
+    }
+
+    /** mysqli's bind-in-execute / bind_param binding: $types one MYSQL_TYPE_* per parameter. */
+    public function bindParams(): bool
+    {
+        if ($this->state < self::PREPARED) {
+            $this->setErr(2030, 'HY000', self::NOT_PREPARED);
+            return false;
+        }
+        $this->emptyErrors();
+        if ($this->paramCount > 0) { $this->sendTypes = true; }
+        return true;
+    }
+
+    public function bindResults(): bool
+    {
+        if ($this->state < self::PREPARED) {
+            $this->setErr(2030, 'HY000', self::NOT_PREPARED);
+            return false;
+        }
+        $this->emptyErrors();
+        return true;
+    }
+
+    /** A value as mysqlnd converts it to a string parameter (convert_to_string). */
+    private static function str(mixed $v): string
+    {
+        if (\is_bool($v)) { return $v ? '1' : ''; }
+        if (\is_array($v)) { return 'Array'; }
+        return (string) $v;
+    }
+
+    /** COM_STMT_EXECUTE's parameter block (mysqlnd_stmt_execute_store_params): NULL bitmap, types flag, types, values. */
+    private function encodeParams(): string
+    {
+        $n = $this->paramCount;
+        if ($n === 0) { return ''; }
+        /** @var array<int,mixed> */
+        $vals = [];
+        $resend = false;
+        for ($i = 0; $i < $n; $i++) {
+            $v = $this->pv[$i];
+            // an i value that is no integer: a string when its double is out of the integer range, else the integer
+            if ($v !== null && $this->ptype[$i] === 8 && !\is_int($v)) {
+                $d = \is_array($v) ? (\count($v) > 0 ? 1.0 : 0.0) : (float) $v;
+                if ($d >= 9.2233720368547758E18 || $d < -9.2233720368547758E18) {
+                    $v = self::str($v);
+                    // the types go out now and with the next execute too (the server would read the string as an integer)
+                    $resend = true;
+                    $this->sendTypes = true;
+                } else {
+                    $v = \is_array($v) ? (int) $d : (int) $v;
+                }
+            }
+            $vals[] = $v;
+        }
+        $bm = '';
+        $types = '';
+        $data = '';
+        for ($i = 0; $i < $n; $i += 8) {
+            $b = 0;
+            for ($j = 0; $j < 8 && $i + $j < $n; $j++) {
+                if ($vals[$i + $j] === null) { $b |= 1 << $j; }
+            }
+            $bm .= \chr($b);
+        }
+        for ($i = 0; $i < $n; $i++) {
+            $t = $this->ptype[$i];
+            $v = $vals[$i];
+            if ($t === 8 && $v !== null && \is_string($v)) { $t = 253; }
+            $types .= \chr($t) . "\0";
+            if ($v === null) { continue; }
+            $pt = $this->ptype[$i];
+            if ($pt === 5) {
+                $data .= __McPdoMyWire::putF64(\is_array($v) ? (\count($v) > 0 ? 1.0 : 0.0) : (float) $v);
+            } elseif ($pt === 8 && \is_int($v)) {
+                $data .= __McPdoMyWire::putLe($v, 8);
+            } elseif ($pt === 251) {
+                if (isset($this->blobUsed[$i]) && $this->blobUsed[$i]) { $this->blobUsed[$i] = false; } else { $data .= "\0"; }
+            } else {
+                $s = self::str($v);
+                $data .= __McPdoMyWire::lenencInt(\strlen($s)) . $s;
+            }
+        }
+        $flag = $this->sendTypes ? "\x01" : "\x00";
+        $out = $bm . $flag . ($this->sendTypes ? $types : '') . $data;
+        $this->sendTypes = $resend;
+        return $out;
+    }
+
+    public function execute(): bool
+    {
+        $c = $this->c;
+        $this->affected = -1;
+        if ($c !== null) { $c->affectedRows = -1; }
+        if ($this->hasRes && $this->state >= self::PREPARED && $this->fieldCount > 0) {
+            $this->flush();
+            if ($this->hasRes) { $this->freeBuffers(); }
+            $this->state = self::PREPARED;
+        } elseif ($this->state < self::PREPARED) {
+            $this->setErr(2014, 'HY000', __McMysqliConn::OOS);
+            return false;
+        }
+        if ($this->paramCount > 0 && !$this->pbound) {
+            $this->setErr(2031, 'HY000', 'No data supplied for parameters in prepared statement');
+            return false;
+        }
+        $payload = $this->encodeParams();
+        $w = $this->ready();
+        if ($w === null || $c === null) {
+            $this->copyConnErr();
+            return false;
+        }
+        $c->clear();
+        try {
+            $r = $w->execute($this->id, $payload, true, $this->flags);
+        } catch (PDOException $e) {
+            return $this->wireErr($e);
+        }
+        return $this->parseResponse($r, false);
+    }
+
+    /** mysqlnd_stmt_execute_parse_response: the header of the next result of the chain ($next: next_result()). */
+    private function parseResponse(?__McPdoMyResult $r, bool $next): bool
+    {
+        $c = $this->c;
+        if ($r === null || $c === null) { return false; }
+        $this->cur = $r;
+        $c->affectedRows = -1;
+        if ($r->err !== null) {
+            $this->serverErr($r->err);
+            $this->affected = $c->affectedRows;
+            $this->insertId = 0;
+            $this->warnings = 0;
+            $this->state = self::PREPARED;
+            $this->sendTypes = true;
+            $this->settle();
+            return false;
+        }
+        $this->emptyErrors();
+        if (!$r->isSet) {
+            $c->affectedRows = $r->affected;
+            $c->insertId = $r->insertId;
+            $c->info = $r->info === '' ? null : $r->info;
+            $c->warningCount = $r->warnings;
+            $c->fieldCount = 0;
+            $this->warnings = $r->warnings;
+            $this->affected = $r->affected;
+            $this->insertId = $r->insertId;
+            $this->state = self::EXECUTED;
+            // mysqlnd (measured): the closing OK of a CALL still reports the previous result set's column count
+            if (!$next) { $this->fieldCount = 0; }
+            $this->settle();
+            return true;
+        }
+        $n = \count($r->names);
+        $c->info = null;
+        $c->insertId = 0;
+        $c->warningCount = $r->warnings;
+        $c->fieldCount = $n;
+        $this->hasRes = true;
+        $this->meta = $r;
+        if ($this->rbn > $n) { $this->rbn = $n; }
+        $this->warnings = $r->warnings;
+        $this->affected = -1;
+        $this->insertId = 0;
+        $this->state = self::EXECUTED;
+        $this->fieldCount = $n;
+        $this->rmode = 0;
+        $this->rows = [];
+        if ($n > 0) {
+            $this->state = self::WAITING;
+            if (($this->flags & 1) !== 0) {
+                if ($r->cursor) {
+                    $this->cursor = true;
+                    $this->storeDefault = false;
+                } else {
+                    $this->storeDefault = true;
+                }
+            } else {
+                $this->storeDefault = false;
+            }
+        }
+        $this->settle();
+        return true;
+    }
+
+    private function defaultHandler(): void
+    {
+        if ($this->storeDefault) { $this->store(); } else { $this->useResult(); }
+    }
+
+    public function useResult(): bool
+    {
+        if (!$this->hasRes) { return false; }
+        if ($this->fieldCount === 0 || !$this->checkState()) {
+            if ($this->c !== null) { $this->c->record(2014, 'HY000', __McMysqliConn::OOS); }
+            return false;
+        }
+        $this->emptyErrors();
+        $this->rmode = 1;
+        $this->rowCount = 0;
+        $this->eof = false;
+        $this->state = self::USED;
+        return true;
+    }
+
+    /**
+     * Reads what is left of the current result: through the cursor one COM_STMT_FETCH for everything, else the wire to the
+     * closing EOF. The connection ends up with affected_rows = the row count and the EOF's warnings; an ERR is the
+     * connection's error (false).
+     *
+     * @return array<int,array<int,?string>>|false
+     */
+    private function readAll(): array|false
+    {
+        $c = $this->c;
+        $r = $this->cur;
+        if ($c === null || $r === null) { return false; }
+        /** @var array<int,array<int,?string>> */
+        $rows = [];
+        if ($this->cursor) {
+            $w = $this->ready();
+            if ($w === null) {
+                $this->copyConnErr();
+                return false;
+            }
+            $r->rows = [];
+            $r->err = null;
+            try {
+                $w->stmtFetch($this->id, -1, $r);
+            } catch (PDOException $e) {
+                return $this->wireErr($e);
+            }
+            $rows = $r->rows;
+            $r->rows = [];
+        } else {
+            $w = $c->wire;
+            if ($w === null) { return false; }
+            try {
+                while (true) {
+                    $row = $w->cursorRow($r);
+                    if (\count($row) === 0) { break; }
+                    $rows[] = $row;
+                }
+            } catch (PDOException $e) {
+                return $this->wireErr($e);
+            }
+        }
+        if ($r->err !== null) {
+            $c->record($r->err->no, $r->err->state, $r->err->msg);
+            $this->settle();
+            return false;
+        }
+        $c->insertId = 0;
+        $c->warningCount = $r->warnings;
+        $c->affectedRows = \count($rows);
+        $this->settle();
+        return $rows;
+    }
+
+    /** mysqlnd's stmt store_result (null when nothing is stored). */
+    public function store(): bool
+    {
+        if (!$this->hasRes || $this->fieldCount === 0) { return false; }
+        if (!$this->checkState()) {
+            $this->setErr(2014, 'HY000', __McMysqliConn::OOS);
+            return false;
+        }
+        $this->storeDefault = true;
+        $this->emptyErrors();
+        $rows = $this->readAll();
+        if ($rows === false) {
+            $this->copyConnErr();
+            $this->hasRes = false;
+            $this->meta = null;
+            $this->rmode = 0;
+            $this->state = self::PREPARED;
+            return false;
+        }
+        $this->rows = $rows;
+        $this->pos = 0;
+        $this->rmode = 2;
+        $this->affected = \count($rows);
+        $this->state = self::USED;
+        return true;
+    }
+
+    /** get_result(): every row of the current result into a result of its own; the statement is PREPARED again. */
+    public function getResult(): ?__McMysqliRs
+    {
+        $c = $this->c;
+        if (!$this->hasRes || $this->fieldCount === 0 || $c === null) { return null; }
+        $r = $this->cur;
+        if (!$this->checkState() || $r === null) {
+            $this->setErr(2014, 'HY000', __McMysqliConn::OOS);
+            return null;
+        }
+        $this->emptyErrors();
+        $rows = $this->readAll();
+        $this->state = self::PREPARED;
+        if ($rows === false) {
+            $this->copyConnErr();
+            return null;
+        }
+        $this->affected = \count($rows);
+        $res = self::copyMeta($r);
+        $res->rows = $rows;
+        return __McMysqliRs::make($c, $res, false);
+    }
+
+    /** A result carrying $r's column definitions and no rows (bin: binary-protocol cells). */
+    public static function copyMeta(__McPdoMyResult $r): __McPdoMyResult
+    {
+        $o = new __McPdoMyResult();
+        $o->names = $r->names;
+        $o->tables = $r->tables;
+        $o->types = $r->types;
+        $o->flags = $r->flags;
+        $o->lens = $r->lens;
+        $o->decs = $r->decs;
+        $o->cats = $r->cats;
+        $o->dbs = $r->dbs;
+        $o->orgTables = $r->orgTables;
+        $o->orgNames = $r->orgNames;
+        $o->charsets = $r->charsets;
+        $o->isSet = true;
+        $o->bin = true;
+        return $o;
+    }
+
+    /**
+     * The next row of the row source: an array (empty when $skip), null when there is none, false when the read failed
+     * (mysqlnd's fetch_row of the unbuffered, cursor and buffered result).
+     *
+     * @return array<int,?string>|false|null
+     */
+    private function fetchRow(bool $skip): array|false|null
+    {
+        if ($this->rmode === 2) {
+            if ($this->pos < \count($this->rows)) {
+                $row = $this->rows[$this->pos];
+                $this->pos++;
+                return $row;
+            }
+            if ($this->pos === \count($this->rows)) { $this->pos++; }
+            return null;
+        }
+        if ($this->rmode !== 1) { return null; }
+        $c = $this->c;
+        $r = $this->cur;
+        if ($c === null || $r === null) { return false; }
+        if ($this->cursor) {
+            if ($this->state < self::FETCHING) {
+                $c->record(2014, 'HY000', __McMysqliConn::OOS);
+                return false;
+            }
+            $this->emptyErrors();
+            $w = $this->ready();
+            if ($w === null) {
+                $this->copyConnErr();
+                return false;
+            }
+            $this->affected = 0;
+            $this->insertId = 0;
+            $this->warnings = 0;
+            $r->rows = [];
+            $r->err = null;
+            try {
+                $w->stmtFetch($this->id, 1, $r);
+            } catch (PDOException $e) {
+                return $this->wireErr($e);
+            }
+            // mysqlnd does not record the ERR a fetch past the cursor's end gets
+            if ($r->err !== null) {
+                $r->err = null;
+                return false;
+            }
+            $this->warnings = $r->warnings;
+            $c->warningCount = $r->warnings;
+            if (\count($r->rows) > 0) {
+                $row = $r->rows[0];
+                $r->rows = [];
+                $this->rowCount++;
+                return $skip ? [] : $row;
+            }
+            $this->eof = true;
+            return null;
+        }
+        if ($this->eof) { return null; }
+        if (!$this->fetching()) {
+            $c->record(2014, 'HY000', __McMysqliConn::OOS);
+            return false;
+        }
+        $w = $c->wire;
+        if ($w === null) { return false; }
+        try {
+            $row = $w->cursorRow($r, $skip);
+        } catch (PDOException $e) {
+            return $this->wireErr($e);
+        }
+        if (\count($row) > 0) {
+            $this->rowCount++;
+            return $skip ? [] : $row;
+        }
+        $this->eof = true;
+        if ($r->err !== null) {
+            $this->serverErr($r->err);
+            $this->settle();
+            return false;
+        }
+        $c->affectedRows = 0;
+        $c->insertId = 0;
+        $c->warningCount = $r->warnings;
+        $this->settle();
+        return null;
+    }
+
+    /** fetch(): true with the bound variables written, null past the last row, false on a failure. */
+    public function fetch(): ?bool
+    {
+        if (!$this->hasRes || $this->state < self::WAITING) {
+            $this->setErr(2014, 'HY000', __McMysqliConn::OOS);
+            return false;
+        }
+        if ($this->state === self::WAITING) { $this->defaultHandler(); }
+        $this->state = self::FETCHING;
+        $this->emptyErrors();
+        $row = $this->fetchRow($this->rbn === 0);
+        if ($row === false) { return false; }
+        if ($row === null) { return null; }
+        if ($this->rbn > 0 && $this->cur !== null) {
+            $vals = self::decode($this->cur, $row);
+            $n = \min($this->rbn, \count($vals));
+            for ($i = 0; $i < $n; $i++) { $this->rv[$i] = $vals[$i]; }
+        }
+        return true;
+    }
+
+    /** Reads and drops what is left of an unbuffered result (mysqlnd's skip_result). */
+    private function skip(): void
+    {
+        if ($this->rmode !== 1 || $this->eof) { return; }
+        while (true) {
+            $row = $this->fetchRow(true);
+            if (!\is_array($row)) { break; }
+        }
+    }
+
+    public function moreResults(): bool
+    {
+        $c = $this->c;
+        if ($c === null || $c->wire === null) { return false; }
+        if ($this->cur !== null && $this->cur->err !== null) { return false; }
+        return ($c->wire->status & 8) !== 0;
+    }
+
+    public function nextResult(): bool
+    {
+        $c = $this->c;
+        if (!$this->hasRes || $c === null) { return false; }
+        if ($c->ps !== $this || !$c->psNext || !$this->moreResults()) { return false; }
+        $r = $this->cur;
+        $w = $c->wire;
+        if ($r === null || $w === null) { return false; }
+        $this->unbindResults();
+        $this->hasRes = false;
+        $this->meta = null;
+        $this->rmode = 0;
+        $this->rows = [];
+        $this->errorList = [];
+        try {
+            if ($r->more) { $w->cursorNext($r); }
+        } catch (PDOException $e) {
+            return $this->wireErr($e);
+        }
+        return $this->parseResponse($r->next, true);
+    }
+
+    /** Every result of the statement still on the wire is read and dropped (mysqlnd's flush). */
+    private function flush(): void
+    {
+        if ($this->id === 0) { return; }
+        do {
+            if ($this->state === self::WAITING) {
+                $this->defaultHandler();
+                $this->state = self::FETCHING;
+            }
+            if ($this->hasRes) { $this->skip(); }
+        } while ($this->moreResults() && $this->nextResult());
+    }
+
+    private function freeBuffers(): void
+    {
+        $this->meta = null;
+        $this->rmode = 0;
+        $this->rows = [];
+        $this->pos = 0;
+    }
+
+    public function freeResult(): void
+    {
+        if (!$this->hasRes) { return; }
+        if ($this->state === self::WAITING) {
+            $this->storeDefault = false;
+            $this->useResult();
+        }
+        if ($this->state > self::WAITING) {
+            $this->skip();
+            $this->unbindResults();
+            $this->freeBuffers();
+        }
+        if ($this->state > self::PREPARED) { $this->state = self::PREPARED; }
     }
 
     public function reset(): bool
     {
-        throw new Error('mysqli: not implemented');
+        $this->emptyErrors();
+        if ($this->id === 0) { return true; }
+        foreach ($this->blobUsed as $i => $_) { $this->blobUsed[$i] = false; }
+        $this->flush();
+        $ok = true;
+        $c = $this->c;
+        if ($this->isReady() && $c !== null && $c->wire !== null) {
+            $c->clear();
+            $c->affectedRows = -1;
+            try {
+                $e = $c->wire->stmtReset($this->id);
+            } catch (PDOException $x) {
+                $this->wireErr($x);
+                $e = null;
+                $ok = false;
+            }
+            if ($e !== null) {
+                $this->serverErr($e);
+                $ok = false;
+            }
+        }
+        if ($c !== null) {
+            $this->affected = $c->affectedRows;
+            $this->insertId = $c->insertId;
+            $this->warnings = $c->warningCount;
+        }
+        return $ok;
+    }
+
+    /** close_on_server: the results still on the wire are dropped, COM_STMT_CLOSE goes out when the connection is free. */
+    private function closeOnServer(): void
+    {
+        $this->emptyErrors();
+        do {
+            if ($this->state === self::WAITING) {
+                $this->defaultHandler();
+                $this->state = self::FETCHING;
+            }
+            if ($this->hasRes) { $this->skip(); }
+        } while ($this->moreResults() && $this->nextResult());
+        $c = $this->c;
+        if ($this->id !== 0 && $this->isReady() && $c !== null && $c->wire !== null && $c->wire->gen === $this->gen) {
+            $c->clear();
+            $c->affectedRows = -1;
+            $c->wire->closeStmt($this->id);
+        }
+        $this->unbindParams();
+        $this->unbindResults();
+        $this->hasRes = false;
+        $this->meta = null;
+        $this->rmode = 0;
+        $this->rows = [];
+        $this->cur = null;
+    }
+
+    public function close(): void
+    {
+        if ($this->c === null) { return; }
+        $this->closeOnServer();
+        $c = $this->c;
+        if ($c !== null && $c->ps === $this) {
+            $c->ps = null;
+            $c->psNext = false;
+        }
+        $this->c = null;
+        $this->link = null;
+    }
+
+    public function numRows(): int|string
+    {
+        $n = 0;
+        if ($this->hasRes) {
+            if ($this->rmode === 2) { $n = \count($this->rows); }
+            elseif ($this->rmode === 1 && $this->eof) { $n = $this->rowCount; }
+        }
+        $this->nr = $n;
+        return $this->nr;
+    }
+
+    public function dataSeek(int $offset): void
+    {
+        if ($this->hasRes && $this->rmode === 2) { $this->pos = \min($offset, \count($this->rows)); }
+    }
+
+    public function sendLongData(int $param, string $data): bool
+    {
+        $this->emptyErrors();
+        if ($this->state < self::PREPARED) {
+            $this->setErr(2030, 'HY000', self::NOT_PREPARED);
+            return false;
+        }
+        if (!$this->pbound) {
+            $this->setErr(2014, 'HY000', __McMysqliConn::OOS);
+            return false;
+        }
+        if ($param >= $this->paramCount) {
+            $this->setErr(2034, 'HY000', 'Invalid parameter number');
+            return false;
+        }
+        if ($this->ptype[$param] !== 251) {
+            $this->setErr(2035, 'HY000', "Can't send long data for non-string/non-binary data types");
+            return false;
+        }
+        $c = $this->c;
+        if (!$this->isReady() || $c === null || $c->wire === null) { return false; }
+        $c->clear();
+        $c->affectedRows = -1;
+        $this->blobUsed[$param] = true;
+        try {
+            $c->wire->sendLongData($this->id, $param, $data);
+        } catch (PDOException $e) {
+            return $this->wireErr($e);
+        }
+        return true;
+    }
+
+    /** result_metadata(): a result with the column definitions and no rows (null when the statement has no result set). */
+    public function metadata(): ?__McMysqliRs
+    {
+        $m = $this->meta;
+        if ($this->fieldCount === 0 || !$this->hasRes || $m === null) { return null; }
+        $rs = new __McMysqliRs();
+        $rs->r = self::copyMeta($m);
+        $rs->unbuf = true;
+        $rs->mem = true;
+        $rs->ended = true;
+        $rs->bin = true;
+        return $rs;
+    }
+
+    /** mysqli's get_warnings for the statement: SHOW WARNINGS on its connection when the statement saw warnings. */
+    public function getWarnings(): false|mysqli_warning
+    {
+        $c = $this->c;
+        if ($this->warnings === 0 || $c === null || $c->st !== __McMysqliConn::VALID || $c->wire === null) { return false; }
+        return $c->warnings();
+    }
+
+    /**
+     * A binary-protocol row as mysqlnd hands it out: integers as int (ZEROFILL zero-padded to the display width, an UNSIGNED
+     * BIGINT past PHP_INT_MAX as its decimal string), FLOAT / DOUBLE as float, BIT as the number it holds, YEAR as an
+     * integer (zero-padded text when ZEROFILL), everything else the text the wire layer formatted.
+     *
+     * @param array<int,?string> $row
+     * @return array<int,mixed>
+     */
+    public static function decode(__McPdoMyResult $r, array $row): array
+    {
+        /** @var array<int,mixed> */
+        $o = [];
+        foreach ($row as $i => $v) {
+            if ($v === null) { $o[] = null; continue; }
+            $t = $r->types[$i];
+            $f = $r->flags[$i];
+            $uns = ($f & 32) !== 0;
+            $zf = ($f & 64) !== 0;
+            if ($t === 1 || $t === 2 || $t === 3 || $t === 9 || $t === 8 || $t === 13) {
+                $x = 0;
+                $big = '';
+                if ($t === 13) { $x = (int) $v; }
+                elseif ($t === 1) {
+                    $x = \ord($v);
+                    if (!$uns && $x >= 128) { $x -= 256; }
+                } elseif ($t === 2) {
+                    $x = __McPdoMyWire::le16($v, 0);
+                    if (!$uns && $x >= 32768) { $x -= 65536; }
+                } elseif ($t === 3 || $t === 9) {
+                    $x = __McPdoMyWire::le32($v, 0);
+                    if (!$uns && $x >= 2147483648) { $x -= 4294967296; }
+                } else {
+                    $hi = __McPdoMyWire::le32($v, 4);
+                    if ($uns && $hi >= 2147483648) { $big = __McPdoMyWire::beToDec(\strrev($v)); }
+                    else { $x = __McPdoMyWire::le32($v, 0) | ($hi << 32); }
+                }
+                if ($uns && $zf) { $o[] = \str_pad($big === '' ? (string) $x : $big, $r->lens[$i], '0', \STR_PAD_LEFT); }
+                elseif ($big !== '') { $o[] = $big; }
+                else { $o[] = $x; }
+                continue;
+            }
+            if ($t === 5) { $o[] = __McPdoMyWire::f64($v); continue; }
+            if ($t === 4) { $o[] = __McPdoMyWire::f32($v, $r->decs[$i]); continue; }
+            if ($t === 16) {
+                $n = \strlen($v);
+                if ($n === 8 && \ord($v[0]) >= 128) { $o[] = __McPdoMyWire::beToDec($v); continue; }
+                $x = 0;
+                for ($k = 0; $k < $n; $k++) { $x = ($x << 8) | \ord($v[$k]); }
+                $o[] = $x;
+                continue;
+            }
+            $o[] = $v;
+        }
+        return $o;
+    }
+}
+
+class mysqli_stmt
+{
+    public int|string $affected_rows { get => __McMysqliStmt::prop($this, 0)->affected; set { __McMysqliConn::ro($this, 'affected_rows'); } }
+    public int $errno { get => __McMysqliStmt::prop($this, 2)->errno; set { __McMysqliConn::ro($this, 'errno'); } }
+    public string $error { get => __McMysqliStmt::prop($this, 2)->error; set { __McMysqliConn::ro($this, 'error'); } }
+    public array $error_list { get => __McMysqliStmt::prop($this, 3)->errorList; set { __McMysqliConn::ro($this, 'error_list'); } }
+    public int $field_count { get => __McMysqliStmt::prop($this, 1)->fieldCount; set { __McMysqliConn::ro($this, 'field_count'); } }
+    public int $id { get => __McMysqliStmt::prop($this, 0)->id; set { __McMysqliConn::ro($this, 'id'); } }
+    public int|string $insert_id { get => __McMysqliStmt::prop($this, 1)->insertId; set { __McMysqliConn::ro($this, 'insert_id'); } }
+    public int|string $num_rows { get => __McMysqliStmt::prop($this, 1)->numRows(); set { __McMysqliConn::ro($this, 'num_rows'); } }
+    public int $param_count { get => __McMysqliStmt::prop($this, 1)->paramCount; set { __McMysqliConn::ro($this, 'param_count'); } }
+    public string $sqlstate { get => __McMysqliStmt::prop($this, 2)->sqlstate; set { __McMysqliConn::ro($this, 'sqlstate'); } }
+
+    /** Internal: see mysqli::$__mc; null once closed (or when a subclass constructor skipped the parent's). */
+    private ?__McMysqliStmt $__mc = null;
+
+    public function __mcSt(): ?__McMysqliStmt
+    {
+        return $this->__mc;
+    }
+
+    /** Internal: the statement is gone without a close (mysqli_prepare's failure path already closed it). */
+    public function __mcDetach(): void
+    {
+        $this->__mc = null;
+    }
+
+    /** @return array<string,mixed> the properties whose read does not throw, in Zend's order */
+    public function __debugInfo(): array
+    {
+        /** @var array<string,mixed> */
+        $o = [];
+        foreach (['affected_rows', 'insert_id', 'num_rows', 'param_count', 'field_count', 'errno', 'error', 'error_list', 'sqlstate', 'id'] as $p) {
+            try {
+                $o[$p] = $this->$p;
+            } catch (Error $e) {
+            }
+        }
+        return $o;
+    }
+
+    public function __construct(mysqli $mysql, ?string $query = null)
+    {
+        $c = __McMysqliConn::of($mysql)->link();
+        $st = new __McMysqliStmt();
+        $st->c = $c;
+        $st->link = $mysql;
+        $this->__mc = $st;
+        if ($query === null) { return; }
+        if (!$st->prepare($query)) {
+            $st->report();
+            return;
+        }
+        $st->rst = __McMysqliConn::VALID;
+    }
+
+    public function __destruct()
+    {
+        $st = $this->__mc;
+        if ($st !== null) { $st->close(); }
+    }
+
+    public function attr_get(int $attribute): int
+    {
+        return $this->__mcAttrGet($attribute, 'mysqli_stmt::attr_get', 1);
+    }
+
+    public function __mcAttrGet(int $attribute, string $fn, int $arg): int
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        if ($attribute === 0) { return $st->updateMaxLength ? 1 : 0; }
+        if ($attribute === 1) { return $st->flags; }
+        throw new ValueError($fn . '(): Argument #' . $arg . ' ($attribute) must be either MYSQLI_STMT_ATTR_UPDATE_MAX_LENGTH or MYSQLI_STMT_ATTR_CURSOR_TYPE');
+    }
+
+    public function attr_set(int $attribute, int $value): bool
+    {
+        return $this->__mcAttrSet($attribute, $value, 'mysqli_stmt::attr_set', 1);
+    }
+
+    public function __mcAttrSet(int $attribute, int $value, string $fn, int $arg): bool
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        if ($attribute === 0) {
+            if ($value !== 0 && $value !== 1) { throw new ValueError($fn . '(): Argument #' . ($arg + 1) . ' ($value) must be 0 or 1 for attribute MYSQLI_STMT_ATTR_UPDATE_MAX_LENGTH'); }
+            $st->updateMaxLength = $value === 1;
+            return true;
+        }
+        if ($attribute === 1) {
+            if ($value !== 0 && $value !== 1) { throw new ValueError($fn . '(): Argument #' . ($arg + 1) . ' ($value) must be one of the MYSQLI_CURSOR_TYPE_* constants for attribute MYSQLI_STMT_ATTR_CURSOR_TYPE'); }
+            $st->flags = $value;
+            return true;
+        }
+        throw new ValueError($fn . '(): Argument #' . $arg . ' ($attribute) must be either MYSQLI_STMT_ATTR_UPDATE_MAX_LENGTH or MYSQLI_STMT_ATTR_CURSOR_TYPE');
+    }
+
+    public function bind_param(string $types, mixed &...$vars): bool
+    {
+        return $this->__mcBindParam($types, 'mysqli_stmt::bind_param', 1, ...$vars);
+    }
+
+    /** bind_param() and mysqli_stmt_bind_param(): $fn and $arg (the types' position) word the argument errors. */
+    public function __mcBindParam(string $types, string $fn, int $arg, mixed &...$vars): bool
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        $n = \strlen($types);
+        if ($n === 0) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($types) must not be empty'); }
+        if ($n !== \count($vars)) { throw new ArgumentCountError('The number of elements in the type definition string must match the number of bind variables'); }
+        if ($n !== $st->paramCount) { throw new ArgumentCountError('The number of variables must match the number of parameters in the prepared statement'); }
+        /** @var array<int,int> */
+        $tys = [];
+        for ($i = 0; $i < $n; $i++) {
+            $ch = $types[$i];
+            if ($ch === 'i') { $tys[] = 8; }
+            elseif ($ch === 'd') { $tys[] = 5; }
+            elseif ($ch === 's') { $tys[] = 253; }
+            elseif ($ch === 'b') { $tys[] = 251; }
+            else { throw new ValueError($fn . '(): Argument #' . $arg . ' ($types) must only contain the "b", "d", "i", "s" type specifiers'); }
+        }
+        $ok = $st->bindParams();
+        if ($ok && $st->paramCount > 0) {
+            $st->pv = [];
+            foreach ($vars as $i => $_) { $st->pv[$i] = &$vars[$i]; }
+            $st->ptype = $tys;
+            $st->blobUsed = [];
+            $st->pbound = true;
+        }
+        $st->report();
+        return $ok;
+    }
+
+    public function bind_result(mixed &...$vars): bool
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        if (\count($vars) !== $st->fieldCount) { throw new ArgumentCountError("Number of bind variables doesn't match number of fields in prepared statement"); }
+        if (!$st->bindResults()) { return false; }
+        if ($st->fieldCount > 0) {
+            $st->rv = [];
+            foreach ($vars as $i => $_) { $st->rv[$i] = &$vars[$i]; }
+            $st->rbn = \count($vars);
+        }
+        return true;
+    }
+
+    public function close(): true
+    {
+        __McMysqliStmt::of($this, __McMysqliConn::VALID)->close();
+        $this->__mc = null;
+        return true;
+    }
+
+    public function data_seek(int $offset): void
+    {
+        $this->__mcDataSeek($offset, 'mysqli_stmt::data_seek', 1);
+    }
+
+    public function __mcDataSeek(int $offset, string $fn, int $arg): void
+    {
+        if ($offset < 0) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($offset) must be greater than or equal to 0'); }
+        __McMysqliStmt::of($this, __McMysqliConn::VALID)->dataSeek($offset);
+    }
+
+    public function execute(?array $params = null): bool
+    {
+        return $this->__mcExecute($params, 'mysqli_stmt::execute', 1);
+    }
+
+    /** execute(), mysqli_stmt_execute() and mysqli_execute(): $fn and $arg (the params' position) word the errors. */
+    public function __mcExecute(?array $params, string $fn, int $arg): bool
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        $ret = true;
+        if ($params !== null) {
+            if (!\array_is_list($params)) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($params) must be a list array'); }
+            $n = \count($params);
+            if ($n !== $st->paramCount) {
+                throw new ValueError($fn . '(): Argument #' . $arg . ' ($params) must consist of exactly ' . $st->paramCount . ' elements, ' . $n . ' present');
+            }
+            if ($st->bindParams()) {
+                if ($n > 0) {
+                    /** @var array<int,mixed> */
+                    $vals = [];
+                    /** @var array<int,int> */
+                    $tys = [];
+                    foreach ($params as $v) {
+                        $vals[] = $v;
+                        $tys[] = 253;
+                    }
+                    $st->pv = $vals;
+                    $st->ptype = $tys;
+                    $st->blobUsed = [];
+                    $st->pbound = true;
+                }
+            } else {
+                $st->report();
+                $ret = false;
+            }
+        }
+        if (!$st->execute()) {
+            $st->report();
+            return false;
+        }
+        return $ret;
+    }
+
+    public function fetch(): ?bool
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        $r = $st->fetch();
+        if ($r === false) { $st->report(); }
+        return $r;
+    }
+
+    public function free_result(): void
+    {
+        __McMysqliStmt::of($this, __McMysqliConn::VALID)->freeResult();
+    }
+
+    public function get_result(): false|mysqli_result
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        $rs = $st->getResult();
+        if ($rs === null) {
+            $st->report();
+            return false;
+        }
+        return __McMysqliRs::wrap($rs, $st->link);
+    }
+
+    public function get_warnings(): false|mysqli_warning
+    {
+        return __McMysqliStmt::of($this, __McMysqliConn::VALID)->getWarnings();
+    }
+
+    public function more_results(): bool
+    {
+        return __McMysqliStmt::of($this, __McMysqliConn::VALID)->moreResults();
+    }
+
+    public function next_result(): bool
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        if (!$st->nextResult()) {
+            $st->report();
+            return false;
+        }
+        return true;
+    }
+
+    public function num_rows(): int|string
+    {
+        return __McMysqliStmt::of($this, __McMysqliConn::VALID)->numRows();
+    }
+
+    public function prepare(string $query): bool
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::INIT);
+        if (!$st->prepare($query)) {
+            $st->report();
+            return false;
+        }
+        $st->rst = __McMysqliConn::VALID;
+        return true;
+    }
+
+    public function reset(): bool
+    {
+        return __McMysqliStmt::of($this, __McMysqliConn::VALID)->reset();
     }
 
     public function result_metadata(): false|mysqli_result
     {
-        throw new Error('mysqli: not implemented');
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        $rs = $st->metadata();
+        if ($rs === null) {
+            $st->report();
+            return false;
+        }
+        return __McMysqliRs::wrap($rs, $st->link);
     }
 
     public function send_long_data(int $param_num, string $data): bool
     {
-        throw new Error('mysqli: not implemented');
+        return $this->__mcSendLongData($param_num, $data, 'mysqli_stmt::send_long_data', 1);
+    }
+
+    public function __mcSendLongData(int $param, string $data, string $fn, int $arg): bool
+    {
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        if ($param < 0) { throw new ValueError($fn . '(): Argument #' . $arg . ' ($param_num) must be greater than or equal to 0'); }
+        return $st->sendLongData($param, $data);
     }
 
     public function store_result(): bool
     {
-        throw new Error('mysqli: not implemented');
+        $st = __McMysqliStmt::of($this, __McMysqliConn::VALID);
+        if ($st->fieldCount === 0) { return true; }
+        if (!$st->store()) {
+            $st->report();
+            return false;
+        }
+        return true;
     }
 }
 

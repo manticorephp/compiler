@@ -75,6 +75,8 @@ final class __McPdoMyResult
     public bool $more = false;
     /** The statement made this result its current one (php's pending-result-sets error until it does). */
     public bool $entered = false;
+    /** COM_STMT_EXECUTE opened a server cursor (SERVER_STATUS_CURSOR_EXISTS): no rows follow the metadata, COM_STMT_FETCH reads them. */
+    public bool $cursor = false;
 }
 
 /** The reply to COM_STMT_PREPARE: statement id and the counts the server announced. */
@@ -85,6 +87,8 @@ final class __McPdoMyPrep
     public int $params = 0;
     public int $warnings = 0;
     public ?__McPdoMyErr $err = null;
+    /** The result set's column definitions the server sent with PREPARE_OK (null when it has none). */
+    public ?__McPdoMyResult $meta = null;
 }
 
 final class __McPdoMyWire
@@ -1119,6 +1123,15 @@ final class __McPdoMyWire
         if (\strlen($e) < 5 || \strlen($e) >= 9 || \ord($e[0]) !== 0xFE) { throw $this->malformed('missing EOF after column definitions'); }
         $r->isSet = true;
         $r->bin = $bin;
+        // SERVER_STATUS_CURSOR_EXISTS (only a COM_STMT_EXECUTE that asked for a cursor gets it): the rows stay on the server
+        if ($bin && (self::le16($e, 3) & 0x40) !== 0) {
+            $r->status = self::le16($e, 3);
+            $r->warnings = self::le16($e, 1);
+            $this->status = $r->status;
+            $r->cursor = true;
+            $r->done = true;
+            return $r;
+        }
         if ($stream) {
             $r->stream = true;
             // the metadata EOF already carries SERVER_MORE_RESULTS_EXISTS, which is what mysqlnd's more_results() answers
@@ -1163,9 +1176,47 @@ final class __McPdoMyWire
      * COM_STMT_EXECUTE of statement $id; $params is everything after the iteration count (NULL bitmap, bound flag, types,
      * values), empty for a statement without parameters. Same chain and same failure contract as query(), with binary rows.
      */
-    public function execute(int $id, string $params, bool $stream = false): __McPdoMyResult
+    public function execute(int $id, string $params, bool $stream = false, int $flags = 0): __McPdoMyResult
     {
-        return $this->cycle("\x17" . self::putLe($id, 4) . "\0" . self::putLe(1, 4) . $params, true, $stream);
+        return $this->cycle("\x17" . self::putLe($id, 4) . \chr($flags & 255) . self::putLe(1, 4) . $params, true, $stream);
+    }
+
+    /** COM_STMT_RESET: drops the long data sent so far and closes the statement's cursor. */
+    public function stmtReset(int $id): ?__McPdoMyErr { return $this->cycle("\x1a" . self::putLe($id, 4), false)->err; }
+
+    /**
+     * COM_STMT_FETCH: up to $n rows (-1 = all) of the open cursor of statement $id, appended to $r->rows; the closing EOF sets
+     * $r->status / $r->warnings, an ERR lands in $r->err (the stream is in sync either way).
+     */
+    public function stmtFetch(int $id, int $n, __McPdoMyResult $r): void
+    {
+        $this->sendCmd("\x1c" . self::putLe($id, 4) . self::putLe($n & 0xFFFFFFFF, 4));
+        try {
+            while (true) {
+                $p = $this->packet(self::ROW_CAP);
+                $bl = \strlen($p);
+                if ($bl < 1) { throw $this->malformed('empty row'); }
+                $t = \ord($p[0]);
+                if ($t === 0xFE && $bl < 9) {
+                    if ($bl < 5) { throw $this->malformed('EOF packet'); }
+                    $r->warnings = self::le16($p, 1);
+                    $r->status = self::le16($p, 3);
+                    $this->status = $r->status;
+                    break;
+                }
+                if ($t === 0xFF) {
+                    $r->err = $this->parseErr($p);
+                    break;
+                }
+                $r->rows[] = $this->parseBinRow($p, $r);
+            }
+            $this->inflight = false;
+        } catch (\Throwable $x) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $x;
+        } finally {
+            $this->release();
+        }
     }
 
     private function cycle(string $cmd, bool $bin, bool $stream = false): __McPdoMyResult
@@ -1521,9 +1572,11 @@ final class __McPdoMyWire
             $q->params = self::le16($p, 7);
             $q->warnings = self::le16($p, 10);
             if ($q->cols > self::MAX_COLUMNS || $q->params > self::MAX_PARAMS) { throw $this->malformed('PREPARE_OK counts'); }
-            foreach ([$q->params, $q->cols] as $cnt) {
+            foreach ([$q->params, $q->cols] as $k => $cnt) {
                 if ($cnt === 0) { continue; }
-                for ($i = 0; $i < $cnt; $i++) { $this->parseCol($this->packet(self::CTRL_CAP), new __McPdoMyResult()); }
+                $defs = new __McPdoMyResult();
+                for ($i = 0; $i < $cnt; $i++) { $this->parseCol($this->packet(self::CTRL_CAP), $defs); }
+                if ($k === 1) { $q->meta = $defs; }
                 $e = $this->packet(self::CTRL_CAP);
                 if (\strlen($e) < 5 || \strlen($e) >= 9 || \ord($e[0]) !== 0xFE) { throw $this->malformed('missing EOF after definitions'); }
             }
