@@ -65,6 +65,9 @@ final class Parser
     /** Current statement + expression nesting (tolerant mode; see MAX_DEPTH). */
     private int $depth = 0;
 
+    /** Tolerant mode: an error beyond the 100th was dropped; parseTolerant appends the one "too many errors" entry. */
+    private bool $capped = false;
+
     /** record() calls so far, dropped duplicates included: a loop sees whether an iteration reported anything. */
     private int $recorded = 0;
 
@@ -154,7 +157,7 @@ final class Parser
             $p = new self($tokens, $source, $file, false);
             $p->ranges = true;
             $p->tolerant = 1;
-            $p->errors = $lexer->errors;
+            foreach ($lexer->errors as $le) { $p->record($le); }
             $program = $p->parseProgram();
         } catch (ParseError $e) {
             if ($p !== null) { $p->record($e); }
@@ -163,6 +166,7 @@ final class Parser
             $errors[] = new ParseError($e->getMessage(), 1, 1, 1, 1);
         }
         if ($p !== null) { $errors = $p->errors; }
+        $capped = $p !== null && $p->capped;
         for ($i = 1; $i < \count($errors); $i = $i + 1) {
             $e = $errors[$i];
             $j = $i - 1;
@@ -172,6 +176,10 @@ final class Parser
                 $j = $j - 1;
             }
             $errors[$j + 1] = $e;
+        }
+        if ($capped) {
+            $l = $errors[\count($errors) - 1];
+            $errors[] = new ParseError('too many errors', $l->errLine, $l->column, $l->endLine, $l->endColumn);
         }
         return new ParseResult($program, $errors);
     }
@@ -3794,12 +3802,11 @@ final class Parser
     {
         $this->recorded = $this->recorded + 1;
         $n = \count($this->errors);
-        if ($n > 100) { return; }
         for ($i = 0; $i < $n; $i = $i + 1) {
             if ($this->errors[$i]->errLine === $e->errLine && $this->errors[$i]->column === $e->column) { return; }
         }
-        if ($n === 100) {
-            $this->errors[] = new ParseError('too many errors', $e->errLine, $e->column, $e->endLine, $e->endColumn);
+        if ($n >= 100) {
+            $this->capped = true;
             return;
         }
         $this->errors[] = $e;
@@ -4081,6 +4088,9 @@ final class Parser
         if ($first === null) {
             return new Span($el, $ec, $file, $el, $ec);
         }
+        if ($el < $first->line || ($el === $first->line && $ec < $first->column)) {
+            return new Span($el, $ec, $file, $el, $ec);
+        }
         return new Span($first->line, $first->column, $file, $el, $ec);
     }
 
@@ -4092,12 +4102,15 @@ final class Parser
         return new Span($c->startLine(), $c->startColumn(), $c->file, $c->endLine, $c->endColumn);
     }
 
-    /** Move the cursor back to token index $p, keeping the previous-token end consistent. */
+    /** Move the cursor back to token index $p, keeping the previous-token end consistent and any synthetic point at or before it. */
     private function rewind(int $p): void
     {
         $this->pos = $p;
-        $this->synthLine = 0;
-        $this->synthColumn = 0;
+        $at = $this->tokens[$p];
+        if ($this->synthLine > $at->line || ($this->synthLine === $at->line && $this->synthColumn > $at->column)) {
+            $this->synthLine = 0;
+            $this->synthColumn = 0;
+        }
         $prev = $p > 0 ? $this->tokens[$p - 1] : null;
         $this->prevEndLine = $prev !== null ? $prev->endLine : 0;
         $this->prevEndColumn = $prev !== null ? $prev->endColumn : 0;

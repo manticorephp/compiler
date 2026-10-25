@@ -189,7 +189,25 @@ stress alt_if_nest < <({ printf '<?php\n'; rep 'if (1): ' 50000; })
 stress alt_foreach_else < <({ printf '<?php\n'; rep 'foreach ($a as $b): if (1): else: ' 30000; })
 stress elseif_chain < <({ printf '<?php\nif (1) {}'; rep ' elseif (1) {}' 100000; })
 stress property_hook_nest < <({ printf '<?php\nclass A { public $p { get { '; rep 'class B { public $q { get { ' 20000; })
-stress do_while_nest < <({ printf '<?php\n'; rep 'do ' 100000; })
+stress do_while_nest < <({ printf '<?php\n'; rep 'do { ' 100000; })
+
+# Error cap: at most 100 errors + one final "too many errors", exit 0.
+flood() {
+    local name="$1" f="$WORK/flood_$1.php"
+    [[ -n "$FILTER" && "flood_$name" != *"$FILTER"* ]] && return
+    cat > "$f"
+    run_limited "$MANTICORE" dump-ast --tolerant "$f" > "$WORK/flood_$name.out" 2>&1
+    local rc=$?
+    local n last
+    n="$(/usr/bin/grep -c '^error ' "$WORK/flood_$name.out")"
+    last="$(/usr/bin/grep '^error ' "$WORK/flood_$name.out" | tail -n 1)"
+    if [[ $rc -eq 0 && $n -eq 101 && "$last" == *"too many errors" ]]; then passed=$((passed + 1)); printf 'PASS flood_%s\n' "$name"
+    else failed=$((failed + 1)); failed_names+=("flood_$name"); printf 'FAIL flood_%s  (exit %d, %d errors, last: %s)\n' "$name" "$rc" "$n" "$last"; fi
+    rm -f "$f" "$WORK/flood_$name.out"
+}
+flood parser_errors < <({ printf '<?php\n'; rep 'foo(;\n' 300; })
+flood lexer_errors < <({ printf '<?php\n'; rep '\001' 300; })
+flood mixed_errors < <({ printf '<?php\n'; rep 'foo(;\n\001\n' 400; })
 
 # Strict (non-tolerant) parse with ranges: the end()/endFrom() clamps must never need to fire.
 for f in "$ROOT/src/Parser/Parser.php" "$ROOT/src/Parser/Dump.php" "$CASES"/*.strict.php; do
