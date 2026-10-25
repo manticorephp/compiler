@@ -70,6 +70,8 @@ final class EscapeSummaries
     private array $isAMemo = [];
     /** @var array<string, bool> */
     private array $pureNames = [];
+    /** @var array<string, array<string, bool>> slot sets by content: most functions write the same few */
+    private array $setPool = [];
 
     public static function fromModule(Module $module): self
     {
@@ -207,6 +209,22 @@ final class EscapeSummaries
         $this->noteCall($n);
     }
 
+    /**
+     * One shared copy per distinct set of slots: a module of 130k functions otherwise holds
+     * 130k private copies of the same few sets.
+     *
+     * @param array<string, bool> $set
+     * @return array<string, bool>
+     */
+    private function pooled(array $set): array
+    {
+        $keys = \array_keys($set);
+        \sort($keys);
+        $sig = \implode("\0", $keys);
+        if (!isset($this->setPool[$sig])) { $this->setPool[$sig] = $set; }
+        return $this->setPool[$sig];
+    }
+
     private function resetScratch(): void
     {
         $this->ewWrites = [];
@@ -257,7 +275,7 @@ final class EscapeSummaries
             $callees[$name] = \array_keys($this->ewReads);
             $localPark[$name] = $this->ewPark;
             $localAny[$name] = $this->ewAny;
-            $localWrites[$name] = $this->ewWrites;
+            $localWrites[$name] = $this->pooled($this->ewWrites);
             $localWhy[$name] = $this->ewWhy;
         }
         // 2. Strongly connected components, callees first. Every member of a
@@ -286,13 +304,17 @@ final class EscapeSummaries
                     foreach ($this->writes[$c] as $wk => $unused) { $writes[$wk] = true; }
                 }
             }
+            $pooledWrites = $this->pooled($writes);
             foreach ($scc as $m) {
                 $this->parkFree[$m] = $park;
                 $this->writesAny[$m] = $any;
-                $this->writes[$m] = $writes;
+                $this->writes[$m] = $pooledWrites;
                 if (!$park || $any) { $this->why[$m] = $why; }
+                // Consumed: a component's members are never read again.
+                unset($callees[$m], $localWrites[$m], $localWhy[$m]);
             }
         }
+        $this->setPool = [];
         \Compile\Stats::line('escape: fns=' . (string)\count($names) . ' sccs=' . (string)\count($sccs));
         $this->ewReads = [];
         $this->ewWrites = [];
