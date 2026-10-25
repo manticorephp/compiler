@@ -1,6 +1,5 @@
 <?php
 // ReflectionClassConstant::getAttributes() is missing (Call to undefined method); symfony's ReflectionClassResource calls it.
-// issue: #244
 
 #[Attribute]
 class Tag { public function __construct(public string $v = '') {} }

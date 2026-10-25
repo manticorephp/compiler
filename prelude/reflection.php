@@ -2519,13 +2519,27 @@ class ReflectionClassConstant
     }
 
     /**
-     * A class constant's attributes. The compiler keeps no attribute rows for constants yet (#244), so
-     * this answers none: right for a constant that carries none, which is what Symfony's
-     * ReflectionClassResource hashes through here.
+     * A class constant's attributes, looked up in the constant table of this class
+     * or the nearest ancestor that declares the constant.
      * @return ReflectionAttribute[]
      */
     public function getAttributes(?string $name = null, int $flags = 0): array
     {
+        $h = __mc_refl_find(__mc_refl_unqualify($this->class));
+        while ($h !== 0) {
+            $n = __mc_refl_nconsts($h);
+            $base = __mc_refl_consts_base($h);
+            $i = 0;
+            while ($i < $n) {
+                if (__mc_refl_row_name($base, $i) === $this->name) {
+                    $row = __mc_refl_row_at($base, $i);
+                    return __mc_refl_attrs_of(
+                        __mc_refl_row_attrs($row), __mc_refl_row_nattrs($row), $name, $flags);
+                }
+                $i = $i + 1;
+            }
+            $h = __mc_refl_parent($h);
+        }
         return [];
     }
 

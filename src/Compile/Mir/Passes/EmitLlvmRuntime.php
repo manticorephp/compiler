@@ -2102,6 +2102,11 @@ trait EmitLlvmRuntime
         $defs = '';
         $i = 0;
         foreach ($cls->propertyMeta as $pn => $pm) {
+            // The throwables' stack storage is ours, not php's property set.
+            if (($pn === 'traceNames' || $pn === 'traceLines')
+                && \in_array($pm->declaringClass !== '' ? $pm->declaringClass : $cls->name, ['Exception', 'Error'], true)) {
+                continue;
+            }
             $sym = '@.rmeta.p.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($sym, $pn);
             // Type name — the hint AS WRITTEN (`?App\Foo`). getType() derives
@@ -2141,6 +2146,30 @@ trait EmitLlvmRuntime
     }
 
     /**
+     * The class-constant table: a name + attribute-table row per OWN constant
+     * that carries attributes. Same row shape as a property row.
+     *
+     * @return string[] [globalDefs, "i64 n, ptr sym"]
+     */
+    private function rmetaConstTable(\Compile\Mir\ClassDef $cls, string $id): array
+    {
+        $rows = [];
+        $defs = '';
+        $i = 0;
+        foreach ($cls->constAttributes as $cn => $names) {
+            $sym = '@.rmeta.k.' . $id . '.' . (string)$i;
+            $defs .= $this->strGlobalDef($sym, (string)$cn);
+            $ap = $this->attrTableFor($names, $cls->name, 'k', (string)$cn, '@.rmeta.kattr.' . $id . '.' . (string)$i);
+            $defs .= $ap[0];
+            $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
+                $this->strSymBytes($sym), 0, 'null', 0, 0, 'null', $ap[1], $ap[2]);
+            $i = $i + 1;
+        }
+        $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.kt.' . $id, $rows);
+        return [$defs . $pair[0], $pair[1]];
+    }
+
+    /**
      * A property accessor field: `ptr @manticore_…` when {@see ReflectSynth}
      * synthesized it (guarded by its presence in the signature table — a data
      * reference to an undefined symbol is a link error), else `ptr null`.
@@ -2172,6 +2201,7 @@ trait EmitLlvmRuntime
         if ($kind === 'm') { $target = \Compile\BuiltinAttributes::TARGET_METHOD; }
         elseif ($kind === 'p') { $target = \Compile\BuiltinAttributes::TARGET_PROPERTY; }
         elseif ($kind === 'a') { $target = \Compile\BuiltinAttributes::TARGET_PARAMETER; }
+        elseif ($kind === 'k') { $target = \Compile\BuiltinAttributes::TARGET_CLASS_CONSTANT; }
         // A repeat is a property of the SITE, so it is counted over all names
         // here, not per surviving row.
         $counts = [];
@@ -2696,6 +2726,8 @@ trait EmitLlvmRuntime
             $descs .= $aPair[0];
             $attrsFlds = 'i64 ' . (string)$aPair[1] . ', '
                        . ($aPair[2] === 'null' ? 'ptr null' : 'ptr ' . $aPair[2]);
+            $kPair = $this->rmetaConstTable($cls, $id);
+            $descs .= $kPair[0];
             $constsFnFld = 'ptr null';
             $constsFn = \Compile\Mir\Passes\ReflectSynth::constsFn($cls->name);
             if (isset($this->sigs->paramTypes[$constsFn])) {
@@ -2719,7 +2751,7 @@ trait EmitLlvmRuntime
             $descs .= \Compile\Mir\RuntimeLibrary::rmetaGlobal(
                 $id, 'ptr ' . $this->strSymBytes($nameSym), $flags, $parentId,
                 $parentNameFld, $mFlds, $pFlds, $this->ctorTrampField($cls), $attrsFlds,
-                $constsFnFld, $ifacesFnFld, $fileFnFld, $docFnFld);
+                $constsFnFld, $ifacesFnFld, $fileFnFld, $docFnFld, $kPair[1]);
             $descs .= \Compile\Mir\RuntimeLibrary::descriptorGlobal(
                 (int)$id, $dropFld, \Compile\Mir\RuntimeLibrary::rmetaField((int)$id),
                 $dynFld, $propsFld, $cmpViewFld, $cmpGroup, $jsonFld, $visitFld);

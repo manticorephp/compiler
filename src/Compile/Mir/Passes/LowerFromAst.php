@@ -2357,6 +2357,9 @@ final class LowerFromAst implements Pass
             foreach ($decl->properties as $prop) {
                 $this->attrFactoriesFor($cd->name, 'p', $prop->name, $prop->attributes, $out);
             }
+            foreach ($decl->consts as $const) {
+                $this->attrFactoriesFor($cd->name, 'k', $const->name, $const->attributes, $out);
+            }
         }
         return $out;
     }

@@ -190,7 +190,7 @@ final class RuntimeLibrary
      */
     public static function rmetaType(): string
     {
-        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr }';
+        return '{ ptr, i64, i64, ptr, i64, ptr, i64, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, i64, ptr }';
     }
 
     /** One method/property row:
@@ -340,13 +340,14 @@ final class RuntimeLibrary
         string $constsFnFld = 'ptr null',
         string $ifacesFnFld = 'ptr null',
         string $fileFnFld = 'ptr null',
-        string $docFnFld = 'ptr null'
+        string $docFnFld = 'ptr null',
+        string $constRowsFlds = 'i64 0, ptr null'
     ): string {
-        return '@__mc_rmeta_v5_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
+        return '@__mc_rmeta_v6_' . $id . ' = linkonce_odr constant ' . self::rmetaType()
             . ' { ' . $nameFld . ', i64 ' . (string)$flags . ', i64 ' . (string)$parentId
             . ', ' . $parentNameFld . ', ' . $methodsFlds . ', ' . $propsFlds
             . ', ' . $ctorTrampFld . ', ' . $attrsFlds . ', ' . $constsFnFld
-            . ', ' . $ifacesFnFld . ', ' . $fileFnFld . ', ' . $docFnFld . " }\n";
+            . ', ' . $ifacesFnFld . ', ' . $fileFnFld . ', ' . $docFnFld . ', ' . $constRowsFlds . " }\n";
     }
 
     /** The rmeta pointer field for a descriptor: the class's block, or null
@@ -356,7 +357,7 @@ final class RuntimeLibrary
      *  error, not silent linkonce_odr coalescing onto the wrong shape. */
     public static function rmetaField(int $id): string
     {
-        return 'ptr @__mc_rmeta_v5_' . (string)$id;
+        return 'ptr @__mc_rmeta_v6_' . (string)$id;
     }
 
     /** Registry node: `{ ptr rmeta, ptr next, i64 registered }`. */
@@ -388,7 +389,7 @@ final class RuntimeLibrary
         $sid = $key;
         $node = '@__mc_refl_node_' . $sid;
         $t = self::reflNodeType();
-        $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_v5_' . $sid
+        $out = $node . ' = linkonce_odr global ' . $t . ' { ptr @__mc_rmeta_v6_' . $sid
              . ", ptr null, i64 0 }\n";
         $out .= 'define void @__mc_refl_reg_' . $sid . "() {\nentry:\n";
         $out .= '  %f = getelementptr i8, ptr ' . $node . ", i64 16\n";
