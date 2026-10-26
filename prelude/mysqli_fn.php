@@ -285,7 +285,7 @@ function mysqli_ping(mysqli $mysql): bool
 
 function mysqli_poll(?array &$read, ?array &$error, array &$reject, int $seconds, int $microseconds = 0): false|int
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::poll($read, $error, $reject, $seconds, $microseconds, 'mysqli_poll');
 }
 
 function mysqli_prepare(mysqli $mysql, string $query): false|mysqli_stmt
@@ -315,7 +315,7 @@ function mysqli_real_query(mysqli $mysql, string $query): bool
 
 function mysqli_reap_async_query(mysqli $mysql): bool|mysqli_result
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->reap_async_query();
 }
 
 function mysqli_refresh(mysqli $mysql, int $flags): bool

@@ -1267,7 +1267,8 @@ final class __McPdoMyWire
         $this->pendFiber = \Runtime\AsyncHook::active() ? \Fiber::getCurrent() : null;
     }
 
-    private function ownsPending(): bool
+    /** No sendQuery() reply is pending, or it belongs to the calling fiber (always, without a scheduler). */
+    public function ownsPending(): bool
     {
         return !\Runtime\AsyncHook::active() || \Fiber::getCurrent() === $this->pendFiber;
     }

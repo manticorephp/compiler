@@ -307,7 +307,154 @@ final class __McMysqliConn
     /** A result is waiting to be taken, read or advanced: no command may start (mysqlnd's state != READY). */
     public function busy(): bool
     {
-        return $this->pend !== null || $this->open !== null || $this->chain !== null || $this->ps !== null;
+        return $this->async || $this->pend !== null || $this->open !== null || $this->chain !== null || $this->ps !== null;
+    }
+
+    /** query(MYSQLI_ASYNC) sent its command and reap_async_query() has not read the reply (mysqlnd's QUERY_SENT). */
+    public bool $async = false;
+    /** The result mode reap_async_query() takes the reply's result set with (MYSQLI_STORE_RESULT / MYSQLI_USE_RESULT). */
+    public int $asyncMode = 0;
+
+    /** query($sql, MYSQLI_ASYNC): the command is sent, its reply is left for reap_async_query(). */
+    public function sendAsync(string $sql, int $mode): bool
+    {
+        $w = $this->liveWire();
+        if (!$this->begin()) { return false; }
+        try {
+            $this->multiMode($w, false);
+            $w->sendQuery($sql);
+        } catch (PDOException $e) {
+            return $this->wireFail($e);
+        }
+        $this->async = true;
+        $this->asyncMode = $mode;
+        return true;
+    }
+
+    /**
+     * reap_async_query(): reads the pending reply like query() would have. Nothing pending (mysqlnd warns "Connection not
+     * opened, clear or has been closed") is false, and the last error stands (thrown again under STRICT). The reply is
+     * the sending fiber's: another fiber is out of sync.
+     */
+    public function reap(): bool
+    {
+        $w = $this->liveWire();
+        if (!$this->async) {
+            $this->report();
+            return false;
+        }
+        if (!$w->ownsPending()) { return $this->fail(2014, 'HY000', self::OOS); }
+        $this->async = false;
+        try {
+            $r = $w->readQueryReply($this->asyncMode === 1);
+        } catch (PDOException $e) {
+            return $this->wireFail($e);
+        }
+        return $this->take($r);
+    }
+
+    /**
+     * mysqli_poll(): the read links with no reply to wait for are moved to $reject (mysqlnd's state <= READY), the rest
+     * and the $error links are waited on for up to $sec + $usec, and both arrays are rewritten (list order, duplicates
+     * kept) to the links that are ready; $reject always is. An exceptional condition never arises on a MySQL socket.
+     * Bytes the wire already buffered are not on the socket: such a link is ready without waiting.
+     *
+     * @param ?array<int|string,mixed> $read
+     * @param ?array<int|string,mixed> $error
+     * @param array<int|string,mixed> $reject
+     */
+    public static function poll(?array &$read, ?array &$error, array &$reject, int $sec, int $usec, string $fn): false|int
+    {
+        if ($sec < 0) { throw new ValueError($fn . '(): Argument #4 ($seconds) must be greater than or equal to 0'); }
+        if ($usec < 0) { throw new ValueError($fn . '(): Argument #5 ($microseconds) must be greater than or equal to 0'); }
+        if ($read === null && $error === null) { throw new ValueError('No stream arrays were passed'); }
+        $rl = $read === null ? [] : self::pollLinks($read, $fn);
+        $el = $error === null ? [] : self::pollLinks($error, $fn);
+        /** @var array<int,mysqli> $rej */
+        $rej = [];
+        /** @var array<int,mysqli> $wait */
+        $wait = [];
+        foreach ($rl as $m) {
+            if (self::of($m)->busy()) { $wait[] = $m; } else { $rej[] = $m; }
+        }
+        $reject = $rej;
+        if (\count($wait) === 0 && \count($el) === 0) {
+            if ($read !== null) { $read = []; }
+            if ($error !== null) { $error = []; }
+            return false;
+        }
+        /** @var array<int,mixed> $rs */
+        $rs = [];
+        /** @var array<int,mixed> $es */
+        $es = [];
+        $now = false;
+        /** @var array<int,bool> $seen */
+        $seen = [];
+        foreach ($wait as $m) {
+            $c = self::of($m);
+            $w = $c->wire;
+            if ($w === null) { continue; }
+            if ($c->async && $w->hasBuffered()) { $now = true; }
+            $s = $w->socket();
+            if (isset($seen[\get_resource_id($s)])) { continue; }
+            $seen[\get_resource_id($s)] = true;
+            $rs[] = $s;
+        }
+        foreach ($el as $m) {
+            $w = self::of($m)->wire;
+            if ($w !== null) { $es[] = $w->socket(); }
+        }
+        $sec += \intdiv($usec, 1000000);
+        $usec %= 1000000;
+        $nul = null;
+        $n = \stream_select($rs, $nul, $es, $now ? 0 : $sec, $now ? 0 : $usec);
+        if ($n === false) { return false; }
+        /** @var array<int,bool> $ready */
+        $ready = [];
+        foreach ($rs as $s) { $ready[\get_resource_id($s)] = true; }
+        /** @var array<int,mysqli> $out */
+        $out = [];
+        $count = 0;
+        $seen = [];
+        foreach ($wait as $m) {
+            $c = self::of($m);
+            $w = $c->wire;
+            if ($w === null) { continue; }
+            $id = \get_resource_id($w->socket());
+            if (!isset($ready[$id]) && !($c->async && $w->hasBuffered())) { continue; }
+            $out[] = $m;
+            if (!isset($seen[$id])) { $seen[$id] = true; $count++; }
+        }
+        if ($read !== null) { $read = $out; }
+        if ($error !== null) { $error = []; }
+        return $count;
+    }
+
+    /**
+     * The links of one poll array, refused as mysqlnd refuses them: a non-mysqli element names its position as if it
+     * were an argument (Zend's own wording), a link must be connected.
+     *
+     * @param array<int|string,mixed> $arr
+     * @return array<int,mysqli>
+     */
+    private static function pollLinks(array $arr, string $fn): array
+    {
+        $names = ['read', 'error', 'reject', 'seconds', 'microseconds'];
+        $o = [];
+        $i = 0;
+        foreach ($arr as $v) {
+            $i++;
+            if (!$v instanceof mysqli) {
+                $t = $v === true ? 'true' : ($v === false ? 'false' : (\is_resource($v) ? 'resource' : \get_debug_type($v)));
+                throw new TypeError($fn . '(): Argument #' . $i . ($i <= 5 ? ' ($' . $names[$i - 1] . ')' : '') . ' must be an instance of mysqli, ' . $t . ' given');
+            }
+            $st = self::of($v)->st;
+            if ($st !== self::VALID) {
+                throw new Error(\get_class($v) . ($st === self::INIT ? ' object is not fully initialized' : ' object is already closed'));
+            }
+            $o[] = $v;
+        }
+        return $o;
     }
 
     /** Forgets every result in flight (the connection is going away). */
@@ -315,6 +462,7 @@ final class __McMysqliConn
     {
         $o = $this->open;
         $this->open = null;
+        $this->async = false;
         $this->pend = null;
         $this->chain = null;
         $this->ps = null;
@@ -382,6 +530,12 @@ final class __McMysqliConn
     public function send(string $sql, bool $stream, bool $multi = false): bool
     {
         $w = $this->liveWire();
+        if ($multi && !$this->mq && $this->busy()) {
+            // mysqli turns multi-statements on before the query: that command is refused too, an error of its own
+            $this->clear();
+            $this->record(2014, 'HY000', self::OOS);
+            return $this->fail(2014, 'HY000', self::OOS);
+        }
         if (!$this->begin()) { return false; }
         try {
             $this->multiMode($w, $multi);
@@ -1098,7 +1252,7 @@ class mysqli
 
     public static function poll(?array &$read, ?array &$error, array &$reject, int $seconds, int $microseconds = 0): false|int
     {
-        throw new Error('mysqli: not implemented');
+        return __McMysqliConn::poll($read, $error, $reject, $seconds, $microseconds, 'mysqli::poll');
     }
 
     public function prepare(string $query): false|mysqli_stmt
@@ -1130,8 +1284,8 @@ class mysqli
         if ($m !== 0 && $m !== 1) {
             throw new ValueError($fn . '(): Argument #' . ($arg + 1) . ' ($result_mode) must be either MYSQLI_USE_RESULT or MYSQLI_STORE_RESULT with MYSQLI_ASYNC as an optional bitmask flag');
         }
-        if (($mode & 8) !== 0) { throw new Error('mysqli: not implemented'); }
         $c = __McMysqliConn::of($this);
+        if (($mode & 8) !== 0) { return $c->sendAsync($query, $m); }
         if (!$c->send($query, $m === 1)) { return false; }
         if ($c->pend === null) { return true; }
         return new mysqli_result($this, $m);
@@ -1154,7 +1308,10 @@ class mysqli
 
     public function reap_async_query(): bool|mysqli_result
     {
-        throw new Error('mysqli: not implemented');
+        $c = __McMysqliConn::of($this);
+        if (!$c->reap()) { return false; }
+        if ($c->pend === null) { return true; }
+        return new mysqli_result($this, $c->asyncMode);
     }
 
     public function refresh(int $flags): bool
