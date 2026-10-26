@@ -103,6 +103,11 @@ _manticore() {
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
+        '--tolerant[Recover from syntax errors; print the tree and every error]' \
+        '--ranges[Print spans as start-end ranges]' \
+        '--names[Print the written-name table instead of the tree]' \
+        '--check-names[Verify every name span slices to its written text; print each mismatch, exit 1 if any]' \
+        '--check-ranges[Verify the range invariants; print each violation, exit 1 if any]' \
         '*:file:_files'
       ;;
     analyze)

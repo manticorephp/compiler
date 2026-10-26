@@ -11,11 +11,14 @@ namespace Lexer;
  *   - line   1-based source line of the first byte
  *   - column 1-based column of the first byte
  *
+ * {@see endLine()} / {@see endColumn()} (just past the last byte) are 0 here;
+ * {@see RangedToken} carries them.
+ *
  * Immutable. No enum is used so parser code can compare kinds with plain
  * `===` against TokenKind constants without tripping the current AOT
  * compiler's enum-identity bug.
  */
-final class Token
+class Token
 {
     public function __construct(
         public readonly string $kind,
@@ -23,6 +26,16 @@ final class Token
         public readonly int $line,
         public readonly int $column,
     ) {}
+
+    public function endLine(): int
+    {
+        return 0;
+    }
+
+    public function endColumn(): int
+    {
+        return 0;
+    }
 
     public function describe(): string
     {

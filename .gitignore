@@ -40,3 +40,4 @@ bin/manticore.fast
 tests/pdo_net/.work
 tests/pdo_net/.certs
 /_site/
+tests/parser/.work

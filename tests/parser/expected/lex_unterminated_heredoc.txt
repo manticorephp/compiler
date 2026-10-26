@@ -1,0 +1,15 @@
+Program
+  Stmt:Expression @2:1-5:1
+    expr:
+      Expr:Assign @2:1-5:1
+        target:
+          Expr:Variable @2:1-2:3
+            name: "a"
+        value:
+          Expr:StringLiteral @2:6-5:1
+            value: ""
+    docComment: null
+    attributes: [0]
+error 2:6-5:1 unterminated heredoc
+error 5:1-5:1 expected ';' after expression
+

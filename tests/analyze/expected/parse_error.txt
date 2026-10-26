@@ -1,3 +1,4 @@
 tests/analyze/cases/parse_error.php:3:10: error: expected function name
+tests/analyze/cases/parse_error.php:4:1: error: expected $variable in parameter list
 
-Found 1 error(s), 0 warning(s).
+Found 2 error(s), 0 warning(s).

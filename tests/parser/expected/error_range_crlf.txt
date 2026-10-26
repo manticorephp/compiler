@@ -1,0 +1,28 @@
+Program
+  Stmt:Expression @2:1-2:15
+    expr:
+      Expr:Assign @2:1-2:15
+        target:
+          Expr:Variable @2:1-2:4
+            name: "é"
+        value:
+          Expr:Call @2:7-2:15
+            function: "foo"
+            args: [1]
+              Expr:StringLiteral @2:11-2:15
+                value: "é"
+            qualified: false
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @2:16-3:3
+    expr:
+      Expr:StringLiteral @2:16-3:3
+        value: "a
+b"
+    docComment: null
+    attributes: [0]
+  Stmt:Error @3:3-3:4
+    skipped: 1
+error 2:16-3:3 expected ')' after arguments
+error 3:3-3:4 expected ';' after expression
+

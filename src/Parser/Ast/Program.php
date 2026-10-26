@@ -28,5 +28,11 @@ final class Program
          * @var string[]
          */
         public readonly array $docComments = [],
+        /**
+         * Every written name, in source order; filled only when the parser is asked
+         * to collect names (tolerant parse, dump-ast --names), empty otherwise.
+         * @var NameRef[]
+         */
+        public readonly array $names = [],
     ) {}
 }

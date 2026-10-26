@@ -1,0 +1,6 @@
+Program
+  Stmt:UseDecl @2:1-2:4
+    items: [1]
+      UseItem class  @2:4-2:4
+error 2:5-2:5 expected ';' after use
+

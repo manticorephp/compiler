@@ -1,0 +1,56 @@
+Program
+  Stmt:For @2:1-4:2
+    init: [1]
+      Expr:Assign @2:6-2:12
+        target:
+          Expr:Variable @2:6-2:8
+            name: "i"
+        value:
+          Expr:IntLiteral @2:11-2:12
+            value: 0
+    condition:
+      Expr:BinaryOp @2:14-2:19
+        op: "<"
+        left:
+          Expr:Variable @2:14-2:16
+            name: "i"
+        right:
+          Expr:Error @2:19-2:19
+    update: [1]
+      Expr:IncDec @2:21-2:25
+        op: "++"
+        prefix: false
+        operand:
+          Expr:Variable @2:21-2:23
+            name: "i"
+    body: Block @2:27-4:2
+      Stmt:Echo @3:3-3:11
+        exprs: [1]
+          Expr:Variable @3:8-3:10
+            name: "i"
+  Stmt:Expression @5:1-5:8
+    expr:
+      Expr:Assign @5:1-5:7
+        target:
+          Expr:Variable @5:1-5:3
+            name: "z"
+        value:
+          Expr:IntLiteral @5:6-5:7
+            value: 1
+    docComment: null
+    attributes: [0]
+  Stmt:For @6:1-7:1
+    init: [0]
+    condition: null
+    update: [1]
+      Expr:Identifier @6:9-6:16
+        name: "garbage"
+    body: Block @7:1-7:1
+      Stmt:Expression @7:1-7:1
+        expr:
+          Expr:Error @7:1-7:1
+        docComment: null
+        attributes: [0]
+error 2:19-2:20 unexpected token in expression: Semicolon
+error 7:1-7:1 expected ')' after for clauses
+

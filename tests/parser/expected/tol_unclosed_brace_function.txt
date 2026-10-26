@@ -1,0 +1,23 @@
+Program
+  Stmt:Function @2:1-4:13
+    decl: FunctionDecl f
+      return: (none)
+      params: 0
+      body: Block @2:14-4:13
+        Stmt:Expression @3:5-3:12
+          expr:
+            Expr:Assign @3:5-3:11
+              target:
+                Expr:Variable @3:5-3:7
+                  name: "a"
+              value:
+                Expr:IntLiteral @3:10-3:11
+                  value: 1
+          docComment: null
+          attributes: [0]
+        Stmt:Echo @4:5-4:13
+          exprs: [1]
+            Expr:Variable @4:10-4:12
+              name: "a"
+error 5:1-5:1 expected '}'
+

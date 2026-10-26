@@ -1,0 +1,16 @@
+Program
+  Stmt:UseDecl @2:1-2:4
+    items: [1]
+      UseItem class  @2:4-2:4
+  Stmt:Expression @2:5-3:1
+    expr:
+      Expr:Assign @2:5-3:1
+        target:
+          Expr:Error @2:5-2:5
+        value:
+          Expr:Error @3:1-3:1
+    docComment: null
+    attributes: [0]
+error 2:5-2:6 expected ';' after use
+error 3:1-3:1 unexpected token in expression: Eof
+

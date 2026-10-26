@@ -1,0 +1,78 @@
+Program
+  Stmt:Expression @2:1-2:112
+    expr:
+      Expr:Assign @2:1-2:111
+        target:
+          Expr:Variable @2:1-2:3
+            name: "r"
+        value:
+          Expr:Ternary @2:6-2:111
+            condition:
+              Expr:Call @2:6-2:38
+                function: "foo"
+                args: [2]
+                  Expr:BinaryOp @2:10-2:21
+                    op: "+"
+                    left:
+                      Expr:Variable @2:10-2:12
+                        name: "a"
+                    right:
+                      Expr:BinaryOp @2:15-2:21
+                        op: "*"
+                        left:
+                          Expr:Variable @2:15-2:17
+                            name: "b"
+                        right:
+                          Expr:IntLiteral @2:20-2:21
+                            value: 2
+                  Expr:ArrayLit @2:23-2:37
+                    elements: [2]
+                      [0] ArrayElement
+                        key: null
+                        value:
+                          Expr:IntLiteral @2:24-2:25
+                            value: 1
+                        byRef: false
+                      [1] ArrayElement
+                        key:
+                          Expr:StringLiteral @2:27-2:30
+                            value: "k"
+                        value:
+                          Expr:Variable @2:34-2:36
+                            name: "c"
+                        byRef: false
+                qualified: false
+            then:
+              Expr:Closure @2:41-2:69
+                isStatic: false
+                params: [1]
+                  Param $q : (untyped) @2:51-2:53
+                uses: [0]
+                returnType: null
+                body: Block @2:55-2:69
+                  Stmt:Return @2:57-2:67
+                    value:
+                      Expr:Variable @2:64-2:66
+                        name: "q"
+                returnsByRef: false
+            else:
+              Expr:Match @2:72-2:111
+                subject:
+                  Expr:Variable @2:79-2:81
+                    name: "z"
+                arms: [2]
+                  [0] MatchArm
+                    conds: [1]
+                      Expr:IntLiteral @2:85-2:86
+                        value: 1
+                    body:
+                      Expr:StringLiteral @2:90-2:93
+                        value: "a"
+                  [1] MatchArm
+                    conds: null
+                    body:
+                      Expr:StringLiteral @2:106-2:109
+                        value: "b"
+    docComment: null
+    attributes: [0]
+

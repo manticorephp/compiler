@@ -1,0 +1,36 @@
+Program
+  Stmt:Expression @2:1-2:16
+    expr:
+      Expr:Assign @2:1-2:15
+        target:
+          Expr:Variable @2:1-2:4
+            name: "é"
+        value:
+          Expr:StringLiteral @2:7-2:15
+            value: "日本"
+    docComment: null
+    attributes: [0]
+  Stmt:If @3:1-5:2
+    condition:
+      Expr:Variable @3:5-3:8
+        name: "é"
+    then: Block @3:10-5:2
+      Stmt:Echo @4:5-4:18
+        exprs: [1]
+          Expr:StringLiteral @4:10-4:17
+            value: "é日"
+    elseifs: [0]
+    else: null
+  Stmt:Expression @6:1-6:15
+    expr:
+      Expr:Call @6:1-6:14
+        function: "foo"
+        args: [2]
+          Expr:StringLiteral @6:5-6:9
+            value: "é"
+          Expr:Variable @6:11-6:13
+            name: "x"
+        qualified: false
+    docComment: null
+    attributes: [0]
+

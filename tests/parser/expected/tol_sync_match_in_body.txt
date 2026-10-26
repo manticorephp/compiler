@@ -1,0 +1,26 @@
+Program
+  Stmt:Function @2:1-5:2
+    decl: FunctionDecl f
+      return: (none)
+      params: 1
+      Param $x : (untyped) @2:12-2:14
+      body: Block @2:15-5:2
+        Stmt:Error @3:3-3:42
+          skipped: 15
+        Stmt:Return @4:3-4:13
+          value:
+            Expr:Variable @4:10-4:12
+              name: "y"
+  Stmt:Expression @6:1-6:8
+    expr:
+      Expr:Assign @6:1-6:7
+        target:
+          Expr:Variable @6:1-6:3
+            name: "z"
+        value:
+          Expr:IntLiteral @6:6-6:7
+            value: 1
+    docComment: null
+    attributes: [0]
+error 3:28-3:35 expected '=>' in match arm
+

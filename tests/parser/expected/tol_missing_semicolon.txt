@@ -1,0 +1,25 @@
+Program
+  Stmt:Expression @2:1-2:7
+    expr:
+      Expr:Assign @2:1-2:7
+        target:
+          Expr:Variable @2:1-2:3
+            name: "a"
+        value:
+          Expr:IntLiteral @2:6-2:7
+            value: 1
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @3:1-3:8
+    expr:
+      Expr:Assign @3:1-3:7
+        target:
+          Expr:Variable @3:1-3:3
+            name: "b"
+        value:
+          Expr:IntLiteral @3:6-3:7
+            value: 2
+    docComment: null
+    attributes: [0]
+error 3:1-3:3 expected ';' after expression
+

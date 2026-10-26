@@ -5,6 +5,7 @@ namespace Parser;
 use Parser\Ast\AttributeNode;
 use Parser\Ast\Block;
 use Parser\Ast\ClassDecl;
+use Parser\Ast\ClosureUse;
 use Parser\Ast\ConstDecl;
 use Parser\Ast\Expr;
 use Parser\Ast\FunctionDecl;
@@ -28,12 +29,26 @@ final class Dump
 {
     private int $indent = 0;
     private string $out = '';
+    private int $ranges = 0;
 
-    public static function program(Program $program): string
+    public static function program(Program $program, bool $ranges = false): string
     {
         $d = new self();
+        $d->ranges = $ranges ? 1 : 0;
         $d->program_($program);
         return $d->out;
+    }
+
+    /** The name table alone: `names:` and one `  @L:C-L:C kind written -> resolved [global-fallback]` line per NameRef. */
+    public static function names(Program $program): string
+    {
+        $out = "names:\n";
+        foreach ($program->names as $r) {
+            $s = $r->span;
+            $out .= '  @' . (string)$s->line . ':' . (string)$s->column . '-' . (string)$s->endLine() . ':' . (string)$s->endColumn()
+                . ' ' . $r->kind . ' ' . $r->written . ' -> ' . $r->resolved . ($r->globalFallback ? ' [global-fallback]' : '') . "\n";
+        }
+        return $out;
     }
 
     private function program_(Program $p): void
@@ -99,7 +114,7 @@ final class Dump
             return;
         }
         if ($value instanceof Block) {
-            $this->line($name . ': Block');
+            $this->line($name . ': Block' . ($this->ranges === 1 && $value->span !== null && $value->span->endLine() !== 0 ? ' ' . $this->spanStr($value->span) : ''));
             $this->indent = $this->indent + 1;
             foreach ($value->statements as $s) {
                 $this->stmt($s);
@@ -138,16 +153,21 @@ final class Dump
             }
             foreach ($value->attributes as $a) { $this->attribute($a); }
             foreach ($value->cases as $c) {
-                $this->line('Case ' . $c[0]);
-                if ($c[1] !== null) {
+                $this->line('Case ' . $c->name . ($this->ranges === 1 ? ' ' . $this->spanStr($c->span) : ''));
+                if ($c->value !== null) {
                     $this->indent = $this->indent + 1;
-                    $this->field('value', $c[1]);
+                    $this->field('value', $c->value);
                     $this->indent = $this->indent - 1;
                 }
             }
             foreach ($value->consts as $cd) { $this->constDecl($cd); }
             foreach ($value->properties as $pd) { $this->propertyDecl($pd); }
             foreach ($value->methods as $md) { $this->methodDecl($md); }
+            if ($this->ranges === 1) {
+                foreach ($value->traitAdaptations as $ta) {
+                    $this->line('Adapt ' . $ta->kind . ' ' . $ta->trait . '::' . $ta->method . ' ' . $this->spanStr($ta->span));
+                }
+            }
             $this->indent = $this->indent - 1;
             return;
         }
@@ -165,7 +185,7 @@ final class Dump
         }
         if ($value instanceof UseItem) {
             $alias = $value->alias === null ? '' : ' as ' . $value->alias;
-            $this->line('UseItem ' . $value->kind . ' ' . $value->fqn . $alias);
+            $this->line('UseItem ' . $value->kind . ' ' . $value->fqn . $alias . $this->itemSpan($value->span));
             return;
         }
         if ($value instanceof AttributeNode) {
@@ -192,7 +212,7 @@ final class Dump
                     $this->param($item);
                 } elseif ($item instanceof UseItem) {
                     $alias = $item->alias === null ? '' : ' as ' . $item->alias;
-                    $this->line('UseItem ' . $item->kind . ' ' . $item->fqn . $alias);
+                    $this->line('UseItem ' . $item->kind . ' ' . $item->fqn . $alias . $this->itemSpan($item->span));
                 } elseif ($item instanceof AttributeNode) {
                     $this->attribute($item);
                 } elseif (is_object($item)) {
@@ -200,9 +220,11 @@ final class Dump
                     // CatchClause, MatchArm, ArrayElement, ClosureUse,
                     // StaticLocalDecl) — dump as anonymous "Item N"
                     // with their public properties.
-                    $this->line('[' . (string)$i . '] ' . $this->shortClass($item));
+                    $this->line('[' . (string)$i . '] ' . $this->shortClass($item)
+                        . ($item instanceof ClosureUse ? $this->itemSpan($item->span) : ''));
                     $this->indent = $this->indent + 1;
                     foreach (get_object_vars($item) as $k => $v) {
+                        if ($k === 'span') { continue; }
                         $this->field($k, $v);
                     }
                     $this->indent = $this->indent - 1;
@@ -264,6 +286,15 @@ final class Dump
         if ($p->default !== null) {
             $this->field('default', $p->default);
         }
+        if ($this->ranges === 1) {
+            foreach ($p->hooks as $h) {
+                $this->line('Hook ' . $h->kind . ' ' . $this->spanStr($h->span));
+                $this->indent = $this->indent + 1;
+                if ($h->exprBody !== null) { $this->field('body', $h->exprBody); }
+                if ($h->blockBody !== null) { $this->field('body', $h->blockBody); }
+                $this->indent = $this->indent - 1;
+            }
+        }
         $this->indent = $this->indent - 1;
     }
 
@@ -324,8 +355,19 @@ final class Dump
         return get_debug_type($value);
     }
 
+    /** ' @L:C-L:C' for a node whose range is set, '' otherwise (and always outside --ranges). */
+    private function itemSpan(?Span $s): string
+    {
+        if ($this->ranges !== 1 || $s === null || $s->endLine() === 0) { return ''; }
+        return ' ' . $this->spanStr($s);
+    }
+
     private function spanStr(Span $s): string
     {
+        if ($this->ranges === 1 && $s->endLine() !== 0) {
+            return '@' . (string)$s->startLine() . ':' . (string)$s->startColumn()
+                . '-' . (string)$s->endLine() . ':' . (string)$s->endColumn();
+        }
         return '@' . (string)$s->line . ':' . (string)$s->column;
     }
 

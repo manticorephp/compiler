@@ -1,0 +1,5 @@
+tests/analyze/cases/parse_errors_all.php:3:16: error: expected ')' to close parenthesised expression
+tests/analyze/cases/parse_errors_all.php:6:10: error: unexpected token in expression: Semicolon
+tests/analyze/cases/parse_errors_all.php:10:2: error: unexpected token in expression: CloseBrace
+
+Found 3 error(s), 0 warning(s).

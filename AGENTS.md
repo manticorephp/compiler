@@ -75,6 +75,10 @@ bash tests/aot/run.sh -j 0           # all cores (note: `-j 0` is two args)
 bash tests/aot/run.sh --shard 2/4    # every 4th case from the 2nd — how CI splits a row across 4 jobs (the native runner has it too)
 bash tests/pdo_net/run.sh          # PDO pgsql/mysql/mariadb vs php on live servers (tests/pdo_net/up.sh starts them in docker; CI job pdo-net)
 bash tests/cli/run.sh                # CLI golden: command wiring, options, exit codes, help, progress formats (codegen-independent; runs in CI)
+bash tests/parser/run.sh             # tolerant-parser golden: recovery, ranges, name table, stress inputs (codegen-independent; runs in the gate)
+bash tests/parser/fuzz.sh [-n 8]     # truncation / garbage / deep-nesting fuzz of tolerant dump-ast (minutes; not in CI)
+bash tests/parser/strict_invariance.sh --check DIR   # strict dump-ast byte-identical to the base commit ($STRICT_BASE, default merge-base main); --record DIR first
+bash tests/parser/mem_check.sh --base <compiler>     # strict parse memory/time vs a base compiler (macOS; target within 1%)
 bash tests/aot/xfail.sh              # known-bug repros (tests/aot/repro): XFAIL = still open, XPASS = fixed, promote it
 bash tools/difftest.sh               # byte parity vs the `php` interpreter over the corpus
 bash tools/selfhost_fixpoint.sh      # gen2 IR == gen3 IR, self-host suite, rebuild stability
