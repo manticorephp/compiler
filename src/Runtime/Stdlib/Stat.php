@@ -482,7 +482,7 @@ function __mc_sapi_server(int $op): int
     return $on;
 }
 
-/** The Zend Engine version of the php this build tracks (PHP_VERSION 8.5.11). */
+/** The Zend Engine version of the php this build tracks (PHP_VERSION 8.5.12). */
 function zend_version(): string
 {
     return '4.5.11';

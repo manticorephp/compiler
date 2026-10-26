@@ -1,0 +1,18 @@
+int(0)
+int(10)
+int(20)
+string(4) "r2c0"
+string(4) "r2c1"
+string(4) "r2c2"
+NULL
+NULL
+NULL
+int(0)
+int(0)
+int(10)
+string(4) "r2c0"
+int(0)
+string(4) "r2c1"
+NULL
+int(0)
+NULL

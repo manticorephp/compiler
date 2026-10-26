@@ -76,7 +76,7 @@ function compiles and fails at run time with `Call to undefined function`.
 - [ ] `xml` SAX parser [#216] · [x] `random` classes [#217] · `fileinfo` [#219] · `dom` 28 % [#220]
       · [x] `filter` [#221] · `posix` / `pcntl` [#222]
 - [ ] `xmlwriter`, `xmlreader`, `libxml` loaders (see #225)
-- [ ] `mysqli`, `pgsql` procedural APIs after the PDO drivers
+- [x] `mysqli` (full surface, async, [docs/mysqli.md](mysqli.md)) · [ ] `pgsql` procedural API after the PDO driver
 - [x] `pdo_sqlite`, `curl`, `session`, `sockets`, `intl`, `iconv`, `ctype`, `tokenizer`
 
 **P2 — common**

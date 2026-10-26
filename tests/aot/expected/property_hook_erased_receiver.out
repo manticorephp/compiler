@@ -1,0 +1,18 @@
+42 str1 1.5 'one' 30
+A set 3
+50
+A: 42 str1 1.5 'one' 30
+A set 9
+C: 5 c 2.5 'cc' 7
+no error
+42 str1 1.5 'one' 30
+42 str2 NULL
+A set 1
+A set 2
+110
+42 str1 1.5 'one' 30
+42 str1 1.5 'one' 30
+5 c 2.5 'cc' 7
+42 str1
+5 c
+42 str1

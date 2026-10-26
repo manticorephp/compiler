@@ -1,0 +1,3620 @@
+{
+    "classes": {
+        "mysqli": {
+            "parent": null,
+            "interfaces": [],
+            "final": false,
+            "methods": {
+                "__construct": {
+                    "params": [
+                        {
+                            "name": "hostname",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "username",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "password",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "database",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "port",
+                            "type": "int|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "socket",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": null,
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "autocommit": {
+                    "params": [
+                        {
+                            "name": "enable",
+                            "type": "bool",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "begin_transaction": {
+                    "params": [
+                        {
+                            "name": "flags",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "name",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "change_user": {
+                    "params": [
+                        {
+                            "name": "username",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "password",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "database",
+                            "type": "string|null",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "character_set_name": {
+                    "params": [],
+                    "return": "string",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "close": {
+                    "params": [],
+                    "return": "true",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "commit": {
+                    "params": [
+                        {
+                            "name": "flags",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "name",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "connect": {
+                    "params": [
+                        {
+                            "name": "hostname",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "username",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "password",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "database",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "port",
+                            "type": "int|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "socket",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "debug": {
+                    "params": [
+                        {
+                            "name": "options",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "true",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "dump_debug_info": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "escape_string": {
+                    "params": [
+                        {
+                            "name": "string",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "string",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "execute_query": {
+                    "params": [
+                        {
+                            "name": "query",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "params",
+                            "type": "array|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool|mysqli_result",
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "get_charset": {
+                    "params": [],
+                    "return": "object|null",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "get_client_info": {
+                    "params": [],
+                    "return": "string",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "get_connection_stats": {
+                    "params": [],
+                    "return": "array",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "get_server_info": {
+                    "params": [],
+                    "return": "string",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "get_warnings": {
+                    "params": [],
+                    "return": "false|mysqli_warning",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "init": {
+                    "params": [],
+                    "return": null,
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "kill": {
+                    "params": [
+                        {
+                            "name": "process_id",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "more_results": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "multi_query": {
+                    "params": [
+                        {
+                            "name": "query",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "next_result": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "options": {
+                    "params": [
+                        {
+                            "name": "option",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "value",
+                            "type": null,
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "ping": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "poll": {
+                    "params": [
+                        {
+                            "name": "read",
+                            "type": "array|null",
+                            "default": null,
+                            "byRef": true,
+                            "variadic": false
+                        },
+                        {
+                            "name": "error",
+                            "type": "array|null",
+                            "default": null,
+                            "byRef": true,
+                            "variadic": false
+                        },
+                        {
+                            "name": "reject",
+                            "type": "array",
+                            "default": null,
+                            "byRef": true,
+                            "variadic": false
+                        },
+                        {
+                            "name": "seconds",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "microseconds",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "false|int",
+                    "tentative": true,
+                    "static": true,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "prepare": {
+                    "params": [
+                        {
+                            "name": "query",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "false|mysqli_stmt",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "query": {
+                    "params": [
+                        {
+                            "name": "query",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "result_mode",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool|mysqli_result",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "real_connect": {
+                    "params": [
+                        {
+                            "name": "hostname",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "username",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "password",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "database",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "port",
+                            "type": "int|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "socket",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "flags",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "real_escape_string": {
+                    "params": [
+                        {
+                            "name": "string",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "string",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "real_query": {
+                    "params": [
+                        {
+                            "name": "query",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "reap_async_query": {
+                    "params": [],
+                    "return": "bool|mysqli_result",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "refresh": {
+                    "params": [
+                        {
+                            "name": "flags",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "release_savepoint": {
+                    "params": [
+                        {
+                            "name": "name",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "rollback": {
+                    "params": [
+                        {
+                            "name": "flags",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "name",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "savepoint": {
+                    "params": [
+                        {
+                            "name": "name",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "select_db": {
+                    "params": [
+                        {
+                            "name": "database",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "set_charset": {
+                    "params": [
+                        {
+                            "name": "charset",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "set_opt": {
+                    "params": [
+                        {
+                            "name": "option",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "value",
+                            "type": null,
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "ssl_set": {
+                    "params": [
+                        {
+                            "name": "key",
+                            "type": "string|null",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "certificate",
+                            "type": "string|null",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "ca_certificate",
+                            "type": "string|null",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "ca_path",
+                            "type": "string|null",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "cipher_algos",
+                            "type": "string|null",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "true",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "stat": {
+                    "params": [],
+                    "return": "false|string",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "stmt_init": {
+                    "params": [],
+                    "return": "false|mysqli_stmt",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "store_result": {
+                    "params": [
+                        {
+                            "name": "mode",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "false|mysqli_result",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "thread_safe": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "use_result": {
+                    "params": [],
+                    "return": "false|mysqli_result",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                }
+            },
+            "properties": {
+                "affected_rows": {
+                    "type": "int|string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "client_info": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "client_version": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "connect_errno": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "connect_error": {
+                    "type": "string|null",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "errno": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "error": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "error_list": {
+                    "type": "array",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "field_count": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "host_info": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "info": {
+                    "type": "string|null",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "insert_id": {
+                    "type": "int|string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "protocol_version": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "server_info": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "server_version": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "sqlstate": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "thread_id": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "warning_count": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                }
+            },
+            "constants": []
+        },
+        "mysqli_driver": {
+            "parent": null,
+            "interfaces": [],
+            "final": true,
+            "methods": [],
+            "properties": {
+                "client_info": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "client_version": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "driver_version": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "report_mode": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                }
+            },
+            "constants": []
+        },
+        "mysqli_result": {
+            "parent": null,
+            "interfaces": [
+                "IteratorAggregate",
+                "Traversable"
+            ],
+            "final": false,
+            "methods": {
+                "__construct": {
+                    "params": [
+                        {
+                            "name": "mysql",
+                            "type": "mysqli",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "result_mode",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": null,
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "close": {
+                    "params": [],
+                    "return": "void",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "data_seek": {
+                    "params": [
+                        {
+                            "name": "offset",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_all": {
+                    "params": [
+                        {
+                            "name": "mode",
+                            "type": "int",
+                            "default": "2",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "array",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_array": {
+                    "params": [
+                        {
+                            "name": "mode",
+                            "type": "int",
+                            "default": "3",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "array|false|null",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_assoc": {
+                    "params": [],
+                    "return": "array|false|null",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_column": {
+                    "params": [
+                        {
+                            "name": "column",
+                            "type": "int",
+                            "default": "0",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "false|float|int|string|null",
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_field": {
+                    "params": [],
+                    "return": "false|object",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_field_direct": {
+                    "params": [
+                        {
+                            "name": "index",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "false|object",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_fields": {
+                    "params": [],
+                    "return": "array",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_object": {
+                    "params": [
+                        {
+                            "name": "class",
+                            "type": "string",
+                            "default": "'stdClass'",
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "constructor_args",
+                            "type": "array",
+                            "default": "array (\n)",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "false|object|null",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch_row": {
+                    "params": [],
+                    "return": "array|false|null",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "field_seek": {
+                    "params": [
+                        {
+                            "name": "index",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "true",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "free": {
+                    "params": [],
+                    "return": "void",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "free_result": {
+                    "params": [],
+                    "return": "void",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "getIterator": {
+                    "params": [],
+                    "return": "Iterator",
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                }
+            },
+            "properties": {
+                "current_field": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "field_count": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "lengths": {
+                    "type": "array|null",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "num_rows": {
+                    "type": "int|string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "type": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                }
+            },
+            "constants": []
+        },
+        "mysqli_sql_exception": {
+            "parent": "RuntimeException",
+            "interfaces": [
+                "Stringable",
+                "Throwable"
+            ],
+            "final": true,
+            "methods": {
+                "getSqlState": {
+                    "params": [],
+                    "return": "string",
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                }
+            },
+            "properties": {
+                "sqlstate": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "protected"
+                }
+            },
+            "constants": []
+        },
+        "mysqli_stmt": {
+            "parent": null,
+            "interfaces": [],
+            "final": false,
+            "methods": {
+                "__construct": {
+                    "params": [
+                        {
+                            "name": "mysql",
+                            "type": "mysqli",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "query",
+                            "type": "string|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": null,
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "attr_get": {
+                    "params": [
+                        {
+                            "name": "attribute",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "int",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "attr_set": {
+                    "params": [
+                        {
+                            "name": "attribute",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "value",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "bind_param": {
+                    "params": [
+                        {
+                            "name": "types",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "vars",
+                            "type": "mixed",
+                            "default": null,
+                            "byRef": true,
+                            "variadic": true
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "bind_result": {
+                    "params": [
+                        {
+                            "name": "vars",
+                            "type": "mixed",
+                            "default": null,
+                            "byRef": true,
+                            "variadic": true
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "close": {
+                    "params": [],
+                    "return": "true",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "data_seek": {
+                    "params": [
+                        {
+                            "name": "offset",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "void",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "execute": {
+                    "params": [
+                        {
+                            "name": "params",
+                            "type": "array|null",
+                            "default": "NULL",
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "fetch": {
+                    "params": [],
+                    "return": "bool|null",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "free_result": {
+                    "params": [],
+                    "return": "void",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "get_result": {
+                    "params": [],
+                    "return": "false|mysqli_result",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "get_warnings": {
+                    "params": [],
+                    "return": "false|mysqli_warning",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "more_results": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "next_result": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "num_rows": {
+                    "params": [],
+                    "return": "int|string",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "prepare": {
+                    "params": [
+                        {
+                            "name": "query",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "reset": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "result_metadata": {
+                    "params": [],
+                    "return": "false|mysqli_result",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "send_long_data": {
+                    "params": [
+                        {
+                            "name": "param_num",
+                            "type": "int",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        },
+                        {
+                            "name": "data",
+                            "type": "string",
+                            "default": null,
+                            "byRef": false,
+                            "variadic": false
+                        }
+                    ],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                },
+                "store_result": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": true,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                }
+            },
+            "properties": {
+                "affected_rows": {
+                    "type": "int|string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "errno": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "error": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "error_list": {
+                    "type": "array",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "field_count": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "id": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "insert_id": {
+                    "type": "int|string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "num_rows": {
+                    "type": "int|string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "param_count": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "sqlstate": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                }
+            },
+            "constants": []
+        },
+        "mysqli_warning": {
+            "parent": null,
+            "interfaces": [],
+            "final": true,
+            "methods": {
+                "__construct": {
+                    "params": [],
+                    "return": null,
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "private",
+                    "final": false,
+                    "abstract": false
+                },
+                "next": {
+                    "params": [],
+                    "return": "bool",
+                    "tentative": false,
+                    "static": false,
+                    "visibility": "public",
+                    "final": false,
+                    "abstract": false
+                }
+            },
+            "properties": {
+                "errno": {
+                    "type": "int",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "message": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                },
+                "sqlstate": {
+                    "type": "string",
+                    "readonly": false,
+                    "static": false,
+                    "visibility": "public"
+                }
+            },
+            "constants": []
+        }
+    },
+    "functions": {
+        "mysqli_affected_rows": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int|string",
+            "tentative": false
+        },
+        "mysqli_autocommit": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "enable",
+                    "type": "bool",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_begin_transaction": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "flags",
+                    "type": "int",
+                    "default": "0",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "name",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_change_user": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "username",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "password",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "database",
+                    "type": "string|null",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_character_set_name": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_close": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "true",
+            "tentative": false
+        },
+        "mysqli_commit": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "flags",
+                    "type": "int",
+                    "default": "0",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "name",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_connect": {
+            "params": [
+                {
+                    "name": "hostname",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "username",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "password",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "database",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "port",
+                    "type": "int|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "socket",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli",
+            "tentative": false
+        },
+        "mysqli_connect_errno": {
+            "params": [],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_connect_error": {
+            "params": [],
+            "return": "string|null",
+            "tentative": false
+        },
+        "mysqli_data_seek": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "offset",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_debug": {
+            "params": [
+                {
+                    "name": "options",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "true",
+            "tentative": false
+        },
+        "mysqli_dump_debug_info": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_errno": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_error": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_error_list": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array",
+            "tentative": false
+        },
+        "mysqli_escape_string": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "string",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_execute": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "params",
+                    "type": "array|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_execute_query": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "query",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "params",
+                    "type": "array|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool|mysqli_result",
+            "tentative": false
+        },
+        "mysqli_fetch_all": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "mode",
+                    "type": "int",
+                    "default": "2",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array",
+            "tentative": false
+        },
+        "mysqli_fetch_array": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "mode",
+                    "type": "int",
+                    "default": "3",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array|false|null",
+            "tentative": false
+        },
+        "mysqli_fetch_assoc": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array|false|null",
+            "tentative": false
+        },
+        "mysqli_fetch_column": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "column",
+                    "type": "int",
+                    "default": "0",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|float|int|string|null",
+            "tentative": false
+        },
+        "mysqli_fetch_field": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|object",
+            "tentative": false
+        },
+        "mysqli_fetch_field_direct": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "index",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|object",
+            "tentative": false
+        },
+        "mysqli_fetch_fields": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array",
+            "tentative": false
+        },
+        "mysqli_fetch_lengths": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array|false",
+            "tentative": false
+        },
+        "mysqli_fetch_object": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "class",
+                    "type": "string",
+                    "default": "'stdClass'",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "constructor_args",
+                    "type": "array",
+                    "default": "array (\n)",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|object|null",
+            "tentative": false
+        },
+        "mysqli_fetch_row": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array|false|null",
+            "tentative": false
+        },
+        "mysqli_field_count": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_field_seek": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "index",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "true",
+            "tentative": false
+        },
+        "mysqli_field_tell": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_free_result": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "void",
+            "tentative": false
+        },
+        "mysqli_get_charset": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "object|null",
+            "tentative": false
+        },
+        "mysqli_get_client_info": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_get_client_stats": {
+            "params": [],
+            "return": "array",
+            "tentative": false
+        },
+        "mysqli_get_client_version": {
+            "params": [],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_get_connection_stats": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array",
+            "tentative": false
+        },
+        "mysqli_get_host_info": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_get_links_stats": {
+            "params": [],
+            "return": "array",
+            "tentative": false
+        },
+        "mysqli_get_proto_info": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_get_server_info": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_get_server_version": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_get_warnings": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli_warning",
+            "tentative": false
+        },
+        "mysqli_info": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string|null",
+            "tentative": false
+        },
+        "mysqli_init": {
+            "params": [],
+            "return": "false|mysqli",
+            "tentative": false
+        },
+        "mysqli_insert_id": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int|string",
+            "tentative": false
+        },
+        "mysqli_kill": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "process_id",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_more_results": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_multi_query": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "query",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_next_result": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_num_fields": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_num_rows": {
+            "params": [
+                {
+                    "name": "result",
+                    "type": "mysqli_result",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int|string",
+            "tentative": false
+        },
+        "mysqli_options": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "option",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "value",
+                    "type": null,
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_ping": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_poll": {
+            "params": [
+                {
+                    "name": "read",
+                    "type": "array|null",
+                    "default": null,
+                    "byRef": true,
+                    "variadic": false
+                },
+                {
+                    "name": "error",
+                    "type": "array|null",
+                    "default": null,
+                    "byRef": true,
+                    "variadic": false
+                },
+                {
+                    "name": "reject",
+                    "type": "array",
+                    "default": null,
+                    "byRef": true,
+                    "variadic": false
+                },
+                {
+                    "name": "seconds",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "microseconds",
+                    "type": "int",
+                    "default": "0",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|int",
+            "tentative": false
+        },
+        "mysqli_prepare": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "query",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli_stmt",
+            "tentative": false
+        },
+        "mysqli_query": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "query",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "result_mode",
+                    "type": "int",
+                    "default": "0",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool|mysqli_result",
+            "tentative": false
+        },
+        "mysqli_real_connect": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "hostname",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "username",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "password",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "database",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "port",
+                    "type": "int|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "socket",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "flags",
+                    "type": "int",
+                    "default": "0",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_real_escape_string": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "string",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_real_query": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "query",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_reap_async_query": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool|mysqli_result",
+            "tentative": false
+        },
+        "mysqli_refresh": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "flags",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_release_savepoint": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "name",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_report": {
+            "params": [
+                {
+                    "name": "flags",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "true",
+            "tentative": false
+        },
+        "mysqli_rollback": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "flags",
+                    "type": "int",
+                    "default": "0",
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "name",
+                    "type": "string|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_savepoint": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "name",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_select_db": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "database",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_set_charset": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "charset",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_set_opt": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "option",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "value",
+                    "type": null,
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_sqlstate": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_ssl_set": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "key",
+                    "type": "string|null",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "certificate",
+                    "type": "string|null",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "ca_certificate",
+                    "type": "string|null",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "ca_path",
+                    "type": "string|null",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "cipher_algos",
+                    "type": "string|null",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "true",
+            "tentative": false
+        },
+        "mysqli_stat": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|string",
+            "tentative": false
+        },
+        "mysqli_stmt_affected_rows": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int|string",
+            "tentative": false
+        },
+        "mysqli_stmt_attr_get": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "attribute",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_stmt_attr_set": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "attribute",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "value",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_bind_param": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "types",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "vars",
+                    "type": "mixed",
+                    "default": null,
+                    "byRef": true,
+                    "variadic": true
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_bind_result": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "vars",
+                    "type": "mixed",
+                    "default": null,
+                    "byRef": true,
+                    "variadic": true
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_close": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "true",
+            "tentative": false
+        },
+        "mysqli_stmt_data_seek": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "offset",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "void",
+            "tentative": false
+        },
+        "mysqli_stmt_errno": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_stmt_error": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_stmt_error_list": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "array",
+            "tentative": false
+        },
+        "mysqli_stmt_execute": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "params",
+                    "type": "array|null",
+                    "default": "NULL",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_fetch": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool|null",
+            "tentative": false
+        },
+        "mysqli_stmt_field_count": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_stmt_free_result": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "void",
+            "tentative": false
+        },
+        "mysqli_stmt_get_result": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli_result",
+            "tentative": false
+        },
+        "mysqli_stmt_get_warnings": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli_warning",
+            "tentative": false
+        },
+        "mysqli_stmt_init": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli_stmt",
+            "tentative": false
+        },
+        "mysqli_stmt_insert_id": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int|string",
+            "tentative": false
+        },
+        "mysqli_stmt_more_results": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_next_result": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_num_rows": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int|string",
+            "tentative": false
+        },
+        "mysqli_stmt_param_count": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_stmt_prepare": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "query",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_reset": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_result_metadata": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli_result",
+            "tentative": false
+        },
+        "mysqli_stmt_send_long_data": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "param_num",
+                    "type": "int",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "data",
+                    "type": "string",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_stmt_sqlstate": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "string",
+            "tentative": false
+        },
+        "mysqli_stmt_store_result": {
+            "params": [
+                {
+                    "name": "statement",
+                    "type": "mysqli_stmt",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_store_result": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                },
+                {
+                    "name": "mode",
+                    "type": "int",
+                    "default": "0",
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli_result",
+            "tentative": false
+        },
+        "mysqli_thread_id": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        },
+        "mysqli_thread_safe": {
+            "params": [],
+            "return": "bool",
+            "tentative": false
+        },
+        "mysqli_use_result": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "false|mysqli_result",
+            "tentative": false
+        },
+        "mysqli_warning_count": {
+            "params": [
+                {
+                    "name": "mysql",
+                    "type": "mysqli",
+                    "default": null,
+                    "byRef": false,
+                    "variadic": false
+                }
+            ],
+            "return": "int",
+            "tentative": false
+        }
+    },
+    "constants": {
+        "MYSQLI_ASSOC": 1,
+        "MYSQLI_ASYNC": 8,
+        "MYSQLI_AUTO_INCREMENT_FLAG": 512,
+        "MYSQLI_BINARY_FLAG": 128,
+        "MYSQLI_BLOB_FLAG": 16,
+        "MYSQLI_BOTH": 3,
+        "MYSQLI_CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS": 4194304,
+        "MYSQLI_CLIENT_COMPRESS": 32,
+        "MYSQLI_CLIENT_FOUND_ROWS": 2,
+        "MYSQLI_CLIENT_IGNORE_SPACE": 256,
+        "MYSQLI_CLIENT_INTERACTIVE": 1024,
+        "MYSQLI_CLIENT_NO_SCHEMA": 16,
+        "MYSQLI_CLIENT_SSL": 2048,
+        "MYSQLI_CLIENT_SSL_DONT_VERIFY_SERVER_CERT": 64,
+        "MYSQLI_CLIENT_SSL_VERIFY_SERVER_CERT": 1073741824,
+        "MYSQLI_CURSOR_TYPE_NO_CURSOR": 0,
+        "MYSQLI_CURSOR_TYPE_READ_ONLY": 1,
+        "MYSQLI_DATA_TRUNCATED": 101,
+        "MYSQLI_DEBUG_TRACE_ENABLED": 0,
+        "MYSQLI_ENUM_FLAG": 256,
+        "MYSQLI_GROUP_FLAG": 32768,
+        "MYSQLI_INIT_COMMAND": 3,
+        "MYSQLI_IS_MARIADB": false,
+        "MYSQLI_MULTIPLE_KEY_FLAG": 8,
+        "MYSQLI_NOT_NULL_FLAG": 1,
+        "MYSQLI_NO_DATA": 100,
+        "MYSQLI_NO_DEFAULT_VALUE_FLAG": 4096,
+        "MYSQLI_NUM": 2,
+        "MYSQLI_NUM_FLAG": 32768,
+        "MYSQLI_ON_UPDATE_NOW_FLAG": 8192,
+        "MYSQLI_OPT_CAN_HANDLE_EXPIRED_PASSWORDS": 37,
+        "MYSQLI_OPT_CONNECT_TIMEOUT": 0,
+        "MYSQLI_OPT_INT_AND_FLOAT_NATIVE": 201,
+        "MYSQLI_OPT_LOAD_DATA_LOCAL_DIR": 43,
+        "MYSQLI_OPT_LOCAL_INFILE": 8,
+        "MYSQLI_OPT_NET_CMD_BUFFER_SIZE": 202,
+        "MYSQLI_OPT_NET_READ_BUFFER_SIZE": 203,
+        "MYSQLI_OPT_READ_TIMEOUT": 11,
+        "MYSQLI_OPT_SSL_VERIFY_SERVER_CERT": 21,
+        "MYSQLI_PART_KEY_FLAG": 16384,
+        "MYSQLI_PRI_KEY_FLAG": 2,
+        "MYSQLI_READ_DEFAULT_FILE": 4,
+        "MYSQLI_READ_DEFAULT_GROUP": 5,
+        "MYSQLI_REFRESH_BACKUP_LOG": 2097152,
+        "MYSQLI_REFRESH_GRANT": 1,
+        "MYSQLI_REFRESH_HOSTS": 8,
+        "MYSQLI_REFRESH_LOG": 2,
+        "MYSQLI_REFRESH_MASTER": 128,
+        "MYSQLI_REFRESH_REPLICA": 64,
+        "MYSQLI_REFRESH_SLAVE": 64,
+        "MYSQLI_REFRESH_STATUS": 16,
+        "MYSQLI_REFRESH_TABLES": 4,
+        "MYSQLI_REFRESH_THREADS": 32,
+        "MYSQLI_REPORT_ALL": 255,
+        "MYSQLI_REPORT_ERROR": 1,
+        "MYSQLI_REPORT_INDEX": 4,
+        "MYSQLI_REPORT_OFF": 0,
+        "MYSQLI_REPORT_STRICT": 2,
+        "MYSQLI_SERVER_PS_OUT_PARAMS": 4096,
+        "MYSQLI_SERVER_PUBLIC_KEY": 35,
+        "MYSQLI_SERVER_QUERY_NO_GOOD_INDEX_USED": 16,
+        "MYSQLI_SERVER_QUERY_NO_INDEX_USED": 32,
+        "MYSQLI_SERVER_QUERY_WAS_SLOW": 2048,
+        "MYSQLI_SET_CHARSET_NAME": 7,
+        "MYSQLI_SET_FLAG": 2048,
+        "MYSQLI_STMT_ATTR_CURSOR_TYPE": 1,
+        "MYSQLI_STMT_ATTR_UPDATE_MAX_LENGTH": 0,
+        "MYSQLI_STORE_RESULT": 0,
+        "MYSQLI_STORE_RESULT_COPY_DATA": 16,
+        "MYSQLI_TIMESTAMP_FLAG": 1024,
+        "MYSQLI_TRANS_COR_AND_CHAIN": 1,
+        "MYSQLI_TRANS_COR_AND_NO_CHAIN": 2,
+        "MYSQLI_TRANS_COR_NO_RELEASE": 8,
+        "MYSQLI_TRANS_COR_RELEASE": 4,
+        "MYSQLI_TRANS_START_READ_ONLY": 4,
+        "MYSQLI_TRANS_START_READ_WRITE": 2,
+        "MYSQLI_TRANS_START_WITH_CONSISTENT_SNAPSHOT": 1,
+        "MYSQLI_TYPE_BIT": 16,
+        "MYSQLI_TYPE_BLOB": 252,
+        "MYSQLI_TYPE_CHAR": 1,
+        "MYSQLI_TYPE_DATE": 10,
+        "MYSQLI_TYPE_DATETIME": 12,
+        "MYSQLI_TYPE_DECIMAL": 0,
+        "MYSQLI_TYPE_DOUBLE": 5,
+        "MYSQLI_TYPE_ENUM": 247,
+        "MYSQLI_TYPE_FLOAT": 4,
+        "MYSQLI_TYPE_GEOMETRY": 255,
+        "MYSQLI_TYPE_INT24": 9,
+        "MYSQLI_TYPE_JSON": 245,
+        "MYSQLI_TYPE_LONG": 3,
+        "MYSQLI_TYPE_LONGLONG": 8,
+        "MYSQLI_TYPE_LONG_BLOB": 251,
+        "MYSQLI_TYPE_MEDIUM_BLOB": 250,
+        "MYSQLI_TYPE_NEWDATE": 14,
+        "MYSQLI_TYPE_NEWDECIMAL": 246,
+        "MYSQLI_TYPE_NULL": 6,
+        "MYSQLI_TYPE_SET": 248,
+        "MYSQLI_TYPE_SHORT": 2,
+        "MYSQLI_TYPE_STRING": 254,
+        "MYSQLI_TYPE_TIME": 11,
+        "MYSQLI_TYPE_TIMESTAMP": 7,
+        "MYSQLI_TYPE_TINY": 1,
+        "MYSQLI_TYPE_TINY_BLOB": 249,
+        "MYSQLI_TYPE_VAR_STRING": 253,
+        "MYSQLI_TYPE_VECTOR": 242,
+        "MYSQLI_TYPE_YEAR": 13,
+        "MYSQLI_UNIQUE_KEY_FLAG": 4,
+        "MYSQLI_UNSIGNED_FLAG": 32,
+        "MYSQLI_USE_RESULT": 1,
+        "MYSQLI_ZEROFILL_FLAG": 64
+    }
+}

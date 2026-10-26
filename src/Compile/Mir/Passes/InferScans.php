@@ -2220,6 +2220,13 @@ trait InferScans
             $cut = \strrpos($fk, '#');
             if ($cut !== false) { $foreignCallees['callf:' . \substr($fk, 0, $cut)] = true; }
         }
+        // A method callee is reached by a static, method or `new` call: keyed by the method NAME (the receiver
+        // class is a matter of types, which the cached body-kind set does not know).
+        foreach ($this->classes as $cn => $cd) {
+            foreach ($cd->methodNames as $mm => $unused) {
+                if (isset($foreignCallees['callf:' . $cn . '__' . $mm])) { $foreignCallees['callm:' . $mm] = true; }
+            }
+        }
         $changed = false;
         foreach ($module->functions as $fn) {
             // A prelude body is linkonce_odr and shared across modules — never
@@ -2500,25 +2507,29 @@ trait InferScans
                     if ($t !== null) { $tokens[$t] = true; }
                 }
             }
-        } elseif ($n->kind === Node::KIND_CALL) {
+        } elseif ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_STATIC_CALL
+            || $n->kind === Node::KIND_METHOD_CALL || $n->kind === Node::KIND_NEW_OBJ) {
             // Transitive hand-off: `outer(array &$a){ inner($a); }` appends
-            // whatever `inner` appends. Re-express the callee's tokens in THIS
-            // body's terms — a param source resolves through the argument we
-            // actually pass, and a value we hand over out of our own array is
-            // still a move, not a foreign append.
-            $c = $n;
-            $i = -1;
-            foreach ($c->args as $a) {
+            // whatever `inner` appends — a method or static callee as much as a
+            // function. Re-express the callee's tokens in THIS body's terms — a
+            // param source resolves through the argument we actually pass, and a
+            // value we hand over out of our own array is still a move, not a
+            // foreign append.
+            $base = 0;
+            $sib = [];
+            $callee = $this->refCallSite($n, $base, $sib);
+            $i = $base - 1;
+            foreach ($this->refCallArgs($n) as $a) {
                 $i = $i + 1;
-                if ($a->kind !== Node::KIND_LOAD_LOCAL || $a->name !== $pname) { continue; }
-                $ck = $c->function . '#' . (string)$i;
+                if ($callee === '' || $a->kind !== Node::KIND_LOAD_LOCAL || $a->name !== $pname) { continue; }
+                $ck = $callee . '#' . (string)$i;
                 foreach ($map[$ck] ?? [] as $tok => $unused) {
                     if (\str_starts_with($tok, 'k:')) { $tokens[$tok] = true; continue; }
                     $parts = \explode(':', $tok);
                     $j = (int)$parts[1];
                     $flag = $parts[2];
-                    if ($j >= \count($c->args)) { continue; }
-                    $arg = $c->args[$j];
+                    if ($j >= \count($sib)) { continue; }
+                    $arg = $sib[$j];
                     $o = $this->originOf($arg, $origin);
                     if ($o !== null) {
                         $ps = \explode('|', $o);
@@ -2566,12 +2577,17 @@ trait InferScans
      */
     private function collectByRefWidenArgs(Node $n, array $foreign, array &$found): void
     {
-        if ($n->kind === Node::KIND_CALL) {
-            $c = $n;
-            $i = -1;
-            foreach ($c->args as $a) {
-                $i = $i + 1;
-                $this->widenIfForeign($c->function . '#' . (string)$i, $a, $c->args, $foreign, $found);
+        if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_STATIC_CALL
+            || $n->kind === Node::KIND_METHOD_CALL || $n->kind === Node::KIND_NEW_OBJ) {
+            $base = 0;
+            $sib = [];
+            $callee = $this->refCallSite($n, $base, $sib);
+            if ($callee !== '') {
+                $i = $base - 1;
+                foreach ($this->refCallArgs($n) as $a) {
+                    $i = $i + 1;
+                    $this->widenIfForeign($callee . '#' . (string)$i, $a, $sib, $foreign, $found);
+                }
             }
         } elseif ($n->kind === Node::KIND_INVOKE) {
             // `$f($x)` on a closure whose type names it is a by-ref call like
@@ -3461,6 +3477,25 @@ trait InferScans
             $this->anyDeclarerMemo[$method] = VivifyRefArgs::firstDeclarer(\array_keys($this->fnByName), $method);
         }
         return $this->anyDeclarerMemo[$method];
+    }
+
+    /**
+     * A function, static, method or constructor call as by-ref sinks: the
+     * callee ('' when unknown), the param index of its first argument, and
+     * `$sib` index-aligned with the callee's params (the receiver — or for a
+     * constructor the new object — in slot 0), as `p:<idx>` tokens count them.
+     *
+     * @param Node[] $sib
+     */
+    private function refCallSite(Node $n, int &$base, array &$sib): string
+    {
+        $callee = $this->refCalleeOf($n, $base);
+        $sib = $this->refCallArgs($n);
+        if ($base === 1) {
+            if ($n->kind === Node::KIND_METHOD_CALL) { $mc = $n; \array_unshift($sib, $mc->object); }
+            else { \array_unshift($sib, $n); }
+        }
+        return $callee;
     }
 
     /** The arguments of a call node of any kind. @return Node[] */

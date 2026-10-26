@@ -4053,6 +4053,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $ownFns = [];
     $walkerRoots = [];
     $walkerDynamic = false;
+    $fetchObjectClass = false;
+    $usesMysqli = $demand->mentionsPrefix('mysqli');
     foreach ($sources as $i => $source) {
         try {
             // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
@@ -4086,6 +4088,42 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             || preg_match("/FETCH_CLASS|fetchObject/", $source)
             || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
             $walkerDynamic = true;
+        }
+        // mysqli's fetch_object allocates (without its constructor) an object of the class the program names: a literal class
+        // roots just that class, no class argument needs nothing (stdClass), anything else leaves reachability open.
+        // A program that never names mysqli has no fetch_object of its own to answer for.
+        $nFo = $usesMysqli ? preg_match_all("/fetch_object\\s*\\(/i", $source) : 0;
+        if ($nFo > 0) {
+            preg_match_all("/(->|_)?fetch_object\\s*\\(([^()]*)\\)/i", $source, $fo);
+            if ($nFo > count($fo[0])) { $walkerDynamic = true; $fetchObjectClass = true; }
+            foreach ($fo[2] as $foi => $foText) {
+                $foArgs = explode(',', $foText);
+                $foArg = $fo[1][$foi] === '->' ? 0 : 1;
+                $foCls = isset($foArgs[$foArg]) ? trim($foArgs[$foArg]) : '';
+                if ($foCls === '') { continue; }
+                if (preg_match("/^['\"]\\\\?([A-Za-z_][A-Za-z0-9_\\\\\\\\]*)['\"]$/", $foCls, $fm) || preg_match("/^\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)::class$/", $foCls, $fm)) {
+                    $foName = str_replace('\\\\', '\\', $fm[1]);
+                    if (strcasecmp($foName, 'stdClass') === 0) { continue; }
+                    // self/static/parent::class and a name a `use` alias stands for name a class this scan cannot resolve
+                    $foHead = strpos($foName, '\\') === false ? $foName : substr($foName, 0, (int)strpos($foName, '\\'));
+                    $foAlias = false;
+                    foreach ($program->useAliases as $foShort => $foFull) {
+                        if (strcasecmp((string)$foShort, $foHead) === 0) { $foAlias = true; }
+                    }
+                    if ($foAlias || preg_match('/^(self|static|parent)$/i', $foName)) {
+                        $walkerDynamic = true;
+                        $fetchObjectClass = true;
+                        continue;
+                    }
+                    $fetchObjectClass = true;
+                    $walkerRoots[$foName] = true;
+                    $foSeg = strrpos($foName, '\\');
+                    if ($foSeg !== false) { $walkerRoots[substr($foName, $foSeg + 1)] = true; }
+                } else {
+                    $walkerDynamic = true;
+                    $fetchObjectClass = true;
+                }
+            }
         }
         preg_match_all("/\\bnew\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m1);
         preg_match_all("/\\binstanceof\\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)/", $source, $m2);
@@ -4371,6 +4409,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $pdoMysqlSrc = prelude_src_or_empty("pdo_mysql.php");
     $pdoPgsqlOffSrc = prelude_src_or_empty("pdo_pgsql_off.php");
     $pdoMysqlOffSrc = prelude_src_or_empty("pdo_mysql_off.php");
+    $pdoSqliteOffSrc = prelude_src_or_empty("pdo_sqlite_off.php");
+    // ext/mysqli: classes + constants in one file, the procedural API in the other.
+    $mysqliSrc = prelude_src_or_empty("mysqli.php");
+    $mysqliFnSrc = prelude_src_or_empty("mysqli_fn.php");
 
     // ext/tokenizer, deliberately TWO files. tokenizer.php names nothing Zend
     // owns, so it stays require-able under `php` itself and tools/tokenizer_diff.php
@@ -4648,7 +4690,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'get_mangled_object_vars',
             'get_class_vars',
             'get_defined_constants',
-        ]);
+        ])
+        // mysqli's fetch_object builds an object of the class the program names, through ReflectionClass in the prelude.
+        || $fetchObjectClass;
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
     // #[Deprecated] / #[NoDiscard] diagnostics, target validation) are entirely
     // compiler-side — the declarations matter only so reflection can hand back a
@@ -4848,12 +4892,18 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // those drivers; any other site (a variable DSN, a call, `extends PDO`) or no site at all keeps every driver.
     // A driver left out is replaced by a stand-in that answers "could not find driver" and says why.
     $usePdoSqlite = $usePdo;
+    // ext/mysqli gates on a MENTION of any `mysqli*` identifier in code: every Zend class, function and MYSQLI_* constant
+    // starts with it, so no program owns one without meaning the extension.
+    $useMysqli = $demand->mentionsPrefix('mysqli');
     $usePdoPgsql = $usePdo && $demand->opensDriver("pgsql");
-    $usePdoMysql = $usePdo && $demand->opensDriver("mysql");
+    // mysqli rides the pdo_mysql wire (__McPdoMyWire), which throws PDOException and leans on __McPdo and the TLS layer:
+    // a mysqli program links the PDO facade and the mysql driver, never sqlite (FFI, -lsqlite3): a stand-in answers its open.
+    $usePdoMysql = ($usePdo && $demand->opensDriver("mysql")) || $useMysqli;
+    $usePdoCore = $usePdo || $useMysqli;
     // PDO::ERRMODE_WARNING routes through trigger_error, which lives in
     // errors.php — and the demand gate cannot see a call made from the prelude
     // itself, only one made from user code.
-    if ($usePdo) {
+    if ($usePdoCore) {
         $useErrors = true;
     }
 
@@ -5083,8 +5133,12 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         dprint("compile failed: prelude: cannot read curl_multi.php");
         return null;
     }
-    if ($usePdo && ($pdoSrc === "" || $pdoSqliteSrc === "" || $pdoSqlSrc === "" || $pdoPgsqlSrc === "" || $pdoMysqlSrc === "" || $pdoPgsqlOffSrc === "" || $pdoMysqlOffSrc === "")) {
+    if ($usePdoCore && ($pdoSrc === "" || $pdoSqliteSrc === "" || $pdoSqliteOffSrc === "" || $pdoSqlSrc === "" || $pdoPgsqlSrc === "" || $pdoMysqlSrc === "" || $pdoPgsqlOffSrc === "" || $pdoMysqlOffSrc === "")) {
         dprint("compile failed: prelude: cannot read pdo.php / pdo_sqlite.php / pdo_sql.php / pdo_pgsql.php / pdo_mysql.php");
+        return null;
+    }
+    if ($useMysqli && ($mysqliSrc === "" || $mysqliFnSrc === "")) {
+        dprint("compile failed: prelude: cannot read mysqli.php / mysqli_fn.php");
         return null;
     }
     if ($useTokenizer && ($tokenizerSrc === "" || $tokenizerApiSrc === "")) {
@@ -5180,11 +5234,12 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->xmlDomSrc = $useXmlDom ? $xmlDomSrc : "";
         $lower->curlSrc = $useCurl ? $curlSrc : "";
         $lower->curlMultiSrc = $useCurlMulti ? $curlMultiSrc : "";
-        $lower->pdoSrc = $usePdo ? $pdoSrc : "";
-        $lower->pdoSqliteSrc = $usePdoSqlite ? $pdoSqliteSrc : "";
+        $lower->pdoSrc = $usePdoCore ? $pdoSrc : "";
+        $lower->pdoSqliteSrc = $usePdoSqlite ? $pdoSqliteSrc : ($usePdoCore ? $pdoSqliteOffSrc : "");
         $lower->pdoSqlSrc = ($usePdoPgsql || $usePdoMysql) ? $pdoSqlSrc : "";
-        $lower->pdoPgsqlSrc = $usePdoPgsql ? $pdoPgsqlSrc : ($usePdo ? $pdoPgsqlOffSrc : "");
-        $lower->pdoMysqlSrc = $usePdoMysql ? $pdoMysqlSrc : ($usePdo ? $pdoMysqlOffSrc : "");
+        $lower->pdoPgsqlSrc = $usePdoPgsql ? $pdoPgsqlSrc : ($usePdoCore ? $pdoPgsqlOffSrc : "");
+        $lower->pdoMysqlSrc = $usePdoMysql ? $pdoMysqlSrc : ($usePdoCore ? $pdoMysqlOffSrc : "");
+        $lower->mysqliSrc = $useMysqli ? $mysqliSrc . $mysqliFnSrc : "";
         $lower->tokenizerSrc = $useTokenizer ? $tokenizerSrc : "";
         $lower->tokenizerApiSrc = $useTokenizer ? $tokenizerApiSrc : "";
         $lower->opensslSrc = $useOpenssl ? $opensslSrc : "";
@@ -5726,6 +5781,9 @@ function analyze_prelude_files(): array
         "pdo_sql.php",
         "pdo_pgsql.php",
         "pdo_mysql.php",
+        // Same for mysqli / mysqli_result / mysqli_stmt type hints and the mysqli_* functions.
+        "mysqli.php",
+        "mysqli_fn.php",
     ];
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];

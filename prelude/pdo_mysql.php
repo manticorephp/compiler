@@ -44,6 +44,16 @@ final class __McPdoMyResult
     public array $lens = [];
     /** @var array<int,int> decimals */
     public array $decs = [];
+    /** @var array<int,string> column definition: catalog, schema, original table, original column name */
+    public array $cats = [];
+    /** @var array<int,string> */
+    public array $dbs = [];
+    /** @var array<int,string> */
+    public array $orgTables = [];
+    /** @var array<int,string> */
+    public array $orgNames = [];
+    /** @var array<int,int> character set number of the column */
+    public array $charsets = [];
     /** @var array<int,array<int,?string>> */
     public array $rows = [];
     public bool $isSet = false;
@@ -53,6 +63,10 @@ final class __McPdoMyResult
     public int $insertId = 0;
     public int $status = 0;
     public int $warnings = 0;
+    /** The OUT-parameter set of a CALL (SERVER_PS_OUT_PARAMS): readChain() drops it, as mysqlnd does. */
+    public bool $outParams = false;
+    /** The OK packet's human-readable message (mysql_info()), '' when it has none. */
+    public string $info = '';
     public ?__McPdoMyErr $err = null;
     public ?__McPdoMyResult $next = null;
     /** Unbuffered: only the header was read, the rows are still on the wire (see __McPdoMyWire::cursorRow). */
@@ -63,6 +77,8 @@ final class __McPdoMyResult
     public bool $more = false;
     /** The statement made this result its current one (php's pending-result-sets error until it does). */
     public bool $entered = false;
+    /** COM_STMT_EXECUTE opened a server cursor (SERVER_STATUS_CURSOR_EXISTS): no rows follow the metadata, COM_STMT_FETCH reads them. */
+    public bool $cursor = false;
 }
 
 /** The reply to COM_STMT_PREPARE: statement id and the counts the server announced. */
@@ -73,6 +89,8 @@ final class __McPdoMyPrep
     public int $params = 0;
     public int $warnings = 0;
     public ?__McPdoMyErr $err = null;
+    /** The result set's column definitions the server sent with PREPARE_OK (null when it has none). */
+    public ?__McPdoMyResult $meta = null;
 }
 
 final class __McPdoMyWire
@@ -105,6 +123,8 @@ final class __McPdoMyWire
     public int $connId = 0;
     /** The status flags of the latest OK/EOF packet (SERVER_STATUS_*). */
     public int $status = 0;
+    /** The latest OK packet's message, the authentication one included (MariaDB puts its certificate digest there). */
+    public string $okInfo = '';
     /** The last OK packet's AUTO_INCREMENT id; 0 after any other command, as mysql_insert_id(). */
     public int $insertId = 0;
     /** The endpoint, for ATTR_CONNECTION_STATUS. */
@@ -164,11 +184,30 @@ final class __McPdoMyWire
     private int $pos = 0;
     /** Offset after the last lstr(). */
     private int $lp = 0;
+    /** The socket path of a connectUnix() connection (empty for TCP). */
+    private string $unix = '';
+    /** sendQuery() was called and readQueryReply() has not run: the reply belongs to pendFiber. */
+    private bool $pending = false;
+    private ?object $pendFiber = null;
 
-    public function __construct(string $host, int $port, float $timeout)
+    /** @param string $unix a socket path: only connectUnix() passes it; $host and $port are then unused */
+    public function __construct(string $host, int $port, float $timeout, string $unix = '')
     {
         $this->host = $host;
         $this->port = $port;
+        $this->unix = $unix;
+        if ($unix !== '') {
+            $en = 0;
+            $es = '';
+            $s = \stream_socket_client('unix://' . $unix, $en, $es, $timeout);
+            if ($s === false) {
+                throw __McPdo::connectFail('HY000', 2002, $es);
+            }
+            $this->s = $s;
+            $this->setTimeout($timeout);
+            $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
+            return;
+        }
         $ip = $host;
         if (\strpos($host, ':') === false && \ip2long($host) === false) {
             $ip = \gethostbyname($host);
@@ -191,6 +230,20 @@ final class __McPdoMyWire
         $this->setTimeout($timeout);
         $this->authDeadline = $timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $timeout : 0.0;
     }
+
+    /** A connection over a unix domain socket. */
+    public static function connectUnix(string $path, float $timeout): self
+    {
+        return new self($path, 0, $timeout, $path);
+    }
+
+    /**
+     * @return resource the connection's stream, for stream_select(). Bytes already read into this object's buffer (or
+     * decrypted by TLS) are invisible to stream_select: check hasBuffered() first.
+     */
+    public function socket(): mixed { return $this->s; }
+
+    public function hasBuffered(): bool { return \strlen($this->buf) > $this->pos; }
 
     public function timeoutValue(): float { return $this->timeout; }
 
@@ -506,6 +559,8 @@ final class __McPdoMyWire
         }
         $this->dead = true;
         $this->openCursor = null;
+        $this->pending = false;
+        $this->pendFiber = null;
         if ($this->closed) { return; }
         $this->closed = true;
         unset(self::$pwStore[$this->kPwId]);
@@ -534,7 +589,7 @@ final class __McPdoMyWire
         $w = null;
         try {
             $t0 = \__mc_monotonic_f();
-            $w = new self($this->host, $this->port, 1.0);
+            $w = $this->unix !== '' ? self::connectUnix($this->unix, 1.0) : new self($this->host, $this->port, 1.0);
             $w->explicitTimeout = true;
             $w->noCancel = true;
             $w->handshake();
@@ -696,7 +751,16 @@ final class __McPdoMyWire
         if (($caps & self::CLIENT_CONNECT_WITH_DB) !== 0) { $r .= $db . "\0"; }
         if (($caps & self::CLIENT_PLUGIN_AUTH) !== 0) { $r .= $this->plugin . "\0"; }
         $this->sendPacket($r);
+        $e = $this->authExchange($pw);
+        if ($e !== null) { throw $this->errPacket($e); }
+    }
 
+    /**
+     * The server's side of the authentication exchange after a HandshakeResponse41 or a COM_CHANGE_USER, up to its OK
+     * (null) or its ERR packet (returned as is).
+     */
+    private function authExchange(string $pw): ?string
+    {
         $plugin = $this->plugin;
         $scramble = $this->scramble;
         $switches = 0;
@@ -715,9 +779,9 @@ final class __McPdoMyWire
             if ($t === 0x00) {
                 $this->parseOk($p, new __McPdoMyResult());
                 $this->connecting = false;
-                return;
+                return null;
             }
-            if ($t === 0xFF) { throw $this->errPacket($p); }
+            if ($t === 0xFF) { return $p; }
             if ($t === 0xFE) {
                 if (++$switches > 2) { throw $this->malformed('too many authentication switches'); }
                 if (\strlen($p) === 1) {
@@ -835,6 +899,16 @@ final class __McPdoMyWire
         $r->status = self::le16($p, $o);
         $r->warnings = self::le16($p, $o + 2);
         $this->status = $r->status;
+        // mysqlnd reads the message as a length-encoded string, clipped to the packet, whether or not session tracking is on
+        $o += 4;
+        $info = '';
+        $l = self::lenencAt($p, $o, \PHP_INT_MAX);
+        if ($l > 0) {
+            $s = $o + self::lenencSize($p, $o);
+            $info = \substr($p, $s, \min($l, $n - $s));
+        }
+        $r->info = $info;
+        $this->okInfo = $info;
     }
 
     /** A length-encoded string at $o; sets $this->lp past it. A bad length is a malformed packet. */
@@ -850,16 +924,21 @@ final class __McPdoMyWire
 
     private function parseCol(string $b, __McPdoMyResult $r): void
     {
-        $this->lstr($b, 0);                   // catalog
-        $this->lstr($b, $this->lp);           // schema
+        $cat = $this->lstr($b, 0);
+        $db = $this->lstr($b, $this->lp);
         $tbl = $this->lstr($b, $this->lp);    // table (alias)
-        $this->lstr($b, $this->lp);           // org_table
+        $orgTbl = $this->lstr($b, $this->lp);
         $name = $this->lstr($b, $this->lp);
-        $this->lstr($b, $this->lp);           // org_name
+        $orgName = $this->lstr($b, $this->lp);
         $o = $this->lp;
         if ($o + 13 > \strlen($b) || \ord($b[$o]) !== 0x0c) { throw $this->malformed('column definition'); }
         $r->names[] = $name;
         $r->tables[] = $tbl;
+        $r->cats[] = $cat;
+        $r->dbs[] = $db;
+        $r->orgTables[] = $orgTbl;
+        $r->orgNames[] = $orgName;
+        $r->charsets[] = self::le16($b, $o + 1);
         $r->lens[] = self::le32($b, $o + 3);
         $r->types[] = \ord($b[$o + 7]);
         $r->flags[] = self::le16($b, $o + 8);
@@ -1046,7 +1125,18 @@ final class __McPdoMyWire
         if (\strlen($e) < 5 || \strlen($e) >= 9 || \ord($e[0]) !== 0xFE) { throw $this->malformed('missing EOF after column definitions'); }
         $r->isSet = true;
         $r->bin = $bin;
-        if ($stream) {
+        // SERVER_STATUS_CURSOR_EXISTS (only a COM_STMT_EXECUTE that asked for a cursor gets it): the rows stay on the server
+        if ($bin && (self::le16($e, 3) & 0x40) !== 0) {
+            $r->status = self::le16($e, 3);
+            $r->warnings = self::le16($e, 1);
+            $this->status = $r->status;
+            $r->cursor = true;
+            $r->done = true;
+            return $r;
+        }
+        // SERVER_PS_OUT_PARAMS: the OUT parameters of a CALL, a one-row set mysqlnd reads and hides (never streamed)
+        $r->outParams = (self::le16($e, 3) & 4096) !== 0;
+        if ($stream && !$r->outParams) {
             $r->stream = true;
             // the metadata EOF already carries SERVER_MORE_RESULTS_EXISTS, which is what mysqlnd's more_results() answers
             $r->status = self::le16($e, 3);
@@ -1090,19 +1180,210 @@ final class __McPdoMyWire
      * COM_STMT_EXECUTE of statement $id; $params is everything after the iteration count (NULL bitmap, bound flag, types,
      * values), empty for a statement without parameters. Same chain and same failure contract as query(), with binary rows.
      */
-    public function execute(int $id, string $params, bool $stream = false): __McPdoMyResult
+    public function execute(int $id, string $params, bool $stream = false, int $flags = 0): __McPdoMyResult
     {
-        return $this->cycle("\x17" . self::putLe($id, 4) . "\0" . self::putLe(1, 4) . $params, true, $stream);
+        return $this->cycle("\x17" . self::putLe($id, 4) . \chr($flags & 255) . self::putLe(1, 4) . $params, true, $stream);
+    }
+
+    /** COM_STMT_RESET: drops the long data sent so far and closes the statement's cursor. */
+    public function stmtReset(int $id): ?__McPdoMyErr { return $this->cycle("\x1a" . self::putLe($id, 4), false)->err; }
+
+    /**
+     * COM_STMT_FETCH: up to $n rows (-1 = all) of the open cursor of statement $id, appended to $r->rows; the closing EOF sets
+     * $r->status / $r->warnings, an ERR lands in $r->err (the stream is in sync either way).
+     */
+    public function stmtFetch(int $id, int $n, __McPdoMyResult $r): void
+    {
+        $this->sendCmd("\x1c" . self::putLe($id, 4) . self::putLe($n & 0xFFFFFFFF, 4));
+        try {
+            while (true) {
+                $p = $this->packet(self::ROW_CAP);
+                $bl = \strlen($p);
+                if ($bl < 1) { throw $this->malformed('empty row'); }
+                $t = \ord($p[0]);
+                if ($t === 0xFE && $bl < 9) {
+                    if ($bl < 5) { throw $this->malformed('EOF packet'); }
+                    $r->warnings = self::le16($p, 1);
+                    $r->status = self::le16($p, 3);
+                    $this->status = $r->status;
+                    break;
+                }
+                if ($t === 0xFF) {
+                    $r->err = $this->parseErr($p);
+                    break;
+                }
+                $r->rows[] = $this->parseBinRow($p, $r);
+            }
+            $this->inflight = false;
+        } catch (\Throwable $x) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $x;
+        } finally {
+            $this->release();
+        }
     }
 
     private function cycle(string $cmd, bool $bin, bool $stream = false): __McPdoMyResult
     {
+        $this->sendCmd($cmd);
+        return $this->readReply($bin, $stream);
+    }
+
+    /** First half of a cycle: takes the wire and sends $cmd. The wire stays held until readReply() (or the send fails). */
+    private function sendCmd(string $cmd): void
+    {
         $this->enter();
         try {
-            return $this->queryRun($cmd, $bin, $stream);
+            if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $this->drainOwed();
+            $this->inflight = true;
+            $this->insertId = 0;
+            $this->seq = 0;
+            $this->sendPacket($cmd);
+            $this->awaiting = true;
+            $this->respStart = true;
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            $this->release();
+            throw $t;
+        }
+    }
+
+    /** Second half of a cycle: reads the whole reply of the command sendCmd() sent, then frees the wire. */
+    private function readReply(bool $bin, bool $stream): __McPdoMyResult
+    {
+        try {
+            return $this->readChain($bin, $stream);
         } catch (\Throwable $t) {
             // a cancel/timeout/protocol failure inside a cycle leaves half a response on the wire: nobody may reuse it
             if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->release();
+        }
+    }
+
+    /** Async split of query(): send now, read the reply later (the wire is held in between). */
+    public function sendQuery(string $sql): void
+    {
+        $this->sendCmd("\x03" . $sql);
+        $this->pending = true;
+        $this->pendFiber = \Runtime\AsyncHook::active() ? \Fiber::getCurrent() : null;
+    }
+
+    /** No sendQuery() reply is pending, or it belongs to the calling fiber (always, without a scheduler). */
+    public function ownsPending(): bool
+    {
+        return !\Runtime\AsyncHook::active() || \Fiber::getCurrent() === $this->pendFiber;
+    }
+
+    private function outOfSync(): PDOException
+    {
+        $e = new __McPdoMyErr();
+        $e->no = 2014;
+        $e->state = 'HY000';
+        $e->msg = "Commands out of sync; you can't run this command now";
+        return __McPdoMy::errFrom($e);
+    }
+
+    public function readQueryReply(bool $stream = false): __McPdoMyResult
+    {
+        if (!$this->pending || !$this->ownsPending()) { throw $this->outOfSync(); }
+        try {
+            return $this->readReply(false, $stream);
+        } finally {
+            $this->pending = false;
+            $this->pendFiber = null;
+        }
+    }
+
+    /**
+     * COM_SET_OPTION MYSQL_OPTION_MULTI_STATEMENTS_ON / _OFF: mysqli turns multi-statements on for one multi_query() and off
+     * again before the next plain command. The reply is an EOF packet (or an ERR).
+     */
+    public function setMultiStatements(bool $on): ?__McPdoMyErr
+    {
+        $this->sendCmd("\x1b" . self::putLe($on ? 0 : 1, 2));
+        try {
+            $p = $this->packet(self::CTRL_CAP);
+            $this->inflight = false;
+            return \strlen($p) > 0 && \ord($p[0]) === 0xFF ? $this->parseErr($p) : null;
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->release();
+        }
+    }
+
+    /** @return ?__McPdoMyErr null on OK */
+    public function initDb(string $db): ?__McPdoMyErr { return $this->cycle("\x02" . $db, false)->err; }
+
+    public function processKill(int $id): ?__McPdoMyErr { return $this->cycle("\x0c" . self::putLe($id, 4), false)->err; }
+
+    public function refresh(int $flags): ?__McPdoMyErr { return $this->cycle("\x07" . \chr($flags & 255), false)->err; }
+
+    /**
+     * COM_CHANGE_USER: re-authenticates this connection as $user (session state is reset, the server's own plugin
+     * negotiation is answered by the same exchange as auth()). A server ERR is returned and leaves the old identity
+     * recorded; a protocol failure poisons the connection and throws.
+     */
+    public function changeUser(string $user, ?string $pw, string $db, int $charsetNo): ?__McPdoMyErr
+    {
+        $pw = $pw === null ? '' : $pw;
+        if (\strpos($user, "\0") !== false || \strpos($db, "\0") !== false) {
+            $e = new __McPdoMyErr();
+            $e->no = 2000;
+            $e->state = 'HY000';
+            $e->msg = 'invalid NUL byte in user or database name';
+            return $e;
+        }
+        $this->enter();
+        try {
+            if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $this->drainOwed();
+            $this->inflight = true;
+            $this->insertId = 0;
+            $this->seq = 0;
+            $this->authDeadline = $this->timeout > 0.0 ? \__mc_monotonic_f() + 2.0 * $this->timeout : 0.0;
+            $auth = $this->pluginResponse($this->plugin, $pw, $this->scramble);
+            $r = "\x11" . $user . "\0";
+            $r .= \chr(\strlen($auth)) . $auth;
+            $r .= $db . "\0" . self::putLe($charsetNo, 2);
+            if (($this->cliCaps & self::CLIENT_PLUGIN_AUTH) !== 0) { $r .= $this->plugin . "\0"; }
+            $this->sendPacket($r);
+            $this->awaiting = true;
+            $this->respStart = true;
+            // nothing cancellable runs here: a failure must not start a KILL QUERY connection
+            $this->inflight = false;
+            $p = $this->authExchange($pw);
+            if ($p !== null) { return $this->parseErr($p); }
+            $this->owed = [];
+            $this->gen = $this->gen + 1;
+            $this->kUser = $user;
+            self::$pwStore[$this->kPwId] = $pw;
+            $this->kCs = $charsetNo;
+            return null;
+        } catch (\Throwable $t) {
+            // half an exchange is on the wire (inflight is false, so no KILL QUERY follows)
+            $this->closeSock();
+            throw $t;
+        } finally {
+            $this->release();
+        }
+    }
+
+    /** COM_STMT_SEND_LONG_DATA: appends a chunk to parameter $param of statement $stmtId. No reply. */
+    public function sendLongData(int $stmtId, int $param, string $data): void
+    {
+        $this->enter();
+        try {
+            if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
+            $this->drainOwed();
+            $this->seq = 0;
+            $this->sendPacket("\x18" . self::putLe($stmtId, 4) . self::putLe($param, 2) . $data);
+        } catch (\Throwable $t) {
+            $this->closeSock();
             throw $t;
         } finally {
             $this->release();
@@ -1116,6 +1397,7 @@ final class __McPdoMyWire
      */
     private function enter(): void
     {
+        if ($this->pending && !$this->dead && $this->ownsPending()) { throw $this->outOfSync(); }
         // php: any command while an unbuffered result is open is 2014. Another fiber is not the owner: it waits for the cursor to end.
         if ($this->openCursor !== null && !$this->dead && (!\Runtime\AsyncHook::active() || \Fiber::getCurrent() === $this->curFiber)) {
             $e = new __McPdoMyErr();
@@ -1141,19 +1423,6 @@ final class __McPdoMyWire
         $this->busy = true;
     }
 
-    private function queryRun(string $cmd, bool $bin, bool $stream = false): __McPdoMyResult
-    {
-        if ($this->dead) { throw $this->ioFail(2006, 'MySQL server has gone away'); }
-        $this->drainOwed();
-        $this->inflight = true;
-        $this->insertId = 0;
-        $this->seq = 0;
-        $this->sendPacket($cmd);
-        $this->awaiting = true;
-        $this->respStart = true;
-        return $this->readChain($bin, $stream);
-    }
-
     /**
      * Reads results until the chain ends, or ($stream) until one result set's header: its rows stay on the wire, the
      * connection stays mid-protocol (inflight) and openCursor names the result until cursorRow() reaches its end.
@@ -1165,6 +1434,11 @@ final class __McPdoMyWire
         $n = 0;
         while (true) {
             $r = $this->readResult($bin, $stream);
+            // hidden from the chain; MySQL closes it without MORE_RESULTS, yet the CALL's closing OK still follows
+            if ($r->outParams && $r->err === null) {
+                if (++$n > 100000) { throw $this->malformed('too many result sets'); }
+                continue;
+            }
             if ($first === null) { $first = $r; } else { $last->next = $r; }
             $last = $r;
             if (!$r->isSet && $r->err === null) { $this->insertId = $r->insertId; }
@@ -1327,9 +1601,11 @@ final class __McPdoMyWire
             $q->params = self::le16($p, 7);
             $q->warnings = self::le16($p, 10);
             if ($q->cols > self::MAX_COLUMNS || $q->params > self::MAX_PARAMS) { throw $this->malformed('PREPARE_OK counts'); }
-            foreach ([$q->params, $q->cols] as $cnt) {
+            foreach ([$q->params, $q->cols] as $k => $cnt) {
                 if ($cnt === 0) { continue; }
-                for ($i = 0; $i < $cnt; $i++) { $this->parseCol($this->packet(self::CTRL_CAP), new __McPdoMyResult()); }
+                $defs = new __McPdoMyResult();
+                for ($i = 0; $i < $cnt; $i++) { $this->parseCol($this->packet(self::CTRL_CAP), $defs); }
+                if ($k === 1) { $q->meta = $defs; }
                 $e = $this->packet(self::CTRL_CAP);
                 if (\strlen($e) < 5 || \strlen($e) >= 9 || \ord($e[0]) !== 0xFE) { throw $this->malformed('missing EOF after definitions'); }
             }
@@ -1973,15 +2249,6 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
         if ($n->err !== null) {
             $this->res = null;
             throw __McPdoMy::errFrom($n->err);
-        }
-        if ($this->native && !$n->isSet && $this->res->isSet) {
-            // mysqlnd (measured): the closing OK of a CALL still reports the previous result set's columns
-            $n->names = $this->res->names;
-            $n->tables = $this->res->tables;
-            $n->types = $this->res->types;
-            $n->flags = $this->res->flags;
-            $n->lens = $this->res->lens;
-            $n->decs = $this->res->decs;
         }
         $n->entered = true;
         $this->res = $n;

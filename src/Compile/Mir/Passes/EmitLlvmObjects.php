@@ -1528,9 +1528,9 @@ trait EmitLlvmObjects
      * @param array<string,\Compile\Mir\EnumDef> $enumArms
      * @param array<string,string> $magic class name → declaring class (a bare `array` would erase its key channel)
      */
-    private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag): string
+    private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag, bool $fresh = false): string
     {
-        $key = '__mc_prop_read_' . $this->mangle($prop);
+        $key = '__mc_prop_read_' . $this->mangle($prop) . ($fresh ? '__fresh' : '');
         $sym = '@manticore_' . $key;
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
@@ -1555,12 +1555,24 @@ trait EmitLlvmObjects
         $def = $this->ssa->allocLabel('pr.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
+        $hooks = $this->hookPropHolders($prop, 'get');
+        $fixed = self::withoutHooked($fixed, $hooks);
+        foreach ($hooks as $hc => $hsym) {
+            unset($magic[$hc]);
+            $lbl = $this->ssa->allocLabel('pr.hook');
+            $switch .= '    i64 ' . (string)$this->classes[$hc]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n" . $this->emitHookGetCell($obj, $hsym);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
         foreach ($fixed as $cd) {
             $lbl = $this->ssa->allocLabel('pr.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitFixedPropLoad($obj, $cd, $prop);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $fv = $this->lastValue;
+            if ($fresh) { $bodies .= $this->rcRetainReg($fv, 'cell'); }
+            $bodies .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
         foreach ($enumArms as $ename => $ed) {
@@ -1568,7 +1580,9 @@ trait EmitLlvmObjects
             $switch .= '    i64 ' . (string)$ed->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
             $bodies .= $this->emitEnumCellPropLoad($obj, $ename, $ed, $prop);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $fv = $this->lastValue;
+            if ($fresh) { $bodies .= $this->rcRetainReg($fv, 'cell'); }
+            $bodies .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {
@@ -1593,7 +1607,9 @@ trait EmitLlvmObjects
         $out .= $switch . $bodies . $def . ":\n";
         if ($hasBag) {
             $out .= $this->emitBagReadByName($prop, $obj);
-            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $fv = $this->lastValue;
+            if ($fresh) { $out .= $this->rcRetainReg($fv, 'cell'); }
+            $out .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
         } else {
             $this->rt->needsTagged = true;
             $null = $this->ssa->allocReg();
@@ -1643,15 +1659,17 @@ trait EmitLlvmObjects
         // __get but not $prop answers through the method, exactly as the typed
         // path already does.
         $magic = $this->magicPropHolders($prop, '__get');
+        // A get hook answers for its class as on the typed path; its arms live in the shared reader only.
+        $hooked = $this->hookPropHolders($prop, 'get') !== [];
         // Pure dynamic-bag receiver — no concrete holder of $prop.
-        if (\count($fixed) === 0 && $enumArms === [] && $magic === []) {
+        if (\count($fixed) === 0 && $enumArms === [] && $magic === [] && !$hooked) {
             return \implode('', $outChunks) . $this->emitBagReadByClassId($pa, $objPtr);
         }
         // Runtime dispatch on the object's class_id. Fixed-slot-only reads are
         // extracted once per property: the caller keeps only the object coercion
         // and a normal call, while the helper owns the shared switch.
-        if (\count($fixed) + \count($enumArms) + \count($magic) > 1) {
-            $helper = $this->cellPropertyReadHelper($prop, $fixed, $enumArms, $magic, $hasBag);
+        if (\count($fixed) + \count($enumArms) + \count($magic) > 1 || $hooked) {
+            $helper = $this->cellPropertyReadHelper($prop, $fixed, $enumArms, $magic, $hasBag, $this->own->hookFreshRead($pa));
             $r = $this->ssa->allocReg();
             $outChunks[] = '  ' . $r . ' = call i64 ' . $helper . '(ptr ' . $objPtr . ")\n";
             $this->lastValue = $r;
@@ -1782,6 +1800,75 @@ trait EmitLlvmObjects
         }
         $this->magicPropertyHoldersCache[$key] = $holders;
         return $holders;
+    }
+
+    /**
+     * Concrete classes whose `$prop` carries a `$which` ('get' / 'set') hook, keyed by class — its class_id is what an
+     * erased or union receiver's switch matches — mapping to the hook's symbol (inherited hooks are copied down, so a
+     * subclass maps to the hook it runs). A hook stands in for the slot, so these arms win over the fixed-slot ones.
+     *
+     * @return array<string,string>
+     */
+    private function hookPropHolders(string $prop, string $which): array
+    {
+        $key = $prop . '|' . $which;
+        if (isset($this->hookPropertyHoldersCache[$key])) {
+            return $this->hookPropertyHoldersCache[$key];
+        }
+        $holders = [];
+        foreach ($this->classes as $cd) {
+            $sym = $cd->propHooks[$prop][$which] ?? '';
+            if ($sym !== '') { $holders[$cd->name] = $sym; }
+        }
+        $this->hookPropertyHoldersCache[$key] = $holders;
+        return $holders;
+    }
+
+    /**
+     * @param ClassDef[] $fixed
+     * @param array<string,string> $hooks
+     * @return ClassDef[] the fixed-slot holders whose slot no hook replaces
+     */
+    private static function withoutHooked(array $fixed, array $hooks): array
+    {
+        if ($hooks === []) { return $fixed; }
+        $keep = [];
+        foreach ($fixed as $cd) {
+            if (!isset($hooks[$cd->name])) { $keep[] = $cd; }
+        }
+        return $keep;
+    }
+
+    /** A get-hook arm of the shared erased reader: `$sym($obj)`, its typed result boxed to a cell (the reader's contract). lastValue ← the cell. */
+    private function emitHookGetCell(string $objPtr, string $sym): string
+    {
+        $oi = $this->ssa->allocReg();
+        $out = '  ' . $oi . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @manticore_' . $this->mangle($sym) . '(i64 ' . $oi . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out . $this->hookResultAs($sym, Type::cell());
+    }
+
+    /**
+     * The get hook `$sym` returned its own (possibly narrowed) return type in lastValue; a read typed `$want` as a cell
+     * (a `int|string` property, an erased reader) gets it boxed, a float comes back as a double.
+     */
+    private function hookResultAs(string $sym, Type $want): string
+    {
+        $rt = $this->sigs->returnType[$sym] ?? Type::cell();
+        $out = '';
+        if ($rt->kind === Type::KIND_FLOAT) {
+            $d = $this->ssa->allocReg();
+            $out .= '  ' . $d . ' = bitcast i64 ' . $this->lastValue . " to double\n";
+            $this->lastValue = $d;
+            $this->lastValueType = 'double';
+        }
+        if ($want->kind === Type::KIND_CELL && $rt->kind !== Type::KIND_CELL && $rt->kind !== Type::KIND_UNKNOWN) {
+            $out .= $this->boxToCell($rt);
+        }
+        return $out;
     }
 
     /**
@@ -1941,12 +2028,17 @@ trait EmitLlvmObjects
         $fixed = $this->fixedPropertyHolders($prop);
         // Property overloading on an ERASED receiver — see magicPropHolders.
         $magic = $this->magicPropHolders($prop, '__get');
+        // A get hook answers for its class, as on the typed path.
+        $hooks = $this->hookPropHolders($prop, 'get');
+        $fixed = self::withoutHooked($fixed, $hooks);
+        // a hook arm hands back a +1: then the read is fresh and the slot arms take one too
+        $fresh = $this->own->hookFreshRead($pa);
         $out = $this->emitNode($pa->object);
         $out .= $this->cellToPtr();
         $objPtr = $this->lastValue;
         // No class declares `$prop`: only a bag object can hold it; anything else
         // reads an undefined property — null, never the first field of the object.
-        if (\count($fixed) === 0 && $magic === []) {
+        if (\count($fixed) === 0 && $magic === [] && $hooks === []) {
             return $out . $this->emitBagReadByName($prop, $objPtr);
         }
         // Even a single holder is read through the class_id switch: the receiver
@@ -1967,10 +2059,20 @@ trait EmitLlvmObjects
         $bodies = '';
         /** @var array<string, string> {@see canonArm} */
         $armSeen = [];
+        foreach ($hooks as $hc => $hsym) {
+            unset($magic[$hc]);
+            $lbl = $this->ssa->allocLabel('rp.hook');
+            $switch .= '    i64 ' . (string)$this->classes[$hc]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n" . $this->emitHookGetCell($objPtr, $hsym);
+            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
         foreach ($fixed as $cd) {
             $lbl = $this->ssa->allocLabel('rp.case');
             $arm = $this->emitFixedPropLoad($objPtr, $cd, $prop);
-            $arm .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+            $fv = $this->lastValue;
+            if ($fresh) { $arm .= $this->rcRetainReg($fv, 'cell'); }
+            $arm .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
             $arm .= '  br label %' . $end . "\n";
             $key = $this->canonArm($arm);
             if (isset($armSeen[$key])) {
@@ -1993,7 +2095,9 @@ trait EmitLlvmObjects
         $out .= $switch . $bodies;
         $out .= $def . ":\n";
         $out .= $this->emitBagReadByName($prop, $objPtr);
-        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        $fv = $this->lastValue;
+        if ($fresh) { $out .= $this->rcRetainReg($fv, 'cell'); }
+        $out .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n";
         $r = $this->ssa->allocReg();
@@ -2150,7 +2254,9 @@ trait EmitLlvmObjects
                                            $fixed, $magic, $hasBag);
         }
         // No known holder → __set, bag store (stdClass), or drop; never offset-16.
-        if (\count($fixed) === 0 && $magic === []) {
+        // A set hook replaces the store for its class (a virtual property has no slot): only the shared writer has those arms.
+        $setHooked = $this->hookPropHolders($prop, 'set') !== [];
+        if (\count($fixed) === 0 && $magic === [] && !$setHooked) {
             if ($hasBag) { $out .= $this->emitCellBagStore($n, $objPtr, $cellVal); }
             $this->lastValue = $cellVal;
             $this->lastValueType = 'i64';
@@ -2160,7 +2266,7 @@ trait EmitLlvmObjects
         // Not after a narrowing: one holder AMONG the subtypes does not mean
         // every subtype holds the slot, and the class_id default is what keeps
         // a store into one that does not off a foreign offset.
-        if ($within === '' && \count($fixed) === 1 && !$hasBag && $magic === []) {
+        if ($within === '' && \count($fixed) === 1 && !$hasBag && $magic === [] && !$setHooked) {
             $out .= $this->emitCellSlotStoreDropping($objPtr, $fixed[0], $prop, $cellVal, true, true);
             $this->lastValue = $cellVal;
             $this->lastValueType = 'i64';
@@ -2220,6 +2326,29 @@ trait EmitLlvmObjects
      * by tag (`$dropBoxed`; it owns what it holds). A slot a `&` promoted is not dropped:
      * its word is a REF cell, not the value.
      */
+    /** `$setHook($obj, $value)` with the boxed `$cellVal` unboxed to the hook's `$value` type; the hook borrows, so the
+     *  count the site took for the store goes back. */
+    private function emitCellHookSet(string $obj, ClassDef $cd, string $prop, string $setHook, string $cellVal): string
+    {
+        $this->rt->needsRc = true;
+        $pt = $this->sigs->paramTypes[$setHook][1] ?? ($cd->propertyTypes[$prop] ?? Type::cell());
+        $this->lastValue = $cellVal;
+        $this->lastValueType = 'i64';
+        $out = $this->unboxCellToType($pt);
+        $arg = $this->lastValue;
+        if ($this->lastValueType === 'double') {
+            $bits = $this->ssa->allocReg();
+            $out .= '  ' . $bits . ' = bitcast double ' . $arg . " to i64\n";
+            $arg = $bits;
+        }
+        $thisI = $this->ssa->allocReg();
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $thisI . ' = ptrtoint ptr ' . $obj . " to i64\n";
+        $out .= '  ' . $res . ' = call i64 @manticore_' . $this->mangle($setHook)
+               . '(i64 ' . $thisI . ', i64 ' . $arg . ")\n";
+        return $out . '  call void @__mir_cell_drop(i64 ' . $cellVal . ")\n";
+    }
+
     private function emitCellSlotStoreDropping(string $obj, ClassDef $cd, string $prop, string $cellVal, bool $dropRaw, bool $dropBoxed): string
     {
         // A user-level store ($dropBoxed) into a property with a set hook runs the
@@ -2227,23 +2356,7 @@ trait EmitLlvmObjects
         // goes back, since the hook borrows its argument.
         $setHook = $dropBoxed ? ($cd->propHooks[$prop]['set'] ?? '') : '';
         if ($setHook !== '') {
-            $this->rt->needsRc = true;
-            $pt = $this->sigs->paramTypes[$setHook][1] ?? ($cd->propertyTypes[$prop] ?? Type::cell());
-            $this->lastValue = $cellVal;
-            $this->lastValueType = 'i64';
-            $out = $this->unboxCellToType($pt);
-            $arg = $this->lastValue;
-            if ($this->lastValueType === 'double') {
-                $bits = $this->ssa->allocReg();
-                $out .= '  ' . $bits . ' = bitcast double ' . $arg . " to i64\n";
-                $arg = $bits;
-            }
-            $thisI = $this->ssa->allocReg();
-            $res = $this->ssa->allocReg();
-            $out .= '  ' . $thisI . ' = ptrtoint ptr ' . $obj . " to i64\n";
-            $out .= '  ' . $res . ' = call i64 @manticore_' . $this->mangle($setHook)
-                   . '(i64 ' . $thisI . ', i64 ' . $arg . ")\n";
-            return $out . '  call void @__mir_cell_drop(i64 ' . $cellVal . ")\n";
+            return $this->emitCellHookSet($obj, $cd, $prop, $setHook, $cellVal);
         }
         $oldSlot = '';
         $oldFlavor = '';
@@ -2398,6 +2511,11 @@ trait EmitLlvmObjects
               . '(i64 ' . $thisArg . ")\n";
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
+        if (isset($this->sigs->returnType[$hookSym])) {
+            // the hook's return may be narrower than the property (an `int|string` slot is a cell, a hook answering
+            // only ints returns a raw int)
+            return $out . $this->hookResultAs($hookSym, $resultType);
+        }
         if ($resultType->kind === Type::KIND_FLOAT) {
             $rf = $this->ssa->allocReg();
             $out .= '  ' . $rf . ' = bitcast i64 ' . $reg . " to double\n";
@@ -4128,11 +4246,13 @@ trait EmitLlvmObjects
      * everything that depends only on the class and the name: each holder's slot
      * store, the `__set` arms, and the bag default.
      */
-    private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false, bool $dropBoxed = false): string
+    private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false, bool $dropBoxed = false, bool $hooks = false): string
     {
+        // a user-level store ($dropBoxed, or $hooks for one that keeps the old slot value) runs a set hook
+        $hooks = $hooks || $dropBoxed;
         $key = '__mc_prop_write_' . $this->mangle($prop)
              . ($within === '' ? '' : '__in_' . $this->mangle($within))
-             . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '');
+             . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '') . ($hooks ? 'h' : '');
         $sym = '@manticore_' . $key;
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
@@ -4162,6 +4282,14 @@ trait EmitLlvmObjects
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
         $seen = [];
+        foreach ($hooks ? $this->hookPropHolders($prop, 'set') : [] as $hc => $hsym) {
+            if ($within !== '' && !$this->classIsA($hc, $within)) { continue; }
+            $seen[$hc] = true;
+            $lbl = $this->ssa->allocLabel('pw.hook');
+            $switch .= '    i64 ' . (string)$this->classes[$hc]->classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n" . $this->emitCellHookSet($obj, $this->classes[$hc], $prop, $hsym, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+        }
         foreach ($fixed as $cd) {
             if (isset($seen[$cd->name])) { continue; }
             $seen[$cd->name] = true;
@@ -6060,7 +6188,7 @@ trait EmitLlvmObjects
         // The write twin of the reader table in {@see emitErasedDynPropDispatch}.
         if (\count($propTypes) >= self::DYNF_TABLE_MIN) {
             $rows = [];
-            foreach ($propTypes as $p => $pt) { $rows[(string)$p] = $this->cellPropertyWriteHelper((string)$p); }
+            foreach ($propTypes as $p => $pt) { $rows[(string)$p] = $this->cellPropertyWriteHelper((string)$p, '', false, false, true); }
             $out .= $this->dynPropTableProbe($keyP, $rows, 'dynsp');
             $fp = $this->lastValue;
             $out .= '  call void ' . $fp . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
@@ -6077,7 +6205,7 @@ trait EmitLlvmObjects
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
-            $out .= '  call void ' . $this->cellPropertyWriteHelper($p)
+            $out .= '  call void ' . $this->cellPropertyWriteHelper($p, '', false, false, true)
                   . '(ptr ' . $objPtr . ', i64 ' . $cellVal . ")\n";
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
@@ -9958,10 +10086,12 @@ trait EmitLlvmObjects
             if ($firstOff === -1) { $firstOff = $o; }
             elseif ($firstOff !== $o) { $agree = false; }
         }
+        // A get hook answers for its class (and the subclasses it is copied down to), as on the typed path.
+        $hooks = $this->hookPropHolders($pa->property, 'get');
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
         $objPtr = $this->lastValue;
-        if ($agree) {
+        if ($agree && !$this->unionReachesHook($atoms, $hooks)) {
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i8, ptr ' . $objPtr
                   . ', i64 ' . (string)$firstOff . "\n";
@@ -9988,12 +10118,25 @@ trait EmitLlvmObjects
                 $seen[$c] = true;
                 $caseL = $this->ssa->allocLabel('up.case');
                 $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $caseL . "\n";
-                $g = $this->ssa->allocReg();
                 $bodies .= $caseL . ":\n";
+                if (isset($hooks[$c])) {
+                    $oi = $this->ssa->allocReg();
+                    $hv = $this->ssa->allocReg();
+                    $bodies .= '  ' . $oi . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+                    $bodies .= '  ' . $hv . ' = call i64 @manticore_' . $this->mangle($hooks[$c]) . '(i64 ' . $oi . ")\n";
+                    $this->lastValue = $hv;
+                    $this->lastValueType = 'i64';
+                    $bodies .= $this->hookResultAs($hooks[$c], $pa->type) . $this->coerceToI64();
+                    $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                    $bodies .= '  br label %' . $endL . "\n";
+                    continue;
+                }
+                $g = $this->ssa->allocReg();
                 $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $objPtr
                          . ', i64 ' . (string)$offByClass[$ac] . "\n";
                 $vv = $this->ssa->allocReg();
                 $bodies .= '  ' . $vv . ' = load i64, ptr ' . $g . "\n";
+                $bodies .= $this->freshArmRetain($pa, $vv);
                 $bodies .= '  store i64 ' . $vv . ', ptr ' . $res . "\n";
                 $bodies .= '  br label %' . $endL . "\n";
             }
@@ -10006,6 +10149,7 @@ trait EmitLlvmObjects
               . ', i64 ' . (string)$firstOff . "\n";
         $vd = $this->ssa->allocReg();
         $out .= '  ' . $vd . ' = load i64, ptr ' . $gd . "\n";
+        $out .= $this->freshArmRetain($pa, $vd);
         $out .= '  store i64 ' . $vd . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -10014,6 +10158,33 @@ trait EmitLlvmObjects
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
         return $out;
+    }
+
+    /**
+     * A slot arm of a read that {@see \Compile\Mir\Ownership::hookFreshRead} calls fresh (a hook arm hands back a +1):
+     * the slot's value gets the same +1, so every arm agrees.
+     */
+    private function freshArmRetain(PropertyAccess_ $pa, string $reg): string
+    {
+        if (!$this->own->hookFreshRead($pa)) { return ''; }
+        if ($pa->type->kind === Type::KIND_CELL) { return $this->rcRetainReg($reg, 'cell'); }
+        return $this->rcRetainByType($pa, $reg, $pa->type);
+    }
+
+    /**
+     * Whether a union receiver can be an instance of a class in $hooks (an atom or a subclass of one).
+     * @param Type[] $atoms
+     * @param array<string,string> $hooks
+     */
+    private function unionReachesHook(array $atoms, array $hooks): bool
+    {
+        if ($hooks === []) { return false; }
+        foreach ($atoms as $atom) {
+            foreach ($this->selfAndDescendants($atom->class ?? '') as $c) {
+                if (isset($hooks[$c])) { return true; }
+            }
+        }
+        return false;
     }
 
     /** The set-hook symbol class `$cls` runs for a union store, or ''. */

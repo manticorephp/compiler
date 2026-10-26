@@ -810,8 +810,10 @@ function __mc_unix_fill(\Ffi\Ptr $buf, string $path): int
  */
 function __mc_unix_connect(string $path)
 {
+    \__mc_net_errno(true, 0);
     $fd = \Runtime\Libc\sys_socket(1, 1, 0);   // AF_UNIX(1), SOCK_STREAM(1), proto 0
     if ($fd < 0) {
+        \__mc_net_errno(true, \__mc_errno());
         return false;
     }
     $buf = \Runtime\Libc\calloc(128, 1);
@@ -821,6 +823,7 @@ function __mc_unix_connect(string $path)
     }
     $len = \__mc_unix_fill($buf, $path);
     $rc = \Runtime\Libc\sys_connect($fd, $buf, $len);
+    if ($rc !== 0) { \__mc_net_errno(true, \__mc_errno()); }
     \Runtime\Libc\free($buf);
     if ($rc !== 0) {
         \Runtime\Libc\sys_close($fd);
@@ -1146,8 +1149,10 @@ function stream_socket_client(string $address, &$error_code = 0, &$error_message
     if ($scheme === 'unix') {
         $sock = \__mc_unix_connect($addr);
         if ($sock === false) {
-            $error_code = -1;
-            $error_message = 'cannot connect to ' . $address;
+            // the connect's errno + strerror, as php: a missing path is ENOENT "No such file or directory"
+            $e = \__mc_net_errno(false, 0);
+            $error_code = $e !== 0 ? $e : -1;
+            $error_message = $e !== 0 ? \__mc_errno_msg($e) : 'cannot connect to ' . $address;
             return false;
         }
         if ($context !== null) {

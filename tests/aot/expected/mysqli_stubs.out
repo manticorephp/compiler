@@ -1,0 +1,26 @@
+bool(true)
+163 011e06bc68a7b4a0d5c0daa1e1cd45b9
+array(1) {
+  [0]=>
+  string(1) "0"
+}
+bool(true)
+Error: mysqli object is not fully initialized
+Error: mysqli object is not fully initialized
+Error: mysqli object is not fully initialized
+Error: mysqli object is not fully initialized
+bool(false)
+bool(false)
+array(3) {
+  ["total"]=>
+  int(0)
+  ["active_plinks"]=>
+  int(0)
+  ["cached_plinks"]=>
+  int(0)
+}
+bool(true)
+bool(true)
+bool(true)
+bool(true)
+bool(false)

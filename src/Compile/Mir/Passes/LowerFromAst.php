@@ -505,6 +505,9 @@ final class LowerFromAst implements Pass
     public string $pdoSqlSrc = '';
     public string $pdoPgsqlSrc = '';
     public string $pdoMysqlSrc = '';
+    /** ext/mysqli (classes, constants, procedural API) — DEMAND-GATED on any `mysqli*` mention. Global namespace;
+     *  mysqli_sql_exception extends RuntimeException, mysqli_result implements IteratorAggregate. */
+    public string $mysqliSrc = '';
     /** ext/tokenizer's scanner core — DEMAND-GATED. Names nothing Zend owns so
      *  it stays loadable under `php` for tools/tokenizer_diff.php. */
     public string $tokenizerSrc = '';
@@ -2676,7 +2679,9 @@ final class LowerFromAst implements Pass
         $out = [];
         $targets = [];
         foreach ($module->classes as $cd) {
-            if ($cd->isStruct || $cd->isPreludeClass) { continue; }
+            if ($cd->isStruct) { continue; }
+            // of the prelude classes only ext/mysqli's (mysqli_result implements IteratorAggregate) answer reflection's interface queries
+            if ($cd->isPreludeClass && \strncasecmp($cd->name, 'mysqli', 6) !== 0) { continue; }
             $targets[] = $cd->name;
         }
         // An interface has no ClassDef but does get a reflection row.
@@ -5788,7 +5793,7 @@ final class LowerFromAst implements Pass
         return $ext === 'pcre' || $ext === 'json' || $ext === 'ctype'
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
             || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl'
-            || $ext === 'session'
+            || $ext === 'session' || $ext === 'mysqli'
             || $ext === 'bcmath';
     }
 

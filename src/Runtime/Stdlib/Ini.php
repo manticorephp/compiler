@@ -283,6 +283,18 @@ function __mc_ini_table(): array
         "session.cache_expire" => "180",
         "session.sid_length" => "32",
         "session.sid_bits_per_character" => "4",
+        // ext/mysqli reads its connect defaults here. default_socket has no compiled-in path: the prelude probes the usual ones.
+        "mysqli.allow_local_infile" => "0",
+        "mysqli.allow_persistent" => "1",
+        "mysqli.default_host" => "",
+        "mysqli.default_port" => "3306",
+        "mysqli.default_pw" => "",
+        "mysqli.default_socket" => "",
+        "mysqli.default_user" => "",
+        "mysqli.local_infile_directory" => "",
+        "mysqli.max_links" => "-1",
+        "mysqli.max_persistent" => "-1",
+        "mysqli.rollback_on_cached_plink" => "0",
     ];
 }
 

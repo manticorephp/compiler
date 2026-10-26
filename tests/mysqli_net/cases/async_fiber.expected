@@ -1,0 +1,7 @@
+query: q1 q2 overlapped loop-alive
+use_result: u1/1 u2/2 overlapped loop-alive
+prepared: p1 p2 overlapped loop-alive
+async api: a1 a2 overlapped loop-alive
+multi: m1 m2 overlapped loop-alive
+reap from another fiber: 2014 Commands out of sync; you can't run this command now
+owner reaps: 0

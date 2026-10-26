@@ -1,0 +1,16 @@
+string(6) "object"
+bool(true)
+int(1)
+bool(true)
+string(6) "string"
+string(6) "object"
+int(1)
+string(6) "object"
+bool(true)
+int(1)
+string(6) "object"
+bool(true)
+array(1) {
+  [0]=>
+  float(1.5)
+}

@@ -261,6 +261,10 @@ final class InferTypes implements Pass
             if ($bs !== false) { $fname = \substr($fname, $bs + 1); }
             $set['call:' . $fname] = true;
             $set['callf:' . $n->function] = true;
+        } elseif ($n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_METHOD_CALL) {
+            $set['callm:' . $n->method] = true;
+        } elseif ($n->kind === Node::KIND_NEW_OBJ) {
+            $set['callm:__construct'] = true;
         } elseif ($n->kind === Node::KIND_STORE_ELEMENT) {
             $set['se:' . $n->array->kind] = true;
         }
