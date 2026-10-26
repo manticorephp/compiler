@@ -18,3 +18,48 @@ namespace Manticore {
         public function __compare(mixed $other): int;
     }
 }
+
+// Run-time dispatch for an operand whose class is erased (mixed / untyped): the
+// static rewrite in InlineClosures::tryOperator cannot see the hook, so it calls these.
+// Their own fallback operators are exempt from that rewrite (the `__mc_overload_` prefix).
+namespace {
+
+    function __mc_overload_op(string $op, mixed $x, mixed $y): mixed
+    {
+        if ($x instanceof \Manticore\Overloadable) { return $x->__operator($op, $y, false); }
+        if ($y instanceof \Manticore\Overloadable) { return $y->__operator($op, $x, true); }
+        if ($op === '+') { return $x + $y; }
+        if ($op === '-') { return $x - $y; }
+        if ($op === '*') { return $x * $y; }
+        if ($op === '/') { return $x / $y; }
+        if ($op === '%') { return $x % $y; }
+        return $x ** $y;
+    }
+
+    function __mc_overload_spaceship(mixed $x, mixed $y): int
+    {
+        if ($x instanceof \Manticore\Overloadable) { return $x->__compare($y); }
+        if ($y instanceof \Manticore\Overloadable) { return -$y->__compare($x); }
+        return $x <=> $y;
+    }
+
+    function __mc_overload_cmp(string $op, mixed $x, mixed $y): bool
+    {
+        if ($x instanceof \Manticore\Overloadable) { $c = $x->__compare($y); }
+        elseif ($y instanceof \Manticore\Overloadable) { $c = -$y->__compare($x); }
+        else {
+            if ($op === '<') { return $x < $y; }
+            if ($op === '<=') { return $x <= $y; }
+            if ($op === '>') { return $x > $y; }
+            if ($op === '>=') { return $x >= $y; }
+            if ($op === '==') { return $x == $y; }
+            return $x != $y;
+        }
+        if ($op === '<') { return $c < 0; }
+        if ($op === '<=') { return $c <= 0; }
+        if ($op === '>') { return $c > 0; }
+        if ($op === '>=') { return $c >= 0; }
+        if ($op === '==') { return $c === 0; }
+        return $c !== 0;
+    }
+}

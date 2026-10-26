@@ -240,6 +240,15 @@ trait EmitLlvmArrays
         return \Compile\Mir\IntConst::asWritten($idx);
     }
 
+    /** Whether `$cls` or any class below it implements ArrayAccess; an unknown class is assumed to (true). */
+    private function mayBeArrayAccess(string $cls): bool
+    {
+        if ($cls === '' || !isset($this->classes[$cls])) { return true; }
+        foreach ($this->classes as $name => $_cd) {
+            if ($this->classImplements($name, 'ArrayAccess') && $this->classIsA($name, $cls)) { return true; }
+        }
+        return false;
+    }
     private function emitArrayAccess(ArrayAccess_ $n): string
     {
         $aa = $n;
@@ -290,6 +299,15 @@ trait EmitLlvmArrays
                 return $wantObj ? $borrow . $this->unboxFixedElemObj() : $borrow;
             }
             return $this->emitMethodCall($mc);
+        }
+        // `$obj[$k]` on an object NO subtype of which implements ArrayAccess: php
+        // throws; the array path below would read the object's header as a table.
+        if ($aa->array->type->kind === Type::KIND_OBJ && !$this->mayBeArrayAccess($aa->array->type->class ?? '')) {
+            $out = $this->emitNode($aa->array) . $this->emitNode($aa->index);
+            $out .= $this->emitThrowError('Cannot use object of type ' . \ltrim($aa->array->type->class, '\\') . ' as array');
+            $this->lastValue = '0';
+            $this->lastValueType = 'i64';
+            return $out;
         }
         // `$erased[$k]` — a cell/unknown subject is an OBJECT, a STRING or an
         // ARRAY only at run time, so the static type cannot pick a path. One

@@ -1,6 +1,5 @@
 <?php
 // Operator overloading is skipped when the operand is an erased (mixed/cell) value, so BcMath\Number arithmetic computes on the pointer.
-// issue: #263
 use BcMath\Number;
 function plus(mixed $x, mixed $y): mixed { return $x + $y; }
 function lt(mixed $x, mixed $y): bool { return $x < $y; }
