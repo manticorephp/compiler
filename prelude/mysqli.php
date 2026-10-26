@@ -316,9 +316,23 @@ final class __McMysqliConn
     public int $asyncMode = 0;
 
     /** query($sql, MYSQLI_ASYNC): the command is sent, its reply is left for reap_async_query(). */
+    /**
+     * A query-family command (query, real_query, multi_query) on a busy link. mysqli switches multi-statements to $multi
+     * first: when that is a real switch it is refused as well, an error of its own (error_list holds both), and mysqli
+     * forgets the multi-statements flag either way.
+     */
+    public function refuseQuery(bool $multi): false
+    {
+        $this->clear();
+        if ($this->mq !== $multi) { $this->record(2014, 'HY000', self::OOS); }
+        $this->mq = false;
+        return $this->fail(2014, 'HY000', self::OOS);
+    }
+
     public function sendAsync(string $sql, int $mode): bool
     {
         $w = $this->liveWire();
+        if ($this->busy()) { return $this->refuseQuery(false); }
         if (!$this->begin()) { return false; }
         try {
             $this->multiMode($w, false);
@@ -526,16 +540,18 @@ final class __McMysqliConn
         $w->setMultiStatements($on);
     }
 
+    /** query(), real_query(), multi_query(): send(), refused as mysqli refuses them on a busy link (see refuseQuery()). */
+    public function userQuery(string $sql, bool $stream, bool $multi = false): bool
+    {
+        $this->liveWire();
+        if ($this->busy()) { return $this->refuseQuery($multi); }
+        return $this->send($sql, $stream, $multi);
+    }
+
     /** COM_QUERY. $stream: leave the rows of a result set on the wire (real_query, MYSQLI_USE_RESULT); $multi: multi_query. */
     public function send(string $sql, bool $stream, bool $multi = false): bool
     {
         $w = $this->liveWire();
-        if ($multi && !$this->mq && $this->busy()) {
-            // mysqli turns multi-statements on before the query: that command is refused too, an error of its own
-            $this->clear();
-            $this->record(2014, 'HY000', self::OOS);
-            return $this->fail(2014, 'HY000', self::OOS);
-        }
         if (!$this->begin()) { return false; }
         try {
             $this->multiMode($w, $multi);
@@ -1226,7 +1242,7 @@ class mysqli
 
     public function multi_query(string $query): bool
     {
-        return __McMysqliConn::of($this)->send($query, true, true);
+        return __McMysqliConn::of($this)->userQuery($query, true, true);
     }
 
     public function next_result(): bool
@@ -1286,7 +1302,7 @@ class mysqli
         }
         $c = __McMysqliConn::of($this);
         if (($mode & 8) !== 0) { return $c->sendAsync($query, $m); }
-        if (!$c->send($query, $m === 1)) { return false; }
+        if (!$c->userQuery($query, $m === 1)) { return false; }
         if ($c->pend === null) { return true; }
         return new mysqli_result($this, $m);
     }
@@ -1303,7 +1319,7 @@ class mysqli
 
     public function real_query(string $query): bool
     {
-        return __McMysqliConn::of($this)->send($query, true);
+        return __McMysqliConn::of($this)->userQuery($query, true);
     }
 
     public function reap_async_query(): bool|mysqli_result
@@ -2371,7 +2387,7 @@ final class __McMysqliStmt
         }
         $c->clear();
         try {
-            $c->multiMode($w, false);
+            // mysqli's prepare leaves multi-statements as they are (measured: the flag stays on)
             $p = $w->prepare($query);
         } catch (PDOException $e) {
             return $this->wireErr($e);

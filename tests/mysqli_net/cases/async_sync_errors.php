@@ -62,6 +62,41 @@ while ($m->more_results()) { $m->next_result(); $m->store_result(); }
 t('mq after', fn() => $m->multi_query('SELECT 5; SELECT 6'));
 while ($m->more_results()) { $m->next_result(); $m->store_result(); }
 
+echo "-- multi-statements ON and a result chain pending: query / async / real_query refuse the OFF switch too, and the flag is forgotten\n";
+function busyOn(mysqli $m): void { $m->multi_query('SELECT 1; SELECT 2'); $m->store_result()->free(); }
+function drainAll(mysqli $m): void { while ($m->more_results()) { $m->next_result(); if ($r = $m->store_result()) { $r->free(); } } }
+function mqProbe(mysqli $m, string $tag): void
+{
+    $s = $m->prepare('SELECT 1');
+    $s->execute();
+    $m->multi_query('SELECT 1; SELECT 2');
+    echo '   ', $tag, ' then multi_query on a busy link: list=', count($m->error_list), "\n";
+    $s->close();
+    drainAll($m);
+}
+busyOn($m); drainAll($m); mqProbe($m, 'untouched');
+foreach (['query' => fn($m) => $m->query('SELECT 9'), 'async' => fn($m) => $m->query('SELECT 9', MYSQLI_ASYNC),
+    'real_query' => fn($m) => $m->real_query('SELECT 9'), 'use' => fn($m) => mysqli_query($m, 'SELECT 9', MYSQLI_USE_RESULT),
+    'multi_query' => fn($m) => $m->multi_query('SELECT 9'), 'prepare' => fn($m) => $m->prepare('SELECT 9'),
+    'select_db' => fn($m) => $m->select_db(getenv('MYSQLI_DB'))] as $n => $f) {
+    busyOn($m);
+    t("mq on, busy: $n", fn() => $f($m));
+    echo '   ', st($m), "\n";
+    drainAll($m);
+    mqProbe($m, $n);
+}
+busyOn($m); drainAll($m);
+t('mq on: prepare of two statements', fn() => $m->prepare('SELECT 1; SELECT 2'));
+echo '   ', st($m), "\n";
+mqProbe($m, 'prepare two');
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+busyOn($m);
+t('mq on, busy, STRICT query', fn() => $m->query('SELECT 9'));
+echo '   ', st($m), "\n";
+drainAll($m);
+mysqli_report(MYSQLI_REPORT_OFF);
+$m->query('SELECT 1');
+
 echo "-- reap with nothing pending\n";
 $f = c();
 t('fresh', fn() => @$f->reap_async_query());
