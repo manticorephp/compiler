@@ -550,6 +550,10 @@ final class Parser
      */
     private function parseUseGroupItem(string $prefix, string $kind): UseItem
     {
+        if ($kind === 'class') {
+            if ($this->checkKeyword('function')) { $this->advance(); $kind = 'function'; }
+            elseif ($this->checkKeyword('const')) { $this->advance(); $kind = 'const'; }
+        }
         $tail = $this->parseClassNameLiteral();
         $tail = \ltrim($tail, '\\');
         $fqn = $prefix === '' ? $tail : ($prefix . '\\' . $tail);
