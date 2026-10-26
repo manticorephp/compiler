@@ -2,26 +2,25 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    types: [opened, ready_for_review]
+    paths:
+      - "src/**"
+      - "prelude/**"
+      - "tools/**"
+      - "tests/**"
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
       id-token: write
 
@@ -32,14 +31,15 @@ jobs:
           fetch-depth: 1
 
       - name: Run Claude Code Review
-        id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          claude_args: '--allowedTools "mcp__github_inline_comment__create_inline_comment"'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-
+          prompt: |
+            Review PR ${{ github.repository }}/pull/${{ github.event.pull_request.number }}.
+            Read AGENTS.md first. Fetch the diff with `gh pr diff`; read other files only when a finding needs them.
+            Report only correctness bugs: memory ownership/refcount, ABI/layout, bootstrap two-step rule, Zend semantics divergence, missing test for a fix.
+            Skip style, naming and nits. Max 8 findings, each as an inline comment with file:line and a concrete failure scenario. No findings = say so in one line.
+          claude_args: >-
+            --model claude-sonnet-5-5
+            --max-turns 12
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
