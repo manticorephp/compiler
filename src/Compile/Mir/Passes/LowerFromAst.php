@@ -214,6 +214,8 @@ final class LowerFromAst implements Pass
      *  free function — so a `self::`/`static::`/`parent::` call inside one has
      *  no receiver to forward, however the callee is declared. */
     private bool $currentLowerFnHasThis = false;
+    /** Lowering the closure literal of `Closure::bind(fn, obj, Scope)`: its `$this` is filled by the bind, never captured. */
+    private bool $bindLateThis = false;
 
     /** Closures being lowered around the current expression: a closure's scope
      *  can be rebound at run time, so no member-access check is made inside one. */
@@ -7623,7 +7625,14 @@ final class LowerFromAst implements Pass
                     $prevS = $this->currentStaticClass;
                     $this->currentLowerClass = $bindScope;
                     $this->currentStaticClass = $bindScope;
+                    // The closure is bound to an instance of $bindScope: `$this` is live in it.
+                    $prevT = $this->currentLowerFnHasThis;
+                    $prevB = $this->bindLateThis;
+                    $this->currentLowerFnHasThis = true;
+                    $this->bindLateThis = true;
                     $args[] = $this->lowerExpr($a);
+                    $this->currentLowerFnHasThis = $prevT;
+                    $this->bindLateThis = $prevB;
                     $this->currentLowerClass = $prevL;
                     $this->currentStaticClass = $prevS;
                 } else {

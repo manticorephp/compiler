@@ -2931,6 +2931,27 @@ trait EmitLlvmObjects
         ));
     }
 
+    /**
+     * A `readonly` property is initialised ONCE: a store to a slot whose init bit is already set is
+     * php's `Error`. `__clone` is exempt (php 8.3 lets it re-initialise).
+     */
+    private function emitReadonlyReinitGuard(\Compile\Mir\StoreProperty $n, string $objPtr, string $gep): string
+    {
+        $cls = $n->object->type->class ?? '';
+        if ($cls === '' || $this->readonlyDeclClass($cls, $n->property) === '') { return ''; }
+        if (\str_ends_with($this->frame->name, '__clone') || \str_starts_with($this->frame->name, '__mc_unser_set')) { return ''; }
+        $out = '';
+        $set = $this->emitInitTest($objPtr, $this->initMapHolder($n->object, $n->property), $n->property,
+            $this->propertyOffsetOrNull($n->object, $n->property) ?? -1, $gep, $out);
+        if ($set === '') { return ''; }
+        $keep = $this->lastValue;
+        $keepT = $this->lastValueType;
+        $out .= $this->emitThrowIf($set, 'Error', 'Cannot modify readonly property ' . $this->readonlyDeclClass($cls, $n->property) . '::$' . $n->property);
+        $this->lastValue = $keep;
+        $this->lastValueType = $keepT;
+        return $out;
+    }
+
     private function emitStoreProperty(\Compile\Mir\StoreProperty $n): string
     {
         $acls = $n->object->type->kind === Type::KIND_OBJ ? ($n->object->type->class ?? '') : '';
@@ -3003,7 +3024,10 @@ trait EmitLlvmObjects
             // from the class table, one arm per class, and reached only from
             // `unserialize`). The guard is a frame-NAME prefix test, not a scope
             // model, so the exemption has to be spelled out here.
-            if ($roDecl !== '' && !\str_starts_with($this->frame->name, $roDecl . '__')
+            // A closure whose scope is unknown here (bound at run time by Closure::bind) is let through, as
+            // accessDenied does; a closure written at top level has the global scope and is not.
+            $roScopeOk = $this->frame->isClosure && !$this->frame->isPrelude && $this->accessScope() === null;
+            if ($roDecl !== '' && !$roScopeOk && !\str_starts_with($this->frame->name, $roDecl . '__')
                 && !\str_starts_with($this->frame->name, '__mc_unser_set')) {
                 $out = $this->emitNode($n->value);
                 $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $n->property;
@@ -3223,6 +3247,7 @@ trait EmitLlvmObjects
         }
         $out .= $this->propSlotGep($n->object, $objPtr, $n->property);
         $gep = $this->lastValue;
+        $out .= $this->emitReadonlyReinitGuard($n, $objPtr, $gep);
         // Release-before-overwrite. A LOCAL slot has always dropped its previous
         // value; a property slot never has, so every rc value an overwritten
         // property leaves behind is immortal — 191.7 MB at 100k iterations of
@@ -5998,6 +6023,25 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** The class that declares `$prop` on a receiver of type `$t` (first atom of a union that does), or ''. */
+    private function dynStoreOwnerClass(Type $t, string $prop): string
+    {
+        $cands = [];
+        if ($t->kind === Type::KIND_UNION) {
+            foreach ($t->atoms as $atom) { $cands[] = $atom->class ?? ''; }
+        } else {
+            $cands[] = $t->class ?? '';
+        }
+        foreach ($cands as $c) {
+            $cur = $c;
+            while ($cur !== '' && isset($this->classes[$cur])) {
+                if (isset($this->classes[$cur]->propertyTypes[$prop])) { return $cur; }
+                $cur = $this->classes[$cur]->parent ?? '';
+            }
+        }
+        return '';
+    }
+
     /** `$o->$name = v` on a receiver with a known member set (a class or a union):
      *  strcmp the runtime name against each declared property and reuse the full
      *  property-store path (readonly guard, rc retain, float truncation, set
@@ -6023,7 +6067,13 @@ trait EmitLlvmObjects
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
-            $sp = new \Compile\Mir\StoreProperty($n->object, $p, $n->value, $pt);
+            // The name was a runtime value, so TypeCheck could not coerce the value to this
+            // slot's declared scalar type; do it here, as it does for a static `$o->p = v`.
+            $own = $this->dynStoreOwnerClass($n->object->type, $p);
+            $dv = $own === '' || isset($this->classes[$own]->propHooks[$p]) ? $n->value
+                : \Compile\Mir\Passes\TypeCheck::coerceScalar($n->value, $pt, 'Cannot assign string to property '
+                    . $own . '::$' . $p . ' of type ' . $pt->toString());
+            $sp = new \Compile\Mir\StoreProperty($n->object, $p, $dv, $pt);
             $out .= $this->emitStoreProperty($sp);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";

@@ -5440,7 +5440,9 @@ trait EmitLlvmCalls
                 // the untagged pointer as "not a cell" and freed nothing, so
                 // `trim(json_encode($x))` leaked the whole document.
                 $cellArgTemp = $this->isFreshCellTemp($a) ? $this->lastValue : '';
+                $this->objArgHead = $c->objArgHeads[$ai] ?? '';
                 $out .= $this->unboxCellArg($a, $ptypes, $ai, $ahmask);
+                $this->objArgHead = '';
                 $cso = $this->takeCellStrArgOwn();
                 if ($cso !== '') { $argTemps[] = $cso; }
                 $argList .= 'i64 ' . $this->lastValue;

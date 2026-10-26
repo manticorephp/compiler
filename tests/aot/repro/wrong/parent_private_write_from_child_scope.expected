@@ -1,0 +1,6 @@
+parent-private
+Child Object
+(
+    [a:Base:private] => parent-private
+    [a] => x
+)

@@ -3922,6 +3922,23 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /** A coercive string -> int|float cast of a typed sink: a non-numeric string is the sink's TypeError, not 0. */
+    private function emitNumericStrGuard(Cast $c, string $sp): string
+    {
+        if ($c->typeErr === '') { return ''; }
+        $this->rt->needsTaggedEq = true;
+        $num = $this->ssa->allocReg();
+        $bad = $this->ssa->allocReg();
+        $out = '  ' . $num . ' = call i1 @__mir_is_numeric_str(ptr ' . $sp . ")\n";
+        $out .= '  ' . $bad . ' = xor i1 ' . $num . ", true\n";
+        $keep = $this->lastValue;
+        $keepT = $this->lastValueType;
+        $out .= $this->emitThrowIf($bad, 'TypeError', $c->typeErr);
+        $this->lastValue = $keep;
+        $this->lastValueType = $keepT;
+        return $out;
+    }
+
     private function emitCast(Cast $n): string
     {
         $c = $n;
@@ -3964,6 +3981,7 @@ trait EmitLlvmExpr
                 $this->rt->needsStrtol = true;
                 $out .= $this->coerceToPtr();
                 $sp = $this->lastValue;
+                $out .= $this->emitNumericStrGuard($c, $sp);
                 $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call i64 @__mir_str_to_int(ptr ' . $sp . ')' . "\n";
                 // A number cannot reference the text, so a FRESH operand is
@@ -4001,6 +4019,7 @@ trait EmitLlvmExpr
                 $this->rt->needsStrtod = true;
                 $out .= $this->coerceToPtr();
                 $sp = $this->lastValue;
+                $out .= $this->emitNumericStrGuard($c, $sp);
                 $reg = $this->ssa->allocReg();
                 $out .= '  ' . $reg . ' = call double @__mir_php_strtod(ptr ' . $sp . ', ptr null)' . "\n";
                 $out .= $this->freeStrTemp($c->operand, $sp);
@@ -6661,6 +6680,44 @@ trait EmitLlvmExpr
         return $o;
     }
 
+    /** {@see \Compile\Mir\Call::$objArgHeads} for the argument being unboxed, or ''. */
+    private string $objArgHead = '';
+
+    /**
+     * A CELL word reaching a class-typed param that is tagged int / bool / string is php's TypeError
+     * (`false given`): without it the unbox masked the tag off and the callee read a null object.
+     * Only TAGGED words are judged — an untagged word may be a raw object pointer the claim never boxed.
+     */
+    private function emitObjArgGuard(string $head): string
+    {
+        $v = $this->lastValue;
+        $vt = $this->lastValueType;
+        $out = $this->cellTagIr($v);
+        $tag = $this->cellTagReg;
+        foreach ([[1, 'int'], [4, 'string']] as $tn) {
+            $c = $this->ssa->allocReg();
+            $out .= '  ' . $c . ' = icmp eq i64 ' . $tag . ', ' . (string)$tn[0] . "\n";
+            $out .= $this->emitThrowIf($c, 'TypeError', $head . $tn[1] . ' given');
+        }
+        $isB = $this->ssa->allocReg();
+        $bit = $this->ssa->allocReg();
+        $f = $this->ssa->allocReg();
+        $t = $this->ssa->allocReg();
+        $isF = $this->ssa->allocReg();
+        $isT = $this->ssa->allocReg();
+        $out .= '  ' . $isB . ' = icmp eq i64 ' . $tag . ", 2\n";
+        $out .= '  ' . $bit . ' = and i64 ' . $v . ", 1\n";
+        $out .= '  ' . $f . ' = icmp eq i64 ' . $bit . ", 0\n";
+        $out .= '  ' . $t . ' = icmp eq i64 ' . $bit . ", 1\n";
+        $out .= '  ' . $isF . ' = and i1 ' . $isB . ', ' . $f . "\n";
+        $out .= '  ' . $isT . ' = and i1 ' . $isB . ', ' . $t . "\n";
+        $out .= $this->emitThrowIf($isF, 'TypeError', $head . 'false given');
+        $out .= $this->emitThrowIf($isT, 'TypeError', $head . 'true given');
+        $this->lastValue = $v;
+        $this->lastValueType = $vt;
+        return $out;
+    }
+
     private function unboxCellArg(Node $a, array $ptypes, int $pi, array $ahmask = []): string
     {
         $this->cellStrOwn = '';
@@ -6728,8 +6785,10 @@ trait EmitLlvmExpr
         }
         if ($ak !== Type::KIND_CELL) { return $this->nestedArgConform($a->type, $pt); }
         if ($pt === null) { return ''; }
+        $out = $this->objArgHead !== '' && $pt->kind === Type::KIND_OBJ && !$this->isEnumType($pt)
+            ? $this->emitObjArgGuard($this->objArgHead) : '';
         $this->collectCellStrOwn = true;
-        $out = $this->unboxCellToType($pt);
+        $out .= $this->unboxCellToType($pt);
         $this->collectCellStrOwn = false;
         $out .= $this->nestedArgConform($a->type, $pt);
         // ABI: every arg crosses as i64. A FLOAT param is the one unboxing that
