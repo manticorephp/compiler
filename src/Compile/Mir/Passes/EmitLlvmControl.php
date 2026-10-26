@@ -202,13 +202,13 @@ trait EmitLlvmControl
             if ($gf !== '') { $out .= $this->rcRetainReg($cur, $gf); }
             $out .= $this->foreachPrevDrop($fe, false);
         }
-        $out .= '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+        $out .= $this->foreachVarStore($fe->valueVar, $cur, $gelem);
         if ($fe->keyVar !== null) {
             $out .= $this->genFieldLoad($g, 24);
             $kw = $this->lastValue;
             if ($fe->ownKey) { $out .= $this->rcRetainReg($kw, 'cell'); }
             $out .= $this->foreachPrevDrop($fe, true);
-            $out .= '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[$fe->keyVar] . "\n";
+            $out .= $this->foreachVarStore((string)$fe->keyVar, $kw, null);
         }
         $out .= $this->emitForeachBodyArm($fe, $endLabel, $stepLabel, true);
 
@@ -848,13 +848,13 @@ trait EmitLlvmControl
     private function foreachBindValue(Foreach_ $fe, string $cur): string
     {
         $out = $this->foreachValueOwns($fe) ? $this->foreachOwnedRebind($fe, $cur, false) : $this->foreachPrevDrop($fe, false);
-        return $out . '  store i64 ' . $cur . ', ptr ' . $this->locals->slots[$fe->valueVar] . "\n";
+        return $out . $this->foreachVarStore($fe->valueVar, $cur, $fe->iterValueType);
     }
 
     /** Bind an iterator step's +1 key `$kw` to the loop's key variable. */
     private function foreachBindKey(Foreach_ $fe, string $kw): string
     {
-        return $this->foreachPrevDrop($fe, true) . '  store i64 ' . $kw . ', ptr ' . $this->locals->slots[(string)$fe->keyVar] . "\n";
+        return $this->foreachPrevDrop($fe, true) . $this->foreachVarStore((string)$fe->keyVar, $kw, null);
     }
 
     /**
