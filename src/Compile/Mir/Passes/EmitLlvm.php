@@ -151,6 +151,7 @@ final class EmitLlvm implements EmitVisitor
         $this->fixedPropertyHoldersCache = [];
         $this->bagClassNamesCache = [];
         $this->magicPropertyHoldersCache = [];
+        $this->hookPropertyHoldersCache = [];
     }
 
     private function rootSnapshot(string $phase, \Compile\Mir\Module $module, bool $withBytes = false, int $stagedBytes = 0): void
@@ -226,6 +227,8 @@ final class EmitLlvm implements EmitVisitor
     private array $bagClassNamesCache = [];
     /** @var array<string, array<string, string>> */
     private array $magicPropertyHoldersCache = [];
+    /** @var array<string, array<string, string>> */
+    private array $hookPropertyHoldersCache = [];
     /** @var array<string, string> helper symbol → emitted LLVM body */
     private array $propertyReadHelpers = [];
     /** @var array<string, string> erased dynamic-method helper bodies */
@@ -715,6 +718,7 @@ final class EmitLlvm implements EmitVisitor
         $this->fixedPropertyHoldersCache = [];
         $this->bagClassNamesCache = [];
         $this->magicPropertyHoldersCache = [];
+        $this->hookPropertyHoldersCache = [];
         $this->propertyReadHelpers = [];
         $this->dynamicMethodHelpers = [];
         $this->raiseRejected = [];

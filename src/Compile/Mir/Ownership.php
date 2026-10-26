@@ -481,15 +481,49 @@ final class Ownership
     /** Typed through a PropertyAccess_ param so `->object` resolves under the self-host. */
     private function hookFreshPropRead(PropertyAccess_ $v): bool
     {
+        $k = $v->type->kind;
+        if ($k !== Type::KIND_STRING && $k !== Type::KIND_CELL && $k !== Type::KIND_OBJ) { return false; }
         $ot = $v->object->type;
+        // A union receiver that can be a hooked class, and an erased one when any class hooks the name: the emitter reads
+        // through a class_id switch whose every arm then hands back a +1 (the hook's own, a retained slot otherwise).
+        if ($ot->kind === Type::KIND_UNION) { return $this->unionReachesGetHook($ot, $v->property); }
+        if ($ot->kind === Type::KIND_CELL || $ot->kind === Type::KIND_UNKNOWN) { return $this->anyGetHook($v->property); }
         if ($ot->kind !== Type::KIND_OBJ) { return false; }
         $cls = $ot->class ?? '';
         if ($cls === '' || !isset($this->ctx->classes[$cls])) { return false; }
         $hk = $this->ctx->classes[$cls]->propHooks[$v->property] ?? null;
         if ($hk === null || $hk['get'] === '') { return false; }
-        if ($this->fnName === $hk['get'] || ($hk['set'] !== '' && $this->fnName === $hk['set'])) { return false; }
-        $k = $v->type->kind;
-        return $k === Type::KIND_STRING || $k === Type::KIND_CELL || $k === Type::KIND_OBJ;
+        return !($this->fnName === $hk['get'] || ($hk['set'] !== '' && $this->fnName === $hk['set']));
+    }
+
+    /** Some class declares (or inherits) a get hook for `$prop`. */
+    public function anyGetHook(string $prop): bool
+    {
+        foreach ($this->ctx->classes as $cd) {
+            if (($cd->propHooks[$prop]['get'] ?? '') !== '') { return true; }
+        }
+        return false;
+    }
+
+    /** A class with a get hook for `$prop` is one of the union's atoms or a subclass of one. */
+    public function unionReachesGetHook(Type $u, string $prop): bool
+    {
+        $atoms = [];
+        foreach ($u->atoms as $a) {
+            $c = $a->class ?? '';
+            if ($c !== '') { $atoms[$c] = true; }
+        }
+        if ($atoms === []) { return false; }
+        foreach ($this->ctx->classes as $cd) {
+            if (($cd->propHooks[$prop]['get'] ?? '') === '') { continue; }
+            $c = $cd->name;
+            while ($c !== '') {
+                if (isset($atoms[$c])) { return true; }
+                $pc = $this->ctx->classes[$c] ?? null;
+                $c = $pc !== null ? $pc->parent : '';
+            }
+        }
+        return false;
     }
 
     public function propReadCoOwns(Node $v): bool
