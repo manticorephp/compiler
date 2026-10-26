@@ -2564,6 +2564,10 @@ trait EmitLlvmArrays
             $kind = \Compile\MemoryAbi::ARRAY_ELEM_HINT_STR;
         }
         $enc = $this->ssa->allocReg();
+        // The store as an EXPRESSION is the raw operand: the encoded word is boxed or raw by
+        // the buffer's runtime hint, and a consumer reads the value in the node's static type.
+        $this->elemRawReg = $this->elemValReg;
+        $this->elemRawType = 'i64';
         $out = '  ' . $enc . ' = call i64 @__mir_elem_encode_raw(ptr ' . $arrPtr . ', i64 '
              . $this->elemValReg . ', i64 ' . (string)$kind . ', i64 '
              . ($se->array->type->element === null || $se->array->type->element->kind === Type::KIND_UNKNOWN ? '1' : '0') . ")\n";
@@ -3262,7 +3266,7 @@ trait EmitLlvmArrays
         // The store as an EXPRESSION is the value in the node's own static
         // type, not the word the slot took: a boxing store yields the raw
         // operand, or a chained `$a[$k] = $b[$k] = v` reads a cell as a value.
-        if ($boxVal && $this->elemRawReg !== '') {
+        if ($this->elemRawReg !== '') {
             $this->lastValue = $this->elemRawReg;
             $this->lastValueType = $this->elemRawType;
         } else {
