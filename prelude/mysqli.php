@@ -323,7 +323,6 @@ final class __McMysqliConn
     /** The result mode reap_async_query() takes the reply's result set with (MYSQLI_STORE_RESULT / MYSQLI_USE_RESULT). */
     public int $asyncMode = 0;
 
-    /** query($sql, MYSQLI_ASYNC): the command is sent, its reply is left for reap_async_query(). */
     /**
      * A query-family command (query, real_query, multi_query) on a busy link. mysqli switches multi-statements to $multi
      * first: when that is a real switch it is refused as well, an error of its own (error_list holds both), and mysqli
@@ -337,6 +336,7 @@ final class __McMysqliConn
         return $this->fail(2014, 'HY000', self::OOS);
     }
 
+    /** query($sql, MYSQLI_ASYNC): the command is sent, its reply is left for reap_async_query(). */
     public function sendAsync(string $sql, int $mode): bool
     {
         $w = $this->liveWire();

@@ -1,6 +1,6 @@
 <?php
 
-/** ext/mysqli procedural API (skeleton): see mysqli.php. */
+/** ext/mysqli procedural API: see mysqli.php. */
 
 function mysqli_affected_rows(mysqli $mysql): int|string
 {
