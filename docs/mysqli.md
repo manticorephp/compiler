@@ -93,9 +93,9 @@ MySQL 8.4 answers ERR 1047 to `COM_REFRESH` / `COM_PROCESS_KILL`; the call repor
 - **Warnings are not printed.** Where php warns and carries on, Manticore stays silent (see report modes).
 - `mysqli_report(MYSQLI_REPORT_INDEX)` does nothing observable.
 - `var_dump` object handle numbers (`#N`) and `spl_object_id` differ from php (#457).
-- `var_dump` and `print_r` match php through `__debugInfo`. `(array) $mysqli` and `get_object_vars()` / `foreach` still list the
-  virtual hooked properties (and `(array)` the private `$__mc`); php lists none, although #449 is closed for plain classes.
-- `get_object_vars()` returns NULL / 0 for a virtual property with a get hook instead of calling the hook (#480).
+- `var_dump` and `print_r` match php through `__debugInfo`. php lists no property of a mysqli object anywhere else;
+  here `get_object_vars()` lists the virtual hooked properties (with their hook values), `foreach` lists them and the
+  private `$__mc` (#487), and `(array)` lists `$__mc` alone.
 - `ini_get('mysqli.default_socket')` is `''` (php: its compiled-in path).
 - Statistics are not metered (see stubs).
 - Closing a link with an async reply pending sends `KILL QUERY` on a side connection; mysqlnd drops the socket.
@@ -105,15 +105,28 @@ MySQL 8.4 answers ERR 1047 to `COM_REFRESH` / `COM_PROCESS_KILL`; the call repor
 
 ### Internals visible to introspection (accepted)
 
-The surface audit (`tools/mysqli_surface_audit.php`, golden `tests/mysqli_net/surface.json`) reports six extras on
+The surface audit (`tools/mysqli_surface_audit.php`, golden `tests/mysqli_net/surface.json`) reports seven extras on
 purpose; they are not part of Zend's surface but cannot be hidden:
 
-- `mysqli_result::__destruct`, `mysqli_stmt::__destruct`, `mysqli_warning::__clone`
+- `mysqli::__destruct`, `mysqli_result::__destruct`, `mysqli_stmt::__destruct`, `mysqli_warning::__clone`
 - the private properties `mysqli_warning::$__i`, `$__msg`, `$__no`
 
-Also visible to `get_class_methods()` / reflection: `mysqli::__mcConn()`, `__debugInfo()` on the classes,
-`mysqli_sql_exception::__mcNew()`; and the private `mysqli::$__mc` in an `(array)` cast. Names starting `__mc` are
-internal.
+The audit skips names starting `__mc` and `__debugInfo`, but `get_class_methods()`, `method_exists()` and reflection
+see them too. The full list of internal members:
+
+| Class | Methods | Properties |
+|---|---|---|
+| `mysqli` | `__destruct`, `__debugInfo`, `__mcConn`, `__mcBeginTx`, `__mcEndTx`, `__mcSavepoint`, `__mcExecuteQuery`, `__mcKill`, `__mcQuery` | private `$__mc` |
+| `mysqli_result` | `__destruct`, `__debugInfo`, `__mcRs`, `__mcDataSeek`, `__mcFetchAll`, `__mcFetchArray`, `__mcFetchColumn`, `__mcFetchObject`, `__mcFieldDirect`, `__mcFieldSeek` | private `$__mc` |
+| `mysqli_stmt` | `__destruct`, `__debugInfo`, `__mcSt`, `__mcAttrGet`, `__mcAttrSet`, `__mcBindParam`, `__mcDataSeek`, `__mcDetach`, `__mcExecute`, `__mcSendLongData` | private `$__mc` |
+| `mysqli_warning` | `__clone`, `__debugInfo`, static `__mcNew` | private `$__msg`, `$__no`, `$__i` |
+| `mysqli_driver` | `__debugInfo` | |
+| `mysqli_sql_exception` | static `__mcNew` | |
+
+The private `$__mc` shows in an `(array)` cast and in `ReflectionClass::getProperties()`. Reflection also lists the
+declared properties in source order, which is not Zend's registration order (`var_dump` / `print_r` use Zend's, through
+`__debugInfo`). A subclass of `mysqli` that declares its own `__destruct` without calling `parent::__destruct()` keeps
+the link open until the connection state itself is freed (Zend closes it regardless).
 
 ## Tests
 
