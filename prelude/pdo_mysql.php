@@ -63,6 +63,8 @@ final class __McPdoMyResult
     public int $insertId = 0;
     public int $status = 0;
     public int $warnings = 0;
+    /** The OUT-parameter set of a CALL (SERVER_PS_OUT_PARAMS): readChain() drops it, as mysqlnd does. */
+    public bool $outParams = false;
     /** The OK packet's human-readable message (mysql_info()), '' when it has none. */
     public string $info = '';
     public ?__McPdoMyErr $err = null;
@@ -1132,7 +1134,9 @@ final class __McPdoMyWire
             $r->done = true;
             return $r;
         }
-        if ($stream) {
+        // SERVER_PS_OUT_PARAMS: the OUT parameters of a CALL, a one-row set mysqlnd reads and hides (never streamed)
+        $r->outParams = (self::le16($e, 3) & 4096) !== 0;
+        if ($stream && !$r->outParams) {
             $r->stream = true;
             // the metadata EOF already carries SERVER_MORE_RESULTS_EXISTS, which is what mysqlnd's more_results() answers
             $r->status = self::le16($e, 3);
@@ -1430,6 +1434,11 @@ final class __McPdoMyWire
         $n = 0;
         while (true) {
             $r = $this->readResult($bin, $stream);
+            // hidden from the chain; MySQL closes it without MORE_RESULTS, yet the CALL's closing OK still follows
+            if ($r->outParams && $r->err === null) {
+                if (++$n > 100000) { throw $this->malformed('too many result sets'); }
+                continue;
+            }
             if ($first === null) { $first = $r; } else { $last->next = $r; }
             $last = $r;
             if (!$r->isSet && $r->err === null) { $this->insertId = $r->insertId; }
@@ -1472,14 +1481,11 @@ final class __McPdoMyWire
             $t = \ord($p[0]);
             if ($t === 0xFE && $bl < 9) {
                 if ($bl < 5) { throw $this->malformed('EOF packet'); }
-                // MySQL closes the OUT-parameter set of a CALL (SERVER_PS_OUT_PARAMS on its metadata) without MORE_RESULTS,
-                // yet the closing OK of the CALL still follows: it is read like any next result
-                $out = ($r->status & 4096) !== 0;
                 $r->warnings = self::le16($p, 1);
                 $r->status = self::le16($p, 3);
                 $this->status = $r->status;
                 $r->done = true;
-                if (($r->status & 8) !== 0 || $out) {
+                if (($r->status & 8) !== 0) {
                     $r->more = true;
                 } else {
                     $this->openCursor = null;

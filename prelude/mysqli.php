@@ -2580,28 +2580,14 @@ final class __McMysqliStmt
         } catch (PDOException $e) {
             return $this->wireErr($e);
         }
-        return $this->parseResponse($r, false);
+        return $this->parseResponse($r);
     }
 
-    /** mysqlnd_stmt_execute_parse_response: the header of the next result of the chain ($next: next_result()). */
-    private function parseResponse(?__McPdoMyResult $r, bool $next): bool
+    /** mysqlnd_stmt_execute_parse_response: the header of the next result of the chain. */
+    private function parseResponse(?__McPdoMyResult $r): bool
     {
         $c = $this->c;
         if ($r === null || $c === null) { return false; }
-        // SERVER_PS_OUT_PARAMS: the OUT parameters of a CALL travel as a result set of their own, which mysqlnd skips
-        if ($r->err === null && $r->isSet && ($r->status & 4096) !== 0 && $c->wire !== null) {
-            $w = $c->wire;
-            try {
-                if ($r->stream) {
-                    while (\count($w->cursorRow($r, true)) > 0) {
-                    }
-                }
-                if ($r->err === null && $r->more) { $w->cursorNext($r); }
-            } catch (PDOException $e) {
-                return $this->wireErr($e);
-            }
-            if ($r->err === null) { return $this->parseResponse($r->next, true); }
-        }
         $this->cur = $r;
         $c->affectedRows = -1;
         if ($r->err !== null) {
@@ -2950,7 +2936,7 @@ final class __McMysqliStmt
         } catch (PDOException $e) {
             return $this->wireErr($e);
         }
-        return $this->parseResponse($r->next, true);
+        return $this->parseResponse($r->next);
     }
 
     /** Every result of the statement still on the wire is read and dropped (mysqlnd's flush). */
