@@ -464,7 +464,7 @@ jobs:
           if [ "${{ github.event_name }}" = pull_request ]; then
             files="$(gh pr diff "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --name-only)"
             if echo "$files" | grep -qE '^(prelude/pdo|tests/pdo_net/|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then pdo=true; fi
-            if echo "$files" | grep -qE '^(prelude/(mysqli|pdo_mysql)|tests/mysqli_net/|tests/pdo_net/up\.sh|tools/mysqli_surface_audit\.php|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then mysqli=true; fi
+            if echo "$files" | grep -qE '^(prelude/(mysqli|pdo_mysql|pdo\.php|pdo_sql\.php)|src/|tests/mysqli_net/|tests/pdo_net/up\.sh|tools/mysqli_surface_audit\.php|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then mysqli=true; fi
           fi
           echo "pdo=$pdo" >> "$GITHUB_OUTPUT"
           echo "mysqli=$mysqli" >> "$GITHUB_OUTPUT"
@@ -548,7 +548,7 @@ jobs:
   # pdo-net: the servers come from tests/pdo_net/up.sh; gate.sh stops after the build when MC_MYSQLI_NET is set.
   # The server-less surface audit and stub cases run in the suite (tests/aot/cases/mysqli_*).
   mysqli-net:
-    name: mysqli-net-${{ matrix.tag }}-${{ matrix.server }} (${{ matrix.shard }}/4)
+    name: mysqli-net-${{ matrix.tag }}-${{ matrix.server }} (${{ matrix.shard }}/2)
     needs: [changes, build]
     if: github.event_name != 'pull_request' || needs.changes.outputs.mysqli == 'true'
     runs-on: ${{ matrix.runner }}
@@ -558,7 +558,7 @@ jobs:
       matrix:
         tag: [arm64, amd64]
         server: [mysql, mariadb]
-        shard: [1, 2, 3, 4]
+        shard: [1, 2]
         include:
           - tag: arm64
             runner: ubuntu-24.04-arm
@@ -601,7 +601,7 @@ jobs:
             -e MC_LOGDIR=/logs \
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_MYSQLI_NET=${{ matrix.server }} \
-            -e MC_MYSQLI_NET_ARGS="--shard ${{ matrix.shard }}/4" \
+            -e MC_MYSQLI_NET_ARGS="--shard ${{ matrix.shard }}/2" \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
 
