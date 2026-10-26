@@ -236,11 +236,18 @@ trait EmitLlvmArrays
     private function keyAsWritten(Node $base, Node $idx): Node
     {
         if ($base->type->kind !== Type::KIND_OBJ
-            || !$this->classImplements($base->type->class ?? '', 'ArrayAccess')) { return $idx; }
+            || !$this->isArrayAccessClass($base->type->class ?? '')) { return $idx; }
         return \Compile\Mir\IntConst::asWritten($idx);
     }
 
     /** Whether `$cls` or any class below it implements ArrayAccess; an unknown class is assumed to (true). */
+    /** Whether an object typed `$cls` is read through `offsetGet`: it implements ArrayAccess, or an interface /
+     *  base class does not declare it but a class below it does (`$this->app['x']` over a contract). */
+    private function isArrayAccessClass(string $cls): bool
+    {
+        return $cls !== '' && ($this->classImplements($cls, 'ArrayAccess') || $this->mayBeArrayAccess($cls));
+    }
+
     private function mayBeArrayAccess(string $cls): bool
     {
         if ($cls === '' || !isset($this->classes[$cls])) { return true; }
@@ -282,7 +289,7 @@ trait EmitLlvmArrays
         }
         // `$obj[$k]` on an ArrayAccess object → `$obj->offsetGet($k)`.
         if ($aa->array->type->kind === Type::KIND_OBJ
-            && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
+            && $this->isArrayAccessClass($aa->array->type->class ?? '')) {
             // A bound SplFixedArray<Class> read is typed the class
             // ({@see InferNodes::inferArrayAccess}); the call and the inline
             // load both answer the CELL word, which is unboxed to the pointer.
@@ -1152,7 +1159,7 @@ trait EmitLlvmArrays
         // `$obj->offsetSet($k, $v)`. The append form `$obj[]=` already lowered
         // its index to a NullConst, so `$se->index` is the right key as-is.
         if ($se->array->type->kind === Type::KIND_OBJ
-            && $this->classImplements($se->array->type->class ?? '', 'ArrayAccess')) {
+            && $this->isArrayAccessClass($se->array->type->class ?? '')) {
             $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$this->keyAsWritten($se->array, $se->index), $se->value], Type::void());
             // A value the binding's claim does not provably hold goes through the
             // erased thunk (a check), not the inline store.

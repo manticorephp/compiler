@@ -6706,7 +6706,7 @@ trait EmitLlvmObjects
             $aa = $t;
             // `isset($obj[$k])` on an ArrayAccess object → `offsetExists()`.
             if ($aa->array->type->kind === Type::KIND_OBJ
-                && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
+                && $this->isArrayAccessClass($aa->array->type->class ?? '')) {
                 $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetExists', [$this->keyAsWritten($aa->array, $aa->index)], Type::bool_());
                 $out = $this->emitMethodCall($mc);
                 $out .= $this->coerceToI64();
@@ -7096,7 +7096,7 @@ trait EmitLlvmObjects
                 }
                 // `unset($obj[$k])` on an ArrayAccess object → `offsetUnset()`.
                 if ($aa->array->type->kind === Type::KIND_OBJ
-                    && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
+                    && $this->isArrayAccessClass($aa->array->type->class ?? '')) {
                     $mc = new \Compile\Mir\MethodCall_($aa->array, 'offsetUnset', [$this->keyAsWritten($aa->array, $aa->index)], Type::void());
                     $out .= $this->emitMethodCall($mc);
                 } elseif ($aa->array->type->kind !== Type::KIND_STRING) {
