@@ -341,6 +341,16 @@ if [ -n "${MC_PDO_NET:-}" ]; then
     exit "$pdo_rc"
 fi
 
+# mysqli against the same live servers: MC_MYSQLI_NET=<mysql|mariadb> runs ONLY tests/mysqli_net and stops here.
+if [ -n "${MC_MYSQLI_NET:-}" ]; then
+    echo
+    echo "=== tests/mysqli_net/run.sh --server $MC_MYSQLI_NET ==="
+    MC_PDO_STRICT=1 bash tests/mysqli_net/run.sh --server "$MC_MYSQLI_NET" ${MC_MYSQLI_NET_ARGS:-} > "$MC_LOGDIR/mysqli_net.log" 2>&1
+    my_rc=$?
+    tail -40 "$MC_LOGDIR/mysqli_net.log"
+    exit "$my_rc"
+fi
+
 if [ "${MC_SMOKES:-1}" = "1" ]; then
 # Before the suite, because it is seconds and it covers what the suite cannot:
 # the suite always calls `bin/manticore` by path, so it never notices a compiler

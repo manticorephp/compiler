@@ -453,17 +453,21 @@ jobs:
     timeout-minutes: 5
     outputs:
       pdo: ${{ steps.f.outputs.pdo }}
+      mysqli: ${{ steps.f.outputs.mysqli }}
     steps:
       - id: f
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           pdo=false
+          mysqli=false
           if [ "${{ github.event_name }}" = pull_request ]; then
             files="$(gh pr diff "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --name-only)"
             if echo "$files" | grep -qE '^(prelude/pdo|tests/pdo_net/|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then pdo=true; fi
+            if echo "$files" | grep -qE '^(prelude/(mysqli|pdo_mysql)|tests/mysqli_net/|tests/pdo_net/up\.sh|tools/mysqli_surface_audit\.php|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then mysqli=true; fi
           fi
           echo "pdo=$pdo" >> "$GITHUB_OUTPUT"
+          echo "mysqli=$mysqli" >> "$GITHUB_OUTPUT"
 
   # PDO network drivers (pgsql, mysql, mariadb) against live servers, graded
   # against php's own pdo_pgsql / pdo_mysql. The servers run on the runner via
@@ -537,6 +541,79 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs-pdo-net-${{ matrix.tag }}-${{ matrix.server }}-${{ matrix.shard }}
+          path: ci-logs/
+          if-no-files-found: warn
+
+  # mysqli against live mysql 8.4 / mariadb 11, graded against php's own mysqli (tests/mysqli_net). Same shape as
+  # pdo-net: the servers come from tests/pdo_net/up.sh; gate.sh stops after the build when MC_MYSQLI_NET is set.
+  # The server-less surface audit and stub cases run in the suite (tests/aot/cases/mysqli_*).
+  mysqli-net:
+    name: mysqli-net-${{ matrix.tag }}-${{ matrix.server }} (${{ matrix.shard }}/4)
+    needs: [changes, build]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.mysqli == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [arm64, amd64]
+        server: [mysql, mariadb]
+        shard: [1, 2, 3, 4]
+        include:
+          - tag: arm64
+            runner: ubuntu-24.04-arm
+          - tag: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: toolchain
+          tags: manticore-toolchain:${{ matrix.tag }}
+          load: true
+          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: compiler-${{ matrix.tag }}
+      - name: Unpack the compiler
+        run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
+
+      # postgres 16, mysql 8.4 (plain, TLS, native-password, isolated) and mariadb 11,
+      # with the throwaway TLS certificates; then the CA mysql made for itself.
+      - name: Start the database servers
+        run: |
+          bash tests/pdo_net/up.sh
+          mkdir -p ci-pdo && docker cp mc-my:/var/lib/mysql/ca.pem ci-pdo/my_ca.pem && chmod -R a+rX ci-pdo tests/pdo_net/.certs
+
+      - name: Build + mysqli_net
+        run: |
+          mkdir -p ci-logs && chmod -R 777 ci-logs ci-cache
+          docker run --rm --network host \
+            -v "$PWD":/repo:ro \
+            -v "$PWD/ci-logs":/logs \
+            -v "$PWD/ci-cache":/compiler-cache \
+            -v "$PWD/ci-pdo":/mysqli-net:ro \
+            -e MC_GATE=0 \
+            -e MC_LOGDIR=/logs \
+            -e MC_COMPILER_CACHE=/compiler-cache \
+            -e MC_MYSQLI_NET=${{ matrix.server }} \
+            -e MC_MYSQLI_NET_ARGS="--shard ${{ matrix.shard }}/4" \
+            -e PDO_MY_SSL_CA=/mysqli-net/my_ca.pem \
+            manticore-toolchain:${{ matrix.tag }} \
+            /bin/bash /repo/tools/docker/gate.sh
+
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-mysqli-net-${{ matrix.tag }}-${{ matrix.server }}-${{ matrix.shard }}
           path: ci-logs/
           if-no-files-found: warn
 
