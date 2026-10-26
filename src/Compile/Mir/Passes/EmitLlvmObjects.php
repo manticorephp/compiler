@@ -3932,6 +3932,18 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `$this` inside a closure that `Closure::bind` / `bindTo` / `call` may
+     * rebind: lowering types it from the LEXICAL class, but at run time it is
+     * whatever object was bound, so a name-keyed access must dispatch on the
+     * object's real class instead of the written-in one.
+     */
+    private function isRebindableThis(Node $obj): bool
+    {
+        return $obj->kind === Node::KIND_LOAD_LOCAL && $obj->name === 'this'
+            && $this->frame->isClosure && !$this->frame->isPrelude
+            && !isset($this->unscopedClosures[$this->frame->name]);
+    }
     /** `$o->$name` — read the boxed value from the bag by runtime key. */
     private function emitDynProp(DynProp_ $n): string
     {
@@ -3940,7 +3952,7 @@ trait EmitLlvmObjects
         // dynamic bag). Match the name against each declared property's offset,
         // then fall back to the bag / null.
         $cls = $n->object->type->class ?? '';
-        if ($cls !== '' && isset($this->classes[$cls])) {
+        if ($cls !== '' && isset($this->classes[$cls]) && !$this->isRebindableThis($n->object)) {
             $cd = $this->classes[$cls];
             return $this->emitDynPropDispatch($n, $this->declaredPropTypes($cd), $cd);
         }
@@ -5896,7 +5908,7 @@ trait EmitLlvmObjects
         // slot (with the full store semantics — readonly guard, rc retain, float
         // truncation, set hooks), falling back to the bag for an undeclared name.
         $cls = $n->object->type->class ?? '';
-        if ($cls !== '' && isset($this->classes[$cls])) {
+        if ($cls !== '' && isset($this->classes[$cls]) && !$this->isRebindableThis($n->object)) {
             $cd = $this->classes[$cls];
             return $this->emitStoreDynPropDispatch($n, $this->declaredPropTypes($cd), $cd);
         }
