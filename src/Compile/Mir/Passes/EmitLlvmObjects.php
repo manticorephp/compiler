@@ -737,7 +737,7 @@ trait EmitLlvmObjects
                     $out .= $this->emitSpreadOperand($a->operand);
                     [$sir, $sregs] = $this->emitSpreadFill(
                         $this->lastValue, $ai + 1, $ptypes, $tmask,
-                        $a->operand->type->element ?? null, $ctorClass . '____construct');
+                        $a->operand->type->element ?? null, $ctorClass . '____construct', $a->operand->type);
                     $out .= $sir;
                     foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
                     $ai = \count($ptypes) - 1;
@@ -4988,8 +4988,16 @@ trait EmitLlvmObjects
     {
         /** @var Node[] $ops */
         $ops = [$dp->object, $dp->name];
+        /** @var Node[] $packOps */
+        $packOps = [];
         foreach ($iv->args as $a) {
-            $ops[] = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
+            if ($a->kind === Node::KIND_SPREAD) {
+                $po = $this->asSpreadNode($a)->operand;
+                $packOps[] = $po;
+                $ops[] = $po;
+            } else {
+                $ops[] = $a;
+            }
         }
         $need = false;
         $refMayBind = null;
@@ -5002,7 +5010,9 @@ trait EmitLlvmObjects
                     $cands = $this->dynMethodCandidates($dp->object->type, $this->siteArgc($iv->args));
                     $refMayBind = $cands !== null && $this->dynMethodHasRefParam($cands, \count($iv->args));
                 }
-                if ($refMayBind && $o !== $dp->object && $o !== $dp->name) { return false; }
+                // An unpacked array is read by value: the dispatch hands the callee its elements
+                // as a pack, so a copy of the array held in a slot binds nothing a by-ref arm could see.
+                if ($refMayBind && $o !== $dp->object && $o !== $dp->name && !\in_array($o, $packOps, true)) { return false; }
             }
             if (!$this->dynHoistableRead($o)) { return false; }
             $need = true;
@@ -5037,6 +5047,8 @@ trait EmitLlvmObjects
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
         if ($n->kind === Node::KIND_ARRAY_ACCESS) { return $this->dynHoistableElem($n); }
+        // `static::$dispatcher->$method(...)`: a static property read runs no user code.
+        if ($n->kind === Node::KIND_STATIC_PROP) { return true; }
         return false;
     }
 
@@ -5144,9 +5156,15 @@ trait EmitLlvmObjects
         $recv = $dp->object;
         $nameNode = $dp->name;
         $methods = $this->dynMethodCandidates($recv->type, $this->siteArgc($iv->args));
+        $this->dynRejectWhy = '';
         if ($methods !== null && $this->dynamicMethodMeta) {
             $viaTable = $this->emitDynMethodDispatch($dp, $iv, $methods);
             if ($viaTable !== null) { return $viaTable; }
+        }
+        if (\getenv('MANTICORE_DYNM_TRACE') !== false && $methods !== null && \count($methods) >= 16) {
+            \error_log('DYNTAB no ' . $this->frame->name . ' meta=' . ($this->dynamicMethodMeta ? '1' : '0')
+                . ' methods=' . (string)\count($methods) . ' recvType=' . (string)$recv->type->kind
+                . ' why=' . $this->dynRejectWhy);
         }
         if ($methods === null) {
             // Erased receiver (cell/unknown): no static class set to enumerate.
@@ -5600,7 +5618,7 @@ trait EmitLlvmObjects
         $rk = $recv->type->kind;
         if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN
             && $rk !== Type::KIND_UNION && $rk !== Type::KIND_OBJ) {
-            if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.recv_kind', 1); }
+            $this->dynRejectWhy = 'recv_kind'; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.recv_kind', 1); }
             return null;
         }
         $argc = \count($iv->args);
@@ -5608,23 +5626,29 @@ trait EmitLlvmObjects
         $fixedArgs = $iv->args;
         $pack = null;
         $packElem = null;
+        $packCell = false;
+        $packErased = false;
         foreach ($iv->args as $i => $a) {
             if ($a->kind !== Node::KIND_SPREAD) { continue; }
-            if ($argc !== 1) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.multi_spread', 1); } return null; }
+            if ($argc !== 1) { $this->dynRejectWhy = 'multi_spread'; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.multi_spread', 1); } return null; }
             $op = $this->asSpreadNode($a)->operand;
             // `...[a, b]` is the argument list `a, b`.
             if ($op instanceof \Compile\Mir\ArrayLit) {
                 $fixedArgs = [];
                 foreach ($op->elements as $e) {
-                    if ($e->key !== null || $e->value->kind === Node::KIND_SPREAD) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.keyed_spread', 1); } return null; }
+                    if ($e->key !== null || $e->value->kind === Node::KIND_SPREAD) { $this->dynRejectWhy = 'keyed_spread'; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.keyed_spread', 1); } return null; }
                     $fixedArgs[] = $e->value;
                 }
                 continue;
             }
             $pt = $op->type;
-            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.pack_shape', 1); } return null; }
+            $packCell = $pt->kind === Type::KIND_CELL;
+            // A bare `array $p` is KIND_UNKNOWN: an erased array word, read through the
+            // 48-bit payload mask as every other spread operand is ({@see emitSpreadOperand}).
+            $packErased = $pt->kind === Type::KIND_UNKNOWN;
+            if ((!$pt->isVec() && !$packCell && !$packErased) || $op->kind !== Node::KIND_LOAD_LOCAL) { $this->dynRejectWhy = 'pack_shape:' . $pt->kind . '/' . ($pt->key === null ? 'nokey' : $pt->key->kind) . '/' . ($pt->element === null ? 'noel' : $pt->element->kind) . ' op=' . (string)$op->kind; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.pack_shape', 1); } return null; }
             $el = $pt->element;
-            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+            if (!$packCell && $el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
                 $packElem = $el;
             }
             $pack = $op;
@@ -5641,7 +5665,9 @@ trait EmitLlvmObjects
             if ($needsNodes ? !$this->dynOperandsPlain($dp, $iv)
                             : !($this->dynPureRead($dp->object)
                                 && ($dp->name->kind === Node::KIND_STRING_CONST || $this->dynPureRead($dp->name)))) {
-                if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.operands', 1); }
+                $whyArgs = '';
+                foreach ($iv->args as $wa) { $whyArgs .= $wa->kind . ','; }
+                $this->dynRejectWhy = 'operands obj=' . $dp->object->kind . ' name=' . $dp->name->kind . ' args=' . $whyArgs; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.operands', 1); }
                 return null;
             }
         }
@@ -5654,7 +5680,31 @@ trait EmitLlvmObjects
         // A borrowed cell pack rides as is; a concrete-element one is rebuilt
         // as cells (the trampoline's contract) and that copy is ours to drop.
         $fresh = $pack === null || $packElem !== null;
-        if ($pack !== null) {
+        if ($pack !== null && $packErased) {
+            $out .= $this->emitNode($pack);
+            $out .= $this->cellToPtr();
+        } elseif ($pack !== null && $packCell) {
+            // An untyped `array $parameters` rides as a cell: strip the tag to
+            // the vec[cell] payload the trampolines take, as the ABI path does.
+            $out .= $this->emitNode($pack);
+            $out .= $this->coerceToI64();
+            $packCellReg = $this->lastValue;
+            $out .= $this->cellTagIr($packCellReg);
+            $isArr = $this->ssa->allocReg();
+            $out .= '  ' . $isArr . ' = icmp eq i64 ' . $this->cellTagReg . ", 7\n";
+            $packGood = $this->ssa->allocLabel('dynd.array');
+            $packBad = $this->ssa->allocLabel('dynd.nonarray');
+            $out .= '  br i1 ' . $isArr . ', label %' . $packGood . ', label %' . $packBad . "\n";
+            $out .= $packBad . ":\n";
+            $out .= $this->emitNamedFatal('PHP Fatal error: Only arrays and Traversables can be unpacked');
+            $out .= "  unreachable\n";
+            $out .= $packGood . ":\n";
+            $payload = $this->ssa->allocReg();
+            $out .= '  ' . $payload . ' = and i64 ' . $packCellReg . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $argsPtr = $this->ssa->allocReg();
+            $out .= '  ' . $argsPtr . ' = inttoptr i64 ' . $payload . " to ptr\n";
+            $this->lastValue = $argsPtr;
+        } elseif ($pack !== null) {
             $out .= $this->emitNode($pack);
             $out .= $this->coerceToPtr();
             if ($packElem !== null) {
@@ -7684,7 +7734,7 @@ trait EmitLlvmObjects
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
-                                                       $cls . '__' . $n->method);
+                                                       $cls . '__' . $n->method, $a->operand->type);
                 $out .= $sir;
                 foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }
