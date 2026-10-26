@@ -964,6 +964,13 @@ trait EmitLlvmModule
     /** An emit failure names the function it came from. */
     private function emitFunction(FunctionDef $fn): string
     {
+        if ($this->dumpMirOnly === null) {
+            $dm = \getenv('MANTICORE_DUMP_MIR');
+            $this->dumpMirOnly = \is_string($dm) ? $dm : '';
+        }
+        if ($this->dumpMirOnly !== '' && \str_contains($fn->name, $this->dumpMirOnly)) {
+            \error_log(\Compile\Mir\Dump::fn($fn));
+        }
         try {
             return $this->emitFunctionBody($fn);
         } catch (\Throwable $e) {

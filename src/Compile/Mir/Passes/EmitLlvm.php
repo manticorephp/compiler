@@ -365,6 +365,9 @@ final class EmitLlvm implements EmitVisitor
     /** True while the erased-callee object arm emits its `__invoke` call: that call must reach dispatch, not the closure rewrite. */
     private bool $inErasedInvokeArm = false;
 
+    /** `MANTICORE_DUMP_MIR=<substr>`: print the MIR of every emitted function whose name contains it (null = not read yet). */
+    private ?string $dumpMirOnly = null;
+
     // ── generator state (set while emitting a `$resume` function) ──
     /** Per-function generator emit state (fresh each {@see emit}). */
     private ?GeneratorContext $gen = null;
