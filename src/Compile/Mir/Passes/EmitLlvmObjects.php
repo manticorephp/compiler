@@ -8819,6 +8819,15 @@ trait EmitLlvmObjects
         return false;
     }
 
+    /** Whether `$holder` DECLARES `$method` static (unknown metadata answers false). */
+    private function holderIsStaticMethod(string $holder, string $method): bool
+    {
+        $cd = $this->classes[$holder] ?? null;
+        if ($cd === null) { return false; }
+        $mm = $cd->methodMeta[$method] ?? null;
+        return $mm !== null && $mm->isStatic;
+    }
+
     private function methodHolders(string $method): array
     {
         $this->ensureMethodIndex();
@@ -9628,7 +9637,12 @@ trait EmitLlvmObjects
         // and in the same order — resolve here too, so the ONE coercion the call
         // site emits speaks the ABI the arms were selected for.
         if ($static === '' && $fallback === '') {
-            foreach ($this->methodHolders($mc->method) as $r) { $fallback = $r; break; }
+            // An INSTANCE holder first: a static one (a trait's `static dispatch(...$args)`)
+            // has no `$this` slot, so a site speaking its signature drops the arguments.
+            foreach ($this->methodHolders($mc->method) as $r) {
+                if ($fallback === '' || $this->holderIsStaticMethod($fallback, $mc->method)) { $fallback = $r; }
+                if (!$this->holderIsStaticMethod($fallback, $mc->method)) { break; }
+            }
         }
         // An ABSTRACT declaration has no body, so no signature: the site read
         // an empty by-ref mask and handed `abstract function m(&$x)` the VALUE
@@ -9652,10 +9666,10 @@ trait EmitLlvmObjects
         // IntlBreakIterator::next(?int), which then read its default.
         if ($fallback !== '' && ($static === '' || !isset($this->classes[$static]))) {
             $argc = \count($mc->args) + 1;
-            if (!$this->holderTakesArgs($fallback, $mc->method, $argc)) {
+            if (!$this->holderTakesArgs($fallback, $mc->method, $argc) || $this->holderIsStaticMethod($fallback, $mc->method)) {
                 foreach ($this->methodHolders($mc->method) as $cn => $r) {
                     if ($static !== '' && !$this->classImplementsIface($cn, $static)) { continue; }
-                    if ($this->holderTakesArgs($r, $mc->method, $argc)) { $fallback = $r; break; }
+                    if ($this->holderTakesArgs($r, $mc->method, $argc) && !$this->holderIsStaticMethod($r, $mc->method)) { $fallback = $r; break; }
                 }
             }
         }
