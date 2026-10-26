@@ -319,7 +319,10 @@ final class __McMysqliConn
         $this->chain = null;
         $this->ps = null;
         $this->psNext = false;
-        if ($o !== null) { $o->c = null; }
+        if ($o !== null) {
+            $o->c = null;
+            $o->lost = true;
+        }
     }
 
     /**
@@ -329,8 +332,10 @@ final class __McMysqliConn
     public function begin(): bool
     {
         $this->clear();
-        $this->affectedRows = -1;
-        if (!$this->busy()) { return true; }
+        if (!$this->busy()) {
+            $this->affectedRows = -1;
+            return true;
+        }
         $this->fail(2014, 'HY000', self::OOS);
         return false;
     }
@@ -362,12 +367,24 @@ final class __McMysqliConn
         return true;
     }
 
-    /** COM_QUERY. $stream: leave the rows of a result set on the wire (real_query, MYSQLI_USE_RESULT). */
-    public function send(string $sql, bool $stream): bool
+    /** The server has multi-statements on (multi_query turned them on; the next plain command turns them off, as mysqli does). */
+    public bool $mq = false;
+
+    /** MYSQLI_ENABLE_MQ / MYSQLI_DISABLE_MQ: a refusal of the option is not an error of the command that follows. */
+    public function multiMode(__McPdoMyWire $w, bool $on): void
+    {
+        if ($this->mq === $on) { return; }
+        $this->mq = $on;
+        $w->setMultiStatements($on);
+    }
+
+    /** COM_QUERY. $stream: leave the rows of a result set on the wire (real_query, MYSQLI_USE_RESULT); $multi: multi_query. */
+    public function send(string $sql, bool $stream, bool $multi = false): bool
     {
         $w = $this->liveWire();
         if (!$this->begin()) { return false; }
         try {
+            $this->multiMode($w, $multi);
             $r = $w->query($sql, $stream);
         } catch (PDOException $e) {
             return $this->wireFail($e);
@@ -423,21 +440,19 @@ final class __McMysqliConn
     public function more(): bool
     {
         if ($this->chain !== null) { return true; }
+        if ($this->ps !== null) { return $this->wire !== null && ($this->wire->status & 8) !== 0; }
         $s = $this->pend;
         if ($s === null && $this->open !== null) { $s = $this->open->r; }
         return $s !== null && $s->stream && !$s->done && ($s->status & 8) !== 0;
     }
 
-    /** next_result(): what is unread of the current result is dropped, the next one becomes the current. */
+    /** next_result(): once the current result is consumed (stored, fully read, an OK) the next one becomes the current. */
     public function nextResult(): bool
     {
         $this->clear();
         if (!$this->more()) { return false; }
-        if ($this->pend !== null) {
-            $rs = $this->takeUsed();
-            if ($rs !== null) { $rs->drain(); }
-        }
-        if ($this->open !== null) { $this->open->drain(); }
+        // a result set read from the wire (waiting, or rows still coming): mysqlnd's state is not NEXT_RESULT_PENDING, the call fails without an error
+        if ($this->pend !== null || $this->open !== null) { return false; }
         $x = $this->chain;
         if ($x === null) { return false; }
         $this->affectedRows = -1;
@@ -736,6 +751,7 @@ final class __McMysqliConn
             return false;
         }
         $this->wire = $wire;
+        $this->mq = false;
         $this->st = self::VALID;
         $this->charset = $cs;
         $this->csRow = $row;
@@ -884,6 +900,7 @@ class mysqli
             return $c->fail(2006, 'HY000', 'MySQL server has gone away');
         }
         if (!$c->begin()) { return false; }
+        $c->mq = false;
         // a success is an OK that leaves field_count alone; user and database are C strings (they end at a NUL)
         $db = $database === null ? '' : __McMysqliConn::cutNul($database);
         try {
@@ -1055,7 +1072,7 @@ class mysqli
 
     public function multi_query(string $query): bool
     {
-        throw new Error('mysqli: not implemented');
+        return __McMysqliConn::of($this)->send($query, true, true);
     }
 
     public function next_result(): bool
@@ -1072,6 +1089,7 @@ class mysqli
     {
         $c = __McMysqliConn::of($this);
         $w = $c->liveWire();
+        $c->affectedRows = -1;
         if (!$c->begin()) { return false; }
         if (!$w->ping()) { return $c->fail(2006, 'HY000', 'MySQL server has gone away'); }
         $c->info = null;
@@ -1180,6 +1198,7 @@ class mysqli
     {
         $c = __McMysqliConn::of($this);
         $w = $c->liveWire();
+        $c->affectedRows = -1;
         if (!$c->begin()) { return false; }
         try {
             $e = $w->initDb($database);
@@ -1295,6 +1314,8 @@ final class __McMysqliRs
     /** @var ?array<int,?string> the row fetched last */
     public ?array $cur = null;
     public bool $ended = false;
+    /** The connection closed under the unread rows: a fetch answers false where the end of the rows answers null. */
+    public bool $lost = false;
     public int $field = 0;
     /** numRows()'s answer, held in a union slot so it crosses the property hook tagged. */
     public int|string $rows = 0;
@@ -1748,12 +1769,12 @@ class mysqli_result implements IteratorAggregate
         return $this->__mcFetchArray($mode, 'mysqli_result::fetch_array', 1);
     }
 
-    public function __mcFetchArray(int $mode, string $fn, int $arg): array|null
+    public function __mcFetchArray(int $mode, string $fn, int $arg): array|false|null
     {
         $rs = __McMysqliRs::of($this);
         if ($mode < 1 || $mode > 3) { throw __McMysqliRs::modeError($fn, $arg); }
         $row = $rs->row();
-        if ($row === null) { return null; }
+        if ($row === null) { return $rs->lost ? false : null; }
         if ($mode === 2) { return $row; }
         if ($mode === 1) { return $rs->assoc($row); }
         return $rs->both($row);
@@ -1763,7 +1784,8 @@ class mysqli_result implements IteratorAggregate
     {
         $rs = __McMysqliRs::of($this);
         $row = $rs->row();
-        return $row === null ? null : $rs->assoc($row);
+        if ($row === null) { return $rs->lost ? false : null; }
+        return $rs->assoc($row);
     }
 
     public function fetch_column(int $column = 0): false|float|int|string|null
@@ -1821,7 +1843,7 @@ class mysqli_result implements IteratorAggregate
      *
      * @param mixed[] $args
      */
-    public function __mcFetchObject(string $class, array $args, string $fn, int $arg): object|null
+    public function __mcFetchObject(string $class, array $args, string $fn, int $arg): object|false|null
     {
         $rs = __McMysqliRs::of($this);
         $std = \strcasecmp($class, 'stdClass') === 0;
@@ -1830,7 +1852,7 @@ class mysqli_result implements IteratorAggregate
         }
         $row = $rs->row();
         $r = $rs->r;
-        if ($row === null || $r === null) { return null; }
+        if ($row === null || $r === null) { return $rs->lost ? false : null; }
         $n = \count($r->names);
         if ($std) {
             if (\count($args) > 0) {
@@ -1862,7 +1884,9 @@ class mysqli_result implements IteratorAggregate
 
     public function fetch_row(): array|false|null
     {
-        return __McMysqliRs::of($this)->row();
+        $rs = __McMysqliRs::of($this);
+        $row = $rs->row();
+        return $row === null && $rs->lost ? false : $row;
     }
 
     public function field_seek(int $index): true
@@ -2190,6 +2214,7 @@ final class __McMysqliStmt
         }
         $c->clear();
         try {
+            $c->multiMode($w, false);
             $p = $w->prepare($query);
         } catch (PDOException $e) {
             return $this->wireErr($e);

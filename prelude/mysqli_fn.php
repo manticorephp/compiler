@@ -253,7 +253,7 @@ function mysqli_more_results(mysqli $mysql): bool
 
 function mysqli_multi_query(mysqli $mysql, string $query): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->multi_query($query);
 }
 
 function mysqli_next_result(mysqli $mysql): bool

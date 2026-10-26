@@ -1292,6 +1292,25 @@ final class __McPdoMyWire
         }
     }
 
+    /**
+     * COM_SET_OPTION MYSQL_OPTION_MULTI_STATEMENTS_ON / _OFF: mysqli turns multi-statements on for one multi_query() and off
+     * again before the next plain command. The reply is an EOF packet (or an ERR).
+     */
+    public function setMultiStatements(bool $on): ?__McPdoMyErr
+    {
+        $this->sendCmd("\x1b" . self::putLe($on ? 0 : 1, 2));
+        try {
+            $p = $this->packet(self::CTRL_CAP);
+            $this->inflight = false;
+            return \strlen($p) > 0 && \ord($p[0]) === 0xFF ? $this->parseErr($p) : null;
+        } catch (\Throwable $t) {
+            if ($this->inflight) { $this->closeSock(); }
+            throw $t;
+        } finally {
+            $this->release();
+        }
+    }
+
     /** @return ?__McPdoMyErr null on OK */
     public function initDb(string $db): ?__McPdoMyErr { return $this->cycle("\x02" . $db, false)->err; }
 
