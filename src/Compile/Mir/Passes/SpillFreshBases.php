@@ -187,6 +187,7 @@ final class SpillFreshBases
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
             $this->fnName = $fn->name;
+            $this->own->fnName = $fn->name;
             $this->pinned = [];
             $this->keyFirst = [];
             $this->pinWrites($fn->body, $fn->returnsByRef);
