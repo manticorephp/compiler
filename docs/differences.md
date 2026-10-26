@@ -301,7 +301,7 @@ There is no `php.ini`, no `-d` flag, no extension loader, no PECL
 ## Functions that do not exist yet
 
 Roughly half of PHP's internal functions and a third of its classes are not
-implemented (`gd`, `gmp`, `sodium`, `ftp`, `xmlwriter`, most of `mysqli`/`pgsql`, `posix`,
+implemented (`gd`, `gmp`, `sodium`, `ftp`, `xmlwriter`, most of `pgsql`, `posix`,
 `calendar`, `ldap`, `bz2`, …; 1127 of 2135 functions, 206 of 327 classes at the time of
 writing). The full, generated, per-extension list is [builtins.md](builtins.md).
 

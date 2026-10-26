@@ -34,7 +34,7 @@ mentions `mysqli` links none of it.
 | `MYSQLI_REPORT_ERROR` alone | php warns and carries on. Manticore has no warnings: the call returns `false` and carries on, nothing is printed |
 | `MYSQLI_REPORT_STRICT` | throws, as the default |
 | `MYSQLI_REPORT_INDEX` | php warns when a query used no (or a bad) index. Manticore does not inspect the server flags: no output |
-| `MYSQLI_REPORT_ALL` | `ERROR \| STRICT \| INDEX \| ALL` bits; behaves as STRICT |
+| `MYSQLI_REPORT_ALL` | 255 (all bits); behaves as STRICT |
 
 A connect failure is recorded process-wide (`mysqli_connect_errno()`, `mysqli_connect_error()`) and thrown iff STRICT is
 set. `refresh()` and `stat()` never throw, as in php.
@@ -93,8 +93,9 @@ MySQL 8.4 answers ERR 1047 to `COM_REFRESH` / `COM_PROCESS_KILL`; the call repor
 - **Warnings are not printed.** Where php warns and carries on, Manticore stays silent (see report modes).
 - `mysqli_report(MYSQLI_REPORT_INDEX)` does nothing observable.
 - `var_dump` object handle numbers (`#N`) and `spl_object_id` differ from php (#457).
-- `get_object_vars()` / `foreach` over a mysqli object list its (virtual, hooked) properties; php lists none. `var_dump`,
-  `print_r` match through `__debugInfo`. A virtual property also shows in `(array)`.
+- `var_dump` and `print_r` match php through `__debugInfo`. `(array) $mysqli` and `get_object_vars()` / `foreach` still list the
+  virtual hooked properties (and `(array)` the private `$__mc`); php lists none, although #449 is closed for plain classes.
+- `get_object_vars()` returns NULL / 0 for a virtual property with a get hook instead of calling the hook (#480).
 - `ini_get('mysqli.default_socket')` is `''` (php: its compiled-in path).
 - Statistics are not metered (see stubs).
 - Closing a link with an async reply pending sends `KILL QUERY` on a side connection; mysqlnd drops the socket.

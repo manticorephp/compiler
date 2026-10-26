@@ -417,7 +417,7 @@ Tests: `async_pool_basic`, `async_pool_cancel`, `pdo_sqlite_reset` (AOT), `pgsql
 ## Limitations
 
 `nextRowset()` reports IM001 on sqlite and pgsql, as php does, and works on the
-`mysql:` driver. Out of scope: the `mysqli` and `pgsql_*` procedural APIs, `LOAD DATA LOCAL INFILE`.
+`mysql:` driver. Out of scope: the `pgsql_*` procedural API (`mysqli` is in [mysqli.md](mysqli.md)), `LOAD DATA LOCAL INFILE`.
 
 ## Regression notes: default fetch mode and variadic calls
 

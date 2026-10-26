@@ -585,12 +585,10 @@ jobs:
       - name: Unpack the compiler
         run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
 
-      # postgres 16, mysql 8.4 (plain, TLS, native-password, isolated) and mariadb 11,
-      # with the throwaway TLS certificates; then the CA mysql made for itself.
+      # up.sh starts every pdo_net server; mysqli_net needs only mysql (mc-my) and mariadb (mc-maria). Its TLS case
+      # does not verify the certificate, so no CA is handed to the container.
       - name: Start the database servers
-        run: |
-          bash tests/pdo_net/up.sh
-          mkdir -p ci-pdo && docker cp mc-my:/var/lib/mysql/ca.pem ci-pdo/my_ca.pem && chmod -R a+rX ci-pdo tests/pdo_net/.certs
+        run: bash tests/pdo_net/up.sh
 
       - name: Build + mysqli_net
         run: |
@@ -599,13 +597,11 @@ jobs:
             -v "$PWD":/repo:ro \
             -v "$PWD/ci-logs":/logs \
             -v "$PWD/ci-cache":/compiler-cache \
-            -v "$PWD/ci-pdo":/mysqli-net:ro \
             -e MC_GATE=0 \
             -e MC_LOGDIR=/logs \
             -e MC_COMPILER_CACHE=/compiler-cache \
             -e MC_MYSQLI_NET=${{ matrix.server }} \
             -e MC_MYSQLI_NET_ARGS="--shard ${{ matrix.shard }}/4" \
-            -e PDO_MY_SSL_CA=/mysqli-net/my_ca.pem \
             manticore-toolchain:${{ matrix.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
 
