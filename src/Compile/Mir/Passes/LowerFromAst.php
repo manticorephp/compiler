@@ -7565,6 +7565,20 @@ final class LowerFromAst implements Pass
             $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
         } else {
             $args = [];
+            // A receiver whose class is only known after inference (`?C`, an untyped value): its
+            // parameter NAMES are not known here either, so the named arguments ride one string-keyed
+            // spread and each candidate binds them to its own parameters at emit
+            // ({@see EmitLlvmCalls::emitSpreadFill}). Lowered by value they bound by position.
+            $named = false;
+            foreach ($expr->args as $a) { if ($a->kind === 'NamedArg') { $named = true; } }
+            if ($named && $magicHint === '') {
+                foreach ($this->foldSpreadNamed($expr->args, $expr->span, true) as $a) {
+                    $args[] = $this->lowerExpr($a);
+                }
+                $mcn = new MethodCall_($obj, $expr->method, $args, Type::unknown());
+                $mcn->srcArgc = \count($args);
+                return $mcn;
+            }
             foreach ($expr->args as $a) {
                 $args[] = $this->lowerExpr($a);
             }
