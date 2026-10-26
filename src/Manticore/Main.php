@@ -4081,6 +4081,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             || preg_match("/\\$[A-Za-z_][A-Za-z0-9_]*::\\$?[A-Za-z_][A-Za-z0-9_]*\\s*\\(/", $source)
             || preg_match("/\\bunserialize\\s*\\(/", $source)
             || preg_match("/ReflectionClass|class_alias/", $source)
+            // PDO's FETCH_CLASS / fetchObject instantiate the class named by a run-time string
+            // (`new $cls` in the pdo prelude, which this scan never reads).
+            || preg_match("/FETCH_CLASS|fetchObject/", $source)
             || preg_match("/(class_exists|interface_exists|trait_exists|enum_exists)\\s*\\(\\s*\\$/", $source)) {
             $walkerDynamic = true;
         }

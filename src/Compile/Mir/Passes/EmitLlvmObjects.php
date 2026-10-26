@@ -7961,10 +7961,19 @@ trait EmitLlvmObjects
                 && \str_starts_with($parts[$i], 'i64 ')) {
                 $srcCell = $src->kind === Type::KIND_CELL;
                 $ctCell = $ct->kind === Type::KIND_CELL;
-                if ($srcCell !== $ctCell) {
+                // A RAW int/bool the site coerced for another candidate, read by an arm
+                // declaring `string`: the word is a number, not a string pointer. Route it
+                // through a cell so the arm gets the value php's coercion would give.
+                $scalarToStr = !$srcCell && !$ctCell && $ct->kind === Type::KIND_STRING
+                    && ($src->kind === Type::KIND_INT || $src->kind === Type::KIND_BOOL);
+                if ($srcCell !== $ctCell || $scalarToStr) {
                     $this->lastValue = \substr($parts[$i], 4);
                     $this->lastValueType = 'i64';
-                    $out .= $ctCell ? $this->boxToCell($src) : $this->unboxCellToType($ct);
+                    if ($scalarToStr) {
+                        $out .= $this->boxToCell($src) . $this->unboxCellToType($ct);
+                    } else {
+                        $out .= $ctCell ? $this->boxToCell($src) : $this->unboxCellToType($ct);
+                    }
                     $out .= $this->coerceToI64();
                     $parts[$i] = 'i64 ' . $this->lastValue;
                     $changed = true;

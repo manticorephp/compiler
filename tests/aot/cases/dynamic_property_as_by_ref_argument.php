@@ -1,6 +1,5 @@
 <?php
 // `f($this->$name)` into an `array &$x` parameter segfaults
-// issue: #201
 final class B
 {
     public array $a = [1 => [1]];

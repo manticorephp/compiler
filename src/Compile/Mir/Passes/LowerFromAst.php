@@ -389,6 +389,13 @@ final class LowerFromAst implements Pass
      *  @var array<string, \Parser\Ast\Expr> bare name → value expression */
     private array $userConstants = [];
 
+    /** Constants whose `define()` value is only known at run time (reads a
+     *  variable, calls, `new`): one module cell each, stored when the define
+     *  runs — inlining the expression would re-evaluate it, in the wrong scope,
+     *  at every use.
+     *  @var array<string, string> bare name → module cell symbol */
+    private array $runtimeConstants = [];
+
     /** Synthesized reflection factories, registered early (the params pre-pass
      *  reads `$fnDecls`) and lowered late (their bodies may name a global
      *  constant, and `$userConstants` is filled after that pre-pass).
@@ -4226,6 +4233,7 @@ final class LowerFromAst implements Pass
         $name = $this->constBareName($rawName);
         $pre = $this->predefinedConstant($name);
         if ($pre !== null) { return $pre; }
+        if (isset($this->runtimeConstants[$name])) { return new StaticProp_($this->runtimeConstants[$name], Type::cell()); }
         if (isset($this->userConstants[$name])) {
             $this->noteDeprecatedConstUse($name, $line);
             return $this->lowerExpr($this->userConstants[$name]);
@@ -4296,8 +4304,29 @@ final class LowerFromAst implements Pass
             if (\strtolower($this->constBareName($de->function)) !== 'define') { continue; }
             $dargs = $de->args;
             if (\count($dargs) < 2 || $dargs[0]->kind !== 'StringLiteral') { continue; }
-            $this->userConstants[$this->constBareName($this->stringLitValue($dargs[0]))] = $dargs[1];
+            $this->registerDefinedConstant($this->constBareName($this->stringLitValue($dargs[0])), $dargs[1]);
         }
+    }
+
+    /** Record `define(N, <value>)`: inlined when constant, a module cell when the value is run-time. */
+    private function registerDefinedConstant(string $name, \Parser\Ast\Expr $value): void
+    {
+        $w = new \Analyze\AstWalk(false);
+        $w->exprTree($value);
+        $runtime = false;
+        foreach ($w->exprs as $e) {
+            if ($e instanceof \Parser\Ast\Variable || $e instanceof \Parser\Ast\CallExpr
+                || $e instanceof \Parser\Ast\NewExpr || $e instanceof \Parser\Ast\NewDynExpr
+                || $e instanceof \Parser\Ast\MethodCallExpr || $e instanceof \Parser\Ast\StaticCall) {
+                $runtime = true;
+                break;
+            }
+        }
+        if (!$runtime) { $this->userConstants[$name] = $value; return; }
+        $cell = '@const_' . $this->sanitizeSym($name);
+        $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
+        $this->module->addGlobalCell($cell . '_set', new IntConst(0, Type::int_()));
+        $this->runtimeConstants[$name] = $cell;
     }
     private function constBareName(string $raw): string
     {
@@ -4366,8 +4395,8 @@ final class LowerFromAst implements Pass
         if ($de->args[0]->kind !== 'StringLiteral') { return; }
         $name = $this->constBareName($this->stringLitValue($de->args[0]));
         if ($name !== $guarded) { return; }
-        if (isset($this->userConstants[$name])) { return; }
-        $this->userConstants[$name] = $de->args[1];
+        if (isset($this->userConstants[$name]) || isset($this->runtimeConstants[$name])) { return; }
+        $this->registerDefinedConstant($name, $de->args[1]);
     }
 
     private function staticPropRef(string $rawClass, string $rawName): ?StaticProp_
@@ -5670,6 +5699,7 @@ final class LowerFromAst implements Pass
             // undefined constant drop before that name reaches lowering.
             if ($fn === 'defined' && $a0->kind === 'StringLiteral') {
                 $nm = $this->constBareName($this->stringLitValue($a0));
+                if (isset($this->runtimeConstants[$nm])) { return self::GUARD_UNKNOWN; }
                 return $this->guardOf($this->predefinedConstant($nm) !== null || isset($this->userConstants[$nm]));
             }
             // `class_exists(X)` / interface_ / trait_ / enum_exists guarding an
@@ -6109,6 +6139,7 @@ final class LowerFromAst implements Pass
             foreach ($astArgs as $a) {
                 $conv = $i < $np ? $this->coerceCallableShim($this->lowerParamType($this->paramTypeHint($params[$i])), $a) : null;
                 $conv = $conv ?? $this->lowerSpreadArg($params, $i, $a);
+                if ($conv === null && $i < $np) { $conv = $this->lowerDynPropByRefArg($params[$i], $a); }
                 $out[] = $conv !== null ? $conv : $this->lowerExpr($a);
                 $i = $i + 1;
             }
