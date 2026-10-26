@@ -606,7 +606,7 @@ trait LowerFns
         $captures = [];
         $captureByRef = [];
         foreach ($capNames as $cn) {
-            if ($cn === 'this' && $this->currentLowerClass === '') {
+            if ($cn === 'this' && ($this->currentLowerClass === '' || $this->bindLateThis)) {
                 // A top-level closure that reads `$this` has no enclosing object
                 // to capture — the slot is a LATE-BOUND placeholder filled by
                 // Closure::bind / ->bindTo / ->call. Capture NULL (0) so no

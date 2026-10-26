@@ -549,6 +549,11 @@ final class Call extends Node
      *  counts the written args only. Declared LAST. */
     public int $recvArgs = 0;
 
+    /** arg index => the TypeError text up to the given type, for a CELL argument bound to a class-typed
+     *  param: a scalar-tagged cell there is php's TypeError ({@see Passes\EmitLlvmExpr::unboxCellArg}).
+     *  @var array<int, string> */
+    public array $objArgHeads = [];
+
 
     public function accept(EmitVisitor $v): string
     {
@@ -1289,6 +1294,9 @@ final class Cast extends Node
 
     /** A `string` cast of a cell keeps NULL as NULL (a `?string` param's null), not "". */
     public bool $keepNull = false;
+
+    /** Non-empty: a string operand that is not numeric raises a TypeError with this text instead of parsing to 0. */
+    public string $typeErr = '';
 
     public function accept(EmitVisitor $v): string
     {
