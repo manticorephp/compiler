@@ -670,11 +670,12 @@ trait InferNodes
         // collapsed to unknown (unionWith) above and is not adopted.
         if ($rk === Type::KIND_UNKNOWN && $u !== null
             && ($u->kind === Type::KIND_STRING || $u->kind === Type::KIND_INT
-                || $u->kind === Type::KIND_FLOAT || $u->kind === Type::KIND_BOOL)) {
+                || $u->kind === Type::KIND_FLOAT || $u->kind === Type::KIND_BOOL
+                || $u->kind === Type::KIND_NULL)) {
             // A path that falls off the end (or a bare `return;`) yields NULL, which
             // no raw scalar can carry: the result is a tagged cell.
             $nullPath = !$fn->isGenerator && ($this->fnBareReturn || !$this->alwaysExits($fn->body));
-            $adopt = $nullPath ? Type::cell() : $u;
+            $adopt = $nullPath && $u->kind !== Type::KIND_NULL ? Type::cell() : $u;
             $fn->returnType = $adopt;
             $this->sigs[$fn->name] = $adopt;
         }
