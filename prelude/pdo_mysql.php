@@ -2244,15 +2244,6 @@ final class __McPdoMyStmt implements __McPdoDrvStmt, __McPdoDrvMulti
             $this->res = null;
             throw __McPdoMy::errFrom($n->err);
         }
-        if ($this->native && !$n->isSet && $this->res->isSet) {
-            // mysqlnd (measured): the closing OK of a CALL still reports the previous result set's columns
-            $n->names = $this->res->names;
-            $n->tables = $this->res->tables;
-            $n->types = $this->res->types;
-            $n->flags = $this->res->flags;
-            $n->lens = $this->res->lens;
-            $n->decs = $this->res->decs;
-        }
         $n->entered = true;
         $this->res = $n;
         $this->idx = -1;

@@ -2625,8 +2625,7 @@ final class __McMysqliStmt
             $this->affected = $r->affected;
             $this->insertId = $r->insertId;
             $this->state = self::EXECUTED;
-            // mysqlnd (measured): the closing OK of a CALL still reports the previous result set's column count
-            if (!$next) { $this->fieldCount = 0; }
+            $this->fieldCount = 0;
             $this->settle();
             return true;
         }
