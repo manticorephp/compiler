@@ -2680,6 +2680,8 @@ final class LowerFromAst implements Pass
         $targets = [];
         foreach ($module->classes as $cd) {
             if ($cd->isStruct) { continue; }
+            // of the prelude classes only ext/mysqli's (mysqli_result implements IteratorAggregate) answer reflection's interface queries
+            if ($cd->isPreludeClass && \strncasecmp($cd->name, 'mysqli', 6) !== 0) { continue; }
             $targets[] = $cd->name;
         }
         // An interface has no ClassDef but does get a reflection row.
