@@ -49,6 +49,10 @@ final class Ownership
 
     public OwnershipContext $ctx;
 
+    /** The function being classified: inside a property's own get/set hook its
+     *  `$this->prop` reads the backing slot, not the hook ({@see hookFreshRead}). */
+    public string $fnName = '';
+
     public function __construct(OwnershipContext $ctx)
     {
         $this->ctx = $ctx;
@@ -227,6 +231,7 @@ final class Ownership
         // emitter says owned, the value leaks; if only this side does, the
         // release has no matching retain and the value is double-freed.
         if ($this->condOwnedStored($value)) { return true; }
+        if ($this->hookFreshRead($value)) { return true; }
         // A CLOSURE LITERAL builds a fresh capturing env with rc=1 and a drop fn
         // ({@see Passes\EmitLlvmCalls::emitClosure}); the local owns it and releases it
         // at scope exit / before an overwrite, which is what frees both the env
@@ -459,8 +464,37 @@ final class Ownership
      * same predicate. A `#[Struct]`, an enum ordinal and an `Ffi\Ptr` have no
      * count to take.
      */
+    /**
+     * A typed read of a property that has a GET HOOK is a call to the hook, and
+     * the hook hands back the +1 every call does — a fresh string / cell / object
+     * the reader owns, never a borrow of the slot. Same predicate for the store
+     * side, the temp side and the emitter, or the +1 is stranded (leak) or
+     * released twice. Inside the property's own hook the read is the backing
+     * slot, a plain borrow ({@see Passes\EmitLlvmObjects::insideOwnHook}).
+     */
+    public function hookFreshRead(Node $v): bool
+    {
+        if ($v->kind !== Node::KIND_PROPERTY_ACCESS) { return false; }
+        return $this->hookFreshPropRead($v);
+    }
+
+    /** Typed through a PropertyAccess_ param so `->object` resolves under the self-host. */
+    private function hookFreshPropRead(PropertyAccess_ $v): bool
+    {
+        $ot = $v->object->type;
+        if ($ot->kind !== Type::KIND_OBJ) { return false; }
+        $cls = $ot->class ?? '';
+        if ($cls === '' || !isset($this->ctx->classes[$cls])) { return false; }
+        $hk = $this->ctx->classes[$cls]->propHooks[$v->property] ?? null;
+        if ($hk === null || $hk['get'] === '') { return false; }
+        if ($this->fnName === $hk['get'] || ($hk['set'] !== '' && $this->fnName === $hk['set'])) { return false; }
+        $k = $v->type->kind;
+        return $k === Type::KIND_STRING || $k === Type::KIND_CELL || $k === Type::KIND_OBJ;
+    }
+
     public function propReadCoOwns(Node $v): bool
     {
+        if ($this->hookFreshRead($v)) { return false; }
         if (!AliasOwn::propReadCoOwns($v)) { return false; }
         $t = $v->type;
         $k = $t->kind;
@@ -696,6 +730,7 @@ final class Ownership
         // owned qualify — one with an erased arm stays borrowed.
         if ($this->condOwnedTemp($node)) { return true; }
         if (self::isStrCharRead($node)) { return true; }
+        if ($this->hookFreshRead($node)) { return true; }
         // `(string)$int` / `(string)$float` MINT a buffer (__mir_int_to_str /
         // __mir_float_to_str), so a consumer that frees its fresh operands must
         // free this one: `strlen((string)$i)` and `$m[(string)$i] = 1` each
@@ -785,6 +820,7 @@ final class Ownership
         $k = $n->kind;
         // The sent value a `yield` expression moved out of the frame.
         if ($k === Node::KIND_YIELD) { return true; }
+        if ($this->hookFreshRead($n)) { return true; }
         // A closure / callable INVOKE returns under the same +1 convention
         // ({@see returnBorrowsObj} and {@see keyTempRelease} already read it as
         // fresh): `[...$closure()]` stranded the whole array it spread.

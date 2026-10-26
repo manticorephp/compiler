@@ -229,6 +229,7 @@ final class OwnershipFlow implements Pass
     private function lowerFunction(FunctionDef $fn): void
     {
         $this->fnName = $fn->name;
+        $this->own->fnName = $fn->name;
         $this->fnBody = $fn->body;
         $this->releases = self::bisectAdmits($fn->name);
         $this->trace = $this->traceWant !== '' && \str_contains($fn->name, $this->traceWant);
