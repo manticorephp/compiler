@@ -1,0 +1,6 @@
+TypeError: Cannot assign string to property Tp::$x of type int
+TypeError: Cannot assign string to property Tp::$x of type int
+TypeError: Cannot assign string to property Tp::$x of type int
+int(12)
+TypeError: Cannot assign string to property Tp::$x of type int
+int(7)

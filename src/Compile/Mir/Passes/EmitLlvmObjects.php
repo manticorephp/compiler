@@ -737,7 +737,7 @@ trait EmitLlvmObjects
                     $out .= $this->emitSpreadOperand($a->operand);
                     [$sir, $sregs] = $this->emitSpreadFill(
                         $this->lastValue, $ai + 1, $ptypes, $tmask,
-                        $a->operand->type->element ?? null, $ctorClass . '____construct');
+                        $a->operand->type->element ?? null, $ctorClass . '____construct', $a->operand->type);
                     $out .= $sir;
                     foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
                     $ai = \count($ptypes) - 1;
@@ -1313,7 +1313,8 @@ trait EmitLlvmObjects
         // `$cell->prop` — a tagged object cell (array_first over an obj array,
         // a `mixed` field, a json_decode stdClass): resolve the holder's slot.
         if ($pa->object->type->kind === Type::KIND_CELL) {
-            return $this->emitCellPropertyRead($pa);
+            $cr = $this->emitCellPropertyRead($pa);
+            return $this->unboxNarrowedObjRead($pa, $cr);
         }
         if ($pa->object->type->kind === Type::KIND_UNION) {
             return $this->emitUnionPropertyAccess($pa);
@@ -1377,7 +1378,8 @@ trait EmitLlvmObjects
         // the real holder lays $prop elsewhere. Recover the class at runtime from
         // the object's class_id and read $prop's REAL per-holder offset.
         if ($pa->object->type->kind === Type::KIND_UNKNOWN) {
-            return $this->emitRawPropByClassId($pa);
+            $rr = $this->emitRawPropByClassId($pa);
+            return $this->unboxNarrowedObjRead($pa, $rr);
         }
         // The class is KNOWN but does not put `$prop` anywhere — neither on
         // itself nor on any subclass. A static offset here is not a fact, it is
@@ -1393,7 +1395,8 @@ trait EmitLlvmObjects
         // does exactly that — `fn &() => $this->instanceof` sits in the app
         // Kernel and is bound to a PhpFileLoader.
         if (!$this->propHasTypedSlot($pa->object, $pa->property)) {
-            return $this->emitRawPropByClassId($pa);
+            $rr = $this->emitRawPropByClassId($pa);
+            return $this->unboxNarrowedObjRead($pa, $rr);
         }
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
@@ -2002,6 +2005,21 @@ trait EmitLlvmObjects
     }
 
     /**
+     * An erased-receiver read answers a boxed CELL. A property PATH narrowed by
+     * `instanceof` types the node OBJ, and its consumers dereference the word as
+     * a raw pointer: strip the tag here, at the producer, as the typed read does.
+     */
+    private function unboxNarrowedObjRead(PropertyAccess_ $pa, string $out): string
+    {
+        if ($pa->type->kind !== Type::KIND_OBJ) { return $out; }
+        $masked = $this->ssa->allocReg();
+        $out .= '  ' . $masked . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+        $this->lastValue = $masked;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /**
      * The ADDRESS of `$prop` as i64 in lastValue, for a receiver whose layout
      * is not statically knowable; null when NO class in the module declares
      * `$prop`, since then there is no slot to point at and the caller must fall
@@ -2268,11 +2286,13 @@ trait EmitLlvmObjects
         // A bare `array` hint erased to KIND_UNKNOWN still holds a RAW pointer —
         // unbox it as an array, or the tag rides into a slot the readers deref.
         // Same rule as the class-typed store path (see slotIsArrayHinted).
+        $this->unboxPropCtx = $cd->name . '::$' . $prop;
         $out .= $this->unboxCellToType(
             (!$pt->isArray() && ($cd->propertyArrayHinted[$prop] ?? false))
                 ? Type::vec(Type::unknown())
                 : $pt,
         );
+        $this->unboxPropCtx = '';
         $val = $this->lastValue;
         if ($this->lastValueType === 'double') {
             $bits = $this->ssa->allocReg();
@@ -2931,6 +2951,27 @@ trait EmitLlvmObjects
         ));
     }
 
+    /**
+     * A `readonly` property is initialised ONCE: a store to a slot whose init bit is already set is
+     * php's `Error`. `__clone` is exempt (php 8.3 lets it re-initialise).
+     */
+    private function emitReadonlyReinitGuard(\Compile\Mir\StoreProperty $n, string $objPtr, string $gep): string
+    {
+        $cls = $n->object->type->class ?? '';
+        if ($cls === '' || $this->readonlyDeclClass($cls, $n->property) === '') { return ''; }
+        if (\str_ends_with($this->frame->name, '__clone') || \str_starts_with($this->frame->name, '__mc_unser_set')) { return ''; }
+        $out = '';
+        $set = $this->emitInitTest($objPtr, $this->initMapHolder($n->object, $n->property), $n->property,
+            $this->propertyOffsetOrNull($n->object, $n->property) ?? -1, $gep, $out);
+        if ($set === '') { return ''; }
+        $keep = $this->lastValue;
+        $keepT = $this->lastValueType;
+        $out .= $this->emitThrowIf($set, 'Error', 'Cannot modify readonly property ' . $this->readonlyDeclClass($cls, $n->property) . '::$' . $n->property);
+        $this->lastValue = $keep;
+        $this->lastValueType = $keepT;
+        return $out;
+    }
+
     private function emitStoreProperty(\Compile\Mir\StoreProperty $n): string
     {
         $acls = $n->object->type->kind === Type::KIND_OBJ ? ($n->object->type->class ?? '') : '';
@@ -3003,7 +3044,10 @@ trait EmitLlvmObjects
             // from the class table, one arm per class, and reached only from
             // `unserialize`). The guard is a frame-NAME prefix test, not a scope
             // model, so the exemption has to be spelled out here.
-            if ($roDecl !== '' && !\str_starts_with($this->frame->name, $roDecl . '__')
+            // A closure whose scope is unknown here (bound at run time by Closure::bind) is let through, as
+            // accessDenied does; a closure written at top level has the global scope and is not.
+            $roScopeOk = $this->frame->isClosure && !$this->frame->isPrelude && $this->accessScope() === null;
+            if ($roDecl !== '' && !$roScopeOk && !\str_starts_with($this->frame->name, $roDecl . '__')
                 && !\str_starts_with($this->frame->name, '__mc_unser_set')) {
                 $out = $this->emitNode($n->value);
                 $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $n->property;
@@ -3223,6 +3267,7 @@ trait EmitLlvmObjects
         }
         $out .= $this->propSlotGep($n->object, $objPtr, $n->property);
         $gep = $this->lastValue;
+        $out .= $this->emitReadonlyReinitGuard($n, $objPtr, $gep);
         // Release-before-overwrite. A LOCAL slot has always dropped its previous
         // value; a property slot never has, so every rc value an overwritten
         // property leaves behind is immortal — 191.7 MB at 100k iterations of
@@ -3932,6 +3977,18 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * `$this` inside a closure that `Closure::bind` / `bindTo` / `call` may
+     * rebind: lowering types it from the LEXICAL class, but at run time it is
+     * whatever object was bound, so a name-keyed access must dispatch on the
+     * object's real class instead of the written-in one.
+     */
+    private function isRebindableThis(Node $obj): bool
+    {
+        return $obj->kind === Node::KIND_LOAD_LOCAL && $obj->name === 'this'
+            && $this->frame->isClosure && !$this->frame->isPrelude
+            && !isset($this->unscopedClosures[$this->frame->name]);
+    }
     /** `$o->$name` — read the boxed value from the bag by runtime key. */
     private function emitDynProp(DynProp_ $n): string
     {
@@ -3940,7 +3997,7 @@ trait EmitLlvmObjects
         // dynamic bag). Match the name against each declared property's offset,
         // then fall back to the bag / null.
         $cls = $n->object->type->class ?? '';
-        if ($cls !== '' && isset($this->classes[$cls])) {
+        if ($cls !== '' && isset($this->classes[$cls]) && !$this->isRebindableThis($n->object)) {
             $cd = $this->classes[$cls];
             return $this->emitDynPropDispatch($n, $this->declaredPropTypes($cd), $cd);
         }
@@ -4933,8 +4990,16 @@ trait EmitLlvmObjects
     {
         /** @var Node[] $ops */
         $ops = [$dp->object, $dp->name];
+        /** @var Node[] $packOps */
+        $packOps = [];
         foreach ($iv->args as $a) {
-            $ops[] = $a->kind === Node::KIND_SPREAD ? $this->asSpreadNode($a)->operand : $a;
+            if ($a->kind === Node::KIND_SPREAD) {
+                $po = $this->asSpreadNode($a)->operand;
+                $packOps[] = $po;
+                $ops[] = $po;
+            } else {
+                $ops[] = $a;
+            }
         }
         $need = false;
         $refMayBind = null;
@@ -4947,7 +5012,9 @@ trait EmitLlvmObjects
                     $cands = $this->dynMethodCandidates($dp->object->type, $this->siteArgc($iv->args));
                     $refMayBind = $cands !== null && $this->dynMethodHasRefParam($cands, \count($iv->args));
                 }
-                if ($refMayBind && $o !== $dp->object && $o !== $dp->name) { return false; }
+                // An unpacked array is read by value: the dispatch hands the callee its elements
+                // as a pack, so a copy of the array held in a slot binds nothing a by-ref arm could see.
+                if ($refMayBind && $o !== $dp->object && $o !== $dp->name && !\in_array($o, $packOps, true)) { return false; }
             }
             if (!$this->dynHoistableRead($o)) { return false; }
             $need = true;
@@ -4982,6 +5049,8 @@ trait EmitLlvmObjects
         }
         if ($n->kind === Node::KIND_PROPERTY_ACCESS) { return $this->dynHoistableProp($n); }
         if ($n->kind === Node::KIND_ARRAY_ACCESS) { return $this->dynHoistableElem($n); }
+        // `static::$dispatcher->$method(...)`: a static property read runs no user code.
+        if ($n->kind === Node::KIND_STATIC_PROP) { return true; }
         return false;
     }
 
@@ -5089,9 +5158,15 @@ trait EmitLlvmObjects
         $recv = $dp->object;
         $nameNode = $dp->name;
         $methods = $this->dynMethodCandidates($recv->type, $this->siteArgc($iv->args));
+        $this->dynRejectWhy = '';
         if ($methods !== null && $this->dynamicMethodMeta) {
             $viaTable = $this->emitDynMethodDispatch($dp, $iv, $methods);
             if ($viaTable !== null) { return $viaTable; }
+        }
+        if (\getenv('MANTICORE_DYNM_TRACE') !== false && $methods !== null && \count($methods) >= 16) {
+            \error_log('DYNTAB no ' . $this->frame->name . ' meta=' . ($this->dynamicMethodMeta ? '1' : '0')
+                . ' methods=' . (string)\count($methods) . ' recvType=' . (string)$recv->type->kind
+                . ' why=' . $this->dynRejectWhy);
         }
         if ($methods === null) {
             // Erased receiver (cell/unknown): no static class set to enumerate.
@@ -5545,7 +5620,7 @@ trait EmitLlvmObjects
         $rk = $recv->type->kind;
         if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN
             && $rk !== Type::KIND_UNION && $rk !== Type::KIND_OBJ) {
-            if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.recv_kind', 1); }
+            $this->dynRejectWhy = 'recv_kind'; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.recv_kind', 1); }
             return null;
         }
         $argc = \count($iv->args);
@@ -5553,23 +5628,29 @@ trait EmitLlvmObjects
         $fixedArgs = $iv->args;
         $pack = null;
         $packElem = null;
+        $packCell = false;
+        $packErased = false;
         foreach ($iv->args as $i => $a) {
             if ($a->kind !== Node::KIND_SPREAD) { continue; }
-            if ($argc !== 1) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.multi_spread', 1); } return null; }
+            if ($argc !== 1) { $this->dynRejectWhy = 'multi_spread'; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.multi_spread', 1); } return null; }
             $op = $this->asSpreadNode($a)->operand;
             // `...[a, b]` is the argument list `a, b`.
             if ($op instanceof \Compile\Mir\ArrayLit) {
                 $fixedArgs = [];
                 foreach ($op->elements as $e) {
-                    if ($e->key !== null || $e->value->kind === Node::KIND_SPREAD) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.keyed_spread', 1); } return null; }
+                    if ($e->key !== null || $e->value->kind === Node::KIND_SPREAD) { $this->dynRejectWhy = 'keyed_spread'; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.keyed_spread', 1); } return null; }
                     $fixedArgs[] = $e->value;
                 }
                 continue;
             }
             $pt = $op->type;
-            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.pack_shape', 1); } return null; }
+            $packCell = $pt->kind === Type::KIND_CELL;
+            // A bare `array $p` is KIND_UNKNOWN: an erased array word, read through the
+            // 48-bit payload mask as every other spread operand is ({@see emitSpreadOperand}).
+            $packErased = $pt->kind === Type::KIND_UNKNOWN;
+            if ((!$pt->isVec() && !$packCell && !$packErased) || $op->kind !== Node::KIND_LOAD_LOCAL) { $this->dynRejectWhy = 'pack_shape:' . $pt->kind . '/' . ($pt->key === null ? 'nokey' : $pt->key->kind) . '/' . ($pt->element === null ? 'noel' : $pt->element->kind) . ' op=' . (string)$op->kind; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.pack_shape', 1); } return null; }
             $el = $pt->element;
-            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+            if (!$packCell && $el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
                 $packElem = $el;
             }
             $pack = $op;
@@ -5586,7 +5667,9 @@ trait EmitLlvmObjects
             if ($needsNodes ? !$this->dynOperandsPlain($dp, $iv)
                             : !($this->dynPureRead($dp->object)
                                 && ($dp->name->kind === Node::KIND_STRING_CONST || $this->dynPureRead($dp->name)))) {
-                if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.operands', 1); }
+                $whyArgs = '';
+                foreach ($iv->args as $wa) { $whyArgs .= $wa->kind . ','; }
+                $this->dynRejectWhy = 'operands obj=' . $dp->object->kind . ' name=' . $dp->name->kind . ' args=' . $whyArgs; if (\Compile\Stats::$on) { \Compile\Stats::bump('dynd.reject.operands', 1); }
                 return null;
             }
         }
@@ -5599,7 +5682,31 @@ trait EmitLlvmObjects
         // A borrowed cell pack rides as is; a concrete-element one is rebuilt
         // as cells (the trampoline's contract) and that copy is ours to drop.
         $fresh = $pack === null || $packElem !== null;
-        if ($pack !== null) {
+        if ($pack !== null && $packErased) {
+            $out .= $this->emitNode($pack);
+            $out .= $this->cellToPtr();
+        } elseif ($pack !== null && $packCell) {
+            // An untyped `array $parameters` rides as a cell: strip the tag to
+            // the vec[cell] payload the trampolines take, as the ABI path does.
+            $out .= $this->emitNode($pack);
+            $out .= $this->coerceToI64();
+            $packCellReg = $this->lastValue;
+            $out .= $this->cellTagIr($packCellReg);
+            $isArr = $this->ssa->allocReg();
+            $out .= '  ' . $isArr . ' = icmp eq i64 ' . $this->cellTagReg . ", 7\n";
+            $packGood = $this->ssa->allocLabel('dynd.array');
+            $packBad = $this->ssa->allocLabel('dynd.nonarray');
+            $out .= '  br i1 ' . $isArr . ', label %' . $packGood . ', label %' . $packBad . "\n";
+            $out .= $packBad . ":\n";
+            $out .= $this->emitNamedFatal('PHP Fatal error: Only arrays and Traversables can be unpacked');
+            $out .= "  unreachable\n";
+            $out .= $packGood . ":\n";
+            $payload = $this->ssa->allocReg();
+            $out .= '  ' . $payload . ' = and i64 ' . $packCellReg . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $argsPtr = $this->ssa->allocReg();
+            $out .= '  ' . $argsPtr . ' = inttoptr i64 ' . $payload . " to ptr\n";
+            $this->lastValue = $argsPtr;
+        } elseif ($pack !== null) {
             $out .= $this->emitNode($pack);
             $out .= $this->coerceToPtr();
             if ($packElem !== null) {
@@ -5896,7 +6003,7 @@ trait EmitLlvmObjects
         // slot (with the full store semantics — readonly guard, rc retain, float
         // truncation, set hooks), falling back to the bag for an undeclared name.
         $cls = $n->object->type->class ?? '';
-        if ($cls !== '' && isset($this->classes[$cls])) {
+        if ($cls !== '' && isset($this->classes[$cls]) && !$this->isRebindableThis($n->object)) {
             $cd = $this->classes[$cls];
             return $this->emitStoreDynPropDispatch($n, $this->declaredPropTypes($cd), $cd);
         }
@@ -5998,6 +6105,25 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** The class that declares `$prop` on a receiver of type `$t` (first atom of a union that does), or ''. */
+    private function dynStoreOwnerClass(Type $t, string $prop): string
+    {
+        $cands = [];
+        if ($t->kind === Type::KIND_UNION) {
+            foreach ($t->atoms as $atom) { $cands[] = $atom->class ?? ''; }
+        } else {
+            $cands[] = $t->class ?? '';
+        }
+        foreach ($cands as $c) {
+            $cur = $c;
+            while ($cur !== '' && isset($this->classes[$cur])) {
+                if (isset($this->classes[$cur]->propertyTypes[$prop])) { return $cur; }
+                $cur = $this->classes[$cur]->parent ?? '';
+            }
+        }
+        return '';
+    }
+
     /** `$o->$name = v` on a receiver with a known member set (a class or a union):
      *  strcmp the runtime name against each declared property and reuse the full
      *  property-store path (readonly guard, rc retain, float truncation, set
@@ -6023,7 +6149,13 @@ trait EmitLlvmObjects
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
-            $sp = new \Compile\Mir\StoreProperty($n->object, $p, $n->value, $pt);
+            // The name was a runtime value, so TypeCheck could not coerce the value to this
+            // slot's declared scalar type; do it here, as it does for a static `$o->p = v`.
+            $own = $this->dynStoreOwnerClass($n->object->type, $p);
+            $dv = $own === '' || isset($this->classes[$own]->propHooks[$p]) ? $n->value
+                : \Compile\Mir\Passes\TypeCheck::coerceScalar($n->value, $pt, 'Cannot assign string to property '
+                    . $own . '::$' . $p . ' of type ' . $pt->toString());
+            $sp = new \Compile\Mir\StoreProperty($n->object, $p, $dv, $pt);
             $out .= $this->emitStoreProperty($sp);
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $out .= '  br label %' . $endL . "\n";
@@ -7604,7 +7736,7 @@ trait EmitLlvmObjects
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
-                                                       $cls . '__' . $n->method);
+                                                       $cls . '__' . $n->method, $a->operand->type);
                 $out .= $sir;
                 foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }

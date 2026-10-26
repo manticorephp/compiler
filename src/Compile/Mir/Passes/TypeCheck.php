@@ -202,7 +202,7 @@ final class TypeCheck
                 $cd = $this->classes[$cls];
                 $pt = $cd->propertyTypes[$n->property] ?? null;
                 if ($pt !== null) {
-                    if (!isset($cd->propHooks[$n->property])) { $n->value = $this->scalarCast($n->value, $pt, $inFn); }
+                    if (!isset($cd->propHooks[$n->property])) { $n->value = $this->scalarCast($n->value, $pt, $inFn, 'Cannot assign string to property ' . $cls . '::$' . $n->property . ' of type ' . $this->phpTypeName($pt)); }
                     return;
                 }
                 $cls = $cd->parent;
@@ -210,9 +210,18 @@ final class TypeCheck
         }
     }
 
-    private function scalarCast(Node $v, Type $want, string $inFn): Node
+    private function scalarCast(Node $v, Type $want, string $inFn, string $strErr = ''): Node
     {
         if ($v->kind === Node::KIND_LOAD_LOCAL && isset($this->staticLocals[$inFn . '::' . $v->name])) { return $v; }
+        return self::coerceScalar($v, $want, $strErr);
+    }
+
+    /**
+     * The coercive-mode cast of `$v` to the scalar type `$want` a typed sink declares, or `$v` itself
+     * when none applies. `$strErr` is the TypeError a NON-NUMERIC string raises instead of parsing to 0.
+     */
+    public static function coerceScalar(Node $v, Type $want, string $strErr): Node
+    {
         $wk = $want->kind;
         $vk = $v->type->kind;
         if ($wk === $vk || ($wk === Type::KIND_FLOAT && $vk === Type::KIND_INT)) { return $v; }
@@ -220,6 +229,7 @@ final class TypeCheck
         if ($vk !== Type::KIND_INT && $vk !== Type::KIND_FLOAT && $vk !== Type::KIND_STRING && $vk !== Type::KIND_BOOL) { return $v; }
         $cast = new \Compile\Mir\Cast($wk === Type::KIND_INT ? 'int' : ($wk === Type::KIND_FLOAT ? 'float' : 'string'), $v, $want);
         $cast->line = $v->line;
+        if ($vk === Type::KIND_STRING && $wk !== Type::KIND_STRING) { $cast->typeErr = $strErr; }
         return $cast;
     }
 
@@ -352,6 +362,12 @@ final class TypeCheck
                 $cast->line = $arg->line;
                 $site->args[$ai] = $cast;
                 continue;
+            }
+            if ($site->kind === Node::KIND_CALL && $ak === Type::KIND_CELL && !$p->byRef && $p->type->kind === Type::KIND_OBJ
+                && $p->type->class !== null && isset($this->classes[$p->type->class])
+                && !isset($this->ffiFns[$fnName]) && !isset($this->claimFns[$fnName])) {
+                $site->objArgHeads[$ai] = $label . '(): Argument #' . (string)($ai + 1) . ' ($' . $p->name
+                    . ') must be of type ' . $p->type->class . ', ';
             }
             if ($this->castOnly) { continue; }
             if (!$this->reprOnly &&$this->incompatible($this->provenType($arg), $p->type)) {

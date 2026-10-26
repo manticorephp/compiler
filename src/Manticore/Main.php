@@ -299,6 +299,14 @@ function collect_argv(): array
     return $out;
 }
 
+/** `read_file` then delete it: for scratch files that capture a command's output. */
+function read_file_once(string $path): ?string
+{
+    $c = read_file($path);
+    sys_unlink($path);
+    return $c;
+}
+
 /**
  * Read a file from disk into a fresh calloc'd buffer (zero-init tail
  * acts as implicit NUL terminator). Returns the buffer or null when
@@ -415,7 +423,7 @@ function read_stdlib_dir(string $dir): array
     $out = [];
     $listPath = "/tmp/manticore_stdlib_" . (string)getpid() . ".txt";
     system("find " . $dir . " -name '*.php' -type f 2>/dev/null | sort > " . $listPath);
-    $contents = read_file($listPath);
+    $contents = read_file_once($listPath);
     if ($contents === null) {
         return $out;
     }
@@ -451,13 +459,11 @@ function pcre2_link_flags(): string
 {
     $listPath = "/tmp/manticore_pcre2_" . (string)getpid() . ".txt";
     $rc = system("pcre2-config --libs8 > " . $listPath . " 2>/dev/null");
-    if ($rc === 0) {
-        $c = read_file($listPath);
-        if ($c !== null) {
-            $t = \trim($c);
-            if ($t !== "") {
-                return $t;
-            }
+    $c = read_file_once($listPath);
+    if ($rc === 0 && $c !== null) {
+        $t = \trim($c);
+        if ($t !== "") {
+            return $t;
         }
     }
     $home = homebrew_opt_lib('pcre2');
@@ -478,13 +484,11 @@ function openssl_link_flags(): string
 {
     $listPath = "/tmp/manticore_openssl_" . (string)getpid() . ".txt";
     $rc = system("pkg-config --libs openssl > " . $listPath . " 2>/dev/null");
-    if ($rc === 0) {
-        $c = read_file($listPath);
-        if ($c !== null) {
-            $t = \trim($c);
-            if ($t !== "") {
-                return $t;
-            }
+    $c = read_file_once($listPath);
+    if ($rc === 0 && $c !== null) {
+        $t = \trim($c);
+        if ($t !== "") {
+            return $t;
         }
     }
     $home = homebrew_opt_lib('openssl@3');
@@ -669,23 +673,19 @@ function generic_link_flags(string $name): string
 {
     $listPath = "/tmp/manticore_lib_" . $name . "_" . (string)getpid() . ".txt";
     $rc = system("pkg-config --libs " . $name . " > " . $listPath . " 2>/dev/null");
-    if ($rc === 0) {
-        $c = read_file($listPath);
-        if ($c !== null) {
-            $t = \trim($c);
-            if ($t !== "") {
-                return $t;
-            }
+    $c = read_file_once($listPath);
+    if ($rc === 0 && $c !== null) {
+        $t = \trim($c);
+        if ($t !== "") {
+            return $t;
         }
     }
     $rc = system($name . "-config --libs > " . $listPath . " 2>/dev/null");
-    if ($rc === 0) {
-        $c = read_file($listPath);
-        if ($c !== null) {
-            $t = \trim($c);
-            if ($t !== "") {
-                return $t;
-            }
+    $c = read_file_once($listPath);
+    if ($rc === 0 && $c !== null) {
+        $t = \trim($c);
+        if ($t !== "") {
+            return $t;
         }
     }
     return "-l" . $name;
@@ -2410,7 +2410,7 @@ function resolve_sources(array $files): ?array
                 // byte of the path is read as a single-char string).
                 $listPath = "/tmp/manticore_files_" . (string)getpid() . ".txt";
                 system("find " . $path . " -name '*.php' -type f 2>/dev/null | sort > " . $listPath);
-                $listContents = read_file($listPath);
+                $listContents = read_file_once($listPath);
                 if ($listContents !== null) {
                     foreach (\explode("\n", $listContents) as $file) {
                         if (\strlen($file) === 0) {
@@ -2461,7 +2461,7 @@ function resolve_source_files(array $files): ?array
             if (is_directory($path)) {
                 $listPath = "/tmp/manticore_afiles_" . (string)getpid() . ".txt";
                 system("find " . $path . " -name '*.php' -type f 2>/dev/null | sort > " . $listPath);
-                $listContents = read_file($listPath);
+                $listContents = read_file_once($listPath);
                 if ($listContents !== null) {
                     foreach (\explode("\n", $listContents) as $file) {
                         if (\strlen($file) === 0) {
@@ -2622,7 +2622,7 @@ function collect_php_sources(string $dir, array $excludes): array
     $out = [];
     $listPath = "/tmp/manticore_build_" . (string)getpid() . ".txt";
     system("find " . $dir . " -name '*.php' -type f 2>/dev/null | sort > " . $listPath);
-    $contents = read_file($listPath);
+    $contents = read_file_once($listPath);
     if ($contents === null) {
         return $out;
     }
@@ -2664,7 +2664,7 @@ function collect_php_source_files(string $dir, array $excludes): array
     $out = [];
     $listPath = "/tmp/manticore_buildf_" . (string)getpid() . ".txt";
     system("find " . $dir . " -name '*.php' -type f 2>/dev/null | sort > " . $listPath);
-    $contents = read_file($listPath);
+    $contents = read_file_once($listPath);
     if ($contents === null) {
         return $out;
     }

@@ -666,6 +666,10 @@ final class Parser
     private function parseUseGroupItem(string $prefix, string $kind): UseItem
     {
         $first = $this->peek();
+        if ($kind === 'class') {
+            if ($this->checkKeyword('function')) { $this->advance(); $kind = 'function'; }
+            elseif ($this->checkKeyword('const')) { $this->advance(); $kind = 'const'; }
+        }
         $tail = $this->parseClassNameLiteral();
         $written = $tail;
         $tail = \ltrim($tail, '\\');
@@ -2756,8 +2760,17 @@ final class Parser
             }
         }
         $this->expect(TokenKind::CloseParen, "expected ')' after arguments");
+        $spread = false;
+        foreach ($args as $a) {
+            if ($a->kind === 'Spread') { $spread = true; }
+            elseif ($spread && $a->kind === 'NamedArg') { self::$sawNamedSpread = true; }
+        }
         return $args;
     }
+
+    /** A call anywhere in the process names an argument after a spread (`f(...$a, name: v)`):
+     *  lowering reads it before it has seen every body, to decide how trampolines take their arguments. */
+    public static bool $sawNamedSpread = false;
 
     /**
      * Parse a single call argument. PHP 8.0 named arguments

@@ -122,6 +122,10 @@ trait LowerExprs
 
     private function lowerCallExpr(\Parser\Ast\CallExpr $expr): Node
     {
+        $canon = $this->canonFunctionName($expr->function);
+        if ($canon !== $expr->function) {
+            return $this->lowerCallExpr(new \Parser\Ast\CallExpr($canon, $expr->args, $expr->span, $expr->qualified));
+        }
             $fn = \strtolower($expr->function);
             // Every desugaring below matches the BARE name. A namespaced file
             // QUALIFIES an unqualified call ({@see Parser::resolveClassName}),

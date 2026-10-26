@@ -1,0 +1,6 @@
+array(2) {
+  ["message"]=>
+  string(1) "x"
+  ["errno"]=>
+  int(5)
+}

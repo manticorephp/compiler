@@ -1,0 +1,2 @@
+TypeError: use_box(): Argument #1 ($b) must be of type Box, false given
+1

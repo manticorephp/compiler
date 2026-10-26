@@ -35,6 +35,10 @@ final class FunctionSignatures
     public array $returnType = [];
     /** @var array<string, bool[]> fn name → which parameters are variadic */
     public array $variadicParams = [];
+    /** @var array<string, string[]> fn name → parameter names, for binding a string-keyed spread */
+    public array $paramNames = [];
+    /** The module spreads a string-keyed array into a call ({@see \Compile\Mir\Module::$namedSpread}). */
+    public bool $namedSpread = false;
     /** @var array<string, bool> fn name → body calls the func-args family, so a
      *  call site must push its as-written argument count onto the side channel
      *  ({@see FunctionDef::$usesFuncArgs}). */

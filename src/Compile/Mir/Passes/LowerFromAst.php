@@ -214,6 +214,8 @@ final class LowerFromAst implements Pass
      *  free function — so a `self::`/`static::`/`parent::` call inside one has
      *  no receiver to forward, however the callee is declared. */
     private bool $currentLowerFnHasThis = false;
+    /** Lowering the closure literal of `Closure::bind(fn, obj, Scope)`: its `$this` is filled by the bind, never captured. */
+    private bool $bindLateThis = false;
 
     /** Closures being lowered around the current expression: a closure's scope
      *  can be rebound at run time, so no member-access check is made inside one. */
@@ -1243,6 +1245,7 @@ final class LowerFromAst implements Pass
             }
         }
 
+        if (\Parser\Parser::$sawNamedSpread) { $module->namedSpread = true; }
         // Reflection Ф2: an invoke trampoline per (user class, method) + ctor,
         // synthesized from the now-complete class table (same point + pattern as
         // __mir_dump_object). Gated on the program reflecting at all; a
@@ -1265,6 +1268,7 @@ final class LowerFromAst implements Pass
                 $afn->isPrelude = true;
                 $module->addFunction($afn);
             }
+            \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
@@ -1619,6 +1623,7 @@ final class LowerFromAst implements Pass
                     $module->addFunction($this->lowerFunction($rfd));
                 }
             }
+            \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
             $fnTrampSrc = '';
             foreach ($module->reflFnMeta as $fn => $mm) {
                 $variadic = false; $byRef = false;
@@ -1743,6 +1748,7 @@ final class LowerFromAst implements Pass
             // here would define every constructor/method twice. Non-reflection
             // modules still need the dynamic ABI trampolines here.
             if (!$this->includeReflection) {
+                \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
                 $dynamicTrampSrc = '';
                 foreach ($module->classes as $cd) {
                     $dynamicTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
@@ -7274,6 +7280,19 @@ final class LowerFromAst implements Pass
         return '';
     }
 
+    /** A class in the chain uses a trait or extends a class not declared here: its method set is not visible to lowering. */
+    private function classChainOpaque(string $class): bool
+    {
+        $c = $class;
+        while ($c !== '') {
+            if (!isset($this->classDecls[$c])) { return true; }
+            $cd = $this->classDecls[$c];
+            if ($this->classDeclUses($cd) !== []) { return true; }
+            $ext = $this->classDeclExtends($cd);
+            $c = ($ext !== []) ? $ext[0] : '';
+        }
+        return false;
+    }
     private function lowerPropertyAccess(\Parser\Ast\PropertyAccess $expr): PropertyAccess_
     {
         $obj = $this->lowerExpr($expr->object);
@@ -7301,8 +7320,55 @@ final class LowerFromAst implements Pass
         return new Ternary($cond, new NullConst(Type::null_()), $prop, Type::unknown(), true);
     }
 
+    /** @var array<string, string> lowercase method name → the one spelling every declaration uses ('' = spellings differ) */
+    private array $methodCanon = [];
+    private int $methodCanonStamp = -1;
+    /** @var array<string, string> lowercase function name → declared spelling */
+    private array $fnCanon = [];
+    private int $fnCanonStamp = -1;
+
+    /** php resolves method names case-insensitively; the emitter matches them exactly,
+     *  so a call site is rewritten to the spelling the declarations use. */
+    private function canonMethodName(string $name): string
+    {
+        $stamp = \count($this->classDecls) + \count($this->traitTable);
+        if ($stamp !== $this->methodCanonStamp) {
+            $this->methodCanonStamp = $stamp;
+            $this->methodCanon = [];
+            $all = [];
+            foreach ($this->classDecls as $cd0) { $all[] = $cd0; }
+            foreach ($this->traitTable as $td0) { $all[] = $td0; }
+            foreach ($all as $d0) {
+                foreach ($this->classDeclMethods($this->classDeclOf($d0)) as $m) {
+                    $mn = $this->methodDeclName($m);
+                    $lc = \strtolower($mn);
+                    if (!isset($this->methodCanon[$lc])) { $this->methodCanon[$lc] = $mn; }
+                    elseif ($this->methodCanon[$lc] !== $mn) { $this->methodCanon[$lc] = ''; }
+                }
+            }
+        }
+        $c = $this->methodCanon[\strtolower($name)] ?? '';
+        return $c === '' ? $name : $c;
+    }
+
+    private function canonFunctionName(string $name): string
+    {
+        if (isset($this->fnDecls[$name])) { return $name; }
+        $stamp = \count($this->fnDecls);
+        if ($stamp !== $this->fnCanonStamp) {
+            $this->fnCanonStamp = $stamp;
+            $this->fnCanon = [];
+            foreach ($this->fnDecls as $fname => $_) { $this->fnCanon[\strtolower((string)$fname)] = (string)$fname; }
+        }
+        return $this->fnCanon[\strtolower($name)] ?? $name;
+    }
+
     private function lowerMethodCall(\Parser\Ast\MethodCallExpr $expr): Node
     {
+        $canon = $this->canonMethodName($expr->method);
+        if ($canon !== $expr->method) {
+            return $this->lowerMethodCall(new \Parser\Ast\MethodCallExpr($expr->object, $canon, $expr->args, $expr->nullsafe, $expr->span));
+        }
         // First-class callable `$o->m(...)` → a closure capturing `$o`.
         if (\count($expr->args) === 1 && $expr->args[0]->kind === 'Ellipsis') {
             return $this->synthMethodClosure($this->lowerExpr($expr->object), $expr->method);
@@ -7358,7 +7424,16 @@ final class LowerFromAst implements Pass
         // InferTypes. Variadic-ness is a property of the method NAME, so resolve
         // a consistent variadic signature across all classes and pack against it
         // (default-arg padding for non-variadic methods still defers to emit).
+        // `$o->undeclared(...)` on a statically known class whose `__call` takes it: the arguments
+        // reach `$arguments` as written, never packed against some other class's variadic of that name.
+        $magicHint = '';
         if ($params === null) {
+            $mh = $this->receiverClassHint($expr->object);
+            if ($mh !== '' && $this->resolveMethodDeclClass($mh, $expr->method) === ''
+                && !$this->classChainOpaque($mh)
+                && $this->resolveMethodDeclClass($mh, '__call') !== '') { $magicHint = $mh; }
+        }
+        if ($params === null && $magicHint === '') {
             $params = $this->variadicMethodParams($expr->method);
         }
         if ($params !== null) {
@@ -7366,7 +7441,22 @@ final class LowerFromAst implements Pass
             $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
         } else {
             $args = [];
-            foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
+            foreach ($expr->args as $a) {
+                $args[] = $this->lowerExpr($a);
+            }
+            // `$o->undeclared(1, b: 2)` on a class whose `__call` takes it: the named
+            // arguments reach `$arguments` under their names, after the positional ones.
+            if ($magicHint !== '') {
+                $els = [];
+                foreach ($expr->args as $i => $a) {
+                    $key = $a->kind === 'NamedArg' ? new StringConst($this->namedArgName($a), Type::string_()) : null;
+                    $els[] = new ArrayElement_($key, $args[$i]);
+                }
+                return new MethodCall_($obj, '__call', [
+                    new StringConst($expr->method, Type::string_()),
+                    new ArrayLit($els, Type::unknown()),
+                ], Type::unknown());
+            }
         }
         // php lets a STATIC method be reached through `->`, and it passes NO
         // receiver. Lowered as an ordinary method call it got one anyway, so
@@ -7480,6 +7570,10 @@ final class LowerFromAst implements Pass
 
     private function lowerStaticCall(\Parser\Ast\StaticCall $expr): Node
     {
+        $canon = $this->canonMethodName($expr->method);
+        if ($canon !== $expr->method) {
+            return $this->lowerStaticCall(new \Parser\Ast\StaticCall($expr->class, $canon, $expr->args, $expr->span));
+        }
         $class = $expr->class;
         $low = \strtolower($class);
         // Dispatch target vs. late-static scope. `static::` dispatches to the
@@ -7623,7 +7717,14 @@ final class LowerFromAst implements Pass
                     $prevS = $this->currentStaticClass;
                     $this->currentLowerClass = $bindScope;
                     $this->currentStaticClass = $bindScope;
+                    // The closure is bound to an instance of $bindScope: `$this` is live in it.
+                    $prevT = $this->currentLowerFnHasThis;
+                    $prevB = $this->bindLateThis;
+                    $this->currentLowerFnHasThis = true;
+                    $this->bindLateThis = true;
                     $args[] = $this->lowerExpr($a);
+                    $this->currentLowerFnHasThis = $prevT;
+                    $this->bindLateThis = $prevB;
                     $this->currentLowerClass = $prevL;
                     $this->currentStaticClass = $prevS;
                 } else {

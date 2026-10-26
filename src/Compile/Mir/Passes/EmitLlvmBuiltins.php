@@ -9375,6 +9375,15 @@ trait EmitLlvmBuiltins
      * retain it again.
      */
     /** php's `(array)` key for a property: "\0*\0name" protected, "\0Declarer\0name" private. */
+    /** The throwables' captured stack (`traceNames` / `traceLines`) is ours, not
+     *  php's property set: no object view shows it. */
+    private function isThrowableTraceSlot(\Compile\Mir\ClassDef $cd, string $pn): bool
+    {
+        if ($pn !== 'traceNames' && $pn !== 'traceLines') { return false; }
+        $pm = $cd->propertyMeta[$pn] ?? null;
+        $decl = $pm !== null && $pm->declaringClass !== '' ? $pm->declaringClass : $cd->name;
+        return $decl === 'Exception' || $decl === 'Error';
+    }
     private function mangledPropKey(\Compile\Mir\ClassDef $cd, string $pn): string
     {
         $pm = $cd->propertyMeta[$pn] ?? null;
@@ -9776,7 +9785,7 @@ trait EmitLlvmBuiltins
                 if (($cd->propertyTypes[$pn] ?? null) === null) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
                 if ($mangle && isset($cd->virtualProps[$pn])) { continue; }
-                if ($this->isBufSlot($cd, $pn)) { continue; }
+                if ($this->isBufSlot($cd, $pn) || $this->isThrowableTraceSlot($cd, $pn)) { continue; }
                 if ($publicOnly && !$forCompare) {
                     $pm = $cd->propertyMeta[$pn] ?? null;
                     if ($pm !== null && $pm->visibility !== 'public') { continue; }
@@ -9797,7 +9806,7 @@ trait EmitLlvmBuiltins
                 if ($pt === null) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
                 if ($mangle && isset($cd->virtualProps[$pn])) { continue; }
-                if ($this->isBufSlot($cd, $pn)) { continue; }
+                if ($this->isBufSlot($cd, $pn) || $this->isThrowableTraceSlot($cd, $pn)) { continue; }
                 // php serializes ONLY public properties from an object; a
                 // missing meta entry is a compiler-synthesised slot, which is
                 // public by construction. `(array)$o` and an in-scope
@@ -9959,7 +9968,7 @@ trait EmitLlvmBuiltins
         foreach ($cd->propertyNames as $pn) {
             $pt = $cd->propertyTypes[$pn] ?? null;
             if ($pt === null) { continue; }
-            if ($this->isBufSlot($cd, $pn)) { continue; }
+            if ($this->isBufSlot($cd, $pn) || $this->isThrowableTraceSlot($cd, $pn)) { continue; }
             $pm = $cd->propertyMeta[$pn] ?? null;
             if ($pm !== null && $pm->visibility !== 'public') { continue; }
             $ini = $cd->initChecked($pn)

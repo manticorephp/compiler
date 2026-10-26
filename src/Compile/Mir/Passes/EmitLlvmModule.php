@@ -929,7 +929,17 @@ trait EmitLlvmModule
         return $out;
     }
 
+    /** An emit failure names the function it came from. */
     private function emitFunction(FunctionDef $fn): string
+    {
+        try {
+            return $this->emitFunctionBody($fn);
+        } catch (\RuntimeException $e) {
+            throw new \RuntimeException($e->getMessage() . ' (in ' . $fn->name . ')');
+        }
+    }
+
+    private function emitFunctionBody(FunctionDef $fn): string
     {
         // Signature-only stdlib import: emit a bare `declare`, no body. The
         // definition is linked from the prebuilt stdlib.o. Uniform i64 ABI →
@@ -953,6 +963,7 @@ trait EmitLlvmModule
         $this->clearPtrArgCells();
         $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
+        $this->own->fnName = $fn->name;
         $this->frame->isPrelude = $fn->isPrelude;
         $this->frame->body = $fn->body;
         $this->frame->hasArena = false;

@@ -89,6 +89,8 @@ final class InlineClosures implements Pass
     /** While a Ds method body is cloned: the local holding its callback. */
     private string $dsCbVar = '';
     private ?FunctionDef $dsCbFn = null;
+    /** Rewriting a `__mc_overload_*` helper body: its own fallback operators must stay plain. */
+    private bool $inOverloadHelper = false;
 
     public function name(): string { return self::NAME; }
 
@@ -117,8 +119,10 @@ final class InlineClosures implements Pass
             // overloading still applies there: it is a per-node rewrite, and the
             // untouched `$a + $b` on an object would run as integer arithmetic.
             $this->opOnly = isset($this->captureCount[$fn->name]);
+            $this->inOverloadHelper = \str_starts_with($fn->name, '__mc_overload_');
             $fn->body = $this->rewriteBlock($fn->body);
             $this->opOnly = false;
+            $this->inOverloadHelper = false;
         }
         $module->markPassApplied(self::NAME);
         return $module;
@@ -171,6 +175,7 @@ final class InlineClosures implements Pass
             if ($this->hasHook($n->right, '__compare')) {
                 return new \Compile\Mir\Neg($this->opCall($n->right, '__compare', [$n->left], Type::int_()), Type::int_());
             }
+            if ($this->eitherErased($n->left, $n->right)) { return new Call('__mc_overload_spaceship', [$n->left, $n->right], Type::int_()); }
             return null;
         }
         if ($k === Node::KIND_CMP) {
@@ -186,6 +191,9 @@ final class InlineClosures implements Pass
                 return new \Compile\Mir\Cmp(
                     $this->opCall($n->right, '__compare', [$n->left], Type::int_()),
                     new \Compile\Mir\IntConst(0, Type::int_()), $flip);
+            }
+            if ($this->eitherErased($n->left, $n->right)) {
+                return new Call('__mc_overload_cmp', [new \Compile\Mir\StringConst($op, Type::string_()), $n->left, $n->right], Type::bool_());
             }
         }
         return null;
@@ -229,7 +237,24 @@ final class InlineClosures implements Pass
                 new \Compile\Mir\StringConst($op, Type::string_()), $l,
                 new \Compile\Mir\BoolConst(true, Type::bool_())], $type);
         }
+        if ($this->eitherErased($l, $r)) {
+            return new Call('__mc_overload_op', [new \Compile\Mir\StringConst($op, Type::string_()), $l, $r], Type::cell());
+        }
         return null;
+    }
+
+    /**
+     * An operand whose class is erased (mixed / untyped) may be an Overloadable at run
+     * time; the prelude helper dispatches on it. Only when the prelude carries the helper.
+     */
+    private function eitherErased(Node $l, Node $r): bool
+    {
+        if ($this->inOverloadHelper || !isset($this->fnByName['__mc_overload_op'])) { return false; }
+        foreach ([$l, $r] as $o) {
+            $k = $o->type->kind;
+            if (($k === Type::KIND_CELL && !$o->type->isNumericCell()) || $k === Type::KIND_UNKNOWN) { return true; }
+        }
+        return false;
     }
 
     /** @param Node[] $args */
