@@ -333,6 +333,18 @@ class DateInterval
 }
 
 /** A mutable date and time. */
+/** The process-wide `getLastErrors()` slot both classes share: `false` = the last parse was clean. @return array<string, mixed>|false */
+function __mc_dt_last_errors(int $set = 0): array|false
+{
+    static $last = false;
+    if ($set === 1) {
+        $last = false;
+    } elseif ($set === 2) {
+        $last = ['warning_count' => 0, 'warnings' => [], 'error_count' => 1, 'errors' => [0 => 'Unexpected data found.']];
+    }
+    return $last;
+}
+
 class DateTime implements DateTimeInterface
 {
     #[\Manticore\Attr\CompareKey] private int $ts = 0;
@@ -366,8 +378,10 @@ class DateTime implements DateTimeInterface
         }
         $t = \__mc_strtotime_core($datetime, \time(), $this->zid, 0);
         if ($t === \__mc_dt_fail()) {
+            \__mc_dt_last_errors(2);
             throw new DateMalformedStringException('DateTime::__construct(): Failed to parse time string (' . $datetime . ')');
         }
+        \__mc_dt_last_errors(1);
         $this->ts = $t;
         $this->us = \__mc_dt_us(0, 0);
         // a zone written in the string wins over the argument
@@ -463,6 +477,7 @@ class DateTime implements DateTimeInterface
         if ($t === \__mc_dt_fail()) {
             throw new DateMalformedStringException('DateTime::modify(): Failed to parse time string (' . $modifier . ')');
         }
+        \__mc_dt_last_errors(1);
         $this->ts = $t;
         return $this;
     }
@@ -500,12 +515,20 @@ class DateTime implements DateTimeInterface
         return $iv;
     }
 
+    /** @return array<string, mixed>|false */
+    public static function getLastErrors(): array|false
+    {
+        return \__mc_dt_last_errors();
+    }
+
     public static function createFromFormat(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTime|false
     {
         $t = \__mc_dt_from_format($format, $datetime);
         if ($t === \__mc_dt_fail()) {
+            \__mc_dt_last_errors(2);
             return false;
         }
+        \__mc_dt_last_errors(1);
         $d = new DateTime('@' . $t, $timezone);
         if ($timezone !== null) {
             $d->setTimezone($timezone);
@@ -564,8 +587,10 @@ class DateTimeImmutable implements DateTimeInterface
         }
         $t = \__mc_strtotime_core($datetime, \time(), $this->zid, 0);
         if ($t === \__mc_dt_fail()) {
+            \__mc_dt_last_errors(2);
             throw new DateMalformedStringException('DateTimeImmutable::__construct(): Failed to parse time string (' . $datetime . ')');
         }
+        \__mc_dt_last_errors(1);
         $this->ts = $t;
         $this->us = \__mc_dt_us(0, 0);
         // a zone written in the string wins over the argument
@@ -709,12 +734,20 @@ class DateTimeImmutable implements DateTimeInterface
         return $iv;
     }
 
+    /** @return array<string, mixed>|false */
+    public static function getLastErrors(): array|false
+    {
+        return \__mc_dt_last_errors();
+    }
+
     public static function createFromFormat(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTimeImmutable|false
     {
         $t = \__mc_dt_from_format($format, $datetime);
         if ($t === \__mc_dt_fail()) {
+            \__mc_dt_last_errors(2);
             return false;
         }
+        \__mc_dt_last_errors(1);
         $d = new DateTimeImmutable('@' . $t, $timezone);
         if ($timezone !== null) {
             return $d->setTimezone($timezone);
