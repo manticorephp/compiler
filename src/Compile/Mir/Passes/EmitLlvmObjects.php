@@ -1313,7 +1313,8 @@ trait EmitLlvmObjects
         // `$cell->prop` — a tagged object cell (array_first over an obj array,
         // a `mixed` field, a json_decode stdClass): resolve the holder's slot.
         if ($pa->object->type->kind === Type::KIND_CELL) {
-            return $this->emitCellPropertyRead($pa);
+            $cr = $this->emitCellPropertyRead($pa);
+            return $this->unboxNarrowedObjRead($pa, $cr);
         }
         if ($pa->object->type->kind === Type::KIND_UNION) {
             return $this->emitUnionPropertyAccess($pa);
@@ -1377,7 +1378,8 @@ trait EmitLlvmObjects
         // the real holder lays $prop elsewhere. Recover the class at runtime from
         // the object's class_id and read $prop's REAL per-holder offset.
         if ($pa->object->type->kind === Type::KIND_UNKNOWN) {
-            return $this->emitRawPropByClassId($pa);
+            $rr = $this->emitRawPropByClassId($pa);
+            return $this->unboxNarrowedObjRead($pa, $rr);
         }
         // The class is KNOWN but does not put `$prop` anywhere — neither on
         // itself nor on any subclass. A static offset here is not a fact, it is
@@ -1393,7 +1395,8 @@ trait EmitLlvmObjects
         // does exactly that — `fn &() => $this->instanceof` sits in the app
         // Kernel and is bound to a PhpFileLoader.
         if (!$this->propHasTypedSlot($pa->object, $pa->property)) {
-            return $this->emitRawPropByClassId($pa);
+            $rr = $this->emitRawPropByClassId($pa);
+            return $this->unboxNarrowedObjRead($pa, $rr);
         }
         $out = $this->emitNode($pa->object);
         $out .= $this->coerceToPtr();
@@ -1998,6 +2001,21 @@ trait EmitLlvmObjects
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
+        return $out;
+    }
+
+    /**
+     * An erased-receiver read answers a boxed CELL. A property PATH narrowed by
+     * `instanceof` types the node OBJ, and its consumers dereference the word as
+     * a raw pointer: strip the tag here, at the producer, as the typed read does.
+     */
+    private function unboxNarrowedObjRead(PropertyAccess_ $pa, string $out): string
+    {
+        if ($pa->type->kind !== Type::KIND_OBJ) { return $out; }
+        $masked = $this->ssa->allocReg();
+        $out .= '  ' . $masked . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";
+        $this->lastValue = $masked;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
