@@ -60,12 +60,12 @@ function mysqli_data_seek(mysqli_result $result, int $offset): bool
 
 function mysqli_debug(string $options): true
 {
-    throw new Error('mysqli: not implemented');
+    return true;
 }
 
 function mysqli_dump_debug_info(mysqli $mysql): bool
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->dump_debug_info();
 }
 
 function mysqli_errno(mysqli $mysql): int
@@ -183,7 +183,7 @@ function mysqli_get_client_info(?mysqli $mysql = null): string
 
 function mysqli_get_client_stats(): array
 {
-    throw new Error('mysqli: not implemented');
+    return __McMysqliConn::stats();
 }
 
 function mysqli_get_client_version(): int
@@ -193,7 +193,7 @@ function mysqli_get_client_version(): int
 
 function mysqli_get_connection_stats(mysqli $mysql): array
 {
-    throw new Error('mysqli: not implemented');
+    return $mysql->get_connection_stats();
 }
 
 function mysqli_get_host_info(mysqli $mysql): string
@@ -203,7 +203,7 @@ function mysqli_get_host_info(mysqli $mysql): string
 
 function mysqli_get_links_stats(): array
 {
-    throw new Error('mysqli: not implemented');
+    return ['total' => 0, 'active_plinks' => 0, 'cached_plinks' => 0];
 }
 
 function mysqli_get_proto_info(mysqli $mysql): int
