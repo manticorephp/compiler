@@ -737,7 +737,7 @@ trait EmitLlvmObjects
                     $out .= $this->emitSpreadOperand($a->operand);
                     [$sir, $sregs] = $this->emitSpreadFill(
                         $this->lastValue, $ai + 1, $ptypes, $tmask,
-                        $a->operand->type->element ?? null, $ctorClass . '____construct');
+                        $a->operand->type->element ?? null, $ctorClass . '____construct', $a->operand->type);
                     $out .= $sir;
                     foreach ($sregs as $rg) { $argList .= ', i64 ' . $rg; }
                     $ai = \count($ptypes) - 1;
@@ -7654,7 +7654,7 @@ trait EmitLlvmObjects
                 $arr = $this->lastValue;
                 $elemType = $a->operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
-                                                       $cls . '__' . $n->method);
+                                                       $cls . '__' . $n->method, $a->operand->type);
                 $out .= $sir;
                 foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }

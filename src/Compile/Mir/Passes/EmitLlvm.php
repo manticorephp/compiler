@@ -834,7 +834,7 @@ final class EmitLlvm implements EmitVisitor
             $this->sigs->variadicParams[$fn->name] = $vmask;
             $this->sigs->paramTypes[$fn->name] = $ptypes;
             $this->sigs->paramDefaults[$fn->name] = $pdefs;
-            if ($module->namedSpread) { $this->sigs->paramNames[$fn->name] = $pnames; }
+            $this->sigs->paramNames[$fn->name] = $pnames;
             $this->sigs->returnsByRef[$fn->name] = $fn->returnsByRef;
             $this->sigs->returnType[$fn->name] = $fn->returnType;
             $this->sigs->usesFuncArgs[$fn->name] = $fn->usesFuncArgs;

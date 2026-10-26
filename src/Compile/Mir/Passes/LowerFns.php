@@ -1439,6 +1439,14 @@ trait LowerFns
         }
         if ($si < 0 || $si >= $vidx || $si !== \count($astArgs) - 1) { return null; }
         $spread = $astArgs[$si];
+        // A string key binds by parameter NAME ({@see foldSpreadNamed}); the emitter's spread
+        // expansion does that against the signature, positional reads here would not.
+        $sv = $this->spreadValueOf($spread);
+        if ($sv instanceof \Parser\Ast\ArrayLit) {
+            foreach ($sv->elements as $el) {
+                if ($el->key instanceof \Parser\Ast\StringLiteral) { return null; }
+            }
+        }
         $span = $spread->span;
         $tmp = \Parser\Ast\Expr::variable('__sprpk' . (string)$this->destrCounter, $span);
         $this->destrCounter = $this->destrCounter + 1;

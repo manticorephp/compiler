@@ -2485,6 +2485,21 @@ trait EmitLlvmCalls
                 }
                 $spVpos = $spVi - $capCnt;
                 $spDefs = $this->sigs->paramDefaults[$fn] ?? [];
+                // A string key of the array binds the parameter of that name, an omitted one before it takes its default.
+                $spNames = $this->sigs->paramNames[$fn] ?? [];
+                $spHit = [];
+                $spNpos = '';
+                $spByName = $spNames !== [] && $this->spreadMayBeKeyed($a->operand->type);
+                if ($spByName) {
+                    $byK = [];
+                    for ($q = $pi; $q < $nparams; $q = $q + 1) {
+                        if ($spVi >= 0 && $q >= $spVpos) { break; }
+                        $qn = $spNames[$capCnt + $q] ?? '';
+                        if ($qn !== '') { $byK[$q] = $qn; }
+                    }
+                    [$hs, $spHit, $spNpos] = $this->emitSpreadNameHits($arr, $byK, $spreadLen);
+                    $out .= $hs;
+                }
                 while ($pi < $nparams) {
                     if ($spVi >= 0 && $pi === $spVpos) {
                         // The rest of the array, renumbered, is the ONE vec the variadic takes.
@@ -2504,20 +2519,47 @@ trait EmitLlvmCalls
                         $pi = $pi + 1;
                         continue;
                     }
-                    if (($spDefs[$capCnt + $pi] ?? null) === null) {
-                        $short = $this->ssa->allocReg();
-                        $out .= '  ' . $short . ' = icmp ule i64 ' . $spreadLen . ', ' . (string)($pi - $base) . "\n";
-                        $out .= $this->emitThrowIf($short, 'ArgumentCountError', 'Too few arguments to function {closure}()');
-                    }
+                    $has = '';
                     $ev = $this->ssa->allocReg();
                     $out .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr ' . $arr
                           . ', i64 ' . (string)($pi - $base) . ")\n";
+                    if (isset($spHit[$pi])) {
+                        $posHas = $this->ssa->allocReg();
+                        $out .= '  ' . $posHas . ' = icmp ugt i64 ' . $spNpos . ', ' . (string)($pi - $base) . "\n";
+                        $nw = $this->ssa->allocReg();
+                        $out .= '  ' . $nw . ' = load i64, ptr ' . $spHit[$pi][1] . "\n";
+                        $byName = $this->ssa->allocReg();
+                        $out .= '  ' . $byName . ' = select i1 ' . $spHit[$pi][0] . ', i64 ' . $nw . ', i64 ' . $ev . "\n";
+                        $pick = $this->ssa->allocReg();
+                        $out .= '  ' . $pick . ' = select i1 ' . $posHas . ', i64 ' . $ev . ', i64 ' . $byName . "\n";
+                        $ev = $pick;
+                        $has = $this->ssa->allocReg();
+                        $out .= '  ' . $has . ' = or i1 ' . $posHas . ', ' . $spHit[$pi][0] . "\n";
+                    }
+                    if (($spDefs[$capCnt + $pi] ?? null) === null) {
+                        $short = $this->ssa->allocReg();
+                        if ($has !== '') {
+                            $out .= '  ' . $short . ' = xor i1 ' . $has . ", true\n";
+                        } else {
+                            $out .= '  ' . $short . ' = icmp ule i64 ' . $spreadLen . ', ' . (string)($pi - $base) . "\n";
+                        }
+                        $out .= $this->emitThrowIf($short, 'ArgumentCountError', 'Too few arguments to function {closure}()');
+                    }
                     if ($elemType !== null && $elemType->kind !== Type::KIND_CELL
                         && $this->isCellBoxableArg($elemType)) {
                         $this->lastValue = $ev;
                         $this->lastValueType = 'i64';
                         $out .= $this->boxToCell($elemType);
                         $ev = $this->lastValue;
+                    }
+                    if ($has !== '' && ($spDefs[$capCnt + $pi] ?? null) !== null) {
+                        $dnode = $spDefs[$capCnt + $pi];
+                        $out .= $this->emitNode($dnode);
+                        $out .= $this->closureArgRepr($dnode->type, $calleeParams[$capCnt + $pi] ?? null, $dnode);
+                        $dv = $this->lastValue;
+                        $sel = $this->ssa->allocReg();
+                        $out .= '  ' . $sel . ' = select i1 ' . $has . ', i64 ' . $ev . ', i64 ' . $dv . "\n";
+                        $ev = $sel;
                     }
                     $argList .= ', i64 ' . $ev;
                     $argTypes .= ', i64';
@@ -2529,6 +2571,10 @@ trait EmitLlvmCalls
                     if ($di >= $capCnt && $dv !== null) { $hasOpt = true; }
                 }
                 if ($hasOpt) {
+                    if ($spByName) {
+                        $spreadCnt = $this->ssa->allocReg();
+                        $out .= '  ' . $spreadCnt . ' = add i64 0, ' . (string)$nparams . "\n";
+                    }
                     $out .= $this->cloArityStoreReg($spreadCnt, '@manticore_' . $this->mangle($fn));
                 }
                 continue;
@@ -4569,7 +4615,7 @@ trait EmitLlvmCalls
      * @return array{0:string,1:string[]}
      */
     private function emitSpreadFill(string $arrReg, int $firstParam, array $ptypes,
-                                    array $tmask, ?Type $elemType, string $fnKey = ''): array
+                                    array $tmask, ?Type $elemType, string $fnKey = '', ?Type $arrType = null): array
     {
         $out = '';
         $regs = [];
@@ -4617,30 +4663,20 @@ trait EmitLlvmCalls
         // (`f(...$pos, name: v)` is folded to such an array, {@see LowerFns::foldSpreadNamed}).
         // The positional run is every entry that is not a name hit; a param takes its
         // positional element, else its named one, else its default.
-        $pnames = ($this->sigs->namedSpread && $fnKey !== '') ? ($this->sigs->paramNames[$fnKey] ?? []) : [];
+        $pnames = ($this->spreadMayBeKeyed($arrType) && $fnKey !== '') ? ($this->sigs->paramNames[$fnKey] ?? []) : [];
         $hit = [];
         $npos = '';
         if ($pnames !== []) {
             $out .= $this->arrayCountFromPtrIr($arrReg);
             $cnt = $this->lastValue;
-            $npos = $cnt;
-            $nullA = $this->ssa->allocReg();
-            $out .= '  ' . $nullA . ' = icmp eq ptr ' . $arrReg . ", null\n";
+            $byK = [];
             for ($k = $firstParam; $k < $n; $k = $k + 1) {
                 $pn = $pnames[$k] ?? '';
                 if ($pn === '' || ($vmask[$k] ?? false)) { continue; }
-                $lp = $this->ssa->allocReg();
-                $out .= '  ' . $lp . ' = call ptr @__mir_array_lookup_str(ptr ' . $arrReg . ', ptr '
-                      . $this->litStr($pn) . ", i64 0, i64 0)\n";
-                $isHit = $this->ssa->allocReg();
-                $out .= '  ' . $isHit . ' = icmp ne ptr ' . $lp . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
-                $hi = $this->ssa->allocReg();
-                $out .= '  ' . $hi . ' = zext i1 ' . $isHit . " to i64\n";
-                $left = $this->ssa->allocReg();
-                $out .= '  ' . $left . ' = sub i64 ' . $npos . ', ' . $hi . "\n";
-                $npos = $left;
-                $hit[$k] = [$isHit, $lp];
+                $byK[$k] = $pn;
             }
+            [$hs, $hit, $npos] = $this->emitSpreadNameHits($arrReg, $byK, $cnt);
+            $out .= $hs;
         }
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
             if ($k > $firstParam && ($vmask[$k] ?? false)) {
@@ -4839,6 +4875,42 @@ trait EmitLlvmCalls
      * caller's arg list is already non-empty (so the suffix needs a leading
      * comma); false for a zero-arg call whose first pad value opens the list.
      */
+    /** Only a vec of a concrete element is certainly a list; a cell/erased vec may carry string keys. */
+    private function spreadMayBeKeyed(?Type $t): bool
+    {
+        if ($t === null || !$t->isVec()) { return true; }
+        $e = $t->element;
+        return $e === null || $e->kind === Type::KIND_CELL || $e->kind === Type::KIND_UNKNOWN;
+    }
+    /**
+     * Look up each named parameter among the string keys of a spread array: per param the
+     * (hit flag, value slot) pair, and the register holding the length of the positional run
+     * (the entries that are not a name hit).
+     *
+     * @param array<int,string> $names param index => name
+     * @return array{0:string,1:array<int,array{0:string,1:string}>,2:string}
+     */
+    private function emitSpreadNameHits(string $arrReg, array $names, string $cnt): array
+    {
+        $out = '';
+        $hit = [];
+        $npos = $cnt;
+        foreach ($names as $k => $pn) {
+            $lp = $this->ssa->allocReg();
+            $out .= '  ' . $lp . ' = call ptr @__mir_array_lookup_str(ptr ' . $arrReg . ', ptr '
+                  . $this->litStr($pn) . ", i64 0, i64 0)\n";
+            $isHit = $this->ssa->allocReg();
+            $out .= '  ' . $isHit . ' = icmp ne ptr ' . $lp . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
+            $hi = $this->ssa->allocReg();
+            $out .= '  ' . $hi . ' = zext i1 ' . $isHit . " to i64\n";
+            $left = $this->ssa->allocReg();
+            $out .= '  ' . $left . ' = sub i64 ' . $npos . ', ' . $hi . "\n";
+            $npos = $left;
+            $hit[(int)$k] = [$isHit, $lp];
+        }
+        return [$out, $hit, $npos];
+    }
+
     /**
      * An OMITTED argument's default, in the representation its PARAMETER
      * takes: boxed when the callee reads it as a cell (a `?int`/`mixed` param,
@@ -5409,7 +5481,7 @@ trait EmitLlvmCalls
                 $arr = $this->lastValue;
                 $elemType = $operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask,
-                                                       $elemType, $c->function);
+                                                       $elemType, $c->function, $operand->type);
                 $out .= $sir;
                 foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }

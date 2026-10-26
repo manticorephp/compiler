@@ -7278,6 +7278,19 @@ final class LowerFromAst implements Pass
         return '';
     }
 
+    /** A class in the chain uses a trait or extends a class not declared here: its method set is not visible to lowering. */
+    private function classChainOpaque(string $class): bool
+    {
+        $c = $class;
+        while ($c !== '') {
+            if (!isset($this->classDecls[$c])) { return true; }
+            $cd = $this->classDecls[$c];
+            if ($this->classDeclUses($cd) !== []) { return true; }
+            $ext = $this->classDeclExtends($cd);
+            $c = ($ext !== []) ? $ext[0] : '';
+        }
+        return false;
+    }
     private function lowerPropertyAccess(\Parser\Ast\PropertyAccess $expr): PropertyAccess_
     {
         $obj = $this->lowerExpr($expr->object);
@@ -7362,7 +7375,16 @@ final class LowerFromAst implements Pass
         // InferTypes. Variadic-ness is a property of the method NAME, so resolve
         // a consistent variadic signature across all classes and pack against it
         // (default-arg padding for non-variadic methods still defers to emit).
+        // `$o->undeclared(...)` on a statically known class whose `__call` takes it: the arguments
+        // reach `$arguments` as written, never packed against some other class's variadic of that name.
+        $magicHint = '';
         if ($params === null) {
+            $mh = $this->receiverClassHint($expr->object);
+            if ($mh !== '' && $this->resolveMethodDeclClass($mh, $expr->method) === ''
+                && !$this->classChainOpaque($mh)
+                && $this->resolveMethodDeclClass($mh, '__call') !== '') { $magicHint = $mh; }
+        }
+        if ($params === null && $magicHint === '') {
             $params = $this->variadicMethodParams($expr->method);
         }
         if ($params !== null) {
@@ -7370,7 +7392,22 @@ final class LowerFromAst implements Pass
             $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
         } else {
             $args = [];
-            foreach ($expr->args as $a) { $args[] = $this->lowerExpr($a); }
+            foreach ($expr->args as $a) {
+                $args[] = $this->lowerExpr($a);
+            }
+            // `$o->undeclared(1, b: 2)` on a class whose `__call` takes it: the named
+            // arguments reach `$arguments` under their names, after the positional ones.
+            if ($magicHint !== '') {
+                $els = [];
+                foreach ($expr->args as $i => $a) {
+                    $key = $a->kind === 'NamedArg' ? new StringConst($this->namedArgName($a), Type::string_()) : null;
+                    $els[] = new ArrayElement_($key, $args[$i]);
+                }
+                return new MethodCall_($obj, '__call', [
+                    new StringConst($expr->method, Type::string_()),
+                    new ArrayLit($els, Type::unknown()),
+                ], Type::unknown());
+            }
         }
         // php lets a STATIC method be reached through `->`, and it passes NO
         // receiver. Lowered as an ordinary method call it got one anyway, so
