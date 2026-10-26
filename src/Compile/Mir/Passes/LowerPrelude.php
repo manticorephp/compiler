@@ -1596,8 +1596,8 @@ trait LowerPrelude
             'UPLOAD_ERR_PARTIAL' => 3, 'UPLOAD_ERR_NO_FILE' => 4, 'UPLOAD_ERR_NO_TMP_DIR' => 6,
             'UPLOAD_ERR_CANT_WRITE' => 7, 'UPLOAD_ERR_EXTENSION' => 8,
             // php core ints
-            'PHP_INT_SIZE' => 8, 'PHP_VERSION_ID' => 80511, 'PHP_MAJOR_VERSION' => 8,
-            'PHP_MINOR_VERSION' => 5, 'PHP_RELEASE_VERSION' => 8, 'PHP_FLOAT_DIG' => 15,
+            'PHP_INT_SIZE' => 8, 'PHP_VERSION_ID' => 80512, 'PHP_MAJOR_VERSION' => 8,
+            'PHP_MINOR_VERSION' => 5, 'PHP_RELEASE_VERSION' => 12, 'PHP_FLOAT_DIG' => 15,
             'PHP_ZTS' => 0, 'PHP_DEBUG' => 0, 'PHP_MAXPATHLEN' => 1024,
             // json flags
             'JSON_HEX_TAG' => 1, 'JSON_HEX_AMP' => 2, 'JSON_HEX_APOS' => 4,
@@ -1774,7 +1774,7 @@ trait LowerPrelude
             'PASSWORD_DEFAULT' => '2y', 'PASSWORD_BCRYPT' => '2y', 'PASSWORD_ARGON2I' => 'argon2i',
             'PASSWORD_ARGON2ID' => 'argon2id', 'PASSWORD_ARGON2_PROVIDER' => 'standard',
             'PHP_EOL' => "\n", 'DIRECTORY_SEPARATOR' => '/', 'PATH_SEPARATOR' => ':',
-            'PHP_VERSION' => '8.5.11', 'PHP_EXTRA_VERSION' => '',
+            'PHP_VERSION' => '8.5.12', 'PHP_EXTRA_VERSION' => '',
             'PCRE_VERSION' => '10.47 2025-10-21',
             'DATE_ATOM' => 'Y-m-d\\TH:i:sP', 'DATE_COOKIE' => 'l, d-M-Y H:i:s T',
             'DATE_ISO8601' => 'Y-m-d\\TH:i:sO', 'DATE_ISO8601_EXPANDED' => 'X-m-d\\TH:i:sP',
