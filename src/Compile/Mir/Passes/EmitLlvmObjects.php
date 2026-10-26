@@ -2286,11 +2286,13 @@ trait EmitLlvmObjects
         // A bare `array` hint erased to KIND_UNKNOWN still holds a RAW pointer —
         // unbox it as an array, or the tag rides into a slot the readers deref.
         // Same rule as the class-typed store path (see slotIsArrayHinted).
+        $this->unboxPropCtx = $cd->name . '::$' . $prop;
         $out .= $this->unboxCellToType(
             (!$pt->isArray() && ($cd->propertyArrayHinted[$prop] ?? false))
                 ? Type::vec(Type::unknown())
                 : $pt,
         );
+        $this->unboxPropCtx = '';
         $val = $this->lastValue;
         if ($this->lastValueType === 'double') {
             $bits = $this->ssa->allocReg();
