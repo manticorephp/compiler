@@ -4054,6 +4054,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $walkerRoots = [];
     $walkerDynamic = false;
     $fetchObjectClass = false;
+    $usesMysqli = $demand->mentionsPrefix('mysqli');
     foreach ($sources as $i => $source) {
         try {
             // The path travels with the source so `__FILE__`/`__DIR__` fold to it at
@@ -4090,7 +4091,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
         // mysqli's fetch_object allocates (without its constructor) an object of the class the program names: a literal class
         // roots just that class, no class argument needs nothing (stdClass), anything else leaves reachability open.
-        $nFo = preg_match_all("/fetch_object\\s*\\(/i", $source);
+        // A program that never names mysqli has no fetch_object of its own to answer for.
+        $nFo = $usesMysqli ? preg_match_all("/fetch_object\\s*\\(/i", $source) : 0;
         if ($nFo > 0) {
             preg_match_all("/(->|_)?fetch_object\\s*\\(([^()]*)\\)/i", $source, $fo);
             if ($nFo > count($fo[0])) { $walkerDynamic = true; $fetchObjectClass = true; }
@@ -4690,7 +4692,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             'get_defined_constants',
         ])
         // mysqli's fetch_object builds an object of the class the program names, through ReflectionClass in the prelude.
-        || ($fetchObjectClass && $demand->mentionsPrefix('mysqli'));
+        || $fetchObjectClass;
     // PHP's reserved attribute classes. Their SEMANTICS (#[Override] checking,
     // #[Deprecated] / #[NoDiscard] diagnostics, target validation) are entirely
     // compiler-side — the declarations matter only so reflection can hand back a
