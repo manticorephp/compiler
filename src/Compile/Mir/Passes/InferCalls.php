@@ -956,6 +956,18 @@ trait InferCalls
                     if ($this->classImplementsT($cn, $recvIface)) { $cls = $cn; break; }
                 }
             }
+            // The declarer scan above only sees classes that DECLARE the method. An
+            // implementer that INHERITS it (`App extends Container implements
+            // Application`) is invisible to it, and the name-only fallback below
+            // then adopted an unrelated `Signals::instance(): Signals` as the
+            // result type of `$app->instance(...)`. Resolve through the subtypes.
+            if ($cls === '') {
+                if (!$this->subtypeIndexBuilt) { $this->buildSubtypeIndex(); }
+                foreach ($this->subtypesOf[$objType->class] ?? [] as $sub) {
+                    $b = $this->resolveMethodClass($sub, $node->method);
+                    if ($b !== '') { $cls = $b; break; }
+                }
+            }
             // No implementing class in this module (a cross-module interface, or
             // a built-in like \Throwable) — fall back to the old name-only match.
             if ($cls === '') {
