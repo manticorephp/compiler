@@ -9357,6 +9357,7 @@ trait EmitLlvmObjects
         $lm = \strtolower($mc->method);
         if ($lm === '__invoke') {
             $onClosure = new \Compile\Mir\Invoke_($fnT(), $mc->args, $cell);
+            $onClosure->srcArgc = -2;
         } elseif ($lm === 'call' && $mc->args !== []) {
             // rebind then invoke: the typed `call` arm answers a raw word, not a cell
             $bound = new \Compile\Mir\MethodCall_($fnT(), 'bindTo', [$mc->args[0]], Type::closure());

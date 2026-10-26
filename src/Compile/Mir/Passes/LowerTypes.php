@@ -1269,6 +1269,14 @@ trait LowerTypes
         if ($j < $n && \substr($h, $j, 1) === ':') {
             $j = $this->skipDocSpaces($h, $j + 1, $n);
             $rt = \trim(\substr($h, $j, $n - $j));
+            // The return type is ONE atom: in `\Closure(A): T|class-string<T>` the
+            // `|` closes the signature and starts an outer union (phpdoc-parser's
+            // callable return is a single atomic type). A union with a non-null
+            // arm is a tagged cell — typed `closure`, Laravel's
+            // `Container::build($concrete)` took a class-name string as a closure env.
+            foreach (\array_slice($this->topLevelUnionArms($rt), 1) as $arm) {
+                if (\strtolower(\trim($arm)) !== 'null') { return Type::cell(); }
+            }
             if ($rt !== '') { $ret = $this->lowerTypeHint($rt); }
         }
         return Type::closureOf($ret, $params);
