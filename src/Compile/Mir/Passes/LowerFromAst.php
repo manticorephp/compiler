@@ -7301,8 +7301,55 @@ final class LowerFromAst implements Pass
         return new Ternary($cond, new NullConst(Type::null_()), $prop, Type::unknown(), true);
     }
 
+    /** @var array<string, string> lowercase method name → the one spelling every declaration uses ('' = spellings differ) */
+    private array $methodCanon = [];
+    private int $methodCanonStamp = -1;
+    /** @var array<string, string> lowercase function name → declared spelling */
+    private array $fnCanon = [];
+    private int $fnCanonStamp = -1;
+
+    /** php resolves method names case-insensitively; the emitter matches them exactly,
+     *  so a call site is rewritten to the spelling the declarations use. */
+    private function canonMethodName(string $name): string
+    {
+        $stamp = \count($this->classDecls) + \count($this->traitTable);
+        if ($stamp !== $this->methodCanonStamp) {
+            $this->methodCanonStamp = $stamp;
+            $this->methodCanon = [];
+            $all = [];
+            foreach ($this->classDecls as $cd0) { $all[] = $cd0; }
+            foreach ($this->traitTable as $td0) { $all[] = $td0; }
+            foreach ($all as $d0) {
+                foreach ($this->classDeclMethods($this->classDeclOf($d0)) as $m) {
+                    $mn = $this->methodDeclName($m);
+                    $lc = \strtolower($mn);
+                    if (!isset($this->methodCanon[$lc])) { $this->methodCanon[$lc] = $mn; }
+                    elseif ($this->methodCanon[$lc] !== $mn) { $this->methodCanon[$lc] = ''; }
+                }
+            }
+        }
+        $c = $this->methodCanon[\strtolower($name)] ?? '';
+        return $c === '' ? $name : $c;
+    }
+
+    private function canonFunctionName(string $name): string
+    {
+        if (isset($this->fnDecls[$name])) { return $name; }
+        $stamp = \count($this->fnDecls);
+        if ($stamp !== $this->fnCanonStamp) {
+            $this->fnCanonStamp = $stamp;
+            $this->fnCanon = [];
+            foreach ($this->fnDecls as $fname => $_) { $this->fnCanon[\strtolower((string)$fname)] = (string)$fname; }
+        }
+        return $this->fnCanon[\strtolower($name)] ?? $name;
+    }
+
     private function lowerMethodCall(\Parser\Ast\MethodCallExpr $expr): Node
     {
+        $canon = $this->canonMethodName($expr->method);
+        if ($canon !== $expr->method) {
+            return $this->lowerMethodCall(new \Parser\Ast\MethodCallExpr($expr->object, $canon, $expr->args, $expr->nullsafe, $expr->span));
+        }
         // First-class callable `$o->m(...)` → a closure capturing `$o`.
         if (\count($expr->args) === 1 && $expr->args[0]->kind === 'Ellipsis') {
             return $this->synthMethodClosure($this->lowerExpr($expr->object), $expr->method);
@@ -7480,6 +7527,10 @@ final class LowerFromAst implements Pass
 
     private function lowerStaticCall(\Parser\Ast\StaticCall $expr): Node
     {
+        $canon = $this->canonMethodName($expr->method);
+        if ($canon !== $expr->method) {
+            return $this->lowerStaticCall(new \Parser\Ast\StaticCall($expr->class, $canon, $expr->args, $expr->span));
+        }
         $class = $expr->class;
         $low = \strtolower($class);
         // Dispatch target vs. late-static scope. `static::` dispatches to the
