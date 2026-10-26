@@ -1018,6 +1018,12 @@ class mysqli
         $c->connect($hostname, $username, $password, $database, $port, $socket, 0, false);
     }
 
+    /** Zend closes the link with the object: a result or statement that outlives it finds it gone (out of sync). */
+    public function __destruct()
+    {
+        if ($this->__mc !== null && $this->__mc->st !== __McMysqliConn::CLOSED) { $this->__mc->close(); }
+    }
+
     public function autocommit(bool $enable): bool
     {
         return __McMysqliConn::of($this)->link()->send($enable ? 'SET AUTOCOMMIT=1' : 'SET AUTOCOMMIT=0', false);
@@ -1145,7 +1151,6 @@ class mysqli
         $c = __McMysqliConn::of($this)->link();
         $st = new __McMysqliStmt();
         $st->c = $c;
-        $st->link = $this;
         if (!$st->prepare($query)) {
             $ex = $st->reportEx();
             $st->closeKeepingError(true);
@@ -1514,12 +1519,19 @@ final class __McMysqliRs
     /** The state the next mysqli_result constructor takes instead of a connection's result (see wrap()). */
     public static ?__McMysqliRs $next = null;
 
-    /** A mysqli_result over $rs: constructed against $link, the constructor takes $rs instead of the connection's pending result. */
-    public static function wrap(__McMysqliRs $rs, mysqli $link): mysqli_result
+    /** An unconnected mysqli that only satisfies the constructor's parameter type (see wrap()). */
+    private static ?mysqli $carrier = null;
+
+    /**
+     * A mysqli_result over $rs (a statement's result): the constructor takes $rs instead of a connection's pending result.
+     * The statement holds no mysqli (Zend's does not keep the object alive), so the constructor gets a placeholder.
+     */
+    public static function wrap(__McMysqliRs $rs): mysqli_result
     {
+        if (self::$carrier === null) { self::$carrier = new mysqli(); }
         self::$next = $rs;
         try {
-            return new mysqli_result($link);
+            return new mysqli_result(self::$carrier);
         } finally {
             self::$next = null;
         }
@@ -1677,7 +1689,11 @@ final class __McMysqliRs
         }
         if ($this->ended) { return null; }
         $c = $this->c;
-        if ($c === null) { return null; }
+        if ($c === null) {
+            // the connection closed under the unread rows: mysqlnd answers out of sync (thrown under MYSQLI_REPORT_STRICT)
+            if ($this->lost && (__McMysqliConn::$mode & 3) === 3) { throw mysqli_sql_exception::__mcNew(__McMysqliConn::OOS, 2014, 'HY000'); }
+            return null;
+        }
         $w = $c->wire;
         if ($w === null) {
             $this->end();
@@ -2137,8 +2153,6 @@ final class __McMysqliStmt
 
     /** The connection, null once the statement is closed. */
     public ?__McMysqliConn $c = null;
-    /** The mysqli the statement was made on (a mysqli_result made from the statement is constructed against it). */
-    public ?mysqli $link = null;
     /** mysqli's MYSQLI_STATUS_*: INITIALIZED until a prepare succeeded, then VALID. */
     public int $rst = __McMysqliConn::INIT;
     public int $state = self::INITTED;
@@ -3042,7 +3056,6 @@ final class __McMysqliStmt
             $c->psNext = false;
         }
         $this->c = null;
-        $this->link = null;
     }
 
     public function numRows(): int|string
@@ -3218,7 +3231,6 @@ class mysqli_stmt
         $c = __McMysqliConn::of($mysql)->link();
         $st = new __McMysqliStmt();
         $st->c = $c;
-        $st->link = $mysql;
         $this->__mc = $st;
         if ($query === null) { return; }
         if (!$st->prepare($query)) {
@@ -3383,7 +3395,7 @@ class mysqli_stmt
             $st->report();
             return false;
         }
-        return __McMysqliRs::wrap($rs, $st->link);
+        return __McMysqliRs::wrap($rs);
     }
 
     public function get_warnings(): false|mysqli_warning
@@ -3435,7 +3447,7 @@ class mysqli_stmt
             $st->report();
             return false;
         }
-        return __McMysqliRs::wrap($rs, $st->link);
+        return __McMysqliRs::wrap($rs);
     }
 
     public function send_long_data(int $param_num, string $data): bool
