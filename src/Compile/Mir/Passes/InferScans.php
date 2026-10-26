@@ -3027,7 +3027,17 @@ trait InferScans
             $idx = -1;
             foreach ($fn->params as $p) {
                 $idx = $idx + 1;
-                if (!$p->byRef || $p->variadic || !$this->isByRefRetypeKind($p->type)) { continue; }
+                if (!$p->byRef || $p->variadic) { continue; }
+                // An ARRAY param the body rebinds (`$array = &$array[$k]`) names slots of two
+                // representations — the caller's raw array, then an element cell — and the
+                // emitter types the local once, so the first access wrote a boxed word into
+                // the caller's variable. The cell carries both.
+                if ($p->type->isArray() && $this->refRebindsLocal($fn->body, $p->name)) {
+                    $this->retypeByRefParamCell($fn, $p);
+                    $changed = true;
+                    continue;
+                }
+                if (!$this->isByRefRetypeKind($p->type)) { continue; }
                 if (!$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)
                     && !$this->refCellOfLocal($fn->body, $p->name)) { continue; }
                 $this->retypeByRefParamCell($fn, $p);
@@ -3056,6 +3066,16 @@ trait InferScans
             }
         }
         return $changed;
+    }
+
+    /** Does `$n` rebind local `$name` to another slot (`$name = &$a[$k]`, `$name = &$o->p`)? */
+    private function refRebindsLocal(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_REF_ADDR && $n instanceof \Compile\Mir\RefAddr_ && $n->target === $name) { return true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->refRebindsLocal($c, $name)) { return true; }
+        }
+        return false;
     }
 
     /** Does `$n` store a reference to local `$name` (`[&$name]`, `$o->p = &$name`)? Such a param rides a cell so the callee can share ONE box. */
