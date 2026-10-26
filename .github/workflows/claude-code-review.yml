@@ -1,21 +1,26 @@
 name: Claude Code Review
 
+# On demand only: comment `/review` on a PR, or add the `claude-review` label.
 on:
+  issue_comment:
+    types: [created]
   pull_request:
-    types: [opened, ready_for_review]
-    paths:
-      - "src/**"
-      - "prelude/**"
-      - "tools/**"
-      - "tests/**"
+    types: [labeled]
 
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  group: claude-review-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   claude-review:
-    if: github.event.pull_request.draft == false
+    if: |
+      (github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && startsWith(github.event.comment.body, '/review')
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+      || (github.event_name == 'pull_request'
+        && github.event.label.name == 'claude-review'
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -35,7 +40,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            Review PR ${{ github.repository }}/pull/${{ github.event.pull_request.number }}.
+            Review PR ${{ github.repository }}/pull/${{ github.event.issue.number || github.event.pull_request.number }}.
             Read AGENTS.md first. Fetch the diff with `gh pr diff`; read other files only when a finding needs them.
             Report only correctness bugs: memory ownership/refcount, ABI/layout, bootstrap two-step rule, Zend semantics divergence, missing test for a fix.
             Skip style, naming and nits. Max 8 findings, each as an inline comment with file:line and a concrete failure scenario. No findings = say so in one line.
