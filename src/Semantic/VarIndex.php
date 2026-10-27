@@ -5,6 +5,8 @@ namespace Semantic;
 use Analyze\AstWalk;
 use Analyze\DeclScopes;
 use Parser\Ast\ArrayAccess;
+use Parser\Ast\AttributeNode;
+use Parser\Ast\Param;
 use Parser\Ast\ArrayLit;
 use Parser\Ast\ArrowFn;
 use Parser\Ast\Assign;
@@ -91,6 +93,8 @@ final class VarIndex
     private array $scVars = [];
     /** @var array<int, StringLiteral[]> literal names of compact() calls */
     private array $scCompact = [];
+    /** @var array<int, UncertainSite> set hook scope => its explicit parameter's (unlocatable) site */
+    private array $scHookSite = [];
     /** @var array<int, string> set-hook value parameter name */
     private array $scHookParam = [];
     /** @var array<int, array<string, string>> arrow scope => name it writes => "line:col" of the first write */
@@ -171,6 +175,7 @@ final class VarIndex
         foreach ($this->scHookParam as $sid => $hp) {
             if ($hp !== '' && !isset($this->scMap[$sid][$hp])) {
                 $b = $this->fresh($hp, false);
+                if (isset($this->scHookSite[$sid])) { $this->bUncertain[$b][] = $this->scHookSite[$sid]; }
                 $this->scMap[$sid][$hp] = $b;
                 $this->addScope($b, $sid);
             }
@@ -245,8 +250,10 @@ final class VarIndex
             if ($e instanceof Variable) {
                 $this->scVars[$sid][] = $e;
             } elseif ($e instanceof Closure) {
+                $this->scanParams($e->params);
                 $this->process($this->newScope('closure', $e->span, $e->body->statements, null, $e, $sid, $e->isStatic));
             } elseif ($e instanceof ArrowFn) {
+                $this->scanParams($e->params);
                 $this->process($this->newScope('arrow', $e->span, [], $e->body, $e, $sid, $e->isStatic));
             } elseif ($e instanceof CallExpr) {
                 $this->noteCall($sid, $e);
@@ -262,15 +269,31 @@ final class VarIndex
     {
         foreach ($stmts as $s) {
             if ($s instanceof FunctionStmt) {
+                $this->scanParams($s->decl->params);
+                $this->scanAttrs($s->decl->attributes);
                 if ($s->decl->body !== null) { $this->process($this->newScope('fn', $s->decl->span, $s->decl->body->statements, null, null, -1, false)); }
             } elseif ($s instanceof ClassStmt) {
+                $this->scanAttrs($s->decl->attributes);
+                foreach ($s->decl->consts as $k) { $this->scanExpr($k->value); $this->scanAttrs($k->attributes); }
+                foreach ($s->decl->cases as $k) { $this->scanExpr($k->value); $this->scanAttrs($k->attributes); }
                 foreach ($s->decl->methods as $m) {
+                    $this->scanParams($m->params);
+                    $this->scanAttrs($m->attributes);
                     if ($m->body !== null) { $this->process($this->newScope('fn', $m->span, $m->body->statements, null, null, -1, false)); }
                 }
                 foreach ($s->decl->properties as $prop) {
+                    $this->scanExpr($prop->default);
+                    $this->scanAttrs($prop->attributes);
                     foreach ($prop->hooks as $h) {
                         $id = $this->newScope('fn', $h->span, $h->blockBody === null ? [] : $h->blockBody->statements, $h->exprBody, null, -1, false);
-                        if ($h->kind === 'set') { $this->scHookParam[$id] = $h->paramName ?? 'value'; }
+                        if ($h->kind === 'set') {
+                            $this->scHookParam[$id] = $h->paramName ?? 'value';
+                            if ($h->paramName !== null) {
+                                // an explicit hook parameter has no name entry: list the hook as the site to rename by hand
+                                $hs = $h->span ?? $prop->span;
+                                $this->scHookSite[$id] = new UncertainSite($this->file, $hs->startLine(), $hs->startColumn(), 'hook-parameter');
+                            }
+                        }
                         $this->process($id);
                     }
                 }
@@ -282,6 +305,37 @@ final class VarIndex
                 elseif ($s instanceof ForeachStmt) { $this->discover($s->body->statements); }
                 elseif ($s instanceof SwitchStmt) { foreach ($s->cases as $arm) { $this->discover($arm->body); } }
             }
+        }
+    }
+
+    /** Opens parentless scopes for the closures / arrow functions inside a constant-like expression (default, const, case, attribute argument). */
+    private function scanExpr(?Expr $e): void
+    {
+        if ($e === null) { return; }
+        $w = new AstWalk(true);
+        $w->exprTree($e);
+        foreach ($w->exprs as $x) {
+            if ($x instanceof Closure) {
+                $this->scanParams($x->params);
+                $this->process($this->newScope('closure', $x->span, $x->body->statements, null, $x, -1, $x->isStatic));
+            } elseif ($x instanceof ArrowFn) {
+                $this->scanParams($x->params);
+                $this->process($this->newScope('arrow', $x->span, [], $x->body, $x, -1, $x->isStatic));
+            }
+        }
+    }
+
+    /** @param Param[] $params */
+    private function scanParams(array $params): void
+    {
+        foreach ($params as $p) { $this->scanExpr($p->default); $this->scanAttrs($p->attributes); }
+    }
+
+    /** @param AttributeNode[] $attrs */
+    private function scanAttrs(array $attrs): void
+    {
+        foreach ($attrs as $a) {
+            foreach ($a->args as $x) { $this->scanExpr($x); }
         }
     }
 
