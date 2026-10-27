@@ -294,6 +294,9 @@ final class Workspace
         if ($o === null) { return []; }
         $out = $this->names->uncertainSites($o->resolvedLower);
         if ($o->kind !== 'member') { return $out; }
+        foreach ($this->membersOf($o) ?? [] as $m) {
+            foreach ($this->index->familyAdaptations($m) as $a) { $out[] = new UncertainSite($a[0], $a[1], $a[2], 'trait-adaptation'); }
+        }
         $family = $this->familyOf($o);
         foreach ($this->names->allOccurrences() as $c) {
             if (!$this->sameMemberName($c, $o) || $c->isDecl || ($family !== '' && self::familyOfRole($c->role) !== $family)) { continue; }
@@ -337,6 +340,7 @@ final class Workspace
     /**
      * Reasons a rename of the symbol under the cursor cannot be done mechanically, empty when it can:
      * `unresolved-member`, `owner-unknown` (class nested in a closure / loop), `implicit-member`, `library-declaration`,
+     * `trait-adaptation:<file>:<line>:<col>` for an `insteadof` / `as` rule naming the method in a class the family reaches,
      * one `named-argument:<file>:<line>:<col>` per named argument (call or attribute) spelled like the member (a promoted
      * property is also a parameter name), `heredoc-scan-failed:<file>` when the heredoc scan gave up, and one `heredoc-interpolation:<file>:<line>:<col>` per heredoc in the workspace (they hold unindexed uses).
      *
@@ -355,6 +359,7 @@ final class Workspace
                 if (\str_starts_with($m->file, LibrarySymbols::LABEL_PREFIX)) { $out[] = 'library-declaration'; }
                 $d = $this->names->occurrenceAt($m->file, $m->line, $m->col);
                 if ($d !== null && $d->isDecl && $d->owner === '') { $out[] = 'owner-unknown'; }
+                foreach ($this->index->familyAdaptations($m) as $a) { $out[] = 'trait-adaptation:' . $a[0] . ':' . $a[1] . ':' . $a[2]; }
             }
         }
         foreach ($this->names->uncertainSites('') as $s) {

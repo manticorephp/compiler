@@ -501,8 +501,23 @@ final class Index
         $this->curSpans[$l] = $d->span;
         $this->curClasses[$l] = new ClassInfo(
             $fqn, $d->kind, $d->extends, $d->implements, $d->uses, $methods, $consts, $d->isAbstract, $propTypes, $partial,
-            $this->collectMembers($d, $fqn)
+            $this->collectMembers($d, $fqn),
+            self::adaptedNames($d)
         );
+    }
+
+    /** @return array<string, int[]> */
+    private static function adaptedNames(\Parser\Ast\ClassDecl $d): array
+    {
+        $out = [];
+        foreach ($d->traitAdaptations as $a) {
+            $sp = $a->span;
+            $at = $sp === null ? [0, 0] : [$sp->startLine(), $sp->startColumn()];
+            foreach ([$a->method, $a->alias] as $n) {
+                if ($n !== '' && !isset($out[\strtolower($n)])) { $out[\strtolower($n)] = $at; }
+            }
+        }
+        return $out;
     }
 
     /** @return array<string, MemberInfo> */
@@ -752,48 +767,79 @@ final class Index
     }
 
     /**
-     * The override family of a member: every non-private declaration with the same kind and name in the
-     * transitive ancestors (parents, interfaces, traits) of its class, and in every descendant / implementer
-     * / trait user of those ancestors (siblings included). One entry per declaration, the argument included.
-     * A private member, and a constructor, belong to no family but their own (a child's private `m` is not an
-     * override; constructors are not renamed across inheritance). Static and instance members of one name are
-     * one family. A `const` or `case` is looked up under its own kind key.
+     * The override family of a member: the connected set of non-private declarations of one kind and name
+     * linked by the hierarchy. From a class that provides the member (declares it, inherits it, or gets it from
+     * a trait, traits of traits included) it walks every transitive ancestor (parents, interfaces, traits) and
+     * every descendant / implementer / trait user that provides it too, so siblings' overrides, an interface
+     * method satisfied by a trait, and a trait overriding an inherited method are all one family. One entry per
+     * declaration, the argument included. A private member, and a constructor, belong to no family but their own
+     * (a child's private `m` is not an override; constructors are not renamed across inheritance). Static and
+     * instance members of one name are one family.
      *
      * @return MemberInfo[]
      */
     public function memberFamily(MemberInfo $m): array
     {
-        if ($m->visibility === 'private' || ($m->kind === 'method' && \strtolower($m->name) === '__construct')) { return [$m]; }
-        $key = $m->kind . ':' . ($m->kind === 'method' ? \strtolower($m->name) : $m->name);
-        $start = \strtolower(\ltrim($m->declClass, '\\'));
-        /** @var array<string, bool> $roots */
-        $roots = [$start => true];
-        $queue = [$start];
-        for ($i = 0; $i < \count($queue); $i++) {
-            $ci = $this->classes[$queue[$i]] ?? null;
-            if ($ci === null) { continue; }
-            foreach ($this->edges($ci) as $t) {
-                if (!isset($roots[$t])) { $roots[$t] = true; $queue[] = $t; }
-            }
-        }
-        /** @var array<string, bool> $cands */
-        $cands = $roots;
-        foreach (\array_keys($roots) as $r) {
-            foreach ($this->implementersOf($r) as $d) { $cands[$d] = true; }
-        }
-        /** @var MemberInfo[] $out */
-        $out = [$m];
-        $seen = [\spl_object_id($m) => true];
-        foreach (\array_keys($cands) as $c) {
-            $ci = $this->classes[$c] ?? null;
-            $x = $ci === null ? null : ($ci->members[$key] ?? null);
-            if ($x === null || $x->visibility === 'private' || isset($seen[\spl_object_id($x)])) { continue; }
-            $seen[\spl_object_id($x)] = true;
-            $out[] = $x;
-        }
-        return $out;
+        return $this->familyWalk($m)[0];
     }
 
+    /**
+     * Trait adaptation rules (`insteadof`, `as`) that mention the name of a method of the family, in classes the
+     * family reaches: [file, line, col]. Rename tooling must not guess through them.
+     *
+     * @return array<int, array{0: string, 1: int, 2: int}>
+     */
+    public function familyAdaptations(MemberInfo $m): array
+    {
+        return $this->familyWalk($m)[1];
+    }
+
+    /** @return array{0: MemberInfo[], 1: array<int, array{0: string, 1: int, 2: int}>} */
+    private function familyWalk(MemberInfo $m): array
+    {
+        if ($m->visibility === 'private' || ($m->kind === 'method' && \strtolower($m->name) === '__construct')) { return [[$m], []]; }
+        $kind = $m->kind === 'case' ? 'const' : $m->kind;
+        $low = \strtolower($m->name);
+        $start = \strtolower(\ltrim($m->declClass, '\\'));
+        /** @var MemberInfo[] $out */
+        $out = [$m];
+        /** @var array<int, bool> $seen */
+        $seen = [\spl_object_id($m) => true];
+        /** @var array<int, array{0: string, 1: int, 2: int}> $ad */
+        $ad = [];
+        /** @var array<string, bool> $done */
+        $done = [];
+        $work = [$start];
+        while (\count($work) > 0) {
+            $c = \array_pop($work);
+            if (isset($done[$c])) { continue; }
+            $done[$c] = true;
+            $ci = $this->classes[$c] ?? null;
+            if ($ci !== null && $kind === 'method' && isset($ci->traitAdapted[$low])) {
+                $ad[] = [$this->classWinner[$c] ?? '', $ci->traitAdapted[$low][0], $ci->traitAdapted[$low][1]];
+            }
+            /** @var array<string, bool> $near */
+            $near = [];
+            $queue = [$c];
+            for ($i = 0; $i < \count($queue); $i++) {
+                $q = $this->classes[$queue[$i]] ?? null;
+                if ($q === null) { continue; }
+                foreach ($this->edges($q) as $t) {
+                    if (!isset($near[$t])) { $near[$t] = true; $queue[] = $t; }
+                }
+            }
+            foreach ($this->implementersOf($c) as $dd) { $near[$dd] = true; }
+            foreach (\array_keys($near) as $n) {
+                if (isset($done[$n]) || !isset($this->classes[$n])) { continue; }
+                $x = $this->resolveMember($n, $m->name, $kind, 0);
+                if ($x === null || $x->visibility === 'private') { continue; }
+                if (!isset($seen[\spl_object_id($x)])) { $seen[\spl_object_id($x)] = true; $out[] = $x; }
+                $work[] = $n;
+                $work[] = \strtolower(\ltrim($x->declClass, '\\'));
+            }
+        }
+        return [$out, $ad];
+    }
     /** Does the class (or an ancestor) define `__call` / `__callStatic`? */
     public function hasMagicCall(string $classFqn): bool
     {
