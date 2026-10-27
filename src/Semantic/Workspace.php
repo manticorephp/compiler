@@ -126,16 +126,22 @@ final class Workspace
      * Class and function names, and a declaration name under the cursor (an enum case included).
      * The range is the NAME token of the winning declaration; it falls back to the declaration
      * start (end equals start) when the declaring file holds no declaration entry for the name
-     * (a library file, a member). The Index records no global constants, so a constant use
-     * resolves to null. An unqualified function call in a namespace falls back to the global
+     * (a library file, a member). A global constant (`const X`, `define('X')`) answers with its name literal, case-sensitively. An unqualified function call in a namespace falls back to the global
      * function when no namespaced one is declared, as PHP does.
      */
     public function definitionOf(string $uri, int $line, int $col): ?Location
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
-        if ($o === null) { return null; }
+        if ($o === null) {
+            $k = $this->index->constAt($uri, $line, $col);
+            return $k === null ? null : $this->constLocation($k);
+        }
         if ($o->isDecl) { return new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol); }
         $kind = $o->denotes();
+        if ($kind === 'constant') {
+            $k = $this->constKeyOf($o);
+            return $k === null ? null : $this->constLocation($k);
+        }
         if ($kind !== 'class' && $kind !== 'function') { return null; }
         $name = $o->resolvedLower;
         $file = $this->index->declaringFile($name, $kind);
@@ -165,6 +171,8 @@ final class Workspace
     public function referencesTo(string $uri, int $line, int $col): array
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
+        $ck = $o === null ? $this->index->constAt($uri, $line, $col) : ($o->denotes() === 'constant' ? $this->constKeyOf($o) : null);
+        if ($ck !== null) { return $this->constReferences($ck); }
         if ($o === null) { return []; }
         $want = $this->targets($o);
         $kind = $o->denotes();
@@ -181,6 +189,44 @@ final class Workspace
             }
         }
         return $out;
+    }
+
+    /** The declared constant a constant occurrence denotes: its resolved name, else the bare name under the global fallback. */
+    private function constKeyOf(NameOccurrence $o): ?string
+    {
+        if ($o->resolved !== '' && $this->index->declaredConst($o->resolved) !== null) { return $o->resolved; }
+        $bare = self::tail($o->resolved);
+        if ($o->globalFallback && $bare !== '' && $this->index->declaredConst($bare) !== null) { return $bare; }
+        return null;
+    }
+
+    private function constLocation(string $key): ?Location
+    {
+        $sp = $this->index->declaredConst($key);
+        $file = $this->index->constDeclaringFile($key);
+        if ($sp === null || $file === null) { return null; }
+        return new Location($file, $sp->startLine(), $sp->startColumn(), $sp->endLine(), $sp->endColumn());
+    }
+
+    /** @return Location[] the declaration name literal, then every constant use and `use const` import that denotes it */
+    private function constReferences(string $key): array
+    {
+        $decl = $this->constLocation($key);
+        /** @var Location[] $out */
+        $out = $decl === null ? [] : [$decl];
+        foreach ($this->names->allOccurrences() as $r) {
+            if ($r->denotes() !== 'constant' || $this->constKeyOf($r) === null) { continue; }
+            if (\strcmp(self::normKey($this->constKeyOf($r)), self::normKey($key)) !== 0) { continue; }
+            $out[] = new Location($r->file, $r->line, $r->col, $r->endLine, $r->endCol);
+        }
+        return $out;
+    }
+
+    private static function normKey(string $n): string
+    {
+        $n = \ltrim($n, '\\');
+        $bs = \strrpos($n, '\\');
+        return $bs === false ? $n : \strtolower(\substr($n, 0, $bs)) . \substr($n, $bs);
     }
 
     /** @return array<string, bool> the lowercased names an occurrence may denote */
