@@ -15,6 +15,7 @@ final class NameOccurrence
         public readonly bool $globalFallback,
         public readonly bool $isDecl = false,
         public readonly string $role = '',
+        public readonly string $resolved = '',
     ) {}
 
     /** The symbol kind this entry names: a `use` import names its imported kind (class | function | constant). */

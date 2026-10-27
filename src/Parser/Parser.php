@@ -856,7 +856,7 @@ final class Parser
         if ($this->checkKeyword('case') && $kindKw === 'enum') {
             $this->advance();
             $caseNameTok = $this->expectMemberName('expected enum case name');
-            $this->noteDecl($caseNameTok, $caseNameTok->lexeme, 'constant', 1);
+            $this->noteDecl($caseNameTok, $caseNameTok->lexeme, 'member', 1);
             $value = null;
             if ($this->match(TokenKind::Equals)) {
                 $value = $this->parseExpression();
@@ -1137,7 +1137,7 @@ final class Parser
         $consts = [];
         while (true) {
             $nameTok = $this->expectMemberName('expected const name');
-            $this->noteDecl($nameTok, $nameTok->lexeme, 'constant', 2);
+            $this->noteDecl($nameTok, $nameTok->lexeme, 'member', 2);
             $this->expect(TokenKind::Equals, "expected '=' in const");
             $value = $this->parseExpression();
             $last = !$this->check(TokenKind::Comma);
@@ -2876,7 +2876,7 @@ final class Parser
         );
     }
 
-    /** A declaration name token: level 1 = class-likes, functions, enum cases; level 2 adds members and class constants. */
+    /** A declaration name token: level 1 = class-likes, functions, enum cases (a member kind); level 2 adds methods, properties and class constants. */
     private function noteDecl(Token $tok, string $resolved, string $kind, int $level): void
     {
         if ($this->collectNames !== 1 || $this->declNames < $level) { return; }

@@ -41,7 +41,7 @@ final class NameIndex
             $list[] = new NameOccurrence(
                 $path, $n->kind, strtolower(ltrim($n->resolved, '\\')),
                 $s->startLine(), $s->startColumn(), $endLine, $endCol, $n->globalFallback,
-                $n->role === 'decl', $n->role === 'decl' ? '' : $n->role,
+                $n->role === 'decl', $n->role === 'decl' ? '' : $n->role, ltrim($n->resolved, '\\'),
             );
         }
         $this->occ[$path] = $list;
