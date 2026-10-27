@@ -12,5 +12,6 @@ final class NameOccurrence
         public readonly int $col,
         public readonly int $endLine,
         public readonly int $endCol,
+        public readonly bool $globalFallback,
     ) {}
 }

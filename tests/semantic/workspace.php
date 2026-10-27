@@ -155,4 +155,73 @@ check('closed_file_keeps_index_but_not_ast', function () use ($A, $B) {
     return count($w->diagnostics('b.php')) === 3 ?: 'remove kept decls';
 });
 
+/** @param \Semantic\Location[] $ls @return string[] */
+function locs(array $ls): array
+{
+    $o = array_map(fn($l) => $l->file . ':' . $l->line, $ls);
+    sort($o);
+    return $o;
+}
+
+check('definition_of_namespaced_call_falls_back_to_global_function', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nfunction helper() {}\n");
+    $w->open('b.php', "<?php\nnamespace N;\nhelper();\n");
+    $l = $w->definitionOf('b.php', 3, 1);
+    if ($l === null || $l->file !== 'a.php' || $l->line !== 2) { return json_encode($l); }
+    $w->open('d.php', "<?php\nnamespace N;\nfunction helper() {}\n");
+    $l = $w->definitionOf('b.php', 3, 1);
+    return ($l !== null && $l->file === 'd.php') ?: 'namespaced declaration must win: ' . json_encode($l);
+});
+
+check('references_cross_the_global_fallback_both_ways', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nfunction helper() {}\n");
+    $w->open('b.php', "<?php\nnamespace N;\nhelper();\n");
+    $w->open('c.php', "<?php\nhelper();\n");
+    $fromGlobal = locs($w->referencesTo('c.php', 2, 1));
+    $fromNs = locs($w->referencesTo('b.php', 3, 1));
+    if ($fromGlobal !== ['b.php:3', 'c.php:2']) { return 'global ' . json_encode($fromGlobal); }
+    if ($fromNs !== $fromGlobal) { return 'ns ' . json_encode($fromNs); }
+    $w->open('d.php', "<?php\nnamespace N;\nfunction helper() {}\n");
+    $g = locs($w->referencesTo('c.php', 2, 1));
+    $n = locs($w->referencesTo('b.php', 3, 1));
+    return ($g === ['c.php:2'] && $n === ['b.php:3']) ?: 'declared ns fn splits them ' . json_encode([$g, $n]);
+});
+
+check('references_cross_the_global_fallback_for_constants', function () {
+    $w = new Workspace(lib());
+    $w->open('b.php', "<?php\nnamespace N;\necho PHP_EOL;\n");
+    $w->open('c.php', "<?php\necho PHP_EOL;\n");
+    $g = locs($w->referencesTo('c.php', 2, 6));
+    return ($g === ['b.php:3', 'c.php:2'] && locs($w->referencesTo('b.php', 3, 6)) === $g) ?: json_encode($g);
+});
+
+check('references_include_the_use_import_line', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nnamespace M;\nclass Foo {}\nfunction bar() {}\n");
+    $w->open('b.php', "<?php\nnamespace N;\nuse M\\Foo;\nuse function M\\bar;\nnew Foo;\nbar();\n");
+    $fromUse = locs($w->referencesTo('b.php', 3, 8));
+    $fromNew = locs($w->referencesTo('b.php', 5, 5));
+    if ($fromUse !== ['b.php:3', 'b.php:5'] || $fromNew !== $fromUse) { return json_encode([$fromUse, $fromNew]); }
+    $fn = locs($w->referencesTo('b.php', 4, 16));
+    return $fn === ['b.php:4', 'b.php:6'] ?: json_encode($fn);
+});
+
+check('definition_keeps_class_and_function_of_one_name_apart', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nclass foo {}\nfunction foo() {}\n");
+    $w->open('b.php', "<?php\nnew foo; foo();\n");
+    $c = $w->definitionOf('b.php', 2, 5);
+    $f = $w->definitionOf('b.php', 2, 11);
+    return ($c !== null && $c->line === 2 && $f !== null && $f->line === 3) ?: json_encode([$c, $f]);
+});
+
+check('definition_of_function_call_ignores_a_class_of_the_same_name', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nclass foo {}\n");
+    $w->open('b.php', "<?php\nfoo();\n");
+    return $w->definitionOf('b.php', 2, 1) === null ?: 'jumped to the class';
+});
+
 exit($fail);
