@@ -91,10 +91,11 @@ check('update_into_syntax_error_then_back', function () use ($A, $B) {
     $w->update('a.php', "<?php\nnamespace N;\nclass Foo { function ( }\n");
     $da = $w->diagnostics('a.php');
     if (count($da) === 0) { return 'no parse errors'; }
-    foreach ($da as $d) { if ($d->code !== 'parse.error') { return 'non-parse diag ' . $d->code; } }
+    if ($da[0]->code !== 'parse.error') { return 'parse.error missing: ' . $da[0]->code; }
+    // P2b: a file with syntax errors keeps its recovered tree and its declarations (was: dropped, 3 diagnostics).
     $db = dg($w, 'b.php');
-    if (count($db) !== 3) { return 'stale or lost declarations: ' . json_encode($db); }
-    if ($w->definitionOf('b.php', 4, 15) !== null) { return 'stale definition'; }
+    if ($db !== $clean) { return 'declarations lost: ' . json_encode($db); }
+    if ($w->definitionOf('b.php', 4, 15) === null) { return 'definition lost'; }
     $w->update('a.php', $A);
     return ($clean === dg($w, 'b.php') && $w->definitionOf('b.php', 4, 15) !== null && dg($w, 'a.php') === [])
         ?: 'not restored ' . json_encode(dg($w, 'b.php'));
@@ -258,10 +259,11 @@ check('bom_first_line_and_crlf_second_line_columns_match_run_and_bytes', functio
     return ($got === [[1, $line1], [2, $line2]]) ?: json_encode($got) . " want [[1,$line1],[2,$line2]]";
 });
 
-check('file_that_does_not_parse_holds_no_ast', function () {
+check('file_that_does_not_parse_keeps_its_recovered_ast', function () {
     $w = new Workspace(lib());
     $w->open('ok.php', "<?php\n");
     $w->open('bad.php', "<?php\nclass { \n");
-    return ($w->openFileCount() === 1 && count($w->diagnostics('bad.php')) > 0) ?: 'count ' . $w->openFileCount();
+    // P2b: the broken file keeps its recovered AST (was: held none, count 1).
+    return ($w->openFileCount() === 2 && count($w->diagnostics('bad.php')) > 0) ?: 'count ' . $w->openFileCount();
 });
 exit($fail);

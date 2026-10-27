@@ -81,6 +81,8 @@ final class Index
     /** @var array<string, \Parser\Ast\Span> */
     private array $curFnSpans = [];
 
+    private ?ParsedFile $curFile = null;
+
     /** @param ParsedFile[] $files */
     public static function build(array $files): Index
     {
@@ -101,12 +103,31 @@ final class Index
         $classPos = [];
         foreach ($this->fileFns[$path] ?? [] as $l => $_) { $fnPos[$l] = \array_search($path, $this->fnDeclarers[$l], true); }
         foreach ($this->fileClasses[$path] ?? [] as $l => $_) { $classPos[$l] = \array_search($path, $this->classDeclarers[$l], true); }
+        $oldFns = $this->fileFns[$path] ?? [];
+        $oldClasses = $this->fileClasses[$path] ?? [];
+        $oldSpans = $this->fileSpans[$path] ?? [];
+        $oldFnSpans = $this->fileFnSpans[$path] ?? [];
         $this->removeFile($path);
         $this->curFns = [];
         $this->curClasses = [];
         $this->curSpans = [];
         $this->curFnSpans = [];
+        $this->curFile = $pf;
         $this->collectStmts($pf->program->statements);
+        $this->curFile = null;
+        if ($pf->hasErrors) {
+            // Sticky: a declaration the recovered tree lost stays until the file is removed or parses clean.
+            foreach ($oldFns as $l => $fi) {
+                if (isset($this->curFns[$l])) { continue; }
+                $this->curFns[$l] = $fi;
+                $this->curFnSpans[$l] = $oldFnSpans[$l];
+            }
+            foreach ($oldClasses as $l => $ci) {
+                if (isset($this->curClasses[$l])) { continue; }
+                $this->curClasses[$l] = $ci;
+                $this->curSpans[$l] = $oldSpans[$l];
+            }
+        }
         $this->fileFns[$path] = $this->curFns;
         $this->fileClasses[$path] = $this->curClasses;
         $this->fileSpans[$path] = $this->curSpans;
@@ -267,6 +288,7 @@ final class Index
 
     private function addFunction(FunctionDecl $d): void
     {
+        if ($d->name === '') { return; }
         $l = \strtolower($d->name);
         $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType);
         $this->curFnSpans[$l] = $d->span;
@@ -275,6 +297,7 @@ final class Index
     private function addClass(ClassDecl $d): void
     {
         $fqn = $d->name;
+        if ($fqn === '') { return; }
         /** @var array<string, MethodInfo> $methods */
         $methods = [];
         foreach ($d->methods as $m) {
@@ -288,7 +311,14 @@ final class Index
         foreach ($d->cases as $case) { $consts[$case->name] = true; }
         /** @var array<string, ?string> $propTypes */
         $propTypes = [];
-        foreach ($d->properties as $prop) { $propTypes[$prop->name] = $prop->typeHint; }
+        $partial = \count($d->errorMembers) > 0;
+        foreach ($d->properties as $prop) {
+            // A recovered `public int ;` is a phantom property named `$`.
+            if ($prop->name === '' || $prop->name === '$') { $partial = true; continue; }
+            $propTypes[$prop->name] = $prop->typeHint;
+        }
+        $sp = $d->span;
+        if ($this->curFile !== null && $this->curFile->hitsRange($sp->startLine(), $sp->startColumn(), $sp->endLine(), $sp->endColumn())) { $partial = true; }
         // Constructor property promotion also declares properties.
         foreach ($d->methods as $m) {
             if (\strtolower($m->name) !== '__construct') { continue; }
@@ -299,7 +329,7 @@ final class Index
         $l = \strtolower($fqn);
         $this->curSpans[$l] = $d->span;
         $this->curClasses[$l] = new ClassInfo(
-            $fqn, $d->kind, $d->extends, $d->implements, $d->uses, $methods, $consts, $d->isAbstract, $propTypes
+            $fqn, $d->kind, $d->extends, $d->implements, $d->uses, $methods, $consts, $d->isAbstract, $propTypes, $partial
         );
     }
 
@@ -399,7 +429,7 @@ final class Index
     {
         if ($depth > 50) { return true; }
         $ci = $this->findClass($classFqn);
-        if ($ci === null) { return false; }
+        if ($ci === null || $ci->partial) { return false; }
         foreach ($ci->parents as $p) { if (!$this->fullHierarchyKnown($p, $depth + 1)) { return false; } }
         foreach ($ci->interfaces as $i) { if (!$this->fullHierarchyKnown($i, $depth + 1)) { return false; } }
         foreach ($ci->traits as $t) { if (!$this->fullHierarchyKnown($t, $depth + 1)) { return false; } }
@@ -491,7 +521,7 @@ final class Index
     {
         if ($depth > 50) { return true; }
         $ci = $this->findClass($classFqn);
-        if ($ci === null) { return false; }
+        if ($ci === null || $ci->partial) { return false; }
         foreach ($ci->parents as $p) {
             if (!$this->hierarchyKnown($p, $depth + 1)) { return false; }
         }
