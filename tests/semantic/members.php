@@ -81,7 +81,8 @@ check('no decl names falls back to decl start', function () {
 });
 check('workspace owner on member decls', function () {
     $ni = new \Semantic\NameIndex();
-    $ni->replaceFile('o.php', \Parser\Parser::parseTolerant("<?php\nnamespace A;\nclass K { function f() {} public \$p; const Q = 1; }\nclass L { function f() {} }\n", 'o.php', true, true, 2)->program);
+    $src84 = "<?php\nnamespace A;\nclass K { function f() {} public \$p; const Q = 1; }\nclass L { function f() {} }\n";
+    $ni->replaceFile('o.php', \Parser\Parser::parseTolerant($src84, 'o.php', true, true, 2)->program, $src84);
     $owners = [];
     foreach ($ni->allOccurrences() as $o) { if ($o->isDecl && $o->kind === 'member') { $owners[] = $o->resolved . '@' . $o->owner; } }
     return $owners === ['f@A\K', 'p@A\K', 'Q@A\K', 'f@A\L'] ? true : implode(',', $owners);
@@ -90,7 +91,7 @@ check('workspace owner on member decls', function () {
 function ownersOf(string $src): string
 {
     $ni = new \Semantic\NameIndex();
-    $ni->replaceFile('o.php', \Parser\Parser::parseTolerant($src, 'o.php', true, true, 2)->program);
+    $ni->replaceFile('o.php', \Parser\Parser::parseTolerant($src, 'o.php', true, true, 2)->program, $src);
     $owners = [];
     foreach ($ni->allOccurrences() as $o) { if ($o->isDecl && $o->kind === 'member') { $owners[] = $o->resolved . '@' . preg_replace('/^(\\\\?)__anon_class_\d+_\d+_\d+$/', 'ANON', $o->owner); } }
     return implode(',', $owners);
@@ -102,7 +103,7 @@ check('anon owner matches Index key', function () {
     $src = "<?php\nclass A { function m() { return new class { function run() {} }; } }\n";
     $p = \Parser\Parser::parseTolerant($src, 'o.php', true, true, 2)->program;
     $ni = new \Semantic\NameIndex();
-    $ni->replaceFile('o.php', $p);
+    $ni->replaceFile('o.php', $p, $src);
     $idx = Index::build([new ParsedFile('o.php', $p)]);
     foreach ($ni->allOccurrences() as $o) {
         if ($o->isDecl && $o->resolved === 'run' && $idx->lookupMember($o->owner, 'run', 'method') !== null && $o->owner !== 'A') { return true; }

@@ -202,8 +202,9 @@ final class Workspace
      * class Foo, function foo and constant FOO never collide. A global-fallback name that no
      * namespaced declaration answers for counts as the global name, so a global call and an
      * unqualified namespaced call to the same function find each other.
-     * A member (enum case, class constant, method, property) resolves through its receiver type: the declaration, the
-     * overriding declarations and every use site that resolves to one of them; a site whose receiver is unknown is
+     * A member (enum case, class constant, method, property) resolves through its receiver type: the whole override
+     * family (Index::memberFamily: ancestors, descendants, interfaces, traits, siblings; private members and
+     * constructors excepted) and every use site that resolves to one of them; a site whose receiver is unknown is
      * not listed (see uncertainSitesFor).
      *
      * @return Location[]
@@ -323,7 +324,7 @@ final class Workspace
             if ($ms !== null && \count($ms) > 0) {
                 $parts = [];
                 foreach ($ms as $m) { $parts[] = $this->signature($m); }
-                return new HoverInfo(\implode(' | ', $parts), new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
+                return new HoverInfo(\implode("\nor ", $parts), new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
             }
         }
         $t = $this->typeAt($uri, $line, $col);
@@ -336,7 +337,8 @@ final class Workspace
     /**
      * Reasons a rename of the symbol under the cursor cannot be done mechanically, empty when it can:
      * `unresolved-member`, `owner-unknown` (class nested in a closure / loop), `implicit-member`, `library-declaration`,
-     * and one `heredoc-interpolation:<file>:<line>:<col>` per heredoc in the workspace (they hold unindexed uses).
+     * one `named-argument:<file>:<line>:<col>` per named argument (call or attribute) spelled like the member (a promoted
+     * property is also a parameter name), `heredoc-scan-failed:<file>` when the heredoc scan gave up, and one `heredoc-interpolation:<file>:<line>:<col>` per heredoc in the workspace (they hold unindexed uses).
      *
      * @return string[]
      */
@@ -357,6 +359,12 @@ final class Workspace
         }
         foreach ($this->names->uncertainSites('') as $s) {
             if ($s->reason === 'heredoc-interpolation') { $out[] = 'heredoc-interpolation:' . $s->file . ':' . $s->line . ':' . $s->col; }
+            if ($s->reason === 'heredoc-scan-failed') { $out[] = 'heredoc-scan-failed:' . $s->file; }
+        }
+        if ($o->kind === 'member') {
+            foreach ($this->names->uncertainSites($o->resolvedLower) as $s) {
+                if ($s->reason === 'named-argument') { $out[] = 'named-argument:' . $s->file . ':' . $s->line . ':' . $s->col; }
+            }
         }
         return \array_values(\array_unique($out));
     }
@@ -412,14 +420,10 @@ final class Workspace
         /** @var array<string, Location> $out */
         $out = [];
         foreach ($ms as $m) {
-            $want[MemberResolver::key($m)] = true;
-            $l = $this->memberLocation($m);
-            if ($l !== null) { $out[self::locKey($l)] = $l; }
-            if ($m->kind !== 'method') { continue; }
-            foreach ($this->index->overridersOf($m->declClass, $m->name) as $ov) {
-                $want[MemberResolver::key($ov)] = true;
-                $ol = $this->memberLocation($ov);
-                if ($ol !== null) { $out[self::locKey($ol)] = $ol; }
+            foreach ($this->index->memberFamily($m) as $fm) {
+                $want[MemberResolver::key($fm)] = true;
+                $l = $this->memberLocation($fm);
+                if ($l !== null) { $out[self::locKey($l)] = $l; }
             }
         }
         $family = $this->familyOf($o);
@@ -468,15 +472,27 @@ final class Workspace
 
     private function signature(MemberInfo $m): string
     {
-        $n = $m->declClass . '::';
+        $n = ($m->isStatic ? 'static ' : '') . $m->declClass . '::';
         if ($m->kind === 'prop') { return $n . '$' . $m->name . ($m->typeHint !== null ? ': ' . $m->typeHint : ''); }
         if ($m->kind !== 'method') { return $n . $m->name . ($m->kind === 'const' && $m->typeHint !== null ? ': ' . $m->typeHint : ''); }
         $mi = $this->index->findMethod($m->declClass, \strtolower($m->name), 0);
         if ($mi === null) { return $n . $m->name; }
         $ps = [];
         foreach ($mi->params as $p) {
-            $ps[] = ($p->typeHint !== null ? $p->typeHint . ' ' : '') . ($p->byRef ? '&' : '') . ($p->variadic ? '...' : '') . '$' . $p->name;
+            $ps[] = ($p->typeHint !== null ? $p->typeHint . ' ' : '') . ($p->byRef ? '&' : '') . ($p->variadic ? '...' : '') . '$' . $p->name
+                . ($p->default !== null ? ' = ' . self::defaultText($p->default) : '');
         }
         return $n . $m->name . '(' . \implode(', ', $ps) . ')' . ($mi->returnType !== null ? ': ' . $mi->returnType : '');
+    }
+
+    /** Source-ish text of a parameter default: literals as written, anything else as `…`. */
+    private static function defaultText(Expr $e): string
+    {
+        if ($e instanceof \Parser\Ast\IntLiteral) { return (string)$e->value; }
+        if ($e instanceof \Parser\Ast\StringLiteral) { return "'" . $e->value . "'"; }
+        if ($e instanceof \Parser\Ast\BoolLiteral) { return $e->value ? 'true' : 'false'; }
+        if ($e instanceof \Parser\Ast\NullLiteral) { return 'null'; }
+        if ($e instanceof \Parser\Ast\Identifier) { return $e->name; }
+        return '…';
     }
 }

@@ -212,6 +212,7 @@ heredoc/nowdoc), anonymous-class naming, global constants in the Index.
 - `typeAt` and narrowing.
 
 **P3** - document symbols and completion.
+- Closed files: member use sites in a closed file resolve to nothing and are listed uncertain (`unresolved-receiver`), so a project-wide rename is uncertain everywhere outside open files. Root-cause fix: keep each indexed file's text (or re-read it from disk) and lazily reparse it, building `ExprAt` / `UnitLookup` on demand through a small LRU; never keep every AST.
 
 **Open**
 - Diagnostics for closed files (a closed file reports only the parse errors it had).

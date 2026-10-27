@@ -751,6 +751,49 @@ final class Index
         return $out;
     }
 
+    /**
+     * The override family of a member: every non-private declaration with the same kind and name in the
+     * transitive ancestors (parents, interfaces, traits) of its class, and in every descendant / implementer
+     * / trait user of those ancestors (siblings included). One entry per declaration, the argument included.
+     * A private member, and a constructor, belong to no family but their own (a child's private `m` is not an
+     * override; constructors are not renamed across inheritance). Static and instance members of one name are
+     * one family. A `const` or `case` is looked up under its own kind key.
+     *
+     * @return MemberInfo[]
+     */
+    public function memberFamily(MemberInfo $m): array
+    {
+        if ($m->visibility === 'private' || ($m->kind === 'method' && \strtolower($m->name) === '__construct')) { return [$m]; }
+        $key = $m->kind . ':' . ($m->kind === 'method' ? \strtolower($m->name) : $m->name);
+        $start = \strtolower(\ltrim($m->declClass, '\\'));
+        /** @var array<string, bool> $roots */
+        $roots = [$start => true];
+        $queue = [$start];
+        for ($i = 0; $i < \count($queue); $i++) {
+            $ci = $this->classes[$queue[$i]] ?? null;
+            if ($ci === null) { continue; }
+            foreach ($this->edges($ci) as $t) {
+                if (!isset($roots[$t])) { $roots[$t] = true; $queue[] = $t; }
+            }
+        }
+        /** @var array<string, bool> $cands */
+        $cands = $roots;
+        foreach (\array_keys($roots) as $r) {
+            foreach ($this->implementersOf($r) as $d) { $cands[$d] = true; }
+        }
+        /** @var MemberInfo[] $out */
+        $out = [$m];
+        $seen = [\spl_object_id($m) => true];
+        foreach (\array_keys($cands) as $c) {
+            $ci = $this->classes[$c] ?? null;
+            $x = $ci === null ? null : ($ci->members[$key] ?? null);
+            if ($x === null || $x->visibility === 'private' || isset($seen[\spl_object_id($x)])) { continue; }
+            $seen[\spl_object_id($x)] = true;
+            $out[] = $x;
+        }
+        return $out;
+    }
+
     /** Does the class (or an ancestor) define `__call` / `__callStatic`? */
     public function hasMagicCall(string $classFqn): bool
     {
