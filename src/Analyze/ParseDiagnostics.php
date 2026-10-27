@@ -13,7 +13,12 @@ final class ParseDiagnostics
         /** @var Diagnostic[] $out */
         $out = [];
         foreach ($r->errors as $pe) {
-            $out[] = Diagnostic::error($file, $pe->errLine, $pe->column, 'parse.error', $pe->reason);
+            $d = Diagnostic::error($file, $pe->errLine, $pe->column, 'parse.error', $pe->reason);
+            $d->startLine = $pe->errLine;
+            $d->startCol = $pe->column;
+            $d->endLine = $pe->endLine;
+            $d->endCol = $pe->endColumn;
+            $out[] = $d;
         }
         return $out;
     }
