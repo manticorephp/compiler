@@ -1078,7 +1078,8 @@ final class InferTypes implements Pass
         // instance scan above can reach them.
         $this->retypedProps = [];
         if ($this->scanStaticPropElemFromStores($module)) {
-            $this->inferAfterPropScan($module, 'static_prop_elem');
+            $this->rescanProps = [];
+            $this->rescanPropagating($module, 'static_prop_elem');
         }
         // By-ref param type inference: an UNTYPED (`cell`) `&$p` holds the
         // caller's RAW slot value (a string/array pointer), but a cell type
@@ -1171,7 +1172,7 @@ final class InferTypes implements Pass
             // A callee the call-site scans pinned to the pre-widening element
             // (`array_reverse($t)`) is re-observed against the widened local.
             if ($this->scanCallSiteArrayElems($module)) {
-                $this->inferFunctionsForScope($module, 'nested_elem_callsite_array');
+                $this->rescanPropagating($module, 'nested_elem_callsite_array');
             }
             $guard = $guard + 1;
         }
@@ -1190,7 +1191,7 @@ final class InferTypes implements Pass
         while ($guard < 4 && $this->scanByRefElemWiden($module)) {
             $this->inferFunctionsForScope($module, 'byref_elem_second');
             if ($this->scanCallSiteArrayElems($module)) {
-                $this->inferFunctionsForScope($module, 'byref_elem_callsite_array');
+                $this->rescanPropagating($module, 'byref_elem_callsite_array');
             }
             $guard = $guard + 1;
         }

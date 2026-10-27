@@ -691,9 +691,10 @@ trait InferScans
         // ONE walk for every retyped slot — a walk per slot was the module
         // times the static properties that have stores.
         $changed = false;
+        $this->rescanTouched = [];
         foreach ($module->functions as $fn) {
             if (!$this->bodyHas($fn, Node::KIND_STATIC_PROP)) { continue; }
-            if ($this->retypeStaticPropNodes($fn->body, $targets)) { $changed = true; }
+            if ($this->retypeStaticPropNodes($fn->body, $targets)) { $changed = true; $this->rescanTouched[$fn->name] = true; }
         }
         if ($changed && $this->ctx !== null) {
             foreach ($targets as $g => $unused) { $this->ctx->changes->addProp($g); }
