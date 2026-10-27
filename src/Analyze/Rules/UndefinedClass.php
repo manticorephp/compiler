@@ -6,6 +6,7 @@ use Analyze\AstWalk;
 use Analyze\Builtins;
 use Analyze\Diagnostic;
 use Analyze\Index;
+use Analyze\NameRanges;
 use Analyze\ParsedFile;
 use Parser\Ast\ClassStmt;
 use Parser\Ast\DoWhileStmt;
@@ -75,16 +76,16 @@ final class UndefinedClass
         foreach ($stmts as $s) {
             if ($s instanceof ClassStmt) {
                 $span = $s->decl->span;
-                foreach ($s->decl->extends as $c) { $this->check($c, $span); }
-                foreach ($s->decl->implements as $c) { $this->check($c, $span); }
-                foreach ($s->decl->uses as $c) { $this->check($c, $span); }
+                foreach ($s->decl->extends as $c) { $this->check($c, $span, $span); }
+                foreach ($s->decl->implements as $c) { $this->check($c, $span, $span); }
+                foreach ($s->decl->uses as $c) { $this->check($c, $span, $span); }
                 // Method bodies are covered by the expression walk above.
                 continue;
             }
             if ($s instanceof TryCatchStmt) {
                 $this->scanStmts($s->try->statements);
                 foreach ($s->catches as $cat) {
-                    foreach ($cat->types as $t) { $this->check($t, $s->span); }
+                    foreach ($cat->types as $t) { $this->check($t, $s->span, $s->span, $s->try->span); }
                     $this->scanStmts($cat->body->statements);
                 }
                 if ($s->finally !== null) { $this->scanStmts($s->finally->statements); }
@@ -108,16 +109,21 @@ final class UndefinedClass
         }
     }
 
-    private function check(string $name, \Parser\Ast\Span $span): void
+    private function check(string $name, \Parser\Ast\Span $span, ?\Parser\Ast\Span $within = null, ?\Parser\Ast\Span $after = null): void
     {
         if ($name === '') { return; }
         $low = \strtolower(\ltrim($name, '\\'));
         if ($low === 'self' || $low === 'static' || $low === 'parent') { return; }
         if ($this->idx->findClass($name) !== null) { return; }
         if (Builtins::isKnownClass($low)) { return; }
-        $this->diags[] = Diagnostic::at(
+        $d = Diagnostic::at(
             $this->pf->path, $span, Diagnostic::SEV_ERROR, 'undefined.class',
             'unknown class ' . \ltrim($name, '\\')
         );
+        if ($within !== null) {
+            $ref = NameRanges::useOf($this->pf->program->names, $name, $within, $after);
+            if ($ref !== null) { $d->withRange($ref->span); }
+        }
+        $this->diags[] = $d;
     }
 }
