@@ -6,7 +6,11 @@ names:
   @8:23-8:25 member:decl $n -> n
   @9:21-9:32 member:decl __construct -> __construct
   @9:45-9:47 variable:param $q -> q
+  @9:45-9:47 member:decl $q -> q
   @9:64-9:70 variable:param $label -> label
+  @9:64-9:70 member:decl $label -> label
+  @9:92-9:94 variable:param $z -> z
+  @9:92-9:94 member:decl $z -> z
   @10:21-10:24 member:decl run -> run
   @10:25-10:28 class Box -> App\Box
   @10:29-10:31 variable:param $o -> o
@@ -27,5 +31,6 @@ names:
   @23:24-23:29 member:prop label -> label
   @24:18-24:28 class \Exception -> Exception
   @24:29-24:31 variable:catch $e -> e
-  @26:21-26:23 variable:param $x -> x
+  @26:21-26:26 member:prop label -> label
+  @27:21-27:23 variable:param $x -> x
 

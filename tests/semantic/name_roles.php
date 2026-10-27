@@ -108,6 +108,8 @@ $o->p; $o?->p; $o->m(); A::m(); A::C; A::$p; E::Hearts; A::class;
 function f(int $a, &...$r) { global $g; static $s = 1; try {} catch (X $e) {} }
 class K { function __construct(private int $q) {} }
 echo "{$o->w}";
+echo "x $o->s y";
+class R { function __construct(readonly int $ro, public $pp) {} }
 PHP;
 
 /** @return string[] "role:written@line:col-endCol" for member / variable entries */
@@ -130,6 +132,8 @@ check('member_and_variable_entries_level2', function () use ($MEM) {
         'variable/param:$a=a@3:16-18', 'variable/param:$r=r@3:24-26', 'variable/global:$g=g@3:37-39',
         'variable/static:$s=s@3:48-50', 'variable/catch:$e=e@3:72-74',
         'variable/param:$q=q@4:44-46', 'member/prop:w=w@5:12-13',
+        'member/prop:s=s@6:13-14',
+        'variable/param:$ro=ro@7:45-48', 'variable/param:$pp=pp@7:57-60',
     ];
     $got = memberEntries($MEM, 2);
     return $got === $want ?: "\n" . implode("\n", $got);
