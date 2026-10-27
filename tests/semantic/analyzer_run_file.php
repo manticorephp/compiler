@@ -45,4 +45,32 @@ check('run_equals_runfile_loop', function () use ($A, $B) {
     return true;
 });
 
+/** @return array<string, int> code => count, for runFile over the fixtures */
+function codes(bool $undef): array
+{
+    global $A, $B;
+    $index = Index::build([$A, $B]);
+    $index->addExternFunctions([]);
+    $out = [];
+    foreach ([$A, $B] as $p) {
+        foreach ((new Analyzer())->runFile($p, $index, $undef) as $d) { $out[$d->code] = ($out[$d->code] ?? 0) + 1; }
+    }
+    return $out;
+}
+
+check('every_rule_is_wired_into_run_file', function () {
+    $on = codes(true);
+    foreach (['arg.count', 'undefined.method', 'undefined.class', 'undefined.function'] as $code) {
+        if (!isset($on[$code])) { return "missing $code: " . json_encode($on); }
+    }
+    return ($on['arg.count'] === 2) ?: 'arg.count count ' . json_encode($on);
+});
+
+check('closed_world_rules_are_off_without_check_undefined', function () {
+    $off = codes(false);
+    foreach (['undefined.class', 'undefined.function'] as $code) {
+        if (isset($off[$code])) { return "$code present with checkUndefined=false"; }
+    }
+    return (isset($off['arg.count']) && isset($off['undefined.method'])) ?: json_encode($off);
+});
 exit($fail);
