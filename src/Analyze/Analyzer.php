@@ -46,49 +46,63 @@ final class Analyzer
         }
 
         foreach ($files as $pf) {
-            $argCount = new \Analyze\Rules\ArgCount();
-            foreach ($argCount->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
-
-            $missingArray = new \Analyze\Rules\MissingArrayType();
-            foreach ($missingArray->run($pf) as $d) { $this->diagnostics[] = $d; }
-
-            $stringArith = new \Analyze\Rules\StringArithmetic();
-            foreach ($stringArith->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
-
-            $argType = new \Analyze\Rules\ArgType();
-            foreach ($argType->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
-
-            $returnType = new \Analyze\Rules\ReturnType();
-            foreach ($returnType->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
-
-            // Async hazards. Both self-gate on the file naming `Async\`, so a
-            // program that never touches the runtime keeps its output unchanged.
-            $asyncStatic = new \Analyze\Rules\AsyncStaticLocal();
-            foreach ($asyncStatic->run($pf) as $d) { $this->diagnostics[] = $d; }
-
-            $asyncIo = new \Analyze\Rules\AsyncBlockingIo();
-            foreach ($asyncIo->run($pf) as $d) { $this->diagnostics[] = $d; }
-
-            // Method existence self-gates on a fully-known hierarchy, so it is
-            // safe even in single-file mode.
-            $undefMethod = new \Analyze\Rules\UndefinedMethod();
-            foreach ($undefMethod->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
-
-            $unresolvedInc = new \Analyze\Rules\UnresolvedInclude();
-            foreach ($unresolvedInc->run($pf, $unitPaths) as $d) { $this->diagnostics[] = $d; }
-
-            if ($checkUndefined) {
-                $undefClass = new \Analyze\Rules\UndefinedClass();
-                foreach ($undefClass->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
-
-                $undefFn = new \Analyze\Rules\UndefinedFunction();
-                foreach ($undefFn->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
-
-                $undefConst = new \Analyze\Rules\UndefinedClassConst();
-                foreach ($undefConst->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
-            }
+            foreach ($this->runFile($pf, $index, $checkUndefined, $unitPaths) as $d) { $this->diagnostics[] = $d; }
         }
         $this->diagnostics = Report::sortDiags($this->diagnostics);
         return $this->diagnostics;
+    }
+
+    /**
+     * @param array<string, bool>|null $unitPaths realpaths of the compile set; null (single document) skips UnresolvedInclude
+     * @return Diagnostic[] unsorted
+     */
+    public function runFile(ParsedFile $pf, Index $index, bool $checkUndefined, ?array $unitPaths = null): array
+    {
+        /** @var Diagnostic[] $out */
+        $out = [];
+        $argCount = new \Analyze\Rules\ArgCount();
+        foreach ($argCount->run($pf, $index) as $d) { $out[] = $d; }
+
+        $missingArray = new \Analyze\Rules\MissingArrayType();
+        foreach ($missingArray->run($pf) as $d) { $out[] = $d; }
+
+        $stringArith = new \Analyze\Rules\StringArithmetic();
+        foreach ($stringArith->run($pf, $index) as $d) { $out[] = $d; }
+
+        $argType = new \Analyze\Rules\ArgType();
+        foreach ($argType->run($pf, $index) as $d) { $out[] = $d; }
+
+        $returnType = new \Analyze\Rules\ReturnType();
+        foreach ($returnType->run($pf, $index) as $d) { $out[] = $d; }
+
+        // Async hazards. Both self-gate on the file naming `Async\`, so a
+        // program that never touches the runtime keeps its output unchanged.
+        $asyncStatic = new \Analyze\Rules\AsyncStaticLocal();
+        foreach ($asyncStatic->run($pf) as $d) { $out[] = $d; }
+
+        $asyncIo = new \Analyze\Rules\AsyncBlockingIo();
+        foreach ($asyncIo->run($pf) as $d) { $out[] = $d; }
+
+        // Method existence self-gates on a fully-known hierarchy, so it is
+        // safe even in single-file mode.
+        $undefMethod = new \Analyze\Rules\UndefinedMethod();
+        foreach ($undefMethod->run($pf, $index) as $d) { $out[] = $d; }
+
+        if ($unitPaths !== null) {
+            $unresolvedInc = new \Analyze\Rules\UnresolvedInclude();
+            foreach ($unresolvedInc->run($pf, $unitPaths) as $d) { $out[] = $d; }
+        }
+
+        if ($checkUndefined) {
+            $undefClass = new \Analyze\Rules\UndefinedClass();
+            foreach ($undefClass->run($pf, $index) as $d) { $out[] = $d; }
+
+            $undefFn = new \Analyze\Rules\UndefinedFunction();
+            foreach ($undefFn->run($pf, $index) as $d) { $out[] = $d; }
+
+            $undefConst = new \Analyze\Rules\UndefinedClassConst();
+            foreach ($undefConst->run($pf, $index) as $d) { $out[] = $d; }
+        }
+        return $out;
     }
 }
