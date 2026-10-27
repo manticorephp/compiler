@@ -95,20 +95,30 @@ final class Workspace
     /**
      * Class and function names only: the Index records no global constants, so a constant
      * resolves to null. The span is the declaration's start; the end equals the start.
+     * An unqualified function call in a namespace falls back to the global function when
+     * no namespaced one is declared, as PHP does.
      */
     public function definitionOf(string $uri, int $line, int $col): ?Location
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
-        if ($o === null) { return null; }
-        $file = $this->index->declaringFile($o->resolvedLower);
-        $span = $this->index->declSpan($o->resolvedLower);
+        if ($o === null || $o->kind === 'constant' || $o->kind === 'namespace') { return null; }
+        $kind = $o->kind === 'class' || $o->kind === 'function' ? $o->kind : null;
+        $name = $o->resolvedLower;
+        $file = $this->index->declaringFile($name, $kind);
+        if ($file === null && $o->globalFallback) {
+            $name = self::bareName($name);
+            $file = $this->index->declaringFile($name, $kind);
+        }
+        $span = $this->index->declSpan($name, $kind);
         if ($file === null || $span === null) { return null; }
         return new Location($file, $span->startLine(), $span->startColumn(), $span->startLine(), $span->startColumn());
     }
 
     /**
-     * Use sites of the resolved name only. P2b gap: the declaration site is not included,
-     * because declaration names are not NameRefs.
+     * Use sites of the resolved name, `use` imports included. A global-fallback name that
+     * no namespaced declaration answers for counts as the global name, so a global call
+     * and an unqualified namespaced call to the same function find each other. P2b gap:
+     * the declaration site is not included, because declaration names are not NameRefs.
      *
      * @return Location[]
      */
@@ -116,13 +126,42 @@ final class Workspace
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
         if ($o === null) { return []; }
+        $want = $this->targets($o);
         $out = [];
-        foreach ($this->names->occurrences($o->kind, $o->resolvedLower) as $r) {
-            $out[] = new Location($r->file, $r->line, $r->col, $r->endLine, $r->endCol);
+        foreach ($this->names->allOccurrences() as $r) {
+            if (!self::kindsMatch($o->kind, $r->kind)) { continue; }
+            foreach ($this->targets($r) as $t => $_) {
+                if (isset($want[$t])) {
+                    $out[] = new Location($r->file, $r->line, $r->col, $r->endLine, $r->endCol);
+                    break;
+                }
+            }
         }
         return $out;
     }
 
+    /** @return array<string, bool> the lowercased names an occurrence may denote */
+    private function targets(NameOccurrence $o): array
+    {
+        $t = [$o->resolvedLower => true];
+        if ($o->globalFallback && $this->index->declaringFile($o->resolvedLower, $o->kind) === null) {
+            $t[self::bareName($o->resolvedLower)] = true;
+        }
+        return $t;
+    }
+
+    private static function bareName(string $lower): string
+    {
+        $bs = \strrpos($lower, '\\');
+        return $bs === false ? $lower : \substr($lower, $bs + 1);
+    }
+
+    private static function kindsMatch(string $a, string $b): bool
+    {
+        if ($a === $b) { return true; }
+        $named = ['class' => true, 'function' => true, 'constant' => true];
+        return ($a === 'use' && isset($named[$b])) || ($b === 'use' && isset($named[$a]));
+    }
     /** @return UncertainSite[] */
     public function uncertainSitesFor(string $uri, int $line, int $col): array
     {

@@ -40,7 +40,7 @@ final class NameIndex
             }
             $list[] = new NameOccurrence(
                 $path, $n->kind, strtolower(ltrim($n->resolved, '\\')),
-                $s->startLine(), $s->startColumn(), $endLine, $endCol,
+                $s->startLine(), $s->startColumn(), $endLine, $endCol, $n->globalFallback,
             );
         }
         $this->occ[$path] = $list;
@@ -82,6 +82,16 @@ final class NameIndex
             foreach ($list as $o) {
                 if ($o->kind === $kind && $o->resolvedLower === $resolvedLower) { $out[] = $o; }
             }
+        }
+        return $out;
+    }
+
+    /** @return NameOccurrence[] */
+    public function allOccurrences(): array
+    {
+        $out = [];
+        foreach ($this->occ as $list) {
+            foreach ($list as $o) { $out[] = $o; }
         }
         return $out;
     }

@@ -48,8 +48,11 @@ final class Index
     /** @var array<string, array<string, ClassInfo>> path → lower FQN → class it declared */
     private array $fileClasses = [];
 
-    /** @var array<string, array<string, \Parser\Ast\Span>> path → lower FQN → declaration start */
+    /** @var array<string, array<string, \Parser\Ast\Span>> path → lower FQN → class declaration start */
     private array $fileSpans = [];
+
+    /** @var array<string, array<string, \Parser\Ast\Span>> path → lower FQN → function declaration start */
+    private array $fileFnSpans = [];
 
     /** @var array<string, string[]> lower FQN → declaring paths, winner first */
     private array $fnDeclarers = [];
@@ -75,6 +78,9 @@ final class Index
     /** @var array<string, \Parser\Ast\Span> */
     private array $curSpans = [];
 
+    /** @var array<string, \Parser\Ast\Span> */
+    private array $curFnSpans = [];
+
     /** @param ParsedFile[] $files */
     public static function build(array $files): Index
     {
@@ -99,10 +105,12 @@ final class Index
         $this->curFns = [];
         $this->curClasses = [];
         $this->curSpans = [];
+        $this->curFnSpans = [];
         $this->collectStmts($pf->program->statements);
         $this->fileFns[$path] = $this->curFns;
         $this->fileClasses[$path] = $this->curClasses;
         $this->fileSpans[$path] = $this->curSpans;
+        $this->fileFnSpans[$path] = $this->curFnSpans;
         foreach ($this->curFns as $l => $fi) {
             $this->fnDeclarers[$l] ??= [];
             $at = \min($fnPos[$l] ?? \PHP_INT_MAX, \count($this->fnDeclarers[$l]));
@@ -123,6 +131,7 @@ final class Index
         $this->curFns = [];
         $this->curClasses = [];
         $this->curSpans = [];
+        $this->curFnSpans = [];
     }
 
     public function removeFile(string $path): void
@@ -154,20 +163,30 @@ final class Index
                 $this->classDeclarers[$l] = $q;
             }
         }
-        unset($this->fileFns[$path], $this->fileClasses[$path], $this->fileSpans[$path]);
+        unset($this->fileFns[$path], $this->fileClasses[$path], $this->fileSpans[$path], $this->fileFnSpans[$path]);
     }
 
-    /** Path of the file whose declaration of this class or function currently wins. */
-    public function declaringFile(string $lowerFqn): ?string
+    /**
+     * Path of the file whose declaration of this class or function currently wins.
+     * $kind 'class' or 'function' restricts the lookup; null tries the class first.
+     */
+    public function declaringFile(string $lowerFqn, ?string $kind = null): ?string
     {
+        if ($kind === 'class') { return $this->classWinner[$lowerFqn] ?? null; }
+        if ($kind === 'function') { return $this->fnWinner[$lowerFqn] ?? null; }
         return $this->classWinner[$lowerFqn] ?? $this->fnWinner[$lowerFqn] ?? null;
     }
 
-    /** Start of the winning declaration; a class shadows a function of the same name. */
-    public function declSpan(string $lowerFqn): ?\Parser\Ast\Span
+    /** Start of the winning declaration; with no $kind a class shadows a function of the same name. */
+    public function declSpan(string $lowerFqn, ?string $kind = null): ?\Parser\Ast\Span
     {
-        $p = $this->classWinner[$lowerFqn] ?? $this->fnWinner[$lowerFqn] ?? null;
-        return $p === null ? null : ($this->fileSpans[$p][$lowerFqn] ?? null);
+        if ($kind !== 'function' && isset($this->classWinner[$lowerFqn])) {
+            return $this->fileSpans[$this->classWinner[$lowerFqn]][$lowerFqn] ?? null;
+        }
+        if ($kind !== 'class' && isset($this->fnWinner[$lowerFqn])) {
+            return $this->fileFnSpans[$this->fnWinner[$lowerFqn]][$lowerFqn] ?? null;
+        }
+        return null;
     }
 
     /** @return string[] lower FQNs of classes that directly extend, implement or use the target */
@@ -250,7 +269,7 @@ final class Index
     {
         $l = \strtolower($d->name);
         $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType);
-        $this->curSpans[$l] = $d->span;
+        $this->curFnSpans[$l] = $d->span;
     }
 
     private function addClass(ClassDecl $d): void
