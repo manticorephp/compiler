@@ -1141,6 +1141,8 @@ trait InferScans
      */
     private function scanDocListKeyPromote(Module $module): bool
     {
+        $this->rescanTouched = [];
+        $this->rescanProps = [];
         $cand = [];                      // "fn#idx" → true
         foreach ($module->functions as $fn) {
             if ($fn->isExtern || $fn->isPrelude) { continue; }
@@ -1198,6 +1200,7 @@ trait InferScans
                 $newT = Type::assoc(Type::cell(), $elem === null ? Type::unknown() : $elem);
                 if ($param->type->exactString() === $newT->exactString()) { continue; }
                 $param->type = $newT;
+                $this->rescanTouched[$fn->name] = true;
                 $changed = true;
             }
         }
@@ -1210,7 +1213,7 @@ trait InferScans
                 if ($this->setPropType($cd, $prop, Type::assoc(
                     Type::cell(),
                     $elem === null ? Type::unknown() : $elem,
-                ))) { $changed = true; }
+                ))) { $this->rescanProps[$prop] = true; $changed = true; }
             }
         }
         return $changed;
