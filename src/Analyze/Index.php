@@ -42,14 +42,173 @@ final class Index
         return isset($this->externFunctions[$lowerName]);
     }
 
+    /** @var array<string, array<string, FnInfo>> path → lower FQN → function it declared */
+    private array $fileFns = [];
+
+    /** @var array<string, array<string, ClassInfo>> path → lower FQN → class it declared */
+    private array $fileClasses = [];
+
+    /** @var array<string, array<string, \Parser\Ast\Span>> path → lower FQN → declaration start */
+    private array $fileSpans = [];
+
+    /** @var array<string, string[]> lower FQN → declaring paths, winner first */
+    private array $fnDeclarers = [];
+
+    /** @var array<string, string[]> lower FQN → declaring paths, winner first */
+    private array $classDeclarers = [];
+
+    /** @var array<string, string> lower FQN → path of the winning function declarer */
+    private array $fnWinner = [];
+
+    /** @var array<string, string> */
+    private array $classWinner = [];
+
+    /** @var array<string, array<string, bool>> lower target FQN → lower FQNs of classes naming it as parent, interface or trait */
+    private array $dependents = [];
+
+    /** @var array<string, FnInfo> scratch for the file being collected */
+    private array $curFns = [];
+
+    /** @var array<string, ClassInfo> */
+    private array $curClasses = [];
+
+    /** @var array<string, \Parser\Ast\Span> */
+    private array $curSpans = [];
+
     /** @param ParsedFile[] $files */
     public static function build(array $files): Index
     {
         $idx = new Index();
         foreach ($files as $pf) {
-            $idx->collectStmts($pf->program->statements);
+            $idx->replaceFile($pf);
         }
         return $idx;
+    }
+
+    /** Drop the file's previous contribution, then add the new one. */
+    public function replaceFile(ParsedFile $pf): void
+    {
+        $this->removeFile($pf->path);
+        $this->curFns = [];
+        $this->curClasses = [];
+        $this->curSpans = [];
+        $this->collectStmts($pf->program->statements);
+        $path = $pf->path;
+        $this->fileFns[$path] = $this->curFns;
+        $this->fileClasses[$path] = $this->curClasses;
+        $this->fileSpans[$path] = $this->curSpans;
+        foreach ($this->curFns as $l => $fi) {
+            $this->fnDeclarers[$l][] = $path;
+            if (\count($this->fnDeclarers[$l]) === 1) {
+                $this->functions[$l] = $fi;
+                $this->fnWinner[$l] = $path;
+            }
+        }
+        foreach ($this->curClasses as $l => $ci) {
+            $this->classDeclarers[$l][] = $path;
+            if (\count($this->classDeclarers[$l]) === 1) {
+                $this->setClass($l, $ci, $path);
+            }
+        }
+        $this->curFns = [];
+        $this->curClasses = [];
+        $this->curSpans = [];
+    }
+
+    public function removeFile(string $path): void
+    {
+        if (!isset($this->fileFns[$path])) { return; }
+        foreach ($this->fileFns[$path] as $l => $_) {
+            $q = [];
+            foreach ($this->fnDeclarers[$l] as $p) { if ($p !== $path) { $q[] = $p; } }
+            if ($q === []) {
+                unset($this->fnDeclarers[$l], $this->functions[$l], $this->fnWinner[$l]);
+            } else {
+                $this->fnDeclarers[$l] = $q;
+                if ($this->fnWinner[$l] === $path) {
+                    $this->fnWinner[$l] = $q[0];
+                    $this->functions[$l] = $this->fileFns[$q[0]][$l];
+                }
+            }
+        }
+        foreach ($this->fileClasses[$path] as $l => $_) {
+            $q = [];
+            foreach ($this->classDeclarers[$l] as $p) { if ($p !== $path) { $q[] = $p; } }
+            if ($q === []) {
+                unset($this->classDeclarers[$l]);
+                $this->setClass($l, null, '');
+            } elseif ($this->classWinner[$l] === $path) {
+                $this->classDeclarers[$l] = $q;
+                $this->setClass($l, $this->fileClasses[$q[0]][$l], $q[0]);
+            } else {
+                $this->classDeclarers[$l] = $q;
+            }
+        }
+        unset($this->fileFns[$path], $this->fileClasses[$path], $this->fileSpans[$path]);
+    }
+
+    /** Path of the file whose declaration of this class or function currently wins. */
+    public function declaringFile(string $lowerFqn): ?string
+    {
+        return $this->classWinner[$lowerFqn] ?? $this->fnWinner[$lowerFqn] ?? null;
+    }
+
+    /** Start of the winning declaration; a class shadows a function of the same name. */
+    public function declSpan(string $lowerFqn): ?\Parser\Ast\Span
+    {
+        $p = $this->classWinner[$lowerFqn] ?? $this->fnWinner[$lowerFqn] ?? null;
+        return $p === null ? null : ($this->fileSpans[$p][$lowerFqn] ?? null);
+    }
+
+    /** @return string[] lower FQNs of classes that directly extend, implement or use the target */
+    public function dependentsOf(string $lowerClassFqn): array
+    {
+        return \array_keys($this->dependents[$lowerClassFqn] ?? []);
+    }
+
+    /** @return string[] lower FQNs of every direct and transitive implementer / subclass */
+    public function implementersOf(string $lowerIface): array
+    {
+        /** @var array<string, bool> $seen */
+        $seen = [];
+        $queue = [$lowerIface];
+        for ($i = 0; $i < \count($queue); $i++) {
+            foreach ($this->dependents[$queue[$i]] ?? [] as $d => $_) {
+                if (isset($seen[$d])) { continue; }
+                $seen[$d] = true;
+                $queue[] = $d;
+            }
+        }
+        unset($seen[$lowerIface]);
+        return \array_keys($seen);
+    }
+
+    private function setClass(string $lower, ?ClassInfo $ci, string $path): void
+    {
+        $old = $this->classes[$lower] ?? null;
+        if ($old !== null) {
+            foreach ($this->edges($old) as $t) {
+                unset($this->dependents[$t][$lower]);
+                if ($this->dependents[$t] === []) { unset($this->dependents[$t]); }
+            }
+        }
+        if ($ci === null) {
+            unset($this->classes[$lower], $this->classWinner[$lower]);
+            return;
+        }
+        $this->classes[$lower] = $ci;
+        $this->classWinner[$lower] = $path;
+        foreach ($this->edges($ci) as $t) { $this->dependents[$t][$lower] = true; }
+    }
+
+    /** @return string[] lower FQNs of the parents, interfaces and traits of a class */
+    private function edges(ClassInfo $ci): array
+    {
+        $out = [];
+        foreach ([$ci->parents, $ci->interfaces, $ci->traits] as $names) {
+            foreach ($names as $n) { $out[] = \strtolower(\ltrim($n, '\\')); }
+        }
+        return $out;
     }
 
     /**
@@ -79,7 +238,9 @@ final class Index
 
     private function addFunction(FunctionDecl $d): void
     {
-        $this->functions[\strtolower($d->name)] = new FnInfo($d->name, $d->params, $d->returnType);
+        $l = \strtolower($d->name);
+        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType);
+        $this->curSpans[$l] = $d->span;
     }
 
     private function addClass(ClassDecl $d): void
@@ -106,7 +267,9 @@ final class Index
                 if ($mp->promoted !== '') { $propTypes[$mp->name] = $mp->typeHint; }
             }
         }
-        $this->classes[\strtolower($fqn)] = new ClassInfo(
+        $l = \strtolower($fqn);
+        $this->curSpans[$l] = $d->span;
+        $this->curClasses[$l] = new ClassInfo(
             $fqn, $d->kind, $d->extends, $d->implements, $d->uses, $methods, $consts, $d->isAbstract, $propTypes
         );
     }
@@ -277,8 +440,18 @@ final class Index
     public function implementerHasMethod(string $iface, string $lowerMethod): bool
     {
         $il = \strtolower(\ltrim($iface, '\\'));
-        foreach ($this->classes as $lc => $ci) {
-            if ($ci->kind === 'interface' || $lc === $il) { continue; }
+        // reaches() is permissive: a class under an unseen ancestor, or any
+        // __toString class for Stringable, reaches everything / Stringable.
+        $cands = $this->implementersOf($il);
+        foreach ($this->dependents as $target => $_) {
+            if (isset($this->classes[$target])) { continue; }
+            foreach ($this->implementersOf($target) as $c) { $cands[] = $c; }
+            foreach ($this->dependents[$target] as $c => $__) { $cands[] = $c; }
+        }
+        if ($il === 'stringable') { $cands = \array_keys($this->classes); }
+        foreach ($cands as $lc) {
+            $ci = $this->classes[$lc] ?? null;
+            if ($ci === null || $ci->kind === 'interface' || $lc === $il) { continue; }
             if (!$this->reaches($lc, $il, 0)) { continue; }
             if ($this->findMethod($ci->fqn, $lowerMethod, 0) !== null) { return true; }
         }
