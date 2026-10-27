@@ -1088,7 +1088,7 @@ final class EmitLlvm implements EmitVisitor
                 // path, which avoids raw+hoisted duplication at the dangerous
                 // Doctrine/Symfony sizes while keeping ordinary emission fast.
                 $h = new \Compile\Mir\HoistAllocas();
-                $body = $h->run($body);
+                $body = $h->runFast($body);
                 $hoistedAllocas += $h->moved;
                 if (!\Manticore\append_file_bytes($bodyPath, $body)) {
                     throw new \RuntimeException('EmitLlvm: cannot append in-memory body');
@@ -1291,7 +1291,7 @@ final class EmitLlvm implements EmitVisitor
                 $bodyBytes += $nBody;
             };
             $h = new \Compile\Mir\HoistAllocas();
-            $extraBodies = $h->run($extraBodies);
+            $extraBodies = $h->runFast($extraBodies);
             $hoistedAllocas += $h->moved;
             if (!\Manticore\append_file_bytes($bodyPath, $extraBodies)) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
@@ -1398,7 +1398,7 @@ final class EmitLlvm implements EmitVisitor
         // and a hot loop dies on the guard page. {@see \Compile\Mir\HoistAllocas}
         $statT = \Compile\Stats::begin('  hoist allocas');
         $hoist = new \Compile\Mir\HoistAllocas();
-        $ir = $hoist->run($ir);
+        $ir = $hoist->runFast($ir);
         \Compile\Stats::step('  hoist allocas', $statT, $hoist->moved, -1);
         // Everything above is emitted on DEMAND FLAGS, not on reachability: the
         // whole unified array runtime, the rc/arena/pool helpers and the
