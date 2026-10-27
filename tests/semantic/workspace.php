@@ -375,7 +375,7 @@ check('enum_case_is_a_member_not_a_global_constant', function () {
     $g = locs($w->referencesTo('b.php', 3, 6));
     $c = locs($w->referencesTo('a.php', 2, 18));
     $d = $w->definitionOf('a.php', 2, 18);
-    return ($g === ['b.php:3', 'c.php:3'] && $c === ['a.php:2'] && $d !== null && $d->line === 2 && $d->col === 18)
+    return ($g === ['b.php:2', 'b.php:3', 'c.php:3'] && $c === ['a.php:2'] && $d !== null && $d->line === 2 && $d->col === 18)
         ?: json_encode([$g, $c, $d]);
 });
 
