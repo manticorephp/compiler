@@ -64,6 +64,7 @@ final class Parser
 
     /** 1 when the written-name table is collected (an int, not a bool: see Lexer::scan()). */
     private int $collectNames = 0;
+    private int $declNames = 0;
 
     /** 1 when the tokens are RangedTokens (ranges or names on); only then are token ends read. */
     private int $ends = 0;
@@ -177,7 +178,7 @@ final class Parser
         return $p->parseProgram();
     }
 
-    public static function parseTolerant(string $source, string $file = '', bool $ranges = true, bool $names = true): ParseResult
+    public static function parseTolerant(string $source, string $file = '', bool $ranges = true, bool $names = true, int $declNames = 0): ParseResult
     {
         $lexer = new Lexer();
         $errors = [];
@@ -191,6 +192,7 @@ final class Parser
             $p->ends = ($ranges || $names) ? 1 : 0;
             $p->tolerant = 1;
             $p->collectNames = $names ? 1 : 0;
+            $p->declNames = $declNames;
             // Lexer errors are recorded first: the cap keeps the first 100 in discovery order (not by position), so lexer errors alone can fill it and drop the parser errors.
             foreach ($lexer->errors as $le) { $p->record($le); }
             $program = $p->parseProgram();
@@ -631,11 +633,11 @@ final class Parser
      * Build a UseItem from a fully-resolved FQN string already in
      * hand. Mirrors parseUseItem's `as`-alias + alias-table wiring.
      */
-    private function finishUseItem(string $fqn, string $kind, Token $first, ?string $written = null): UseItem
+    private function finishUseItem(string $fqn, string $kind, Token $first, ?string $written = null, ?Token $nameFirst = null): UseItem
     {
         if ($this->collectNames === 1 && $fqn !== '') {
-            $this->setNameRange($first, $this->prevEndLine, $this->prevEndColumn);
-            $this->noteName($written ?? $fqn, \ltrim($fqn, '\\'), 'use', false);
+            $this->setNameRange($nameFirst ?? $first, $this->prevEndLine, $this->prevEndColumn);
+            $this->noteName($written ?? $fqn, \ltrim($fqn, '\\'), 'use', false, $this->useRole($kind));
         }
         $fqn = \ltrim($fqn, '\\');
         $alias = null;
@@ -670,18 +672,19 @@ final class Parser
             if ($this->checkKeyword('function')) { $this->advance(); $kind = 'function'; }
             elseif ($this->checkKeyword('const')) { $this->advance(); $kind = 'const'; }
         }
+        $nameFirst = $this->peek();
         $tail = $this->parseClassNameLiteral();
         $written = $tail;
         $tail = \ltrim($tail, '\\');
         $fqn = $prefix === '' ? $tail : ($prefix . '\\' . $tail);
-        return $this->finishUseItem($fqn, $kind, $first, $written);
+        return $this->finishUseItem($fqn, $kind, $first, $written, $nameFirst);
     }
 
     private function parseUseItem(string $kind): UseItem
     {
         $first = $this->peek();
         $written = $this->parseClassNameLiteral();
-        if ($this->collectNames === 1) { $this->noteName($written, ltrim($written, '\\'), 'use', false); }
+        if ($this->collectNames === 1) { $this->noteName($written, ltrim($written, '\\'), 'use', false, $this->useRole($kind)); }
         $fqn = ltrim($written, '\\');
         $alias = null;
         if ($this->checkKeyword('as')) {
@@ -737,6 +740,7 @@ final class Parser
         if ($this->currentNamespace !== '') {
             $name = $this->currentNamespace . '\\' . $name;
         }
+        $this->noteDecl($nameTok, $name, 'class', 1);
 
         $decl = $this->finishClassDecl($kindKw, $name, $attributes, $isFinal, $isAbstract, $isReadonly, $span, $docComment, $first);
         return Stmt::class_($decl, $decl->span);
@@ -852,6 +856,7 @@ final class Parser
         if ($this->checkKeyword('case') && $kindKw === 'enum') {
             $this->advance();
             $caseNameTok = $this->expectMemberName('expected enum case name');
+            $this->noteDecl($caseNameTok, $caseNameTok->lexeme, 'constant', 1);
             $value = null;
             if ($this->match(TokenKind::Equals)) {
                 $value = $this->parseExpression();
@@ -1025,6 +1030,7 @@ final class Parser
         while (true) {
             $varTok = $this->expect(TokenKind::Variable, 'expected $property');
             $name = substr($varTok->lexeme, 1);
+            $this->noteDecl($varTok, $name, 'member', 2);
             $default = null;
             if ($this->match(TokenKind::Equals)) {
                 $default = $this->parseExpression();
@@ -1131,6 +1137,7 @@ final class Parser
         $consts = [];
         while (true) {
             $nameTok = $this->expectMemberName('expected const name');
+            $this->noteDecl($nameTok, $nameTok->lexeme, 'constant', 2);
             $this->expect(TokenKind::Equals, "expected '=' in const");
             $value = $this->parseExpression();
             $last = !$this->check(TokenKind::Comma);
@@ -1162,6 +1169,7 @@ final class Parser
         if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword) {
             throw $this->error('expected method name');
         }
+        $this->noteDecl($nameTok, $nameTok->lexeme, 'member', 2);
         $this->expect(TokenKind::OpenParen, "expected '(' after method name");
         $params = [];
         if (!$this->check(TokenKind::CloseParen)) {
@@ -1220,6 +1228,7 @@ final class Parser
         $returnsByRef = $this->match(TokenKind::Ampersand);
 
         $nameTok = $this->expect(TokenKind::Identifier, 'expected function name');
+        $this->noteDecl($nameTok, $this->currentNamespace !== '' ? $this->currentNamespace . '\\' . $nameTok->lexeme : $nameTok->lexeme, 'function', 1);
         $this->expect(TokenKind::OpenParen, "expected '(' after function name");
 
         $params = [];
@@ -2855,15 +2864,30 @@ final class Parser
     }
 
     /** Record the name parseClassNameLiteral() read last (call before anything else is consumed). */
-    private function noteName(string $written, string $resolved, string $kind, bool $globalFallback): void
+    private function noteName(string $written, string $resolved, string $kind, bool $globalFallback, string $role = ''): void
     {
-        $this->names[(string)$this->nmLine . ':' . (string)$this->nmColumn . ':' . $kind] = new NameRef(
+        $this->names[(string)$this->nmLine . ':' . (string)$this->nmColumn . ':' . $kind . $role] = new NameRef(
             new RangedSpan($this->nmLine, $this->nmColumn, $this->sourceFile, $this->nmEndLine, $this->nmEndColumn),
             $written,
             $resolved,
             $kind,
             $globalFallback,
+            $role,
         );
+    }
+
+    /** A declaration name token: level 1 = class-likes, functions, enum cases; level 2 adds members and class constants. */
+    private function noteDecl(Token $tok, string $resolved, string $kind, int $level): void
+    {
+        if ($this->collectNames !== 1 || $this->declNames < $level) { return; }
+        $this->setNameRange($tok, $tok->line, $tok->column + \strlen($tok->lexeme));
+        $this->noteName($tok->lexeme, $resolved, $kind, false, 'decl');
+    }
+
+    private function useRole(string $kind): string
+    {
+        if ($this->declNames === 0) { return ''; }
+        return $kind === 'const' ? 'constant' : $kind;
     }
 
     /** A class reference: scalar / pseudo type names are not names. */
@@ -3371,15 +3395,20 @@ final class Parser
      */
     private function parseAnonClass(Span $span): Expr
     {
-        $this->advance(); // 'class'
+        $classTok = $this->advance(); // 'class'
         $args = [];
         if ($this->check(TokenKind::OpenParen)) {
             $args = $this->parseArgList();
         }
         // A valid identifier (LLVM symbol-safe) — PHP's `class@anonymous` form
         // carries an `@` that the mangler can't emit.
-        $name = '__anon_class_' . (string)$this->anonClassCounter;
-        $this->anonClassCounter = $this->anonClassCounter + 1;
+        if ($this->tolerant === 1) {
+            $name = '__anon_class_' . (string)\crc32($this->sourceFile === '' ? '0' : $this->sourceFile)
+                . '_' . (string)$classTok->line . '_' . (string)$classTok->column;
+        } else {
+            $name = '__anon_class_' . (string)$this->anonClassCounter;
+            $this->anonClassCounter = $this->anonClassCounter + 1;
+        }
         if ($this->currentNamespace !== '') {
             $name = $this->currentNamespace . '\\' . $name;
         }
