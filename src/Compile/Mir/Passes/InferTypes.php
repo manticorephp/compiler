@@ -526,6 +526,8 @@ final class InferTypes implements Pass
         if (\Compile\Stats::$on) {
             \Compile\Stats::bump('infer.rescan.' . $reason . '.ms',
                 \intdiv(\Compile\Stats::now() - $startNs, 1000000));
+            \Compile\Stats::line('    rescan ' . $reason . ' fns=' . (string)\count($functions) . ' '
+                . (string)\intdiv(\Compile\Stats::now() - $startNs, 1000000) . 'ms');
         }
     }
 
@@ -1308,6 +1310,8 @@ final class InferTypes implements Pass
             \Compile\Stats::bump('infer.t.walk_ms', \intdiv($tPost - $tWalk, 1000000));
             \Compile\Stats::bump('infer.t.post_ms', \intdiv(\Compile\Stats::now() - $tPost, 1000000));
             \Compile\Stats::bump('infer.t.runs', 1);
+            \Compile\Stats::line('  infer run: pre-scans=' . (string)\intdiv($tWalk - $tRun, 1000000) . 'ms walk='
+                . (string)\intdiv($tPost - $tWalk, 1000000) . 'ms post=' . (string)\intdiv(\Compile\Stats::now() - $tPost, 1000000) . 'ms');
         }
         return $module;
     }
