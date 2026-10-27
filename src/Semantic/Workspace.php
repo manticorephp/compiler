@@ -12,6 +12,10 @@ use Analyze\Report;
 /**
  * Incremental analysis of a set of files: text in, diagnostics and name queries out.
  *
+ * Library files are labelled `lib:prelude/<name>.php` (see LibrarySymbols); that scheme is
+ * reserved, and open/update/close/remove throw InvalidArgumentException for such a URI. A
+ * `lib:` label is not a path on disk: the host maps it to the prelude directory itself.
+ *
  * Project membership: open/update add a file, close drops its text and AST but keeps its
  * Index and NameIndex entries, remove forgets the file. A file with syntax errors reports
  * only its parse.error diagnostics and contributes nothing to the Index while it has them.
@@ -23,7 +27,7 @@ final class Workspace
     private Index $index;
     private NameIndex $names;
 
-    /** @var array<string, ParsedFile> uri => AST of every open file */
+    /** @var array<string, ParsedFile> uri => AST of every open file that parsed cleanly */
     private array $asts = [];
 
     /** @var array<string, Diagnostic[]> uri => parse errors of a file whose text does not parse */
@@ -42,12 +46,13 @@ final class Workspace
 
     public function open(string $uri, string $text): void
     {
+        self::assertUserUri($uri);
         $r = \Parser\Parser::parseTolerant($text, $uri);
         if (count($r->errors) > 0) {
             $this->parseErrors[$uri] = ParseDiagnostics::of($uri, $r);
             $this->index->removeFile($uri);
             $this->names->removeFile($uri);
-            $this->asts[$uri] = new ParsedFile($uri, $r->program);
+            unset($this->asts[$uri]);
             return;
         }
         unset($this->parseErrors[$uri]);
@@ -57,6 +62,13 @@ final class Workspace
         $this->names->replaceFile($uri, $r->program);
     }
 
+    private static function assertUserUri(string $uri): void
+    {
+        if (\str_starts_with($uri, LibrarySymbols::LABEL_PREFIX)) {
+            throw new \InvalidArgumentException('Workspace: the "lib:" URI scheme is reserved for library files: ' . $uri);
+        }
+    }
+
     public function update(string $uri, string $text): void
     {
         $this->open($uri, $text);
@@ -64,16 +76,19 @@ final class Workspace
 
     public function close(string $uri): void
     {
+        self::assertUserUri($uri);
         unset($this->asts[$uri]);
     }
 
     public function remove(string $uri): void
     {
+        self::assertUserUri($uri);
         unset($this->asts[$uri], $this->parseErrors[$uri]);
         $this->index->removeFile($uri);
         $this->names->removeFile($uri);
     }
 
+    /** Files holding a live, usable AST: an open file that does not parse, and a closed one, hold none. */
     public function openFileCount(): int
     {
         return count($this->asts);

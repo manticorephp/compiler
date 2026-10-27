@@ -7,9 +7,16 @@ use Analyze\ParsedFile;
 /**
  * The analyzer's library universe: the prelude (parsed) and the stdlib function
  * names from the bundled `.o.sig`. Resolved the way the compiler resolves them.
+ *
+ * Prelude files are labelled `lib:prelude/<name>.php`. The label is not a disk path: the
+ * prelude is found through `\Manticore\prelude_src_or_empty` (several candidate roots), so a
+ * host that wants to open one maps the `lib:prelude/` prefix to its prelude directory.
  */
 final class LibrarySymbols
 {
+    /** Reserved label prefix of every library file; a Workspace refuses it as a user URI. */
+    public const LABEL_PREFIX = 'lib:';
+
     private static ?LibrarySymbols $loaded = null;
 
     /** @var ParsedFile[] */
@@ -146,7 +153,7 @@ final class LibrarySymbols
             // after a prelude header); re-add it so this parses as a standalone file.
             try {
                 $program = \Parser\Parser::parseSource("<?php\n" . $src);
-                $out[] = new ParsedFile("prelude/" . $name, $program);
+                $out[] = new ParsedFile(self::LABEL_PREFIX . "prelude/" . $name, $program);
             } catch (\Throwable $e) {
                 // A prelude file that does not parse standalone is simply skipped.
             }
