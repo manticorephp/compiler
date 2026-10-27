@@ -99,6 +99,14 @@ final class VarIndex
     private array $scHookParam = [];
     /** @var array<int, array<string, string>> arrow scope => name it writes => "line:col" of the first write */
     private array $scArrowWrites = [];
+    /** @var int[] scope span index, sorted by start: start, end, scope id, enclosing index (-1 none) */
+    private array $ssStart = [];
+    /** @var int[] */
+    private array $ssEnd = [];
+    /** @var int[] */
+    private array $ssId = [];
+    /** @var int[] */
+    private array $ssParent = [];
     /** @var UncertainSite[] parameters that sit in no function / method / closure range */
     private array $unscoped = [];
 
@@ -147,6 +155,7 @@ final class VarIndex
         $this->newScope('main', null, $p->statements, null, null, -1, false);
         $this->process(0);
         // declarations (params, catch, static, global) by position
+        $this->indexScopes();
         foreach ($p->names as $n) {
             if ($n->kind !== 'variable' || ($n->role !== 'param' && $n->role !== 'catch' && $n->role !== 'global' && $n->role !== 'static')) { continue; }
             $sp = $n->span;
@@ -378,23 +387,45 @@ final class VarIndex
         }
     }
 
+    /** Spans sorted by start, each with its enclosing span, so scopeAt is a binary search plus a walk up the nesting. */
+    private function indexScopes(): void
+    {
+        $ord = [];
+        foreach ($this->scSpan as $i => $s) {
+            if ($s === null || $s->endLine() === 0) { continue; }
+            $ord[] = [self::pos($s->startLine(), $s->startColumn()), $i];
+        }
+        \usort($ord, fn(array $x, array $y): int => $x[0] <=> $y[0] ?: $x[1] <=> $y[1]);
+        $stack = [];
+        foreach ($ord as $k => [$start, $id]) {
+            $s = $this->scSpan[$id];
+            while ($stack !== [] && $this->ssEnd[$stack[\count($stack) - 1]] <= $start) { \array_pop($stack); }
+            $this->ssStart[] = $start;
+            $this->ssId[] = $id;
+            $this->ssEnd[] = self::pos($s->endLine(), $s->endColumn());
+            $this->ssParent[] = $stack === [] ? -1 : $stack[\count($stack) - 1];
+            $stack[] = $k;
+        }
+    }
+
+    private static function pos(int $line, int $col): int
+    {
+        return $line * 4294967296 + $col;
+    }
+
     /** The innermost function / method / hook / closure range holding the point, else `{main}` (0). */
     private function scopeAt(int $line, int $col): int
     {
-        $best = 0;
-        $bl = 0;
-        $bc = 0;
-        foreach ($this->scSpan as $i => $s) {
-            if ($s === null || $s->endLine() === 0) { continue; }
-            if ($s->startLine() > $line || ($s->startLine() === $line && $s->startColumn() > $col)) { continue; }
-            if ($s->endLine() < $line || ($s->endLine() === $line && $s->endColumn() <= $col)) { continue; }
-            if ($s->startLine() > $bl || ($s->startLine() === $bl && $s->startColumn() >= $bc)) {
-                $best = $i;
-                $bl = $s->startLine();
-                $bc = $s->startColumn();
-            }
+        $p = self::pos($line, $col);
+        $lo = 0;
+        $hi = \count($this->ssStart) - 1;
+        $k = -1;
+        while ($lo <= $hi) {
+            $mid = ($lo + $hi) >> 1;
+            if ($this->ssStart[$mid] <= $p) { $k = $mid; $lo = $mid + 1; } else { $hi = $mid - 1; }
         }
-        return $best;
+        while ($k >= 0 && $this->ssEnd[$k] <= $p) { $k = $this->ssParent[$k]; }
+        return $k < 0 ? 0 : $this->ssId[$k];
     }
 
     private function fresh(string $name, bool $special): int
