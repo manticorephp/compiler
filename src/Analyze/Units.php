@@ -27,7 +27,7 @@ final class Units
 
         foreach ($decls->functions as $fn) {
             if ($fn->body === null) { continue; }
-            $this->units[] = new Unit($fn->name . '()', $fn->params, '', $fn->body->statements, null, $fn->returnType);
+            $this->units[] = new Unit($fn->name . '()', $fn->params, '', $fn->body->statements, null, $fn->returnType, $fn->docComment);
         }
         $i = 0;
         foreach ($decls->methods as $m) {
@@ -36,7 +36,7 @@ final class Units
             if ($m->body === null) { continue; }
             // A non-static method binds `$this` to its class; a static one does not.
             $thisClass = $m->isStatic ? '' : $cls;
-            $this->units[] = new Unit($cls . '::' . $m->name . '()', $m->params, $thisClass, $m->body->statements, null, $m->returnType);
+            $this->units[] = new Unit($cls . '::' . $m->name . '()', $m->params, $thisClass, $m->body->statements, null, $m->returnType, $m->docComment, $cls);
         }
 
         // Closures / arrow fns anywhere in the file — each its own scope. `$this`
