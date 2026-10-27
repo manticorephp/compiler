@@ -21,6 +21,7 @@ final class DumpAstCommand extends Command
             new Option('tolerant', \Cli\ArgParse::FLAG, 'Recover from syntax errors; print the tree and every error'),
             new Option('ranges', \Cli\ArgParse::FLAG, 'Print spans as start-end ranges'),
             new Option('names', \Cli\ArgParse::FLAG, 'Print the written-name table instead of the tree'),
+            new Option('decl-names', \Cli\ArgParse::VALUE, 'With --tolerant --names: also record declaration names and use roles (1 = class-likes, functions, enum cases; 2 = also members and class constants)', 'level'),
             new Option('check-names', \Cli\ArgParse::FLAG, 'Verify every name span slices to its written text; print each mismatch, exit 1 if any'),
             new Option('check-ranges', \Cli\ArgParse::FLAG, 'Verify the range invariants; print each violation, exit 1 if any'),
         ]);
@@ -45,10 +46,10 @@ final class DumpAstCommand extends Command
         }
         if ($args->flag('check-names')) {
             $file = \count(\Manticore\CompileArgs::$files) === \count($sources) ? \Manticore\CompileArgs::$files[0] : '';
-            return $this->checkNames($sources[0], $file, $args->flag('tolerant'));
+            return $this->checkNames($sources[0], $file, $args->flag('tolerant'), (int)$args->value('decl-names', '0'));
         }
         if ($args->flag('names')) {
-            $program = $this->parseForNames($sources[0]);
+            $program = $this->parseForNames($sources[0], true, (int)$args->value('decl-names', '0'));
             if ($program === null) { return 65; }
             \Manticore\puts(\Parser\Dump::names($program));
             return 0;
@@ -73,11 +74,11 @@ final class DumpAstCommand extends Command
         return 0;
     }
 
-    private function parseForNames(string $source, bool $tolerant = true): ?\Parser\Ast\Program
+    private function parseForNames(string $source, bool $tolerant = true, int $declNames = 0): ?\Parser\Ast\Program
     {
         try {
             if ($tolerant) {
-                return \Parser\Parser::parseTolerant($source)->program;
+                return \Parser\Parser::parseTolerant($source, '', true, true, $declNames)->program;
             }
             return \Parser\Parser::parseSource($source, '', false, false, true);
         } catch (\Throwable $e) {
@@ -86,9 +87,9 @@ final class DumpAstCommand extends Command
         }
     }
 
-    private function checkNames(string $source, string $file, bool $tolerant): int
+    private function checkNames(string $source, string $file, bool $tolerant, int $declNames): int
     {
-        $program = $this->parseForNames($source, $tolerant);
+        $program = $this->parseForNames($source, $tolerant, $declNames);
         if ($program === null) { return 65; }
         $violations = \Parser\NameCheck::verify($program, $source, $file);
         if (\count($violations) === 0) {

@@ -46,7 +46,7 @@ final class Dump
         foreach ($program->names as $r) {
             $s = $r->span;
             $out .= '  @' . (string)$s->line . ':' . (string)$s->column . '-' . (string)$s->endLine() . ':' . (string)$s->endColumn()
-                . ' ' . $r->kind . ' ' . $r->written . ' -> ' . $r->resolved . ($r->globalFallback ? ' [global-fallback]' : '') . "\n";
+                . ' ' . $r->kind . ($r->role === '' ? '' : ':' . $r->role) . ' ' . $r->written . ' -> ' . $r->resolved . ($r->globalFallback ? ' [global-fallback]' : '') . "\n";
         }
         return $out;
     }
