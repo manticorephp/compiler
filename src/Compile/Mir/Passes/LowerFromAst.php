@@ -799,6 +799,7 @@ final class LowerFromAst implements Pass
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
         $this->variadicMethodParamsCache = [];
+        $this->variadicIdxBuilt = false;
         $this->module = $module;
         // Lowering passes such as injectSuperglobals need the target kind
         // before they register globals; a vendor library must import app-owned
@@ -5491,6 +5492,7 @@ final class LowerFromAst implements Pass
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
         $this->variadicMethodParamsCache = [];
+        $this->variadicIdxBuilt = false;
         $this->knownClassNames[$cname] = true;
         $bs = \strrpos($cname, '\\');
         if ($bs !== false && $bs >= 0) {
@@ -7095,10 +7097,24 @@ final class LowerFromAst implements Pass
      */
     private function variadicMethodParams(string $method): ?array
     {
-        if (\array_key_exists($method, $this->variadicMethodParamsCache)) {
-            return $this->variadicMethodParamsCache[$method];
-        }
-        $found = null;
+        if (!$this->variadicIdxBuilt) { $this->buildVariadicIdx(); }
+        return $this->variadicIdx[$method] ?? null;
+    }
+
+    /** @var array<string, \Parser\Ast\Param[]|null> method name → the agreed variadic params, null when declarations disagree */
+    private array $variadicIdx = [];
+    private bool $variadicIdxBuilt = false;
+
+    /**
+     * One pass over every declared method instead of one per distinct name asked:
+     * the answer per name is the rule {@see variadicMethodParams} states.
+     */
+    private function buildVariadicIdx(): void
+    {
+        $this->variadicIdxBuilt = true;
+        $this->variadicIdx = [];
+        /** @var array<string, bool> $bad */
+        $bad = [];
         // Trait bodies count too: a trait's `call()` reaches every user class by
         // `use`, so a non-variadic one disagrees with an unrelated variadic
         // `call()` (symfony ErrorHandler::call(callable, ...)) and must defer.
@@ -7106,22 +7122,17 @@ final class LowerFromAst implements Pass
         foreach ($this->traitTable as $td) { $decls[] = $td; }
         foreach ($decls as $cd) {
             foreach ($this->classDeclMethods($cd) as $m) {
-                if ($this->methodDeclName($m) !== $method) { continue; }
+                $name = $this->methodDeclName($m);
+                if (isset($bad[$name])) { continue; }
                 $mp = $this->methodDeclParams($m);
                 $np = \count($mp);
-                if ($np === 0 || !$this->paramVariadic($mp[$np - 1])) {
-                    $this->variadicMethodParamsCache[$method] = null;
-                    return null;
-                }
-                if ($found !== null && \count($found) !== $np) {
-                    $this->variadicMethodParamsCache[$method] = null;
-                    return null;
-                }
-                $found = $mp;
+                if ($np === 0 || !$this->paramVariadic($mp[$np - 1])) { $bad[$name] = true; continue; }
+                $found = $this->variadicIdx[$name] ?? null;
+                if ($found !== null && \count($found) !== $np) { $bad[$name] = true; continue; }
+                $this->variadicIdx[$name] = $mp;
             }
         }
-        $this->variadicMethodParamsCache[$method] = $found;
-        return $found;
+        foreach ($bad as $name => $unused) { unset($this->variadicIdx[$name]); }
     }
 
     /**
