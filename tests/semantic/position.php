@@ -103,4 +103,34 @@ check('close_and_remove_drop_index', function () {
     return $w->nodeAt('a.php', 2, 1) === null ? true : 'remove';
 });
 
+check('chain_drops_partially_overlapping_parent', function () {
+    $rs = fn(int $c1, int $c2) => new \Parser\Ast\RangedSpan(1, $c1, 'x', 1, $c2);
+    $inner = new \Parser\Ast\Variable('b', $rs(5, 15));
+    $outer = new \Parser\Ast\Cast('int', $inner, $rs(1, 10));
+    $p = new \Parser\Ast\Program([new \Parser\Ast\ExpressionStmt($outer, $rs(1, 10))]);
+    $ix = \Semantic\ExprAt::build($p);
+    if (array_map('cls', $ix->chain(1, 12)) !== ['Variable']) { return 'outer must not contain col 12'; }
+    if (array_map('cls', $ix->chain(1, 7)) !== ['Cast', 'Variable']) { return 'both contain col 7'; }
+    return true;
+});
+
+check('expr_at_long_line_no_key_collision', function () {
+    // columns past 2^20 on one line must not alias the next line
+    $big = 1048576 + 5;
+    $a = new \Parser\Ast\Variable('a', new \Parser\Ast\RangedSpan(1, 1, 'x', 1, $big + 10));
+    $b = new \Parser\Ast\Variable('b', new \Parser\Ast\RangedSpan(2, 1, 'x', 2, 4));
+    $p = new \Parser\Ast\Program([new \Parser\Ast\ExpressionStmt($a, $a->span), new \Parser\Ast\ExpressionStmt($b, $b->span)]);
+    $ix = \Semantic\ExprAt::build($p);
+    $n = $ix->innermost(1, $big + 2);
+    if ($n === null || $n->name !== 'a') { return 'long-line column'; }
+    if ($ix->innermost(2, 10) !== null) { return 'line 2 col 10 is outside every node'; }
+    $m = $ix->innermost(2, 2);
+    return $m !== null && $m->name === 'b' ? true : 'next line aliased';
+});
+
+check('line_col_of_out_of_range_clamps', function () {
+    $li = new LineIndex("ab\ncd");
+    return $li->lineColOf(-5) === [1, 1] && $li->lineColOf(99) === [2, 3] ? true : json_encode([$li->lineColOf(-5), $li->lineColOf(99)]);
+});
+
 exit($fail);

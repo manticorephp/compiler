@@ -11,9 +11,12 @@ final class LineIndex
     /** @var int[] offset one past the last content byte of each line */
     private array $ends = [];
 
+    private int $len;
+
     public function __construct(string $text)
     {
         $n = \strlen($text);
+        $this->len = $n;
         $from = 0;
         while (true) {
             $nl = \strpos($text, "\n", $from);
@@ -32,9 +35,10 @@ final class LineIndex
         return $off > $this->ends[$line - 1] ? null : $off;
     }
 
-    /** @return int[] [line, col] */
+    /** @return int[] [line, col]; an offset outside the text is clamped to its start or end */
     public function lineColOf(int $offset): array
     {
+        $offset = \max(0, \min($offset, $this->len));
         $lo = 0;
         $hi = \count($this->starts) - 1;
         while ($lo < $hi) {
