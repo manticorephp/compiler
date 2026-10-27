@@ -10,6 +10,7 @@ use Parser\Ast\DynamicStaticAccess;
 use Parser\Ast\DynamicStaticCall;
 use Parser\Ast\DynamicStaticMethodCall;
 use Parser\Ast\DynProp;
+use Parser\Ast\NamedArg;
 use Parser\Ast\NewDynExpr;
 use Parser\Ast\Program;
 use Parser\Ast\StringLiteral;
@@ -28,10 +29,13 @@ final class NameIndex
     /** @var array<string, array<string, UncertainSite[]>> file => lowercased literal => sites */
     private array $literals = [];
 
+    /** @var array<string, array<string, UncertainSite[]>> file => lowercased argument name => named-argument sites */
+    private array $named = [];
+
     /** @var array<string, UncertainSite[]> file => dynamic-member sites */
     private array $dynamic = [];
 
-    public function replaceFile(string $path, Program $program, string $text = ''): void
+    public function replaceFile(string $path, Program $program, string $text): void
     {
         $this->removeFile($path);
         $list = [];
@@ -64,6 +68,8 @@ final class NameIndex
         $w->stmts($program->statements);
         $lits = [];
         $dyn = [];
+        /** @var array<string, UncertainSite[]> $named lowercased argument name => sites */
+        $named = [];
         foreach ($w->exprs as $e) {
             if ($e instanceof StringLiteral) {
                 if (preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*(::[A-Za-z_][A-Za-z0-9_]*)?\z/', $e->value) === 1) {
@@ -73,6 +79,8 @@ final class NameIndex
                     $lits[$full][] = $site;
                     if ($reason === 'callable-string') { $lits[substr($full, 0, strpos($full, '::'))][] = $site; }
                 }
+            } elseif ($e instanceof NamedArg) {
+                $named[strtolower($e->name)][] = new UncertainSite($path, $e->span->startLine(), $e->span->startColumn(), 'named-argument');
             } elseif (
                 $e instanceof DynProp || $e instanceof NewDynExpr || $e instanceof DynamicStaticAccess
                 || $e instanceof DynamicStaticCall || $e instanceof DynamicStaticMethodCall
@@ -82,6 +90,10 @@ final class NameIndex
         }
         $this->literals[$path] = $lits;
         foreach (self::heredocSites($path, $text) as $s) { $dyn[] = $s; }
+        foreach (self::attributeNamedArgs($path, $text) as $nm => $sites) {
+            foreach ($sites as $s) { $named[$nm][] = $s; }
+        }
+        $this->named[$path] = $named;
         $this->dynamic[$path] = $dyn;
     }
 
@@ -96,13 +108,46 @@ final class NameIndex
         $out = [];
         if ($text === '' || !str_contains($text, '<<<')) { return $out; }
         $n = preg_match_all('/<<<[ \t]*("?)([A-Za-z_][A-Za-z0-9_]*)\1\r?\n(.*?)\n[ \t]*\2(?![A-Za-z0-9_])/s', $text, $m, PREG_OFFSET_CAPTURE);
-        if ($n === false) { return $out; }
+        if ($n === false) { return [new UncertainSite($path, 1, 1, 'heredoc-scan-failed')]; }
         for ($i = 0; $i < $n; $i++) {
             if (preg_match('/\\$[A-Za-z_{]|\{\\$/', $m[3][$i][0]) !== 1) { continue; }
-            $off = $m[0][$i][1];
-            $before = substr($text, 0, $off);
-            $nl = strrpos($before, "\n");
-            $out[] = new UncertainSite($path, 1 + substr_count($before, "\n"), $off - ($nl === false ? -1 : $nl), 'heredoc-interpolation');
+            $out[] = self::siteAt($path, $text, $m[0][$i][1], 'heredoc-interpolation');
+        }
+        return $out;
+    }
+
+    private static function siteAt(string $path, string $text, int $off, string $reason): UncertainSite
+    {
+        $before = substr($text, 0, $off);
+        $nl = strrpos($before, "\n");
+        return new UncertainSite($path, 1 + substr_count($before, "\n"), $off - ($nl === false ? -1 : $nl), $reason);
+    }
+
+    /**
+     * Named arguments inside attributes (`#[Foo(bar: 1)]`): attribute arguments are not in the expression walk, so
+     * they are found by text. Over-inclusive on purpose (a ternary inside an attribute adds a harmless site).
+     * Reason `named-argument`.
+     *
+     * @return array<string, UncertainSite[]> lowercased argument name => sites
+     */
+    private static function attributeNamedArgs(string $path, string $text): array
+    {
+        $out = [];
+        $len = strlen($text);
+        $at = 0;
+        while (($at = strpos($text, '#[', $at)) !== false) {
+            $depth = 0;
+            $j = $at + 1;
+            while ($j < $len) {
+                $ch = $text[$j];
+                if ($ch === '[') { $depth++; } elseif ($ch === ']') { $depth--; if ($depth === 0) { break; } }
+                $j++;
+            }
+            $seg = substr($text, $at, $j - $at);
+            if (preg_match_all('/(?<![A-Za-z0-9_$:\\\\])([A-Za-z_][A-Za-z0-9_]*)[ \t\r\n]*:(?!:)/', $seg, $m, PREG_OFFSET_CAPTURE) !== false) {
+                foreach ($m[1] as $hit) { $out[strtolower($hit[0])][] = self::siteAt($path, $text, $at + $hit[1], 'named-argument'); }
+            }
+            $at = $at + 2;
         }
         return $out;
     }
@@ -145,7 +190,7 @@ final class NameIndex
 
     public function removeFile(string $path): void
     {
-        unset($this->occ[$path], $this->literals[$path], $this->dynamic[$path]);
+        unset($this->occ[$path], $this->literals[$path], $this->dynamic[$path], $this->named[$path]);
     }
 
     /**
@@ -184,16 +229,18 @@ final class NameIndex
         return $out;
     }
 
-    /** Start and end columns are both inclusive. NameRefs never overlap, so the first hit is the only one. */
+    /** Start and end columns are both inclusive. A member entry wins over any other entry covering the point (a promoted constructor parameter is a variable AND a property). */
     public function occurrenceAt(string $path, int $line, int $col): ?NameOccurrence
     {
+        $hit = null;
         foreach ($this->occ[$path] ?? [] as $o) {
             if ($line < $o->line || $line > $o->endLine) { continue; }
             if ($line === $o->line && $col < $o->col) { continue; }
             if ($line === $o->endLine && $col > $o->endCol) { continue; }
-            return $o;
+            if ($o->kind === 'member') { return $o; }
+            if ($hit === null) { $hit = $o; }
         }
-        return null;
+        return $hit;
     }
 
     /** @return UncertainSite[] */
@@ -206,6 +253,9 @@ final class NameIndex
         }
         foreach ($this->dynamic as $sites) {
             foreach ($sites as $s) { $out[] = $s; }
+        }
+        foreach ($this->named as $byName) {
+            foreach ($byName[$key] ?? [] as $s) { $out[] = $s; }
         }
         return $out;
     }

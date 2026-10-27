@@ -325,4 +325,150 @@ check('perf: typeAt on a 3000-line file p50 < 10 ms', function () {
     return $p50 < 10 ? true : "p50 $p50 ms";
 });
 
+/** @return string[] "file:line:col" of every location */
+function refs(Workspace $w, string $uri, array $p): array { return locs($w->referencesTo($uri, $p[0], $p[1])); }
+function lc(string $uri, array $p): string { return "$uri:{$p[0]}:{$p[1]}"; }
+
+$FAM = <<<'PHP'
+<?php
+interface I { public function m(): int; }
+class P implements I { public function m(): int { return 1; } }
+class C extends P { public function m(): int { return 2; } }
+class D extends P { public function m(): int { return 3; } }
+function f(I $i, P $p, C $c, D $d) {
+    $i->m();
+    $p->m();
+    $c->m();
+    $d->m();
+}
+PHP;
+
+check('family: query from any member reaches ancestors, interface, siblings and all call sites', function () use ($FAM) {
+    $w = ws(['a.php' => $FAM]);
+    $decls = [where($FAM, 'm()', 1), where($FAM, 'm()', 2), where($FAM, 'm()', 3), where($FAM, 'm()', 4)];
+    $uses = [where($FAM, '$i->m', 1, 4), where($FAM, '$p->m', 1, 4), where($FAM, '$c->m', 1, 4), where($FAM, '$d->m', 1, 4)];
+    $exp = [];
+    foreach (array_merge($decls, $uses) as $p) { $exp[] = lc('a.php', $p); }
+    sort($exp);
+    foreach ($decls as $q) {
+        $r = refs($w, 'a.php', $q);
+        if ($r !== $exp) { return 'from ' . json_encode($q) . ': ' . json_encode([$r, $exp]); }
+    }
+    foreach ($uses as $q) {
+        $r = refs($w, 'a.php', $q);
+        if ($r !== $exp) { return 'from use ' . json_encode($q) . ': ' . json_encode([$r, $exp]); }
+    }
+    return true;
+});
+
+check('private parent method is not overridden by child method (both directions)', function () {
+    $src = "<?php\nclass P { private function m() { return 1; } public function go() { return \$this->m(); } }\nclass C extends P { public function m() { return 2; } public function g2() { return \$this->m(); } }\nfunction f(C \$c) { \$c->m(); }\n";
+    $w = ws(['a.php' => $src]);
+    $pm = where($src, 'function m', 1, 9);
+    $cm = where($src, 'function m', 2, 9);
+    $r1 = refs($w, 'a.php', $pm);
+    $e1 = [lc('a.php', $pm), lc('a.php', where($src, '$this->m', 1, 7))];
+    sort($e1);
+    $r2 = refs($w, 'a.php', $cm);
+    $e2 = [lc('a.php', $cm), lc('a.php', where($src, '$this->m', 2, 7)), lc('a.php', where($src, '$c->m', 1, 4))];
+    sort($e2);
+    return $r1 === $e1 && $r2 === $e2 ? true : json_encode([$r1, $e1, $r2, $e2]);
+});
+
+check('constructors are not a family across inheritance', function () {
+    $src = "<?php\nclass P { public function __construct() {} }\nclass C extends P { public function __construct() { parent::__construct(); } }\n";
+    $w = ws(['a.php' => $src]);
+    $p = where($src, '__construct', 1);
+    $e = [lc('a.php', $p), lc('a.php', where($src, 'parent::__construct', 1, 8))];
+    return refs($w, 'a.php', $p) === $e ? true : json_encode(refs($w, 'a.php', $p));
+});
+
+check('property family: redeclared in child, both directions', function () {
+    $src = "<?php\nclass P { public int \$x = 1; }\nclass C extends P { public int \$x = 2; }\nfunction f(P \$p, C \$c) { \$p->x; \$c->x; }\n";
+    $w = ws(['a.php' => $src]);
+    $d = [where($src, '$x', 1), where($src, '$x', 2)];
+    $u = [where($src, '$p->x', 1, 4), where($src, '$c->x', 1, 4)];
+    $exp = [];
+    foreach (array_merge($d, $u) as $p) { $exp[] = lc('a.php', $p); }
+    sort($exp);
+    foreach (array_merge($d, $u) as $q) { if (refs($w, 'a.php', $q) !== $exp) { return json_encode([$q, refs($w, 'a.php', $q), $exp]); } }
+    return true;
+});
+
+check('class const family: interface const, override, enum case', function () {
+    $src = "<?php\ninterface HasK { const K = 1; }\nclass Impl implements HasK { const K = 2; }\nclass Sub extends Impl {}\nenum Suit { case H; }\nfunction f() { HasK::K; Impl::K; Sub::K; Suit::H; }\n";
+    $w = ws(['a.php' => $src]);
+    $d = [where($src, 'K = 1', 1), where($src, 'K = 2', 1)];
+    $u = [where($src, 'HasK::K', 1, 6), where($src, 'Impl::K', 1, 6), where($src, 'Sub::K', 1, 5)];
+    $exp = [];
+    foreach (array_merge($d, $u) as $p) { $exp[] = lc('a.php', $p); }
+    sort($exp);
+    foreach ([$d[0], $d[1], $u[0], $u[2]] as $q) { if (refs($w, 'a.php', $q) !== $exp) { return json_encode([$q, refs($w, 'a.php', $q), $exp]); } }
+    $h = where($src, 'H;', 1);
+    $hu = where($src, 'Suit::H', 1, 6);
+    $r = refs($w, 'a.php', $hu);
+    return $r === [lc('a.php', $h), lc('a.php', $hu)] || $r === [lc('a.php', $hu), lc('a.php', $h)] ? true : json_encode($r);
+});
+
+$PRO = <<<'PHP'
+<?php
+#[Attr(name: 1)]
+class A { public function __construct(public int $name) {} }
+function other(string $name) { return $name; }
+function g(A $a) { $a->name; new A(name: 1); }
+PHP;
+
+check('promoted param is the property: refs include uses, exclude unrelated param', function () use ($PRO) {
+    $w = ws(['a.php' => $PRO]);
+    $q = where($PRO, '$name', 1, 1);
+    $use = where($PRO, '$a->name', 1, 4);
+    $r = refs($w, 'a.php', $q);
+    $oth = where($PRO, '$name', 2, 1);
+    if (in_array(lc('a.php', $oth), $r, true)) { return 'unrelated param included: ' . json_encode($r); }
+    return in_array(lc('a.php', $use), $r, true) && count($r) === 2 ? true : json_encode($r);
+});
+
+check('named arguments (call and attribute) are uncertain and rename blockers; unrelated names are not', function () use ($PRO) {
+    $w = ws(['a.php' => $PRO]);
+    $q = where($PRO, '$name', 1, 1);
+    $un = [];
+    foreach ($w->uncertainSitesFor('a.php', $q[0], $q[1]) as $s) { if ($s->reason === 'named-argument') { $un[] = $s->line . ':' . $s->col; } }
+    sort($un);
+    $bl = array_filter($w->renameBlockers('a.php', $q[0], $q[1]), fn($b) => str_starts_with($b, 'named-argument'));
+    $other = $w->renameBlockers('a.php', where($PRO, 'name;', 1)[0], where($PRO, 'name;', 1)[1]);
+    if (count($un) !== 2 || count($bl) !== 2) { return json_encode([$un, $bl]); }
+    $src2 = "<?php\nclass A { public int \$z = 0; }\nfunction g(A \$a) { \$a->z; f(name: 1); }\n";
+    $w2 = ws(['a.php' => $src2]);
+    $p = where($src2, '$z', 1, 1);
+    foreach ($w2->uncertainSitesFor('a.php', $p[0], $p[1]) as $s) { if ($s->reason === 'named-argument') { return 'false positive'; } }
+    return true;
+});
+
+check('heredoc scan failure is a blocker, not silence', function () {
+    $body = str_repeat("line \$o->p and more text\n", 400);
+    $src = "<?php\n\$o = 1;\n\$s = <<<EOT\n$body" . "EOT;\n";
+    $w = ws(['a.php' => "<?php\nclass A { public int \$p = 0; }\n"]);
+    $oldLimit = ini_get('pcre.backtrack_limit');
+    $oldJit = ini_get('pcre.jit');
+    ini_set('pcre.jit', '0');
+    ini_set('pcre.backtrack_limit', '10');
+    $w->open('big.php', $src);
+    ini_set('pcre.backtrack_limit', (string)$oldLimit);
+    ini_set('pcre.jit', (string)$oldJit);
+    $p = where("<?php\nclass A { public int \$p = 0; }\n", '$p', 1, 1);
+    return in_array('heredoc-scan-failed:big.php', $w->renameBlockers('a.php', $p[0], $p[1]), true) ? true : json_encode($w->renameBlockers('a.php', $p[0], $p[1]));
+});
+
+check('hover: static, defaults, union receiver as separate lines', function () {
+    $src = "<?php\nclass A { public static function s(int \$a = 5, ?string \$b = null, \$c = [1]): int { return 1; } public function run(): int { return 1; } }\nclass B { public function run(): int { return 1; } }\nfunction f(A|B \$x) { A::s(); \$x->run(); }\n";
+    $w = ws(['a.php' => $src]);
+    $p = where($src, 'A::s', 1, 3);
+    $h = $w->hover('a.php', $p[0], $p[1]);
+    $q = where($src, '$x->run', 1, 4);
+    $h2 = $w->hover('a.php', $q[0], $q[1]);
+    $ok1 = $h !== null && $h->text === 'static A::s(int $a = 5, ?string $b = null, $c = …): int';
+    $ok2 = $h2 !== null && $h2->text === "A::run(): int\nor B::run(): int";
+    return $ok1 && $ok2 ? true : json_encode([$h, $h2]);
+});
+
 exit($fail);
