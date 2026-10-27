@@ -133,7 +133,7 @@ check('definition_range_is_the_name_literal', function () {
     $f = slice($a, $w->definitionOf('b.php', 3, 6));
     $r = slice($a, $w->definitionOf('b.php', 3, 12));
     $self = slice($a, $w->definitionOf('a.php', 3, 8));
-    return ($f === 'FOO' && $r === "'BAR'" && $self === 'FOO') ?: json_encode([$f, $r, $self]);
+    return ($f === 'FOO' && $r === 'BAR' && $self === 'FOO') ?: json_encode([$f, $r, $self]);
 });
 
 check('references_include_const_declaration_site', function () {
@@ -172,6 +172,25 @@ check('conditional_define_inside_if_not_defined', function () {
     $a = "<?php\nif (!defined('X')) {\n    define('X', 1);\n}\n";
     $l = at(['a.php' => $a, 'b.php' => "<?php\necho X;\n"], 'b.php', 2, 6);
     return ($l !== null && $l->file === 'a.php' && $l->line === 3) ?: json_encode($l);
+});
+
+check('escaped_define_literal_keeps_full_range', function () {
+    $a = "<?php\ndefine(\"A\\x42\", 2);\n";
+    $b = "<?php\necho AB;\n";
+    $l = at(['a.php' => $a, 'b.php' => $b], 'b.php', 2, 6);
+    return ($l !== null && slice($a, $l) === '"A\x42"') ?: slice($a, $l);
+});
+
+check('numeric_const_names_do_not_break', function () {
+    $a = "<?php\ndefine('123', 1);\ndefine('007', 1);\ndefine('X', 1);\n";
+    $w = ws();
+    $w->open('a.php', $a);
+    $w->open('b.php', "<?php\necho X;\n");
+    $w->update('a.php', $a);
+    $x = $w->definitionOf('b.php', 2, 6);
+    $w->definitionOf('a.php', 2, 9);
+    $w->referencesTo('a.php', 3, 9);
+    return ($x !== null && $x->file === 'a.php' && $x->line === 4) ?: json_encode($x);
 });
 
 exit($fail);
