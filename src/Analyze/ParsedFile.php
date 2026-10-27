@@ -76,6 +76,27 @@ final class ParsedFile
         return $line * self::COL + $col;
     }
 
+    /** The text after any leading `#[...]` attribute groups (an attributed declaration's error starts at `#[`). */
+    private static function skipAttributes(string $t): string
+    {
+        $t = \ltrim($t);
+        while (\str_starts_with($t, '#[')) {
+            $depth = 0;
+            $n = \strlen($t);
+            $i = 1;
+            for (; $i < $n; $i = $i + 1) {
+                $c = $t[$i];
+                if ($c === '[') { $depth = $depth + 1; }
+                if ($c === ']') {
+                    $depth = $depth - 1;
+                    if ($depth === 0) { break; }
+                }
+            }
+            $t = \ltrim(\substr($t, $i + 1));
+        }
+        return $t;
+    }
+
     /**
      * @param Stmt[] $stmts
      * @param string[] $lines
@@ -84,8 +105,8 @@ final class ParsedFile
     {
         foreach ($stmts as $s) {
             if ($s instanceof ErrorStmt) {
-                $row = $lines[$s->span->startLine() - 1] ?? '';
-                if (\preg_match('/^(use|namespace|class|interface|trait|enum|function|abstract|final|readonly|const)\b/i', \substr($row, $s->span->startColumn() - 1)) === 1) { return true; }
+                $rest = \substr(\implode("\n", \array_slice($lines, $s->span->startLine() - 1, 20)), $s->span->startColumn() - 1);
+                if (\preg_match('/^(use|namespace|class|interface|trait|enum|function|abstract|final|readonly|const|declare)\b/i', self::skipAttributes($rest)) === 1) { return true; }
                 continue;
             }
             foreach (DeclScopes::nested($s) as $body) {

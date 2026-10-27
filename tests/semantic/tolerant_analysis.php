@@ -150,4 +150,42 @@ check('open_file_count_counts_live_asts', function () {
     if ($w->openFileCount() !== 1) { return 'close ' . $w->openFileCount(); }
     return count($w->diagnostics('bad.php')) > 0 ?: 'closed file lost its parse errors';
 });
+
+// A file-level suppression: the broken header hides undefined.class for the whole file, attributed or not.
+check('attributed_broken_header_suppresses_undefined_class', function () {
+    $w = ws(['a.php' => "<?php\n#[\\Attribute]\nclass Foo extends {\n}\nnew Foo;\n"]);
+    $got = dg($w, 'a.php');
+    foreach ($got as $g) { if (str_ends_with($g, ':undefined.class')) { return json_encode($got); } }
+    $w = ws(['b.php' => "<?php\n#[A(['x' => [1]])]\n#[B]\nfinal class Foo extends {\n}\nnew Foo;\n"]);
+    foreach (dg($w, 'b.php') as $g) { if (str_ends_with($g, ':undefined.class')) { return 'multi-group ' . json_encode(dg($w, 'b.php')); } }
+    return true;
+});
+
+/** @return array<string, array{0: string, 1: string, 2: string, 3: int, 4: int}> kind => [live text, broken text, user text, line, col] */
+function stickyKinds(): array
+{
+    return [
+        'class' => ["<?php\nclass Foo {}\n", "<?php\nclass {\n", "<?php\nnew Foo;\n", 2, 5],
+        'function' => ["<?php\nfunction foo() {}\n", "<?php\nfunction {\n", "<?php\nfoo();\n", 2, 1],
+        'const' => ["<?php\nconst KK = 1;\n", "<?php\nconst = 1;\n", "<?php\necho KK;\n", 2, 6],
+    ];
+}
+
+foreach (stickyKinds() as $kind => [$live, $broken, $user, $ln, $co]) {
+    check("sticky_entry_loses_to_live_declarer_$kind", function () use ($live, $broken, $user, $ln, $co) {
+        $w = ws(['a.php' => $live, 'c.php' => $live, 'u.php' => $user]);
+        $loc = $w->definitionOf('u.php', $ln, $co);
+        if ($loc === null || $loc->file !== 'a.php') { return 'control ' . json_encode($loc); }
+        $w->open('a.php', $broken);
+        $loc = $w->definitionOf('u.php', $ln, $co);
+        if ($loc === null || $loc->file !== 'c.php') { return 'broken a: ' . json_encode($loc); }
+        $w->open('a.php', $live);
+        $loc = $w->definitionOf('u.php', $ln, $co);
+        if ($loc === null || $loc->file !== 'a.php') { return 'fix-back lost position: ' . json_encode($loc); }
+        $w->open('a.php', $broken);
+        $w->remove('c.php');
+        $loc = $w->definitionOf('u.php', $ln, $co);
+        return ($loc !== null && $loc->file === 'a.php') ?: 'sticky not promoted: ' . json_encode($loc);
+    });
+}
 exit($fail);
