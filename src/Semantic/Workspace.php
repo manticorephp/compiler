@@ -5,9 +5,11 @@ namespace Semantic;
 use Analyze\Analyzer;
 use Analyze\Diagnostic;
 use Analyze\Index;
+use Analyze\MemberInfo;
 use Analyze\ParseDiagnostics;
 use Analyze\ParsedFile;
 use Analyze\Report;
+use Parser\Ast\ErrorExpr;
 use Parser\Ast\Expr;
 
 /**
@@ -39,6 +41,12 @@ final class Workspace
     /** @var array<string, ExprAt> uri => position index of every open file */
     private array $exprAt = [];
 
+    /** @var array<string, UnitLookup> uri => expression -> unit map, built on the first typed query; same lifetime as exprAt */
+    private array $unitLookups = [];
+
+    /** @var array<string, array<string, MemberInfo[]|null>> uri => "line:col" => resolved member use site; cleared on ANY file change (a class elsewhere may have moved) */
+    private array $siteCache = [];
+
     /** @var array<string, Diagnostic[]> uri => parse errors of a file whose text does not parse (kept after close) */
     private array $parseErrors = [];
 
@@ -63,11 +71,13 @@ final class Workspace
         } else {
             unset($this->parseErrors[$uri]);
         }
+        unset($this->unitLookups[$uri]);
+        $this->siteCache = [];
         $this->asts[$uri] = $pf;
         $this->lines[$uri] = new LineIndex($text);
         $this->exprAt[$uri] = ExprAt::build($r->program);
         $this->index->replaceFile($pf);
-        $this->names->replaceFile($uri, $r->program);
+        $this->names->replaceFile($uri, $r->program, $text);
     }
 
     private static function assertUserUri(string $uri): void
@@ -85,13 +95,15 @@ final class Workspace
     public function close(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri]);
+        unset($this->siteCache[$uri]);
     }
 
     public function remove(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->parseErrors[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->parseErrors[$uri]);
+        $this->siteCache = [];
         $this->index->removeFile($uri);
         $this->names->removeFile($uri);
     }
@@ -164,6 +176,10 @@ final class Workspace
             $k = $this->constKeyOf($o);
             return $k === null ? null : $this->constLocation($k);
         }
+        if ($kind === 'member') {
+            $ms = $this->membersOf($o);
+            return $ms === null || $ms === [] ? null : $this->memberLocation($ms[0]);
+        }
         if ($kind !== 'class' && $kind !== 'function') { return null; }
         $name = $o->resolvedLower;
         $file = $this->index->declaringFile($name, $kind);
@@ -186,7 +202,9 @@ final class Workspace
      * class Foo, function foo and constant FOO never collide. A global-fallback name that no
      * namespaced declaration answers for counts as the global name, so a global call and an
      * unqualified namespaced call to the same function find each other.
-     * A member (enum case, class constant, method, property) resolves by its bare name only, so it lists just itself.
+     * A member (enum case, class constant, method, property) resolves through its receiver type: the declaration, the
+     * overriding declarations and every use site that resolves to one of them; a site whose receiver is unknown is
+     * not listed (see uncertainSitesFor).
      *
      * @return Location[]
      */
@@ -198,7 +216,7 @@ final class Workspace
         if ($o === null) { return []; }
         $want = $this->targets($o);
         $kind = $o->denotes();
-        if ($kind === 'member') { return [new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol)]; }
+        if ($kind === 'member') { return $this->memberReferences($o); }
         $tail = $kind === 'constant' ? self::tail($o->resolved) : '';
         $out = [];
         foreach ($this->names->allOccurrences() as $r) {
@@ -272,6 +290,193 @@ final class Workspace
     public function uncertainSitesFor(string $uri, int $line, int $col): array
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
-        return $o === null ? [] : $this->names->uncertainSites($o->resolvedLower);
+        if ($o === null) { return []; }
+        $out = $this->names->uncertainSites($o->resolvedLower);
+        if ($o->kind !== 'member') { return $out; }
+        $family = $this->familyOf($o);
+        foreach ($this->names->allOccurrences() as $c) {
+            if (!$this->sameMemberName($c, $o) || $c->isDecl || ($family !== '' && self::familyOfRole($c->role) !== $family)) { continue; }
+            if ($this->resolveSite($c) === null) { $out[] = new UncertainSite($c->file, $c->line, $c->col, 'unresolved-receiver'); }
+        }
+        return $out;
+    }
+    /** The type of the innermost expression at the position; null in whitespace, inside an error expression, or when not inferable. */
+    public function typeAt(string $uri, int $line, int $col): ?SourceType
+    {
+        $at = $this->exprAt[$uri] ?? null;
+        $pf = $this->asts[$uri] ?? null;
+        if ($at === null || $pf === null) { return null; }
+        $chain = $at->chain($line, $col);
+        if (\count($chain) === 0) { return null; }
+        foreach ($chain as $n) { if ($n instanceof ErrorExpr) { return null; } }
+        $node = $chain[\count($chain) - 1];
+        $env = $this->unitsOf($uri, $pf)->envAt($node, $this->index, $uri);
+        return (new ExprTyper($this->index, $uri))->typeOf($node, $env);
+    }
+
+    /** Declared signature of a member under the cursor (`Foo::bar(int $a): ?Baz`), else the type of the expression there. */
+    public function hover(string $uri, int $line, int $col): ?HoverInfo
+    {
+        $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o !== null && $o->kind === 'member') {
+            $ms = $this->membersOf($o);
+            if ($ms !== null && \count($ms) > 0) {
+                $parts = [];
+                foreach ($ms as $m) { $parts[] = $this->signature($m); }
+                return new HoverInfo(\implode(' | ', $parts), new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
+            }
+        }
+        $t = $this->typeAt($uri, $line, $col);
+        $n = $this->nodeAt($uri, $line, $col);
+        if ($t === null || $n === null) { return null; }
+        $sp = $n->span;
+        return new HoverInfo($t->toString(), new Location($uri, $sp->startLine(), $sp->startColumn(), $sp->endLine(), $sp->endColumn()));
+    }
+
+    /**
+     * Reasons a rename of the symbol under the cursor cannot be done mechanically, empty when it can:
+     * `unresolved-member`, `owner-unknown` (class nested in a closure / loop), `implicit-member`, `library-declaration`,
+     * and one `heredoc-interpolation:<file>:<line>:<col>` per heredoc in the workspace (they hold unindexed uses).
+     *
+     * @return string[]
+     */
+    public function renameBlockers(string $uri, int $line, int $col): array
+    {
+        $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o === null) { return []; }
+        $out = [];
+        if ($o->kind === 'member') {
+            $ms = $this->membersOf($o);
+            if ($ms === null) { $out[] = $o->isDecl ? 'owner-unknown' : 'unresolved-member'; }
+            foreach ($ms ?? [] as $m) {
+                if ($m->implicit) { $out[] = 'implicit-member'; }
+                if (\str_starts_with($m->file, LibrarySymbols::LABEL_PREFIX)) { $out[] = 'library-declaration'; }
+                $d = $this->names->occurrenceAt($m->file, $m->line, $m->col);
+                if ($d !== null && $d->isDecl && $d->owner === '') { $out[] = 'owner-unknown'; }
+            }
+        }
+        foreach ($this->names->uncertainSites('') as $s) {
+            if ($s->reason === 'heredoc-interpolation') { $out[] = 'heredoc-interpolation:' . $s->file . ':' . $s->line . ':' . $s->col; }
+        }
+        return \array_values(\array_unique($out));
+    }
+
+    private function unitsOf(string $uri, ParsedFile $pf): UnitLookup
+    {
+        if (!isset($this->unitLookups[$uri])) { $this->unitLookups[$uri] = UnitLookup::build($pf->program); }
+        return $this->unitLookups[$uri];
+    }
+
+    /** @return MemberInfo[]|null the declarations a member occurrence denotes: a use site's resolved ones, a declaration site itself */
+    private function membersOf(NameOccurrence $o): ?array
+    {
+        if ($o->kind !== 'member') { return null; }
+        if (!$o->isDecl) { return $this->resolveSite($o); }
+        if ($o->owner === '') { return null; }
+        $ci = $this->index->findClass($o->owner);
+        if ($ci === null) { return null; }
+        foreach ($ci->members as $m) {
+            if ($m->file === $o->file && $m->line === $o->line && $m->col === $o->col) { return [$m]; }
+        }
+        return null;
+    }
+
+    /** @return MemberInfo[]|null */
+    private function resolveSite(NameOccurrence $o): ?array
+    {
+        $at = $this->exprAt[$o->file] ?? null;
+        $pf = $this->asts[$o->file] ?? null;
+        if ($at === null || $pf === null) { return null; }
+        $k = $o->line . ':' . $o->col;
+        if (isset($this->siteCache[$o->file]) && \array_key_exists($k, $this->siteCache[$o->file])) { return $this->siteCache[$o->file][$k]; }
+        $r = (new MemberResolver($this->index))->resolve($o->file, $o, $at, $this->unitsOf($o->file, $pf));
+        $this->siteCache[$o->file][$k] = $r;
+        return $r;
+    }
+
+    private function memberLocation(MemberInfo $m): ?Location
+    {
+        if ($m->implicit || $m->line === 0) { return null; }
+        $d = $this->names->occurrenceAt($m->file, $m->line, $m->col);
+        if ($d !== null && $d->isDecl && $d->kind === 'member') { return new Location($d->file, $d->line, $d->col, $d->endLine, $d->endCol); }
+        return new Location($m->file, $m->line, $m->col, $m->line, $m->col + \strlen($m->name));
+    }
+
+    /** @return Location[] */
+    private function memberReferences(NameOccurrence $o): array
+    {
+        $ms = $this->membersOf($o);
+        if ($ms === null) { return [new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol)]; }
+        /** @var array<string, bool> $want */
+        $want = [];
+        /** @var array<string, Location> $out */
+        $out = [];
+        foreach ($ms as $m) {
+            $want[MemberResolver::key($m)] = true;
+            $l = $this->memberLocation($m);
+            if ($l !== null) { $out[self::locKey($l)] = $l; }
+            if ($m->kind !== 'method') { continue; }
+            foreach ($this->index->overridersOf($m->declClass, $m->name) as $ov) {
+                $want[MemberResolver::key($ov)] = true;
+                $ol = $this->memberLocation($ov);
+                if ($ol !== null) { $out[self::locKey($ol)] = $ol; }
+            }
+        }
+        $family = $this->familyOf($o);
+        foreach ($this->names->allOccurrences() as $c) {
+            if ($c->isDecl || !$this->sameMemberName($c, $o) || ($family !== '' && self::familyOfRole($c->role) !== $family)) { continue; }
+            $rs = $this->resolveSite($c);
+            if ($rs === null) { continue; }
+            foreach ($rs as $m) {
+                if (isset($want[MemberResolver::key($m)])) {
+                    $l = new Location($c->file, $c->line, $c->col, $c->endLine, $c->endCol);
+                    $out[self::locKey($l)] = $l;
+                    break;
+                }
+            }
+        }
+        return \array_values($out);
+    }
+
+    private static function locKey(Location $l): string
+    {
+        return $l->file . ':' . $l->line . ':' . $l->col;
+    }
+
+    /** Same bare member name (methods compare case-insensitively). */
+    private function sameMemberName(NameOccurrence $a, NameOccurrence $b): bool
+    {
+        if ($a->kind !== 'member') { return false; }
+        $x = \ltrim($a->resolved, '$');
+        $y = \ltrim($b->resolved, '$');
+        return $x === $y || (\strtolower($x) === \strtolower($y) && ($a->role === 'method' || $b->role === 'method' || $b->role === ''));
+    }
+
+    /** method | prop | const of a member occurrence ('' when it cannot be told: a declaration whose class is unknown). */
+    private function familyOf(NameOccurrence $o): string
+    {
+        if (!$o->isDecl) { return self::familyOfRole($o->role); }
+        $ms = $this->membersOf($o);
+        if ($ms === null || \count($ms) === 0) { return ''; }
+        return $ms[0]->kind === 'case' ? 'const' : $ms[0]->kind;
+    }
+
+    private static function familyOfRole(string $role): string
+    {
+        return $role === 'sprop' ? 'prop' : $role;
+    }
+
+    private function signature(MemberInfo $m): string
+    {
+        $n = $m->declClass . '::';
+        if ($m->kind === 'prop') { return $n . '$' . $m->name . ($m->typeHint !== null ? ': ' . $m->typeHint : ''); }
+        if ($m->kind !== 'method') { return $n . $m->name . ($m->kind === 'const' && $m->typeHint !== null ? ': ' . $m->typeHint : ''); }
+        $mi = $this->index->findMethod($m->declClass, \strtolower($m->name), 0);
+        if ($mi === null) { return $n . $m->name; }
+        $ps = [];
+        foreach ($mi->params as $p) {
+            $ps[] = ($p->typeHint !== null ? $p->typeHint . ' ' : '') . ($p->byRef ? '&' : '') . ($p->variadic ? '...' : '') . '$' . $p->name;
+        }
+        return $n . $m->name . '(' . \implode(', ', $ps) . ')' . ($mi->returnType !== null ? ': ' . $mi->returnType : '');
     }
 }

@@ -31,7 +31,7 @@ final class NameIndex
     /** @var array<string, UncertainSite[]> file => dynamic-member sites */
     private array $dynamic = [];
 
-    public function replaceFile(string $path, Program $program): void
+    public function replaceFile(string $path, Program $program, string $text = ''): void
     {
         $this->removeFile($path);
         $list = [];
@@ -81,7 +81,30 @@ final class NameIndex
             }
         }
         $this->literals[$path] = $lits;
+        foreach (self::heredocSites($path, $text) as $s) { $dyn[] = $s; }
         $this->dynamic[$path] = $dyn;
+    }
+
+    /**
+     * Heredocs with interpolation: their variable and member uses carry no name entries, so each is a site
+     * every rename must list. Found by text (a lookalike in a comment or string only adds a harmless site).
+     *
+     * @return UncertainSite[]
+     */
+    private static function heredocSites(string $path, string $text): array
+    {
+        $out = [];
+        if ($text === '' || !str_contains($text, '<<<')) { return $out; }
+        $n = preg_match_all('/<<<[ \t]*("?)([A-Za-z_][A-Za-z0-9_]*)\1\r?\n(.*?)\n[ \t]*\2(?![A-Za-z0-9_])/s', $text, $m, PREG_OFFSET_CAPTURE);
+        if ($n === false) { return $out; }
+        for ($i = 0; $i < $n; $i++) {
+            if (preg_match('/\\$[A-Za-z_{]|\{\\$/', $m[3][$i][0]) !== 1) { continue; }
+            $off = $m[0][$i][1];
+            $before = substr($text, 0, $off);
+            $nl = strrpos($before, "\n");
+            $out[] = new UncertainSite($path, 1 + substr_count($before, "\n"), $off - ($nl === false ? -1 : $nl), 'heredoc-interpolation');
+        }
+        return $out;
     }
 
     /**
