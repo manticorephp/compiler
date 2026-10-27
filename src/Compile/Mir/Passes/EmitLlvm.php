@@ -4200,44 +4200,20 @@ final class EmitLlvm implements EmitVisitor
      *  `$base`, the line is that global plus `$line` (a delta). */
     private function btPushInline(string $nameLit, string $line, string $base): string
     {
-        $d = $this->ssa->allocReg();
-        $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
-        $ok = $this->ssa->allocReg();
-        $out .= '  ' . $ok . ' = icmp slt i64 ' . $d . ", 4096\n";
-        $st = $this->ssa->allocLabel('btpush.st');
-        $inc = $this->ssa->allocLabel('btpush.inc');
-        $out .= '  br i1 ' . $ok . ', label %' . $st . ', label %' . $inc . "\n" . $st . ":\n";
-        $ni = $this->ssa->allocReg();
-        $out .= '  ' . $ni . ' = ptrtoint ptr ' . $nameLit . " to i64\n";
-        $np = $this->ssa->allocReg();
-        $out .= '  ' . $np . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 ' . $d . "\n";
-        $out .= '  store i64 ' . $ni . ', ptr ' . $np . "\n";
-        $ln = $line;
+        // One call, not ~20 lines of two blocks per call site: the helpers are `alwaysinline`
+        // (EmitLlvmModule), so the machine code is the same push, but the IR that every later
+        // phase writes, splits and parses is a sixth the size.
         if ($base !== '') {
-            $b = $this->ssa->allocReg();
-            $out .= '  ' . $b . ' = load i64, ptr ' . $base . "\n";
-            $ln = $this->ssa->allocReg();
-            $out .= '  ' . $ln . ' = add i64 ' . $b . ', ' . $line . "\n";
+            return '  call void @__mir_bt_push_rel(ptr ' . $nameLit . ', ptr ' . $base . ', i64 ' . $line . ")\n";
         }
-        $lp = $this->ssa->allocReg();
-        $out .= '  ' . $lp . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_line, i64 0, i64 ' . $d . "\n";
-        $out .= '  store i64 ' . $ln . ', ptr ' . $lp . "\n";
-        $out .= '  br label %' . $inc . "\n" . $inc . ":\n";
-        $d1 = $this->ssa->allocReg();
-        $out .= '  ' . $d1 . ' = add i64 ' . $d . ", 1\n";
-        $out .= '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
-        return $out;
+        return '  call void @__mir_bt_push(ptr ' . $nameLit . ', i64 ' . $line . ")\n";
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */
     private function btPop(): string
     {
         if (!$this->rt->needsBacktrace) { return ''; }
-        $d = $this->ssa->allocReg();
-        $d1 = $this->ssa->allocReg();
-        return '  ' . $d . " = load i64, ptr @__mir_bt_depth\n"
-             . '  ' . $d1 . ' = sub i64 ' . $d . ", 1\n"
-             . '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
+        return "  call void @__mir_bt_pop()\n";
     }
 
     /**
