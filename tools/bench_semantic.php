@@ -147,7 +147,11 @@ if ($parity) {
         $raw = (string)file_get_contents($cliJson);
     } else {
         $bin = dirname(__DIR__) . '/bin/manticore';
-        $raw = (string)shell_exec($bin . ' analyze --json ' . $dir . ' 2>/dev/null');
+        $raw = (string)shell_exec($bin . ' analyze --json ' . escapeshellarg($dir) . ' 2>/dev/null');
+    }
+    if (trim($raw) === '' || !is_array(json_decode($raw, true))) {
+        fwrite(STDERR, "parity: the CLI output is empty or not valid JSON (is bin/manticore built and does it accept --json?)\n");
+        exit(1);
     }
     $cli = bench_group_json($raw);
     $diffs = [];
@@ -177,6 +181,11 @@ if ($parity) {
         if (count($diffs) === $before && count($mine) !== count($theirs)) {
             $diffs[] = 'duplicate count differs for ' . $f . ': workspace=' . count($mine) . ' cli=' . count($theirs);
         }
+    }
+    $known = [];
+    foreach ($files as $f) { $known['"' . $f . '"'] = true; }
+    foreach ($cli as $key => $objs) {
+        if (!isset($known[$key])) { $diffs[] = 'cli-only file unknown to the workspace: ' . $key; }
     }
     echo 'parity: checked=' . $checked . ' skipped(parse errors)=' . $skipped . ' cli diagnostics=' . substr_count($raw, '"code":') . ' differences=' . count($diffs) . "\n";
     $shown = 0;

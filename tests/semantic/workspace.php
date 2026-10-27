@@ -242,4 +242,26 @@ check('library_labels_are_reserved_for_every_mutation', function () {
     }
     return dg($w, 'u.php') === [] && $w->definitionOf('x.php', 1, 1) === null;
 });
+check('bom_first_line_and_crlf_second_line_columns_match_run_and_bytes', function () {
+    $text = "\xEF\xBB\xBF<?php new Nope(); \$s = 'é';\r\nnew Other();\r\n";
+    $w = new Workspace(lib());
+    $w->open('m.php', $text);
+    $got = [];
+    foreach ($w->diagnostics('m.php') as $d) { $got[] = [$d->line, $d->col]; }
+    $l = lib();
+    $want = [];
+    $pf = new ParsedFile('m.php', \Parser\Parser::parseTolerant($text, 'm.php')->program);
+    foreach ((new Analyzer())->run([$pf], $l->preludeFiles(), true, $l->stdlibFunctionNames()) as $d) { $want[] = [$d->line, $d->col]; }
+    $line1 = strpos($text, 'new Nope') + 1;
+    $line2 = strpos($text, 'new Other') - strpos($text, "\n") ;
+    if ($got !== $want) { return json_encode([$got, $want]); }
+    return ($got === [[1, $line1], [2, $line2]]) ?: json_encode($got) . " want [[1,$line1],[2,$line2]]";
+});
+
+check('file_that_does_not_parse_holds_no_ast', function () {
+    $w = new Workspace(lib());
+    $w->open('ok.php', "<?php\n");
+    $w->open('bad.php', "<?php\nclass { \n");
+    return ($w->openFileCount() === 1 && count($w->diagnostics('bad.php')) > 0) ?: 'count ' . $w->openFileCount();
+});
 exit($fail);

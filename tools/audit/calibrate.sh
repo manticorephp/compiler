@@ -127,7 +127,11 @@ if ($userVisible) {
 $listed = [];
 $main = (string)file_get_contents("$root/src/Semantic/LibrarySymbols.php");
 $s = strpos($main, "function preludeFileNames");
-$e = strpos($main, "return \$names;", $s);
+$e = $s === false ? false : strpos($main, "return \$names;", $s);
+if ($s === false || $e === false) {
+    fwrite(STDERR, "FAIL cannot find preludeFileNames up to its return statement in LibrarySymbols.php; update this extraction\n");
+    exit(1);
+}
 preg_match_all("/.([a-z_0-9]+\.php)./", substr($main, $s, $e - $s), $pm);
 foreach ($pm[1] as $n) { $listed[$n] = true; }
 $onDisk = [];

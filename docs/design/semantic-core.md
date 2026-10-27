@@ -1,8 +1,7 @@
 # Semantic core (P2a)
 
 Library layer under the future LSP: text in, diagnostics and name queries out, one file edit
-at a time. Spec: `docs/superpowers/specs/2026-10-26-semantic-core-design.md` (untracked).
-Goals measured here: **G1** single-file edit to refreshed diagnostics in single-digit ms on a
+at a time. Goals measured here: **G1** single-file edit to refreshed diagnostics in single-digit ms on a
 mid-size project; **G4** `analyze --json` unchanged. Anti-goal: the LSP process must not keep
 every AST of every file alive.
 
@@ -12,10 +11,10 @@ every AST of every file alive.
 |---|---|
 | `Analyze\Index` | Project symbol table (user classes, interfaces, traits, enums, functions) keyed by lowercased FQN. Incremental: `replaceFile` drops the file's previous contribution and adds the new one, `removeFile` forgets it. A file keeps its place in each FQN's *declarer order*, so when two files declare the same name the winner does not flip because one of them was edited. Also answers `declaringFile`, `declSpan`, `dependentsOf`, `implementersOf`. Stdlib function names enter through `addExternFunctions`. |
 | `Semantic\NameIndex` | Per-file name occurrences (`NameOccurrence`: kind, resolved lowercased name, range) plus the sites a name-based rename cannot be sure of (`UncertainSite`: dynamic members, string literals equal to a name). `occurrenceAt(file, line, col)` finds the occurrence under a cursor; `occurrences(kind, name)` is the reference list. |
-| `Semantic\SourceType` / `SourceTypeParser` | Source-faithful type (what the author wrote, not the lowered `Compile\Mir\Type`), immutable; the parser reads hints and docblock types, depth-limited, rejects null-only unions. |
+| `Semantic\SourceType` / `SourceTypeParser` | Source-faithful type (what the author wrote, not the lowered `Compile\Mir\Type`), immutable; the parser reads hints and docblock types, depth-limited, rejects null-only unions. A callable return may be a union (printed parenthesized), an intersection or `?A`. |
 | `Semantic\LibrarySymbols` | The library universe the analyzer is closed over: the prelude (54 parsed files) and the stdlib function names from `lib/manticore_stdlib.o.sig`, normalised the way `LowerFromAst` aliases namespaced externs (`normalizeNames`). `load()` caches per process; `fromParts()` is for tests and hosts that supply their own. |
 | `Analyze\ParseDiagnostics` | The one mapping from tolerant-parse errors to `parse.error` diagnostics, shared by the CLI and the Workspace. |
-| `Semantic\Workspace` | Facade: `open/update/close/remove`, `diagnostics`, `definitionOf`, `referencesTo`, `uncertainSitesFor`. Holds Index + NameIndex + the ASTs of open files. Diagnostics are computed per call from the current Index, so an edit in file A is seen by every dependent B on B's next `diagnostics` call with no invalidation bookkeeping. `close` drops the AST/text but keeps the file's Index and NameIndex entries (project membership survives); `remove` forgets the file. |
+| `Semantic\Workspace` | Facade: `open/update/close/remove`, `diagnostics`, `definitionOf`, `referencesTo`, `uncertainSitesFor`. Holds Index + NameIndex + the ASTs of open files that parsed (a file with syntax errors keeps none; `openFileCount` counts live ASTs). Diagnostics are computed per call from the current Index, so an edit in file A is seen by every dependent B on B's next `diagnostics` call with no invalidation bookkeeping. `definitionOf` falls back from an undeclared namespaced function name to the global one and takes the symbol kind into account; `referencesTo` includes `use` imports and links global and unqualified namespaced uses of one function or constant. `close` drops the AST/text but keeps the file's Index and NameIndex entries (project membership survives); `remove` forgets the file. |
 
 `LibrarySymbols` caveats:
 
@@ -31,6 +30,19 @@ every AST of every file alive.
 - Under Zend the `Manticore\file_exists` / `read_file` helpers are throwing stubs, so
   `load()` returns the prelude but zero stdlib names. `tools/bench_semantic.php` works around
   it by reading the sig through plain Zend functions (see Tooling).
+
+- **Reserved `lib:` labels.** Library files are labelled `lib:prelude/<name>.php`, never a
+  bare relative path, so a user file named `prelude/exceptions.php` cannot displace one.
+  `Workspace::open/update/close/remove` throw `InvalidArgumentException` for a `lib:` URI. The
+  label is not a disk path (the prelude is found through several candidate roots), so an LSP
+  layer that wants to open a library file maps `lib:prelude/` to its prelude directory.
+
+**Duplicate declarations.** `Index` keeps the first declarer of a name (declarer order, stable
+under edits). The Workspace indexes the library first, so a library declaration beats a user
+one, and among user files the first opened wins. `Analyzer::run` (the CLI) deliberately keeps
+the legacy rule for byte-compatible output: it feeds the library first and the user files in
+reverse, so the library still wins and the LAST user file wins. The two differ only for a name
+declared in two user files.
 
 A file with syntax errors reports only its `parse.error` diagnostics and contributes nothing
 to the Index and NameIndex while it has them (the walkers are not Error-node aware yet).
@@ -52,7 +64,7 @@ message; order-insensitive).
 
 Legitimate CLI-vs-library differences that exist but did not show up as output differences:
 the CLI parses with `parseTolerant($src, '', false, false)` (no ranges, no name table), the
-Workspace parses with both; the analyzer reads neither. Parse-error files are excluded from
+Workspace parses with both; no output difference attributable to that was observed. Parse-error files are excluded from
 the comparison (the Workspace reports the same `parse.error` set, but the CLI also analyzes
 the rest of the project without them, and so does the Workspace by construction).
 
@@ -101,8 +113,8 @@ the 221 MB native RSS is the worst case of "every file open"). `close` drops the
 text and keeps only the Index/NameIndex entries, which is the intended LSP shape (open
 editors only); the bench does not close files, so the closed-project footprint is not
 measured here. RSS growth over 200 edits is +78 MB native (`update` replaces an AST and
-the allocator does not return the old one to the OS in a short run); a longer soak was not
-run.
+the old AST's memory is probably not returned to the OS within a short run, which was not
+verified); a longer soak was not run.
 
 ## Tooling
 
@@ -131,14 +143,10 @@ bench compares with `in_array` instead). Not minimised or filed here.
 **P2c** - `typeAt` and narrowing.
 
 **Known gaps from the task reviews**
-- `SourceType::toString` loses the parentheses of a callable with a union return;
-  `callable(): ?A` is unsupported by `SourceTypeParser`.
 - `withDoc` has no production caller.
 - `NameIndex::occurrenceAt` relies on NameRefs never overlapping.
 - `UncertainSite` has no end position.
 - Docblock and `Invoke` uncertain sites are not implemented.
-- `Workspace::open` does not catch parser exceptions, and a file with errors keeps an AST
-  that nothing uses.
 - `perform_analysis` (the CLI) still uses `Analyzer::run`, not the Workspace path; the two
   agree on every corpus above, but nothing enforces it yet beyond this bench.
 - Latency tail on multi-thousand-line files (see G1 verdict).
