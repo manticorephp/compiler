@@ -397,7 +397,10 @@ final class Index
         $key = self::constKey($name);
         // PHP coerces integer-like array keys to int; such a name would make the map mixed-keyed.
         if ((string)(int)$key === $key) { return; }
-        $this->curConsts[$key] ??= $lowered ? $lit->span : self::unquoted($lit);
+        if (isset($this->curConsts[$key])) { return; }
+        $span = $lit->span;
+        if (!$lowered) { $span = self::unquoted($lit); }
+        $this->curConsts[$key] = $span;
     }
 
     /**
