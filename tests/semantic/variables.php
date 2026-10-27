@@ -339,6 +339,36 @@ check('L1: arrow fn assignment to a captured name is a separate binding with arr
     return $outer === at($s, '$x', [1, 3]) && $inner === at($s, '$x', [2]) && $u === ['a.php:' . $p[0] . ':' . $p[1] . ':arrow-assignment'] && $ui === $u ? true : json_encode([$outer, $inner, $u, $ui]);
 });
 
+check('R2-1: explicit set-hook parameter is bound and flagged hook-parameter', function () {
+    $s = "<?php\nclass P {\n    public int \$x { set(\$v) { \$this->x = \$v; } }\n}\n";
+    $w = ws(['a.php' => $s]);
+    $p = where($s, '$v', 2);
+    $bl = $w->renameBlockers('a.php', $p[0], $p[1]);
+    $hp = array_filter($bl, fn($b) => str_starts_with($b, 'hook-parameter:a.php:'));
+    return refs($s, '$v', 2, 'a.php', $w) === at($s, '$v', [2]) && count($hp) === 1 ? true : json_encode($bl);
+});
+
+check('R2-2: closure in a param default has its own scope', function () {
+    $s = "<?php\nfunction f(\$a, \$g = static function(\$a) { return \$a; }) {\n    return \$a;\n}\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$a', 1, 'a.php', $w) === at($s, '$a', [1, 4]) && refs($s, '$a', 2, 'a.php', $w) === at($s, '$a', [2, 3]) ? true : refs($s, '$a', 1, 'a.php', $w);
+});
+
+check('R2-2: closures in const, case, property default and attribute do not merge into {main}', function () {
+    $s = "<?php\n\$q = 1;\nclass K {\n    const C = static fn(\$q) => \$q;\n    public \$d = null;\n    #[Attr(static function(\$q) { return \$q; })]\n    public function m() {}\n}\necho \$q;\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$q', 1, 'a.php', $w) === at($s, '$q', [1, 6]) && refs($s, '$q', 2, 'a.php', $w) === at($s, '$q', [2, 3])
+        && refs($s, '$q', 4, 'a.php', $w) === at($s, '$q', [4, 5]) ? true : refs($s, '$q', 1, 'a.php', $w);
+});
+
+check('anonymous-class methods: top level, in a function, in a closure', function () {
+    $s = "<?php\n\$o = new class { function m(\$z) { return \$z; } };\nfunction f(\$z) { \$p = new class { function n(\$z) { return \$z; } }; return \$z; }\n\$c = function (\$z) { \$r = new class { function k(\$z) { return \$z; } }; return \$z; };\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$z', 1, 'a.php', $w) === at($s, '$z', [1, 2])
+        && refs($s, '$z', 3, 'a.php', $w) === at($s, '$z', [3, 6]) && refs($s, '$z', 4, 'a.php', $w) === at($s, '$z', [4, 5])
+        && refs($s, '$z', 7, 'a.php', $w) === at($s, '$z', [7, 10]) && refs($s, '$z', 8, 'a.php', $w) === at($s, '$z', [8, 9]) ? true : refs($s, '$z', 3, 'a.php', $w);
+});
+
 check('perf: variable query on a 3000-line file p50 < 5 ms', function () {
     $src = "<?php\n";
     for ($i = 0; $i < 300; $i++) {
