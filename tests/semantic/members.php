@@ -87,4 +87,38 @@ check('workspace owner on member decls', function () {
     return $owners === ['f@A\K', 'p@A\K', 'Q@A\K', 'f@A\L'] ? true : implode(',', $owners);
 });
 
+function ownersOf(string $src): string
+{
+    $ni = new \Semantic\NameIndex();
+    $ni->replaceFile('o.php', \Parser\Parser::parseTolerant($src, 'o.php', true, true, 2)->program);
+    $owners = [];
+    foreach ($ni->allOccurrences() as $o) { if ($o->isDecl && $o->kind === 'member') { $owners[] = $o->resolved . '@' . preg_replace('/^(\\\\?)__anon_class_\d+_\d+_\d+$/', 'ANON', $o->owner); } }
+    return implode(',', $owners);
+}
+check('owner: anon class inside method', fn() => ownersOf("<?php\nclass A { function m() { return new class { function run() {} }; } function run() {} }\n") === 'm@A,run@ANON,run@A' ? true : ownersOf("<?php\nclass A { function m() { return new class { function run() {} }; } function run() {} }\n"));
+check('owner: top-level anon after class', fn() => ownersOf("<?php\nclass A { function f() {} }\n\$x = new class { function g() {} };\n") === 'f@A,g@ANON' ? true : ownersOf("<?php\nclass A { function f() {} }\n\$x = new class { function g() {} };\n"));
+check('owner: named class in function', fn() => ownersOf("<?php\nfunction mk() { class Inner { function z() {} } }\nclass B { function y() {} }\n") === 'z@Inner,y@B' ? true : ownersOf("<?php\nfunction mk() { class Inner { function z() {} } }\nclass B { function y() {} }\n"));
+check('anon owner matches Index key', function () {
+    $src = "<?php\nclass A { function m() { return new class { function run() {} }; } }\n";
+    $p = \Parser\Parser::parseTolerant($src, 'o.php', true, true, 2)->program;
+    $ni = new \Semantic\NameIndex();
+    $ni->replaceFile('o.php', $p);
+    $idx = Index::build([new ParsedFile('o.php', $p)]);
+    foreach ($ni->allOccurrences() as $o) {
+        if ($o->isDecl && $o->resolved === 'run' && $idx->lookupMember($o->owner, 'run', 'method') !== null && $o->owner !== 'A') { return true; }
+    }
+    return 'no anon owner resolvable in Index';
+});
+check('enum implicit members flagged', function () use ($idx) {
+    $m = $idx->lookupMember('N\E', 'from', 'method');
+    $c = $idx->lookupMember('N\E', 'A', 'case');
+    return $m->implicit && $m->line === 0 && !$c->implicit && $c->line > 0 ? true : 'bad';
+});
+check('declOf: member decl cannot win over function own name', function () {
+    $p = \Parser\Parser::parseTolerant("<?php\nfunction run(array \$a) { return new class { function run(array \$b) {} }; }\n", 'o.php', true, true, 2)->program;
+    $fn = $p->statements[0]->decl;
+    $r = \Analyze\NameRanges::declOf($p->names, 'run', $fn->span);
+    return $r !== null && $r->kind === 'function' ? true : 'wrong decl';
+});
+
 exit($fail);

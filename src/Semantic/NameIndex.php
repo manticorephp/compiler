@@ -3,6 +3,9 @@
 namespace Semantic;
 
 use Analyze\AstWalk;
+use Analyze\DeclScopes;
+use Parser\Ast\ClassStmt;
+use Parser\Ast\FunctionStmt;
 use Parser\Ast\DynamicStaticAccess;
 use Parser\Ast\DynamicStaticCall;
 use Parser\Ast\DynamicStaticMethodCall;
@@ -17,6 +20,8 @@ use Parser\Ast\StringLiteral;
  */
 final class NameIndex
 {
+    private const COL = 1048576;
+
     /** @var array<string, NameOccurrence[]> file => occurrences */
     private array $occ = [];
 
@@ -30,7 +35,10 @@ final class NameIndex
     {
         $this->removeFile($path);
         $list = [];
-        $owner = '';
+        $classes = self::classRanges($program->statements);
+        $next = 0;
+        /** @var int[] $open indexes into $classes of the classes containing the current name, innermost last */
+        $open = [];
         foreach ($program->names as $n) {
             $s = $n->span;
             $endLine = $s->endLine();
@@ -39,8 +47,10 @@ final class NameIndex
                 $endLine = $s->startLine();
                 $endCol = $s->startColumn() + strlen($n->written);
             }
-            // ponytail: the last class-like declaration name owns the member declarations that follow; an anonymous class's members read as the enclosing class's
-            if ($n->role === 'decl' && $n->kind === 'class') { $owner = ltrim($n->resolved, '\\'); }
+            $at = $s->startLine() * self::COL + $s->startColumn();
+            while ($next < count($classes) && $classes[$next][0] <= $at) { $open[] = $next; $next++; }
+            while ($open !== [] && $classes[$open[count($open) - 1]][1] <= $at) { array_pop($open); }
+            $owner = $open === [] ? '' : $classes[$open[count($open) - 1]][2];
             $list[] = new NameOccurrence(
                 $path, $n->kind, strtolower(ltrim($n->resolved, '\\')),
                 $s->startLine(), $s->startColumn(), $endLine, $endCol, $n->globalFallback,
@@ -72,6 +82,42 @@ final class NameIndex
         }
         $this->literals[$path] = $lits;
         $this->dynamic[$path] = $dyn;
+    }
+
+    /**
+     * Every class-like declaration with a range (hoisted anonymous classes included), by start, as
+     * [start key, end key, fqn]; the fqn is Index's class key. Nested named classes are found in namespace,
+     * conditional and function bodies.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @return array<int, array{0: int, 1: int, 2: string}>
+     */
+    private static function classRanges(array $stmts): array
+    {
+        $out = [];
+        self::collectClassRanges($stmts, $out);
+        usort($out, fn($a, $b) => $a[0] <=> $b[0]);
+        return $out;
+    }
+
+    /**
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @param array<int, array{0: int, 1: int, 2: string}> $out
+     */
+    private static function collectClassRanges(array $stmts, array &$out): void
+    {
+        foreach ($stmts as $s) {
+            if ($s instanceof ClassStmt) {
+                $sp = $s->decl->span;
+                if ($sp->endLine() > 0 && $s->decl->name !== '') {
+                    $out[] = [$sp->startLine() * self::COL + $sp->startColumn(), $sp->endLine() * self::COL + $sp->endColumn(), $s->decl->name];
+                }
+            } elseif ($s instanceof FunctionStmt) {
+                if ($s->decl->body !== null) { self::collectClassRanges($s->decl->body->statements, $out); }
+            } else {
+                foreach (DeclScopes::nested($s) as $body) { self::collectClassRanges($body, $out); }
+            }
+        }
     }
 
     public function removeFile(string $path): void
