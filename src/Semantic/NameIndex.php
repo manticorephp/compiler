@@ -51,10 +51,12 @@ final class NameIndex
         $dyn = [];
         foreach ($w->exprs as $e) {
             if ($e instanceof StringLiteral) {
-                if (preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*(::[A-Za-z_][A-Za-z0-9_]*)?$/', $e->value) === 1) {
+                if (preg_match('/^\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*(::[A-Za-z_][A-Za-z0-9_]*)?\z/', $e->value) === 1) {
                     $reason = str_contains($e->value, '::') ? 'callable-string' : 'string-class-name';
-                    $lits[strtolower(ltrim($e->value, '\\'))][] =
-                        new UncertainSite($path, $e->span->startLine(), $e->span->startColumn(), $reason);
+                    $site = new UncertainSite($path, $e->span->startLine(), $e->span->startColumn(), $reason);
+                    $full = strtolower(ltrim($e->value, '\\'));
+                    $lits[$full][] = $site;
+                    if ($reason === 'callable-string') { $lits[substr($full, 0, strpos($full, '::'))][] = $site; }
                 }
             } elseif (
                 $e instanceof DynProp || $e instanceof NewDynExpr || $e instanceof DynamicStaticAccess
@@ -84,19 +86,16 @@ final class NameIndex
         return $out;
     }
 
-    /** Start and end columns are both inclusive; the narrowest hit wins. */
+    /** Start and end columns are both inclusive. NameRefs never overlap, so the first hit is the only one. */
     public function occurrenceAt(string $path, int $line, int $col): ?NameOccurrence
     {
-        $best = null;
-        $bestLen = 0;
         foreach ($this->occ[$path] ?? [] as $o) {
             if ($line < $o->line || $line > $o->endLine) { continue; }
             if ($line === $o->line && $col < $o->col) { continue; }
             if ($line === $o->endLine && $col > $o->endCol) { continue; }
-            $len = $o->endLine === $o->line ? $o->endCol - $o->col : PHP_INT_MAX;
-            if ($best === null || $len < $bestLen) { $best = $o; $bestLen = $len; }
+            return $o;
         }
-        return $best;
+        return null;
     }
 
     /** @return UncertainSite[] */

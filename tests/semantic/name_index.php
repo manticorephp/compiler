@@ -46,7 +46,9 @@ check('occurrence_at_cursor_inside_and_on_boundary', function () use ($A) {
     $out = $i->occurrenceAt('a.php', 4, 15);
     $other = $i->occurrenceAt('zz.php', 4, 12);
     if ($in === null || $in->line !== 4 || $in->col !== 10 || $in->endCol !== 13) { return 'inside ' . json_encode($in); }
-    if ($start === null || $end === null) { return 'boundary'; }
+    if ($start === null || $start->col !== 10 || $start->resolvedLower !== 'n\\foo') { return 'start boundary'; }
+    if ($end === null || $end->col !== 10 || $end->endCol !== 13 || $end->kind !== 'class') { return 'end boundary'; }
+    if ($i->occurrenceAt('a.php', 4, 9) !== null) { return 'before start'; }
     return $out === null && $other === null ? true : 'outside';
 });
 
@@ -65,8 +67,8 @@ check('string_literal_class_name_is_uncertain', function () {
     $i->replaceFile('s.php', prog('s.php', "<?php\n\$c = '\\\\N\\\\Foo';\n\$d = 'n\\\\foo::bar';\n\$e = 'Other';\n"));
     $s = $i->uncertainSites('n\\foo');
     $m = $i->uncertainSites('n\\foo::bar');
-    if (count($s) !== 1 || $s[0]->reason !== 'string-class-name' || $s[0]->line !== 2) { return 'class ' . json_encode($s); }
-    return count($m) === 1 && $m[0]->reason === 'callable-string' && $m[0]->line === 3 ? true : 'method ' . json_encode($m);
+    if (count($s) !== 2 || $s[0]->reason !== 'string-class-name' || $s[0]->line !== 2 || $s[0]->col !== 6) { return 'class ' . json_encode($s); }
+    return count($m) === 1 && $m[0]->reason === 'callable-string' && $m[0]->line === 3 && $m[0]->col === 6 ? true : 'method ' . json_encode($m);
 });
 
 check('dynamic_member_is_uncertain', function () {
@@ -76,7 +78,35 @@ check('dynamic_member_is_uncertain', function () {
     $lines = array_map(fn($x) => $x->line, $s);
     sort($lines);
     $reasons = array_unique(array_map(fn($x) => $x->reason, $s));
-    return $lines === [2, 3, 4] && $reasons === ['dynamic-member'] ? true : 'got ' . json_encode($s);
+    return $lines === [2, 3, 4] && array_unique(array_map(fn($x) => $x->col, $s)) === [1] && $reasons === ['dynamic-member'] ? true : 'got ' . json_encode($s);
+});
+
+check('callable_string_matches_class_part_and_full', function () {
+    $i = new NameIndex();
+    $i->replaceFile('c.php', prog('c.php', "<?php\n\$f = 'N\\\\Foo::bar';\n"));
+    foreach (['n\\foo', 'n\\foo::bar'] as $q) {
+        $s = $i->uncertainSites($q);
+        if (count($s) !== 1 || $s[0]->reason !== 'callable-string' || $s[0]->line !== 2 || $s[0]->col !== 6) { return "$q " . json_encode($s); }
+    }
+    return $i->uncertainSites('n\\other') === [] ? true : 'other';
+});
+
+check('replace_and_remove_drop_old_sites_keep_others', function () {
+    $i = new NameIndex();
+    $i->replaceFile('a.php', prog('a.php', "<?php\n\$c = 'Foo';\n\$o->\$n;\n"));
+    $i->replaceFile('b.php', prog('b.php', "<?php\n\$c = 'Foo';\n\$o->\$n;\n"));
+    if (count($i->uncertainSites('foo')) !== 4) { return 'initial'; }
+    $i->replaceFile('a.php', prog('a.php', "<?php\n\$x = 1;\n"));
+    $s = $i->uncertainSites('foo');
+    if (count($s) !== 2 || $s[0]->file !== 'b.php' || $s[1]->file !== 'b.php') { return 'replace ' . json_encode($s); }
+    $i->removeFile('b.php');
+    return $i->uncertainSites('foo') === [] ? true : 'remove';
+});
+
+check('trailing_newline_literal_is_not_a_name', function () {
+    $i = new NameIndex();
+    $i->replaceFile('n.php', prog('n.php', "<?php\n\$c = \"Foo\\n\";\n"));
+    return $i->uncertainSites('foo') === [] ? true : 'matched';
 });
 
 exit($fail);
