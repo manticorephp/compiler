@@ -46,7 +46,8 @@ $LIB = "<?php\nnamespace N;\n"
     . "final class Bar { public function id(): int { return 1; } public ?Foo \$foo = null; }\n"
     . "function mk(): ?Foo { return null; }\n"
     . "function nv(): never { exit; }\n"
-    . "function refy(&\$o): void {}\n";
+    . "function refy(&\$o): void {}\n"
+    . "class Rb { public function __construct(&\$o = null) {} public function m(&\$o): void {} public static function s(&\$o): void {} }\n";
 
 /**
  * Run Flow at the marker `$__T = EXPR;` inside method m() of N\Foo2 (a subclass of Foo).
@@ -226,7 +227,7 @@ check('nested loops do not explode', function () {
     for ($i = 0; $i < 6; $i++) { $code .= ' } }'; }
     $t0 = microtime(true);
     $r = at($code);
-    return microtime(true) - $t0 < 5.0 && ueq(v($r, 'x'), 'N\Foo|N\Bar') ? true : 'slow or wrong: ' . v($r, 'x') . ' ' . (microtime(true) - $t0);
+    return microtime(true) - $t0 < 5.0 && (v($r, 'x') === 'unknown' || ueq(v($r, 'x'), 'N\Foo|N\Bar')) ? true : 'slow or wrong: ' . v($r, 'x') . ' ' . (microtime(true) - $t0);
 });
 
 // ── try / switch ──
@@ -358,6 +359,80 @@ check('agrees with FlowWalk where it narrows', function () {
         }
     }
     return $total >= 5 ? true : "only $total comparisons";
+});
+
+// ── fix round 1 ──
+check('loop widening is a fixpoint: growing type is unknown', function () {
+    $in = v(at('$x = 1; while (zzz()) { $__T = 1; $x = [$x]; }'), 'x');
+    $out = v(at('$x = 1; while (zzz()) { $x = [$x]; } $__T = 1;'), 'x');
+    return $in === 'unknown' && $out === 'unknown' ? true : "$in / $out";
+});
+check('4-step copy chain is sound', function () {
+    $pre = '$a = 1; $b = "s"; $c = 1.5; $d = null; ';
+    $in = v(at($pre . 'while (zzz()) { $__T = 1; $d = $c; $c = $b; $b = $a; $a = []; }'), 'd');
+    $out = v(at($pre . 'while (zzz()) { $d = $c; $c = $b; $b = $a; $a = []; } $__T = 1;'), 'd');
+    $ok = fn($t) => $t === 'unknown' || (strpos($t, 'int') !== false && strpos($t, 'array') !== false && strpos($t, 'string') !== false && strpos($t, 'float') !== false);
+    return $ok($in) && $ok($out) ? true : "$in / $out";
+});
+check('nested loops growing type', function () {
+    $r = at('$x = 1; while (zzz()) { foreach ($arr as $v) { while (zzz()) { $x = [$x]; } } } $__T = 1;');
+    return v($r, 'x') === 'unknown' ? true : v($r, 'x');
+});
+check('stabilising var keeps its union', function () {
+    $r = at('$x = new Foo; $y = $x; while (zzz()) { $y = $x; $x = new Bar; } $__T = 1;');
+    return ueq(v($r, 'x'), 'N\Foo|N\Bar') && ueq(v($r, 'y'), 'N\Foo|N\Bar') ? true : v($r, 'x') . ' / ' . v($r, 'y');
+});
+check('unset variable and property', function () {
+    $a = v(at('$x = new Foo; unset($x); $__T = 1;'), 'x');
+    $b = at('if ($this->nb !== null) { unset($this->nb); $__T = $this->nb; }')[1];
+    $c = v(at('$x = new Foo; $arr = [1]; unset($arr["k"]); $__T = 1;'), 'arr');
+    $d = at('if ($a->nb !== null) { unset($a->nb); $__T = $a->nb; }', 'Foo $a')[1];
+    return $a === 'unknown' && $b === '?N\Bar' && $c === 'list<int>' && $d === '?N\Bar' ? true : "$a / $b / $c / $d";
+});
+check('by-ref arg: property path, element, method, static, new, unresolved', function () {
+    $a = at('if ($this->nb !== null) { refy($this->nb); $__T = $this->nb; }')[1];
+    $b = v(at('$x = new Foo; $r = new Rb; $r->m($x); $__T = 1;'), 'x');
+    $c = v(at('$x = new Foo; Rb::s($x); $__T = 1;'), 'x');
+    $d = v(at('$x = new Foo; $r = new Rb($x); $__T = 1;'), 'x');
+    $e = v(at('$x = new Foo; $u->m($x); $__T = 1;', '$u'), 'x');
+    $f = v(at('$x = new Foo; $y = new Foo; $r = new Rb; $r->m($y); $__T = 1;'), 'x');
+    $g = v(at('$x = new Foo; sort($x); $__T = 1;'), 'x');
+    $h = v(at('$x = new Foo; Unknown::s($x); $__T = 1;'), 'x');
+    return $a === '?N\Bar' && $b === 'unknown' && $c === 'unknown' && $d === 'unknown' && $e === 'unknown' && $f === 'N\Foo' && $g === 'unknown' && $h === 'unknown' ? true : "$a $b $c $d $e $f $g $h";
+});
+check('aliasing drops property paths', function () {
+    $a = at('if ($a->nb !== null) { $b = $a; $b->nb = null; $__T = $a->nb; }', 'Foo $a')[1];
+    $b = at('if ($a->nb !== null) { zzz($a); $__T = $a->nb; }', 'Foo $a')[1];
+    $c = at('if ($a->nb !== null) { $this->bar = $a; $__T = $a->nb; }', 'Foo $a')[1];
+    $d = at('if ($a->nb !== null) { $__T = $a->nb; }', 'Foo $a')[1];
+    $e = v(at('$a = new Foo; $b = &$a; $__T = 1;'), 'a');
+    $f = v(at('$a = new Foo; $b = &$a; $__T = 1;'), 'b');
+    return $a === '?N\Bar' && $b === '?N\Bar' && $c === '?N\Bar' && $d === 'N\Bar' && $e === 'unknown' && $f === 'unknown' ? true : "$a $b $c $d $e $f";
+});
+check('Closure::bind / bindTo / call enter without a class', function () {
+    $a = at('$f = Closure::bind(function () { $__T = 1; }, null, Foo::class);');
+    $b = at('$f = (function () { $__T = 1; })->bindTo($this);');
+    $c = at('(function () { $__T = 1; })->call($this);');
+    $d = at('$f = function () { $__T = 1; };');
+    $none = fn($r) => v($r, 'this') === 'unknown' && $r[0]->thisClass === null;
+    return $none($a) && $none($b) && $none($c) && v($d, 'this') === 'N\Foo2' ? true : 'bound closure kept the class';
+});
+check('instanceof against an interface keeps non-subtype classes', function () {
+    $a = v(at('if ($x instanceof Shape) { $__T = 1; }', 'Foo|Circle $x'), 'x');
+    $b = v(at('if ($x instanceof Foo) { $__T = 1; }', 'Foo|Circle $x'), 'x');
+    $c = v(at('if ($x instanceof Shape) { $__T = 1; }', '$x'), 'x');
+    return ueq($a, 'N\Foo|N\Circle') && $b === 'N\Foo' && $c === 'N\Shape' ? true : "$a / $b / $c";
+});
+check('nested try/finally is not exponential', function () {
+    $code = '';
+    for ($i = 0; $i < 12; $i++) { $code .= 'try { '; }
+    $code .= '$x = new Foo; $__T = 1;';
+    for ($i = 0; $i < 12; $i++) { $code .= ' } finally { $y = 1; }'; }
+    $t0 = microtime(true);
+    at($code);
+    $dt = microtime(true) - $t0;
+    $r2 = at(str_replace('$__T = 1;', '', $code) . ' $__T = 1;');
+    return $dt < 2.0 && microtime(true) - $t0 < 4.0 && v($r2, 'y') !== '' ? true : "dt=$dt";
 });
 
 exit($fail);

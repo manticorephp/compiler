@@ -81,13 +81,17 @@ use Parser\Ast\YieldExpr;
  * `a->b->c`) is narrowable; it is dropped by an assignment to it or to a prefix of it, by a method call
  * on its root variable, by `self::` / `parent::` / `static::` calls (root `this`) and by calling a
  * closure value. Loops: the entry env is widened by up to two silent passes over the body (one when
- * nested three or deeper) before the recording pass, so a variable reassigned in a loop is the union of
- * its types; a type that keeps growing after that is not tracked further. try: a catch starts from the
+ * nested three or deeper), so a variable reassigned in a loop is the union of its types; names still
+ * changing after that are made unknown and the pass is re-run until nothing changes (a growing type
+ * such as `$x = [$x]` is unknown), and past a budget of silent passes a loop head is all-unknown.
+ * Aliasing is conservative: an object copied to another name or passed to any call loses its property
+ * paths. A closure given to Closure::bind / bindTo / call is entered with no class. try: a catch starts from the
  * union of the env before the try and after every statement inside it.
  *
- * Known limits (documented, not hidden): reference aliasing between names, `$GLOBALS`, `extract`
- * beyond clearing the env, inline `@var` docblocks and by-ref arguments of methods are not modelled;
- * `switch(true)` arms are not narrowed.
+ * Known limits (documented, not hidden): reference aliasing beyond the rules above, `$GLOBALS`, inline
+ * `@var` docblocks and by-ref writes made inside a closure after `use (&$x)` are not modelled; a plain
+ * function missing from the index is checked against a small by-ref builtin table only; `switch(true)`
+ * arms are not narrowed; a positive `instanceof` against an interface keeps the union's classes unchanged.
  */
 final class Flow
 {
@@ -104,6 +108,10 @@ final class Flow
     private array $sw = [];
     /** @var TypeEnv[][] envs seen inside each active try body */
     private array $tryAcc = [];
+    /** @var array<int, bool> spl_object_id of closures passed to / used as receiver of bind, bindTo, call */
+    private array $rebound = [];
+    /** silent loop passes left; when spent a loop head falls back to an all-unknown env (sound, imprecise) */
+    private int $passBudget = 400;
 
     private function __construct(private Index $idx, string $file, private Expr $target)
     {
@@ -263,26 +271,60 @@ final class Flow
     }
 
     /**
-     * Widen the entry env with up to two silent passes, then run the recording pass. $iter takes the
-     * loop-head env and returns [env at the end of the body, env leaving the loop normally].
-     *
+     * Widen the entry env with up to two silent passes (one when nested three deep), then make it a
+     * fixpoint by giving up (unknown) every name that is still changing, then run the recording pass.
+     * $iter takes the loop-head env and returns [env at the end of the body, env leaving the loop normally].
+     * When the pass budget is spent the head is all-unknown.
      */
     private function loop(TypeEnv $entry, callable $iter): TypeEnv
     {
         $h = $entry;
         $this->loopDepth = $this->loopDepth + 1;
-        $passes = $this->loopDepth <= 2 ? 2 : 1;
-        for ($i = 0; $i < $passes && $this->found === null; $i++) {
-            $this->silent = $this->silent + 1;
-            $r = $this->iterate($iter, $h);
-            $this->silent = $this->silent - 1;
-            $h2 = self::join($h, $r[0]);
-            if (self::same($h, $h2)) { break; }
-            $h = $h2;
+        if ($this->passBudget <= 0) {
+            $h = self::onlyThis($entry);
+        } else {
+            $passes = $this->loopDepth <= 2 ? 2 : 1;
+            $stable = false;
+            for ($i = 0; $i < $passes && $this->found === null; $i++) {
+                $h2 = self::join($h, $this->silentBack($iter, $h));
+                if (self::same($h, $h2)) { $stable = true; break; }
+                $h = $h2;
+            }
+            // forgetting one name can change a name copied from it, so re-run until nothing changes
+            for ($k = 0; !$stable && $k < 4 && $this->found === null; $k++) {
+                $h2 = self::join($h, $this->silentBack($iter, $h));
+                $drop = [];
+                foreach ($h->vars as $name => $t) {
+                    $u = $h2->vars[$name] ?? null;
+                    if ($u === null || ($t !== $u && $t->toString() !== $u->toString())) { $drop[] = (string)$name; }
+                }
+                if (\count($drop) === 0) { $stable = true; break; }
+                $h = $h->copy();
+                foreach ($drop as $name) { $h->forget($name); }
+            }
+            if (!$stable) { $h = self::onlyThis($h); }
         }
         $r = $this->iterate($iter, $h);
         $this->loopDepth = $this->loopDepth - 1;
         return $r[1];
+    }
+
+    /** One silent pass over a loop body; returns its back-edge env. */
+    private function silentBack(callable $iter, TypeEnv $h): TypeEnv
+    {
+        $this->passBudget = $this->passBudget - 1;
+        $this->silent = $this->silent + 1;
+        $r = $this->iterate($iter, $h);
+        $this->silent = $this->silent - 1;
+        return $r[0];
+    }
+
+    private static function onlyThis(TypeEnv $env): TypeEnv
+    {
+        $o = $env->copy();
+        $keep = $o->vars['this'] ?? null;
+        $o->vars = $keep === null ? [] : ['this' => $keep];
+        return $o;
     }
 
     /**
@@ -360,14 +402,10 @@ final class Flow
             $result = self::join($result, $this->block($c->body, $ce));
         }
         if ($s->finally === null) { return $result; }
-        // finally also runs on the paths that left through return / throw: record against the wide env,
-        // then derive the post-state silently from the normal-completion env
-        $this->block($s->finally, self::join($result, $catchIn));
-        if ($this->found !== null) { return $result; }
-        $this->silent = $this->silent + 1;
-        $post = $this->block($s->finally, $result);
-        $this->silent = $this->silent - 1;
-        return $post;
+        // finally also runs on the paths that left through return / throw: walk it ONCE against the wide
+        // env (sound for the recorded target and for the post-state, a little imprecise for the latter)
+        $post = $this->block($s->finally, self::join($result, $catchIn));
+        return $result->dead ? self::dead($post) : $post;
     }
 
     // ── env algebra ───────────────────────────────────────────────────
@@ -454,6 +492,7 @@ final class Flow
             $l = \strtolower($e->name);
             return $l === 'exit' || $l === 'die' ? self::dead($env) : $env;
         }
+        if ($e instanceof NewExpr) { return $this->newExpr($e, $env); }
         if ($e instanceof CallExpr || $e instanceof MethodCallExpr || $e instanceof StaticCall || $e instanceof Invoke) {
             return $this->callLike($e, $env);
         }
@@ -512,7 +551,9 @@ final class Flow
         $t = $e->target;
         $env = $this->lvalue($t, $env);
         $env = $this->expr($e->value, $env);
-        return $this->store($t, $this->typer->typeOf($e->value, $env), $env);
+        $out = $this->store($t, $this->typer->typeOf($e->value, $env), $env);
+        // `$b = $a`: both names now reach one object, so no property path of it can be trusted
+        return $this->escape($e->value, $out);
     }
 
     /** Evaluate what an assignment target itself reads (receiver, index); the target is not read. */
@@ -586,6 +627,7 @@ final class Flow
 
     private function callLike(Expr $e, TypeEnv $env): TypeEnv
     {
+        $this->markRebound($e);
         if ($e instanceof MethodCallExpr) { $env = $this->expr($e->object, $env); }
         if ($e instanceof Invoke) { $env = $this->expr($e->callee, $env); }
         foreach ($e->args as $a) { $env = $this->expr($a, $env); }
@@ -599,33 +641,183 @@ final class Flow
         } elseif ($e instanceof Invoke) {
             $out = $out->copy();
             foreach (\array_keys($out->vars) as $k) { if (\strpos((string)$k, '->') !== false) { unset($out->vars[$k]); } }
-        } elseif ($e instanceof CallExpr) {
-            $out = $this->callEffects($e, $out);
         }
+        if ($e instanceof CallExpr) { $out = $this->callEffects($e, $out); }
+        $out = $this->refArgs($e, $out);
+        foreach ($e->args as $a) { $out = $this->escape($a, $out); }
         $ty = $this->typer->typeOf($e, $out);
         if ($ty !== null && $ty->kind === SourceType::NEVER) { return self::dead($out); }
         return $out;
     }
 
-    /** By-ref arguments become unknown; `extract` / `parse_str` / `eval` clobber the scope. */
+    /** `new` evaluates its arguments like a call and may take them by reference. */
+    private function newExpr(NewExpr $e, TypeEnv $env): TypeEnv
+    {
+        foreach ($e->args as $a) { $env = $this->expr($a, $env); }
+        $out = $this->refArgs($e, $env);
+        foreach ($e->args as $a) { $out = $this->escape($a, $out); }
+        return $out;
+    }
+
+    /**
+     * An object passed to anything (or copied to another name) may be changed through the other name:
+     * drop every property path below it. Aliasing is otherwise not tracked.
+     */
+    private function escape(Expr $a, TypeEnv $env): TypeEnv
+    {
+        if ($a instanceof NamedArg || $a instanceof Spread) { $a = $a->value; }
+        $key = TypeEnv::pathKey($a);
+        if ($key === null) { return $env; }
+        $out = $env->copy();
+        $out->forgetBelow($key);
+        return $out;
+    }
+
+    /**
+     * A closure handed to Closure::bind / fromCallable, or used as the receiver of bindTo / call, runs with
+     * another `$this` and scope than its lexical one: it is entered with no class at all.
+     */
+    private function markRebound(Expr $e): void
+    {
+        $c = null;
+        if ($e instanceof StaticCall) {
+            $cls = self::bareFn($e->class); // the parser prefixes the namespace: `N\Closure`
+            $m = \strtolower($e->method);
+            if ($cls === 'closure' && ($m === 'bind' || $m === 'fromcallable') && \count($e->args) > 0) { $c = $e->args[0]; }
+        } elseif ($e instanceof MethodCallExpr) {
+            $m = \strtolower($e->method);
+            if ($m === 'bindto' || $m === 'call' || $m === 'bind') { $c = $e->object; }
+        }
+        if ($c instanceof Closure || $c instanceof ArrowFn) { $this->rebound[\spl_object_id($c)] = true; }
+    }
+
+    /**
+     * Arguments a callee takes by reference become unknown (a property path or array element loses its
+     * narrowing too). A method / static / constructor callee that cannot be resolved, and any call with
+     * named or spread arguments, invalidates every variable / path argument; an unresolved plain function
+     * is looked up in a small builtin table.
+     */
+    private function refArgs(Expr $e, TypeEnv $env): TypeEnv
+    {
+        $params = null;
+        $all = false;
+        if ($e instanceof CallExpr) {
+            $fn = $this->idx->resolveFunction($e->function);
+            if ($fn === null) { return $this->builtinRefArgs($e, $env); }
+            $params = $fn->params;
+        } elseif ($e instanceof MethodCallExpr) {
+            $classes = $this->receiverClasses($this->typer->typeOf($e->object, $env), $env);
+            $params = $classes === null ? null : $this->methodParams($classes, $e->method);
+            $all = $params === null;
+        } elseif ($e instanceof StaticCall) {
+            $cls = $this->classOf($e->class, $env);
+            $params = $cls === null ? null : $this->methodParams([$cls], $e->method);
+            $all = $params === null;
+        } elseif ($e instanceof NewExpr) {
+            $cls = $this->classOf($e->class, $env);
+            if ($cls === null || $this->idx->findClass($cls) === null) {
+                $all = true;
+            } else {
+                $params = $this->methodParams([$cls], '__construct');
+                if ($params === null) { return $env; }
+            }
+        } else {
+            return $env;
+        }
+        foreach ($e->args as $a) { if ($a instanceof NamedArg || $a instanceof Spread) { $all = true; } }
+        $out = $env;
+        foreach ($e->args as $i => $a) {
+            $byRef = $all;
+            if (!$byRef && $params !== null) {
+                $last = \count($params) - 1;
+                $p = $params[$i] ?? ($last >= 0 && $params[$last]->variadic ? $params[$last] : null);
+                $byRef = $p !== null && $p->byRef;
+            }
+            if (!$byRef) { continue; }
+            if ($a instanceof NamedArg || $a instanceof Spread) { $a = $a->value; }
+            if (TypeEnv::pathKey($a) !== null || $a instanceof ArrayAccess) { $out = $this->store($a, null, $out); }
+        }
+        return $out;
+    }
+
+    /**
+     * Parameters of $method over all $classes (a position is by-ref if any class says so); null when a
+     * class or the method is unknown. A class without the method yields null, `__construct` included, so
+     * the caller must check the class exists first.
+     *
+     * @param string[] $classes
+     * @return \Parser\Ast\Param[]|null
+     */
+    private function methodParams(array $classes, string $method): ?array
+    {
+        $best = null;
+        foreach ($classes as $c) {
+            $m = $this->idx->findMethod($c, \strtolower($method), 0);
+            if ($m === null) { return null; }
+            if ($best === null) { $best = $m->params; continue; }
+            foreach ($m->params as $i => $p) {
+                if (!isset($best[$i]) || ($p->byRef && !$best[$i]->byRef)) { $best[$i] = $p; }
+            }
+        }
+        return $best;
+    }
+
+    /**
+     * @return string[]|null
+     */
+    private function receiverClasses(?SourceType $t, TypeEnv $env): ?array
+    {
+        if ($t === null) { return null; }
+        $out = [];
+        foreach (self::members($t) as $m) {
+            if ($m->kind === SourceType::SCALAR && $m->name === 'null') { continue; }
+            if ($m->kind === SourceType::CLASS_) { $out[] = \ltrim($m->name, '\\'); continue; }
+            if (($m->kind === SourceType::SELF || $m->kind === SourceType::STATIC) && $env->thisClass !== null) { $out[] = $env->thisClass; continue; }
+            return null;
+        }
+        return \count($out) === 0 ? null : $out;
+    }
+
+    /** @var array<string, int[]> by-reference argument positions of common builtins */
+    private const BUILTIN_REF = [
+        'preg_match' => [2], 'preg_match_all' => [2], 'preg_replace_callback' => [4], 'preg_replace' => [4],
+        'str_replace' => [3], 'str_ireplace' => [3], 'similar_text' => [2], 'exec' => [1, 2], 'settype' => [0],
+        'sort' => [0], 'rsort' => [0], 'usort' => [0], 'uasort' => [0], 'uksort' => [0], 'asort' => [0], 'arsort' => [0],
+        'ksort' => [0], 'krsort' => [0], 'natsort' => [0], 'natcasesort' => [0], 'shuffle' => [0], 'array_multisort' => [0],
+        'array_push' => [0], 'array_pop' => [0], 'array_shift' => [0], 'array_unshift' => [0], 'array_splice' => [0],
+        'array_walk' => [0], 'end' => [0], 'reset' => [0], 'next' => [0], 'prev' => [0],
+        'stream_select' => [0, 1, 2], 'sscanf' => [2, 3, 4], 'fscanf' => [2, 3, 4],
+    ];
+
+    private function builtinRefArgs(CallExpr $e, TypeEnv $env): TypeEnv
+    {
+        $pos = self::BUILTIN_REF[self::bareFn($e->function)] ?? null;
+        if ($pos === null) { return $env; }
+        $out = $env;
+        foreach ($e->args as $i => $a) {
+            if (\in_array($i, $pos, true) && (TypeEnv::pathKey($a) !== null || $a instanceof ArrayAccess)) { $out = $this->store($a, null, $out); }
+        }
+        return $out;
+    }
+
+    /** `unset`, `exit`, and calls that clobber the scope. */
     private function callEffects(CallExpr $e, TypeEnv $env): TypeEnv
     {
         $l = self::bareFn($e->function);
         if ($l === 'exit' || $l === 'die') { return self::dead($env); }
-        if ($l === 'extract' || $l === 'parse_str' || $l === 'eval') {
-            $o = $env->copy();
-            $keep = $o->vars['this'] ?? null;
-            $o->vars = $keep === null ? [] : ['this' => $keep];
-            return $o;
+        if ($l === 'unset') {
+            $out = $env->copy();
+            foreach ($e->args as $a) {
+                // unset($arr['k']) leaves the array's type alone
+                if ($a instanceof Variable || $a instanceof PropertyAccess) {
+                    $k = TypeEnv::pathKey($a);
+                    if ($k !== null && $k !== 'this') { $out->forget($k); }
+                }
+            }
+            return $out;
         }
-        $fn = $this->idx->resolveFunction($e->function);
-        if ($fn === null) { return $env; }
-        $out = $env;
-        foreach ($e->args as $i => $a) {
-            $p = $fn->params[$i] ?? null;
-            if ($p !== null && $p->byRef && $a instanceof Variable) { $out = $this->store($a, null, $out); }
-        }
-        return $out;
+        if ($l === 'extract' || $l === 'parse_str' || $l === 'eval') { return self::onlyThis($env); }
+        return $env;
     }
 
     /** Variable name at the base of `$a->b->c()` / `$a->b()->c`, or null. */
@@ -690,7 +882,7 @@ final class Flow
      */
     private function enterClosure(Expr $e, TypeEnv $env): void
     {
-        $owner = $env->thisClass ?? '';
+        $owner = isset($this->rebound[\spl_object_id($e)]) ? '' : ($env->thisClass ?? '');
         $bound = $e->isStatic || $env->isStatic || $owner === '' ? '' : $owner;
         $stmts = $e instanceof Closure ? $e->body->statements : [];
         $body = $e instanceof ArrowFn ? $e->body : null;
@@ -892,9 +1084,15 @@ final class Flow
         if ($mode === 'inst') {
             if ($pos) {
                 $kept = [];
+                // against a class every instance IS that class, so non-subtypes drop out; against an interface
+                // (or a name the index does not know) a non-subtype class may still implement it, so the member
+                // is kept unchanged (the typer cannot resolve a `Foo&Shape` intersection, so none is built)
+                $ci = $idx->findClass($arg);
+                $exact = $ci !== null && $ci->kind !== 'interface';
                 if ($cur !== null) {
                     foreach (self::members($cur) as $m) {
-                        if ($m->kind === SourceType::CLASS_ && self::isSub($m->name, $arg, $idx)) { $kept[] = $m; }
+                        if ($m->kind !== SourceType::CLASS_) { continue; }
+                        if (self::isSub($m->name, $arg, $idx) || !$exact) { $kept[] = $m; }
                     }
                 }
                 return \count($kept) > 0 ? ExprTyper::union($kept) : new SourceType(SourceType::CLASS_, $arg);
