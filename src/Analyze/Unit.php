@@ -26,7 +26,8 @@ final class Unit
         public array $stmts,
         public ?Expr $exprBody,
         public ?string $returnType,
-        public ?string $docComment = null,
+        /** @var array<string, string> param name → namespace-qualified `@param` tag type */
+        public array $paramDocs = [],
         public string $ownerClass = '',
     ) {}
 }

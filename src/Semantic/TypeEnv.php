@@ -2,7 +2,6 @@
 
 namespace Semantic;
 
-use Analyze\DocType;
 use Analyze\Index;
 use Analyze\Unit;
 
@@ -34,7 +33,7 @@ final class TypeEnv
         foreach ($u->params as $p) {
             if ($p->variadic) { $env->vars[$p->name] = new SourceType(SourceType::SCALAR, 'array'); continue; }
             $native = SourceTypeParser::fromHint($p->typeHint, $owner);
-            $doc = SourceTypeParser::fromHint(DocType::tag($u->docComment, '@param', $p->name), $owner);
+            $doc = SourceTypeParser::fromHint($u->paramDocs[$p->name] ?? null, $owner);
             $t = ExprTyper::bind(SourceTypeParser::withDoc($native, $doc), $owner, $owner, $idx);
             if ($t !== null) { $env->vars[$p->name] = $t; }
         }

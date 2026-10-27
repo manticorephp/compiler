@@ -2,7 +2,6 @@
 
 namespace Semantic;
 
-use Analyze\DocType;
 use Analyze\Index;
 use Parser\Ast\ArrayAccess;
 use Parser\Ast\ArrayLit;
@@ -16,6 +15,8 @@ use Parser\Ast\CloneExpr;
 use Parser\Ast\Closure;
 use Parser\Ast\CompoundAssign;
 use Parser\Ast\Expr;
+use Parser\Ast\DynProp;
+use Parser\Ast\Ellipsis;
 use Parser\Ast\FloatLiteral;
 use Parser\Ast\IncDec;
 use Parser\Ast\InstanceofExpr;
@@ -43,18 +44,26 @@ use Parser\Ast\Variable;
  */
 final class ExprTyper
 {
-    private const MAX_DEPTH = 64;
+    private const MAX_DEPTH = 400;
+    private const MAX_NODES = 4000;
+
+    /** @var array<string, bool> constants being evaluated (cycle guard) */
+    private array $busy = [];
+    private int $budget = 0;
 
     public function __construct(private Index $idx, private string $file) {}
 
     public function typeOf(Expr $e, TypeEnv $env): ?SourceType
     {
+        $this->budget = self::MAX_NODES;
+        $this->busy = [];
         return $this->go($e, $env, 0);
     }
 
     private function go(Expr $e, TypeEnv $env, int $d): ?SourceType
     {
-        if ($d > self::MAX_DEPTH) { return null; }
+        if ($d > self::MAX_DEPTH || $this->budget <= 0) { return null; }
+        $this->budget = $this->budget - 1;
         $d = $d + 1;
         if ($e instanceof Variable) { return $env->vars[$e->name] ?? null; }
         if ($e instanceof IntLiteral) { return self::scalar('int'); }
@@ -77,7 +86,7 @@ final class ExprTyper
             $l = $this->go($e->left, $env, $d);
             $r = $this->go($e->right, $env, $d);
             if ($l === null || $r === null) { return null; }
-            return self::hasNull($l) ? self::union([self::withoutNull($l), $r]) : $l;
+            return self::hasNull($l) || self::maybeUnset($e->left) ? self::union([self::withoutNull($l), $r]) : $l;
         }
         if ($e instanceof MatchExpr) {
             $parts = [];
@@ -89,8 +98,8 @@ final class ExprTyper
             return self::union($parts);
         }
         if ($e instanceof CloneExpr) { return $this->go($e->object, $env, $d); }
-        if ($e instanceof Closure || $e instanceof ArrowFn) { return new SourceType(SourceType::CLASS_, 'Closure'); }
-        if ($e instanceof Cast) { return $this->cast($e->cast); }
+        if ($e instanceof Closure || $e instanceof ArrowFn) { return self::closure(); }
+        if ($e instanceof Cast) { return $this->cast($e, $env, $d); }
         if ($e instanceof InstanceofExpr) { return self::scalar('bool'); }
         if ($e instanceof Assign) { return $this->go($e->value, $env, $d); }
         if ($e instanceof RefAssign) { return $this->go($e->source, $env, $d); }
@@ -110,12 +119,13 @@ final class ExprTyper
 
     private function call(CallExpr $e): ?SourceType
     {
+        if (self::isFcc($e->args)) { return self::closure(); }
         $l = \strtolower($e->function);
         if ($l === 'isset' || $l === 'empty') { return self::scalar('bool'); }
         $fn = $this->idx->resolveFunction($e->function);
         if ($fn === null) { return null; }
         $native = SourceTypeParser::fromHint($fn->returnType, '');
-        $doc = $fn->docComment === null ? null : SourceTypeParser::fromHint(DocType::tag($fn->docComment, '@return', ''), '');
+        $doc = SourceTypeParser::fromHint($fn->docType, '');
         return SourceTypeParser::withDoc($native, $doc);
     }
 
@@ -134,20 +144,22 @@ final class ExprTyper
         $classes = $this->classesOf($recv, $env);
         if ($classes === null) { return null; }
         $t = $this->overClasses($classes, $e->property, 'prop');
-        return $t !== null && $e->nullsafe ? self::union([$t, self::scalar('null')]) : $t;
+        return $t !== null && ($e->nullsafe || self::chainHasNullsafe($e->object)) ? self::union([$t, self::scalar('null')]) : $t;
     }
 
     private function methodCall(MethodCallExpr $e, TypeEnv $env, int $d): ?SourceType
     {
+        if (self::isFcc($e->args)) { return self::closure(); }
         $recv = $this->go($e->object, $env, $d);
         $classes = $this->classesOf($recv, $env);
         if ($classes === null) { return null; }
         $t = $this->overClasses($classes, $e->method, 'method');
-        return $t !== null && $e->nullsafe ? self::union([$t, self::scalar('null')]) : $t;
+        return $t !== null && ($e->nullsafe || self::chainHasNullsafe($e->object)) ? self::union([$t, self::scalar('null')]) : $t;
     }
 
     private function staticCall(StaticCall $e, TypeEnv $env): ?SourceType
     {
+        if (self::isFcc($e->args)) { return self::closure(); }
         $cls = $this->classRef($e->class, $env);
         if ($cls === null) { return null; }
         $low = \strtolower($e->class);
@@ -167,7 +179,12 @@ final class ExprTyper
         if ($m->kind === 'case') { return new SourceType(SourceType::CLASS_, $m->declClass); }
         if ($m->typeHint !== null) { return $this->memberType($cls, $e->name, 'const', $cls); }
         if ($m->value === null) { return null; }
-        return $this->go($m->value, new TypeEnv([], $m->declClass, true, null), $d);
+        $key = \strtolower($m->declClass) . '::' . $m->name;
+        if (isset($this->busy[$key])) { return null; }
+        $this->busy[$key] = true;
+        $r = $this->go($m->value, new TypeEnv([], $m->declClass, true, null), $d);
+        unset($this->busy[$key]);
+        return $r;
     }
 
     /**
@@ -190,10 +207,7 @@ final class ExprTyper
         $m = $this->idx->lookupMember($cls, $name, $kind);
         if ($m === null) { return null; }
         $native = SourceTypeParser::fromHint($m->typeHint, $m->declClass);
-        $doc = null;
-        if ($m->docComment !== null && ($kind === 'method' || $kind === 'prop')) {
-            $doc = SourceTypeParser::fromHint(DocType::tag($m->docComment, $kind === 'method' ? '@return' : '@var', ''), $m->declClass);
-        }
+        $doc = SourceTypeParser::fromHint($m->docType, $m->declClass);
         $t = SourceTypeParser::withDoc($native, $doc);
         // A trait's `self` is the using class.
         $di = $this->idx->findClass($m->declClass);
@@ -301,7 +315,7 @@ final class ExprTyper
         $r = $this->go($e->value, $env, $d);
         if ($op === '??') {
             if ($l === null || $r === null) { return null; }
-            return self::hasNull($l) ? self::union([self::withoutNull($l), $r]) : $l;
+            return self::hasNull($l) || self::maybeUnset($e->target) ? self::union([self::withoutNull($l), $r]) : $l;
         }
         return self::binary($op, $l, $r);
     }
@@ -319,15 +333,20 @@ final class ExprTyper
         return null;
     }
 
-    private function cast(string $cast): ?SourceType
+    private function cast(Cast $e, TypeEnv $env, int $d): ?SourceType
     {
-        switch (\strtolower($cast)) {
+        switch (\strtolower($e->cast)) {
             case 'int': case 'integer': return self::scalar('int');
             case 'float': case 'double': case 'real': return self::scalar('float');
             case 'string': case 'binary': return self::scalar('string');
             case 'bool': case 'boolean': return self::scalar('bool');
             case 'array': return self::scalar('array');
-            case 'object': return new SourceType(SourceType::CLASS_, 'stdClass');
+            case 'object':
+                $o = $this->go($e->operand, $env, $d);
+                if ($o === null) { return null; }
+                if ($o->kind === SourceType::CLASS_) { return $o; }
+                $arrayish = $o->kind === SourceType::GENERIC && ($o->name === 'array' || $o->name === 'list');
+                return $o->kind === SourceType::SCALAR || $arrayish ? new SourceType(SourceType::CLASS_, 'stdClass') : null;
             case 'unset': return self::scalar('null');
             default: return null;
         }
@@ -400,6 +419,41 @@ final class ExprTyper
             return $b->args[\count($b->args) - 1];
         }
         return null;
+    }
+
+    private static function closure(): SourceType
+    {
+        return new SourceType(SourceType::CLASS_, 'Closure');
+    }
+
+    /**
+     * @param Expr[] $args
+     */
+    private static function isFcc(array $args): bool
+    {
+        return \count($args) === 1 && $args[0] instanceof Ellipsis;
+    }
+
+    /** Does a `?->` earlier in the chain short-circuit the whole expression to null? */
+    private static function chainHasNullsafe(Expr $o): bool
+    {
+        while (true) {
+            if ($o instanceof PropertyAccess || $o instanceof MethodCallExpr) {
+                if ($o->nullsafe) { return true; }
+                $o = $o->object;
+            } elseif ($o instanceof ArrayAccess) {
+                $o = $o->array;
+            } else {
+                return false;
+            }
+        }
+    }
+
+    /** Reads that may find nothing at all (missing key, unset or uninitialized property), whatever their declared type. */
+    private static function maybeUnset(Expr $e): bool
+    {
+        return $e instanceof ArrayAccess || $e instanceof PropertyAccess || $e instanceof DynProp
+            || ($e instanceof StaticAccess && $e->name !== '' && $e->name[0] === '$');
     }
 
     // ── type algebra ──────────────────────────────────────────────────
