@@ -2,7 +2,7 @@
 
 // Latency / memory / parity bench for Semantic\Workspace.
 //
-//   php -d xdebug.mode=off tools/bench_semantic.php <dir> [--edits N] [--broken N] [--parity] [--cli-json FILE]
+//   php -d xdebug.mode=off -d memory_limit=-1 tools/bench_semantic.php <dir> [--edits N] [--broken N] [--queries N] [--seed S] [--parity] [--cli-json FILE]
 //
 // Also self-compilable (see docs/design/semantic-core.md): the native binary loads the real
 // prelude + stdlib sig through LibrarySymbols::load(); under Zend the same call works once
@@ -16,7 +16,13 @@
 // garbage line injected, a random line deleted); every mutation is updated into the Workspace and
 // timed (update + diagnostics), the undefined.* diagnostics that appear in untouched dependents are
 // counted (sticky declarations keep it at 0 unless the mutation deleted the declaration), and the
-// file is restored and its diagnostics must return to the original set. Exit 1 otherwise.
+// file is restored and its diagnostics must return to the original set. Exit 1 otherwise. After each mutation
+// typeAt / hover / definitionOf / referencesTo / renameBlockers are also called at a few positions of the mutated
+// text (and at the mutation point); any exception is counted and fails the run (exit 1).
+//
+// --queries N: N random positions of the corpus per operation (typeAt, hover, definitionOf, referencesTo of a
+// member use site and of a variable, renameBlockers); the first call of each operation is reported as cold, the
+// rest as warm p50 / p95 / max. --seed S makes the picks deterministic (default 4242).
 
 if (!class_exists('Semantic\Workspace')) {
     $root = dirname(__DIR__);
@@ -56,6 +62,28 @@ function bench_pct(array $v, int $p): float
     $i = intdiv(count($v) * $p, 100);
     if ($i >= count($v)) { $i = count($v) - 1; }
     return $v[$i];
+}
+
+/** @return int[] [line, col] 1-based, bytes, of byte offset $off of $text */
+function bench_lc(string $text, int $off): array
+{
+    $line = substr_count($text, "\n", 0, $off) + 1;
+    $nl = strrpos(substr($text, 0, $off), "\n");
+    return [$line, $off - ($nl === false ? -1 : $nl)];
+}
+
+/** @return int[][] [line, col] of every match start (capture group $g) of $re in $text, capped at 4000 */
+function bench_matches(string $text, string $re, int $g = 0): array
+{
+    $out = [];
+    if (preg_match_all($re, $text, $m, PREG_OFFSET_CAPTURE) > 0) {
+        $step = max(1, intdiv(count($m[$g]), 4000));
+        for ($i = 0; $i < count($m[$g]); $i += $step) {
+            $off = (int)$m[$g][$i][1];
+            $out[] = bench_lc($text, $off >= 0 ? $off : (int)$m[0][$i][1]);
+        }
+    }
+    return $out;
 }
 
 function bench_ms(float $v): string
@@ -128,16 +156,20 @@ $edits = 200;
 $parity = false;
 $cliJson = '';
 $broken = 0;
+$queries = 0;
+$qseed = 4242;
 $n = count($argv);
 for ($i = 1; $i < $n; $i++) {
     $a = $argv[$i];
     if ($a === '--edits') { $i++; $edits = (int)$argv[$i]; }
     elseif ($a === '--broken') { $i++; $broken = (int)$argv[$i]; }
+    elseif ($a === '--queries') { $i++; $queries = (int)$argv[$i]; }
+    elseif ($a === '--seed') { $i++; $qseed = (int)$argv[$i]; }
     elseif ($a === '--parity') { $parity = true; }
     elseif ($a === '--cli-json') { $i++; $cliJson = $argv[$i]; }
     else { $dir = rtrim($a, '/'); }
 }
-if ($dir === '') { echo "usage: bench_semantic.php <dir> [--edits N] [--parity] [--cli-json FILE]\n"; exit(64); }
+if ($dir === '') { echo "usage: bench_semantic.php <dir> [--edits N] [--broken N] [--queries N] [--seed S] [--parity] [--cli-json FILE]\n"; exit(64); }
 
 $files = bench_collect($dir);
 $texts = [];
@@ -252,6 +284,27 @@ if ($broken > 0 && count($files) > 0) {
     $flood = [];
     $legit = 0;
     $restoreDiffs = [];
+    $queryCalls = 0;
+    $queryExceptions = [];
+    // own generator: the probes must not shift the mutation sequence
+    $pseed = 99;
+    $prnd = function (int $mod) use (&$pseed): int {
+        $pseed = ($pseed * 1103515245 + 12345) % 2147483648;
+        return intdiv($pseed, 65536) % max(1, $mod);
+    };
+    $probe = function (string $f, string $text, int $atLine) use ($ws, &$queryCalls, &$queryExceptions, $prnd): void {
+        $at = [[max(1, $atLine), 1], [max(1, $atLine), 5]];
+        foreach (bench_matches($text, '/(?:->|::)\s*([A-Za-z_]\w*)|\$([A-Za-z_]\w*)|\b([A-Z]\w+)\b/', 0) as $p) {
+            if ($prnd(40) === 0) { $at[] = $p; }
+        }
+        foreach ($at as [$l, $c]) {
+            foreach (['typeAt', 'hover', 'definitionOf', 'referencesTo', 'renameBlockers', 'uncertainSitesFor'] as $op) {
+                $queryCalls++;
+                try { $ws->$op($f, $l, $c); }
+                catch (\Throwable $e) { $queryExceptions[] = $op . ' ' . $f . ':' . $l . ':' . $c . ' ' . get_class($e) . ': ' . $e->getMessage(); }
+            }
+        }
+    };
     foreach (array_keys($picked) as $f) {
         $orig = $texts[$f];
         $names = bench_decl_names($orig);
@@ -274,6 +327,7 @@ if ($broken > 0 && count($files) > 0) {
             $ws->update($f, $mut);
             $ws->diagnostics($f);
             $tot[] = (hrtime(true) - $t0) / 1e6;
+            $probe($f, $mut, $kind === 'delete-line' ? $prnd(count($lines) + 1) : 1);
             foreach ($deps as $g) {
                 $before = array_flip($base[$g]);
                 foreach (bench_sig($ws, $g) as $sg) {
@@ -300,10 +354,63 @@ if ($broken > 0 && count($files) > 0) {
     echo str_pad('update+diagnostics', 22) . str_pad(bench_ms(bench_pct($tot, 50)), 9) . str_pad(bench_ms(bench_pct($tot, 95)), 9) . bench_ms(max($tot)) . "\n";
     echo 'new undefined.* in untouched dependents (declaration kept): ' . count($flood) . '; (declaration deleted by the mutation, expected): ' . $legit . "\n";
     foreach (array_slice($flood, 0, 10) as $x) { echo substr($x, 0, 300) . "\n"; }
+    echo 'queries on mutated files (typeAt, hover, definitionOf, referencesTo, renameBlockers, uncertainSitesFor): calls=' . $queryCalls . ' exceptions=' . count($queryExceptions) . "\n";
+    foreach (array_slice($queryExceptions, 0, 10) as $x) { echo substr($x, 0, 300) . "\n"; }
     echo 'restore: differences=' . count($restoreDiffs) . "\n";
     foreach (array_slice($restoreDiffs, 0, 10) as $x) { echo substr($x, 0, 300) . "\n"; }
     echo 'peak RSS after broken (getrusage ru_maxrss): ' . bench_rss_mb() . " MB\n";
-    if (count($restoreDiffs) > 0) { $status = 1; }
+    if (count($restoreDiffs) > 0 || count($queryExceptions) > 0) { $status = 1; }
+}
+if ($queries > 0 && count($files) > 0) {
+    $seed = $qseed;
+    $rnd = function (int $mod) use (&$seed): int {
+        $seed = ($seed * 1103515245 + 12345) % 2147483648;
+        return intdiv($seed, 65536) % max(1, $mod);
+    };
+    $kinds = [
+        'word' => '/\$[A-Za-z_]\w*|(?:->|\?->|::)\s*([A-Za-z_]\w*)|\b[A-Za-z_]\w*(?=\s*\()|\b[A-Z]\w+/',
+        'member' => '/(?:->|\?->|::)\s*(\$?[A-Za-z_][A-Za-z0-9_]*)/',
+        'variable' => '/\$([A-Za-z_][A-Za-z0-9_]*)/',
+    ];
+    $cands = [];
+    $pick = function (string $kind) use (&$cands, $kinds, $files, $texts, $rnd): array {
+        for ($try = 0; $try < 200; $try++) {
+            $f = $files[$rnd(count($files))];
+            $cands[$kind][$f] ??= bench_matches($texts[$f], $kinds[$kind], 1);
+            if (count($cands[$kind][$f]) > 0) {
+                $p = $cands[$kind][$f][$rnd(count($cands[$kind][$f]))];
+                return [$f, $p[0], $p[1]];
+            }
+        }
+        return [$files[0], 1, 1];
+    };
+    $ops = [
+        'typeAt' => ['word', fn($f, $l, $c) => $ws->typeAt($f, $l, $c)],
+        'hover' => ['word', fn($f, $l, $c) => $ws->hover($f, $l, $c)],
+        'definitionOf' => ['word', fn($f, $l, $c) => $ws->definitionOf($f, $l, $c)],
+        'referencesTo (member)' => ['member', fn($f, $l, $c) => $ws->referencesTo($f, $l, $c)],
+        'referencesTo (variable)' => ['variable', fn($f, $l, $c) => $ws->referencesTo($f, $l, $c)],
+        'renameBlockers (member)' => ['member', fn($f, $l, $c) => $ws->renameBlockers($f, $l, $c)],
+        'renameBlockers (variable)' => ['variable', fn($f, $l, $c) => $ws->renameBlockers($f, $l, $c)],
+    ];
+    echo 'queries: ' . $queries . ' random positions per operation, seed=' . $qseed . "\n";
+    echo str_pad('operation', 28) . str_pad('cold(1st)', 11) . str_pad('warm p50', 10) . str_pad('p95', 10) . str_pad('max', 10) . str_pad('answered', 10) . "exceptions\n";
+    foreach ($ops as $label => [$kind, $fn]) {
+        $v = [];
+        $cold = 0.0;
+        $exc = 0;
+        $hit = 0;
+        for ($q = 0; $q < $queries; $q++) {
+            [$f, $l, $c] = $pick($kind);
+            $t0 = hrtime(true);
+            try { $r = $fn($f, $l, $c); if ($r !== null && $r !== []) { $hit++; } } catch (\Throwable $e) { $exc++; if ($exc <= 3) { echo '  exception ' . $label . ' ' . $f . ':' . $l . ':' . $c . ' ' . $e->getMessage() . "\n"; } }
+            $ms = (hrtime(true) - $t0) / 1e6;
+            if ($q === 0) { $cold = $ms; } else { $v[] = $ms; }
+        }
+        echo str_pad($label, 28) . str_pad(bench_ms($cold), 11) . str_pad(bench_ms(bench_pct($v, 50)), 10) . str_pad(bench_ms(bench_pct($v, 95)), 10) . str_pad(bench_ms($v === [] ? 0.0 : max($v)), 10) . str_pad((string)$hit, 10) . $exc . "\n";
+        if ($exc > 0) { $status = 1; }
+    }
+    echo 'peak RSS after queries (getrusage ru_maxrss): ' . bench_rss_mb() . " MB\n";
 }
 if ($edits > 0 && count($files) > 0) {
     $seed = 12345;
