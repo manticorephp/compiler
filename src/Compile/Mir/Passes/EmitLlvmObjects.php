@@ -5788,6 +5788,15 @@ trait EmitLlvmObjects
         /** @var array<string, bool> $nodeNames */
         $nodeNames = [];
         $inline = $this->dynInlineOnlyNames($methods, $needsNodes, $nodeNames);
+        // A site whose ONLY argument is one spread of a cell-element pack hands every holder its
+        // arguments out of that pack — by-ref and variadic names included — so nothing of the
+        // caller's own argument nodes is needed and those names share the helper too. Kept inline
+        // they cost ~20 KB an arm, once per late-static-binding copy of a forwarder (Laravel's
+        // Facade::__callStatic: 268 names x 46 copies).
+        if ($needsNodes && $pack !== null && $argc === 1 && $packElem === null) {
+            $needsNodes = false;
+            $nodeNames = [];
+        }
         // A by-ref / variadic arm binds the caller's own argument EXPRESSIONS, so
         // those must be safe to emit a second time. Every other arm (a prelude
         // class's by-value method) reads the arguments back out of the packed
