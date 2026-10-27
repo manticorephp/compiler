@@ -76,16 +76,21 @@ final class UndefinedClass
         foreach ($stmts as $s) {
             if ($s instanceof ClassStmt) {
                 $span = $s->decl->span;
-                foreach ($s->decl->extends as $c) { $this->check($c, $span, $span); }
-                foreach ($s->decl->implements as $c) { $this->check($c, $span, $span); }
-                foreach ($s->decl->uses as $c) { $this->check($c, $span, $span); }
+                $names = $this->pf->program->names;
+                foreach ($s->decl->extends as $c) { $this->check($c, $span, NameRanges::headerOf($names, $s->decl, $c)); }
+                foreach ($s->decl->implements as $c) { $this->check($c, $span, NameRanges::headerOf($names, $s->decl, $c)); }
+                foreach ($s->decl->uses as $c) { $this->check($c, $span, NameRanges::traitOf($names, $s->decl, $c)); }
                 // Method bodies are covered by the expression walk above.
                 continue;
             }
             if ($s instanceof TryCatchStmt) {
                 $this->scanStmts($s->try->statements);
+                $after = $s->try->span;
                 foreach ($s->catches as $cat) {
-                    foreach ($cat->types as $t) { $this->check($t, $s->span, $s->span, $s->try->span); }
+                    foreach ($cat->types as $t) {
+                        $this->check($t, $s->span, NameRanges::useOf($this->pf->program->names, $t, $s->span, $after));
+                    }
+                    if ($cat->body->span !== null) { $after = $cat->body->span; }
                     $this->scanStmts($cat->body->statements);
                 }
                 if ($s->finally !== null) { $this->scanStmts($s->finally->statements); }
@@ -109,7 +114,7 @@ final class UndefinedClass
         }
     }
 
-    private function check(string $name, \Parser\Ast\Span $span, ?\Parser\Ast\Span $within = null, ?\Parser\Ast\Span $after = null): void
+    private function check(string $name, \Parser\Ast\Span $span, ?\Parser\Ast\NameRef $ref = null): void
     {
         if ($name === '') { return; }
         $low = \strtolower(\ltrim($name, '\\'));
@@ -120,10 +125,7 @@ final class UndefinedClass
             $this->pf->path, $span, Diagnostic::SEV_ERROR, 'undefined.class',
             'unknown class ' . \ltrim($name, '\\')
         );
-        if ($within !== null) {
-            $ref = NameRanges::useOf($this->pf->program->names, $name, $within, $after);
-            if ($ref !== null) { $d->withRange($ref->span); }
-        }
+        if ($ref !== null) { $d->withRange($ref->span); }
         $this->diags[] = $d;
     }
 }
