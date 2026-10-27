@@ -3,13 +3,28 @@
 namespace Semantic;
 
 use Analyze\AstWalk;
-use Analyze\Units;
+use Analyze\DeclScopes;
+use Parser\Ast\ArrayAccess;
+use Parser\Ast\ArrayLit;
 use Parser\Ast\ArrowFn;
+use Parser\Ast\Assign;
 use Parser\Ast\CallExpr;
 use Parser\Ast\Closure;
+use Parser\Ast\ClassStmt;
+use Parser\Ast\CompoundAssign;
+use Parser\Ast\DoWhileStmt;
+use Parser\Ast\Expr;
+use Parser\Ast\ForStmt;
+use Parser\Ast\ForeachStmt;
+use Parser\Ast\FunctionStmt;
+use Parser\Ast\IncDec;
 use Parser\Ast\Program;
+use Parser\Ast\RefAssign;
+use Parser\Ast\Span;
 use Parser\Ast\StringLiteral;
+use Parser\Ast\SwitchStmt;
 use Parser\Ast\Variable;
+use Parser\Ast\WhileStmt;
 
 /**
  * Variable bindings of one file. A binding is one variable of one scope (`{main}`, a function, a method,
@@ -29,6 +44,14 @@ use Parser\Ast\Variable;
  *   names lists that literal for `a` alone;
  * - a variable inside heredoc text has no name-precise span: it is listed as an uncertain site
  *   (`heredoc-interpolation`) of its binding, never as a location.
+ *
+ * - an arrow function that WRITES a name (`fn() => $x = 5`) keeps a local copy: its uses of that name are a separate
+ *   binding, and both it and the outer one list the first write as `arrow-assignment` (reads before the write see the outer value);
+ * - scopes are discovered here (not via Analyze\Units, which feeds the analyzer rules): functions, methods and property hooks
+ *   at any nesting depth (inside function bodies, conditionals, namespaces, loops, try), and closures inside them. A set hook
+ *   binds `$value` (or its named parameter). A parameter that still falls in no scope is listed as `unscoped-declaration`.
+ * - cross-file `global-scope` sites come from the open files' VarIndexes and the name index of every file (a closed file's
+ *   `{main}` variables are NOT known, only its `global` statements).
  *
  * Site ranges cover `$name`, end exclusive. Built once per file version.
  */
@@ -56,6 +79,24 @@ final class VarIndex
     private array $scMap = [];
     /** @var array<int, UncertainSite[]> scope => scope-wide dynamic sites */
     private array $scDyn = [];
+    /** @var array<int, ?Span> */
+    private array $scSpan = [];
+    /** @var array<int, \Parser\Ast\Stmt[]> */
+    private array $scStmts = [];
+    /** @var array<int, ?Expr> arrow function / hook expression body */
+    private array $scExpr = [];
+    /** @var array<int, ?Expr> the Closure / ArrowFn of a closure scope */
+    private array $scNode = [];
+    /** @var array<int, Variable[]> */
+    private array $scVars = [];
+    /** @var array<int, StringLiteral[]> literal names of compact() calls */
+    private array $scCompact = [];
+    /** @var array<int, string> set-hook value parameter name */
+    private array $scHookParam = [];
+    /** @var array<int, array<string, string>> arrow scope => name it writes => "line:col" of the first write */
+    private array $scArrowWrites = [];
+    /** @var UncertainSite[] parameters that sit in no function / method / closure range */
+    private array $unscoped = [];
 
     // bindings (parallel arrays)
     /** @var string[] */
@@ -99,50 +140,19 @@ final class VarIndex
 
     private function run(Program $p): void
     {
-        $units = new Units();
-        $units->collect($p->statements, $p->useAliases);
-        /** @var array<int, int> $scopeOfNode spl_object_id of a Closure / ArrowFn => scope */
-        $scopeOfNode = [];
-        foreach ($units->units as $i => $u) {
-            $this->scKind[$i] = $u->label === '{main}' ? 'main' : ($u->label === '{closure}' ? ($u->exprBody !== null ? 'arrow' : 'closure') : 'fn');
-            $this->scParent[$i] = -1;
-            $this->scStatic[$i] = false;
-            $this->scMap[$i] = [];
-            $this->scDyn[$i] = [];
-            if ($u->node !== null) {
-                $scopeOfNode[\spl_object_id($u->node)] = $i;
-                $this->scStatic[$i] = ($u->node instanceof Closure || $u->node instanceof ArrowFn) && $u->node->isStatic;
-            }
-        }
-        // pass 1: what each scope holds directly
-        /** @var array<int, Variable[]> $vars */
-        $vars = [];
-        /** @var array<int, array<int, StringLiteral>> $compact scope => literal names of compact() */
-        $compact = [];
-        foreach ($units->units as $i => $u) {
-            $vars[$i] = [];
-            $compact[$i] = [];
-            $w = new AstWalk(true);
-            if ($u->exprBody !== null) { $w->exprTree($u->exprBody); } else { $w->stmts($u->stmts); }
-            foreach ($w->exprs as $e) {
-                if ($e instanceof Variable) {
-                    $vars[$i][] = $e;
-                } elseif ($e instanceof Closure || $e instanceof ArrowFn) {
-                    $c = $scopeOfNode[\spl_object_id($e)] ?? -1;
-                    if ($c >= 0) { $this->scParent[$c] = $i; }
-                } elseif ($e instanceof CallExpr) {
-                    $this->noteCall($i, $e, $compact);
-                }
-            }
-        }
-        // pass 2: declarations (params, catch, static, global) by position
+        $this->newScope('main', null, $p->statements, null, null, -1, false);
+        $this->process(0);
+        // declarations (params, catch, static, global) by position
         foreach ($p->names as $n) {
             if ($n->kind !== 'variable' || ($n->role !== 'param' && $n->role !== 'catch' && $n->role !== 'global' && $n->role !== 'static')) { continue; }
             $sp = $n->span;
-            $sid = $this->scopeAt($units, $sp->startLine(), $sp->startColumn());
+            $sid = $this->scopeAt($sp->startLine(), $sp->startColumn());
             $name = \ltrim($n->written, '$');
             $el = $sp->endLine() === 0 ? $sp->startLine() : $sp->endLine();
             $ec = $sp->endLine() === 0 ? $sp->startColumn() + \strlen($n->written) : $sp->endColumn();
+            if ($n->role === 'param' && $sid === 0) {
+                $this->unscoped[] = new UncertainSite($this->file, $sp->startLine(), $sp->startColumn(), 'unscoped-declaration');
+            }
             if ($n->role === 'global') {
                 $b = $this->bind(0, $name);
                 $this->scMap[$sid][$name] = $b;
@@ -157,10 +167,18 @@ final class VarIndex
             }
             $this->addSite($b, $sp->startLine(), $sp->startColumn(), $el, $ec, true);
         }
-        // pass 3: closure `use` lists
-        foreach ($units->units as $i => $u) {
-            if (!($u->node instanceof Closure)) { continue; }
-            foreach ($u->node->uses as $cu) {
+        // a property hook's value parameter has no name entry: bind it in the hook's own scope
+        foreach ($this->scHookParam as $sid => $hp) {
+            if ($hp !== '' && !isset($this->scMap[$sid][$hp])) {
+                $b = $this->fresh($hp, false);
+                $this->scMap[$sid][$hp] = $b;
+                $this->addScope($b, $sid);
+            }
+        }
+        // closure `use` lists
+        foreach ($this->scNode as $i => $node) {
+            if (!($node instanceof Closure)) { continue; }
+            foreach ($node->uses as $cu) {
                 $outer = $this->scParent[$i];
                 $b = $outer >= 0 ? $this->bind($outer, $cu->name) : $this->fresh($cu->name, false);
                 if (!isset($this->scMap[$i][$cu->name])) {
@@ -172,9 +190,9 @@ final class VarIndex
                 $this->addSite($b, $sp->startLine(), $sp->endColumn() - \strlen($cu->name) - 1, $sp->endLine(), $sp->endColumn(), false);
             }
         }
-        // pass 4: uses
-        foreach ($units->units as $i => $u) {
-            foreach ($vars[$i] as $v) {
+        // uses
+        foreach ($this->scKind as $i => $_) {
+            foreach ($this->scVars[$i] as $v) {
                 if ($v->name === '__mc_destructure_skip') { continue; }
                 $sp = $v->span;
                 if ($v->name === '') {
@@ -191,7 +209,7 @@ final class VarIndex
                     $this->bUncertain[$b][] = new UncertainSite($this->file, $sp->startLine(), $sp->startColumn(), 'heredoc-interpolation');
                 }
             }
-            foreach ($compact[$i] as $lit) {
+            foreach ($this->scCompact[$i] as $lit) {
                 if (\preg_match('/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*\z/', $lit->value) !== 1) { continue; }
                 $b = $this->bind($i, $lit->value);
                 $this->bUncertain[$b][] = new UncertainSite($this->file, $lit->span->startLine(), $lit->span->startColumn(), 'dynamic-variable');
@@ -199,8 +217,95 @@ final class VarIndex
         }
     }
 
-    /** @param array<int, array<int, StringLiteral>> $compact */
-    private function noteCall(int $sid, CallExpr $c, array &$compact): void
+    private function newScope(string $kind, ?Span $span, array $stmts, ?Expr $exprBody, ?Expr $node, int $parent, bool $static): int
+    {
+        $id = \count($this->scKind);
+        $this->scKind[] = $kind;
+        $this->scParent[] = $parent;
+        $this->scStatic[] = $static;
+        $this->scMap[$id] = [];
+        $this->scDyn[$id] = [];
+        $this->scSpan[] = $span;
+        $this->scStmts[] = $stmts;
+        $this->scExpr[] = $exprBody;
+        $this->scNode[] = $node;
+        $this->scVars[$id] = [];
+        $this->scCompact[$id] = [];
+        $this->scHookParam[$id] = '';
+        $this->scArrowWrites[$id] = [];
+        return $id;
+    }
+
+    /** Collects what scope `$sid` holds directly, then opens a scope for every closure, function, method and hook it contains. */
+    private function process(int $sid): void
+    {
+        $w = new AstWalk(true);
+        if ($this->scExpr[$sid] !== null) { $w->exprTree($this->scExpr[$sid]); } else { $w->stmts($this->scStmts[$sid]); }
+        foreach ($w->exprs as $e) {
+            if ($e instanceof Variable) {
+                $this->scVars[$sid][] = $e;
+            } elseif ($e instanceof Closure) {
+                $this->process($this->newScope('closure', $e->span, $e->body->statements, null, $e, $sid, $e->isStatic));
+            } elseif ($e instanceof ArrowFn) {
+                $this->process($this->newScope('arrow', $e->span, [], $e->body, $e, $sid, $e->isStatic));
+            } elseif ($e instanceof CallExpr) {
+                $this->noteCall($sid, $e);
+            } elseif ($this->scKind[$sid] === 'arrow') {
+                $this->noteWrite($sid, $e);
+            }
+        }
+        $this->discover($this->scStmts[$sid]);
+    }
+
+    /** Opens scopes for the functions, classes (methods, property hooks) declared in a statement list, at any nesting depth short of another body. */
+    private function discover(array $stmts): void
+    {
+        foreach ($stmts as $s) {
+            if ($s instanceof FunctionStmt) {
+                if ($s->decl->body !== null) { $this->process($this->newScope('fn', $s->decl->span, $s->decl->body->statements, null, null, -1, false)); }
+            } elseif ($s instanceof ClassStmt) {
+                foreach ($s->decl->methods as $m) {
+                    if ($m->body !== null) { $this->process($this->newScope('fn', $m->span, $m->body->statements, null, null, -1, false)); }
+                }
+                foreach ($s->decl->properties as $prop) {
+                    foreach ($prop->hooks as $h) {
+                        $id = $this->newScope('fn', $h->span, $h->blockBody === null ? [] : $h->blockBody->statements, $h->exprBody, null, -1, false);
+                        if ($h->kind === 'set') { $this->scHookParam[$id] = $h->paramName ?? 'value'; }
+                        $this->process($id);
+                    }
+                }
+            } else {
+                foreach (DeclScopes::nested($s) as $body) { $this->discover($body); }
+                if ($s instanceof WhileStmt) { $this->discover($s->body->statements); }
+                elseif ($s instanceof DoWhileStmt) { $this->discover($s->body->statements); }
+                elseif ($s instanceof ForStmt) { $this->discover($s->body->statements); }
+                elseif ($s instanceof ForeachStmt) { $this->discover($s->body->statements); }
+                elseif ($s instanceof SwitchStmt) { foreach ($s->cases as $arm) { $this->discover($arm->body); } }
+            }
+        }
+    }
+
+    /** Names an arrow function writes (PHP keeps them local to the arrow): `$x = ..`, `$x op= ..`, `$x++`, `$x =& ..`, `[$x] = ..`, `$x[0] = ..`. */
+    private function noteWrite(int $sid, Expr $e): void
+    {
+        if ($e instanceof Assign || $e instanceof CompoundAssign || $e instanceof RefAssign) { $this->noteTarget($sid, $e->target); }
+        elseif ($e instanceof IncDec) { $this->noteTarget($sid, $e->operand); }
+    }
+
+    private function noteTarget(int $sid, Expr $t): void
+    {
+        if ($t instanceof Variable) {
+            if ($t->name !== '' && !isset($this->scArrowWrites[$sid][$t->name])) {
+                $this->scArrowWrites[$sid][$t->name] = $t->span->startLine() . ':' . $t->span->startColumn();
+            }
+        } elseif ($t instanceof ArrayAccess) {
+            $this->noteTarget($sid, $t->array);
+        } elseif ($t instanceof ArrayLit) {
+            foreach ($t->elements as $el) { $this->noteTarget($sid, $el->value); }
+        }
+    }
+
+    private function noteCall(int $sid, CallExpr $c): void
     {
         $name = \strtolower(\ltrim($c->function, '\\'));
         $sp = $c->span;
@@ -211,7 +316,7 @@ final class VarIndex
         } elseif ($name === 'compact') {
             $whole = false;
             foreach ($c->args as $a) {
-                if ($a instanceof StringLiteral) { $compact[$sid][] = $a; } else { $whole = true; }
+                if ($a instanceof StringLiteral) { $this->scCompact[$sid][] = $a; } else { $whole = true; }
             }
             if ($whole || \count($c->args) === 0) {
                 $this->scDyn[$sid][] = new UncertainSite($this->file, $sp->startLine(), $sp->startColumn(), 'dynamic-variable');
@@ -219,14 +324,13 @@ final class VarIndex
         }
     }
 
-    /** The innermost function / method / closure range holding the point, else `{main}` (0). */
-    private function scopeAt(Units $units, int $line, int $col): int
+    /** The innermost function / method / hook / closure range holding the point, else `{main}` (0). */
+    private function scopeAt(int $line, int $col): int
     {
         $best = 0;
         $bl = 0;
         $bc = 0;
-        foreach ($units->units as $i => $u) {
-            $s = $u->span;
+        foreach ($this->scSpan as $i => $s) {
             if ($s === null || $s->endLine() === 0) { continue; }
             if ($s->startLine() > $line || ($s->startLine() === $line && $s->startColumn() > $col)) { continue; }
             if ($s->endLine() < $line || ($s->endLine() === $line && $s->endColumn() <= $col)) { continue; }
@@ -266,6 +370,14 @@ final class VarIndex
             $par = $this->scParent[$sid];
             $b = ($par >= 0 && !$this->scStatic[$sid] && ($this->scKind[$sid] === 'closure' || $this->scKind[$sid] === 'arrow'))
                 ? $this->bind($par, 'this') : $this->fresh($name, true);
+        } elseif ($this->scKind[$sid] === 'arrow' && $this->scParent[$sid] >= 0 && isset($this->scArrowWrites[$sid][$name])) {
+            // written inside the arrow: a local copy, whatever the outer variable holds (reads before the write see the outer value)
+            $b = $this->fresh($name, false);
+            $pos = \explode(':', $this->scArrowWrites[$sid][$name]);
+            $site = new UncertainSite($this->file, (int)$pos[0], (int)$pos[1], 'arrow-assignment');
+            $this->bUncertain[$b][] = $site;
+            $outer = $this->bind($this->scParent[$sid], $name);
+            $this->bUncertain[$outer][] = $site;
         } elseif ($this->scKind[$sid] === 'arrow' && $this->scParent[$sid] >= 0) {
             $b = $this->bind($this->scParent[$sid], $name);
         } else {
@@ -393,6 +505,7 @@ final class VarIndex
         /** @var array<string, UncertainSite> $seen */
         $seen = [];
         foreach ($this->bUncertain[$b] as $s) { $seen[$s->reason . ':' . $s->line . ':' . $s->col] = $s; }
+        foreach ($this->unscoped as $s) { $seen[$s->reason . ':' . $s->line . ':' . $s->col] = $s; }
         foreach ($this->bScopes[$b] as $sid) {
             foreach ($this->scDyn[$sid] as $s) { $seen[$s->reason . ':' . $s->line . ':' . $s->col] = $s; }
         }

@@ -362,7 +362,8 @@ final class Workspace
      * `unresolved-member`, `owner-unknown` (class nested in a closure / loop), `implicit-member`, `library-declaration`,
      * `trait-adaptation:<file>:<line>:<col>` for an `insteadof` / `as` rule naming the method in a class the family reaches,
      * one `named-argument:<file>:<line>:<col>` per named argument (call or attribute) spelled like the member (a promoted
-     * property is also a parameter name), `heredoc-scan-failed:<file>` when the heredoc scan gave up, and one `heredoc-interpolation:<file>:<line>:<col>` per heredoc in the workspace (they hold unindexed uses).
+     * property is also a parameter name), `parse-error-region:<file>` for every workspace file with syntax errors (an error region can hide uses; a variable rename: its own file),
+     * `heredoc-scan-failed:<file>` when the heredoc scan gave up, and one `heredoc-interpolation:<file>:<line>:<col>` per heredoc in the workspace (they hold unindexed uses).
      *
      * @return string[]
      */
@@ -387,6 +388,7 @@ final class Workspace
                 foreach ($this->index->familyAdaptations($m) as $a) { $out[] = 'trait-adaptation:' . $a[0] . ':' . $a[1] . ':' . $a[2]; }
             }
         }
+        foreach (\array_keys($this->parseErrors) as $bad) { $out[] = 'parse-error-region:' . $bad; }
         foreach ($this->names->uncertainSites('') as $s) {
             if ($s->reason === 'heredoc-interpolation') { $out[] = 'heredoc-interpolation:' . $s->file . ':' . $s->line . ':' . $s->col; }
             if ($s->reason === 'heredoc-scan-failed') { $out[] = 'heredoc-scan-failed:' . $s->file; }
@@ -454,6 +456,7 @@ final class Workspace
     private function variableBlockers(string $uri, VarIndex $vi, int $b): array
     {
         $out = [];
+        if (isset($this->parseErrors[$uri])) { $out[] = 'parse-error-region:' . $uri; }
         if ($vi->isSpecial($b)) { $out[] = 'special-variable'; }
         foreach ($vi->declSitesOf($b) as $d) {
             $m = $this->names->occurrenceAt($uri, $d->line, $d->col);
