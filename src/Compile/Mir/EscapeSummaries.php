@@ -72,6 +72,16 @@ final class EscapeSummaries
     private array $pureNames = [];
     /** @var array<string, array<string, bool>> slot sets by content: most functions write the same few */
     private array $setPool = [];
+    /** @var array<string, int> pooled set signature → id (0 is reserved for 'no set') */
+    private array $setIds = [];
+    private int $poolSeq = 0;
+    private int $lastPoolId = 0;
+    /** @var array<string, int> function → id of its pooled write set */
+    private array $writesId = [];
+    /** @var array<int, bool> callee write-set ids already queued by this walk */
+    private array $ewSeenIds = [];
+    /** @var array<int, array<string, bool>> callee write sets met outside recording, tested without being merged */
+    private array $ewCalleeSets = [];
 
     public static function fromModule(Module $module): self
     {
@@ -168,7 +178,11 @@ final class EscapeSummaries
         foreach ($window as $w) { $this->walk($w); }
         if ($consumer !== null) { $this->noteConsumer($consumer); }
         if (!$this->ewPark || $this->ewAny) { return true; }
-        return $this->keysMeet($held, $this->ewWrites);
+        if ($this->keysMeet($held, $this->ewWrites)) { return true; }
+        foreach ($this->ewCalleeSets as $set) {
+            if ($this->keysMeet($held, $set)) { return true; }
+        }
+        return false;
     }
 
     /**
@@ -192,8 +206,12 @@ final class EscapeSummaries
         $k = $n->kind;
         if ($k === Node::KIND_STORE_PROPERTY) {
             $saved = $this->ewWrites;
+            $savedSets = $this->ewCalleeSets;
+            $savedIds = $this->ewSeenIds;
             $this->noteStoreProperty(self::asStoreProperty($n));
             $this->ewWrites = $saved;
+            $this->ewCalleeSets = $savedSets;
+            $this->ewSeenIds = $savedIds;
             return;
         }
         if ($k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_ARRAY_ACCESS) {
@@ -218,10 +236,18 @@ final class EscapeSummaries
      */
     private function pooled(array $set): array
     {
-        $keys = \array_keys($set);
+        // A string[] list takes the native word sort; array_keys of the set answers a cell list,
+        // whose sort compares tagged values (and parses numeric-looking strings) per pair.
+        /** @var string[] $keys */
+        $keys = [];
+        foreach ($set as $k => $unused) { $keys[] = (string)$k; }
         \sort($keys);
         $sig = \implode("\0", $keys);
-        if (!isset($this->setPool[$sig])) { $this->setPool[$sig] = $set; }
+        if (!isset($this->setPool[$sig])) {
+            $this->setPool[$sig] = $set;
+            if (!isset($this->setIds[$sig])) { $this->poolSeq = $this->poolSeq + 1; $this->setIds[$sig] = $this->poolSeq; }
+        }
+        $this->lastPoolId = $this->setIds[$sig];
         return $this->setPool[$sig];
     }
 
@@ -231,6 +257,8 @@ final class EscapeSummaries
         $this->ewAny = false;
         $this->ewPark = true;
         $this->ewWhy = '';
+        $this->ewSeenIds = [];
+        $this->ewCalleeSets = [];
     }
 
     private function compute(Module $module): void
@@ -308,17 +336,19 @@ final class EscapeSummaries
             }
             // The union only grows from its parts: a callee set of the same size IS the union.
             $pooledWrites = null;
+            $pooledId = 0;
             $total = \count($writes);
             foreach ($scc as $m) {
                 foreach ($callees[$m] as $c) {
-                    if (!isset($inScc[$c]) && \count($this->writes[$c]) === $total) { $pooledWrites = $this->writes[$c]; break 2; }
+                    if (!isset($inScc[$c]) && \count($this->writes[$c]) === $total) { $pooledWrites = $this->writes[$c]; $pooledId = $this->writesId[$c] ?? 0; break 2; }
                 }
             }
-            if ($pooledWrites === null) { $pooledWrites = $this->pooled($writes); }
+            if ($pooledWrites === null) { $pooledWrites = $this->pooled($writes); $pooledId = $this->lastPoolId; }
             foreach ($scc as $m) {
                 $this->parkFree[$m] = $park;
                 $this->writesAny[$m] = $any;
                 $this->writes[$m] = $pooledWrites;
+                $this->writesId[$m] = $pooledId;
                 if (!$park || $any) { $this->why[$m] = $why; }
                 // Consumed: a component's members are never read again.
                 unset($callees[$m], $localWrites[$m], $localWhy[$m]);
@@ -565,7 +595,19 @@ final class EscapeSummaries
             if ((!$this->parkFree[$t] || $this->writesAny[$t]) && $this->ewWhy === '') { $this->ewWhy = 'via ' . $t; }
             if (!$this->parkFree[$t]) { $this->ewPark = false; }
             if ($this->writesAny[$t]) { $this->ewAny = true; }
-            foreach ($this->writes[$t] as $prop => $unused) { $this->ewWrites[$prop] = true; }
+            if ($this->ewRecording) {
+                foreach ($this->writes[$t] as $prop => $unused) { $this->ewWrites[$prop] = true; }
+            } else {
+                // A finished summary: test it as it is, once per distinct pooled set, instead of
+                // copying every slot into this walk's set.
+                $wid = $this->writesId[$t] ?? 0;
+                if ($wid === 0) {
+                    foreach ($this->writes[$t] as $prop => $unused) { $this->ewWrites[$prop] = true; }
+                } elseif (!isset($this->ewSeenIds[$wid])) {
+                    $this->ewSeenIds[$wid] = true;
+                    $this->ewCalleeSets[] = $this->writes[$t];
+                }
+            }
             $off = isset($this->thisFirst[$t]) ? 1 : 0;
             $refs = $this->refParams[$t] ?? [];
             $i = 0;
