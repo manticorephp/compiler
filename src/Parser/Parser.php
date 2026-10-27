@@ -1330,6 +1330,7 @@ final class Parser
 
         $varTok = $this->expect(TokenKind::Variable, 'expected $variable in parameter list');
         $name = substr($varTok->lexeme, 1);
+        $this->noteVarDecl($varTok, 'param');
 
         $default = null;
         if ($this->match(TokenKind::Equals)) {
@@ -1852,6 +1853,7 @@ final class Parser
         while (true) {
             $tok = $this->expect(TokenKind::Variable, "expected variable after 'static'");
             $name = ltrim($tok->lexeme, '$');
+            $this->noteVarDecl($tok, 'static');
             $default = null;
             if ($this->match(TokenKind::Equals)) {
                 $default = $this->parseExpression();
@@ -1911,6 +1913,7 @@ final class Parser
         while (true) {
             $tok = $this->expect(TokenKind::Variable, "expected variable after 'global'");
             $names[] = ltrim($tok->lexeme, '$');
+            $this->noteVarDecl($tok, 'global');
             if (!$this->match(TokenKind::Comma)) { break; }
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after global declaration");
@@ -1932,7 +1935,9 @@ final class Parser
             }
             $variableName = null;
             if ($this->check(TokenKind::Variable)) {
-                $variableName = substr($this->advance()->lexeme, 1);
+                $vt = $this->advance();
+                $variableName = substr($vt->lexeme, 1);
+                $this->noteVarDecl($vt, 'catch');
             }
             $this->expect(TokenKind::CloseParen, "expected ')' after catch params");
             $catchBody = $this->parseBlock();
@@ -2719,6 +2724,7 @@ final class Parser
                     throw $this->error('expected member name after ->');
                 }
                 $name = $nameTok->lexeme;
+                $this->noteMemberUse($nameTok, $this->check(TokenKind::OpenParen) ? 'method' : 'prop');
                 if ($this->check(TokenKind::OpenParen)) {
                     $args = $this->parseArgList();
                     $left = Expr::methodCall($left, $name, $args, $nullsafe, $this->end($span, $left));
@@ -2755,6 +2761,7 @@ final class Parser
                 $this->advance();
                 $memberTok = $this->advance();
                 $memberName = $memberTok->lexeme;
+                $this->noteStaticMember($memberTok);
                 // `$v::{$m}(...)` is `$v::$m(...)` when the braces wrap a plain variable (laravel HigherOrderCollectionProxy).
                 if ($memberTok->kind === TokenKind::OpenBrace) {
                     $nameExpr = $this->parseExpression();
@@ -2926,6 +2933,35 @@ final class Parser
         if ($this->collectNames !== 1 || $this->declNames < $level) { return; }
         $this->setNameRange($tok, $tok->line, $tok->column + \strlen($tok->lexeme));
         $this->noteName($tok->lexeme, $resolved, $kind, false, 'decl');
+    }
+
+    /** A member-name USE (level 2): role prop | method | const | sprop | case; `resolved` is the bare name, `written` the lexeme (`$p` for sprop). */
+    private function noteMemberUse(Token $tok, string $role): void
+    {
+        if ($this->collectNames !== 1 || $this->declNames < 2) { return; }
+        $this->setNameRange($tok, $tok->line, $tok->column + \strlen($tok->lexeme));
+        $this->noteName($tok->lexeme, \ltrim($tok->lexeme, '$'), 'member', false, $role);
+    }
+
+    /** The member token after `::` (call before `(` is consumed). Enum cases are class constants syntactically: they read as `const`. `::class` is no member. */
+    private function noteStaticMember(Token $tok): void
+    {
+        if ($tok->kind === TokenKind::Variable) {
+            if ($tok->lexeme !== '$' && !$this->check(TokenKind::OpenParen)) { $this->noteMemberUse($tok, 'sprop'); }
+            return;
+        }
+        if ($tok->kind !== TokenKind::Identifier && $tok->kind !== TokenKind::Keyword && $tok->kind !== TokenKind::MagicConstant) { return; }
+        if ($this->check(TokenKind::OpenParen)) { $this->noteMemberUse($tok, 'method'); return; }
+        if (\strtolower($tok->lexeme) === 'class') { return; }
+        $this->noteMemberUse($tok, 'const');
+    }
+
+    /** A variable DECLARATION (level 2): role param | catch | global | static; `written` is the lexeme with its `$`, `resolved` without. */
+    private function noteVarDecl(Token $tok, string $role): void
+    {
+        if ($this->collectNames !== 1 || $this->declNames < 2 || $tok->lexeme === '') { return; }
+        $this->setNameRange($tok, $tok->line, $tok->column + \strlen($tok->lexeme));
+        $this->noteName($tok->lexeme, \ltrim($tok->lexeme, '$'), 'variable', false, $role);
     }
 
     private function useRole(string $kind): string
@@ -3402,6 +3438,7 @@ final class Parser
                     if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword && $nameTok->kind !== TokenKind::MagicConstant) {
                         throw $this->error('expected member name after ->');
                     }
+                    $this->noteMemberUse($nameTok, 'prop');
                     $classExpr = Expr::propertyAccess($classExpr, $nameTok->lexeme, $nullsafe, $this->end($mspan, $classExpr));
                     continue;
                 }
@@ -3431,7 +3468,7 @@ final class Parser
         if ($dc->kind === TokenKind::DoubleColon && $pv !== null && $pv->kind === TokenKind::Variable && $pv->lexeme !== '$') {
             if ($this->collectNames === 1) { $this->noteClass($literal, $this->resolveClassName($literal)); }
             $this->advance();
-            $this->advance();
+            $this->noteMemberUse($this->advance(), 'sprop');
             $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
             // `new static::$map[$k](args)`: subscripts still name the class; only `(` starts the arguments.
             while ($this->check(TokenKind::OpenBracket)) {
@@ -3610,6 +3647,7 @@ final class Parser
                 return new \Parser\Ast\DynamicStaticMethodCall($name, $nameExpr, $this->parseArgList(), $this->end($span));
             }
             // `Class::method(...)`
+            $this->noteStaticMember($member);
             if ($this->check(TokenKind::OpenParen)) {
                 $args = $this->parseArgList();
                 return Expr::staticCall($name, $member->lexeme, $args, $this->end($span));
@@ -4136,6 +4174,7 @@ final class Parser
             $sub->tolerant = 1;
             $sub->depth = $this->depth;
             $sub->collectNames = $this->collectNames;
+            $sub->declNames = $this->declNames;
             $sub->currentNamespace = $this->currentNamespace;
             $sub->useAliases = $this->useAliases;
             $sub->useFnAliases = $this->useFnAliases;

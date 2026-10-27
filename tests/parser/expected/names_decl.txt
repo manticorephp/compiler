@@ -17,6 +17,7 @@ names:
   @20:10-20:16 member:decl Spades -> Spades
   @21:11-21:15 member:decl Wild -> Wild
   @21:18-21:22 class self -> self
+  @21:24-21:30 member:const Spades -> Spades
   @24:16-24:20 class:decl Base -> App\Core\Base
   @26:11-26:12 member:decl A -> A
   @26:18-26:19 member:decl B -> B
@@ -30,4 +31,5 @@ names:
   @35:32-35:36 class Base -> App\Core\Base
   @35:48-35:51 member:decl run -> run
   @39:10-39:16 function:decl helper -> App\Core\helper
+  @39:21-39:23 variable:param $a -> a
 
