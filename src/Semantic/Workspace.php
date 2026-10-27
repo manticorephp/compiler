@@ -8,6 +8,7 @@ use Analyze\Index;
 use Analyze\ParseDiagnostics;
 use Analyze\ParsedFile;
 use Analyze\Report;
+use Parser\Ast\Expr;
 
 /**
  * Incremental analysis of a set of files: text in, diagnostics and name queries out.
@@ -31,6 +32,12 @@ final class Workspace
 
     /** @var array<string, ParsedFile> uri => recovered AST of every open file, broken ones included */
     private array $asts = [];
+
+    /** @var array<string, LineIndex> uri => line table of every open file */
+    private array $lines = [];
+
+    /** @var array<string, ExprAt> uri => position index of every open file */
+    private array $exprAt = [];
 
     /** @var array<string, Diagnostic[]> uri => parse errors of a file whose text does not parse (kept after close) */
     private array $parseErrors = [];
@@ -57,6 +64,8 @@ final class Workspace
             unset($this->parseErrors[$uri]);
         }
         $this->asts[$uri] = $pf;
+        $this->lines[$uri] = new LineIndex($text);
+        $this->exprAt[$uri] = ExprAt::build($r->program);
         $this->index->replaceFile($pf);
         $this->names->replaceFile($uri, $r->program);
     }
@@ -76,15 +85,28 @@ final class Workspace
     public function close(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri]);
     }
 
     public function remove(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri], $this->parseErrors[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->parseErrors[$uri]);
         $this->index->removeFile($uri);
         $this->names->removeFile($uri);
+    }
+
+    /** The innermost expression at (line 1-based, byte column 1-based) of an open file; null elsewhere. */
+    public function nodeAt(string $uri, int $line, int $col): ?Expr
+    {
+        $ix = $this->exprAt[$uri] ?? null;
+        return $ix === null ? null : $ix->innermost($line, $col);
+    }
+
+    /** Line table of an open file (offset <-> line/column); null when the file is not open. */
+    public function lineIndex(string $uri): ?LineIndex
+    {
+        return $this->lines[$uri] ?? null;
     }
 
     /** Files holding a live AST, one with syntax errors included; a closed file holds none. */
