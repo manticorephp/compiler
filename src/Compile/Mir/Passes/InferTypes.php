@@ -1027,7 +1027,7 @@ final class InferTypes implements Pass
         // their own rebuild buffer is typed. Bounded: a seed only widens to cell.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefElemWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_elem', $this->rescanScope($module));
+            $this->rescanPropagating($module, 'byref_elem');
             $guard = $guard + 1;
         }
         // Call-site element inference: refine a bare-`array` param to vec[T]
@@ -1037,7 +1037,7 @@ final class InferTypes implements Pass
         // element-used-as-key lands under a positional int. Externs (the
         // separately-linked stdlib) can't be specialized this way.
         if ($this->scanCallSiteArrayElems($module)) {
-            $this->inferFunctionsForScope($module, 'callsite_array', $this->rescanScope($module));
+            $this->rescanPropagating($module, 'callsite_array');
         }
         // A doc-declared `T[]` / `array<V>` param handed a STRING-KEYED array by
         // some call site: move it to the tagged key channel instead of refusing
@@ -1249,6 +1249,8 @@ final class InferTypes implements Pass
         // When it changes a property type, re-run inference so the new
         // element type propagates into reads (`foreach $obj->prop as $x`
         // and the subsequent append now see obj elements → rc them).
+        $this->rescanTouched = [];
+        $this->rescanProps = [];
         $changed = $this->scanCtorPropContainers($module);
         // Second assoc-prop scan now that node types are inferred: a
         // string-keyed store whose key is a property read / method call
@@ -1258,7 +1260,7 @@ final class InferTypes implements Pass
         // the assoc path → assoc_cow reads past the 16-byte vec buffer.
         if ($this->scanAssocProps($module)) { $changed = true; }
         if ($changed) {
-            $this->inferFunctionsForScope($module, 'assoc_prop');
+            $this->rescanPropagating($module, 'assoc_prop');
         }
         // Second pass once capture sites are typed: closure bodies re-infer
         // with their capture locals seeded (see inferFunction) — a captured
