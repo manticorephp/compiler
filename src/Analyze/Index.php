@@ -85,28 +85,38 @@ final class Index
         return $idx;
     }
 
-    /** Drop the file's previous contribution, then add the new one. */
+    /** Drop the file's previous contribution, then add the new one. The file keeps its place in each FQN's declarer order. */
     public function replaceFile(ParsedFile $pf): void
     {
-        $this->removeFile($pf->path);
+        $path = $pf->path;
+        /** @var array<string, int> $fnPos */
+        $fnPos = [];
+        /** @var array<string, int> $classPos */
+        $classPos = [];
+        foreach ($this->fileFns[$path] ?? [] as $l => $_) { $fnPos[$l] = \array_search($path, $this->fnDeclarers[$l], true); }
+        foreach ($this->fileClasses[$path] ?? [] as $l => $_) { $classPos[$l] = \array_search($path, $this->classDeclarers[$l], true); }
+        $this->removeFile($path);
         $this->curFns = [];
         $this->curClasses = [];
         $this->curSpans = [];
         $this->collectStmts($pf->program->statements);
-        $path = $pf->path;
         $this->fileFns[$path] = $this->curFns;
         $this->fileClasses[$path] = $this->curClasses;
         $this->fileSpans[$path] = $this->curSpans;
         foreach ($this->curFns as $l => $fi) {
-            $this->fnDeclarers[$l][] = $path;
-            if (\count($this->fnDeclarers[$l]) === 1) {
+            $this->fnDeclarers[$l] ??= [];
+            $at = \min($fnPos[$l] ?? \PHP_INT_MAX, \count($this->fnDeclarers[$l]));
+            \array_splice($this->fnDeclarers[$l], $at, 0, [$path]);
+            if ($at === 0) {
                 $this->functions[$l] = $fi;
                 $this->fnWinner[$l] = $path;
             }
         }
         foreach ($this->curClasses as $l => $ci) {
-            $this->classDeclarers[$l][] = $path;
-            if (\count($this->classDeclarers[$l]) === 1) {
+            $this->classDeclarers[$l] ??= [];
+            $at = \min($classPos[$l] ?? \PHP_INT_MAX, \count($this->classDeclarers[$l]));
+            \array_splice($this->classDeclarers[$l], $at, 0, [$path]);
+            if ($at === 0) {
                 $this->setClass($l, $ci, $path);
             }
         }
