@@ -33,8 +33,10 @@ final class Analyzer
     {
         /** @var ParsedFile[] $all */
         $all = [];
-        foreach ($files as $pf) { $all[] = $pf; }
+        // Index::build keeps the FIRST declarer; the legacy rule is last wins among user files
+        // and library over user, so feed the library first and the user files reversed.
         foreach ($libFiles as $pf) { $all[] = $pf; }
+        for ($i = \count($files) - 1; $i >= 0; $i--) { $all[] = $files[$i]; }
         $index = Index::build($all);
         $index->addExternFunctions($stdlibFns);
 
