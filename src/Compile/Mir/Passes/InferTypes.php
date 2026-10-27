@@ -879,6 +879,7 @@ final class InferTypes implements Pass
         $this->classes = $module->classes;
         $this->interfaceAncestors = $module->interfaceAncestors;
         $this->declarersIdx = [];
+        $this->anyDeclarerBuilt = false;
         $this->enums = $module->enums;
         $this->moduleSourceFile = $module->sourceFile;
         $this->typeDefs = $module->typeDefs;
