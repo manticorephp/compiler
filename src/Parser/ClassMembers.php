@@ -3,6 +3,7 @@
 namespace Parser;
 
 use Parser\Ast\ConstDecl;
+use Parser\Ast\ErrorMember;
 use Parser\Ast\EnumCase;
 use Parser\Ast\MethodDecl;
 use Parser\Ast\PropertyDecl;
@@ -33,4 +34,6 @@ final class ClassMembers
     public array $useDocs = [];
     /** @var TraitAdaptation[] */
     public array $traitAdaptations = [];
+    /** @var ErrorMember[] */
+    public array $errorMembers = [];
 }

@@ -806,6 +806,7 @@ final class Parser
             $acc->traitAdaptations,
             $docComment,
             $acc->useDocs,
+            $acc->errorMembers,
         );
     }
 
@@ -896,6 +897,7 @@ final class Parser
             }
             $iterPos = $this->pos;
             $memberStart = $this->pos;
+            $memberAnchor = $this->span();
             $memberDepth = $this->depth;
             try {
                 $this->parseClassMember($kindKw, $acc);
@@ -903,6 +905,7 @@ final class Parser
                 $this->depth = $memberDepth;
                 $this->record($e);
                 $this->skipToSync($memberStart, true);
+                $acc->errorMembers[] = new \Parser\Ast\ErrorMember($this->endFrom($memberAnchor, $this->tokens[$memberStart]), $this->pos - $memberStart);
             }
         }
     }
@@ -4014,7 +4017,22 @@ final class Parser
             $this->record($this->error('unexpected token: ' . $this->tokens[$this->pos]->kind));
             $this->advance();
         }
-        return new \Parser\Ast\ErrorStmt($this->endFrom($anchor, $this->tokens[$start]), $this->pos - $start);
+        return new \Parser\Ast\ErrorStmt($this->endFrom($anchor, $this->tokens[$start]), $this->pos - $start, $thrown ? $this->declNameAt($start) : null);
+    }
+
+    /** Best-effort name of a declaration whose header failed: `[modifiers] class|interface|trait|enum|function [&] Name` at token $i. */
+    private function declNameAt(int $i): ?string
+    {
+        $n = \count($this->tokens);
+        while ($i < $n && $this->tokens[$i]->kind === TokenKind::Keyword) {
+            $kw = \strtolower($this->tokens[$i]->lexeme);
+            if ($kw === 'final' || $kw === 'abstract' || $kw === 'readonly') { $i = $i + 1; continue; }
+            if ($kw !== 'class' && $kw !== 'interface' && $kw !== 'trait' && $kw !== 'enum' && $kw !== 'function') { return null; }
+            $i = $i + 1;
+            if ($i < $n && $this->tokens[$i]->kind === TokenKind::Identifier) { return $this->tokens[$i]->lexeme; }
+            return null;
+        }
+        return null;
     }
 
     /**
