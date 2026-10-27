@@ -222,7 +222,7 @@ final class ExprTyper
     }
 
     /** Class FQN a written class reference means here, or null. */
-    private function classRef(string $written, TypeEnv $env): ?string
+    public function classRef(string $written, TypeEnv $env): ?string
     {
         $low = \strtolower($written);
         if ($low === 'self' || $low === 'static') { return $env->thisClass; }
@@ -241,7 +241,7 @@ final class ExprTyper
      *
      * @return string[]|null
      */
-    private function classesOf(?SourceType $t, TypeEnv $env): ?array
+    public function classesOf(?SourceType $t, TypeEnv $env): ?array
     {
         if ($t === null) { return null; }
         switch ($t->kind) {

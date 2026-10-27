@@ -136,6 +136,12 @@ final class Flow
         }
         if ($chosen === null) { $chosen = $main; }
         if ($chosen === null) { return new TypeEnv(); }
+        return self::envAtUnit($chosen, $idx, $file, $target);
+    }
+
+    /** As {@see envAt} when the unit holding $target is already known (UnitLookup): walks that unit only. */
+    public static function envAtUnit(Unit $chosen, Index $idx, string $file, Expr $target): TypeEnv
+    {
         $env = TypeEnv::forUnit($chosen, $idx);
         $f = new Flow($idx, $file, $target);
         $f->runUnit($chosen, $env);
