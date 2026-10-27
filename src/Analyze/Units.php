@@ -30,7 +30,7 @@ final class Units
 
         foreach ($decls->functions as $fn) {
             if ($fn->body === null) { continue; }
-            $this->units[] = new Unit($fn->name . '()', $fn->params, '', $fn->body->statements, null, $fn->returnType, self::paramDocs($fn->docComment, $fn->params, $fn->name, [], $uses));
+            $this->units[] = new Unit($fn->name . '()', $fn->params, '', $fn->body->statements, null, $fn->returnType, self::paramDocs($fn->docComment, $fn->params, $fn->name, [], $uses), '', $fn->span);
         }
         $i = 0;
         foreach ($decls->methods as $m) {
@@ -39,7 +39,7 @@ final class Units
             if ($m->body === null) { continue; }
             // A non-static method binds `$this` to its class; a static one does not.
             $thisClass = $m->isStatic ? '' : $cls;
-            $this->units[] = new Unit($cls . '::' . $m->name . '()', $m->params, $thisClass, $m->body->statements, null, $m->returnType, self::paramDocs($m->docComment, $m->params, $cls, $decls->classTemplates[$cls] ?? [], $uses), $cls);
+            $this->units[] = new Unit($cls . '::' . $m->name . '()', $m->params, $thisClass, $m->body->statements, null, $m->returnType, self::paramDocs($m->docComment, $m->params, $cls, $decls->classTemplates[$cls] ?? [], $uses), $cls, $m->span);
         }
 
         // Closures / arrow fns anywhere in the file — each its own scope. `$this`
@@ -49,9 +49,9 @@ final class Units
         $walk->stmts($stmts);
         foreach ($walk->exprs as $e) {
             if ($e instanceof Closure) {
-                $this->units[] = new Unit('{closure}', $e->params, '', $e->body->statements, null, $e->returnType);
+                $this->units[] = new Unit('{closure}', $e->params, '', $e->body->statements, null, $e->returnType, [], '', $e->span, $e);
             } elseif ($e instanceof ArrowFn) {
-                $this->units[] = new Unit('{closure}', $e->params, '', [], $e->body, $e->returnType);
+                $this->units[] = new Unit('{closure}', $e->params, '', [], $e->body, $e->returnType, [], '', $e->span, $e);
             }
         }
     }
