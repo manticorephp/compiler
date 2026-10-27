@@ -461,7 +461,7 @@ final class Index
     {
         if ($d->name === '') { return; }
         $l = \strtolower($d->name);
-        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType);
+        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $d->docComment);
         $this->curFnSpans[$l] = $d->span;
     }
 
@@ -515,7 +515,7 @@ final class Index
         /** @var array<string, MemberInfo> $out */
         $out = [];
         foreach ($d->methods as $m) {
-            $out['method:' . \strtolower($m->name)] ??= $this->member('method', $m->name, $m->name, $fqn, $m->visibility, $m->isStatic, $m->isAbstract || $isIface, $m->returnType, $file, $m->span, $end);
+            $out['method:' . \strtolower($m->name)] ??= $this->member('method', $m->name, $m->name, $fqn, $m->visibility, $m->isStatic, $m->isAbstract || $isIface, $m->returnType, $file, $m->span, $end, $m->docComment);
             if (\strtolower($m->name) !== '__construct') { continue; }
             foreach ($m->params as $mp) {
                 if ($mp->promoted === '') { continue; }
@@ -524,10 +524,10 @@ final class Index
         }
         foreach ($d->properties as $p) {
             if ($p->name === '' || $p->name === '$') { continue; }
-            $out['prop:' . $p->name] ??= $this->member('prop', $p->name, '$' . $p->name, $fqn, $p->visibility, $p->isStatic, false, $p->typeHint, $file, $p->span, $end);
+            $out['prop:' . $p->name] ??= $this->member('prop', $p->name, '$' . $p->name, $fqn, $p->visibility, $p->isStatic, false, $p->typeHint, $file, $p->span, $end, $p->docComment);
         }
         foreach ($d->consts as $c) {
-            $out['const:' . $c->name] ??= $this->member('const', $c->name, $c->name, $fqn, $c->visibility, true, false, $c->typeHint, $file, $c->span, $end);
+            $out['const:' . $c->name] ??= $this->member('const', $c->name, $c->name, $fqn, $c->visibility, true, false, $c->typeHint, $file, $c->span, $end, null, $c->value);
         }
         foreach ($d->cases as $case) {
             $sp = $case->span ?? $d->span;
@@ -547,7 +547,7 @@ final class Index
     }
 
     /** Name-precise position from the file's declaration names when present, else the start of the declaration. */
-    private function member(string $kind, string $name, string $written, string $declClass, string $visibility, bool $isStatic, bool $isAbstract, ?string $typeHint, string $file, \Parser\Ast\Span $sp, int $classEnd): MemberInfo
+    private function member(string $kind, string $name, string $written, string $declClass, string $visibility, bool $isStatic, bool $isAbstract, ?string $typeHint, string $file, \Parser\Ast\Span $sp, int $classEnd, ?string $doc = null, ?\Parser\Ast\Expr $value = null): MemberInfo
     {
         $line = $sp->startLine();
         $col = $sp->startColumn();
@@ -564,7 +564,7 @@ final class Index
             $line = $list[$lo]->span->startLine();
             $col = $list[$lo]->span->startColumn();
         }
-        return new MemberInfo($kind, $name, $declClass, $visibility, $isStatic, $isAbstract, $typeHint, $file, $line, $col);
+        return new MemberInfo($kind, $name, $declClass, $visibility, $isStatic, $isAbstract, $typeHint, $file, $line, $col, false, $doc, $value);
     }
 
     /**

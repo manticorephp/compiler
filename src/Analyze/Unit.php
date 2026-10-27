@@ -26,5 +26,7 @@ final class Unit
         public array $stmts,
         public ?Expr $exprBody,
         public ?string $returnType,
+        public ?string $docComment = null,
+        public string $ownerClass = '',
     ) {}
 }
