@@ -141,6 +141,12 @@ final class ExprTyper
     private function property(PropertyAccess $e, TypeEnv $env, int $d): ?SourceType
     {
         $recv = $this->go($e->object, $env, $d);
+        $key = TypeEnv::pathKey($e);
+        if ($key !== null && isset($env->vars[$key])) {
+            // a narrowed or assigned property path (see Flow)
+            $known = $env->vars[$key];
+            return ($e->nullsafe || self::chainHasNullsafe($e->object)) && $recv !== null && self::hasNull($recv) ? self::union([$known, self::scalar('null')]) : $known;
+        }
         $classes = $this->classesOf($recv, $env);
         if ($classes === null) { return null; }
         $t = $this->overClasses($classes, $e->property, 'prop');
@@ -458,7 +464,7 @@ final class ExprTyper
 
     // ── type algebra ──────────────────────────────────────────────────
 
-    private static function scalar(string $name): SourceType
+    public static function scalar(string $name): SourceType
     {
         return new SourceType(SourceType::SCALAR, $name);
     }
@@ -479,7 +485,7 @@ final class ExprTyper
         return self::isScalar($t, 'array') || ($t->kind === SourceType::GENERIC && ($t->name === 'array' || $t->name === 'list'));
     }
 
-    private static function hasNull(SourceType $t): bool
+    public static function hasNull(SourceType $t): bool
     {
         if ($t->kind === SourceType::NULLABLE || $t->kind === SourceType::MIXED) { return true; }
         if (self::isScalar($t, 'null')) { return true; }
@@ -490,7 +496,7 @@ final class ExprTyper
     }
 
     /** $t minus its null part; a bare `null` stays as is (nothing left to keep). */
-    private static function withoutNull(SourceType $t): SourceType
+    public static function withoutNull(SourceType $t): SourceType
     {
         if ($t->kind === SourceType::NULLABLE) { return $t->args[0]; }
         if ($t->kind !== SourceType::UNION) { return $t; }
@@ -504,7 +510,7 @@ final class ExprTyper
      *
      * @param SourceType[] $parts
      */
-    private static function union(array $parts): SourceType
+    public static function union(array $parts): SourceType
     {
         /** @var SourceType[] $flat */
         $flat = [];

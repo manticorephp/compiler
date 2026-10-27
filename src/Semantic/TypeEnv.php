@@ -19,7 +19,44 @@ final class TypeEnv
         public ?string $thisClass = null,
         public bool $isStatic = false,
         public ?string $parentClass = null,
+        /** unreachable point (after return / throw / break): joins ignore it */
+        public bool $dead = false,
     ) {}
+
+    public function copy(): TypeEnv
+    {
+        return new TypeEnv($this->vars, $this->thisClass, $this->isStatic, $this->parentClass, $this->dead);
+    }
+
+    /**
+     * Key under which a variable or a property path (`$a->b->c` => `a->b->c`) is tracked; null for anything
+     * else. A nullsafe hop keys like a plain one.
+     */
+    public static function pathKey(\Parser\Ast\Expr $e): ?string
+    {
+        if ($e instanceof \Parser\Ast\Variable) { return $e->name; }
+        if ($e instanceof \Parser\Ast\PropertyAccess) {
+            $base = self::pathKey($e->object);
+            return $base === null ? null : $base . '->' . $e->property;
+        }
+        return null;
+    }
+
+    /** Drop `$key` and every path below it. */
+    public function forget(string $key): void
+    {
+        unset($this->vars[$key]);
+        $this->forgetBelow($key);
+    }
+
+    /** Drop every path below `$key` (`$key->…`), keep `$key` itself. */
+    public function forgetBelow(string $key): void
+    {
+        $prefix = $key . '->';
+        foreach (\array_keys($this->vars) as $k) {
+            if (\str_starts_with((string)$k, $prefix)) { unset($this->vars[$k]); }
+        }
+    }
 
     public static function forUnit(Unit $u, Index $idx): TypeEnv
     {
