@@ -66,7 +66,10 @@ final class SourceType
                 $parts = [];
                 foreach ($this->args as $a) { $parts[] = $a->toString(); }
                 $out = $this->name . '(' . \implode(',', $parts) . ')';
-                return $this->ret === null ? $out : $out . ':' . $this->ret->toString();
+                if ($this->ret === null) { return $out; }
+                $r = $this->ret->toString();
+                $wrap = $this->ret->kind === self::UNION || $this->ret->kind === self::INTERSECTION;
+                return $out . ':' . ($wrap ? '(' . $r . ')' : $r);
             default:
                 return $this->name;
         }

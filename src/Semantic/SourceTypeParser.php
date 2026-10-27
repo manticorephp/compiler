@@ -190,8 +190,12 @@ final class SourceTypeParser
         self::ws($c);
         if (self::peek($c) === ':') {
             $c->pos = $c->pos + 1;
+            self::ws($c);
+            $nullable = self::peek($c) === '?';
+            if ($nullable) { $c->pos = $c->pos + 1; }
             $ret = self::parseAtom($c, $cls, $d);
             if ($ret === null) { return null; }
+            if ($nullable && $ret->kind !== SourceType::NULLABLE) { $ret = new SourceType(SourceType::NULLABLE, '', [$ret]); }
         }
         return new SourceType(SourceType::CALLABLE, $name, $params, '', $ret);
     }

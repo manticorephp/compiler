@@ -30,6 +30,9 @@ check('hints_roundtrip', function () {
         ['list<A>', 'list<A>'], ['A[]', 'array<A>'], ['int[][]', 'array<array<int>>'],
         ['callable(int):string', 'callable(int):string'], ['callable(int, string $x): void', 'callable(int,string):void'],
         ['Closure(): int', 'Closure():int'], ['callable', 'callable'],
+        ['callable(): (A|B)', 'callable():(A|B)'], ['callable(): (A&B)', 'callable():(A&B)'],
+        ['callable(): ?A', 'callable():?A'], ['Closure(int): ?int', 'Closure(int):?int'],
+        ['(callable(): (A|B))|C', 'callable():(A|B)|C'],
         ['\Foo\Bar', '\Foo\Bar'], ["'a'|'b'", "'a'|'b'"], ['-1|2', '-1|2'],
         ['iterable<int>', 'iterable<int>'], ['iterable', 'iterable'], ['mixed', 'mixed'],
         ['void', 'void'], ['never', 'never'], ['INTEGER', 'int'], ['Boolean', 'bool'],
@@ -42,6 +45,19 @@ check('hints_roundtrip', function () {
     return true;
 });
 
+check('printed_hints_reparse_to_the_same_string', function () {
+    $rows = ['callable(): (A|B)', 'callable(): (A&B)', 'callable(): ?A', '(A&B)|C', 'array<int, string|null>',
+        'Closure(callable(int): (A|B)): ?C', 'list<callable(): (A|B)>', 'int|string|null', '?Foo'];
+    foreach ($rows as $in) {
+        $t = SourceTypeParser::fromHint($in, 'N\C');
+        if ($t === null) { return "$in: no parse"; }
+        $p = $t->toString();
+        $again = ts(SourceTypeParser::fromHint($p, 'N\C'));
+        if ($again !== $p) { return "$in: printed $p reparsed $again"; }
+    }
+    $c = SourceTypeParser::fromHint('callable(): (A|B)');
+    return ($c->kind === SourceType::CALLABLE && $c->ret->kind === SourceType::UNION) ?: 'shape';
+});
 check('kinds_and_resolved', function () {
     $s = SourceTypeParser::fromHint('self', 'N\C');
     if ($s->kind !== SourceType::SELF || $s->resolved !== 'N\C') { return 'self'; }
