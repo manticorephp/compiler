@@ -1326,6 +1326,7 @@ final class Parser
         $varTok = $this->expect(TokenKind::Variable, 'expected $variable in parameter list');
         $name = substr($varTok->lexeme, 1);
         $this->noteVarDecl($varTok, 'param');
+        if ($promoted !== '' || $promotedReadonly) { $this->noteDecl($varTok, $name, 'member', 2); }
 
         $default = null;
         if ($this->match(TokenKind::Equals)) {
@@ -2902,6 +2903,7 @@ final class Parser
     /** The member token after `::` (call before `(` is consumed). Enum cases are class constants syntactically: they read as `const`. `::class` is no member. */
     private function noteStaticMember(Token $tok): void
     {
+        if ($this->collectNames !== 1 || $this->declNames < 2) { return; }
         if ($tok->kind === TokenKind::Variable) {
             if ($tok->lexeme !== '$' && !$this->check(TokenKind::OpenParen)) { $this->noteMemberUse($tok, 'sprop'); }
             return;
@@ -3947,6 +3949,14 @@ final class Parser
                     if ($exact) {
                         $this->interpAt($lex, $i + 1);
                         $aSpan = $this->interpRange($span, $sl, $sc);
+                        if ($this->collectNames === 1 && $this->declNames >= 2) {
+                            $pn = \substr($body, $ps, $i - $ps);
+                            $this->nmLine = $this->ipLine;
+                            $this->nmColumn = $this->ipCol - \strlen($pn);
+                            $this->nmEndLine = $this->ipLine;
+                            $this->nmEndColumn = $this->ipCol;
+                            $this->noteName($pn, $pn, 'member', false, 'prop');
+                        }
                     }
                     $expr = Expr::propertyAccess($expr, \substr($body, $ps, $i - $ps), false, $aSpan);
                 } elseif ($i < $n && \substr($body, $i, 1) === '[') {

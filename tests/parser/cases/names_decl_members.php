@@ -6,7 +6,7 @@ enum Suit { case Hearts; }
 class Box
 {
     public static int $n = 0;
-    public function __construct(private int $q, public ?string $label = null) {}
+    public function __construct(private int $q, public ?string $label = null, readonly int $z = 0) {}
     public function run(Box $o, ...$rest): void
     {
         global $g;
@@ -23,6 +23,7 @@ class Box
             echo "{$o->label}";
         } catch (\Exception $e) {
         }
+        echo "v $o->label z";
         $f = fn(int $x) => $x;
     }
 }
