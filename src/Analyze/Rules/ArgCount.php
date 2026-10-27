@@ -114,16 +114,16 @@ final class ArgCount
         $max = \count($params);
 
         if ($given < $min) {
-            $this->diags[] = Diagnostic::error(
-                $pf->path, $site->span->line, $site->span->column, 'arg.count',
+            $this->diags[] = Diagnostic::at(
+                $pf->path, $site->span, Diagnostic::SEV_ERROR, 'arg.count',
                 'too few arguments to ' . $label . ': ' . (string)$given
                     . ' passed, at least ' . (string)$min . ' expected'
             );
             return;
         }
         if (!$variadic && $given > $max) {
-            $this->diags[] = Diagnostic::warning(
-                $pf->path, $site->span->line, $site->span->column, 'arg.count',
+            $this->diags[] = Diagnostic::at(
+                $pf->path, $site->span, Diagnostic::SEV_WARNING, 'arg.count',
                 'too many arguments to ' . $label . ': ' . (string)$given
                     . ' passed, at most ' . (string)$max . ' expected'
             );

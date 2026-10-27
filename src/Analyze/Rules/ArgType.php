@@ -114,8 +114,8 @@ final class ArgType
             $target = Ty::fromHint($p->typeHint);
             $src = $infer->of($arg);
             if (Ty::assignable($target, $src, $idx) || Ty::coercedScalars($target, $src, $pf->path)) { continue; }
-            $this->diags[] = Diagnostic::error(
-                $pf->path, $arg->span->line, $arg->span->column, 'arg.type',
+            $this->diags[] = Diagnostic::at(
+                $pf->path, $arg->span, Diagnostic::SEV_ERROR, 'arg.type',
                 'argument ' . (string)$ai . ' of ' . $label . ': ' . $src->display()
                     . ' given, ' . $target->display() . ' expected'
             );

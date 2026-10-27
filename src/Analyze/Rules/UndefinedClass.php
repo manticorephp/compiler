@@ -53,13 +53,13 @@ final class UndefinedClass
         $walk->stmts($pf->program->statements);
         foreach ($walk->exprs as $e) {
             if ($e instanceof NewExpr) {
-                $this->check($e->class, $e->span->line, $e->span->column);
+                $this->check($e->class, $e->span);
             } elseif ($e instanceof InstanceofExpr) {
-                $this->check($e->class, $e->span->line, $e->span->column);
+                $this->check($e->class, $e->span);
             } elseif ($e instanceof StaticCall) {
-                $this->check($e->class, $e->span->line, $e->span->column);
+                $this->check($e->class, $e->span);
             } elseif ($e instanceof StaticAccess) {
-                $this->check($e->class, $e->span->line, $e->span->column);
+                $this->check($e->class, $e->span);
             }
         }
 
@@ -74,18 +74,17 @@ final class UndefinedClass
     {
         foreach ($stmts as $s) {
             if ($s instanceof ClassStmt) {
-                $line = $s->decl->span->line;
-                $col = $s->decl->span->column;
-                foreach ($s->decl->extends as $c) { $this->check($c, $line, $col); }
-                foreach ($s->decl->implements as $c) { $this->check($c, $line, $col); }
-                foreach ($s->decl->uses as $c) { $this->check($c, $line, $col); }
+                $span = $s->decl->span;
+                foreach ($s->decl->extends as $c) { $this->check($c, $span); }
+                foreach ($s->decl->implements as $c) { $this->check($c, $span); }
+                foreach ($s->decl->uses as $c) { $this->check($c, $span); }
                 // Method bodies are covered by the expression walk above.
                 continue;
             }
             if ($s instanceof TryCatchStmt) {
                 $this->scanStmts($s->try->statements);
                 foreach ($s->catches as $cat) {
-                    foreach ($cat->types as $t) { $this->check($t, $s->span->line, $s->span->column); }
+                    foreach ($cat->types as $t) { $this->check($t, $s->span); }
                     $this->scanStmts($cat->body->statements);
                 }
                 if ($s->finally !== null) { $this->scanStmts($s->finally->statements); }
@@ -109,15 +108,15 @@ final class UndefinedClass
         }
     }
 
-    private function check(string $name, int $line, int $col): void
+    private function check(string $name, \Parser\Ast\Span $span): void
     {
         if ($name === '') { return; }
         $low = \strtolower(\ltrim($name, '\\'));
         if ($low === 'self' || $low === 'static' || $low === 'parent') { return; }
         if ($this->idx->findClass($name) !== null) { return; }
         if (Builtins::isKnownClass($low)) { return; }
-        $this->diags[] = Diagnostic::error(
-            $this->pf->path, $line, $col, 'undefined.class',
+        $this->diags[] = Diagnostic::at(
+            $this->pf->path, $span, Diagnostic::SEV_ERROR, 'undefined.class',
             'unknown class ' . \ltrim($name, '\\')
         );
     }

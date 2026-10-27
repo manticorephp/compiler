@@ -68,8 +68,8 @@ final class StringArithmetic
                 if (!$lStr && !$rStr) { continue; }
                 $bad = $this->refusedLiteral($e->left) ?? $this->refusedLiteral($e->right);
                 if ($bad !== null) {
-                    $this->diags[] = Diagnostic::error(
-                        $pf->path, $e->span->line, $e->span->column, 'arith.string',
+                    $this->diags[] = Diagnostic::at(
+                        $pf->path, $e->span, Diagnostic::SEV_ERROR, 'arith.string',
                         'arithmetic (`' . $op . '`) on the non-numeric string "' . $bad
                         . '" — php raises a TypeError; cast explicitly ((int)/(float))'
                     );
@@ -77,8 +77,8 @@ final class StringArithmetic
                 }
                 $lead = $this->leadingNumericLiteral($e->left) ?? $this->leadingNumericLiteral($e->right);
                 if ($lead !== null) {
-                    $this->diags[] = Diagnostic::warning(
-                        $pf->path, $e->span->line, $e->span->column, 'arith.string',
+                    $this->diags[] = Diagnostic::at(
+                        $pf->path, $e->span, Diagnostic::SEV_WARNING, 'arith.string',
                         'arithmetic (`' . $op . '`) on the leading-numeric string "' . $lead
                         . '" — php warns and computes on the numeric prefix; cast explicitly ((int)/(float))'
                     );
@@ -87,8 +87,8 @@ final class StringArithmetic
                 // A fully numeric LITERAL is ordinary php on both sides; only an
                 // operand whose value the run time decides is worth a word.
                 if ($this->numericLiteral($e->left) || $this->numericLiteral($e->right)) { continue; }
-                $this->diags[] = Diagnostic::warning(
-                    $pf->path, $e->span->line, $e->span->column, 'arith.string',
+                $this->diags[] = Diagnostic::at(
+                    $pf->path, $e->span, Diagnostic::SEV_WARNING, 'arith.string',
                     'arithmetic (`' . $op . '`) on a string operand — php raises a TypeError'
                     . ' unless the value is numeric; cast explicitly ((int)/(float))'
                 );
