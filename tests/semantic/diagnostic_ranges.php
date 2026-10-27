@@ -23,9 +23,9 @@ function check(string $name, callable $fn): void
 }
 
 /** Diagnostics of $src, parsed with the given parser flags. @return Diagnostic[] */
-function diagsOf(string $src, bool $ranges = true, bool $names = true): array
+function diagsOf(string $src, bool $ranges = true, bool $names = true, int $declNames = 1): array
 {
-    $pf = new ParsedFile('t.php', \Parser\Parser::parseTolerant($src, 't.php', $ranges, $names)->program);
+    $pf = new ParsedFile('t.php', \Parser\Parser::parseTolerant($src, 't.php', $ranges, $names, $declNames)->program);
     $index = Index::build([$pf]);
     $index->addExternFunctions([]);
     return (new Analyzer())->runFile($pf, $index, true);
@@ -125,6 +125,74 @@ check('byte_columns_with_bom_crlf_multibyte', function () {
     $got = [$d->startLine, $d->startCol, $d->endLine, $d->endCol];
     $want = [4, $wantCol, 4, $wantCol + strlen('f(1, 2)')];
     return $got === $want ?: json_encode($got) . ' != ' . json_encode($want);
+});
+
+/** Slice of the first diagnostic with $code. */
+function sliceOf(string $src, string $code, bool $ranges = true, bool $names = true): ?string
+{
+    foreach (diagsOf($src, $ranges, $names) as $d) {
+        if ($d->code === $code) { return slice($src, $d); }
+    }
+    return null;
+}
+
+/** @return string[] slices of every diagnostic with $code */
+function allSlices(string $src, string $code): array
+{
+    $out = [];
+    foreach (diagsOf($src) as $d) {
+        if ($d->code === $code) { $out[] = slice($src, $d); }
+    }
+    return $out;
+}
+
+check('undefined_extends_range_is_the_name', function () {
+    $s = "<?php\nclass A extends Nope { public function m() {} }\n";
+    $g = allSlices($s, 'undefined.class');
+    return $g === ['Nope'] ?: json_encode($g);
+});
+
+check('undefined_implements_range_is_the_name', function () {
+    $s = "<?php\ninterface I {}\nclass A implements I, Gone, \\Also\\Gone { }\n";
+    $g = allSlices($s, 'undefined.class');
+    return $g === ['Gone', '\\Also\\Gone'] ?: json_encode($g);
+});
+
+check('undefined_trait_use_range_is_the_name', function () {
+    $s = "<?php\nclass A {\n    public function m() { return 1; }\n    use NoTrait;\n}\n";
+    $g = allSlices($s, 'undefined.class');
+    return $g === ['NoTrait'] ?: json_encode($g);
+});
+
+check('undefined_catch_range_is_the_class_name', function () {
+    $s = "<?php\ntry { f(); } catch (Ok | Missing \$e) { }\nfunction f() {}\nclass Ok {}\n";
+    $g = allSlices($s, 'undefined.class');
+    return $g === ['Missing'] ?: json_encode($g);
+});
+
+check('missing_array_return_range_is_narrow', function () {
+    $s = "<?php\nfunction build(): array\n{\n    return [1];\n}\nclass K { public function items(): array { return []; } }\n";
+    $g = allSlices($s, 'array.no-value-type');
+    return $g === ["build", "public function items(): array { return []; }"] ?: json_encode($g);
+});
+
+check('cli_mode_keeps_old_ranges_and_anchors', function () {
+    $s = "<?php\nclass A extends Nope { }\nfunction build(): array { return []; }\ntry { } catch (Missing \$e) { }\n";
+    foreach (diagsOf($s, false, false) as $d) {
+        if ($d->endLine !== 0 || $d->endCol !== 0) { return "$d->code has an end"; }
+    }
+    $a = array_map(fn($d) => [$d->code, $d->line, $d->col], diagsOf($s, false, false));
+    $w = [['array.no-value-type', 3, 1], ['undefined.class', 2, 1], ['undefined.class', 4, 1]];
+    return $a === $w ?: json_encode($a);
+});
+
+check('anchors_unchanged_in_workspace_mode', function () {
+    $s = "<?php\ninterface I {}\nclass A extends Nope implements I, Gone { use T; }\nfunction build(): array { return []; }\ntry { } catch (Missing \$e) { }\n";
+    $key = fn($ds) => json_encode(array_map(fn($d) => [$d->code, $d->line, $d->col, $d->message], $ds));
+    $on = diagsOf($s, true, true);
+    $off = diagsOf($s, true, false, 0);
+    if (count($on) < 5) { return 'too few diagnostics: ' . count($on); }
+    return $key($on) === $key($off) ?: $key($on) . ' != ' . $key($off);
 });
 
 exit($fail);
