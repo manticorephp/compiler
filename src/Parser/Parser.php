@@ -3020,7 +3020,7 @@ final class Parser
         if ($tok->kind === TokenKind::StringLiteral) {
             $this->advance();
             if ($this->needsInterp($tok->lexeme)) {
-                return $this->parseInterpolated($tok->lexeme, $this->end($span));
+                return $this->parseInterpolated($tok->lexeme, $this->end($span), $tok);
             }
             return Expr::string($this->unquoteString($tok->lexeme), $this->end($span));
         }
@@ -3699,6 +3699,11 @@ final class Parser
     /** chars consumed AFTER the backslash by the last {@see decodeEscapeSeq}. */
     private int $escapeLen = 0;
 
+    /** Interpolation cursor: byte offset into the raw string lexeme and the file line/column there (tolerant + ranges). */
+    private int $ipOff = 0;
+    private int $ipLine = 0;
+    private int $ipCol = 0;
+
     /** One code point as UTF-8 bytes, for the `\u{…}` escape. */
     private function utf8Encode(int $cp): string
     {
@@ -3798,24 +3803,53 @@ final class Parser
      * Parse a double-quoted string with interpolation into a concat chain.
      * Supports PHP's simple syntax (`$v`, `$v->prop`, `$v[idx]` where idx is a
      * bareword/int/`$var`) and the complex `{$expr}` form (any expression).
+     *
+     * Tolerant + ranges: every part gets its own range, computed by walking the
+     * RAW lexeme from the string token's start (columns are bytes, a newline
+     * resets the column, exactly like the lexer), and the `{$expr}` body is
+     * lexed at its real position so its nodes and written names are real too.
+     * A heredoc lexeme is normalised (opener and indentation gone), so its walk
+     * does not end where the token does: those strings keep the whole-string
+     * range on every part. `${x}` stays literal text, as in the strict parser.
      */
-    private function parseInterpolated(string $lex, Span $span): Expr
+    private function parseInterpolated(string $lex, Span $span, ?Token $tok = null): Expr
     {
+        $exact = false;
+        if ($tok !== null && $this->tolerant === 1 && $this->ranges === 1) {
+            $this->ipOff = 0;
+            $this->ipLine = $tok->line;
+            $this->ipCol = $tok->column;
+            $this->interpAt($lex, \strlen($lex));
+            $exact = $this->ipLine === $tok->endLine() && $this->ipCol === $tok->endColumn();
+            $this->ipOff = 0;
+            $this->ipLine = $tok->line;
+            $this->ipCol = $tok->column;
+        }
         $body = \substr($lex, 1, \strlen($lex) - 2);
         $n = \strlen($body);
         $parts = [];
+        /** @var Expr[] $inners */
+        $inners = [];
+        /** @var int[] $endLines */
+        $endLines = [];
+        /** @var int[] $endCols */
+        $endCols = [];
+        /** @var string[] literal text of a literal part, '' for any other */
+        $litVals = [];
         $lit = '';
+        $litStart = 0;
         $i = 0;
         while ($i < $n) {
             $c = \substr($body, $i, 1);
             if ($c === '\\' && $i + 1 < $n) {
+                if ($lit === '') { $litStart = $i; }
                 $lit .= $this->decodeEscapeSeq($body, $n, $i + 1);
                 $i = $i + 1 + $this->escapeLen;
                 continue;
             }
             // Complex: {$expr}
             if ($c === '{' && $i + 1 < $n && \substr($body, $i + 1, 1) === '$') {
-                if ($lit !== '') { $parts[] = Expr::string($lit, $span); $lit = ''; }
+                if ($lit !== '') { $parts[] = $this->interpLit($lex, $lit, $litStart, $i, $span, $exact); $inners[] = $parts[\count($parts) - 1]; $litVals[] = $lit; $endLines[] = $this->ipLine; $endCols[] = $this->ipCol; $lit = ''; }
                 $depth = 1;
                 $j = $i + 1;
                 while ($j < $n) {
@@ -3825,46 +3859,138 @@ final class Parser
                     $j = $j + 1;
                 }
                 $inner = \substr($body, $i + 1, $j - $i - 1);
-                $parts[] = $this->parseSubExpr($inner, $span);
+                if ($exact) {
+                    $this->interpAt($lex, $i + 1);
+                    $sl = $this->ipLine;
+                    $sc = $this->ipCol;
+                    $this->interpAt($lex, $i + 2);
+                    $part = $this->parseSubExpr($inner, $span, $this->ipLine, $this->ipCol);
+                    if ($j >= $n) {
+                        $this->interpAt($lex, $j + 1);
+                        $this->record(new ParseError('Unterminated "{$" interpolation', $sl, $sc, $this->ipLine, $this->ipCol));
+                    } else {
+                        $this->interpAt($lex, $j + 2);
+                    }
+                } else {
+                    $part = $this->parseSubExpr($inner, $span);
+                }
+                $parts[] = Expr::cast('string', $part, $exact ? $part->span : $span);
+                $inners[] = $part;
+                $litVals[] = '';
+                $endLines[] = $this->ipLine;
+                $endCols[] = $this->ipCol;
                 $i = $j + 1;
                 continue;
             }
             // Simple: $name [-> prop | [idx]]
             if ($c === '$' && $i + 1 < $n && $this->isIdentStart(\substr($body, $i + 1, 1))) {
-                if ($lit !== '') { $parts[] = Expr::string($lit, $span); $lit = ''; }
+                if ($lit !== '') { $parts[] = $this->interpLit($lex, $lit, $litStart, $i, $span, $exact); $inners[] = $parts[\count($parts) - 1]; $litVals[] = $lit; $endLines[] = $this->ipLine; $endCols[] = $this->ipCol; $lit = ''; }
+                $a = $i;
                 $i = $i + 1;
                 $ns = $i;
                 while ($i < $n && $this->isIdentChar(\substr($body, $i, 1))) { $i = $i + 1; }
-                $expr = Expr::variable(\substr($body, $ns, $i - $ns), $span);
+                $vSpan = $span;
+                $sl = 0;
+                $sc = 0;
+                if ($exact) {
+                    $this->interpAt($lex, $a + 1);
+                    $sl = $this->ipLine;
+                    $sc = $this->ipCol;
+                    $this->interpAt($lex, $i + 1);
+                    $vSpan = $this->interpRange($span, $sl, $sc);
+                }
+                $expr = Expr::variable(\substr($body, $ns, $i - $ns), $vSpan);
                 if ($i + 2 < $n && \substr($body, $i, 1) === '-' && \substr($body, $i + 1, 1) === '>'
                     && $this->isIdentStart(\substr($body, $i + 2, 1))) {
                     $i = $i + 2;
                     $ps = $i;
                     while ($i < $n && $this->isIdentChar(\substr($body, $i, 1))) { $i = $i + 1; }
-                    $expr = Expr::propertyAccess($expr, \substr($body, $ps, $i - $ps), false, $span);
+                    $aSpan = $span;
+                    if ($exact) {
+                        $this->interpAt($lex, $i + 1);
+                        $aSpan = $this->interpRange($span, $sl, $sc);
+                    }
+                    $expr = Expr::propertyAccess($expr, \substr($body, $ps, $i - $ps), false, $aSpan);
                 } elseif ($i < $n && \substr($body, $i, 1) === '[') {
                     $i = $i + 1;
                     $ks = $i;
                     while ($i < $n && \substr($body, $i, 1) !== ']') { $i = $i + 1; }
                     $key = \substr($body, $ks, $i - $ks);
+                    $kSpan = $span;
+                    if ($exact) {
+                        $this->interpAt($lex, $ks + 1);
+                        $kl = $this->ipLine;
+                        $kc = $this->ipCol;
+                        $this->interpAt($lex, $i + 1);
+                        $kSpan = $this->interpRange($span, $kl, $kc);
+                    }
                     if ($i < $n) { $i = $i + 1; }
-                    $expr = Expr::arrayAccess($expr, $this->interpArrayKey($key, $span), $span);
+                    $aSpan = $span;
+                    if ($exact) {
+                        $this->interpAt($lex, $i + 1);
+                        $aSpan = $this->interpRange($span, $sl, $sc);
+                    }
+                    $expr = Expr::arrayAccess($expr, $this->interpArrayKey($key, $kSpan), $aSpan);
                 }
-                $parts[] = Expr::cast('string', $expr, $span);
+                $parts[] = Expr::cast('string', $expr, $exact ? $expr->span : $span);
+                $inners[] = $expr;
+                $litVals[] = '';
+                $endLines[] = $this->ipLine;
+                $endCols[] = $this->ipCol;
                 continue;
             }
+            if ($lit === '') { $litStart = $i; }
             $lit .= $c;
             $i = $i + 1;
         }
-        if ($lit !== '') { $parts[] = Expr::string($lit, $span); }
+        if ($lit !== '') { $parts[] = $this->interpLit($lex, $lit, $litStart, $n, $span, $exact); $inners[] = $parts[\count($parts) - 1]; $litVals[] = $lit; $endLines[] = $this->ipLine; $endCols[] = $this->ipCol; }
         if (\count($parts) === 0) { return Expr::string('', $span); }
+        if ($exact && \count($parts) === 1) {
+            return $litVals[0] !== '' ? Expr::string($litVals[0], $span) : Expr::cast('string', $inners[0], $span);
+        }
         $result = $parts[0];
         $k = 1;
         while ($k < \count($parts)) {
-            $result = Expr::binary('.', $result, $parts[$k], $span);
+            $bSpan = $span;
+            if ($exact && $k + 1 < \count($parts)) {
+                $bSpan = new RangedSpan($span->line, $span->column, $span->file, $endLines[$k], $endCols[$k], $span->startLine(), $span->startColumn());
+            }
+            $result = Expr::binary('.', $result, $parts[$k], $bSpan);
             $k = $k + 1;
         }
         return $result;
+    }
+
+    /** Literal run of an interpolated string, [$from, $to) in body offsets; leaves the cursor at its end. */
+    private function interpLit(string $lex, string $lit, int $from, int $to, Span $span, bool $exact): Expr
+    {
+        if (!$exact) { return Expr::string($lit, $span); }
+        $this->interpAt($lex, $from + 1);
+        $sl = $this->ipLine;
+        $sc = $this->ipCol;
+        $this->interpAt($lex, $to + 1);
+        return Expr::string($lit, $this->interpRange($span, $sl, $sc));
+    }
+
+    /** Move the interpolation cursor forward over the raw lexeme to byte offset $off, counting lines and byte columns like the lexer. */
+    private function interpAt(string $lex, int $off): void
+    {
+        $i = $this->ipOff;
+        $l = $this->ipLine;
+        $c = $this->ipCol;
+        while ($i < $off) {
+            if (\ord(\substr($lex, $i, 1)) === 10) { $l = $l + 1; $c = 1; } else { $c = $c + 1; }
+            $i = $i + 1;
+        }
+        $this->ipOff = $i;
+        $this->ipLine = $l;
+        $this->ipCol = $c;
+    }
+
+    /** Range from ($sl, $sc) to the cursor, anchored at its start. */
+    private function interpRange(Span $whole, int $sl, int $sc): Span
+    {
+        return new RangedSpan($sl, $sc, $whole->file, $this->ipLine, $this->ipCol, $sl, $sc);
     }
 
     /** Simple-syntax array key: `$var` → variable, all-digits → int, else bareword string. */
@@ -3885,9 +4011,30 @@ final class Parser
         return Expr::string($key, $span);
     }
 
-    /** Sub-lex + parse an interpolation `{$expr}` body into a (string)-cast expression. */
-    private function parseSubExpr(string $src, Span $span): Expr
+    /**
+     * Sub-lex + parse an interpolation `{$expr}` body. With a position base
+     * ($line > 0, tolerant + ranges) the body is lexed where it sits in the file
+     * and its names are collected; otherwise its positions are relative to the
+     * body and every node carries the whole string's range.
+     */
+    private function parseSubExpr(string $src, Span $span, int $line = 0, int $col = 0): Expr
     {
+        if ($line > 0) {
+            $sub = new self((new Lexer())->scan($src, true, false, true, $line, $col), '', $this->sourceFile);
+            $sub->ranges = 1;
+            $sub->ends = 1;
+            $sub->tolerant = 1;
+            $sub->depth = $this->depth;
+            $sub->collectNames = $this->collectNames;
+            $sub->currentNamespace = $this->currentNamespace;
+            $sub->useAliases = $this->useAliases;
+            $sub->useFnAliases = $this->useFnAliases;
+            $sub->useConstAliases = $this->useConstAliases;
+            $inner = $sub->parseExpression();
+            foreach ($sub->names as $key => $ref) { $this->names[$key] = $ref; }
+            foreach ($sub->errors as $e) { $this->record($e); }
+            return $inner;
+        }
         $tokens = (new Lexer())->scan($src, true, false, $this->ranges === 1);
         $sub = new self($tokens);
         $sub->ranges = $this->ranges;
@@ -3902,7 +4049,7 @@ final class Parser
         foreach ($sub->errors as $e) {
             $this->record(new ParseError($e->reason, $span->line, $span->column, $span->line, $span->column));
         }
-        return Expr::cast('string', $inner, $span);
+        return $inner;
     }
 
     // ── Token helpers ────────────────────────────────────────────────────────
