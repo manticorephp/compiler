@@ -79,8 +79,8 @@ check('levels_0_1_2_counts', function () use ($SRC) {
         ksort($k);
         $c[$lv] = json_encode($k);
     }
-    $ok = $c[0] === '[]' && $c[1] === '{"class":4,"constant":1,"function":1}'
-        && $c[2] === '{"class":4,"constant":3,"function":1,"member":3}';
+    $ok = $c[0] === '[]' && $c[1] === '{"class":4,"function":1,"member":1}'
+        && $c[2] === '{"class":4,"function":1,"member":6}';
     return $ok ?: json_encode($c);
 });
 

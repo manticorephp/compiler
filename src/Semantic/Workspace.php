@@ -158,7 +158,7 @@ final class Workspace
      * class Foo, function foo and constant FOO never collide. A global-fallback name that no
      * namespaced declaration answers for counts as the global name, so a global call and an
      * unqualified namespaced call to the same function find each other.
-     * Limitation: names are compared lowercased, so constants `FOO` and `foo` collide.
+     * A member (enum case, class constant, method, property) resolves by its bare name only, so it lists just itself.
      *
      * @return Location[]
      */
@@ -168,9 +168,11 @@ final class Workspace
         if ($o === null) { return []; }
         $want = $this->targets($o);
         $kind = $o->denotes();
+        if ($kind === 'member') { return [new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol)]; }
+        $tail = $kind === 'constant' ? self::tail($o->resolved) : '';
         $out = [];
         foreach ($this->names->allOccurrences() as $r) {
-            if ($r->denotes() !== $kind) { continue; }
+            if ($r->denotes() !== $kind || ($kind === 'constant' && self::tail($r->resolved) !== $tail)) { continue; }
             foreach ($this->targets($r) as $t => $_) {
                 if (isset($want[$t])) {
                     $out[] = new Location($r->file, $r->line, $r->col, $r->endLine, $r->endCol);
@@ -180,6 +182,7 @@ final class Workspace
         }
         return $out;
     }
+
     /** @return array<string, bool> the lowercased names an occurrence may denote */
     private function targets(NameOccurrence $o): array
     {
@@ -190,12 +193,18 @@ final class Workspace
         return $t;
     }
 
+    /** Constant names are case-sensitive, their namespace part is not. */
+    private static function tail(string $resolved): string
+    {
+        $bs = \strrpos($resolved, '\\');
+        return $bs === false ? $resolved : \substr($resolved, $bs + 1);
+    }
+
     private static function bareName(string $lower): string
     {
         $bs = \strrpos($lower, '\\');
         return $bs === false ? $lower : \substr($lower, $bs + 1);
     }
-
 
     /** @return UncertainSite[] */
     public function uncertainSitesFor(string $uri, int $line, int $col): array
