@@ -68,12 +68,14 @@ final class EscapeSummaries
     private array $byMethodMemo = [];
     /** @var array<string, string[]> class / interface → every class that is-a it */
     private array $isAMemo = [];
+    /** @var array<string, array<string, bool>> class → every class / interface it is-a */
+    private array $ancestorsMemo = [];
     /** @var array<string, bool> */
     private array $pureNames = [];
     /** @var array<string, array<string, bool>> slot sets by content: most functions write the same few */
-    private array $setPool = [];
-    /** @var array<string, int> pooled set signature → id (0 is reserved for 'no set') */
-    private array $setIds = [];
+    private array $poolSets = [];
+    /** @var array<int, int[]> set hash → ids of the pooled sets with it (0 is reserved for 'no set') */
+    private array $setBuckets = [];
     private int $poolSeq = 0;
     private int $lastPoolId = 0;
     /** @var array<string, int> function → id of its pooled write set */
@@ -236,19 +238,30 @@ final class EscapeSummaries
      */
     private function pooled(array $set): array
     {
-        // A string[] list takes the native word sort; array_keys of the set answers a cell list,
-        // whose sort compares tagged values (and parses numeric-looking strings) per pair.
-        /** @var string[] $keys */
-        $keys = [];
-        foreach ($set as $k => $unused) { $keys[] = (string)$k; }
-        \sort($keys);
-        $sig = \implode("\0", $keys);
-        if (!isset($this->setPool[$sig])) {
-            $this->setPool[$sig] = $set;
-            if (!isset($this->setIds[$sig])) { $this->poolSeq = $this->poolSeq + 1; $this->setIds[$sig] = $this->poolSeq; }
+        // Bucketed by an order-free hash and confirmed key by key: no canonical order, so no sort.
+        $n = \count($set);
+        $h = $n * 1000003;
+        foreach ($set as $k => $unused) {
+            $ks = (string)$k;
+            $len = \strlen($ks);
+            $h = $h + $len * 7919 + \ord($ks) * 131 + \ord(\substr($ks, $len >> 1, 1));
         }
-        $this->lastPoolId = $this->setIds[$sig];
-        return $this->setPool[$sig];
+        $bucket = $this->setBuckets[$h] ?? [];
+        foreach ($bucket as $id) {
+            $cand = $this->poolSets[$id];
+            if (\count($cand) !== $n) { continue; }
+            $same = true;
+            foreach ($set as $k => $unused) {
+                if (!isset($cand[$k])) { $same = false; break; }
+            }
+            if ($same) { $this->lastPoolId = $id; return $cand; }
+        }
+        $this->poolSeq = $this->poolSeq + 1;
+        $this->poolSets[$this->poolSeq] = $set;
+        $bucket[] = $this->poolSeq;
+        $this->setBuckets[$h] = $bucket;
+        $this->lastPoolId = $this->poolSeq;
+        return $set;
     }
 
     private function resetScratch(): void
@@ -354,7 +367,8 @@ final class EscapeSummaries
                 unset($callees[$m], $localWrites[$m], $localWhy[$m]);
             }
         }
-        $this->setPool = [];
+        $this->poolSets = [];
+        $this->setBuckets = [];
         \Compile\Stats::line('escape: fns=' . (string)\count($names) . ' sccs=' . (string)\count($sccs));
         $this->ewReads = [];
         $this->ewWrites = [];
@@ -765,6 +779,16 @@ final class EscapeSummaries
 
     private function isA(string $name, string $target): bool
     {
+        if (!isset($this->ancestorsMemo[$name])) { $this->ancestorsMemo[$name] = $this->ancestorsOf($name); }
+        return isset($this->ancestorsMemo[$name][$target]);
+    }
+
+    /**
+     * Everything `$name` is-a, itself included: one walk per class instead of one per pair asked.
+     * @return array<string, bool>
+     */
+    private function ancestorsOf(string $name): array
+    {
         /** @var array<string, bool> $seen */
         $seen = [];
         /** @var string[] $stack */
@@ -773,7 +797,6 @@ final class EscapeSummaries
             $c = \array_pop($stack);
             if ($c === '' || isset($seen[$c])) { continue; }
             $seen[$c] = true;
-            if ($c === $target) { return true; }
             if (!isset($this->classes[$c])) {
                 foreach ($this->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = $ia; }
                 continue;
@@ -784,8 +807,9 @@ final class EscapeSummaries
             // `ClassDef::$interfaces` is a bare `array`: its elements arrive erased.
             foreach ($cd->interfaces as $i) { $stack[] = (string)$i; }
         }
-        return false;
+        return $seen;
     }
+
 
     /**
      * Every concrete class a method NAME can dispatch to, or [] when that is
