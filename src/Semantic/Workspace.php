@@ -49,7 +49,7 @@ final class Workspace
     public function open(string $uri, string $text): void
     {
         self::assertUserUri($uri);
-        $r = \Parser\Parser::parseTolerant($text, $uri);
+        $r = \Parser\Parser::parseTolerant($text, $uri, true, true, 1);
         $pf = ParsedFile::fromParse($uri, $text, $r);
         if ($pf->hasErrors) {
             $this->parseErrors[$uri] = ParseDiagnostics::of($uri, $r);
@@ -123,32 +123,42 @@ final class Workspace
     }
 
     /**
-     * Class and function names only: the Index records no global constants, so a constant
-     * resolves to null. The span is the declaration's start; the end equals the start.
-     * An unqualified function call in a namespace falls back to the global function when
-     * no namespaced one is declared, as PHP does.
+     * Class and function names, and a declaration name under the cursor (an enum case included).
+     * The range is the NAME token of the winning declaration; it falls back to the declaration
+     * start (end equals start) when the declaring file holds no declaration entry for the name
+     * (a library file, a member). The Index records no global constants, so a constant use
+     * resolves to null. An unqualified function call in a namespace falls back to the global
+     * function when no namespaced one is declared, as PHP does.
      */
     public function definitionOf(string $uri, int $line, int $col): ?Location
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
-        if ($o === null || $o->kind === 'constant' || $o->kind === 'namespace') { return null; }
-        $kind = $o->kind === 'class' || $o->kind === 'function' ? $o->kind : null;
+        if ($o === null) { return null; }
+        if ($o->isDecl) { return new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol); }
+        $kind = $o->denotes();
+        if ($kind !== 'class' && $kind !== 'function') { return null; }
         $name = $o->resolvedLower;
         $file = $this->index->declaringFile($name, $kind);
         if ($file === null && $o->globalFallback) {
             $name = self::bareName($name);
             $file = $this->index->declaringFile($name, $kind);
         }
+        if ($file === null) { return null; }
+        foreach ($this->names->declarations($kind, $name) as $d) {
+            if ($d->file === $file) { return new Location($d->file, $d->line, $d->col, $d->endLine, $d->endCol); }
+        }
         $span = $this->index->declSpan($name, $kind);
-        if ($file === null || $span === null) { return null; }
+        if ($span === null) { return null; }
         return new Location($file, $span->startLine(), $span->startColumn(), $span->startLine(), $span->startColumn());
     }
 
     /**
-     * Use sites of the resolved name, `use` imports included. A global-fallback name that
-     * no namespaced declaration answers for counts as the global name, so a global call
-     * and an unqualified namespaced call to the same function find each other. P2b gap:
-     * the declaration site is not included, because declaration names are not NameRefs.
+     * Use sites and declaration names of the symbol, `use` imports included. An entry matches
+     * by kind: a `use` import counts as its imported kind (class | function | constant), so
+     * class Foo, function foo and constant FOO never collide. A global-fallback name that no
+     * namespaced declaration answers for counts as the global name, so a global call and an
+     * unqualified namespaced call to the same function find each other.
+     * Limitation: names are compared lowercased, so constants `FOO` and `foo` collide.
      *
      * @return Location[]
      */
@@ -157,9 +167,10 @@ final class Workspace
         $o = $this->names->occurrenceAt($uri, $line, $col);
         if ($o === null) { return []; }
         $want = $this->targets($o);
+        $kind = $o->denotes();
         $out = [];
         foreach ($this->names->allOccurrences() as $r) {
-            if (!self::kindsMatch($o->kind, $r->kind)) { continue; }
+            if ($r->denotes() !== $kind) { continue; }
             foreach ($this->targets($r) as $t => $_) {
                 if (isset($want[$t])) {
                     $out[] = new Location($r->file, $r->line, $r->col, $r->endLine, $r->endCol);
@@ -169,7 +180,6 @@ final class Workspace
         }
         return $out;
     }
-
     /** @return array<string, bool> the lowercased names an occurrence may denote */
     private function targets(NameOccurrence $o): array
     {
@@ -186,12 +196,7 @@ final class Workspace
         return $bs === false ? $lower : \substr($lower, $bs + 1);
     }
 
-    private static function kindsMatch(string $a, string $b): bool
-    {
-        if ($a === $b) { return true; }
-        $named = ['class' => true, 'function' => true, 'constant' => true];
-        return ($a === 'use' && isset($named[$b])) || ($b === 'use' && isset($named[$a]));
-    }
+
     /** @return UncertainSite[] */
     public function uncertainSitesFor(string $uri, int $line, int $col): array
     {
