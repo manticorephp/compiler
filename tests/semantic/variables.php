@@ -286,6 +286,59 @@ check('position that is not a variable: no variable answer', function () {
     return $w->referencesTo('a.php', 1, 1) === [] && $w->definitionOf('a.php', 1, 1) === null ? true : 'unexpected';
 });
 
+check('H1: function declared inside a function body has its own scope', function () {
+    $s = "<?php\nfunction outer(\$a) {\n    if (1) { function inner(\$a) { return \$a; } }\n    return \$a;\n}\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$a', 1, 'a.php', $w) === at($s, '$a', [1, 4]) && refs($s, '$a', 2, 'a.php', $w) === at($s, '$a', [2, 3]) ? true : refs($s, '$a', 1, 'a.php', $w);
+});
+
+check('H1: function inside a method, class inside a function, closure in nested function', function () {
+    $s = "<?php\nclass A { function m(\$a) { function f(\$a) { return \$a; } return \$a; } }\nfunction outer(\$a) { class K { function m(\$a) { return \$a; } } return \$a; }\nfunction o2(\$a) { function n(\$a) { \$h = function () use (\$a) { return \$a; }; return \$h; } return \$a; }\n";
+    $w = ws(['a.php' => $s]);
+    $ok = refs($s, '$a', 1, 'a.php', $w) === at($s, '$a', [1, 4])
+        && refs($s, '$a', 2, 'a.php', $w) === at($s, '$a', [2, 3])
+        && refs($s, '$a', 5, 'a.php', $w) === at($s, '$a', [5, 8])
+        && refs($s, '$a', 6, 'a.php', $w) === at($s, '$a', [6, 7])
+        && refs($s, '$a', 9, 'a.php', $w) === at($s, '$a', [9, 13])
+        && refs($s, '$a', 10, 'a.php', $w) === at($s, '$a', [10, 11, 12]);
+    return $ok ? true : refs($s, '$a', 9, 'a.php', $w);
+});
+
+check('M1: property hooks get their own scope; set binds $value', function () {
+    $s = "<?php\nclass P {\n    public int \$v { get { \$tt = 1; return \$tt; } set(int \$n) { \$this->v = \$n; } }\n    public int \$w { set { \$q = \$value; } }\n}\nfunction t(\$tt) { return \$tt; }\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$tt', 1, 'a.php', $w) === at($s, '$tt', [1, 2]) && refs($s, '$tt', 3, 'a.php', $w) === at($s, '$tt', [3, 4])
+        && refs($s, '$n', 2, 'a.php', $w) !== '' && refs($s, '$value', 1, 'a.php', $w) === at($s, '$value', [1])
+        && refs($s, '$q', 1, 'a.php', $w) === at($s, '$q', [1]) ? true : refs($s, '$n', 2, 'a.php', $w);
+});
+
+check('M2: parse-error-region blocker for variable, member and class renames; none when clean', function () {
+    $bad = "<?php\nclass {\n";
+    $good = "<?php\nclass A { public function m(\$a) { return \$a; } }\nfunction f(\$z) { return (new A)->m(\$z); }\n";
+    $w = ws(['good.php' => $good, 'bad.php' => $bad]);
+    $has = fn($bl, $f) => in_array('parse-error-region:' . $f, $bl, true);
+    $v = $w->renameBlockers('good.php', ...where($good, '$z', 1));
+    $m = $w->renameBlockers('good.php', ...where($good, 'm(', 1));
+    $c = $w->renameBlockers('good.php', ...where($good, 'A', 1));
+    $wc = ws(['good.php' => $good]);
+    $clean = array_merge($wc->renameBlockers('good.php', ...where($good, '$z', 1)), $wc->renameBlockers('good.php', ...where($good, 'm(', 1)));
+    $nv = array_filter($clean, fn($b) => str_starts_with($b, 'parse-error-region'));
+    $w2 = ws(['bad.php' => "<?php\nfunction f(\$z) { return \$z; }\nclass {\n"]);
+    $own = $w2->renameBlockers('bad.php', 2, 12);
+    return $has($m, 'bad.php') && $has($c, 'bad.php') && $nv === [] && $has($own, 'bad.php') && !$has($v, 'bad.php') ? true : json_encode([$v, $m, $c, $own, $nv]);
+});
+
+check('L1: arrow fn assignment to a captured name is a separate binding with arrow-assignment sites', function () {
+    $s = "<?php\nfunction f() {\n    \$x = 1;\n    \$g = fn() => \$x = 5;\n    return \$x;\n}\n";
+    $w = ws(['a.php' => $s]);
+    $outer = refs($s, '$x', 1, 'a.php', $w);
+    $inner = refs($s, '$x', 2, 'a.php', $w);
+    $u = uncertain($w, $s, '$x', 1);
+    $ui = uncertain($w, $s, '$x', 2);
+    $p = where($s, '$x', 2);
+    return $outer === at($s, '$x', [1, 3]) && $inner === at($s, '$x', [2]) && $u === ['a.php:' . $p[0] . ':' . $p[1] . ':arrow-assignment'] && $ui === $u ? true : json_encode([$outer, $inner, $u, $ui]);
+});
+
 check('perf: variable query on a 3000-line file p50 < 5 ms', function () {
     $src = "<?php\n";
     for ($i = 0; $i < 300; $i++) {
