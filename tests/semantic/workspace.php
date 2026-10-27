@@ -367,4 +367,23 @@ check('broken_file_declaration_names_still_resolve', function () {
     return ($l !== null && $l->file === 'a.php' && slice_of($a, $l) === 'Survivor') ?: json_encode($l);
 });
 
+check('enum_case_is_a_member_not_a_global_constant', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nenum Suit { case Hearts; }\nenum Other { case Hearts; }\nclass K { const HEARTS = 2; }\n");
+    $w->open('b.php', "<?php\nconst HEARTS = 1;\necho HEARTS;\n");
+    $w->open('c.php', "<?php\nnamespace N;\necho HEARTS;\n");
+    $g = locs($w->referencesTo('b.php', 3, 6));
+    $c = locs($w->referencesTo('a.php', 2, 18));
+    $d = $w->definitionOf('a.php', 2, 18);
+    return ($g === ['b.php:3', 'c.php:3'] && $c === ['a.php:2'] && $d !== null && $d->line === 2 && $d->col === 18)
+        ?: json_encode([$g, $c, $d]);
+});
+
+check('constants_differing_in_case_do_not_collide', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\necho FOO; echo foo;\n");
+    $r = $w->referencesTo('a.php', 2, 6);
+    return count($r) === 1 ?: 'collide: ' . count($r);
+});
+
 exit($fail);

@@ -9,7 +9,8 @@ namespace Parser\Ast;
  * constant name that PHP falls back to the global namespace for at run time
  * (the parser cannot know whether that global symbol exists). $role is empty,
  * the imported kind (class | function | constant) on a `use` entry, or `decl` on a
- * declaration name (then $kind is class | function | constant | member).
+ * declaration name (then $kind is class | function | member; enum cases, class constants,
+ * methods and properties are members, never global constants).
  */
 final class NameRef
 {
