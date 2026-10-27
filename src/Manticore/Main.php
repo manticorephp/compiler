@@ -5803,14 +5803,8 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array
             if (\count($r->errors) === 0) {
                 $parsed[] = new \Analyze\ParsedFile(__mc_source_path($sf), $r->program);
             }
-            foreach ($r->errors as $pe) {
-                $diags[] = \Analyze\Diagnostic::error(
-                    __mc_source_path($sf),
-                    $pe->errLine,
-                    $pe->column,
-                    'parse.error',
-                    $pe->reason
-                );
+            foreach (\Analyze\ParseDiagnostics::of(__mc_source_path($sf), $r) as $pd) {
+                $diags[] = $pd;
             }
         } catch (\Throwable $e) {
             $diags[] = \Analyze\Diagnostic::error(__mc_source_path($sf), 0, 0, 'parse.error', $e->getMessage());
