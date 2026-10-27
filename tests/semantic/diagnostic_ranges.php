@@ -195,4 +195,39 @@ check('anchors_unchanged_in_workspace_mode', function () {
     return $key($on) === $key($off) ?: $key($on) . ' != ' . $key($off);
 });
 
+check('trait_use_range_skips_earlier_mention_in_property_type', function () {
+    $s = "<?php\nclass A {\n    public Gone \$p;\n    use Gone;\n}\n";
+    $ds = array_values(array_filter(diagsOf($s), fn($d) => $d->code === 'undefined.class'));
+    if (count($ds) !== 1) { return 'count ' . count($ds); }
+    return ($ds[0]->startLine === 4 && slice($s, $ds[0]) === 'Gone') ?: "line " . $ds[0]->startLine . " " . json_encode(slice($s, $ds[0]));
+});
+
+check('trait_use_range_skips_earlier_param_type_and_attribute', function () {
+    $s = "<?php\n#[Attribute]\nclass At {}\nclass A {\n    #[Gone] public int \$q = 1;\n    public function m(Gone \$x) {}\n    use Gone;\n}\n";
+    $ds = array_values(array_filter(diagsOf($s), fn($d) => $d->code === 'undefined.class' && $d->message === 'unknown class Gone'));
+    $uses = array_values(array_filter($ds, fn($d) => $d->startLine === 7));
+    if (count($uses) !== 1) { return 'no diagnostic on the use line: ' . json_encode(array_map(fn($d) => [$d->startLine, $d->startCol], $ds)); }
+    return slice($s, $uses[0]) === 'Gone' ?: json_encode(slice($s, $uses[0]));
+});
+
+check('implements_range_skips_earlier_mention_in_attribute', function () {
+    $s = "<?php\n#[Gone]\nclass A implements Gone {\n    #[Gone] public int \$q = 1;\n}\n";
+    $ds = array_values(array_filter(diagsOf($s), fn($d) => $d->code === 'undefined.class'));
+    foreach ($ds as $d) {
+        if ($d->startLine === 3) { return ($d->startCol === 20 && slice($s, $d) === 'Gone') ?: "range " . $d->startLine . ':' . $d->startCol . ' ' . json_encode(slice($s, $d)); }
+    }
+    return 'no diagnostic on the header';
+});
+
+check('second_catch_of_same_class_gets_its_own_range', function () {
+    $s = "<?php\ntry { } catch (Gone \$e) { } catch (Gone \$f) { }\n";
+    $ds = array_values(array_filter(diagsOf($s), fn($d) => $d->code === 'undefined.class'));
+    if (count($ds) !== 2) { return 'count ' . count($ds); }
+    $first = strpos($s, 'Gone');
+    $second = strpos($s, 'Gone', $first + 1);
+    $col = fn($o) => $o - strrpos(substr($s, 0, $o), "\n");
+    return ($ds[0]->startCol === $col($first) && $ds[1]->startCol === $col($second) && slice($s, $ds[1]) === 'Gone')
+        ?: json_encode([$ds[0]->startCol, $ds[1]->startCol, $col($first), $col($second)]);
+});
+
 exit($fail);
