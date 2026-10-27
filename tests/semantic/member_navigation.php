@@ -471,4 +471,59 @@ check('hover: static, defaults, union receiver as separate lines', function () {
     return $ok1 && $ok2 ? true : json_encode([$h, $h2]);
 });
 
+function famCheck(string $src, array $queries, array $expect): ?string
+{
+    $w = ws(['a.php' => $src]);
+    $exp = [];
+    foreach ($expect as $p) { $exp[] = lc('a.php', $p); }
+    sort($exp);
+    foreach ($queries as $q) {
+        $r = refs($w, 'a.php', $q);
+        if ($r !== $exp) { return json_encode([$q, $r, $exp]); }
+    }
+    return null;
+}
+
+check('trait method satisfying interface method joins the family (both directions)', function () {
+    $src = "<?php\ninterface I { function m(); }\ntrait T { function m() {} }\nclass C implements I { use T; }\nfunction f(I \$i, C \$c) { \$i->m(); \$c->m(); }\n";
+    $d = [where($src, 'm()', 1), where($src, 'm()', 2)];
+    $u = [where($src, '$i->m', 1, 4), where($src, '$c->m', 1, 4)];
+    return famCheck($src, array_merge($d, $u), array_merge($d, $u)) ?? true;
+});
+
+check('trait of trait and abstract parent implemented by trait', function () {
+    $src = "<?php\nabstract class A { abstract function m(); }\ntrait Inner { function m() {} }\ntrait Outer { use Inner; }\nclass C extends A { use Outer; }\nfunction f(A \$a, C \$c) { \$a->m(); \$c->m(); }\n";
+    $d = [where($src, 'm()', 1), where($src, 'm()', 2)];
+    $u = [where($src, '$a->m', 1, 4), where($src, '$c->m', 1, 4)];
+    return famCheck($src, array_merge($d, $u), array_merge($d, $u)) ?? true;
+});
+
+check('trait overriding an inherited method in a child', function () {
+    $src = "<?php\nclass P { function m() {} }\ntrait T { function m() {} }\nclass C extends P { use T; }\nfunction f(P \$p, C \$c) { \$p->m(); \$c->m(); }\n";
+    $d = [where($src, 'm()', 1), where($src, 'm()', 2)];
+    $u = [where($src, '$p->m', 1, 4), where($src, '$c->m', 1, 4)];
+    return famCheck($src, array_merge($d, $u), array_merge($d, $u)) ?? true;
+});
+
+check('props and consts provided by traits join the family', function () {
+    $src = "<?php\nclass P { public \$x = 1; }\ntrait T { public \$x = 1; }\nclass C extends P { use T; }\nfunction f(P \$p, C \$c) { \$p->x; \$c->x; }\n";
+    $d = [where($src, '$x', 1), where($src, '$x', 2)];
+    $u = [where($src, '$p->x', 1, 4), where($src, '$c->x', 1, 4)];
+    return famCheck($src, array_merge($d, $u), array_merge($d, $u)) ?? true;
+});
+
+check('trait adaptation (insteadof / as) is an uncertain site and a blocker', function () {
+    $src = "<?php\ninterface I { function m(); }\ntrait A { function m() {} }\ntrait B { function m() {} }\nclass C implements I { use A, B { A::m insteadof B; B::m as protected bm; } }\nclass D implements I { use A; }\nfunction f(I \$i) { \$i->m(); }\n";
+    $w = ws(['a.php' => $src]);
+    $q = where($src, 'm()', 1);
+    $ad = [];
+    foreach ($w->uncertainSitesFor('a.php', $q[0], $q[1]) as $s) { if ($s->reason === 'trait-adaptation') { $ad[] = $s->line; } }
+    $bl = array_values(array_filter($w->renameBlockers('a.php', $q[0], $q[1]), fn($b) => str_starts_with($b, 'trait-adaptation')));
+    $plain = "<?php\ninterface I { function m(); }\ntrait A { function m() {} }\nclass D implements I { use A; }\n";
+    $w2 = ws(['a.php' => $plain]);
+    $q2 = where($plain, 'm()', 1);
+    $none = array_filter($w2->renameBlockers('a.php', $q2[0], $q2[1]), fn($b) => str_starts_with($b, 'trait-adaptation'));
+    return count($ad) >= 1 && count($bl) >= 1 && $ad[0] === 5 && count($none) === 0 ? true : json_encode([$ad, $bl, $none]);
+});
+
 exit($fail);
