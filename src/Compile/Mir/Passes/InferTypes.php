@@ -1201,7 +1201,7 @@ final class InferTypes implements Pass
         // capture site and the closure body have been typed once.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefCaptureWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_capture');
+            $this->rescanPropagating($module, 'byref_capture');
             $guard = $guard + 1;
         }
         // A local handed to a `mixed &` parameter is likewise one word two
@@ -1234,7 +1234,7 @@ final class InferTypes implements Pass
             // A retyped param captured `use (&$i)` is a cell at the capture
             // site now, and the closure's side of that word must follow.
             $captured = $retyped && $this->scanByRefCaptureWiden($module);
-            if ($captured) { $this->inferFunctionsForScope($module, 'byref_capture'); }
+            if ($captured) { $this->rescanPropagating($module, 'byref_capture'); }
             if (!$retyped && !$widened && !$captured) { break; }
             $rounds = $rounds + 1;
             if ($rounds > $cap) {
@@ -1316,7 +1316,7 @@ final class InferTypes implements Pass
         // add as `unknown` and found no disagreement; this one sees the cell.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefCaptureWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_capture_post');
+            $this->rescanPropagating($module, 'byref_capture_post');
             $guard = $guard + 1;
         }
         if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }

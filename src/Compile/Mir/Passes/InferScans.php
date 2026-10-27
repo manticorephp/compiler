@@ -1732,6 +1732,7 @@ trait InferScans
         $byName = [];
         foreach ($module->functions as $f) { $byName[$f->name] = $f; }
         $changed = false;
+        $this->rescanTouched = [];
         foreach ($module->functions as $fn) {
             // A prelude body is linkonce_odr and shared across modules — never
             // specialize one from this module's capture sites.
@@ -1767,6 +1768,8 @@ trait InferScans
                     && !isset($this->byRefCaptureCellLocals[$clName][$pn])) {
                     $this->byRefCaptureCellLocals[$clName][$pn] = true;
                     $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                 }
                 if ($this->byRefCaptureDisagrees($cl, $pn, $siteKind)
                     || $this->byRefCaptureDisagrees($fn, $local, $siteKind)) {
@@ -1774,10 +1777,14 @@ trait InferScans
                         $this->byRefCaptureCellLocals[$fn->name][$local] = true;
                         $this->boxParamAtEntry($fn, $local);
                         $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                     }
                     if (!isset($this->byRefCaptureCellLocals[$clName][$pn])) {
                         $this->byRefCaptureCellLocals[$clName][$pn] = true;
                         $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                     }
                     continue;
                 }
@@ -1792,11 +1799,15 @@ trait InferScans
                     $this->forcedCellElemLocals[$fn->name][$local] = true;
                     $this->byRefCaptureElemLocals[$fn->name][$local] = true;
                     $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                 }
                 if (!isset($this->forcedCellElemLocals[$clName][$pn])) {
                     $this->forcedCellElemLocals[$clName][$pn] = true;
                     $this->byRefCaptureElemLocals[$clName][$pn] = true;
                     $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                 }
             }
         }
