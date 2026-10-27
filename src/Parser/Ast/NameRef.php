@@ -7,7 +7,9 @@ namespace Parser\Ast;
  * parser statically resolved it to. $kind is class | function | constant |
  * namespace | use. $globalFallback is true for an unqualified function or
  * constant name that PHP falls back to the global namespace for at run time
- * (the parser cannot know whether that global symbol exists).
+ * (the parser cannot know whether that global symbol exists). $role is empty,
+ * the imported kind (class | function | constant) on a `use` entry, or `decl` on a
+ * declaration name (then $kind is class | function | constant | member).
  */
 final class NameRef
 {
@@ -17,5 +19,6 @@ final class NameRef
         public readonly string $resolved,
         public readonly string $kind,
         public readonly bool $globalFallback,
+        public readonly string $role = '',
     ) {}
 }

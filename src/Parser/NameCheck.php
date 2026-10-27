@@ -26,11 +26,26 @@ final class NameCheck
                 $base = $offsets[$s->line - 1];
                 $got = \substr($source, $base + $s->column - 1, $s->endColumn() - $s->column);
             }
+            if ($r->role === 'decl' && !self::declResolvesTo($r)) {
+                $out[] = $file . ':' . (string)$s->line . ':' . (string)$s->column
+                    . ' decl "' . $r->written . '" resolves to "' . $r->resolved . '"';
+            }
             if ($got !== $r->written) {
                 $out[] = $file . ':' . (string)$s->line . ':' . (string)$s->column
                     . ' name span slices to "' . $got . '", written "' . $r->written . '"';
             }
         }
         return $out;
+    }
+
+    /** A decl resolves to its written name: class-likes and functions namespace-qualified, members as the bare name. */
+    private static function declResolvesTo(\Parser\Ast\NameRef $r): bool
+    {
+        $bare = \ltrim($r->written, '$');
+        if ($r->kind === 'class' || $r->kind === 'function') {
+            return $r->resolved === $r->written
+                || \str_ends_with($r->resolved, '\\' . $r->written);
+        }
+        return $r->resolved === $bare;
     }
 }
