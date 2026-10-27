@@ -17,8 +17,10 @@ use Analyze\Report;
  * `lib:` label is not a path on disk: the host maps it to the prelude directory itself.
  *
  * Project membership: open/update add a file, close drops its text and AST but keeps its
- * Index and NameIndex entries, remove forgets the file. A file with syntax errors reports
- * only its parse.error diagnostics and contributes nothing to the Index while it has them.
+ * Index and NameIndex entries, remove forgets the file. A file with syntax errors keeps the
+ * AST the tolerant parser recovered and contributes its recovered declarations to the Index
+ * (a declaration it lost stays until the file parses clean or is removed). Its diagnostics are
+ * the analyzer output minus the findings a broken tree would make up, plus its parse.error ones.
  * Diagnostics are computed on each call from the current Index, so a change in one file is
  * seen by every dependent without invalidation bookkeeping.
  */
@@ -27,10 +29,10 @@ final class Workspace
     private Index $index;
     private NameIndex $names;
 
-    /** @var array<string, ParsedFile> uri => AST of every open file that parsed cleanly */
+    /** @var array<string, ParsedFile> uri => recovered AST of every open file, broken ones included */
     private array $asts = [];
 
-    /** @var array<string, Diagnostic[]> uri => parse errors of a file whose text does not parse */
+    /** @var array<string, Diagnostic[]> uri => parse errors of a file whose text does not parse (kept after close) */
     private array $parseErrors = [];
 
     public function __construct(private LibrarySymbols $lib, private bool $checkUndefined = true)
@@ -48,15 +50,12 @@ final class Workspace
     {
         self::assertUserUri($uri);
         $r = \Parser\Parser::parseTolerant($text, $uri);
-        if (count($r->errors) > 0) {
+        $pf = ParsedFile::fromParse($uri, $text, $r);
+        if ($pf->hasErrors) {
             $this->parseErrors[$uri] = ParseDiagnostics::of($uri, $r);
-            $this->index->removeFile($uri);
-            $this->names->removeFile($uri);
-            unset($this->asts[$uri]);
-            return;
+        } else {
+            unset($this->parseErrors[$uri]);
         }
-        unset($this->parseErrors[$uri]);
-        $pf = new ParsedFile($uri, $r->program);
         $this->asts[$uri] = $pf;
         $this->index->replaceFile($pf);
         $this->names->replaceFile($uri, $r->program);
@@ -88,7 +87,7 @@ final class Workspace
         $this->names->removeFile($uri);
     }
 
-    /** Files holding a live, usable AST: an open file that does not parse, and a closed one, hold none. */
+    /** Files holding a live AST, one with syntax errors included; a closed file holds none. */
     public function openFileCount(): int
     {
         return count($this->asts);
@@ -96,15 +95,31 @@ final class Workspace
 
     /**
      * Sorted. A closed file has no AST and reports only the parse errors it had when closed.
+     * In a file with syntax errors, findings that depend on the broken region are dropped: undefined
+     * class / function when a use, namespace or declaration statement failed, and arg.count / arg.type /
+     * return.* whose range holds a parse error or error expression.
      *
      * @return Diagnostic[]
      */
     public function diagnostics(string $uri): array
     {
-        if (isset($this->parseErrors[$uri])) { return $this->parseErrors[$uri]; }
-        if (!isset($this->asts[$uri])) { return []; }
+        $pf = $this->asts[$uri] ?? null;
+        if ($pf === null) { return $this->parseErrors[$uri] ?? []; }
         $analyzer = new Analyzer();
-        return Report::sortDiags($analyzer->runFile($this->asts[$uri], $this->index, $this->checkUndefined));
+        /** @var Diagnostic[] $out */
+        $out = [];
+        foreach ($analyzer->runFile($pf, $this->index, $this->checkUndefined) as $d) {
+            if (!$pf->hasErrors || !self::madeUpByBreak($pf, $d)) { $out[] = $d; }
+        }
+        foreach ($this->parseErrors[$uri] ?? [] as $d) { $out[] = $d; }
+        return Report::sortDiags($out);
+    }
+
+    private static function madeUpByBreak(ParsedFile $pf, Diagnostic $d): bool
+    {
+        if ($pf->brokenPreamble && ($d->code === 'undefined.class' || $d->code === 'undefined.function')) { return true; }
+        $ranged = $d->code === 'arg.count' || $d->code === 'arg.type' || \str_starts_with($d->code, 'return.');
+        return $ranged && $pf->hitsRange($d->startLine, $d->startCol, $d->endLine, $d->endCol);
     }
 
     /**
