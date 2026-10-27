@@ -41,6 +41,7 @@ final class NameIndex
             $list[] = new NameOccurrence(
                 $path, $n->kind, strtolower(ltrim($n->resolved, '\\')),
                 $s->startLine(), $s->startColumn(), $endLine, $endCol, $n->globalFallback,
+                $n->role === 'decl', $n->role === 'decl' ? '' : $n->role,
             );
         }
         $this->occ[$path] = $list;
@@ -74,7 +75,11 @@ final class NameIndex
         unset($this->occ[$path], $this->literals[$path], $this->dynamic[$path]);
     }
 
-    /** @return NameOccurrence[] */
+    /**
+     * Uses and declaration names alike; a `use` import is matched by kind 'use', not by its role.
+     *
+     * @return NameOccurrence[]
+     */
     public function occurrences(string $kind, string $resolvedLower): array
     {
         $out = [];
@@ -82,6 +87,16 @@ final class NameIndex
             foreach ($list as $o) {
                 if ($o->kind === $kind && $o->resolvedLower === $resolvedLower) { $out[] = $o; }
             }
+        }
+        return $out;
+    }
+
+    /** @return NameOccurrence[] the declaration-name entries only */
+    public function declarations(string $kind, string $resolvedLower): array
+    {
+        $out = [];
+        foreach ($this->occurrences($kind, $resolvedLower) as $o) {
+            if ($o->isDecl) { $out[] = $o; }
         }
         return $out;
     }

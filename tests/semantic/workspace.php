@@ -141,7 +141,7 @@ check('references_exclude_other_symbols', function () {
     $w->open('a.php', "<?php\nnamespace N;\nclass Foo {}\nclass Bar {}\n");
     $w->open('b.php', "<?php\nnamespace N;\n\$x = new Foo();\n\$y = new Bar();\n\$z = new Foo();\n");
     $lines = array_map(fn($l) => $l->file . ':' . $l->line, $w->referencesTo('b.php', 3, 12));
-    return ($lines === ['b.php:3', 'b.php:5']) ?: json_encode($lines);
+    return ($lines === ['a.php:3', 'b.php:3', 'b.php:5']) ?: json_encode($lines);
 });
 
 check('closed_file_keeps_index_but_not_ast', function () use ($A, $B) {
@@ -182,12 +182,12 @@ check('references_cross_the_global_fallback_both_ways', function () {
     $w->open('c.php', "<?php\nhelper();\n");
     $fromGlobal = locs($w->referencesTo('c.php', 2, 1));
     $fromNs = locs($w->referencesTo('b.php', 3, 1));
-    if ($fromGlobal !== ['b.php:3', 'c.php:2']) { return 'global ' . json_encode($fromGlobal); }
+    if ($fromGlobal !== ['a.php:2', 'b.php:3', 'c.php:2']) { return 'global ' . json_encode($fromGlobal); }
     if ($fromNs !== $fromGlobal) { return 'ns ' . json_encode($fromNs); }
     $w->open('d.php', "<?php\nnamespace N;\nfunction helper() {}\n");
     $g = locs($w->referencesTo('c.php', 2, 1));
     $n = locs($w->referencesTo('b.php', 3, 1));
-    return ($g === ['c.php:2'] && $n === ['b.php:3']) ?: 'declared ns fn splits them ' . json_encode([$g, $n]);
+    return ($g === ['a.php:2', 'c.php:2'] && $n === ['b.php:3', 'd.php:3']) ?: 'declared ns fn splits them ' . json_encode([$g, $n]);
 });
 
 check('references_cross_the_global_fallback_for_constants', function () {
@@ -204,9 +204,9 @@ check('references_include_the_use_import_line', function () {
     $w->open('b.php', "<?php\nnamespace N;\nuse M\\Foo;\nuse function M\\bar;\nnew Foo;\nbar();\n");
     $fromUse = locs($w->referencesTo('b.php', 3, 8));
     $fromNew = locs($w->referencesTo('b.php', 5, 5));
-    if ($fromUse !== ['b.php:3', 'b.php:5'] || $fromNew !== $fromUse) { return json_encode([$fromUse, $fromNew]); }
+    if ($fromUse !== ['a.php:3', 'b.php:3', 'b.php:5'] || $fromNew !== $fromUse) { return json_encode([$fromUse, $fromNew]); }
     $fn = locs($w->referencesTo('b.php', 4, 16));
-    return $fn === ['b.php:4', 'b.php:6'] ?: json_encode($fn);
+    return $fn === ['a.php:4', 'b.php:4', 'b.php:6'] ?: json_encode($fn);
 });
 
 check('definition_keeps_class_and_function_of_one_name_apart', function () {
@@ -266,4 +266,105 @@ check('file_that_does_not_parse_keeps_its_recovered_ast', function () {
     // P2b: the broken file keeps its recovered AST (was: held none, count 1).
     return ($w->openFileCount() === 2 && count($w->diagnostics('bad.php')) > 0) ?: 'count ' . $w->openFileCount();
 });
+
+function slice_of(string $src, ?\Semantic\Location $l): string
+{
+    if ($l === null) { return '(null)'; }
+    $line = explode("\n", $src)[$l->line - 1] ?? '';
+    return substr($line, $l->col - 1, $l->endCol - $l->col);
+}
+
+check('references_include_declaration_site', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nnamespace N;\nclass Foo {}\n");
+    $w->open('b.php', "<?php\nnamespace N;\nnew Foo;\n");
+    $r = locs($w->referencesTo('b.php', 3, 5));
+    return $r === ['a.php:3', 'b.php:3'] ?: json_encode($r);
+});
+
+check('references_exclude_same_lowered_name_other_symbol', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nclass Foo {}\nfunction foo() {}\n");
+    $w->open('b.php', "<?php\nnew Foo; foo(); echo FOO;\n");
+    $c = locs($w->referencesTo('b.php', 2, 5));
+    $f = locs($w->referencesTo('b.php', 2, 11));
+    $k = locs($w->referencesTo('b.php', 2, 23));
+    return ($c === ['a.php:2', 'b.php:2'] && $f === ['a.php:3', 'b.php:2'] && $k === ['b.php:2'])
+        ?: json_encode([$c, $f, $k]);
+});
+
+check('use_function_does_not_match_class', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nnamespace M;\nclass foo {}\nfunction foo() {}\n");
+    $w->open('b.php', "<?php\nnamespace N;\nuse function M\\foo;\nfoo();\n");
+    $f = locs($w->referencesTo('b.php', 4, 1));
+    $c = locs($w->referencesTo('a.php', 3, 8));
+    return ($f === ['a.php:4', 'b.php:3', 'b.php:4'] && $c === ['a.php:3']) ?: json_encode([$f, $c]);
+});
+
+check('use_const_matches_constant_only', function () {
+    $w = new Workspace(lib());
+    $w->open('b.php', "<?php\nnamespace N;\nuse const M\\FOO;\nuse function M\\foo;\necho FOO;\nfoo();\n");
+    $k = locs($w->referencesTo('b.php', 3, 14));
+    $f = locs($w->referencesTo('b.php', 4, 16));
+    return ($k === ['b.php:3', 'b.php:5'] && $f === ['b.php:4', 'b.php:6']) ?: json_encode([$k, $f]);
+});
+
+check('definition_returns_name_range_not_decl_start', function () {
+    $a = "<?php\nnamespace N;\nfinal class Widget {}\nfunction build() {}\nenum E { case One; }\n";
+    $w = new Workspace(lib());
+    $w->open('a.php', $a);
+    $w->open('b.php', "<?php\nnamespace N;\nnew Widget; build();\n");
+    $c = $w->definitionOf('b.php', 3, 6);
+    $f = $w->definitionOf('b.php', 3, 14);
+    $e = $w->definitionOf('a.php', 5, 16);
+    return (slice_of($a, $c) === 'Widget' && slice_of($a, $f) === 'build' && slice_of($a, $e) === 'One')
+        ?: json_encode([slice_of($a, $c), slice_of($a, $f), slice_of($a, $e)]);
+});
+
+check('cursor_on_declaration_lists_references', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nclass Foo {}\n");
+    $w->open('b.php', "<?php\nnew Foo;\nnew Foo;\n");
+    $r = locs($w->referencesTo('a.php', 2, 8));
+    $d = $w->definitionOf('a.php', 2, 8);
+    return ($r === ['a.php:2', 'b.php:2', 'b.php:3'] && $d !== null && $d->file === 'a.php' && $d->line === 2 && $d->col === 7)
+        ?: json_encode([$r, $d]);
+});
+
+check('definition_of_class_in_other_file_returns_name_range', function () {
+    $a = "<?php\n\n  abstract class   Spaced {}\n";
+    $w = new Workspace(lib());
+    $w->open('a.php', $a);
+    $w->open('b.php', "<?php\nnew Spaced;\n");
+    $l = $w->definitionOf('b.php', 2, 6);
+    return ($l !== null && $l->file === 'a.php' && slice_of($a, $l) === 'Spaced') ?: json_encode($l);
+});
+
+check('library_class_definition_still_resolves', function () {
+    $w = new Workspace(lib());
+    $w->open('b.php', "<?php\nnew \\Exception('x');\n");
+    $l = $w->definitionOf('b.php', 2, 6);
+    return ($l !== null && str_starts_with($l->file, 'lib:prelude/')) ?: json_encode($l);
+});
+
+check('global_fallback_function_definition_and_references_still_work', function () {
+    $w = new Workspace(lib());
+    $w->open('a.php', "<?php\nfunction helper() {}\n");
+    $w->open('b.php', "<?php\nnamespace N;\nhelper();\n");
+    $l = $w->definitionOf('b.php', 3, 1);
+    $r = locs($w->referencesTo('b.php', 3, 1));
+    return ($l !== null && $l->file === 'a.php' && $l->line === 2 && $l->col === 10 && $r === ['a.php:2', 'b.php:3'])
+        ?: json_encode([$l, $r]);
+});
+
+check('broken_file_declaration_names_still_resolve', function () {
+    $a = "<?php\nclass Survivor {}\nfunction broken( {\n";
+    $w = new Workspace(lib());
+    $w->open('a.php', $a);
+    $w->open('b.php', "<?php\nnew Survivor;\n");
+    $l = $w->definitionOf('b.php', 2, 6);
+    return ($l !== null && $l->file === 'a.php' && slice_of($a, $l) === 'Survivor') ?: json_encode($l);
+});
+
 exit($fail);

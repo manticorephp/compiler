@@ -13,5 +13,13 @@ final class NameOccurrence
         public readonly int $endLine,
         public readonly int $endCol,
         public readonly bool $globalFallback,
+        public readonly bool $isDecl = false,
+        public readonly string $role = '',
     ) {}
+
+    /** The symbol kind this entry names: a `use` import names its imported kind (class | function | constant). */
+    public function denotes(): string
+    {
+        return $this->kind === 'use' && $this->role !== '' ? $this->role : $this->kind;
+    }
 }
