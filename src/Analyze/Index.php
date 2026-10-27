@@ -105,7 +105,7 @@ final class Index
     /** @var array<string, \Parser\Ast\NameRef[]> written lexeme → member declaration names of the file being collected (parsed with declNames >= 2) */
     private array $curDeclNames = [];
 
-    /** @var array<string, array<string, ?MemberInfo>> lower class FQN → `kind\0name` → memoized lookupMember answer */
+    /** @var array<string, array<string, ?MemberInfo>> lower class FQN → `kind\0name` → memoized lookupMember answer; cleared whole on any class change */
     private array $memberMemo = [];
 
     private string $curNs = '';
@@ -355,8 +355,8 @@ final class Index
 
     private function setClass(string $lower, ?ClassInfo $ci, string $path): void
     {
-        unset($this->memberMemo[$lower]);
-        foreach ($this->implementersOf($lower) as $d) { unset($this->memberMemo[$d]); }
+        // Any class may reach $lower through its hierarchy; a global clear is O(1) and edits are rare against lookups.
+        if ($this->memberMemo !== []) { $this->memberMemo = []; }
         $old = $this->classes[$lower] ?? null;
         if ($old !== null) {
             foreach ($this->edges($old) as $t) {
@@ -535,12 +535,12 @@ final class Index
         }
         if ($isEnum) {
             $sp = $d->span;
-            $out['method:cases'] ??= new MemberInfo('method', 'cases', $fqn, 'public', true, false, 'array', $file, $sp->startLine(), $sp->startColumn());
-            $out['prop:name'] ??= new MemberInfo('prop', 'name', $fqn, 'public', false, false, 'string', $file, $sp->startLine(), $sp->startColumn());
+            $out['method:cases'] ??= new MemberInfo('method', 'cases', $fqn, 'public', true, false, 'array', $file, 0, 0, true);
+            $out['prop:name'] ??= new MemberInfo('prop', 'name', $fqn, 'public', false, false, 'string', $file, 0, 0, true);
             if ($d->enumBackingType !== null) {
-                $out['method:from'] ??= new MemberInfo('method', 'from', $fqn, 'public', true, false, 'static', $file, $sp->startLine(), $sp->startColumn());
-                $out['method:tryfrom'] ??= new MemberInfo('method', 'tryFrom', $fqn, 'public', true, false, '?static', $file, $sp->startLine(), $sp->startColumn());
-                $out['prop:value'] ??= new MemberInfo('prop', 'value', $fqn, 'public', false, false, $d->enumBackingType, $file, $sp->startLine(), $sp->startColumn());
+                $out['method:from'] ??= new MemberInfo('method', 'from', $fqn, 'public', true, false, 'static', $file, 0, 0, true);
+                $out['method:tryfrom'] ??= new MemberInfo('method', 'tryFrom', $fqn, 'public', true, false, '?static', $file, 0, 0, true);
+                $out['prop:value'] ??= new MemberInfo('prop', 'value', $fqn, 'public', false, false, $d->enumBackingType, $file, 0, 0, true);
             }
         }
         return $out;
@@ -551,11 +551,18 @@ final class Index
     {
         $line = $sp->startLine();
         $col = $sp->startColumn();
-        foreach ($this->curDeclNames[$written] ?? [] as $n) {
-            $nl = $n->span->startLine();
-            $nc = $n->span->startColumn();
-            if ($nl > $classEnd) { break; }
-            if ($nl > $line || ($nl === $line && $nc >= $col)) { $line = $nl; $col = $nc; break; }
+        $list = $this->curDeclNames[$written] ?? [];
+        // Lower bound by position: the first entry at or after the declaration start (the list is in source order).
+        $lo = 0;
+        $hi = \count($list);
+        while ($lo < $hi) {
+            $mid = \intdiv($lo + $hi, 2);
+            $nl = $list[$mid]->span->startLine();
+            if ($nl < $line || ($nl === $line && $list[$mid]->span->startColumn() < $col)) { $lo = $mid + 1; } else { $hi = $mid; }
+        }
+        if ($lo < \count($list) && $list[$lo]->span->startLine() <= $classEnd) {
+            $line = $list[$lo]->span->startLine();
+            $col = $list[$lo]->span->startColumn();
         }
         return new MemberInfo($kind, $name, $declClass, $visibility, $isStatic, $isAbstract, $typeHint, $file, $line, $col);
     }
@@ -702,7 +709,12 @@ final class Index
         return null;
     }
 
-    /** @return MemberInfo[] own declarations of $method in every direct and transitive subclass / implementer */
+    /**
+     * Own declarations of $method in every direct and transitive subclass / implementer. An override provided by a
+     * used trait is NOT returned (P3 resolves those).
+     *
+     * @return MemberInfo[]
+     */
     public function overridersOf(string $classFqn, string $method): array
     {
         $key = 'method:' . \strtolower($method);
