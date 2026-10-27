@@ -5165,6 +5165,7 @@ trait EmitLlvmObjects
         if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
             || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_INVOKE
             || $n->kind === Node::KIND_CONCAT || $n->kind === Node::KIND_NEW_OBJ
+            || $n->kind === Node::KIND_NEW_DYN_OBJ || $n->kind === Node::KIND_CLOSURE
             || $n->kind === Node::KIND_STORE_LOCAL || $n->kind === Node::KIND_ARRAY_LIT) {
             return true;
         }
