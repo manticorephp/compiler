@@ -216,17 +216,10 @@ final class Workspace
         $out = $decl === null ? [] : [$decl];
         foreach ($this->names->allOccurrences() as $r) {
             if ($r->denotes() !== 'constant' || $this->constKeyOf($r) === null) { continue; }
-            if (\strcmp(self::normKey($this->constKeyOf($r)), self::normKey($key)) !== 0) { continue; }
+            if (\strcmp(Index::constKey($this->constKeyOf($r)), Index::constKey($key)) !== 0) { continue; }
             $out[] = new Location($r->file, $r->line, $r->col, $r->endLine, $r->endCol);
         }
         return $out;
-    }
-
-    private static function normKey(string $n): string
-    {
-        $n = \ltrim($n, '\\');
-        $bs = \strrpos($n, '\\');
-        return $bs === false ? $n : \strtolower(\substr($n, 0, $bs)) . \substr($n, $bs);
     }
 
     /** @return array<string, bool> the lowercased names an occurrence may denote */

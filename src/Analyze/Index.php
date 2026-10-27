@@ -264,7 +264,7 @@ final class Index
     }
 
     /** Constants are case-sensitive; only the namespace part is folded. */
-    private static function constKey(string $name): string
+    public static function constKey(string $name): string
     {
         $n = \ltrim($name, '\\');
         $bs = \strrpos($n, '\\');
@@ -394,7 +394,23 @@ final class Index
         $name = \ltrim($lit->value, '\\');
         if ($name === '') { return; }
         if ($lowered && $this->curNs !== '') { $name = $this->curNs . '\\' . $name; }
-        $this->curConsts[self::constKey($name)] ??= $lit->span;
+        $key = self::constKey($name);
+        // PHP coerces integer-like array keys to int; such a name would make the map mixed-keyed.
+        if ((string)(int)$key === $key) { return; }
+        $this->curConsts[$key] ??= $lowered ? $lit->span : self::unquoted($lit);
+    }
+
+    /**
+     * The literal's range without its quotes, so a rename replaces just the name. An escaped
+     * literal (source width != value + 2 quotes) keeps the whole literal range.
+     */
+    private static function unquoted(StringLiteral $lit): \Parser\Ast\Span
+    {
+        $sp = $lit->span;
+        $l = $sp->startLine();
+        $c = $sp->startColumn();
+        if ($sp->endLine() !== $l || $sp->endColumn() - $c !== \strlen($lit->value) + 2) { return $sp; }
+        return new \Parser\Ast\RangedSpan($l, $c + 1, $sp->file, $l, $sp->endColumn() - 1);
     }
 
     private function addFunction(FunctionDecl $d): void
