@@ -8423,35 +8423,15 @@ trait EmitLlvmObjects
      */
     private function irIsClosed(string $ir): bool
     {
+        // `%rN = ...` at the start of a line is a definition (parameters are `%aN` and never
+        // match); every other `%rN` is a use. The scan is PCRE's, not a per-byte PHP loop.
+        if (\preg_match_all('/%r[0-9]+/', $ir, $used) === 0) { return true; }
+        \preg_match_all('/^[ \t\r\f\v]*(%r[0-9]+) = /m', $ir, $defs);
+        /** @var array<string, bool> $defined */
         $defined = [];
-        $used = [];
-        foreach (\explode("\n", $ir) as $line) {
-            $t = \ltrim($line);
-            // `%rN = ...` — a definition. Parameters are `%aN` and never match.
-            if (\strncmp($t, '%r', 2) === 0) {
-                $eq = \strpos($t, ' = ');
-                if ($eq !== false) { $defined[\substr($t, 0, $eq)] = true; }
-            }
-            $n = \strlen($line);
-            $i = 0;
-            while ($i < $n) {
-                $c = $line[$i];
-                if ($c === '%' && $i + 1 < $n && $line[$i + 1] === 'r') {
-                    $j = $i + 2;
-                    while ($j < $n) {
-                        $d = $line[$j];
-                        if ($d < '0' || $d > '9') { break; }
-                        $j = $j + 1;
-                    }
-                    if ($j > $i + 2) { $used[\substr($line, $i, $j - $i)] = true; }
-                    $i = $j;
-                    continue;
-                }
-                $i = $i + 1;
-            }
-        }
-        foreach ($used as $u => $_) {
-            if (!isset($defined[$u])) { return false; }
+        foreach ($defs[1] as $d) { $defined[(string)$d] = true; }
+        foreach ($used[0] as $u) {
+            if (!isset($defined[(string)$u])) { return false; }
         }
         return true;
     }

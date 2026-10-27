@@ -2135,6 +2135,7 @@ trait EmitLlvmModule
      */
     private function classCensusIndex(): array
     {
+        if (\count($this->classes) === $this->censusIdxClasses) { return $this->censusIdxMemo; }
         $m = [];
         $i = 0;
         foreach ($this->classes as $cd) {
@@ -2142,8 +2143,14 @@ trait EmitLlvmModule
             $m[$cd->name] = $i;
             $i = $i + 1;
         }
+        $this->censusIdxMemo = $m;
+        $this->censusIdxClasses = \count($this->classes);
         return $m;
     }
+
+    /** @var array<string,int> */
+    private array $censusIdxMemo = [];
+    private int $censusIdxClasses = -1;
 
     /** The dump half: ONE loop, silent for a class that never allocated. */
     private function classCensusDump(): string

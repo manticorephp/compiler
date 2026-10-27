@@ -773,9 +773,13 @@ trait EmitLlvmCalls
         // evaluates them itself, and the table path below is reached only when
         // none did.
         $dynfSyms = [];
-        if (!$hasSpread) {
+        // The candidate set depends on the argument count alone, so every site of that arity shares it.
+        $memoHit = !$hasSpread && isset($this->dynfSymsMemo[$argc]);
+        if ($memoHit) {
+            $dynfSyms = $this->dynfSymsMemo[$argc];
+        } elseif (!$hasSpread) {
             $clean = [];
-            foreach ($this->sigs->returnType as $cname => $crt) {
+            foreach ($this->dynfNameableSigs() as $cname => $crt) {
                 if (!$this->dynfNameable($cname)) { continue; }
                 // Arity by RANGE, not by count: the thunk builds an ordinary call
                 // from its loads, so emitCall fills the omitted defaults exactly as
@@ -806,7 +810,7 @@ trait EmitLlvmCalls
             // only the arity rule differs: the pack supplies whatever the callee
             // wants past the fixed prefix.
             $clean = [];
-            foreach ($this->sigs->returnType as $cname => $crt) {
+            foreach ($this->dynfNameableSigs() as $cname => $crt) {
                 if (!$this->dynfNameable($cname)) { continue; }
                 $cpt = $this->sigs->paramTypes[$cname] ?? [];
                 if (\count($cpt) < $numFixed) { continue; }
@@ -829,7 +833,7 @@ trait EmitLlvmCalls
             }
             if (\count($dynfSyms) < self::DYNF_TABLE_MIN) { $dynfSyms = []; }
         }
-        if ($dynfSyms !== []) {
+        if (!$memoHit && $dynfSyms !== []) {
             $twElem = null;
             if ($hasSpread) {
                 $twSp = $this->asSpreadNode($iv->args[$spreadIdx])->operand->type->element;
@@ -845,6 +849,7 @@ trait EmitLlvmCalls
                 if ($tsym !== '') { $dynfSyms[$bname] = $tsym; }
             }
         }
+        if (!$hasSpread) { $this->dynfSymsMemo[$argc] = $dynfSyms; }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
@@ -873,7 +878,7 @@ trait EmitLlvmCalls
         $out .= '  ' . $rowSafe . ' = select i1 ' . $hasRow . ', ptr ' . $rowIdAddr . ', ptr ' . $this->dynfZeroSym() . "\n";
         $out .= '  ' . $idp . ' = load ptr, ptr ' . $rowSafe . "\n";
         $out .= '  ' . $nameId . ' = ptrtoint ptr ' . $idp . " to i64\n";
-        foreach ($this->sigs->returnType as $fname => $rt) {
+        foreach ($this->dynfNameableSigs() as $fname => $rt) {
             if (!$this->dynfNameable($fname)) { continue; }
             if (isset($dynfSyms[$fname])) { continue; }
             $ptypes = $this->sigs->paramTypes[$fname] ?? [];
@@ -3670,6 +3675,31 @@ trait EmitLlvmCalls
     private function dynfPublicName(string $fname): string
     {
         return \str_starts_with($fname, 'mctwin_') ? \substr($fname, 7) : $fname;
+    }
+
+    /** @var array<int, array<string, string>> argument count → the thunk symbol per table-reachable function */
+    private array $dynfSymsMemo = [];
+    /** @var array<string, Type> */
+    private array $dynfNameableRt = [];
+    private int $dynfNameableCount = -1;
+
+    /**
+     * The nameable functions of the signature table, in table order. A site walks them
+     * per call: filtering 130k method names out each time was the emitter's quadratic.
+     * @return array<string, Type>
+     */
+    private function dynfNameableSigs(): array
+    {
+        $n = \count($this->sigs->returnType);
+        if ($n !== $this->dynfNameableCount) {
+            $this->dynfNameableCount = $n;
+            $this->dynfNameableRt = [];
+            $this->dynfSymsMemo = [];
+            foreach ($this->sigs->returnType as $fname => $rt) {
+                if ($this->dynfNameable((string)$fname)) { $this->dynfNameableRt[(string)$fname] = $rt; }
+            }
+        }
+        return $this->dynfNameableRt;
     }
 
     private function dynfNameable(string $fname): bool
