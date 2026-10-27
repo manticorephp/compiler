@@ -84,21 +84,51 @@ check('dependents_and_implementers', function () use ($A, $B, $C) {
     $d = $i->dependentsOf('n\foo');
     $im = $i->implementersOf('n\i');
     sort($im);
-    $ok = $d === ['n\bar'] && $im === ['n\baz', 'n\bar'] || $im === ['n\bar', 'n\baz'];
+    $ok = ($d === ['n\bar']) && ($im === ['n\bar', 'n\baz']);
     if (!$ok) { return json_encode([$d, $im]); }
     $i->removeFile('c.php');
     return $i->implementersOf('n\i') === ['n\bar'] ?: 'stale reverse map';
 });
 
-check('decl_span', function () use ($A) {
-    $i = Index::build([$A]);
-    $s = $i->declSpan('n\foo');
-    return ($s !== null && $s->line === 1 && $i->declSpan('nope') === null) ?: 'bad span';
+check('decl_span', function () {
+    $i = Index::build([pf('s.php', "<?php\nnamespace N;\n\nfunction g(){}\n\nclass Late {}\n")]);
+    $c = $i->declSpan('n\late');
+    $g = $i->declSpan('n\g');
+    return ($c !== null && $c->line === 6 && $g !== null && $g->line === 4 && $i->declSpan('nope') === null) ?: 'bad span';
+});
+
+check('replace_keeps_declarer_position', function () {
+    $i = new Index();
+    $src = fn(string $m) => "<?php function d(){} class D { function $m(){} }";
+    $i->replaceFile(pf('1.php', $src('a')));
+    $i->replaceFile(pf('2.php', $src('b')));
+    $i->replaceFile(pf('1.php', $src('a')));
+    if ($i->declaringFile('d') !== '1.php') { return 'same content flipped'; }
+    $i->replaceFile(pf('1.php', $src('c')));
+    if ($i->declaringFile('d') !== '1.php' || !isset($i->findClass('D')->methods['c'])) { return 'changed content flipped'; }
+    $i->replaceFile(pf('2.php', $src('e')));
+    if ($i->declaringFile('d') !== '1.php' || isset($i->findClass('D')->methods['e'])) { return 'loser replace stole'; }
+    $i->removeFile('1.php');
+    return ($i->declaringFile('d') === '2.php' && isset($i->findClass('D')->methods['e'])) ?: 'promote after replace';
 });
 
 check('implementer_has_method', function () use ($A, $B, $C) {
     $i = Index::build([$A, $B, $C]);
     return $i->implementerHasMethod('N\I', 'm') && !$i->implementerHasMethod('N\I', 'zzz') ?: 'wrong';
+});
+
+check('implementer_has_method_permissive_branches', function () {
+    $i = Index::build([
+        pf('i.php', '<?php interface I {} interface J {} class Known implements J {}'),
+        pf('x.php', '<?php class X extends Missing { function m(){} }'),
+        pf('y.php', '<?php class Y extends X {}'),
+        pf('t.php', '<?php trait T { function tm(){} } class UsesT { use T; } class UsesMissingT { use MissingT; function mm(){} }'),
+        pf('s.php', '<?php class S { function __toString(): string { return ""; } function sm(){} }'),
+    ]);
+    if (!$i->implementerHasMethod('I', 'm')) { return 'unknown ancestor must be permissive'; }
+    if ($i->implementerHasMethod('I', 'mm') || $i->implementerHasMethod('T', 'tm')) { return 'trait edges are not implementer edges (reaches ignores traits)'; }
+    if (!$i->implementerHasMethod('Stringable', 'sm')) { return 'stringable fallback'; }
+    return !$i->implementerHasMethod('J', 'zzz') ?: 'false positive';
 });
 
 exit($fail);
