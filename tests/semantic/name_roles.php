@@ -2,7 +2,6 @@
 
 require __DIR__ . '/bootstrap.php';
 
-use Analyze\Anon;
 use Analyze\Index;
 use Analyze\ParsedFile;
 use Parser\Parser;
@@ -90,7 +89,7 @@ check('anon_classes_do_not_shadow_across_files', function () {
     $i->replaceFile($mk('a.php', 'ma'));
     $i->replaceFile($mk('b.php', 'mb'));
     $anon = [];
-    foreach ($i->classes as $k => $ci) { if (Anon::isAnon(substr(strrchr('\\' . $k, '\\'), 1))) { $anon[$k] = array_keys($ci->methods); } }
+    foreach ($i->classes as $k => $ci) { if (str_starts_with(substr(strrchr('\\' . $k, '\\'), 1), '__anon_class_')) { $anon[$k] = array_keys($ci->methods); } }
     if (count($anon) !== 2) { return 'anon classes: ' . json_encode(array_keys($i->classes)); }
     $ms = array_map(fn($m) => $m[0], array_values($anon));
     sort($ms);

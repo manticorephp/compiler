@@ -215,8 +215,9 @@ final class Workspace
         /** @var Location[] $out */
         $out = $decl === null ? [] : [$decl];
         foreach ($this->names->allOccurrences() as $r) {
-            if ($r->denotes() !== 'constant' || $this->constKeyOf($r) === null) { continue; }
-            if (\strcmp(Index::constKey($this->constKeyOf($r)), Index::constKey($key)) !== 0) { continue; }
+            $rk = $this->constKeyOf($r);
+            if ($r->denotes() !== 'constant' || $rk === null) { continue; }
+            if (\strcmp(Index::constKey($rk), Index::constKey($key)) !== 0) { continue; }
             $out[] = new Location($r->file, $r->line, $r->col, $r->endLine, $r->endCol);
         }
         return $out;

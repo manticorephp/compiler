@@ -99,6 +99,9 @@ final class Index
     /** @var array<string, \Parser\Ast\Span> */
     private array $curConsts = [];
 
+    /** @var array<string, bool> kind . path . NUL . key → the declaration is kept from before the file broke, not present in its tree */
+    private array $sticky = [];
+
     private string $curNs = '';
 
     private ?ParsedFile $curFile = null;
@@ -147,14 +150,18 @@ final class Index
                 if (isset($this->curFns[$l])) { continue; }
                 $this->curFns[$l] = $fi;
                 $this->curFnSpans[$l] = $oldFnSpans[$l];
+                $this->sticky['f' . $path . "\0" . $l] = true;
             }
             foreach ($oldClasses as $l => $ci) {
                 if (isset($this->curClasses[$l])) { continue; }
                 $this->curClasses[$l] = $ci;
                 $this->curSpans[$l] = $oldSpans[$l];
+                $this->sticky['c' . $path . "\0" . $l] = true;
             }
             foreach ($oldConsts as $k => $sp) {
-                if (!isset($this->curConsts[$k])) { $this->curConsts[$k] = $sp; }
+                if (isset($this->curConsts[$k])) { continue; }
+                $this->curConsts[$k] = $sp;
+                $this->sticky['k' . $path . "\0" . $k] = true;
             }
         }
         $this->fileFns[$path] = $this->curFns;
@@ -166,27 +173,19 @@ final class Index
             $this->fnDeclarers[$l] ??= [];
             $at = \min($fnPos[$l] ?? \PHP_INT_MAX, \count($this->fnDeclarers[$l]));
             \array_splice($this->fnDeclarers[$l], $at, 0, [$path]);
-            if ($at === 0) {
-                $this->functions[$l] = $fi;
-                $this->fnWinner[$l] = $path;
-            }
+            $this->electFn($l);
         }
         foreach ($this->curClasses as $l => $ci) {
             $this->classDeclarers[$l] ??= [];
             $at = \min($classPos[$l] ?? \PHP_INT_MAX, \count($this->classDeclarers[$l]));
             \array_splice($this->classDeclarers[$l], $at, 0, [$path]);
-            if ($at === 0) {
-                $this->setClass($l, $ci, $path);
-            }
+            $this->electClass($l);
         }
         foreach ($this->curConsts as $k => $sp) {
             $this->constDeclarers[$k] ??= [];
             $at = \min($constPos[$k] ?? \PHP_INT_MAX, \count($this->constDeclarers[$k]));
             \array_splice($this->constDeclarers[$k], $at, 0, [$path]);
-            if ($at === 0) {
-                $this->consts[$k] = $sp;
-                $this->constWinner[$k] = $path;
-            }
+            $this->electConst($k);
         }
         $this->curFns = [];
         $this->curClasses = [];
@@ -205,10 +204,7 @@ final class Index
                 unset($this->fnDeclarers[$l], $this->functions[$l], $this->fnWinner[$l]);
             } else {
                 $this->fnDeclarers[$l] = $q;
-                if ($this->fnWinner[$l] === $path) {
-                    $this->fnWinner[$l] = $q[0];
-                    $this->functions[$l] = $this->fileFns[$q[0]][$l];
-                }
+                $this->electFn($l);
             }
         }
         foreach ($this->fileClasses[$path] as $l => $_) {
@@ -217,11 +213,9 @@ final class Index
             if ($q === []) {
                 unset($this->classDeclarers[$l]);
                 $this->setClass($l, null, '');
-            } elseif ($this->classWinner[$l] === $path) {
-                $this->classDeclarers[$l] = $q;
-                $this->setClass($l, $this->fileClasses[$q[0]][$l], $q[0]);
             } else {
                 $this->classDeclarers[$l] = $q;
+                $this->electClass($l);
             }
         }
         foreach ($this->fileConsts[$path] ?? [] as $k => $_) {
@@ -231,13 +225,46 @@ final class Index
                 unset($this->constDeclarers[$k], $this->consts[$k], $this->constWinner[$k]);
             } else {
                 $this->constDeclarers[$k] = $q;
-                if ($this->constWinner[$k] === $path) {
-                    $this->constWinner[$k] = $q[0];
-                    $this->consts[$k] = $this->fileConsts[$q[0]][$k];
-                }
+                $this->electConst($k);
             }
         }
+        foreach ($this->fileFns[$path] as $l => $_) { unset($this->sticky['f' . $path . "\0" . $l]); }
+        foreach ($this->fileClasses[$path] as $l => $_) { unset($this->sticky['c' . $path . "\0" . $l]); }
+        foreach ($this->fileConsts[$path] ?? [] as $k => $_) { unset($this->sticky['k' . $path . "\0" . $k]); }
         unset($this->fileFns[$path], $this->fileClasses[$path], $this->fileSpans[$path], $this->fileFnSpans[$path], $this->fileConsts[$path]);
+    }
+
+    /**
+     * The first declarer in order whose declaration is live; a kept (sticky) one only when every declarer is.
+     *
+     * @param string[] $declarers
+     */
+    private function liveFirst(array $declarers, string $kind, string $key): string
+    {
+        foreach ($declarers as $p) {
+            if (!isset($this->sticky[$kind . $p . "\0" . $key])) { return $p; }
+        }
+        return $declarers[0];
+    }
+
+    private function electFn(string $l): void
+    {
+        $w = $this->liveFirst($this->fnDeclarers[$l], 'f', $l);
+        $this->fnWinner[$l] = $w;
+        $this->functions[$l] = $this->fileFns[$w][$l];
+    }
+
+    private function electClass(string $l): void
+    {
+        $w = $this->liveFirst($this->classDeclarers[$l], 'c', $l);
+        $this->setClass($l, $this->fileClasses[$w][$l], $w);
+    }
+
+    private function electConst(string $k): void
+    {
+        $w = $this->liveFirst($this->constDeclarers[$k], 'k', $k);
+        $this->constWinner[$k] = $w;
+        $this->consts[$k] = $this->fileConsts[$w][$k];
     }
 
     /**
@@ -398,6 +425,7 @@ final class Index
         // PHP coerces integer-like array keys to int; such a name would make the map mixed-keyed.
         if ((string)(int)$key === $key) { return; }
         if (isset($this->curConsts[$key])) { return; }
+        // #502: keep this if/assign form until BOOTSTRAP_VERSION names a release containing the fix
         $span = $lit->span;
         if (!$lowered) { $span = self::unquoted($lit); }
         $this->curConsts[$key] = $span;
