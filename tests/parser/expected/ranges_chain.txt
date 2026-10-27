@@ -73,30 +73,30 @@ Program
           Expr:BinaryOp @5:6-5:20
             op: "."
             left:
-              Expr:BinaryOp @5:6-5:20
+              Expr:BinaryOp @5:6-5:12
                 op: "."
                 left:
-                  Expr:BinaryOp @5:6-5:20
+                  Expr:BinaryOp @5:6-5:11
                     op: "."
                     left:
-                      Expr:StringLiteral @5:6-5:20
+                      Expr:StringLiteral @5:7-5:9
                         value: "a "
                     right:
-                      Expr:Cast @5:6-5:20
+                      Expr:Cast @5:9-5:11
                         cast: "string"
                         operand:
-                          Expr:Variable @5:6-5:20
+                          Expr:Variable @5:9-5:11
                             name: "b"
                 right:
-                  Expr:StringLiteral @5:6-5:20
+                  Expr:StringLiteral @5:11-5:12
                     value: " "
             right:
-              Expr:Cast @5:6-5:20
+              Expr:Cast @5:13-5:18
                 cast: "string"
                 operand:
-                  Expr:PropertyAccess @5:6-5:20
+                  Expr:PropertyAccess @5:13-5:18
                     object:
-                      Expr:Variable @5:6-5:20
+                      Expr:Variable @5:13-5:15
                         name: "c"
                     property: "d"
                     nullsafe: false

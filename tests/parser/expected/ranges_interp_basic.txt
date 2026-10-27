@@ -1,0 +1,116 @@
+Program
+  Stmt:Expression @2:1-2:15
+    expr:
+      Expr:Assign @2:1-2:14
+        target:
+          Expr:Variable @2:1-2:3
+            name: "a"
+        value:
+          Expr:BinaryOp @2:6-2:14
+            op: "."
+            left:
+              Expr:BinaryOp @2:6-2:11
+                op: "."
+                left:
+                  Expr:StringLiteral @2:7-2:9
+                    value: "a "
+                right:
+                  Expr:Cast @2:9-2:11
+                    cast: "string"
+                    operand:
+                      Expr:Variable @2:9-2:11
+                        name: "x"
+            right:
+              Expr:StringLiteral @2:11-2:13
+                value: " b"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @3:1-3:19
+    expr:
+      Expr:Assign @3:1-3:18
+        target:
+          Expr:Variable @3:1-3:3
+            name: "b"
+        value:
+          Expr:Cast @3:6-3:18
+            cast: "string"
+            operand:
+              Expr:MethodCall @3:8-3:16
+                object:
+                  Expr:Variable @3:8-3:10
+                    name: "o"
+                method: "m"
+                args: [1]
+                  Expr:IntLiteral @3:14-3:15
+                    value: 1
+                nullsafe: false
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @4:1-4:14
+    expr:
+      Expr:Assign @4:1-4:13
+        target:
+          Expr:Variable @4:1-4:3
+            name: "c"
+        value:
+          Expr:Cast @4:6-4:13
+            cast: "string"
+            operand:
+              Expr:ArrayAccess @4:7-4:12
+                array:
+                  Expr:Variable @4:7-4:9
+                    name: "a"
+                index:
+                  Expr:IntLiteral @4:10-4:11
+                    value: 0
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @5:1-5:14
+    expr:
+      Expr:Assign @5:1-5:13
+        target:
+          Expr:Variable @5:1-5:3
+            name: "d"
+        value:
+          Expr:Cast @5:6-5:13
+            cast: "string"
+            operand:
+              Expr:PropertyAccess @5:7-5:12
+                object:
+                  Expr:Variable @5:7-5:9
+                    name: "o"
+                property: "p"
+                nullsafe: false
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @6:1-6:13
+    expr:
+      Expr:Assign @6:1-6:12
+        target:
+          Expr:Variable @6:1-6:3
+            name: "e"
+        value:
+          Expr:StringLiteral @6:6-6:12
+            value: "${x}"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @7:1-7:18
+    expr:
+      Expr:Assign @7:1-7:17
+        target:
+          Expr:Variable @7:1-7:3
+            name: "f"
+        value:
+          Expr:Cast @7:6-7:17
+            cast: "string"
+            operand:
+              Expr:ArrayAccess @7:8-7:15
+                array:
+                  Expr:Variable @7:8-7:10
+                    name: "a"
+                index:
+                  Expr:StringLiteral @7:11-7:14
+                    value: "k"
+    docComment: null
+    attributes: [0]
+

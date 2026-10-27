@@ -1,0 +1,198 @@
+Program
+  Stmt:Expression @2:1-4:6
+    expr:
+      Expr:Assign @2:1-4:5
+        target:
+          Expr:Variable @2:1-2:3
+            name: "a"
+        value:
+          Expr:BinaryOp @2:6-4:5
+            op: "."
+            left:
+              Expr:BinaryOp @2:6-3:24
+                op: "."
+                left:
+                  Expr:BinaryOp @2:6-3:14
+                    op: "."
+                    left:
+                      Expr:BinaryOp @2:6-3:9
+                        op: "."
+                        left:
+                          Expr:StringLiteral @2:7-3:7
+                            value: "first
+ line "
+                        right:
+                          Expr:Cast @3:7-3:9
+                            cast: "string"
+                            operand:
+                              Expr:Variable @3:7-3:9
+                                name: "x"
+                    right:
+                      Expr:StringLiteral @3:9-3:14
+                        value: " and "
+                right:
+                  Expr:Cast @3:15-3:23
+                    cast: "string"
+                    operand:
+                      Expr:MethodCall @3:15-3:23
+                        object:
+                          Expr:Variable @3:15-3:17
+                            name: "o"
+                        method: "m"
+                        args: [1]
+                          Expr:IntLiteral @3:21-3:22
+                            value: 2
+                        nullsafe: false
+            right:
+              Expr:StringLiteral @3:24-4:4
+                value: "
+end"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @5:1-5:25
+    expr:
+      Expr:Assign @5:1-5:24
+        target:
+          Expr:Variable @5:1-5:3
+            name: "b"
+        value:
+          Expr:BinaryOp @5:6-5:24
+            op: "."
+            left:
+              Expr:BinaryOp @5:6-5:19
+                op: "."
+                left:
+                  Expr:BinaryOp @5:6-5:15
+                    op: "."
+                    left:
+                      Expr:StringLiteral @5:7-5:13
+                        value: "é日 "
+                    right:
+                      Expr:Cast @5:13-5:15
+                        cast: "string"
+                        operand:
+                          Expr:Variable @5:13-5:15
+                            name: "y"
+                right:
+                  Expr:StringLiteral @5:15-5:19
+                    value: " é "
+            right:
+              Expr:Cast @5:20-5:22
+                cast: "string"
+                operand:
+                  Expr:Variable @5:20-5:22
+                    name: "z"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @6:1-6:27
+    expr:
+      Expr:Assign @6:1-6:26
+        target:
+          Expr:Variable @6:1-6:3
+            name: "c"
+        value:
+          Expr:BinaryOp @6:6-6:26
+            op: "."
+            left:
+              Expr:BinaryOp @6:6-6:24
+                op: "."
+                left:
+                  Expr:BinaryOp @6:6-6:22
+                    op: "."
+                    left:
+                      Expr:BinaryOp @6:6-6:19
+                        op: "."
+                        left:
+                          Expr:BinaryOp @6:6-6:17
+                            op: "."
+                            left:
+                              Expr:BinaryOp @6:6-6:13
+                                op: "."
+                                left:
+                                  Expr:StringLiteral @6:7-6:11
+                                    value: "q\" "
+                                right:
+                                  Expr:Cast @6:11-6:13
+                                    cast: "string"
+                                    operand:
+                                      Expr:Variable @6:11-6:13
+                                        name: "p"
+                            right:
+                              Expr:StringLiteral @6:13-6:17
+                                value: " $ "
+                        right:
+                          Expr:Cast @6:17-6:19
+                            cast: "string"
+                            operand:
+                              Expr:Variable @6:17-6:19
+                                name: "r"
+                    right:
+                      Expr:StringLiteral @6:19-6:22
+                        value: " \\{"
+                right:
+                  Expr:Cast @6:22-6:24
+                    cast: "string"
+                    operand:
+                      Expr:Variable @6:22-6:24
+                        name: "s"
+            right:
+              Expr:StringLiteral @6:24-6:25
+                value: "}"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @7:1-7:14
+    expr:
+      Expr:Assign @7:1-7:13
+        target:
+          Expr:Variable @7:1-7:3
+            name: "d"
+        value:
+          Expr:BinaryOp @7:6-7:13
+            op: "."
+            left:
+              Expr:StringLiteral @7:7-7:9
+                value: "a "
+            right:
+              Expr:Cast @7:10-7:12
+                cast: "string"
+                operand:
+                  Expr:Variable @7:10-7:12
+                    name: "x"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @8:1-8:12
+    expr:
+      Expr:Assign @8:1-8:12
+        target:
+          Expr:Variable @8:1-8:3
+            name: "e"
+        value:
+          Expr:Cast @8:6-8:12
+            cast: "string"
+            operand:
+              Expr:ArrayAccess @8:8-8:11
+                array:
+                  Expr:Variable @8:8-8:10
+                    name: "a"
+                index:
+                  Expr:Error @8:11-8:11
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @8:12-8:13
+    expr:
+      Expr:Identifier @8:12-8:13
+        name: "b"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @8:13-8:18
+    expr:
+      Expr:StringLiteral @8:13-8:17
+        value: "]}"
+    docComment: null
+    attributes: [0]
+error 7:9-7:12 Unterminated "{$" interpolation
+error 8:7-8:11 Unterminated "{$" interpolation
+error 8:11-8:11 unexpected token in expression: Eof
+error 8:12-8:13 expected ';' after expression
+error 8:13-8:17 expected ';' after expression
+
