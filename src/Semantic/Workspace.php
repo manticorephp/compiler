@@ -44,6 +44,9 @@ final class Workspace
     /** @var array<string, UnitLookup> uri => expression -> unit map, built on the first typed query; same lifetime as exprAt */
     private array $unitLookups = [];
 
+    /** @var array<string, VarIndex> uri => variable bindings, built on the first variable query; same lifetime as exprAt */
+    private array $varIndexes = [];
+
     /** @var array<string, array<string, MemberInfo[]|null>> uri => "line:col" => resolved member use site; cleared on ANY file change (a class elsewhere may have moved) */
     private array $siteCache = [];
 
@@ -71,7 +74,7 @@ final class Workspace
         } else {
             unset($this->parseErrors[$uri]);
         }
-        unset($this->unitLookups[$uri]);
+        unset($this->unitLookups[$uri], $this->varIndexes[$uri]);
         $this->siteCache = [];
         $this->asts[$uri] = $pf;
         $this->lines[$uri] = new LineIndex($text);
@@ -95,14 +98,14 @@ final class Workspace
     public function close(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->varIndexes[$uri]);
         unset($this->siteCache[$uri]);
     }
 
     public function remove(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->parseErrors[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->varIndexes[$uri], $this->parseErrors[$uri]);
         $this->siteCache = [];
         $this->index->removeFile($uri);
         $this->names->removeFile($uri);
@@ -166,6 +169,11 @@ final class Workspace
     public function definitionOf(string $uri, int $line, int $col): ?Location
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o === null || $o->kind === 'variable') {
+            $vi = $this->varsAt($uri, $line, $col);
+            if ($vi !== null) { return $vi->definitionOf($vi->bindingAt($line, $col)); }
+            if ($o !== null) { return null; }
+        }
         if ($o === null) {
             $k = $this->index->constAt($uri, $line, $col);
             return $k === null ? null : $this->constLocation($k);
@@ -202,6 +210,8 @@ final class Workspace
      * class Foo, function foo and constant FOO never collide. A global-fallback name that no
      * namespaced declaration answers for counts as the global name, so a global call and an
      * unqualified namespaced call to the same function find each other.
+     * A variable (use, parameter, catch, global, static, closure `use` entry) answers with the sites of its binding (see VarIndex); a promoted
+     * constructor parameter stays the PROPERTY (member wins) and its family also lists the constructor-local variable uses of the parameter.
      * A member (enum case, class constant, method, property) resolves through its receiver type: the whole override
      * family (Index::memberFamily: ancestors, descendants, interfaces, traits, siblings; private members and
      * constructors excepted) and every use site that resolves to one of them; a site whose receiver is unknown is
@@ -212,6 +222,11 @@ final class Workspace
     public function referencesTo(string $uri, int $line, int $col): array
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o === null || $o->kind === 'variable') {
+            $vi = $this->varsAt($uri, $line, $col);
+            if ($vi !== null) { return $vi->sitesOf($vi->bindingAt($line, $col)); }
+            if ($o !== null) { return []; }
+        }
         $ck = $o === null ? $this->index->constAt($uri, $line, $col) : ($o->denotes() === 'constant' ? $this->constKeyOf($o) : null);
         if ($ck !== null) { return $this->constReferences($ck); }
         if ($o === null) { return []; }
@@ -291,6 +306,11 @@ final class Workspace
     public function uncertainSitesFor(string $uri, int $line, int $col): array
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o === null || $o->kind === 'variable') {
+            $vi = $this->varsAt($uri, $line, $col);
+            if ($vi !== null) { return $this->variableUncertain($uri, $vi, $vi->bindingAt($line, $col)); }
+            if ($o !== null) { return []; }
+        }
         if ($o === null) { return []; }
         $out = $this->names->uncertainSites($o->resolvedLower);
         if ($o->kind !== 'member') { return $out; }
@@ -349,6 +369,11 @@ final class Workspace
     public function renameBlockers(string $uri, int $line, int $col): array
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o === null || $o->kind === 'variable') {
+            $vi = $this->varsAt($uri, $line, $col);
+            if ($vi !== null) { return $this->variableBlockers($uri, $vi, $vi->bindingAt($line, $col)); }
+            if ($o !== null) { return []; }
+        }
         if ($o === null) { return []; }
         $out = [];
         if ($o->kind === 'member') {
@@ -371,6 +396,70 @@ final class Workspace
                 if ($s->reason === 'named-argument') { $out[] = 'named-argument:' . $s->file . ':' . $s->line . ':' . $s->col; }
             }
         }
+        return \array_values(\array_unique($out));
+    }
+
+    /** The variable bindings of an open file, built on first use. */
+    private function varsOf(string $uri): ?VarIndex
+    {
+        $pf = $this->asts[$uri] ?? null;
+        if ($pf === null) { return null; }
+        if (!isset($this->varIndexes[$uri])) { $this->varIndexes[$uri] = VarIndex::build($pf->program, $uri); }
+        return $this->varIndexes[$uri];
+    }
+
+    /** The file's bindings when a variable (a use, or a parameter / catch / global / static declaration) covers the point. */
+    private function varsAt(string $uri, int $line, int $col): ?VarIndex
+    {
+        $vi = $this->varsOf($uri);
+        return $vi !== null && $vi->bindingAt($line, $col) >= 0 ? $vi : null;
+    }
+
+    /**
+     * Uncertain sites of a variable: heredoc text, `compact('x')`, dynamic-variable and include scopes it is visible in,
+     * and (`global-scope`) the `global` statements and `{main}` variables of the same name in OTHER files when the
+     * variable is a `{main}` one or reached by `global`.
+     *
+     * @return UncertainSite[]
+     */
+    private function variableUncertain(string $uri, VarIndex $vi, int $b): array
+    {
+        $out = $vi->uncertainOf($b);
+        if (!$vi->isGlobalScoped($b) || $vi->isSpecial($b)) { return $out; }
+        $name = $vi->nameOf($b);
+        foreach ($this->names->allOccurrences() as $c) {
+            if ($c->file !== $uri && $c->kind === 'variable' && $c->role === 'global' && $c->resolved === $name) {
+                $out[] = new UncertainSite($c->file, $c->line, $c->col, 'global-scope');
+            }
+        }
+        foreach ($this->asts as $other => $_) {
+            if ($other === $uri) { continue; }
+            $ov = $this->varsOf($other);
+            $ob = $ov === null ? -1 : $ov->mainBinding($name);
+            if ($ob < 0) { continue; }
+            foreach ($ov->sitesOf($ob) as $l) { $out[] = new UncertainSite($l->file, $l->line, $l->col, 'global-scope'); }
+        }
+        /** @var array<string, UncertainSite> $seen */
+        $seen = [];
+        foreach ($out as $s) { $seen[$s->reason . ':' . $s->file . ':' . $s->line . ':' . $s->col] = $s; }
+        return \array_values($seen);
+    }
+
+    /**
+     * `special-variable` (`$this`, superglobals), `promoted-parameter` (the variable is a promoted constructor parameter:
+     * rename it from the parameter, which renames the property too), and every uncertain site as `reason:file:line:col`.
+     *
+     * @return string[]
+     */
+    private function variableBlockers(string $uri, VarIndex $vi, int $b): array
+    {
+        $out = [];
+        if ($vi->isSpecial($b)) { $out[] = 'special-variable'; }
+        foreach ($vi->declSitesOf($b) as $d) {
+            $m = $this->names->occurrenceAt($uri, $d->line, $d->col);
+            if ($m !== null && $m->kind === 'member') { $out[] = 'promoted-parameter'; }
+        }
+        foreach ($this->variableUncertain($uri, $vi, $b) as $s) { $out[] = $s->reason . ':' . $s->file . ':' . $s->line . ':' . $s->col; }
         return \array_values(\array_unique($out));
     }
 
@@ -429,6 +518,12 @@ final class Workspace
                 $want[MemberResolver::key($fm)] = true;
                 $l = $this->memberLocation($fm);
                 if ($l !== null) { $out[self::locKey($l)] = $l; }
+                // a promoted constructor parameter is also a variable: its uses in the constructor body belong to the family
+                $vi = $fm->kind === 'prop' && $l !== null ? $this->varsOf($l->file) : null;
+                $vb = $vi === null ? -1 : $vi->declAt($l->line, $l->col);
+                if ($vi !== null && $vb >= 0) {
+                    foreach ($vi->sitesOf($vb) as $vl) { $out[self::locKey($vl)] = $vl; }
+                }
             }
         }
         $family = $this->familyOf($o);
