@@ -1,0 +1,63 @@
+Program
+  Stmt:Expression @2:1-5:7
+    expr:
+      Expr:Assign @2:1-5:6
+        target:
+          Expr:Variable @2:1-2:3
+            name: "h"
+        value:
+          Expr:BinaryOp @2:6-5:6
+            op: "."
+            left:
+              Expr:BinaryOp @2:6-5:6
+                op: "."
+                left:
+                  Expr:BinaryOp @2:6-5:6
+                    op: "."
+                    left:
+                      Expr:StringLiteral @2:6-5:6
+                        value: "one "
+                    right:
+                      Expr:Cast @2:6-5:6
+                        cast: "string"
+                        operand:
+                          Expr:Variable @2:6-5:6
+                            name: "x"
+                right:
+                  Expr:StringLiteral @2:6-5:6
+                    value: "
+  two "
+            right:
+              Expr:Cast @2:6-5:6
+                cast: "string"
+                operand:
+                  Expr:MethodCall @2:6-5:6
+                    object:
+                      Expr:Variable @2:6-5:6
+                        name: "o"
+                    method: "m"
+                    args: [0]
+                    nullsafe: false
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @6:1-6:17
+    expr:
+      Expr:Assign @6:1-6:16
+        target:
+          Expr:Variable @6:1-6:3
+            name: "n"
+        value:
+          Expr:BinaryOp @6:6-6:16
+            op: "."
+            left:
+              Expr:StringLiteral @6:7-6:13
+                value: "after "
+            right:
+              Expr:Cast @6:13-6:15
+                cast: "string"
+                operand:
+                  Expr:Variable @6:13-6:15
+                    name: "y"
+    docComment: null
+    attributes: [0]
+
