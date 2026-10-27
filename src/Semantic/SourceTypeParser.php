@@ -16,13 +16,15 @@ use Compile\TypeHint\GenericCursor;
  */
 final class SourceTypeParser
 {
+    private const MAX_DEPTH = 64;
+
     public static function fromHint(?string $hint, string $currentClassFqn = ''): ?SourceType
     {
         if ($hint === null) { return null; }
         $len = \strlen($hint);
         if ($len === 0) { return null; }
         $c = new GenericCursor($hint, 0, $len);
-        $t = self::parseUnion($c, $currentClassFqn, true);
+        $t = self::parseUnion($c, $currentClassFqn, true, 0);
         if ($t === null) { return null; }
         self::ws($c);
         return $c->pos === $c->len ? $t : null;
@@ -47,24 +49,29 @@ final class SourceTypeParser
         return $bare ? $doc : $native;
     }
 
-    private static function parseUnion(GenericCursor $c, string $cls, bool $allowUnion): ?SourceType
+    private static function parseUnion(GenericCursor $c, string $cls, bool $allowUnion, int $d): ?SourceType
     {
         self::ws($c);
         if (self::peek($c) === '?') {
             $c->pos = $c->pos + 1;
-            $inner = self::parseInter($c, $cls);
+            $inner = self::parseInter($c, $cls, $d);
             if ($inner === null) { return null; }
             return $inner->kind === SourceType::NULLABLE ? $inner : new SourceType(SourceType::NULLABLE, '', [$inner]);
         }
         $arms = [];
         while (true) {
-            $a = self::parseInter($c, $cls);
+            $a = self::parseInter($c, $cls, $d);
             if ($a === null) { return null; }
             $arms[] = $a;
             self::ws($c);
             if ($allowUnion && self::peek($c) === '|') { $c->pos = $c->pos + 1; continue; }
             break;
         }
+        $allNull = true;
+        foreach ($arms as $a) {
+            if (!($a->kind === SourceType::SCALAR && $a->name === 'null')) { $allNull = false; break; }
+        }
+        if ($allNull && \count($arms) > 1) { return null; }
         if (\count($arms) === 1) { return $arms[0]; }
         if (\count($arms) === 2) {
             for ($i = 0; $i < 2; $i = $i + 1) {
@@ -78,11 +85,11 @@ final class SourceTypeParser
         return new SourceType(SourceType::UNION, '', $arms);
     }
 
-    private static function parseInter(GenericCursor $c, string $cls): ?SourceType
+    private static function parseInter(GenericCursor $c, string $cls, int $d): ?SourceType
     {
         $arms = [];
         while (true) {
-            $a = self::parseAtom($c, $cls);
+            $a = self::parseAtom($c, $cls, $d);
             if ($a === null) { return null; }
             $arms[] = $a;
             self::ws($c);
@@ -92,13 +99,14 @@ final class SourceTypeParser
         return \count($arms) === 1 ? $arms[0] : new SourceType(SourceType::INTERSECTION, '', $arms);
     }
 
-    private static function parseAtom(GenericCursor $c, string $cls): ?SourceType
+    private static function parseAtom(GenericCursor $c, string $cls, int $d): ?SourceType
     {
+        if ($d > self::MAX_DEPTH) { return null; }
         self::ws($c);
         $ch = self::peek($c);
         if ($ch === '(') {
             $c->pos = $c->pos + 1;
-            $t = self::parseUnion($c, $cls, true);
+            $t = self::parseUnion($c, $cls, true, $d + 1);
             if ($t === null) { return null; }
             self::ws($c);
             if (self::peek($c) !== ')') { return null; }
@@ -136,7 +144,7 @@ final class SourceTypeParser
             $c->pos = $c->pos + 1;
             $hasArgs = true;
             while (true) {
-                $a = self::parseUnion($c, $cls, true);
+                $a = self::parseUnion($c, $cls, true, $d + 1);
                 if ($a === null) { return null; }
                 $args[] = $a;
                 self::ws($c);
@@ -147,14 +155,14 @@ final class SourceTypeParser
             $c->pos = $c->pos + 1;
         }
         if (self::peek($c) === '(' && !$hasArgs && ($low === 'callable' || $low === 'closure')) {
-            $cb = self::parseCallable($c, $low === 'callable' ? 'callable' : $name, $cls);
+            $cb = self::parseCallable($c, $low === 'callable' ? 'callable' : $name, $cls, $d + 1);
             return $cb === null ? null : self::postfix($c, $cb);
         }
         $t = self::named($name, $low, $args, $hasArgs, $cls);
         return $t === null ? null : self::postfix($c, $t);
     }
 
-    private static function parseCallable(GenericCursor $c, string $name, string $cls): ?SourceType
+    private static function parseCallable(GenericCursor $c, string $name, string $cls, int $d): ?SourceType
     {
         $c->pos = $c->pos + 1;
         $params = [];
@@ -163,7 +171,7 @@ final class SourceTypeParser
             $c->pos = $c->pos + 1;
         } else {
             while (true) {
-                $p = self::parseUnion($c, $cls, true);
+                $p = self::parseUnion($c, $cls, true, $d);
                 if ($p === null) { return null; }
                 $params[] = $p;
                 self::ws($c);
@@ -182,7 +190,7 @@ final class SourceTypeParser
         self::ws($c);
         if (self::peek($c) === ':') {
             $c->pos = $c->pos + 1;
-            $ret = self::parseAtom($c, $cls);
+            $ret = self::parseAtom($c, $cls, $d);
             if ($ret === null) { return null; }
         }
         return new SourceType(SourceType::CALLABLE, $name, $params, '', $ret);

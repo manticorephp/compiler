@@ -85,4 +85,34 @@ check('malformed_is_null_no_throw', function () {
     return true;
 });
 
+check('depth_limit_and_pathological', function () {
+    $nul = fn(string $h) => SourceTypeParser::fromHint($h) === null;
+    $n = 1000;
+    if (!$nul(str_repeat('array<', $n) . 'int' . str_repeat('>', $n))) { return 'deep generic closed'; }
+    if (!$nul(str_repeat('array<', $n))) { return 'deep generic unclosed'; }
+    if (!$nul(str_repeat('(', $n) . 'int' . str_repeat(')', $n))) { return 'deep parens'; }
+    if (!$nul(str_repeat('(', $n))) { return 'deep parens unclosed'; }
+    if (!$nul(str_repeat('callable(', $n) . 'int' . str_repeat(')', $n))) { return 'deep callable'; }
+    if (!$nul(str_repeat('callable(', $n))) { return 'deep callable unclosed'; }
+    $s = SourceTypeParser::fromHint(str_repeat('array<', 60) . 'int' . str_repeat('>', 60));
+    if ($s === null || $s->toString() !== str_repeat('array<', 60) . 'int' . str_repeat('>', 60)) { return '60-deep generic'; }
+    $p = SourceTypeParser::fromHint(str_repeat('(', 60) . 'int' . str_repeat(')', 60));
+    if (ts($p) !== 'int') { return '60-deep parens'; }
+    $u = SourceTypeParser::fromHint(implode('|', array_fill(0, 100000, 'int')));
+    if ($u === null || $u->kind !== SourceType::UNION || count($u->args) !== 100000) { return '100k union parses as UNION'; }
+    return true;
+});
+
+check('null_only_union_is_null', function () {
+    foreach (['null|null', 'null|null|null'] as $in) {
+        if (SourceTypeParser::fromHint($in) !== null) { return $in; }
+    }
+    return ts(SourceTypeParser::fromHint('null')) === 'null' ?: 'bare null';
+});
+
+check('callable_return_binds_tight_rest_is_union_arm', function () {
+    $t = SourceTypeParser::fromHint('callable(): A|B');
+    return ($t !== null && $t->kind === SourceType::UNION && $t->toString() === 'callable():A|B') ?: ts($t);
+});
+
 exit($fail);
