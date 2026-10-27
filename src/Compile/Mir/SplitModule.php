@@ -698,6 +698,8 @@ final class SplitModule
         $start = 0;
         /** @var array<string, bool> */
         $refs = [];
+        // The body of the define being read, scanned for `@symbol` once at its closing brace.
+        $body = '';
         while (true) {
             // fgets stops at the BUFFER as readily as at the newline, and this
             // module has global initialisers whose single line runs to megabytes
@@ -716,13 +718,12 @@ final class SplitModule
             }
             if ($line === '') { break; }
             $n = \strlen($line);
-            // The stored text must match `run`'s: lines joined by "\n" with the
-            // closing brace's newline included, since run appends one itself.
-            $bare = \rtrim($line, "\n");
             if ($cur !== '') {
-                $this->collectRefs($bare, $refs);
+                $body .= $line;
                 $pos = $pos + $n;
-                if (\rtrim($bare) === '}') {
+                if ($line[0] === '}' && \rtrim($line) === '}') {
+                    $this->collectRefsBulk($body, $refs);
+                    $body = '';
                     $defOff[$cur] = $start;
                     $defSize[$cur] = $pos - $start;
                     $defRefs[$cur] = $refs;
@@ -732,6 +733,9 @@ final class SplitModule
                 }
                 continue;
             }
+            // The stored text must match `run`'s: lines joined by "\n" with the
+            // closing brace's newline included, since run appends one itself.
+            $bare = \rtrim($line, "\n");
             if (\strlen($bare) > 7 && \substr($bare, 0, 7) === 'define ') {
                 $sym = $this->defineSymbol($bare);
                 if ($sym === '') { $header[] = $bare; $pos = $pos + $n; continue; }
@@ -1025,6 +1029,26 @@ final class SplitModule
             if ($s !== '') { $into[$s] = true; }
             $i = $at + 1 + \strlen($s);
             if ($i <= $at) { $i = $at + 1; }
+        }
+    }
+
+    /**
+     * {@see collectRefs} over a whole body: one PCRE pass instead of a per-byte symbol reader
+     * per `@`. A quoted symbol stays on its line, as it does line by line.
+     *
+     * @param array<string, bool> $into
+     */
+    private function collectRefsBulk(string $text, array &$into): void
+    {
+        if (\strpos($text, '@') === false) { return; }
+        \preg_match_all('/@("[^"\n]*"|[A-Za-z0-9_.$\\\\-]+)/', $text, $m);
+        /** @var array<string, bool> $uniq */
+        $uniq = [];
+        foreach ($m[1] as $raw) { $uniq[$raw] = true; }
+        foreach ($uniq as $raw => $unused) {
+            $sym = (string)$raw;
+            if ($sym !== '' && $sym[0] === '"') { $sym = \substr($sym, 1, \strlen($sym) - 2); }
+            if ($sym !== '') { $into[$sym] = true; }
         }
     }
 
