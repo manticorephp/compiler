@@ -1,6 +1,5 @@
 <?php
-// `$a[$k] ??= $c ? $n->prop : f($n)` SIGSEGVs once a later inference run erases $n to a cell.
-// issue: #502
+// #502: `$a[$k] ??= $c ? $n->prop : f($n)` once a later inference run erases $n to a cell.
 // The `??=` value block kept the type it adopted on the first InferTypes run (obj) while its
 // last node became a cell, so the arm boxed the cell word as an object pointer.
 final class Span { public function __construct(public int $a) {} }

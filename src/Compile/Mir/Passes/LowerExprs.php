@@ -1115,7 +1115,7 @@ trait LowerExprs
                 $ct,
             ),
             new LoadLocal($vtmp, $value->type),
-        ], $value->type);
+        ], $value->type, true);
     }
 
     /** Build the store node for an assignment target + already-lowered value. */
@@ -1147,7 +1147,7 @@ trait LowerExprs
                 $this->valueTemps[] = $name;
                 $tmp = new StoreLocal($name, $value, $value->type);
                 $store = new StoreElement($arr, $idx, new LoadLocal($name, Type::unknown()), $value->type);
-                return new Block([$tmp, $store], $value->type);
+                return new Block([$tmp, $store], $value->type, true);
             }
             return new StoreElement($arr, $idx, $value, $value->type);
         }

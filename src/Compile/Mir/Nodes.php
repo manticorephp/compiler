@@ -569,8 +569,13 @@ final class Call extends Node
 
 final class Block extends Node
 {
-    /** @param Node[] $stmts */
-    public function __construct(public array $stmts, Type $type)
+    /**
+     * @param Node[] $stmts
+     * @param bool $followsLast a VALUE block standing for its last node: its type is
+     *        re-read from that node on every inference run, never frozen
+     *        ({@see Passes\InferNodes::inferBlock}).
+     */
+    public function __construct(public array $stmts, Type $type, public bool $followsLast = false)
     {
         parent::__construct(Node::KIND_BLOCK, $type);
     }
