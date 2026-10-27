@@ -5759,11 +5759,13 @@ final class LowerFromAst implements Pass
             if ($vk === 'ArrayAccess' || $vk === 'PropertyAccess') { return $this->storeToTarget($expr->target, $value); }
             $vtmp = '__av_' . (string)$this->destrCounter;
             $this->destrCounter = $this->destrCounter + 1;
-            return new Block([
+            $blk = new Block([
                 new StoreLocal($vtmp, $value, $value->type),
                 $this->storeToTarget($expr->target, new LoadLocal($vtmp, $value->type)),
                 new LoadLocal($vtmp, $value->type),
             ], $value->type);
+            $blk->fromLast = true;
+            return $blk;
         }
         $value = $this->lowerExpr($expr->value);
         // `$a[$k] = $a`: php takes the value first, so the store separates the array from it.
@@ -6094,11 +6096,13 @@ final class LowerFromAst implements Pass
                 $arms[$i]->type,
             );
         }
-        return new Block([
+        $blk = new Block([
             new StoreLocal($nameTmp, $this->lowerExpr($this->dynStaticPropNameExpr($dyn)), Type::string_()),
             $guard,
             $chain,
         ], $chain->type);
+        $blk->fromLast = true;
+        return $blk;
     }
 
     /**
