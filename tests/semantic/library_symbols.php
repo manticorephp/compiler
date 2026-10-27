@@ -21,7 +21,7 @@ function check(string $name, callable $fn): void
 function prelude(string $file): \Analyze\ParsedFile
 {
     $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/' . $file);
-    return new \Analyze\ParsedFile('prelude/' . $file, \Parser\Parser::parseTolerant($src, $file)->program);
+    return new \Analyze\ParsedFile('lib:prelude/' . $file, \Parser\Parser::parseTolerant($src, $file)->program);
 }
 
 check('from_parts_exposes_prelude_and_names', function () {

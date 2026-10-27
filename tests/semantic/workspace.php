@@ -27,7 +27,7 @@ function prelude(): array
     $out = [];
     foreach (['core_interfaces.php', 'exceptions.php'] as $f) {
         $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/' . $f);
-        $out[] = new ParsedFile('prelude/' . $f, \Parser\Parser::parseTolerant($src, $f)->program);
+        $out[] = new ParsedFile('lib:prelude/' . $f, \Parser\Parser::parseTolerant($src, $f)->program);
     }
     return $out;
 }
@@ -224,4 +224,22 @@ check('definition_of_function_call_ignores_a_class_of_the_same_name', function (
     return $w->definitionOf('b.php', 2, 1) === null ?: 'jumped to the class';
 });
 
+check('user_uri_shaped_like_a_prelude_path_cannot_displace_the_library', function () {
+    $w = new Workspace(lib());
+    $w->open('prelude/exceptions.php', "<?php\n");
+    $w->open('u.php', "<?php\nnew \\Exception('x');\n");
+    $w->remove('prelude/exceptions.php');
+    return dg($w, 'u.php') === [] ?: json_encode(dg($w, 'u.php'));
+});
+
+check('library_labels_are_reserved_for_every_mutation', function () {
+    $w = new Workspace(lib());
+    foreach (['open', 'update'] as $m) {
+        try { $w->$m('lib:prelude/exceptions.php', "<?php\n"); return "$m did not throw"; } catch (\InvalidArgumentException $e) {}
+    }
+    foreach (['close', 'remove'] as $m) {
+        try { $w->$m('lib:prelude/exceptions.php'); return "$m did not throw"; } catch (\InvalidArgumentException $e) {}
+    }
+    return dg($w, 'u.php') === [] && $w->definitionOf('x.php', 1, 1) === null;
+});
 exit($fail);
