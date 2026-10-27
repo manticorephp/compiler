@@ -56,7 +56,7 @@ final class Workspace
     public function open(string $uri, string $text): void
     {
         self::assertUserUri($uri);
-        $r = \Parser\Parser::parseTolerant($text, $uri, true, true, 1);
+        $r = \Parser\Parser::parseTolerant($text, $uri, true, true, 2);
         $pf = ParsedFile::fromParse($uri, $text, $r);
         if ($pf->hasErrors) {
             $this->parseErrors[$uri] = ParseDiagnostics::of($uri, $r);

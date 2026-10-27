@@ -30,6 +30,7 @@ final class NameIndex
     {
         $this->removeFile($path);
         $list = [];
+        $owner = '';
         foreach ($program->names as $n) {
             $s = $n->span;
             $endLine = $s->endLine();
@@ -38,10 +39,13 @@ final class NameIndex
                 $endLine = $s->startLine();
                 $endCol = $s->startColumn() + strlen($n->written);
             }
+            // ponytail: the last class-like declaration name owns the member declarations that follow; an anonymous class's members read as the enclosing class's
+            if ($n->role === 'decl' && $n->kind === 'class') { $owner = ltrim($n->resolved, '\\'); }
             $list[] = new NameOccurrence(
                 $path, $n->kind, strtolower(ltrim($n->resolved, '\\')),
                 $s->startLine(), $s->startColumn(), $endLine, $endCol, $n->globalFallback,
                 $n->role === 'decl', $n->role === 'decl' ? '' : $n->role, ltrim($n->resolved, '\\'),
+                ($n->role === 'decl' && $n->kind === 'member') ? $owner : '',
             );
         }
         $this->occ[$path] = $list;
