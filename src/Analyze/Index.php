@@ -461,7 +461,7 @@ final class Index
     {
         if ($d->name === '') { return; }
         $l = \strtolower($d->name);
-        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $d->docComment);
+        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $this->docTag($d->docComment, '@return', $d->name, \Semantic\DocNames::templates($d->docComment)));
         $this->curFnSpans[$l] = $d->span;
     }
 
@@ -514,20 +514,24 @@ final class Index
         $end = $d->span->endLine();
         /** @var array<string, MemberInfo> $out */
         $out = [];
+        $ctpl = \Semantic\DocNames::templates($d->docComment);
+        $tpl = $ctpl;
         foreach ($d->methods as $m) {
-            $out['method:' . \strtolower($m->name)] ??= $this->member('method', $m->name, $m->name, $fqn, $m->visibility, $m->isStatic, $m->isAbstract || $isIface, $m->returnType, $file, $m->span, $end, $m->docComment);
+            $tpl = \array_merge($ctpl, \Semantic\DocNames::templates($m->docComment));
+            $out['method:' . \strtolower($m->name)] ??= $this->member('method', $m->name, $m->name, $fqn, $m->visibility, $m->isStatic, $m->isAbstract || $isIface, $m->returnType, $file, $m->span, $end, $this->docTag($m->docComment, '@return', $fqn, $tpl));
             if (\strtolower($m->name) !== '__construct') { continue; }
             foreach ($m->params as $mp) {
                 if ($mp->promoted === '') { continue; }
                 $out['prop:' . $mp->name] ??= $this->member('prop', $mp->name, '$' . $mp->name, $fqn, $mp->promoted, false, false, $mp->typeHint, $file, $mp->span, $end);
             }
         }
+        $tpl = $ctpl;
         foreach ($d->properties as $p) {
             if ($p->name === '' || $p->name === '$') { continue; }
-            $out['prop:' . $p->name] ??= $this->member('prop', $p->name, '$' . $p->name, $fqn, $p->visibility, $p->isStatic, false, $p->typeHint, $file, $p->span, $end, $p->docComment);
+            $out['prop:' . $p->name] ??= $this->member('prop', $p->name, '$' . $p->name, $fqn, $p->visibility, $p->isStatic, false, $p->typeHint, $file, $p->span, $end, $this->docTag($p->docComment, '@var', $fqn, $tpl));
         }
         foreach ($d->consts as $c) {
-            $out['const:' . $c->name] ??= $this->member('const', $c->name, $c->name, $fqn, $c->visibility, true, false, $c->typeHint, $file, $c->span, $end, null, $c->value);
+            $out['const:' . $c->name] ??= $this->member('const', $c->name, $c->name, $fqn, $c->visibility, true, false, $c->typeHint, $file, $c->span, $end, null, $c->typeHint === null ? self::smallValue($c->value) : null);
         }
         foreach ($d->cases as $case) {
             $sp = $case->span ?? $d->span;
@@ -544,6 +548,27 @@ final class Index
             }
         }
         return $out;
+    }
+
+    /**
+     * The namespace-qualified tag type of a docblock, resolved against the namespace of $declFqn and the file's `use` map.
+     *
+     * @param string[] $templates
+     */
+    private function docTag(?string $doc, string $tag, string $declFqn, array $templates): ?string
+    {
+        if ($doc === null) { return null; }
+        $uses = $this->curFile === null ? [] : $this->curFile->program->useAliases;
+        return \Semantic\DocNames::tagType($doc, $tag, "", \Semantic\DocNames::nsOf($declFqn), $uses, $templates);
+    }
+
+    /** A constant initializer worth keeping for typing: small trees as is, an array literal as an empty one, else null. */
+    private static function smallValue(\Parser\Ast\Expr $e): ?\Parser\Ast\Expr
+    {
+        if ($e instanceof \Parser\Ast\ArrayLit) { return new \Parser\Ast\ArrayLit([], $e->span); }
+        $w = new AstWalk(true);
+        $w->exprTree($e);
+        return \count($w->exprs) <= 16 ? $e : null;
     }
 
     /** Name-precise position from the file's declaration names when present, else the start of the declaration. */
