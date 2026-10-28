@@ -721,6 +721,17 @@ trait InferScans
                 $n->type = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
                 $changed = true;
             }
+            // A docblock that lies: Laravel's `@var array<string, string> $snakeCache`
+            // is written `$snakeCache[$k][$j] = v` — what the program STORES says
+            // the element is an array, and a scalar element type would index a
+            // string. Writes that prove a cell element win over a scalar claim.
+            elseif ($elem->kind === Type::KIND_CELL && $cur->isArray() && $cur->element !== null
+                && ($cur->element->kind === Type::KIND_STRING || $cur->element->kind === Type::KIND_INT
+                    || $cur->element->kind === Type::KIND_FLOAT || $cur->element->kind === Type::KIND_BOOL)) {
+                $keyT = $cur->key;
+                $n->type = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
+                $changed = true;
+            }
         }
         foreach (Walk::children($n) as $c) {
             if ($this->retypeStaticPropNodes($c, $targets)) { $changed = true; }
