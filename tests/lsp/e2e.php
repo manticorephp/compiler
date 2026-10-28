@@ -9,10 +9,17 @@ function frame(array $m): string
     return 'Content-Length: ' . strlen($b) . "\r\n\r\n" . $b;
 }
 
+function waitReadable($pipe): bool
+{
+    $r = [$pipe];
+    $w = $e = null;
+    return stream_select($r, $w, $e, 20) > 0;
+}
+
 function readFrame($pipe): ?array
 {
     $len = null;
-    while (($l = fgets($pipe)) !== false) {
+    while (waitReadable($pipe) && ($l = fgets($pipe)) !== false) {
         $l = rtrim($l, "\r\n");
         if ($l === '') { break; }
         if (stripos($l, 'Content-Length:') === 0) { $len = (int)trim(substr($l, 15)); }
@@ -20,6 +27,7 @@ function readFrame($pipe): ?array
     if ($len === null) { return null; }
     $body = '';
     while (strlen($body) < $len) {
+        if (!waitReadable($pipe)) { return null; }
         $c = fread($pipe, $len - strlen($body));
         if ($c === false || $c === '') { return null; }
         $body .= $c;
@@ -63,5 +71,24 @@ check('exit code 0', $code === 0, "code=$code $err");
     ['jsonrpc' => '2.0', 'method' => 'exit'],
 ], 0);
 check('exit without shutdown -> 1', $code === 1, "code=$code $err");
+
+$root = sys_get_temp_dir() . '/lspe2e' . getmypid();
+mkdir($root);
+file_put_contents("$root/lib.php", "<?php\nfunction fromdisk() {}");
+$uri = 'file://' . $root . '/main.php';
+[$got, $code, $rest, $err] = session($bin, [
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file://' . $root]],
+    ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
+    ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nfromdisk();\nnope_undefined();"]]],
+    ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
+    ['jsonrpc' => '2.0', 'method' => 'exit'],
+], 3);
+unlink("$root/lib.php");
+rmdir($root);
+$pub = $got[1] ?? [];
+$diags = $pub['params']['diagnostics'] ?? [];
+check('publishDiagnostics pushed', ($pub['method'] ?? '') === 'textDocument/publishDiagnostics' && ($pub['params']['uri'] ?? '') === $uri, json_encode($got) . $err);
+check('diagnostic: indexed fromdisk() ok, nope_undefined() flagged', count($diags) === 1 && $diags[0]['code'] === 'undefined.function' && $diags[0]['range']['start']['line'] === 2, json_encode($diags));
+check('shutdown after push', ($got[2]['id'] ?? null) === 2 && $code === 0, json_encode($got[2] ?? null) . " code=$code");
 
 exit($fail);
