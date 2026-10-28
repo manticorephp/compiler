@@ -59,6 +59,9 @@ class MemHandler implements SessionHandlerInterface
 }
 
 ini_set("session.use_cookies", "0");
+// php rolls session.gc_probability / gc_divisor (1/100) at every session_start and calls gc() on a hit; the
+// protocol this test pins has no gc, so the dice are switched off (php's own session tests do the same).
+ini_set("session.gc_probability", "0");
 session_set_save_handler(new MemHandler(), false);
 session_id("memone");
 
