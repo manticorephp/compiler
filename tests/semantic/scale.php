@@ -37,7 +37,7 @@ function gen(int $n): string
     return $s;
 }
 
-/** @return float ms of the first (cold) referencesTo on a property declaration of an n-class file, best of two. */
+/** @return float ms of the first (cold) referencesTo on a property declaration of an n-class file, best of three. */
 function coldRefs(int $n, int &$count): float
 {
     static $prelude = null;
@@ -50,7 +50,7 @@ function coldRefs(int $n, int &$count): float
     }
     $src = gen($n);
     $best = INF;
-    for ($k = 0; $k < 2; $k++) {
+    for ($k = 0; $k < 3; $k++) {
         $w = new Workspace(LibrarySymbols::fromParts($prelude, ['strlen']));
         $w->open('/a.php', $src);
         $t = hrtime(true);

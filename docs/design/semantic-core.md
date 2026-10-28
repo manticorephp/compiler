@@ -306,6 +306,11 @@ Native finding while writing it: the combination `sort($a); sort($b); $a !== $b`
 `string[]` built in a loop and `array_diff` on them SIGSEGVs in the compiled binary (the
 bench compares with `in_array` instead). Not minimised or filed here.
 
+`bash tests/semantic/run.sh [-k a,b]` runs the library tests NATIVELY: it compiles `src/` (minus `main.php`) and every
+`tests/semantic/*.php` into one binary (~2 min; each script moves into its own namespace, its trailing `exit($fail)` folds
+into the combined exit code) and runs it. The scripts stay plain PHP, so `php tests/semantic/<x>.php` still works as a quick
+loop, but only the native run counts: it has found native-only failures Zend hides (see the issues filed from it).
+
 ## What remains
 
 Closed in P2b (no longer gaps): tolerant analysis and `ErrorMember`, `Diagnostic` end ranges,
