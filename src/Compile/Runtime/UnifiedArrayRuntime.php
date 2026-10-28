@@ -1528,6 +1528,10 @@ final class UnifiedArrayRuntime
         $rfp = $this->hdr($adopt, $res0, MemoryAbi::ARRAY_FLAGS_OFFSET);
         $rfl = $adopt->load(Type::i64(), $rfp);
         $adopt->store($adopt->or_($adopt->and_($rfl, Value::int(Type::i64(), ~(MemoryAbi::ARRAY_ELEM_HINT_MASK | MemoryAbi::ARRAY_REPR_MASK))), $adopt->and_($bflags, $adm)), $rfp);
+        // The result now describes `$b`'s words as they are: the "two different
+        // hints" box flag computed above (an empty `$a` can carry a stale hint)
+        // must not box them under a raw hint.
+        $adopt->store($zero, $boxSlot);
         $adopt->br($head);
         $prep = $afterAdopt;
         $prep->brIf($prep->and_($mixed, $prep->icmp('ne', $ha, $cell)), $cellify, $head);
