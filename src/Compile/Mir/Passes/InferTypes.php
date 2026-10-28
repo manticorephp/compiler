@@ -1614,6 +1614,16 @@ final class InferTypes implements Pass
                     && !$this->sameElemShape($observed[$key], $vt)) {
                     $observed[$key] = Type::cell();
                 }
+            } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
+                // A NESTED write `static::$cache[$k][$j] = v` proves the static's
+                // element is itself an array — a cell, as for an instance
+                // property ({@see collectPropElemStores}). Unseen, another
+                // write typed the element `string` and the nested read-back
+                // (`isset($cache[$k][$j])`) indexed a string
+                // (Illuminate\Support\Str::$snakeCache).
+                $root = $se->array;
+                while ($root->kind === Node::KIND_ARRAY_ACCESS) { $root = $root->array; }
+                if ($root->kind === Node::KIND_STATIC_PROP) { $observed[$root->global] = Type::cell(); }
             }
         }
         foreach (Walk::children($n) as $c) { $this->collectStaticPropElemStores($c, $observed, $unusable); }
