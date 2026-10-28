@@ -9,6 +9,7 @@ use Parser\Ast\FunctionStmt;
 use Parser\Ast\DynamicStaticAccess;
 use Parser\Ast\DynamicStaticCall;
 use Parser\Ast\DynamicStaticMethodCall;
+use Parser\Ast\DynamicStaticProp;
 use Parser\Ast\DynProp;
 use Parser\Ast\NamedArg;
 use Parser\Ast\NewDynExpr;
@@ -34,6 +35,9 @@ final class NameIndex
 
     /** @var array<string, UncertainSite[]> file => dynamic-member sites */
     private array $dynamic = [];
+
+    /** @var array<string, UncertainSite[]> file => `${` string literals (already in dynamic) */
+    private array $legacy = [];
 
     public function replaceFile(string $path, Program $program, string $text): void
     {
@@ -68,6 +72,8 @@ final class NameIndex
         $w->stmts($program->statements);
         $lits = [];
         $dyn = [];
+        /** @var UncertainSite[] $legacy */
+        $legacy = [];
         /** @var array<string, UncertainSite[]> $named lowercased argument name => sites */
         $named = [];
         foreach ($w->exprs as $e) {
@@ -77,13 +83,21 @@ final class NameIndex
                     $site = new UncertainSite($path, $e->span->startLine(), $e->span->startColumn(), $reason);
                     $full = strtolower(ltrim($e->value, '\\'));
                     $lits[$full][] = $site;
-                    if ($reason === 'callable-string') { $lits[substr($full, 0, strpos($full, '::'))][] = $site; }
+                    if ($reason === 'callable-string') {
+                        $cut = strpos($full, '::');
+                        $lits[substr($full, 0, $cut)][] = $site;
+                        // ponytail: any class's `X::run` string is listed for a method `run` (no class match), upgrade by resolving the class part
+                        $lits[substr($full, $cut + 2)][] = $site;
+                    }
+                } elseif (str_contains($e->value, '${')) {
+                    // the lexer reads `"${n}"` as a plain string: no Variable node, so list the literal itself
+                    $legacy[] = new UncertainSite($path, $e->span->startLine(), $e->span->startColumn(), 'legacy-interpolation');
                 }
             } elseif ($e instanceof NamedArg) {
                 $named[strtolower($e->name)][] = new UncertainSite($path, $e->span->startLine(), $e->span->startColumn(), 'named-argument');
             } elseif (
                 $e instanceof DynProp || $e instanceof NewDynExpr || $e instanceof DynamicStaticAccess
-                || $e instanceof DynamicStaticCall || $e instanceof DynamicStaticMethodCall
+                || $e instanceof DynamicStaticCall || $e instanceof DynamicStaticMethodCall || $e instanceof DynamicStaticProp
             ) {
                 $dyn[] = new UncertainSite($path, $e->span->startLine(), $e->span->startColumn(), 'dynamic-member');
             }
@@ -94,6 +108,8 @@ final class NameIndex
             foreach ($sites as $s) { $named[$nm][] = $s; }
         }
         $this->named[$path] = $named;
+        $this->legacy[$path] = $legacy;
+        foreach ($legacy as $s) { $dyn[] = $s; }
         $this->dynamic[$path] = $dyn;
     }
 
@@ -190,7 +206,7 @@ final class NameIndex
 
     public function removeFile(string $path): void
     {
-        unset($this->occ[$path], $this->literals[$path], $this->dynamic[$path], $this->named[$path]);
+        unset($this->legacy[$path], $this->occ[$path], $this->literals[$path], $this->dynamic[$path], $this->named[$path]);
     }
 
     /**
@@ -241,6 +257,12 @@ final class NameIndex
             if ($hit === null) { $hit = $o; }
         }
         return $hit;
+    }
+
+    /** @return UncertainSite[] the `${` string literals of one file */
+    public function legacySites(string $path): array
+    {
+        return $this->legacy[$path] ?? [];
     }
 
     /** @return UncertainSite[] */

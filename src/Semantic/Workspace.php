@@ -29,6 +29,8 @@ use Parser\Ast\Expr;
  */
 final class Workspace
 {
+    private const BLOCKER_CAP = 50;
+
     private Index $index;
     private NameIndex $names;
 
@@ -393,12 +395,34 @@ final class Workspace
             if ($s->reason === 'heredoc-interpolation') { $out[] = 'heredoc-interpolation:' . $s->file . ':' . $s->line . ':' . $s->col; }
             if ($s->reason === 'heredoc-scan-failed') { $out[] = 'heredoc-scan-failed:' . $s->file; }
         }
-        if ($o->kind === 'member') {
-            foreach ($this->names->uncertainSites($o->resolvedLower) as $s) {
-                if ($s->reason === 'named-argument') { $out[] = 'named-argument:' . $s->file . ':' . $s->line . ':' . $s->col; }
-            }
-        }
+        foreach ($this->capped($this->uncertainSitesFor($uri, $line, $col), $out) as $b) { $out[] = $b; }
         return \array_values(\array_unique($out));
+    }
+
+    /**
+     * One blocker `reason:file:line:col` per uncertain site, at most BLOCKER_CAP per reason, then `reason:…+N more`
+     * (`unresolved-receiver` is reported as `unresolved-member`). Blockers already in `$have` are skipped.
+     *
+     * @param UncertainSite[] $sites
+     * @param string[] $have
+     * @return string[]
+     */
+    private function capped(array $sites, array $have): array
+    {
+        /** @var array<string, int> $count */
+        $count = [];
+        $out = [];
+        foreach ($sites as $s) {
+            $r = $s->reason === 'unresolved-receiver' ? 'unresolved-member' : $s->reason;
+            $b = $r === 'heredoc-scan-failed' ? $r . ':' . $s->file : $r . ':' . $s->file . ':' . $s->line . ':' . $s->col;
+            if (\in_array($b, $have, true)) { continue; }
+            $count[$r] = ($count[$r] ?? 0) + 1;
+            if ($count[$r] <= self::BLOCKER_CAP) { $out[] = $b; }
+        }
+        foreach ($count as $r => $n) {
+            if ($n > self::BLOCKER_CAP) { $out[] = $r . ':…+' . ($n - self::BLOCKER_CAP) . ' more'; }
+        }
+        return $out;
     }
 
     /** The variable bindings of an open file, built on first use. */
@@ -427,6 +451,7 @@ final class Workspace
     private function variableUncertain(string $uri, VarIndex $vi, int $b): array
     {
         $out = $vi->uncertainOf($b);
+        foreach ($this->names->legacySites($uri) as $l) { $out[] = $l; }
         if (!$vi->isGlobalScoped($b) || $vi->isSpecial($b)) { return $out; }
         $name = $vi->nameOf($b);
         foreach ($this->names->allOccurrences() as $c) {
@@ -436,6 +461,7 @@ final class Workspace
         }
         foreach ($this->asts as $other => $_) {
             if ($other === $uri) { continue; }
+            foreach ($this->names->legacySites($other) as $l) { $out[] = $l; }
             $ov = $this->varsOf($other);
             $ob = $ov === null ? -1 : $ov->mainBinding($name);
             if ($ob < 0) { continue; }

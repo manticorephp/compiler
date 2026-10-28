@@ -292,7 +292,7 @@ check('rename blockers: implicit enum member, owner unknown, library, heredoc', 
     $okFrom = in_array('implicit-member', $from, true) && in_array($h, $from, true);
     $okHid = in_array('owner-unknown', $hid, true);
     $okLib = in_array('library-declaration', $lib, true);
-    $okPlain = !in_array('implicit-member', $plain, true) && !in_array('owner-unknown', $plain, true) && in_array($h, $plain, true) && count($plain) === 1;
+    $okPlain = !in_array('implicit-member', $plain, true) && !in_array('owner-unknown', $plain, true) && in_array($h, $plain, true) && count(array_filter($plain, fn($x) => !str_starts_with($x, 'string-class-name'))) === 1;
     return $okFrom && $okHid && $okLib && $okPlain ? true : json_encode([$from, $hid, $lib, $plain]);
 });
 
