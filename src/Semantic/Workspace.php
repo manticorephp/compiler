@@ -206,6 +206,18 @@ final class Workspace
         return new Location($file, $span->startLine(), $span->startColumn(), $span->startLine(), $span->startColumn());
     }
 
+    /** What the cursor names: 'member' | 'class' | 'function' | 'constant' | 'variable', null for nothing indexed. */
+    public function symbolKindAt(string $uri, int $line, int $col): ?string
+    {
+        $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o === null || $o->kind === 'variable') {
+            if ($this->varsAt($uri, $line, $col) !== null) { return 'variable'; }
+            if ($o !== null) { return 'variable'; }
+            return $this->index->constAt($uri, $line, $col) === null ? null : 'constant';
+        }
+        return $o->denotes();
+    }
+
     /**
      * Every declaration the symbol under the cursor can denote: all of a union receiver's members, else `definitionOf`.
      *

@@ -4,11 +4,13 @@ namespace Lsp;
 
 use Semantic\Location;
 
-/** Core Location (1-based line, byte column) -> LSP Location. Target text comes from the open docs, else from disk. */
+/** One instance per request (it caches disk reads). Core Location (1-based line, byte column) -> LSP Location. Target text comes from the open docs, else from disk. */
 final class LocationMap
 {
     /** @var callable */
     private $docs;
+    /** @var array<string, string|false> uri => disk text, one read per file */
+    private array $disk = [];
 
     /** @param callable $docs returns array<string, string> uri => open text */
     public function __construct(callable $docs)
@@ -24,9 +26,11 @@ final class LocationMap
         $open = ($this->docs)();
         $text = $open[$l->file] ?? null;
         if ($text === null) {
-            $path = Uri::toPath($l->file);
-            if ($path === null) { return null; }
-            $text = @\file_get_contents($path);
+            if (!isset($this->disk[$l->file])) {
+                $path = Uri::toPath($l->file);
+                $this->disk[$l->file] = $path !== null && \is_file($path) ? @\file_get_contents($path) : false;
+            }
+            $text = $this->disk[$l->file];
             if ($text === false) { return null; }
         }
         $a = Position::lineText($text, $l->line);
