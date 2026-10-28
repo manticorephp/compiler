@@ -93,4 +93,23 @@ check('diagnostic: indexed fromdisk() ok, nope_undefined() flagged', count($diag
 check('definition round trip lands in lib.php', ($got[2]['id'] ?? null) === 3 && ($got[2]['result'][0]['uri'] ?? '') === 'file://' . $root . '/lib.php' && ($got[2]['result'][0]['range']['start'] ?? null) === ['line' => 1, 'character' => 9], json_encode($got[2] ?? null));
 check('shutdown after push', ($got[3]['id'] ?? null) === 2 && $code === 0 && $rest === '', json_encode($got[3] ?? null) . " code=$code rest=$rest");
 
+$root = sys_get_temp_dir() . '/lspe2e_rn' . getmypid();
+mkdir($root);
+file_put_contents("$root/lib.php", "<?php\nfunction fromdisk() {}");
+$uri = 'file://' . $root . '/main.php';
+[$got, $code, $rest, $err] = session($bin, [
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file://' . $root]],
+    ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
+    ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nfromdisk();"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/rename', 'params' => ['textDocument' => ['uri' => $uri], 'position' => ['line' => 1, 'character' => 2], 'newName' => 'renamed']],
+    ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
+    ['jsonrpc' => '2.0', 'method' => 'exit'],
+], 4);
+unlink("$root/lib.php");
+rmdir($root);
+$ch = $got[2]['result']['changes'] ?? [];
+check('rename round trip edits main.php and lib.php', ($got[2]['id'] ?? null) === 3 && count($ch) === 2
+    && ($ch['file://' . $root . '/lib.php'][0]['range']['start'] ?? null) === ['line' => 1, 'character' => 9]
+    && ($ch[$uri][0]['newText'] ?? '') === 'renamed', json_encode($got[2] ?? null) . $err);
+
 exit($fail);
