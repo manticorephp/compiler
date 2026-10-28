@@ -159,6 +159,15 @@ final class InsertMemoryOps implements Pass
             }
             return self::elemReadCoOwns($at->element, $enums, $classes) ? $at->element : null;
         }
+        // An ERASED subject (`mixed`, a decoded / untyped array) co-owns as a
+        // `vec[cell]` does. Left borrowed, the loop variable sat at the owner's
+        // rc 1, so a write to it (`$parts[] = x`, `array_shift($parts)`) mutated
+        // the source's own element in place (#515). Every arm of the erased loop
+        // binds a cell: the array arm takes the +1 itself, the iterator arms are
+        // +1 by their return convention.
+        if ($at->kind === Type::KIND_CELL || $at->kind === Type::KIND_UNKNOWN) {
+            return \Compile\Debug::$rcElemReadOwns ? Type::cell() : null;
+        }
         if ($at->kind !== Type::KIND_OBJ) { return null; }
         if (($at->class ?? '') === 'Generator') {
             $el = $at->element;
