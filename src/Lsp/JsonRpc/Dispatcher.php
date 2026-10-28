@@ -33,6 +33,8 @@ class Dispatcher
                 ($this->guard)($req->method);
             } catch (RpcError $e) {
                 return $req->isNotification() ? null : self::error($req->rawId, $e->rpcCode, $e->getMessage());
+            } catch (\Throwable $e) {
+                return $req->isNotification() ? null : self::error($req->rawId, RpcError::INTERNAL, $e->getMessage());
             }
         }
         $h = $this->handlers[$req->method] ?? null;

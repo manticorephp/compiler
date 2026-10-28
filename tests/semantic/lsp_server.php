@@ -95,5 +95,17 @@ check('cancelRequest accepted', function () use ($init): bool|string {
     call($d, $init);
     return call($d, '{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":1}}') === null;
 });
+check('didOpen of lib: uri -> no crash, not tracked, nothing published', function () use ($init): bool|string {
+    $sent = 0;
+    $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/core_interfaces.php');
+    $pf = new ParsedFile('lib:prelude/core_interfaces.php', \Parser\Parser::parseTolerant($src, 'core_interfaces.php')->program);
+    $s = new Server(new Workspace(LibrarySymbols::fromParts([$pf], ['strlen'])), function (string $j) use (&$sent): void { $sent++; });
+    $d = new Dispatcher();
+    $s->register($d);
+    call($d, $init);
+    $r = call($d, '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"lib:x.php","text":"<?php"}}}');
+    $c = call($d, '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"lib:x.php"},"contentChanges":[{"text":"x"}]}}');
+    return $r === null && $c === null && $sent === 0;
+});
 
 exit($fail);

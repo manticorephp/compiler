@@ -99,5 +99,11 @@ check('id 0 echoed as int', function (): bool|string {
 check('notification handler throws -> null', function (): bool {
     return dx()->handle('{"jsonrpc":"2.0","method":"boom"}') === null;
 });
+check('guard throwing Throwable -> -32603', function (): bool {
+    $d = new Dispatcher();
+    $d->guard(function (string $m): void { throw new \RuntimeException('g'); });
+    $r = json_decode((string)$d->handle('{"jsonrpc":"2.0","id":1,"method":"x"}'), true);
+    return $r['error']['code'] === -32603;
+});
 
 exit($fail);
