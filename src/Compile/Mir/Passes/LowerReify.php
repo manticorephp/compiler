@@ -850,8 +850,11 @@ trait LowerReify
         }
         $this->fnPosCount = $n;
         $pos = $this->fnPosIdx[$name] ?? -1;
-        if ($pos >= 0 && $module->functions[$pos]->name === $name) { return $module->functions[$pos]; }
-        // A stale slot (the list was edited in place): the plain walk is the answer.
+        // The index covers every entry up to the current count, and chainMethodFn probes `Class__method`
+        // up the parent chain — most probes miss, so a miss must not fall back to the walk.
+        if ($pos < 0) { return null; }
+        if ($module->functions[$pos]->name === $name) { return $module->functions[$pos]; }
+        // The slot no longer holds that name (an entry was renamed in place): the plain walk is the answer.
         foreach ($module->functions as $fn) {
             if ($fn->name === $name) { return $fn; }
         }

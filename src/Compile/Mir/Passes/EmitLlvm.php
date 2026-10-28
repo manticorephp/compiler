@@ -1337,7 +1337,13 @@ final class EmitLlvm implements EmitVisitor
         $statT = \Compile\Stats::begin('  emit preamble');
         $this->preambleSpoolOn = $streaming && !\Compile\Debug::$framePointers;
         $this->preambleSpoolSeq = 0;
-        $preamble = $this->linkonceRuntime($this->emitPreamble());
+        $this->preambleSpoolFiles = [];
+        try {
+            $preamble = $this->linkonceRuntime($this->emitPreamble());
+        } catch (\Throwable $e) {
+            $this->dropPreambleSpools();
+            throw $e;
+        }
         $spooled = $this->preambleSpoolSeq > 0;
         $this->preambleSpoolOn = false;
         // The preamble mints lazy helpers too (a per-class `__mir_props_*` body
@@ -1353,9 +1359,14 @@ final class EmitLlvm implements EmitVisitor
             $statT = \Compile\Stats::begin('  hoist allocas (streamed)');
             $preambleBytes = \strlen($preamble);
             if ($spooled) {
-                $preambleBytes = $this->writeSpooledPreamble($preamble, $this->streamIrPath);
-                if ($preambleBytes < 0 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
-                    throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
+                try {
+                    $preambleBytes = $this->writeSpooledPreamble($preamble, $this->streamIrPath);
+                    if ($preambleBytes < 0 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
+                        throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
+                    }
+                } catch (\Throwable $e) {
+                    $this->dropPreambleSpools();
+                    throw $e;
                 }
             } elseif (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
                 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
@@ -1465,19 +1476,11 @@ final class EmitLlvm implements EmitVisitor
         return \implode("\n", $lines);
     }
 
-    /**
-     * Promote every `define` in the runtime preamble to `linkonce_odr`
-     * linkage. The preamble's defines are all shared runtime helpers; tagging
-     * them linkonce_odr lets two objects (user + stdlib) coexist at link time.
-     * Read-only constants (string pool, `@__mir_zero_word`) stay `internal` —
-     * file-local, foldable, identical per-.o. But MUTABLE runtime STATE
-     * (arena/jmp/argv/cc/prof globals) is emitted `linkonce_odr` at its def
-     * site so it coalesces to ONE address across the two objects — see those
-     * defs. Only `define` lines (helpers) need touching here.
-     */
     /** True while a STAGED module's preamble is being built: big pieces go to spool files. */
     private bool $preambleSpoolOn = false;
     private int $preambleSpoolSeq = 0;
+    /** @var string[] spool files not yet consumed by {@see writeSpooledPreamble} */
+    private array $preambleSpoolFiles = [];
 
     /**
      * Parts of the preamble written to a spool file with the {@see linkonceRuntime} rewrite already
@@ -1495,6 +1498,7 @@ final class EmitLlvm implements EmitVisitor
         $path = $this->streamIrPath . '.pre' . (string)$this->preambleSpoolSeq;
         if (!\Manticore\write_file($path, '')) { return \implode('', $parts); }
         $this->preambleSpoolSeq = $this->preambleSpoolSeq + 1;
+        $this->preambleSpoolFiles[] = $path;
         // Each spool stands where a line starts, so a leading `define ` is rewritten too.
         $leadingNl = true;
         foreach ($parts as $i => $part) {
@@ -1544,6 +1548,14 @@ final class EmitLlvm implements EmitVisitor
         return $total;
     }
 
+    /** Delete spool files a failed build left behind. */
+    private function dropPreambleSpools(): void
+    {
+        foreach ($this->preambleSpoolFiles as $p) { \Manticore\sys_unlink($p); }
+        $this->preambleSpoolFiles = [];
+        $this->preambleSpoolOn = false;
+    }
+
     /**
      * The staged preamble file: `$preamble` with each spool marker replaced by the spool's content.
      * @return int bytes written, or -1
@@ -1564,6 +1576,10 @@ final class EmitLlvm implements EmitVisitor
                 $total += $stop - $pos;
             }
             if ($m === false) { break; }
+            // spoolPreamble rewrote a leading `define ` as if a line break came first: hold it to that.
+            if ($m > 0 && $preamble[$m - 1] !== "\n") {
+                throw new \RuntimeException('EmitLlvm: a preamble spool does not start a line');
+            }
             $e = \strpos($preamble, "\x1e", $m + $marklen);
             if ($e === false) { return -1; }
             $spool = \substr($preamble, $m + $marklen, $e - $m - $marklen);
@@ -1571,11 +1587,22 @@ final class EmitLlvm implements EmitVisitor
             if ($size === false || !\Manticore\append_file_path($spool, $path)) { return -1; }
             \Manticore\sys_unlink($spool);
             $total += $size;
+            $this->preambleSpoolFiles = \array_values(\array_filter($this->preambleSpoolFiles, static fn (string $p): bool => $p !== $spool));
             $pos = $e + 1;
         }
         return $total;
     }
 
+    /**
+     * Promote every `define` in the runtime preamble to `linkonce_odr`
+     * linkage. The preamble's defines are all shared runtime helpers; tagging
+     * them linkonce_odr lets two objects (user + stdlib) coexist at link time.
+     * Read-only constants (string pool, `@__mir_zero_word`) stay `internal` —
+     * file-local, foldable, identical per-.o. But MUTABLE runtime STATE
+     * (arena/jmp/argv/cc/prof globals) is emitted `linkonce_odr` at its def
+     * site so it coalesces to ONE address across the two objects — see those
+     * defs. Only `define` lines (helpers) need touching here.
+     */
     private function linkonceRuntime(string $preamble): string
     {
         // explode/implode, NOT str_replace: the bundled str_replace appends a

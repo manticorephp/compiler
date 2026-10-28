@@ -192,8 +192,6 @@ final class LowerFromAst implements Pass
     private array $methodParamsCache = [];
     /** @var array<string, string> */
     private array $methodDeclClassCache = [];
-    /** @var array<string, array<int, \Parser\Ast\Param>|null> */
-    private array $variadicMethodParamsCache = [];
 
     /**
      * Namespace of the class / function whose signature or property
@@ -798,7 +796,6 @@ final class LowerFromAst implements Pass
         $this->hasNamespacedGetenvAt = -1;
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
-        $this->variadicMethodParamsCache = [];
         $this->variadicIdxBuilt = false;
         $this->module = $module;
         // Lowering passes such as injectSuperglobals need the target kind
@@ -5491,7 +5488,6 @@ final class LowerFromAst implements Pass
         $this->methodReturnClassCache = [];
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
-        $this->variadicMethodParamsCache = [];
         $this->variadicIdxBuilt = false;
         $this->knownClassNames[$cname] = true;
         $bs = \strrpos($cname, '\\');

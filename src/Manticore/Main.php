@@ -3247,8 +3247,9 @@ function build_compile_module(
     if (!$keep) {
         // A build killed mid-way (SIGTERM, a crash) leaves its staged IR and parts behind — 4 GB for
         // Laravel, 50 GB across a day of aborted runs. Every dir is named by its builder's pid, so one
-        // whose pid is gone is nobody's: sweep them before staging ours. A live builder keeps its own.
-        system('for f in /tmp/manticore_buildobj_*; do [ -e "$f" ] || continue; p=${f#/tmp/manticore_buildobj_}; p=${p%%[.-]*}; kill -0 "$p" 2>/dev/null || rm -rf "$f"; done');
+        // whose pid is gone is nobody's: sweep them before staging ours. A live builder keeps its own,
+        // and only entries owned by this user are touched.
+        system('for f in /tmp/manticore_buildobj_*; do [ -e "$f" ] && [ -O "$f" ] || continue; p=${f#/tmp/manticore_buildobj_}; p=${p%%[.-]*}; kill -0 "$p" 2>/dev/null || rm -rf "$f"; done');
     }
     $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
     $llPath = $base . ".ll";
