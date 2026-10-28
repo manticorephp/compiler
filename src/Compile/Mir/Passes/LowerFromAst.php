@@ -3123,7 +3123,7 @@ final class LowerFromAst implements Pass
         $usesFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = $savedSawFuncArgs;
         $mretDoc = $this->docTagType($m->docComment, '@return', '');
-        $mret = $this->lowerTypeHint($this->effectiveHint($m->returnType, $mretDoc));
+        $mret = $this->lowerTypeHint($this->effectiveReturnHint($m->returnType, $mretDoc));
         // `@return T` on a generic class: the shared body must see the ERASED
         // type (exactly what it saw before generics), so keep the un-erased form
         // aside for call sites to substitute against their receiver's binding.

@@ -908,6 +908,25 @@ trait LowerTypes
     }
 
     /**
+     * {@see effectiveHint} for a RETURN. An unhinted function's body already
+     * says what it returns (NarrowReturns), so a docblock naming only scalars
+     * is not allowed to override it: Laravel's `level()` is documented
+     * `@return int` and returns a `Monolog\Level`, which the signature then
+     * typed `int` and handed the enum's singleton pointer to every caller as a
+     * number. Class, array and type-parameter docs still carry what the body
+     * cannot show.
+     */
+    private function effectiveReturnHint(?string $hint, ?string $docType): ?string
+    {
+        if ($hint === null && $docType !== null
+            && \preg_match('/^\??(?:int|integer|float|double|string|bool|boolean|null|false|true)(?:\|(?:int|integer|float|double|string|bool|boolean|null|false|true))*$/i', $docType) === 1) {
+            return null;
+        }
+        return $this->effectiveHint($hint, $docType);
+    }
+
+
+    /**
      * Lower a type hint, recovering a bare `array`'s element type from a
      * docblock annotation token (`X[]` or `array<...>`). PHP's `array`
      * hint erases the element type; the `@param`/`@return`/`@var X[]`

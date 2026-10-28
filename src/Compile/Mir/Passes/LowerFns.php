@@ -214,7 +214,7 @@ trait LowerFns
         $fn = new FunctionDef(
             name: $decl->name,
             params: $params,
-            returnType: $this->lowerTypeHint($this->effectiveHint(
+            returnType: $this->lowerTypeHint($this->effectiveReturnHint(
                 $decl->returnType,
                 $this->docTagType($decl->docComment, '@return', ''),
             )),
@@ -297,7 +297,7 @@ trait LowerFns
         $ext = new FunctionDef(
             name: $decl->name,
             params: $params,
-            returnType: $this->lowerTypeHint($this->effectiveHint(
+            returnType: $this->lowerTypeHint($this->effectiveReturnHint(
                 $decl->returnType,
                 $this->docTagType($decl->docComment, '@return', ''),
             )),
