@@ -3358,6 +3358,18 @@ trait EmitLlvmObjects
                 $this->lastValueType = 'i64';
                 $res = $val;
                 $resTy = 'i64';
+            } elseif ($vk === Type::KIND_ARRAY && $n->value->type->element !== null
+                && $this->isEnumType($n->value->type->element)) {
+                // An enum ELEMENT is an ordinal and has no element hint, so a
+                // flat box leaves an erased reader a tag-0 word (`float(0)`).
+                // The rebuild resolves each ordinal to its singleton and the
+                // slot owns the fresh cell array.
+                $out .= $this->coerceToI64();
+                $raw = $this->lastValue;
+                $out .= $this->boxToCell($n->value->type, $n->value);
+                $val = $this->lastValue;
+                $res = $raw;
+                $resTy = 'i64';
             } elseif ($vk === Type::KIND_ARRAY) {
                 // An array is boxed FLAT — the same buffer under a tag, its
                 // element hint intact, never the cell rebuild — exactly as a
