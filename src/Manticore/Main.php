@@ -5851,6 +5851,7 @@ function main_driver(): int
     $cli->add(new \Cli\Commands\SplitIrCommand());
     $cli->add(new \Cli\Commands\DumpSigCommand());
     $cli->add(new \Cli\Commands\VersionCommand());
+    $cli->add(new \Cli\Commands\LspCommand());
     $cli->add(new \Cli\Commands\UpgradeCommand());
     $cli->add(new \Cli\Commands\DoctorCommand());
     $cli->add(new \Cli\Commands\CompletionsCommand($cli));
