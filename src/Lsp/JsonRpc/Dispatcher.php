@@ -7,6 +7,15 @@ class Dispatcher
     /** @var array<string, callable> */
     private array $handlers = [];
 
+    /** @var callable|null */
+    private $guard = null;
+
+    /** Runs before every lookup with the method name; throws RpcError to refuse (lifecycle state checks). */
+    public function guard(callable $g): void
+    {
+        $this->guard = $g;
+    }
+
     public function on(string $method, callable $h): void
     {
         $this->handlers[$method] = $h;
@@ -18,6 +27,13 @@ class Dispatcher
             $req = Request::parse($json);
         } catch (RpcError $e) {
             return self::error(null, $e->rpcCode, $e->getMessage());
+        }
+        if ($this->guard !== null) {
+            try {
+                ($this->guard)($req->method);
+            } catch (RpcError $e) {
+                return $req->isNotification() ? null : self::error($req->rawId, $e->rpcCode, $e->getMessage());
+            }
         }
         $h = $this->handlers[$req->method] ?? null;
         if ($h === null) {
