@@ -79,4 +79,15 @@ check('shouldStop honoured', function () use ($m2): bool {
     return stream_get_contents($out) === '';
 });
 
+foreach (['99999999999' => 'huge', 'abc' => 'non-numeric', '-5' => 'negative'] as $cl => $label) {
+    check("Content-Length $label -> -32700 then resync", function () use ($cl, $m2): bool|string {
+        $r = unframe(runIo("Content-Length: $cl\r\n\r\n" . Stdio::encode($m2)));
+        return count($r) === 2 && json_decode($r[0], true)['error']['code'] === -32700 && json_decode($r[1], true)['id'] === 2;
+    });
+}
+check('fragment glued before header resyncs', function () use ($m2): bool|string {
+    $r = unframe(runIo('junk' . Stdio::encode($m2)));
+    return count($r) === 1 && json_decode($r[0], true)['id'] === 2;
+});
+
 exit($fail);

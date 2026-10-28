@@ -7,6 +7,8 @@ use Lsp\JsonRpc\RpcError;
 
 class Stdio
 {
+    private const MAX_BODY = 67108864;
+
     /** @var callable */
     private $shouldStop;
 
@@ -28,6 +30,7 @@ class Stdio
     public static function readMessage($in): ?string
     {
         $len = -1;
+        $bad = false;
         $lines = 0;
         while (true) {
             $line = fgets($in);
@@ -42,12 +45,20 @@ class Stdio
                 break;
             }
             $lines++;
-            if (strncasecmp($line, 'Content-Length:', 15) === 0) {
-                $len = (int) trim(substr($line, 15));
+            $p = stripos($line, 'content-length:');
+            if ($p !== false) {
+                $v = trim(substr($line, $p + 15));
+                if ($v !== '' && strlen($v) <= 10 && ctype_digit($v) && (int) $v <= self::MAX_BODY) {
+                    $len = (int) $v;
+                    $bad = false;
+                } else {
+                    $len = -1;
+                    $bad = true;
+                }
             }
         }
         if ($len < 0) {
-            throw new RpcError(RpcError::PARSE, 'Missing Content-Length header');
+            throw new RpcError(RpcError::PARSE, $bad ? 'Invalid Content-Length' : 'Missing Content-Length header');
         }
         $body = '';
         while (strlen($body) < $len) {
@@ -66,8 +77,9 @@ class Stdio
             try {
                 $msg = self::readMessage($in);
             } catch (RpcError $e) {
-                fwrite($out, self::encode(Dispatcher::error(null, $e->rpcCode, $e->getMessage())));
-                fflush($out);
+                if (!self::write($out, self::encode(Dispatcher::error(null, $e->rpcCode, $e->getMessage())))) {
+                    return;
+                }
                 continue;
             }
             if ($msg === null) {
@@ -75,9 +87,26 @@ class Stdio
             }
             $resp = $d->handle($msg);
             if ($resp !== null) {
-                fwrite($out, self::encode($resp));
-                fflush($out);
+                if (!self::write($out, self::encode($resp))) {
+                    return;
+                }
             }
         }
+    }
+
+    /** False when the peer closed the pipe. */
+    private static function write($out, string $data): bool
+    {
+        $off = 0;
+        $n = strlen($data);
+        while ($off < $n) {
+            $w = fwrite($out, substr($data, $off));
+            if ($w === false || $w === 0) {
+                return false;
+            }
+            $off += $w;
+        }
+        fflush($out);
+        return true;
     }
 }
