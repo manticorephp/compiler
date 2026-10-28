@@ -3,6 +3,7 @@
 namespace Lsp;
 
 use Lsp\JsonRpc\Dispatcher;
+use Lsp\Handlers\NavigationHandlers;
 use Lsp\JsonRpc\RpcError;
 use Semantic\Workspace;
 
@@ -66,7 +67,11 @@ final class Server
                 }
             }
             return [
-                'capabilities' => ['textDocumentSync' => ['openClose' => true, 'change' => 1]],
+                'capabilities' => [
+                    'textDocumentSync' => ['openClose' => true, 'change' => 1],
+                    'hoverProvider' => true,
+                    'definitionProvider' => true,
+                ],
                 'serverInfo' => ['name' => 'manticore', 'version' => \Manticore\Version::STRING],
             ];
         });
@@ -82,6 +87,7 @@ final class Server
             $this->exit = $this->shutdown ? 0 : 1;
             return null;
         });
+        (new NavigationHandlers($this->ws, fn(): array => $this->docs))->register($d);
         $d->on('$/cancelRequest', function (array $p): mixed { return null; });
         $d->on('textDocument/didOpen', function (array $p): mixed {
             $td = $p['textDocument'] ?? null;
@@ -106,8 +112,8 @@ final class Server
             if (!is_string($text)) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'didChange: full-text change required');
             }
-            $this->docs[$uri] = $text;
             $this->ws->update($uri, $text);
+            $this->docs[$uri] = $text;
             $this->republish($uri);
             return null;
         });
@@ -155,7 +161,12 @@ final class Server
     {
         $this->publish($uri, true);
         foreach ($this->docs as $other => $_) {
-            if ($other !== $uri) { $this->publish($other, false); }
+            if ($other === $uri) { continue; }
+            try {
+                $this->publish($other, false);
+            } catch (\Throwable $e) {
+                continue;
+            }
         }
     }
 

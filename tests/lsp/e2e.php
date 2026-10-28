@@ -80,15 +80,17 @@ $uri = 'file://' . $root . '/main.php';
     ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file://' . $root]],
     ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
     ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nfromdisk();\nnope_undefined();"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/definition', 'params' => ['textDocument' => ['uri' => $uri], 'position' => ['line' => 1, 'character' => 2]]],
     ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
     ['jsonrpc' => '2.0', 'method' => 'exit'],
-], 3);
+], 4);
 unlink("$root/lib.php");
 rmdir($root);
 $pub = $got[1] ?? [];
 $diags = $pub['params']['diagnostics'] ?? [];
 check('publishDiagnostics pushed', ($pub['method'] ?? '') === 'textDocument/publishDiagnostics' && ($pub['params']['uri'] ?? '') === $uri, json_encode($got) . $err);
 check('diagnostic: indexed fromdisk() ok, nope_undefined() flagged', count($diags) === 1 && $diags[0]['code'] === 'undefined.function' && $diags[0]['range']['start']['line'] === 2, json_encode($diags));
-check('shutdown after push', ($got[2]['id'] ?? null) === 2 && $code === 0, json_encode($got[2] ?? null) . " code=$code");
+check('definition round trip lands in lib.php', ($got[2]['id'] ?? null) === 3 && ($got[2]['result'][0]['uri'] ?? '') === 'file://' . $root . '/lib.php' && ($got[2]['result'][0]['range']['start'] ?? null) === ['line' => 1, 'character' => 9], json_encode($got[2] ?? null));
+check('shutdown after push', ($got[3]['id'] ?? null) === 2 && $code === 0 && $rest === '', json_encode($got[3] ?? null) . " code=$code rest=$rest");
 
 exit($fail);
