@@ -47,6 +47,7 @@ use Parser\Ast\NullLiteral;
 use Parser\Ast\Program;
 use Parser\Ast\PropertyAccess;
 use Parser\Ast\RangedSpan;
+use Parser\Ast\LabelStmt;
 use Parser\Ast\RefAssign;
 use Parser\Ast\ReturnStmt;
 use Parser\Ast\Spread;
@@ -89,7 +90,8 @@ use Parser\Ast\YieldExpr;
  * union of the env before the try and after every statement inside it.
  *
  * Known limits (documented, not hidden): reference aliasing beyond the rules above, `$GLOBALS`, inline
- * `@var` docblocks and by-ref writes made inside a closure after `use (&$x)` are not modelled; a plain
+ * `@var` docblocks are not modelled; a name that is ever reference-aliased (`use (&$x)`, `&$x`, a by-ref foreach) is never typed, and `$$n`, `include`, a label
+ * make the scope unknown; a plain
  * function missing from the index is checked against a small by-ref builtin table only; `switch(true)`
  * arms are not narrowed; a positive `instanceof` against an interface keeps the union's classes unchanged.
  */
@@ -110,6 +112,8 @@ final class Flow
     private array $tryAcc = [];
     /** @var array<int, bool> spl_object_id of closures passed to / used as receiver of bind, bindTo, call */
     private array $rebound = [];
+    /** @var array<string, bool> names that are or may be reference-aliased (by-ref capture, `&$x`): never given a type */
+    private array $aliased = [];
     /** silent loop passes left; when spent a loop head falls back to an all-unknown env (sound, imprecise) */
     private int $passBudget = 400;
 
@@ -202,6 +206,12 @@ final class Flow
         if ($s instanceof BreakStmt) { return $this->jump($env, $s->level, false); }
         if ($s instanceof ContinueStmt) { return $this->jump($env, $s->level, true); }
         if ($s instanceof NamespaceStmt) { return $this->block($s->body, $env); }
+        if ($s instanceof LabelStmt) {
+            // a goto may arrive from anywhere: nothing is known here
+            $o = self::onlyThis($env);
+            $o->dead = false;
+            return $o;
+        }
         if ($s instanceof StaticLocalStmt) {
             $out = $env->copy();
             foreach ($s->decls as $d) { $out->forget($d->name); }
@@ -270,6 +280,10 @@ final class Flow
         $elems = self::elementTypes($this->typer->typeOf($s->expr, $env));
         return $this->loop($env, function (TypeEnv $h) use ($s, $elems): array {
             $b = $h;
+            if ($s->valueByRef) {
+                $b = $this->alias($s->expr, $b);
+                $b = $this->alias($s->value, $b);
+            }
             if ($s->key !== null) { $b = $this->store($s->key, $elems[0], $b); }
             $b = $this->store($s->value, $s->valueByRef ? null : $elems[1], $b);
             return [$this->block($s->body, $b), $h];
@@ -454,7 +468,7 @@ final class Flow
     {
         if ($this->found !== null) { return $env; }
         if ($e === $this->target && $this->silent === 0) { $this->found = $env; return $env; }
-        if ($e instanceof Variable) { return $env; }
+        if ($e instanceof Variable) { return $e->name === '' ? self::onlyThis($env) : $env; } // nameless: `$$n`, any variable may be written
         if ($e instanceof Assign) { return $this->assign($e, $env); }
         if ($e instanceof BinaryOp) {
             $op = $e->op;
@@ -476,8 +490,8 @@ final class Flow
         }
         if ($e instanceof RefAssign) {
             $env = $this->expr($e->source, $env);
-            $out = $this->store($e->target, null, $env);
-            return $this->store($e->source, null, $out);
+            $out = $this->alias($e->target, $env);
+            return $this->alias($e->source, $out);
         }
         if ($e instanceof Ternary) {
             [$t, $f] = $this->cond($e->condition, $env);
@@ -502,8 +516,22 @@ final class Flow
         if ($e instanceof CallExpr || $e instanceof MethodCallExpr || $e instanceof StaticCall || $e instanceof Invoke) {
             return $this->callLike($e, $env);
         }
+        if ($e instanceof ArrayLit) {
+            foreach ($e->elements as $el) { if ($el->byRef) { $env = $this->alias($el->value, $env); } }
+        }
         foreach (self::kids($e) as $k) { $env = $this->expr($k, $env); }
         return $env;
+    }
+
+    /** The root variable of $t is reference-aliased from now on: forgotten, and never typed again. */
+    private function alias(Expr $t, TypeEnv $env): TypeEnv
+    {
+        $root = self::rootVar($t);
+        if ($root === null) { return $this->store($t, null, $env); }
+        $this->aliased[$root] = true;
+        $out = $env->copy();
+        $out->forget($root);
+        return $out;
     }
 
     /**
@@ -589,8 +617,10 @@ final class Flow
         $out = $env->copy();
         if ($t instanceof Variable) {
             if ($t->name === 'this') { return $env; }
+            // a nameless Variable is `$$n`: any variable may be written
+            if ($t->name === '') { return self::onlyThis($env); }
             $out->forget($t->name);
-            if ($ty !== null && $ty->kind !== SourceType::NEVER) { $out->vars[$t->name] = $ty; }
+            if ($ty !== null && $ty->kind !== SourceType::NEVER && !isset($this->aliased[$t->name])) { $out->vars[$t->name] = $ty; }
             return $out;
         }
         if ($t instanceof PropertyAccess) {
@@ -822,7 +852,7 @@ final class Flow
             }
             return $out;
         }
-        if ($l === 'extract' || $l === 'parse_str' || $l === 'eval') { return self::onlyThis($env); }
+        if ($l === 'extract' || $l === 'parse_str' || $l === 'eval' || $l === '__mc_require_value') { return self::onlyThis($env); }
         return $env;
     }
 
@@ -874,7 +904,11 @@ final class Flow
         $out = $env;
         if ($e instanceof Closure) {
             foreach ($e->uses as $u) {
-                if ($u->byRef) { $out = $out === $env ? $env->copy() : $out; $out->forget($u->name); }
+                if ($u->byRef) {
+                    $this->aliased[$u->name] = true;
+                    $out = $out === $env ? $env->copy() : $out;
+                    $out->forget($u->name);
+                }
             }
         }
         if ($this->silent === 0 && $this->found === null && self::contains($e, $this->target)) {
