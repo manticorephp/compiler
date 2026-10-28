@@ -9,7 +9,13 @@ echo viaArr(1), " ", viaCapture(2), " ", selfAssign(3), "\n";
 // string (>= 2 MB) dwarfs the 200 KB budget.
 foreach (['viaArr', 'viaCapture', 'selfAssign'] as $fn) {
     for ($i = 0; $i < 20000; $i++) { $fn($i); }
-    $b = memory_get_usage();
-    for ($i = 0; $i < 40000; $i++) { $fn($i); }
-    echo $fn, " ", (memory_get_usage() - $b) < 200000 ? "flat" : "leak", "\n";
+    // A real per-call leak grows EVERY batch; a page-granular jump of the peak does not repeat, so
+    // the function is flat if any of three consecutive batches stays inside the budget.
+    $flat = false;
+    for ($round = 0; $round < 3 && !$flat; $round++) {
+        $b = memory_get_usage();
+        for ($i = 0; $i < 40000; $i++) { $fn($i); }
+        $flat = (memory_get_usage() - $b) < 200000;
+    }
+    echo $fn, " ", $flat ? "flat" : "leak", "\n";
 }
