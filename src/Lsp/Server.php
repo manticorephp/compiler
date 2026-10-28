@@ -4,6 +4,7 @@ namespace Lsp;
 
 use Lsp\JsonRpc\Dispatcher;
 use Lsp\Handlers\NavigationHandlers;
+use Lsp\Handlers\RenameHandlers;
 use Lsp\JsonRpc\RpcError;
 use Semantic\Workspace;
 
@@ -74,6 +75,7 @@ final class Server
                     'hoverProvider' => true,
                     'definitionProvider' => true,
                     'referencesProvider' => true,
+                    'renameProvider' => ['prepareProvider' => true],
                 ],
                 'serverInfo' => ['name' => 'manticore', 'version' => \Manticore\Version::STRING],
             ];
@@ -91,6 +93,7 @@ final class Server
             return null;
         });
         (new NavigationHandlers($this->ws, fn(): array => $this->docs, $this->closed))->register($d);
+        (new RenameHandlers($this->ws, fn(): array => $this->docs, $this->closed, $this->send))->register($d);
         $d->on('$/cancelRequest', function (array $p): mixed { return null; });
         $d->on('textDocument/didOpen', function (array $p): mixed {
             $td = $p['textDocument'] ?? null;
@@ -124,6 +127,7 @@ final class Server
             $uri = $p['textDocument']['uri'] ?? null;
             if (is_string($uri) && isset($this->docs[$uri])) {
                 unset($this->docs[$uri]);
+                $this->closed->add($uri);
                 $this->ws->close($uri);
                 unset($this->published[$uri]);
                 $this->push($uri, []);
