@@ -1335,7 +1335,11 @@ final class EmitLlvm implements EmitVisitor
         // PHP functions stay external (unique) and `@main` lives in the
         // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
         $statT = \Compile\Stats::begin('  emit preamble');
+        $this->preambleSpoolOn = $streaming && !\Compile\Debug::$framePointers;
+        $this->preambleSpoolSeq = 0;
         $preamble = $this->linkonceRuntime($this->emitPreamble());
+        $spooled = $this->preambleSpoolSeq > 0;
+        $this->preambleSpoolOn = false;
         // The preamble mints lazy helpers too (a per-class `__mir_props_*` body
         // cellifying an array property), after both drains above ran. Drained
         // entries are blanked, so this only picks up the late ones.
@@ -1347,7 +1351,13 @@ final class EmitLlvm implements EmitVisitor
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {
             $statT = \Compile\Stats::begin('  hoist allocas (streamed)');
-            if (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
+            $preambleBytes = \strlen($preamble);
+            if ($spooled) {
+                $preambleBytes = $this->writeSpooledPreamble($preamble, $this->streamIrPath);
+                if ($preambleBytes < 0 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
+                    throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
+                }
+            } elseif (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
                 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
                 throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
             }
@@ -1358,7 +1368,7 @@ final class EmitLlvm implements EmitVisitor
             }
             \Manticore\sys_unlink($bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
-            $stagedBytes = \strlen($preamble) + $bodyBytes;
+            $stagedBytes = $preambleBytes + $bodyBytes;
             // PruneIr used to be unreachable from here: this branch returns the
             // staged marker before the in-memory pruner below ever runs, so every
             // manifest build has been handing clang the discardable helpers it
@@ -1465,6 +1475,107 @@ final class EmitLlvm implements EmitVisitor
      * site so it coalesces to ONE address across the two objects — see those
      * defs. Only `define` lines (helpers) need touching here.
      */
+    /** True while a STAGED module's preamble is being built: big pieces go to spool files. */
+    private bool $preambleSpoolOn = false;
+    private int $preambleSpoolSeq = 0;
+
+    /**
+     * Parts of the preamble written to a spool file with the {@see linkonceRuntime} rewrite already
+     * applied, replaced in the text by `\x1eMCSPOOL:<path>\x1e` + the newline the last part ended with —
+     * so the surrounding text still sees a line break before whatever follows. Off (the parts are
+     * simply joined) unless {@see $preambleSpoolOn}.
+     * @param string[] $parts
+     */
+    private function spoolPreamble(array $parts): string
+    {
+        $last = \count($parts) - 1;
+        if (!$this->preambleSpoolOn || $last < 0 || \substr($parts[$last], -1) !== "\n") {
+            return \implode('', $parts);
+        }
+        $path = $this->streamIrPath . '.pre' . (string)$this->preambleSpoolSeq;
+        if (!\Manticore\write_file($path, '')) { return \implode('', $parts); }
+        $this->preambleSpoolSeq = $this->preambleSpoolSeq + 1;
+        // Each spool stands where a line starts, so a leading `define ` is rewritten too.
+        $leadingNl = true;
+        foreach ($parts as $i => $part) {
+            if ($part === '') { continue; }
+            if ($this->appendLinkonce($path, $part, $leadingNl, $i === $last) < 0) {
+                throw new \RuntimeException('EmitLlvm: cannot spool the preamble to ' . $path);
+            }
+            $leadingNl = \substr($part, -1) === "\n";
+            $parts[$i] = '';
+        }
+        return "\x1eMCSPOOL:" . $path . "\x1e\n";
+    }
+
+    /**
+     * Append `$raw` to `$path` with every `\ndefine ` rewritten to `\ndefine linkonce_odr ` (and a leading
+     * `define ` too when `$leadingNl`), a bounded buffer at a time; `$dropFinalNl` leaves the last byte out.
+     * @return int bytes written, or -1
+     */
+    private function appendLinkonce(string $path, string $raw, bool $leadingNl, bool $dropFinalNl): int
+    {
+        $sep = "\ndefine ";
+        $rep = "\ndefine linkonce_odr ";
+        $seplen = \strlen($sep);
+        $end = \strlen($raw) - ($dropFinalNl ? 1 : 0);
+        $pos = 0;
+        $total = 0;
+        $buf = '';
+        if ($leadingNl && \substr($raw, 0, 7) === 'define ') {
+            $buf = 'define linkonce_odr ';
+            $pos = 7;
+        }
+        while (true) {
+            $d = \strpos($raw, $sep, $pos);
+            if ($d === false || $d >= $end) { $buf .= \substr($raw, $pos, $end - $pos); break; }
+            $buf .= \substr($raw, $pos, $d - $pos) . $rep;
+            $pos = $d + $seplen;
+            if (\strlen($buf) >= 8388608) {
+                if (!\Manticore\append_file_bytes($path, $buf)) { return -1; }
+                $total += \strlen($buf);
+                $buf = '';
+            }
+        }
+        if ($buf !== '') {
+            if (!\Manticore\append_file_bytes($path, $buf)) { return -1; }
+            $total += \strlen($buf);
+        }
+        return $total;
+    }
+
+    /**
+     * The staged preamble file: `$preamble` with each spool marker replaced by the spool's content.
+     * @return int bytes written, or -1
+     */
+    private function writeSpooledPreamble(string $preamble, string $path): int
+    {
+        if (!\Manticore\write_file($path, '')) { return -1; }
+        $mark = "\x1eMCSPOOL:";
+        $marklen = \strlen($mark);
+        $pos = 0;
+        $total = 0;
+        $n = \strlen($preamble);
+        while (true) {
+            $m = \strpos($preamble, $mark, $pos);
+            $stop = $m === false ? $n : $m;
+            if ($stop > $pos) {
+                if (!\Manticore\append_file_bytes($path, \substr($preamble, $pos, $stop - $pos))) { return -1; }
+                $total += $stop - $pos;
+            }
+            if ($m === false) { break; }
+            $e = \strpos($preamble, "\x1e", $m + $marklen);
+            if ($e === false) { return -1; }
+            $spool = \substr($preamble, $m + $marklen, $e - $m - $marklen);
+            $size = \filesize($spool);
+            if ($size === false || !\Manticore\append_file_path($spool, $path)) { return -1; }
+            \Manticore\sys_unlink($spool);
+            $total += $size;
+            $pos = $e + 1;
+        }
+        return $total;
+    }
+
     private function linkonceRuntime(string $preamble): string
     {
         // explode/implode, NOT str_replace: the bundled str_replace appends a
