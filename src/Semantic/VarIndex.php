@@ -12,6 +12,7 @@ use Parser\Ast\ArrowFn;
 use Parser\Ast\Assign;
 use Parser\Ast\CallExpr;
 use Parser\Ast\Closure;
+use Parser\Ast\DynamicStaticProp;
 use Parser\Ast\ClassStmt;
 use Parser\Ast\CompoundAssign;
 use Parser\Ast\DoWhileStmt;
@@ -255,8 +256,15 @@ final class VarIndex
     {
         $w = new AstWalk(true);
         if ($this->scExpr[$sid] !== null) { $w->exprTree($this->scExpr[$sid]); } else { $w->stmts($this->scStmts[$sid]); }
-        foreach ($w->exprs as $e) {
-            if ($e instanceof Variable) {
+        $list = $w->exprs;
+        // AstWalk (shared with the compiler) leaves the name expression of `A::$$n` unvisited
+        for ($i = 0; $i < count($list); $i++) {
+            $e = $list[$i];
+            if ($e instanceof DynamicStaticProp) {
+                $sub = new AstWalk(true);
+                $sub->exprTree($e->nameExpr);
+                foreach ($sub->exprs as $x) { $list[] = $x; }
+            } elseif ($e instanceof Variable) {
                 $this->scVars[$sid][] = $e;
             } elseif ($e instanceof Closure) {
                 $this->scanParams($e->params);

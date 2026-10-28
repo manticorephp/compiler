@@ -131,11 +131,15 @@ arrow fns), a binding per variable per scope, closure `use` sharing the outer bi
 `definitionOf` / `referencesTo` on a variable answer from it; `scopeAt` is a binary search over scope spans (it was a
 linear scan per declaration name, see Latency).
 
-**Rename blockers** (`Workspace::renameBlockers`; empty = mechanical rename is safe):
+**Rename blockers** (`Workspace::renameBlockers`; empty = mechanical rename is safe). Contract: every site in
+`uncertainSitesFor` for the same query is also a blocker `reason:file:line:col` (`unresolved-receiver` is reported as
+`unresolved-member`; at most 50 per reason, then one `reason:…+N more` entry), closed files included. So empty blockers
+imply an empty uncertain list; a P3 rename that finds any blocker must refuse or ask.
 
 | Blocker | Meaning |
 |---|---|
-| `unresolved-member` | a use site of the member name whose receiver type is unknown |
+| `unresolved-member` | the cursor use site, or (with `:file:line:col`) any same-name use site anywhere in the workspace whose receiver type is unknown, closed files included |
+| `string-class-name`, `callable-string`, `dynamic-member`, `legacy-interpolation` | uncertain sites carried over as blockers: a string equal to the name, `'A::run'`, a dynamic access (`->$n`, `A::$$n`), a `"${n}"` literal (the lexer reads it as a plain string) |
 | `owner-unknown` | declaring class nested in a closure / loop / switch (no owner) |
 | `implicit-member` | member the source never declares (synthesized by the Index, e.g. from `__toString`) |
 | `library-declaration` | declared in the prelude / stdlib |
