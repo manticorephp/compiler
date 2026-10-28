@@ -99,4 +99,37 @@ check('request on a doc that is not open is null', function (): bool|string {
     return ask($d, 'textDocument/hover', 'file:///t/zzz.php', 0, 0) === null;
 });
 
+/** @return string[] */
+function uris(mixed $r): array
+{
+    $o = [];
+    foreach (is_array($r) ? $r : [] as $x) { $o[] = $x['uri'] . '@' . $x['range']['start']['line']; }
+    sort($o);
+    return $o;
+}
+
+check('references: open site and closed (indexed) site of a class; declaration toggle', function () use ($A, $B): bool|string {
+    $r = sys_get_temp_dir() . '/lspnav' . getmypid();
+    mkdir($r);
+    file_put_contents("$r/c.php", "<?php\n\$g = new Foo();\n\$g->bar();\n");
+    $d = rig(new Sink(), 'file://' . $r);
+    $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+    open($d, 'file:///t/a.php', $A);
+    open($d, 'file:///t/b.php', $B);
+    $all = uris(ask($d, 'textDocument/references', 'file:///t/a.php', 1, 8, ['context' => ['includeDeclaration' => true]]));
+    $nod = uris(ask($d, 'textDocument/references', 'file:///t/a.php', 1, 8, ['context' => ['includeDeclaration' => false]]));
+    unlink("$r/c.php"); rmdir($r);
+    $want = ['file:///t/a.php@1', 'file:///t/b.php@1', 'file://' . $r . '/c.php@1'];
+    sort($want);
+    $wantNo = array_values(array_filter($want, fn($x) => $x !== 'file:///t/a.php@1'));
+    return ($all === $want && $nod === $wantNo) ?: json_encode([$all, $nod]);
+});
+check('references: unresolved receiver site not listed', function () use ($A): bool|string {
+    $d = rig(new Sink());
+    open($d, 'file:///t/a.php', $A);
+    open($d, 'file:///t/b.php', "<?php\nfunction mk(\$u) { \$u->bar(); }\n\$f = new Foo();\n\$f->bar();\n");
+    $r = uris(ask($d, 'textDocument/references', 'file:///t/b.php', 3, 5, ['context' => ['includeDeclaration' => true]]));
+    return $r === ['file:///t/a.php@2', 'file:///t/b.php@3'] ?: json_encode($r);
+});
+
 exit($fail);

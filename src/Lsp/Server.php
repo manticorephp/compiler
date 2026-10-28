@@ -71,6 +71,7 @@ final class Server
                     'textDocumentSync' => ['openClose' => true, 'change' => 1],
                     'hoverProvider' => true,
                     'definitionProvider' => true,
+                    'referencesProvider' => true,
                 ],
                 'serverInfo' => ['name' => 'manticore', 'version' => \Manticore\Version::STRING],
             ];
