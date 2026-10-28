@@ -435,4 +435,16 @@ check('nested try/finally is not exponential', function () {
     return $dt < 2.0 && microtime(true) - $t0 < 4.0 && v($r2, 'y') !== '' ? true : "dt=$dt";
 });
 
+// ── aliasing and scope-clobbering soundness ──
+check('by-ref capture: assignment after the closure stays unknown', function () {
+    $r = at('$fn = function () use (&$x) { $x = new Bar; }; $x = new Foo; $fn(); $__T = 1;');
+    return v($r, 'x') === 'unknown' ? true : v($r, 'x');
+});
+check('by-ref capture: unrelated name stays typed', fn() => v(at('$fn = function () use (&$x) { $x = 1; }; $y = new Foo; $x = new Foo; $__T = 1;'), 'y') === 'N\Foo');
+check('variable-variable write clobbers the scope', fn() => v(at('$x = new Foo; $n = "x"; $$n = new Bar; $__T = 1;'), 'x') === 'unknown');
+check('include clobbers the scope', fn() => v(at('$x = new Foo; include "a.php"; $__T = 1;'), 'x') === 'unknown' && v(at('$x = new Foo; require_once "a.php"; $__T = 1;', '', 'fn'), 'x') === 'unknown');
+check('goto: everything after a label is unknown', fn() => v(at('$x = new Foo; goto end; $x = new Bar; end: $__T = 1;'), 'x') === 'unknown' && v(at('$x = new Foo; $__T = 1;'), 'x') === 'N\Foo');
+check('array literal reference makes the name unknown', fn() => v(at('$x = new Foo; $arr2 = [&$x]; $arr2[0] = new Bar; $__T = 1;'), 'x') === 'unknown');
+check('reference assignment marks both names', fn() => v(at('$q = new Foo; $r = &$q; $q = new Foo; $__T = 1;'), 'q') === 'unknown');
+check('foreach by reference marks the iterated variable', fn() => v(at('$xs = [new Foo]; foreach ($xs as &$e) { $e = new Bar; } $__T = 1;'), 'xs') === 'unknown');
 exit($fail);
