@@ -2083,7 +2083,12 @@ final class Parser
             && \strtolower($this->peek()->lexeme) === 'yield') {
             return $this->parseYield();
         }
-        $left = $this->parseTernary();
+        return $this->parseAssignTail($this->parseTernary());
+    }
+
+    /** The `= …` / `op= …` that may follow an already-parsed assignment target. */
+    private function parseAssignTail(Expr $left): Expr
+    {
         $tok = $this->peek();
         if ($tok->kind === TokenKind::Equals) {
             $span = $this->span();
@@ -2320,7 +2325,24 @@ final class Parser
             //
             // parseAssign, not parseExpression: `and` / `or` / `xor` bind looser
             // than this, so `$a ?? $b and $c` must stay `($a ?? $b) and $c`.
-            $right = $this->parseAssign();
+            //
+            // But NOT the ternary: `??` binds tighter than `?:`, so
+            // `$a ?? false ? [1] : []` is `($a ?? false) ? [1] : []`. The operand
+            // is a coalesce-level expression that may itself be assigned to
+            // (`$x ?? $y = 1`), which is the only way an `=` follows it.
+            if ($this->peek()->kind === TokenKind::Keyword
+                && \strtolower($this->peek()->lexeme) === 'yield') {
+                $right = $this->parseYield();
+            } else {
+                // The recursion carries the same depth guard parseAssign has: a
+                // long `a ?? a ?? …` chain is right-nested.
+                if ($this->tolerant === 1) {
+                    if ($this->depth > self::MAX_DEPTH) { throw $this->error('nesting too deep'); }
+                    $this->depth = $this->depth + 1;
+                }
+                $right = $this->parseAssignTail($this->parseNullCoalesce());
+                if ($this->tolerant === 1) { $this->depth = $this->depth - 1; }
+            }
             return Expr::nullCoalesce($left, $right, $this->end($span, $left));
         }
         return $left;
