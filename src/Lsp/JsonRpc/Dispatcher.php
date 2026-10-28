@@ -40,7 +40,7 @@ class Dispatcher
         return $out;
     }
 
-    private static function error(mixed $id, int $code, string $message): string
+    public static function error(mixed $id, int $code, string $message): string
     {
         $out = json_encode(['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => $code, 'message' => $message]], JSON_INVALID_UTF8_SUBSTITUTE);
         if ($out === false) {
