@@ -1103,9 +1103,14 @@ trait InferCalls
         $shapeDiffers = false;
         $numeric = true;
         $differ = false;
+        /** @var array<string, bool> $objClasses */
+        $objClasses = [];
+        $allObj = true;
         foreach ($bodies as $b) {
             $t = $this->sigs[$b . '__' . $method] ?? null;
             if ($t === null) { continue; }
+            if ($t->kind === Type::KIND_OBJ && $t->class !== null && $t->class !== '') { $objClasses[$t->class] = true; }
+            else { $allObj = false; }
             if ($t->kind !== Type::KIND_INT && $t->kind !== Type::KIND_FLOAT) { $numeric = false; }
             if ($first === null) { $first = $t; $acc = $t; continue; }
             if ($t->kind === Type::KIND_ARRAY && $acc !== null && $acc->kind === Type::KIND_ARRAY) {
@@ -1119,6 +1124,17 @@ trait InferCalls
             if ($t->kind !== $first->kind) { $differ = true; }
         }
         if (!$differ) {
+            // Objects of different CLASSES share the representation but not the
+            // class: adopting the first body's `obj<S>` told every consumer the
+            // result IS an `S` — `get_class()` folded to it and a method call on
+            // the result bound to `S`'s body (phpoption's `Result::map` answered
+            // a `Success` for an `Error`). The call's type is the nearest common
+            // ancestor of what the bodies return.
+            if ($allObj && \count($objClasses) > 1) {
+                $anc = $this->commonAncestorClass(\array_keys($objClasses));
+                if ($anc !== '') { return Type::obj($anc); }
+                return Type::cell();
+            }
             // Arrays of different ELEMENT shapes share a representation but not a
             // view: the call must read the join, not whichever body came first.
             // The join's element is ERASED: unionWith takes an unrefined element
@@ -1127,6 +1143,29 @@ trait InferCalls
             return $shapeDiffers && $acc !== null ? $acc->withElement(Type::unknown()) : null;
         }
         return $numeric ? Type::numericCell() : Type::cell();
+    }
+
+    /** The nearest class every one of `$classes` descends from (itself included), '' when they share none. @param string[] $classes */
+    private function commonAncestorClass(array $classes): string
+    {
+        $first = $classes[0];
+        for ($c = $first, $d = 0; $c !== '' && $d < 64; $d = $d + 1) {
+            $all = true;
+            foreach ($classes as $k) {
+                $x = $k;
+                $hit = false;
+                for ($e = 0; $x !== '' && $e < 64; $e = $e + 1) {
+                    if ($x === $c) { $hit = true; break; }
+                    $cd = $this->classes[$x] ?? null;
+                    $x = $cd === null ? '' : $cd->parent;
+                }
+                if (!$hit) { $all = false; break; }
+            }
+            if ($all) { return $c; }
+            $cd0 = $this->classes[$c] ?? null;
+            $c = $cd0 === null ? '' : $cd0->parent;
+        }
+        return '';
     }
 
     /** How an array's elements are laid out, ignoring which class an object is: two arrays that differ here are read differently. */
