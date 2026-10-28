@@ -5165,6 +5165,7 @@ trait EmitLlvmObjects
         if ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_METHOD_CALL
             || $n->kind === Node::KIND_STATIC_CALL || $n->kind === Node::KIND_INVOKE
             || $n->kind === Node::KIND_CONCAT || $n->kind === Node::KIND_NEW_OBJ
+            || $n->kind === Node::KIND_NEW_DYN_OBJ || $n->kind === Node::KIND_CLOSURE
             || $n->kind === Node::KIND_STORE_LOCAL || $n->kind === Node::KIND_ARRAY_LIT) {
             return true;
         }
@@ -5787,6 +5788,15 @@ trait EmitLlvmObjects
         /** @var array<string, bool> $nodeNames */
         $nodeNames = [];
         $inline = $this->dynInlineOnlyNames($methods, $needsNodes, $nodeNames);
+        // A site whose ONLY argument is one spread of a cell-element pack hands every holder its
+        // arguments out of that pack — by-ref and variadic names included — so nothing of the
+        // caller's own argument nodes is needed and those names share the helper too. Kept inline
+        // they cost ~20 KB an arm, once per late-static-binding copy of a forwarder (Laravel's
+        // Facade::__callStatic: 268 names x 46 copies).
+        if ($needsNodes && $pack !== null && $argc === 1 && $packElem === null) {
+            $needsNodes = false;
+            $nodeNames = [];
+        }
         // A by-ref / variadic arm binds the caller's own argument EXPRESSIONS, so
         // those must be safe to emit a second time. Every other arm (a prelude
         // class's by-value method) reads the arguments back out of the packed
@@ -8423,35 +8433,15 @@ trait EmitLlvmObjects
      */
     private function irIsClosed(string $ir): bool
     {
+        // `%rN = ...` at the start of a line is a definition (parameters are `%aN` and never
+        // match); every other `%rN` is a use. The scan is PCRE's, not a per-byte PHP loop.
+        if (\preg_match_all('/%r[0-9]+/', $ir, $used) === 0) { return true; }
+        \preg_match_all('/^[ \t\r\f\v]*(%r[0-9]+) = /m', $ir, $defs);
+        /** @var array<string, bool> $defined */
         $defined = [];
-        $used = [];
-        foreach (\explode("\n", $ir) as $line) {
-            $t = \ltrim($line);
-            // `%rN = ...` — a definition. Parameters are `%aN` and never match.
-            if (\strncmp($t, '%r', 2) === 0) {
-                $eq = \strpos($t, ' = ');
-                if ($eq !== false) { $defined[\substr($t, 0, $eq)] = true; }
-            }
-            $n = \strlen($line);
-            $i = 0;
-            while ($i < $n) {
-                $c = $line[$i];
-                if ($c === '%' && $i + 1 < $n && $line[$i + 1] === 'r') {
-                    $j = $i + 2;
-                    while ($j < $n) {
-                        $d = $line[$j];
-                        if ($d < '0' || $d > '9') { break; }
-                        $j = $j + 1;
-                    }
-                    if ($j > $i + 2) { $used[\substr($line, $i, $j - $i)] = true; }
-                    $i = $j;
-                    continue;
-                }
-                $i = $i + 1;
-            }
-        }
-        foreach ($used as $u => $_) {
-            if (!isset($defined[$u])) { return false; }
+        foreach ($defs[1] as $d) { $defined[(string)$d] = true; }
+        foreach ($used[0] as $u) {
+            if (!isset($defined[(string)$u])) { return false; }
         }
         return true;
     }

@@ -137,6 +137,15 @@ final class HoistAllocas
      */
     public function runFile(string $input, string $output): bool
     {
+        // A body that fits in memory is sliced whole ({@see runFast}); only a fat one streams.
+        $size = \filesize($input);
+        if ($size !== false && $size <= 67108864) {
+            $text = \file_get_contents($input);
+            if ($text === false) { return false; }
+            $res = $this->runFast($text);
+            unset($text);
+            return \Manticore\write_file($output, $res);
+        }
         $in = \Manticore\fopen($input, 'rb');
         if ($in === null) { return false; }
         $out = \Manticore\fopen($output, 'wb');
@@ -229,6 +238,88 @@ final class HoistAllocas
         \Manticore\fclose($in);
         \Manticore\fclose($out);
         return $ok;
+    }
+
+    /**
+     * {@see run}, by slicing instead of by line: PCRE-free, one `strpos` per alloca and
+     * one copy per stretch between them, so the cost follows the allocas (a few per
+     * function) rather than the lines. Same output for well-formed IR.
+     */
+    public function runFast(string $ir): string
+    {
+        $this->moved = 0;
+        $len = \strlen($ir);
+        $out = '';
+        $pos = 0;
+        while ($pos < $len) {
+            if ($pos === 0 && \substr($ir, 0, 7) === 'define ') {
+                $d = 0;
+            } else {
+                $f = \strpos($ir, "\ndefine ", $pos);
+                if ($f === false) { break; }
+                $d = $f + 1;
+            }
+            $out .= \substr($ir, $pos, $d - $pos);
+            $h = \strpos($ir, "\n", $d);
+            if ($h === false) {
+                $out .= self::withFrameRecord(\substr($ir, $d));
+                $pos = $len;
+                break;
+            }
+            $out .= self::withFrameRecord(\substr($ir, $d, $h - $d)) . "\n";
+            $b = $h + 1;
+            if ($b >= $len) { $pos = $len; break; }
+            // The function ends at the first line that is only `}`.
+            $end = $len;
+            $s = $h;
+            while (true) {
+                $e = \strpos($ir, "\n}", $s);
+                if ($e === false) { break; }
+                $le = \strpos($ir, "\n", $e + 1);
+                $lineEnd = $le === false ? $len : $le;
+                if (\rtrim(\substr($ir, $e + 1, $lineEnd - $e - 1)) === '}') { $end = $lineEnd; break; }
+                $s = $e + 1;
+            }
+            // The first body line stays first.
+            $l0 = \strpos($ir, "\n", $b);
+            if ($l0 === false || $l0 >= $end) {
+                $out .= \substr($ir, $b, $end - $b);
+                $pos = $end;
+                continue;
+            }
+            $out .= \substr($ir, $b, $l0 - $b + 1);
+            $p0 = $l0 + 1;
+            $allocs = '';
+            $rest = '';
+            // Searched inside this body only: an unbounded strpos in a function with no (more) allocas
+            // scans on to the next one anywhere in the module — quadratic over a 166 MB string of
+            // small allocaless helpers.
+            $body = \substr($ir, $p0, $end - $p0);
+            $blen = \strlen($body);
+            $copyFrom = 0;
+            $q = 0;
+            while (true) {
+                $q = \strpos($body, ' = alloca ', $q);
+                if ($q === false) { break; }
+                $ls = $q;
+                while ($ls > 0 && $body[$ls - 1] !== "\n") { $ls = $ls - 1; }
+                $le = \strpos($body, "\n", $q);
+                if ($le === false) { $le = $blen; }
+                $line = \substr($body, $ls, $le - $ls);
+                if ($this->isStaticAlloca($line)) {
+                    $rest .= \substr($body, $copyFrom, $ls - $copyFrom);
+                    $allocs .= $line . "\n";
+                    $copyFrom = $le + 1;
+                    $this->moved = $this->moved + 1;
+                }
+                $q = $le;
+            }
+            if ($blen > $copyFrom) { $rest .= \substr($body, $copyFrom); }
+            $out .= $allocs . $rest;
+            $pos = $end;
+        }
+        if ($pos < $len) { $out .= \substr($ir, $pos); }
+        return $out;
     }
 
     /**

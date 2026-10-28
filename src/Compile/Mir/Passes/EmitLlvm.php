@@ -1088,7 +1088,7 @@ final class EmitLlvm implements EmitVisitor
                 // path, which avoids raw+hoisted duplication at the dangerous
                 // Doctrine/Symfony sizes while keeping ordinary emission fast.
                 $h = new \Compile\Mir\HoistAllocas();
-                $body = $h->run($body);
+                $body = $h->runFast($body);
                 $hoistedAllocas += $h->moved;
                 if (!\Manticore\append_file_bytes($bodyPath, $body)) {
                     throw new \RuntimeException('EmitLlvm: cannot append in-memory body');
@@ -1229,6 +1229,7 @@ final class EmitLlvm implements EmitVisitor
         }
         \Compile\Progress::counter('functions', $emitIndex, $functionTotal);
         unset($functionKeys);
+        \Compile\Stats::line('IR: function loop done');
         $this->rootSnapshot('post-function-emission', $module, true, $bodyBytes);
         // Before every lazy-helper flush below: a thunk body is an ordinary call
         // and may ask for any of them.
@@ -1237,6 +1238,7 @@ final class EmitLlvm implements EmitVisitor
         // the captures its env co-owns, and its address is already stamped into
         // every env {@see EmitLlvmCalls::emitClosure}.
         $extraBodies = $this->emitClosureDropFns();
+        \Compile\Stats::line('IR: closure drop fns ' . (string)\strlen($extraBodies) . ' bytes');
         $this->rootSnapshot('post-closure-drop-build', $module, true, $bodyBytes);
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
@@ -1261,6 +1263,10 @@ final class EmitLlvm implements EmitVisitor
         // class-id switch. The preamble is emitted afterwards, so any runtime
         // demand raised by the helper is still visible to emitPreamble().
         $this->rootSnapshot('post-lazy-helper-build', $module, true, $bodyBytes);
+        \Compile\Stats::line('IR: extra bodies joined ' . (string)\strlen($extraBodies) . ' bytes'
+            . ' (vd ' . (string)\strlen($this->vdExtraBodies) . ', dynm ' . (string)\strlen($this->dynmExtraBodies)
+            . ', dynf ' . (string)\strlen($this->dynfExtraBodies) . ', lit ' . (string)\strlen($this->litTableBodies)
+            . ', helpers ' . (string)\count($this->dynamicMethodHelpers) . ')');
         if ($streaming) {
             // Helper bodies are compiler-owned text and can be numerous on Doctrine.
             // Do not join all of them into one temporary PHP string: stage, hoist,
@@ -1291,14 +1297,17 @@ final class EmitLlvm implements EmitVisitor
                 $bodyBytes += $nBody;
             };
             $h = new \Compile\Mir\HoistAllocas();
-            $extraBodies = $h->run($extraBodies);
+            $extraBodies = $h->runFast($extraBodies);
+            \Compile\Stats::line('IR: extra bodies hoisted');
             $hoistedAllocas += $h->moved;
             if (!\Manticore\append_file_bytes($bodyPath, $extraBodies)) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
             }
             $bodyBytes += \strlen($extraBodies);
             unset($extraBodies);
+            \Compile\Stats::line('IR: extra bodies appended');
             $this->drainLazyHelpers($appendStreamedBody);
+            \Compile\Stats::line('IR: lazy helpers drained');
             unset($appendStreamedBody);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
             $this->reportIrCensus($bodyBytes);
@@ -1326,7 +1335,17 @@ final class EmitLlvm implements EmitVisitor
         // PHP functions stay external (unique) and `@main` lives in the
         // bodies, never the preamble. linkonce_odr is a no-op for a lone `.o`.
         $statT = \Compile\Stats::begin('  emit preamble');
-        $preamble = $this->linkonceRuntime($this->emitPreamble());
+        $this->preambleSpoolOn = $streaming && !\Compile\Debug::$framePointers;
+        $this->preambleSpoolSeq = 0;
+        $this->preambleSpoolFiles = [];
+        try {
+            $preamble = $this->linkonceRuntime($this->emitPreamble());
+        } catch (\Throwable $e) {
+            $this->dropPreambleSpools();
+            throw $e;
+        }
+        $spooled = $this->preambleSpoolSeq > 0;
+        $this->preambleSpoolOn = false;
         // The preamble mints lazy helpers too (a per-class `__mir_props_*` body
         // cellifying an array property), after both drains above ran. Drained
         // entries are blanked, so this only picks up the late ones.
@@ -1338,7 +1357,18 @@ final class EmitLlvm implements EmitVisitor
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {
             $statT = \Compile\Stats::begin('  hoist allocas (streamed)');
-            if (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
+            $preambleBytes = \strlen($preamble);
+            if ($spooled) {
+                try {
+                    $preambleBytes = $this->writeSpooledPreamble($preamble, $this->streamIrPath);
+                    if ($preambleBytes < 0 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
+                        throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
+                    }
+                } catch (\Throwable $e) {
+                    $this->dropPreambleSpools();
+                    throw $e;
+                }
+            } elseif (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
                 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
                 throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
             }
@@ -1349,7 +1379,7 @@ final class EmitLlvm implements EmitVisitor
             }
             \Manticore\sys_unlink($bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
-            $stagedBytes = \strlen($preamble) + $bodyBytes;
+            $stagedBytes = $preambleBytes + $bodyBytes;
             // PruneIr used to be unreachable from here: this branch returns the
             // staged marker before the in-memory pruner below ever runs, so every
             // manifest build has been handing clang the discardable helpers it
@@ -1398,7 +1428,7 @@ final class EmitLlvm implements EmitVisitor
         // and a hot loop dies on the guard page. {@see \Compile\Mir\HoistAllocas}
         $statT = \Compile\Stats::begin('  hoist allocas');
         $hoist = new \Compile\Mir\HoistAllocas();
-        $ir = $hoist->run($ir);
+        $ir = $hoist->runFast($ir);
         \Compile\Stats::step('  hoist allocas', $statT, $hoist->moved, -1);
         // Everything above is emitted on DEMAND FLAGS, not on reachability: the
         // whole unified array runtime, the rc/arena/pool helpers and the
@@ -1444,6 +1474,123 @@ final class EmitLlvm implements EmitVisitor
             $lines[$i] = \substr($l, 0, -2) . '#0 {';
         }
         return \implode("\n", $lines);
+    }
+
+    /** True while a STAGED module's preamble is being built: big pieces go to spool files. */
+    private bool $preambleSpoolOn = false;
+    private int $preambleSpoolSeq = 0;
+    /** @var string[] spool files not yet consumed by {@see writeSpooledPreamble} */
+    private array $preambleSpoolFiles = [];
+
+    /**
+     * Parts of the preamble written to a spool file with the {@see linkonceRuntime} rewrite already
+     * applied, replaced in the text by `\x1eMCSPOOL:<path>\x1e` + the newline the last part ended with —
+     * so the surrounding text still sees a line break before whatever follows. Off (the parts are
+     * simply joined) unless {@see $preambleSpoolOn}.
+     * @param string[] $parts
+     */
+    private function spoolPreamble(array $parts): string
+    {
+        $last = \count($parts) - 1;
+        if (!$this->preambleSpoolOn || $last < 0 || \substr($parts[$last], -1) !== "\n") {
+            return \implode('', $parts);
+        }
+        $path = $this->streamIrPath . '.pre' . (string)$this->preambleSpoolSeq;
+        if (!\Manticore\write_file($path, '')) { return \implode('', $parts); }
+        $this->preambleSpoolSeq = $this->preambleSpoolSeq + 1;
+        $this->preambleSpoolFiles[] = $path;
+        // Each spool stands where a line starts, so a leading `define ` is rewritten too.
+        $leadingNl = true;
+        foreach ($parts as $i => $part) {
+            if ($part === '') { continue; }
+            if ($this->appendLinkonce($path, $part, $leadingNl, $i === $last) < 0) {
+                throw new \RuntimeException('EmitLlvm: cannot spool the preamble to ' . $path);
+            }
+            $leadingNl = \substr($part, -1) === "\n";
+            $parts[$i] = '';
+        }
+        return "\x1eMCSPOOL:" . $path . "\x1e\n";
+    }
+
+    /**
+     * Append `$raw` to `$path` with every `\ndefine ` rewritten to `\ndefine linkonce_odr ` (and a leading
+     * `define ` too when `$leadingNl`), a bounded buffer at a time; `$dropFinalNl` leaves the last byte out.
+     * @return int bytes written, or -1
+     */
+    private function appendLinkonce(string $path, string $raw, bool $leadingNl, bool $dropFinalNl): int
+    {
+        $sep = "\ndefine ";
+        $rep = "\ndefine linkonce_odr ";
+        $seplen = \strlen($sep);
+        $end = \strlen($raw) - ($dropFinalNl ? 1 : 0);
+        $pos = 0;
+        $total = 0;
+        $buf = '';
+        if ($leadingNl && \substr($raw, 0, 7) === 'define ') {
+            $buf = 'define linkonce_odr ';
+            $pos = 7;
+        }
+        while (true) {
+            $d = \strpos($raw, $sep, $pos);
+            if ($d === false || $d >= $end) { $buf .= \substr($raw, $pos, $end - $pos); break; }
+            $buf .= \substr($raw, $pos, $d - $pos) . $rep;
+            $pos = $d + $seplen;
+            if (\strlen($buf) >= 8388608) {
+                if (!\Manticore\append_file_bytes($path, $buf)) { return -1; }
+                $total += \strlen($buf);
+                $buf = '';
+            }
+        }
+        if ($buf !== '') {
+            if (!\Manticore\append_file_bytes($path, $buf)) { return -1; }
+            $total += \strlen($buf);
+        }
+        return $total;
+    }
+
+    /** Delete spool files a failed build left behind. */
+    private function dropPreambleSpools(): void
+    {
+        foreach ($this->preambleSpoolFiles as $p) { \Manticore\sys_unlink($p); }
+        $this->preambleSpoolFiles = [];
+        $this->preambleSpoolOn = false;
+    }
+
+    /**
+     * The staged preamble file: `$preamble` with each spool marker replaced by the spool's content.
+     * @return int bytes written, or -1
+     */
+    private function writeSpooledPreamble(string $preamble, string $path): int
+    {
+        if (!\Manticore\write_file($path, '')) { return -1; }
+        $mark = "\x1eMCSPOOL:";
+        $marklen = \strlen($mark);
+        $pos = 0;
+        $total = 0;
+        $n = \strlen($preamble);
+        while (true) {
+            $m = \strpos($preamble, $mark, $pos);
+            $stop = $m === false ? $n : $m;
+            if ($stop > $pos) {
+                if (!\Manticore\append_file_bytes($path, \substr($preamble, $pos, $stop - $pos))) { return -1; }
+                $total += $stop - $pos;
+            }
+            if ($m === false) { break; }
+            // spoolPreamble rewrote a leading `define ` as if a line break came first: hold it to that.
+            if ($m > 0 && $preamble[$m - 1] !== "\n") {
+                throw new \RuntimeException('EmitLlvm: a preamble spool does not start a line');
+            }
+            $e = \strpos($preamble, "\x1e", $m + $marklen);
+            if ($e === false) { return -1; }
+            $spool = \substr($preamble, $m + $marklen, $e - $m - $marklen);
+            $size = \filesize($spool);
+            if ($size === false || !\Manticore\append_file_path($spool, $path)) { return -1; }
+            \Manticore\sys_unlink($spool);
+            $total += $size;
+            $this->preambleSpoolFiles = \array_values(\array_filter($this->preambleSpoolFiles, static fn (string $p): bool => $p !== $spool));
+            $pos = $e + 1;
+        }
+        return $total;
     }
 
     /**
@@ -4200,44 +4347,20 @@ final class EmitLlvm implements EmitVisitor
      *  `$base`, the line is that global plus `$line` (a delta). */
     private function btPushInline(string $nameLit, string $line, string $base): string
     {
-        $d = $this->ssa->allocReg();
-        $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
-        $ok = $this->ssa->allocReg();
-        $out .= '  ' . $ok . ' = icmp slt i64 ' . $d . ", 4096\n";
-        $st = $this->ssa->allocLabel('btpush.st');
-        $inc = $this->ssa->allocLabel('btpush.inc');
-        $out .= '  br i1 ' . $ok . ', label %' . $st . ', label %' . $inc . "\n" . $st . ":\n";
-        $ni = $this->ssa->allocReg();
-        $out .= '  ' . $ni . ' = ptrtoint ptr ' . $nameLit . " to i64\n";
-        $np = $this->ssa->allocReg();
-        $out .= '  ' . $np . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_name, i64 0, i64 ' . $d . "\n";
-        $out .= '  store i64 ' . $ni . ', ptr ' . $np . "\n";
-        $ln = $line;
+        // One call, not ~20 lines of two blocks per call site: the helpers are `alwaysinline`
+        // (EmitLlvmModule), so the machine code is the same push, but the IR that every later
+        // phase writes, splits and parses is a sixth the size.
         if ($base !== '') {
-            $b = $this->ssa->allocReg();
-            $out .= '  ' . $b . ' = load i64, ptr ' . $base . "\n";
-            $ln = $this->ssa->allocReg();
-            $out .= '  ' . $ln . ' = add i64 ' . $b . ', ' . $line . "\n";
+            return '  call void @__mir_bt_push_rel(ptr ' . $nameLit . ', ptr ' . $base . ', i64 ' . $line . ")\n";
         }
-        $lp = $this->ssa->allocReg();
-        $out .= '  ' . $lp . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_line, i64 0, i64 ' . $d . "\n";
-        $out .= '  store i64 ' . $ln . ', ptr ' . $lp . "\n";
-        $out .= '  br label %' . $inc . "\n" . $inc . ":\n";
-        $d1 = $this->ssa->allocReg();
-        $out .= '  ' . $d1 . ' = add i64 ' . $d . ", 1\n";
-        $out .= '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
-        return $out;
+        return '  call void @__mir_bt_push(ptr ' . $nameLit . ', i64 ' . $line . ")\n";
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */
     private function btPop(): string
     {
         if (!$this->rt->needsBacktrace) { return ''; }
-        $d = $this->ssa->allocReg();
-        $d1 = $this->ssa->allocReg();
-        return '  ' . $d . " = load i64, ptr @__mir_bt_depth\n"
-             . '  ' . $d1 . ' = sub i64 ' . $d . ", 1\n"
-             . '  store i64 ' . $d1 . ", ptr @__mir_bt_depth\n";
+        return "  call void @__mir_bt_pop()\n";
     }
 
     /**

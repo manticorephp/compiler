@@ -212,10 +212,21 @@ trait InferScans
      * hint erased the element type. Without this the prop-store skips the
      * co-owner retain and the caller's local buffer is freed under it.
      */
+    /** @var array<string,int> */
+    private array $ctorFnIdx = [];
+
     private function scanCtorPropContainers(Module $module): bool
     {
         $this->ctorPropChanged = false;
         $this->ctorParamNamesCache = [];
+        // name → position of every constructor, so a `new` site finds its ctor in O(1)
+        // instead of walking the whole function list once per class.
+        $this->ctorFnIdx = [];
+        $ci = 0;
+        foreach ($module->functions as $fn) {
+            if (\substr($fn->name, -13) === '____construct') { $this->ctorFnIdx[$fn->name] = $ci; }
+            $ci = $ci + 1;
+        }
         foreach ($module->functions as $fn) {
             if (!$this->bodyHas($fn, Node::KIND_NEW_OBJ)) { continue; }
             $this->scanCtorPropNode($fn->body, $module);
@@ -238,29 +249,26 @@ trait InferScans
                 $pnames = $this->ctorParamNamesCache[$ctorName] ?? null;
                 if ($pnames === null) {
                     $pnames = [];
-                    if (\Compile\Stats::$on) {
-                        \Compile\Stats::bump('scanCtorProp.fns_scanned', \count($module->functions));
-                    }
                     // Searching $module->functions (a typed FunctionDef[] prop)
                     // keeps each $cfn / $param class resolvable under self-host;
                     // a `name → Param[]` map would erase it through the assoc.
-                    foreach ($module->functions as $cfn) {
-                        if ($cfn->name === $ctorName) {
-                            // Only a param the ctor stores AS IS (`$this->p = $p`,
-                            // what promotion lowers to) reveals the property's
-                            // type; a same-named param the ctor merely reads gave
-                            // HeaderBag::$headers its ctor arg's assoc[string,
-                            // string] while set() stored arrays into it, and the
-                            // element drop then leaked every inner array.
-                            /** @var array<string,bool> $stored */
-                            $stored = [];
-                            $this->ctorStoredParams($cfn->body, $stored);
-                            // The ctor's first param is the implicit `$this`;
-                            // call args align with the rest, so drop it.
-                            foreach ($cfn->params as $param) {
-                                if ($param->name === 'this') { continue; }
-                                $pnames[] = isset($stored[$param->name]) ? $param->name : '';
-                            }
+                    $cpos = $this->ctorFnIdx[$ctorName] ?? -1;
+                    if ($cpos >= 0) {
+                        $cfn = $module->functions[$cpos];
+                        // Only a param the ctor stores AS IS (`$this->p = $p`,
+                        // what promotion lowers to) reveals the property's
+                        // type; a same-named param the ctor merely reads gave
+                        // HeaderBag::$headers its ctor arg's assoc[string,
+                        // string] while set() stored arrays into it, and the
+                        // element drop then leaked every inner array.
+                        /** @var array<string,bool> $stored */
+                        $stored = [];
+                        $this->ctorStoredParams($cfn->body, $stored);
+                        // The ctor's first param is the implicit `$this`;
+                        // call args align with the rest, so drop it.
+                        foreach ($cfn->params as $param) {
+                            if ($param->name === 'this') { continue; }
+                            $pnames[] = isset($stored[$param->name]) ? $param->name : '';
                         }
                     }
                     $this->ctorParamNamesCache[$ctorName] = $pnames;
@@ -3469,14 +3477,24 @@ trait InferScans
 
     /** @var array<string,string> */
     private array $anyDeclarerMemo = [];
+    private bool $anyDeclarerBuilt = false;
 
     /** The first function declaring `$method`: the rule {@see VivifyRefArgs} vivifies by, so both agree on an erased receiver. */
     private function anyDeclarerFn(string $method): string
     {
-        if (!isset($this->anyDeclarerMemo[$method])) {
-            $this->anyDeclarerMemo[$method] = VivifyRefArgs::firstDeclarer(\array_keys($this->fnByName), $method);
+        if (!$this->anyDeclarerBuilt) {
+            // One pass: the first function (in table order) per method name — what
+            // VivifyRefArgs::firstDeclarer finds, without walking every name per method.
+            $this->anyDeclarerBuilt = true;
+            $this->anyDeclarerMemo = [];
+            foreach ($this->fnByName as $fname => $_) {
+                $i = \strpos((string)$fname, '__');
+                if ($i === false) { continue; }
+                $m = \substr((string)$fname, $i + 2);
+                if (!isset($this->anyDeclarerMemo[$m])) { $this->anyDeclarerMemo[$m] = (string)$fname; }
+            }
         }
-        return $this->anyDeclarerMemo[$method];
+        return $this->anyDeclarerMemo[$method] ?? '';
     }
 
     /**

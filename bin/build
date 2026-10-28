@@ -224,11 +224,18 @@ if [[ $FAST -eq 1 ]]; then
         echo "   (installed compiler predates -O on \`build\` — building at its default)"
     fi
 fi
-# The shipping compiler stays ONE translation unit: auto-split trades ~7% runtime for build time.
-export MANTICORE_AUTO_SPLIT=0
-# The compiler never builds cycles it needs reclaimed within one run: the collector cost ~5% of a
-# build (cc_collect_cycles) and freed nothing measurable (RSS 978 vs 975 MB on manticore-fmt).
-export MANTICORE_AUTO_GC=0
+# The compiler's own module is auto-split like any large application: one serial `clang -O2` over
+# its ~200 MB of IR takes ~10 min and peaks at ~7.7 GB (the middle end plateaus near 2.8 GB, the
+# backend ramps past 7 GB), while 19 parts take ~1.5 min at ~4 GB. The split costs the compiler
+# ~4.5% of its own run time (measured 2026-10-28: same commit, both MANTICORE_AUTO_GC=0, 6
+# interleaved symfony-app compiles per variant, 62.9 s vs 65.7 s wall, 62.6 s vs 65.4 s CPU).
+# The emitted IR is identical either way. To build the compiler as ONE unit anyway:
+#   MANTICORE_AUTO_SPLIT=0 bin/build
+export MANTICORE_AUTO_SPLIT="${MANTICORE_AUTO_SPLIT:-1}"
+# The compiler keeps its automatic cycle collector (MANTICORE_AUTO_GC unset = on). It costs ~4.5% of a
+# compile (Laravel to the assembly step, 340 s -> 356 s) and takes the compiler's own peak RSS from
+# 6.5 GB to 4.7 GB (after the parse step 667 MB -> 155 MB; measured 2026-10-28, -O 0). Build the
+# compiler without it only to compare:  MANTICORE_AUTO_GC=0 bin/build
 set +e
 # shellcheck disable=SC2086
 if [[ -n "${CELLGUARD_PASS1:-}" ]]; then export MANTICORE_CELLGUARD="$CELLGUARD_PASS1"; fi

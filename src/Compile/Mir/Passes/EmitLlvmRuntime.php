@@ -2789,13 +2789,12 @@ trait EmitLlvmRuntime
             $this->rt->needsStrcmp = true;
             $dynRuntime = \Compile\Mir\RuntimeLibrary::dynamicMethodRuntime();
         }
-        $out = $dynRuntime . $descs . $defs;
         // The weak-reference death hook (prelude/weak.php): null until a
         // WeakMap / WeakReference first enrolls an object, then the prelude's
         // `__mc_weak_forget(addr)`. Every free — rc zero or the cycle
         // collector — passes here, in every module, so the pointer is the one
         // shared word and no module names the prelude function itself.
-        $out .= "@__mc_weak_hook = linkonce_odr global ptr null\n";
+        $out = "@__mc_weak_hook = linkonce_odr global ptr null\n";
         $out .= "define void @__mir_drop_dispatch(ptr %p) {\nentry:\n";
         $out .= "  %wh = load ptr, ptr @__mc_weak_hook\n";
         $out .= "  %whz = icmp eq ptr %wh, null\n";
@@ -2818,7 +2817,10 @@ trait EmitLlvmRuntime
         $out .= "  call void %df(ptr %p)\n";
         $out .= "  br label %end\n";
         $out .= "end:\n  ret void\n}\n";
-        return $out;
+        // Class descriptors, reflection tables and drop bodies are the bulk of a large program's
+        // preamble (237 MB for Laravel); passed up as a string they were copied at every level that
+        // appends them. A staged module spools them straight to a file and sends up a marker.
+        return $this->spoolPreamble([$dynRuntime, $descs, $defs, $out]);
     }
 
     /**

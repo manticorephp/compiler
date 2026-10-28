@@ -835,8 +835,26 @@ trait LowerReify
         return false;
     }
 
+    /** @var array<string, int> function name → position of its first entry in `Module::$functions` */
+    private array $fnPosIdx = [];
+    private int $fnPosCount = 0;
+
     private function findFunctionDef(Module $module, string $name): ?FunctionDef
     {
+        $n = \count($module->functions);
+        if ($n < $this->fnPosCount) { $this->fnPosIdx = []; $this->fnPosCount = 0; }
+        // The list only grows while this runs: index the tail added since the last call.
+        for ($i = $this->fnPosCount; $i < $n; $i = $i + 1) {
+            $fname = $module->functions[$i]->name;
+            if (!isset($this->fnPosIdx[$fname])) { $this->fnPosIdx[$fname] = $i; }
+        }
+        $this->fnPosCount = $n;
+        $pos = $this->fnPosIdx[$name] ?? -1;
+        // The index covers every entry up to the current count, and chainMethodFn probes `Class__method`
+        // up the parent chain — most probes miss, so a miss must not fall back to the walk.
+        if ($pos < 0) { return null; }
+        if ($module->functions[$pos]->name === $name) { return $module->functions[$pos]; }
+        // The slot no longer holds that name (an entry was renamed in place): the plain walk is the answer.
         foreach ($module->functions as $fn) {
             if ($fn->name === $name) { return $fn; }
         }

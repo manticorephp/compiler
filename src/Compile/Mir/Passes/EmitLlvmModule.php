@@ -368,7 +368,7 @@ trait EmitLlvmModule
             $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_line = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_depth = linkonce_odr global i64 0\n";
-            $out .= "define void @__mir_bt_push(ptr %name, i64 %line) {\n";
+            $out .= "define void @__mir_bt_push(ptr %name, i64 %line) alwaysinline {\n";
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
             $out .= "  %ok = icmp slt i64 %d, 4096\n";
@@ -386,7 +386,7 @@ trait EmitLlvmModule
             $out .= "  ret void\n}\n";
             // The call site's line as an offset from its function's base line,
             // which lives in `@.btl.<fn>` ({@see EmitLlvm::btPush}).
-            $out .= "define void @__mir_bt_push_rel(ptr %name, ptr %base, i64 %delta) {\n";
+            $out .= "define void @__mir_bt_push_rel(ptr %name, ptr %base, i64 %delta) alwaysinline {\n";
             $out .= "entry:\n";
             $out .= "  %b = load i64, ptr %base\n";
             $out .= "  %line = add i64 %b, %delta\n";
@@ -423,7 +423,7 @@ trait EmitLlvmModule
             $out .= "  %np = inttoptr i64 %v to ptr\n";
             $out .= "  %r = select i1 %live, ptr %np, ptr @__mir_bt_unknown\n";
             $out .= "  ret ptr %r\n}\n";
-            $out .= "define void @__mir_bt_pop() {\n";
+            $out .= "define void @__mir_bt_pop() alwaysinline {\n";
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
             $out .= "  %d1 = sub i64 %d, 1\n";
@@ -2135,6 +2135,7 @@ trait EmitLlvmModule
      */
     private function classCensusIndex(): array
     {
+        if (\count($this->classes) === $this->censusIdxClasses) { return $this->censusIdxMemo; }
         $m = [];
         $i = 0;
         foreach ($this->classes as $cd) {
@@ -2142,8 +2143,14 @@ trait EmitLlvmModule
             $m[$cd->name] = $i;
             $i = $i + 1;
         }
+        $this->censusIdxMemo = $m;
+        $this->censusIdxClasses = \count($this->classes);
         return $m;
     }
+
+    /** @var array<string,int> */
+    private array $censusIdxMemo = [];
+    private int $censusIdxClasses = -1;
 
     /** The dump half: ONE loop, silent for a class that never allocated. */
     private function classCensusDump(): string

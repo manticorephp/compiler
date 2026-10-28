@@ -1062,6 +1062,10 @@ trait LowerPrelude
             . "    \$out = \$out . \$pad . '    [' . __mir_print_r_debug_key((string)\$k) . '] => ' . __mir_print_r_str(\$val, \$indent + 8) . \"\\n\";\n"
             . "  }\n"
             . "  return \$out . \$pad . \")\\n\";\n}\n"
+            // One property line, as a call: inlined per property the concatenation costs ~5 KB of IR,
+            // times every property of every class of the program.
+            . "function __mir_print_r_line(string \$out, string \$pad, string \$key, mixed \$val, int \$indent): string {\n"
+            . "  return \$out . \$pad . '    [' . \$key . '] => ' . __mir_print_r_str(\$val, \$indent + 8) . \"\\n\";\n}\n"
             // A mangled key ({@see dumpObjectSrc}): `p:protected`, `p:Class:private`.
             . "function __mir_print_r_debug_key(string \$k): string {\n"
             . "  if (\$k === '' || \$k[0] !== \"\\0\") { return \$k; }\n"
@@ -1107,8 +1111,8 @@ trait LowerPrelude
                             $key = $p . ':' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . ':private';
                         }
                     }
-                    $line = "\$out = \$out . \$pad . \"    [" . $this->dqBody($key) . "] => \" . __mir_print_r_str(\$v->"
-                        . $p . ", \$indent + 8) . \"\\n\";";
+                    $line = "\$out = __mir_print_r_line(\$out, \$pad, \"" . $this->dqBody($key) . "\", \$v->"
+                        . $p . ", \$indent);";
                     $body .= isset($this->maybeUninitIn($cd)[$p])
                         ? "    if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
                         : "    " . $line . "\n";
@@ -1150,7 +1154,9 @@ trait LowerPrelude
     private function exportObjectSrc(): string
     {
         $names = $this->walkableClassesDerivedFirst();
-        $body = '';
+        // One property line, as a call (see __mir_print_r_line).
+        $body = "function __mir_export_prop(string \$out, string \$ipad, string \$key, mixed \$val, int \$indent): string {\n"
+            . "  return \$out . \$ipad . \"'\" . \$key . \"' => \" . __mir_var_export(\$val, \$indent + 2) . \",\\n\";\n}\n";
         $dispatch = "function __mir_export_object(mixed \$v, int \$indent): string {\n"
             . "  \$pad = str_repeat(' ', \$indent);\n"
             . "  \$ipad = \$pad . '   ';\n"
@@ -1167,8 +1173,8 @@ trait LowerPrelude
                 . "  if (\$v instanceof \\" . $cname . ") {\n"
                 . "  \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
             foreach ($cd->propertyNames as $p) {
-                $line = "\$out = \$out . \$ipad . \"'" . $p . "' => \" . __mir_var_export(\$v->"
-                    . $p . ", \$indent + 2) . \",\\n\";";
+                $line = "\$out = __mir_export_prop(\$out, \$ipad, \"" . $p . "\", \$v->"
+                    . $p . ", \$indent);";
                 $body .= isset($this->maybeUninitIn($cd)[$p])
                     ? "    if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
                     : "    " . $line . "\n";

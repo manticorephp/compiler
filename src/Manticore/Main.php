@@ -1022,9 +1022,9 @@ function clang_tuning_flags(): string
  * module alone is ~20x its text in clang). Split, it is ~2 minutes at 2.2 GB,
  * and {@see \Compile\Mir\SplitModule}'s `available_externally` copies keep the
  * inlining a part boundary used to cost (the compiler built in 8 parts: +6.6%
- * instead of +53%). `bin/build` exports MANTICORE_AUTO_SPLIT=0, so the
- * compiler's own ~85 MB module stays one unit and
- * its output is unchanged; a library never gets here — its `.o` is one unit.
+ * instead of +53%; measured again on the whole run, 2026-10-28: +4.5%). `bin/build` splits the
+ * compiler's own ~200 MB module the same way (`MANTICORE_AUTO_SPLIT=0 bin/build` keeps it one
+ * unit); a library never gets here — its `.o` is one unit.
  */
 function auto_split_parts(int $irBytes): int
 {
@@ -3244,6 +3244,13 @@ function build_compile_module(
     $splitLibrary = $emitLibrary && (int)(\getenv("MANTICORE_SPLIT_JOBS") ?: "0") >= 2;
     if (!import_stdlib_decls($emitLibrary, !($withStdlib || $splitLibrary))) { return 65; }
     $keep = CompileArgs::$keepIr;
+    if (!$keep) {
+        // A build killed mid-way (SIGTERM, a crash) leaves its staged IR and parts behind — 4 GB for
+        // Laravel, 50 GB across a day of aborted runs. Every dir is named by its builder's pid, so one
+        // whose pid is gone is nobody's: sweep them before staging ours. A live builder keeps its own,
+        // and only entries owned by this user are touched.
+        system('for f in /tmp/manticore_buildobj_*; do [ -e "$f" ] && [ -O "$f" ] || continue; p=${f#/tmp/manticore_buildobj_}; p=${p%%[.-]*}; kill -0 "$p" 2>/dev/null || rm -rf "$f"; done');
+    }
     $base = $keep ? ($output . ".dbg") : ("/tmp/manticore_buildobj_" . (string)getpid());
     $llPath = $base . ".ll";
     // Stream function bodies by default. Keeping the complete module in one PHP

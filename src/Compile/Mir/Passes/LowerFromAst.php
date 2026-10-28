@@ -192,8 +192,6 @@ final class LowerFromAst implements Pass
     private array $methodParamsCache = [];
     /** @var array<string, string> */
     private array $methodDeclClassCache = [];
-    /** @var array<string, array<int, \Parser\Ast\Param>|null> */
-    private array $variadicMethodParamsCache = [];
 
     /**
      * Namespace of the class / function whose signature or property
@@ -798,7 +796,7 @@ final class LowerFromAst implements Pass
         $this->hasNamespacedGetenvAt = -1;
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
-        $this->variadicMethodParamsCache = [];
+        $this->variadicIdxBuilt = false;
         $this->module = $module;
         // Lowering passes such as injectSuperglobals need the target kind
         // before they register globals; a vendor library must import app-owned
@@ -1141,7 +1139,7 @@ final class LowerFromAst implements Pass
             $dumpProg = \Parser\Parser::parseSource("<?php\n" . $this->dumpObjectSrc());
             foreach ($dumpProg->statements as $dstmt) {
                 if ($dstmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$dstmt->decl->name] = $dstmt->decl;
+                $this->declareFn($dstmt->decl->name, $dstmt->decl);
                 $dfn = $this->lowerFunction($dstmt->decl);
                 $dfn->isPrelude = true;
                 $module->addFunction($dfn);
@@ -1158,7 +1156,7 @@ final class LowerFromAst implements Pass
         $tsProg = \Parser\Parser::parseSource("<?php\n" . $this->objToStrSrc());
         foreach ($tsProg->statements as $tstmt) {
             if ($tstmt->kind !== 'Function') { continue; }
-            $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
+            $this->declareFn($tstmt->decl->name, $tstmt->decl);
             $tfn = $this->lowerFunction($tstmt->decl);
             $tfn->isPrelude = true;
             $tfn->moduleLocal = true;
@@ -1174,7 +1172,7 @@ final class LowerFromAst implements Pass
             $jsProg = \Parser\Parser::parseSource("<?php\n" . $jsSrc);
             foreach ($jsProg->statements as $jstmt) {
                 if ($jstmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$jstmt->decl->name] = $jstmt->decl;
+                $this->declareFn($jstmt->decl->name, $jstmt->decl);
                 $jfn = $this->lowerFunction($jstmt->decl);
                 $jfn->isPrelude = true;
                 $module->addFunction($jfn);
@@ -1187,7 +1185,7 @@ final class LowerFromAst implements Pass
             $cuProg = \Parser\Parser::parseSource("<?php\n" . $this->classUsesSrc());
             foreach ($cuProg->statements as $custmt) {
                 if ($custmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$custmt->decl->name] = $custmt->decl;
+                $this->declareFn($custmt->decl->name, $custmt->decl);
                 $cufn = $this->lowerFunction($custmt->decl);
                 $cufn->isPrelude = true;
                 $module->addFunction($cufn);
@@ -1199,7 +1197,7 @@ final class LowerFromAst implements Pass
             $prProg = \Parser\Parser::parseSource("<?php\n" . $this->printRObjectSrc());
             foreach ($prProg->statements as $pstmt) {
                 if ($pstmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$pstmt->decl->name] = $pstmt->decl;
+                $this->declareFn($pstmt->decl->name, $pstmt->decl);
                 $pfn = $this->lowerFunction($pstmt->decl);
                 $pfn->isPrelude = true;
                 $module->addFunction($pfn);
@@ -1213,7 +1211,7 @@ final class LowerFromAst implements Pass
             $exProg = \Parser\Parser::parseSource("<?php\n" . $this->exportObjectSrc());
             foreach ($exProg->statements as $estmt) {
                 if ($estmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$estmt->decl->name] = $estmt->decl;
+                $this->declareFn($estmt->decl->name, $estmt->decl);
                 $efn = $this->lowerFunction($estmt->decl);
                 $efn->isPrelude = true;
                 $module->addFunction($efn);
@@ -1227,7 +1225,7 @@ final class LowerFromAst implements Pass
             $serProg = \Parser\Parser::parseSource("<?php\n" . $this->serObjectSrc());
             foreach ($serProg->statements as $sstmt) {
                 if ($sstmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$sstmt->decl->name] = $sstmt->decl;
+                $this->declareFn($sstmt->decl->name, $sstmt->decl);
                 $sfn = $this->lowerFunction($sstmt->decl);
                 $sfn->isPrelude = true;
                 $module->addFunction($sfn);
@@ -1241,7 +1239,7 @@ final class LowerFromAst implements Pass
             $unProg = \Parser\Parser::parseSource("<?php\n" . $this->unserSrc());
             foreach ($unProg->statements as $ustmt) {
                 if ($ustmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$ustmt->decl->name] = $ustmt->decl;
+                $this->declareFn($ustmt->decl->name, $ustmt->decl);
                 $ufn = $this->lowerFunction($ustmt->decl);
                 $ufn->isPrelude = true;
                 $module->addFunction($ufn);
@@ -1266,7 +1264,7 @@ final class LowerFromAst implements Pass
                 "<?php\n" . $this->reflAllocSrc() . $this->reflEnumMetaSrc());
             foreach ($allocProg->statements as $astmt) {
                 if ($astmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$astmt->decl->name] = $astmt->decl;
+                $this->declareFn($astmt->decl->name, $astmt->decl);
                 $afn = $this->lowerFunction($astmt->decl);
                 $afn->isPrelude = true;
                 $module->addFunction($afn);
@@ -1281,7 +1279,7 @@ final class LowerFromAst implements Pass
                 $trampProg = \Parser\Parser::parseSource("<?php\n" . $trampSrc);
                 foreach ($trampProg->statements as $tstmt) {
                     if ($tstmt->kind !== 'Function') { continue; }
-                    $this->fnDecls[$tstmt->decl->name] = $tstmt->decl;
+                    $this->declareFn($tstmt->decl->name, $tstmt->decl);
                     $module->addFunction($this->lowerFunction($tstmt->decl));
                 }
             }
@@ -1299,31 +1297,31 @@ final class LowerFromAst implements Pass
             // The declaration still has to be registered NOW: the params pre-pass
             // right below reads `$this->fnDecls`.
             foreach ($this->synthAttrFactories($module) as $decl) {
-                $this->fnDecls[$decl->name] = $decl;
+                $this->declareFn($decl->name, $decl);
                 $this->pendingSynthFns[] = $decl;
             }
             foreach ($this->synthParamDefaultFactories($module) as $decl) {
-                $this->fnDecls[$decl->name] = $decl;
+                $this->declareFn($decl->name, $decl);
                 $this->pendingSynthFns[] = $decl;
             }
             // Ф5: a class-constants factory per class with any constant, built as
             // AST that references each constant by `\C::NAME` — reusing the
             // existing class-const resolution (self:: / inherited all resolve).
             foreach ($this->synthConstFactories($module) as $decl) {
-                $this->fnDecls[$decl->name] = $decl;
+                $this->declareFn($decl->name, $decl);
                 $this->pendingSynthFns[] = $decl;
             }
             foreach ($this->synthIfaceFactories($module) as $decl) {
-                $this->fnDecls[$decl->name] = $decl;
+                $this->declareFn($decl->name, $decl);
                 $this->pendingSynthFns[] = $decl;
             }
             foreach ($this->synthFileFactories($module) as $decl) {
-                $this->fnDecls[$decl->name] = $decl;
+                $this->declareFn($decl->name, $decl);
                 $this->pendingSynthFns[] = $decl;
             }
             if ($this->includeDocFactories) {
                 foreach ($this->synthDocFactories($module) as $decl) {
-                    $this->fnDecls[$decl->name] = $decl;
+                    $this->declareFn($decl->name, $decl);
                     $this->pendingSynthFns[] = $decl;
                 }
             }
@@ -1334,7 +1332,7 @@ final class LowerFromAst implements Pass
         foreach ($stmts as $stmt) {
             if ($stmt->kind === 'Function') {
                 $fqn = $stmt->decl->name;
-                $this->fnDecls[$fqn] = $stmt->decl;
+                $this->declareFn($fqn, $stmt->decl);
                 $this->noteSourceFnAlias($fqn);
             }
         }
@@ -1411,7 +1409,7 @@ final class LowerFromAst implements Pass
                 }
                 continue;
             }
-            $this->fnDecls[$name] = $extDecl;
+            $this->declareFn($name, $extDecl);
             // Register the bare-name alias for a namespaced import, exactly as
             // the in-source pre-pass does, so an unqualified `strncmp()` in the
             // consumer resolves to the imported `Runtime\Libc\strncmp` instead
@@ -1563,7 +1561,7 @@ final class LowerFromAst implements Pass
             $dcProg = \Parser\Parser::parseSource("<?php\n" . $this->dynConstantSrc($module, $mainStmts));
             foreach ($dcProg->statements as $dstmt) {
                 if ($dstmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$dstmt->decl->name] = $dstmt->decl;
+                $this->declareFn($dstmt->decl->name, $dstmt->decl);
                 $dfn = $this->lowerFunction($dstmt->decl);
                 $dfn->isPrelude = true;
                 $module->addFunction($dfn);
@@ -1597,7 +1595,7 @@ final class LowerFromAst implements Pass
                 $scope = $this->closureReflFactoryScope[$fi];
                 $fi = $fi + 1;
                 if (!$this->reflFnDynamic) { continue; }
-                $this->fnDecls[$fd->name] = $fd;
+                $this->declareFn($fd->name, $fd);
                 $prevCls = $this->currentLowerClass;
                 $this->currentLowerClass = $scope;
                 $module->addFunction($this->lowerFunction($fd));
@@ -1622,7 +1620,7 @@ final class LowerFromAst implements Pass
                     $rfd = new \Parser\Ast\FunctionDecl(
                         \Compile\Mir\Passes\ReflectSynth::paramDefaultFn('', $rfn, $rpi),
                         [], 'mixed', $rbody, $rp->default->span);
-                    $this->fnDecls[$rfd->name] = $rfd;
+                    $this->declareFn($rfd->name, $rfd);
                     $module->addFunction($this->lowerFunction($rfd));
                 }
             }
@@ -1643,7 +1641,7 @@ final class LowerFromAst implements Pass
                 $prog = \Parser\Parser::parseSource("<?php\n" . $fnTrampSrc);
                 foreach ($prog->statements as $s) {
                     if ($s->kind !== 'Function') { continue; }
-                    $this->fnDecls[$s->decl->name] = $s->decl;
+                    $this->declareFn($s->decl->name, $s->decl);
                     $module->addFunction($this->lowerFunction($s->decl));
                 }
             }
@@ -1655,7 +1653,7 @@ final class LowerFromAst implements Pass
             $dfProg = \Parser\Parser::parseSource("<?php\n" . $this->definedFunctionsSource());
             foreach ($dfProg->statements as $dfs) {
                 if ($dfs->kind !== 'Function') { continue; }
-                $this->fnDecls[$dfs->decl->name] = $dfs->decl;
+                $this->declareFn($dfs->decl->name, $dfs->decl);
                 $module->addFunction($this->lowerFunction($dfs->decl));
             }
         }
@@ -1669,7 +1667,7 @@ final class LowerFromAst implements Pass
             $prog = \Parser\Parser::parseSource("<?php\n" . $this->closureFromSource($module));
             foreach ($prog->statements as $cfs) {
                 if ($cfs->kind !== 'Function') { continue; }
-                $this->fnDecls[$cfs->decl->name] = $cfs->decl;
+                $this->declareFn($cfs->decl->name, $cfs->decl);
                 $module->addFunction($this->lowerFunction($cfs->decl));
             }
         }
@@ -1739,7 +1737,7 @@ final class LowerFromAst implements Pass
                 $fallbackProg = \Parser\Parser::parseSource("<?php\n" . $fallbackSrc);
                 foreach ($fallbackProg->statements as $fstmt) {
                     if ($fstmt->kind !== 'Function') { continue; }
-                    $this->fnDecls[$fstmt->decl->name] = $fstmt->decl;
+                    $this->declareFn($fstmt->decl->name, $fstmt->decl);
                     $module->addFunction($this->lowerFunction($fstmt->decl));
                 }
             }
@@ -1760,7 +1758,7 @@ final class LowerFromAst implements Pass
                     $dynamicTrampProg = \Parser\Parser::parseSource("<?php\n" . $dynamicTrampSrc);
                     foreach ($dynamicTrampProg->statements as $dstmt) {
                         if ($dstmt->kind !== 'Function') { continue; }
-                        $this->fnDecls[$dstmt->decl->name] = $dstmt->decl;
+                        $this->declareFn($dstmt->decl->name, $dstmt->decl);
                         $module->addFunction($this->lowerFunction($dstmt->decl));
                     }
                 }
@@ -1771,7 +1769,7 @@ final class LowerFromAst implements Pass
                 . \Compile\Mir\Passes\TrampolineSynth::dynMethodErrorSource());
             foreach ($errProg->statements as $estmt) {
                 if ($estmt->kind !== 'Function') { continue; }
-                $this->fnDecls[$estmt->decl->name] = $estmt->decl;
+                $this->declareFn($estmt->decl->name, $estmt->decl);
                 $module->addFunction($this->lowerFunction($estmt->decl));
             }
         }
@@ -1899,7 +1897,7 @@ final class LowerFromAst implements Pass
         $prog = \Parser\Parser::parseSource("<?php\n" . TrampolineSynth::staticCallableSource($arms));
         foreach ($prog->statements as $s) {
             if ($s->kind !== 'Function') { continue; }
-            $this->fnDecls[$s->decl->name] = $s->decl;
+            $this->declareFn($s->decl->name, $s->decl);
             $module->addFunction($this->lowerFunction($s->decl));
         }
     }
@@ -5473,7 +5471,7 @@ final class LowerFromAst implements Pass
     {
         if ($s->kind === 'Function') {
             $fqn = $s->decl->name;
-            $this->fnDecls[$fqn] = $s->decl;
+            $this->declareFn($fqn, $s->decl);
             $this->noteSourceFnAlias($fqn);
             return;
         }
@@ -5490,7 +5488,7 @@ final class LowerFromAst implements Pass
         $this->methodReturnClassCache = [];
         $this->methodParamsCache = [];
         $this->methodDeclClassCache = [];
-        $this->variadicMethodParamsCache = [];
+        $this->variadicIdxBuilt = false;
         $this->knownClassNames[$cname] = true;
         $bs = \strrpos($cname, '\\');
         if ($bs !== false && $bs >= 0) {
@@ -7095,10 +7093,24 @@ final class LowerFromAst implements Pass
      */
     private function variadicMethodParams(string $method): ?array
     {
-        if (\array_key_exists($method, $this->variadicMethodParamsCache)) {
-            return $this->variadicMethodParamsCache[$method];
-        }
-        $found = null;
+        if (!$this->variadicIdxBuilt) { $this->buildVariadicIdx(); }
+        return $this->variadicIdx[$method] ?? null;
+    }
+
+    /** @var array<string, \Parser\Ast\Param[]|null> method name → the agreed variadic params, null when declarations disagree */
+    private array $variadicIdx = [];
+    private bool $variadicIdxBuilt = false;
+
+    /**
+     * One pass over every declared method instead of one per distinct name asked:
+     * the answer per name is the rule {@see variadicMethodParams} states.
+     */
+    private function buildVariadicIdx(): void
+    {
+        $this->variadicIdxBuilt = true;
+        $this->variadicIdx = [];
+        /** @var array<string, bool> $bad */
+        $bad = [];
         // Trait bodies count too: a trait's `call()` reaches every user class by
         // `use`, so a non-variadic one disagrees with an unrelated variadic
         // `call()` (symfony ErrorHandler::call(callable, ...)) and must defer.
@@ -7106,22 +7118,17 @@ final class LowerFromAst implements Pass
         foreach ($this->traitTable as $td) { $decls[] = $td; }
         foreach ($decls as $cd) {
             foreach ($this->classDeclMethods($cd) as $m) {
-                if ($this->methodDeclName($m) !== $method) { continue; }
+                $name = $this->methodDeclName($m);
+                if (isset($bad[$name])) { continue; }
                 $mp = $this->methodDeclParams($m);
                 $np = \count($mp);
-                if ($np === 0 || !$this->paramVariadic($mp[$np - 1])) {
-                    $this->variadicMethodParamsCache[$method] = null;
-                    return null;
-                }
-                if ($found !== null && \count($found) !== $np) {
-                    $this->variadicMethodParamsCache[$method] = null;
-                    return null;
-                }
-                $found = $mp;
+                if ($np === 0 || !$this->paramVariadic($mp[$np - 1])) { $bad[$name] = true; continue; }
+                $found = $this->variadicIdx[$name] ?? null;
+                if ($found !== null && \count($found) !== $np) { $bad[$name] = true; continue; }
+                $this->variadicIdx[$name] = $mp;
             }
         }
-        $this->variadicMethodParamsCache[$method] = $found;
-        return $found;
+        foreach ($bad as $name => $unused) { unset($this->variadicIdx[$name]); }
     }
 
     /**
@@ -7330,7 +7337,13 @@ final class LowerFromAst implements Pass
     private int $methodCanonStamp = -1;
     /** @var array<string, string> lowercase function name → declared spelling */
     private array $fnCanon = [];
-    private int $fnCanonStamp = -1;
+
+    /** Register a function declaration; keeps the case-insensitive index current in O(1). */
+    private function declareFn(string $name, \Parser\Ast\FunctionDecl $decl): void
+    {
+        $this->fnDecls[$name] = $decl;
+        $this->fnCanon[\strtolower($name)] = $name;
+    }
 
     /** php resolves method names case-insensitively; the emitter matches them exactly,
      *  so a call site is rewritten to the spelling the declarations use. */
@@ -7359,12 +7372,6 @@ final class LowerFromAst implements Pass
     private function canonFunctionName(string $name): string
     {
         if (isset($this->fnDecls[$name])) { return $name; }
-        $stamp = \count($this->fnDecls);
-        if ($stamp !== $this->fnCanonStamp) {
-            $this->fnCanonStamp = $stamp;
-            $this->fnCanon = [];
-            foreach ($this->fnDecls as $fname => $_) { $this->fnCanon[\strtolower((string)$fname)] = (string)$fname; }
-        }
         return $this->fnCanon[\strtolower($name)] ?? $name;
     }
 
