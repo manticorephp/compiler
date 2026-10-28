@@ -30,15 +30,22 @@ final class Sink
 
 function rig(Sink $k, string $root = 'file:///nonexistent-root'): Dispatcher
 {
+    return rigWs($k, $root)[0];
+}
+
+/** @return array{0: Dispatcher, 1: Workspace} */
+function rigWs(Sink $k, string $root): array
+{
     $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/core_interfaces.php');
     $pf = new ParsedFile('lib:prelude/core_interfaces.php', \Parser\Parser::parseTolerant($src, 'core_interfaces.php')->program);
-    $s = new Server(new Workspace(LibrarySymbols::fromParts([$pf], ['strlen'])), function (string $j) use ($k): void {
+    $ws = new Workspace(LibrarySymbols::fromParts([$pf], ['strlen']));
+    $s = new Server($ws, function (string $j) use ($k): void {
         $k->msgs[] = json_decode($j, true);
     });
     $d = new Dispatcher();
     $s->register($d);
     $d->handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":' . json_encode($root) . '}}');
-    return $d;
+    return [$d, $ws];
 }
 
 function open(Dispatcher $d, string $uri, string $text): void
@@ -130,6 +137,59 @@ check('references: unresolved receiver site not listed', function () use ($A): b
     open($d, 'file:///t/b.php', "<?php\nfunction mk(\$u) { \$u->bar(); }\n\$f = new Foo();\n\$f->bar();\n");
     $r = uris(ask($d, 'textDocument/references', 'file:///t/b.php', 3, 5, ['context' => ['includeDeclaration' => true]]));
     return $r === ['file:///t/a.php@2', 'file:///t/b.php@3'] ?: json_encode($r);
+});
+
+check('references: method called from a CLOSED file is listed; open count restored', function () use ($A): bool|string {
+    $r = sys_get_temp_dir() . '/lspnav2' . getmypid();
+    mkdir($r);
+    file_put_contents("$r/c.php", "<?php\n\$g = new Foo();\n\$g->bar();\n");
+    $k = new Sink();
+    [$d, $ws] = rigWs($k, 'file://' . $r);
+    $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+    open($d, 'file:///t/a.php', $A);
+    $n = $ws->openFileCount();
+    $got = uris(ask($d, 'textDocument/references', 'file:///t/a.php', 2, 22, ['context' => ['includeDeclaration' => true]]));
+    $after = $ws->openFileCount();
+    unlink("$r/c.php"); rmdir($r);
+    $want = ['file:///t/a.php@2', 'file://' . $r . '/c.php@2'];
+    sort($want);
+    return ($got === $want && $n === $after) ?: json_encode([$got, $n, $after]);
+});
+check('references: class query opens no files', function () use ($A): bool|string {
+    $r = sys_get_temp_dir() . '/lspnav3' . getmypid();
+    mkdir($r);
+    file_put_contents("$r/c.php", "<?php\n\$g = new Foo();\n");
+    [$d, $ws] = rigWs(new Sink(), 'file://' . $r);
+    $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+    open($d, 'file:///t/a.php', $A);
+    $got = uris(ask($d, 'textDocument/references', 'file:///t/a.php', 1, 8));
+    $cnt = $ws->openFileCount();
+    unlink("$r/c.php"); rmdir($r);
+    return ($got === ['file:///t/a.php@1', 'file://' . $r . '/c.php@1'] && $cnt === 1) ?: json_encode([$got, $cnt]);
+});
+check('references: missing context includes the declaration', function () use ($A, $B): bool|string {
+    $d = rig(new Sink());
+    open($d, 'file:///t/a.php', $A);
+    open($d, 'file:///t/b.php', $B);
+    $r = uris(ask($d, 'textDocument/references', 'file:///t/b.php', 2, 5));
+    return $r === ['file:///t/a.php@2', 'file:///t/b.php@2'] ?: json_encode($r);
+});
+check('malformed params and negative positions are -32602', function () use ($A): bool|string {
+    $d = rig(new Sink());
+    open($d, 'file:///t/a.php', $A);
+    $bad = [
+        ['textDocument' => ['uri' => 'file:///t/a.php']],
+        ['textDocument' => ['uri' => 'file:///t/a.php'], 'position' => ['line' => -1, 'character' => 0]],
+        ['textDocument' => ['uri' => 'file:///t/a.php'], 'position' => ['line' => 0, 'character' => -3]],
+        ['textDocument' => ['uri' => 'file:///t/a.php'], 'position' => ['line' => '1', 'character' => 0]],
+    ];
+    foreach (['textDocument/hover', 'textDocument/definition', 'textDocument/references'] as $m) {
+        foreach ($bad as $p) {
+            $r = json_decode((string)$d->handle(json_encode(['jsonrpc' => '2.0', 'id' => 5, 'method' => $m, 'params' => $p])), true);
+            if (($r['error']['code'] ?? 0) !== -32602) { return $m . ' ' . json_encode($p) . ' -> ' . json_encode($r); }
+        }
+    }
+    return true;
 });
 
 exit($fail);

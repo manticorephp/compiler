@@ -25,11 +25,13 @@ final class Server
     private $send;
     /** @var array<string, string> uri => last published diagnostics JSON */
     private array $published = [];
+    private ClosedFiles $closed;
     private const MAX_SCAN_BYTES = 2097152;
 
     public function __construct(private Workspace $ws, callable $send)
     {
         $this->send = $send;
+        $this->closed = new ClosedFiles($ws, fn(): array => $this->docs);
     }
 
     public function exitCode(): ?int
@@ -88,7 +90,7 @@ final class Server
             $this->exit = $this->shutdown ? 0 : 1;
             return null;
         });
-        (new NavigationHandlers($this->ws, fn(): array => $this->docs))->register($d);
+        (new NavigationHandlers($this->ws, fn(): array => $this->docs, $this->closed))->register($d);
         $d->on('$/cancelRequest', function (array $p): mixed { return null; });
         $d->on('textDocument/didOpen', function (array $p): mixed {
             $td = $p['textDocument'] ?? null;
@@ -150,6 +152,7 @@ final class Server
                     if ($text === false) { continue; }
                     $this->ws->open($uri, $text);
                     $this->ws->close($uri);
+                    $this->closed->add($uri);
                 } catch (\Throwable $e) {
                     continue;
                 }
