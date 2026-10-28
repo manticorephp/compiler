@@ -2934,7 +2934,25 @@ trait EmitLlvmObjects
                     . ', label %' . $lbl . "\n";
                 $bodyChunks[] = $lbl . ":\n";
                 $args = 'i64 %o';
-                for ($i = 0; $i < $argc; $i++) { $args .= ', i64 %a' . (string)$i; }
+                // The arguments arrive as cells (the interface says `mixed`), but
+                // an implementor may declare — or document — a concrete type for
+                // the slot: Laravel's `Container::offsetExists($offset)` is
+                // `@param string`, so its body reads the key as a raw string and
+                // a boxed one faulted in the array lookup. Decode each cell to the
+                // callee's own parameter type, as a direct call does.
+                $ptypes = $this->sigs->paramTypes[$declCls . '__' . $method] ?? [];
+                for ($i = 0; $i < $argc; $i++) {
+                    $pt = $ptypes[$i + 1] ?? null;
+                    if ($pt === null || $pt->kind === Type::KIND_CELL || $pt->kind === Type::KIND_UNKNOWN) {
+                        $args .= ', i64 %a' . (string)$i;
+                        continue;
+                    }
+                    $this->lastValue = '%a' . (string)$i;
+                    $this->lastValueType = 'i64';
+                    $bodyChunks[] = $this->unboxCellToType($pt);
+                    $bodyChunks[] = $this->coerceToI64();
+                    $args .= ', i64 ' . $this->lastValue;
+                }
                 $r = $this->ssa->allocReg();
                 $bodyChunks[] = '  ' . $r . ' = call i64 @manticore_' . $this->mangle($declCls)
                                . '__' . $method . '(' . $args . ")\n";
