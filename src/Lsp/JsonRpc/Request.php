@@ -29,6 +29,9 @@ class Request
             throw new RpcError(RpcError::INVALID_REQUEST, 'Invalid Request');
         }
         $raw = $j['id'] ?? null;
+        if ($raw !== null && !is_int($raw) && !is_float($raw) && !is_string($raw)) {
+            throw new RpcError(RpcError::INVALID_REQUEST, 'Invalid Request');
+        }
         $id = $raw === null ? null : (string)$raw;
         return new Request($id, $j['method'], $params, $raw);
     }

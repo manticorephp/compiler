@@ -33,11 +33,19 @@ class Dispatcher
         if ($req->isNotification()) {
             return null;
         }
-        return json_encode(['jsonrpc' => '2.0', 'id' => $req->rawId, 'result' => $result]);
+        $out = json_encode(['jsonrpc' => '2.0', 'id' => $req->rawId, 'result' => $result]);
+        if ($out === false) {
+            return self::error($req->rawId, RpcError::INTERNAL, 'Result is not JSON-encodable');
+        }
+        return $out;
     }
 
     private static function error(mixed $id, int $code, string $message): string
     {
-        return json_encode(['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => $code, 'message' => $message]]);
+        $out = json_encode(['jsonrpc' => '2.0', 'id' => $id, 'error' => ['code' => $code, 'message' => $message]], JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($out === false) {
+            $out = json_encode(['jsonrpc' => '2.0', 'id' => null, 'error' => ['code' => $code, 'message' => 'Error']]);
+        }
+        return $out === false ? '{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Error"}}' : $out;
     }
 }
