@@ -1229,6 +1229,7 @@ final class EmitLlvm implements EmitVisitor
         }
         \Compile\Progress::counter('functions', $emitIndex, $functionTotal);
         unset($functionKeys);
+        \Compile\Stats::line('IR: function loop done');
         $this->rootSnapshot('post-function-emission', $module, true, $bodyBytes);
         // Before every lazy-helper flush below: a thunk body is an ordinary call
         // and may ask for any of them.
@@ -1237,6 +1238,7 @@ final class EmitLlvm implements EmitVisitor
         // the captures its env co-owns, and its address is already stamped into
         // every env {@see EmitLlvmCalls::emitClosure}.
         $extraBodies = $this->emitClosureDropFns();
+        \Compile\Stats::line('IR: closure drop fns ' . (string)\strlen($extraBodies) . ' bytes');
         $this->rootSnapshot('post-closure-drop-build', $module, true, $bodyBytes);
         // AFTER the bodies: the flag is set while they emit, and the body it adds
         // sets runtime flags of its own that the preamble below still reads.
@@ -1261,6 +1263,10 @@ final class EmitLlvm implements EmitVisitor
         // class-id switch. The preamble is emitted afterwards, so any runtime
         // demand raised by the helper is still visible to emitPreamble().
         $this->rootSnapshot('post-lazy-helper-build', $module, true, $bodyBytes);
+        \Compile\Stats::line('IR: extra bodies joined ' . (string)\strlen($extraBodies) . ' bytes'
+            . ' (vd ' . (string)\strlen($this->vdExtraBodies) . ', dynm ' . (string)\strlen($this->dynmExtraBodies)
+            . ', dynf ' . (string)\strlen($this->dynfExtraBodies) . ', lit ' . (string)\strlen($this->litTableBodies)
+            . ', helpers ' . (string)\count($this->dynamicMethodHelpers) . ')');
         if ($streaming) {
             // Helper bodies are compiler-owned text and can be numerous on Doctrine.
             // Do not join all of them into one temporary PHP string: stage, hoist,
@@ -1292,13 +1298,16 @@ final class EmitLlvm implements EmitVisitor
             };
             $h = new \Compile\Mir\HoistAllocas();
             $extraBodies = $h->runFast($extraBodies);
+            \Compile\Stats::line('IR: extra bodies hoisted');
             $hoistedAllocas += $h->moved;
             if (!\Manticore\append_file_bytes($bodyPath, $extraBodies)) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
             }
             $bodyBytes += \strlen($extraBodies);
             unset($extraBodies);
+            \Compile\Stats::line('IR: extra bodies appended');
             $this->drainLazyHelpers($appendStreamedBody);
+            \Compile\Stats::line('IR: lazy helpers drained');
             unset($appendStreamedBody);
             \Compile\Stats::line('IR: streamed bodies ' . (string)$bodyBytes . ' bytes');
             $this->reportIrCensus($bodyBytes);

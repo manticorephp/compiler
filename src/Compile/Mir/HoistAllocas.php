@@ -291,25 +291,30 @@ final class HoistAllocas
             $p0 = $l0 + 1;
             $allocs = '';
             $rest = '';
-            $copyFrom = $p0;
-            $q = $p0;
+            // Searched inside this body only: an unbounded strpos in a function with no (more) allocas
+            // scans on to the next one anywhere in the module — quadratic over a 166 MB string of
+            // small allocaless helpers.
+            $body = \substr($ir, $p0, $end - $p0);
+            $blen = \strlen($body);
+            $copyFrom = 0;
+            $q = 0;
             while (true) {
-                $q = \strpos($ir, ' = alloca ', $q);
-                if ($q === false || $q >= $end) { break; }
+                $q = \strpos($body, ' = alloca ', $q);
+                if ($q === false) { break; }
                 $ls = $q;
-                while ($ls > $p0 && $ir[$ls - 1] !== "\n") { $ls = $ls - 1; }
-                $le = \strpos($ir, "\n", $q);
-                if ($le === false || $le > $end) { $le = $end; }
-                $line = \substr($ir, $ls, $le - $ls);
+                while ($ls > 0 && $body[$ls - 1] !== "\n") { $ls = $ls - 1; }
+                $le = \strpos($body, "\n", $q);
+                if ($le === false) { $le = $blen; }
+                $line = \substr($body, $ls, $le - $ls);
                 if ($this->isStaticAlloca($line)) {
-                    $rest .= \substr($ir, $copyFrom, $ls - $copyFrom);
+                    $rest .= \substr($body, $copyFrom, $ls - $copyFrom);
                     $allocs .= $line . "\n";
                     $copyFrom = $le + 1;
                     $this->moved = $this->moved + 1;
                 }
                 $q = $le;
             }
-            if ($end > $copyFrom) { $rest .= \substr($ir, $copyFrom, $end - $copyFrom); }
+            if ($blen > $copyFrom) { $rest .= \substr($body, $copyFrom); }
             $out .= $allocs . $rest;
             $pos = $end;
         }
