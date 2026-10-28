@@ -452,6 +452,12 @@ check('heredoc scan failure is a blocker, not silence', function () {
     $oldJit = ini_get('pcre.jit');
     ini_set('pcre.jit', '0');
     ini_set('pcre.backtrack_limit', '10');
+    if (@preg_match('/^(a|aa)+$/', str_repeat('a', 30) . '!') !== false) {
+        ini_set('pcre.backtrack_limit', (string)$oldLimit);
+        ini_set('pcre.jit', (string)$oldJit);
+        echo "SKIP heredoc scan failure: this PCRE has no pcre.backtrack_limit, so the failure path cannot be provoked.\n";
+        return true;
+    }
     $w->open('big.php', $src);
     ini_set('pcre.backtrack_limit', (string)$oldLimit);
     ini_set('pcre.jit', (string)$oldJit);
