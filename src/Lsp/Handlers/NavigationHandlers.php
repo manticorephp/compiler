@@ -9,7 +9,7 @@ use Lsp\Position;
 use Semantic\Location;
 use Semantic\Workspace;
 
-/** hover, definition. */
+/** hover, definition, references. */
 final class NavigationHandlers
 {
     private LocationMap $map;
@@ -42,6 +42,26 @@ final class NavigationHandlers
             if ($at === null) { return null; }
             return $this->locations($this->ws->definitionsOf($at[0], $at[1], $at[2]));
         });
+        $d->on('textDocument/references', function (array $p): mixed {
+            $at = $this->at($p);
+            if ($at === null) { return null; }
+            $sites = $this->ws->referencesTo($at[0], $at[1], $at[2]);
+            $ctx = $p['context'] ?? null;
+            $incl = !is_array($ctx) || ($ctx['includeDeclaration'] ?? true) !== false;
+            if (!$incl) {
+                $decl = $this->ws->definitionOf($at[0], $at[1], $at[2]);
+                if ($decl !== null) {
+                    $sites = array_values(array_filter($sites, fn(Location $s): bool => !self::same($s, $decl)));
+                }
+            }
+            return $this->locations($sites);
+        });
+    }
+
+    private static function same(Location $a, Location $b): bool
+    {
+        return $a->file === $b->file && $a->line === $b->line && $a->col === $b->col
+            && $a->endLine === $b->endLine && $a->endCol === $b->endCol;
     }
 
     /**
