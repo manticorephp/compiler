@@ -59,4 +59,45 @@ check('string id echoed', function (): bool|string {
     return $r !== null && json_decode($r, true)['id'] === 'abc';
 });
 
+function dx(): Dispatcher
+{
+    $d = disp();
+    $d->on('rpc', function (array $p): mixed { throw new \Lsp\JsonRpc\RpcError(-32002, 'nope'); });
+    $d->on('bad', function (array $p): mixed { return "\xff\xfe"; });
+    $d->on('nan', function (array $p): mixed { return NAN; });
+    $d->on('badmsg', function (array $p): mixed { throw new \RuntimeException("x\xff"); });
+    return $d;
+}
+check('RpcError code passes through', function (): bool|string {
+    $r = dx()->handle('{"jsonrpc":"2.0","id":1,"method":"rpc"}');
+    return $r !== null && json_decode($r, true)['error']['code'] === -32002;
+});
+check('invalid utf8 result -> -32603', function (): bool|string {
+    $r = dx()->handle('{"jsonrpc":"2.0","id":1,"method":"bad"}');
+    return $r !== null && json_decode($r, true)['error']['code'] === -32603;
+});
+check('NaN result -> -32603', function (): bool|string {
+    $r = dx()->handle('{"jsonrpc":"2.0","id":1,"method":"nan"}');
+    return $r !== null && json_decode($r, true)['error']['code'] === -32603;
+});
+check('invalid utf8 error message survives', function (): bool|string {
+    $r = dx()->handle('{"jsonrpc":"2.0","id":1,"method":"badmsg"}');
+    return $r !== null && json_decode($r, true)['error']['code'] === -32603;
+});
+check('array id -> -32600', function (): bool|string {
+    $r = dx()->handle('{"jsonrpc":"2.0","id":[],"method":"x"}');
+    return $r !== null && json_decode($r, true)['error']['code'] === -32600;
+});
+check('bool id -> -32600', function (): bool|string {
+    $r = dx()->handle('{"jsonrpc":"2.0","id":true,"method":"x"}');
+    return $r !== null && json_decode($r, true)['error']['code'] === -32600;
+});
+check('id 0 echoed as int', function (): bool|string {
+    $r = dx()->handle('{"jsonrpc":"2.0","id":0,"method":"x"}');
+    return $r !== null && json_decode($r, true)['id'] === 0;
+});
+check('notification handler throws -> null', function (): bool {
+    return dx()->handle('{"jsonrpc":"2.0","method":"boom"}') === null;
+});
+
 exit($fail);
