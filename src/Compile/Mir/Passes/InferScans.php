@@ -673,7 +673,8 @@ trait InferScans
         $observed = [];   // global cell symbol → element Type (cell when mixed)
         $unusable = [];   // global cell symbol → true
         foreach ($module->functions as $fn) {
-            if (!$this->bodyHas($fn, 'se:' . Node::KIND_STATIC_PROP)) { continue; }
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_STATIC_PROP)
+                && !$this->bodyHas($fn, 'se:' . Node::KIND_ARRAY_ACCESS)) { continue; }
             $this->collectStaticPropElemStores($fn->body, $observed, $unusable);
         }
         /** @var array<string, Type> $targets */
