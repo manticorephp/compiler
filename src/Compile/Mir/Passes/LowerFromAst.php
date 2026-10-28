@@ -2212,6 +2212,20 @@ final class LowerFromAst implements Pass
                 if ($cc->visibility === 'public' || $cc->visibility === '') { $names[\ltrim($cd->name, '\\') . '::' . $cc->name] = true; }
             }
         }
+        // An enum CASE is a class constant to `constant()` / `defined()`
+        // (Monolog's `\defined(Level::class . '::' . $upper)`), though the
+        // declaration keeps it apart from `consts`.
+        /** @var array<string, bool> $caseNames */
+        $caseNames = [];
+        // (Read from the lowered enum table: the declaration's `cases` are
+        // released as soon as the class is lowered.)
+        foreach ($module->enums as $ed) {
+            foreach ($ed->caseNames as $cn0) {
+                $ck = \ltrim($ed->name, '\\') . '::' . $cn0;
+                $names[$ck] = true;
+                $caseNames[$ck] = true;
+            }
+        }
         $arms = '';
         $defs = '';
         foreach ($names as $n => $_) {
@@ -2221,7 +2235,7 @@ final class LowerFromAst implements Pass
                 // collectConstLits admitted only `Name::CONST` / `Name` shapes.
                 $cls = \substr($n, 0, $dc);
                 $cn = \substr($n, $dc + 2);
-                if ($this->findClassConst($cls, $cn) !== null) { $expr = '\\' . $cls . '::' . $cn; }
+                if ($this->findClassConst($cls, $cn) !== null || isset($caseNames[$n])) { $expr = '\\' . $cls . '::' . $cn; }
             } else {
                 if ($this->predefinedConstant($n) !== null || isset($this->userConstants[$n])) { $expr = '\\' . $n; }
             }
@@ -2231,7 +2245,7 @@ final class LowerFromAst implements Pass
             $defs .= "  if (\$n === \"" . $q . "\") { return true; }\n";
         }
         return "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $arms
-            . "  throw new \\Error('Undefined constant \"' . \$n . '\"');\n}\n"
+            . "  throw new \\Error('Undefined constant ' . (\\strpos(\$n, '::') === false ? '\"' . \$n . '\"' : \$n));\n}\n"
             . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $defs
             . "  return false;\n}\n";
     }
