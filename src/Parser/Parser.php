@@ -1326,7 +1326,7 @@ final class Parser
         $varTok = $this->expect(TokenKind::Variable, 'expected $variable in parameter list');
         $name = substr($varTok->lexeme, 1);
         $this->noteVarDecl($varTok, 'param');
-        if ($promoted !== '' || $promotedReadonly) { $this->noteDecl($varTok, $name, 'member', 2); }
+        if ($this->collectNames === 1 && ($promoted !== '' || $promotedReadonly)) { $this->noteDecl($varTok, $name, 'member', 2); }
 
         $default = null;
         if ($this->match(TokenKind::Equals)) {
@@ -2690,7 +2690,7 @@ final class Parser
                     throw $this->error('expected member name after ->');
                 }
                 $name = $nameTok->lexeme;
-                $this->noteMemberUse($nameTok, $this->check(TokenKind::OpenParen) ? 'method' : 'prop');
+                if ($this->collectNames === 1) { $this->noteMemberUse($nameTok, $this->check(TokenKind::OpenParen) ? 'method' : 'prop'); }
                 if ($this->check(TokenKind::OpenParen)) {
                     $args = $this->parseArgList();
                     $left = Expr::methodCall($left, $name, $args, $nullsafe, $this->end($span, $left));
