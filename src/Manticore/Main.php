@@ -1022,9 +1022,9 @@ function clang_tuning_flags(): string
  * module alone is ~20x its text in clang). Split, it is ~2 minutes at 2.2 GB,
  * and {@see \Compile\Mir\SplitModule}'s `available_externally` copies keep the
  * inlining a part boundary used to cost (the compiler built in 8 parts: +6.6%
- * instead of +53%). `bin/build` exports MANTICORE_AUTO_SPLIT=0, so the
- * compiler's own ~85 MB module stays one unit and
- * its output is unchanged; a library never gets here — its `.o` is one unit.
+ * instead of +53%; measured again on the whole run, 2026-10-28: +4.5%). `bin/build` splits the
+ * compiler's own ~200 MB module the same way (`MANTICORE_AUTO_SPLIT=0 bin/build` keeps it one
+ * unit); a library never gets here — its `.o` is one unit.
  */
 function auto_split_parts(int $irBytes): int
 {
