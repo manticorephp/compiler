@@ -694,6 +694,30 @@ trait InferNodes
             $fn->returnType = $u;
             $this->sigs[$fn->name] = $u;
         }
+        // A fused `array_map` loop ({@see InlineClosures::fuseMap}) is declared with an
+        // unknown return, and its body types only once its callback parameter does: a
+        // call that consumes the result must see the concrete array HERE, before
+        // Monomorphize keys a specialisation on its argument types. Left to the full
+        // NarrowReturns, the consumer stayed on its body-guessed `vec[string]` and was
+        // then handed a `vec[int]` it reads as string pointers. The result keeps the
+        // input's keys, so the type is built from the input's key kind, never from the
+        // untyped store loop's own `vec`.
+        if ($rk === Type::KIND_UNKNOWN && $u !== null && \str_starts_with($fn->name, '__mc_fuse_map_')
+            && $u->isArray() && $u->element !== null
+            && $u->element->kind !== Type::KIND_UNKNOWN && $u->element->kind !== Type::KIND_CELL
+            && $fn->params[0]->type->isArray()) {
+            $in = $fn->params[0]->type;
+            $rt = null;
+            if (!$in->isAssoc() && !$in->hasShape()) {
+                $rt = Type::vec($u->element);
+            } elseif ($in->key !== null && ($in->key->kind === Type::KIND_STRING || $in->key->kind === Type::KIND_INT)) {
+                $rt = Type::assoc($in->key, $u->element);
+            }
+            if ($rt !== null) {
+                $fn->returnType = $rt;
+                $this->sigs[$fn->name] = $rt;
+            }
+        }
         // A CLOSURE always boxes a scalar return to a tagged cell (uniform ABI,
         // {@see EmitLlvm::emitReturn}). A return still UNKNOWN after the above
         // narrowings is integer arithmetic on cell params (`fn($x) => $x * 2`):
