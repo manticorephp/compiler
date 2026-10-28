@@ -113,4 +113,35 @@ check('A::$$n and "${n}" are not missed', function () {
         && contract($w, 'a.php', $p) === null && contract($w, 'a.php', $sp) === null ? true : json_encode([$lines, $re, $reSp]);
 });
 
+check('readonly-only promoted parameter is a property with a member record', function () {
+    $a = "<?php\nclass R { function __construct(readonly int \$x) {} }\nfunction f(R \$r) { return \$r->x; }\n";
+    $w = ws(['a.php' => $a]);
+    $p = where($a, '$r->x', 1, 4);
+    $refs = $w->referencesTo('a.php', $p[0], $p[1]);
+    $bl = $w->renameBlockers('a.php', $p[0], $p[1]);
+    return count($refs) >= 2 && !in_array('owner-unknown', $bl, true) && !in_array('unresolved-member', $bl, true) ? true : json_encode([count($refs), $bl]);
+});
+
+check('instance access of a static property is not in the static family', function () {
+    $a = "<?php\nclass A { public static int \$sp = 1; }\nfunction f(A \$x) { \$x->sp; return A::\$sp; }\n";
+    $w = ws(['a.php' => $a]);
+    $d = where($a, '$sp', 1);
+    $lines = [];
+    foreach ($w->referencesTo('a.php', $d[0], $d[1]) as $r) { $lines[] = $r->line . ':' . $r->col; }
+    $bad = where($a, '->sp', 1, 2);
+    $un = [];
+    foreach ($w->uncertainSitesFor('a.php', $d[0], $d[1]) as $s) { $un[] = $s->line . ':' . $s->col; }
+    return !in_array($bad[0] . ':' . $bad[1], $lines, true) && count($lines) === 2 && in_array($bad[0] . ':' . $bad[1], $un, true) && contract($w, 'a.php', $d) === null
+        ? true : json_encode([$lines, $un]);
+});
+
+check('union receiver: definitionsOf lists every member; hover hides anonymous class names', function () {
+    $a = "<?php\nclass A { function run() {} }\nclass B { function run() {} }\nfunction f(A|B \$u) { \$u->run(); }\n\$o = new class { function z() {} };\n\$o->z();\n";
+    $w = ws(['a.php' => $a]);
+    $p = where($a, 'run();', 1);
+    $ds = $w->definitionsOf('a.php', $p[0], $p[1]);
+    $q = where($a, 'z();', 1);
+    $h = $w->hover('a.php', $q[0], $q[1]);
+    return count($ds) === 2 && $h !== null && !str_contains($h->text, '__anon_class') && str_contains($h->text, 'class@anonymous') ? true : json_encode([count($ds), $h === null ? null : $h->text]);
+});
 exit($fail);

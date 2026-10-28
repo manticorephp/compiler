@@ -48,6 +48,8 @@ final class MemberResolver
         foreach ($classes as $cls) {
             $m = $this->idx->lookupMember($cls, $name, $kind);
             if ($m === null) { return null; }
+            // `$x->sp` on a static property (or `A::$n` on an instance one) is a different namespace: left unresolved, so it is listed as uncertain
+            if ($kind === 'prop' && ($site->role === 'sprop') !== $m->isStatic) { return null; }
             $k = self::key($m);
             if (!isset($seen[$k])) { $seen[$k] = true; $out[] = $m; }
         }

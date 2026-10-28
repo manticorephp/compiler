@@ -207,6 +207,27 @@ final class Workspace
     }
 
     /**
+     * Every declaration the symbol under the cursor can denote: all of a union receiver's members, else `definitionOf`.
+     *
+     * @return Location[]
+     */
+    public function definitionsOf(string $uri, int $line, int $col): array
+    {
+        $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o !== null && $o->kind === 'member' && !$o->isDecl) {
+            /** @var Location[] $out */
+            $out = [];
+            foreach ($this->membersOf($o) ?? [] as $m) {
+                $l = $this->memberLocation($m);
+                if ($l !== null) { $out[] = $l; }
+            }
+            return $out;
+        }
+        $d = $this->definitionOf($uri, $line, $col);
+        return $d === null ? [] : [$d];
+    }
+
+    /**
      * Use sites and declaration names of the symbol, `use` imports included. An entry matches
      * by kind: a `use` import counts as its imported kind (class | function | constant), so
      * class Foo, function foo and constant FOO never collide. A global-fallback name that no
@@ -356,7 +377,7 @@ final class Workspace
         $n = $this->nodeAt($uri, $line, $col);
         if ($t === null || $n === null) { return null; }
         $sp = $n->span;
-        return new HoverInfo($t->toString(), new Location($uri, $sp->startLine(), $sp->startColumn(), $sp->endLine(), $sp->endColumn()));
+        return new HoverInfo(self::shown($t->toString()), new Location($uri, $sp->startLine(), $sp->startColumn(), $sp->endLine(), $sp->endColumn()));
     }
 
     /**
@@ -599,9 +620,15 @@ final class Workspace
         return $role === 'sprop' ? 'prop' : $role;
     }
 
+    /** The internal anonymous class name rendered the way PHP prints it. */
+    private static function shown(string $s): string
+    {
+        return (string)\preg_replace('/__anon_class_[A-Za-z0-9_]+/', 'class@anonymous', $s);
+    }
+
     private function signature(MemberInfo $m): string
     {
-        $n = ($m->isStatic ? 'static ' : '') . $m->declClass . '::';
+        $n = ($m->isStatic ? 'static ' : '') . self::shown($m->declClass) . '::';
         if ($m->kind === 'prop') { return $n . '$' . $m->name . ($m->typeHint !== null ? ': ' . $m->typeHint : ''); }
         if ($m->kind !== 'method') { return $n . $m->name . ($m->kind === 'const' && $m->typeHint !== null ? ': ' . $m->typeHint : ''); }
         $mi = $this->index->findMethod($m->declClass, \strtolower($m->name), 0);
