@@ -536,8 +536,8 @@ final class Index
             $out['method:' . \strtolower($m->name)] ??= $this->member('method', $m->name, $m->name, $fqn, $m->visibility, $m->isStatic, $m->isAbstract || $isIface, $m->returnType, $file, $m->span, $end, $this->docTag($m->docComment, '@return', $fqn, $tpl));
             if (\strtolower($m->name) !== '__construct') { continue; }
             foreach ($m->params as $mp) {
-                if ($mp->promoted === '') { continue; }
-                $out['prop:' . $mp->name] ??= $this->member('prop', $mp->name, '$' . $mp->name, $fqn, $mp->promoted, false, false, $mp->typeHint, $file, $mp->span, $end);
+                if ($mp->promoted === '' && !$mp->promotedReadonly) { continue; }
+                $out['prop:' . $mp->name] ??= $this->member('prop', $mp->name, '$' . $mp->name, $fqn, $mp->promoted === '' ? 'public' : $mp->promoted, false, false, $mp->typeHint, $file, $mp->span, $end);
             }
         }
         $tpl = $ctpl;
