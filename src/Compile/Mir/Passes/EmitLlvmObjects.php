@@ -3412,6 +3412,20 @@ trait EmitLlvmObjects
                 $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
             }
+        } elseif ($n->value->type->kind === Type::KIND_ARRAY && $n->value->type->element !== null
+            && $this->isEnumType($n->value->type->element)
+            && $propType !== null && $propType->kind === Type::KIND_ARRAY
+            && ($propType->element === null || !$this->isEnumType($propType->element))) {
+            // Enum ordinals into an array slot whose element is NOT that enum
+            // (a trait-imported `$levels = [...]` types as `vec[cell]`): the
+            // reader decodes each word as a cell, so rebuild with singletons
+            // and strip the tag. The rebuilt buffer is fresh — no retain.
+            $out .= $this->boxToCell($n->value->type, $n->value);
+            $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+            $out .= $this->coerceToI64();
+            $val = $this->lastValue;
+            $res = $val;
+            $resTy = 'i64';
         } else {
             // A CELL value stored into a CONCRETE-typed property must be
             // UNBOXED, or the tagged bits land in the slot and read back as
