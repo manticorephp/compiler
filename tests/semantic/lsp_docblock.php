@@ -138,5 +138,22 @@ check('no uncertain docblock blocker for an indexed docblock name', function ():
     foreach ($b as $x) { if (str_starts_with($x, 'docblock')) { return json_encode($b); } }
     return $ws->symbolKindAt('file:///t/b.php', 5, 12) === 'class' ?: 'kind ' . $ws->symbolKindAt('file:///t/b.php', 5, 12);
 });
+check('two namespaces: rename B\Foo never edits the A docblock, rename A\Foo edits only its own', function (): bool|string {
+    $src = "<?php\nnamespace A { class Foo {}\n/** @return Foo */\nfunction fa() {} }\nnamespace B { class Foo {}\n/** @param Foo \$x */\nfunction fb() {} }\n";
+    [$d] = rigWs(new Sink());
+    open($d, 'file:///t/a.php', $src);
+    $b = flat(ask($d, 'textDocument/rename', 'file:///t/a.php', 4, 22, ['newName' => 'Bar']));
+    $a = flat(ask($d, 'textDocument/rename', 'file:///t/a.php', 1, 22, ['newName' => 'Bar']));
+    return ($b === ['file:///t/a.php:4:20-23:Bar', 'file:///t/a.php:5:11-14:Bar']
+        && $a === ['file:///t/a.php:1:20-23:Bar', 'file:///t/a.php:2:12-15:Bar']) ?: json_encode([$a, $b]);
+});
+check('multibyte text before a docblock name gives UTF-16 columns in the edit', function (): bool|string {
+    [$d] = rigWs(new Sink());
+    open($d, 'file:///t/a.php', SRC_A);
+    open($d, 'file:///t/b.php', "<?php\nnamespace Use;\nuse App\\Foo;\n/** @param array{\u{e9}: int, k: Foo} \$x */\nfunction f(\$x) {}\n");
+    $r = flat(ask($d, 'textDocument/rename', 'file:///t/a.php', 2, 8, ['newName' => 'Bar']));
+    return in_array('file:///t/b.php:3:28-31:Bar', $r, true) ?: json_encode($r);
+});
+
 
 exit($fail);

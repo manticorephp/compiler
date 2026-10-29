@@ -179,11 +179,14 @@ final class RenameHandlers
             if (($line[$i] ?? '') === '"' || ($line[$i] ?? '') === "'") { $i++; }
             if ($isVar && ($line[$i] ?? '') === '$') { $i++; }
             $len = \strlen($old);
-            $seg = \substr($line, $i, $len);
-            if ($len === 0 || \strlen($seg) !== $len || ($ci ? \strcasecmp($seg, $old) : \strcmp($seg, $old)) !== 0) { continue; }
-            $next = $line[$i + $len] ?? '';
+            $run = $i;
+            while ($run < \strlen($line) && (self::isIdByte($line[$run]) || $line[$run] === '\\')) { $run++; }
+            $cut = \strrpos(\substr($line, $i, $run - $i), '\\');
             $prev = $i > 0 ? $line[$i - 1] : '';
-            if (self::isIdByte($next) || ($prev !== '$' && self::isIdByte($prev))) { continue; }
+            if ($cut !== false) { $i = $i + $cut + 1; $prev = ''; }
+            $seg = \substr($line, $i, $len);
+            if ($len === 0 || $run - $i !== $len || ($ci ? \strcasecmp($seg, $old) : \strcmp($seg, $old)) !== 0) { continue; }
+            if ($prev !== '$' && self::isIdByte($prev)) { continue; }
             $m = $map->toLsp(new Location($s->file, $s->line, $i + 1, $s->line, $i + 1 + $len));
             if ($m === null) { continue; }
             $key = $m['uri'] . ':' . $m['range']['start']['line'] . ':' . $m['range']['start']['character'];
