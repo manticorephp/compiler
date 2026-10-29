@@ -2,12 +2,16 @@
 
 namespace Semantic;
 
+use Lexer\Token;
+use Lexer\TokenKind;
+
 /**
  * The class names written inside the type-carrying tags of a file's docblocks (`@param Foo $x`, `@return Foo[]`,
  * `@var array<int, Foo>`, `@method`, `@template T of Foo` ...), with their positions and the FQN each resolves to.
- * Prose lines and non-type tags are never read. Docblocks are found by text, skipping strings, plain comments,
- * heredocs and inline HTML; the parser keeps no comment span. The namespace and `use` map in force at each
- * docblock are tracked from the same pass (a file may hold several namespace blocks).
+ * Prose lines and non-type tags are never read. Docblocks, `namespace` and top-level `use` clauses come from the
+ * lexer's tokens (so strings, plain comments, heredocs and inline HTML are skipped by the lexer itself); the
+ * namespace and `use` map in force at each docblock are tracked from the same pass (a file may hold several
+ * namespace blocks).
  */
 final class DocblockNames
 {
@@ -18,42 +22,18 @@ final class DocblockNames
         'self-out' => 1, 'this-out' => 1,
     ];
 
+    private const PROSE_STARTERS = ['a' => 1, 'an' => 1, 'the' => 1, 'this' => 1, 'these' => 1, 'those' => 1, 'it' => 1, 'its' => 1, 'if' => 1, 'when' => 1, 'returns' => 1, 'whether' => 1, 'all' => 1, 'any' => 1, 'one' => 1, 'some' => 1, 'no' => 1];
+
     private const WORDS = ['min' => 1, 'max' => 1, 'is' => 1, 'not' => 1, 'of' => 1, 'as' => 1, 'empty' => 1, 'array' => 1, 'list' => 1];
 
-    private static function tokenRe(): string
-    {
-        $skip = [
-            '\x27(?:[^\x27\\\\]++|\\\\.)*+\x27',
-            '\x22(?:[^\x22\\\\]++|\\\\.)*+\x22',
-            '//[^\n]*+',
-            '#(?!\[)[^\n]*+',
-            '/\*\*/',
-            '/\*(?!\*)(?:[^*]++|\*(?!/))*+\*/',
-            '<<<[ \t]*(?P<q>[\x22\x27]?)(?P<id>[A-Za-z_][A-Za-z0-9_]*)(?P=q)\r?\n(?:.*?\n)?[ \t]*(?P=id)(?![A-Za-z0-9_])',
-            '\?>.*?(?=<\?(?:php|=)|\z)',
-        ];
-        $keep = [
-            '(?P<doc>/\*\*(?:[^*]++|\*(?!/))*+\*/)',
-            '(?P<ns>(?<![\w$>:\\\\])namespace(?:\s+(?P<nsname>[A-Za-z_\x80-\xff][\w\\\\\x80-\xff]*))?\s*(?P<nsend>[;{]))',
-            '(?P<use>(?<![\w$>:\\\\])use\s+(?P<useclause>[^;{}()]*(?:\{[^{}]*\}[^;{}()]*)?);)',
-            '(?P<open>\{)',
-            '(?P<close>\})',
-        ];
-        return '~(?:' . \implode('|', $skip) . ')(*SKIP)(*F)|' . \implode('|', $keep) . '~s';
-    }
-
     /**
-     * $ns and $uses seed the degraded path only (see scanBlocks); the main path reads them from the text.
-     *
-     * @param array<string, string> $uses alias → FQN
      * @return array<int, array{0: string, 1: int, 2: int, 3: string}> [written name, line, 1-based byte column, FQN]; a name never spans lines
      */
-    public static function scan(string $text, string $ns = '', array $uses = []): array
+    public static function scan(string $text): array
     {
         $out = [];
         if (\strpos($text, '/**') === false) { return $out; }
-        $n = \preg_match_all(self::tokenRe(), $text, $m, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
-        if ($n === false || \preg_last_error() !== PREG_NO_ERROR) { return self::scanBlocks($text, $ns, $uses); }
+        $toks = (new \Lexer\Lexer())->scan($text, false, true, true);
         /** @var array<string, int> $declared template and type-alias names seen so far in the file */
         $declared = [];
         /** @var array<string, string> $curUses */
@@ -62,36 +42,18 @@ final class DocblockNames
         $depth = 0;
         $base = 0;
         $braced = false;
-        $line = 1;
-        $prev = 0;
-        $lineStart = 0;
-        foreach ($m as $hit) {
-            if (isset($hit['doc']) && $hit['doc'][1] >= 0) {
-                $off = $hit['doc'][1];
-                $seg = \substr($text, $prev, $off - $prev);
-                $nl = \substr_count($seg, "\n");
-                if ($nl > 0) {
-                    $line = $line + $nl;
-                    $lineStart = $prev + \strrpos($seg, "\n") + 1;
-                }
-                $prev = $off;
-                if (\strpos($hit['doc'][0], '@') === false) { continue; }
+        $n = \count($toks);
+        for ($i = 0; $i < $n; $i++) {
+            $t = $toks[$i];
+            $k = $t->kind;
+            if ($k === TokenKind::DocComment) {
+                if (\strpos($t->lexeme, '@') === false) { continue; }
                 $before = \count($out);
-                self::doc($hit['doc'][0], $line, $off - $lineStart, $declared, $out);
-                for ($k = $before; $k < \count($out); $k++) { $out[$k][] = DocNames::qualify($out[$k][0], $curNs, $curUses); }
-            } elseif (isset($hit['ns']) && $hit['ns'][1] >= 0) {
-                $curNs = isset($hit['nsname']) ? $hit['nsname'][0] : '';
-                $curUses = [];
-                if ($hit['nsend'][0] === '{') {
-                    $depth++;
-                    $braced = true;
-                    $base = $depth;
-                }
-            } elseif (isset($hit['use']) && $hit['use'][1] >= 0) {
-                if ($depth === ($braced ? $base : 0)) { self::useClause($hit['useclause'][0], $curUses); }
-            } elseif (isset($hit['open']) && $hit['open'][1] >= 0) {
+                self::doc($t->lexeme, $t->line, $t->column - 1, $declared, $out);
+                for ($j = $before; $j < \count($out); $j++) { $out[$j][] = DocNames::qualify($out[$j][0], $curNs, $curUses); }
+            } elseif ($k === TokenKind::OpenBrace) {
                 $depth++;
-            } elseif (isset($hit['close']) && $hit['close'][1] >= 0) {
+            } elseif ($k === TokenKind::CloseBrace) {
                 $depth--;
                 if ($braced && $depth < $base) {
                     $curNs = '';
@@ -99,75 +61,81 @@ final class DocblockNames
                     $braced = false;
                     $base = 0;
                 }
+            } elseif ($k === TokenKind::Keyword && $t->lexeme === 'namespace' && !self::isMember($toks, $i)) {
+                $j = $i + 1;
+                $name = '';
+                while ($j < $n && ($toks[$j]->kind === TokenKind::Identifier || $toks[$j]->kind === TokenKind::Backslash)) { $name .= $toks[$j]->lexeme; $j++; }
+                if ($j >= $n || ($name[0] ?? '') === '\\') { continue; }
+                $kk = $toks[$j]->kind;
+                if ($kk !== TokenKind::Semicolon && $kk !== TokenKind::OpenBrace) { continue; }
+                $curNs = $name;
+                $curUses = [];
+                if ($kk === TokenKind::OpenBrace) {
+                    $depth++;
+                    $braced = true;
+                    $base = $depth;
+                }
+                $i = $j;
+            } elseif ($k === TokenKind::Keyword && $t->lexeme === 'use' && $depth === ($braced ? $base : 0) && !self::isMember($toks, $i)) {
+                $j = $i + 1;
+                while ($j < $n && $toks[$j]->kind !== TokenKind::Semicolon && $toks[$j]->kind !== TokenKind::OpenParen && $toks[$j]->kind !== TokenKind::Eof) { $j++; }
+                if ($j >= $n || $toks[$j]->kind !== TokenKind::Semicolon) { continue; }
+                self::useClause(\array_slice($toks, $i + 1, $j - $i - 1), $curUses);
+                $i = $j;
             }
         }
         return $out;
     }
 
-    /**
-     * Degraded path when the PCRE scan fails: every `/** ... *\/` block by plain search, resolved against one
-     * namespace and use map. Strings and comments are not told apart, so a file with more than one `namespace`
-     * (or a lookalike) yields nothing rather than a possibly wrong class.
-     *
-     * @param array<string, string> $uses
-     * @return array<int, array{0: string, 1: int, 2: int, 3: string}>
-     */
-    public static function scanBlocks(string $text, string $ns, array $uses): array
+    /** @param Token[] $toks */
+    private static function isMember(array $toks, int $i): bool
     {
-        $out = [];
-        if (\preg_match_all('/(?<![\w$>:\\\\])namespace\s*[A-Za-z_{]/', $text) > 1) { return $out; }
-        $declared = [];
-        $line = 1;
-        $prev = 0;
-        $lineStart = 0;
-        $off = 0;
-        while (($off = \strpos($text, '/**', $off)) !== false) {
-            $e = \strpos($text, '*/', $off + 3);
-            $end = $e === false ? \strlen($text) : $e + 2;
-            $seg = \substr($text, $prev, $off - $prev);
-            $nl = \substr_count($seg, "\n");
-            if ($nl > 0) {
-                $line = $line + $nl;
-                $lineStart = $prev + \strrpos($seg, "\n") + 1;
-            }
-            $prev = $off;
-            $doc = \substr($text, $off, $end - $off);
-            if (\strpos($doc, '@') !== false) {
-                $before = \count($out);
-                self::doc($doc, $line, $off - $lineStart, $declared, $out);
-                for ($k = $before; $k < \count($out); $k++) { $out[$k][] = DocNames::qualify($out[$k][0], $ns, $uses); }
-            }
-            $off = $end;
-        }
-        return $out;
+        if ($i === 0) { return false; }
+        $p = $toks[$i - 1]->kind;
+        return $p === TokenKind::Arrow || $p === TokenKind::NullsafeArrow || $p === TokenKind::DoubleColon;
     }
 
     /**
-     * One top-level `use` clause (the text between `use` and `;`): class imports only.
+     * One top-level `use` clause (the tokens between `use` and `;`, comments already gone): class imports only.
      *
+     * @param Token[] $toks
      * @param array<string, string> $uses alias → FQN
      */
-    private static function useClause(string $clause, array &$uses): void
+    private static function useClause(array $toks, array &$uses): void
     {
-        $clause = \trim($clause);
-        if (\preg_match('/^(?:function|const)\s/i', $clause) === 1) { return; }
         $prefix = '';
-        $items = [];
-        $br = \strpos($clause, '{');
-        if ($br === false) {
-            $items = \explode(',', $clause);
-        } else {
-            $prefix = \ltrim(\trim(\substr($clause, 0, $br)), '\\');
-            $close = \strrpos($clause, '}');
-            $items = \explode(',', \substr($clause, $br + 1, ($close === false ? \strlen($clause) : $close) - $br - 1));
+        $cur = '';
+        $alias = '';
+        $asNext = false;
+        $itemKind = false;
+        $clauseKind = false;
+        $flush = function () use (&$prefix, &$cur, &$alias, &$itemKind, &$clauseKind, &$uses): void {
+            if ($cur !== '' && !$itemKind && !$clauseKind) {
+                $fqn = $prefix . \ltrim($cur, '\\');
+                $uses[$alias !== '' ? $alias : \substr($fqn, (int)\strrpos('\\' . $fqn, '\\'))] = $fqn;
+            }
+            $cur = '';
+            $alias = '';
+            $itemKind = false;
+        };
+        foreach ($toks as $t) {
+            $k = $t->kind;
+            if ($k === TokenKind::Keyword && ($t->lexeme === 'function' || $t->lexeme === 'const') && $cur === '') {
+                if ($prefix === '') { $clauseKind = true; } else { $itemKind = true; }
+            } elseif ($k === TokenKind::Keyword && $t->lexeme === 'as') {
+                $asNext = true;
+            } elseif ($k === TokenKind::Identifier || $k === TokenKind::Keyword) {
+                if ($asNext) { $alias = $t->lexeme; $asNext = false; } else { $cur .= $t->lexeme; }
+            } elseif ($k === TokenKind::Backslash) {
+                $cur .= '\\';
+            } elseif ($k === TokenKind::OpenBrace) {
+                $prefix = \trim($cur, '\\') . '\\';
+                $cur = '';
+            } elseif ($k === TokenKind::Comma || $k === TokenKind::CloseBrace) {
+                $flush();
+            }
         }
-        foreach ($items as $item) {
-            if (\preg_match('/^\s*(?:(function|const)\s+)?\\\\?([\w\\\\\x80-\xff]+)(?:\s+as\s+([\w\x80-\xff]+))?\s*$/i', $item, $mm) !== 1) { continue; }
-            if ($mm[1] !== '') { continue; }
-            $fqn = $prefix . $mm[2];
-            $alias = isset($mm[3]) && $mm[3] !== '' ? $mm[3] : \substr($fqn, (int)\strrpos('\\' . $fqn, '\\'));
-            $uses[$alias] = $fqn;
-        }
+        $flush();
     }
 
     /**
@@ -283,10 +251,11 @@ final class DocblockNames
         }
     }
 
-    /** `@return the thing`: a lone lowercase word with more words after it is description, not a type. */
+    /** `@return the thing` / `@return A new instance`: a lone lowercase word or an article-like opener with more words after it is description, not a type. */
     private static function isProse(string $s, int $i, int $e, int $n): bool
     {
-        if (\preg_match('/^[a-z][a-z0-9_]*$/', \substr($s, $i, $e - $i)) !== 1) { return false; }
+        $w = \substr($s, $i, $e - $i);
+        if (\preg_match('/^[a-z][a-z0-9_]*$/', $w) !== 1 && !isset(self::PROSE_STARTERS[\strtolower($w)])) { return false; }
         $k = self::skipWs($s, $e, $n);
         return $k > $e && $k < $n && (\ctype_alnum($s[$k]) || $s[$k] === '_');
     }
