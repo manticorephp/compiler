@@ -102,6 +102,13 @@ not block.
   `parent::__construct` are not offered; keywords are not offered; capped at 200 items
   (`isIncomplete`).
 - Member references are the slowest operation (below): they re-parse the closed files.
+- Class, function and constant renames trust the startup index for closed files. A file that
+  gained a reference after startup (git checkout, external edit) is not re-read, so that site is
+  omitted. Stale sites already in the index are detected and refuse the rename; new ones are not.
+  There is no `didChangeWatchedFiles` / `didSave` handling yet. Restart the server after a branch switch.
+- Renaming a magic method (`__construct`, `__invoke`, …) or an interface method called implicitly
+  (`offsetGet`, `current`, `count`, `getIterator`, …) edits the declaration and not the implicit
+  callers; references miss them too. Do not rename these through the editor.
 
 ## Latency
 
