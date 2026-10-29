@@ -1920,7 +1920,11 @@ function stream_socket_pair(int $domain, int $type, int $protocol)
 /** The fd behind a stream \Resource (typed so an array element is unboxed). */
 function __mc_stream_fd(\Resource $s): int
 {
-    return $s->addr;
+    // memory / output streams have no descriptor: -1 (poll skips it, select treats it as always ready)
+    if ($s->kind === \Resource::KIND_MEMORY || $s->kind === \Resource::KIND_MEMFILE || $s->kind === \Resource::KIND_OUTPUT) {
+        return -1;
+    }
+    return \__mc_fileno($s);
 }
 
 /**
@@ -2079,6 +2083,9 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
     // null $sec = block forever (-1); otherwise sec*1000 + usec/1000.
     $um = $usec === null ? 0 : $usec;
     $timeoutMs = $sec === null ? -1 : ($sec * 1000 + \intdiv($um, 1000));
+    if (\in_array(-1, $fds, true)) {
+        $timeoutMs = 0;   // a descriptor-less stream is ready already: never wait on its account
+    }
     $rc = \__mc_select_wait($pfds, $count, $timeoutMs);
     if ($rc < 0) {
         \Runtime\Libc\free($pfds);
@@ -2095,7 +2102,8 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
     if ($read !== null) {
         $nr = [];
         foreach ($read as $s) {
-            $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
+            $fdv = \__mc_stream_fd($s);
+            $r = $fdv < 0 ? 0x7fff : $rev[\__mc_sel_index($fds, $fdv)];
             if (($r & ($POLLIN | $POLLHUP | $POLLERR)) !== 0) { $nr[] = \__mc_stream_id($s); $ready = $ready + 1; }
         }
         $read = $nr;
@@ -2103,7 +2111,8 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
     if ($write !== null) {
         $nw = [];
         foreach ($write as $s) {
-            $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
+            $fdv = \__mc_stream_fd($s);
+            $r = $fdv < 0 ? 0x7fff : $rev[\__mc_sel_index($fds, $fdv)];
             if (($r & ($POLLOUT | $POLLERR)) !== 0) { $nw[] = \__mc_stream_id($s); $ready = $ready + 1; }
         }
         $write = $nw;
@@ -2111,7 +2120,8 @@ function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec
     if ($except !== null) {
         $ne = [];
         foreach ($except as $s) {
-            $r = $rev[\__mc_sel_index($fds, \__mc_stream_fd($s))];
+            $fdv = \__mc_stream_fd($s);
+            $r = $fdv < 0 ? 0 : $rev[\__mc_sel_index($fds, $fdv)];
             if (($r & ($POLLPRI | $POLLERR)) !== 0) { $ne[] = \__mc_stream_id($s); $ready = $ready + 1; }
         }
         $except = $ne;
