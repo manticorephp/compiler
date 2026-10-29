@@ -158,6 +158,10 @@ function feof(Ptr $stream): int {}
 #[Library('c'), Symbol('fflush'), CType('int')]
 function fflush(Ptr $stream): int {}
 
+// `int setvbuf(FILE *, char *buf, int mode, size_t size)` — _IONBF is 2 on glibc, musl and Darwin.
+#[Library('c'), Symbol('setvbuf'), CType('int')]
+function setvbuf(Ptr $stream, Ptr $buf, #[CType('int')] int $mode, #[CType('size_t')] int $size): int {}
+
 // `char *fgets(char *str, int n, FILE *stream)` — fills str, returns str (or
 // NULL at EOF / on error). The result aliases the caller's $buf (NOT a fresh
 // allocation, so no #[Give]); typed Ptr for the PHP-side EOF null-check.

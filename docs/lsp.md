@@ -196,4 +196,7 @@ lists for the query, and closing it before the next file. Only locations and mem
 file, never its AST. The cancellation check still runs between files, and the skipped/cap accounting is
 unchanged. Measured under Zend over `src/` (60 member queries, `memory_get_usage` after a
 `gc_collect_cycles`): 83 MB after the scan, 84 MB after the queries, 163 MB in-query peak (was ~510 MB).
-Native RSS was not re-measured (bin/manticore not rebuilt); the peak drop of ~3x is what bounds it.
+Native (`tools/bench_lsp.php --nref 60 --n 50`, three runs, macOS arm64): RSS 126-128 MB after the scan, 421-516 MB at the end
+(805 MB before the change). That is still ~3.3-4x the post-scan figure, not the 1.5x the issue asked for: the in-query peak is
+now ~3x lower but the native allocator keeps its high-water mark resident and the compiler's known leak adds to it, so the
+remaining growth is not a retained AST. #528 stays open for that.

@@ -98,12 +98,46 @@ class Stdio
         if ($ready === 0) {
             return;
         }
-        $chunk = fread($this->in, 65536);
-        if ($chunk === false || $chunk === '') {
-            $this->eof = true;
-            return;
+        $this->readFrame();
+    }
+
+    /**
+     * Read one whole message off the stream: header lines, then exactly Content-Length body bytes.
+     * Whole frames, not chunks: a libc fread on a pipe waits for ALL requested bytes, php's returns what is there.
+     * ponytail: a frame already pulled into the FILE* buffer is invisible to stream_select, so a cancel that
+     * arrives in the same write as its request is seen only after the request finishes.
+     */
+    private function readFrame(): void
+    {
+        $raw = '';
+        $len = -1;
+        while (true) {
+            $line = fgets($this->in);
+            if ($line === false) {
+                $this->eof = true;
+                return;
+            }
+            $raw .= $line;
+            $t = rtrim($line, "\r\n");
+            if ($t === '') {
+                break;
+            }
+            $p = stripos($t, 'content-length:');
+            if ($p !== false) {
+                $v = trim(substr($t, $p + 15));
+                $len = ctype_digit($v) && strlen($v) <= 10 && (int) $v <= self::MAX_BODY ? (int) $v : -1;
+            }
         }
-        $this->buf .= $chunk;
+        $body = '';
+        while ($len > 0 && strlen($body) < $len) {
+            $c = fread($this->in, $len - strlen($body));
+            if ($c === false || $c === '') {
+                $this->eof = true;
+                break;
+            }
+            $body .= $c;
+        }
+        $this->buf .= $raw . $body;
     }
 
     /** Pull pending input while a request runs: cancellations take effect, everything else waits in the queue. */
@@ -157,6 +191,7 @@ class Stdio
     public function run(Dispatcher $d, $in = STDIN, $out = STDOUT): void
     {
         $this->in = $in;
+        stream_set_read_buffer($in, 0);   // stdio read-ahead would hide queued frames from stream_select
         $this->d = $d;
         $d->cancellation()->setPoll(function (): void { $this->poll(); });
         while (!($this->shouldStop)()) {
