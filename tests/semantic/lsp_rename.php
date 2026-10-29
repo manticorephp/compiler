@@ -29,7 +29,7 @@ final class Sink
 }
 
 /** @return array{0: Dispatcher, 1: Workspace} */
-function rigWs(Sink $k, string $root = 'file:///nonexistent-root', int $max = \Lsp\ClosedFiles::MAX): array
+function rigWs(Sink $k, string $root = 'file:///nonexistent-root', int $max = \Lsp\ClosedFiles::MAX, bool $annot = false): array
 {
     $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/core_interfaces.php');
     $pf = new ParsedFile('lib:prelude/core_interfaces.php', \Parser\Parser::parseTolerant($src, 'core_interfaces.php')->program);
@@ -39,13 +39,14 @@ function rigWs(Sink $k, string $root = 'file:///nonexistent-root', int $max = \L
     }, $max);
     $d = new Dispatcher();
     $s->register($d);
-    $d->handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":' . json_encode($root) . '}}');
+    $d->handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":' . json_encode($root) . ($annot ? ',"capabilities":{"workspace":{"workspaceEdit":{"documentChanges":true,"changeAnnotationSupport":{"groupsOnLabel":true}}}}' : '') . '}}');
     return [$d, $ws];
 }
 
-function open(Dispatcher $d, string $uri, string $text): void
+function open(Dispatcher $d, string $uri, string $text, ?int $version = null): void
 {
-    $d->handle(json_encode(['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => $text]]]));
+    $td = ['uri' => $uri, 'text' => $text] + ($version === null ? [] : ['version' => $version]);
+    $d->handle(json_encode(['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => $td]]));
 }
 
 /** @param array<string, mixed> $extra */
@@ -370,7 +371,56 @@ check('client uri with different percent-encoding maps to the scan key', functio
     $key = \Lsp\Uri::fromPath($r . '/a.php');
     return $got === [$key . ':1:9-13:hi', $key . ':2:0-4:hi'] ?: json_encode([$got, $key]);
 });
-check('re-entrant ClosedFiles::with throws', function (): bool|string {
+$FOO = "<?php\nclass Foo {\n    public function bar(): int { return 1; }\n}\n";
+
+check('annotating client: unresolved-receiver site is an annotated edit, certain edits are not, versions carried', function () use ($FOO): bool|string {
+    $k = new Sink();
+    [$d] = rigWs($k, 'file:///nonexistent-root', \Lsp\ClosedFiles::MAX, true);
+    open($d, 'file:///t/a.php', $FOO, 7);
+    open($d, 'file:///t/b.php', "<?php\nfunction mk(\$u) { \$u->bar(); }\n\$f = new Foo();\n\$f->bar();\n");
+    $r = rn($d, 'file:///t/a.php', 2, 22, 'baz');
+    if (!is_array($r) || isset($r['changes']) || !isset($r['documentChanges'])) { return json_encode($r); }
+    $by = [];
+    foreach ($r['documentChanges'] as $dc) { $by[$dc['textDocument']['uri']] = $dc; }
+    $a = $by['file:///t/a.php'] ?? null;
+    $b = $by['file:///t/b.php'] ?? null;
+    if ($a === null || $b === null) { return json_encode($r); }
+    $ann = $r['changeAnnotations']['uncertain:unresolved-receiver'] ?? null;
+    $bEdits = [];
+    foreach ($b['edits'] as $e) { $bEdits[$e['range']['start']['line']] = $e['annotationId'] ?? null; }
+    $msg = null;
+    foreach ($k->msgs as $x) { if (($x['method'] ?? '') === 'window/showMessage') { $msg = $x['params']['message']; } }
+    return ($a['textDocument']['version'] === 7 && $b['textDocument']['version'] === null
+        && !isset($a['edits'][0]['annotationId'])
+        && $bEdits === [1 => 'uncertain:unresolved-receiver', 3 => null]
+        && ($ann['needsConfirmation'] ?? false) === true && ($ann['label'] ?? '') === 'Uncertain site (receiver type unknown)'
+        && is_string($msg) && str_contains($msg, 'for confirmation')) ?: json_encode([$r, $msg]);
+});
+check('client without changeAnnotationSupport: changes only, certain edits, showMessage sent', function () use ($FOO): bool|string {
+    $k = new Sink();
+    [$d] = rigWs($k);
+    open($d, 'file:///t/a.php', $FOO, 7);
+    open($d, 'file:///t/b.php', "<?php\nfunction mk(\$u) { \$u->bar(); }\n\$f = new Foo();\n\$f->bar();\n");
+    $r = rn($d, 'file:///t/a.php', 2, 22, 'baz');
+    $msg = null;
+    foreach ($k->msgs as $x) { if (($x['method'] ?? '') === 'window/showMessage') { $msg = $x['params']['message']; } }
+    return (flat($r) === ['file:///t/a.php:2:20-23:baz', 'file:///t/b.php:3:4-7:baz'] && !isset($r['documentChanges']) && !isset($r['changeAnnotations'])
+        && is_string($msg) && str_contains($msg, 'uncertain')) ?: json_encode([$r, $msg]);
+});
+check('uncertain site whose text does not spell the name is dropped; UTF-16 before a flagged site', function () use ($FOO): bool|string {
+    [$d] = rigWs(new Sink(), 'file:///nonexistent-root', \Lsp\ClosedFiles::MAX, true);
+    open($d, 'file:///t/a.php', $FOO);
+    open($d, 'file:///t/b.php', "<?php\nfunction mk(\$u, \$n) { /* \u{e9} */ \$u->bar(); \$u->\$n(); }\n");
+    $r = rn($d, 'file:///t/a.php', 2, 22, 'baz');
+    $edits = [];
+    foreach (is_array($r) ? ($r['documentChanges'] ?? []) : [] as $dc) {
+        if ($dc['textDocument']['uri'] === 'file:///t/b.php') { $edits = $dc['edits']; }
+    }
+    return (count($edits) === 1 && $edits[0]['range']['start'] === ['line' => 1, 'character' => 34] && $edits[0]['range']['end']['character'] === 37
+        && ($edits[0]['annotationId'] ?? '') === 'uncertain:unresolved-receiver') ?: json_encode($r);
+});
+
+check('re-entrant ClosedFiles::with throws',function (): bool|string {
     $ws = rigWs(new Sink())[1];
     $c = new \Lsp\ClosedFiles($ws, fn(): array => []);
     try {

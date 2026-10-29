@@ -19,15 +19,23 @@ final class RenameHandlers
     private $docs;
     /** @var callable */
     private $send;
+    /** @var callable */
+    private $annotated;
+    /** @var callable */
+    private $versions;
 
     /**
      * @param callable $docs returns array<string, string> uri => open text
      * @param callable $send takes one JSON message string
+     * @param callable $annotated returns bool: the client takes documentChanges with change annotations
+     * @param callable $versions returns array<string, int> uri => version of an open document
      */
-    public function __construct(private Workspace $ws, callable $docs, private ClosedFiles $closed, callable $send)
+    public function __construct(private Workspace $ws, callable $docs, private ClosedFiles $closed, callable $send, ?callable $annotated = null, ?callable $versions = null)
     {
         $this->docs = $docs;
         $this->send = $send;
+        $this->annotated = $annotated ?? static fn(): bool => false;
+        $this->versions = $versions ?? static fn(): array => [];
     }
 
     public function register(Dispatcher $d): void
@@ -95,6 +103,8 @@ final class RenameHandlers
             $sigil = false;
             /** @var array<string, array<int, array<string, mixed>>> $changes */
             $changes = [];
+            /** @var array<string, bool> $certain uri:line:char of every certain edit */
+            $certain = [];
             foreach ($set as $l) {
                 if ($l->endLine === $l->line && $l->endCol <= $l->col) { continue; }
                 $tail = $this->tailRange($l, $map);
@@ -114,9 +124,17 @@ final class RenameHandlers
                     throw new RpcError(RpcError::INVALID_PARAMS, 'cannot edit library symbol: ' . $l->file);
                 }
                 $changes[(string)$m['uri']][] = ['range' => $m['range'], 'newText' => $bare];
+                $certain[$m['uri'] . ':' . $m['range']['start']['line'] . ':' . $m['range']['start']['character']] = true;
             }
             if (!$sigil && $bare !== $new) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'newName is not a valid PHP identifier');
+            }
+            $flagged = [];
+            if (($this->annotated)()) {
+                $flagged = $this->flagged($uncertain, $old, $bare, $ci, $kind === 'variable', $certain, $map);
+                foreach ($flagged as $u => $edits) {
+                    foreach ($edits as $e) { $changes[$u][] = $e; }
+                }
             }
             \ksort($changes);
             foreach ($changes as $u => $edits) {
@@ -124,9 +142,84 @@ final class RenameHandlers
                     <=> [$b['range']['start']['line'], $b['range']['start']['character']]);
                 $changes[$u] = $edits;
             }
-            $this->warn($uncertain);
-            return ['changes' => (object)$changes];
+            $nFlagged = 0;
+            foreach ($flagged as $edits) { $nFlagged += \count($edits); }
+            $this->warn($uncertain, $nFlagged);
+            if ($nFlagged === 0) { return ['changes' => (object)$changes]; }
+            return $this->annotatedEdit($changes);
         });
+    }
+
+    private const LABELS = [
+        'unresolved-receiver' => 'Uncertain site (receiver type unknown)',
+        'dynamic-member' => 'Uncertain site (dynamic member)',
+        'string-class-name' => 'Uncertain site (class name in a string)',
+        'callable-string' => 'Uncertain site (callable string)',
+        'docblock' => 'Uncertain site (docblock mention)',
+        'heredoc-interpolation' => 'Uncertain site (heredoc interpolation)',
+    ];
+
+    /**
+     * Uncertain sites whose source text spells the old name as a whole identifier become edits flagged for confirmation;
+     * all others are dropped.
+     *
+     * @param UncertainSite[] $sites
+     * @param array<string, bool> $certain
+     * @return array<string, array<int, array<string, mixed>>>
+     */
+    private function flagged(array $sites, string $old, string $bare, bool $ci, bool $isVar, array $certain, LocationMap $map): array
+    {
+        $out = [];
+        foreach ($sites as $s) {
+            if (\str_starts_with($s->file, 'lib:')) { continue; }
+            $text = $map->text($s->file);
+            if ($text === null) { continue; }
+            $line = Position::lineText($text, $s->line);
+            $i = $s->col - 1;
+            if (($line[$i] ?? '') === '"' || ($line[$i] ?? '') === "'") { $i++; }
+            if ($isVar && ($line[$i] ?? '') === '$') { $i++; }
+            $len = \strlen($old);
+            $seg = \substr($line, $i, $len);
+            if ($len === 0 || \strlen($seg) !== $len || ($ci ? \strcasecmp($seg, $old) : \strcmp($seg, $old)) !== 0) { continue; }
+            $next = $line[$i + $len] ?? '';
+            $prev = $i > 0 ? $line[$i - 1] : '';
+            if (self::isIdByte($next) || ($prev !== '$' && self::isIdByte($prev))) { continue; }
+            $m = $map->toLsp(new Location($s->file, $s->line, $i + 1, $s->line, $i + 1 + $len));
+            if ($m === null) { continue; }
+            $key = $m['uri'] . ':' . $m['range']['start']['line'] . ':' . $m['range']['start']['character'];
+            if (isset($certain[$key])) { continue; }
+            $certain[$key] = true;
+            $out[(string)$m['uri']][] = ['range' => $m['range'], 'newText' => $bare, 'annotationId' => 'uncertain:' . $s->reason];
+        }
+        return $out;
+    }
+
+    private static function isIdByte(string $c): bool
+    {
+        return $c !== '' && (\ctype_alnum($c) || $c === '_' || \ord($c) >= 0x80);
+    }
+
+    /**
+     * @param array<string, array<int, array<string, mixed>>> $changes
+     * @return array<string, mixed>
+     */
+    private function annotatedEdit(array $changes): array
+    {
+        /** @var array<string, int> $versions */
+        $versions = ($this->versions)();
+        $docs = [];
+        $ann = [];
+        foreach ($changes as $u => $edits) {
+            foreach ($edits as $e) {
+                if (isset($e['annotationId'])) {
+                    $reason = \substr((string)$e['annotationId'], 10);
+                    $ann[(string)$e['annotationId']] = ['label' => self::LABELS[$reason] ?? 'Uncertain site (' . $reason . ')', 'needsConfirmation' => true, 'description' => $reason];
+                }
+            }
+            $docs[] = ['textDocument' => ['uri' => $u, 'version' => $versions[$u] ?? null], 'edits' => $edits];
+        }
+        \ksort($ann);
+        return ['documentChanges' => $docs, 'changeAnnotations' => (object)$ann];
     }
 
     /** renameBlockers also lists every uncertain site as `reason:file:line:col`; those warn instead of blocking. */
@@ -137,7 +230,7 @@ final class RenameHandlers
     }
 
     /** @param UncertainSite[] $sites */
-    private function warn(array $sites): void
+    private function warn(array $sites, int $flagged = 0): void
     {
         $items = [];
         foreach ($sites as $s) {
@@ -148,7 +241,9 @@ final class RenameHandlers
         $msg = \json_encode([
             'jsonrpc' => '2.0',
             'method' => 'window/showMessage',
-            'params' => ['type' => 2, 'message' => 'Rename left ' . \count($items) . ' uncertain site(s): ' . \implode(', ', \array_slice($items, 0, 10))],
+            'params' => ['type' => 2, 'message' => ($flagged > 0
+                ? 'Rename flagged ' . $flagged . ' of ' . \count($items) . ' uncertain site(s) for confirmation: '
+                : 'Rename left ' . \count($items) . ' uncertain site(s): ') . \implode(', ', \array_slice($items, 0, 10))],
         ], JSON_INVALID_UTF8_SUBSTITUTE);
         if ($msg !== false) { ($this->send)($msg); }
     }

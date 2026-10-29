@@ -63,9 +63,16 @@ declarations.
 - **Blockers refuse.** Cases the engine cannot rewrite safely (unknown owner, library
   declaration, named-argument and trait-adaptation uses, a parse-error region) fail the request
   with an error naming the reason.
-- **Uncertain sites are warned.** Sites that may or may not refer to the symbol (a class name
+- **Uncertain sites are flagged.** Sites that may or may not refer to the symbol (a class name
   in a string, a dynamic member, a callable string, a docblock mention, an unresolved
-  receiver) are edited where certain and listed in a `window/showMessage` warning.
+  receiver) are listed in a `window/showMessage` warning. When the client declares
+  `workspace.workspaceEdit.documentChanges` and `changeAnnotationSupport`, those sites whose
+  text really spells the old name are also returned as edits with a change annotation
+  (`uncertain:<reason>`, `needsConfirmation: true`), so VS Code's Refactor Preview shows them
+  unticked for the user to decide; the edit then uses `documentChanges` with the open
+  document's version (`null` for closed files). Certain edits carry no annotation. Uncertain
+  sites whose text does not match are dropped. Other clients get `changes` with the certain
+  edits only.
 - **Members search the workspace files that mention them.** A member query temporarily opens
   every scanned closed file whose text contains the member name (case-insensitive) so its use
   sites resolve; other files are not parsed. Rename refuses with `rename incomplete: N workspace
