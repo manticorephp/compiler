@@ -5,7 +5,7 @@ framing). It is built on the semantic core (`src/Semantic/`, see
 [`design/semantic-core.md`](design/semantic-core.md)): the same name index, type inference and
 analyzer the `analyze` command uses, so editor diagnostics and `manticore analyze` agree.
 
-A VS Code client lives in [`../editors/vscode/`](../editors/vscode/README.md); any LSP client
+A VS Code client is developed in a separate repository; any LSP client
 works with the command `manticore lsp`.
 
 ## Supported methods
