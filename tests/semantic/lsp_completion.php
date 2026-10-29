@@ -123,4 +123,18 @@ check('sortText on every item, own members before inherited', function () use ($
     return ($f[0]['sortText'] ?? '') === '02_' . strtolower($f[0]['label']) ? true : json_encode($f[0] ?? null);
 });
 
+check('class completion carries a use edit', function () use ($U): bool|string {
+    $d = rig();
+    open($d, 'file:///t/lib.php', "<?php\nnamespace Lib;\nclass Widget {}\n");
+    open($d, $U, "<?php\nnamespace App;\nWidg\n");
+    $items = complete($d, $U, 2, 4)['result']['items'] ?? [];
+    foreach ($items as $i) {
+        if ($i['label'] === 'Widget') {
+            $e = $i['additionalTextEdits'][0] ?? null;
+            return $i['insertText'] === 'Widget' && ($e['newText'] ?? '') === "use Lib\\Widget;\n" && $e['range']['start'] === ['line' => 2, 'character' => 0] ? true : json_encode($i);
+        }
+    }
+    return 'no Widget ' . json_encode($items);
+});
+
 exit($fail);
