@@ -224,6 +224,8 @@ final class TrampolineSynth
                   . ' && $lm === ' . \var_export(\strtolower($arm[1]), true) . ') { '
                   . ($arm[2] ? $call . '; return null;' : 'return ' . $call . ';') . " }\n";
         }
+        // A subclass the program names but no arm covers runs its parent's method.
+        $out .= "  \$p = \\get_parent_class(\$c);\n  if (\$p !== false) { return __mc_static_callable(\$p, \$m, \$a); }\n";
         return $out . "  throw new \\Error('Call to undefined method ' . \\ltrim(\$c, '\\\\') . '::' . \$m . '()');\n}\n";
     }
 

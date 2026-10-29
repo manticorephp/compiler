@@ -1900,15 +1900,41 @@ final class LowerFromAst implements Pass
                 $arms[] =[$cd->name, (string)$mn, \strtolower($mm->returnType) === 'void'];
             }
         }
+        // A late-static method inherited by a subclass runs with `static` = THAT class
+        // (`Child::instance()` → `new Child`), so the subclass needs an arm of its
+        // own; an arm on the declaring class would build the parent. Methods that
+        // do not look at `static` fall back to the parent's arm at run time.
+        /** @var array<string, bool> $lsbKeys */
+        $lsbKeys = [];
+        foreach ($this->lsbPending as $lp) {
+            $lsbKeys[\strtolower($lp->lexicalClass !== '' ? $lp->lexicalClass : $lp->decl->name) . '::' . \strtolower($lp->method->name)] = true;
+        }
+        $extra = [];
+        foreach ($arms as $arm) {
+            if (!isset($lsbKeys[\strtolower($arm[0]) . '::' . \strtolower($arm[1])])) { continue; }
+            foreach ($this->descendantsOf($arm[0]) as $sub) {
+                $scd = $module->classes[$sub] ?? null;
+                if ($scd === null || isset($scd->methodMeta[$arm[1]])) { continue; }
+                $extra[] = [$sub, $arm[1], $arm[2]];
+            }
+        }
+        foreach ($extra as $e) { $arms[] = $e; }
         if (isset($this->callableNamesAnyRecv['fromcallable'])) { $arms[] = ['Closure', 'fromCallable', false]; }
         if ($arms === []) { return; }
         $prog = \Parser\Parser::parseSource("<?php\n" . TrampolineSynth::staticCallableSource($arms));
         foreach ($prog->statements as $s) {
             if ($s->kind !== 'Function') { continue; }
             $this->declareFn($s->decl->name, $s->decl);
+            // Every arm names a method `methodMeta` already proved to exist; the
+            // declarations' `uses` are released by now, so the usual "is it declared
+            // anywhere" walk would call a trait-provided one undefined.
+            $this->synthTrustsStaticCalls = true;
             $module->addFunction($this->lowerFunction($s->decl));
+            $this->synthTrustsStaticCalls = false;
         }
     }
+
+    private bool $synthTrustsStaticCalls = false;
 
     /**
      * `'Class::method'` string literals into {@see Module::$callableStaticStrings}:
@@ -7965,7 +7991,7 @@ final class LowerFromAst implements Pass
 
     private function staticCallUnresolvable(string $class, string $method): bool
     {
-        if ($class === '' || $method === '') { return false; }
+        if ($class === '' || $method === '' || $this->synthTrustsStaticCalls) { return false; }
         $c = $class;
         $guard = 0;
         while ($c !== '' && $guard < 64) {
@@ -7977,17 +8003,28 @@ final class LowerFromAst implements Pass
                 if ($m->name === $method || $m->name === '__callStatic') { return false; }
             }
             foreach ($decl->uses as $traitName) {
-                $t = $this->classDecls[$traitName] ?? null;
-                if ($t === null) { return false; }
-                foreach ($t->methods as $tm) {
-                    if ($tm->name === $method || $tm->name === '__callStatic') { return false; }
-                }
+                // A trait may itself use traits (Carbon's `Date` uses `Creator`).
+                if (!$this->traitProvablyLacks(\ltrim($traitName, '\\'), $method, 0)) { return false; }
             }
             $cd = $this->classTable[$c] ?? null;
             $c = $cd !== null ? $cd->parent : '';
             $guard = $guard + 1;
         }
         return $guard < 64;
+    }
+
+    /** True only when `$trait` and every trait it uses provably declare neither `$method` nor `__callStatic`. */
+    private function traitProvablyLacks(string $trait, string $method, int $depth): bool
+    {
+        $t = $this->classDecls[$trait] ?? ($this->traitTable[$trait] ?? null);
+        if ($t === null || $depth > 16) { return false; }
+        foreach ($t->methods as $tm) {
+            if ($tm->name === $method || $tm->name === '__callStatic') { return false; }
+        }
+        foreach ($t->uses as $inner) {
+            if (!$this->traitProvablyLacks(\ltrim($inner, '\\'), $method, $depth + 1)) { return false; }
+        }
+        return true;
     }
 
     /** Whether `$method` resolved from `$class` (walking ancestors) is a
