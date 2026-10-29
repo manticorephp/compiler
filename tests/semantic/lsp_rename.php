@@ -29,14 +29,14 @@ final class Sink
 }
 
 /** @return array{0: Dispatcher, 1: Workspace} */
-function rigWs(Sink $k, string $root = 'file:///nonexistent-root'): array
+function rigWs(Sink $k, string $root = 'file:///nonexistent-root', int $max = \Lsp\ClosedFiles::MAX): array
 {
     $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/core_interfaces.php');
     $pf = new ParsedFile('lib:prelude/core_interfaces.php', \Parser\Parser::parseTolerant($src, 'core_interfaces.php')->program);
     $ws = new Workspace(LibrarySymbols::fromParts([$pf], ['strlen']));
     $s = new Server($ws, function (string $j) use ($k): void {
         $k->msgs[] = json_decode($j, true);
-    });
+    }, $max);
     $d = new Dispatcher();
     $s->register($d);
     $d->handle('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":' . json_encode($root) . '}}');
@@ -153,6 +153,78 @@ check('CRLF file: \r does not shift ranges', function (): bool|string {
     open($d, 'file:///t/a.php', "<?php\r\nfunction helo() {}\r\nhelo();\r\n");
     $r = flat(rn($d, 'file:///t/a.php', 2, 1, 'hi'));
     return $r === ['file:///t/a.php:1:9-13:hi', 'file:///t/a.php:2:0-4:hi'] ?: json_encode($r);
+});
+
+/** Applies one file's edits (ASCII text) and returns the result. */
+function applyEdits(string $text, mixed $r, string $uri): string
+{
+    $lines = explode("\n", $text);
+    $es = is_array($r) ? ($r['changes'][$uri] ?? []) : [];
+    usort($es, fn($a, $b) => [$b['range']['start']['line'], $b['range']['start']['character']] <=> [$a['range']['start']['line'], $a['range']['start']['character']]);
+    foreach ($es as $e) {
+        $l = $e['range']['start']['line'];
+        $lines[$l] = substr($lines[$l], 0, $e['range']['start']['character']) . $e['newText'] . substr($lines[$l], $e['range']['end']['character']);
+    }
+    return implode("\n", $lines);
+}
+
+check('rename instance property keeps $ on the declaration, plain on uses', function (): bool|string {
+    [$d] = rigWs(new Sink());
+    $src = "<?php\nclass A {\n    public \$sp = 1;\n    function m() { return \$this->sp; }\n}\n\$o = new A();\necho \$o->sp;\n";
+    open($d, 'file:///t/a.php', $src);
+    $r = rn($d, 'file:///t/a.php', 6, 9, 'foo');
+    $out = applyEdits($src, $r, 'file:///t/a.php');
+    $want = "<?php\nclass A {\n    public \$foo = 1;\n    function m() { return \$this->foo; }\n}\n\$o = new A();\necho \$o->foo;\n";
+    return $out === $want ?: $out;
+});
+check('rename static property keeps $ on declaration and A::$sp', function (): bool|string {
+    [$d] = rigWs(new Sink());
+    $src = "<?php\nclass A {\n    public static \$sp = 1;\n}\necho A::\$sp;\n";
+    open($d, 'file:///t/a.php', $src);
+    $r = rn($d, 'file:///t/a.php', 4, 10, '$foo');
+    $p = ask($d, 'textDocument/prepareRename', 'file:///t/a.php', 4, 10);
+    $out = applyEdits($src, $r, 'file:///t/a.php');
+    $want = "<?php\nclass A {\n    public static \$foo = 1;\n}\necho A::\$foo;\n";
+    return ($out === $want && ($p['placeholder'] ?? '') === 'sp') ?: json_encode([$out, $p]);
+});
+check('rename promoted ctor property keeps every $', function (): bool|string {
+    [$d] = rigWs(new Sink());
+    $src = "<?php\nclass A {\n    function __construct(public int \$sp) {}\n    function m() { return \$this->sp; }\n}\n";
+    open($d, 'file:///t/a.php', $src);
+    $r = rn($d, 'file:///t/a.php', 3, 34, 'foo');
+    $out = applyEdits($src, $r, 'file:///t/a.php');
+    $want = "<?php\nclass A {\n    function __construct(public int \$foo) {}\n    function m() { return \$this->foo; }\n}\n";
+    return $out === $want ?: json_encode([$out, $r]);
+});
+check('$-prefixed newName on a function is -32602', function (): bool|string {
+    [$d] = rigWs(new Sink());
+    open($d, 'file:///t/a.php', "<?php\nfunction helo() {}\n");
+    $r = rn($d, 'file:///t/a.php', 1, 10, '$x');
+    return (is_array($r) && ($r['error'] ?? 0) === -32602) ?: json_encode($r);
+});
+check('member rename refuses when the closed-file cap is hit', function (): bool|string {
+    $r = sys_get_temp_dir() . '/lsprn2' . getmypid();
+    mkdir($r);
+    file_put_contents("$r/c.php", "<?php\n\$g = new Foo();\n\$g->bar();\n");
+    file_put_contents("$r/d.php", "<?php\n\$h = 1;\n");
+    [$d] = rigWs(new Sink(), 'file://' . $r, 1);
+    $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+    open($d, 'file:///t/a.php', "<?php\nclass Foo {\n    public function bar(): int { return 1; }\n}\n");
+    $got = rn($d, 'file:///t/a.php', 2, 22, 'baz');
+    unlink("$r/c.php"); unlink("$r/d.php"); rmdir($r);
+    return (is_array($got) && ($got['error'] ?? 0) === -32602 && str_contains($got['message'], 'rename incomplete: 2 workspace files')) ?: json_encode($got);
+});
+check('member rename refuses when a scanned file became unreadable', function (): bool|string {
+    $r = sys_get_temp_dir() . '/lsprn3' . getmypid();
+    mkdir($r);
+    file_put_contents("$r/c.php", "<?php\n\$g = new Foo();\n\$g->bar();\n");
+    [$d] = rigWs(new Sink(), 'file://' . $r);
+    $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+    unlink("$r/c.php");
+    open($d, 'file:///t/a.php', "<?php\nclass Foo {\n    public function bar(): int { return 1; }\n}\n");
+    $got = rn($d, 'file:///t/a.php', 2, 22, 'baz');
+    rmdir($r);
+    return (is_array($got) && ($got['error'] ?? 0) === -32602 && str_contains($got['message'], 'rename incomplete: 1 workspace files')) ?: json_encode($got);
 });
 
 exit($fail);
