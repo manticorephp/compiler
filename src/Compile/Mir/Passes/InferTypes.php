@@ -3866,7 +3866,27 @@ final class InferTypes implements Pass
                 $found = $found->unionWith($sig);
             }
         }
+        // A class that only answers the name through `__call` (a tap proxy) can
+        // be the receiver too, and what it returns is its own: the declarers'
+        // type would be a false claim about that answer.
+        if ($found !== null && $this->magicOnlyClassExists($method)) { return Type::cell(); }
         return $shapeDiffers ? $found->withElement(Type::unknown()) : $found;
+    }
+
+    /** @var array<string, bool> */
+    private array $magicOnlyCache = [];
+
+    /** Does some class answer `$method` ONLY through `__call` (neither declares nor inherits it)? */
+    private function magicOnlyClassExists(string $method): bool
+    {
+        if (isset($this->magicOnlyCache[$method])) { return $this->magicOnlyCache[$method]; }
+        $found = false;
+        foreach ($this->classes as $cd) {
+            if ($this->resolveMethodClass($cd->name, $method) === ''
+                && $this->classDefinesMagic($cd->name, '__call')) { $found = true; break; }
+        }
+        $this->magicOnlyCache[$method] = $found;
+        return $found;
     }
 
     /**

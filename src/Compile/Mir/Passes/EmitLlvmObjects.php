@@ -9383,6 +9383,76 @@ trait EmitLlvmObjects
      * the receiver is spilled once and the arm is picked at run time instead
      * of dispatching blindly into an unrelated class's `__call`.
      */
+    /** @var array<int, bool> MethodCall_ nodes already wrapped by {@see emitMixedMagicCall} */
+    private array $mixedMagicDone = [];
+
+    /** @var array<string, bool> */
+    private array $magicOnlyCache = [];
+
+    /**
+     * Does some class answer `$method` ONLY through `__call` — it neither
+     * declares nor inherits the method but defines `__call`?
+     */
+    private function magicOnlyClassExists(string $method): bool
+    {
+        if (isset($this->magicOnlyCache[$method])) { return $this->magicOnlyCache[$method]; }
+        $found = false;
+        foreach ($this->classes as $cd) {
+            if ($cd->isStruct || isset($this->enums[$cd->name]) || $this->isClosureClass($cd->name)) { continue; }
+            if ($this->resolveMethodClass($cd->name, $method) === ''
+                && $this->resolveMethodClass($cd->name, '__call') !== '') { $found = true; break; }
+        }
+        $this->magicOnlyCache[$method] = $found;
+        return $found;
+    }
+
+    /**
+     * A call on an ERASED receiver where some classes declare `$method` and
+     * others only define `__call`: `tap($thing)->add()` is a
+     * `HigherOrderTapProxy`, which has no `add()`. The declared-method dispatch
+     * has no arm for such a class, so the proxy ran `Thing::add` on its own
+     * slots. Decide at run time: an object whose class lacks the method and
+     * has `__call` goes through `__call` (as the all-magic reroute does); every
+     * other receiver takes the ordinary dispatch.
+     */
+    private function emitMixedMagicCall(\Compile\Mir\MethodCall_ $mc): string
+    {
+        $out = $this->emitNode($mc->object);
+        $out .= $this->coerceToI64();
+        $cellV = $this->lastValue;
+        $tag = \substr($this->ssa->allocReg(), 2);
+        $cellName = '__emx' . $tag;
+        $cellSlot = $this->ssa->allocReg();
+        $out .= '  ' . $cellSlot . " = alloca i64\n";
+        $out .= '  store i64 ' . $cellV . ', ptr ' . $cellSlot . "\n";
+        $this->locals->slots[$cellName] = $cellSlot;
+        $cell = Type::cell();
+        $bool = Type::bool_();
+        $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
+        $t = fn (): Node => new \Compile\Mir\LoadLocal($cellName, $cell);
+        $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
+        $false = fn (): Node => new \Compile\Mir\BoolConst(false, $bool);
+        $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
+        // is_object && method_exists(__call) && !method_exists(method)
+        $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
+            new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
+                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str($mc->method)]), $false(), $true(), $bool),
+                $false(), $bool),
+            $false(), $bool);
+        $elems = [];
+        foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+        $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
+        $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
+        $plain = new \Compile\Mir\MethodCall_($t(), $mc->method, $mc->args, $mc->type);
+        $plain->srcArgc = $mc->srcArgc;
+        $this->mixedMagicDone[\spl_object_id($plain)] = true;
+        $out .= $this->emitNode(new \Compile\Mir\Ternary($magicOnly, $viaMagic, $plain, $cell));
+        if ($mc->type->kind !== Type::KIND_CELL && $mc->type->kind !== Type::KIND_UNKNOWN
+            && $mc->type->kind !== Type::KIND_VOID) {
+            $out .= $this->unboxCellToType($mc->type);
+        }
+        return $out;
+    }
     private function emitErasedMagicCall(\Compile\Mir\MethodCall_ $mc): string
     {
         $out = $this->emitNode($mc->object);
@@ -9599,6 +9669,11 @@ trait EmitLlvmObjects
         // is NOT handled: the two shapes need different argument lists, so they
         // cannot share one switch, and the arg emission below is already built
         // against the resolved callee's signature. Recorded in docs/ROADMAP.md.
+        if (!isset($this->classes[$mcStatic]) && !isset($this->mixedMagicDone[\spl_object_id($mc)])
+            && ($mc->object->type->kind === Type::KIND_CELL || $mc->object->type->kind === Type::KIND_UNKNOWN)
+            && $this->anyClassDeclares($mc->method) && $this->magicOnlyClassExists($mc->method)) {
+            return $this->emitMixedMagicCall($mc);
+        }
         if (!isset($this->classes[$mcStatic]) && !$this->anyClassDeclares($mc->method)) {
             if ($mc->object->type->kind === Type::KIND_CELL || $mc->object->type->kind === Type::KIND_UNKNOWN) {
                 return $this->emitErasedMagicCall($mc);
