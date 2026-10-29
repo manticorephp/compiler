@@ -497,6 +497,9 @@ final class Workspace
                 return new HoverInfo(\implode("\nor ", $parts), new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
             }
         }
+        if ($o !== null && $o->inDoc) {
+            return new HoverInfo($o->resolved, new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
+        }
         $t = $this->typeAt($uri, $line, $col);
         $n = $this->nodeAt($uri, $line, $col);
         if ($t === null || $n === null) { return null; }

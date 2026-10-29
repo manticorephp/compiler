@@ -27,6 +27,18 @@ Capabilities advertised: `textDocumentSync {openClose, change: 1}`, `hoverProvid
 `definitionProvider`, `referencesProvider`, `renameProvider {prepareProvider}`,
 `documentSymbolProvider`, `completionProvider`.
 
+## Docblocks
+
+Class names in the type-carrying tags of `/** */` docblocks (`@param`, `@return`, `@var`, `@throws`, `@property*`,
+`@method`, `@mixin`, `@extends` / `@implements` / `@use`, `@template T of X`, and their `@psalm-` / `@phpstan-`
+variants) are class references: definition, references, hover and rename treat them like a written class name,
+including generics (`Foo<Bar>`), unions, `Foo[]`, `?Foo`, `class-string<Foo>`, and `\Fully\Qualified` names (rename edits
+the last segment only). Names resolve with the file's namespace and `use` map; a `use X as Y` alias is never edited.
+Built-in and pseudo types, `@template` / `@psalm-type` names, `array{...}` keys and prose lines are not indexed.
+A lowercase word right after `@return` / `@param` is read as a type, as PHPStan does. Docblocks are found by text
+(strings and plain comments skipped; a heredoc holding an apostrophe can hide one), and a file with several
+`namespace` blocks resolves docblock names against the first.
+
 ## Positions
 
 LSP positions are 0-based lines and **UTF-16 code units**; the semantic core counts 1-based

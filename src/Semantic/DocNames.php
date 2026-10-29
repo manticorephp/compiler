@@ -19,6 +19,12 @@ final class DocNames
         'resource' => 1, 'numeric' => 1, 'scalar' => 1,
     ];
 
+    /** A name that is a built-in or pseudo type, never a class (lowercased input). */
+    public static function isKeyword(string $lower): bool
+    {
+        return isset(self::BUILTIN[$lower]);
+    }
+
     /**
      * @param array<string, string> $uses alias → FQN
      */
