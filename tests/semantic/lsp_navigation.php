@@ -188,6 +188,30 @@ check('references: method called from a CLOSED file is listed; open count restor
     sort($want);
     return ($got === $want && $n === $after) ?: json_encode([$got, $n, $after]);
 });
+check('references: closed files are opened one at a time, results unchanged (#528)', function () use ($A): bool|string {
+    $r = sys_get_temp_dir() . '/lspnav4' . getmypid();
+    mkdir($r);
+    foreach (['c', 'd', 'e', 'f'] as $n) { file_put_contents("$r/$n.php", "<?php\n\$g = new Foo();\n\$g->bar();\n"); }
+    file_put_contents("$r/g.php", "<?php\n\$g = new Foo();\n\$g->baz();\n");
+    $k = new Sink();
+    [$d, $ws] = rigWs($k, 'file://' . $r);
+    $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+    open($d, 'file:///t/a.php', $A);
+    $seen = [];
+    // an observable ClosedFiles over the same workspace
+    $c = new \Lsp\ClosedFiles($ws, fn(): array => ['file:///t/a.php' => $A]);
+    foreach (['c', 'd', 'e', 'f', 'g'] as $n) { $c->add('file://' . $r . "/$n.php"); }
+    $c->setCheck(function () use ($ws, &$seen): void { $seen[] = $ws->openFileCount(); });
+    $base = $ws->openFileCount();
+    $got = $c->with(fn(): array => $ws->referencesTo('file:///t/a.php', 3, 22));
+    $after = $ws->openFileCount();
+    foreach (['c', 'd', 'e', 'f', 'g'] as $n) { unlink("$r/$n.php"); }
+    rmdir($r);
+    $files = array_map(fn($l) => basename($l->file), $got);
+    sort($files);
+    return ($files === ['a.php', 'c.php', 'd.php', 'e.php', 'f.php'] && $after === $base && $seen !== [] && max($seen) <= $base)
+        ?: json_encode([$files, $base, $after, $seen]);
+});
 check('references: class query opens no files', function () use ($A): bool|string {
     $r = sys_get_temp_dir() . '/lspnav3' . getmypid();
     mkdir($r);

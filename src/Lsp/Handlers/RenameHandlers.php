@@ -260,15 +260,13 @@ final class RenameHandlers
     }
 
     /**
-     * A member query needs the closed workspace files that mention its name opened for its duration (ClosedFiles::with).
+     * A member query needs the closed workspace files opened one at a time (ClosedFiles::with).
      *
      * @param array{0: string, 1: int, 2: int} $at
      */
     private function query(array $at, callable $fn): mixed
     {
-        /** @var array<string, string> $open */
-        $open = ($this->docs)();
-        return (new MemberQuery($this->ws, $this->closed))->run($at[0], $at[1], $at[2], Position::lineText($open[$at[0]] ?? '', $at[1]), $fn);
+        return (new MemberQuery($this->ws, $this->closed))->run($at[0], $at[1], $at[2], $fn);
     }
 
     /** @param array{0: string, 1: int, 2: int} $at */
