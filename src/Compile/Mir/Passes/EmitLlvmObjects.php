@@ -9407,6 +9407,18 @@ trait EmitLlvmObjects
     }
 
     /**
+     * Does a class below `$class` answer `$method` ONLY through `__call`? `Carbon::setTimestamp()` is typed `DateTime`, whose subclass is the
+     * one that serves `->setMicroseconds()` via `__call`.
+     */
+    private function descendantAnswers(string $class, string $method): bool
+    {
+        foreach ($this->selfAndDescendants($class) as $d) {
+            if ($this->resolveMethodClass($d, $method) === '' && $this->resolveMethodClass($d, '__call') !== '') { return true; }
+        }
+        return false;
+    }
+
+    /**
      * A call on an ERASED receiver where some classes declare `$method` and
      * others only define `__call`: `tap($thing)->add()` is a
      * `HigherOrderTapProxy`, which has no `add()`. The declared-method dispatch
@@ -9415,9 +9427,11 @@ trait EmitLlvmObjects
      * has `__call` goes through `__call` (as the all-magic reroute does); every
      * other receiver takes the ordinary dispatch.
      */
-    private function emitMixedMagicCall(\Compile\Mir\MethodCall_ $mc): string
+    private function emitMixedMagicCall(\Compile\Mir\MethodCall_ $mc, bool $boxObject = false): string
     {
         $out = $this->emitNode($mc->object);
+        // A typed receiver is a raw object pointer: the guard and the dispatch below speak cells.
+        if ($boxObject) { $out .= $this->boxToCell($mc->object->type); }
         $out .= $this->coerceToI64();
         $cellV = $this->lastValue;
         $tag = \substr($this->ssa->allocReg(), 2);
@@ -9719,6 +9733,13 @@ trait EmitLlvmObjects
         // is NOT handled: the two shapes need different argument lists, so they
         // cannot share one switch, and the arg emission below is already built
         // against the resolved callee's signature. Recorded in docs/ROADMAP.md.
+        if ($mcStatic !== '' && isset($this->classes[$mcStatic]) && $mc->object->type->kind === Type::KIND_OBJ
+            && !isset($this->mixedMagicDone[\spl_object_id($mc)])
+            && $this->resolveMethodClass($mcStatic, $mc->method) === ''
+            && $this->resolveMethodClass($mcStatic, '__call') === ''
+            && $this->descendantAnswers($mcStatic, $mc->method)) {
+            return $this->emitMixedMagicCall($mc, true);
+        }
         if (!isset($this->classes[$mcStatic]) && !isset($this->mixedMagicDone[\spl_object_id($mc)])
             && ($mc->object->type->kind === Type::KIND_CELL || $mc->object->type->kind === Type::KIND_UNKNOWN)
             && $this->anyClassDeclares($mc->method) && $this->magicOnlyClassExists($mc->method)) {
