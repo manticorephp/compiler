@@ -140,6 +140,8 @@ Known semantic gaps in detail: [`gaps.md`](gaps.md).
 - [x] Release tarballs and container images built from the pinned bootstrap
 - [x] `manticore upgrade` ([#174](https://github.com/manticorephp/compiler/issues/174))
 - [x] `manticore doctor`, `manticore completions`, `manticore version --check`
+- [x] `manticore lsp`: language server (diagnostics, hover, definition, references, rename, outline, completion) + VS Code client ([`lsp.md`](lsp.md))
+- [ ] LSP: incremental sync, lazy reparse of closed files, library navigation
 - [x] One version source: `COMPILER_VERSION`, checked in CI and at release
 - [ ] Surface the ABI version in `manticore version`
 - [ ] Dependency fetching and a shared module cache (design exists, not built)
@@ -157,7 +159,7 @@ Known semantic gaps in detail: [`gaps.md`](gaps.md).
 
 ## Further reading
 
-[`../README.md`](../README.md) · [`install.md`](install.md) · [`builtins.md`](builtins.md) ·
+[`../README.md`](../README.md) · [`install.md`](install.md) · [`lsp.md`](lsp.md) · [`builtins.md`](builtins.md) ·
 [`superset.md`](superset.md) · [`async.md`](async.md) · [`ffi.md`](ffi.md) ·
 [`modules.md`](modules.md) · [`memory.md`](memory.md) · [`http.md`](http.md) ·
 [`ds.md`](ds.md) · [`gaps.md`](gaps.md)
