@@ -941,6 +941,15 @@ trait InferCalls
                 return $node->type;
             }
             $cls = $this->resolveMethodClass($objType->class, $node->method);
+            // The static class has no such method but a subclass answers it through
+            // `__call` (`Carbon::setTimestamp()` is typed `DateTime`, and
+            // `->setMicroseconds()` is Carbon's magic): the emitter dispatches on
+            // the runtime class and the answer is a boxed cell, not whatever word
+            // `unknown` would read.
+            if ($cls === '' && $this->subclassAnswersByMagicCall($objType->class, $node->method)) {
+                $node->type = Type::cell();
+                return $node->type;
+            }
             // Interface-typed receiver (e.g. `\Throwable $e`): the interface has
             // no ClassDef, so borrow a return signature from an IMPLEMENTING
             // class. Matching on the method NAME alone picks whichever unrelated
@@ -1050,6 +1059,18 @@ trait InferCalls
             if ($rt !== null) { $node->type = $rt; }
         }
         return $node->type;
+    }
+
+    /** Does a class below `$class` answer `$method` ONLY through `__call` (the class itself neither declares nor inherits it)? */
+    private function subclassAnswersByMagicCall(string $class, string $method): bool
+    {
+        if (!isset($this->classes[$class])) { return false; }
+        if (!$this->subtypeIndexBuilt) { $this->buildSubtypeIndex(); }
+        foreach ($this->subtypesOf[$class] ?? [] as $sub) {
+            if ($sub === $class) { continue; }
+            if ($this->resolveMethodClass($sub, $method) === '' && $this->classDefinesMagic($sub, '__call')) { return true; }
+        }
+        return false;
     }
 
     /**

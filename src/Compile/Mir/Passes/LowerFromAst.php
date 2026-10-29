@@ -8010,16 +8010,31 @@ final class LowerFromAst implements Pass
             // argument shifted one place — silently: the first parameter read
             // the object pointer, the last read whatever followed the frame.
             foreach ($decl->uses as $traitName) {
-                $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
-                if ($td === null) { continue; }
-                foreach ($td->methods as $m) {
-                    if ($m->name === $method) { return $m->isStatic; }
-                }
+                $ts = $this->traitMethodIsStatic(\ltrim($traitName, '\\'), $method, 0);
+                if ($ts !== null) { return $ts; }
             }
             $cd = $this->classTable[$c] ?? null;
             $c = $cd !== null ? $cd->parent : '';
         }
         return false;
+    }
+
+    /**
+     * Whether trait `$trait` (or a trait IT uses — Carbon's `Date` uses `Mixin`)
+     * declares `$method` static; null when no such method is found.
+     */
+    private function traitMethodIsStatic(string $trait, string $method, int $depth): ?bool
+    {
+        $td = $this->traitTable[$trait] ?? null;
+        if ($td === null || $depth > 16) { return null; }
+        foreach ($td->methods as $m) {
+            if ($m->name === $method) { return $m->isStatic; }
+        }
+        foreach ($td->uses as $inner) {
+            $r = $this->traitMethodIsStatic(\ltrim($inner, '\\'), $method, $depth + 1);
+            if ($r !== null) { return $r; }
+        }
+        return null;
     }
 
     private function lowerBinary(\Parser\Ast\BinaryOp $e): Node
