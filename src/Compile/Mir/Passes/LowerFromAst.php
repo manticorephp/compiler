@@ -3200,6 +3200,17 @@ final class LowerFromAst implements Pass
                 // copy of Process's `new static([], …)` against PhpProcess's
                 // constructor was a type error in code that cannot run.
                 if ($this->overriddenBelow($owner, $sub, $p->method->name)) { continue; }
+                // The copy is lowered long after its class: restore the type context the original
+                // saw, or a `@return TCollection` the original resolved lowers to `cell` here and the
+                // two disagree on the return ABI (the dispatcher reads the original's).
+                $this->currentTypeParams = [];
+                $this->currentTypeBounds = [];
+                $this->currentTypeSubst = $this->memberTypeSubst($p->decl);
+                if (isset($this->classTable[$owner])) {
+                    $this->currentTypeParams = $this->classTable[$owner]->typeParams;
+                    $this->currentTypeBounds = $this->classTable[$owner]->typeParamBounds;
+                }
+                $this->currentDeclNamespace = $this->nsOf($owner);
                 $spec = $this->lowerMethodFn(
                     $p->decl, $p->method, $p->cd, $p->defaultStores,
                     $sub, $owner . '__' . $p->method->name . '__lsb' . $sub, $p->lexicalClass,
