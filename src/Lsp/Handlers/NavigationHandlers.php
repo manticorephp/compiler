@@ -24,6 +24,17 @@ final class NavigationHandlers
         $this->docs = $docs;
     }
 
+    /** A php code block whose fence is longer than any backtick run in the text. */
+    private static function fenced(string $text): string
+    {
+        $run = 2;
+        if (preg_match_all('/`+/', $text, $m) > 0) {
+            foreach ($m[0] as $r) { if (strlen($r) > $run) { $run = strlen($r); } }
+        }
+        $f = str_repeat('`', $run + 1);
+        return $f . "php\n" . $text . "\n" . $f;
+    }
+
     public function register(Dispatcher $d): void
     {
         $d->on('textDocument/hover', function (array $p): mixed {
@@ -34,7 +45,7 @@ final class NavigationHandlers
             $range = (new LocationMap($this->docs))->toLsp($h->range);
             if ($range === null) { return null; }
             return [
-                'contents' => ['kind' => 'markdown', 'value' => "```php\n" . $h->text . "\n```" . ($h->detail === '' ? '' : "\n\n" . $h->detail)],
+                'contents' => ['kind' => 'markdown', 'value' => self::fenced($h->text) . ($h->detail === '' ? '' : "\n\n" . $h->detail)],
                 'range' => $range['range'],
             ];
         });

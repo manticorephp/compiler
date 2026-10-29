@@ -44,11 +44,46 @@ final class TypeDetail
                 return $t->name . '<' . \implode(', ', $parts) . '>';
             case SourceType::SHAPE:
                 $parts = [];
-                foreach ($t->args as $i => $a) { $parts[] = $t->keys[$i] . ': ' . self::inline($a); }
+                foreach ($t->args as $i => $a) { $parts[] = self::keyText($t->keys[$i]) . ': ' . self::inline($a); }
                 return $t->name . '{' . \implode(', ', $parts) . '}';
+            case SourceType::LITERAL:
+                return (string)\preg_replace('/[\x00-\x1f]/', ' ', $t->name);
             default:
                 return $t->toString();
         }
+    }
+
+    /** A shape key as written: bare when it is a plain word, else single-quoted with `\`, `'`, backtick and control characters escaped. */
+    public static function keyText(string $key): string
+    {
+        $opt = \str_ends_with($key, '?');
+        $k = $opt ? \substr($key, 0, -1) : $key;
+        if (\preg_match('/^[A-Za-z0-9_\x80-\xff]+$/', $k) !== 1) {
+            $out = '';
+            $n = \strlen($k);
+            for ($i = 0; $i < $n; $i = $i + 1) {
+                $ch = $k[$i];
+                if ($ch === '\\' || $ch === "'" || $ch === '`') { $out .= '\\' . $ch; }
+                elseif ($ch === "\n") { $out .= '\\n'; }
+                elseif ($ch === "\r") { $out .= '\\r'; }
+                elseif (\ord($ch) < 32) { $out .= '\\x' . \sprintf('%02x', \ord($ch)); }
+                else { $out .= $ch; }
+            }
+            $k = "'" . $out . "'";
+        }
+        return $k . ($opt ? '?' : '');
+    }
+
+    /** A markdown code span that survives backticks in its text (delimiter longer than the longest run inside). */
+    public static function span(string $text): string
+    {
+        $run = 0;
+        if (\preg_match_all('/`+/', $text, $m) > 0) {
+            foreach ($m[0] as $r) { if (\strlen($r) > $run) { $run = \strlen($r); } }
+        }
+        $d = \str_repeat('`', $run + 1);
+        $pad = $run > 0 ? ' ' : '';
+        return $d . $pad . $text . $pad . $d;
     }
 
     /** The array part of a type: itself, the inner type of a nullable, or the single array arm of a union. */
@@ -95,21 +130,21 @@ final class TypeDetail
         $pad = \str_repeat('  ', $depth);
         if ($t->kind === SourceType::SHAPE) {
             foreach ($t->args as $i => $v) {
-                $lines[] = $pad . '- `' . $t->keys[$i] . ': ' . self::inline($v) . '`';
+                $lines[] = $pad . '- ' . self::span(self::keyText($t->keys[$i]) . ': ' . self::inline($v));
                 self::nested($v, $depth, $lines);
             }
             return;
         }
         $n = \count($t->args);
         if ($n === 0) {
-            $lines[] = $pad . '- keys: `' . ($t->name === 'list' ? 'int' : 'int|string') . '`';
+            $lines[] = $pad . '- keys: ' . self::span($t->name === 'list' ? 'int' : 'int|string');
             $lines[] = $pad . '- values: `mixed`';
             return;
         }
         $v = $t->args[$n - 1];
         $k = $n >= 2 ? self::inline($t->args[0]) : ($t->name === 'list' ? 'int' : 'int|string');
-        $lines[] = $pad . '- keys: `' . $k . '`' . ($t->name === 'list' ? ' (list)' : '');
-        $lines[] = $pad . '- values: `' . self::inline($v) . '`';
+        $lines[] = $pad . '- keys: ' . self::span($k) . ($t->name === 'list' ? ' (list)' : '');
+        $lines[] = $pad . '- values: ' . self::span(self::inline($v));
         self::nested($v, $depth, $lines);
     }
 

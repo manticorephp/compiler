@@ -92,6 +92,13 @@ check('hover on a local array: markdown with detail, range in UTF-16 after a mul
     $rg = $r['range'];
     return $rg['start'] === ['line' => 1, 'character' => 10] && $rg['end'] === ['line' => 1, 'character' => 12] ?: json_encode($rg);
 });
+check('hover fence grows past a backtick run in the type text', function (): bool|string {
+    $d = rig(new Sink());
+    open($d, 'file:///t/f.php', "<?php\nclass K {\n    /** @var 'a```b' */\n    public \$p;\n}\n");
+    $r = ask($d, 'textDocument/hover', 'file:///t/f.php', 3, 12);
+    $v = is_array($r) ? ($r['contents']['value'] ?? '') : '';
+    return str_starts_with($v, "````php\nK::\$p: 'a```b'\n````") ?: json_encode($v);
+});
 check('definition of unknown symbol is null', function (): bool|string {
     $d = rig(new Sink());
     open($d, 'file:///t/b.php', "<?php\nnope();\n");

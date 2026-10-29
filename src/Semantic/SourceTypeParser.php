@@ -46,7 +46,9 @@ final class SourceTypeParser
         $core = $native->kind === SourceType::NULLABLE ? $native->args[0] : $native;
         $bare = $core->args === []
             && ($core->kind === SourceType::ITERABLE || ($core->kind === SourceType::SCALAR && $core->name === 'array'));
-        return $bare ? $doc : $native;
+        if (!$bare) { return $native; }
+        $plainArray = $core->kind === SourceType::SCALAR;
+        return $plainArray && TypeDetail::arrayPart($doc) === null ? $native : $doc;
     }
 
     private static function parseUnion(GenericCursor $c, string $cls, bool $allowUnion, int $d): ?SourceType

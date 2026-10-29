@@ -485,6 +485,12 @@ final class Workspace
         return false;
     }
 
+    /** Test seam: called first on every hover; whatever it throws degrades the hover to the plain text. */
+    public ?\Closure $hoverProbe = null;
+
+    /** Message of the last failure the rich hover absorbed. */
+    public ?string $hoverError = null;
+
     /**
      * Declared signature of a member or function under the cursor (`Foo::bar(int $a): ?Baz`, types merged from the native
      * hint and the docblock), the type of a variable there, else the type of the expression. `detail` carries the key and
@@ -493,9 +499,11 @@ final class Workspace
     public function hover(string $uri, int $line, int $col): ?HoverInfo
     {
         try {
+            if ($this->hoverProbe !== null) { ($this->hoverProbe)(); }
             $h = $this->hoverRich($uri, $line, $col);
             if ($h !== null) { return $h; }
         } catch (\Throwable $e) {
+            $this->hoverError = $e->getMessage();
         }
         return $this->hoverPlain($uri, $line, $col);
     }
@@ -562,30 +570,88 @@ final class Workspace
         $n = \count($chain);
         $node = $n > 0 ? $chain[$n - 1] : null;
         $t = null;
-        $label = 'inferred';
+        $declared = null;
+        $declLabel = '';
         $empty = false;
+        $typer = new ExprTyper($this->index, $uri);
         $param = $lookup->paramUnit($name, $line, $col);
-        if ($param !== null && $vi->declAt($line, $col) >= 0) {
-            $env = TypeEnv::forUnit($param, $this->index);
-            $t = $env->vars[$name] ?? null;
-            $label = self::paramLabel($param, $name);
+        if ($param !== null) {
+            $t = TypeEnv::forUnit($param, $this->index)->vars[$name] ?? null;
+            $declared = $t;
+            $declLabel = self::paramLabel($param, $name);
         } elseif ($node instanceof \Parser\Ast\Variable) {
             $parent = $n > 1 ? $chain[$n - 2] : null;
+            $fe = $lookup->foreachOf($node);
             if ($parent instanceof \Parser\Ast\Assign && $parent->target === $node) {
-                $t = (new ExprTyper($this->index, $uri))->typeOf($parent, $lookup->envAt($parent, $this->index, $uri));
+                $t = $typer->typeOf($parent, $lookup->envAt($parent, $this->index, $uri));
                 $empty = $parent->value instanceof \Parser\Ast\ArrayLit && \count($parent->value->elements) === 0;
+            } elseif ($fe !== null) {
+                if ($fe->value === $node && $fe->valueByRef) { $t = null; }
+                else {
+                    $el = Flow::elementTypes($typer->typeOf($fe->expr, $lookup->envAt($fe->expr, $this->index, $uri)));
+                    $t = $fe->key === $node ? $el[0] : $el[1];
+                }
+            } elseif ($parent instanceof \Parser\Ast\ArrayLit && self::isListTarget($chain, $n - 2)) {
+                $t = $this->destructured($chain, $n, $typer, $lookup, $uri);
             } else {
-                $t = (new ExprTyper($this->index, $uri))->typeOf($node, $lookup->envAt($node, $this->index, $uri));
-                $d = $vi->declSitesOf($b);
-                $pu = \count($d) > 0 ? $lookup->paramUnit($name, $d[0]->line, $d[0]->col) : null;
-                if ($pu !== null) { $label = self::paramLabel($pu, $name); }
+                $t = $typer->typeOf($node, $lookup->envAt($node, $this->index, $uri));
+                foreach ($vi->declSitesOf($b) as $d) {
+                    $pu = $lookup->paramUnit($name, $d->line, $d->col);
+                    if ($pu === null) { continue; }
+                    $declared = TypeEnv::forUnit($pu, $this->index)->vars[$name] ?? null;
+                    $declLabel = self::paramLabel($pu, $name);
+                    break;
+                }
             }
         }
+        $label = $declared !== null && $t !== null && TypeDetail::inline($declared) === TypeDetail::inline($t) ? $declLabel : 'inferred';
         if ($t === null) { $t = $this->nextUseType($uri, $vi, $b, $line, $col); }
         if ($t === null) { return null; }
         $text = '$' . $name . ': ' . self::shown(TypeDetail::inline($t));
         $detail = $empty ? '- empty array' : TypeDetail::detail($t);
         return new HoverInfo($text, new Location($uri, $site->line, $site->col, $site->endLine, $site->endCol), self::detailText($detail, $label));
+    }
+
+    /**
+     * Is chain[$i] an array literal that is (inside nested ones) the target of an assignment?
+     *
+     * @param Expr[] $chain
+     */
+    private static function isListTarget(array $chain, int $i): bool
+    {
+        while ($i > 0 && $chain[$i] instanceof \Parser\Ast\ArrayLit) {
+            $p = $chain[$i - 1];
+            if ($p instanceof \Parser\Ast\Assign) { return $p->target === $chain[$i]; }
+            $i = $i - 1;
+        }
+        return false;
+    }
+
+    /**
+     * Type a variable gets from `[$a, 'k' => $b] = value`: the element of the assigned value at its position or key.
+     *
+     * @param Expr[] $chain
+     */
+    private function destructured(array $chain, int $n, ExprTyper $typer, UnitLookup $lookup, string $uri): ?SourceType
+    {
+        $lit = $chain[$n - 2];
+        $assign = $chain[$n - 3] ?? null;
+        if (!($lit instanceof \Parser\Ast\ArrayLit) || !($assign instanceof \Parser\Ast\Assign) || $assign->target !== $lit) { return null; }
+        $v = $typer->typeOf($assign->value, $lookup->envAt($assign->value, $this->index, $uri));
+        if ($v === null) { return null; }
+        $pos = 0;
+        foreach ($lit->elements as $el) {
+            if ($el->value === $chain[$n - 1]) {
+                if ($v->kind === SourceType::SHAPE) {
+                    $want = $el->key instanceof \Parser\Ast\StringLiteral ? $el->key->value : ($el->key instanceof \Parser\Ast\IntLiteral ? (string)$el->key->value : (string)$pos);
+                    foreach ($v->args as $i => $a) { if (\rtrim($v->keys[$i], '?') === $want) { return $a; } }
+                    return null;
+                }
+                return Flow::elementTypes($v)[1];
+            }
+            $pos = $pos + 1;
+        }
+        return null;
     }
 
     /** Type of the first later use of a binding that has one (a foreach or catch variable is typed only inside its body). */
