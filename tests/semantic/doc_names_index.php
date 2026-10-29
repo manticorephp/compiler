@@ -223,4 +223,14 @@ check('multibyte_before_name_uses_byte_columns', function () {
     return docNames($s) === ['Foo@2:30-33'] ? true : json_encode(docNames($s));
 });
 
+check('fallback_returns_nothing_for_multi_namespace_file', function () {
+    $s = "<?php\nnamespace A { /** @return Foo */ function fa() {} }\nnamespace B { /** @param Foo \$x */ function fb() {} }\n";
+    return \Semantic\DocblockNames::scanBlocks($s, 'B', []) === [] ? true : 'not empty';
+});
+
+check('group_use_function_registers_no_class_alias', function () {
+    $s = "<?php\nnamespace N;\nuse function P\\{a, b};\n/** @param a \$x */\nfunction f() {}\n";
+    return names($s) === 'N\\a' ? true : names($s);
+});
+
 exit($fail);

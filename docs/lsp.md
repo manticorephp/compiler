@@ -39,7 +39,7 @@ A lone lowercase word right after `@return` / `@throws` followed by more words (
 type; a capitalised word (`@return A new instance`) still reads as a class, a known ceiling. Docblocks are found by text
 (strings, plain comments, heredocs / nowdocs and inline HTML are skipped); the namespace and top-level `use` map in force at
 each docblock are tracked from the same pass, so files with several `namespace` blocks resolve per block. If the PCRE scan
-fails, a degraded linear scan of `/** */` blocks runs against the file's last namespace and use map.
+fails, a degraded linear scan of `/** */` blocks runs for files with a single `namespace` (it cannot tell strings from comments); files with several namespaces get no docblock names.
 
 ## Positions
 
