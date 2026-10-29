@@ -112,4 +112,18 @@ check('rename round trip edits main.php and lib.php', ($got[2]['id'] ?? null) ==
     && ($ch['file://' . $root . '/lib.php'][0]['range']['start'] ?? null) === ['line' => 1, 'character' => 9]
     && ($ch[$uri][0]['newText'] ?? '') === 'renamed', json_encode($got[2] ?? null) . $err);
 
+$uri = 'file:///tmp/lspe2e_sym.php';
+[$got, $code, $rest, $err] = session($bin, [
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///tmp']],
+    ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
+    ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nclass Foo {\n    public function bar() {}\n}\n"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/documentSymbol', 'params' => ['textDocument' => ['uri' => $uri]]],
+    ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
+    ['jsonrpc' => '2.0', 'method' => 'exit'],
+], 4);
+$sym = $got[2]['result'][0] ?? [];
+check('documentSymbol round trip: class Foo with method bar', ($got[2]['id'] ?? null) === 3 && ($sym['name'] ?? '') === 'Foo' && ($sym['kind'] ?? 0) === 5
+    && ($sym['children'][0]['name'] ?? '') === 'bar' && ($sym['children'][0]['kind'] ?? 0) === 6
+    && ($sym['children'][0]['selectionRange']['start'] ?? null) === ['line' => 2, 'character' => 20], json_encode($got[2] ?? null) . $err);
+
 exit($fail);

@@ -653,6 +653,88 @@ final class Workspace
         return $n . $m->name . '(' . \implode(', ', $ps) . ')' . ($mi->returnType !== null ? ': ' . $mi->returnType : '');
     }
 
+    /**
+     * Declarations of an open file as a tree: types with their members underneath, namespaces not wrapped.
+     * Names come from the parser's declaration name table; a node's range is its AST span (the name range
+     * when the span carries no end). Closures and nested functions are not listed.
+     *
+     * @return DocumentSymbol[] [] for a file that is not open
+     */
+    public function documentSymbols(string $uri): array
+    {
+        $pf = $this->asts[$uri] ?? null;
+        if ($pf === null) { return []; }
+        /** @var \Parser\Ast\NameRef[] $decls */
+        $decls = [];
+        foreach ($pf->program->names as $n) {
+            if ($n->role === 'decl') { $decls[] = $n; }
+        }
+        return self::outline($uri, $pf->program->statements, $decls);
+    }
+
+    /**
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @param \Parser\Ast\NameRef[] $decls
+     * @return DocumentSymbol[]
+     */
+    private static function outline(string $uri, array $stmts, array $decls): array
+    {
+        $out = [];
+        foreach ($stmts as $st) {
+            if ($st instanceof \Parser\Ast\NamespaceStmt) {
+                if ($st->body !== null) {
+                    foreach (self::outline($uri, $st->body->statements, $decls) as $c) { $out[] = $c; }
+                }
+            } elseif ($st instanceof \Parser\Ast\FunctionStmt) {
+                $s = self::symbol($uri, $st->decl->name, 'function', 'function', $st->decl->span, $decls, []);
+                if ($s !== null) { $out[] = $s; }
+            } elseif ($st instanceof \Parser\Ast\ClassStmt) {
+                $c = $st->decl;
+                /** @var DocumentSymbol[] $members */
+                $members = [];
+                foreach ($c->cases as $m) { self::push($members, self::symbol($uri, $m->name, 'member', 'case', $m->span ?? $c->span, $decls, [])); }
+                foreach ($c->consts as $m) { self::push($members, self::symbol($uri, $m->name, 'member', 'constant', $m->span, $decls, [])); }
+                foreach ($c->properties as $m) { self::push($members, self::symbol($uri, $m->name, 'member', 'property', $m->span, $decls, [])); }
+                foreach ($c->methods as $m) { self::push($members, self::symbol($uri, $m->name, 'member', 'method', $m->span, $decls, [])); }
+                usort($members, fn(DocumentSymbol $a, DocumentSymbol $b): int => [$a->range->line, $a->range->col] <=> [$b->range->line, $b->range->col]);
+                $s = self::symbol($uri, $c->name, 'class', $c->kind, $c->span, $decls, $members);
+                if ($s !== null) { $out[] = $s; }
+            }
+        }
+        return $out;
+    }
+
+    /** @param DocumentSymbol[] $to */
+    private static function push(array &$to, ?DocumentSymbol $s): void
+    {
+        if ($s !== null) { $to[] = $s; }
+    }
+
+    /**
+     * @param \Parser\Ast\NameRef[] $decls
+     * @param DocumentSymbol[] $children
+     */
+    private static function symbol(string $uri, string $name, string $nameKind, string $kind, \Parser\Ast\Span $sp, array $decls, array $children): ?DocumentSymbol
+    {
+        $bare = $nameKind === 'member' ? $name : (\strrchr($name, '\\') === false ? $name : \substr(\strrchr($name, '\\'), 1));
+        $from = $sp->startLine() * 1048576 + $sp->startColumn();
+        $to = $sp->endLine() === 0 ? PHP_INT_MAX : $sp->endLine() * 1048576 + $sp->endColumn();
+        foreach ($decls as $n) {
+            if ($n->kind !== $nameKind || ltrim($n->written, '$') !== $bare) { continue; }
+            $at = $n->span->startLine() * 1048576 + $n->span->startColumn();
+            if ($at < $from || $at > $to) { continue; }
+            $nl = $n->span->endLine() === 0 ? $n->span->startLine() : $n->span->endLine();
+            $nc = $n->span->endLine() === 0 ? $n->span->startColumn() + strlen($n->written) : $n->span->endColumn();
+            $nameRange = new Location($uri, $n->span->startLine(), $n->span->startColumn(), $nl, $nc);
+            $range = $sp->endLine() === 0
+                ? $nameRange
+                : new Location($uri, $sp->startLine(), $sp->startColumn(), $sp->endLine(), $sp->endColumn());
+            return new DocumentSymbol($bare, $kind, $range, $nameRange, $children);
+        }
+        return null;
+    }
+
+
     /** Source-ish text of a parameter default: literals as written, anything else as `…`. */
     private static function defaultText(Expr $e): string
     {
