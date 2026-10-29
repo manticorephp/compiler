@@ -74,6 +74,32 @@ check('kinds mapped, selectionRange inside range', function () use ($U, $SRC): b
     $want = ['Foo' => 5, 'X' => 14, 'p' => 7, 'm' => 6, 'E' => 10, 'C' => 22, 'I' => 11, 'T' => 5, 'f' => 12];
     return ($kinds === $want && $ok) ? true : json_encode($kinds) . ($ok ? '' : ' selectionRange outside range');
 });
+check('selectionRange inside range: multi-const, multi-property, abstract, interface, truncated class', function () use ($U): bool|string {
+    $srcs = [
+        "<?php\nclass A {\n    const X = 1, Y = 2;\n    public \$a, \$b;\n}\n",
+        "<?php\nabstract class B {\n    abstract public function m(int \$x): int;\n    abstract protected function n();\n}\n",
+        "<?php\ninterface I {\n    const C = 1;\n    public function m();\n    public function n(): void;\n}\n",
+        "<?php\nclass T {\n    const X = 1, Y = 2;\n    public \$a, \$b;\n    public function m(",
+    ];
+    foreach ($srcs as $i => $src) {
+        $d = rig();
+        open($d, $U, $src);
+        $r = symbols($d, $U);
+        if (!is_array($r) || $r === []) { return "case $i: " . json_encode($r); }
+        $ok = true;
+        $n = 0;
+        $walk = function (array $l) use (&$walk, &$ok, &$n): void {
+            foreach ($l as $s) {
+                $n++;
+                $ok = $ok && within($s['range'], $s['selectionRange']);
+                $walk($s['children']);
+            }
+        };
+        $walk($r);
+        if (!$ok || $n < 3) { return "case $i: ok=" . json_encode($ok) . " symbols=$n " . json_encode($r); }
+    }
+    return true;
+});
 check('UTF-16 columns after a multi-byte character', function () use ($U): bool|string {
     $d = rig();
     open($d, $U, "<?php\n/* é */ function été() {}\n");
