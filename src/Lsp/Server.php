@@ -29,7 +29,6 @@ final class Server
     /** @var array<string, string> uri => last published diagnostics JSON */
     private array $published = [];
     private ClosedFiles $closed;
-    private const MAX_SCAN_BYTES = 2097152;
 
     public function __construct(private Workspace $ws, callable $send, int $closedMax = ClosedFiles::MAX)
     {
@@ -106,13 +105,15 @@ final class Server
             if (!is_array($td) || !is_string($td['uri'] ?? null) || !is_string($td['text'] ?? null)) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'didOpen: textDocument.uri and .text required');
             }
-            $this->ws->open($td['uri'], $td['text']);
-            $this->docs[$td['uri']] = $td['text'];
-            $this->republish($td['uri']);
+            $uri = Uri::normalize($td['uri']);
+            $this->ws->open($uri, $td['text']);
+            $this->docs[$uri] = $td['text'];
+            $this->republish($uri);
             return null;
         });
         $d->on('textDocument/didChange', function (array $p): mixed {
             $uri = $p['textDocument']['uri'] ?? null;
+            $uri = is_string($uri) ? Uri::normalize($uri) : null;
             $ch = $p['contentChanges'] ?? null;
             if (!is_string($uri) || !is_array($ch) || $ch === []) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'didChange: uri and contentChanges required');
@@ -131,10 +132,10 @@ final class Server
         });
         $d->on('textDocument/didClose', function (array $p): mixed {
             $uri = $p['textDocument']['uri'] ?? null;
-            if (is_string($uri) && isset($this->docs[$uri])) {
+            $uri = is_string($uri) ? Uri::normalize($uri) : null;
+            if ($uri !== null && isset($this->docs[$uri])) {
                 unset($this->docs[$uri]);
-                $this->closed->add($uri);
-                $this->ws->close($uri);
+                $this->closed->reindex($uri);
                 unset($this->published[$uri]);
                 $this->push($uri, []);
             }
@@ -155,17 +156,8 @@ final class Server
                 $uri = Uri::fromPath($path);
                 if (isset($seen[$uri]) || isset($this->docs[$uri])) { continue; }
                 $seen[$uri] = true;
-                try {
-                    $size = @filesize($path);
-                    if ($size === false || $size > self::MAX_SCAN_BYTES) { continue; }
-                    $text = @file_get_contents($path);
-                    if ($text === false) { continue; }
-                    $this->ws->open($uri, $text);
-                    $this->ws->close($uri);
-                    $this->closed->add($uri);
-                } catch (\Throwable $e) {
-                    continue;
-                }
+                if (!@is_file($path)) { continue; }
+                $this->closed->reindex($uri);
             }
         }
     }

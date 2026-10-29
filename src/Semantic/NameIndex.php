@@ -265,6 +265,16 @@ final class NameIndex
         return $this->legacy[$path] ?? [];
     }
 
+    /** @return UncertainSite[] every named argument spelled $nameLower in the workspace */
+    public function namedArgSites(string $nameLower): array
+    {
+        $out = [];
+        foreach ($this->named as $byName) {
+            foreach ($byName[\strtolower($nameLower)] ?? [] as $s) { $out[] = $s; }
+        }
+        return $out;
+    }
+
     /** @return UncertainSite[] */
     public function uncertainSites(string $resolvedLower): array
     {

@@ -144,4 +144,18 @@ check('union receiver: definitionsOf lists every member; hover hides anonymous c
     $h = $w->hover('a.php', $q[0], $q[1]);
     return count($ds) === 2 && $h !== null && !str_contains($h->text, '__anon_class') && str_contains($h->text, 'class@anonymous') ? true : json_encode([count($ds), $h === null ? null : $h->text]);
 });
+
+check('renaming a parameter is blocked by a named argument spelled like it', function () {
+    $src = "<?php\nfunction m(int \$val) { return \$val; }\nm(val: 2);\n";
+    $w = ws(['file:///t/a.php' => $src]);
+    $p = where($src, '$val', 1, 1);
+    $b = $w->renameBlockers('file:///t/a.php', $p[0], $p[1]);
+    return (count($b) === 1 && str_starts_with($b[0], 'named-argument:file:///t/a.php:3:')) ?: json_encode($b);
+});
+check('renaming a plain local is not blocked by a named argument of the same name', function () {
+    $src = "<?php\nfunction m(int \$other) {}\nfunction g() { \$val = 1; return \$val; }\nm(val: 2);\n";
+    $w = ws(['file:///t/a.php' => $src]);
+    $p = where($src, '$val', 1, 1);
+    return $w->renameBlockers('file:///t/a.php', $p[0], $p[1]) === [] ?: 'blocked';
+});
 exit($fail);

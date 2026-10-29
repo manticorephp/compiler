@@ -66,16 +66,28 @@ declarations.
 - **Uncertain sites are warned.** Sites that may or may not refer to the symbol (a class name
   in a string, a dynamic member, a callable string, a docblock mention, an unresolved
   receiver) are edited where certain and listed in a `window/showMessage` warning.
-- **Members search the whole workspace.** A member query temporarily opens every scanned
-  closed file so their member use sites resolve. Rename refuses with `rename incomplete` when
-  the workspace has more than 5000 files or a file cannot be read, rather than apply a partial
-  edit.
+- **Members search the workspace files that mention them.** A member query temporarily opens
+  every scanned closed file whose text contains the member name (case-insensitive) so its use
+  sites resolve; other files are not parsed. Rename refuses with `rename incomplete: N workspace
+  files could not be searched` when more than 5000 files would be opened, a file is over 2 MiB
+  or unreadable, or the startup scan could not index a file (any rename kind, since class and
+  function renames read the same index), rather than apply a partial edit.
+- **Only the last name segment is edited.** `use App\Models\User;`, `new \App\Models\User()` and
+  `new User()` become `...\Person`, `...\Person`, `Person`. A site spelled with an import alias
+  (`use ... as U2; new U2()`) is left alone; the `use` line is renamed. Before editing, every
+  site's text is checked against the symbol's name; if the file changed on disk since it was
+  indexed, the rename fails with `index out of date for <file>` instead of editing wrong bytes.
+- **Closing a file** re-reads it from disk into the index, so discarded edits do not leave stale
+  positions; a closed file that no longer exists is dropped from the index.
+- **Parameters:** renaming a parameter is refused while a named argument spelled like it exists
+  in the workspace (`m(val: 2)`).
 - **Sigils** (`$`) are decided per location from the source text, so renaming a property or
   static property never corrupts `$` and a leading `$` in the new name is stripped.
 
-Known limit: a heredoc anywhere in the workspace blocks **all** renames
-(`Workspace::renameBlockers` reports `heredoc-*`), because interpolation parts inside heredocs
-share one range.
+Known limit: an **interpolating** heredoc (a body containing `$name` or `{$`) anywhere in the
+workspace blocks **all** renames (`Workspace::renameBlockers` reports `heredoc-interpolation`),
+because interpolation parts inside heredocs share one range. Heredocs without interpolation do
+not block.
 
 ## Known ceilings
 
@@ -102,12 +114,13 @@ compiler build, 2026-10-29:
 |---|---|---|---|---|
 | hover | 200 | 0.1 | 0.4 | 1.2 |
 | definition | 200 | 0.2 | 7.7 | 8.8 |
-| references (class) | 30 | 11.3 | 13.3 | 37.7 |
-| references (member) | 30 | 1761.5 | 2386.9 | 2667.4 |
-| completion after `->` | 200 | 6.1 | 7.5 | 16.8 |
-| documentSymbol | 200 | 0.8 | 0.8 | 3.2 |
-| didChange to diagnostics | 200 | 9.3 | 10.5 | 11.0 |
+| references (class) | 30 | 8.0 | 8.9 | 33.7 |
+| references (member) | 30 | 984.0 | 1859.4 | 1984.9 |
+| completion after `->` | 200 | 4.5 | 5.2 | 6.1 |
+| documentSymbol | 200 | 0.7 | 0.7 | 0.9 |
+| didChange to diagnostics | 200 | 7.6 | 8.7 | 10.8 |
 
-Startup scan of `src/`: 1.6 s. didOpen to first diagnostics: 11 ms. Server RSS: 126 MB after
-the scan, 546 MB at the end (after the member-references passes, which parse every closed
-file). Linux numbers are not recorded.
+Startup scan of `src/`: 1.2 s. didOpen to first diagnostics: 8 ms. Server RSS: 123 MB after
+the scan, 510 MB at the end (after the member-references passes, which parse every closed
+file that mentions the member name; 60 member queries end at 633 MB, so growth flattens
+rather than scaling per query). Linux numbers are not recorded.

@@ -27,8 +27,7 @@ final class LspCommand extends Command
             return 1;
         }
         $server = new Server($ws, function (string $json): void {
-            fwrite(STDOUT, Stdio::encode($json));
-            fflush(STDOUT);
+            Stdio::write(STDOUT, Stdio::encode($json));
         });
         $d = new Dispatcher();
         $server->register($d);

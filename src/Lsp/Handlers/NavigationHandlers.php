@@ -6,7 +6,9 @@ use Lsp\ClosedFiles;
 use Lsp\JsonRpc\Dispatcher;
 use Lsp\JsonRpc\RpcError;
 use Lsp\LocationMap;
+use Lsp\MemberQuery;
 use Lsp\Position;
+use Lsp\Uri;
 use Semantic\Location;
 use Semantic\Workspace;
 
@@ -66,11 +68,10 @@ final class NavigationHandlers
      */
     private function references(string $uri, int $line, int $col): array
     {
-        if ($this->ws->symbolKindAt($uri, $line, $col) !== 'member') {
-            return $this->ws->referencesTo($uri, $line, $col);
-        }
+        /** @var array<string, string> $open */
+        $open = ($this->docs)();
         /** @var Location[] $r */
-        $r = $this->closed->with(fn(): array => $this->ws->referencesTo($uri, $line, $col));
+        $r = (new MemberQuery($this->ws, $this->closed))->run($uri, $line, $col, Position::lineText($open[$uri] ?? '', $line), fn(): array => $this->ws->referencesTo($uri, $line, $col));
         return $r;
     }
 
@@ -86,6 +87,7 @@ final class NavigationHandlers
     private function at(array $p): ?array
     {
         $uri = $p['textDocument']['uri'] ?? null;
+        $uri = \is_string($uri) ? Uri::normalize($uri) : null;
         $pos = $p['position'] ?? null;
         if (!is_string($uri) || !is_array($pos) || !is_int($pos['line'] ?? null) || !is_int($pos['character'] ?? null)
             || $pos['line'] < 0 || $pos['character'] < 0) {
