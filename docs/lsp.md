@@ -35,9 +35,11 @@ variants) are class references: definition, references, hover and rename treat t
 including generics (`Foo<Bar>`), unions, `Foo[]`, `?Foo`, `class-string<Foo>`, and `\Fully\Qualified` names (rename edits
 the last segment only). Names resolve with the file's namespace and `use` map; a `use X as Y` alias is never edited.
 Built-in and pseudo types, `@template` / `@psalm-type` names, `array{...}` keys and prose lines are not indexed.
-A lowercase word right after `@return` / `@param` is read as a type, as PHPStan does. Docblocks are found by text
-(strings and plain comments skipped; a heredoc holding an apostrophe can hide one), and a file with several
-`namespace` blocks resolves docblock names against the first.
+A lone lowercase word right after `@return` / `@throws` followed by more words (`@return the thing`) is description, not a
+type; a capitalised word (`@return A new instance`) still reads as a class, a known ceiling. Docblocks are found by text
+(strings, plain comments, heredocs / nowdocs and inline HTML are skipped); the namespace and top-level `use` map in force at
+each docblock are tracked from the same pass, so files with several `namespace` blocks resolve per block. If the PCRE scan
+fails, a degraded linear scan of `/** */` blocks runs against the file's last namespace and use map.
 
 ## Positions
 
@@ -79,7 +81,7 @@ declarations.
   in a string, a dynamic member, a callable string, a docblock mention, an unresolved
   receiver) are listed in a `window/showMessage` warning. When the client declares
   `workspace.workspaceEdit.documentChanges` and `changeAnnotationSupport`, those sites whose
-  text really spells the old name are also returned as edits with a change annotation
+  text really spells the old name (a qualified string such as `'App\Foo'` matches by its last segment only; `'Foo\Bar'` never matches `Foo`) are also returned as edits with a change annotation
   (`uncertain:<reason>`, `needsConfirmation: true`), so VS Code's Refactor Preview shows them
   unticked for the user to decide; the edit then uses `documentChanges` with the open
   document's version (`null` for closed files). Certain edits carry no annotation. Uncertain

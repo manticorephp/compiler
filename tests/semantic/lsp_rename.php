@@ -431,4 +431,28 @@ check('re-entrant ClosedFiles::with throws',function (): bool|string {
     return 'no throw';
 });
 
+check('annotated rename: a namespace prefix inside a class-name string is dropped, the last segment is accepted', function (): bool|string {
+    [$d] = rigWs(new Sink(), 'file:///nonexistent-root', \Lsp\ClosedFiles::MAX, true);
+    open($d, 'file:///t/a.php', "<?php\nnamespace App;\nclass Foo {}\n");
+    open($d, 'file:///t/b.php', "<?php\n\$a = 'Foo\\\\Bar';\n\$b = \"Foo\\\\\\\\Bar\";\n\$c = 'App\\\\Foo';\n");
+    $r = rn($d, 'file:///t/a.php', 2, 8, 'Baz');
+    $lines = [];
+    foreach (is_array($r) ? ($r['documentChanges'] ?? []) : [] as $dc) {
+        if ($dc['textDocument']['uri'] === 'file:///t/b.php') {
+            foreach ($dc['edits'] as $e) { $lines[] = $e['range']['start']['line'] . ':' . $e['range']['start']['character']; }
+        }
+    }
+    return $lines === ['3:11'] ?: json_encode([$lines, $r]);
+});
+check('didChange without a version drops the tracked version', function (): bool|string {
+    [$d] = rigWs(new Sink(), 'file:///nonexistent-root', \Lsp\ClosedFiles::MAX, true);
+    open($d, 'file:///t/a.php', "<?php\nclass Foo {}\n", 7);
+    open($d, 'file:///t/b.php', "<?php\n\$f = new Foo();\n\$n = 'Foo';\n", 3);
+    $d->handle(json_encode(['jsonrpc' => '2.0', 'method' => 'textDocument/didChange', 'params' => ['textDocument' => ['uri' => 'file:///t/a.php'], 'contentChanges' => [['text' => "<?php\nclass Foo {}\n"]]]]));
+    $r = rn($d, 'file:///t/a.php', 1, 8, 'Bar');
+    $by = [];
+    foreach (is_array($r) ? ($r['documentChanges'] ?? []) : [] as $dc) { $by[$dc['textDocument']['uri']] = $dc['textDocument']['version']; }
+    return ($by === ['file:///t/a.php' => null, 'file:///t/b.php' => 3]) ?: json_encode([$by, $r]);
+});
+
 exit($fail);

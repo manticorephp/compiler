@@ -4,13 +4,13 @@ namespace Semantic;
 
 /**
  * The class names written inside the type-carrying tags of a file's docblocks (`@param Foo $x`, `@return Foo[]`,
- * `@var array<int, Foo>`, `@method`, `@template T of Foo` ...), with their positions. Prose lines and non-type tags
- * are never read. Docblocks are found by text, skipping strings and plain comments; the parser keeps no comment span.
+ * `@var array<int, Foo>`, `@method`, `@template T of Foo` ...), with their positions and the FQN each resolves to.
+ * Prose lines and non-type tags are never read. Docblocks are found by text, skipping strings, plain comments,
+ * heredocs and inline HTML; the parser keeps no comment span. The namespace and `use` map in force at each
+ * docblock are tracked from the same pass (a file may hold several namespace blocks).
  */
 final class DocblockNames
 {
-    private const DOC_RE = '~(?:\x27(?:[^\x27\\\\]++|\\\\.)*+\x27|\x22(?:[^\x22\\\\]++|\\\\.)*+\x22|//[^\n]*+|#(?!\[)[^\n]*+|/\*\*/|/\*(?!\*)(?:[^*]++|\*(?!/))*+\*/)(*SKIP)(*F)|/\*\*(?:[^*]++|\*(?!/))*+\*/~';
-
     private const TYPE_TAGS = [
         'param' => 1, 'return' => 1, 'var' => 1, 'throws' => 1, 'property' => 1, 'property-read' => 1, 'property-write' => 1,
         'extends' => 1, 'implements' => 1, 'use' => 1, 'mixin' => 1, 'template-extends' => 1, 'template-implements' => 1,
@@ -20,23 +20,108 @@ final class DocblockNames
 
     private const WORDS = ['min' => 1, 'max' => 1, 'is' => 1, 'not' => 1, 'of' => 1, 'as' => 1, 'empty' => 1, 'array' => 1, 'list' => 1];
 
+    private static function tokenRe(): string
+    {
+        $skip = [
+            '\x27(?:[^\x27\\\\]++|\\\\.)*+\x27',
+            '\x22(?:[^\x22\\\\]++|\\\\.)*+\x22',
+            '//[^\n]*+',
+            '#(?!\[)[^\n]*+',
+            '/\*\*/',
+            '/\*(?!\*)(?:[^*]++|\*(?!/))*+\*/',
+            '<<<[ \t]*(?P<q>[\x22\x27]?)(?P<id>[A-Za-z_][A-Za-z0-9_]*)(?P=q)\r?\n(?:.*?\n)?[ \t]*(?P=id)(?![A-Za-z0-9_])',
+            '\?>.*?(?=<\?(?:php|=)|\z)',
+        ];
+        $keep = [
+            '(?P<doc>/\*\*(?:[^*]++|\*(?!/))*+\*/)',
+            '(?P<ns>(?<![\w$>:\\\\])namespace(?:\s+(?P<nsname>[A-Za-z_\x80-\xff][\w\\\\\x80-\xff]*))?\s*(?P<nsend>[;{]))',
+            '(?P<use>(?<![\w$>:\\\\])use\s+(?P<useclause>[^;{}()]*(?:\{[^{}]*\}[^;{}()]*)?);)',
+            '(?P<open>\{)',
+            '(?P<close>\})',
+        ];
+        return '~(?:' . \implode('|', $skip) . ')(*SKIP)(*F)|' . \implode('|', $keep) . '~s';
+    }
+
     /**
-     * @return array<int, array{0: string, 1: int, 2: int}> [written name, line, 1-based byte column]; a name never spans lines
+     * $ns and $uses seed the degraded path only (see scanBlocks); the main path reads them from the text.
+     *
+     * @param array<string, string> $uses alias → FQN
+     * @return array<int, array{0: string, 1: int, 2: int, 3: string}> [written name, line, 1-based byte column, FQN]; a name never spans lines
      */
-    public static function scan(string $text): array
+    public static function scan(string $text, string $ns = '', array $uses = []): array
     {
         $out = [];
         if (\strpos($text, '/**') === false) { return $out; }
-        $n = \preg_match_all(self::DOC_RE, $text, $m, PREG_OFFSET_CAPTURE);
-        if ($n === false || $n === 0) { return $out; }
+        $n = \preg_match_all(self::tokenRe(), $text, $m, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
+        if ($n === false || \preg_last_error() !== PREG_NO_ERROR) { return self::scanBlocks($text, $ns, $uses); }
         /** @var array<string, int> $declared template and type-alias names seen so far in the file */
+        $declared = [];
+        /** @var array<string, string> $curUses */
+        $curUses = [];
+        $curNs = '';
+        $depth = 0;
+        $base = 0;
+        $braced = false;
+        $line = 1;
+        $prev = 0;
+        $lineStart = 0;
+        foreach ($m as $hit) {
+            if (isset($hit['doc']) && $hit['doc'][1] >= 0) {
+                $off = $hit['doc'][1];
+                $seg = \substr($text, $prev, $off - $prev);
+                $nl = \substr_count($seg, "\n");
+                if ($nl > 0) {
+                    $line = $line + $nl;
+                    $lineStart = $prev + \strrpos($seg, "\n") + 1;
+                }
+                $prev = $off;
+                if (\strpos($hit['doc'][0], '@') === false) { continue; }
+                $before = \count($out);
+                self::doc($hit['doc'][0], $line, $off - $lineStart, $declared, $out);
+                for ($k = $before; $k < \count($out); $k++) { $out[$k][] = DocNames::qualify($out[$k][0], $curNs, $curUses); }
+            } elseif (isset($hit['ns']) && $hit['ns'][1] >= 0) {
+                $curNs = isset($hit['nsname']) ? $hit['nsname'][0] : '';
+                $curUses = [];
+                if ($hit['nsend'][0] === '{') {
+                    $depth++;
+                    $braced = true;
+                    $base = $depth;
+                }
+            } elseif (isset($hit['use']) && $hit['use'][1] >= 0) {
+                if ($depth === ($braced ? $base : 0)) { self::useClause($hit['useclause'][0], $curUses); }
+            } elseif (isset($hit['open']) && $hit['open'][1] >= 0) {
+                $depth++;
+            } elseif (isset($hit['close']) && $hit['close'][1] >= 0) {
+                $depth--;
+                if ($braced && $depth < $base) {
+                    $curNs = '';
+                    $curUses = [];
+                    $braced = false;
+                    $base = 0;
+                }
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Degraded path when the PCRE scan fails: every `/** ... *\/` block by plain search, resolved against one
+     * namespace and use map (strings and comments are not told apart).
+     *
+     * @param array<string, string> $uses
+     * @return array<int, array{0: string, 1: int, 2: int, 3: string}>
+     */
+    public static function scanBlocks(string $text, string $ns, array $uses): array
+    {
+        $out = [];
         $declared = [];
         $line = 1;
         $prev = 0;
         $lineStart = 0;
-        foreach ($m[0] as $hit) {
-            $doc = $hit[0];
-            $off = $hit[1];
+        $off = 0;
+        while (($off = \strpos($text, '/**', $off)) !== false) {
+            $e = \strpos($text, '*/', $off + 3);
+            $end = $e === false ? \strlen($text) : $e + 2;
             $seg = \substr($text, $prev, $off - $prev);
             $nl = \substr_count($seg, "\n");
             if ($nl > 0) {
@@ -44,10 +129,42 @@ final class DocblockNames
                 $lineStart = $prev + \strrpos($seg, "\n") + 1;
             }
             $prev = $off;
-            if (\strpos($doc, '@') === false) { continue; }
-            self::doc($doc, $line, $off - $lineStart, $declared, $out);
+            $doc = \substr($text, $off, $end - $off);
+            if (\strpos($doc, '@') !== false) {
+                $before = \count($out);
+                self::doc($doc, $line, $off - $lineStart, $declared, $out);
+                for ($k = $before; $k < \count($out); $k++) { $out[$k][] = DocNames::qualify($out[$k][0], $ns, $uses); }
+            }
+            $off = $end;
         }
         return $out;
+    }
+
+    /**
+     * One top-level `use` clause (the text between `use` and `;`): class imports only.
+     *
+     * @param array<string, string> $uses alias → FQN
+     */
+    private static function useClause(string $clause, array &$uses): void
+    {
+        $clause = \trim($clause);
+        $prefix = '';
+        $items = [];
+        $br = \strpos($clause, '{');
+        if ($br === false) {
+            $items = \explode(',', $clause);
+        } else {
+            $prefix = \ltrim(\trim(\substr($clause, 0, $br)), '\\');
+            $close = \strrpos($clause, '}');
+            $items = \explode(',', \substr($clause, $br + 1, ($close === false ? \strlen($clause) : $close) - $br - 1));
+        }
+        foreach ($items as $item) {
+            if (\preg_match('/^\s*(?:(function|const)\s+)?\\\\?([\w\\\\\x80-\xff]+)(?:\s+as\s+([\w\x80-\xff]+))?\s*$/i', $item, $mm) !== 1) { continue; }
+            if ($mm[1] !== '') { continue; }
+            $fqn = $prefix . $mm[2];
+            $alias = isset($mm[3]) && $mm[3] !== '' ? $mm[3] : \substr($fqn, (int)\strrpos('\\' . $fqn, '\\'));
+            $uses[$alias] = $fqn;
+        }
     }
 
     /**
@@ -119,7 +236,9 @@ final class DocblockNames
             return;
         }
         if (isset(self::TYPE_TAGS[$t])) {
-            self::names($body, $i, self::extent($body, $i, $n), $segs, $declared, $out);
+            $e = self::extent($body, $i, $n);
+            if (($t === 'return' || $t === 'throws') && self::isProse($body, $i, $e, $n)) { return; }
+            self::names($body, $i, $e, $segs, $declared, $out);
         }
     }
 
@@ -159,6 +278,14 @@ final class DocblockNames
             }
             $q++;
         }
+    }
+
+    /** `@return the thing`: a lone lowercase word with more words after it is description, not a type. */
+    private static function isProse(string $s, int $i, int $e, int $n): bool
+    {
+        if (\preg_match('/^[a-z][a-z0-9_]*$/', \substr($s, $i, $e - $i)) !== 1) { return false; }
+        $k = self::skipWs($s, $e, $n);
+        return $k > $e && $k < $n && (\ctype_alnum($s[$k]) || $s[$k] === '_');
     }
 
     /** End of the type expression starting at $i: stops at whitespace outside brackets unless a `|` / `&` joins the next part. */

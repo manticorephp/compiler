@@ -134,7 +134,7 @@ final class Server
             $this->ws->update($uri, $text);
             $this->docs[$uri] = $text;
             $v = $p['textDocument']['version'] ?? null;
-            if (is_int($v)) { $this->versions[$uri] = $v; }
+            if (is_int($v)) { $this->versions[$uri] = $v; } else { unset($this->versions[$uri]); }
             $this->republish($uri);
             return null;
         });

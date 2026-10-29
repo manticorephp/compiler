@@ -124,4 +124,103 @@ check('doc_site_joins_hint_site_under_one_key', function () {
     return $n === 2 ? true : "got $n";
 });
 
+check('two_namespace_blocks_resolve_per_docblock', function () {
+    $s = <<<'PHP'
+<?php
+namespace A { class Foo {}
+/** @return Foo */
+function fa() {} }
+namespace B { class Foo {}
+/** @param Foo $x */
+function fb() {} }
+PHP;
+    return docNames($s) === ['A\\Foo@3:13-16', 'B\\Foo@6:12-15'] ? true : json_encode(docNames($s));
+});
+
+check('unbraced_namespaces_reset_use_map', function () {
+    $s = <<<'PHP'
+<?php
+namespace A;
+use X\Foo;
+/** @param Foo $a */
+function f() {}
+namespace B;
+/** @param Foo $a */
+function g() {}
+PHP;
+    return names($s) === 'X\\Foo,B\\Foo' ? true : names($s);
+});
+
+check('group_use_alias_function_const_and_trait_use', function () {
+    $s = <<<'PHP'
+<?php
+namespace N;
+use P\{Q, R as S};
+use function P\fn1;
+use const P\C1;
+class K { use T1; }
+/** @param Q|S|T1|fn1 $a */
+function f() {}
+PHP;
+    return names($s) === 'P\\Q,P\\R,N\\T1,N\\fn1' ? true : names($s);
+});
+
+check('heredoc_with_apostrophe_does_not_hide_later_docblock', function () {
+    $s = <<<'PHP'
+<?php
+$a = <<<EOT
+don't /** @param Fake $x */
+EOT;
+/** @param Real $x */
+function f() {}
+PHP;
+    return names($s) === 'Real' ? true : names($s);
+});
+
+check('nowdoc_and_flexible_heredoc_content_not_scanned', function () {
+    $s = <<<'PHP'
+<?php
+$a = <<<'EOT'
+/** @param Fake1 $x */
+EOT;
+$b = <<<"X"
+    /** @param Fake2 $x */
+    X;
+/** @param Real $x */
+function f() {}
+PHP;
+    return names($s) === 'Real' ? true : names($s);
+});
+
+check('inline_html_apostrophe_between_close_and_open_tags', function () {
+    $s = "<?php\necho 1; ?>\n<p>it's /** @param Fake \$x */ here</p>\n<?php\n/** @param Real \$x */\nfunction f() {}\n";
+    return names($s) === 'Real' ? true : names($s);
+});
+
+check('pcre_failure_falls_back_to_block_scan', function () {
+    $s = "<?php\n/**\n * @param Foo \$a\n * @return \\Bar\n */\nfunction f() {}\n/** @var Baz \$x */\n";
+    $r = \Semantic\DocblockNames::scanBlocks($s, 'N', ['Foo' => 'U\\Foo']);
+    return json_encode($r) === json_encode([['Foo', 3, 11, 'U\\Foo'], ['\\Bar', 4, 12, 'Bar'], ['Baz', 7, 10, 'N\\Baz']]) ? true : json_encode($r);
+});
+
+check('prose_after_return_and_throws', function () {
+    $s = "<?php\n/**\n * @return the thing\n * @throws an error\n */\nfunction f() {}\n/** @return Foo the thing */\nfunction g() {}\n/** @return Foo\\Bar */\nfunction h() {}\n/** @return \$this */\nfunction i() {}\n";
+    return names($s) === 'Foo,Foo\\Bar' ? true : names($s);
+});
+
+check('builtin_exclusion_is_case_insensitive', function () {
+    $s = "<?php\n/**\n * @param String \$a\n * @return INT\n * @var Array<int, Foo> \$x\n */\nfunction f() {}\n";
+    return names($s) === 'Foo' ? true : names($s);
+});
+
+check('crlf_docblock_columns', function () {
+    $s = "<?php\r\n/**\r\n * @param Foo \$x\r\n * @return Bar\r\n */\r\nfunction f() {}\r\n";
+    return docNames($s) === ['Foo@3:11-14', 'Bar@4:12-15'] ? true : json_encode(docNames($s));
+});
+
+check('multibyte_before_name_uses_byte_columns', function () {
+    $s = "<?php\n/** @param array{\u{e9}: int, k: Foo} \$x */\nfunction f() {}\n";
+    return docNames($s) === ['Foo@2:30-33'] ? true : json_encode(docNames($s));
+});
+
 exit($fail);
