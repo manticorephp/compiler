@@ -6960,6 +6960,19 @@ final class LowerFromAst implements Pass
                 || $left->object instanceof \Parser\Ast\StaticCall)) {
             return new NullCoalesce_($this->lowerNullsafeProp($left), $this->lowerExpr($e->right), Type::unknown());
         }
+        // A plain local that is null: the default, without touching the probe path of the read
+        // (an uninitialized typed property still answers the default through it).
+        if ($left instanceof \Parser\Ast\PropertyAccess && !$left->nullsafe
+            && $left->object instanceof \Parser\Ast\Variable && $left->object->name !== 'this') {
+            $recv = $this->lowerExpr($left->object);
+            return new Ternary(
+                new Cmp($recv, new NullConst(Type::null_()), '==='),
+                $this->lowerExpr($e->right),
+                new NullCoalesce_($this->markProbe($this->lowerExpr($left)), $this->lowerExpr($e->right), Type::unknown()),
+                Type::unknown(),
+                true,
+            );
+        }
         return new NullCoalesce_(
             $this->markProbe($this->lowerExpr($e->left)),
             $this->lowerExpr($e->right),
