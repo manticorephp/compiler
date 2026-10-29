@@ -412,7 +412,7 @@ final class Workspace
         if (\preg_match('/(\?->|->|::)[ \t]*(\$?\w*)$/', $before, $m, PREG_OFFSET_CAPTURE) === 1) {
             $static = $m[1][0] === '::';
             $prefix = $m[2][0];
-            $head = \rtrim(\substr($before, 0, $m[0][1]));
+            $head = \rtrim(\substr($text, 0, $start + $m[0][1]));
             if ($head === '') { return []; }
             $pcol = $col - \strlen($prefix);
             $rest = (string)\preg_replace('/^\w+/', '', \substr($text, $off));
@@ -434,9 +434,52 @@ final class Workspace
             return \array_slice($out, 0, Completer::CAP);
         }
         if (\preg_match('/(?<![\w$>:\\\\])(\\\\?[A-Za-z_][\w\\\\]*)$/', $before, $m) === 1) {
-            return $comp->symbols($m[1]);
+            return $this->withImports($text, $comp->symbols($m[1]), $m[1]);
         }
         return [];
+    }
+
+    /**
+     * Class items get the short name as label/insert text; a `use` edit is attached unless the name is already
+     * imported, global in a global file, or in the current namespace.
+     *
+     * @param Completion[] $items
+     * @return Completion[]
+     */
+    private function withImports(string $text, array $items, string $typed): array
+    {
+        if ($typed[0] === '\\') { return $items; }
+        $ns = '';
+        /** @var array<string, string> $imports lower fqn => alias */
+        $imports = [];
+        $useLine = 0;
+        $nsLine = 0;
+        $phpLine = 0;
+        foreach (\explode("\n", $text) as $i => $ln) {
+            $n = $i + 1;
+            if ($phpLine === 0 && \preg_match('/^\s*<\?php\b/', $ln) === 1) { $phpLine = $n; }
+            if (\preg_match('/^namespace\s+([\w\\\\]+)\s*;/', $ln, $m) === 1) { $ns = $m[1]; $nsLine = $n; $imports = []; }
+            elseif (\preg_match('/^use\s+([\w\\\\]+)(?:\s+as\s+(\w+))?\s*;/', $ln, $m) === 1) {
+                $f = \ltrim($m[1], '\\');
+                $imports[\strtolower($f)] = $m[2] ?? (\substr($f, (int)\strrpos('\\' . $f, '\\')));
+                $useLine = $n;
+            }
+        }
+        $at = $useLine > 0 ? $useLine + 1 : ($nsLine > 0 ? $nsLine + 1 : ($phpLine > 0 ? $phpLine + 1 : 1));
+        foreach ($items as $c) {
+            if (!\in_array($c->kind, ['class', 'interface', 'enum'], true)) { continue; }
+            $fqn = \ltrim($c->label, '\\');
+            $short = \substr($fqn, (int)\strrpos('\\' . $fqn, '\\'));
+            $c->detail = $fqn;
+            $c->label = $c->insertText = $short;
+            $alias = $imports[\strtolower($fqn)] ?? null;
+            if ($alias !== null) { $c->insertText = $alias; continue; }
+            $dir = \strpos($fqn, '\\') === false ? '' : \substr($fqn, 0, (int)\strrpos($fqn, '\\'));
+            if (\strcasecmp($dir, $ns) === 0) { continue; }
+            $c->useFqn = $fqn;
+            $c->useLine = $at;
+        }
+        return $items;
     }
 
     /**
