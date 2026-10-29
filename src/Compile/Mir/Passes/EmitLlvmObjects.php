@@ -4227,6 +4227,66 @@ trait EmitLlvmObjects
     }
 
     /**
+     * `$o->$name` for a runtime name NO declared slot of `$o`'s class matches:
+     * switch on the object's class_id — a bag class reads its dynamic bag, a class
+     * answering through `__get` calls it with the name — and a boxed null for
+     * anything else. lastValue ← the boxed cell.
+     */
+    private function emitDynMissByClassId(string $objPtr, string $keyP): string
+    {
+        $this->rt->needsTagged = true;
+        /** @var array<int, array{0:string,1:ClassDef|string}> $arms */
+        $arms = [];
+        foreach ($this->bagClassNames() as $name) {
+            if (isset($this->classes[$name])) { $arms[$this->classes[$name]->classId] = ['bag', $this->classes[$name]]; }
+        }
+        foreach ($this->methodHolders('__get') as $cn => $decl) {
+            $cd = $this->classes[$cn] ?? null;
+            if ($cd === null || $cd->isStruct || isset($this->enums[$cn]) || $this->isClosureClass($cn)) { continue; }
+            if (!isset($arms[$cd->classId])) { $arms[$cd->classId] = ['get', $decl]; }
+        }
+        $res = $this->ssa->allocReg();
+        $out = '  ' . $res . " = alloca i64\n";
+        $nullV = $this->ssa->allocReg();
+        $out .= '  ' . $nullV . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $nullV . ', ptr ' . $res . "\n";
+        if ($arms === []) {
+            $this->lastValue = $nullV;
+            $this->lastValueType = 'i64';
+            $this->markCellOpaque($nullV);
+            return $out;
+        }
+        $out .= $this->emitLoadClassId($objPtr);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('dynmiss.end');
+        $sw = '  switch i64 ' . $cid . ', label %' . $end . " [\n";
+        $bodies = '';
+        foreach ($arms as $classId => $arm) {
+            $lbl = $this->ssa->allocLabel('dynmiss.case');
+            $sw .= '    i64 ' . (string)$classId . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            if ($arm[0] === 'bag') {
+                $bodies .= $this->emitBagPtrAt($objPtr, $arm[1]->bagOffset());
+                $rv = $this->ssa->allocReg();
+                $bodies .= '  ' . $rv . ' = call i64 @__mir_bag_get_str(ptr ' . $this->bagPtrReg . ', ptr ' . $keyP . ")\n";
+            } else {
+                $ni = $this->ssa->allocReg();
+                $bodies .= '  ' . $ni . ' = ptrtoint ptr ' . $keyP . " to i64\n";
+                $bodies .= $this->emitMagicGetCell((string)$arm[1], $objPtr, '', null, $ni);
+                $rv = $this->lastValue;
+            }
+            $bodies .= '  store i64 ' . $rv . ', ptr ' . $res . "\n";
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $out .= $sw . "  ]\n" . $bodies . $end . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellOpaque($r);
+        return $out;
+    }
+    /**
      * `$o->$name` on an ERASED receiver — the shape that owns the T6 emission
      * peak. The general path builds one arm per property NAME and inlines a full
      * class_id switch inside each, so a single site carries the program's entire
@@ -4281,13 +4341,11 @@ trait EmitLlvmObjects
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
-        if ($bagCd !== null && $bagCd->usesBag()) {
-            $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
-            $reg = $this->ssa->allocReg();
-            $out .= '  ' . $reg . ' = call i64 @__mir_bag_get_str(ptr ' . $this->bagPtrReg
-                  . ', ptr ' . $keyP . ")\n";
-            $out .= '  store i64 ' . $reg . ', ptr ' . $res . "\n";
-        }
+        // A name no declared slot matches: judged by the object's REAL class —
+        // its dynamic bag, or its `__get` (the receiver is erased, so the stdClass
+        // bag offset says nothing about it).
+        $out .= $this->emitDynMissByClassId($objPtr, $keyP);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $rv = $this->ssa->allocReg();
@@ -4568,7 +4626,18 @@ trait EmitLlvmObjects
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
-        if ($bagCd !== null && $bagCd->usesBag()) {
+        // A name no declared slot matches reaches `__get` — Carbon's
+        // `$this->$name` over `year`/`month`/… is entirely that. The bag read
+        // below assumed a bag slot the class need not have.
+        $getter = $bagCd !== null ? $this->resolveMethodClass($bagCd->name, '__get') : '';
+        if ($getter !== '') {
+            $out .= $this->emitObjPtrOf($n->object);
+            $objPtr = $this->lastValue;
+            $ni = $this->ssa->allocReg();
+            $out .= '  ' . $ni . ' = ptrtoint ptr ' . $keyP . " to i64\n";
+            $out .= $this->emitMagicGetCell($getter, $objPtr, '', null, $ni);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+        } elseif ($bagCd !== null && $bagCd->usesBag()) {
             $out .= $this->emitObjPtrOf($n->object);
             $objPtr = $this->lastValue;
             $out .= $this->emitBagPtr($n->object, $objPtr, $bagCd->bagOffset());
