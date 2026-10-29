@@ -3397,6 +3397,14 @@ final class Parser
             $this->advance();
             $this->advance();
             $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
+            // `new static::$map[$k](args)`: subscripts still name the class; only `(` starts the arguments.
+            while ($this->check(TokenKind::OpenBracket)) {
+                $bspan = $this->span();
+                $this->advance();
+                $bindex = $this->parseExpression();
+                $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
+                $classExpr = Expr::arrayAccess($classExpr, $bindex, $this->end($bspan, $classExpr));
+            }
             $dargs = [];
             if ($this->check(TokenKind::OpenParen)) {
                 $dargs = $this->parseArgList();
