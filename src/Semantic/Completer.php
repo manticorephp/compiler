@@ -27,7 +27,7 @@ final class Completer
             foreach ($this->collect($cls) as $m) {
                 if (!$this->visible($m, $from) || !self::startsWith($m->name, $prefix)) { continue; }
                 $c = self::item($m, $static, $withInstance);
-                if ($c !== null) { $out[$c->kind . ':' . $c->label] = $c; }
+                if ($c !== null) { $c->rank = \strcasecmp(\ltrim($m->declClass, '\\'), \ltrim($cls, '\\')) === 0 ? 0 : 1; $out[$c->kind . ':' . $c->label] = $c; }
             }
         }
         return self::finish($out);
