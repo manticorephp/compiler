@@ -82,6 +82,16 @@ check('hover over typed variable shows type', function () use ($A, $B): bool|str
     $v = is_array($r) ? ($r['contents']['value'] ?? '') : '';
     return (str_contains($v, 'Foo') && str_starts_with($v, "```php\n") && isset($r['range'])) ?: json_encode($r);
 });
+check('hover on a local array: markdown with detail, range in UTF-16 after a multibyte char', function (): bool|string {
+    $d = rig(new Sink());
+    open($d, 'file:///t/h.php', "<?php\n\$é = 'é'; \$m = ['a' => 1, 'b' => 'x'];\n");
+    $r = ask($d, 'textDocument/hover', 'file:///t/h.php', 1, 11);
+    $v = is_array($r) ? ($r['contents']['value'] ?? '') : '';
+    $want = "```php\n\$m: array{a: int, b: string}\n```\n\n- `a: int`\n- `b: string`\n\n*inferred*";
+    if ($v !== $want) { return json_encode($v); }
+    $rg = $r['range'];
+    return $rg['start'] === ['line' => 1, 'character' => 10] && $rg['end'] === ['line' => 1, 'character' => 12] ?: json_encode($rg);
+});
 check('definition of unknown symbol is null', function (): bool|string {
     $d = rig(new Sink());
     open($d, 'file:///t/b.php', "<?php\nnope();\n");

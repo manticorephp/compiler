@@ -167,7 +167,7 @@ check('hover on expression = type', function () use ($A) {
     $w = ws(['a.php' => $A]);
     $u = where($A, '$maybe?->run', 1, 1);
     $h = $w->hover('a.php', $u[0], $u[1]);
-    return $h !== null && $h->text === '?A' ? true : json_encode($h);
+    return $h !== null && $h->text === '$maybe: ?A' ? true : json_encode($h);
 });
 
 check('typeAt: nullsafe call nullable; chains; static; new()->m()', function () use ($A) {

@@ -34,7 +34,7 @@ final class NavigationHandlers
             $range = (new LocationMap($this->docs))->toLsp($h->range);
             if ($range === null) { return null; }
             return [
-                'contents' => ['kind' => 'markdown', 'value' => "```php\n" . $h->text . "\n```"],
+                'contents' => ['kind' => 'markdown', 'value' => "```php\n" . $h->text . "\n```" . ($h->detail === '' ? '' : "\n\n" . $h->detail)],
                 'range' => $range['range'],
             ];
         });

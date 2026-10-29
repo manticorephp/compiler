@@ -109,7 +109,11 @@ final class DocNames
      */
     public static function tagType(?string $doc, string $tag, string $var, string $ns, array $uses, array $templates): ?string
     {
-        $raw = DocType::tag($doc, $tag, $var);
+        $raw = null;
+        foreach (['@phpstan-', '@psalm-', '@'] as $pre) {
+            $raw = DocType::tag($doc, $pre . \substr($tag, 1), $var);
+            if ($raw !== null) { break; }
+        }
         if ($raw === null || $raw === '') { return null; }
         if (\count($templates) > 0) {
             \preg_match_all('/[A-Za-z_][A-Za-z0-9_]*/', $raw, $m);

@@ -467,7 +467,7 @@ final class Index
     {
         if ($d->name === '') { return; }
         $l = \strtolower($d->name);
-        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $this->docTag($d->docComment, '@return', $d->name, \Semantic\DocNames::templates($d->docComment)));
+        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $this->docTag($d->docComment, '@return', $d->name, \Semantic\DocNames::templates($d->docComment)), $this->paramDocs($d->docComment, $d->params, $d->name, []));
         $this->curFnSpans[$l] = $d->span;
     }
 
@@ -477,9 +477,11 @@ final class Index
         if ($fqn === '') { return; }
         /** @var array<string, MethodInfo> $methods */
         $methods = [];
+        $classTpl = \Semantic\DocNames::templates($d->docComment);
         foreach ($d->methods as $m) {
             $methods[\strtolower($m->name)] = new MethodInfo(
-                $m->name, $m->params, $m->isStatic, $m->visibility, $m->returnType, $fqn
+                $m->name, $m->params, $m->isStatic, $m->visibility, $m->returnType, $fqn,
+                $this->paramDocs($m->docComment, $m->params, $fqn, $classTpl)
             );
         }
         /** @var array<string, bool> $consts */
@@ -581,6 +583,24 @@ final class Index
         if ($doc === null) { return null; }
         $uses = $this->curFile === null ? [] : $this->curFile->program->useAliases;
         return \Semantic\DocNames::tagType($doc, $tag, "", \Semantic\DocNames::nsOf($declFqn), $uses, $templates);
+    }
+
+    /**
+     * @param \Parser\Ast\Param[] $params
+     * @param string[] $classTemplates
+     * @return array<string, string>
+     */
+    private function paramDocs(?string $doc, array $params, string $declFqn, array $classTemplates): array
+    {
+        $out = [];
+        if ($doc === null) { return $out; }
+        $uses = $this->curFile === null ? [] : $this->curFile->program->useAliases;
+        $tpl = \array_merge($classTemplates, \Semantic\DocNames::templates($doc));
+        foreach ($params as $p) {
+            $t = \Semantic\DocNames::tagType($doc, '@param', $p->name, \Semantic\DocNames::nsOf($declFqn), $uses, $tpl);
+            if ($t !== null) { $out[$p->name] = $t; }
+        }
+        return $out;
     }
 
     /** A constant initializer worth keeping for typing: small trees as is, an array literal as an empty one, else null. */
