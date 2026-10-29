@@ -121,7 +121,7 @@ final class NavigationHandlers
         $map = new LocationMap($this->docs);
         $out = [];
         foreach ($locs as $l) {
-            $m = $map->toLsp($l);
+            $m = $map->toLsp($l, true);
             if ($m !== null) { $out[] = $m; }
         }
         return $out === [] ? null : $out;
