@@ -112,7 +112,23 @@ check('position after multibyte char hits the right token', function (): bool|st
     $x = is_array($r) ? ($r[0] ?? null) : null;
     return ($x !== null && $x['range']['start'] === ['line' => 1, 'character' => 9]) ?: json_encode($r);
 });
-check('prelude class definition is null', function (): bool|string {
+check('prelude class definition opens a readable cached file', function (): bool|string {
+    $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/core_interfaces.php');
+    \Lsp\LocationMap::$libText = fn(string $n): ?string => $n === 'core_interfaces.php' ? $src : null;
+    try {
+        $d = rig(new Sink());
+        open($d, 'file:///t/a.php', "<?php\n\$x = new Countable();\n");
+        $r = ask($d, 'textDocument/definition', 'file:///t/a.php', 1, 12);
+        $x = is_array($r) ? ($r[0] ?? null) : null;
+        if ($x === null || !str_starts_with($x['uri'], 'file://')) { return json_encode($r); }
+        $text = (string)file_get_contents(\Lsp\Uri::toPath($x['uri']));
+        $line = explode("\n", $text)[$x['range']['start']['line']] ?? '';
+        return preg_match('/^interface Countable\b/', $line) === 1 ? true : json_encode([$line, $x]);
+    } finally {
+        \Lsp\LocationMap::$libText = null;
+    }
+});
+check('prelude definition without a text source stays null', function (): bool|string {
     $d = rig(new Sink());
     open($d, 'file:///t/a.php', "<?php\n\$x = new Countable();\n");
     $r = ask($d, 'textDocument/definition', 'file:///t/a.php', 1, 12);
