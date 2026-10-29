@@ -632,6 +632,9 @@ final class Workspace
         foreach ($vi->declSitesOf($b) as $d) {
             $m = $this->names->occurrenceAt($uri, $d->line, $d->col);
             if ($m !== null && $m->kind === 'member') { $out[] = 'promoted-parameter'; }
+            if ($m !== null && $m->role === 'param') {
+                foreach ($this->names->namedArgSites($vi->nameOf($b)) as $s) { $out[] = 'named-argument:' . $s->file . ':' . $s->line . ':' . $s->col; }
+            }
         }
         foreach ($this->variableUncertain($uri, $vi, $b) as $s) { $out[] = $s->reason . ':' . $s->file . ':' . $s->line . ':' . $s->col; }
         return \array_values(\array_unique($out));

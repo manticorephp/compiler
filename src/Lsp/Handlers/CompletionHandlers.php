@@ -29,6 +29,7 @@ final class CompletionHandlers
     {
         $d->on('textDocument/completion', function (array $p): mixed {
             $uri = $p['textDocument']['uri'] ?? null;
+            $uri = is_string($uri) ? \Lsp\Uri::normalize($uri) : null;
             $pos = $p['position'] ?? null;
             if (!is_string($uri) || !is_array($pos) || !is_int($pos['line'] ?? null) || !is_int($pos['character'] ?? null)
                 || $pos['line'] < 0 || $pos['character'] < 0) {
