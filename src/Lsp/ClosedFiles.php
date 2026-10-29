@@ -21,11 +21,18 @@ final class ClosedFiles
     private bool $busy = false;
     /** @var callable */
     private $docs;
+    /** @var callable|null runs between files of a long query; throws to abandon it */
+    private $check = null;
 
     /** @param callable $docs returns array<string, string> uri => open text */
     public function __construct(private Workspace $ws, callable $docs, private int $max = self::MAX)
     {
         $this->docs = $docs;
+    }
+
+    public function setCheck(callable $check): void
+    {
+        $this->check = $check;
     }
 
     public function add(string $uri): void
@@ -84,6 +91,14 @@ final class ClosedFiles
         }
     }
 
+    /** Forget every scanned file under a deleted directory URI prefix (ending in /). */
+    public function forgetUnder(string $prefix): void
+    {
+        foreach (\array_keys($this->scanned) as $uri) {
+            if (\strncmp($uri, $prefix, \strlen($prefix)) === 0) { $this->forget($uri); }
+        }
+    }
+
     /**
      * Forget every given scanned file that is gone from disk; returns how many.
      *
@@ -119,6 +134,7 @@ final class ClosedFiles
             $open = ($this->docs)();
             foreach (\array_keys($this->scanned) as $uri) {
                 if (isset($open[$uri])) { continue; }
+                if ($this->check !== null) { ($this->check)(); }
                 $path = Uri::toPath($uri);
                 if ($path === null || !@\is_file($path)) {
                     $this->forget($uri);
