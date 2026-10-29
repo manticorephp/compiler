@@ -598,7 +598,13 @@ trait LowerClasses
             // uses, and that one round-trips through every path. Statics are left
             // alone deliberately: they are external-linkage globals here, so their
             // repr is a linking contract and not this pass's to change.
-            if ($veff === null || $veff === '') { $pt = Type::cell(); }
+            if ($veff === null || $veff === '') {
+                // …but a REDECLARATION shares the parent's slot, and the parent's methods
+                // read it in the parent's representation: a `@var array` parent slot is
+                // a raw array, so a subclass's bare `protected $casts = [..]` boxing it
+                // handed Eloquent's `array_merge($this->casts, …)` a tagged word.
+                $pt = isset($types[$prop->name]) ? $types[$prop->name] : Type::cell();
+            }
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
             $neverObj[$prop->name] = $this->hintNeverObject($veff);
