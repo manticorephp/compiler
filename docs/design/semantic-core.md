@@ -336,7 +336,7 @@ Member references cost ~1.8 s p50 on `src/` (362 files) for that reason.
 **P3 remains**
 - Incremental text sync (full text is re-sent and re-parsed per change).
 - Closed files: keep each indexed file's text and reparse lazily through a small LRU (`ExprAt` / `UnitLookup` on demand, never every AST) instead of the open-all pass.
-- `.sig` by-ref flags and return types (stdlib calls are typed from the prelude only).
+- `.sig` by-ref flags and return types.
 - Heredoc/nowdoc names: a heredoc anywhere in the workspace blocks every rename (`renameBlockers`).
 - Library (`lib:`) locations are not navigable; `.gitignore` is not honoured by the workspace scan.
 
