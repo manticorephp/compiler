@@ -193,7 +193,7 @@ final class SourceTypeParser
             }
             $v = self::parseUnion($c, $cls, true, $d);
             if ($v === null) { return null; }
-            $keys[] = $opt ? $key . '?' : $key;
+            $keys[] = $opt ? $key . SourceType::OPT : $key;
             $vals[] = $v;
             self::ws($c);
             if (self::peek($c) === ',') { $c->pos = $c->pos + 1; self::ws($c); continue; }

@@ -109,7 +109,7 @@ check('magic const', fn() => $t('__CLASS__;') === 'string' && $t('__LINE__;') ==
 check('param variable', fn() => $t('$a;', 'int $a') === 'int');
 check('nullable param', fn() => $t('$a;', '?Foo $a') === '?N\Foo');
 check('untyped param unknown', fn() => $t('$a;', '$a') === 'null');
-check('variadic param is array', fn() => $t('$a;', 'int ...$a') === 'array');
+check('variadic param is a list of its element type', fn() => $t('$a;', 'int ...$a') === 'list<int>');
 check('doc @param refines array', fn() => $t('$arr;', 'array $arr') === 'array<N\Foo>');
 check('promoted ctor property', fn() => $t('(new Foo)->name;') === 'string');
 check('$this', fn() => $t('$this;') === 'N\Foo2');

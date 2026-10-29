@@ -14,6 +14,9 @@ namespace Semantic;
 final class SourceType
 {
     public const SCALAR = 'scalar';
+
+    /** Suffix of an optional shape key; a NUL cannot be confused with a quoted key that ends in `?`. */
+    public const OPT = "\0";
     public const CLASS_ = 'class';
     public const NULLABLE = 'nullable';
     public const UNION = 'union';
@@ -68,7 +71,7 @@ final class SourceType
                 return $this->name . '<' . \implode(',', $parts) . '>';
             case self::SHAPE:
                 $parts = [];
-                foreach ($this->args as $i => $a) { $parts[] = $this->keys[$i] . ':' . $a->toString(); }
+                foreach ($this->args as $i => $a) { $parts[] = (\str_ends_with($this->keys[$i], self::OPT) ? \substr($this->keys[$i], 0, -1) . '?' : $this->keys[$i]) . ':' . $a->toString(); }
                 return $this->name . '{' . \implode(',', $parts) . '}';
             case self::CALLABLE:
                 if ($this->args === [] && $this->ret === null) { return $this->name; }

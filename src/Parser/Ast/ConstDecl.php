@@ -21,5 +21,6 @@ final class ConstDecl
         public readonly array $attributes,
         public readonly Span $span,
         public readonly bool $isFinal = false,
+        public readonly ?string $docComment = null,
     ) {}
 }

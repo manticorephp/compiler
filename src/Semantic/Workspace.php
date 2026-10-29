@@ -718,16 +718,29 @@ final class Workspace
         }
         for ($k = \count($path) - 1; $k >= 0 && $t !== null; $k = $k - 1) {
             $el = $path[$k][0];
-            if ($t->kind === SourceType::SHAPE) {
-                $want = $el->key instanceof \Parser\Ast\StringLiteral ? $el->key->value : ($el->key instanceof \Parser\Ast\IntLiteral ? (string)$el->key->value : (string)$path[$k][1]);
-                $next = null;
-                foreach ($t->args as $j => $arg) { if (\rtrim($t->keys[$j], '?') === $want) { $next = $arg; } }
-                $t = $next;
-            } else {
-                $t = Flow::elementTypes($t)[1];
-            }
+            $want = $el->key instanceof \Parser\Ast\StringLiteral ? $el->key->value : ($el->key instanceof \Parser\Ast\IntLiteral ? (string)$el->key->value : (string)$path[$k][1]);
+            $t = self::stepInto($t, $want);
         }
         return $t;
+    }
+
+    /** The element `$want` of a destructured value; a union or nullable is stepped member by member (members without elements drop out). */
+    private static function stepInto(SourceType $t, string $want): ?SourceType
+    {
+        if ($t->kind === SourceType::UNION || $t->kind === SourceType::NULLABLE) {
+            $parts = [];
+            foreach ($t->args as $m) {
+                $e = self::stepInto($m, $want);
+                if ($e !== null) { $parts[] = $e; }
+            }
+            return \count($parts) === 0 ? null : ExprTyper::union($parts);
+        }
+        if ($t->kind === SourceType::SHAPE) {
+            $next = null;
+            foreach ($t->args as $j => $arg) { if (\rtrim($t->keys[$j], SourceType::OPT) === $want) { $next = $arg; } }
+            return $next;
+        }
+        return Flow::elementTypes($t)[1];
     }
     /** Type of the first later use of a binding that has one (a foreach or catch variable is typed only inside its body). */
     private function nextUseType(string $uri, VarIndex $vi, int $b, int $line, int $col): ?SourceType
@@ -1071,8 +1084,12 @@ final class Workspace
             $ty = self::merged($m->typeHint, $m->docType, $m->declClass);
             return [$n . '$' . $m->name . ($ty[0] !== null ? ': ' . $ty[0] : ''), $ty[1], $ty[2]];
         }
+        if ($m->kind === 'const') {
+            $ty = self::merged($m->typeHint, $m->docType, $m->declClass);
+            return [$n . $m->name . ($ty[0] !== null ? ': ' . $ty[0] : ''), $ty[1], $ty[2]];
+        }
         if ($m->kind !== 'method') {
-            return [$n . $m->name . ($m->kind === 'const' && $m->typeHint !== null ? ': ' . $m->typeHint : ''), null, false];
+            return [$n . $m->name, null, false];
         }
         $mi = $this->index->findMethod($m->declClass, \strtolower($m->name), 0);
         if ($mi === null) { return [$n . $m->name, null, false]; }

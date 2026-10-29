@@ -68,10 +68,13 @@ final class TypeEnv
             if (!$env->isStatic) { $env->vars['this'] = new SourceType(SourceType::CLASS_, $owner); }
         }
         foreach ($u->params as $p) {
-            if ($p->variadic) { $env->vars[$p->name] = new SourceType(SourceType::SCALAR, 'array'); continue; }
             $native = SourceTypeParser::fromHint($p->typeHint, $owner);
             $doc = SourceTypeParser::fromHint($u->paramDocs[$p->name] ?? null, $owner);
             $t = ExprTyper::bind(SourceTypeParser::withDoc($native, $doc), $owner, $owner, $idx);
+            if ($p->variadic) {
+                $env->vars[$p->name] = new SourceType(SourceType::GENERIC, 'list', [$t ?? new SourceType(SourceType::MIXED, 'mixed')]);
+                continue;
+            }
             if ($t !== null) { $env->vars[$p->name] = $t; }
         }
         return $env;
