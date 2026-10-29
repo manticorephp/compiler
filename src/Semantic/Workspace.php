@@ -504,7 +504,8 @@ final class Workspace
             $fqn = \ltrim($c->label, '\\');
             $short = \substr($fqn, (int)\strrpos('\\' . $fqn, '\\'));
             $c->detail = $fqn;
-            $c->label = $c->insertText = $short;
+            $c->insertText = $short;
+            $c->label = $short;
             $alias = $imports[\strtolower($fqn)] ?? null;
             if ($alias !== null) { $c->insertText = $alias; continue; }
             $dir = \strpos($fqn, '\\') === false ? '' : \substr($fqn, 0, (int)\strrpos($fqn, '\\'));
