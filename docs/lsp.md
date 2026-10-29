@@ -15,7 +15,7 @@ works with the command `manticore lsp`.
 | `initialize`, `initialized`, `shutdown`, `exit` | `rootUri` (or the first workspace folder) is scanned at startup |
 | `textDocument/didOpen`, `didChange`, `didClose` | full text sync |
 | `textDocument/publishDiagnostics` | pushed on open and change |
-| `textDocument/hover` | members and expressions (types) |
+| `textDocument/hover` | members, functions, variables and expressions (types; see Hover) |
 | `textDocument/definition` | classes, functions, constants, members, variables |
 | `textDocument/references` | classes, functions, members, variables; honours `includeDeclaration` |
 | `textDocument/prepareRename`, `rename` | see [Rename](#rename) |
@@ -27,6 +27,34 @@ Capabilities advertised: `textDocumentSync {openClose, change: 1}`, `hoverProvid
 `definitionProvider`, `referencesProvider`, `renameProvider {prepareProvider}`,
 `documentSymbolProvider`, `completionProvider`.
 
+## Hover
+
+The signature goes in a `php` code block; array types add a short bullet list below it, then one line saying where
+the type comes from.
+
+- Declared types are the native hint merged with the docblock (`@var`, `@param`, `@return`, `@psalm-` / `@phpstan-`
+  variants): a docblock refines a bare `array` / `iterable` (nullable too), any other native hint wins. Class names are
+  fully qualified through the file's namespace and `use` map.
+- Rendering: `list<V>`, `array<K, V>`, `array{id: int, name?: string}` (`?` = optional key; positional entries are
+  keyed `0`, `1`, ...), and `V[]` for the one-argument `array<V>` (also what `@var V[]` means).
+- Variables: parameters show the declared type, locals the inferred type at that point (narrowing applies), foreach
+  variables the element type. A literal with distinct string keys (at most 8) is a shape, other keyed literals are
+  `array<K, V>`, elements of different types join into a union (`list<int|string>`), `[]` is a bare `array`.
+- Source label: `*from annotation*` when a docblock refined the type, `*inferred*` for locals; a plain native
+  declaration has no label.
+- Detail lines list `keys` / `values` (generic arrays) or one `key: type` per entry (shapes), nested arrays indented,
+  at most 12 lines, `…` when cut. A method or function hover prefixes the list of its return type with `**Returns**`.
+
+```php
+App\A::$byName: array<string, App\Foo>
+```
+- keys: `string`
+- values: `App\Foo`
+
+*from annotation*
+
+Constants show their native type only (the parser keeps no docblock on a constant). Hover never fails: any error
+answers the plain type text.
 ## Docblocks
 
 Class names in the type-carrying tags of `/** */` docblocks (`@param`, `@return`, `@var`, `@throws`, `@property*`,

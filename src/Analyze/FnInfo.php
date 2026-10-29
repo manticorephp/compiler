@@ -13,5 +13,7 @@ final class FnInfo
         public array $params,
         public ?string $returnType,
         public ?string $docType = null,
+        /** @var array<string, string> param name → qualified docblock type */
+        public array $paramDocs = [],
     ) {}
 }

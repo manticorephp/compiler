@@ -187,7 +187,8 @@ check('instanceof', fn() => $t('$a instanceof Foo;', '$a') === 'bool');
 check('isset/empty', fn() => $t('isset($a);', '$a') === 'bool' && $t('empty($a);', '$a') === 'bool');
 check('array literal plain', fn() => $t('[];') === 'array');
 check('array literal list', fn() => $t('[1, 2];') === 'list<int>' && $t('[1, "a"];') === 'list<int|string>');
-check('array literal keyed', fn() => $t('["a" => 1, "b" => 2.5];') === 'array<string,int|float>');
+check('array literal keyed', fn() => $t('["a" => 1, "b" => 2.5];') === 'array{a:int,b:float}'
+    && $t('["a" => 1, "a" => 2];') === 'array<string,int>' && $t('["a" => 1, 2];') === 'array<string|int,int>');
 check('array literal unknown elem', fn() => $t('[1, $u];', '$u') === 'array');
 check('array access', fn() => $t('$arr[0];', 'array $arr') === 'N\Foo' && $t('$l[0];', 'int $l') === 'null' && $t('[1, 2][0];') === 'int');
 check('unknown variable', fn() => $t('$nope;') === 'null');
@@ -249,6 +250,8 @@ function stKind(SourceType $s): string
     switch ($s->kind) {
         case SourceType::SCALAR:
             return $s->name === 'true' || $s->name === 'false' ? 'bool' : $s->name;
+        case SourceType::SHAPE:
+            return 'array';
         case SourceType::GENERIC:
             return $s->name === 'array' || $s->name === 'list' ? 'array' : 'object';
         case SourceType::ITERABLE:
