@@ -667,6 +667,12 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, \Compile\Mir\MethodMeta> */
     private array $reflClosureMeta = [];
 
+    /** @var array<string, string[]> */
+    private array $closureCapNames = [];
+
+    /** @var array<string, array<int, int>> closure fn → capture index → {@see \Compile\MemoryAbi::RMETA_CAP_UNSUPPORTED} … code, as the creation site stored it */
+    private array $closureCapKinds = [];
+
     /** `#[\Deprecated]` / `#[\NoDiscard]` diagnostic bodies, from the module.
      *  Keyed by function name / "DeclaringClass::method".
      *  @var array<string, string> */
@@ -749,6 +755,7 @@ final class EmitLlvm implements EmitVisitor
         $this->traitNames = $module->traitNames;
         $this->reflFnMeta = $module->reflFnMeta;
         $this->reflClosureMeta = $module->reflClosureMeta;
+        $this->closureCapNames = $module->closureCapNames;
         $this->deprecatedFns = $module->deprecatedFns;
         $this->deprecatedMethods = $module->deprecatedMethods;
         $this->noDiscardFns = $module->noDiscardFns;

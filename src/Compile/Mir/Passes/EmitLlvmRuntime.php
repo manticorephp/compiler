@@ -2445,10 +2445,29 @@ trait EmitLlvmRuntime
             $out .= $pp[0];
             $rsym = '@.fnmeta.ret.' . $id;
             $out .= $this->strGlobalDef($rsym, $mm->returnType);
+            $caps = 'null';
+            $capNames = $this->closureCapNames[$fn] ?? [];
+            if ($capNames !== []) {
+                // The captured names, with how to read each env slot back as a cell
+                // (ReflectionFunctionAbstract::getClosureUsedVariables).
+                $ents = [];
+                $ci = 0;
+                foreach ($capNames as $cn) {
+                    $csym = '@.fnmeta.cap.' . $id . '.' . (string)$ci;
+                    $out .= $this->strGlobalDef($csym, $cn);
+                    $kind = $this->closureCapKinds[$fn][$ci] ?? \Compile\MemoryAbi::RMETA_CAP_UNSUPPORTED;
+                    $ents[] = '{ ptr, i64 } { ptr ' . $this->strSymBytes($csym) . ', i64 ' . (string)$kind . ' }';
+                    $ci = $ci + 1;
+                }
+                $cn2 = (string)\count($ents);
+                $caps = '@__mc_fncaps_' . $id;
+                $out .= $caps . ' = linkonce_odr constant { i64, [' . $cn2 . ' x { ptr, i64 }] } { i64 ' . $cn2
+                      . ', [' . $cn2 . ' x { ptr, i64 }] [' . \implode(', ', $ents) . "] }\n";
+            }
             $row = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($nameSym), 0, 'null',
                 $this->methodArity($mm), \count($mm->params), $pp[1],
-                0, 'null', $this->strSymBytes($rsym));
+                0, 'null', $this->strSymBytes($rsym), 'null', $caps);
             $out .= '@__mc_fnmeta_' . $id . ' = linkonce_odr constant ' . $row . "\n";
         }
         $out .= "define i64 @__mc_refl_clo_find(i64 %fp) {\nentry:\n";

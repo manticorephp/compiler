@@ -335,18 +335,19 @@ trait InferCalls
             || $n === '__mc_refl_consts_fn' || $n === '__mc_refl_ifaces_fn' || $n === '__mc_refl_file_fn' || $n === '__mc_refl_doc_fn'
             || $n === '__mc_refl_fn_find' || $n === '__mc_refl_clo_find' || $n === '__mc_refl_row_tramp'
             || $n === '__mc_refl_param_flags'
+            || $n === '__mc_refl_row_caps' || $n === '__mc_refl_caps_count' || $n === '__mc_refl_caps_kind'
             || $n === '__mc_refl_param_nattrs' || $n === '__mc_refl_param_attrs'
             || $n === '__mc_refl_param_deffn') { return Type::int_(); }
         if ($n === '__mc_refl_name'
             || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type'
-            || $n === '__mc_refl_row_name' || $n === '__mc_refl_attr_name'
+            || $n === '__mc_refl_row_name' || $n === '__mc_refl_attr_name' || $n === '__mc_refl_caps_name'
             || $n === '__mc_refl_attr_err'
             || $n === '__mc_refl_row_rettype' || $n === '__mc_refl_row_declclass'
             || $n === '__mc_refl_prow_type') { return Type::string_(); }
         // The boxed result of an indirect trampoline call — a mixed cell the
         // prelude's ReflectionMethod::invoke / newInstance hand back to the user.
         if ($n === '__mc_refl_invoke' || $n === '__mc_refl_call1'
-            || $n === '__mc_refl_call0' || $n === '__mc_refl_clo_this') { return Type::cell(); }
+            || $n === '__mc_refl_call0' || $n === '__mc_refl_clo_this' || $n === '__mc_refl_clo_cap') { return Type::cell(); }
         if ($n === '__mc_refl_prop_set') { return Type::void(); }
         // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
         if ($n === 'ptr_to_int') { return Type::int_(); }

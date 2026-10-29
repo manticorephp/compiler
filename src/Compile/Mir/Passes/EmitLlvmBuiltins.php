@@ -488,6 +488,11 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_row_tramp')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET, true); }
         if ($name === '__mc_refl_fn_find')            { return $this->biMcReflFnFind($args); }
         if ($name === '__mc_refl_clo_find')           { return $this->biMcReflCloFind($args); }
+        if ($name === '__mc_refl_row_caps')           { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_CAPS_OFFSET, true); }
+        if ($name === '__mc_refl_caps_count')         { return $this->emitReflFieldI64($args, 0, false); }
+        if ($name === '__mc_refl_caps_name')          { return $this->emitReflParamField($args, 0, true, \Compile\MemoryAbi::RMETA_CAP_ENTRY_SIZE); }
+        if ($name === '__mc_refl_caps_kind')          { return $this->emitReflParamField($args, 8, false, \Compile\MemoryAbi::RMETA_CAP_ENTRY_SIZE); }
+        if ($name === '__mc_refl_clo_cap')            { return $this->biMcReflCloCap($args); }
         if ($name === '__mc_refl_clo_this')           { return $this->biMcReflCloThis($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_object_class_id')          { return $this->biObjectClassId($args); }
@@ -7113,6 +7118,78 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * `__mc_refl_clo_cap($closure, $kind, $i)` — the `$i`-th captured value of a
+     * closure env as a counted cell, boxed by the capture-table `$kind`
+     * ({@see \Compile\MemoryAbi::RMETA_CAP_INT} …): the env keeps each capture in
+     * the representation of its static type, so the reader needs the kind the
+     * metadata row recorded. The null cell for an unsupported (by-ref) capture.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCloCap(array $args): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $env = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $kind = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceToI64();
+        $idx = $this->lastValue;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . ' = add i64 ' . $idx . ", 1\n";
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr inbounds i64, ptr ' . $env . ', i64 ' . $slot . "\n";
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = load i64, ptr ' . $gp . "\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $nullV = $this->ssa->allocReg();
+        $out .= '  ' . $nullV . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $nullV . ', ptr ' . $res . "\n";
+        $done = $this->ssa->allocLabel('ccap.done');
+        $labels = [];
+        $sw = '  switch i64 ' . $kind . ', label %' . $done . " [\n";
+        foreach ([1, 2, 3, 4, 5, 6, 7] as $k) {
+            $labels[$k] = $this->ssa->allocLabel('ccap.k' . (string)$k);
+            $sw .= '    i64 ' . (string)$k . ', label %' . $labels[$k] . "\n";
+        }
+        $out .= $sw . "  ]\n";
+        foreach ($labels as $k => $lbl) {
+            $out .= $lbl . ":\n";
+            $b = $this->ssa->allocReg();
+            if ($k === 1) {
+                $out .= '  ' . $b . ' = call i64 @__manticore_box_int(i64 ' . $w . ")\n";
+            } elseif ($k === 2) {
+                $d = $this->ssa->allocReg();
+                $out .= '  ' . $d . ' = bitcast i64 ' . $w . " to double\n";
+                $out .= '  ' . $b . ' = call i64 @__manticore_box_float(double ' . $d . ")\n";
+            } elseif ($k === 3) {
+                $out .= '  ' . $b . ' = call i64 @__manticore_box_bool(i64 ' . $w . ")\n";
+            } elseif ($k === 7) {
+                $b = $w;
+            } else {
+                $p = $this->ssa->allocReg();
+                $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+                $fn = $k === 4 ? '__manticore_box_ptr' : ($k === 5 ? '__manticore_box_array' : '__manticore_box_object');
+                $out .= '  ' . $b . ' = call i64 @' . $fn . '(ptr ' . $p . ")\n";
+            }
+            if ($k >= 4) { $out .= '  call void @__mir_cell_retain(i64 ' . $b . ")\n"; }
+            $out .= '  store i64 ' . $b . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $done . "\n";
+        }
+        $out .= $done . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $out = $this->finishI64($out, $r);
+        $this->markCellOpaque($this->lastValue);
+        return $out;
+    }
     /**
      * `__mc_refl_member($h, $name, $wantMethods)` — a member's flags + 1, or 0
      * when absent. The `+1` keeps one i64 answering both "present?" and "what?"

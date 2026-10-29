@@ -597,6 +597,7 @@ trait LowerFns
         if ($this->currentLowerClass === '') { $this->module->unscopedClosures[$fnName] = true; }
         if ($this->includeReflection) {
             $this->module->reflClosureMeta[$fnName] = $this->closureMethodMeta($fnName, $declParams, $retHint);
+            $this->module->closureCapNames[$fnName] = $capNames;
             $this->queueClosureFactories($fnName, $declParams);
         }
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/

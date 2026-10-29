@@ -480,6 +480,9 @@ final class Module
      *  reflects a computed name (the closure may be what it names). Declared LAST. */
     public array $reflClosureMeta = [];
 
+    /** @var array<string, string[]> closure fn name → captured variable names, in env order (`this` included) */
+    public array $closureCapNames = [];
+
     /** Whether the program reflects a computed name, so a closure built after lowering
      *  ({@see Passes\ResolveMethodFcc}) must record its shape too. Declared LAST. */
     public bool $reflClosureWanted = false;

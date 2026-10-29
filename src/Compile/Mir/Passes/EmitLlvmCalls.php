@@ -331,6 +331,20 @@ trait EmitLlvmCalls
      * The closure value is the struct ptr; the fn itself is the
      * top-level `__closure_N` synthesised at lowering.
      */
+    /** How a closure env word of static type `$t` is read back into a cell ({@see biMcReflCloCap}). */
+    private function capKindOf(Type $t): int
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_INT) { return \Compile\MemoryAbi::RMETA_CAP_INT; }
+        if ($k === Type::KIND_FLOAT) { return \Compile\MemoryAbi::RMETA_CAP_FLOAT; }
+        if ($k === Type::KIND_BOOL) { return \Compile\MemoryAbi::RMETA_CAP_BOOL; }
+        if ($k === Type::KIND_STRING) { return \Compile\MemoryAbi::RMETA_CAP_STRING; }
+        if ($k === Type::KIND_ARRAY) { return \Compile\MemoryAbi::RMETA_CAP_ARRAY; }
+        if ($k === Type::KIND_CLOSURE || ($k === Type::KIND_OBJ && !$this->isEnumType($t))) { return \Compile\MemoryAbi::RMETA_CAP_OBJECT; }
+        if ($k === Type::KIND_CELL) { return \Compile\MemoryAbi::RMETA_CAP_CELL; }
+        return \Compile\MemoryAbi::RMETA_CAP_UNSUPPORTED;
+    }
+
     private function emitClosure(Closure_ $n): string
     {
         $cl = $n;
@@ -436,6 +450,7 @@ trait EmitLlvmCalls
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)($i + 1) . "\n";
             $out .= '  store i64 ' . $capV . ', ptr ' . $gep . "\n";
+            $this->closureCapKinds[$fnName][$i] = ($cl->captureByRef[$i] ?? false) ? \Compile\MemoryAbi::RMETA_CAP_UNSUPPORTED : $this->capKindOf($c->type);
             $i = $i + 1;
         }
         $this->lastValue = $buf;
