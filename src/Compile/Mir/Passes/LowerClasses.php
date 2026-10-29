@@ -1306,6 +1306,19 @@ trait LowerClasses
                 $pptype = $cd->propertyTypes[$pprop->name] ?? Type::unknown();
                 $defaultStores[] = $this->inheritedPropDefaultStore($pprop, $decl->name, $pptype);
             }
+            // …and the defaults the PARENT mixed in from its traits: they live in no ClassDecl
+            // property list, so a subclass of a trait-using class left them uninitialised.
+            foreach ($this->usedTraitsFlat($pdecl) as $ptraitName) {
+                $ptd = $this->traitTable[\ltrim($ptraitName, '\\')] ?? null;
+                if ($ptd === null) { continue; }
+                foreach ($ptd->properties as $ptprop) {
+                    if (isset($seen[$ptprop->name])) { continue; }
+                    $seen[$ptprop->name] = true;
+                    if ($ptprop->isStatic || !$this->traitPropHasDefault($ptprop)) { continue; }
+                    $ptptype = $cd->propertyTypes[$ptprop->name] ?? Type::unknown();
+                    $defaultStores[] = $this->traitPropDefaultStore($ptprop, $decl->name, $ptptype);
+                }
+            }
             $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';
             $guard = $guard + 1;
         }
