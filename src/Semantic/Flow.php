@@ -1211,11 +1211,11 @@ final class Flow
      *
      * @return (SourceType|null)[]
      */
-    private static function elementTypes(?SourceType $t): array
+    public static function elementTypes(?SourceType $t): array
     {
         if ($t !== null && $t->kind === SourceType::SHAPE) {
             $ks = [];
-            foreach ($t->keys as $k) { $ks[] = ExprTyper::scalar(\ctype_digit(\rtrim($k, '?')) ? 'int' : 'string'); }
+            foreach ($t->keys as $k) { $ks[] = ExprTyper::scalar(ExprTyper::isIntKey(\rtrim($k, '?')) ? 'int' : 'string'); }
             return [ExprTyper::union($ks), ExprTyper::union($t->args)];
         }
         if ($t === null || ($t->kind !== SourceType::GENERIC && $t->kind !== SourceType::ITERABLE)) { return [null, null]; }

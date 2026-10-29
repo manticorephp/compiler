@@ -405,7 +405,7 @@ final class ExprTyper
             if ($v === null || $el->byRef) { return self::scalar('array'); }
             $vals[] = $v;
             if ($el->key !== null) {
-                $k = $this->go($el->key, $env, $d);
+                $k = $el->key instanceof StringLiteral && self::isIntKey($el->key->value) ? self::scalar('int') : $this->go($el->key, $env, $d);
                 if ($k === null) { return self::scalar('array'); }
                 $keyed = true;
                 $keys[] = $k;
@@ -431,11 +431,18 @@ final class ExprTyper
         $keys = [];
         $seen = [];
         foreach ($e->elements as $el) {
-            if (!($el->key instanceof StringLiteral) || isset($seen['k:' . $el->key->value])) { return null; }
+            if (!($el->key instanceof StringLiteral) || self::isIntKey($el->key->value) || $el->key->value === '' || \str_ends_with($el->key->value, '?')
+                || isset($seen['k:' . $el->key->value])) { return null; }
             $seen['k:' . $el->key->value] = true;
             $keys[] = $el->key->value;
         }
         return new SourceType(SourceType::SHAPE, 'array', $vals, '', null, $keys);
+    }
+
+    /** PHP stores a decimal-integer string key as an int key. */
+    public static function isIntKey(string $k): bool
+    {
+        return \preg_match('/^(0|-?[1-9][0-9]*)$/', $k) === 1;
     }
 
     private function arrayAccess(ArrayAccess $e, TypeEnv $env, int $d): ?SourceType

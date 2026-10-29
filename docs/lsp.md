@@ -36,12 +36,16 @@ the type comes from.
   variants): a docblock refines a bare `array` / `iterable` (nullable too), any other native hint wins. Class names are
   fully qualified through the file's namespace and `use` map.
 - Rendering: `list<V>`, `array<K, V>`, `array{id: int, name?: string}` (`?` = optional key; positional entries are
-  keyed `0`, `1`, ...), and `V[]` for the one-argument `array<V>` (also what `@var V[]` means).
+  keyed `0`, `1`, ...; a key that is not a plain word is single-quoted with `\\`, `'`, backtick and newline escaped), and `V[]` for the one-argument `array<V>` (also what `@var V[]` means).
 - Variables: parameters show the declared type, locals the inferred type at that point (narrowing applies), foreach
   variables the element type. A literal with distinct string keys (at most 8) is a shape, other keyed literals are
   `array<K, V>`, elements of different types join into a union (`list<int|string>`), `[]` is a bare `array`.
-- Source label: `*from annotation*` when a docblock refined the type, `*inferred*` for locals; a plain native
-  declaration has no label.
+- A string-literal key that PHP casts to an int (`'1'`, `'-5'`) or ends in `?` makes the literal a plain `array<K, V>`, not a shape.
+- Source label: `*from annotation*` only while the shown type is the docblock-refined declared one; after a reassignment or
+  narrowing, and for locals, `*inferred*`; a plain native declaration has no label. A docblock never overrides a native
+  `int`/`string`/class hint, and a non-array docblock type is ignored on a native `array`.
+- Markdown safety: code spans use a delimiter longer than any backtick run inside, and the signature fence grows past a
+  ``` run in the text.
 - Detail lines list `keys` / `values` (generic arrays) or one `key: type` per entry (shapes), nested arrays indented,
   at most 12 lines, `…` when cut. A method or function hover prefixes the list of its return type with `**Returns**`.
 

@@ -159,12 +159,90 @@ check('shape parse: optional, quoted and positional keys', function (): bool|str
     $t = SourceTypeParser::fromHint("array{'a b': int, c?: ?string, int, list<int>}");
     if ($t === null) { return 'null'; }
     $s = TypeDetail::inline($t);
-    return $s === "array{a b: int, c?: ?string, 0: int, 1: list<int>}" ? true : $s;
+    return $s === "array{'a b': int, c?: ?string, 0: int, 1: list<int>}" ? true : $s;
 });
 check('hover never throws on garbage positions', function () use ($w): bool|string {
     foreach ([[0, 0], [1, 1], [999, 1], [20, 500], [-1, -1]] as [$l, $c]) { $w->hover('a.php', $l, $c); }
     $w->hover('zzz.php', 1, 1);
     return true;
+});
+
+/** @return string[] [text, detail] of a hover in a standalone file */
+function hv(string $src, string $needle, int $nth = 1, int $off = 1): array
+{
+    $w = ws(['a.php' => $src]);
+    return h($w, $src, $needle, $nth, $off);
+}
+
+check('numeric-string keys are int keys: no shape', function (): bool|string {
+    $src = "<?php\n\$a = ['1' => 'x', 'a b' => 1];\n\$b = ['-1' => 1];\n\$c = ['a?' => 1];\n\$d = ['0' => 1];\n\$f = ['01' => 1];\n";
+    foreach (['$a = ', '$b = ', '$c = ', '$d = '] as $n) {
+        $g = hv($src, $n);
+        if (str_contains($g[0], '{')) { return $n . $g[0]; }
+    }
+    $g = hv($src, '$f = ');
+    return str_contains($g[0], '{') ? true : $g[0];
+});
+check('foreach over a literal with numeric string keys: key is int', function (): bool|string {
+    $src = "<?php\nforeach (['-1' => 1, '-2' => 2] as \$k => \$v) { echo \$k; }\n";
+    $g = hv($src, '$k =>');
+    return $g[0] === '$k: int' ? true : $g[0];
+});
+check('catch variable sharing a parameter name', function (): bool|string {
+    $src = "<?php\nfunction f(?array \$opt) { try { echo 1; } catch (\\Throwable \$opt) { echo \$opt; } }\n";
+    $g = hv($src, '$opt)', 2);
+    $u = hv($src, '$opt;');
+    return $g[0] === '$opt: Throwable' && $u[0] === '$opt: Throwable' ? true : json_encode([$g, $u]);
+});
+check('list destructuring target takes the assigned element type', function (): bool|string {
+    $src = "<?php\n\$p = 'str';\n[\$p, \$z] = [1, 2];\necho \$p;\n";
+    $g = hv($src, '$p, ');
+    return $g[0] === '$p: int' ? true : $g[0];
+});
+check('foreach target defined earlier with another type', function (): bool|string {
+    $src = "<?php\n\$r = 'x';\nforeach ([1.5, 2.5] as \$r) { echo \$r; }\n";
+    $g = hv($src, '$r)');
+    return $g[0] === '$r: float' ? true : $g[0];
+});
+check('annotation label only while the type is the declared one', function (): bool|string {
+    $src = "<?php\n/** @param list<int> \$xs */\nfunction f(array \$xs) { echo \$xs; \$xs = 's'; echo \$xs; }\n";
+    $a = hv($src, '$xs;');
+    $b = hv($src, '$xs;', 2);
+    return $a[0] === '$xs: list<int>' && str_ends_with($a[1], '*from annotation*')
+        && $b[0] === '$xs: string' && $b[1] === '*inferred*' ? true : json_encode([$a, $b]);
+});
+check('markdown: hostile shape keys cannot break spans', function (): bool|string {
+    $src = "<?php\nclass K {\n    /** @var array{'k`z': int, 'a\\nb': int, ok: int} */\n    public array \$p = [];\n}\n";
+    $g = hv($src, '$p =');
+    if (str_contains($g[0], "\n")) { return json_encode($g); }
+    foreach (explode("\n", $g[1]) as $ln) {
+        if ($ln !== '' && !str_starts_with($ln, '- ') && !str_starts_with($ln, '*')) { return json_encode($g); }
+    }
+    return str_contains($g[1], 'k\\`z') && str_contains($g[1], "a\\\\nb") && str_contains($g[1], '- `ok: int`') ? true : json_encode($g);
+});
+check('markdown: a ``` run in a literal type keeps the text one line', function (): bool|string {
+    $src = "<?php\nclass K {\n    /** @var 'a```b' */\n    public \$p;\n}\n";
+    $g = hv($src, '$p;');
+    return !str_contains($g[0], "\n") ? true : json_encode($g);
+});
+check('native wins over a conflicting doc type', function (): bool|string {
+    $src = "<?php\n/** @param string \$x */\nfunction f(int \$x) {}\n/** @param int \$y */\nfunction g(array \$y) {}\n";
+    $a = hv($src, 'f(int', 1, 0);
+    $b = hv($src, 'g(array', 1, 0);
+    return $a[0] === 'f(int $x)' && $b[0] === 'g(array $y)' ? true : json_encode([$a, $b]);
+});
+check('unresolvable class in a docblock prints as written; unknown @param ignored', function (): bool|string {
+    $src = "<?php\nnamespace N;\n/**\n * @param list<Nope> \$xs\n * @param int \$ghost\n */\nfunction f(array \$xs) {}\n";
+    $a = hv($src, 'f(array', 1, 0);
+    return $a[0] === 'N\\f(list<N\\Nope> $xs)' ? true : $a[0];
+});
+check('a throwing rich path degrades to the plain text', function (): bool|string {
+    $src = "<?php\nclass A { public int \$n = 0; }\nfunction f(A \$a) { return \$a->n; }\n";
+    $w = ws(['a.php' => $src]);
+    $p = where($src, '$a->n', 1, 5);
+    $w->hoverProbe = function (): void { throw new \RuntimeException('boom'); };
+    $x = $w->hover('a.php', $p[0], $p[1]);
+    return $x !== null && $x->text === 'A::$n: int' && $x->detail === '' && $w->hoverError === 'boom' ? true : json_encode([$x, $w->hoverError]);
 });
 
 exit($fail);
