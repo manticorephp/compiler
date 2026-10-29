@@ -554,7 +554,7 @@ final class Index
             $out['prop:' . $p->name] ??= $this->member('prop', $p->name, '$' . $p->name, $fqn, $p->visibility, $p->isStatic, false, $p->typeHint, $file, $p->span, $end, $this->docTag($p->docComment, '@var', $fqn, $tpl));
         }
         foreach ($d->consts as $c) {
-            $out['const:' . $c->name] ??= $this->member('const', $c->name, $c->name, $fqn, $c->visibility, true, false, $c->typeHint, $file, $c->span, $end, null, $c->typeHint === null ? self::smallValue($c->value) : null);
+            $out['const:' . $c->name] ??= $this->member('const', $c->name, $c->name, $fqn, $c->visibility, true, false, $c->typeHint, $file, $c->span, $end, $this->docTag($c->docComment, '@var', $fqn, $ctpl), $c->typeHint === null ? self::smallValue($c->value) : null);
         }
         foreach ($d->cases as $case) {
             $sp = $case->span ?? $d->span;
