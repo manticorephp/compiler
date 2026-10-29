@@ -6952,6 +6952,14 @@ final class LowerFromAst implements Pass
         // as a null-safe chain works for user code but REGRESSED the self-host
         // (the compiler's own `??` chains over erased types crash Stage-2 emit),
         // so it stays a bare read for now — use `$a->b?->c ?? $d` explicitly.
+        // A property read off a CALL result (`f()->p ?? $d`) answers the default when the
+        // call returns null; plain-variable receivers keep the bare read (see the note above).
+        $left = $e->left;
+        if ($left instanceof \Parser\Ast\PropertyAccess && !$left->nullsafe
+            && ($left->object instanceof \Parser\Ast\CallExpr || $left->object instanceof \Parser\Ast\MethodCallExpr
+                || $left->object instanceof \Parser\Ast\StaticCall)) {
+            return new NullCoalesce_($this->lowerNullsafeProp($left), $this->lowerExpr($e->right), Type::unknown());
+        }
         return new NullCoalesce_(
             $this->markProbe($this->lowerExpr($e->left)),
             $this->lowerExpr($e->right),
