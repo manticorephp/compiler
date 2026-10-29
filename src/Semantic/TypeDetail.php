@@ -58,6 +58,12 @@ final class TypeDetail
     {
         $opt = \str_ends_with($key, '?');
         $k = $opt ? \substr($key, 0, -1) : $key;
+        $cut = \strlen($k) > 60;
+        if ($cut) {
+            $len = 60;
+            while ($len > 0 && (\ord($k[$len]) & 0xC0) === 0x80) { $len = $len - 1; }
+            $k = \substr($k, 0, $len);
+        }
         if (\preg_match('/^[A-Za-z0-9_\x80-\xff]+$/', $k) !== 1) {
             $out = '';
             $n = \strlen($k);
@@ -66,10 +72,12 @@ final class TypeDetail
                 if ($ch === '\\' || $ch === "'" || $ch === '`') { $out .= '\\' . $ch; }
                 elseif ($ch === "\n") { $out .= '\\n'; }
                 elseif ($ch === "\r") { $out .= '\\r'; }
-                elseif (\ord($ch) < 32) { $out .= '\\x' . \sprintf('%02x', \ord($ch)); }
+                elseif (\ord($ch) < 32 || \ord($ch) === 127) { $out .= '\\x' . \sprintf('%02x', \ord($ch)); }
                 else { $out .= $ch; }
             }
-            $k = "'" . $out . "'";
+            $k = "'" . $out . ($cut ? '…' : '') . "'";
+        } elseif ($cut) {
+            $k = $k . '…';
         }
         return $k . ($opt ? '?' : '');
     }

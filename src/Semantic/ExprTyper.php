@@ -442,7 +442,11 @@ final class ExprTyper
     /** PHP stores a decimal-integer string key as an int key. */
     public static function isIntKey(string $k): bool
     {
-        return \preg_match('/^(0|-?[1-9][0-9]*)$/', $k) === 1;
+        if (\preg_match('/^(0|-?[1-9][0-9]*)\z/', $k) !== 1) { return false; }
+        $neg = $k[0] === '-';
+        $digits = $neg ? \substr($k, 1) : $k;
+        if (\strlen($digits) !== 19) { return \strlen($digits) < 19; }
+        return \strcmp($digits, $neg ? '9223372036854775808' : '9223372036854775807') <= 0;
     }
 
     private function arrayAccess(ArrayAccess $e, TypeEnv $env, int $d): ?SourceType

@@ -245,4 +245,55 @@ check('a throwing rich path degrades to the plain text', function (): bool|strin
     return $x !== null && $x->text === 'A::$n: int' && $x->detail === '' && $w->hoverError === 'boom' ? true : json_encode([$x, $w->hoverError]);
 });
 
+check('foreach list target with a previously defined type', function (): bool|string {
+    $src = "<?php\n\$p = 's';\n/** @param list<list<int>> \$xs */\nfunction f(array \$xs) { global \$p; }\nfunction g() { \$p = 's'; \$xs = [[1, 2], [3, 4]]; foreach (\$xs as [\$p, \$q]) { echo \$p; } }\n";
+    $g = hv($src, '$p, $q]');
+    $h = hv($src, '$q]');
+    return $g[0] === '$p: int' && $h[0] === '$q: int' ? true : json_encode([$g, $h]);
+});
+check('nested positional destructuring', function (): bool|string {
+    $src = "<?php\n\$p = 's';\n[[\$p, \$b], \$c] = f([[1, 2]]);\necho \$p;\n/** @return list<list<int>> */\nfunction f(array \$a): array { return \$a; }\n";
+    $a = hv($src, '$p, $b');
+    $b = hv($src, '$b]');
+    $c = hv($src, '$c]');
+    return $a[0] === '$p: int' && $b[0] === '$b: int' && $c[0] === '$c: list<int>' ? true : json_encode([$a, $b, $c]);
+});
+check('nested keyed destructuring from a shape', function (): bool|string {
+    $src = "<?php\n\$shape = ['a' => [1, 'x'], 'n' => 1.5];\n['a' => [\$x, \$y], 'n' => \$n] = \$shape;\necho \$x;\n";
+    $a = hv($src, '$x, $y');
+    $n = hv($src, '$n]');
+    return $a[0] === '$x: int|string' && $n[0] === '$n: float' ? true : json_encode([$a, $n]);
+});
+check('destructuring an unknown value falls back safely', function (): bool|string {
+    $src = "<?php\nfunction f(\$u) { [\$a, [\$b]] = \$u; echo \$b; foreach (\$u as [\$c]) { echo \$c; } }\n";
+    $a = hv($src, '$a,');
+    $r = hv($src, '$c]');
+    return $a[0] === '<null>' && $r[0] === '<null>' ? true : json_encode([$a, $r]);
+});
+check('array literal read is not a destructuring target', function (): bool|string {
+    $src = "<?php\n\$p = 's';\n\$z = [\$p, 1];\n";
+    $g = hv($src, '$p, 1');
+    return $g[0] === '$p: string' ? true : $g[0];
+});
+check('integer-like keys follow Zend exactly', function (): bool|string {
+    $want = ["1" => true, "1\n" => false, "9223372036854775807" => true, "9223372036854775808" => false,
+        "-9223372036854775808" => true, "-9223372036854775809" => false, "-0" => false, "01" => false, "0" => true];
+    foreach ($want as $k => $is) {
+        if (\Semantic\ExprTyper::isIntKey((string)$k) !== $is) { return json_encode($k); }
+    }
+    return true;
+});
+check('long and del keys are cut and escaped', function (): bool|string {
+    $k = \Semantic\TypeDetail::keyText(str_repeat('é', 40));
+    $d = \Semantic\TypeDetail::keyText("a\x7fb");
+    return strlen($k) < 90 && str_ends_with($k, '…') && mb_check_encoding($k, 'UTF-8') && $d === "'a\\x7fb'" ? true : json_encode([$k, $d]);
+});
+
+check('unknown destructured value never shows the stale type', function (): bool|string {
+    $src = "<?php\nfunction f(\$u) { \$p = 's'; [\$p] = \$u; foreach (\$u as [\$p]) { } }\n";
+    $a = hv($src, '$p]');
+    $b = hv($src, '$p]', 2);
+    return $a[0] === '<null>' && $b[0] === '<null>' ? true : json_encode([$a, $b]);
+});
+
 exit($fail);

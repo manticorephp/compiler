@@ -500,8 +500,7 @@ final class Workspace
     {
         try {
             if ($this->hoverProbe !== null) { ($this->hoverProbe)(); }
-            $h = $this->hoverRich($uri, $line, $col);
-            if ($h !== null) { return $h; }
+            return $this->hoverRich($uri, $line, $col);
         } catch (\Throwable $e) {
             $this->hoverError = $e->getMessage();
         }
@@ -540,9 +539,13 @@ final class Workspace
                 return new HoverInfo($text, new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol), self::detailText($detail, $ret[2] || $ps[1] ? 'from annotation' : ''));
             }
         }
-        if ($o !== null && $o->inDoc) { return null; }
+        if ($o !== null && $o->inDoc) {
+            return new HoverInfo($o->resolved, new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
+        }
         $v = $this->variableHover($uri, $line, $col);
         if ($v !== null) { return $v; }
+        $vi = $this->varsAt($uri, $line, $col);
+        if ($vi !== null && !$vi->isSpecial($vi->bindingAt($line, $col))) { return null; }
         $t = $this->typeAt($uri, $line, $col);
         $n = $this->nodeAt($uri, $line, $col);
         if ($t === null || $n === null) { return null; }
@@ -591,7 +594,7 @@ final class Workspace
                     $el = Flow::elementTypes($typer->typeOf($fe->expr, $lookup->envAt($fe->expr, $this->index, $uri)));
                     $t = $fe->key === $node ? $el[0] : $el[1];
                 }
-            } elseif ($parent instanceof \Parser\Ast\ArrayLit && self::isListTarget($chain, $n - 2)) {
+            } elseif ($parent instanceof \Parser\Ast\ArrayLit && self::isListTarget($chain, $n, $lookup)) {
                 $t = $this->destructured($chain, $n, $typer, $lookup, $uri);
             } else {
                 $t = $typer->typeOf($node, $lookup->envAt($node, $this->index, $uri));
@@ -613,47 +616,67 @@ final class Workspace
     }
 
     /**
-     * Is chain[$i] an array literal that is (inside nested ones) the target of an assignment?
+     * Is the variable at chain[$n - 1] inside a destructuring pattern: nested array literals under an assignment target or a foreach value?
      *
      * @param Expr[] $chain
      */
-    private static function isListTarget(array $chain, int $i): bool
+    private static function isListTarget(array $chain, int $n, UnitLookup $lookup): bool
     {
-        while ($i > 0 && $chain[$i] instanceof \Parser\Ast\ArrayLit) {
-            $p = $chain[$i - 1];
-            if ($p instanceof \Parser\Ast\Assign) { return $p->target === $chain[$i]; }
-            $i = $i - 1;
-        }
-        return false;
+        $i = $n - 1;
+        while ($i > 0 && $chain[$i - 1] instanceof \Parser\Ast\ArrayLit) { $i = $i - 1; }
+        if ($i === $n - 1) { return false; }
+        $p = $i > 0 ? $chain[$i - 1] : null;
+        if ($p instanceof \Parser\Ast\Assign) { return $p->target === $chain[$i]; }
+        $fe = $lookup->foreachOf($chain[$i]);
+        return $fe !== null && $fe->value === $chain[$i];
     }
 
     /**
-     * Type a variable gets from `[$a, 'k' => $b] = value`: the element of the assigned value at its position or key.
+     * Type a variable gets from `[$a, 'k' => [$b, $c]] = value` or `foreach ($xs as [$a, $b])`: the value's element type taken
+     * stepwise by position or literal key down the pattern; null where unknown.
      *
      * @param Expr[] $chain
      */
     private function destructured(array $chain, int $n, ExprTyper $typer, UnitLookup $lookup, string $uri): ?SourceType
     {
-        $lit = $chain[$n - 2];
-        $assign = $chain[$n - 3] ?? null;
-        if (!($lit instanceof \Parser\Ast\ArrayLit) || !($assign instanceof \Parser\Ast\Assign) || $assign->target !== $lit) { return null; }
-        $v = $typer->typeOf($assign->value, $lookup->envAt($assign->value, $this->index, $uri));
-        if ($v === null) { return null; }
-        $pos = 0;
-        foreach ($lit->elements as $el) {
-            if ($el->value === $chain[$n - 1]) {
-                if ($v->kind === SourceType::SHAPE) {
-                    $want = $el->key instanceof \Parser\Ast\StringLiteral ? $el->key->value : ($el->key instanceof \Parser\Ast\IntLiteral ? (string)$el->key->value : (string)$pos);
-                    foreach ($v->args as $i => $a) { if (\rtrim($v->keys[$i], '?') === $want) { return $a; } }
-                    return null;
-                }
-                return Flow::elementTypes($v)[1];
+        /** @var array<int, array{0: \Parser\Ast\ArrayElement, 1: int}> $path bottom-up */
+        $path = [];
+        $i = $n - 1;
+        while ($i > 0 && $chain[$i - 1] instanceof \Parser\Ast\ArrayLit) {
+            $lit = $chain[$i - 1];
+            $pos = 0;
+            $found = null;
+            foreach ($lit->elements as $el) {
+                if ($el->value === $chain[$i]) { $found = $el; break; }
+                $pos = $pos + 1;
             }
-            $pos = $pos + 1;
+            if ($found === null || $found->byRef) { return null; }
+            $path[] = [$found, $pos];
+            $i = $i - 1;
         }
-        return null;
+        $top = $chain[$i];
+        $p = $i > 0 ? $chain[$i - 1] : null;
+        $fe = $lookup->foreachOf($top);
+        if ($p instanceof \Parser\Ast\Assign && $p->target === $top) {
+            $t = $typer->typeOf($p->value, $lookup->envAt($p->value, $this->index, $uri));
+        } elseif ($fe !== null && $fe->value === $top && !$fe->valueByRef) {
+            $t = Flow::elementTypes($typer->typeOf($fe->expr, $lookup->envAt($fe->expr, $this->index, $uri)))[1];
+        } else {
+            return null;
+        }
+        for ($k = \count($path) - 1; $k >= 0 && $t !== null; $k = $k - 1) {
+            $el = $path[$k][0];
+            if ($t->kind === SourceType::SHAPE) {
+                $want = $el->key instanceof \Parser\Ast\StringLiteral ? $el->key->value : ($el->key instanceof \Parser\Ast\IntLiteral ? (string)$el->key->value : (string)$path[$k][1]);
+                $next = null;
+                foreach ($t->args as $j => $arg) { if (\rtrim($t->keys[$j], '?') === $want) { $next = $arg; } }
+                $t = $next;
+            } else {
+                $t = Flow::elementTypes($t)[1];
+            }
+        }
+        return $t;
     }
-
     /** Type of the first later use of a binding that has one (a foreach or catch variable is typed only inside its body). */
     private function nextUseType(string $uri, VarIndex $vi, int $b, int $line, int $col): ?SourceType
     {
