@@ -10,6 +10,8 @@ final class Completion
         public string $kind,
         public string $detail = '',
         public string $insertText = '',
+        /** 0 own member / variable, 1 inherited member, 2 global name */
+        public int $rank = 2,
     ) {
         if ($this->insertText === '') { $this->insertText = $label; }
     }

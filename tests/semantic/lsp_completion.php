@@ -110,4 +110,17 @@ check('unknown receiver -> empty items, no error', function () use ($U): bool|st
     return ($r['result']['items'] ?? null) === [] ? true : json_encode($r);
 });
 
+check('sortText on every item, own members before inherited', function () use ($U): bool|string {
+    $d = rig();
+    open($d, $U, "<?php\nclass P { public function aaa() {} }\nclass C extends P { public function zzz() {} function t() { \$this->; } }\nstr\n");
+    $r = complete($d, $U, 2, 67)['result']['items'] ?? [];
+    $st = array_column($r, 'sortText', 'label');
+    if (($st['zzz'] ?? '') !== '00_zzz' || ($st['aaa'] ?? '') !== '01_aaa') { return json_encode($st); }
+    $f = complete($d, $U, 3, 3)['result']['items'] ?? [];
+    foreach (array_merge($r, $f) as $i) {
+        if (!str_starts_with($i['sortText'] ?? 'x', '0')) { return 'bad sortText ' . json_encode($i); }
+    }
+    return ($f[0]['sortText'] ?? '') === '02_' . strtolower($f[0]['label']) ? true : json_encode($f[0] ?? null);
+});
+
 exit($fail);

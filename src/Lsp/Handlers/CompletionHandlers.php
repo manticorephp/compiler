@@ -43,7 +43,8 @@ final class CompletionHandlers
             $items = [];
             $found = $this->ws->completionsAt($uri, $line, Position::toCore(Position::lineText($text, $line), $pos['character']));
             foreach ($found as $c) {
-                $items[] = ['label' => $c->label, 'kind' => self::KINDS[$c->kind] ?? 1, 'detail' => $c->detail, 'insertText' => $c->insertText];
+                $items[] = ['label' => $c->label, 'kind' => self::KINDS[$c->kind] ?? 1, 'detail' => $c->detail, 'insertText' => $c->insertText,
+                    'sortText' => '0' . $c->rank . '_' . strtolower($c->label)];
             }
             return ['isIncomplete' => count($found) >= Completer::CAP, 'items' => $items];
         });

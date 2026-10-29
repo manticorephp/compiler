@@ -428,7 +428,7 @@ final class Workspace
             if ($this->insideClass($uri, $line, $col)) { $names[] = 'this'; }
             $out = [];
             foreach (\array_unique($names) as $n) {
-                if ($prefix === '' || \stripos($n, $prefix) === 0) { $out[] = new Completion('$' . $n, 'variable'); }
+                if ($prefix === '' || \stripos($n, $prefix) === 0) { $out[] = new Completion('$' . $n, 'variable', '', '', 0); }
             }
             \usort($out, fn(Completion $a, Completion $b): int => \strcmp($a->label, $b->label));
             return \array_slice($out, 0, Completer::CAP);
