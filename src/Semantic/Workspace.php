@@ -55,6 +55,9 @@ final class Workspace
     /** @var array<string, Diagnostic[]> uri => parse errors of a file whose text does not parse (kept after close) */
     private array $parseErrors = [];
 
+    /** @var array<string, string> uri => open text (completion reads the line before the cursor) */
+    private array $texts = [];
+
     public function __construct(private LibrarySymbols $lib, private bool $checkUndefined = true)
     {
         if (count($lib->preludeFiles()) === 0) {
@@ -80,6 +83,7 @@ final class Workspace
         $this->siteCache = [];
         $this->asts[$uri] = $pf;
         $this->lines[$uri] = new LineIndex($text);
+        $this->texts[$uri] = $text;
         $this->exprAt[$uri] = ExprAt::build($r->program);
         $this->index->replaceFile($pf);
         $this->names->replaceFile($uri, $r->program, $text);
@@ -100,14 +104,14 @@ final class Workspace
     public function close(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->varIndexes[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->varIndexes[$uri], $this->texts[$uri]);
         unset($this->siteCache[$uri]);
     }
 
     public function remove(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->varIndexes[$uri], $this->parseErrors[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->varIndexes[$uri], $this->parseErrors[$uri], $this->texts[$uri]);
         $this->siteCache = [];
         $this->index->removeFile($uri);
         $this->names->removeFile($uri);
@@ -371,6 +375,114 @@ final class Workspace
         $node = $chain[\count($chain) - 1];
         $env = $this->unitsOf($uri, $pf)->envAt($node, $this->index, $uri);
         return (new ExprTyper($this->index, $uri))->typeOf($node, $env);
+    }
+
+    /**
+     * Candidates at the cursor (the position just after the typed text), at most Completer::CAP, sorted. The context is read
+     * from the line before the cursor: `->` / `?->` (members of the receiver's type, visible from the enclosing class),
+     * `::` (static members, constants, cases), `$name` (variables bound earlier in the scope, `$this` in a class), else a
+     * bare name (classes, functions, constants). A receiver on an earlier line, or of unknown type, answers nothing.
+     * Keywords are not offered. Never throws.
+     *
+     * The receiver is typed on a scratch parse of the text with a placeholder member in place of the typed word, so a
+     * file that is broken at the cursor (`$a->` and nothing after) still answers.
+     *
+     * @return Completion[]
+     */
+    public function completionsAt(string $uri, int $line, int $col): array
+    {
+        try {
+            return $this->complete($uri, $line, $col);
+        } catch (\Throwable) {
+            return [];
+        }
+    }
+
+    /** @return Completion[] */
+    private function complete(string $uri, int $line, int $col): array
+    {
+        $text = $this->texts[$uri] ?? null;
+        $li = $this->lines[$uri] ?? null;
+        if ($text === null || $li === null) { return []; }
+        $start = $li->offsetOf($line, 1);
+        $off = $li->offsetOf($line, $col);
+        if ($start === null || $off === null) { return []; }
+        $before = \substr($text, $start, $off - $start);
+        $comp = new Completer($this->index);
+        if (\preg_match('/(\?->|->|::)[ \t]*(\$?\w*)$/', $before, $m, PREG_OFFSET_CAPTURE) === 1) {
+            $static = $m[1][0] === '::';
+            $prefix = $m[2][0];
+            $head = \rtrim(\substr($before, 0, $m[0][1]));
+            if ($head === '') { return []; }
+            $pcol = $col - \strlen($prefix);
+            $rest = (string)\preg_replace('/^\w+/', '', \substr($text, $off));
+            $r = $this->scratchReceiver($uri, \substr($text, 0, $off - \strlen($prefix)) . '__c;' . $rest, $line, $pcol, $static);
+            if ($r === null) { return []; }
+            [$classes, $env, $withInstance] = $r;
+            return $comp->members($classes, $env->thisClass, $static, $withInstance, $prefix);
+        }
+        if (\preg_match('/\$(\w*)$/', $before, $m, PREG_OFFSET_CAPTURE) === 1) {
+            $prefix = $m[1][0];
+            $vi = $this->varsOf($uri);
+            $names = $vi === null ? [] : $vi->namesBefore($line, $col - \strlen($prefix) - 1);
+            if ($this->insideClass($uri, $line, $col)) { $names[] = 'this'; }
+            $out = [];
+            foreach (\array_unique($names) as $n) {
+                if ($prefix === '' || \stripos($n, $prefix) === 0) { $out[] = new Completion('$' . $n, 'variable'); }
+            }
+            \usort($out, fn(Completion $a, Completion $b): int => \strcmp($a->label, $b->label));
+            return \array_slice($out, 0, Completer::CAP);
+        }
+        if (\preg_match('/(?<![\w$>:\\\\])(\\\\?[A-Za-z_][\w\\\\]*)$/', $before, $m) === 1) {
+            return $comp->symbols($m[1]);
+        }
+        return [];
+    }
+
+    /**
+     * Classes the receiver of the placeholder member `__c` at (line, col) may be, the environment there, and whether
+     * instance members are reachable through a static reference (`self`, `static`, `parent`).
+     *
+     * @return array{0: string[], 1: TypeEnv, 2: bool}|null
+     */
+    private function scratchReceiver(string $uri, string $patched, int $line, int $col, bool $static): ?array
+    {
+        $r = \Parser\Parser::parseTolerant($patched, $uri, true, true, 2);
+        $node = null;
+        foreach (\array_reverse(ExprAt::build($r->program)->chain($line, $col)) as $n) {
+            if (($n instanceof \Parser\Ast\PropertyAccess && $n->property === '__c')
+                || ($n instanceof \Parser\Ast\StaticAccess && $n->name === '__c')) { $node = $n; break; }
+        }
+        if ($node === null) { return null; }
+        $env = UnitLookup::build($r->program)->envAt($node, $this->index, $uri);
+        $typer = new ExprTyper($this->index, $uri);
+        if ($node instanceof \Parser\Ast\StaticAccess) {
+            $c = $typer->classRef($node->class, $env);
+            $low = \strtolower($node->class);
+            return $c === null ? null : [[$c], $env, $low === 'self' || $low === 'static' || $low === 'parent'];
+        }
+        $classes = $typer->classesOf($typer->typeOf($node->object, $env), $env);
+        return $classes === null ? null : [$classes, $env, false];
+    }
+
+    private function insideClass(string $uri, int $line, int $col): bool
+    {
+        $pf = $this->asts[$uri] ?? null;
+        return $pf !== null && self::inClass($pf->program->statements, $line, $col);
+    }
+
+    /** @param \Parser\Ast\Stmt[] $stmts */
+    private static function inClass(array $stmts, int $line, int $col): bool
+    {
+        $p = $line * 4294967296 + $col;
+        foreach ($stmts as $st) {
+            if ($st instanceof \Parser\Ast\NamespaceStmt && $st->body !== null && self::inClass($st->body->statements, $line, $col)) { return true; }
+            if (!($st instanceof \Parser\Ast\ClassStmt)) { continue; }
+            $sp = $st->decl->span;
+            $end = $sp->endLine() === 0 ? PHP_INT_MAX : $sp->endLine() * 4294967296 + $sp->endColumn();
+            if ($p >= $sp->startLine() * 4294967296 + $sp->startColumn() && $p <= $end) { return true; }
+        }
+        return false;
     }
 
     /** Declared signature of a member under the cursor (`Foo::bar(int $a): ?Baz`), else the type of the expression there. */

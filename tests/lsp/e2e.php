@@ -126,4 +126,17 @@ check('documentSymbol round trip: class Foo with method bar', ($got[2]['id'] ?? 
     && ($sym['children'][0]['name'] ?? '') === 'bar' && ($sym['children'][0]['kind'] ?? 0) === 6
     && ($sym['children'][0]['selectionRange']['start'] ?? null) === ['line' => 2, 'character' => 20], json_encode($got[2] ?? null) . $err);
 
+$uri = 'file:///tmp/lspe2e_comp.php';
+[$got, $code, $rest, $err] = session($bin, [
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///tmp']],
+    ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
+    ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nclass Foo {\n    public \$pub;\n    private \$priv;\n    public function bar() {}\n}\nfunction t(Foo \$a) {\n    \$a->\n}\n"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/completion', 'params' => ['textDocument' => ['uri' => $uri], 'position' => ['line' => 7, 'character' => 8]]],
+    ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
+    ['jsonrpc' => '2.0', 'method' => 'exit'],
+], 4);
+$items = $got[2]['result']['items'] ?? [];
+$lab = array_column($items, 'kind', 'label');
+check('completion round trip: public members of a broken-file receiver', ($got[2]['id'] ?? null) === 3 && $lab === ['bar' => 2, 'pub' => 5]
+    && ($got[0]['result']['capabilities']['completionProvider']['triggerCharacters'] ?? null) === ['$', '>', ':', '\\'], json_encode($got[2] ?? null) . $err);
 exit($fail);

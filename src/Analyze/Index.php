@@ -309,6 +309,12 @@ final class Index
         return $bs === false ? $n : \strtolower(\substr($n, 0, $bs)) . \substr($n, $bs);
     }
 
+    /** @return string[] keys (namespace part lowercased) of every declared global constant */
+    public function constNames(): array
+    {
+        return \array_map('strval', \array_keys($this->consts));
+    }
+
     /** Name literal of the winning declaration of a global constant (`const X` or `define('X')`), by FQN, exact case in the name part. */
     public function declaredConst(string $name): ?\Parser\Ast\Span
     {

@@ -3,6 +3,7 @@
 namespace Lsp;
 
 use Lsp\JsonRpc\Dispatcher;
+use Lsp\Handlers\CompletionHandlers;
 use Lsp\Handlers\NavigationHandlers;
 use Lsp\Handlers\RenameHandlers;
 use Lsp\Handlers\SymbolHandlers;
@@ -78,6 +79,7 @@ final class Server
                     'referencesProvider' => true,
                     'documentSymbolProvider' => true,
                     'renameProvider' => ['prepareProvider' => true],
+                    'completionProvider' => ['triggerCharacters' => ['$', '>', ':', '\\']],
                 ],
                 'serverInfo' => ['name' => 'manticore', 'version' => \Manticore\Version::STRING],
             ];
@@ -95,6 +97,7 @@ final class Server
             return null;
         });
         (new NavigationHandlers($this->ws, fn(): array => $this->docs, $this->closed))->register($d);
+        (new CompletionHandlers($this->ws, fn(): array => $this->docs))->register($d);
         (new SymbolHandlers($this->ws, fn(): array => $this->docs))->register($d);
         (new RenameHandlers($this->ws, fn(): array => $this->docs, $this->closed, $this->send))->register($d);
         $d->on('$/cancelRequest', function (array $p): mixed { return null; });

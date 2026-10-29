@@ -517,6 +517,28 @@ final class VarIndex
         return $s < 0 ? -1 : $this->sBind[$s];
     }
 
+    /**
+     * Variable names (without `$`) with a site before the point in the scope holding it; an arrow function also sees its
+     * enclosing scopes. Superglobals are left out.
+     *
+     * @return string[]
+     */
+    public function namesBefore(int $line, int $col): array
+    {
+        $sid = $this->scopeAt($line, $col);
+        $out = [];
+        while ($sid >= 0) {
+            foreach ($this->scMap[$sid] ?? [] as $name => $b) {
+                if ($this->bSpecial[$b]) { continue; }
+                foreach ($this->bSites[$b] as $id) {
+                    if ($this->sLine[$id] < $line || ($this->sLine[$id] === $line && $this->sCol[$id] < $col)) { $out[(string)$name] = true; break; }
+                }
+            }
+            $sid = $this->scKind[$sid] === 'arrow' ? $this->scParent[$sid] : -1;
+        }
+        return \array_map('strval', \array_keys($out));
+    }
+
     /** Binding whose DECLARATION (parameter, catch, global, static) covers the point, -1 when none. */
     public function declAt(int $line, int $col): int
     {
