@@ -9516,7 +9516,57 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * A call site whose candidate callee reads `func_get_args()` re-emits the
+     * arguments past its arity into the overflow channel ({@see faPush}) AFTER
+     * the call's own argument evaluation, so an impure argument ran twice —
+     * `find($view = $this->normalizeName($view))` normalised the name again
+     * from the already-assigned value. Evaluate the receiver and the impure
+     * arguments ONCE up front; both emissions then reuse the registers.
+     */
     private function emitMethodCallInner(\Compile\Mir\MethodCall_ $n): string
+    {
+        $mc = $n;
+        if ($mc->srcArgc >= 0 && $mc->args !== [] && $this->callSiteMayOverflowArgs($mc)) {
+            $mark = \count($this->preEvalNodes);
+            $pre = '';
+            $nodes = [$mc->object];
+            foreach ($mc->args as $a) { $nodes[] = $a; }
+            $impure = false;
+            foreach ($mc->args as $a) { if (!$this->indirectOperandIsPure($a)) { $impure = true; } }
+            if ($impure) {
+                foreach ($nodes as $nd) {
+                    if ($this->indirectOperandIsPure($nd)) { continue; }
+                    $pre .= $this->emitNode($nd);
+                    $this->preEvalNodes[] = $nd;
+                    $this->preEvalRegs[] = $this->lastValue;
+                    $this->preEvalTypes[] = $this->lastValueType;
+                }
+                $body = $this->emitMethodCallInnerBody($mc);
+                $rv = $this->lastValue;
+                $rt = $this->lastValueType;
+                $this->popPreEval($mark);
+                $this->lastValue = $rv;
+                $this->lastValueType = $rt;
+                return $pre . $body;
+            }
+        }
+        return $this->emitMethodCallInnerBody($mc);
+    }
+
+    /** Does some class that may answer `$mc` read `func_get_args()` with fewer parameters than the call passes? */
+    private function callSiteMayOverflowArgs(\Compile\Mir\MethodCall_ $mc): bool
+    {
+        $argc = \count($mc->args);
+        foreach ($this->methodHolders($mc->method) as $decl) {
+            $sym = $decl . '__' . $mc->method;
+            if (!($this->sigs->usesFuncArgs[$sym] ?? false)) { continue; }
+            if (\count($this->sigs->paramTypes[$sym] ?? []) - 1 < $argc) { return true; }
+        }
+        return false;
+    }
+
+    private function emitMethodCallInnerBody(\Compile\Mir\MethodCall_ $n): string
     {
         $mc = $n;
         // Routed to one body with no dispatch (a reified receiver whose argument
