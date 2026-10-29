@@ -106,7 +106,8 @@ final class DocblockNames
 
     /**
      * Degraded path when the PCRE scan fails: every `/** ... *\/` block by plain search, resolved against one
-     * namespace and use map (strings and comments are not told apart).
+     * namespace and use map. Strings and comments are not told apart, so a file with more than one `namespace`
+     * (or a lookalike) yields nothing rather than a possibly wrong class.
      *
      * @param array<string, string> $uses
      * @return array<int, array{0: string, 1: int, 2: int, 3: string}>
@@ -114,6 +115,7 @@ final class DocblockNames
     public static function scanBlocks(string $text, string $ns, array $uses): array
     {
         $out = [];
+        if (\preg_match_all('/(?<![\w$>:\\\\])namespace\s*[A-Za-z_{]/', $text) > 1) { return $out; }
         $declared = [];
         $line = 1;
         $prev = 0;
@@ -148,6 +150,7 @@ final class DocblockNames
     private static function useClause(string $clause, array &$uses): void
     {
         $clause = \trim($clause);
+        if (\preg_match('/^(?:function|const)\s/i', $clause) === 1) { return; }
         $prefix = '';
         $items = [];
         $br = \strpos($clause, '{');
