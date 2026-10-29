@@ -222,6 +222,15 @@ final class Workspace
         return $o->denotes();
     }
 
+    /** Declared kinds (method | prop | const | case) of the member(s) under the cursor; [] when it is not a resolvable member. @return string[] */
+    public function memberKindsAt(string $uri, int $line, int $col): array
+    {
+        $o = $this->names->occurrenceAt($uri, $line, $col);
+        $ks = [];
+        foreach (($o === null ? null : $this->membersOf($o)) ?? [] as $m) { $ks[$m->kind] = true; }
+        return \array_keys($ks);
+    }
+
     /**
      * Every declaration the symbol under the cursor can denote: all of a union receiver's members, else `definitionOf`.
      *
