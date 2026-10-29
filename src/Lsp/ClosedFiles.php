@@ -6,7 +6,7 @@ use Semantic\Workspace;
 
 /**
  * Scanned-but-closed workspace files. A member's use sites need receiver typing, which needs an AST, which closed
- * files do not keep: `with` opens the ones that can matter from disk for one query and closes them again.
+ * files do not keep: `with` opens them from disk one at a time during one query and closes each again.
  * ponytail: more than `max` files opened per query are skipped (the query answers from open docs plus the name index only); raise or make lazy when real projects hit it.
  */
 final class ClosedFiles
@@ -119,42 +119,46 @@ final class ClosedFiles
     }
 
     /**
-     * Runs $fn with every closed file that mentions $needle (case-insensitive; '' = all) opened from disk.
-     * A file that vanished is forgotten; one that is too big, unreadable or unparsable, or past the cap, counts toward skipped().
+     * Runs $fn with closed files opened lazily, ONE AT A TIME: the workspace asks for a file when a member use site in
+     * it needs receiver typing, the file is opened from disk, its sites are collected, and its AST is released before
+     * the next. A file that vanished is forgotten; one that is too big, unreadable or unparsable, or past the cap, counts toward skipped().
      */
-    public function with(callable $fn, string $needle = ''): mixed
+    public function with(callable $fn): mixed
     {
         if ($this->busy) { throw new \LogicException('ClosedFiles::with is not re-entrant'); }
         $this->busy = true;
         $this->skipped = 0;
-        /** @var string[] $opened */
-        $opened = [];
-        try {
-            /** @var array<string, string> $open */
-            $open = ($this->docs)();
-            foreach (\array_keys($this->scanned) as $uri) {
-                if (isset($open[$uri])) { continue; }
-                if ($this->check !== null) { ($this->check)(); }
-                $path = Uri::toPath($uri);
-                if ($path === null || !@\is_file($path)) {
-                    $this->forget($uri);
-                    continue;
-                }
-                $size = @\filesize($path);
-                $text = $size === false || $size > self::MAX_BYTES ? false : @\file_get_contents($path);
-                if ($text === false) { $this->skipped++; continue; }
-                if ($needle !== '' && \stripos($text, $needle) === false) { continue; }
-                if (\count($opened) >= $this->max) { $this->skipped++; continue; }
-                try {
-                    $this->ws->open($uri, $text);
-                    $opened[] = $uri;
-                } catch (\Throwable $e) {
-                    $this->skipped++;
-                }
+        $opened = 0;
+        /** @var array<string, string> $open */
+        $open = ($this->docs)();
+        $opener = function (string $uri, callable $inside) use ($open, &$opened): bool {
+            if (isset($open[$uri]) || !isset($this->scanned[$uri])) { return false; }
+            if ($this->check !== null) { ($this->check)(); }
+            $path = Uri::toPath($uri);
+            if ($path === null || !@\is_file($path)) {
+                $this->forget($uri);
+                return false;
             }
-            return $fn();
+            $size = @\filesize($path);
+            $text = $size === false || $size > self::MAX_BYTES ? false : @\file_get_contents($path);
+            if ($text === false || $opened >= $this->max) { $this->skipped++; return false; }
+            try {
+                $this->ws->open($uri, $text);
+            } catch (\Throwable $e) {
+                $this->skipped++;
+                return false;
+            }
+            $opened++;
+            try {
+                $inside();
+            } finally {
+                $this->ws->close($uri);
+            }
+            return true;
+        };
+        try {
+            return $this->ws->withClosedFiles($opener, $fn);
         } finally {
-            foreach ($opened as $uri) { $this->ws->close($uri); }
             $this->busy = false;
         }
     }

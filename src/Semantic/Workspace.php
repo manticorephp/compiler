@@ -58,6 +58,12 @@ final class Workspace
     /** @var array<string, string> uri => open text (completion reads the line before the cursor) */
     private array $texts = [];
 
+    /** @var (callable(string, callable): bool)|null opens a closed file for the callable only, then releases it; false when it cannot */
+    private $closedOpener = null;
+
+    /** @var array<string, array<string, MemberInfo[]|null>> "name\0file" => "line:col" => member use sites resolved in a closed file during the current withClosedFiles window */
+    private array $closedSites = [];
+
     public function __construct(private LibrarySymbols $lib, private bool $checkUndefined = true)
     {
         if (count($lib->preludeFiles()) === 0) {
@@ -87,6 +93,24 @@ final class Workspace
         $this->exprAt[$uri] = ExprAt::build($r->program);
         $this->index->replaceFile($pf);
         $this->names->replaceFile($uri, $r->program, $text);
+    }
+
+    /**
+     * Runs $fn with $opener serving member queries: a use site in a file that is not open is resolved by opening that
+     * file for the duration of one call, so only one closed file's AST is alive at a time.
+     *
+     * @param callable(string, callable): bool $opener
+     */
+    public function withClosedFiles(callable $opener, callable $fn): mixed
+    {
+        $this->closedOpener = $opener;
+        $this->closedSites = [];
+        try {
+            return $fn();
+        } finally {
+            $this->closedOpener = null;
+            $this->closedSites = [];
+        }
     }
 
     private static function assertUserUri(string $uri): void
@@ -986,12 +1010,43 @@ final class Workspace
     {
         $at = $this->exprAt[$o->file] ?? null;
         $pf = $this->asts[$o->file] ?? null;
-        if ($at === null || $pf === null) { return null; }
+        if ($at === null || $pf === null) { return $this->closedSite($o); }
         $k = $o->line . ':' . $o->col;
         if (isset($this->siteCache[$o->file]) && \array_key_exists($k, $this->siteCache[$o->file])) { return $this->siteCache[$o->file][$k]; }
         $r = (new MemberResolver($this->index))->resolve($o->file, $o, $at, $this->unitsOf($o->file, $pf));
         $this->siteCache[$o->file][$k] = $r;
         return $r;
+    }
+
+    /** @return MemberInfo[]|null a use site in a file that is not open: all same-named sites of that file resolve in one open/close */
+    private function closedSite(NameOccurrence $o): ?array
+    {
+        if ($this->closedOpener === null) { return null; }
+        $key = \strtolower(\ltrim($o->resolved, '$')) . "\0" . $o->file;
+        if (!isset($this->closedSites[$key])) {
+            $this->closedSites[$key] = [];
+            ($this->closedOpener)($o->file, function () use ($o, $key): void {
+                foreach ($this->names->inFile($o->file) as $c) {
+                    if ($c->isDecl || !$this->sameMemberName($c, $o)) { continue; }
+                    $this->closedSites[$key][$c->line . ':' . $c->col] = $this->resolveSite($c);
+                }
+            });
+        }
+        return $this->closedSites[$key][$o->line . ':' . $o->col] ?? null;
+    }
+
+    /** @return Location[] uses of the promoted constructor parameter a property declaration location names, in the declaring file (opened if closed) */
+    private function promotedUses(Location $l): array
+    {
+        $out = [];
+        $collect = function () use ($l, &$out): void {
+            $vi = $this->varsOf($l->file);
+            $vb = $vi === null ? -1 : $vi->declAt($l->line, $l->col);
+            if ($vi !== null && $vb >= 0) { $out = $vi->sitesOf($vb); }
+        };
+        if (isset($this->asts[$l->file])) { $collect(); }
+        elseif ($this->closedOpener !== null) { ($this->closedOpener)($l->file, $collect); }
+        return $out;
     }
 
     private function memberLocation(MemberInfo $m): ?Location
@@ -1017,10 +1072,8 @@ final class Workspace
                 $l = $this->memberLocation($fm);
                 if ($l !== null) { $out[self::locKey($l)] = $l; }
                 // a promoted constructor parameter is also a variable: its uses in the constructor body belong to the family
-                $vi = $fm->kind === 'prop' && $l !== null ? $this->varsOf($l->file) : null;
-                $vb = $vi === null ? -1 : $vi->declAt($l->line, $l->col);
-                if ($vi !== null && $vb >= 0) {
-                    foreach ($vi->sitesOf($vb) as $vl) { $out[self::locKey($vl)] = $vl; }
+                if ($fm->kind === 'prop' && $l !== null) {
+                    foreach ($this->promotedUses($l) as $vl) { $out[self::locKey($vl)] = $vl; }
                 }
             }
         }

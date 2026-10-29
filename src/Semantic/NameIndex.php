@@ -241,6 +241,12 @@ final class NameIndex
     }
 
     /** @return NameOccurrence[] */
+    public function inFile(string $path): array
+    {
+        return $this->occ[$path] ?? [];
+    }
+
+    /** @return NameOccurrence[] */
     public function allOccurrences(): array
     {
         $out = [];

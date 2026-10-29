@@ -186,10 +186,14 @@ the scan, 510 MB at the end (after the member-references passes, which parse eve
 file that mentions the member name; 60 member queries end at 633 MB, so growth flattens
 rather than scaling per query). Linux numbers are not recorded.
 
-Why RSS climbs (issue #528): a member query opens every closed file that mentions the name at
-once, and a tolerant AST is about 45x its source. Under Zend the same session retains a flat
-~93 MB after every query (no AST is held by the workspace after close) while the in-query peak
-is ~510 MB, so nothing is retained: the working set of one query is the AST set of all
-candidate files, and the native allocator keeps that high-water mark resident (plus the
-compiler's known leak). Getting under 1.5x of post-scan needs a per-file or batched pass
-(open, collect sites, close) in `Workspace::referencesTo` and rename, not a cache fix.
+Why RSS climbed, and the fix (issue #528): a member query used to open every closed file that
+mentioned the name at once, and a tolerant AST is about 45x its source, so the in-query peak was the
+AST set of all candidates (~510 MB under Zend; the native allocator kept that high-water mark
+resident, 805 MB RSS after 60 queries versus 132 MB after the scan). `ClosedFiles::with` now hands the
+workspace an opener (`Workspace::withClosedFiles`): a use site in a file that is not open is resolved
+by opening that file, resolving all its same-named sites, caching only the resulting `MemberInfo`
+lists for the query, and closing it before the next file. Only locations and member infos outlive a
+file, never its AST. The cancellation check still runs between files, and the skipped/cap accounting is
+unchanged. Measured under Zend over `src/` (60 member queries, `memory_get_usage` after a
+`gc_collect_cycles`): 83 MB after the scan, 84 MB after the queries, 163 MB in-query peak (was ~510 MB).
+Native RSS was not re-measured (bin/manticore not rebuilt); the peak drop of ~3x is what bounds it.
