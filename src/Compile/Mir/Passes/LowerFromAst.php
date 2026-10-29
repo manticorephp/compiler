@@ -1038,33 +1038,7 @@ final class LowerFromAst implements Pass
                 $decl = $stmt->decl;
                 $dkind = $decl->kind ?? 'class';
                 if ($dkind === 'enum') {
-                    $ed = $this->buildEnumDef($decl);
-                    $this->enumTable[$ed->name] = $ed;
-                    $module->addEnum($ed);
-                    // Register a minimal ClassDef so enum instance methods lower
-                    // and emit (a case is an ordinal; the method takes $this =
-                    // ordinal, and `->name`/`->value` resolve via the enum
-                    // globals). NOT added to module->classes: enum cases are
-                    // value ordinals, not heap objects — the call site dispatches
-                    // directly to `Enum__method`.
-                    $mnames = [];
-                    foreach ($decl->methods as $m) { $mnames[$m->name] = true; }
-                    if ($mnames !== []) {
-                        $ecd = new ClassDef(
-                            name: $ed->name,
-                            classId: $this->stableClassId(\ltrim($ed->name, '\\')),
-                            propertyNames: [],
-                            propertyTypes: [],
-                            methodNames: $mnames,
-                            interfaces: $decl->implements,
-                        );
-                        $this->classTable[$ed->name] = $ecd;
-                        // Registered so InferTypes resolves `$case->method()`
-                        // return types + dispatch. Enum cases stay ordinals — the
-                        // isEnumClass() guards keep rc/new/property on the enum
-                        // path; only method signatures are consulted here.
-                        $module->addClass($ecd);
-                    }
+                    $this->buildEnumInto($decl, $module);
                     continue;
                 }
                 if ($dkind === 'trait') {
@@ -5644,7 +5618,8 @@ final class LowerFromAst implements Pass
         }
         // Only a plain class gets a ClassDef; an interface has none by design
         // and an enum builds its own table entry from its cases.
-        if ($dkind === 'class') { $this->hoistedClassDecls[] = $cdecl; }
+        if ($dkind === 'enum') { $this->enumNames[\ltrim($cname, '\\')] = true; }
+        if ($dkind === 'class' || $dkind === 'enum') { $this->hoistedClassDecls[] = $cdecl; }
     }
 
     /**
@@ -5653,10 +5628,46 @@ final class LowerFromAst implements Pass
      * identically to the top-level pass, so a hoisted class is a first-class
      * one from here on.
      */
+    /** Build an enum's table entry (and the minimal ClassDef its methods lower against) into `$module`. */
+    private function buildEnumInto(\Parser\Ast\ClassDecl $decl, Module $module): void
+    {
+        $ed = $this->buildEnumDef($decl);
+        $this->enumTable[$ed->name] = $ed;
+        $module->addEnum($ed);
+        // Register a minimal ClassDef so enum instance methods lower
+        // and emit (a case is an ordinal; the method takes $this =
+        // ordinal, and `->name`/`->value` resolve via the enum
+        // globals). NOT added to module->classes: enum cases are
+        // value ordinals, not heap objects — the call site dispatches
+        // directly to `Enum__method`.
+        $mnames = [];
+        foreach ($decl->methods as $m) { $mnames[$m->name] = true; }
+        if ($mnames !== []) {
+            $ecd = new ClassDef(
+                name: $ed->name,
+                classId: $this->stableClassId(\ltrim($ed->name, '\\')),
+                propertyNames: [],
+                propertyTypes: [],
+                methodNames: $mnames,
+                interfaces: $decl->implements,
+            );
+            $this->classTable[$ed->name] = $ecd;
+            // Registered so InferTypes resolves `$case->method()`
+            // return types + dispatch. Enum cases stay ordinals — the
+            // isEnumClass() guards keep rc/new/property on the enum
+            // path; only method signatures are consulted here.
+            $module->addClass($ecd);
+        }
+    }
+
     private function buildHoistedClassDefs(Module $module): void
     {
         foreach ($this->hoistedClassDecls as $cdecl) {
             $name = $this->declName($cdecl);
+            if (($cdecl->kind ?? 'class') === 'enum') {
+                if (!isset($this->enumTable[$name])) { $this->buildEnumInto($cdecl, $module); }
+                continue;
+            }
             if ($name === '' || isset($this->classTable[$name])) { continue; }
             $cd = $this->buildClassDef($cdecl, $this->stableClassId(\ltrim($name, '\\')));
             $cd->isPreludeClass = false;
