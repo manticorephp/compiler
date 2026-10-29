@@ -29,10 +29,10 @@ final class Server
     private ClosedFiles $closed;
     private const MAX_SCAN_BYTES = 2097152;
 
-    public function __construct(private Workspace $ws, callable $send)
+    public function __construct(private Workspace $ws, callable $send, int $closedMax = ClosedFiles::MAX)
     {
         $this->send = $send;
-        $this->closed = new ClosedFiles($ws, fn(): array => $this->docs);
+        $this->closed = new ClosedFiles($ws, fn(): array => $this->docs, $closedMax);
     }
 
     public function exitCode(): ?int

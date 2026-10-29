@@ -18,21 +18,26 @@ final class LocationMap
         $this->docs = $docs;
     }
 
+    /** Open text, else disk text; null when unreadable. */
+    public function text(string $uri): ?string
+    {
+        /** @var array<string, string> $open */
+        $open = ($this->docs)();
+        $text = $open[$uri] ?? null;
+        if ($text !== null) { return $text; }
+        if (!isset($this->disk[$uri])) {
+            $path = Uri::toPath($uri);
+            $this->disk[$uri] = $path !== null && \is_file($path) ? @\file_get_contents($path) : false;
+        }
+        return $this->disk[$uri] === false ? null : $this->disk[$uri];
+    }
+
     /** @return array<string, mixed>|null null for `lib:` labels and unreadable targets */
     public function toLsp(Location $l): ?array
     {
         if (\str_starts_with($l->file, 'lib:')) { return null; }
-        /** @var array<string, string> $open */
-        $open = ($this->docs)();
-        $text = $open[$l->file] ?? null;
-        if ($text === null) {
-            if (!isset($this->disk[$l->file])) {
-                $path = Uri::toPath($l->file);
-                $this->disk[$l->file] = $path !== null && \is_file($path) ? @\file_get_contents($path) : false;
-            }
-            $text = $this->disk[$l->file];
-            if ($text === false) { return null; }
-        }
+        $text = $this->text($l->file);
+        if ($text === null) { return null; }
         $a = Position::lineText($text, $l->line);
         $b = $l->endLine === $l->line ? $a : Position::lineText($text, $l->endLine);
         return [

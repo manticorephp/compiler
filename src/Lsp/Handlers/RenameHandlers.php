@@ -8,6 +8,7 @@ use Lsp\JsonRpc\RpcError;
 use Lsp\LocationMap;
 use Lsp\Position;
 use Semantic\Location;
+use Semantic\UncertainSite;
 use Semantic\Workspace;
 
 /** prepareRename, rename. */
@@ -33,16 +34,17 @@ final class RenameHandlers
         $d->on('textDocument/prepareRename', function (array $p): mixed {
             $at = $this->at($p);
             if ($at === null) { return null; }
-            $set = $this->editSet($at);
+            /** @var Location[]|null $set */
+            $set = $this->query($at, fn(): ?array => $this->editSet($at));
             if ($set === null) { return null; }
             $hit = $this->containing($set, $at);
             if ($hit === null) { return null; }
-            $loc = $this->nameRange($hit, $this->kind($at) === 'variable');
-            $m = (new LocationMap($this->docs))->toLsp($loc);
-            if ($m === null) { return null; }
-            /** @var array<string, string> $open */
-            $open = ($this->docs)();
-            $line = Position::lineText($open[$at[0]] ?? '', $loc->line);
+            $map = new LocationMap($this->docs);
+            $loc = $this->nameRange($hit, $map);
+            $m = $map->toLsp($loc);
+            $text = $map->text($loc->file);
+            if ($m === null || $text === null) { return null; }
+            $line = Position::lineText($text, $loc->line);
             return ['range' => $m['range'], 'placeholder' => \substr($line, $loc->col - 1, $loc->endCol - $loc->col)];
         });
         $d->on('textDocument/rename', function (array $p): mixed {
@@ -51,32 +53,44 @@ final class RenameHandlers
             if (!\is_string($new)) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'newName required');
             }
-            if ($at === null) { return null; }
-            $isVar = $this->kind($at) === 'variable';
-            if ($isVar && \str_starts_with($new, '$')) { $new = \substr($new, 1); }
-            if (\preg_match('/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$/', $new) !== 1) {
+            $bare = \str_starts_with($new, '$') ? \substr($new, 1) : $new;
+            if (\preg_match('/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff]*$/', $bare) !== 1) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'newName is not a valid PHP identifier');
             }
-            /** @var string[] $all */
-            $all = $this->query($at, fn(): array => $this->ws->renameBlockers($at[0], $at[1], $at[2]));
+            if ($at === null) { return null; }
+            /** @var array{0: string[], 1: Location[]|null, 2: UncertainSite[]} $g */
+            $g = $this->query($at, fn(): array => [
+                $this->ws->renameBlockers($at[0], $at[1], $at[2]),
+                $this->editSet($at),
+                $this->ws->uncertainSitesFor($at[0], $at[1], $at[2]),
+            ]);
+            [$all, $set, $uncertain] = $g;
+            if ($this->closed->skipped() > 0 && $this->kind($at) === 'member') {
+                throw new RpcError(RpcError::INVALID_PARAMS, 'rename incomplete: ' . $this->closed->skipped() . ' workspace files could not be searched');
+            }
             $blockers = \array_values(\array_filter($all, fn(string $b): bool => !self::isUncertain($b)));
             if ($blockers !== []) {
                 $more = \count($blockers) > 5 ? ' (+' . (\count($blockers) - 5) . ' more)' : '';
                 throw new RpcError(RpcError::INVALID_PARAMS, 'Cannot rename: ' . \implode(', ', \array_slice($blockers, 0, 5)) . $more);
             }
-            $set = $this->editSet($at);
             if ($set === null) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'cannot edit library symbol or no renameable symbol here');
             }
             $map = new LocationMap($this->docs);
+            $sigil = false;
             /** @var array<string, array<int, array<string, mixed>>> $changes */
             $changes = [];
             foreach ($set as $l) {
-                $m = $map->toLsp($this->nameRange($l, $isVar));
+                $r = $this->nameRange($l, $map);
+                if ($r->col !== $l->col) { $sigil = true; }
+                $m = $map->toLsp($r);
                 if ($m === null) {
                     throw new RpcError(RpcError::INVALID_PARAMS, 'cannot edit library symbol: ' . $l->file);
                 }
-                $changes[(string)$m['uri']][] = ['range' => $m['range'], 'newText' => $new];
+                $changes[(string)$m['uri']][] = ['range' => $m['range'], 'newText' => $bare];
+            }
+            if (!$sigil && $bare !== $new) {
+                throw new RpcError(RpcError::INVALID_PARAMS, 'newName is not a valid PHP identifier');
             }
             \ksort($changes);
             foreach ($changes as $u => $edits) {
@@ -84,23 +98,21 @@ final class RenameHandlers
                     <=> [$b['range']['start']['line'], $b['range']['start']['character']]);
                 $changes[$u] = $edits;
             }
-            $this->warnUncertain($at);
+            $this->warn($uncertain);
             return ['changes' => (object)$changes];
         });
     }
 
-    /** renameBlockers also lists every uncertain site as `reason:file:line:col`; those warn (warnUncertain) instead of blocking. */
+    /** renameBlockers also lists every uncertain site as `reason:file:line:col`; those warn instead of blocking. */
     private static function isUncertain(string $blocker): bool
     {
         $i = \strpos($blocker, ':');
         return $i !== false && \in_array(\substr($blocker, 0, $i), ['string-class-name', 'dynamic-member', 'callable-string', 'docblock', 'unresolved-member'], true);
     }
 
-    /** @param array{0: string, 1: int, 2: int} $at */
-    private function warnUncertain(array $at): void
+    /** @param UncertainSite[] $sites */
+    private function warn(array $sites): void
     {
-        /** @var \Semantic\UncertainSite[] $sites */
-        $sites = $this->query($at, fn(): array => $this->ws->uncertainSitesFor($at[0], $at[1], $at[2]));
         $items = [];
         foreach ($sites as $s) {
             if (\str_starts_with($s->file, 'lib:')) { continue; }
@@ -140,10 +152,10 @@ final class RenameHandlers
     private function editSet(array $at): ?array
     {
         /** @var Location[] $all */
-        $all = $this->query($at, fn(): array => \array_merge(
+        $all = \array_merge(
             $this->ws->referencesTo($at[0], $at[1], $at[2]),
             $this->ws->definitionsOf($at[0], $at[1], $at[2]),
-        ));
+        );
         $seen = [];
         $out = [];
         foreach ($all as $l) {
@@ -170,9 +182,13 @@ final class RenameHandlers
         return null;
     }
 
-    private function nameRange(Location $l, bool $isVar): Location
+    /** The edit range: a site whose source text starts with `$` (variable, property declaration, `A::$sp`) keeps the sigil. */
+    private function nameRange(Location $l, LocationMap $map): Location
     {
-        return $isVar ? new Location($l->file, $l->line, $l->col + 1, $l->endLine, $l->endCol) : $l;
+        $text = $map->text($l->file);
+        if ($text === null || $l->line !== $l->endLine) { return $l; }
+        $line = Position::lineText($text, $l->line);
+        return ($line[$l->col - 1] ?? '') === '$' ? new Location($l->file, $l->line, $l->col + 1, $l->endLine, $l->endCol) : $l;
     }
 
     /**
