@@ -13,7 +13,8 @@ works with the command `manticore lsp`.
 | Method | Notes |
 |---|---|
 | `initialize`, `initialized`, `shutdown`, `exit` | `rootUri` (or the first workspace folder) is scanned at startup |
-| `textDocument/didOpen`, `didChange`, `didClose` | full text sync |
+| `textDocument/didOpen`, `didChange`, `didClose` | incremental sync (UTF-16 ranges; a change without a range replaces the text) |
+| `workspace/didChangeWatchedFiles` | created / changed / deleted `.php` files (a deleted directory too) refresh the index; registered dynamically for `**/*.php` when the client allows it |
 | `textDocument/publishDiagnostics` | pushed on open and change |
 | `textDocument/hover` | members, functions, variables and expressions (types; see Hover) |
 | `textDocument/definition` | classes, functions, constants, members, variables |
@@ -21,7 +22,7 @@ works with the command `manticore lsp`.
 | `textDocument/prepareRename`, `rename` | see [Rename](#rename) |
 | `textDocument/documentSymbol` | hierarchical outline |
 | `textDocument/completion` | members after `->` / `?->` / `::`, variables after `$`, global symbols |
-| `$/cancelRequest` | accepted, ignored (the server is synchronous) |
+| `$/cancelRequest` | honoured for queued requests and between files of a member query (error -32800) |
 
 Capabilities advertised: `textDocumentSync {openClose, change: 1}`, `hoverProvider`,
 `definitionProvider`, `referencesProvider`, `renameProvider {prepareProvider}`,
@@ -144,8 +145,8 @@ not block.
 
 ## Known ceilings
 
-- Full-text sync only; every change re-sends and re-parses the file.
-- The server is synchronous: one request at a time, `$/cancelRequest` is accepted but ignored.
+- Every change re-parses the whole file (incremental sync saves transfer, not parsing).
+- The server is single-threaded: one request at a time. `$/cancelRequest` stops a request still queued, or a member query between closed files; it cannot interrupt one parse or the final analysis step. No `didSave` handling: an open file is already current, and disk changes arrive as watched-file events.
 - Locations inside the prelude / stdlib (`lib:` URIs) are not navigable.
 - An **installed** binary needs `lib/` and the prelude next to it. A bare copy of
   `bin/manticore` elsewhere prints the `Workspace: the prelude is empty` error and exits 1.
@@ -184,3 +185,11 @@ Startup scan of `src/`: 1.2 s. didOpen to first diagnostics: 8 ms. Server RSS: 1
 the scan, 510 MB at the end (after the member-references passes, which parse every closed
 file that mentions the member name; 60 member queries end at 633 MB, so growth flattens
 rather than scaling per query). Linux numbers are not recorded.
+
+Why RSS climbs (issue #528): a member query opens every closed file that mentions the name at
+once, and a tolerant AST is about 45x its source. Under Zend the same session retains a flat
+~93 MB after every query (no AST is held by the workspace after close) while the in-query peak
+is ~510 MB, so nothing is retained: the working set of one query is the AST set of all
+candidate files, and the native allocator keeps that high-water mark resident (plus the
+compiler's known leak). Getting under 1.5x of post-scan needs a per-file or batched pass
+(open, collect sites, close) in `Workspace::referencesTo` and rename, not a cache fix.
