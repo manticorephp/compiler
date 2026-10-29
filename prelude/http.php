@@ -5484,6 +5484,7 @@ final class Server
             $req->streamed ? \Manticore\Sapi\Context::$emptyGpc : $req->postArray(),
             $req->cookies(),
             $req->streamed ? \Manticore\Sapi\Context::$emptyGpc : $req->filesArray(),
+            $req->streamed ? '' : $req->body(),
         );
     }
 

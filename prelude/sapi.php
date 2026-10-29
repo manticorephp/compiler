@@ -64,6 +64,12 @@ namespace Manticore\Sapi {
         /** @var array<int,int> parked $status, by task id */
         public static array $savedStatus = [];
 
+        /** The live request's raw body, what `php://input` reads. */
+        public static string $input = '';
+
+        /** @var array<int,string> parked $input, by task id */
+        public static array $savedInput = [];
+
         /** @var array<int,bool> parked $active, by task id */
         public static array $savedActive = [];
 
@@ -189,6 +195,7 @@ namespace Manticore\Sapi {
         Context::$savedStatus[$from] = Context::$status;
         Context::$savedActive[$from] = Context::$active;
         Context::$savedSent[$from] = Context::$sent;
+        Context::$savedInput[$from] = Context::$input;
         Context::$savedServer[$from] = $_SERVER;
         Context::$savedGet[$from] = $_GET;
         Context::$savedPost[$from] = $_POST;
@@ -223,6 +230,8 @@ namespace Manticore\Sapi {
             Context::$status = 200;
             Context::$sent = false;
             Context::$active = false;
+            Context::$input = '';
+            \__mc_input('');
             $_GET = Context::$empty;
             $_POST = Context::$empty;
             $_COOKIE = Context::$empty;
@@ -236,6 +245,8 @@ namespace Manticore\Sapi {
         Context::$status = Context::$savedStatus[$to];
         Context::$active = Context::$savedActive[$to];
         Context::$sent = Context::$savedSent[$to];
+        Context::$input = Context::$savedInput[$to];
+        \__mc_input(Context::$input);
         $_SERVER = Context::$savedServer[$to];
         $_GET = Context::$savedGet[$to];
         $_POST = Context::$savedPost[$to];
@@ -282,8 +293,10 @@ namespace Manticore\Sapi {
     // keys are int-or-string cells ({@see Context::$emptyGpc}): `?0=x` and an
     // anonymous upload land under the INT key, as php does, and the element
     // store below dispatches on the key's tag.
-    function requestBegin(array<string, string> $server = [], array<int|string, mixed> $get = [], array<int|string, mixed> $post = [], array<string, string> $cookie = [], array<int|string, mixed> $files = []): void
+    function requestBegin(array<string, string> $server = [], array<int|string, mixed> $get = [], array<int|string, mixed> $post = [], array<string, string> $cookie = [], array<int|string, mixed> $files = [], string $input = ''): void
     {
+        Context::$input = $input;
+        \__mc_input($input);
         foreach ($server as $k => $v) {
             $_SERVER[$k] = $v;
         }
@@ -361,6 +374,7 @@ namespace Manticore\Sapi {
         unset(Context::$savedStatus[$id]);
         unset(Context::$savedActive[$id]);
         unset(Context::$savedSent[$id]);
+        unset(Context::$savedInput[$id]);
         unset(Context::$savedServer[$id]);
         unset(Context::$savedGet[$id]);
         unset(Context::$savedPost[$id]);
