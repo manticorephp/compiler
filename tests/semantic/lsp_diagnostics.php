@@ -134,4 +134,15 @@ check('initialized indexes folder; open doc sees its declarations', function ():
     return ($m['params']['diagnostics'] === [] && count($k->msgs) === 1) ?: json_encode($k->msgs);
 });
 
+check('published uri keeps the spelling the client opened with', function (): bool|string {
+    $k = new Sink();
+    $d = rig($k);
+    $u = 'file:///t/a%20b/%7Ea.php';
+    open($d, $u, "<?php\nfoo();");
+    $m = $k->msgs[0] ?? null;
+    if (($m['params']['uri'] ?? '') !== $u) { return json_encode($m); }
+    $d->handle(json_encode(['jsonrpc' => '2.0', 'method' => 'textDocument/didClose', 'params' => ['textDocument' => ['uri' => $u]]]));
+    $m = $k->msgs[count($k->msgs) - 1];
+    return ($m['params']['uri'] ?? '') === $u && $m['params']['diagnostics'] === [] ?: json_encode($m);
+});
 exit($fail);
