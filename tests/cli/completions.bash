@@ -18,10 +18,10 @@ _manticore() {
         compile)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j|--progress|--color) return 0 ;;
+                --memory|--backend|-O|--strict|-j|--progress|--color) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --analyze --no-analyze --analyze-strict --progress --quiet --timings --color" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j --analyze --no-analyze --analyze-strict --progress --quiet --timings --color" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -29,10 +29,10 @@ _manticore() {
         build)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j|--progress|--color) return 0 ;;
+                --memory|--backend|-O|--strict|-j|--progress|--color) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --libs-only --apps-only --no-analyze --progress --quiet --timings --color" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j --libs-only --apps-only --no-analyze --progress --quiet --timings --color" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -40,10 +40,10 @@ _manticore() {
         dump-llvm)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|--strict|-j) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -51,10 +51,10 @@ _manticore() {
         dump-ast)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|--strict|-j) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --tolerant --ranges --names --check-names --check-ranges" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j --tolerant --ranges --names --check-names --check-ranges" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -62,10 +62,10 @@ _manticore() {
         analyze)
             case "$prev" in
                 -o|--baseline|--generate-baseline) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j|--only) return 0 ;;
+                --memory|--backend|-O|--strict|-j|--only) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --deep --json --baseline --generate-baseline --only" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j --deep --json --baseline --generate-baseline --only" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -73,10 +73,10 @@ _manticore() {
         dump-mir)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|--strict|-j) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -84,10 +84,10 @@ _manticore() {
         dump-llvm-mir)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|--strict|-j) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -102,10 +102,10 @@ _manticore() {
         dump-sig)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|--strict|-j) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
