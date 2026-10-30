@@ -398,6 +398,12 @@ class DateTime implements DateTimeInterface
         return \__mc_date_fmt($format, $this->ts, $this->us, $this->zid, $this->zname, $this->ztype, $this->zoff);
     }
 
+    /** @return array<string,mixed> */
+    public function __mcJson(): array
+    {
+        return ['date' => $this->format('Y-m-d H:i:s.u'), 'timezone_type' => $this->ztype, 'timezone' => $this->zname];
+    }
+
     public function getTimestamp(): int
     {
         return $this->ts;
@@ -588,6 +594,12 @@ class DateTimeImmutable implements DateTimeInterface
     public function format(string $format): string
     {
         return \__mc_date_fmt($format, $this->ts, $this->us, $this->zid, $this->zname, $this->ztype, $this->zoff);
+    }
+
+    /** @return array<string,mixed> */
+    public function __mcJson(): array
+    {
+        return ['date' => $this->format('Y-m-d H:i:s.u'), 'timezone_type' => $this->ztype, 'timezone' => $this->zname];
     }
 
     public function getTimestamp(): int
