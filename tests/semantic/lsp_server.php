@@ -45,7 +45,7 @@ $open = '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocumen
 check('initialize capabilities', function () use ($init): bool|string {
     [$d] = rig();
     $r = call($d, $init);
-    return $r['result']['capabilities']['textDocumentSync']['change'] === 1
+    return $r['result']['capabilities']['textDocumentSync']['change'] === 2
         && $r['result']['capabilities']['textDocumentSync']['openClose'] === true
         && $r['result']['serverInfo']['name'] === 'manticore';
 });

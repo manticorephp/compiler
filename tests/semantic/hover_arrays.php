@@ -296,4 +296,25 @@ check('unknown destructured value never shows the stale type', function (): bool
     return $a[0] === '<null>' && $b[0] === '<null>' ? true : json_encode([$a, $b]);
 });
 
+check('nested destructuring through a union element type', function (): bool|string {
+    $src = "<?php\n/** @param list<list<int>|list<string>> \$x */\nfunction t(array \$x) { [[\$p]] = \$x; return \$p; }\n";
+    $g = hv($src, '$p]');
+    return $g[0] === '$p: int|string' ? true : json_encode($g);
+});
+check('variadic parameter hovers as a list of its element type', function (): bool|string {
+    $a = hv("<?php\nfunction f(int ...\$nums) { return \$nums; }\n", '$nums)');
+    $b = hv("<?php\n/** @param string ...\$names */\nfunction g(...\$names) { return \$names; }\n", '$names)');
+    return $a[0] === '$nums: list<int>' && $b[0] === '$names: list<string>' ? true : json_encode([$a, $b]);
+});
+check('quoted shape key ending in ? is not optional', function (): bool|string {
+    $src = "<?php\n/** @return array{'a?': int, b?: string} */\nfunction s() { return []; }\n\$v = s();\n";
+    $g = hv($src, '$v');
+    return $g[0] === "\$v: array{'a?': int, b?: string}" ? true : json_encode($g);
+});
+check('class constant hover shows its @var type', function (): bool|string {
+    $src = "<?php\nclass K {\n    /** @var list<int> */\n    public const C = [];\n}\n\$x = K::C;\n";
+    $g = hv($src, 'C;');
+    return $g[0] === 'static K::C: list<int>' ? true : json_encode($g);
+});
+
 exit($fail);

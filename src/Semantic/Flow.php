@@ -1215,7 +1215,7 @@ final class Flow
     {
         if ($t !== null && $t->kind === SourceType::SHAPE) {
             $ks = [];
-            foreach ($t->keys as $k) { $ks[] = ExprTyper::scalar(ExprTyper::isIntKey(\rtrim($k, '?')) ? 'int' : 'string'); }
+            foreach ($t->keys as $k) { $ks[] = ExprTyper::scalar(ExprTyper::isIntKey(\rtrim($k, SourceType::OPT)) ? 'int' : 'string'); }
             return [ExprTyper::union($ks), ExprTyper::union($t->args)];
         }
         if ($t === null || ($t->kind !== SourceType::GENERIC && $t->kind !== SourceType::ITERABLE)) { return [null, null]; }

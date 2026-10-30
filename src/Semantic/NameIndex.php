@@ -67,7 +67,7 @@ final class NameIndex
                 ($n->role === 'decl' && $n->kind === 'member') ? $owner : '',
             );
         }
-        foreach (DocblockNames::scan($text, $program->namespace, $program->useAliases) as $d) {
+        foreach (DocblockNames::scan($text) as $d) {
             $fq = $d[3];
             $list[] = new NameOccurrence($path, 'class', strtolower($fq), $d[1], $d[2], $d[1], $d[2] + strlen($d[0]), false, false, '', $fq, '', true);
         }
@@ -238,6 +238,12 @@ final class NameIndex
             if ($o->isDecl) { $out[] = $o; }
         }
         return $out;
+    }
+
+    /** @return NameOccurrence[] */
+    public function inFile(string $path): array
+    {
+        return $this->occ[$path] ?? [];
     }
 
     /** @return NameOccurrence[] */

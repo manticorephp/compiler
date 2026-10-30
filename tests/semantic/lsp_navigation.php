@@ -112,7 +112,23 @@ check('position after multibyte char hits the right token', function (): bool|st
     $x = is_array($r) ? ($r[0] ?? null) : null;
     return ($x !== null && $x['range']['start'] === ['line' => 1, 'character' => 9]) ?: json_encode($r);
 });
-check('prelude class definition is null', function (): bool|string {
+check('prelude class definition opens a readable cached file', function (): bool|string {
+    $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/core_interfaces.php');
+    \Lsp\LocationMap::$libText = fn(string $n): ?string => $n === 'core_interfaces.php' ? $src : null;
+    try {
+        $d = rig(new Sink());
+        open($d, 'file:///t/a.php', "<?php\n\$x = new Countable();\n");
+        $r = ask($d, 'textDocument/definition', 'file:///t/a.php', 1, 12);
+        $x = is_array($r) ? ($r[0] ?? null) : null;
+        if ($x === null || !str_starts_with($x['uri'], 'file://')) { return json_encode($r); }
+        $text = (string)file_get_contents(\Lsp\Uri::toPath($x['uri']));
+        $line = explode("\n", $text)[$x['range']['start']['line']] ?? '';
+        return preg_match('/^interface Countable\b/', $line) === 1 ? true : json_encode([$line, $x]);
+    } finally {
+        \Lsp\LocationMap::$libText = null;
+    }
+});
+check('prelude definition without a text source stays null', function (): bool|string {
     $d = rig(new Sink());
     open($d, 'file:///t/a.php', "<?php\n\$x = new Countable();\n");
     $r = ask($d, 'textDocument/definition', 'file:///t/a.php', 1, 12);
@@ -171,6 +187,30 @@ check('references: method called from a CLOSED file is listed; open count restor
     $want = ['file:///t/a.php@2', 'file://' . $r . '/c.php@2'];
     sort($want);
     return ($got === $want && $n === $after) ?: json_encode([$got, $n, $after]);
+});
+check('references: closed files are opened one at a time, results unchanged (#528)', function () use ($A): bool|string {
+    $r = sys_get_temp_dir() . '/lspnav4' . getmypid();
+    mkdir($r);
+    foreach (['c', 'd', 'e', 'f'] as $n) { file_put_contents("$r/$n.php", "<?php\n\$g = new Foo();\n\$g->bar();\n"); }
+    file_put_contents("$r/g.php", "<?php\n\$g = new Foo();\n\$g->baz();\n");
+    $k = new Sink();
+    [$d, $ws] = rigWs($k, 'file://' . $r);
+    $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+    open($d, 'file:///t/a.php', $A);
+    $seen = [];
+    // an observable ClosedFiles over the same workspace
+    $c = new \Lsp\ClosedFiles($ws, fn(): array => ['file:///t/a.php' => $A]);
+    foreach (['c', 'd', 'e', 'f', 'g'] as $n) { $c->add('file://' . $r . "/$n.php"); }
+    $c->setCheck(function () use ($ws, &$seen): void { $seen[] = $ws->openFileCount(); });
+    $base = $ws->openFileCount();
+    $got = $c->with(fn(): array => $ws->referencesTo('file:///t/a.php', 3, 22));
+    $after = $ws->openFileCount();
+    foreach (['c', 'd', 'e', 'f', 'g'] as $n) { unlink("$r/$n.php"); }
+    rmdir($r);
+    $files = array_map(fn($l) => basename($l->file), $got);
+    sort($files);
+    return ($files === ['a.php', 'c.php', 'd.php', 'e.php', 'f.php'] && $after === $base && $seen !== [] && max($seen) <= $base)
+        ?: json_encode([$files, $base, $after, $seen]);
 });
 check('references: class query opens no files', function () use ($A): bool|string {
     $r = sys_get_temp_dir() . '/lspnav3' . getmypid();

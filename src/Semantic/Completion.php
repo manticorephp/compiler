@@ -12,6 +12,9 @@ final class Completion
         public string $insertText = '',
         /** 0 own member / variable, 1 inherited member, 2 global name */
         public int $rank = 2,
+        /** FQN to import when the item is accepted; 0 = no import */
+        public ?string $useFqn = null,
+        public int $useLine = 0,
     ) {
         if ($this->insertText === '') { $this->insertText = $label; }
     }

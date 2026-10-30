@@ -49,6 +49,29 @@ final class Position
         return \substr($text, $from, $end - $from);
     }
 
+    /** Byte offset of an LSP (line, UTF-16 character) in $text; a line past the end clamps to the end, a character past the line end to the line end. */
+    public static function offsetOf(string $text, int $line, int $char): int
+    {
+        $from = 0;
+        for ($k = 0; $k < $line; $k++) {
+            $nl = \strpos($text, "\n", $from);
+            if ($nl === false) { return \strlen($text); }
+            $from = $nl + 1;
+        }
+        $nl = \strpos($text, "\n", $from);
+        $end = $nl === false ? \strlen($text) : $nl;
+        if ($nl !== false && $end > $from && $text[$end - 1] === "\r") { $end--; }
+        return $from + self::toCore(\substr($text, $from, $end - $from), $char) - 1;
+    }
+
+    /** $text with the LSP range replaced (an incremental didChange entry). */
+    public static function applyChange(string $text, int $sl, int $sc, int $el, int $ec, string $new): string
+    {
+        $a = self::offsetOf($text, $sl, $sc);
+        $b = \max($a, self::offsetOf($text, $el, $ec));
+        return \substr($text, 0, $a) . $new . \substr($text, $b);
+    }
+
     private static function seqLen(string $s, int $i, int $n): int
     {
         $b = \ord($s[$i]);

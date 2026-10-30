@@ -13,7 +13,7 @@ final class CompletionHandlers
 {
     private const KINDS = [
         'method' => 2, 'function' => 3, 'field' => 5, 'variable' => 6, 'class' => 7, 'interface' => 8,
-        'enum' => 13, 'enumMember' => 20, 'constant' => 21,
+        'enum' => 13, 'enumMember' => 20, 'constant' => 21, 'keyword' => 14,
     ];
 
     /** @var callable */
@@ -43,8 +43,13 @@ final class CompletionHandlers
             $items = [];
             $found = $this->ws->completionsAt($uri, $line, Position::toCore(Position::lineText($text, $line), $pos['character']));
             foreach ($found as $c) {
-                $items[] = ['label' => $c->label, 'kind' => self::KINDS[$c->kind] ?? 1, 'detail' => $c->detail, 'insertText' => $c->insertText,
+                $it = ['label' => $c->label, 'kind' => self::KINDS[$c->kind] ?? 1, 'detail' => $c->detail, 'insertText' => $c->insertText,
                     'sortText' => '0' . $c->rank . '_' . strtolower($c->label)];
+                if ($c->useFqn !== null) {
+                    $at = ['line' => $c->useLine - 1, 'character' => 0];
+                    $it['additionalTextEdits'] = [['range' => ['start' => $at, 'end' => $at], 'newText' => 'use ' . $c->useFqn . ";\n"]];
+                }
+                $items[] = $it;
             }
             return ['isIncomplete' => count($found) >= Completer::CAP, 'items' => $items];
         });

@@ -11,8 +11,8 @@ use Lsp\JsonRpc\RpcError;
 use Semantic\Workspace;
 
 /**
- * LSP lifecycle and full text sync. Synchronous: `$/cancelRequest` is accepted and ignored
- * (a request is answered before the next message is read; ceiling of the single-threaded design).
+ * LSP lifecycle, incremental text sync and watched-file events. Single-threaded: `$/cancelRequest` is honoured
+ * between files of a closed-file pass (Cancellation::check) and for requests still queued, not inside one parse.
  */
 final class Server
 {
@@ -30,8 +30,11 @@ final class Server
     private array $published = [];
     private ClosedFiles $closed;
     private bool $annotations = false;
+    private bool $watchDynamic = false;
     /** @var array<string, int> uri => version of an open document */
     private array $versions = [];
+    /** @var array<string, string> normalised uri => the spelling the client opened it with (echoed back in publishDiagnostics) */
+    private array $clientUri = [];
 
     public function __construct(private Workspace $ws, callable $send, int $closedMax = ClosedFiles::MAX)
     {
@@ -64,6 +67,7 @@ final class Server
             $this->initialized = true;
             $we = $p['capabilities']['workspace']['workspaceEdit'] ?? null;
             $this->annotations = is_array($we) && ($we['documentChanges'] ?? false) === true && is_array($we['changeAnnotationSupport'] ?? null);
+            $this->watchDynamic = ($p['capabilities']['workspace']['didChangeWatchedFiles']['dynamicRegistration'] ?? false) === true;
             $root = $p['rootUri'] ?? '';
             $this->rootUri = is_string($root) ? $root : '';
             $this->folders = [];
@@ -77,7 +81,7 @@ final class Server
             }
             return [
                 'capabilities' => [
-                    'textDocumentSync' => ['openClose' => true, 'change' => 1],
+                    'textDocumentSync' => ['openClose' => true, 'change' => 2],
                     'hoverProvider' => true,
                     'definitionProvider' => true,
                     'referencesProvider' => true,
@@ -90,6 +94,18 @@ final class Server
         });
         $d->on('initialized', function (array $p): mixed {
             $this->scan();
+            if ($this->watchDynamic) {
+                ($this->send)(json_encode([
+                    'jsonrpc' => '2.0',
+                    'id' => 'mc-watch-php',
+                    'method' => 'client/registerCapability',
+                    'params' => ['registrations' => [[
+                        'id' => 'mc-watch-php',
+                        'method' => 'workspace/didChangeWatchedFiles',
+                        'registerOptions' => ['watchers' => [['globPattern' => '**/*.php']]],
+                    ]]],
+                ]));
+            }
             return null;
         });
         $d->on('shutdown', function (array $p): mixed {
@@ -104,13 +120,43 @@ final class Server
         (new CompletionHandlers($this->ws, fn(): array => $this->docs))->register($d);
         (new SymbolHandlers($this->ws, fn(): array => $this->docs))->register($d);
         (new RenameHandlers($this->ws, fn(): array => $this->docs, $this->closed, $this->send, fn(): bool => $this->annotations, fn(): array => $this->versions))->register($d);
+        $this->closed->setCheck(function () use ($d): void { $d->cancellation()->check(); });
         $d->on('$/cancelRequest', function (array $p): mixed { return null; });
+        $d->on('workspace/didChangeWatchedFiles', function (array $p): mixed {
+            $changes = $p['changes'] ?? null;
+            if (!is_array($changes)) {
+                throw new RpcError(RpcError::INVALID_PARAMS, 'didChangeWatchedFiles: changes required');
+            }
+            $touched = false;
+            foreach ($changes as $c) {
+                if (!is_array($c) || !is_string($c['uri'] ?? null) || !is_int($c['type'] ?? null)) { continue; }
+                $uri = Uri::normalize($c['uri']);
+                $path = Uri::toPath($uri);
+                if ($path === null) { continue; }
+                if ($c['type'] === 3) {
+                    if (!isset($this->docs[$uri])) { $this->closed->forget($uri); }
+                    $this->closed->forgetUnder($uri . '/');
+                    $touched = true;
+                } elseif (@is_dir($path)) {
+                    foreach (WorkspaceScan::phpFiles($path) as $f) {
+                        $u = Uri::fromPath($f);
+                        if (!isset($this->docs[$u])) { $this->closed->reindex($u); $touched = true; }
+                    }
+                } elseif (str_ends_with($path, '.php') && !isset($this->docs[$uri])) {
+                    $this->closed->reindex($uri);
+                    $touched = true;
+                }
+            }
+            if ($touched) { $this->republishAll(); }
+            return null;
+        });
         $d->on('textDocument/didOpen', function (array $p): mixed {
             $td = $p['textDocument'] ?? null;
             if (!is_array($td) || !is_string($td['uri'] ?? null) || !is_string($td['text'] ?? null)) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'didOpen: textDocument.uri and .text required');
             }
             $uri = Uri::normalize($td['uri']);
+            $this->clientUri[$uri] = $td['uri'];
             $this->ws->open($uri, $td['text']);
             $this->docs[$uri] = $td['text'];
             if (is_int($td['version'] ?? null)) { $this->versions[$uri] = $td['version']; } else { unset($this->versions[$uri]); }
@@ -127,9 +173,20 @@ final class Server
             if (!isset($this->docs[$uri])) {
                 return null;
             }
-            $text = $ch[count($ch) - 1]['text'] ?? null;
-            if (!is_string($text)) {
-                throw new RpcError(RpcError::INVALID_PARAMS, 'didChange: full-text change required');
+            $text = $this->docs[$uri];
+            foreach ($ch as $c) {
+                $new = is_array($c) ? ($c['text'] ?? null) : null;
+                if (!is_string($new)) {
+                    throw new RpcError(RpcError::INVALID_PARAMS, 'didChange: text required in every change');
+                }
+                $r = $c['range'] ?? null;
+                if ($r === null) { $text = $new; continue; }
+                $s = is_array($r) ? ($r['start'] ?? null) : null;
+                $e = is_array($r) ? ($r['end'] ?? null) : null;
+                if (!is_array($s) || !is_array($e) || !is_int($s['line'] ?? null) || !is_int($s['character'] ?? null) || !is_int($e['line'] ?? null) || !is_int($e['character'] ?? null)) {
+                    throw new RpcError(RpcError::INVALID_PARAMS, 'didChange: bad range');
+                }
+                $text = Position::applyChange($text, $s['line'], $s['character'], $e['line'], $e['character'], $new);
             }
             $this->ws->update($uri, $text);
             $this->docs[$uri] = $text;
@@ -146,6 +203,7 @@ final class Server
                 $this->closed->reindex($uri);
                 unset($this->published[$uri]);
                 $this->push($uri, []);
+                unset($this->clientUri[$uri]);
             }
             return null;
         });
@@ -166,6 +224,17 @@ final class Server
                 $seen[$uri] = true;
                 if (!@is_file($path)) { continue; }
                 $this->closed->reindex($uri);
+            }
+        }
+    }
+
+    private function republishAll(): void
+    {
+        foreach ($this->docs as $other => $_) {
+            try {
+                $this->publish($other, false);
+            } catch (\Throwable $e) {
+                continue;
             }
         }
     }
@@ -206,7 +275,7 @@ final class Server
         $msg = json_encode([
             'jsonrpc' => '2.0',
             'method' => 'textDocument/publishDiagnostics',
-            'params' => ['uri' => $uri, 'diagnostics' => $items],
+            'params' => ['uri' => $this->clientUri[$uri] ?? $uri, 'diagnostics' => $items],
         ], JSON_INVALID_UTF8_SUBSTITUTE);
         if ($msg !== false) { ($this->send)($msg); }
     }

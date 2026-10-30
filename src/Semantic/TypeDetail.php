@@ -56,7 +56,7 @@ final class TypeDetail
     /** A shape key as written: bare when it is a plain word, else single-quoted with `\`, `'`, backtick and control characters escaped. */
     public static function keyText(string $key): string
     {
-        $opt = \str_ends_with($key, '?');
+        $opt = \str_ends_with($key, SourceType::OPT);
         $k = $opt ? \substr($key, 0, -1) : $key;
         $cut = \strlen($k) > 60;
         if ($cut) {

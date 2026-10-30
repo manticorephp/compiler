@@ -9,7 +9,7 @@
 // place for a `use`.
 
 namespace {
-    #[\Ffi\Library('c'), \Ffi\Symbol('poll')]
+    #[\Ffi\Library('c'), \Ffi\Symbol('poll'), \Ffi\CType('int')]
     // `nfds_t` is not one width: glibc types it `unsigned long`, Darwin types it
     // `unsigned int`. Bind the WIDER one — a callee that reads the narrow half
     // ignores the upper bits, whereas the reverse leaves them dirty on the host

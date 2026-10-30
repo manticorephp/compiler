@@ -13,7 +13,8 @@ works with the command `manticore lsp`.
 | Method | Notes |
 |---|---|
 | `initialize`, `initialized`, `shutdown`, `exit` | `rootUri` (or the first workspace folder) is scanned at startup |
-| `textDocument/didOpen`, `didChange`, `didClose` | full text sync |
+| `textDocument/didOpen`, `didChange`, `didClose` | incremental sync (UTF-16 ranges; a change without a range replaces the text) |
+| `workspace/didChangeWatchedFiles` | created / changed / deleted `.php` files (a deleted directory too) refresh the index; registered dynamically for `**/*.php` when the client allows it |
 | `textDocument/publishDiagnostics` | pushed on open and change |
 | `textDocument/hover` | members, functions, variables and expressions (types; see Hover) |
 | `textDocument/definition` | classes, functions, constants, members, variables |
@@ -21,7 +22,7 @@ works with the command `manticore lsp`.
 | `textDocument/prepareRename`, `rename` | see [Rename](#rename) |
 | `textDocument/documentSymbol` | hierarchical outline |
 | `textDocument/completion` | members after `->` / `?->` / `::`, variables after `$`, global symbols |
-| `$/cancelRequest` | accepted, ignored (the server is synchronous) |
+| `$/cancelRequest` | honoured for queued requests and between files of a member query (error -32800) |
 
 Capabilities advertised: `textDocumentSync {openClose, change: 1}`, `hoverProvider`,
 `definitionProvider`, `referencesProvider`, `renameProvider {prepareProvider}`,
@@ -144,8 +145,8 @@ not block.
 
 ## Known ceilings
 
-- Full-text sync only; every change re-sends and re-parses the file.
-- The server is synchronous: one request at a time, `$/cancelRequest` is accepted but ignored.
+- Every change re-parses the whole file (incremental sync saves transfer, not parsing).
+- The server is single-threaded: one request at a time. `$/cancelRequest` stops a request still queued, or a member query between closed files; it cannot interrupt one parse or the final analysis step. No `didSave` handling: an open file is already current, and disk changes arrive as watched-file events.
 - Locations inside the prelude / stdlib (`lib:` URIs) are not navigable.
 - An **installed** binary needs `lib/` and the prelude next to it. A bare copy of
   `bin/manticore` elsewhere prints the `Workspace: the prelude is empty` error and exits 1.
@@ -184,3 +185,18 @@ Startup scan of `src/`: 1.2 s. didOpen to first diagnostics: 8 ms. Server RSS: 1
 the scan, 510 MB at the end (after the member-references passes, which parse every closed
 file that mentions the member name; 60 member queries end at 633 MB, so growth flattens
 rather than scaling per query). Linux numbers are not recorded.
+
+Why RSS climbed, and the fix (issue #528): a member query used to open every closed file that
+mentioned the name at once, and a tolerant AST is about 45x its source, so the in-query peak was the
+AST set of all candidates (~510 MB under Zend; the native allocator kept that high-water mark
+resident, 805 MB RSS after 60 queries versus 132 MB after the scan). `ClosedFiles::with` now hands the
+workspace an opener (`Workspace::withClosedFiles`): a use site in a file that is not open is resolved
+by opening that file, resolving all its same-named sites, caching only the resulting `MemberInfo`
+lists for the query, and closing it before the next file. Only locations and member infos outlive a
+file, never its AST. The cancellation check still runs between files, and the skipped/cap accounting is
+unchanged. Measured under Zend over `src/` (60 member queries, `memory_get_usage` after a
+`gc_collect_cycles`): 83 MB after the scan, 84 MB after the queries, 163 MB in-query peak (was ~510 MB).
+Native (`tools/bench_lsp.php --nref 60 --n 50`, three runs, macOS arm64): RSS 126-128 MB after the scan, 421-516 MB at the end
+(805 MB before the change). That is still ~3.3-4x the post-scan figure, not the 1.5x the issue asked for: the in-query peak is
+now ~3x lower but the native allocator keeps its high-water mark resident and the compiler's known leak adds to it, so the
+remaining growth is not a retained AST. #528 stays open for that.

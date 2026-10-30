@@ -920,10 +920,15 @@ function stream_supports_lock(\Resource $stream): bool
 
 /**
  * Set the read buffer size. A tuning hint with no effect here (our reads are
- * already buffered by the rbuf/rpos machinery); 0 = success, as in php.
+ * already buffered by the rbuf/rpos machinery) — except size 0 on a FILE*-backed
+ * stream, which makes it unbuffered (setvbuf _IONBF) so select(2)/poll(2) see every
+ * pending byte; call it before the first read. 0 = success, as in php.
  */
 function stream_set_read_buffer(\Resource $stream, int $size): int
 {
+    if ($size === 0 && !\__mc_stream_is_buffered($stream) && $stream->addr !== 0) {
+        return \Runtime\Libc\setvbuf(\int_to_ptr($stream->addr), \int_to_ptr(0), 2, 0) === 0 ? 0 : -1;
+    }
     return 0;
 }
 

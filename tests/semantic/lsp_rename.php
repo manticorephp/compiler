@@ -455,4 +455,32 @@ check('didChange without a version drops the tracked version', function (): bool
     return ($by === ['file:///t/a.php' => null, 'file:///t/b.php' => 3]) ?: json_encode([$by, $r]);
 });
 
+check('method rename is case-insensitive: a differently-cased call is renamed', function (): bool|string {
+    [$d] = rigWs(new Sink());
+    $src = "<?php\nclass A {\n    function Run() {}\n}\n\$o = new A();\n\$o->run();\n\$o->RUN();\n";
+    open($d, 'file:///t/a.php', $src);
+    $out = applyEdits($src, rn($d, 'file:///t/a.php', 2, 14, 'go'), 'file:///t/a.php');
+    return $out === "<?php\nclass A {\n    function go() {}\n}\n\$o = new A();\n\$o->go();\n\$o->go();\n" ?: $out;
+});
+check('property and class constant rename are case-sensitive: a differently-cased name is not edited', function (): bool|string {
+    foreach ([
+        ["<?php\nclass A {\n    public \$sp = 1;\n}\n\$o = new A();\necho \$o->sp;\necho \$o->SP;\n", 2, 14, "<?php\nclass A {\n    public \$q = 1;\n}\n\$o = new A();\necho \$o->q;\necho \$o->SP;\n"],
+        ["<?php\nclass A {\n    const K = 1;\n}\necho A::K;\necho A::k;\n", 2, 11, "<?php\nclass A {\n    const Q = 1;\n}\necho A::Q;\necho A::k;\n"],
+    ] as [$src, $l, $c, $want]) {
+        [$d] = rigWs(new Sink());
+        open($d, 'file:///t/a.php', $src);
+        $r = rn($d, 'file:///t/a.php', $l, $c, str_contains($src, 'const') ? 'Q' : 'q');
+        $out = is_array($r) && isset($r['error']) ? json_encode($r) : applyEdits($src, $r, 'file:///t/a.php');
+        if ($out !== $want) { return $out; }
+    }
+    return true;
+});
+check('ImportAliases: only file-level use statements introduce aliases', function (): bool|string {
+    $yes = "<?php\nnamespace N;\nuse A\\B as C, D\\E;\nuse function f\\g as h;\n";
+    $grp = "<?php\nuse P\\{A as X, /* c; */ B as Y};\n";
+    $no = "<?php\n// use A\\B as C\n\$s = 'use A\\B as C';\n\$f = function () use (\$x) { return 1; };\nclass T { use U { go as C; } }\n\$o->use X as C;\n";
+    $ok = \Semantic\ImportAliases::has($yes, 'c') && \Semantic\ImportAliases::has($yes, 'H') && !\Semantic\ImportAliases::has($yes, 'E')
+        && \Semantic\ImportAliases::has($grp, 'Y') && !\Semantic\ImportAliases::has($no, 'C');
+    return $ok ?: 'wrong';
+});
 exit($fail);

@@ -72,17 +72,15 @@ final class NavigationHandlers
 
     /**
      * A member's use sites need receiver typing, so for a member the scanned-but-closed workspace files are opened
-     * from disk for this query only (ClosedFiles::with; skipped past ClosedFiles::MAX files, then only open docs and
+     * from disk one at a time for this query only (ClosedFiles::with; skipped past ClosedFiles::MAX files, then only open docs and
      * the name index answer). Classes, functions, constants and variables are answered from the name index.
      *
      * @return Location[]
      */
     private function references(string $uri, int $line, int $col): array
     {
-        /** @var array<string, string> $open */
-        $open = ($this->docs)();
         /** @var Location[] $r */
-        $r = (new MemberQuery($this->ws, $this->closed))->run($uri, $line, $col, Position::lineText($open[$uri] ?? '', $line), fn(): array => $this->ws->referencesTo($uri, $line, $col));
+        $r = (new MemberQuery($this->ws, $this->closed))->run($uri, $line, $col, fn(): array => $this->ws->referencesTo($uri, $line, $col));
         return $r;
     }
 
@@ -121,7 +119,7 @@ final class NavigationHandlers
         $map = new LocationMap($this->docs);
         $out = [];
         foreach ($locs as $l) {
-            $m = $map->toLsp($l);
+            $m = $map->toLsp($l, true);
             if ($m !== null) { $out[] = $m; }
         }
         return $out === [] ? null : $out;

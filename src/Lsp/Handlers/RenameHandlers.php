@@ -68,18 +68,19 @@ final class RenameHandlers
                 $this->ws->renameBlockers($at[0], $at[1], $at[2]),
                 $this->editSet($at),
                 $this->ws->uncertainSitesFor($at[0], $at[1], $at[2]),
+                $this->ws->memberKindsAt($at[0], $at[1], $at[2]),
             ];
-            /** @var array{0: string[], 1: Location[]|null, 2: UncertainSite[]} $g */
+            /** @var array{0: string[], 1: Location[]|null, 2: UncertainSite[], 3: string[]} $g */
             $g = $this->query($at, $gather);
             if ($g[1] !== null) {
                 $files = [];
                 foreach ($g[1] as $l) { $files[$l->file] = $l->file; }
                 if ($this->closed->prune(\array_values($files)) > 0) {
-                    /** @var array{0: string[], 1: Location[]|null, 2: UncertainSite[]} $g */
+                    /** @var array{0: string[], 1: Location[]|null, 2: UncertainSite[], 3: string[]} $g */
                     $g = $this->query($at, $gather);
                 }
             }
-            [$all, $set, $uncertain] = $g;
+            [$all, $set, $uncertain, $memberKinds] = $g;
             $member = $this->member($at);
             $missed = $this->closed->unindexed() + ($member ? $this->closed->skipped() : 0);
             if ($missed > 0) {
@@ -99,7 +100,8 @@ final class RenameHandlers
                 throw new RpcError(RpcError::INVALID_PARAMS, 'no renameable symbol here');
             }
             $kind = $this->kind($at);
-            $ci = $kind !== 'constant' && $kind !== 'variable';
+            // methods, classes and functions are case-insensitive in PHP; properties, class constants, enum cases, constants and variables are not
+            $ci = $kind === 'member' ? $memberKinds === ['method'] : ($kind !== 'constant' && $kind !== 'variable');
             $sigil = false;
             /** @var array<string, array<int, array<string, mixed>>> $changes */
             $changes = [];
@@ -258,15 +260,13 @@ final class RenameHandlers
     }
 
     /**
-     * A member query needs the closed workspace files that mention its name opened for its duration (ClosedFiles::with).
+     * A member query needs the closed workspace files opened one at a time (ClosedFiles::with).
      *
      * @param array{0: string, 1: int, 2: int} $at
      */
     private function query(array $at, callable $fn): mixed
     {
-        /** @var array<string, string> $open */
-        $open = ($this->docs)();
-        return (new MemberQuery($this->ws, $this->closed))->run($at[0], $at[1], $at[2], Position::lineText($open[$at[0]] ?? '', $at[1]), $fn);
+        return (new MemberQuery($this->ws, $this->closed))->run($at[0], $at[1], $at[2], $fn);
     }
 
     /** @param array{0: string, 1: int, 2: int} $at */
@@ -374,7 +374,7 @@ final class RenameHandlers
         if (\in_array(\strtolower($txt), ['self', 'static', 'parent'], true)) { return true; }
         if ($kind !== 'class' && $kind !== 'function') { return false; }
         $text = $map->text($l->file);
-        return $text !== null && \preg_match('/\buse\b[^;]*?\bas\s+' . \preg_quote($txt, '/') . '\b/i', $text) === 1;
+        return $text !== null && \Semantic\ImportAliases::has($text, $txt);
     }
 
     /**

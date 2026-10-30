@@ -58,6 +58,12 @@ final class Workspace
     /** @var array<string, string> uri => open text (completion reads the line before the cursor) */
     private array $texts = [];
 
+    /** @var (callable(string, callable): bool)|null opens a closed file for the callable only, then releases it; false when it cannot */
+    private $closedOpener = null;
+
+    /** @var array<string, array<string, MemberInfo[]|null>> "name\0file" => "line:col" => member use sites resolved in a closed file during the current withClosedFiles window */
+    private array $closedSites = [];
+
     public function __construct(private LibrarySymbols $lib, private bool $checkUndefined = true)
     {
         if (count($lib->preludeFiles()) === 0) {
@@ -87,6 +93,24 @@ final class Workspace
         $this->exprAt[$uri] = ExprAt::build($r->program);
         $this->index->replaceFile($pf);
         $this->names->replaceFile($uri, $r->program, $text);
+    }
+
+    /**
+     * Runs $fn with $opener serving member queries: a use site in a file that is not open is resolved by opening that
+     * file for the duration of one call, so only one closed file's AST is alive at a time.
+     *
+     * @param callable(string, callable): bool $opener
+     */
+    public function withClosedFiles(callable $opener, callable $fn): mixed
+    {
+        $this->closedOpener = $opener;
+        $this->closedSites = [];
+        try {
+            return $fn();
+        } finally {
+            $this->closedOpener = null;
+            $this->closedSites = [];
+        }
     }
 
     private static function assertUserUri(string $uri): void
@@ -220,6 +244,15 @@ final class Workspace
             return $this->index->constAt($uri, $line, $col) === null ? null : 'constant';
         }
         return $o->denotes();
+    }
+
+    /** Declared kinds (method | prop | const | case) of the member(s) under the cursor; [] when it is not a resolvable member. @return string[] */
+    public function memberKindsAt(string $uri, int $line, int $col): array
+    {
+        $o = $this->names->occurrenceAt($uri, $line, $col);
+        $ks = [];
+        foreach (($o === null ? null : $this->membersOf($o)) ?? [] as $m) { $ks[$m->kind] = true; }
+        return \array_keys($ks);
     }
 
     /**
@@ -412,7 +445,7 @@ final class Workspace
         if (\preg_match('/(\?->|->|::)[ \t]*(\$?\w*)$/', $before, $m, PREG_OFFSET_CAPTURE) === 1) {
             $static = $m[1][0] === '::';
             $prefix = $m[2][0];
-            $head = \rtrim(\substr($before, 0, $m[0][1]));
+            $head = \rtrim(\substr($text, 0, $start + $m[0][1]));
             if ($head === '') { return []; }
             $pcol = $col - \strlen($prefix);
             $rest = (string)\preg_replace('/^\w+/', '', \substr($text, $off));
@@ -434,9 +467,53 @@ final class Workspace
             return \array_slice($out, 0, Completer::CAP);
         }
         if (\preg_match('/(?<![\w$>:\\\\])(\\\\?[A-Za-z_][\w\\\\]*)$/', $before, $m) === 1) {
-            return $comp->symbols($m[1]);
+            return $this->withImports($text, $comp->symbols($m[1]), $m[1]);
         }
         return [];
+    }
+
+    /**
+     * Class items get the short name as label/insert text; a `use` edit is attached unless the name is already
+     * imported, global in a global file, or in the current namespace.
+     *
+     * @param Completion[] $items
+     * @return Completion[]
+     */
+    private function withImports(string $text, array $items, string $typed): array
+    {
+        if ($typed[0] === '\\') { return $items; }
+        $ns = '';
+        /** @var array<string, string> $imports lower fqn => alias */
+        $imports = [];
+        $useLine = 0;
+        $nsLine = 0;
+        $phpLine = 0;
+        foreach (\explode("\n", $text) as $i => $ln) {
+            $n = $i + 1;
+            if ($phpLine === 0 && \preg_match('/^\s*<\?php\b/', $ln) === 1) { $phpLine = $n; }
+            if (\preg_match('/^namespace\s+([\w\\\\]+)\s*;/', $ln, $m) === 1) { $ns = $m[1]; $nsLine = $n; $imports = []; }
+            elseif (\preg_match('/^use\s+([\w\\\\]+)(?:\s+as\s+(\w+))?\s*;/', $ln, $m) === 1) {
+                $f = \ltrim($m[1], '\\');
+                $imports[\strtolower($f)] = $m[2] ?? (\substr($f, (int)\strrpos('\\' . $f, '\\')));
+                $useLine = $n;
+            }
+        }
+        $at = $useLine > 0 ? $useLine + 1 : ($nsLine > 0 ? $nsLine + 1 : ($phpLine > 0 ? $phpLine + 1 : 1));
+        foreach ($items as $c) {
+            if (!\in_array($c->kind, ['class', 'interface', 'enum'], true)) { continue; }
+            $fqn = \ltrim($c->label, '\\');
+            $short = \substr($fqn, (int)\strrpos('\\' . $fqn, '\\'));
+            $c->detail = $fqn;
+            $c->insertText = $short;
+            $c->label = $short;
+            $alias = $imports[\strtolower($fqn)] ?? null;
+            if ($alias !== null) { $c->insertText = $alias; continue; }
+            $dir = \strpos($fqn, '\\') === false ? '' : \substr($fqn, 0, (int)\strrpos($fqn, '\\'));
+            if (\strcasecmp($dir, $ns) === 0) { continue; }
+            $c->useFqn = $fqn;
+            $c->useLine = $at;
+        }
+        return $items;
     }
 
     /**
@@ -666,16 +743,29 @@ final class Workspace
         }
         for ($k = \count($path) - 1; $k >= 0 && $t !== null; $k = $k - 1) {
             $el = $path[$k][0];
-            if ($t->kind === SourceType::SHAPE) {
-                $want = $el->key instanceof \Parser\Ast\StringLiteral ? $el->key->value : ($el->key instanceof \Parser\Ast\IntLiteral ? (string)$el->key->value : (string)$path[$k][1]);
-                $next = null;
-                foreach ($t->args as $j => $arg) { if (\rtrim($t->keys[$j], '?') === $want) { $next = $arg; } }
-                $t = $next;
-            } else {
-                $t = Flow::elementTypes($t)[1];
-            }
+            $want = $el->key instanceof \Parser\Ast\StringLiteral ? $el->key->value : ($el->key instanceof \Parser\Ast\IntLiteral ? (string)$el->key->value : (string)$path[$k][1]);
+            $t = self::stepInto($t, $want);
         }
         return $t;
+    }
+
+    /** The element `$want` of a destructured value; a union or nullable is stepped member by member (members without elements drop out). */
+    private static function stepInto(SourceType $t, string $want): ?SourceType
+    {
+        if ($t->kind === SourceType::UNION || $t->kind === SourceType::NULLABLE) {
+            $parts = [];
+            foreach ($t->args as $m) {
+                $e = self::stepInto($m, $want);
+                if ($e !== null) { $parts[] = $e; }
+            }
+            return \count($parts) === 0 ? null : ExprTyper::union($parts);
+        }
+        if ($t->kind === SourceType::SHAPE) {
+            $next = null;
+            foreach ($t->args as $j => $arg) { if (\rtrim($t->keys[$j], SourceType::OPT) === $want) { $next = $arg; } }
+            return $next;
+        }
+        return Flow::elementTypes($t)[1];
     }
     /** Type of the first later use of a binding that has one (a foreach or catch variable is typed only inside its body). */
     private function nextUseType(string $uri, VarIndex $vi, int $b, int $line, int $col): ?SourceType
@@ -921,12 +1011,43 @@ final class Workspace
     {
         $at = $this->exprAt[$o->file] ?? null;
         $pf = $this->asts[$o->file] ?? null;
-        if ($at === null || $pf === null) { return null; }
+        if ($at === null || $pf === null) { return $this->closedSite($o); }
         $k = $o->line . ':' . $o->col;
         if (isset($this->siteCache[$o->file]) && \array_key_exists($k, $this->siteCache[$o->file])) { return $this->siteCache[$o->file][$k]; }
         $r = (new MemberResolver($this->index))->resolve($o->file, $o, $at, $this->unitsOf($o->file, $pf));
         $this->siteCache[$o->file][$k] = $r;
         return $r;
+    }
+
+    /** @return MemberInfo[]|null a use site in a file that is not open: all same-named sites of that file resolve in one open/close */
+    private function closedSite(NameOccurrence $o): ?array
+    {
+        if ($this->closedOpener === null) { return null; }
+        $key = \strtolower(\ltrim($o->resolved, '$')) . "\0" . $o->file;
+        if (!isset($this->closedSites[$key])) {
+            $this->closedSites[$key] = [];
+            ($this->closedOpener)($o->file, function () use ($o, $key): void {
+                foreach ($this->names->inFile($o->file) as $c) {
+                    if ($c->isDecl || !$this->sameMemberName($c, $o)) { continue; }
+                    $this->closedSites[$key][$c->line . ':' . $c->col] = $this->resolveSite($c);
+                }
+            });
+        }
+        return $this->closedSites[$key][$o->line . ':' . $o->col] ?? null;
+    }
+
+    /** @return Location[] uses of the promoted constructor parameter a property declaration location names, in the declaring file (opened if closed) */
+    private function promotedUses(Location $l): array
+    {
+        $out = [];
+        $collect = function () use ($l, &$out): void {
+            $vi = $this->varsOf($l->file);
+            $vb = $vi === null ? -1 : $vi->declAt($l->line, $l->col);
+            if ($vi !== null && $vb >= 0) { $out = $vi->sitesOf($vb); }
+        };
+        if (isset($this->asts[$l->file])) { $collect(); }
+        elseif ($this->closedOpener !== null) { ($this->closedOpener)($l->file, $collect); }
+        return $out;
     }
 
     private function memberLocation(MemberInfo $m): ?Location
@@ -952,10 +1073,8 @@ final class Workspace
                 $l = $this->memberLocation($fm);
                 if ($l !== null) { $out[self::locKey($l)] = $l; }
                 // a promoted constructor parameter is also a variable: its uses in the constructor body belong to the family
-                $vi = $fm->kind === 'prop' && $l !== null ? $this->varsOf($l->file) : null;
-                $vb = $vi === null ? -1 : $vi->declAt($l->line, $l->col);
-                if ($vi !== null && $vb >= 0) {
-                    foreach ($vi->sitesOf($vb) as $vl) { $out[self::locKey($vl)] = $vl; }
+                if ($fm->kind === 'prop' && $l !== null) {
+                    foreach ($this->promotedUses($l) as $vl) { $out[self::locKey($vl)] = $vl; }
                 }
             }
         }
@@ -1019,8 +1138,12 @@ final class Workspace
             $ty = self::merged($m->typeHint, $m->docType, $m->declClass);
             return [$n . '$' . $m->name . ($ty[0] !== null ? ': ' . $ty[0] : ''), $ty[1], $ty[2]];
         }
+        if ($m->kind === 'const') {
+            $ty = self::merged($m->typeHint, $m->docType, $m->declClass);
+            return [$n . $m->name . ($ty[0] !== null ? ': ' . $ty[0] : ''), $ty[1], $ty[2]];
+        }
         if ($m->kind !== 'method') {
-            return [$n . $m->name . ($m->kind === 'const' && $m->typeHint !== null ? ': ' . $m->typeHint : ''), null, false];
+            return [$n . $m->name, null, false];
         }
         $mi = $this->index->findMethod($m->declClass, \strtolower($m->name), 0);
         if ($mi === null) { return [$n . $m->name, null, false]; }
