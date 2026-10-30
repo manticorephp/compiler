@@ -1002,6 +1002,29 @@ trait InferScans
                 }
             }
         }
+        // An LSB copy (`Owner__m__lsbScope`) is reached through the same dispatcher as its
+        // original, never by name, so no call site ever observes it. It must still end up
+        // speaking the original's parameter ABI: the dispatcher hands every arm the one argument
+        // list, and a copy left at its declared `vec[obj]` read the original's `vec[cell]` as raw
+        // object pointers.
+        foreach ($module->functions as $cfn) {
+            $lp = \strpos($cfn->name, '__lsb');
+            if ($lp === false || $lp === 0) { continue; }
+            $baseName = \substr($cfn->name, 0, $lp);
+            $ci = 0;
+            foreach ($cfn->params as $cp) {
+                $bk = $baseName . '#' . (string)$ci;
+                $ck = $cfn->name . '#' . (string)$ci;
+                $ci = $ci + 1;
+                if (!isset($cand[$bk]) || !isset($cand[$ck])) { continue; }
+                if (isset($observed[$bk])) { $observed[$ck] = $observed[$bk]; }
+                if (isset($conflict[$bk])) { $conflict[$ck] = true; }
+                if (isset($assocKey[$bk])) { $assocKey[$ck] = $assocKey[$bk]; }
+                if (isset($shape[$bk])) { $shape[$ck] = $shape[$bk]; }
+                if (isset($sawCell[$bk])) { $sawCell[$ck] = true; }
+                if (isset($erasedArg[$bk])) { $erasedArg[$ck] = true; }
+            }
+        }
         $changed = false;
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
