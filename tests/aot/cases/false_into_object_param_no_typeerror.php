@@ -1,6 +1,5 @@
 <?php
 // A false returned by a false|Box function and passed to a Box-typed parameter raises no TypeError (the callee reads null).
-// issue: #484
 class Box { public int $n = 1; public function get(): int { return $this->n; } }
 function make(bool $ok): false|Box { return $ok ? new Box() : false; }
 function use_box(Box $b): int { return $b->n; }

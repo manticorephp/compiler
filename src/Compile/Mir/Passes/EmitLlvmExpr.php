@@ -6692,7 +6692,7 @@ trait EmitLlvmExpr
      * (`false given`): without it the unbox masked the tag off and the callee read a null object.
      * Only TAGGED words are judged — an untagged word may be a raw object pointer the claim never boxed.
      */
-    private function emitObjArgGuard(string $head): string
+    private function emitObjArgGuard(string $head, string $given = ' given', string $cls = 'TypeError'): string
     {
         $v = $this->lastValue;
         $vt = $this->lastValueType;
@@ -6701,7 +6701,7 @@ trait EmitLlvmExpr
         foreach ([[1, 'int'], [4, 'string']] as $tn) {
             $c = $this->ssa->allocReg();
             $out .= '  ' . $c . ' = icmp eq i64 ' . $tag . ', ' . (string)$tn[0] . "\n";
-            $out .= $this->emitThrowIf($c, 'TypeError', $head . $tn[1] . ' given');
+            $out .= $this->emitThrowIf($c, $cls, $head . $tn[1] . $given);
         }
         $isB = $this->ssa->allocReg();
         $bit = $this->ssa->allocReg();
@@ -6715,8 +6715,8 @@ trait EmitLlvmExpr
         $out .= '  ' . $t . ' = icmp eq i64 ' . $bit . ", 1\n";
         $out .= '  ' . $isF . ' = and i1 ' . $isB . ', ' . $f . "\n";
         $out .= '  ' . $isT . ' = and i1 ' . $isB . ', ' . $t . "\n";
-        $out .= $this->emitThrowIf($isF, 'TypeError', $head . 'false given');
-        $out .= $this->emitThrowIf($isT, 'TypeError', $head . 'true given');
+        $out .= $this->emitThrowIf($isF, $cls, $head . 'false' . $given);
+        $out .= $this->emitThrowIf($isT, $cls, $head . 'true' . $given);
         $this->lastValue = $v;
         $this->lastValueType = $vt;
         return $out;
