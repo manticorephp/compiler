@@ -10,7 +10,7 @@ _manticore() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "compile build dump-llvm dump-ast analyze dump-mir dump-llvm-mir split-ir dump-sig version upgrade doctor completions help --version --help" -- "$cur"))
+        COMPREPLY=($(compgen -W "compile build dump-llvm dump-ast analyze dump-mir dump-llvm-mir split-ir dump-sig version lsp upgrade doctor completions help --version --help" -- "$cur"))
         return 0
     fi
     cmd="${COMP_WORDS[1]}"
@@ -51,10 +51,10 @@ _manticore() {
         dump-ast)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|-j|--decl-names) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --tolerant --ranges --names --check-names --check-ranges" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --tolerant --ranges --names --decl-names --check-names --check-ranges" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -113,6 +113,13 @@ _manticore() {
         version)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--help --check" -- "$cur"))
+            else
+                _manticore_files "$cur"
+            fi
+            ;;
+        lsp)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--help" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
