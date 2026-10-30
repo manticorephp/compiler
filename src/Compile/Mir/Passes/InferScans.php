@@ -987,7 +987,13 @@ trait InferScans
                 // cell site then reads cells directly and Monomorphize clones
                 // each CONCRETE site off this erased-cell param (m8). Idempotent:
                 // skip when the param already carries a cell element.
-                if (isset($sawCell[$key])) {
+                //
+                // A PRELUDE callee fed an ERASED arg (one whose elements nobody can
+                // see: an untyped fused-closure result, a bare-`array` property) has
+                // the same floor. Its body is linkonce_odr, so no module may guess
+                // an element repr for it; the guess it started from (vec[string])
+                // read an int buffer's raw words as string pointers.
+                if (isset($sawCell[$key]) || ($fn->isPrelude && isset($erasedArg[$key]))) {
                     $cur = $p->type;
                     $already = $cur->isArray() && $cur->element !== null
                         && $cur->element->kind === Type::KIND_CELL;
