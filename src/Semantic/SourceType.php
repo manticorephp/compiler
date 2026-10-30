@@ -9,6 +9,7 @@ namespace Semantic;
  * `resolved` is the FQN a SELF/STATIC type refers to (the enclosing class at
  * parse time); '' when unknown or for PARENT.
  * `ret` is the return type of a CALLABLE written with a signature.
+ * `keys` are the key names of a SHAPE, parallel to `args`.
  */
 final class SourceType
 {
@@ -27,9 +28,12 @@ final class SourceType
     public const VOID = 'void';
     public const NEVER = 'never';
     public const LITERAL = 'literal';
+    /** `array{k: T, o?: U}`: `args` hold the value types, `keys` the key names (`?` suffix = optional). */
+    public const SHAPE = 'shape';
 
     /**
      * @param SourceType[] $args
+     * @param string[] $keys
      */
     public function __construct(
         public readonly string $kind,
@@ -37,6 +41,7 @@ final class SourceType
         public readonly array $args = [],
         public readonly string $resolved = '',
         public readonly ?SourceType $ret = null,
+        public readonly array $keys = [],
     ) {}
 
     public function toString(): string
@@ -61,6 +66,10 @@ final class SourceType
                 $parts = [];
                 foreach ($this->args as $a) { $parts[] = $a->toString(); }
                 return $this->name . '<' . \implode(',', $parts) . '>';
+            case self::SHAPE:
+                $parts = [];
+                foreach ($this->args as $i => $a) { $parts[] = $this->keys[$i] . ':' . $a->toString(); }
+                return $this->name . '{' . \implode(',', $parts) . '}';
             case self::CALLABLE:
                 if ($this->args === [] && $this->ret === null) { return $this->name; }
                 $parts = [];

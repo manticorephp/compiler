@@ -30,6 +30,7 @@ final class SymbolHandlers
     {
         $d->on('textDocument/documentSymbol', function (array $p): mixed {
             $uri = $p['textDocument']['uri'] ?? null;
+            $uri = is_string($uri) ? \Lsp\Uri::normalize($uri) : null;
             if (!is_string($uri)) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'textDocument.uri required');
             }

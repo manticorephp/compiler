@@ -46,6 +46,7 @@ final class ExprTyper
 {
     private const MAX_DEPTH = 400;
     private const MAX_NODES = 4000;
+    private const SHAPE_MAX = 8;
 
     /** @var array<string, bool> constants being evaluated (cycle guard) */
     private array $busy = [];
@@ -404,7 +405,7 @@ final class ExprTyper
             if ($v === null || $el->byRef) { return self::scalar('array'); }
             $vals[] = $v;
             if ($el->key !== null) {
-                $k = $this->go($el->key, $env, $d);
+                $k = $el->key instanceof StringLiteral && self::isIntKey($el->key->value) ? self::scalar('int') : $this->go($el->key, $env, $d);
                 if ($k === null) { return self::scalar('array'); }
                 $keyed = true;
                 $keys[] = $k;
@@ -412,15 +413,54 @@ final class ExprTyper
                 $keys[] = self::scalar('int');
             }
         }
+        $shape = $this->literalShape($e, $vals);
+        if ($shape !== null) { return $shape; }
         $v = self::union($vals);
         if (!$keyed) { return new SourceType(SourceType::GENERIC, 'list', [$v]); }
         return new SourceType(SourceType::GENERIC, 'array', [self::union($keys), $v]);
+    }
+
+    /**
+     * `array{a: T, …}` when every element has a distinct string-literal key and there are at most SHAPE_MAX of them.
+     *
+     * @param SourceType[] $vals
+     */
+    private function literalShape(ArrayLit $e, array $vals): ?SourceType
+    {
+        if (\count($e->elements) > self::SHAPE_MAX) { return null; }
+        $keys = [];
+        $seen = [];
+        foreach ($e->elements as $el) {
+            if (!($el->key instanceof StringLiteral) || self::isIntKey($el->key->value) || $el->key->value === '' || \str_ends_with($el->key->value, '?')
+                || isset($seen['k:' . $el->key->value])) { return null; }
+            $seen['k:' . $el->key->value] = true;
+            $keys[] = $el->key->value;
+        }
+        return new SourceType(SourceType::SHAPE, 'array', $vals, '', null, $keys);
+    }
+
+    /** PHP stores a decimal-integer string key as an int key. */
+    public static function isIntKey(string $k): bool
+    {
+        if (\preg_match('/^(0|-?[1-9][0-9]*)\z/', $k) !== 1) { return false; }
+        $neg = $k[0] === '-';
+        $digits = $neg ? \substr($k, 1) : $k;
+        if (\strlen($digits) !== 19) { return \strlen($digits) < 19; }
+        return \strcmp($digits, $neg ? '9223372036854775808' : '9223372036854775807') <= 0;
     }
 
     private function arrayAccess(ArrayAccess $e, TypeEnv $env, int $d): ?SourceType
     {
         $b = $this->go($e->array, $env, $d);
         if ($b === null || $e->index === null) { return null; }
+        if ($b->kind === SourceType::SHAPE) {
+            $k = $e->index instanceof StringLiteral ? $e->index->value : null;
+            $parts = [];
+            foreach ($b->args as $i => $a) {
+                if ($k === null || \rtrim($b->keys[$i], '?') === $k) { $parts[] = $a; }
+            }
+            return \count($parts) === 0 ? null : self::union($parts);
+        }
         if ($b->kind === SourceType::GENERIC && ($b->name === 'array' || $b->name === 'list') && \count($b->args) > 0) {
             return $b->args[\count($b->args) - 1];
         }
@@ -482,7 +522,7 @@ final class ExprTyper
     private static function isArray(?SourceType $t): bool
     {
         if ($t === null) { return false; }
-        return self::isScalar($t, 'array') || ($t->kind === SourceType::GENERIC && ($t->name === 'array' || $t->name === 'list'));
+        return self::isScalar($t, 'array') || $t->kind === SourceType::SHAPE || ($t->kind === SourceType::GENERIC && ($t->name === 'array' || $t->name === 'list'));
     }
 
     public static function hasNull(SourceType $t): bool

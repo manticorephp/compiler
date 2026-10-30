@@ -636,7 +636,7 @@ final class Flow
             while ($root instanceof ArrayAccess) { $root = $root->array; }
             if ($root instanceof Variable) {
                 $cur = $out->vars[$root->name] ?? null;
-                if ($cur !== null && ($cur->kind === SourceType::GENERIC || $cur->kind === SourceType::ITERABLE)) {
+                if ($cur !== null && ($cur->kind === SourceType::GENERIC || $cur->kind === SourceType::ITERABLE || $cur->kind === SourceType::SHAPE)) {
                     $out->vars[$root->name] = ExprTyper::scalar('array');
                 }
             } elseif ($root instanceof PropertyAccess) {
@@ -1174,7 +1174,7 @@ final class Flow
     {
         if ($kind === 'object') { return $m->kind === SourceType::CLASS_; }
         if ($kind === 'array') {
-            return ($m->kind === SourceType::SCALAR && $m->name === 'array')
+            return ($m->kind === SourceType::SCALAR && $m->name === 'array') || $m->kind === SourceType::SHAPE
                 || (($m->kind === SourceType::GENERIC || $m->kind === SourceType::ITERABLE) && ($m->name === 'array' || $m->name === 'list'));
         }
         return $m->kind === SourceType::SCALAR && $m->name === $kind;
@@ -1211,8 +1211,13 @@ final class Flow
      *
      * @return (SourceType|null)[]
      */
-    private static function elementTypes(?SourceType $t): array
+    public static function elementTypes(?SourceType $t): array
     {
+        if ($t !== null && $t->kind === SourceType::SHAPE) {
+            $ks = [];
+            foreach ($t->keys as $k) { $ks[] = ExprTyper::scalar(ExprTyper::isIntKey(\rtrim($k, '?')) ? 'int' : 'string'); }
+            return [ExprTyper::union($ks), ExprTyper::union($t->args)];
+        }
         if ($t === null || ($t->kind !== SourceType::GENERIC && $t->kind !== SourceType::ITERABLE)) { return [null, null]; }
         $n = \count($t->args);
         if ($n === 0) { return [null, null]; }

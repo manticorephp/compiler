@@ -68,6 +68,9 @@ final class AstWalk
     /** @var Expr[] every expression node, in pre-order */
     public array $exprs = [];
 
+    /** @var ForeachStmt[] every foreach statement, in pre-order */
+    public array $foreachs = [];
+
     /**
      * When true, a nested `Closure` / `ArrowFn` is recorded but NOT descended
      * into — its body belongs to a different variable scope and is analyzed as
@@ -120,6 +123,7 @@ final class AstWalk
             return;
         }
         if ($s instanceof ForeachStmt) {
+            $this->foreachs[] = $s;
             $this->expr($s->expr);
             $this->expr($s->key);
             $this->expr($s->value);

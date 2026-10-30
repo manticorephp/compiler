@@ -428,7 +428,7 @@ final class Workspace
             if ($this->insideClass($uri, $line, $col)) { $names[] = 'this'; }
             $out = [];
             foreach (\array_unique($names) as $n) {
-                if ($prefix === '' || \stripos($n, $prefix) === 0) { $out[] = new Completion('$' . $n, 'variable'); }
+                if ($prefix === '' || \stripos($n, $prefix) === 0) { $out[] = new Completion('$' . $n, 'variable', '', '', 0); }
             }
             \usort($out, fn(Completion $a, Completion $b): int => \strcmp($a->label, $b->label));
             return \array_slice($out, 0, Completer::CAP);
@@ -485,8 +485,261 @@ final class Workspace
         return false;
     }
 
-    /** Declared signature of a member under the cursor (`Foo::bar(int $a): ?Baz`), else the type of the expression there. */
+    /** Test seam: called first on every hover; whatever it throws degrades the hover to the plain text. */
+    public ?\Closure $hoverProbe = null;
+
+    /** Message of the last failure the rich hover absorbed. */
+    public ?string $hoverError = null;
+
+    /**
+     * Declared signature of a member or function under the cursor (`Foo::bar(int $a): ?Baz`, types merged from the native
+     * hint and the docblock), the type of a variable there, else the type of the expression. `detail` carries the key and
+     * value types of an array type and where the type comes from. Never throws: a failure answers the plain type.
+     */
     public function hover(string $uri, int $line, int $col): ?HoverInfo
+    {
+        try {
+            if ($this->hoverProbe !== null) { ($this->hoverProbe)(); }
+            return $this->hoverRich($uri, $line, $col);
+        } catch (\Throwable $e) {
+            $this->hoverError = $e->getMessage();
+        }
+        return $this->hoverPlain($uri, $line, $col);
+    }
+
+    private function hoverRich(string $uri, int $line, int $col): ?HoverInfo
+    {
+        $o = $this->names->occurrenceAt($uri, $line, $col);
+        if ($o !== null && $o->kind === 'member' && !$o->inDoc) {
+            $ms = $this->membersOf($o);
+            if ($ms !== null && \count($ms) > 0) {
+                $parts = [];
+                $detail = '';
+                $refined = false;
+                foreach ($ms as $m) {
+                    $sig = $this->signatureOf($m);
+                    $parts[] = $sig[0];
+                    $refined = $refined || $sig[2];
+                    if ($detail === '' && $sig[1] !== null) {
+                        $detail = TypeDetail::detail($sig[1]);
+                        if ($detail !== '' && $m->kind === 'method') { $detail = "**Returns**\n" . $detail; }
+                    }
+                }
+                return new HoverInfo(\implode("\nor ", $parts), new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol), self::detailText($detail, $refined ? 'from annotation' : ''));
+            }
+        }
+        if ($o !== null && $o->kind === 'function' && !$o->inDoc) {
+            $fn = $this->index->resolveFunction($o->resolved !== '' ? $o->resolved : $o->resolvedLower);
+            if ($fn !== null) {
+                $ret = self::merged($fn->returnType, $fn->docType, '');
+                $ps = $this->paramList($fn->params, $fn->paramDocs, '');
+                $text = $fn->name . '(' . $ps[0] . ')' . ($ret[0] !== null ? ': ' . $ret[0] : '');
+                $detail = $ret[1] === null ? '' : TypeDetail::detail($ret[1]);
+                $detail = $detail === '' ? '' : "**Returns**\n" . $detail;
+                return new HoverInfo($text, new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol), self::detailText($detail, $ret[2] || $ps[1] ? 'from annotation' : ''));
+            }
+        }
+        if ($o !== null && $o->inDoc) {
+            return new HoverInfo($o->resolved, new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
+        }
+        $v = $this->variableHover($uri, $line, $col);
+        if ($v !== null) { return $v; }
+        $vi = $this->varsAt($uri, $line, $col);
+        if ($vi !== null && !$vi->isSpecial($vi->bindingAt($line, $col))) { return null; }
+        $t = $this->typeAt($uri, $line, $col);
+        $n = $this->nodeAt($uri, $line, $col);
+        if ($t === null || $n === null) { return null; }
+        $sp = $n->span;
+        return new HoverInfo(self::shown(TypeDetail::inline($t)), new Location($uri, $sp->startLine(), $sp->startColumn(), $sp->endLine(), $sp->endColumn()), self::detailText(TypeDetail::detail($t), ''));
+    }
+
+    /** Variable under the cursor: `$name: type` with the type at that point, null when it is not a variable or its type is unknown. */
+    private function variableHover(string $uri, int $line, int $col): ?HoverInfo
+    {
+        $vi = $this->varsAt($uri, $line, $col);
+        $pf = $this->asts[$uri] ?? null;
+        $at = $this->exprAt[$uri] ?? null;
+        if ($vi === null || $pf === null || $at === null) { return null; }
+        $b = $vi->bindingAt($line, $col);
+        if ($vi->isSpecial($b)) { return null; }
+        $site = null;
+        foreach ($vi->sitesOf($b) as $s) {
+            if ($s->line === $line && $s->col <= $col && $col <= $s->endCol) { $site = $s; break; }
+        }
+        if ($site === null) { return null; }
+        $name = $vi->nameOf($b);
+        $lookup = $this->unitsOf($uri, $pf);
+        $chain = $at->chain($line, $col);
+        $n = \count($chain);
+        $node = $n > 0 ? $chain[$n - 1] : null;
+        $t = null;
+        $declared = null;
+        $declLabel = '';
+        $empty = false;
+        $typer = new ExprTyper($this->index, $uri);
+        $param = $lookup->paramUnit($name, $line, $col);
+        if ($param !== null) {
+            $t = TypeEnv::forUnit($param, $this->index)->vars[$name] ?? null;
+            $declared = $t;
+            $declLabel = self::paramLabel($param, $name);
+        } elseif ($node instanceof \Parser\Ast\Variable) {
+            $parent = $n > 1 ? $chain[$n - 2] : null;
+            $fe = $lookup->foreachOf($node);
+            if ($parent instanceof \Parser\Ast\Assign && $parent->target === $node) {
+                $t = $typer->typeOf($parent, $lookup->envAt($parent, $this->index, $uri));
+                $empty = $parent->value instanceof \Parser\Ast\ArrayLit && \count($parent->value->elements) === 0;
+            } elseif ($fe !== null) {
+                if ($fe->value === $node && $fe->valueByRef) { $t = null; }
+                else {
+                    $el = Flow::elementTypes($typer->typeOf($fe->expr, $lookup->envAt($fe->expr, $this->index, $uri)));
+                    $t = $fe->key === $node ? $el[0] : $el[1];
+                }
+            } elseif ($parent instanceof \Parser\Ast\ArrayLit && self::isListTarget($chain, $n, $lookup)) {
+                $t = $this->destructured($chain, $n, $typer, $lookup, $uri);
+            } else {
+                $t = $typer->typeOf($node, $lookup->envAt($node, $this->index, $uri));
+                foreach ($vi->declSitesOf($b) as $d) {
+                    $pu = $lookup->paramUnit($name, $d->line, $d->col);
+                    if ($pu === null) { continue; }
+                    $declared = TypeEnv::forUnit($pu, $this->index)->vars[$name] ?? null;
+                    $declLabel = self::paramLabel($pu, $name);
+                    break;
+                }
+            }
+        }
+        $label = $declared !== null && $t !== null && TypeDetail::inline($declared) === TypeDetail::inline($t) ? $declLabel : 'inferred';
+        if ($t === null) { $t = $this->nextUseType($uri, $vi, $b, $line, $col); }
+        if ($t === null) { return null; }
+        $text = '$' . $name . ': ' . self::shown(TypeDetail::inline($t));
+        $detail = $empty ? '- empty array' : TypeDetail::detail($t);
+        return new HoverInfo($text, new Location($uri, $site->line, $site->col, $site->endLine, $site->endCol), self::detailText($detail, $label));
+    }
+
+    /**
+     * Is the variable at chain[$n - 1] inside a destructuring pattern: nested array literals under an assignment target or a foreach value?
+     *
+     * @param Expr[] $chain
+     */
+    private static function isListTarget(array $chain, int $n, UnitLookup $lookup): bool
+    {
+        $i = $n - 1;
+        while ($i > 0 && $chain[$i - 1] instanceof \Parser\Ast\ArrayLit) { $i = $i - 1; }
+        if ($i === $n - 1) { return false; }
+        $p = $i > 0 ? $chain[$i - 1] : null;
+        if ($p instanceof \Parser\Ast\Assign) { return $p->target === $chain[$i]; }
+        $fe = $lookup->foreachOf($chain[$i]);
+        return $fe !== null && $fe->value === $chain[$i];
+    }
+
+    /**
+     * Type a variable gets from `[$a, 'k' => [$b, $c]] = value` or `foreach ($xs as [$a, $b])`: the value's element type taken
+     * stepwise by position or literal key down the pattern; null where unknown.
+     *
+     * @param Expr[] $chain
+     */
+    private function destructured(array $chain, int $n, ExprTyper $typer, UnitLookup $lookup, string $uri): ?SourceType
+    {
+        /** @var array<int, array{0: \Parser\Ast\ArrayElement, 1: int}> $path bottom-up */
+        $path = [];
+        $i = $n - 1;
+        while ($i > 0 && $chain[$i - 1] instanceof \Parser\Ast\ArrayLit) {
+            $lit = $chain[$i - 1];
+            $pos = 0;
+            $found = null;
+            foreach ($lit->elements as $el) {
+                if ($el->value === $chain[$i]) { $found = $el; break; }
+                $pos = $pos + 1;
+            }
+            if ($found === null || $found->byRef) { return null; }
+            $path[] = [$found, $pos];
+            $i = $i - 1;
+        }
+        $top = $chain[$i];
+        $p = $i > 0 ? $chain[$i - 1] : null;
+        $fe = $lookup->foreachOf($top);
+        if ($p instanceof \Parser\Ast\Assign && $p->target === $top) {
+            $t = $typer->typeOf($p->value, $lookup->envAt($p->value, $this->index, $uri));
+        } elseif ($fe !== null && $fe->value === $top && !$fe->valueByRef) {
+            $t = Flow::elementTypes($typer->typeOf($fe->expr, $lookup->envAt($fe->expr, $this->index, $uri)))[1];
+        } else {
+            return null;
+        }
+        for ($k = \count($path) - 1; $k >= 0 && $t !== null; $k = $k - 1) {
+            $el = $path[$k][0];
+            if ($t->kind === SourceType::SHAPE) {
+                $want = $el->key instanceof \Parser\Ast\StringLiteral ? $el->key->value : ($el->key instanceof \Parser\Ast\IntLiteral ? (string)$el->key->value : (string)$path[$k][1]);
+                $next = null;
+                foreach ($t->args as $j => $arg) { if (\rtrim($t->keys[$j], '?') === $want) { $next = $arg; } }
+                $t = $next;
+            } else {
+                $t = Flow::elementTypes($t)[1];
+            }
+        }
+        return $t;
+    }
+    /** Type of the first later use of a binding that has one (a foreach or catch variable is typed only inside its body). */
+    private function nextUseType(string $uri, VarIndex $vi, int $b, int $line, int $col): ?SourceType
+    {
+        $tries = 0;
+        foreach ($vi->sitesOf($b) as $s) {
+            if ($s->line < $line || ($s->line === $line && $s->col <= $col)) { continue; }
+            $tries = $tries + 1;
+            if ($tries > 8) { return null; }
+            $t = $this->typeAt($uri, $s->line, $s->col);
+            if ($t !== null) { return $t; }
+        }
+        return null;
+    }
+
+    private static function paramLabel(\Analyze\Unit $u, string $name): string
+    {
+        $native = null;
+        foreach ($u->params as $p) { if ($p->name === $name) { $native = SourceTypeParser::fromHint($p->typeHint, $u->ownerClass); } }
+        $doc = SourceTypeParser::fromHint($u->paramDocs[$name] ?? null, $u->ownerClass);
+        return $doc !== null && SourceTypeParser::withDoc($native, $doc) !== $native ? 'from annotation' : '';
+    }
+
+    private static function detailText(string $detail, string $label): string
+    {
+        $out = $detail;
+        if ($label !== '') { $out .= ($out === '' ? '' : "\n\n") . '*' . $label . '*'; }
+        return $out;
+    }
+
+    /**
+     * Native hint merged with its docblock type: the display text (null when neither exists), the merged type, and whether the docblock refined it.
+     *
+     * @return array{0: ?string, 1: ?SourceType, 2: bool}
+     */
+    private static function merged(?string $native, ?string $doc, string $cls): array
+    {
+        $n = SourceTypeParser::fromHint($native, $cls);
+        $t = SourceTypeParser::withDoc($n, SourceTypeParser::fromHint($doc, $cls));
+        if ($t === null) { return [$native, null, false]; }
+        if ($t === $n) { return [$native, $n, false]; }
+        if ($n !== null && $n->kind === SourceType::NULLABLE && !ExprTyper::hasNull($t)) { $t = new SourceType(SourceType::NULLABLE, '', [$t]); }
+        return [self::shown(TypeDetail::inline($t)), $t, true];
+    }
+
+    /**
+     * @param \Parser\Ast\Param[] $params
+     * @param array<string, string> $docs
+     * @return array{0: string, 1: bool} the parameter list text and whether a docblock refined any of them
+     */
+    private function paramList(array $params, array $docs, string $cls): array
+    {
+        $ps = [];
+        $refined = false;
+        foreach ($params as $p) {
+            $ty = self::merged($p->typeHint, $docs[$p->name] ?? null, $cls);
+            $refined = $refined || $ty[2];
+            $ps[] = ($ty[0] !== null ? $ty[0] . ' ' : '') . ($p->byRef ? '&' : '') . ($p->variadic ? '...' : '') . '$' . $p->name
+                . ($p->default !== null ? ' = ' . self::defaultText($p->default) : '');
+        }
+        return [\implode(', ', $ps), $refined];
+    }
+
+    private function hoverPlain(string $uri, int $line, int $col): ?HoverInfo
     {
         $o = $this->names->occurrenceAt($uri, $line, $col);
         if ($o !== null && $o->kind === 'member') {
@@ -496,6 +749,9 @@ final class Workspace
                 foreach ($ms as $m) { $parts[] = $this->signature($m); }
                 return new HoverInfo(\implode("\nor ", $parts), new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
             }
+        }
+        if ($o !== null && $o->inDoc) {
+            return new HoverInfo($o->resolved, new Location($o->file, $o->line, $o->col, $o->endLine, $o->endCol));
         }
         $t = $this->typeAt($uri, $line, $col);
         $n = $this->nodeAt($uri, $line, $col);
@@ -632,6 +888,9 @@ final class Workspace
         foreach ($vi->declSitesOf($b) as $d) {
             $m = $this->names->occurrenceAt($uri, $d->line, $d->col);
             if ($m !== null && $m->kind === 'member') { $out[] = 'promoted-parameter'; }
+            if ($m !== null && $m->role === 'param') {
+                foreach ($this->names->namedArgSites($vi->nameOf($b)) as $s) { $out[] = 'named-argument:' . $s->file . ':' . $s->line . ':' . $s->col; }
+            }
         }
         foreach ($this->variableUncertain($uri, $vi, $b) as $s) { $out[] = $s->reason . ':' . $s->file . ':' . $s->line . ':' . $s->col; }
         return \array_values(\array_unique($out));
@@ -748,6 +1007,26 @@ final class Workspace
     private static function shown(string $s): string
     {
         return (string)\preg_replace('/__anon_class_[A-Za-z0-9_]+/', 'class@anonymous', $s);
+    }
+
+    /**
+     * @return array{0: string, 1: ?SourceType, 2: bool} signature text, the array-carrying type (property, return), whether a docblock refined something
+     */
+    private function signatureOf(MemberInfo $m): array
+    {
+        $n = ($m->isStatic ? 'static ' : '') . self::shown($m->declClass) . '::';
+        if ($m->kind === 'prop') {
+            $ty = self::merged($m->typeHint, $m->docType, $m->declClass);
+            return [$n . '$' . $m->name . ($ty[0] !== null ? ': ' . $ty[0] : ''), $ty[1], $ty[2]];
+        }
+        if ($m->kind !== 'method') {
+            return [$n . $m->name . ($m->kind === 'const' && $m->typeHint !== null ? ': ' . $m->typeHint : ''), null, false];
+        }
+        $mi = $this->index->findMethod($m->declClass, \strtolower($m->name), 0);
+        if ($mi === null) { return [$n . $m->name, null, false]; }
+        $ps = $this->paramList($mi->params, $mi->paramDocs, $m->declClass);
+        $ret = self::merged($mi->returnType, $m->docType, $m->declClass);
+        return [$n . $m->name . '(' . $ps[0] . ')' . ($ret[0] !== null ? ': ' . $ret[0] : ''), $ret[1], $ret[2] || $ps[1]];
     }
 
     private function signature(MemberInfo $m): string

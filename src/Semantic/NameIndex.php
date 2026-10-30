@@ -18,7 +18,8 @@ use Parser\Ast\StringLiteral;
 
 /**
  * Per-file name occurrences plus the sites a name-based rename cannot be sure
- * about. Docblock sites (reason 'docblock') are not collected yet.
+ * about. Class names in type-carrying docblock tags are class occurrences (inDoc); other docblock mentions
+ * (reason 'docblock') are not collected.
  */
 final class NameIndex
 {
@@ -65,6 +66,10 @@ final class NameIndex
                 $n->role === 'decl', $n->role === 'decl' ? '' : $n->role, ltrim($n->resolved, '\\'),
                 ($n->role === 'decl' && $n->kind === 'member') ? $owner : '',
             );
+        }
+        foreach (DocblockNames::scan($text, $program->namespace, $program->useAliases) as $d) {
+            $fq = $d[3];
+            $list[] = new NameOccurrence($path, 'class', strtolower($fq), $d[1], $d[2], $d[1], $d[2] + strlen($d[0]), false, false, '', $fq, '', true);
         }
         $this->occ[$path] = $list;
 
@@ -263,6 +268,16 @@ final class NameIndex
     public function legacySites(string $path): array
     {
         return $this->legacy[$path] ?? [];
+    }
+
+    /** @return UncertainSite[] every named argument spelled $nameLower in the workspace */
+    public function namedArgSites(string $nameLower): array
+    {
+        $out = [];
+        foreach ($this->named as $byName) {
+            foreach ($byName[\strtolower($nameLower)] ?? [] as $s) { $out[] = $s; }
+        }
+        return $out;
     }
 
     /** @return UncertainSite[] */

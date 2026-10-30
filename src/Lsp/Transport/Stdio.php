@@ -95,7 +95,7 @@ class Stdio
     }
 
     /** False when the peer closed the pipe. */
-    private static function write($out, string $data): bool
+    public static function write($out, string $data): bool
     {
         $off = 0;
         $n = strlen($data);

@@ -29,7 +29,9 @@ final class Server
     /** @var array<string, string> uri => last published diagnostics JSON */
     private array $published = [];
     private ClosedFiles $closed;
-    private const MAX_SCAN_BYTES = 2097152;
+    private bool $annotations = false;
+    /** @var array<string, int> uri => version of an open document */
+    private array $versions = [];
 
     public function __construct(private Workspace $ws, callable $send, int $closedMax = ClosedFiles::MAX)
     {
@@ -60,6 +62,8 @@ final class Server
                 throw new RpcError(RpcError::INVALID_REQUEST, 'Already initialized');
             }
             $this->initialized = true;
+            $we = $p['capabilities']['workspace']['workspaceEdit'] ?? null;
+            $this->annotations = is_array($we) && ($we['documentChanges'] ?? false) === true && is_array($we['changeAnnotationSupport'] ?? null);
             $root = $p['rootUri'] ?? '';
             $this->rootUri = is_string($root) ? $root : '';
             $this->folders = [];
@@ -99,20 +103,23 @@ final class Server
         (new NavigationHandlers($this->ws, fn(): array => $this->docs, $this->closed))->register($d);
         (new CompletionHandlers($this->ws, fn(): array => $this->docs))->register($d);
         (new SymbolHandlers($this->ws, fn(): array => $this->docs))->register($d);
-        (new RenameHandlers($this->ws, fn(): array => $this->docs, $this->closed, $this->send))->register($d);
+        (new RenameHandlers($this->ws, fn(): array => $this->docs, $this->closed, $this->send, fn(): bool => $this->annotations, fn(): array => $this->versions))->register($d);
         $d->on('$/cancelRequest', function (array $p): mixed { return null; });
         $d->on('textDocument/didOpen', function (array $p): mixed {
             $td = $p['textDocument'] ?? null;
             if (!is_array($td) || !is_string($td['uri'] ?? null) || !is_string($td['text'] ?? null)) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'didOpen: textDocument.uri and .text required');
             }
-            $this->ws->open($td['uri'], $td['text']);
-            $this->docs[$td['uri']] = $td['text'];
-            $this->republish($td['uri']);
+            $uri = Uri::normalize($td['uri']);
+            $this->ws->open($uri, $td['text']);
+            $this->docs[$uri] = $td['text'];
+            if (is_int($td['version'] ?? null)) { $this->versions[$uri] = $td['version']; } else { unset($this->versions[$uri]); }
+            $this->republish($uri);
             return null;
         });
         $d->on('textDocument/didChange', function (array $p): mixed {
             $uri = $p['textDocument']['uri'] ?? null;
+            $uri = is_string($uri) ? Uri::normalize($uri) : null;
             $ch = $p['contentChanges'] ?? null;
             if (!is_string($uri) || !is_array($ch) || $ch === []) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'didChange: uri and contentChanges required');
@@ -126,15 +133,17 @@ final class Server
             }
             $this->ws->update($uri, $text);
             $this->docs[$uri] = $text;
+            $v = $p['textDocument']['version'] ?? null;
+            if (is_int($v)) { $this->versions[$uri] = $v; } else { unset($this->versions[$uri]); }
             $this->republish($uri);
             return null;
         });
         $d->on('textDocument/didClose', function (array $p): mixed {
             $uri = $p['textDocument']['uri'] ?? null;
-            if (is_string($uri) && isset($this->docs[$uri])) {
-                unset($this->docs[$uri]);
-                $this->closed->add($uri);
-                $this->ws->close($uri);
+            $uri = is_string($uri) ? Uri::normalize($uri) : null;
+            if ($uri !== null && isset($this->docs[$uri])) {
+                unset($this->docs[$uri], $this->versions[$uri]);
+                $this->closed->reindex($uri);
                 unset($this->published[$uri]);
                 $this->push($uri, []);
             }
@@ -155,17 +164,8 @@ final class Server
                 $uri = Uri::fromPath($path);
                 if (isset($seen[$uri]) || isset($this->docs[$uri])) { continue; }
                 $seen[$uri] = true;
-                try {
-                    $size = @filesize($path);
-                    if ($size === false || $size > self::MAX_SCAN_BYTES) { continue; }
-                    $text = @file_get_contents($path);
-                    if ($text === false) { continue; }
-                    $this->ws->open($uri, $text);
-                    $this->ws->close($uri);
-                    $this->closed->add($uri);
-                } catch (\Throwable $e) {
-                    continue;
-                }
+                if (!@is_file($path)) { continue; }
+                $this->closed->reindex($uri);
             }
         }
     }
