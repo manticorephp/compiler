@@ -1,0 +1,14 @@
+Program
+  Stmt:Class @2:1-4:22
+    decl: class A
+      Method ok [public] -> (none) @3:5-3:39
+        params: 0
+        body: Block @3:26-3:39
+          Stmt:Return @3:28-3:37
+            value:
+              Expr:IntLiteral @3:35-3:36
+                value: 1
+      ErrorMember @4:5-4:22
+        skipped: 3
+error 5:1-5:1 expected method name
+

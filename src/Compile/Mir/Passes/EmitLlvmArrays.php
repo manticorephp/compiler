@@ -2950,7 +2950,17 @@ trait EmitLlvmArrays
             return '  ' . $dec . ' = call i64 @__mir_elem_decode(ptr ' . $arr . ', i64 ' . $word . ")\n"
                 . $this->rcReleaseReg($dec, 'cell');
         }
-        return $this->rcReleaseReg($word, $flavor);
+        // A pointer-element slot (string / object / array) under a CLAIM the
+        // buffer need not honour: a declared `string[]` filled by a cell writer
+        // (`$out[$k][] = $p` in a fn whose docblock says `array<string,
+        // string[]>`) holds NaN-boxed words. The read strips the tag
+        // ({@see emitArrayAccessUnified}) and the raw store boxes by the hint
+        // ({@see emitElemEncodeRaw}); the drop of the displaced word must too,
+        // or the release dereferences the tag bits.
+        $this->rt->needsElemUntag = true;
+        $raw = $this->ssa->allocReg();
+        return '  ' . $raw . ' = call i64 @__mir_elem_untag(ptr ' . $arr . ', i64 ' . $word . ")\n"
+            . $this->rcReleaseReg($raw, $flavor);
     }
 
     /**

@@ -1,4 +1,4 @@
-# Semantic core (P2a)
+# Semantic core (P2a + P2b)
 
 Library layer under the future LSP: text in, diagnostics and name queries out, one file edit
 at a time. Goals measured here: **G1** single-file edit to refreshed diagnostics in single-digit ms on a
@@ -14,7 +14,7 @@ every AST of every file alive.
 | `Semantic\SourceType` / `SourceTypeParser` | Source-faithful type (what the author wrote, not the lowered `Compile\Mir\Type`), immutable; the parser reads hints and docblock types, depth-limited, rejects null-only unions. A callable return may be a union (printed parenthesized), an intersection or `?A`. |
 | `Semantic\LibrarySymbols` | The library universe the analyzer is closed over: the prelude (54 parsed files) and the stdlib function names from `lib/manticore_stdlib.o.sig`, normalised the way `LowerFromAst` aliases namespaced externs (`normalizeNames`). `load()` caches per process; `fromParts()` is for tests and hosts that supply their own. |
 | `Analyze\ParseDiagnostics` | The one mapping from tolerant-parse errors to `parse.error` diagnostics, shared by the CLI and the Workspace. |
-| `Semantic\Workspace` | Facade: `open/update/close/remove`, `diagnostics`, `definitionOf`, `referencesTo`, `uncertainSitesFor`. Holds Index + NameIndex + the ASTs of open files that parsed (a file with syntax errors keeps none; `openFileCount` counts live ASTs). Diagnostics are computed per call from the current Index, so an edit in file A is seen by every dependent B on B's next `diagnostics` call with no invalidation bookkeeping. `definitionOf` falls back from an undeclared namespaced function name to the global one and takes the symbol kind into account; `referencesTo` includes `use` imports and links global and unqualified namespaced uses of one function or constant. `close` drops the AST/text but keeps the file's Index and NameIndex entries (project membership survives); `remove` forgets the file. |
+| `Semantic\Workspace` | Facade: `open/update/close/remove`, `diagnostics`, `definitionOf`, `referencesTo`, `uncertainSitesFor`. Holds Index + NameIndex + the ASTs of open files (a file with syntax errors keeps its tolerant AST; `openFileCount` counts live ASTs). Diagnostics are computed per call from the current Index, so an edit in file A is seen by every dependent B on B's next `diagnostics` call with no invalidation bookkeeping. `definitionOf` falls back from an undeclared namespaced function name to the global one and takes the symbol kind into account; `referencesTo` includes `use` imports and links global and unqualified namespaced uses of one function or constant. `close` drops the AST/text but keeps the file's Index and NameIndex entries (project membership survives); `remove` forgets the file. |
 
 `LibrarySymbols` caveats:
 
@@ -44,8 +44,59 @@ the legacy rule for byte-compatible output: it feeds the library first and the u
 reverse, so the library still wins and the LAST user file wins. The two differ only for a name
 declared in two user files.
 
-A file with syntax errors reports only its `parse.error` diagnostics and contributes nothing
-to the Index and NameIndex while it has them (the walkers are not Error-node aware yet).
+## Tolerant analysis (P2b)
+
+**Errored files keep their AST.** `Workspace::open` stores the tolerant AST of a file with
+syntax errors (`ParsedFile::$hasErrors`), indexes what parsed, and analyzes it; the walkers
+skip `Error`/`ErrorMember` nodes. `diagnostics` appends the `parse.error` set.
+
+**Suppression post-filter.** Findings that depend on the broken region are dropped, not
+reported as noise: `undefined.class` / `undefined.function` when a `use`, namespace or
+declaration statement failed (`brokenPreamble`), and `arg.count` / `arg.type` / `return.*`
+whose range holds a parse error or error expression (`ParsedFile::hitsRange`).
+
+**Sticky declarations.** When a file is re-indexed while it has errors, declarations (classes,
+functions, constants) it declared in its previous parse and cannot see now are kept
+(`Index::replaceFile` merges the old contribution under the new one). A mid-edit syntax error
+therefore does not make every dependent report `undefined.*`; a clean parse replaces the file's
+contribution exactly, so a declaration really deleted disappears then.
+
+**Partial classes.** A class whose body had errors is indexed with `ClassInfo::$partial`; the
+member-existence rules (`undefined.method`, property and constant lookups) treat it as open and
+stay silent on members the lost region might have declared.
+
+**Name table.** Besides use sites, `NameIndex` holds `decl` entries (`NameOccurrence` kind of
+the declaration, range of the name token) and `role` entries for `use` imports. The parser's
+`declNames` level selects what is recorded: 0 = none (strict-compatible), 1 = class-likes,
+functions and global constants, 2 = also members (methods, properties, class constants, enum
+cases). Members, properties and constants are level 2 only. Enum cases and class constants
+carry kind `member`, so `definitionOf`/`referencesTo` resolve between a declaration and its
+others. With `declNames` = 0 a class attribute shifts the recorded header position (known,
+level 0 is not used by the Workspace). Anonymous classes are named
+`__anon_class_<hash>_<line>_<col>` (tolerant parse only), unique per site, so two anonymous
+classes never shadow one another.
+
+**Constants.** Global constants are indexed: `const X` (namespaced, name range = the bare
+name) and `define('X')` (always global unless the string has a namespace; range = the string
+without its quotes, so a rename replaces just the name; a literal with escapes keeps the whole
+literal range). Constants are case-sensitive (only the namespace part is folded;
+`NameOccurrence::$resolved` keeps the written case). Integer-like names (`define('123')`)
+are not indexed: PHP coerces such array keys to int, which would make the map mixed-keyed.
+`Index::constKey` is the one normalisation; the first declarer wins like classes and functions.
+
+**Name-precise ranges.** Diagnostics carry end ranges, anchored on the declaration name for
+declaration-level findings. `extends`, `implements`, trait `use` and `catch` types are narrowed
+to the written name. Limits: method return-type findings keep the whole-method span (the parser
+has no return-type token range); the header-name rule takes the first `count(extends)+count(implements)`
+name entries and relies on the parser's emission order.
+
+**Interpolation.** In a double-quoted string each interpolated part (`$a`, `{$a->b}`) has its own
+range, so names inside it are found. Heredoc/nowdoc fall back to the whole-string range;
+`"${x}"` stays a literal; a nested `"{$a["b"]}"` is broken by the lexer (pre-existing).
+
+**CLI vs Workspace winner.** For a name declared in two user files the CLI keeps the LAST file,
+the Workspace the FIRST (see Duplicate declarations); the one `dup_decl_user` case shows as a
+difference when the parity bench runs over `tests/analyze/cases`.
 
 ## Parity (G4)
 
@@ -56,11 +107,18 @@ message; order-insensitive).
 
 | Corpus | Host | Files checked | Diagnostics | Differences |
 |---|---|---|---|---|
-| `src/` (330 files) | native bench | 330 | 280 | 0 |
-| `src/` | Zend (php 8.5.12) | 330 | 280 | 0 |
-| `tests/analyze/cases` (27 files, 2 with parse errors skipped) | native | 25 | 44 | 0 |
-| `tests/analyze/cases` | Zend | 25 | 44 | 0 |
-| `examples/symfony-console/src` (1 file; the example's `vendor/` is not in the tree) | both | 1 | 2 | 0 |
+| `src/` (333 files) | native bench | 333 | 281 | 0 |
+| `src/` | Zend (php 8.5.12) | 333 | 281 | 0 |
+| `tests/analyze/cases` as ONE directory (30 files, 2 with parse errors skipped) | native and Zend | 28 | 42 | 13 (see below) |
+| `tests/analyze/cases`, subdirectories and `arg_count` / `string_bitwise` run alone | Zend | per case | - | 0, except `dup_decl_user` = 1 |
+| `examples/symfony-console/src` (P2a run) | both | 1 | 2 | 0 |
+
+The 13 differences on the merged cases directory are not Workspace bugs: that directory is a
+union of independent cases, and cases that declare the same name (the `Box` of `arg_count`
+against the subdirectory cases, `dup_decl_user`, `undefined_member`) hit the documented
+duplicate-declaration rule (CLI: last user file wins; Workspace: first). Run alone, `arg_count`
+and `string_bitwise` give 0 differences, as do all subdirectories but `dup_decl_user` (the rule
+itself, 1 diagnostic). `bin/manticore analyze --json src` is byte-identical to main's binary.
 
 Legitimate CLI-vs-library differences that exist but did not show up as output differences:
 the CLI parses with `parseTolerant($src, '', false, false)` (no ranges, no name table), the
@@ -70,56 +128,70 @@ the rest of the project without them, and so does the Workspace by construction)
 
 ## Latency and memory (G1)
 
-Method: `tools/bench_semantic.php src --edits 200`. All `*.php` under the directory are
-opened into one `Workspace`; then 200 times a pseudo-random file (fixed LCG seed, uniform
-over files) gets a comment line appended, `update()` and `diagnostics()` of that file are
-timed with `hrtime`. macOS arm64 dev host, one run each, numbers rounded.
+Method: `tools/bench_semantic.php src --edits 200 --broken 50` (P2b record, 333 files). All `*.php`
+under the directory are opened into one `Workspace`; then 200 times a pseudo-random file (fixed LCG
+seed, uniform over files) gets a comment line appended, `update()` and `diagnostics()` of that
+file are timed with `hrtime`. macOS arm64 dev host, one run each, numbers rounded.
 **Native** = the bench compiled by `bin/manticore build` (all of `src/` plus the bench as
-entry, `stdlib:false`, as the compiler itself is built) - this is the number that matters
-for an LSP that ships as a native binary. **Zend** = php 8.5.12, no opcache tuning,
-sanity reference only.
+entry, `stdlib:false`) - the number that matters for an LSP that ships as a native binary.
+**Zend** = php 8.5.12, sanity reference only.
 
-`src/` is 330 files; the median file is 71 lines but the tail is long (7k-11k lines: the
-`EmitLlvm*`, `LowerFromAst`, `RuntimeLibrary` files), which dominates p95.
+`src/` median file is 71 lines but the tail is long (7k-11k lines: the `EmitLlvm*`,
+`LowerFromAst`, `RuntimeLibrary` files), which dominates p95.
 
-| Per edit, ms | native p50 | native p95 | native max | Zend p50 | Zend p95 | Zend max |
+| Per edit, ms (200 appended-comment edits) | native p50 | native p95 | native max | Zend p50 | Zend p95 | Zend max |
 |---|---|---|---|---|---|---|
-| update + diagnostics | 1.10 | 22.5 | 130 | 4.57 | 122 | 514 |
-| update (parse + Index + NameIndex) | 0.65 | 12.8 | 64 | 2.66 | 67.7 | 275 |
-| diagnostics (rules) | 0.48 | 10.1 | 77 | 2.09 | 51.6 | 239 |
-| parse alone (reference) | 0.64 | 12.2 | 57 | 2.63 | 67.0 | 347 |
+| update + diagnostics | 1.07 | 18.3 | 124 | 5.05 | 78.5 | 516 |
+| update (parse + Index + NameIndex) | 0.59 | 9.6 | 66.8 | 2.83 | 43.5 | 281 |
+| diagnostics (rules) | 0.44 | 8.7 | 56.9 | 2.05 | 35.0 | 236 |
+| parse alone (reference) | 0.57 | 9.0 | 59.3 | 2.85 | 44.9 | 275 |
+
+Broken-file edits (`--broken 50`: 50 files x 3 mutations = 150 - truncate at a random byte,
+inject a garbage line, delete a random line; update + diagnostics of the mutated file):
+
+| ms | native p50 | native p95 | native max | Zend p50 | Zend p95 | Zend max |
+|---|---|---|---|---|---|---|
+| update + diagnostics, broken file | 0.93 | 27.7 | 116 | 3.30 | 130 | 524 |
+
+Sticky-declaration check: after each mutation the diagnostics of up to 12 untouched dependent
+files (files mentioning a name the mutated file declares) are compared to their baseline.
+**New `undefined.*` for declarations the mutation did not delete: 0** (native and Zend). 5 new
+ones appeared for declarations the mutation itself removed (truncation/line deletion), which
+is correct. After restoring each file, the diagnostics of the file and its dependents return
+exactly to the original set (0 differences).
 
 One-off costs:
 
 | | native | Zend |
 |---|---|---|
-| library load (54 prelude files + sig) | 191 ms | 825 ms |
-| cold `open` of 330 files | 865 ms | 4831 ms |
-| `diagnostics` of all 330 files | 899 ms | 3736 ms |
-| peak RSS after cold load (`ru_maxrss`) | 221 MB | 370 MB |
-| peak RSS after 200 edits | 299 MB | 416 MB |
+| library load (54 prelude files + sig) | 209 ms | 830 ms |
+| cold `open` of 333 files | 889 ms | 4858 ms |
+| `diagnostics` of all 333 files | 943 ms | 3823 ms |
+| peak RSS after cold load (`ru_maxrss`) | 222 MB | 377 MB |
+| peak RSS after 150 broken mutations | 354 MB | 425 MB |
+| peak RSS after the 200 edits (end of run) | 395 MB | 425 MB |
 
-Verdict against G1: **p50 met natively (1.1 ms, single-digit)**, as is the typical small
-file. The tail is not: p95 22 ms and max 130 ms on the multi-thousand-line files. Where the
-time goes: it tracks file size, and `update` is almost entirely the parse (0.65 ms vs
-0.64 ms for parsing alone: Index replace + NameIndex add are in the noise); the rest is the
-rules over the one file's AST (`diagnostics`). So the budget for the large-file tail is the
-tolerant parser and the rule walkers, not the Index. A faster tail needs an incremental
-parse (re-parse the edited top-level declaration) or a cheaper walker, neither of which is
-in P2a.
+NameRef count on `src/` by `declNames` level (Task 3, Zend-run, 332 files): L0 42780 |
+L1 45158 (+2378) | L2 52728 (+7570 over L1, +9948 over L0). The Workspace parses at level 2; the
+extra 23% entries are the price of declaration-aware references/rename.
 
-Memory: `Workspace::open` keeps the AST of every open file (the benchmark opens all 330, so
-the 221 MB native RSS is the worst case of "every file open"). `close` drops the AST and
-text and keeps only the Index/NameIndex entries, which is the intended LSP shape (open
-editors only); the bench does not close files, so the closed-project footprint is not
-measured here. RSS growth over 200 edits is +78 MB native (`update` replaces an AST and
-the old AST's memory is probably not returned to the OS within a short run, which was not
-verified); a longer soak was not run.
+Verdict against G1: **p50 met natively (about 1 ms, also for broken files)**. The tail is not:
+p95 18-28 ms and max 116-124 ms on the multi-thousand-line files. It tracks file size, and
+`update` is almost entirely the parse (0.59 ms vs 0.57 ms for parsing alone); the rest is the
+rules over the one file's AST. A faster tail needs an incremental parse (re-parse the edited
+top-level declaration) or a cheaper walker, neither of which exists. P2b did not regress the
+P2a numbers (p50 1.10 -> 1.07 ms, p95 22.5 -> 18.3 ms native; run-to-run noise is of that size).
+
+Memory: `Workspace::open` keeps the AST of every open file (the benchmark opens all 333, so
+the 222 MB native cold RSS is the worst case of "every file open"). `close` drops the AST and
+text and keeps only the Index/NameIndex entries (the intended LSP shape); the closed-project
+footprint is not measured. RSS growth over the mutations and edits (+173 MB native over cold)
+is most likely un-returned AST memory; a longer soak was not run.
 
 ## Tooling
 
-`tools/bench_semantic.php <dir> [--edits N] [--parity] [--cli-json FILE]`. Runs under Zend
-directly (`php -d xdebug.mode=off tools/bench_semantic.php src --edits 200 --parity`). To
+`tools/bench_semantic.php <dir> [--edits N] [--broken N] [--parity] [--cli-json FILE]`. Runs under Zend
+directly (`php -d xdebug.mode=off -d memory_limit=2G tools/bench_semantic.php src --edits 200 --broken 50 --parity`). To
 compile it natively, build a manifest whose `src` is a copy of `src/` without `main.php` and
 whose `entry` is a copy of the bench (with `dirname(__DIR__)` replaced by the repo path), place
 the binary so `../lib` is the repo's `lib/`, and `bin/manticore build -j 0 manifest.json`
@@ -130,25 +202,27 @@ bench compares with `in_array` instead). Not minimised or filed here.
 
 ## What remains
 
-**P2b - tolerant analyzer**
-- Error-aware walkers and an `ErrorMember` node, so a file with syntax errors still gets
-  diagnostics and contributes declarations (today: parse errors only, nothing indexed).
-- `Diagnostic` end ranges (only a start line/column exist).
-- Declaration-name ranges, so references/rename include the declaration itself
-  (`referencesTo` lists use sites only).
-- Per-part interpolation spans (names inside interpolated strings).
-- Anonymous-class marker.
-- Global constants in the Index (`definitionOf` on a constant returns null).
+Closed in P2b (no longer gaps): tolerant analysis and `ErrorMember`, `Diagnostic` end ranges,
+declaration-name ranges and declaration-aware references, per-part interpolation spans (not
+heredoc/nowdoc), anonymous-class naming, global constants in the Index.
 
-**P2c** - `typeAt` and narrowing.
+**P2c**
+- Parameters as names (declaration and use sites).
+- Member use sites (`Suit::Hearts`, `->prop`): declarations are found, uses are not yet.
+- `typeAt` and narrowing.
 
-**Known gaps from the task reviews**
-- `withDoc` has no production caller.
-- `NameIndex::occurrenceAt` relies on NameRefs never overlapping.
-- `UncertainSite` has no end position.
-- Docblock and `Invoke` uncertain sites are not implemented.
-- `perform_analysis` (the CLI) still uses `Analyzer::run`, not the Workspace path; the two
-  agree on every corpus above, but nothing enforces it yet beyond this bench.
+**P3** - document symbols and completion.
+
+**Open**
+- Diagnostics for closed files (a closed file reports only the parse errors it had).
+- Method return-type token range (needs a parser field; return-type findings span the method).
+- `callable` / `SourceType` gaps still open.
+- Heredoc/nowdoc interpolation parts share the whole-string range.
 - Latency tail on multi-thousand-line files (see G1 verdict).
+- `withDoc` has no production caller; `NameIndex::occurrenceAt` relies on NameRefs never overlapping;
+  `UncertainSite` has no end position; docblock and `Invoke` uncertain sites are not implemented.
+- `perform_analysis` (the CLI) still uses `Analyzer::run`, not the Workspace path; the CLI and
+  Workspace winners differ for a name declared in two user files.
 - Four `tests/analyze` cases fail before this work and still do: `flow_depth`, `json_smoke`,
   `type_mismatch`, `undefined_member`.
+- `gate.sh` skips its php-dependent steps when php is absent.

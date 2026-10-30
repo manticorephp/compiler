@@ -106,6 +106,7 @@ _manticore() {
         '--tolerant[Recover from syntax errors; print the tree and every error]' \
         '--ranges[Print spans as start-end ranges]' \
         '--names[Print the written-name table instead of the tree]' \
+        '--decl-names=[With --tolerant --names: also record declaration names and use roles (1 = class-likes, functions, enum cases; 2 = also members and class constants)]:level:' \
         '--check-names[Verify every name span slices to its written text; print each mismatch, exit 1 if any]' \
         '--check-ranges[Verify the range invariants; print each violation, exit 1 if any]' \
         '*:file:_files'

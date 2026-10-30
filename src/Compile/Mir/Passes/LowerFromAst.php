@@ -4671,7 +4671,7 @@ final class LowerFromAst implements Pass
                 new StoreLocal($vtmp, $value, $value->type),
                 $this->storeToTarget($expr->target, new LoadLocal($vtmp, $value->type)),
                 new LoadLocal($vtmp, $value->type),
-            ], $value->type);
+            ], $value->type, true);
         }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
     }
@@ -4962,7 +4962,7 @@ final class LowerFromAst implements Pass
             new StoreLocal($nameTmp, $this->lowerExpr($this->dynStaticPropNameExpr($dyn)), Type::string_()),
             $guard,
             $chain,
-        ], $chain->type);
+        ], $chain->type, true);
     }
 
     /**
@@ -5028,7 +5028,7 @@ final class LowerFromAst implements Pass
                 $arms[$i]->type,
             );
         }
-        return new Block([$store[0], $store[1], $guard, $chain], $chain->type);
+        return new Block([$store[0], $store[1], $guard, $chain], $chain->type, true);
     }
 
     /**
@@ -6767,7 +6767,7 @@ final class LowerFromAst implements Pass
             $old = $this->lowerExpr($operand);
             $tmp = '__pi_' . (string)$this->lvCounter;
             $this->lvCounter = $this->lvCounter + 1;
-            return new Block([new StoreLocal($tmp, $old, $old->type), $store, new LoadLocal($tmp, $old->type)], $old->type);
+            return new Block([new StoreLocal($tmp, $old, $old->type), $store, new LoadLocal($tmp, $old->type)], $old->type, true);
         }
         return new IncDec($operand->name, $op, $expr->prefix, Type::int_());
     }

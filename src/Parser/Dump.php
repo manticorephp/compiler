@@ -46,7 +46,7 @@ final class Dump
         foreach ($program->names as $r) {
             $s = $r->span;
             $out .= '  @' . (string)$s->line . ':' . (string)$s->column . '-' . (string)$s->endLine() . ':' . (string)$s->endColumn()
-                . ' ' . $r->kind . ' ' . $r->written . ' -> ' . $r->resolved . ($r->globalFallback ? ' [global-fallback]' : '') . "\n";
+                . ' ' . $r->kind . ($r->role === '' ? '' : ':' . $r->role) . ' ' . $r->written . ' -> ' . $r->resolved . ($r->globalFallback ? ' [global-fallback]' : '') . "\n";
         }
         return $out;
     }
@@ -86,6 +86,7 @@ final class Dump
     {
         foreach (get_object_vars($node) as $key => $value) {
             if ($key === 'kind' || $key === 'span') { continue; }
+            if ($key === 'declName' && $value === null) { continue; }
             $this->field((string)$key, $value);
         }
     }
@@ -163,6 +164,10 @@ final class Dump
             foreach ($value->consts as $cd) { $this->constDecl($cd); }
             foreach ($value->properties as $pd) { $this->propertyDecl($pd); }
             foreach ($value->methods as $md) { $this->methodDecl($md); }
+            foreach ($value->errorMembers as $em) {
+                $this->line('ErrorMember ' . $this->spanStr($em->span));
+                $this->line('  skipped: ' . (string)$em->skipped);
+            }
             if ($this->ranges === 1) {
                 foreach ($value->traitAdaptations as $ta) {
                     $this->line('Adapt ' . $ta->kind . ' ' . $ta->trait . '::' . $ta->method . ' ' . $this->spanStr($ta->span));

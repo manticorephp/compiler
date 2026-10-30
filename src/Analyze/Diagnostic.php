@@ -24,7 +24,27 @@ final class Diagnostic
         public string $severity,
         public string $code,
         public string $message,
+        public int $startLine = 0,
+        public int $startCol = 0,
+        public int $endLine = 0,
+        public int $endCol = 0,
     ) {}
+
+    /** Anchor stays the span's line/column; start/end come from the span's range (0 when unranged). */
+    public static function at(string $file, \Parser\Ast\Span $span, string $severity, string $code, string $message): Diagnostic
+    {
+        $d = new Diagnostic($file, $span->line, $span->column, $severity, $code, $message);
+        return $d->withRange($span);
+    }
+
+    public function withRange(\Parser\Ast\Span $span): Diagnostic
+    {
+        $this->startLine = $span->startLine();
+        $this->startCol = $span->startColumn();
+        $this->endLine = $span->endLine();
+        $this->endCol = $span->endColumn();
+        return $this;
+    }
 
     public static function error(string $file, int $line, int $col, string $code, string $message): Diagnostic
     {

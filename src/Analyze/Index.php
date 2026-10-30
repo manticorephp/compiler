@@ -3,7 +3,10 @@
 namespace Analyze;
 
 use Parser\Ast\ClassDecl;
+use Parser\Ast\CallExpr;
 use Parser\Ast\ClassStmt;
+use Parser\Ast\ExpressionStmt;
+use Parser\Ast\StringLiteral;
 use Parser\Ast\FunctionDecl;
 use Parser\Ast\FunctionStmt;
 use Parser\Ast\NamespaceStmt;
@@ -81,6 +84,28 @@ final class Index
     /** @var array<string, \Parser\Ast\Span> */
     private array $curFnSpans = [];
 
+    /** @var array<string, \Parser\Ast\Span> constant key → name literal of the winning declarer */
+    private array $consts = [];
+
+    /** @var array<string, array<string, \Parser\Ast\Span>> path → constant key → name literal */
+    private array $fileConsts = [];
+
+    /** @var array<string, string[]> constant key → declaring paths, winner first */
+    private array $constDeclarers = [];
+
+    /** @var array<string, string> */
+    private array $constWinner = [];
+
+    /** @var array<string, \Parser\Ast\Span> */
+    private array $curConsts = [];
+
+    /** @var array<string, bool> kind . path . NUL . key → the declaration is kept from before the file broke, not present in its tree */
+    private array $sticky = [];
+
+    private string $curNs = '';
+
+    private ?ParsedFile $curFile = null;
+
     /** @param ParsedFile[] $files */
     public static function build(array $files): Index
     {
@@ -101,37 +126,72 @@ final class Index
         $classPos = [];
         foreach ($this->fileFns[$path] ?? [] as $l => $_) { $fnPos[$l] = \array_search($path, $this->fnDeclarers[$l], true); }
         foreach ($this->fileClasses[$path] ?? [] as $l => $_) { $classPos[$l] = \array_search($path, $this->classDeclarers[$l], true); }
+        $oldFns = $this->fileFns[$path] ?? [];
+        $oldClasses = $this->fileClasses[$path] ?? [];
+        $oldSpans = $this->fileSpans[$path] ?? [];
+        $oldFnSpans = $this->fileFnSpans[$path] ?? [];
+        /** @var array<string, int> $constPos */
+        $constPos = [];
+        foreach ($this->fileConsts[$path] ?? [] as $k => $_) { $constPos[$k] = \array_search($path, $this->constDeclarers[$k], true); }
+        $oldConsts = $this->fileConsts[$path] ?? [];
         $this->removeFile($path);
         $this->curFns = [];
         $this->curClasses = [];
         $this->curSpans = [];
         $this->curFnSpans = [];
+        $this->curConsts = [];
+        $this->curNs = '';
+        $this->curFile = $pf;
         $this->collectStmts($pf->program->statements);
+        $this->curFile = null;
+        if ($pf->hasErrors) {
+            // Sticky: a declaration the recovered tree lost stays until the file is removed or parses clean.
+            foreach ($oldFns as $l => $fi) {
+                if (isset($this->curFns[$l])) { continue; }
+                $this->curFns[$l] = $fi;
+                $this->curFnSpans[$l] = $oldFnSpans[$l];
+                $this->sticky['f' . $path . "\0" . $l] = true;
+            }
+            foreach ($oldClasses as $l => $ci) {
+                if (isset($this->curClasses[$l])) { continue; }
+                $this->curClasses[$l] = $ci;
+                $this->curSpans[$l] = $oldSpans[$l];
+                $this->sticky['c' . $path . "\0" . $l] = true;
+            }
+            foreach ($oldConsts as $k => $sp) {
+                if (isset($this->curConsts[$k])) { continue; }
+                $this->curConsts[$k] = $sp;
+                $this->sticky['k' . $path . "\0" . $k] = true;
+            }
+        }
         $this->fileFns[$path] = $this->curFns;
         $this->fileClasses[$path] = $this->curClasses;
         $this->fileSpans[$path] = $this->curSpans;
         $this->fileFnSpans[$path] = $this->curFnSpans;
+        $this->fileConsts[$path] = $this->curConsts;
         foreach ($this->curFns as $l => $fi) {
             $this->fnDeclarers[$l] ??= [];
             $at = \min($fnPos[$l] ?? \PHP_INT_MAX, \count($this->fnDeclarers[$l]));
             \array_splice($this->fnDeclarers[$l], $at, 0, [$path]);
-            if ($at === 0) {
-                $this->functions[$l] = $fi;
-                $this->fnWinner[$l] = $path;
-            }
+            $this->electFn($l);
         }
         foreach ($this->curClasses as $l => $ci) {
             $this->classDeclarers[$l] ??= [];
             $at = \min($classPos[$l] ?? \PHP_INT_MAX, \count($this->classDeclarers[$l]));
             \array_splice($this->classDeclarers[$l], $at, 0, [$path]);
-            if ($at === 0) {
-                $this->setClass($l, $ci, $path);
-            }
+            $this->electClass($l);
+        }
+        foreach ($this->curConsts as $k => $sp) {
+            $this->constDeclarers[$k] ??= [];
+            $at = \min($constPos[$k] ?? \PHP_INT_MAX, \count($this->constDeclarers[$k]));
+            \array_splice($this->constDeclarers[$k], $at, 0, [$path]);
+            $this->electConst($k);
         }
         $this->curFns = [];
         $this->curClasses = [];
         $this->curSpans = [];
         $this->curFnSpans = [];
+        $this->curConsts = [];
     }
 
     public function removeFile(string $path): void
@@ -144,10 +204,7 @@ final class Index
                 unset($this->fnDeclarers[$l], $this->functions[$l], $this->fnWinner[$l]);
             } else {
                 $this->fnDeclarers[$l] = $q;
-                if ($this->fnWinner[$l] === $path) {
-                    $this->fnWinner[$l] = $q[0];
-                    $this->functions[$l] = $this->fileFns[$q[0]][$l];
-                }
+                $this->electFn($l);
             }
         }
         foreach ($this->fileClasses[$path] as $l => $_) {
@@ -156,14 +213,58 @@ final class Index
             if ($q === []) {
                 unset($this->classDeclarers[$l]);
                 $this->setClass($l, null, '');
-            } elseif ($this->classWinner[$l] === $path) {
-                $this->classDeclarers[$l] = $q;
-                $this->setClass($l, $this->fileClasses[$q[0]][$l], $q[0]);
             } else {
                 $this->classDeclarers[$l] = $q;
+                $this->electClass($l);
             }
         }
-        unset($this->fileFns[$path], $this->fileClasses[$path], $this->fileSpans[$path], $this->fileFnSpans[$path]);
+        foreach ($this->fileConsts[$path] ?? [] as $k => $_) {
+            $q = [];
+            foreach ($this->constDeclarers[$k] as $p) { if ($p !== $path) { $q[] = $p; } }
+            if ($q === []) {
+                unset($this->constDeclarers[$k], $this->consts[$k], $this->constWinner[$k]);
+            } else {
+                $this->constDeclarers[$k] = $q;
+                $this->electConst($k);
+            }
+        }
+        foreach ($this->fileFns[$path] as $l => $_) { unset($this->sticky['f' . $path . "\0" . $l]); }
+        foreach ($this->fileClasses[$path] as $l => $_) { unset($this->sticky['c' . $path . "\0" . $l]); }
+        foreach ($this->fileConsts[$path] ?? [] as $k => $_) { unset($this->sticky['k' . $path . "\0" . $k]); }
+        unset($this->fileFns[$path], $this->fileClasses[$path], $this->fileSpans[$path], $this->fileFnSpans[$path], $this->fileConsts[$path]);
+    }
+
+    /**
+     * The first declarer in order whose declaration is live; a kept (sticky) one only when every declarer is.
+     *
+     * @param string[] $declarers
+     */
+    private function liveFirst(array $declarers, string $kind, string $key): string
+    {
+        foreach ($declarers as $p) {
+            if (!isset($this->sticky[$kind . $p . "\0" . $key])) { return $p; }
+        }
+        return $declarers[0];
+    }
+
+    private function electFn(string $l): void
+    {
+        $w = $this->liveFirst($this->fnDeclarers[$l], 'f', $l);
+        $this->fnWinner[$l] = $w;
+        $this->functions[$l] = $this->fileFns[$w][$l];
+    }
+
+    private function electClass(string $l): void
+    {
+        $w = $this->liveFirst($this->classDeclarers[$l], 'c', $l);
+        $this->setClass($l, $this->fileClasses[$w][$l], $w);
+    }
+
+    private function electConst(string $k): void
+    {
+        $w = $this->liveFirst($this->constDeclarers[$k], 'k', $k);
+        $this->constWinner[$k] = $w;
+        $this->consts[$k] = $this->fileConsts[$w][$k];
     }
 
     /**
@@ -185,6 +286,35 @@ final class Index
         }
         if ($kind !== 'class' && isset($this->fnWinner[$lowerFqn])) {
             return $this->fileFnSpans[$this->fnWinner[$lowerFqn]][$lowerFqn] ?? null;
+        }
+        return null;
+    }
+
+    /** Constants are case-sensitive; only the namespace part is folded. */
+    public static function constKey(string $name): string
+    {
+        $n = \ltrim($name, '\\');
+        $bs = \strrpos($n, '\\');
+        return $bs === false ? $n : \strtolower(\substr($n, 0, $bs)) . \substr($n, $bs);
+    }
+
+    /** Name literal of the winning declaration of a global constant (`const X` or `define('X')`), by FQN, exact case in the name part. */
+    public function declaredConst(string $name): ?\Parser\Ast\Span
+    {
+        return $this->consts[self::constKey($name)] ?? null;
+    }
+
+    public function constDeclaringFile(string $name): ?string
+    {
+        return $this->constWinner[self::constKey($name)] ?? null;
+    }
+
+    /** FQN key of the constant whose declaring name literal in $path contains the position, or null. */
+    public function constAt(string $path, int $line, int $col): ?string
+    {
+        foreach ($this->fileConsts[$path] ?? [] as $k => $sp) {
+            if ($sp->startLine() !== $line || $col < $sp->startColumn() || $col > $sp->endColumn()) { continue; }
+            return $k;
         }
         return null;
     }
@@ -255,6 +385,17 @@ final class Index
                 $this->addFunction($s->decl);
             } elseif ($s instanceof ClassStmt) {
                 $this->addClass($s->decl);
+            } elseif ($s instanceof NamespaceStmt) {
+                if ($s->body === null) {
+                    $this->curNs = $s->name;
+                } else {
+                    $outer = $this->curNs;
+                    $this->curNs = $s->name;
+                    $this->collectStmts($s->body->statements);
+                    $this->curNs = $outer;
+                }
+            } elseif ($s instanceof ExpressionStmt && $s->expr instanceof CallExpr) {
+                $this->addConst($s->expr);
             } else {
                 // Namespaces, and the conditional forms a polyfill declares
                 // inside — see {@see DeclScopes} for why. This is the symbol
@@ -265,8 +406,47 @@ final class Index
         }
     }
 
+    /**
+     * `const X = …;` is lowered by the parser to `define("X", …)`; its name literal is anchored
+     * at the call itself (a written `define('X')` literal sits inside the parens), which is the
+     * only way to tell them apart, and only the lowered form is qualified by the active namespace.
+     */
+    private function addConst(CallExpr $c): void
+    {
+        $bs = \strrpos($c->function, '\\');
+        $fn = $bs === false ? $c->function : \substr($c->function, $bs + 1);
+        if (\strtolower($fn) !== 'define' || \count($c->args) < 2 || !($c->args[0] instanceof StringLiteral)) { return; }
+        $lit = $c->args[0];
+        $lowered = $lit->span->line === $c->span->line && $lit->span->column === $c->span->column;
+        $name = \ltrim($lit->value, '\\');
+        if ($name === '') { return; }
+        if ($lowered && $this->curNs !== '') { $name = $this->curNs . '\\' . $name; }
+        $key = self::constKey($name);
+        // PHP coerces integer-like array keys to int; such a name would make the map mixed-keyed.
+        if ((string)(int)$key === $key) { return; }
+        if (isset($this->curConsts[$key])) { return; }
+        // #502: keep this if/assign form until BOOTSTRAP_VERSION names a release containing the fix
+        $span = $lit->span;
+        if (!$lowered) { $span = self::unquoted($lit); }
+        $this->curConsts[$key] = $span;
+    }
+
+    /**
+     * The literal's range without its quotes, so a rename replaces just the name. An escaped
+     * literal (source width != value + 2 quotes) keeps the whole literal range.
+     */
+    private static function unquoted(StringLiteral $lit): \Parser\Ast\Span
+    {
+        $sp = $lit->span;
+        $l = $sp->startLine();
+        $c = $sp->startColumn();
+        if ($sp->endLine() !== $l || $sp->endColumn() - $c !== \strlen($lit->value) + 2) { return $sp; }
+        return new \Parser\Ast\RangedSpan($l, $c + 1, $sp->file, $l, $sp->endColumn() - 1);
+    }
+
     private function addFunction(FunctionDecl $d): void
     {
+        if ($d->name === '') { return; }
         $l = \strtolower($d->name);
         $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType);
         $this->curFnSpans[$l] = $d->span;
@@ -275,6 +455,7 @@ final class Index
     private function addClass(ClassDecl $d): void
     {
         $fqn = $d->name;
+        if ($fqn === '') { return; }
         /** @var array<string, MethodInfo> $methods */
         $methods = [];
         foreach ($d->methods as $m) {
@@ -288,7 +469,14 @@ final class Index
         foreach ($d->cases as $case) { $consts[$case->name] = true; }
         /** @var array<string, ?string> $propTypes */
         $propTypes = [];
-        foreach ($d->properties as $prop) { $propTypes[$prop->name] = $prop->typeHint; }
+        $partial = \count($d->errorMembers) > 0;
+        foreach ($d->properties as $prop) {
+            // A recovered `public int ;` is a phantom property named `$`.
+            if ($prop->name === '' || $prop->name === '$') { $partial = true; continue; }
+            $propTypes[$prop->name] = $prop->typeHint;
+        }
+        $sp = $d->span;
+        if ($this->curFile !== null && $this->curFile->hitsRange($sp->startLine(), $sp->startColumn(), $sp->endLine(), $sp->endColumn())) { $partial = true; }
         // Constructor property promotion also declares properties.
         foreach ($d->methods as $m) {
             if (\strtolower($m->name) !== '__construct') { continue; }
@@ -299,7 +487,7 @@ final class Index
         $l = \strtolower($fqn);
         $this->curSpans[$l] = $d->span;
         $this->curClasses[$l] = new ClassInfo(
-            $fqn, $d->kind, $d->extends, $d->implements, $d->uses, $methods, $consts, $d->isAbstract, $propTypes
+            $fqn, $d->kind, $d->extends, $d->implements, $d->uses, $methods, $consts, $d->isAbstract, $propTypes, $partial
         );
     }
 
@@ -399,7 +587,7 @@ final class Index
     {
         if ($depth > 50) { return true; }
         $ci = $this->findClass($classFqn);
-        if ($ci === null) { return false; }
+        if ($ci === null || $ci->partial) { return false; }
         foreach ($ci->parents as $p) { if (!$this->fullHierarchyKnown($p, $depth + 1)) { return false; } }
         foreach ($ci->interfaces as $i) { if (!$this->fullHierarchyKnown($i, $depth + 1)) { return false; } }
         foreach ($ci->traits as $t) { if (!$this->fullHierarchyKnown($t, $depth + 1)) { return false; } }
@@ -491,7 +679,7 @@ final class Index
     {
         if ($depth > 50) { return true; }
         $ci = $this->findClass($classFqn);
-        if ($ci === null) { return false; }
+        if ($ci === null || $ci->partial) { return false; }
         foreach ($ci->parents as $p) {
             if (!$this->hierarchyKnown($p, $depth + 1)) { return false; }
         }

@@ -105,7 +105,7 @@ Program
             name: "o"
         value:
           Expr:New @16:6-16:53
-            class: "__anon_class_0"
+            class: "__anon_class_4108050209_16_10"
             args: [1]
               Expr:IntLiteral @16:16-16:17
                 value: 1
@@ -153,7 +153,7 @@ Program
       Param $c : string [...] @18:42-18:54
       body: Block @18:62-18:64
   Stmt:Class @16:6-16:53
-    decl: class __anon_class_0
+    decl: class __anon_class_4108050209_16_10
       extends: Bar
       Property $z : int [public] @16:33-16:51
         default:

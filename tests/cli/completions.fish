@@ -80,6 +80,7 @@ complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -s j -r -f -d 'P
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l tolerant -d 'Recover from syntax errors; print the tree and every error'
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l ranges -d 'Print spans as start-end ranges'
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l names -d 'Print the written-name table instead of the tree'
+complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l decl-names -r -f -d 'With --tolerant --names: also record declaration names and use roles (1 = class-likes, functions, enum cases; 2 = also members and class constants)'
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l check-names -d 'Verify every name span slices to its written text; print each mismatch, exit 1 if any'
 complete -c manticore -n '__fish_seen_subcommand_from dump-ast' -l check-ranges -d 'Verify the range invariants; print each violation, exit 1 if any'
 complete -c manticore -n '__fish_seen_subcommand_from analyze' -l help -d 'Show this help text'

@@ -59,32 +59,31 @@ final class AsyncStaticLocal
 
             $walk = new AstWalk(false);
             $walk->stmts($u->stmts);
-            foreach ($statics as $name => $line) {
+            foreach ($statics as $name => $span) {
                 if (!$this->isAssigned($walk, $name)) { continue; }
                 $this->diags[] = Diagnostic::warning(
-                    $pf->path, $line, 1, 'async.static-local',
+                    $pf->path, $span->line, 1, 'async.static-local',
                     'mutable `static $' . $name . '` in ' . $u->label . ' is shared by every fiber'
                     . ' — under a scheduler two tasks in this function clobber each other;'
                     . ' hold it on the task, or in Async\\Context::withValue()'
-                );
+                )->withRange($span);
             }
         }
         return $this->diags;
     }
 
     /**
-     * `static $x` declarations in this unit's own statements, name → line.
+     * `static $x` declarations in this unit's own statements, name → span.
      * Nested declaration bodies are separate units and are visited on their own.
      *
      * @param Stmt[] $stmts
-     * @param array<string,int> $out
+     * @param array<string,\Parser\Ast\Span> $out
      */
     private function collectStatics(array $stmts, array &$out): void
     {
         foreach ($stmts as $s) {
             if ($s instanceof StaticLocalStmt) {
-                $line = $this->staticLine($s);
-                foreach ($this->staticDecls($s) as $d) { $out[$d->name] = $line; }
+                foreach ($this->staticDecls($s) as $d) { $out[$d->name] = $s->span; }
                 continue;
             }
             foreach ($this->childBlocks($s) as $b) {
@@ -137,11 +136,6 @@ final class AsyncStaticLocal
     private function staticDecls(StaticLocalStmt $s): array
     {
         return $s->decls;
-    }
-
-    private function staticLine(StaticLocalStmt $s): int
-    {
-        return $s->span->line;
     }
 
     /** Is $name written to anywhere in this unit? */

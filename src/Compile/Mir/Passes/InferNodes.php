@@ -1624,9 +1624,17 @@ trait InferNodes
         foreach ($node->stmts as $s) {
             $last = $this->inferNode($s);
         }
-        // A VALUE block built untyped (LowerFromAst::wrapCallPost) is its last
-        // node's value; every other block is constructed with its type.
-        if ($node->type->kind === Type::KIND_UNKNOWN && $last !== null) { $node->type = $last; }
+        // A VALUE block (built untyped, LowerFromAst::wrapCallPost, or marked
+        // followsLast) is its last node's value — EmitLlvm yields that node's
+        // word as is — so its type follows the node on EVERY run. Adopted once,
+        // it froze: `$this->m[$k] ??= $c ? $n->span : f($n)` typed the value
+        // obj while $n was still obj, a later run erased $n to a cell, and the
+        // `??=` arm boxed the cell word as an object pointer (SIGSEGV).
+        // Every other block is constructed with its type.
+        if (($node->followsLast || $node->type->kind === Type::KIND_UNKNOWN) && $last !== null) {
+            $node->followsLast = true;
+            $node->type = $last;
+        }
         return $node->type;
     }
 

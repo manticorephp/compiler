@@ -41,8 +41,8 @@ final class UndefinedFunction
             if ($bs !== false && $idx->hasExternFunction(\substr($low, $bs + 1))) { continue; }
             if (Builtins::isKnownFunction($low)) { continue; }
             if ($bs !== false && Builtins::isKnownFunction(\substr($low, $bs + 1))) { continue; }
-            $this->diags[] = Diagnostic::error(
-                $pf->path, $e->span->line, $e->span->column, 'undefined.function',
+            $this->diags[] = Diagnostic::at(
+                $pf->path, $e->span, Diagnostic::SEV_ERROR, 'undefined.function',
                 'unknown function ' . \ltrim($name, '\\') . '()'
             );
         }

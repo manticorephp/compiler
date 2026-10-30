@@ -203,7 +203,7 @@ final class NodeClone
         }
 
         // ── Control flow ──────────────────────────────────────────
-        if ($k === Node::KIND_BLOCK) { $x = self::asBlock($n); return new Block(self::nodes($x->stmts), $n->type); }
+        if ($k === Node::KIND_BLOCK) { $x = self::asBlock($n); return new Block(self::nodes($x->stmts), $n->type, $x->followsLast); }
         if ($k === Node::KIND_IF) {
             $x = self::asIf($n);
             return new If_(self::node($x->cond), self::asBlock(self::node($x->then)), $x->else === null ? null : self::asBlock(self::node($x->else)));

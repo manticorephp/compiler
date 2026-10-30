@@ -16,5 +16,7 @@ Program
             value:
               Expr:IntLiteral @5:37-5:38
                 value: 1
+      ErrorMember @4:5-4:22
+        skipped: 3
 error 5:5-5:11 expected method name
 
