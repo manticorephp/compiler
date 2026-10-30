@@ -455,6 +455,7 @@ trait LowerExprs
                         return new Block([
                             new StoreStaticProp_($cell . '_set', new IntConst(1, Type::int_()), Type::int_(), Type::int_()),
                             new StoreStaticProp_($cell, $dv, $dv->type, Type::cell()),
+                            new BoolConst(true, Type::bool_()),
                         ], Type::bool_());
                     }
                 }
