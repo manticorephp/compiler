@@ -8646,6 +8646,11 @@ trait EmitLlvmObjects
     private function virtualDispatchKey(int $argc, array $cands, array $targets, string $fallback, string $method, bool $boxCell, array $erasedSyms, array $argOutTypes): string
     {
         $k = $method . '#' . $fallback . '#' . ($boxCell ? '1' : '0') . '#' . (string)$argc;
+        // What the SITE wrote, not just how many words the shared list has: a call that omitted
+        // a defaulted argument (`newCollection()`) and one that passed it (`newCollection($m)`)
+        // build the same-length list, but each arm pads/truncates against the written count.
+        // Without it the second site reuses the first's thunk and gets the default.
+        $k .= '#s' . (string)$this->vdSiteArgc;
         foreach ($cands as $c) {
             $t = $targets[$c] ?? '';
             $k .= '|' . $c . '>' . $t . (isset($erasedSyms[$t]) ? 'E' : '');
