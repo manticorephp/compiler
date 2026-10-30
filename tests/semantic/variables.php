@@ -1,0 +1,392 @@
+<?php
+
+require __DIR__ . '/bootstrap.php';
+
+use Analyze\ParsedFile;
+use Semantic\LibrarySymbols;
+use Semantic\Workspace;
+
+$fail = 0;
+function check(string $name, callable $fn): void
+{
+    global $fail;
+    try {
+        $r = $fn();
+        if ($r === true) { echo "PASS $name\n"; return; }
+        echo "FAIL $name: " . (is_string($r) ? $r : 'false') . "\n";
+    } catch (\Throwable $e) {
+        echo "FAIL $name: " . get_class($e) . ' ' . $e->getMessage() . "\n";
+    }
+    $fail = 1;
+}
+
+function ws(array $files): Workspace
+{
+    $prelude = [];
+    foreach (['core_interfaces.php', 'exceptions.php'] as $f) {
+        $src = (string)file_get_contents(dirname(__DIR__, 2) . '/prelude/' . $f);
+        $prelude[] = new ParsedFile('lib:prelude/' . $f, \Parser\Parser::parseTolerant($src, $f)->program);
+    }
+    $w = new Workspace(LibrarySymbols::fromParts($prelude, ['strlen', 'count']));
+    foreach ($files as $u => $t) { $w->open($u, $t); }
+    return $w;
+}
+
+/** @return int[] [line, col] (1-based, bytes) of the $nth occurrence of $needle */
+function where(string $src, string $needle, int $nth = 1, int $off = 0): array
+{
+    $at = -1;
+    for ($i = 0; $i < $nth; $i++) { $at = strpos($src, $needle, $at + 1); if ($at === false) { throw new \RuntimeException("no '$needle' #$nth"); } }
+    $before = substr($src, 0, $at);
+    $nl = strrpos($before, "\n");
+    return [1 + substr_count($before, "\n"), $at - ($nl === false ? -1 : $nl) + $off];
+}
+
+/** "line:col" list of the references of the variable at the $nth occurrence of $needle */
+function refs(string $src, string $needle, int $nth = 1, string $uri = 'a.php', ?Workspace $w = null): string
+{
+    $w = $w ?? ws([$uri => $src]);
+    $p = where($src, $needle, $nth);
+    $o = [];
+    foreach ($w->referencesTo($uri, $p[0], $p[1]) as $l) { $o[] = $l->line . ':' . $l->col; }
+    return implode(' ', $o);
+}
+
+/** the line:col of each needle occurrence, +offset, as a "a b c" list */
+function at(string $src, string $needle, array $nths, int $off = 0): string
+{
+    $o = [];
+    foreach ($nths as $n) { $p = where($src, $needle, $n, $off); $o[] = $p[0] . ':' . $p[1]; }
+    return implode(' ', $o);
+}
+
+function uncertain(Workspace $w, string $src, string $needle, int $nth = 1, string $uri = 'a.php'): array
+{
+    $p = where($src, $needle, $nth);
+    $o = [];
+    foreach ($w->uncertainSitesFor($uri, $p[0], $p[1]) as $s) { $o[] = $s->file . ':' . $s->line . ':' . $s->col . ':' . $s->reason; }
+    sort($o);
+    return $o;
+}
+
+$P = "<?php\nfunction f(int \$a, \$b) {\n    \$c = \$a + 1;\n    return \$a * \$c + \$b;\n}\nfunction g(\$a) {\n    return \$a;\n}\n";
+
+check('param -> declaration and uses', function () use ($P) {
+    $want = at($P, '$a', [1, 2, 3]);
+    $got = refs($P, '$a', 2);
+    $d = ws(['a.php' => $P])->definitionOf('a.php', ...where($P, '$a', 3));
+    return $got === $want && $d !== null && $d->line === 2 && $d->col === 16 ? true : "$got | $want | " . json_encode($d);
+});
+
+check('shadowing across two functions is isolated', function () use ($P) {
+    $g = refs($P, '$a', 4);
+    return $g === at($P, '$a', [4, 5]) ? true : $g;
+});
+
+check('reassigned var: every assignment and use', function () {
+    $s = "<?php\nfunction f() {\n    \$x = 1;\n    \$x = \$x + 1;\n    \$x .= 'a';\n    return \$x;\n}\n";
+    return refs($s, '$x', 3) === at($s, '$x', [1, 2, 3, 4, 5]) ? true : refs($s, '$x', 3);
+});
+
+check('same name in unrelated methods is isolated', function () {
+    $s = "<?php\nclass A {\n    public function m(\$v) { return \$v; }\n    public function n(\$v) { return \$v + 1; }\n}\n";
+    $r = refs($s, '$v', 1);
+    return $r === at($s, '$v', [1, 2]) && refs($s, '$v', 4) === at($s, '$v', [3, 4]) ? true : $r;
+});
+
+$C = "<?php\nfunction f() {\n    \$x = 1;\n    \$h = function (\$y) use (\$x, &\$z) { \$z = \$x + \$y; return \$x; };\n    \$z = 0;\n    \$k = fn(\$q) => \$x + \$q;\n    return \$x;\n}\n";
+
+check('closure use: outer renames use entry and inner uses', function () use ($C) {
+    $got = refs($C, '$x', 1);
+    return $got === at($C, '$x', [1, 2, 3, 4, 5, 6]) ? true : "$got | " . at($C, '$x', [1, 2, 3, 4, 5, 6]);
+});
+
+check('closure use: inner use resolves to the outer binding', function () use ($C) {
+    $got = refs($C, '$x', 3);
+    $d = ws(['a.php' => $C])->definitionOf('a.php', ...where($C, '$x', 3));
+    return $got === at($C, '$x', [1, 2, 3, 4, 5, 6]) && $d->line === 3 ? true : $got;
+});
+
+check('closure use by reference shares the binding', function () use ($C) {
+    $got = refs($C, '$z', 1);
+    $want = at($C, '$z', [1, 2, 3]);
+    return $got === $want && refs($C, '$z', 3) === $want ? true : "$got | $want";
+});
+
+check('closure param is its own binding', function () use ($C) {
+    return refs($C, '$y', 1) === at($C, '$y', [1, 2]) ? true : refs($C, '$y', 1);
+});
+
+check('use-list entry range covers $name only (by-ref too)', function () use ($C) {
+    $w = ws(['a.php' => $C]);
+    $p = where($C, '$z', 1);
+    foreach ($w->referencesTo('a.php', $p[0], $p[1]) as $l) {
+        if ($l->line === $p[0] && $l->col === $p[1] && $l->endCol === $p[1] + 2) { return true; }
+    }
+    return 'no exact $z range';
+});
+
+check('arrow fn captures outer var; its param shadows', function () use ($C) {
+    $got = refs($C, '$q', 1);
+    return $got === at($C, '$q', [1, 2]) && refs($C, '$x', 5) === at($C, '$x', [1, 2, 3, 4, 5, 6]) ? true : $got;
+});
+
+check('nested arrow fns reach the outermost binding', function () {
+    $s = "<?php\nfunction f(\$a) {\n    \$g = fn(\$b) => fn(\$c) => \$a + \$b + \$c;\n    return \$a;\n}\n";
+    $w = ws(['a.php' => $s]);
+    $want = at($s, '$a', [1, 2, 3]);
+    return refs($s, '$a', 2, 'a.php', $w) === $want && refs($s, '$b', 2, 'a.php', $w) === at($s, '$b', [1, 2]) ? true : refs($s, '$a', 2);
+});
+
+check('static fn opens no $this link; $this is special', function () {
+    $s = "<?php\nclass A {\n    public function m() {\n        \$f = fn() => \$this;\n        return \$this;\n    }\n}\n";
+    $w = ws(['a.php' => $s]);
+    $p = where($s, '$this', 2);
+    $bl = $w->renameBlockers('a.php', $p[0], $p[1]);
+    return in_array('special-variable', $bl, true) && $w->definitionOf('a.php', $p[0], $p[1]) === null
+        && refs($s, '$this', 2, 'a.php', $w) === at($s, '$this', [1, 2]) ? true : json_encode($bl);
+});
+
+check('foreach key/value and nested destructuring, skip element filtered', function () {
+    $s = "<?php\nfunction f(\$rows) {\n    foreach (\$rows as \$k => [\$x, , \$y]) { echo \$k, \$x, \$y; }\n    [\$p, [\$q]] = \$rows;\n    list(\$m, \$n) = \$rows;\n    return \$p + \$q + \$m + \$n;\n}\n";
+    $w = ws(['a.php' => $s]);
+    foreach (['$k' => 2, '$x' => 2, '$y' => 2, '$p' => 2, '$q' => 2, '$m' => 2, '$n' => 2] as $v => $cnt) {
+        $n = count(explode(' ', refs($s, $v, 1, 'a.php', $w)));
+        if ($n !== $cnt) { return "$v has $n"; }
+    }
+    $r = refs($s, '$rows', 1, 'a.php', $w);
+    return count(explode(' ', $r)) === 4 ? true : $r;
+});
+
+check('catch variable', function () {
+    $s = "<?php\nfunction f() {\n    try { g(); } catch (\\Exception \$e) { echo \$e->getMessage(); }\n    try { g(); } catch (\\Exception \$e) { echo \$e; }\n}\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$e', 1, 'a.php', $w) === at($s, '$e', [1, 2, 3, 4]) ? true : refs($s, '$e', 1, 'a.php', $w);
+});
+
+check('static local', function () {
+    $s = "<?php\nfunction f() {\n    static \$n = 0;\n    \$n++;\n    return \$n;\n}\nfunction g() { static \$n; return \$n; }\n";
+    return refs($s, '$n', 2) === at($s, '$n', [1, 2, 3]) ? true : refs($s, '$n', 2);
+});
+
+check('global statement binds {main}; sibling functions share it', function () {
+    $s = "<?php\n\$g = 1;\nfunction f() { global \$g; return \$g; }\nfunction h() { global \$g; \$g++; }\nfunction k(\$g) { return \$g; }\n";
+    $w = ws(['a.php' => $s]);
+    $want = at($s, '$g', [1, 2, 3, 4, 5]);
+    $k = refs($s, '$g', 6, 'a.php', $w);
+    return refs($s, '$g', 1, 'a.php', $w) === $want && $k === at($s, '$g', [6, 7]) ? true : refs($s, '$g', 1, 'a.php', $w) . " | $k";
+});
+
+check('global across files is uncertain (global-scope), never guessed', function () {
+    $a = "<?php\n\$g = 1;\n";
+    $b = "<?php\nfunction f() { global \$g; return \$g; }\n";
+    $w = ws(['a.php' => $a, 'b.php' => $b]);
+    $u = uncertain($w, $a, '$g', 1, 'a.php');
+    $u2 = uncertain($w, $b, '$g', 2, 'b.php');
+    $r = refs($a, '$g', 1, 'a.php', $w);
+    return $u === ['b.php:2:23:global-scope', 'b.php:2:34:global-scope'] && in_array('a.php:2:1:global-scope', $u2, true) && $r === '2:1' ? true : json_encode([$u, $u2, $r]);
+});
+
+check('superglobals are not renameable', function () {
+    $s = "<?php\nfunction f() { return \$_GET['a'] . \$_GET['b']; }\nfunction g() { return \$GLOBALS['x']; }\n";
+    $w = ws(['a.php' => $s]);
+    $p = where($s, '$_GET', 2);
+    return in_array('special-variable', $w->renameBlockers('a.php', $p[0], $p[1]), true)
+        && $w->definitionOf('a.php', $p[0], $p[1]) === null
+        && in_array('special-variable', $w->renameBlockers('a.php', ...where($s, '$GLOBALS')), true) ? true : 'no blocker';
+});
+
+check('compact / extract / func_get_args / variable-variable are dynamic-variable sites', function () {
+    $s = "<?php\nfunction f(\$a, \$b) {\n    \$z = compact('a');\n    return \$a + \$b;\n}\nfunction g(\$a) { extract(\$_GET); return \$a; }\nfunction h(\$a) { \$n = 'a'; \$\$n = 2; return \$a; }\nfunction i(\$a) { return func_get_args(); }\nfunction j(\$a) { return \$a; }\n";
+    $w = ws(['a.php' => $s]);
+    $fa = uncertain($w, $s, '$a', 1);
+    $fb = uncertain($w, $s, '$b', 1);
+    $lit = where($s, "'a'", 1);
+    return $fa === ['a.php:' . $lit[0] . ':' . $lit[1] . ':dynamic-variable'] && $fb === []
+        && count(uncertain($w, $s, '$a', 3)) === 1 && count(uncertain($w, $s, '$a', 4)) === 1
+        && count(uncertain($w, $s, '$a', 5)) >= 1 && count(uncertain($w, $s, '$a', 7)) === 1 && uncertain($w, $s, '$a', 8) === []
+        && in_array('dynamic-variable:a.php:' . $lit[0] . ':' . $lit[1], $w->renameBlockers('a.php', ...where($s, '$a', 1)), true) ? true : json_encode([$fa, $fb]);
+});
+
+check('compact with a non-literal argument taints the whole unit', function () {
+    $s = "<?php\nfunction f(\$a, \$names) {\n    return compact(\$names) + [\$a];\n}\n";
+    $w = ws(['a.php' => $s]);
+    return count(uncertain($w, $s, '$a', 1)) === 1 && count(uncertain($w, $s, '$names', 1)) === 1 ? true : 'missing';
+});
+
+check('include inside a unit makes its bindings include-scope uncertain', function () {
+    $s = "<?php\nfunction f(\$a) {\n    include 'x.php';\n    return \$a;\n}\nfunction g(\$a) { return \$a; }\n";
+    $w = ws(['a.php' => $s]);
+    $u = uncertain($w, $s, '$a', 1);
+    return count($u) === 1 && str_ends_with($u[0], ':include-scope') && uncertain($w, $s, '$a', 3) === [] ? true : json_encode($u);
+});
+
+check('interpolation "$a {$a}" has per-part locations', function () {
+    $s = "<?php\nfunction f(\$a) {\n    return \"x \$a y {\$a} z \$a[0]\";\n}\n";
+    $r = refs($s, '$a', 1);
+    return count(explode(' ', $r)) === 4 && substr_count($r, '3:') === 3 ? true : $r;
+});
+
+check('heredoc interpolation is an uncertain site, not a location', function () {
+    $s = "<?php\nfunction f(\$a) {\n    return <<<EOT\n    hi \$a\n    EOT;\n}\n";
+    $w = ws(['a.php' => $s]);
+    $p = where($s, '$a', 1);
+    $u = uncertain($w, $s, '$a', 1);
+    $bl = $w->renameBlockers('a.php', $p[0], $p[1]);
+    return count(explode(' ', refs($s, '$a', 1, 'a.php', $w))) === 1 && count($u) === 1 && str_contains($u[0], 'heredoc-interpolation')
+        && count(array_filter($bl, fn($b) => str_starts_with($b, 'heredoc-interpolation:'))) === 1 ? true : json_encode([$u, $bl]);
+});
+
+check('named arguments are not variables', function () {
+    $s = "<?php\nfunction f(int \$a) { return \$a; }\nfunction g() { \$a = 1; return f(a: \$a); }\n";
+    return refs($s, '$a', 3) === at($s, '$a', [3, 4]) ? true : refs($s, '$a', 3);
+});
+
+check('promoted param: property family plus constructor variable uses', function () {
+    $s = "<?php\nclass A {\n    public function __construct(private int \$x) { if (\$x > 0) { \$this->x = \$x; } }\n    public function get() { return \$this->x; }\n}\n";
+    $w = ws(['a.php' => $s]);
+    $p = where($s, '$x', 1);
+    $fromDecl = [];
+    foreach ($w->referencesTo('a.php', $p[0], $p[1]) as $l) { $fromDecl[] = $l->line . ':' . $l->col; }
+    sort($fromDecl);
+    $exp = explode(' ', at($s, '$x', [1, 2, 3]));
+    $exp[] = '3:' . (strpos(explode("\n", $s)[2], '->x') + 3);
+    $exp[] = '4:' . (strpos(explode("\n", $s)[3], '->x') + 3);
+    sort($exp);
+    // the member decl and the variable decl share one range
+    $u = array_values(array_unique($fromDecl));
+    $d = $w->definitionOf('a.php', $p[0], $p[1]);
+    $varUse = where($s, '$x', 2);
+    $vr = [];
+    foreach ($w->referencesTo('a.php', $varUse[0], $varUse[1]) as $l) { $vr[] = $l->line . ':' . $l->col; }
+    $bl = $w->renameBlockers('a.php', $varUse[0], $varUse[1]);
+    return $u == $exp && count($vr) === 3 && in_array('promoted-parameter', $bl, true) && $d !== null ? true : json_encode([$fromDecl, $exp, $vr, $bl]);
+});
+
+check('file with parse errors: no throw, positions after the error resolve', function () {
+    $s = "<?php\nfunction f(\$a) {\n    \$x = ;\n    return \$a + 1;\n}\nfunction g(\$b) { return \$b; }\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$a', 1, 'a.php', $w) === at($s, '$a', [1, 2]) && refs($s, '$b', 2, 'a.php', $w) === at($s, '$b', [1, 2]) ? true : 'wrong';
+});
+
+check('update drops the cached index', function () {
+    $s = "<?php\nfunction f(\$a) { return \$a; }\n";
+    $w = ws(['a.php' => $s]);
+    $before = count($w->referencesTo('a.php', ...where($s, '$a')));
+    $s2 = "<?php\nfunction f(\$a) { return \$a + \$a; }\n";
+    $w->update('a.php', $s2);
+    $after = count($w->referencesTo('a.php', ...where($s2, '$a')));
+    $w->close('a.php');
+    return $before === 2 && $after === 3 && $w->referencesTo('a.php', 2, 14) === [] ? true : "$before $after";
+});
+
+check('position that is not a variable: no variable answer', function () {
+    $s = "<?php\nfunction f(\$a) { return 1; }\n";
+    $w = ws(['a.php' => $s]);
+    return $w->referencesTo('a.php', 1, 1) === [] && $w->definitionOf('a.php', 1, 1) === null ? true : 'unexpected';
+});
+
+check('H1: function declared inside a function body has its own scope', function () {
+    $s = "<?php\nfunction outer(\$a) {\n    if (1) { function inner(\$a) { return \$a; } }\n    return \$a;\n}\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$a', 1, 'a.php', $w) === at($s, '$a', [1, 4]) && refs($s, '$a', 2, 'a.php', $w) === at($s, '$a', [2, 3]) ? true : refs($s, '$a', 1, 'a.php', $w);
+});
+
+check('H1: function inside a method, class inside a function, closure in nested function', function () {
+    $s = "<?php\nclass A { function m(\$a) { function f(\$a) { return \$a; } return \$a; } }\nfunction outer(\$a) { class K { function m(\$a) { return \$a; } } return \$a; }\nfunction o2(\$a) { function n(\$a) { \$h = function () use (\$a) { return \$a; }; return \$h; } return \$a; }\n";
+    $w = ws(['a.php' => $s]);
+    $ok = refs($s, '$a', 1, 'a.php', $w) === at($s, '$a', [1, 4])
+        && refs($s, '$a', 2, 'a.php', $w) === at($s, '$a', [2, 3])
+        && refs($s, '$a', 5, 'a.php', $w) === at($s, '$a', [5, 8])
+        && refs($s, '$a', 6, 'a.php', $w) === at($s, '$a', [6, 7])
+        && refs($s, '$a', 9, 'a.php', $w) === at($s, '$a', [9, 13])
+        && refs($s, '$a', 10, 'a.php', $w) === at($s, '$a', [10, 11, 12]);
+    return $ok ? true : refs($s, '$a', 9, 'a.php', $w);
+});
+
+check('M1: property hooks get their own scope; set binds $value', function () {
+    $s = "<?php\nclass P {\n    public int \$v { get { \$tt = 1; return \$tt; } set(int \$n) { \$this->v = \$n; } }\n    public int \$w { set { \$q = \$value; } }\n}\nfunction t(\$tt) { return \$tt; }\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$tt', 1, 'a.php', $w) === at($s, '$tt', [1, 2]) && refs($s, '$tt', 3, 'a.php', $w) === at($s, '$tt', [3, 4])
+        && refs($s, '$n', 2, 'a.php', $w) !== '' && refs($s, '$value', 1, 'a.php', $w) === at($s, '$value', [1])
+        && refs($s, '$q', 1, 'a.php', $w) === at($s, '$q', [1]) ? true : refs($s, '$n', 2, 'a.php', $w);
+});
+
+check('M2: parse-error-region blocker for variable, member and class renames; none when clean', function () {
+    $bad = "<?php\nclass {\n";
+    $good = "<?php\nclass A { public function m(\$a) { return \$a; } }\nfunction f(\$z) { return (new A)->m(\$z); }\n";
+    $w = ws(['good.php' => $good, 'bad.php' => $bad]);
+    $has = fn($bl, $f) => in_array('parse-error-region:' . $f, $bl, true);
+    $v = $w->renameBlockers('good.php', ...where($good, '$z', 1));
+    $m = $w->renameBlockers('good.php', ...where($good, 'm(', 1));
+    $c = $w->renameBlockers('good.php', ...where($good, 'A', 1));
+    $wc = ws(['good.php' => $good]);
+    $clean = array_merge($wc->renameBlockers('good.php', ...where($good, '$z', 1)), $wc->renameBlockers('good.php', ...where($good, 'm(', 1)));
+    $nv = array_filter($clean, fn($b) => str_starts_with($b, 'parse-error-region'));
+    $w2 = ws(['bad.php' => "<?php\nfunction f(\$z) { return \$z; }\nclass {\n"]);
+    $own = $w2->renameBlockers('bad.php', 2, 12);
+    return $has($m, 'bad.php') && $has($c, 'bad.php') && $nv === [] && $has($own, 'bad.php') && !$has($v, 'bad.php') ? true : json_encode([$v, $m, $c, $own, $nv]);
+});
+
+check('L1: arrow fn assignment to a captured name is a separate binding with arrow-assignment sites', function () {
+    $s = "<?php\nfunction f() {\n    \$x = 1;\n    \$g = fn() => \$x = 5;\n    return \$x;\n}\n";
+    $w = ws(['a.php' => $s]);
+    $outer = refs($s, '$x', 1, 'a.php', $w);
+    $inner = refs($s, '$x', 2, 'a.php', $w);
+    $u = uncertain($w, $s, '$x', 1);
+    $ui = uncertain($w, $s, '$x', 2);
+    $p = where($s, '$x', 2);
+    return $outer === at($s, '$x', [1, 3]) && $inner === at($s, '$x', [2]) && $u === ['a.php:' . $p[0] . ':' . $p[1] . ':arrow-assignment'] && $ui === $u ? true : json_encode([$outer, $inner, $u, $ui]);
+});
+
+check('R2-1: explicit set-hook parameter is bound and flagged hook-parameter', function () {
+    $s = "<?php\nclass P {\n    public int \$x { set(\$v) { \$this->x = \$v; } }\n}\n";
+    $w = ws(['a.php' => $s]);
+    $p = where($s, '$v', 2);
+    $bl = $w->renameBlockers('a.php', $p[0], $p[1]);
+    $hp = array_filter($bl, fn($b) => str_starts_with($b, 'hook-parameter:a.php:'));
+    return refs($s, '$v', 2, 'a.php', $w) === at($s, '$v', [2]) && count($hp) === 1 ? true : json_encode($bl);
+});
+
+check('R2-2: closure in a param default has its own scope', function () {
+    $s = "<?php\nfunction f(\$a, \$g = static function(\$a) { return \$a; }) {\n    return \$a;\n}\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$a', 1, 'a.php', $w) === at($s, '$a', [1, 4]) && refs($s, '$a', 2, 'a.php', $w) === at($s, '$a', [2, 3]) ? true : refs($s, '$a', 1, 'a.php', $w);
+});
+
+check('R2-2: closures in const, case, property default and attribute do not merge into {main}', function () {
+    $s = "<?php\n\$q = 1;\nclass K {\n    const C = static fn(\$q) => \$q;\n    public \$d = null;\n    #[Attr(static function(\$q) { return \$q; })]\n    public function m() {}\n}\necho \$q;\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$q', 1, 'a.php', $w) === at($s, '$q', [1, 6]) && refs($s, '$q', 2, 'a.php', $w) === at($s, '$q', [2, 3])
+        && refs($s, '$q', 4, 'a.php', $w) === at($s, '$q', [4, 5]) ? true : refs($s, '$q', 1, 'a.php', $w);
+});
+
+check('anonymous-class methods: top level, in a function, in a closure', function () {
+    $s = "<?php\n\$o = new class { function m(\$z) { return \$z; } };\nfunction f(\$z) { \$p = new class { function n(\$z) { return \$z; } }; return \$z; }\n\$c = function (\$z) { \$r = new class { function k(\$z) { return \$z; } }; return \$z; };\n";
+    $w = ws(['a.php' => $s]);
+    return refs($s, '$z', 1, 'a.php', $w) === at($s, '$z', [1, 2])
+        && refs($s, '$z', 3, 'a.php', $w) === at($s, '$z', [3, 6]) && refs($s, '$z', 4, 'a.php', $w) === at($s, '$z', [4, 5])
+        && refs($s, '$z', 7, 'a.php', $w) === at($s, '$z', [7, 10]) && refs($s, '$z', 8, 'a.php', $w) === at($s, '$z', [8, 9]) ? true : refs($s, '$z', 3, 'a.php', $w);
+});
+
+check('perf: variable query on a 3000-line file p50 < 5 ms', function () {
+    $src = "<?php\n";
+    for ($i = 0; $i < 300; $i++) {
+        $src .= "function fn$i(int \$n, \$m): int {\n    \$a = \$n + 1;\n    \$b = \$a + \$m;\n    if (\$n > 3) {\n        \$b = \$b + \$a;\n    }\n    \$f = fn(\$q) => \$q + \$b;\n    foreach ([1, 2, 3] as \$x) {\n        \$b += \$x;\n    }\n    return \$b + \$f(\$a);\n}\n";
+    }
+    $w = ws(['a.php' => $src]);
+    $w->referencesTo('a.php', 2, 17); // build the index
+    $times = [];
+    for ($i = 0; $i < 60; $i++) {
+        $p = where($src, '$b + $a', 1 + (($i * 7) % 300));
+        $t0 = hrtime(true);
+        $r = $w->referencesTo('a.php', $p[0], $p[1]);
+        $times[] = (hrtime(true) - $t0) / 1e6;
+        if (count($r) !== 6) { return 'wrong count ' . count($r); }
+    }
+    sort($times);
+    echo sprintf("  lines=%d p50=%.3f ms max=%.3f ms\n", substr_count($src, "\n"), $times[30], $times[59]);
+    return $times[30] < 5 ? true : "p50 {$times[30]} ms";
+});
+
+exit($fail);

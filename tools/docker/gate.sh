@@ -392,17 +392,12 @@ bash tests/parser/run.sh > "$MC_LOGDIR/parser.log" 2>&1
 parser_rc=$?
 tail -5 "$MC_LOGDIR/parser.log"
 
-# The analyzer library (Semantic\Workspace and friends), hosted by Zend: skipped where php is absent.
+# The analyzer library (Semantic\Workspace and friends), compiled natively with bin/manticore.
 echo
-echo "=== tests/semantic/run.sh (analyzer library) ==="
-if command -v php >/dev/null 2>&1; then
-    bash tests/semantic/run.sh > "$MC_LOGDIR/semantic.log" 2>&1
-    semantic_rc=$?
-    tail -5 "$MC_LOGDIR/semantic.log"
-else
-    echo "skipped: no php"
-    semantic_rc=0
-fi
+echo "=== tests/semantic/run.sh (analyzer library, native) ==="
+bash tests/semantic/run.sh > "$MC_LOGDIR/semantic.log" 2>&1
+semantic_rc=$?
+tail -5 "$MC_LOGDIR/semantic.log"
 
 else
     echo "=== smokes skipped (MC_SMOKES=0) — the build job ran them ==="

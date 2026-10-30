@@ -1133,11 +1133,15 @@ trait EmitLlvmExpr
      * double's bits are re-boxed through box_float so a signaling NaN can't
      * collide with the tagged range (0xFFF1..0xFFF8).
      */
-    /** `%<out> = <raw> as a cell`: by the chain, or by `%<arr>`'s buffer hint
-     *  when the chain is {@see EK_HINT}. */
+    /** `%<out> = <raw> as a cell`: by the chain, or by `%<arr>`'s buffer hint when
+     *  the chain is {@see EK_HINT} or {@see EK_CELL} — a cell-typed channel may be
+     *  backed by a raw-hinted buffer (docs/design/value-channels.md), so the hint,
+     *  not the static type, says what the word is; a CELL-hinted buffer decodes to itself. */
     private static function elemToCellByChain(string $arr, string $raw, string $ek, string $out): string
     {
-        return '  %' . $out . 'h = icmp eq i64 %' . $ek . ', ' . (string)self::EK_HINT . "\n"
+        return '  %' . $out . 'h6 = icmp eq i64 %' . $ek . ', ' . (string)self::EK_HINT . "\n"
+            . '  %' . $out . 'h0 = icmp eq i64 %' . $ek . ', ' . (string)self::EK_CELL . "\n"
+            . '  %' . $out . 'h = or i1 %' . $out . 'h6, %' . $out . "h0\n"
             . '  br i1 %' . $out . 'h, label %' . $out . 'dec, label %' . $out . "chn\n"
             . $out . "dec:\n"
             . '  %' . $out . 'd = call i64 @__mir_elem_decode(ptr %' . $arr . ', i64 %' . $raw . ")\n"

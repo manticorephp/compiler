@@ -1,4 +1,4 @@
-# Semantic core (P2a + P2b)
+# Semantic core (P2a + P2b + P2c)
 
 Library layer under the future LSP: text in, diagnostics and name queries out, one file edit
 at a time. Goals measured here: **G1** single-file edit to refreshed diagnostics in single-digit ms on a
@@ -98,6 +98,67 @@ range, so names inside it are found. Heredoc/nowdoc fall back to the whole-strin
 the Workspace the FIRST (see Duplicate declarations); the one `dup_decl_user` case shows as a
 difference when the parity bench runs over `tests/analyze/cases`.
 
+## Positions, members, types, variables (P2c)
+
+**Position index.** `ExprAt` maps (line, column) to the innermost expression of a file: ranges keyed by
+(start, end) pairs, binary search for the last start <= point, then a climb through parents
+(`chain` keeps only the nodes that contain the point, because under error recovery ranges can overlap
+partially). Built once per file version in `Workspace::open`; `nodeAt` and `typeAt` read it.
+
+**Member NameRefs.** The parser records a name entry for every member use site (`->p`, `?->m()`, `::C`,
+`::$sp`, `::m()`, simple string interpolation `"$o->p"`) with role `prop` / `method` / `const` / `sprop`, next to the
+level-2 declaration entries. A use site is resolved lazily: `MemberResolver` takes the receiver
+expression through `ExprAt`, types it with `Flow` + `ExprTyper`, and looks the member up with
+`Index::lookupMember` (own class, used traits, parents, interfaces; enum cases are constants).
+A union receiver yields one declaration per class; if any class lacks the member, or the receiver type is unknown, the
+site is unresolved and listed as uncertain, never guessed. Results are cached per file (`siteCache`, dropped on any update).
+
+**MemberInfo / memberFamily.** `Analyze\MemberInfo` is one declared member (kind, declaring class, file, name range,
+type hint, static, implicit). `Index::memberFamily` is the set a rename must move together: ancestors, descendants,
+interfaces, traits and sibling implementers; a private member and a constructor belong to their own family only.
+A promoted constructor parameter is a property and a variable at once; its variable uses join the family.
+
+**ExprTyper / Flow / TypeEnv.** `ExprTyper` types an expression from a `TypeEnv` (null = unknown, never a guess; depth and
+node budgets degrade to unknown). `Flow::envAtUnit` computes the env at one expression by a forward walk of its
+unit (`UnitLookup` picks the unit): assignments, `instanceof` / `is_*` / null / `||` / ternary / `match(true)` narrowing,
+early exits, foreach and catch bindings, loops widened by silent passes, property paths dropped on writes or calls.
+Nothing is cached across calls, so nothing goes stale. It re-implements `FlowWalk`'s recognition over `SourceType`
+because `Ty` cannot hold unions (unify in P4). `DocNames` qualifies docblock class names with the file's `use` map.
+`typeAt` returns a `SourceType`; `hover` returns the member signature (members) or the type (expressions).
+
+**VarIndex.** Variable bindings of one file: scopes (`{main}`, functions, methods, property hooks at any depth, closures,
+arrow fns), a binding per variable per scope, closure `use` sharing the outer binding, `global` linked to `{main}`.
+`definitionOf` / `referencesTo` on a variable answer from it; `scopeAt` is a binary search over scope spans (it was a
+linear scan per declaration name, see Latency).
+
+**Rename blockers** (`Workspace::renameBlockers`; empty = mechanical rename is safe). Contract: every site in
+`uncertainSitesFor` for the same query is also a blocker `reason:file:line:col` (`unresolved-receiver` is reported as
+`unresolved-member`; at most 50 per reason, then one `reason:…+N more` entry), closed files included. So empty blockers
+imply an empty uncertain list; a P3 rename that finds any blocker must refuse or ask.
+
+| Blocker | Meaning |
+|---|---|
+| `unresolved-member` | the cursor use site, or (with `:file:line:col`) any same-name use site anywhere in the workspace whose receiver type is unknown, closed files included |
+| `string-class-name`, `callable-string`, `dynamic-member`, `legacy-interpolation` | uncertain sites carried over as blockers: a string equal to the name, `'A::run'`, a dynamic access (`->$n`, `A::$$n`), a `"${n}"` literal (the lexer reads it as a plain string) |
+| `owner-unknown` | declaring class nested in a closure / loop / switch (no owner) |
+| `implicit-member` | member the source never declares (synthesized by the Index, e.g. from `__toString`) |
+| `library-declaration` | declared in the prelude / stdlib |
+| `trait-adaptation` | `insteadof` / `as` rule naming the method in a class the family reaches |
+| `named-argument` | a named argument (call or attribute) spelled like the member (a promoted property is also a parameter) |
+| `heredoc-interpolation` | each heredoc in the workspace holds unindexed uses (no name-precise spans) |
+| `heredoc-scan-failed` | the heredoc scan gave up on a file |
+| `parse-error-region` | a workspace file with syntax errors can hide uses (a variable: its own file) |
+| `special-variable` | `$this` and the superglobals |
+| `global-scope` | `global` statements and `{main}` variables of the same name in other files |
+| `dynamic-variable` | `compact` / `extract` / `get_defined_vars` / `func_get_args` / `eval` / `$$x` in a scope that sees the binding |
+| `include-scope` | `include` / `require` in a scope that sees the binding |
+| `promoted-parameter` | the variable is a promoted constructor parameter: renaming it also renames the property |
+| `unscoped-declaration` | a parameter that falls in no function / method / closure range |
+| `hook-parameter` | an explicit set-hook parameter has no name entry |
+| `arrow-assignment` | an arrow fn that assigns a name keeps a local copy; the first write is listed |
+
+(`dynamic-variable` / `include-scope` / `heredoc-interpolation` / `global-scope` on a variable come from `uncertainSitesFor`.)
+
 ## Parity (G4)
 
 `php tools/bench_semantic.php <dir> --parity` compares, per error-free file,
@@ -188,9 +249,54 @@ text and keeps only the Index/NameIndex entries (the intended LSP shape); the cl
 footprint is not measured. RSS growth over the mutations and edits (+173 MB native over cold)
 is most likely un-returned AST memory; a longer soak was not run.
 
+## Latency (P2c)
+
+Method: `tools/bench_semantic.php src --edits 200 --broken 50 --queries 500 --parity` (343 files, seed 4242), **Zend only**
+(php 8.5.12, macOS arm64, one run; the native numbers are owed by the controller). Library load needs the stdlib sig,
+which a worktree without `lib/` lacks (`MANTICORE_STDLIB_SIG` pointed at main's).
+
+| Operation, 500 random positions (ms) | cold (1st call) | warm p50 | p95 | max | answered |
+|---|---|---|---|---|---|
+| `typeAt` | 0.003 | 0.004 | 1.24 | 145 | 188 |
+| `hover` | 0.006 | 0.018 | 0.76 | 10.3 | 247 |
+| `definitionOf` | 0.013 | 0.008 | 3.33 | 4.0 | 297 |
+| `referencesTo` (member use site) | 28.2 | 19.9 | 99.5 | 1172 | 401 |
+| `referencesTo` (variable) | 19.8 | 0.013 | 20.6 | 291 | 452 |
+| `renameBlockers` (member) | 0.077 | 0.047 | 0.49 | 7.4 | 121 |
+| `renameBlockers` (variable) | 0.044 | 0.011 | 0.068 | 0.27 | 78 |
+
+Budgets: `typeAt` p50 < 5 ms **met** (0.004 ms; p95 1.2 ms); member `referencesTo` p50 < 30 ms warm **met** (19.9 ms; the
+p95 100 ms and the 1.2 s max are the first touch of a file: its `UnitLookup` / `VarIndex` and every site's flow env).
+The first member `referencesTo` of a session resolves every same-named site of the project once.
+Positions that are not an expression (a keyword, whitespace) answer null fast, which is why the p50s are tiny.
+Broken files: 50 files x 3 mutations, then `typeAt` / `hover` / `definitionOf` / `referencesTo` / `renameBlockers` /
+`uncertainSitesFor` at the mutation point and 1-in-40 random positions of the mutated text: **12750 calls, 0 exceptions**
+(`--broken` fails the run on any); 0 differences after restore; update + diagnostics p50 2.9 ms, p95 65 ms, max 221 ms.
+Parity (`--parity` against main's `bin/manticore analyze --json src`): 343 files, 285 diagnostics, **0 differences**.
+Edits (200): update + diagnostics p50 5.7 ms, p95 101 ms (P2b Zend: 5.05 / 78.5; the level-2 name table, the position
+index and the name containment sweep cost ~10%); peak RSS 541 MB after the cold load of 343 files, 837 MB after the run
+(P2b Zend: 377 / 425 MB; `ExprAt` and the member entries are the growth).
+
+**Cold `referencesTo` at scale.** A synthetic file of N classes (8 methods each, member calls, closures) measured the first
+`referencesTo` of a property: 389 ms @100, 1422 ms @200, **5507 ms @400** classes (4x per doubling). Profiling by
+`microtime` around `MemberResolver::resolve` stages and `VarIndex::build` found it all in `VarIndex::scopeAt`: for every
+parameter / catch / global / static declaration name it scanned every scope span (names x scopes). Fix: scope spans
+are sorted once, each remembers its enclosing span, and `scopeAt` is a binary search plus a walk up the nesting.
+
+| Classes | before: `VarIndex::build` | after | before: cold `referencesTo` (prop) | after |
+|---|---|---|---|---|
+| 100 | 336 ms | 24 ms | 389 ms | 74 ms |
+| 200 | 1327 ms | 53 ms | 1422 ms | 172 ms |
+| 400 | 5246 ms | 105 ms | 5507 ms | 349 ms |
+
+The name index (`NameIndex::replaceFile`, `occurrences`, `allOccurrences`) and the owner sweep were NOT quadratic
+(`open` is linear: 270 / 580 / 1300 ms). Regression: `tests/semantic/scale.php` (400 classes cold < 2 s; 200 -> 400 ratio < 3.5;
+fails on the old code at 5.8 s). `src/` was never affected much (128 ms cold) because its files are small.
+
 ## Tooling
 
-`tools/bench_semantic.php <dir> [--edits N] [--broken N] [--parity] [--cli-json FILE]`. Runs under Zend
+`tools/bench_semantic.php <dir> [--edits N] [--broken N] [--queries N] [--seed S] [--parity] [--cli-json FILE]`. `--queries N` times the editor
+operations at N random positions (cold first call, warm p50/p95/max); `--broken` also fires them at the mutated files and counts exceptions. Runs under Zend
 directly (`php -d xdebug.mode=off -d memory_limit=2G tools/bench_semantic.php src --edits 200 --broken 50 --parity`). To
 compile it natively, build a manifest whose `src` is a copy of `src/` without `main.php` and
 whose `entry` is a copy of the bench (with `dirname(__DIR__)` replaced by the repo path), place
@@ -200,18 +306,31 @@ Native finding while writing it: the combination `sort($a); sort($b); $a !== $b`
 `string[]` built in a loop and `array_diff` on them SIGSEGVs in the compiled binary (the
 bench compares with `in_array` instead). Not minimised or filed here.
 
+`bash tests/semantic/run.sh [-k a,b]` runs the library tests NATIVELY: it compiles `src/` (minus `main.php`) and every
+`tests/semantic/*.php` into one binary (~2 min; each script moves into its own namespace, its trailing `exit($fail)` folds
+into the combined exit code) and runs it. The scripts stay plain PHP, so `php tests/semantic/<x>.php` still works as a quick
+loop, but only the native run counts: it has found native-only failures Zend hides (see the issues filed from it).
+
 ## What remains
 
 Closed in P2b (no longer gaps): tolerant analysis and `ErrorMember`, `Diagnostic` end ranges,
 declaration-name ranges and declaration-aware references, per-part interpolation spans (not
 heredoc/nowdoc), anonymous-class naming, global constants in the Index.
 
-**P2c**
-- Parameters as names (declaration and use sites).
-- Member use sites (`Suit::Hearts`, `->prop`): declarations are found, uses are not yet.
-- `typeAt` and narrowing.
+Closed in P2c: parameters and variables as names, member use sites (`->prop`, `::CONST`, `Suit::Hearts`), `typeAt` with flow
+narrowing, hover, member and variable `referencesTo` / `definitionOf`, `renameBlockers`.
 
-**P3** - document symbols and completion.
+**P2c known limits**
+- Closed files are unresolved (no AST): their member use sites are uncertain. P3 keeps the text and reparses lazily.
+- A by-ref write through a stdlib function missing from the by-ref builtin table keeps the narrowed type (needs `.sig` by-ref flags).
+- A closure stored and later `bindTo`'d / `call`ed from elsewhere is typed with its definition-site class.
+- `Identifier` global constants and stdlib function return types are unknown (`typeAt` answers null).
+- `hover` covers members and expressions only (no classes, functions, constants, variables' declarations).
+- Docblock types resolve class names through the file's own `use` map only.
+- Native (compiled) P2c numbers and the Linux run are not recorded here.
+
+**P3** - document symbols, completion, the LSP transport.
+- Closed files: member use sites in a closed file resolve to nothing and are listed uncertain (`unresolved-receiver`), so a project-wide rename is uncertain everywhere outside open files. Root-cause fix: keep each indexed file's text (or re-read it from disk) and lazily reparse it, building `ExprAt` / `UnitLookup` on demand through a small LRU; never keep every AST.
 
 **Open**
 - Diagnostics for closed files (a closed file reports only the parse errors it had).

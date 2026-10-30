@@ -102,4 +102,54 @@ check('strict_parse_keeps_legacy_anon_name', function () {
     return 'no __anon_class_0';
 });
 
+$MEM = <<<'PHP'
+<?php
+$o->p; $o?->p; $o->m(); A::m(); A::C; A::$p; E::Hearts; A::class;
+function f(int $a, &...$r) { global $g; static $s = 1; try {} catch (X $e) {} }
+class K { function __construct(private int $q) {} }
+echo "{$o->w}";
+echo "x $o->s y";
+class R { function __construct(readonly int $ro, public $pp) {} }
+PHP;
+
+/** @return string[] "role:written@line:col-endCol" for member / variable entries */
+function memberEntries(string $src, int $level): array
+{
+    $out = [];
+    foreach (names($src, $level) as $r) {
+        if ($r->kind !== 'member' && $r->kind !== 'variable') { continue; }
+        if ($r->role === 'decl') { continue; }
+        $out[] = $r->kind . '/' . $r->role . ':' . $r->written . '=' . $r->resolved . '@' . $r->span->line . ':' . $r->span->column . '-' . $r->span->endColumn();
+    }
+    return $out;
+}
+
+check('member_and_variable_entries_level2', function () use ($MEM) {
+    $want = [
+        'member/prop:p=p@2:5-6', 'member/prop:p=p@2:13-14', 'member/method:m=m@2:20-21',
+        'member/method:m=m@2:28-29', 'member/const:C=C@2:36-37', 'member/sprop:$p=p@2:42-44',
+        'member/const:Hearts=Hearts@2:49-55',
+        'variable/param:$a=a@3:16-18', 'variable/param:$r=r@3:24-26', 'variable/global:$g=g@3:37-39',
+        'variable/static:$s=s@3:48-50', 'variable/catch:$e=e@3:72-74',
+        'variable/param:$q=q@4:44-46', 'member/prop:w=w@5:12-13',
+        'member/prop:s=s@6:13-14',
+        'variable/param:$ro=ro@7:45-48', 'variable/param:$pp=pp@7:57-60',
+    ];
+    $got = memberEntries($MEM, 2);
+    return $got === $want ?: "\n" . implode("\n", $got);
+});
+
+check('member_and_variable_entries_absent_below_level2', function () use ($MEM) {
+    foreach ([0, 1] as $lv) {
+        $got = memberEntries($MEM, $lv);
+        if ($got !== []) { return "level $lv: " . json_encode($got); }
+    }
+    return true;
+});
+
+check('member_entries_survive_error_recovery', function () {
+    $src = "<?php\n\$o->p;\n\$o->;\n\$o->q;\nfunction f(\$z, ";
+    $got = memberEntries($src, 2);
+    return in_array('member/prop:p=p@2:5-6', $got, true) && in_array('member/prop:q=q@4:5-6', $got, true) ?: json_encode($got);
+});
 exit($fail);

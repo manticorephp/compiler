@@ -102,6 +102,12 @@ final class Index
     /** @var array<string, bool> kind . path . NUL . key → the declaration is kept from before the file broke, not present in its tree */
     private array $sticky = [];
 
+    /** @var array<string, \Parser\Ast\NameRef[]> written lexeme → member declaration names of the file being collected (parsed with declNames >= 2) */
+    private array $curDeclNames = [];
+
+    /** @var array<string, array<string, ?MemberInfo>> lower class FQN → `kind\0name` → memoized lookupMember answer; cleared whole on any class change */
+    private array $memberMemo = [];
+
     private string $curNs = '';
 
     private ?ParsedFile $curFile = null;
@@ -142,8 +148,13 @@ final class Index
         $this->curConsts = [];
         $this->curNs = '';
         $this->curFile = $pf;
+        $this->curDeclNames = [];
+        foreach ($pf->program->names as $n) {
+            if ($n->role === 'decl' && $n->kind === 'member') { $this->curDeclNames[$n->written][] = $n; }
+        }
         $this->collectStmts($pf->program->statements);
         $this->curFile = null;
+        $this->curDeclNames = [];
         if ($pf->hasErrors) {
             // Sticky: a declaration the recovered tree lost stays until the file is removed or parses clean.
             foreach ($oldFns as $l => $fi) {
@@ -344,6 +355,8 @@ final class Index
 
     private function setClass(string $lower, ?ClassInfo $ci, string $path): void
     {
+        // Any class may reach $lower through its hierarchy; a global clear is O(1) and edits are rare against lookups.
+        if ($this->memberMemo !== []) { $this->memberMemo = []; }
         $old = $this->classes[$lower] ?? null;
         if ($old !== null) {
             foreach ($this->edges($old) as $t) {
@@ -448,7 +461,7 @@ final class Index
     {
         if ($d->name === '') { return; }
         $l = \strtolower($d->name);
-        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType);
+        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $this->docTag($d->docComment, '@return', $d->name, \Semantic\DocNames::templates($d->docComment)));
         $this->curFnSpans[$l] = $d->span;
     }
 
@@ -487,8 +500,111 @@ final class Index
         $l = \strtolower($fqn);
         $this->curSpans[$l] = $d->span;
         $this->curClasses[$l] = new ClassInfo(
-            $fqn, $d->kind, $d->extends, $d->implements, $d->uses, $methods, $consts, $d->isAbstract, $propTypes, $partial
+            $fqn, $d->kind, $d->extends, $d->implements, $d->uses, $methods, $consts, $d->isAbstract, $propTypes, $partial,
+            $this->collectMembers($d, $fqn),
+            self::adaptedNames($d)
         );
+    }
+
+    /** @return array<string, int[]> */
+    private static function adaptedNames(\Parser\Ast\ClassDecl $d): array
+    {
+        $out = [];
+        foreach ($d->traitAdaptations as $a) {
+            $sp = $a->span;
+            $at = $sp === null ? [0, 0] : [$sp->startLine(), $sp->startColumn()];
+            foreach ([$a->method, $a->alias] as $n) {
+                if ($n !== '' && !isset($out[\strtolower($n)])) { $out[\strtolower($n)] = $at; }
+            }
+        }
+        return $out;
+    }
+
+    /** @return array<string, MemberInfo> */
+    private function collectMembers(ClassDecl $d, string $fqn): array
+    {
+        $file = $this->curFile === null ? '' : $this->curFile->path;
+        $isEnum = $d->kind === 'enum';
+        $isIface = $d->kind === 'interface';
+        $end = $d->span->endLine();
+        /** @var array<string, MemberInfo> $out */
+        $out = [];
+        $ctpl = \Semantic\DocNames::templates($d->docComment);
+        $tpl = $ctpl;
+        foreach ($d->methods as $m) {
+            $tpl = \array_merge($ctpl, \Semantic\DocNames::templates($m->docComment));
+            $out['method:' . \strtolower($m->name)] ??= $this->member('method', $m->name, $m->name, $fqn, $m->visibility, $m->isStatic, $m->isAbstract || $isIface, $m->returnType, $file, $m->span, $end, $this->docTag($m->docComment, '@return', $fqn, $tpl));
+            if (\strtolower($m->name) !== '__construct') { continue; }
+            foreach ($m->params as $mp) {
+                if ($mp->promoted === '' && !$mp->promotedReadonly) { continue; }
+                $out['prop:' . $mp->name] ??= $this->member('prop', $mp->name, '$' . $mp->name, $fqn, $mp->promoted === '' ? 'public' : $mp->promoted, false, false, $mp->typeHint, $file, $mp->span, $end);
+            }
+        }
+        $tpl = $ctpl;
+        foreach ($d->properties as $p) {
+            if ($p->name === '' || $p->name === '$') { continue; }
+            $out['prop:' . $p->name] ??= $this->member('prop', $p->name, '$' . $p->name, $fqn, $p->visibility, $p->isStatic, false, $p->typeHint, $file, $p->span, $end, $this->docTag($p->docComment, '@var', $fqn, $tpl));
+        }
+        foreach ($d->consts as $c) {
+            $out['const:' . $c->name] ??= $this->member('const', $c->name, $c->name, $fqn, $c->visibility, true, false, $c->typeHint, $file, $c->span, $end, null, $c->typeHint === null ? self::smallValue($c->value) : null);
+        }
+        foreach ($d->cases as $case) {
+            $sp = $case->span ?? $d->span;
+            $out['case:' . $case->name] ??= $this->member('case', $case->name, $case->name, $fqn, 'public', true, false, $fqn, $file, $sp, $end);
+        }
+        if ($isEnum) {
+            $sp = $d->span;
+            $out['method:cases'] ??= new MemberInfo('method', 'cases', $fqn, 'public', true, false, 'array', $file, 0, 0, true);
+            $out['prop:name'] ??= new MemberInfo('prop', 'name', $fqn, 'public', false, false, 'string', $file, 0, 0, true);
+            if ($d->enumBackingType !== null) {
+                $out['method:from'] ??= new MemberInfo('method', 'from', $fqn, 'public', true, false, 'static', $file, 0, 0, true);
+                $out['method:tryfrom'] ??= new MemberInfo('method', 'tryFrom', $fqn, 'public', true, false, '?static', $file, 0, 0, true);
+                $out['prop:value'] ??= new MemberInfo('prop', 'value', $fqn, 'public', false, false, $d->enumBackingType, $file, 0, 0, true);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The namespace-qualified tag type of a docblock, resolved against the namespace of $declFqn and the file's `use` map.
+     *
+     * @param string[] $templates
+     */
+    private function docTag(?string $doc, string $tag, string $declFqn, array $templates): ?string
+    {
+        if ($doc === null) { return null; }
+        $uses = $this->curFile === null ? [] : $this->curFile->program->useAliases;
+        return \Semantic\DocNames::tagType($doc, $tag, "", \Semantic\DocNames::nsOf($declFqn), $uses, $templates);
+    }
+
+    /** A constant initializer worth keeping for typing: small trees as is, an array literal as an empty one, else null. */
+    private static function smallValue(\Parser\Ast\Expr $e): ?\Parser\Ast\Expr
+    {
+        if ($e instanceof \Parser\Ast\ArrayLit) { return new \Parser\Ast\ArrayLit([], $e->span); }
+        $w = new AstWalk(true);
+        $w->exprTree($e);
+        return \count($w->exprs) <= 16 ? $e : null;
+    }
+
+    /** Name-precise position from the file's declaration names when present, else the start of the declaration. */
+    private function member(string $kind, string $name, string $written, string $declClass, string $visibility, bool $isStatic, bool $isAbstract, ?string $typeHint, string $file, \Parser\Ast\Span $sp, int $classEnd, ?string $doc = null, ?\Parser\Ast\Expr $value = null): MemberInfo
+    {
+        $line = $sp->startLine();
+        $col = $sp->startColumn();
+        $list = $this->curDeclNames[$written] ?? [];
+        // Lower bound by position: the first entry at or after the declaration start (the list is in source order).
+        $lo = 0;
+        $hi = \count($list);
+        while ($lo < $hi) {
+            $mid = \intdiv($lo + $hi, 2);
+            $nl = $list[$mid]->span->startLine();
+            if ($nl < $line || ($nl === $line && $list[$mid]->span->startColumn() < $col)) { $lo = $mid + 1; } else { $hi = $mid; }
+        }
+        if ($lo < \count($list) && $list[$lo]->span->startLine() <= $classEnd) {
+            $line = $list[$lo]->span->startLine();
+            $col = $list[$lo]->span->startColumn();
+        }
+        return new MemberInfo($kind, $name, $declClass, $visibility, $isStatic, $isAbstract, $typeHint, $file, $line, $col, false, $doc, $value);
     }
 
     /**
@@ -594,6 +710,136 @@ final class Index
         return true;
     }
 
+    /**
+     * A member as PHP resolves it: the class's own, then used traits (declClass = the trait), then parents, then
+     * interfaces (constants and abstract methods). $kind is method | prop | const | case; a `const` lookup also finds
+     * enum cases. Visibility is reported, not filtered. Memoized until a class in the hierarchy changes.
+     */
+    public function lookupMember(string $classFqn, string $name, string $kind): ?MemberInfo
+    {
+        $l = \strtolower(\ltrim($classFqn, '\\'));
+        $k = $kind . "\0" . $name;
+        if (\array_key_exists($k, $this->memberMemo[$l] ?? [])) { return $this->memberMemo[$l][$k]; }
+        $r = $this->resolveMember($l, $name, $kind, 0);
+        $this->memberMemo[$l][$k] = $r;
+        return $r;
+    }
+
+    private function resolveMember(string $lower, string $name, string $kind, int $depth): ?MemberInfo
+    {
+        if ($depth > 50) { return null; }
+        $ci = $this->classes[$lower] ?? null;
+        if ($ci === null) { return null; }
+        $key = $kind . ':' . ($kind === 'method' ? \strtolower($name) : $name);
+        if (isset($ci->members[$key])) { return $ci->members[$key]; }
+        if ($kind === 'const' && isset($ci->members['case:' . $name])) { return $ci->members['case:' . $name]; }
+        foreach ($ci->traits as $t) {
+            $r = $this->resolveMember(\strtolower(\ltrim($t, '\\')), $name, $kind, $depth + 1);
+            if ($r !== null) { return $r; }
+        }
+        foreach ($ci->parents as $p) {
+            $r = $this->resolveMember(\strtolower(\ltrim($p, '\\')), $name, $kind, $depth + 1);
+            if ($r !== null) { return $r; }
+        }
+        if ($kind === 'prop') { return null; }
+        foreach ($ci->interfaces as $i) {
+            $r = $this->resolveMember(\strtolower(\ltrim($i, '\\')), $name, $kind, $depth + 1);
+            if ($r !== null) { return $r; }
+        }
+        return null;
+    }
+
+    /**
+     * Own declarations of $method in every direct and transitive subclass / implementer. An override provided by a
+     * used trait is NOT returned (P3 resolves those).
+     *
+     * @return MemberInfo[]
+     */
+    public function overridersOf(string $classFqn, string $method): array
+    {
+        $key = 'method:' . \strtolower($method);
+        $out = [];
+        foreach ($this->implementersOf(\strtolower(\ltrim($classFqn, '\\'))) as $d) {
+            $ci = $this->classes[$d] ?? null;
+            if ($ci !== null && isset($ci->members[$key])) { $out[] = $ci->members[$key]; }
+        }
+        return $out;
+    }
+
+    /**
+     * The override family of a member: the connected set of non-private declarations of one kind and name
+     * linked by the hierarchy. From a class that provides the member (declares it, inherits it, or gets it from
+     * a trait, traits of traits included) it walks every transitive ancestor (parents, interfaces, traits) and
+     * every descendant / implementer / trait user that provides it too, so siblings' overrides, an interface
+     * method satisfied by a trait, and a trait overriding an inherited method are all one family. One entry per
+     * declaration, the argument included. A private member, and a constructor, belong to no family but their own
+     * (a child's private `m` is not an override; constructors are not renamed across inheritance). Static and
+     * instance members of one name are one family.
+     *
+     * @return MemberInfo[]
+     */
+    public function memberFamily(MemberInfo $m): array
+    {
+        return $this->familyWalk($m)[0];
+    }
+
+    /**
+     * Trait adaptation rules (`insteadof`, `as`) that mention the name of a method of the family, in classes the
+     * family reaches: [file, line, col]. Rename tooling must not guess through them.
+     *
+     * @return array<int, array{0: string, 1: int, 2: int}>
+     */
+    public function familyAdaptations(MemberInfo $m): array
+    {
+        return $this->familyWalk($m)[1];
+    }
+
+    /** @return array{0: MemberInfo[], 1: array<int, array{0: string, 1: int, 2: int}>} */
+    private function familyWalk(MemberInfo $m): array
+    {
+        if ($m->visibility === 'private' || ($m->kind === 'method' && \strtolower($m->name) === '__construct')) { return [[$m], []]; }
+        $kind = $m->kind === 'case' ? 'const' : $m->kind;
+        $low = \strtolower($m->name);
+        $start = \strtolower(\ltrim($m->declClass, '\\'));
+        /** @var MemberInfo[] $out */
+        $out = [$m];
+        /** @var array<int, bool> $seen */
+        $seen = [\spl_object_id($m) => true];
+        /** @var array<int, array{0: string, 1: int, 2: int}> $ad */
+        $ad = [];
+        /** @var array<string, bool> $done */
+        $done = [];
+        $work = [$start];
+        while (\count($work) > 0) {
+            $c = \array_pop($work);
+            if (isset($done[$c])) { continue; }
+            $done[$c] = true;
+            $ci = $this->classes[$c] ?? null;
+            if ($ci !== null && $kind === 'method' && isset($ci->traitAdapted[$low])) {
+                $ad[] = [$this->classWinner[$c] ?? '', $ci->traitAdapted[$low][0], $ci->traitAdapted[$low][1]];
+            }
+            /** @var array<string, bool> $near */
+            $near = [];
+            $queue = [$c];
+            for ($i = 0; $i < \count($queue); $i++) {
+                $q = $this->classes[$queue[$i]] ?? null;
+                if ($q === null) { continue; }
+                foreach ($this->edges($q) as $t) {
+                    if (!isset($near[$t])) { $near[$t] = true; $queue[] = $t; }
+                }
+            }
+            foreach ($this->implementersOf($c) as $dd) { $near[$dd] = true; }
+            foreach (\array_keys($near) as $n) {
+                if (isset($done[$n]) || !isset($this->classes[$n])) { continue; }
+                $x = $this->resolveMember($n, $m->name, $kind, 0);
+                if ($x === null || $x->visibility === 'private') { continue; }
+                if (!isset($seen[\spl_object_id($x)])) { $seen[\spl_object_id($x)] = true; $out[] = $x; }
+                $work[] = $n;
+                $work[] = \strtolower(\ltrim($x->declClass, '\\'));
+            }
+        }
+        return [$out, $ad];
+    }
     /** Does the class (or an ancestor) define `__call` / `__callStatic`? */
     public function hasMagicCall(string $classFqn): bool
     {

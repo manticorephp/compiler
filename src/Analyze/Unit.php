@@ -26,5 +26,12 @@ final class Unit
         public array $stmts,
         public ?Expr $exprBody,
         public ?string $returnType,
+        /** @var array<string, string> param name → namespace-qualified `@param` tag type */
+        public array $paramDocs = [],
+        public string $ownerClass = '',
+        /** the declaration / closure range (null for `{main}`), for position -> unit lookups */
+        public ?\Parser\Ast\Span $span = null,
+        /** the Closure / ArrowFn expression of a closure unit */
+        public ?Expr $node = null,
     ) {}
 }
