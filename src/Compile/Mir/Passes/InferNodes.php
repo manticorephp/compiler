@@ -576,6 +576,7 @@ trait InferNodes
         $this->genValueType = null;
         $this->genKeyType = null;
         $this->fnReturnUnion = null;
+        $this->fnBareReturn = false;
         $this->cellMergeLocals = [];
         $this->globalBackedNames = [];
         $this->globalCellBound = [];
@@ -670,8 +671,12 @@ trait InferNodes
         if ($rk === Type::KIND_UNKNOWN && $u !== null
             && ($u->kind === Type::KIND_STRING || $u->kind === Type::KIND_INT
                 || $u->kind === Type::KIND_FLOAT || $u->kind === Type::KIND_BOOL)) {
-            $fn->returnType = $u;
-            $this->sigs[$fn->name] = $u;
+            // A path that falls off the end (or a bare `return;`) yields NULL, which
+            // no raw scalar can carry: the result is a tagged cell.
+            $nullPath = !$fn->isGenerator && ($this->fnBareReturn || !$this->alwaysExits($fn->body));
+            $adopt = $nullPath ? Type::cell() : $u;
+            $fn->returnType = $adopt;
+            $this->sigs[$fn->name] = $adopt;
         }
         // An un-hinted factory whose every return is the SAME concrete object
         // class (`static function create() { return new static(); }`) keeps an
@@ -1569,6 +1574,7 @@ trait InferNodes
     private function inferReturn(Return_ $node): Type
     {
         $value = $node->value;
+        if ($value === null) { $this->fnBareReturn = true; }
         if ($value !== null) {
             $rt = $this->inferNode($value);
             if ($this->fnReturnUnion === null) {

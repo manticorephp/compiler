@@ -2606,7 +2606,8 @@ trait EmitLlvmModule
     private function implicitReturnValue(): string
     {
         return ($this->frame->isClosure || $this->frame->isTrampoline
-            || $this->frame->returnType->kind === Type::KIND_UNKNOWN)
+            || $this->frame->returnType->kind === Type::KIND_UNKNOWN
+            || $this->frame->returnType->kind === Type::KIND_CELL)
             ? (string)\Compile\MemoryAbi::CELL_NULL
             : '0';
     }
