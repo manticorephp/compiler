@@ -3472,6 +3472,8 @@ trait EmitLlvmCalls
      *  mirrors {@see EmitLlvm::$classIdReg}). */
     private string $refBoxSlot = '';
     private string $refBoxTmp = '';
+    /** @var array<string, bool> scratch slot (SSA name) → holds a typed COPY of a cell array. */
+    private array $byRefDecelled = [];
 
 
     /**
@@ -3567,6 +3569,7 @@ trait EmitLlvmCalls
             $out .= '  ' . $dv . ' = call i64 @__mir_elem_decode(ptr ' . $this->lastValue . ', i64 ' . $cv . ")\n";
             $cv = $dv;
         }
+        $decelled = false;
         $scalar = $pt !== null && $this->isByRefScalarParam($pt);
         // A STRING param decodes too: php coerces the argument on entry, and the
         // bare payload of an int cell handed to `string &$s` was dereferenced
@@ -3592,9 +3595,22 @@ trait EmitLlvmCalls
         } else {
             $raw = $this->ssa->allocReg();
             $out .= '  ' . $raw . ' = and i64 ' . $cv . ", 281474976710655\n";
+            // A cell array bound to a CONCRETE-element array param: the callee reads
+            // raw words, but the buffer behind the cell is described by its OWN hint
+            // (a cell-element container stores boxed elements). Hand it a typed copy
+            // decoded by that hint; the rebox gives the slot's old buffer back.
+            if ($elemBase === '' && $pt !== null && $this->needsDeCellify($pt, Type::vec(Type::cell()))) {
+                $this->lastValue = $raw;
+                $this->lastValueType = 'i64';
+                $out .= $this->emitCellArrayToTyped($pt, true);
+                $out .= $this->coerceToI64();
+                $raw = $this->lastValue;
+                $decelled = true;
+            }
         }
         $tmp = $this->ssa->allocReg();
         $out .= '  ' . $tmp . " = alloca i64\n";
+        $this->byRefDecelled[$tmp] = $decelled;
         // Written for EVERY scratch, scalar or not: the key is an SSA register
         // name, which the next function reuses. A stale scalar entry re-boxed
         // parse_str's nested array as an INT (`int(4387692744)`).
@@ -3655,6 +3671,11 @@ trait EmitLlvmCalls
             }
             $sp = $this->ssa->allocReg();
             $out .= '  ' . $sp . ' = inttoptr i64 ' . $slots[$bi] . " to ptr\n";
+            if ($this->byRefDecelled[$tmp] ?? false) {
+                $old = $this->ssa->allocReg();
+                $out .= '  ' . $old . ' = load i64, ptr ' . $sp . "\n";
+                $out .= '  call void @__mir_cell_drop(i64 ' . $old . ")\n";
+            }
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $sp . "\n";
             $bi = $bi + 1;
         }
