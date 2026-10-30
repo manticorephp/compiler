@@ -1004,6 +1004,12 @@ function array_column(array $array, int|string|null $column_key, int|string|null
     $out = [];
     foreach ($array as $rawRow) {
         if (!\is_array($rawRow)) {
+            // php skips a row that is neither an array nor an object (a scalar has no columns), except
+            // when the whole row is asked for.
+            if (!\is_object($rawRow)) {
+                if ($column_key === null) { $out[] = $rawRow; }
+                continue;
+            }
             $vars = \__mc_object_vars($rawRow);
             if ($column_key === null) {
                 $oval = $vars;
