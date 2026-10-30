@@ -2599,12 +2599,14 @@ trait EmitLlvmModule
 
     /**
      * The i64 a value-less return yields. A closure/trampoline hands back a BOXED
-     * null (its caller may be dynamic and read the word by tag); everything else
+     * null (its caller may be dynamic and read the word by tag), and so does an
+     * untyped function whose erased result reads as a cell; everything else
      * keeps the historical raw 0, which its typed caller ignores.
      */
     private function implicitReturnValue(): string
     {
-        return ($this->frame->isClosure || $this->frame->isTrampoline)
+        return ($this->frame->isClosure || $this->frame->isTrampoline
+            || $this->frame->returnType->kind === Type::KIND_UNKNOWN)
             ? (string)\Compile\MemoryAbi::CELL_NULL
             : '0';
     }
@@ -3059,7 +3061,8 @@ trait EmitLlvmModule
         if (\Compile\Mir\Ownership::needsCellify($this->frame->returnType, $t)) { return true; }
         $rt = $this->frame->returnType;
         if ($rt !== null && $rt->kind === Type::KIND_CELL) { return true; }
-        return ($this->frame->isClosure || $this->frame->isTrampoline)
+        return ($this->frame->isClosure || $this->frame->isTrampoline
+            || $this->frame->returnType->kind === Type::KIND_UNKNOWN)
             && \Compile\Mir\Ownership::cellBoxableKind($t);
     }
 
