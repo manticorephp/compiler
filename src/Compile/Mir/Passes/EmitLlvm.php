@@ -2560,7 +2560,13 @@ final class EmitLlvm implements EmitVisitor
         $props = [];
         foreach ($this->classes as $name => $cd) {
             if ($cd->isStruct || $cd->isExternClass || $cd->typeDefRepr !== '') { continue; }
-            foreach ($cd->propertyMaybeUninit as $pn => $_) {
+            // A readonly slot is tracked even where the ctor always assigns it (no read check, see
+            // propertyMaybeUninit): the second initialisation is php's Error and only the bit tells.
+            $tracked = $cd->propertyMaybeUninit;
+            foreach ($cd->propertyReadonly as $pn => $ro) {
+                if ($ro) { $tracked[$pn] = true; }
+            }
+            foreach ($tracked as $pn => $_) {
                 if ($cd->propertyOffset($pn) < 0 || $cd->propertyWidth($pn) !== 8) { continue; }
                 if (\str_starts_with($pn, '__')) { continue; }
                 $pm = $cd->propertyMeta[$pn] ?? null;

@@ -4250,7 +4250,9 @@ trait EmitLlvmObjects
     {
         // a user-level store ($dropBoxed, or $hooks for one that keeps the old slot value) runs a set hook
         $hooks = $hooks || $dropBoxed;
-        $key = '__mc_prop_write_' . $this->mangle($prop)
+        // a user-level store re-initialising a readonly slot is php's Error (not in __clone / unserialize)
+        $roGuard = $hooks && !\str_ends_with($this->frame->name, '__clone') && !\str_starts_with($this->frame->name, '__mc_unser_set');
+        $key = '__mc_prop_write_' . $this->mangle($prop) . ($roGuard ? '__ro' : '')
              . ($within === '' ? '' : '__in_' . $this->mangle($within))
              . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '') . ($hooks ? 'h' : '');
         $sym = '@manticore_' . $key;
@@ -4296,6 +4298,12 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('pw.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
+            if ($roGuard && $this->readonlyDeclClass($cd->name, $prop) !== '') {
+                $rg = $this->ssa->allocReg();
+                $bodies .= '  ' . $rg . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";
+                $set = $this->emitInitTest($obj, $cd, $prop, $cd->propertyOffset($prop), $rg, $bodies);
+                if ($set !== '') { $bodies .= $this->emitThrowIf($set, 'Error', 'Cannot modify readonly property ' . $this->readonlyDeclClass($cd->name, $prop) . '::$' . $prop); }
+            }
             // A by-ref write-back over a slot the erased READ rebuilt (a concrete-
             // element array is cellified into a fresh copy, so the seed never
             // aliased the slot) must give the slot's OLD buffer back: the raw
