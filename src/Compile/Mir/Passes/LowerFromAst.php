@@ -3713,6 +3713,24 @@ final class LowerFromAst implements Pass
             (bool)($expr->returnsByRef ?? false), $clUsesFa, null, false, $expr->isStatic);
     }
 
+    /** The class a by-value param of the scope being lowered is declared as, '' when it is no plain class. */
+    private function paramClassHint(string $name): string
+    {
+        $i = \array_search($name, $this->currentLowerParams, true);
+        if ($i === false) { return ''; }
+        $h = \ltrim((string)($this->currentLowerParamHints[$i] ?? ''), '\\');
+        return isset($this->classDecls[$h]) ? $h : '';
+    }
+
+    /** @param \Parser\Ast\Expr[] $args */
+    private function spreadVariableArg(array $args): bool
+    {
+        foreach ($args as $a) {
+            if ($a->kind === 'Spread' && $a->value->kind === 'Variable') { return true; }
+        }
+        return false;
+    }
+
     /** Whether `$name`, read in the scope being lowered, is a bare-`array` param or a capture of one. */
     private function enclosingArrayName(string $name): bool
     {
@@ -7429,6 +7447,15 @@ final class LowerFromAst implements Pass
             if ($hint !== '') {
                 $params = $this->resolveMethodParams($hint, $expr->method);
                 if ($params !== null) { $mcClass = $hint; }
+            }
+        }
+        // `$o->m(...$args)` on a receiver typed by its own parameter: the method's by-ref
+        // parameters decide how the spread unpacks ({@see lowerRefSpread}).
+        if ($params === null && $expr->object->kind === 'Variable') {
+            $pc = $this->paramClassHint($this->varName($expr->object));
+            if ($pc !== '' && $this->spreadVariableArg($expr->args)) {
+                $params = $this->resolveMethodParams($pc, $expr->method);
+                if ($params !== null) { $mcClass = $pc; }
             }
         }
         // A variable-receiver variadic call (`$x->m(a,b,c)`) must STILL pack its

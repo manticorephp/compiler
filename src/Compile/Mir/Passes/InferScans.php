@@ -2521,6 +2521,18 @@ trait InferScans
                     if ($t !== null) { $tokens[$t] = true; }
                 }
             }
+        } elseif ($n instanceof \Compile\Mir\RefAddr_ || $n instanceof \Compile\Mir\RefCell_) {
+            // A reference to an element (`$r = &$a[$k]`, `[&$a[$k]]`) promotes the
+            // slot to a reference box: the buffer becomes a cell channel, so the
+            // caller's array must carry cell elements.
+            $src = $n instanceof \Compile\Mir\RefAddr_ ? $n->lvalue : $n->refSource;
+            $b = $src;
+            $guard = 0;
+            while ($b !== null && $b->kind === Node::KIND_ARRAY_ACCESS && $guard < 16) { $b = $b->array; $guard = $guard + 1; }
+            if ($src !== null && $src->kind === Node::KIND_ARRAY_ACCESS && $b !== null
+                && $b->kind === Node::KIND_LOAD_LOCAL && $b->name === $pname) {
+                $tokens['k:' . Type::KIND_CELL] = true;
+            }
         } elseif ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_STATIC_CALL
             || $n->kind === Node::KIND_METHOD_CALL || $n->kind === Node::KIND_NEW_OBJ) {
             // Transitive hand-off: `outer(array &$a){ inner($a); }` appends

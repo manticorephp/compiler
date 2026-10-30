@@ -303,7 +303,7 @@ trait InferNodes
         $this->localTypes = [];
         $this->narrowSlots = [];
         $this->kindAliasOf = [];
-        $this->currentParamTypes = [];
+        $this->currentParamTypes = []; $this->arrayHintedParamNames = [];
         // Computed BEFORE the walk, not after it: a store re-derives its local's
         // type as it is visited, so a force applied at the end of the pass is
         // undone by `$a = 1` on the next round and the fixpoint never carries it.
@@ -346,7 +346,7 @@ trait InferNodes
                 $pt = Type::cell();
             }
             $this->localTypes[$p->name] = $pt;
-            $this->currentParamTypes[$p->name] = $pt;
+            $this->currentParamTypes[$p->name] = $pt; if ($p->arrayHinted && !$p->byRef) { $this->arrayHintedParamNames[$p->name] = true; }
         }
         // Closure body: seed its capture params (the first N) with the value
         // types observed at the capture site (recorded in pass 1). Safe — this
@@ -1380,11 +1380,25 @@ trait InferNodes
         return $known->isAssoc() ? Type::assoc($known->key ?? Type::string_(), Type::cell()) : Type::vec(Type::cell());
     }
 
+    private function isArrayHintedParamLoad(Node $n): bool
+    {
+        return $n->kind === Node::KIND_LOAD_LOCAL && isset($this->arrayHintedParamNames[$n->name])
+            && ($this->currentParamTypes[$n->name] ?? null) !== null
+            && !$n->type->isArray();
+    }
+
     private function arrayUnionType(Node $left, Node $right): ?Type
     {
         $lt = $this->inferNode($left);
         $rt = $this->inferNode($right);
-        if (!$lt->isArray() && !$rt->isArray()) { return null; }
+        if (!$lt->isArray() && !$rt->isArray()) {
+            // Two bare `array` params erase to unknown, but PHP guarantees arrays:
+            // `+` is the union, not `add i64` over two pointers.
+            if ($this->isArrayHintedParamLoad($left) && $this->isArrayHintedParamLoad($right)) {
+                return Type::assoc(Type::cell(), Type::cell());
+            }
+            return null;
+        }
         // Only one side typed as an array: the other is erased (unknown/cell).
         // Its buffer may carry another element hint, and then the runtime
         // union is a CELL buffer ({@see UnifiedArrayRuntime::emitArrayUnion}) —
