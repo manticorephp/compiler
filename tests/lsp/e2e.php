@@ -80,15 +80,63 @@ $uri = 'file://' . $root . '/main.php';
     ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file://' . $root]],
     ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
     ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nfromdisk();\nnope_undefined();"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/definition', 'params' => ['textDocument' => ['uri' => $uri], 'position' => ['line' => 1, 'character' => 2]]],
     ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
     ['jsonrpc' => '2.0', 'method' => 'exit'],
-], 3);
+], 4);
 unlink("$root/lib.php");
 rmdir($root);
 $pub = $got[1] ?? [];
 $diags = $pub['params']['diagnostics'] ?? [];
 check('publishDiagnostics pushed', ($pub['method'] ?? '') === 'textDocument/publishDiagnostics' && ($pub['params']['uri'] ?? '') === $uri, json_encode($got) . $err);
 check('diagnostic: indexed fromdisk() ok, nope_undefined() flagged', count($diags) === 1 && $diags[0]['code'] === 'undefined.function' && $diags[0]['range']['start']['line'] === 2, json_encode($diags));
-check('shutdown after push', ($got[2]['id'] ?? null) === 2 && $code === 0, json_encode($got[2] ?? null) . " code=$code");
+check('definition round trip lands in lib.php', ($got[2]['id'] ?? null) === 3 && ($got[2]['result'][0]['uri'] ?? '') === 'file://' . $root . '/lib.php' && ($got[2]['result'][0]['range']['start'] ?? null) === ['line' => 1, 'character' => 9], json_encode($got[2] ?? null));
+check('shutdown after push', ($got[3]['id'] ?? null) === 2 && $code === 0 && $rest === '', json_encode($got[3] ?? null) . " code=$code rest=$rest");
 
+$root = sys_get_temp_dir() . '/lspe2e_rn' . getmypid();
+mkdir($root);
+file_put_contents("$root/lib.php", "<?php\nfunction fromdisk() {}");
+$uri = 'file://' . $root . '/main.php';
+[$got, $code, $rest, $err] = session($bin, [
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file://' . $root]],
+    ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
+    ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nfromdisk();"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/rename', 'params' => ['textDocument' => ['uri' => $uri], 'position' => ['line' => 1, 'character' => 2], 'newName' => 'renamed']],
+    ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
+    ['jsonrpc' => '2.0', 'method' => 'exit'],
+], 4);
+unlink("$root/lib.php");
+rmdir($root);
+$ch = $got[2]['result']['changes'] ?? [];
+check('rename round trip edits main.php and lib.php', ($got[2]['id'] ?? null) === 3 && count($ch) === 2
+    && ($ch['file://' . $root . '/lib.php'][0]['range']['start'] ?? null) === ['line' => 1, 'character' => 9]
+    && ($ch[$uri][0]['newText'] ?? '') === 'renamed', json_encode($got[2] ?? null) . $err);
+
+$uri = 'file:///tmp/lspe2e_sym.php';
+[$got, $code, $rest, $err] = session($bin, [
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///tmp']],
+    ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
+    ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nclass Foo {\n    public function bar() {}\n}\n"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/documentSymbol', 'params' => ['textDocument' => ['uri' => $uri]]],
+    ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
+    ['jsonrpc' => '2.0', 'method' => 'exit'],
+], 4);
+$sym = $got[2]['result'][0] ?? [];
+check('documentSymbol round trip: class Foo with method bar', ($got[2]['id'] ?? null) === 3 && ($sym['name'] ?? '') === 'Foo' && ($sym['kind'] ?? 0) === 5
+    && ($sym['children'][0]['name'] ?? '') === 'bar' && ($sym['children'][0]['kind'] ?? 0) === 6
+    && ($sym['children'][0]['selectionRange']['start'] ?? null) === ['line' => 2, 'character' => 20], json_encode($got[2] ?? null) . $err);
+
+$uri = 'file:///tmp/lspe2e_comp.php';
+[$got, $code, $rest, $err] = session($bin, [
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///tmp']],
+    ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
+    ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nclass Foo {\n    public \$pub;\n    private \$priv;\n    public function bar() {}\n}\nfunction t(Foo \$a) {\n    \$a->\n}\n"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/completion', 'params' => ['textDocument' => ['uri' => $uri], 'position' => ['line' => 7, 'character' => 8]]],
+    ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
+    ['jsonrpc' => '2.0', 'method' => 'exit'],
+], 4);
+$items = $got[2]['result']['items'] ?? [];
+$lab = array_column($items, 'kind', 'label');
+check('completion round trip: public members of a broken-file receiver', ($got[2]['id'] ?? null) === 3 && $lab === ['bar' => 2, 'pub' => 5]
+    && ($got[0]['result']['capabilities']['completionProvider']['triggerCharacters'] ?? null) === ['$', '>', ':', '\\'], json_encode($got[2] ?? null) . $err);
 exit($fail);

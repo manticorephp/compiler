@@ -3,6 +3,10 @@
 namespace Lsp;
 
 use Lsp\JsonRpc\Dispatcher;
+use Lsp\Handlers\CompletionHandlers;
+use Lsp\Handlers\NavigationHandlers;
+use Lsp\Handlers\RenameHandlers;
+use Lsp\Handlers\SymbolHandlers;
 use Lsp\JsonRpc\RpcError;
 use Semantic\Workspace;
 
@@ -24,11 +28,13 @@ final class Server
     private $send;
     /** @var array<string, string> uri => last published diagnostics JSON */
     private array $published = [];
+    private ClosedFiles $closed;
     private const MAX_SCAN_BYTES = 2097152;
 
-    public function __construct(private Workspace $ws, callable $send)
+    public function __construct(private Workspace $ws, callable $send, int $closedMax = ClosedFiles::MAX)
     {
         $this->send = $send;
+        $this->closed = new ClosedFiles($ws, fn(): array => $this->docs, $closedMax);
     }
 
     public function exitCode(): ?int
@@ -66,7 +72,15 @@ final class Server
                 }
             }
             return [
-                'capabilities' => ['textDocumentSync' => ['openClose' => true, 'change' => 1]],
+                'capabilities' => [
+                    'textDocumentSync' => ['openClose' => true, 'change' => 1],
+                    'hoverProvider' => true,
+                    'definitionProvider' => true,
+                    'referencesProvider' => true,
+                    'documentSymbolProvider' => true,
+                    'renameProvider' => ['prepareProvider' => true],
+                    'completionProvider' => ['triggerCharacters' => ['$', '>', ':', '\\']],
+                ],
                 'serverInfo' => ['name' => 'manticore', 'version' => \Manticore\Version::STRING],
             ];
         });
@@ -82,6 +96,10 @@ final class Server
             $this->exit = $this->shutdown ? 0 : 1;
             return null;
         });
+        (new NavigationHandlers($this->ws, fn(): array => $this->docs, $this->closed))->register($d);
+        (new CompletionHandlers($this->ws, fn(): array => $this->docs))->register($d);
+        (new SymbolHandlers($this->ws, fn(): array => $this->docs))->register($d);
+        (new RenameHandlers($this->ws, fn(): array => $this->docs, $this->closed, $this->send))->register($d);
         $d->on('$/cancelRequest', function (array $p): mixed { return null; });
         $d->on('textDocument/didOpen', function (array $p): mixed {
             $td = $p['textDocument'] ?? null;
@@ -106,8 +124,8 @@ final class Server
             if (!is_string($text)) {
                 throw new RpcError(RpcError::INVALID_PARAMS, 'didChange: full-text change required');
             }
-            $this->docs[$uri] = $text;
             $this->ws->update($uri, $text);
+            $this->docs[$uri] = $text;
             $this->republish($uri);
             return null;
         });
@@ -115,6 +133,7 @@ final class Server
             $uri = $p['textDocument']['uri'] ?? null;
             if (is_string($uri) && isset($this->docs[$uri])) {
                 unset($this->docs[$uri]);
+                $this->closed->add($uri);
                 $this->ws->close($uri);
                 unset($this->published[$uri]);
                 $this->push($uri, []);
@@ -143,6 +162,7 @@ final class Server
                     if ($text === false) { continue; }
                     $this->ws->open($uri, $text);
                     $this->ws->close($uri);
+                    $this->closed->add($uri);
                 } catch (\Throwable $e) {
                     continue;
                 }
@@ -155,7 +175,12 @@ final class Server
     {
         $this->publish($uri, true);
         foreach ($this->docs as $other => $_) {
-            if ($other !== $uri) { $this->publish($other, false); }
+            if ($other === $uri) { continue; }
+            try {
+                $this->publish($other, false);
+            } catch (\Throwable $e) {
+                continue;
+            }
         }
     }
 

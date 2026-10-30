@@ -532,4 +532,17 @@ check('trait adaptation (insteadof / as) is an uncertain site and a blocker', fu
     return count($ad) >= 1 && count($bl) >= 1 && $ad[0] === 5 && count($none) === 0 ? true : json_encode([$ad, $bl, $none]);
 });
 
+check('symbolKindAt: member, class, function, variable, nothing', function (): bool|string {
+    $src = "<?php\nclass K { public function m() {} }\nfunction fn1() {}\n\$k = new K();\n\$k->m();\nfn1();\n";
+    $w = ws(['a.php' => $src]);
+    $got = [
+        $w->symbolKindAt('a.php', 5, 5),
+        $w->symbolKindAt('a.php', 4, 11),
+        $w->symbolKindAt('a.php', 6, 2),
+        $w->symbolKindAt('a.php', 5, 2),
+        $w->symbolKindAt('a.php', 1, 1),
+    ];
+    return $got === ['member', 'class', 'function', 'variable', null] ?: json_encode($got);
+});
+
 exit($fail);

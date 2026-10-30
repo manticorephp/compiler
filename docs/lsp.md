@@ -1,0 +1,113 @@
+# Language server (`manticore lsp`)
+
+`manticore lsp` is a Language Server Protocol server over stdio (JSON-RPC, `Content-Length`
+framing). It is built on the semantic core (`src/Semantic/`, see
+[`design/semantic-core.md`](design/semantic-core.md)): the same name index, type inference and
+analyzer the `analyze` command uses, so editor diagnostics and `manticore analyze` agree.
+
+A VS Code client lives in [`../editors/vscode/`](../editors/vscode/README.md); any LSP client
+works with the command `manticore lsp`.
+
+## Supported methods
+
+| Method | Notes |
+|---|---|
+| `initialize`, `initialized`, `shutdown`, `exit` | `rootUri` (or the first workspace folder) is scanned at startup |
+| `textDocument/didOpen`, `didChange`, `didClose` | full text sync |
+| `textDocument/publishDiagnostics` | pushed on open and change |
+| `textDocument/hover` | members and expressions (types) |
+| `textDocument/definition` | classes, functions, constants, members, variables |
+| `textDocument/references` | classes, functions, members, variables; honours `includeDeclaration` |
+| `textDocument/prepareRename`, `rename` | see [Rename](#rename) |
+| `textDocument/documentSymbol` | hierarchical outline |
+| `textDocument/completion` | members after `->` / `?->` / `::`, variables after `$`, global symbols |
+| `$/cancelRequest` | accepted, ignored (the server is synchronous) |
+
+Capabilities advertised: `textDocumentSync {openClose, change: 1}`, `hoverProvider`,
+`definitionProvider`, `referencesProvider`, `renameProvider {prepareProvider}`,
+`documentSymbolProvider`, `completionProvider`.
+
+## Positions
+
+LSP positions are 0-based lines and **UTF-16 code units**; the semantic core counts 1-based
+lines and **bytes**. The server converts both ways on every request and every returned range,
+so a line with multi-byte text (`"héllo"`, emoji) keeps hover, rename and diagnostics on the
+right characters.
+
+## Workspace indexing
+
+At startup the server walks the workspace root and indexes every `*.php` file, **including
+`vendor/`**, so go-to-definition and rename see library code. Limits:
+
+- Files over **2 MiB** are skipped.
+- `.gitignore` is not read; everything under the root is walked.
+- Files created after startup are not in the index until opened.
+
+Only open files carry a full AST. Closed files are searched from their text on demand (see
+[Rename](#rename)).
+
+## Diagnostics
+
+The analyzer's findings for the changed file, pushed after each `didOpen` / `didChange` with
+precise ranges (the same rule codes as `manticore analyze`, e.g. `undefined.function`,
+`type.mismatch`). Parse errors come from the tolerant parser, so a half-typed file still gets
+semantic diagnostics for the parts that parse. Dependents of an edited file are re-published.
+Closed files report only the parse errors they had at scan time.
+
+## Rename
+
+`prepareRename` answers the range and placeholder, or `null` if the symbol cannot be renamed
+(for example a library declaration). `rename` computes one edit set from references plus
+declarations.
+
+- **Blockers refuse.** Cases the engine cannot rewrite safely (unknown owner, library
+  declaration, named-argument and trait-adaptation uses, a parse-error region) fail the request
+  with an error naming the reason.
+- **Uncertain sites are warned.** Sites that may or may not refer to the symbol (a class name
+  in a string, a dynamic member, a callable string, a docblock mention, an unresolved
+  receiver) are edited where certain and listed in a `window/showMessage` warning.
+- **Members search the whole workspace.** A member query temporarily opens every scanned
+  closed file so their member use sites resolve. Rename refuses with `rename incomplete` when
+  the workspace has more than 5000 files or a file cannot be read, rather than apply a partial
+  edit.
+- **Sigils** (`$`) are decided per location from the source text, so renaming a property or
+  static property never corrupts `$` and a leading `$` in the new name is stripped.
+
+Known limit: a heredoc anywhere in the workspace blocks **all** renames
+(`Workspace::renameBlockers` reports `heredoc-*`), because interpolation parts inside heredocs
+share one range.
+
+## Known ceilings
+
+- Full-text sync only; every change re-sends and re-parses the file.
+- The server is synchronous: one request at a time, `$/cancelRequest` is accepted but ignored.
+- Locations inside the prelude / stdlib (`lib:` URIs) are not navigable.
+- An **installed** binary needs `lib/` and the prelude next to it. A bare copy of
+  `bin/manticore` elsewhere prints the `Workspace: the prelude is empty` error and exits 1.
+  Symlinks to a real install work.
+- Completion: a receiver on a previous line (multi-line fluent chain starting with `->`) yields
+  no members; global names are fully qualified with no `use`-awareness; `__*` methods such as
+  `parent::__construct` are not offered; keywords are not offered; capped at 200 items
+  (`isIncomplete`).
+- Member references are the slowest operation (below): they re-parse the closed files.
+
+## Latency
+
+`php -d xdebug.mode=off tools/bench_lsp.php` drives a real `bin/manticore lsp` over pipes with
+`rootUri` = this repo's `src/` (362 files), one open file (`Semantic/ExprTyper.php`, 542
+lines) and deterministic positions (seed 4242). Apple M1 Pro, 10 cores, macOS arm64, native
+compiler build, 2026-10-29:
+
+| Operation | n | p50 ms | p95 ms | max ms |
+|---|---|---|---|---|
+| hover | 200 | 0.1 | 0.4 | 1.2 |
+| definition | 200 | 0.2 | 7.7 | 8.8 |
+| references (class) | 30 | 11.3 | 13.3 | 37.7 |
+| references (member) | 30 | 1761.5 | 2386.9 | 2667.4 |
+| completion after `->` | 200 | 6.1 | 7.5 | 16.8 |
+| documentSymbol | 200 | 0.8 | 0.8 | 3.2 |
+| didChange to diagnostics | 200 | 9.3 | 10.5 | 11.0 |
+
+Startup scan of `src/`: 1.6 s. didOpen to first diagnostics: 11 ms. Server RSS: 126 MB after
+the scan, 546 MB at the end (after the member-references passes, which parse every closed
+file). Linux numbers are not recorded.
