@@ -516,6 +516,8 @@ final class InferTypes implements Pass
      *  concrete-element array param stays authoritative across a store: a
      *  cell-array value assigned to it de-cellifies (see inferStoreLocal). */
     private array $currentParamTypes = [];
+    /** @var array<string, bool> by-value bare-`array` params of the function being inferred */
+    private array $arrayHintedParamNames = [];
     /** @var array<string,string> kind-alias local → object local: a `$k = $obj->kind`
      *  binding, so a later `$k === Node::KIND_X` narrows $obj (the `$k = $n->kind`
      *  dispatch idiom). Reset per function; a re-store to $k drops its entry. */
