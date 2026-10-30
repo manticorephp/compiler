@@ -43,6 +43,7 @@ Serialized public symbol table of a library, so a dependent app resolves and typ
 Heterogeneous returns flatten to i64 in self-host today, so parsed args land in static props on `CompileArgs`:
 
 - `-o <path>` → `$output` (default `a.out`).
+- `--strict=<list>` → `$strictShapes` / `$strictAnalyze`; unknown category = error (rc 64).
 - `-O<level>` → `$optLevel`, one of `0 1 2 3 s z`. **Default `2`.** Passed to clang.
 - `--memory=<rc|arena|hybrid>` → `$memory`; routed through `Compile\Debug::applyMemoryMode`.
 - `--backend=<mir|ast>` → `$backend`. **Inert** — `compile_with_backend()` calls `compile_via_mir()` unconditionally, so `ast` is accepted and ignored.
