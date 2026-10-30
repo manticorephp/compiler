@@ -7090,10 +7090,12 @@ final class UnifiedArrayRuntime
     }
 
     /**
-     * `__mir_elem_encode_raw(arr, raw, kind) -> i64` — the word a RAW value of
+     * `__mir_elem_encode_raw(arr, raw, kind, convert) -> i64` — the word a RAW value of
      * static element-kind `kind` (an `ARRAY_ELEM_HINT_*` code, 0 for a word
      * with no describable shape) is stored as: boxed by that kind when the
-     * buffer is already CELL-hinted, itself otherwise. The raw-store mirror of
+     * buffer is already CELL-hinted, itself otherwise. `convert` != 0 (an ERASED
+     * base, whose hint is its only description) also cellifies a raw buffer
+     * holding another kind first. The raw-store mirror of
      * {@see emitElemEncode}: a raw store into a cell buffer used to land a
      * bare word among tagged ones (an erased `$rec['commands'] = array_filter(…)`
      * into a heterogeneous literal, a string into a `string[]` param that
@@ -7105,14 +7107,29 @@ final class UnifiedArrayRuntime
         $arr = $fn->param(Type::ptr(), 'arr');
         $raw = $fn->param(Type::i64(), 'raw');
         $kind = $fn->param(Type::i64(), 'kind');
+        $convert = $fn->param(Type::i64(), 'convert');
         $e = $fn->block('entry');
         $asis = $fn->block('asis');
         $chk = $fn->block('chk');
         $box = $fn->block('box');
         $e->brIf($e->icmp('eq', $arr, Value::null()), $asis, $chk);
         $asis->ret($raw);
-        $isCell = $chk->icmp('eq', $this->elemHint($chk, $arr), Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
-        $chk->brIf($isCell, $box, $asis);
+        $hint = $this->elemHint($chk, $arr);
+        $isCell = $chk->icmp('eq', $hint, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
+        $chk2 = $fn->block('chk2');
+        $mism = $fn->block('mism');
+        $chk->brIf($isCell, $box, $chk2);
+        // A raw buffer described as another kind (`$a[] = 1` into a string-valued
+        // array that arrived through a bare `array` param): stamping the new kind
+        // would reread the old elements as it. Cellify them first, then box.
+        $len = $chk2->load(Type::i64(), $arr);
+        $differs = $chk2->and_(
+            $chk2->and_($chk2->icmp('ne', $hint, Value::int(Type::i64(), 0)), $chk2->and_($chk2->icmp('ne', $kind, Value::int(Type::i64(), 0)), $chk2->icmp('ne', $convert, Value::int(Type::i64(), 0)))),
+            $chk2->and_($chk2->icmp('ne', $hint, $kind), $chk2->icmp('ugt', $len, Value::int(Type::i64(), 0))));
+        $chk2->brIf($differs, $mism, $asis);
+        $mism->call('__mir_array_cellify_inplace', Type::void(), [$arr, $hint]);
+        // A CELL-kind value is boxed already: only the buffer needed converting.
+        $mism->brIf($mism->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $asis, $box);
         $box->ret($box->call('__mir_box_by_repr', Type::i64(), [$raw, $kind]));
     }
 
