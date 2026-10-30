@@ -22,6 +22,8 @@ rc=64
 rc=64
 == compile bad --memory
 rc=64
+== compile bad --strict
+rc=64
 == compile bad --progress
 rc=64
 == compile bad --color
