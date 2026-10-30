@@ -45,6 +45,13 @@ final class TypeCheck
      */
     public bool $demoteArgMismatch = false;
 
+    /**
+     * `--strict=shapes`: a declared `array{…}` shape is CLOSED, an extra key in
+     * the given array is an error. Off, php's view: the docblock is not checked,
+     * so the extra key is a warning and the array stays an ordinary one.
+     */
+    public bool $strictShapes = false;
+
     /** A warning {@see shapeConflict} found while answering, taken by its caller. */
     private string $shapeWarn = '';
 
@@ -696,6 +703,14 @@ final class TypeCheck
                             if ($this->shapeWarn === '') {
                                 $this->shapeWarn = 'optional key ' . Type::shapeKeyLabel($ek) . ' of '
                                     . $given->shapeString() . ' is not in ' . $want->shapeString();
+                            }
+                            continue;
+                        }
+                        if (!$this->strictShapes) {
+                            if ($this->shapeWarn === '') {
+                                $this->shapeWarn = 'key ' . Type::shapeKeyLabel($ek) . ' of '
+                                    . $given->shapeString() . ' is not in ' . $want->shapeString()
+                                    . ' (--strict=shapes makes this an error)';
                             }
                             continue;
                         }

@@ -2112,6 +2112,12 @@ final class CompileArgs
 {
     public static string $output = 'a.out';
 
+    /** `--strict=shapes`: a declared array shape is closed (extra key = error). */
+    public static bool $strictShapes = false;
+
+    /** `--strict=analyze` (alias `--analyze-strict`): analyzer errors fail the compile. */
+    public static bool $strictAnalyze = false;
+
     /** @var string[] */
     public static array $files = [];
 
@@ -2346,6 +2352,16 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool
         $envMemory = \getenv('MANTICORE_MEMORY');
         if ($envMemory !== false && $envMemory !== '') {
             $memory = $envMemory;
+        }
+    }
+    CompileArgs::$strictAnalyze = $p->flag("analyze-strict");
+    foreach (\explode(",", $p->value("strict", "")) as $cat) {
+        if ($cat === "") { continue; }
+        if ($cat === "shapes") { CompileArgs::$strictShapes = true; }
+        elseif ($cat === "analyze") { CompileArgs::$strictAnalyze = true; }
+        else {
+            dprint("unknown --strict category: " . $cat . " (expected shapes|analyze)");
+            return false;
         }
     }
     CompileArgs::$output = $p->value("o", "a.out");
@@ -5447,6 +5463,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $statT = \Compile\Stats::begin('TypeCheck');
             $tc = new \Compile\Mir\Passes\TypeCheck();
             $tc->reprOnly = !$tcOn;
+            $tc->strictShapes = CompileArgs::$strictShapes || \getenv("MANTICORE_TYPECHECK_STRICT") === "1";
             // A provable argument mismatch in a user program is a run-time
             // TypeError at the site, as in php; bin/build (the tree compiling
             // itself) sets MANTICORE_TYPECHECK_STRICT and keeps it a build error.

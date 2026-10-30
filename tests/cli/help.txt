@@ -36,6 +36,7 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
+  --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
   --analyze                Run the analyzer (default)
   --no-analyze             Skip the analyzer
@@ -60,6 +61,7 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
+  --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
   --libs-only              Build library targets and stop (cold seed)
   --apps-only              Build application targets only
@@ -84,6 +86,7 @@ Options:
   --runtime                   With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps     Do not refuse a library that contains undefined-function traps
   --keep-ir                   Keep the intermediate .ll files
+  --strict <list>             Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                      Parallel clang jobs; 0 = one per core
   --deep                      Also run the compiler's MIR type passes (heavier)
   --json                      Machine-readable output
@@ -106,6 +109,7 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
+  --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
 == help dump-ast
 dump-ast — Parse PHP source and print the resulting AST
@@ -123,6 +127,7 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
+  --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
   --tolerant               Recover from syntax errors; print the tree and every error
   --ranges                 Print spans as start-end ranges
@@ -145,6 +150,7 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
+  --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
 == help dump-llvm-mir
 dump-llvm-mir — Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR
@@ -162,6 +168,7 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
+  --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
 == help dump-sig
 dump-sig — Parse PHP, print the module-interface .sig (exported symbol table)
@@ -179,6 +186,7 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
+  --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
 == help split-ir
 split-ir — Split a staged .ll module into N part files (dev tool)

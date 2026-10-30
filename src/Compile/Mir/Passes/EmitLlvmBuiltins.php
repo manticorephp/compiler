@@ -8666,40 +8666,17 @@ trait EmitLlvmBuiltins
         return false;
     }
 
-    /**
-     * `method_exists($o, $m)` where the class or the method name is only known
-     * at RUNTIME — a scan of the closed-world (class, method) table
-     * ({@see EmitLlvmModule}). Exactly what `function_exists($var)` does, and
-     * fixed for the same reason: the fold answered FALSE for every non-literal
-     * argument, silently, and a dispatcher asking `method_exists($obj, $method)`
-     * is the normal way to ask. The literal form still folds; both are decided
-     * by the same enumeration ({@see reflAllMethods}), so they agree.
-     *
-     * The class name comes from {@see biGetClass} for an object receiver, which
-     * already knows how to read a class id out of an obj / cell / unknown slot
-     * and hand back the display name — the same name the table is built from.
-     * A STRING receiver IS the class name.
-     * @param Node[] $args
-     */
-    private function biMethodExistsDynamic(array $args): string
+    /** Class-name C string (ptr) of a method_exists/get_class_methods subject: a name, an object, or an erased cell of either. */
+    private function emitSubjectClassName(Node $subject): string
     {
-        // php's own answer to a one-argument call is an ArgumentCountError, but
-        // a COMPILER CRASH is the worst possible answer to any program: reading
-        // `$args[1]` here is an undefined index under Zend and a null node —
-        // SIGSEGV inside emitNode — self-hosted. The old fold had the same hole
-        // through reflLitStr.
-        if (\count($args) < 2) {
-            return $this->biConstBool($this->reflEvalArgs($args), false);
-        }
-        $this->rt->needsMethodExists = true;
-        if ($this->subjectIsString($args[0])) {
-            $out = $this->emitPtrArg($args[0], true);
+        if ($this->subjectIsString($subject)) {
+            $out = $this->emitPtrArg($subject, true);
             $clsP = $this->lastValue;
-        } elseif ($args[0]->type->kind === Type::KIND_CELL) {
+        } elseif ($subject->type->kind === Type::KIND_CELL) {
             // An erased subject is a class NAME or an object only at run time:
             // get_class() of the name answered '' (`method_exists($cls, $m)`
             // over a `mixed $cls` was always false).
-            $out = $this->emitNode($args[0]);
+            $out = $this->emitNode($subject);
             $out .= $this->coerceToI64();
             $w = $this->lastValue;
             $out .= $this->cellTagIr($w);
@@ -8731,9 +8708,41 @@ trait EmitLlvmBuiltins
             $clsP = $this->ssa->allocReg();
             $out .= '  ' . $clsP . ' = phi ptr [ ' . $sp . ', %' . $strL . ' ], [ ' . $op . ', %' . $objEnd . " ]\n";
         } else {
-            $out = $this->biGetClass([$args[0]]);
+            $out = $this->biGetClass([$subject]);
             $clsP = $this->lastValue;
         }
+        $this->lastValue = $clsP;
+        return $out;
+    }
+
+    /**
+     * `method_exists($o, $m)` where the class or the method name is only known
+     * at RUNTIME — a scan of the closed-world (class, method) table
+     * ({@see EmitLlvmModule}). Exactly what `function_exists($var)` does, and
+     * fixed for the same reason: the fold answered FALSE for every non-literal
+     * argument, silently, and a dispatcher asking `method_exists($obj, $method)`
+     * is the normal way to ask. The literal form still folds; both are decided
+     * by the same enumeration ({@see reflAllMethods}), so they agree.
+     *
+     * The class name comes from {@see biGetClass} for an object receiver, which
+     * already knows how to read a class id out of an obj / cell / unknown slot
+     * and hand back the display name — the same name the table is built from.
+     * A STRING receiver IS the class name.
+     * @param Node[] $args
+     */
+    private function biMethodExistsDynamic(array $args): string
+    {
+        // php's own answer to a one-argument call is an ArgumentCountError, but
+        // a COMPILER CRASH is the worst possible answer to any program: reading
+        // `$args[1]` here is an undefined index under Zend and a null node —
+        // SIGSEGV inside emitNode — self-hosted. The old fold had the same hole
+        // through reflLitStr.
+        if (\count($args) < 2) {
+            return $this->biConstBool($this->reflEvalArgs($args), false);
+        }
+        $this->rt->needsMethodExists = true;
+        $out = $this->emitSubjectClassName($args[0]);
+        $clsP = $this->lastValue;
         $out .= $this->emitPtrArg($args[1]);
         $mP = $this->lastValue;
         $r = $this->ssa->allocReg();
@@ -9241,8 +9250,20 @@ trait EmitLlvmBuiltins
     private function biGetClassMethods(array $args): string
     {
         $this->rt->needsTagged = true;
-        $out = $this->reflEvalArgs($args);
         $cls = $this->reflClassName($args[0]);
+        if ($cls === '' && $args[0]->kind !== Node::KIND_STRING_CONST
+            && ($this->subjectIsString($args[0]) || $args[0]->type->kind === Type::KIND_CELL)) {
+            // A class name only known at run time: look it up in the closed-world table.
+            $this->rt->needsClassMethods = true;
+            $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
+            $out = $this->emitSubjectClassName($args[0]);
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call ptr @__mir_class_methods(ptr ' . $this->lastValue . ")\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
+        $out = $this->reflEvalArgs($args);
         $names = $this->reflAllMethods($cls);
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = call ptr @__mir_array_alloc(i64 '

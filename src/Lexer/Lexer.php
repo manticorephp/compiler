@@ -620,11 +620,43 @@ final class Lexer
                 $closed = true;
                 break;
             }
+            if ($quoteOrd === 34 && ($c === 123 || $c === 36) && $this->pos + 1 < $this->len
+                && \ord($this->src[$this->pos + 1]) === ($c === 123 ? 36 : 123)) {
+                $this->skipInterpBraces();
+                continue;
+            }
             $this->advance();
         }
         if (!$closed && $this->tolerant === 1) { $this->unterminated('string', $line, $col); }
         $lex = substr($this->src, $start, $this->pos - $start);
         $this->tokens[] = $this->token(TokenKind::StringLiteral, $lex, $line, $col);
+    }
+
+    /**
+     * Inside "...": skip a `{$expr}` or `${expr}` region to its matching `}`,
+     * stepping over nested quoted strings so an inner `"` does not end the outer string.
+     */
+    private function skipInterpBraces(): void
+    {
+        $depth = 0;
+        while ($this->pos < $this->len) {
+            $c = \ord($this->src[$this->pos]);
+            if ($c === 123) {
+                $depth = $depth + 1;
+            } elseif ($c === 125) {
+                $depth = $depth - 1;
+                if ($depth <= 0) { $this->advance(); return; }
+            } elseif ($c === 34 || $c === 39) {
+                $this->advance();
+                while ($this->pos < $this->len) {
+                    $d = \ord($this->src[$this->pos]);
+                    if ($d === 92) { $this->advance(); }
+                    elseif ($d === $c) { break; }
+                    if ($this->pos < $this->len) { $this->advance(); }
+                }
+            }
+            $this->advance();
+        }
     }
 
     private function scanOperator(): void

@@ -276,6 +276,33 @@ trait EmitLlvmModule
             }
             $mxCount = $this->memberRowsSorted($mxPairs, true, $mxClsRows, $mxMthRows);
         }
+        // get_class_methods($runtimeName): classes sorted by lower-cased name; per class the
+        // [start, count) slice of one flat method-name pointer table, in declaration order.
+        $gcmCls = '';
+        $gcmStart = '';
+        $gcmCnt = '';
+        $gcmMem = '';
+        $gcmCount = 0;
+        $gcmTotal = 0;
+        if ($this->rt->needsClassMethods) {
+            $gcmKeys = [];
+            foreach ($this->classes as $cd) {
+                $gcmKeys[] = [\strtolower($this->displayClassName($cd->name)), $cd->name];
+            }
+            \usort($gcmKeys, fn (array $x, array $y): int => \strcmp($x[0], $y[0]));
+            foreach ($gcmKeys as $k) {
+                $ms = $this->reflAllMethods($k[1]);
+                $sep = $gcmCount > 0 ? ', ' : '';
+                $gcmCls .= $sep . 'ptr ' . $this->litStr($this->displayClassName($k[1]));
+                $gcmStart .= $sep . 'i64 ' . (string)$gcmTotal;
+                $gcmCnt .= $sep . 'i64 ' . (string)\count($ms);
+                foreach ($ms as $m) {
+                    $gcmMem .= ($gcmTotal > 0 ? ', ' : '') . 'ptr ' . $this->litStr((string)$m);
+                    $gcmTotal = $gcmTotal + 1;
+                }
+                $gcmCount = $gcmCount + 1;
+            }
+        }
         // The (class, ancestor) pairs `is_a` needs when BOTH names are runtime
         // strings. One row per is-a edge INCLUDING the class itself, so the
         // scan answers php's non-strict is_a directly.
@@ -505,6 +532,9 @@ trait EmitLlvmModule
             // php resolves a METHOD name case-insensitively.
             $out .= $this->memberExistsTable('mx', '__mir_method_exists',
                 $mxClsRows, $mxMthRows, $mxCount, 'strcasecmp');
+        }
+        if ($this->rt->needsClassMethods) {
+            $out .= $this->classMethodsTable($gcmCls, $gcmStart, $gcmCnt, $gcmMem, $gcmCount, $gcmTotal);
         }
         if ($this->rt->needsClassIsa) {
             // Both class names are runtime strings, so both compare
@@ -1505,6 +1535,70 @@ trait EmitLlvmModule
         return $n;
     }
 
+    private function classMethodsTable(string $cls, string $start, string $cnt, string $mem, int $n, int $total): string
+    {
+        $len = $n > 0 ? $n : 1;
+        $mlen = $total > 0 ? $total : 1;
+        $L = (string)$len;
+        $out = '@__mir_gcm_cls = internal constant [' . $L . ' x ptr] [' . ($n > 0 ? $cls : 'ptr null') . "]\n";
+        $out .= '@__mir_gcm_start = internal constant [' . $L . ' x i64] [' . ($n > 0 ? $start : 'i64 0') . "]\n";
+        $out .= '@__mir_gcm_cnt = internal constant [' . $L . ' x i64] [' . ($n > 0 ? $cnt : 'i64 0') . "]\n";
+        $out .= '@__mir_gcm_mem = internal constant [' . (string)$mlen . ' x ptr] [' . ($total > 0 ? $mem : 'ptr null') . "]\n";
+        $out .= "define ptr @__mir_class_methods(ptr %cls) {\n";
+        $out .= "entry:\n";
+        $out .= "  %cnull = icmp eq ptr %cls, null\n";
+        $out .= "  br i1 %cnull, label %miss, label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %lo = phi i64 [0, %entry], [%lo2, %next]\n";
+        $out .= "  %hi = phi i64 [" . (string)$n . ", %entry], [%hi2, %next]\n";
+        $out .= "  %done = icmp sge i64 %lo, %hi\n";
+        $out .= "  br i1 %done, label %miss, label %body\n";
+        $out .= "body:\n";
+        $out .= "  %sum = add i64 %lo, %hi\n";
+        $out .= "  %mid = lshr i64 %sum, 1\n";
+        $out .= '  %cp = getelementptr inbounds [' . $L . " x ptr], ptr @__mir_gcm_cls, i64 0, i64 %mid\n";
+        $out .= "  %ccand = load ptr, ptr %cp\n";
+        $out .= "  %cc = call i32 @strcasecmp(ptr %cls, ptr %ccand)\n";
+        $out .= "  %ceq = icmp eq i32 %cc, 0\n";
+        $out .= "  br i1 %ceq, label %hit, label %cdir\n";
+        $out .= "cdir:\n";
+        $out .= "  %clt = icmp slt i32 %cc, 0\n";
+        $out .= "  %mid1 = add i64 %mid, 1\n";
+        $out .= "  %hiC = select i1 %clt, i64 %mid, i64 %hi\n";
+        $out .= "  %loC = select i1 %clt, i64 %lo, i64 %mid1\n";
+        $out .= "  br label %next\n";
+        $out .= "next:\n";
+        $out .= "  %lo2 = phi i64 [%loC, %cdir]\n";
+        $out .= "  %hi2 = phi i64 [%hiC, %cdir]\n";
+        $out .= "  br label %loop\n";
+        $out .= "hit:\n";
+        $out .= '  %sp = getelementptr inbounds [' . $L . " x i64], ptr @__mir_gcm_start, i64 0, i64 %mid\n";
+        $out .= "  %s0 = load i64, ptr %sp\n";
+        $out .= '  %np = getelementptr inbounds [' . $L . " x i64], ptr @__mir_gcm_cnt, i64 0, i64 %mid\n";
+        $out .= "  %nm = load i64, ptr %np\n";
+        $out .= "  %a0 = call ptr @__mir_array_alloc(i64 %nm)\n";
+        $out .= "  br label %fill\n";
+        $out .= "fill:\n";
+        $out .= "  %i = phi i64 [0, %hit], [%i1, %fbody]\n";
+        $out .= "  %a = phi ptr [%a0, %hit], [%a1, %fbody]\n";
+        $out .= "  %fd = icmp sge i64 %i, %nm\n";
+        $out .= "  br i1 %fd, label %fend, label %fbody\n";
+        $out .= "fbody:\n";
+        $out .= "  %ix = add i64 %s0, %i\n";
+        $out .= '  %mp = getelementptr inbounds [' . (string)$mlen . " x ptr], ptr @__mir_gcm_mem, i64 0, i64 %ix\n";
+        $out .= "  %mn = load ptr, ptr %mp\n";
+        $out .= "  %bx = call i64 @__manticore_box_ptr(ptr %mn)\n";
+        $out .= "  %a1 = call ptr @__mir_array_append(ptr %a, i64 %bx)\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %fill\n";
+        $out .= "fend:\n";
+        $out .= "  ret ptr %a\n";
+        $out .= "miss:\n";
+        $out .= "  %e = call ptr @__mir_array_alloc(i64 0)\n";
+        $out .= "  ret ptr %e\n}\n";
+        $this->rt->needsStrcmp = true;
+        return $out;
+    }
     private function memberExistsTable(string $prefix, string $fn, string $clsRows,
                                        string $memRows, int $n, string $cmp): string
     {
@@ -2505,12 +2599,15 @@ trait EmitLlvmModule
 
     /**
      * The i64 a value-less return yields. A closure/trampoline hands back a BOXED
-     * null (its caller may be dynamic and read the word by tag); everything else
+     * null (its caller may be dynamic and read the word by tag), and so does an
+     * untyped function whose erased result reads as a cell; everything else
      * keeps the historical raw 0, which its typed caller ignores.
      */
     private function implicitReturnValue(): string
     {
-        return ($this->frame->isClosure || $this->frame->isTrampoline)
+        return ($this->frame->isClosure || $this->frame->isTrampoline
+            || $this->frame->returnType->kind === Type::KIND_UNKNOWN
+            || $this->frame->returnType->kind === Type::KIND_CELL)
             ? (string)\Compile\MemoryAbi::CELL_NULL
             : '0';
     }
@@ -2965,7 +3062,8 @@ trait EmitLlvmModule
         if (\Compile\Mir\Ownership::needsCellify($this->frame->returnType, $t)) { return true; }
         $rt = $this->frame->returnType;
         if ($rt !== null && $rt->kind === Type::KIND_CELL) { return true; }
-        return ($this->frame->isClosure || $this->frame->isTrampoline)
+        return ($this->frame->isClosure || $this->frame->isTrampoline
+            || $this->frame->returnType->kind === Type::KIND_UNKNOWN)
             && \Compile\Mir\Ownership::cellBoxableKind($t);
     }
 

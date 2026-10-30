@@ -2667,7 +2667,7 @@ trait EmitLlvmRuntime
             $jsonFld = 'ptr null';
             $jsonFn = \Compile\Mir\RuntimeLibrary::jsonSerFn((int)$id);
             if (isset($this->sigs->paramTypes[$jsonFn])
-                && ($this->classImplements($cls->name, 'JsonSerializable') || isset($this->enums[$cls->name])
+                && ($this->classImplements($cls->name, 'JsonSerializable') || $this->classImplements($cls->name, 'DateTimeInterface') || isset($this->enums[$cls->name])
                     || $cls->name === 'Resource')) {
                 $jsonFld = 'ptr @manticore_' . $this->mangle($jsonFn);
             }

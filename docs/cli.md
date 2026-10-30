@@ -56,6 +56,7 @@ manticore compile [options] <files…|manifest.json> -o <out>
 | `--runtime` | | With `--emit-library`: this library is the bundled stdlib |
 | `--allow-undefined-traps` | | Do not refuse a library that contains undefined-function traps |
 | `--keep-ir` | | Keep the intermediate `.ll` files |
+| `--strict` | `<list>` | Comma-separated strict checks: `shapes` (a PHPDoc `array{…}` shape is closed: an extra key is an error instead of a warning), `analyze` (= `--analyze-strict`) |
 | `-j` | `<n>` | Parallel clang jobs; `0` = one per core |
 | `--analyze` | | Run the analyzer (default) |
 | `--no-analyze` | | Skip the analyzer |

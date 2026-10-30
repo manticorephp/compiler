@@ -417,9 +417,11 @@ trait LowerPrelude
                     . "  \\__mc_json_err(8);\n  return null;\n}\n";
                 continue;
             }
-            if (!$this->declaresMethod($cname, 'jsonSerialize')) { continue; }
+            // DateTime/DateTimeImmutable are not JsonSerializable in php, yet encode as their public state: __mcJson() is that view.
+            $jm = $this->declaresMethod($cname, 'jsonSerialize') ? 'jsonSerialize' : ($this->declaresMethod($cname, '__mcJson') ? '__mcJson' : '');
+            if ($jm === '') { continue; }
             $src .= 'function ' . \Compile\Mir\RuntimeLibrary::jsonSerFn($cd->classId) . "(mixed \$v): mixed {\n"
-                . "  if (\$v instanceof \\" . $cname . ") { return \$v->jsonSerialize(); }\n"
+                . "  if (\$v instanceof \\" . $cname . ") { return \$v->" . $jm . "(); }\n"
                 . "  return null;\n}\n";
         }
         // A backed enum case encodes as its backing value (php's rule). Read
