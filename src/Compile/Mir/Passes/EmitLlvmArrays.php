@@ -2562,7 +2562,8 @@ trait EmitLlvmArrays
         }
         $enc = $this->ssa->allocReg();
         $out = '  ' . $enc . ' = call i64 @__mir_elem_encode_raw(ptr ' . $arrPtr . ', i64 '
-             . $this->elemValReg . ', i64 ' . (string)$kind . ")\n";
+             . $this->elemValReg . ', i64 ' . (string)$kind . ', i64 '
+             . ($se->array->type->element === null || $se->array->type->element->kind === Type::KIND_UNKNOWN ? '1' : '0') . ")\n";
         // Boxed or raw by the buffer's RUNTIME hint — a probe's answer, not a
         // static box, so the guard counts it as such.
         $this->markCellProbed($enc);

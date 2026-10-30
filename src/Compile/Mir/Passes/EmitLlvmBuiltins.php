@@ -10925,7 +10925,7 @@ trait EmitLlvmBuiltins
             if ($erasedParent) {
                 $encRaw = $this->ssa->allocReg();
                 $out .= '  ' . $encRaw . ' = call i64 @__mir_elem_encode_raw(ptr ' . $parentPtr . ', i64 ' . $valI . ', i64 '
-                      . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR . ")\n";
+                      . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_ARR . ", i64 0)\n";
                 $this->markCellProbed($encRaw);
                 $valI = $encRaw;
             }
