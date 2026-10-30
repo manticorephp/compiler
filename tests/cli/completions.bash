@@ -51,10 +51,10 @@ _manticore() {
         dump-ast)
             case "$prev" in
                 -o) _manticore_files "$cur"; return 0 ;;
-                --memory|--backend|-O|-j) return 0 ;;
+                --memory|--backend|-O|-j|--decl-names) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --tolerant --ranges --names --check-names --check-ranges" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir -j --tolerant --ranges --names --decl-names --check-names --check-ranges" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
