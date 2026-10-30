@@ -569,10 +569,14 @@ final class Call extends Node
 
 final class Block extends Node
 {
+    /** Built untyped: a VALUE block, retyped from its last node on EVERY inference run. */
+    public bool $fromLast = false;
+
     /** @param Node[] $stmts */
     public function __construct(public array $stmts, Type $type)
     {
         parent::__construct(Node::KIND_BLOCK, $type);
+        $this->fromLast = $type->kind === Type::KIND_UNKNOWN;
     }
 
     public function accept(EmitVisitor $v): string

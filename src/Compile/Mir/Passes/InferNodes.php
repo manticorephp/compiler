@@ -1624,9 +1624,10 @@ trait InferNodes
         foreach ($node->stmts as $s) {
             $last = $this->inferNode($s);
         }
-        // A VALUE block built untyped (LowerFromAst::wrapCallPost) is its last
-        // node's value; every other block is constructed with its type.
-        if ($node->type->kind === Type::KIND_UNKNOWN && $last !== null) { $node->type = $last; }
+        // A VALUE block built untyped (LowerFromAst::wrapCallPost, hoistLvalueExpr)
+        // is its last node's value on every run — a later run may re-type that node
+        // (obj -> cell), and a stale block type boxes the new word as the old kind.
+        if (($node->fromLast || $node->type->kind === Type::KIND_UNKNOWN) && $last !== null) { $node->type = $last; }
         return $node->type;
     }
 
