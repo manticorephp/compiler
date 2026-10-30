@@ -13,6 +13,7 @@ _manticore() {
     'split-ir:Split a staged .ll module into N part files (dev tool)'
     'dump-sig:Parse PHP, print the module-interface .sig (exported symbol table)'
     'version:Print compiler version'
+    'lsp:Run the language server on stdio'
     'upgrade:Update the installed compiler to the latest release (--check only reports)'
     'doctor:Check that this compiler and its toolchain work; exit 1 on a failure'
     'completions:Print a shell completion script (bash, zsh or fish)'
@@ -106,6 +107,7 @@ _manticore() {
         '--tolerant[Recover from syntax errors; print the tree and every error]' \
         '--ranges[Print spans as start-end ranges]' \
         '--names[Print the written-name table instead of the tree]' \
+        '--decl-names=[With --tolerant --names: also record declaration names and use roles (1 = class-likes, functions, enum cases; 2 = also members and class constants)]:level:' \
         '--check-names[Verify every name span slices to its written text; print each mismatch, exit 1 if any]' \
         '--check-ranges[Verify the range invariants; print each violation, exit 1 if any]' \
         '*:file:_files'
@@ -188,6 +190,11 @@ _manticore() {
       _arguments \
         '--help[Show this help text]' \
         '--check[Report installed and latest version (same as upgrade --check); exit 1 if an update exists, 2 on error]' \
+        '*:file:_files'
+      ;;
+    lsp)
+      _arguments \
+        '--help[Show this help text]' \
         '*:file:_files'
       ;;
     upgrade)
