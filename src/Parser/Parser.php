@@ -3375,7 +3375,8 @@ final class Parser
         }
         // A valid identifier (LLVM symbol-safe) — PHP's `class@anonymous` form
         // carries an `@` that the mangler can't emit.
-        $name = '__anon_class_' . (string)$this->anonClassCounter;
+        // The counter is per file: a file hash keeps the symbol unique across files.
+        $name = '__anon_class_' . ($this->sourceFile === '' ? '' : \dechex(\crc32($this->sourceFile)) . '_') . (string)$this->anonClassCounter;
         $this->anonClassCounter = $this->anonClassCounter + 1;
         if ($this->currentNamespace !== '') {
             $name = $this->currentNamespace . '\\' . $name;
