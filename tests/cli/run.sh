@@ -61,7 +61,8 @@ behaviour() {
     run "dump-ast with compile-only flag" "$MC" dump-ast --analyze "f.php"
     run "compile bad -O"           "$MC" compile "f.php" -o "x" -O9
     run "compile bad --memory"     "$MC" compile "f.php" -o "x" --memory bogus
-    run "compile bad --progress"   "$MC" compile "f.php" -o "x" --progress=bogus
+    run "compile bad --strict"     "$MC" compile "f.php" -o "x" --strict=bogus
+    run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir
     run "build missing manifest"   "$MC" build "nope.json"
