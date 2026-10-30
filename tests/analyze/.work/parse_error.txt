@@ -1,3 +1,0 @@
-tests/analyze/cases/parse_error.php:3:10: error: expected function name
-
-Found 1 error(s), 0 warning(s).
