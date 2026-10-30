@@ -529,7 +529,7 @@ class DateTime implements DateTimeInterface
             return false;
         }
         \__mc_dt_last_errors(1);
-        $d = new DateTime('@' . $t, $timezone);
+        $d = new static('@' . $t, $timezone);
         if ($timezone !== null) {
             $d->setTimezone($timezone);
         }
@@ -538,7 +538,7 @@ class DateTime implements DateTimeInterface
 
     public static function createFromImmutable(DateTimeImmutable $object): DateTime
     {
-        $d = new DateTime('@' . $object->getTimestamp(), new DateTimeZone($object->__mcZoneName()));
+        $d = new static('@' . $object->getTimestamp(), new DateTimeZone($object->__mcZoneName()));
         $d->setTimezone(new DateTimeZone($object->__mcZoneName()));
         $d->__mcSet($object->getTimestamp(), $object->__mcUs());
         return $d;
@@ -546,7 +546,7 @@ class DateTime implements DateTimeInterface
 
     public static function createFromInterface(DateTimeInterface $object): DateTime
     {
-        $d = new DateTime('@' . $object->getTimestamp(), new DateTimeZone($object->__mcZoneName()));
+        $d = new static('@' . $object->getTimestamp(), new DateTimeZone($object->__mcZoneName()));
         $d->setTimezone(new DateTimeZone($object->__mcZoneName()));
         $d->__mcSet($object->getTimestamp(), $object->__mcUs());
         return $d;
@@ -748,7 +748,7 @@ class DateTimeImmutable implements DateTimeInterface
             return false;
         }
         \__mc_dt_last_errors(1);
-        $d = new DateTimeImmutable('@' . $t, $timezone);
+        $d = new static('@' . $t, $timezone);
         if ($timezone !== null) {
             return $d->setTimezone($timezone);
         }
@@ -757,7 +757,7 @@ class DateTimeImmutable implements DateTimeInterface
 
     public static function createFromMutable(DateTime $object): DateTimeImmutable
     {
-        $d = new DateTimeImmutable('@' . $object->getTimestamp(), new DateTimeZone($object->__mcZoneName()));
+        $d = new static('@' . $object->getTimestamp(), new DateTimeZone($object->__mcZoneName()));
         $d->__mcSetZone($object->__mcZoneName(), \__mc_tz_open($object->__mcZoneName()), $object->__mcZoneType(), $object->__mcZoneOffset());
         $d->__mcSet($object->getTimestamp(), $object->__mcUs());
         return $d;
@@ -765,7 +765,7 @@ class DateTimeImmutable implements DateTimeInterface
 
     public static function createFromInterface(DateTimeInterface $object): DateTimeImmutable
     {
-        $d = new DateTimeImmutable('@' . $object->getTimestamp(), new DateTimeZone($object->__mcZoneName()));
+        $d = new static('@' . $object->getTimestamp(), new DateTimeZone($object->__mcZoneName()));
         $d->__mcSetZone($object->__mcZoneName(), \__mc_tz_open($object->__mcZoneName()), $object->__mcZoneType(), $object->__mcZoneOffset());
         $d->__mcSet($object->getTimestamp(), $object->__mcUs());
         return $d;
