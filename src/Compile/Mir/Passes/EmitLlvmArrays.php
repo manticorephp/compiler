@@ -3010,7 +3010,7 @@ trait EmitLlvmArrays
         if ($se->array->kind !== Node::KIND_LOAD_LOCAL || !isset($this->byRefParamNames[$this->loadLocalNameOf($se->array)])) { return ''; }
         if (!$this->nodeRunsCode($se->value) && !$this->nodeRunsCode($se->index)) { return ''; }
         $out = $this->emitNode($se->array);
-        $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
+        $out .= ($baseCell || $se->array->type->kind === Type::KIND_UNKNOWN) ? $this->cellToPtr() : $this->coerceToPtr();
         $cow = $this->ssa->allocReg();
         $out .= '  ' . $cow . ' = call ptr ' . $cowFn . '(ptr ' . $this->lastValue . ")\n";
         $out .= $this->vecWriteBack($se->array, $cow, $baseCell);
@@ -3048,7 +3048,11 @@ trait EmitLlvmArrays
             $out = $this->emitSeparatedArray($se->array, $baseCell);
         } else {
             $out = $this->emitNode($se->array);
-            $out .= $baseCell ? $this->cellToPtr() : $this->coerceToPtr();
+            // An UNKNOWN base is a channel nobody typed: a caller may have handed it
+            // a tagged cell (an untyped wrapper forwarding its cell param), and the
+            // tag is not a pointer. Strip it (a no-op on a raw one); the write-back
+            // below stores the raw buffer, which every unknown consumer accepts.
+            $out .= ($baseCell || $se->array->type->kind === Type::KIND_UNKNOWN) ? $this->cellToPtr() : $this->coerceToPtr();
         }
         $arrPtr = $this->lastValue;
         // COW shared buffers (PHP array value semantics) before mutating. The
