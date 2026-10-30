@@ -3088,6 +3088,7 @@ final class LowerFromAst implements Pass
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $mp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $this->isBareArrayHint($effHint) || $pt->isArray();
+            $mp->docOnly = ($p->typeHint === null || $p->typeHint === '') && !$isVar && $pt->isArray();
             $mp->refPack = $this->paramIsRefPack($p);
             // Variadic excluded for the same reason as the free-function path:
             // the pack's keys are the compiler's own 0..n.

@@ -914,6 +914,34 @@ final class InferTypes implements Pass
      *  @var array<string, \Compile\Mir\ClassDef> */
     private array $typeDefs = [];
 
+    /**
+     * A param typed `array` by its docblock ALONE and cast `(array)` in the body is not an array: the
+     * cast is the author converting whatever arrives (Eloquent's `newFromBuilder($attributes)` is handed
+     * the object rows PDO fetched). Trusting the claim made the cast a no-op over an object.
+     */
+    private function withdrawDocArrayClaims(FunctionDef $fn): void
+    {
+        foreach ($fn->params as $p) {
+            if (!$p->docOnly || $fn->body === null) { continue; }
+            if ($this->castsParamToArray($fn->body, $p->name)) {
+                $p->type = Type::cell();
+                $p->arrayHinted = false;
+                $p->docList = false;
+                $p->docOnly = false;
+            }
+        }
+    }
+
+    private function castsParamToArray(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_CAST && $n->target === 'array'
+            && $n->operand->kind === Node::KIND_LOAD_LOCAL && $n->operand->name === $name) { return true; }
+        foreach (Walk::children($n) as $ch) {
+            if ($this->castsParamToArray($ch, $name)) { return true; }
+        }
+        return false;
+    }
+
     public function run(Module $module): Module
     {
         $tRun = \Compile\Stats::now();
@@ -932,6 +960,7 @@ final class InferTypes implements Pass
         $this->closureNodeByName = [];
         $this->sawClosures = false;
         $this->undeclaredReturnFns = [];
+        foreach ($module->functions as $dfn) { $this->withdrawDocArrayClaims($dfn); }
         // The signature tables cover EVERY function, scoped run or not: a call
         // from inside the scope to a function outside it still has to see that
         // function's return, and a dispatch unions the returns of every class.

@@ -126,6 +126,7 @@ trait LowerFns
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
             $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $this->isBareArrayHint($effHint) || $pt->isArray();
+            $fp->docOnly = ($p->typeHint === null || $p->typeHint === '') && !($p->variadic ?? false) && $pt->isArray();
             $fp->refPack = $this->paramIsRefPack($p);
             // A VARIADIC pack is genuinely 0..n — its vec is the compiler's own
             // and its keys are not in question.
