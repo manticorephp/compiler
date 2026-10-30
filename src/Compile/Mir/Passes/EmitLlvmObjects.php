@@ -6996,6 +6996,9 @@ trait EmitLlvmObjects
                     if (!$this->isGlobalsViewName($name)) {
                         $dt = $this->locals->globalBackedType[$name] ?? null;
                         $flavor = $dt === null ? '' : $this->discardReleaseFlavor($dt);
+                    } else {
+                        // A $GLOBALS-viewed slot holds the value BOXED ({@see boxForViewSlot}).
+                        $flavor = 'cell';
                     }
                     if ($flavor !== '') { $out .= $this->rcReleaseSlot($cell, $flavor); }
                     $out .= '  store i64 0, ptr ' . $cell . "\n";
