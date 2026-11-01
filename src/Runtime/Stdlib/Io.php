@@ -235,7 +235,7 @@ function __mc_std_res(int $which, \Ffi\Ptr $handle): \Resource
         return $in;
     }
     if ($which === 1) {
-        if ($haveOut === 0) { $out = new \Resource(\Resource::KIND_FILE, 'stream', \ptr_to_int($handle), true); $haveOut = 1; }
+        if ($haveOut === 0) { \Runtime\Libc\setvbuf($handle, \int_to_ptr(0), 2, 0); $out = new \Resource(\Resource::KIND_FILE, 'stream', \ptr_to_int($handle), true); $haveOut = 1; }
         return $out;
     }
     if ($haveErr === 0) { $err = new \Resource(\Resource::KIND_FILE, 'stream', \ptr_to_int($handle), true); $haveErr = 1; }

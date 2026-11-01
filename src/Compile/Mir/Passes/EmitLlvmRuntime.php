@@ -4128,7 +4128,7 @@ end:
         // walk below skips any level marked in use. That closes the one
         // reentrancy hazard structurally, with no guard the caller can forget.
         $out .= '@__mir_ob_inuse = linkonce_odr global ' . $arrI . " zeroinitializer\n";
-        $out .= "@__mir_ob_implicit = linkonce_odr global i64 0\n";
+        $out .= "@__mir_ob_implicit = linkonce_odr global i64 1\n";
         // Non-zero once a write to stdout has failed. php's CLI ends the script
         // there ({@see outRuntime}); the flag is what stops the atexit handlers
         // — a shutdown function that echoes — from re-entering that ending.

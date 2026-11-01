@@ -220,6 +220,21 @@ helps() {
     done
 }
 
+stdout_check() { # echo/fwrite(STDOUT) reach a pipe at once: ordered vs stderr, and not lost on SIGTERM (#544)
+    cat > "$WORK/so.php" <<'PHP'
+<?php
+fwrite(STDOUT, "1\n");
+echo "2\n";
+fwrite(STDERR, "3\n");
+sleep(30);
+PHP
+    "$MC" compile so.php -o so >/dev/null 2>&1 || { echo "stdout FAIL: compile"; fail=1; return; }
+    ./so >"$WORK/so.out" 2>&1 &
+    local pid=$! i
+    for i in 1 2 3 4 5 6 7 8 9 10; do [ "$(wc -l < "$WORK/so.out")" -ge 3 ] && break; sleep 0.3; done
+    kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    [ "$(tr -d '\n' < "$WORK/so.out")" = "123" ] || { echo "stdout FAIL: got '$(tr '\n' ' ' < "$WORK/so.out")'"; fail=1; }
+}
 completions_check() {
     local sh
     for sh in bash zsh fish; do
@@ -247,5 +262,6 @@ if [ -f "$HERE/help.txt" ]; then
     diff -u "$HERE/help.txt" "$WORK/help.got" || fail=1
 fi
 progress_check
+stdout_check
 completions_check
 [ "$fail" = 0 ] && echo "=== cli golden: ok ===" || { echo "=== cli golden: FAILED ==="; exit 1; }
