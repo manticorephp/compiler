@@ -24,3 +24,19 @@ foreach ([
 ] as $d) {
     echo get_class($d), ' ', $d->format('Y'), isset($d->tag) ? ' ' . $d->tag : '', "\n";
 }
+
+// An internal factory builds the called class WITHOUT running its constructor; a constructor that
+// itself calls the factory (Carbon's does) must not recurse.
+class CtorDT extends DateTime {
+    public static int $ctors = 0;
+    public ?string $clock = null;
+    public function __construct(string $t = 'now', ?DateTimeZone $z = null) {
+        self::$ctors++;
+        parent::__construct($t, $z);
+        $x = static::createFromFormat('U', '0');
+    }
+    public static function viaParent(DateTimeInterface $d) { return parent::createFromFormat('U.u', $d->format('U.u')); }
+}
+$a = CtorDT::createFromFormat('Y-m-d', '2026-01-01');
+$b = CtorDT::viaParent($base);
+echo get_class($a), ' ', get_class($b), ' ctors=', CtorDT::$ctors, ' ', var_export($a->clock, true), ' ', $a->format('Y'), "\n";
