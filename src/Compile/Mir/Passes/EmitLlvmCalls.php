@@ -112,6 +112,28 @@ trait EmitLlvmCalls
     }
 
     /**
+     * How an FFI call to C symbol `$c` meets stdout's stdio buffer. 1 = drain it
+     * first: the call blocks (sleep, poll, accept, recv, read, waitpid, curl,
+     * TLS), spawns or ends a process (fork, exec, popen, _exit, kill), or writes
+     * an fd directly (`write`) — bytes left buffered across any of those arrive
+     * late or out of order. 2 = a stream write whose LAST argument is the FILE*:
+     * stderr drains stdout, stdout marks it dirty. 3 = `puts`, always stdout. 0 = untouched. This is the one
+     * funnel every `#[Ffi\Symbol]` binding passes through ({@see emitFfiWrapper}).
+     */
+    private function ffiOutSyncKind(string $c): int
+    {
+        if ($c === 'fwrite') { return 2; }
+        if ($c === 'puts') { return 3; }
+        return \in_array($c, [
+            'write', 'read', 'fread', 'fgets', 'popen', 'pclose', 'fork', 'waitpid', 'execv', 'execvp',
+            '_exit', 'kill', 'flock', 'connect', 'accept', 'recv', 'recvfrom', 'recvmsg', 'poll',
+            'usleep', 'nanosleep', 'sigwait', 'getaddrinfo', 'getnameinfo', 'epoll_wait', 'kevent',
+            'curl_easy_perform', 'curl_multi_perform', 'curl_multi_poll',
+            'SSL_accept', 'SSL_connect', 'SSL_read',
+        ], true) ? 1 : 0;
+    }
+
+    /**
      * Emit an FFI function as a thin wrapper forwarding to its C symbol.
      * The outer signature is the uniform MIR ABI (i64 params / i64 return);
      * each arg is coerced from its i64 carrier to the extern's C type, the
@@ -237,6 +259,17 @@ trait EmitLlvmCalls
             $this->ffiDeclOwner[$cSym] = $fn->name;
         }
         $callArgs = \implode(', ', $cargs);
+        $syncKind = $this->ffiOutSyncKind($cSym);
+        if ($syncKind === 3) {
+            $this->rt->needsOutBuf = true;
+            $out .= "  call void @__mir_out_note()\n";
+        } elseif ($syncKind === 1) {
+            $this->rt->needsOutBuf = true;
+            $out .= "  call void @__mir_out_sync()\n";
+        } elseif ($syncKind === 2 && $cargs !== []) {
+            $this->rt->needsOutBuf = true;
+            $out .= '  call void @__mir_out_stream(' . $cargs[\count($cargs) - 1] . ")\n";
+        }
         if ($ret === 'void') {
             $out .= '  call ' . $callTypeTok . ' @' . $cSym . '(' . $callArgs . ")\n";
             $out .= "  ret i64 0\n";

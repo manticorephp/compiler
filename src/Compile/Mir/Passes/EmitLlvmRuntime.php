@@ -4128,11 +4128,62 @@ end:
         // walk below skips any level marked in use. That closes the one
         // reentrancy hazard structurally, with no guard the caller can forget.
         $out .= '@__mir_ob_inuse = linkonce_odr global ' . $arrI . " zeroinitializer\n";
-        $out .= "@__mir_ob_implicit = linkonce_odr global i64 0\n";
+        $out .= "@__mir_ob_implicit = linkonce_odr global i64 1\n";
         // Non-zero once a write to stdout has failed. php's CLI ends the script
         // there ({@see outRuntime}); the flag is what stops the atexit handlers
         // — a shutdown function that echoes — from re-entering that ending.
         $out .= "@__mir_out_dead = linkonce_odr global i64 0\n";
+        // stdout stays stdio-buffered (an echo is a memcpy, not a syscall) and is
+        // drained where it could otherwise be observed LATE: before every
+        // blocking or process-spawning primitive and every fd-2 write
+        // ({@see EmitLlvmCalls::ffiOutSyncKind}), at exit, and — bounding a
+        // CPU-bound stretch — by an echo that finds 100 ms gone since the last
+        // drain. DIRTY = "bytes may sit in the stdio buffer".
+        $out .= "@__mir_out_dirty = linkonce_odr global i64 0\n";
+        $out .= "@__mir_out_last = linkonce_odr global i64 0\n";
+        $out .= "\ndefine void @__mir_out_sync() {\nentry:\n";
+        $out .= "  %d = load i64, ptr @__mir_out_dirty\n";
+        $out .= "  %nz = icmp ne i64 %d, 0\n";
+        $out .= "  br i1 %nz, label %go, label %done\n";
+        $out .= "go:\n";
+        $out .= "  store i64 0, ptr @__mir_out_dirty\n";
+        $out .= "  %f = call ptr @manticore_stdout()\n";
+        $out .= "  call i32 @fflush(ptr %f)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+        $out .= "\ndefine void @__mir_out_note() {\nentry:\n";
+        $out .= "  store i64 1, ptr @__mir_out_dirty\n";
+        $out .= "  %imp = load i64, ptr @__mir_ob_implicit\n";
+        $out .= "  %doimp = icmp ne i64 %imp, 0\n";
+        $out .= "  br i1 %doimp, label %tick, label %done\n";
+        $out .= "tick:\n";
+        $out .= "  %now = call i64 @manticore_clock_ns(i64 1)\n";
+        $out .= "  %last = load i64, ptr @__mir_out_last\n";
+        $out .= "  %age = sub i64 %now, %last\n";
+        $out .= "  %old = icmp sge i64 %age, 100000000\n";
+        $out .= "  br i1 %old, label %go, label %done\n";
+        $out .= "go:\n";
+        $out .= "  store i64 %now, ptr @__mir_out_last\n";
+        $out .= "  call void @__mir_out_sync()\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+        // A libc stream-write wrapper hands its FILE* here: fd 2 drains stdout
+        // first (order), stdout itself marks the buffer dirty and takes the timer.
+        $out .= "\ndefine void @__mir_out_stream(ptr %s) {\nentry:\n";
+        $out .= "  %e = call ptr @manticore_stderr()\n";
+        $out .= "  %ise = icmp eq ptr %s, %e\n";
+        $out .= "  br i1 %ise, label %err, label %chk\n";
+        $out .= "err:\n";
+        $out .= "  call void @__mir_out_sync()\n";
+        $out .= "  br label %done\n";
+        $out .= "chk:\n";
+        $out .= "  %o = call ptr @manticore_stdout()\n";
+        $out .= "  %iso = icmp eq ptr %s, %o\n";
+        $out .= "  br i1 %iso, label %out, label %done\n";
+        $out .= "out:\n";
+        $out .= "  call void @__mir_out_note()\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
         // Non-zero while an ob_start() handler is running. php DISCARDS whatever
         // a handler echoes — it does not forward it downstream, and it does not
         // fold it back into the buffer being handled (verified against the
@@ -4248,11 +4299,7 @@ end:
         // and a user fwrite(STDOUT, …) is the stream's problem, not ours.
         $out .= "  %f = call ptr @manticore_stdout()\n";
         $out .= "  call i64 @fwrite(ptr %d, i64 1, i64 %n, ptr %f)\n";
-        $out .= "  %imp = load i64, ptr @__mir_ob_implicit\n";
-        $out .= "  %doimp = icmp ne i64 %imp, 0\n";
-        $out .= "  br i1 %doimp, label %impf, label %chkerr\n";
-        $out .= "impf:\n";
-        $out .= "  call i32 @fflush(ptr %f)\n";
+        $out .= "  call void @__mir_out_note()\n";
         $out .= "  br label %chkerr\n";
         // A reader that walked away — `prog | head` — is a FAILED WRITE here
         // and not a signal: SIGPIPE is ignored for the whole program, as php's
@@ -4327,6 +4374,7 @@ end:
         // push a user's half-written file buffers, which `flush()` does not mean.
         $out .= "\ndefine void @__mir_out_flush() {\n";
         $out .= "entry:\n";
+        $out .= "  store i64 0, ptr @__mir_out_dirty\n";
         $out .= "  %f = call ptr @manticore_stdout()\n";
         $out .= "  call i32 @fflush(ptr %f)\n";
         $out .= "  ret void\n}\n";
