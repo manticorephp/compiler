@@ -345,8 +345,8 @@ trait LowerExprs
             }
             // `include` inside a function of a file that is no compile unit (a
             // template) runs it HERE, in this scope.
-            if ($fnBare === '__mc_require_value' && \count($expr->args) === 1 && !$this->lowerInMain) {
-                $inl = $this->lowerScopedInclude($expr->args[0]);
+            if ($fnBare === '__mc_require_value' && \count($expr->args) === 2 && !$this->lowerInMain) {
+                $inl = $this->lowerScopedInclude($expr->args[0], $expr->args[1]);
                 if ($inl !== null) { return $inl; }
             }
             if ($fnBare === 'get_defined_vars' && \count($expr->args) === 0) {
@@ -1278,7 +1278,7 @@ trait LowerExprs
      * (`__DIR__ . '/views/' . $name`); both arms of a ternary. Null when no
      * candidate is inlinable, which keeps the site exactly as it was.
      */
-    private function lowerScopedInclude(\Parser\Ast\Expr $path): ?Node
+    private function lowerScopedInclude(\Parser\Ast\Expr $path, \Parser\Ast\Expr $required): ?Node
     {
         if ($path instanceof \Parser\Ast\Variable && \str_starts_with($path->name, '__mc_inc_p')) {
             return null;
@@ -1302,7 +1302,7 @@ trait LowerExprs
             \Parser\Ast\Expr::call('__mir_to_cell', [\Parser\Ast\Expr::int(1, $sp)], $sp), $sp), $sp);
         $else = new \Parser\Ast\Block([\Parser\Ast\Stmt::expression(\Parser\Ast\Expr::assign(
             \Parser\Ast\Expr::variable($v, $sp),
-            \Parser\Ast\Expr::call('__mc_require_value', [\Parser\Ast\Expr::variable($p, $sp)], $sp), $sp), $sp)]);
+            \Parser\Ast\Expr::call('__mc_require_value', [\Parser\Ast\Expr::variable($p, $sp), $required], $sp), $sp), $sp)]);
         $first = null;
         $firstBody = new \Parser\Ast\Block([]);
         $elseifs = [];

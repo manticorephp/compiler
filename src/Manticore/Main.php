@@ -5960,7 +5960,7 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array
     // handed to the Analyzer: its walkers are not Error-node aware yet.
     foreach ($files as $sf) {
         try {
-            $r = \Parser\Parser::parseTolerant(__mc_source_contents($sf), '', false, false);
+            $r = \Parser\Parser::parseTolerant(__mc_source_contents($sf), __mc_source_path($sf), false, false);
             if (\count($r->errors) === 0) {
                 $parsed[] = new \Analyze\ParsedFile(__mc_source_path($sf), $r->program);
             }

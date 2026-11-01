@@ -7,26 +7,36 @@
  * as `<?php return [ … ];` (url_matching_routes.php) and `require`s them. This
  * evaluates exactly that shape — one `return` of array / string / number /
  * bool / null literals, `.`-concatenated strings and comments — and answers
- * `false` (php's answer for a missing file) for anything else, which would
+ * `false` for an `include` of anything else (a `require` throws `Error: Failed
+ * opening required`), since the rest would
  * need code to run.
  */
-function __mc_require_runtime(string $path): mixed
+function __mc_require_runtime(string $path, int $required = 0): mixed
 {
     $src = @\file_get_contents($path);
-    if (!\is_string($src)) { return false; }
-    $i = 0;
+    if (!\is_string($src)) {
+        if ($required === 1) { throw new \Error("Failed opening required '" . $path . "' (no such file, and not part of the build)"); }
+        return false;
+    }
     $n = \strlen($src);
-    if (\substr($src, 0, 5) !== '<?php') { return false; }
-    $i = 5;
-    $ok = true;
-    \__mc_rd_ws($src, $i, $n);
-    if (\strtolower(\substr($src, $i, 6)) !== 'return') { return false; }
-    $i = $i + 6;
-    $v = \__mc_rd_expr($src, $i, $n, $ok);
-    if (!$ok) { return false; }
-    \__mc_rd_ws($src, $i, $n);
-    if ($i >= $n || $src[$i] !== ';') { return false; }
-    return $v;
+    $ok = false;
+    $v = false;
+    if (\substr($src, 0, 5) === '<?php') {
+        $i = 5;
+        \__mc_rd_ws($src, $i, $n);
+        if (\strtolower(\substr($src, $i, 6)) === 'return') {
+            $i = $i + 6;
+            $ok = true;
+            $v = \__mc_rd_expr($src, $i, $n, $ok);
+            \__mc_rd_ws($src, $i, $n);
+            if ($ok && ($i >= $n || $src[$i] !== ';')) { $ok = false; }
+        }
+    }
+    if ($ok) { return $v; }
+    if ($required === 1) {
+        throw new \Error("Failed opening required '" . $path . "' (not part of the build, and not a pure-data `return` file)");
+    }
+    return false;
 }
 
 /** Skip whitespace and `//`, `#`, `/* … *\/` comments. */
