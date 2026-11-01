@@ -2025,8 +2025,12 @@ function __mc_select_poll_park(\Ffi\Ptr $pfds, int $count, float $deadline): int
  * are rewritten in place to hold only the ready streams; returns the ready count, 0
  * on timeout, or false on error. O(n) per call — fine for modest fd counts; a
  * kqueue/epoll backend is the async epic, and would slot in under this same API.
+ *
+ * The arrays carry an element type (not a bare `array`): an erased by-ref parameter names
+ * no release flavor for the word it overwrites, so each `$read = $nr` leaked the
+ * previous array.
  */
-function stream_select(?array &$read, ?array &$write, ?array &$except, ?int $sec, ?int $usec = null): int|false
+function stream_select(?array<int, \Resource> &$read, ?array<int, \Resource> &$write, ?array<int, \Resource> &$except, ?int $sec, ?int $usec = null): int|false
 {
     $POLLIN = \__mc_net_const(1);
     $POLLOUT = \__mc_net_const(2);
