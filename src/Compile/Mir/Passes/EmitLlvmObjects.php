@@ -2758,6 +2758,14 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** `__set($name, $value)` through the shared dispatcher with a RUNTIME name pointer (`$o->$n = v` on an undeclared name). */
+    private function emitDynMagicSet(string $objPtr, string $keyP, string $val): string
+    {
+        $sym = $this->magicDispatchFn('__set');
+        $r = $this->ssa->allocReg();
+        return '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $objPtr . ', ptr ' . $keyP . ', i64 ' . $val . ")\n";
+    }
+
     /** `i64 (ptr obj, ptr name, i64 val)` switching on class_id over every class
      *  that overloads `$method` — the arm set of {@see magicPropHolders} for a
      *  name no class declares. Built once per module. */
@@ -6405,6 +6413,9 @@ trait EmitLlvmObjects
             $nbI = $this->ssa->allocReg();
             $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
             $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
+        } elseif ($this->methodHolders('__set') !== []) {
+            // An undeclared name on a class that overloads writes: php calls __set(name, value).
+            $out .= $this->emitDynMagicSet($objPtr, $keyP, $cellVal);
         }
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
@@ -6484,6 +6495,13 @@ trait EmitLlvmObjects
             $nbI = $this->ssa->allocReg();
             $out .= '  ' . $nbI . ' = ptrtoint ptr ' . $nb . " to i64\n";
             $out .= '  store i64 ' . $nbI . ', ptr ' . $bg . "\n";
+            $out .= '  store i64 ' . $val . ', ptr ' . $res . "\n";
+        } elseif ($this->methodHolders('__set') !== []) {
+            $out .= $this->emitObjPtrOf($n->object);
+            $objPtr = $this->lastValue;
+            $out .= $this->emitBagStoreValue($n->value);
+            $val = $this->lastValue;
+            $out .= $this->emitDynMagicSet($objPtr, $keyP, $val);
             $out .= '  store i64 ' . $val . ', ptr ' . $res . "\n";
         }
         $out .= '  br label %' . $endL . "\n";
