@@ -3,7 +3,7 @@ createWordInstance IntlRuleBasedBreakIterator NULL 0:0,1:5,2:6,3:7,4:12,5:13,6:1
   first=0 last=91 prev=90 cur=90 following(5)=6 preceding(20)=18 next(3)=26 next(-2)=19 next(0)=19 isBoundary(7)=true isBoundary(8)=false
   en_US 
 createLineInstance IntlRuleBasedBreakIterator NULL 0:0,1:7,2:14,3:19,4:27,5:30,6:40,7:43,8:46,9:49,10:52,11:55,12:58,13:61,14:68,15:77,16:86,17:91
-  status 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+  status 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
   first=0 last=91 prev=86 cur=86 following(5)=7 preceding(20)=14 next(3)=30 next(-2)=19 next(0)=19 isBoundary(7)=true isBoundary(8)=false
   en_US 
 createSentenceInstance IntlRuleBasedBreakIterator NULL 0:0,1:14,2:40,3:68,4:91
