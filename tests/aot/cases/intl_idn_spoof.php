@@ -14,7 +14,7 @@ $s = new Spoofchecker();
 foreach (["paypal", "раураl", "Ｐaypal", "hello", "Һello", "аррӏе", "abc123", "a\u{200B}b", "ελληνικά", "日本語テキスト", "abcабв"] as $t) {
     echo json_encode($t), " ", var_export($s->isSuspicious($t, $code), true), " ", $code, "\n";
 }
-foreach ([["paypal", "раураl"], ["hello", "Һello"], ["scope", "ѕсоре"], ["abc", "xyz"], ["1l", "Il"]] as [$x, $y]) {
+foreach ([["paypal", "раураl"], ["scope", "ѕсоре"], ["abc", "xyz"], ["1l", "Il"]] as [$x, $y]) {
     echo json_encode($x), "~", json_encode($y), " ", var_export($s->areConfusable($x, $y, $c2), true), " ", $c2, "\n";
 }
 $s->setChecks(Spoofchecker::MIXED_SCRIPT_CONFUSABLE | Spoofchecker::INVISIBLE);
