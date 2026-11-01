@@ -134,6 +134,8 @@ trait EmitLlvmModule
         if ($this->rt->needsOutBuf) {
             $this->rt->needsStdStreams = true;
             $this->rt->needsFloatStr = true;
+            // @__mir_out_note times its drain off the monotonic clock.
+            $this->rt->needsClock = true;
             // Routed through libcExtra, not libcDecls, so the FFI binding check
             // ({@see EmitLlvmCalls}) sees them: `Runtime\Libc\fwrite` declares
             // this same C symbol, and two spellings of one symbol is precisely
