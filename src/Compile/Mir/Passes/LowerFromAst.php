@@ -7812,9 +7812,10 @@ final class LowerFromAst implements Pass
         } elseif ($low === 'parent') {
             $cd = $this->classTable[$this->currentLowerClass] ?? null;
             $class = $cd !== null ? $cd->parent : $this->currentLowerClass;
-            if (\strtolower($expr->method) === \strtolower($this->currentLowerFn)) {
-                $this->forwardsToParent[$this->currentLowerClass . '::' . \strtolower($expr->method)] = true;
-            }
+            // From ANY method of the class, not only the override itself: Carbon's `instance()` calls
+            // `parent::createFromFormat()` while its own `createFromFormat` is a different body, and
+            // the parent body still runs with `static` bound to the subclass.
+            $this->forwardsToParent[$this->currentLowerClass . '::' . \strtolower($expr->method)] = true;
         } else {
             $scope = \ltrim($class, '\\');
         }
