@@ -3074,7 +3074,8 @@ final class Parser
             if ($lower === 'require' || $lower === 'require_once'
                     || $lower === 'include' || $lower === 'include_once') {
                 $this->advance();
-                return Expr::call('__mc_require_value', [$this->parseExpression()], $this->end($span));
+                $req = ($lower === 'require' || $lower === 'require_once') ? 1 : 0;
+                return Expr::call('__mc_require_value', [$this->parseExpression(), Expr::int($req, $span)], $this->end($span));
             }
             // Legacy long-array syntax `array(a, b, k => v)` — identical to
             // `[a, b, k => v]`; still common in generated / data files.

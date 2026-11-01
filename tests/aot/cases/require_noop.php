@@ -9,11 +9,10 @@
 //   * a path that is not a compile unit at all      -> false  (this case)
 //
 // false is also what php's `include` of a missing file evaluates to. php
-// additionally warns, and `require` fatals; neither happens here, because a
-// compiled program's declarations are present either way and there is nothing
-// to abort over. That is the manticore-only part — the VALUE agrees with php.
+// additionally warns; that part is not reproduced (`require` of such a path
+// throws instead: see require_missing_throws).
 function localHelper(): int { return 42; }
-require __DIR__ . '/__manticore_require_noop_absent__.php';
+include __DIR__ . '/__manticore_require_noop_absent__.php';
 $v = include '__manticore_include_noop_absent__.php';
 var_dump($v);
 echo localHelper(), "\n";

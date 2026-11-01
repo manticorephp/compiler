@@ -139,6 +139,7 @@ weakening a member's visibility. Method-signature compatibility (LSP) is not che
 
 | Feature | Behaviour |
 |---|---|
+| `require` / `include` of a file that is not in the build and is not a pure-data `return` file (including code written at run time) | there is no interpreter, so it cannot run. `require` / `require_once` throw `Error: Failed opening required '<path>'`, as php 8.5 does for a missing file. `include` / `include_once` evaluate to `false` and do not throw (`@include` and `include ... or` idioms keep working; there is no warning channel). `compile` and `analyze` warn (`include.unresolved`) when the path is a constant outside the compile set |
 | `eval()` | not supported. The build prints `undefined-function traps (1): eval`; at run time `Call to undefined function eval()` |
 | variable variables (`$$n = 5`, `${'n'}`) | parse error |
 | `get_defined_vars()` | not defined (trap at run time) |
@@ -146,7 +147,10 @@ weakening a member's visibility. Method-signature compatibility (LSP) is not che
 | `ReflectionEnum` | does not exist; the rest of Reflection ships |
 
 What works and might be assumed not to: `include` / `require` with a path held in a
-variable (checked with a file written at run time), `new $className`, `$fn()`,
+variable, *when the target is part of the build* (a constant-prefix path such as
+`__DIR__ . '/views/' . $name` pulls in the files under it) or is a file the program
+wrote at run time that is pure data (`<?php return [ ... ];` literals only, as
+frameworks cache routes and config). `new $className`, `$fn()`,
 `call_user_func*`, `compact()`, `extract()`, `settype()`, `$GLOBALS['x']`, `global`,
 `static`, references, `__get`/`__call`, dynamic properties.
 

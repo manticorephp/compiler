@@ -2626,6 +2626,7 @@ trait EmitLlvmBuiltins
      */
     private function biRequireValue(array $args): string
     {
+        $req = (isset($args[1]) && \Compile\Mir\IntConst::isConstInt($args[1]) && \Compile\Mir\IntConst::valueOf($args[1]) === 1) ? '1' : '0';
         $out = $this->emitNode($args[0]);
         // A path built on an erased channel is a string CELL (symfony's
         // polyfill-mbstring `require $file` in getData), and realpath read its
@@ -2653,7 +2654,7 @@ trait EmitLlvmBuiltins
         // same fix, as the class-table walk {@see emitObjectVarsFn}.
         $this->needsInclResolveFn = true;
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_incl_resolve') . '(ptr ' . $pathP . ")\n";
+        $out .= '  ' . $r . ' = call i64 @' . $this->mirHelperSym('__mir_incl_resolve') . '(ptr ' . $pathP . ', i64 ' . $req . ")\n";
         return $this->finishI64($out, $r);
     }
 
@@ -2661,12 +2662,12 @@ trait EmitLlvmBuiltins
      *  function bodies (not the preamble) when a site asked for it. */
     private function emitInclResolveFn(): string
     {
-        $body = $this->emitInclResolveInline('%incl.path');
+        $body = $this->emitInclResolveInline('%incl.path', '%incl.req');
         // `optnone` for the same reason as {@see emitObjectVarsFn}: a linear
         // strcmp walk over the include table is cold by construction — each
         // `require` of a given file runs once — and optimization cost grows
         // faster than function size.
-        return 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_incl_resolve') . "(ptr %incl.path) noinline optnone {\n"
+        return 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_incl_resolve') . "(ptr %incl.path, i64 %incl.req) noinline optnone {\n"
             . "entry:\n" . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
     }
 
@@ -2675,7 +2676,7 @@ trait EmitLlvmBuiltins
      * is why the body is `internal` and not `linkonce_odr`: a shared symbol would
      * let the linker pick another module's table.
      */
-    private function emitInclResolveInline(string $pathP): string
+    private function emitInclResolveInline(string $pathP, string $req): string
     {
         $out = '';
         $slots = $this->includeSlots;
@@ -2720,7 +2721,7 @@ trait EmitLlvmBuiltins
             $out .= '  br label %' . $endL . "\n";
             $out .= $nextL . ":\n";
         }
-        $out .= $this->inclRuntimeFallback($pathP, $res);
+        $out .= $this->inclRuntimeFallback($pathP, $res, $req);
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $loaded = $this->ssa->allocReg();
@@ -2740,13 +2741,13 @@ trait EmitLlvmBuiltins
      * when it is pure data and answers false otherwise — php's answer for a
      * missing file, and what this chain answered for every such path.
      */
-    private function inclRuntimeFallback(string $pathP, string $res): string
+    private function inclRuntimeFallback(string $pathP, string $res, string $req): string
     {
         if (!isset($this->definedFns[$this->mangle('__mc_require_runtime')])) { return ''; }
         $pi = $this->ssa->allocReg();
         $out = '  ' . $pi . ' = ptrtoint ptr ' . $pathP . " to i64\n";
         $v = $this->ssa->allocReg();
-        $out .= '  ' . $v . ' = call i64 @manticore___mc_require_runtime(i64 ' . $pi . ")\n";
+        $out .= '  ' . $v . ' = call i64 @manticore___mc_require_runtime(i64 ' . $pi . ', i64 ' . $req . ")\n";
         return $out . '  store i64 ' . $v . ', ptr ' . $res . "\n";
     }
 
