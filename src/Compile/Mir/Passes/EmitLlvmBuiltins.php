@@ -6161,6 +6161,8 @@ trait EmitLlvmBuiltins
         $vals = [];
         /** @var string[] */
         $freshObjs = [];
+        /** @var array<int, array{0: string, 1: string}> */
+        $freshCells = [];
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
                 $out .= $this->emitNode($a);
@@ -6186,6 +6188,14 @@ trait EmitLlvmBuiltins
                         $out .= '  ' . $fp . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
                     }
                     $freshObjs[] = $fp;
+                } elseif ($a->type->kind === Type::KIND_CELL && \str_starts_with($this->lastValue, '%')) {
+                    // …and so is an owned CELL temp: `var_dump(f() ?: 'x')`, a
+                    // mixed-returning call. A cell boxes to itself below.
+                    $cf = $this->freshRcArgFlavor($a);
+                    if ($cf !== '') {
+                        $out .= $this->coerceToI64();
+                        $freshCells[] = [$this->lastValue, $cf];
+                    }
                 }
                 // An erased value may already BE a cell (array_shift over a
                 // bare-`array` answers a boxed NULL on empty); box_int would
@@ -6218,6 +6228,7 @@ trait EmitLlvmBuiltins
         }
         if ($freshObjs !== []) { $this->rt->needsRc = true; }
         foreach ($freshObjs as $fo) { $out .= '  call void @__mir_rc_release(ptr ' . $fo . ")\n"; }
+        foreach ($freshCells as $fc) { $out .= $this->rcReleaseReg($fc[0], $fc[1]); }
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
