@@ -412,6 +412,21 @@ trait InferScans
             if ($fn->isExtern) { continue; }
             $this->findRefCellProps($fn->body, $found);
         }
+        // A property handed by ref to a callee that keeps the reference is the same
+        // shape; a narrowed slot there keeps the copy the callee makes (no refusal:
+        // the program never wrote a `&` of its own).
+        foreach ($module->refStoredProps as $key => $unused) {
+            if (isset($found[$key])) { continue; }
+            $cut = \strpos($key, '::');
+            if ($cut === false || $cut < 0) { continue; }
+            $cd = $module->classes[\substr($key, 0, $cut)] ?? null;
+            $prop = \substr($key, $cut + 2);
+            if ($cd === null || !isset($cd->propertyTypes[$prop]) || $cd->propertyWidth($prop) !== 8) { continue; }
+            // An ARRAY slot keeps its buffer repr: its elements carry the references
+            // ({@see retypeByRefParamElems}), and a celled array base breaks them.
+            if ($cd->propertyTypes[$prop]->isArray() || ($cd->propertyArrayHinted[$prop] ?? false)) { continue; }
+            $found[$key] = true;
+        }
         foreach ($found as $key => $unused) {
             $cut = \strpos($key, '::');
             if ($cut === false || $cut < 0) { continue; }
@@ -3025,6 +3040,7 @@ trait InferScans
         foreach ($module->functions as $fn) {
             if ($fn->isPrelude || $fn->isExtern) { continue; }
             $idx = -1;
+            $caps = $module->closureCaptures[$fn->name] ?? 0;
             foreach ($fn->params as $p) {
                 $idx = $idx + 1;
                 if (!$p->byRef || $p->variadic) { continue; }
@@ -3059,7 +3075,6 @@ trait InferScans
             if ($fn->isExtern || !isset($methodOf[$fn->name])) { continue; }
             $m = $methodOf[$fn->name];
             $idx = -1;
-            $caps = $module->closureCaptures[$fn->name] ?? 0;
             foreach ($fn->params as $p) {
                 $idx = $idx + 1;
                 if (!$p->byRef || $p->variadic || !$this->isByRefRetypeKind($p->type)) { continue; }

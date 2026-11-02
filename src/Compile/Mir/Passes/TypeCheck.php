@@ -209,12 +209,25 @@ final class TypeCheck
                 $cd = $this->classes[$cls];
                 $pt = $cd->propertyTypes[$n->property] ?? null;
                 if ($pt !== null) {
+                    // A typed slot a reference retyped to a cell ({@see InferScans::scanRefCellProps})
+                    // still owes its declared scalar the coercion and the TypeError.
+                    if ($pt->kind === Type::KIND_CELL) { $pt = $this->declaredScalarHint($cd, $n->property) ?? $pt; }
                     if (!isset($cd->propHooks[$n->property])) { $n->value = $this->scalarCast($n->value, $pt, $inFn, 'Cannot assign string to property ' . $cls . '::$' . $n->property . ' of type ' . $this->phpTypeName($pt)); }
                     return;
                 }
                 $cls = $cd->parent;
             }
         }
+    }
+
+    private function declaredScalarHint(\Compile\Mir\ClassDef $cd, string $prop): ?Type
+    {
+        $pm = $cd->propertyMeta[$prop] ?? null;
+        $h = $pm === null ? '' : \strtolower($pm->typeHint);
+        if ($h === 'int') { return Type::int_(); }
+        if ($h === 'float') { return Type::float_(); }
+        if ($h === 'string') { return Type::string_(); }
+        return null;
     }
 
     private function scalarCast(Node $v, Type $want, string $inFn, string $strErr = ''): Node

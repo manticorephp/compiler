@@ -117,6 +117,9 @@ final class VivifyRefArgs implements Pass
     /** @var array<string, bool> {@see Module::$refStoredPropNames} */
     private array $storedProps = [];
 
+    /** @var array<string, bool> {@see Module::$refStoredProps} */
+    private array $storedPropKeys = [];
+
     /** Some element argument was marked {@see \Compile\Mir\ArrayAccess_::$refStored}. */
     private bool $storedElems = false;
 
@@ -184,10 +187,12 @@ final class VivifyRefArgs implements Pass
         $this->storedElems = false;
         $this->computeRefStoring($module);
         $this->storedProps = [];
+        $this->storedPropKeys = [];
         foreach ($module->functions as $fn) {
             $this->vivifyFunction($fn, $module);
         }
         $module->refStoredPropNames = $this->storedProps;
+        $module->refStoredProps = $this->storedPropKeys;
         if ($this->storedProps !== [] || $this->storedElems) { $module->hasRefCells = true; }
         $module->markPassApplied(self::NAME);
         return $module;
@@ -322,12 +327,15 @@ final class VivifyRefArgs implements Pass
 
     /**
      * A property handed to a callee that keeps a reference to it is promoted to a
-     * ref cell BY NAME ({@see Module::$refStoredPropNames}). A typed property has
-     * no cell repr and keeps its copy semantics (#353).
+     * ref cell BY NAME ({@see Module::$refStoredPropNames}); a receiver of known
+     * class also retypes the slot to a cell ({@see Module::$refStoredProps}) — a
+     * TYPED property has no other repr that can hold the REF cell (#353).
      */
     private function storeProp(\Compile\Mir\PropertyAccess_ $pa): void
     {
         $this->storedProps[$pa->property] = true;
+        $cls = $pa->object->type->class ?? '';
+        if ($cls !== '') { $this->storedPropKeys[$cls . '::' . $pa->property] = true; }
     }
 
     /** @param Node[] $args */
