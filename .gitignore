@@ -43,3 +43,4 @@ tests/pdo_net/.certs
 tests/parser/.work
 tests/mysqli_net/.work
 tests/analyze/.work
+.manticore.build.*.json

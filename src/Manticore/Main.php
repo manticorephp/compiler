@@ -1728,6 +1728,18 @@ function import_stdlib_types(string $sigJson): void
  */
 function self_dir(): string
 {
+    // Resolved once: argv[0] may be relative, and `build` changes directory to the
+    // manifest's before anything else asks where the compiler lives.
+    if (CompileArgs::$selfDirKnown) {
+        return CompileArgs::$selfDirCache;
+    }
+    CompileArgs::$selfDirCache = self_dir_resolve();
+    CompileArgs::$selfDirKnown = true;
+    return CompileArgs::$selfDirCache;
+}
+
+function self_dir_resolve(): string
+{
     // GUARDED: the libc `argv` binding and `cstr_to_str` are throwing stubs
     // under the Zend cold-seed, where the env overrides are the resolution path.
     $self = "";
@@ -2163,6 +2175,8 @@ final class CompileArgs
      * lldb can actually walk.
      */
     public static bool $keepIr = false;
+    public static string $selfDirCache = "";
+    public static bool $selfDirKnown = false;
 
     /**
      * `lower_module` returns right after SpillFreshBases — the MIR an ownership

@@ -146,6 +146,9 @@ final class SplitModule
             $defRefs[$s] = $this->refsOf($s, $defs[$s]);
             $defSize[$s] = \strlen($defs[$s]);
         }
+        foreach ($this->promoteLarge($defOrder, $defHead, $defSize, $defRefs) as $s => $oldLen) {
+            $defs[$s] = $defHead[$s] . \substr($defs[$s], $oldLen);
+        }
 
         /** @var array<string, bool> */
         $internal = [];
@@ -235,6 +238,46 @@ final class SplitModule
         foreach ($lineTable as $g) { $text .= $this->pinGlobal($globals[$g]) . "\n"; }
         return $text;
     }
+
+    /**
+     * Promote the big file-local bodies that several definitions call.
+     *
+     * A `define internal` body is copied into every part that reaches one
+     * ({@see assignParts}), so a 600 KB closure called from 60 parts is 60
+     * copies for clang to optimise. Past {@see PROMOTE_MIN_BYTES} and with two
+     * or more callers the body is worth more as ONE definition than as a copy
+     * that can be inlined: it goes `hidden` (external to the parts, invisible to
+     * the final binary's symbol table), becomes an ordinary shared definition
+     * and lands in exactly one part. `$defHead` is rewritten in place.
+     *
+     * @param string[]                           $defOrder
+     * @param array<string, string>              $defHead
+     * @param array<string, int>                 $defSize
+     * @param array<string, array<string, bool>> $defRefs
+     * @return array<string, int> promoted symbol => its ORIGINAL header length
+     */
+    private function promoteLarge(array $defOrder, array &$defHead, array $defSize, array $defRefs): array
+    {
+        /** @var array<string, int> */
+        $users = [];
+        foreach ($defOrder as $s) {
+            foreach ($defRefs[$s] as $r => $_) {
+                if ($r !== $s) { $users[$r] = ($users[$r] ?? 0) + 1; }
+            }
+        }
+        /** @var array<string, int> */
+        $promoted = [];
+        foreach ($defOrder as $s) {
+            if (($defSize[$s] ?? 0) < self::PROMOTE_MIN_BYTES || ($users[$s] ?? 0) < 2) { continue; }
+            $h = $defHead[$s];
+            $at = \strpos($h, ' internal ');
+            if ($at === false) { continue; }
+            $promoted[$s] = \strlen($h);
+            $defHead[$s] = \substr($h, 0, $at) . ' hidden ' . \substr($h, $at + 10);
+        }
+        return $promoted;
+    }
+
 
     /**
      * Assign every shared definition to a part, charging each part for the
@@ -759,6 +802,7 @@ final class SplitModule
             $header[] = $bare;
         }
 
+        $promoted = $this->promoteLarge($defOrder, $defHead, $defSize, $defRefs);
         /** @var array<string, bool> */
         $internal = [];
         /** @var string[] */
@@ -799,6 +843,18 @@ final class SplitModule
             }
             $o = \Manticore\fopen($path, 'ab');
             foreach ($plan->mine as $s) {
+                if (isset($promoted[$s])) {
+                    $h = $defHead[$s] . "\n";
+                    $hl = $promoted[$s] + 1;
+                    if (\Manticore\fwrite($h, 1, \strlen($h), $o) !== \strlen($h)
+                        || !$this->copyRange($in, $o, $buf, $cap, $defOff[$s] + $hl, $defSize[$s] - $hl)) {
+                        \Manticore\fclose($o);
+                        \Manticore\free($buf);
+                        \Manticore\fclose($in);
+                        return [];
+                    }
+                    continue;
+                }
                 if (!$this->copyRange($in, $o, $buf, $cap, $defOff[$s], $defSize[$s])) {
                     \Manticore\fclose($o);
                     \Manticore\free($buf);
@@ -957,6 +1013,9 @@ final class SplitModule
     /** IR bytes up to which another part's callee is copied in `available_externally`. */
     private const AVAIL_MAX_BYTES = 2048;
 
+    /** A file-local body at least this big, with two or more callers, is promoted to one shared definition. */
+    private const PROMOTE_MIN_BYTES = 32768;
+
     /** Transitive depth of the copy closure. */
     private const AVAIL_MAX_DEPTH = 4;
 
@@ -999,8 +1058,21 @@ final class SplitModule
         $headLine = $this->head($def);
         $paren = \strpos($headLine, '(');
         if ($paren === false) { return ''; }
-        $close = \strrpos($headLine, ')');
-        if ($close === false || $close < $paren) { return ''; }
+        // The parameter list ends at the paren matching the first one. The LAST
+        // paren is not it: a closure header trails `prefix [..] [.. sub (i64
+        // ptrtoint (..))]` data that is part of the definition, not the signature.
+        $close = false;
+        $depth = 0;
+        $hn = \strlen($headLine);
+        for ($i = $paren; $i < $hn; $i++) {
+            $c = $headLine[$i];
+            if ($c === '(') { $depth++; }
+            elseif ($c === ')') {
+                $depth--;
+                if ($depth === 0) { $close = $i; break; }
+            }
+        }
+        if ($close === false) { return ''; }
         $sig = \substr($headLine, 7, $close + 1 - 7);
         $keys = ['linkonce_odr ', 'weak_odr ', 'internal ', 'private ', 'external ',
                  'dso_local ', 'hidden ', 'weak '];

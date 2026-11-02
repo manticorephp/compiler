@@ -182,8 +182,9 @@ echo "── self-host pass 1: bin/manticore build --apps-only ──"
 # compiler target. Build to a temp output, smoke-test, then atomically
 # swap — a broken self build never clobbers the working binary.
 TMP="$(mktemp -d)/manticore_new"
-TMP_MANIFEST="$(mktemp).json"
+TMP_MANIFEST="$PWD/.manticore.build.$$.json"  # beside manticore.json: manifest paths resolve from its directory
 BUILD_LOG="$(mktemp)"
+trap 'rm -f "$TMP_MANIFEST"' EXIT
 # Redirect the manifest's output to the temp path (the only edit). What is
 # rewritten is the path the MANIFEST names, not $OUT: $OUT is where the
 # smoke-tested result is installed, and the two differ whenever a target

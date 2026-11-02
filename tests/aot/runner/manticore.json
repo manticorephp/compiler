@@ -1,8 +1,8 @@
 {
   "applications": [{
     "name": "runner",
-    "src": "tests/aot/runner/src",
-    "output": "tests/aot/runner/bin/runner",
-    "entry": "tests/aot/runner/src/main.php"
+    "src": "src",
+    "output": "bin/runner",
+    "entry": "src/main.php"
   }]
 }
