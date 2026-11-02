@@ -847,7 +847,7 @@ function host_jobs(): int
  */
 function with_frame_pointers(string $ir): string
 {
-    if (!\Compile\Debug::$framePointers) {
+    if (!\Compile\Debug::$framePointers && !\Compile\Debug::$asan) {
         return $ir;
     }
     $lines = \explode("\n", $ir);
@@ -865,7 +865,7 @@ function with_frame_pointers(string $ir): string
     if ($n === 0) {
         return $ir;
     }
-    return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n";
+    return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\"" . (\Compile\Debug::$asan ? ' sanitize_address' : '') . " }\n";
 }
 
 /**
@@ -1006,6 +1006,9 @@ function clang_opt_level(): string
 
 function clang_tuning_flags(): string
 {
+    if (\Compile\Debug::$asan) {
+        return ' -fsanitize=address -mllvm -asan-stack=0';
+    }
     $e = \getenv("MANTICORE_FAT_FUNCTION_SPLIT");
     if ($e !== false && $e !== "" && $e !== "0" && $e !== "off") {
         return " -mllvm -enable-split-machine-functions";
@@ -2615,7 +2618,8 @@ function target_os_family(): string
  */
 function unwind_link_flags(): string
 {
-    return is_darwin() ? "" : " -static-libgcc";
+    // Both link sites append this, so the ASan runtime (MANTICORE_ASAN=1) rides along here.
+    return (is_darwin() ? "" : " -static-libgcc") . (\Compile\Debug::$asan ? " -fsanitize=address" : "");
 }
 
 /** True when the compile target is Darwin/macOS. */

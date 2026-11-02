@@ -615,6 +615,16 @@ final class Debug
      */
     public static bool $framePointers = false;
 
+    /**
+     * `MANTICORE_ASAN=1` — a HEAP AddressSanitizer build: every function gets the `sanitize_address`
+     * attribute (spliced into the IR text like the frame-pointer one, because `-fsanitize=address`
+     * instruments nothing for `-x ir` input), and clang/the link get `-fsanitize=address`. Stack
+     * instrumentation is off (`-asan-stack=0`): fibers switch stacks and exceptions unwind with
+     * setjmp, which ASan's stack poisoning reports as false positives. A MEASUREMENT build only —
+     * use with `-O 0`.
+     */
+    public static bool $asan = false;
+
     public static function applyMemoryMode(string $mode): bool
     {
         if ($mode === self::MEM_RC || $mode === self::MEM_ARENA || $mode === self::MEM_HYBRID) {
@@ -712,6 +722,11 @@ final class Debug
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
+        }
+        $env = \getenv('MANTICORE_ASAN');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$asan = true;
+            self::$framePointers = true;
         }
         $env = \getenv('MANTICORE_FRAME_POINTERS');
         if ($env !== false && $env !== '0' && $env !== '') {
