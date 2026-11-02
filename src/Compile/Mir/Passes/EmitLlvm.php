@@ -3103,11 +3103,14 @@ final class EmitLlvm implements EmitVisitor
      */
     private function consumedSpillDrop(StoreLocal $sp): string
     {
+        // The flow's own flavor for the slot: a type-derived one misses a
+        // closure (`releaseFlavor` answers '' for it), and zeroing the slot
+        // then stranded the env the statement's drop would have freed.
+        $own = $this->frame->ownLocals[$sp->name] ?? null;
+        if ($own === null || $own->flavor === '') { return ''; }
         $lv = $this->lastValue;
         $lt = $this->lastValueType;
-        $t = $sp->type;
-        $out = $this->emitMemoryOp(new \Compile\Mir\MemoryOp_('drop', $this->discardReleaseFlavor($t),
-            new \Compile\Mir\LoadLocal($sp->name, $t), Type::void()));
+        $out = $this->emitMemoryOp(new \Compile\Mir\MemoryOp_('drop', $own->flavor, $own->target, Type::void()));
         $this->lastValue = $lv;
         $this->lastValueType = $lt;
         return $out;
