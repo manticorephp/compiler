@@ -588,6 +588,8 @@ final class EmitLlvm implements EmitVisitor
     /** Scratch: whether the last free-function call {@see EmitLlvmCalls::emitCall}
      *  emitted went through `emitBuiltin` rather than a `@manticore_*` body. */
     private bool $lastCallWasBuiltin = false;
+    /** Set by a consumer that converts an int `+ - *` straight to float: the op then promotes on overflow instead of throwing. Read and cleared by {@see emitArith}. */
+    private bool $floatSink = false;
     /** Scratch: address reg set by foreachElemAddr / foreachKeyAddr. */
     private string $feAddr = '';
     /** Scratch: result reg set by emitVirtualDispatch. */

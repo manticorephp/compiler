@@ -153,18 +153,18 @@ function __mc_u64_lt(int $a, int $b): bool
 
 /**
  * Unsigned 64-bit `%`. Halving first keeps the trial quotient inside a signed
- * int; the product below wraps, but a wrapped product is still exact modulo
+ * int; the product below is wrapping_mul, and a wrapped product is still exact modulo
  * 2^64, so the remainder it leaves is only ever one or two multiples high.
  */
 function __mc_u64_mod(int $x, int $m): int
 {
     if ($m < 0) {   // m >= 2^63: at most one subtraction
-        return __mc_u64_lt($x, $m) ? $x : $x - $m;
+        return __mc_u64_lt($x, $m) ? $x : \Manticore\wrapping_sub($x, $m);
     }
     if ($x >= 0) { return $x % $m; }
     $q = \intdiv(($x >> 1) & 0x7FFFFFFFFFFFFFFF, $m) << 1;
-    $r = $x - $q * $m;
-    while (!__mc_u64_lt($r, $m)) { $r = $r - $m; }
+    $r = \Manticore\wrapping_sub($x, \Manticore\wrapping_mul($q, $m));
+    while (!__mc_u64_lt($r, $m)) { $r = \Manticore\wrapping_sub($r, $m); }
 
     return $r;
 }
@@ -194,9 +194,10 @@ function __mc_mt_range64(int $umax): int
     $hi = __mc_mt_op('next');
     $r = ($hi << 32) | $lo;
     if ($umax === -1) { return $r; }        // -1 is UINT64_MAX unsigned
-    $m = $umax + 1;
-    if (($m & ($m - 1)) === 0) { return $r & ($m - 1); }
-    $limit = -1 - __mc_u64_mod(-1, $m) - 1;
+    $m = \Manticore\wrapping_add($umax, 1);
+    $m1 = \Manticore\wrapping_sub($m, 1);
+    if (($m & $m1) === 0) { return $r & $m1; }
+    $limit = \Manticore\wrapping_sub(\Manticore\wrapping_sub(-1, __mc_u64_mod(-1, $m)), 1);
     while (__mc_u64_lt($limit, $r)) {
         $lo = __mc_mt_op('next');
         $hi = __mc_mt_op('next');
@@ -214,12 +215,12 @@ function __mc_mt_range64(int $umax): int
  */
 function __mc_mt_range(int $min, int $max): int
 {
-    $umax = $max - $min;
+    $umax = \Manticore\wrapping_sub($max, $min);
     if ($umax >= 0 && $umax <= 0xFFFFFFFF) {
-        return $min + __mc_mt_range32($umax);
+        return \Manticore\wrapping_add($min, __mc_mt_range32($umax));
     }
 
-    return $min + __mc_mt_range64($umax);
+    return \Manticore\wrapping_add($min, __mc_mt_range64($umax));
 }
 
 /**

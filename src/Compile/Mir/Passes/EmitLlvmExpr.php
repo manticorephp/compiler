@@ -2361,6 +2361,8 @@ trait EmitLlvmExpr
 
     private function emitArith(Node $self, Node $left, Node $right, string $intOp, string $floatOp): string
     {
+        $toFloat = $this->floatSink;
+        $this->floatSink = false;
         // A numeric (int|float) cell result is dynamically int-or-float — its
         // runtime tag decides — so route to __manticore_tagged_<op>: box both
         // operands, the helper promotes to float iff either is float and
@@ -2383,16 +2385,19 @@ trait EmitLlvmExpr
         $isFloat = $self->type->kind === Type::KIND_FLOAT;
         $target = $isFloat ? 'double' : 'i64';
         $op = $isFloat ? $floatOp : $intOp;
-        $out = $this->emitNode($left);
+        $out = $isFloat ? $this->emitNodeFloatSink($left) : $this->emitNode($left);
         $out .= $this->cellArithGuard($left, $left, $right, $intOp);
         $out .= $this->coerceArithOperand($left, $isFloat);
         $l = $this->lastValue;
-        $out .= $this->emitNode($right);
+        $out .= $isFloat ? $this->emitNodeFloatSink($right) : $this->emitNode($right);
         $out .= $this->cellArithGuard($right, $left, $right, $intOp);
         $out .= $this->coerceArithOperand($right, $isFloat);
         $r = $this->lastValue;
         if ($op === 'srem') {
             return $out . $this->emitIntRem($l, $r, $right);
+        }
+        if (!$isFloat && $self->type->kind === Type::KIND_INT && $this->lastValueType === 'i64') {
+            return $out . $this->emitCheckedInt($intOp, $l, $r, $toFloat);
         }
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = ' . $op . ' ' . $target . ' ' . $l . ', ' . $r . "\n";
@@ -2499,6 +2504,62 @@ trait EmitLlvmExpr
         $this->lastCallWasBuiltin = $savedB;
         $out .= '  br label %' . $ok . "\n";
         $out .= $ok . ":\n";
+        return $out;
+    }
+
+    /**
+     * Emit `$operand` for a consumer that converts an int `+ - *` result to float at once:
+     * the op promotes to float on overflow, as php does, instead of throwing.
+     */
+    private function emitNodeFloatSink(Node $v): string
+    {
+        $k = $v->kind;
+        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL) && $v->type->kind === Type::KIND_INT) {
+            $this->floatSink = true;
+            $out = $this->emitNode($v);
+            $this->floatSink = false;
+            return $out;
+        }
+        return $this->emitNode($v);
+    }
+
+    /**
+     * Int `+ - *` with php's overflow answered, not wrapped: `llvm.s{add,sub,mul}.with.overflow`.
+     * The overflow arm is cold: an int context throws ArithmeticError; a float sink (`$toFloat`)
+     * recomputes in double and the result is that double (a select, no branch).
+     */
+    private function emitCheckedInt(string $op, string $l, string $r, bool $toFloat): string
+    {
+        $intr = $op === 'add' ? 'sadd' : ($op === 'sub' ? 'ssub' : 'smul');
+        $decl = 'llvm.' . $intr . '.with.overflow.i64';
+        $this->libcExtra[$decl] = 'declare {i64, i1} @' . $decl . '(i64, i64)';
+        $p = $this->ssa->allocReg();
+        $v = $this->ssa->allocReg();
+        $o = $this->ssa->allocReg();
+        $out = '  ' . $p . ' = call {i64, i1} @' . $decl . '(i64 ' . $l . ', i64 ' . $r . ")\n";
+        $out .= '  ' . $v . ' = extractvalue {i64, i1} ' . $p . ", 0\n";
+        $out .= '  ' . $o . ' = extractvalue {i64, i1} ' . $p . ", 1\n";
+        if ($toFloat) {
+            $fl = $this->ssa->allocReg();
+            $fr = $this->ssa->allocReg();
+            $fv = $this->ssa->allocReg();
+            $fo = $this->ssa->allocReg();
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $fl . ' = sitofp i64 ' . $l . " to double\n";
+            $out .= '  ' . $fr . ' = sitofp i64 ' . $r . " to double\n";
+            $out .= '  ' . $fo . ' = ' . ['add' => 'fadd', 'sub' => 'fsub', 'mul' => 'fmul'][$op] . ' double ' . $fl . ', ' . $fr . "\n";
+            $out .= '  ' . $fv . ' = sitofp i64 ' . $v . " to double\n";
+            $out .= '  ' . $res . ' = select i1 ' . $o . ', double ' . $fo . ', double ' . $fv . "\n";
+            $this->lastValue = $res;
+            $this->lastValueType = 'double';
+            return $out;
+        }
+        $this->libcExtra['llvm.expect.i1'] = 'declare i1 @llvm.expect.i1(i1, i1)';
+        $e = $this->ssa->allocReg();
+        $out .= '  ' . $e . ' = call i1 @llvm.expect.i1(i1 ' . $o . ", i1 false)\n";
+        $out .= $this->emitThrowIf($e, 'ArithmeticError', 'Integer overflow');
+        $this->lastValue = $v;
+        $this->lastValueType = 'i64';
         return $out;
     }
 
@@ -2702,10 +2763,10 @@ trait EmitLlvmExpr
     private function emitDiv(Div $n): string
     {
         $d = $n;
-        $out = $this->emitNode($d->left);
+        $out = $this->emitNodeFloatSink($d->left);
         $out .= $this->coerceDoubleOperand($d->left);
         $l = $this->lastValue;
-        $out .= $this->emitNode($d->right);
+        $out .= $this->emitNodeFloatSink($d->right);
         $out .= $this->coerceDoubleOperand($d->right);
         $r = $this->lastValue;
         if (!$this->isNonZeroConst($d->right)) {
@@ -2763,11 +2824,7 @@ trait EmitLlvmExpr
         // negate — negating the raw NaN-boxed bits of `-$x` on a mixed/untyped
         // param produced garbage. Mirrors {@see coerceArithOperand}.
         $out .= $this->coerceArithOperand($neg->operand, false);
-        $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = sub i64 0, ' . $this->lastValue . "\n";
-        $this->lastValue = $reg;
-        $this->lastValueType = 'i64';
-        return $out;
+        return $out . $this->emitCheckedInt('sub', '0', $this->lastValue, false);
     }
 
     private function emitNot(Not_ $n): string
@@ -3947,7 +4004,7 @@ trait EmitLlvmExpr
     {
         $c = $n;
         $ok = $c->operand->type->kind;
-        $out = $this->emitNode($c->operand);
+        $out = $c->target === 'float' ? $this->emitNodeFloatSink($c->operand) : $this->emitNode($c->operand);
         if ($c->target === 'string') {
             if ($ok === Type::KIND_STRING) { $out .= $this->coerceToPtr(); return $out; }
             if ($ok === Type::KIND_CELL) {
@@ -4042,6 +4099,7 @@ trait EmitLlvmExpr
                 $this->lastValue = $reg; $this->lastValueType = 'double';
                 return $out;
             }
+            if ($this->lastValueType === 'double') { return $out; }
             $out .= $this->coerceToI64();
             $reg = $this->ssa->allocReg();
             $out .= '  ' . $reg . ' = sitofp i64 ' . $this->lastValue . " to double\n";
@@ -4470,8 +4528,8 @@ trait EmitLlvmExpr
             $cell = $this->locals->globalBacked[$d->name];
             $old = $this->ssa->allocReg();
             $out = '  ' . $old . ' = load i64, ptr ' . $cell . "\n";
-            $new = $this->ssa->allocReg();
-            $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
+            $out .= $this->emitCheckedInt($instr, $old, '1', false);
+            $new = $this->lastValue;
             $out .= '  store i64 ' . $new . ', ptr ' . $cell . "\n";
             $this->lastValue = $d->prefix ? $new : $old;
             $this->lastValueType = 'i64';
@@ -4484,8 +4542,8 @@ trait EmitLlvmExpr
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
             $old = $this->ssa->allocReg();
             $out .= '  ' . $old . ' = load i64, ptr ' . $p . "\n";
-            $new = $this->ssa->allocReg();
-            $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
+            $out .= $this->emitCheckedInt($instr, $old, '1', false);
+            $new = $this->lastValue;
             $out .= '  store i64 ' . $new . ', ptr ' . $p . "\n";
             $this->lastValue = $d->prefix ? $new : $old;
             $this->lastValueType = 'i64';
@@ -4503,8 +4561,8 @@ trait EmitLlvmExpr
         }
         $old = $this->ssa->allocReg();
         $out .= '  ' . $old . ' = load i64, ptr ' . $slot . "\n";
-        $new = $this->ssa->allocReg();
-        $out .= '  ' . $new . ' = ' . $instr . ' i64 ' . $old . ", 1\n";
+        $out .= $this->emitCheckedInt($instr, $old, '1', false);
+        $new = $this->lastValue;
         $out .= '  store i64 ' . $new . ', ptr ' . $slot . "\n";
         $this->lastValue = $d->prefix ? $new : $old;
         $this->lastValueType = 'i64';

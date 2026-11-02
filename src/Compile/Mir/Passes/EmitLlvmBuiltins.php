@@ -234,6 +234,8 @@ trait EmitLlvmBuiltins
         $name = \strtolower($c->function);
         if ($name === "runtime\\libc\\strlen") {
             $name = "strlen";
+        } elseif ($name === "manticore\\wrapping_add" || $name === "manticore\\wrapping_sub" || $name === "manticore\\wrapping_mul") {
+            return $this->biWrapping(\substr($name, 19), $c->args);
         } elseif (\str_contains($name, '\\')) {
             // A leading slash is PHP's explicit global-namespace spelling.
             // Any other namespace segment denotes a distinct user function.
@@ -4226,6 +4228,25 @@ trait EmitLlvmBuiltins
         return $this->coerceArithOperand($arg, false);
     }
 
+    /**
+     * `Manticore\wrapping_{add,sub,mul}(int, int): int` — the plain two's-complement
+     * instruction, which the checked `+ - *` deliberately is not. Each has a same-named
+     * stdlib body ({@see src/Runtime/Stdlib/Wrapping.php}) the previous compiler links.
+     * @param Node[] $args
+     */
+    private function biWrapping(string $op, array $args): string
+    {
+        $out = $this->emitIntArg($args[0]);
+        $a = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $b = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = ' . $op . ' i64 ' . $a . ', ' . $b . "\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
     /** @param Node[] $args */
     private function biAbs(array $args): string
     {
@@ -4274,8 +4295,8 @@ trait EmitLlvmBuiltins
             $out .= $iL . ":\n";
             $iv = $this->ssa->allocReg();
             $out .= '  ' . $iv . ' = call i64 @__manticore_tagged_to_int(i64 ' . $cell . ")\n";
-            $ineg = $this->ssa->allocReg();
-            $out .= '  ' . $ineg . ' = sub i64 0, ' . $iv . "\n";
+            $out .= $this->emitCheckedInt('sub', '0', $iv, false);
+            $ineg = $this->lastValue;
             $ilt = $this->ssa->allocReg();
             $out .= '  ' . $ilt . ' = icmp slt i64 ' . $iv . ", 0\n";
             $ia = $this->ssa->allocReg();
@@ -4292,8 +4313,8 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->coerceIntArg($args[0]);
         $v = $this->lastValue;
-        $neg = $this->ssa->allocReg();
-        $out .= '  ' . $neg . ' = sub i64 0, ' . $v . "\n";
+        $out .= $this->emitCheckedInt('sub', '0', $v, false);
+        $neg = $this->lastValue;
         $isNeg = $this->ssa->allocReg();
         $out .= '  ' . $isNeg . ' = icmp slt i64 ' . $v . ", 0\n";
         $reg = $this->ssa->allocReg();
