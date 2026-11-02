@@ -213,16 +213,35 @@ final class TrampolineSynth
      */
     public static function staticCallableSource(array $arms): string
     {
-        $out = self::ARGS_HINT . "function __mc_static_callable(string \$c, string \$m, array \$a): mixed {\n"
-             . "  \$lc = \\strtolower(\\ltrim(\$c, '\\\\'));\n  \$lm = \\strtolower(\$m);\n";
+        // One small function per arm, and the dispatcher only compares names: a program with a
+        // dynamic `$c::$m()` gets an arm for EVERY static method (symfony/laravel: ~9 000), and
+        // inlining each arm's argument unpacking made this one function 900k IR lines and ~10k
+        // allocas, which clang optimises super-linearly. Grouped by class, so the class name is
+        // compared once per class and the method name only among that class's arms.
+        $fns = "function __mc_static_callable_box(mixed \$v): mixed { return \$v; }\n";
+        /** @var array<string, string> $byClass lower-case class → its `if ($lm === …)` lines */
+        $byClass = [];
+        $n = 0;
         foreach ($arms as $arm) {
             $fqn = '\\' . \ltrim($arm[0], '\\');
             // `Closure::fromCallable` is a compiler intrinsic, not a declared method.
             $call = \strtolower($fqn . '::' . $arm[1]) === '\\closure::fromcallable'
                 ? '\\Closure::fromCallable($a[0])' : $fqn . '::' . $arm[1] . '(...$a)';
-            $out .= '  if ($lc === ' . \var_export(\strtolower(\ltrim($arm[0], '\\')), true)
-                  . ' && $lm === ' . \var_export(\strtolower($arm[1]), true) . ') { '
-                  . ($arm[2] ? $call . '; return null;' : 'return ' . $call . ';') . " }\n";
+            $name = '__mc_static_callable_arm_' . (string)$n;
+            $n = $n + 1;
+            // Through `__mc_static_callable_box`: a function with a direct caller has its `mixed` return
+            // narrowed to the body's scalar, while the trampoline ABI still boxes it — the value must
+            // already be a cell for the two to agree.
+            $fns .= self::ARGS_HINT . 'function ' . $name . "(array \$a): mixed { "
+                  . ($arm[2] ? $call . '; return __mc_static_callable_box(null);' : 'return __mc_static_callable_box(' . $call . ');') . " }\n";
+            $lc = \strtolower(\ltrim($arm[0], '\\'));
+            if (!isset($byClass[$lc])) { $byClass[$lc] = ''; }
+            $byClass[$lc] .= '    if ($lm === ' . \var_export(\strtolower($arm[1]), true) . ') { return ' . $name . "(\$a); }\n";
+        }
+        $out = $fns . self::ARGS_HINT . "function __mc_static_callable(string \$c, string \$m, array \$a): mixed {\n"
+             . "  \$lc = \\strtolower(\\ltrim(\$c, '\\\\'));\n  \$lm = \\strtolower(\$m);\n";
+        foreach ($byClass as $lc => $lines) {
+            $out .= '  if ($lc === ' . \var_export((string)$lc, true) . ") {\n" . $lines . "  }\n";
         }
         // A subclass the program names but no arm covers runs its parent's method.
         $out .= "  \$p = \\get_parent_class(\$c);\n  if (\$p !== false) { return __mc_static_callable(\$p, \$m, \$a); }\n";
