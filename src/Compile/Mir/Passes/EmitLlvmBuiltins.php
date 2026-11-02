@@ -4294,8 +4294,8 @@ trait EmitLlvmBuiltins
             $out .= $iL . ":\n";
             $iv = $this->ssa->allocReg();
             $out .= '  ' . $iv . ' = call i64 @__manticore_tagged_to_int(i64 ' . $cell . ")\n";
-            $ineg = $this->ssa->allocReg();
-            $out .= '  ' . $ineg . ' = sub i64 0, ' . $iv . "\n";
+            $out .= $this->emitCheckedInt('sub', '0', $iv, false);
+            $ineg = $this->lastValue;
             $ilt = $this->ssa->allocReg();
             $out .= '  ' . $ilt . ' = icmp slt i64 ' . $iv . ", 0\n";
             $ia = $this->ssa->allocReg();
@@ -4312,8 +4312,8 @@ trait EmitLlvmBuiltins
         }
         $out .= $this->coerceIntArg($args[0]);
         $v = $this->lastValue;
-        $neg = $this->ssa->allocReg();
-        $out .= '  ' . $neg . ' = sub i64 0, ' . $v . "\n";
+        $out .= $this->emitCheckedInt('sub', '0', $v, false);
+        $neg = $this->lastValue;
         $isNeg = $this->ssa->allocReg();
         $out .= '  ' . $isNeg . ' = icmp slt i64 ' . $v . ", 0\n";
         $reg = $this->ssa->allocReg();

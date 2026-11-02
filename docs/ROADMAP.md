@@ -127,7 +127,8 @@ Compute-heavy code already runs 2–50× faster than php 8.5; associative arrays
       exceptions and `finally` release correctly
 - [ ] Self-describing values in erased (`mixed`) channels — root of many open bugs
 - [ ] References that agree with their target's representation
-- [ ] Integer overflow promoting to float (needs value-range analysis)
+- [x] Integer overflow: `+ - *`, `++ --`, unary `-`, `abs()` on `int` throw `ArithmeticError` (a documented difference: php promotes to float; see `docs/differences.md`). Results that feed a float context promote like php. Opt-in wrap: `Manticore\wrapping_*`
+- [ ] `int` overflow that promotes to float in an int context (needs value-range analysis and an `int|float` repr; design: `docs/design/numeric-vra.md`), `**` overflow
 - [ ] Visibility enforcement (`__get` on inaccessible members, `(array)` key mangling)
 - [x] `extract()` (+ an `include` inside a function runs the template in its scope)
 - [ ] `settype()`, `goto` into loops, `ReflectionEnum`

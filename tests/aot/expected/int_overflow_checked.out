@@ -1,0 +1,25 @@
+add: ArithmeticError: Integer overflow
+add ok: int(9223372036854775807)
+sub: ArithmeticError: Integer overflow
+mul: ArithmeticError: Integer overflow
+mul ok: int(9223372030926249001)
+mul min -1: ArithmeticError: Integer overflow
+neg: ArithmeticError: Integer overflow
+neg ok: int(-5)
+inc: ArithmeticError: Integer overflow
+dec: ArithmeticError: Integer overflow
+inc ok: int(6)
+compound: ArithmeticError: Integer overflow
+compmul: ArithmeticError: Integer overflow
+float return mul: float(1.8446744073709552E+19)
+float return add: float(9.223372036854776E+18)
+float ret ok: float(12)
+cast: float(9.223372036854776E+18)
+float arith: float(9.223372036854776E+18)
+arg: float(1.8446744073709552E+19)
+local: ArithmeticError: Integer overflow
+abs min: ArithmeticError: Integer overflow
+abs: int(7)
+mod: int(0)
+intdiv: ArithmeticError: Division of PHP_INT_MIN by -1 is not an integer
+big ok: int(9223372036854775807)

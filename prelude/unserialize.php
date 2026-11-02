@@ -114,7 +114,7 @@ function __mc_un_num(\__McUnSt $st, int $stop, bool $signed): int
     while ($q < $n) {
         $c = ord($s[$q]);
         if ($c < 48 || $c > 57) { break; }
-        $acc = $acc * 10 + ($c - 48);
+        if ($q - $d0 < 18) { $acc = $acc * 10 + ($c - 48); }   // 19+ digits take the (int) cast below
         $q = $q + 1;
     }
     if ($q === $d0 || $q >= $n || ord($s[$q]) !== $stop) { $st->ok = false; return 0; }

@@ -942,11 +942,15 @@ trait EmitLlvmLocals
             && !isset($this->locals->refLocals[$sl->name])
             && !isset($this->locals->globalBacked[$sl->name])
             && isset($this->locals->slots[$sl->name])) {
-            $out = $this->emitNode($sl->value);
+            $out = $this->emitNodeFloatSink($sl->value);
         $out .= $this->elemReadCoOwn($sl->value, $sl->type, $sl->name);
-            $out .= $this->coerceToI64();
-            $d = $this->ssa->allocReg();
-            $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
+            if ($this->lastValueType === 'double') {
+                $d = $this->lastValue;
+            } else {
+                $out .= $this->coerceToI64();
+                $d = $this->ssa->allocReg();
+                $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
+            }
             $bits = $this->ssa->allocReg();
             $out .= '  ' . $bits . ' = bitcast double ' . $d . " to i64\n";
             $out .= '  store i64 ' . $bits . ', ptr ' . $this->locals->slots[$sl->name] . "\n";

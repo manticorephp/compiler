@@ -46,7 +46,7 @@ echo $a->getString(0), "\n";
 
 // zero-extends nothing, truncates nothing: the inline loop copies bits
 $c = new UInt64Array(1000);
-for ($i = 0; $i < 1000; $i++) { $c[$i] = $i * 7919 * 104729 * 1299709 * 15485863; }
+for ($i = 0; $i < 1000; $i++) { $c[$i] = \Manticore\wrapping_mul(\Manticore\wrapping_mul(\Manticore\wrapping_mul(\Manticore\wrapping_mul($i, 7919), 104729), 1299709), 15485863); }
 $x = 0;
 for ($i = 0; $i < 1000; $i++) { $x ^= $c[$i]; }
 echo UInt64Array::toDecimal($x), ' ', UInt64Array::toDecimal($c->max()), "\n";

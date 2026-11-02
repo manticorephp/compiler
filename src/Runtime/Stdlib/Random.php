@@ -195,7 +195,8 @@ function __mc_mt_range64(int $umax): int
     $r = ($hi << 32) | $lo;
     if ($umax === -1) { return $r; }        // -1 is UINT64_MAX unsigned
     $m = \Manticore\wrapping_add($umax, 1);
-    if (($m & ($m - 1)) === 0) { return $r & ($m - 1); }
+    $m1 = \Manticore\wrapping_sub($m, 1);
+    if (($m & $m1) === 0) { return $r & $m1; }
     $limit = \Manticore\wrapping_sub(\Manticore\wrapping_sub(-1, __mc_u64_mod(-1, $m)), 1);
     while (__mc_u64_lt($limit, $r)) {
         $lo = __mc_mt_op('next');
