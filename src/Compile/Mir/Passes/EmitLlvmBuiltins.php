@@ -2719,6 +2719,9 @@ trait EmitLlvmBuiltins
             } else {
                 $v = $this->ssa->allocReg();
                 $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";
+                // A call result is +1 for every consumer (Ownership::storedOwned); the
+                // slot keeps its own count, so hand out a retained copy.
+                $out .= '  call void @__mir_cell_retain(i64 ' . $v . ")\n";
                 $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
             }
             $out .= '  br label %' . $endL . "\n";
@@ -2727,6 +2730,9 @@ trait EmitLlvmBuiltins
         $out .= $this->inclRuntimeFallback($pathP, $res, $req);
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
+        // realpath(.., NULL) mallocs its answer; every call leaked it.
+        $this->libcExtra['free'] = 'declare void @free(ptr)';
+        $out .= '  call void @free(ptr ' . $rp . ")\n";
         $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         // NOT marked. Two of three stores into $res box by construction
