@@ -835,7 +835,7 @@ function socket_shutdown(\Socket $socket, int $mode = 2): bool
  * the ready sockets; the return value is the total count of ready sockets, 0 on
  * timeout, or false on error.
  */
-function socket_select(?array &$read, ?array &$write, ?array &$except, ?int $seconds, int $microseconds = 0): int|false
+function socket_select(?array<int, \Socket> &$read, ?array<int, \Socket> &$write, ?array<int, \Socket> &$except, ?int $seconds, int $microseconds = 0): int|false
 {
     $POLLIN = \__mc_net_const(1);
     $POLLOUT = \__mc_net_const(2);
