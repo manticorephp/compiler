@@ -1,0 +1,10 @@
+int(200)
+int(3)
+int(1)
+int(2)
+int(2)
+int(2)
+local flat
+arg flat
+bare flat
+elem flat

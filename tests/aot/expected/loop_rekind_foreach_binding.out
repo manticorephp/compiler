@@ -14,12 +14,12 @@ object(O)#1 (1) {
   ["i"]=>
   int(7)
 }
-object(O)#1 (1) {
+object(O)#2 (1) {
   ["i"]=>
   int(1)
 }
 string(1) "x"
-object(O)#1 (1) {
+object(O)#2 (1) {
   ["i"]=>
   int(9)
 }

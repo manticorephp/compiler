@@ -412,6 +412,21 @@ trait InferScans
             if ($fn->isExtern) { continue; }
             $this->findRefCellProps($fn->body, $found);
         }
+        // A property handed by ref to a callee that keeps the reference is the same
+        // shape; a narrowed slot there keeps the copy the callee makes (no refusal:
+        // the program never wrote a `&` of its own).
+        foreach ($module->refStoredProps as $key => $unused) {
+            if (isset($found[$key])) { continue; }
+            $cut = \strpos($key, '::');
+            if ($cut === false || $cut < 0) { continue; }
+            $cd = $module->classes[\substr($key, 0, $cut)] ?? null;
+            $prop = \substr($key, $cut + 2);
+            if ($cd === null || !isset($cd->propertyTypes[$prop]) || $cd->propertyWidth($prop) !== 8) { continue; }
+            // An ARRAY slot keeps its buffer repr: its elements carry the references
+            // ({@see retypeByRefParamElems}), and a celled array base breaks them.
+            if ($cd->propertyTypes[$prop]->isArray() || ($cd->propertyArrayHinted[$prop] ?? false)) { continue; }
+            $found[$key] = true;
+        }
         foreach ($found as $key => $unused) {
             $cut = \strpos($key, '::');
             if ($cut === false || $cut < 0) { continue; }
@@ -3025,10 +3040,34 @@ trait InferScans
         foreach ($module->functions as $fn) {
             if ($fn->isPrelude || $fn->isExtern) { continue; }
             $idx = -1;
+            $caps = $module->closureCaptures[$fn->name] ?? 0;
             foreach ($fn->params as $p) {
                 $idx = $idx + 1;
-                if (!$p->byRef || $p->variadic || !$this->isByRefRetypeKind($p->type)) { continue; }
-                if (!$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)
+                if (!$p->byRef || $p->variadic) { continue; }
+                // A GENERATOR's by-ref param outlives the call: its body runs after the
+                // caller's write-back of a representation-converting scratch slot, so the
+                // lazy write landed in the scratch (#187). The cell is the repr every
+                // caller's slot can share by address. A capture binds an address already.
+                if ($fn->isGenerator && $idx >= $caps && $p->type->kind !== Type::KIND_CELL) {
+                    $this->retypeByRefParamCell($fn, $p);
+                    $changed = true;
+                    continue;
+                }
+                // An ARRAY param the body rebinds (`$array = &$array[$k]`) names slots of two
+                // representations — the caller's raw array, then an element cell — and the
+                // emitter types the local once, so the first access wrote a boxed word into
+                // the caller's variable. The cell carries both.
+                if ($p->type->isArray() && $this->refRebindsLocal($fn->body, $p->name)) {
+                    $this->retypeByRefParamCell($fn, $p);
+                    $changed = true;
+                    continue;
+                }
+                if (!$this->isByRefRetypeKind($p->type)) { continue; }
+                // A param the body keeps a reference to is handed the caller's REF cell (a
+                // property slot retyped by scanRefCellProps): a raw scalar param would be fed a
+                // scratch copy written back only on a normal return.
+                if (!($module->refStoringParams[$fn->name . '#' . (string)$idx] ?? false)
+                    && !$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)
                     && !$this->refCellOfLocal($fn->body, $p->name)) { continue; }
                 $this->retypeByRefParamCell($fn, $p);
                 $changed = true;
@@ -3056,6 +3095,16 @@ trait InferScans
             }
         }
         return $changed;
+    }
+
+    /** Does `$n` rebind local `$name` to another slot (`$name = &$a[$k]`, `$name = &$o->p`)? */
+    private function refRebindsLocal(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_REF_ADDR && $n instanceof \Compile\Mir\RefAddr_ && $n->target === $name) { return true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->refRebindsLocal($c, $name)) { return true; }
+        }
+        return false;
     }
 
     /** Does `$n` store a reference to local `$name` (`[&$name]`, `$o->p = &$name`)? Such a param rides a cell so the callee can share ONE box. */

@@ -3075,7 +3075,12 @@ final class Parser
                     || $lower === 'include' || $lower === 'include_once') {
                 $this->advance();
                 $req = ($lower === 'require' || $lower === 'require_once') ? 1 : 0;
-                return Expr::call('__mc_require_value', [$this->parseExpression(), Expr::int($req, $span)], $this->end($span));
+                $target = $this->parseExpression();
+                // A constant target (`dirname(__DIR__) . '/x.php'`) becomes ONE literal here, so the
+                // build, the lowering and the analyzer all resolve the same file ({@see IncludePath}).
+                $folded = $target instanceof \Parser\Ast\StringLiteral ? null : IncludePath::fold($target);
+                if ($folded !== null) { $target = Expr::string($folded, $target->span); }
+                return Expr::call('__mc_require_value', [$target, Expr::int($req, $span)], $this->end($span));
             }
             // Legacy long-array syntax `array(a, b, k => v)` — identical to
             // `[a, b, k => v]`; still common in generated / data files.

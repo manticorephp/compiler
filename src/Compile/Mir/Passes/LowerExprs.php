@@ -345,6 +345,12 @@ trait LowerExprs
             }
             // `include` inside a function of a file that is no compile unit (a
             // template) runs it HERE, in this scope.
+            // composer's generated files are built in under `composer: true`: nothing to load, answers true.
+            if ($fnBare === '__mc_require_value' && \Manticore\CompileArgs::$composerBuild
+                    && $expr->args[0]->kind === 'StringLiteral'
+                    && \Parser\IncludePath::isComposerGenerated($this->stringLitValue($expr->args[0]))) {
+                return new BoolConst(true, Type::bool_());
+            }
             if ($fnBare === '__mc_require_value' && \count($expr->args) === 2 && !$this->lowerInMain) {
                 $inl = $this->lowerScopedInclude($expr->args[0], $expr->args[1]);
                 if ($inl !== null) { return $inl; }

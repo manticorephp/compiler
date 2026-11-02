@@ -6866,6 +6866,7 @@ asint:
             $out .= "  store i64 " . $stdDesc . ", ptr %jsoO\n";
             $out .= "  %jsoRc = getelementptr inbounds i64, ptr %jsoO, i64 1\n";
             $out .= "  store i64 1, ptr %jsoRc\n";
+            $out .= "  call void @__mir_obj_handle_alloc(ptr %jsoO)\n";
             $out .= "  %jsoBag = getelementptr inbounds i8, ptr %jsoO, i64 "
                   . (string)$stdBagOff . "\n";
             $out .= "  %jsoFin = ptrtoint ptr %ofin to i64\n";

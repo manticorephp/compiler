@@ -1,6 +1,5 @@
 <?php
 // A nested array returned from a private method and merged with += into a literal comes out as empty arrays.
-// issue: #297
 class Arg { function __construct(private string $n, private mixed $d = null) {}
   function getName(): string { return $this->n; } }
 class Def { function __construct(private array $a) {} function getArguments(): array { return $this->a; } }

@@ -1,5 +1,6 @@
 tests/analyze/cases/include_unresolved.php:3:1: warning: require of 'tests/analyze/cases/arith_string.php' is not part of the build: it throws Error at run time
 tests/analyze/cases/include_unresolved.php:4:1: warning: include of 'tests/analyze/cases/arith_string.php' is not part of the build: it evaluates to false at run time
 tests/analyze/cases/include_unresolved.php:5:1: warning: require of 'tests/analyze/cases/no_such_file.php' does not exist: it throws Error at run time
+tests/analyze/cases/include_unresolved.php:8:1: warning: require of 'tests/analyze/cases/arith_string.php' is not part of the build: it throws Error at run time
 
-Found 0 error(s), 3 warning(s).
+Found 0 error(s), 4 warning(s).

@@ -76,7 +76,7 @@ final class MemoryAbi
      * offset agreed across the tree, past every member's properties and bag;
      * the instance grows by its words. A v23 object of such a class is shorter.
      */
-    public const VERSION = 24;
+    public const VERSION = 25;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -423,7 +423,16 @@ final class MemoryAbi
     // ─── Object header (16 bytes) ─────────────────────────────────
 
     /** Non-`#[Struct]` instances reserve this much before properties. */
-    public const OBJECT_HEADER_SIZE = 16;
+    public const OBJECT_HEADER_SIZE = 24;
+
+    /**
+     * v25: `i64` — the object HANDLE, php's `spl_object_id` / var_dump `#N`:
+     * 1,2,3.. at `new`, reused LIFO after the object is freed. 0 = none (an
+     * object freed, or one never numbered). Allocated by `@__mir_obj_handle_alloc`
+     * after the header is written, released by `@__mir_obj_handle_free` at every
+     * real free. A v24 object has no such word: its first property sits here.
+     */
+    public const OBJECT_HANDLE_OFFSET = 16;
 
     /**
      * Init bitmap (v24): bit `(slot_offset - OBJECT_HEADER_SIZE) / INIT_MAP_SLOT_BYTES`

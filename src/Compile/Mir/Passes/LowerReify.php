@@ -459,8 +459,8 @@ trait LowerReify
         $origin = $this->reifyOrigin[$spec] ?? '';
         if ($origin === '') { return; }
         $layoutOk = $this->reifyLayoutMatches($spec, $origin);
+        $flow = $this->claimFlowKeys($spec, $origin, $module);
         foreach ($this->chainMethodNames($spec) as $m => $_) {
-            if ($m === '__construct') { continue; }
             // Resolve through BOTH chains: the specialized method may be
             // inherited from a specialized parent (`Bag<float>` declares nothing
             // — `get` lives on `Base<float>`), and the erased signature it must
@@ -470,12 +470,51 @@ trait LowerReify
             if ($base === null || $spun === null) { continue; }
             // Nothing was erased away — the raw entry already IS the erased one.
             if (!$this->sigDiffers($base, $spun)) { continue; }
-            if ($layoutOk) {
-                $spun->claimOrigin = $base->name;
-                $spun->claimParams = $this->claimParams($base, $spun);
+            $spun->claimParams = $this->claimParams($base, $spun);
+            // A constructor has no erased entry: ResolveOverloads checks the
+            // arguments of a bound `new` statically, and a misfit throws.
+            if ($m === '__construct') { continue; }
+            // A claimed value is checked, never converted. A misfit keeps running
+            // the origin's erased body (as on an unbound receiver) unless that
+            // would store it where a typed read decodes it as the claim: the
+            // layout moved, or the claimed type also comes OUT of a method.
+            // Those throw, through the erased thunk's run-time check.
+            $strict = [];
+            $keep = true;
+            foreach ($spun->claimParams as $ci => $ct) {
+                if (!$layoutOk || isset($flow[$this->reifyTypeKey($ct)])) { $strict[$ci] = true; $keep = false; }
             }
-            $module->addFunction($this->erasedThunkFor($spec, $m, $base, $spun));
+            $spun->claimOrigin = $keep ? $base->name : $spec . '__' . $m . '$erased';
+            $module->addFunction($this->erasedThunkFor($spec, $m, $base, $spun, $strict));
+            if ($strict !== []) {
+                $module->addFunction($this->claimMisfitFor($spec, $m, $base, $spun));
+            }
         }
+    }
+
+    /**
+     * The claimed types a typed read of the specialization hands back: a method
+     * whose erased return the binding narrowed to a scalar or object. A param of
+     * such a type is stored and read back as it, so it may not be a misfit.
+     *
+     * @return array<string, bool>
+     */
+    private function claimFlowKeys(string $spec, string $origin, Module $module): array
+    {
+        $out = [];
+        foreach ($this->chainMethodNames($spec) as $m => $_) {
+            $base = $this->chainMethodFn($module, $origin, $m);
+            $spun = $this->chainMethodFn($module, $spec, $m);
+            if ($base === null || $spun === null) { continue; }
+            $bk = $base->returnType->kind;
+            $sk = $spun->returnType->kind;
+            if (($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN)
+                && ($sk === Type::KIND_INT || $sk === Type::KIND_FLOAT || $sk === Type::KIND_BOOL
+                    || $sk === Type::KIND_STRING || $sk === Type::KIND_OBJ)) {
+                $out[$this->reifyTypeKey($spun->returnType)] = true;
+            }
+        }
+        return $out;
     }
 
     /** Every method name reachable on a class, including inherited ones.
@@ -594,7 +633,8 @@ trait LowerReify
      * `$this` keeps the SPEC's type so the inner call resolves directly (no
      * dispatch switch, no recursion back into this thunk).
      */
-    private function erasedThunkFor(string $spec, string $method, FunctionDef $base, FunctionDef $spun): FunctionDef
+    /** @param array<int, bool> $strict claimed params whose misfit throws instead of running the origin */
+    private function erasedThunkFor(string $spec, string $method, FunctionDef $base, FunctionDef $spun, array $strict = []): FunctionDef
     {
         $params = [];
         $args = [];
@@ -613,13 +653,15 @@ trait LowerReify
         $stmts = [];
         // A value the binding only CLAIMED (`@param K` over `mixed $key`) is
         // checked, not converted: one that does not fit runs the origin's
-        // erased body, as on an unbound receiver.
-        foreach ($spun->claimParams as $ci => $ct) {
+        // erased body, or throws when that is not sound ({@see emitErasedThunks}).
+        $order = $spun->claimParams;
+        \uksort($order, static fn (int $x, int $y): int => (int)isset($strict[$y]) <=> (int)isset($strict[$x]) ?: $x <=> $y);
+        foreach ($order as $ci => $ct) {
             $p = $base->params[$ci];
             $ok = $this->claimCheck(new \Compile\Mir\LoadLocal($p->name, $p->type), $ct);
             $oargs = [];
             foreach ($params as $q) { $oargs[] = new \Compile\Mir\LoadLocal($q->name, $q->type); }
-            $ocall = new \Compile\Mir\Call($spun->claimOrigin, $oargs, $base->returnType);
+            $ocall = new \Compile\Mir\Call(isset($strict[$ci]) ? $spec . '__' . $method . '$misfit' : $base->name, $oargs, $base->returnType);
             $arm = $base->returnType->kind === Type::KIND_VOID
                 ? [$ocall, new \Compile\Mir\Return_(null, Type::void())]
                 : [new \Compile\Mir\Return_($ocall, Type::void())];
@@ -639,6 +681,27 @@ trait LowerReify
         );
         $thunk->returnArrayHinted = $base->returnArrayHinted;
         return $thunk;
+    }
+
+    /** `Spec__m$misfit`: the erased signature, throws. What the thunk runs for an argument the binding's claim does not hold. */
+    private function claimMisfitFor(string $spec, string $method, FunctionDef $base, FunctionDef $spun): FunctionDef
+    {
+        $params = [];
+        $i = 0;
+        foreach ($base->params as $p) {
+            $params[] = new \Compile\Mir\Param($p->name, $i === 0 ? Type::obj($spec) : $p->type, $p->byRef, $p->variadic, null);
+            $i = $i + 1;
+        }
+        $msg = $this->reifyOrigin[$spec] . '::' . $method . '(): an argument does not fit the type its binding claims';
+        $throw = new \Compile\Mir\Throw_(new \Compile\Mir\NewObj('TypeError', [
+            new \Compile\Mir\StringConst($msg, Type::string_()),
+        ], Type::obj('TypeError')), Type::void());
+        return new FunctionDef(
+            name: $spec . '__' . $method . '$misfit',
+            params: $params,
+            returnType: $base->returnType,
+            body: new \Compile\Mir\Block([$throw], Type::void()),
+        );
     }
 
     /**

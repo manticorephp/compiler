@@ -2083,6 +2083,19 @@ final class InferTypes implements Pass
             $c = $n;
             $i = 0;
             foreach ($c->args as $a) {
+                // `f(...$xs)`: the pack is no argument of its own; its elements
+                // reach this param and every later one, each a cell. The pack's
+                // ARRAY type typed `&$x` an array, and `$x++` then wrote nothing.
+                if ($a->kind === Node::KIND_SPREAD) {
+                    $pre = $c->function . '#';
+                    foreach ($cand as $ck => $_) {
+                        if (\str_starts_with($ck, $pre) && (int)\substr($ck, \strlen($pre)) >= $i) {
+                            unset($observed[$ck]);
+                            $conflict[$ck] = true;
+                        }
+                    }
+                    break;
+                }
                 $key = $c->function . '#' . (string)$i;
                 $i = $i + 1;
                 if (!isset($cand[$key]) || isset($conflict[$key])) { continue; }

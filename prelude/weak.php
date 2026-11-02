@@ -26,7 +26,7 @@ final class __McWeak
 
     public static function enroll(object $o): int
     {
-        $a = \spl_object_id($o);
+        $a = \__mc_obj_addr($o);
         if (!isset(self::$serial[$a])) {
             \__mc_weak_arm();
             self::$next = self::$next + 1;
@@ -84,7 +84,7 @@ final class WeakMap implements ArrayAccess, Countable, IteratorAggregate
     public function offsetGet(mixed $object): mixed
     {
         $o = self::key($object);
-        $a = \spl_object_id($o);
+        $a = \__mc_obj_addr($o);
         if (!isset(__McWeak::$serial[$a]) || !\array_key_exists($a, __McWeak::$data[$this->__id])) {
             throw new Error('Object ' . \get_class($o) . '#' . (string)$a . ' not contained in WeakMap');
         }
@@ -105,13 +105,13 @@ final class WeakMap implements ArrayAccess, Countable, IteratorAggregate
 
     public function offsetExists(mixed $object): bool
     {
-        $a = \spl_object_id(self::key($object));
+        $a = \__mc_obj_addr(self::key($object));
         return isset(__McWeak::$serial[$a]) && isset(__McWeak::$data[$this->__id][$a]);
     }
 
     public function offsetUnset(mixed $object): void
     {
-        $a = \spl_object_id(self::key($object));
+        $a = \__mc_obj_addr(self::key($object));
         if (!\array_key_exists($a, __McWeak::$data[$this->__id])) { return; }
         $old = __McWeak::$data[$this->__id][$a];
         unset(__McWeak::$data[$this->__id][$a]);

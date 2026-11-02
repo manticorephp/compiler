@@ -180,6 +180,18 @@ final class Module
      *  @var array<string, bool> */
     public array $refStoredPropNames = [];
 
+    /** `Class::prop` keys of the {@see $refStoredPropNames} arguments whose receiver
+     *  class is known: such a slot is a CELL for its whole lifetime, typed or not
+     *  ({@see Passes\InferTypes::scanRefCellProps}), so it can hold the REF cell.
+     *  @var array<string, bool> */
+    public array $refStoredProps = [];
+
+    /** `fn#paramIdx` of every by-ref param some body keeps a reference to: the caller's
+     *  slot may be a ref cell, so a scalar param rides a cell too
+     *  ({@see Passes\InferScans::scanByRefParamRetype}).
+     *  @var array<string, bool> */
+    public array $refStoringParams = [];
+
     /** The error/shutdown prelude is compiled in, so main() registers the
      *  atexit trampoline that drains register_shutdown_function's queue and the
      *  uncaught path offers the Throwable to a set_exception_handler() first.

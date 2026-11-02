@@ -1,0 +1,14 @@
+o d1 |
+d2 |
+object(RC)#1 (1) {
+  ["i"]=>
+  int(3)
+}
+d3 |
+o d10 o d11 o d12 |
+d5 object(RC)#1 (1) {
+  ["i"]=>
+  int(4)
+}
+int(2)
+d4 |

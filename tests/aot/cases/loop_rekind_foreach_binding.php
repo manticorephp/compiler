@@ -14,7 +14,7 @@ md3([new O(2)]);
 /** @param O[] $objs */
 function mdb(array $objs): void { foreach (['x'] as $v) {} foreach ($objs as $v) { if ($v->i > 5) { echo "big\n"; break; } } var_dump($v); }
 mdb([]);
-mdb([new O(7), new O(1)]);
+$t = [new O(7), new O(1)]; mdb($t); unset($t);
 mdb([new O(1)]);
 // …and a body that also stores to the binding: the break leaves before the
 // store, with the element still raw in the slot.

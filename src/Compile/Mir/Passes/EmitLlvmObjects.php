@@ -97,6 +97,7 @@ trait EmitLlvmObjects
             $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
             $out .= '  call ptr @memcpy(ptr ' . $obj . ', ptr ' . $tmpl
                   . ', i64 ' . (string)$size . ")\n";
+            $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $obj . ")\n";
             $this->lastValue = $obj;
             $this->lastValueType = 'ptr';
             return $out;
@@ -164,6 +165,7 @@ trait EmitLlvmObjects
                 $out .= '  store i64 0, ptr ' . $mGep . "\n";
             }
         }
+        if (!$isStruct) { $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $obj . ")\n"; }
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
         return $out;
@@ -474,9 +476,7 @@ trait EmitLlvmObjects
                 $out .= $this->faPush($this->lsbTarget($ctorClass, '__construct', $cd->name),
                     $srcArgc, $fixedArgs, 1);
                 $cr = $this->ssa->allocReg();
-                $out .= '  ' . $cr . ' = call i64 @manticore_'
-                      . $this->mangle($this->lsbTarget($ctorClass, '__construct', $cd->name))
-                      . '(' . $argList . ")\n";
+                $out .= $this->ctorCallIr($cr, $cd->name, $this->lsbTarget($ctorClass, '__construct', $cd->name), $argList);
                 $out .= $padDrops;
             }
             // The MIR node is typed CELL (`new_dyn %n() : cell`), so the value
@@ -826,8 +826,7 @@ trait EmitLlvmObjects
             $out .= $this->btPush('__construct', $n->line);
             $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->args, 1);
             $cr = $this->ssa->allocReg();
-            $out .= '  ' . $cr . ' = call i64 @manticore_' . $this->mangle($ctorTarget)
-                  . '(' . $argList . ")\n";
+            $out .= $this->ctorCallIr($cr, $cd->name, $ctorTarget, $argList);
             $out .= $this->btPop();
             $out .= $refSlotDrops;
             $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
@@ -859,6 +858,50 @@ trait EmitLlvmObjects
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
         return $out;
+    }
+
+    /**
+     * `$cr = <constructor of $class>($argList)` for a `new`. A constructor that
+     * may throw goes through `@__mc_ctorg.*`: its cleanup pad gives the
+     * half-built object back the way php's `zend_object_store_ctor_failed`
+     * does (no destructor, then the release, so its handle is reused) and
+     * resumes. Nothing else owns that object yet: without the pad it leaked,
+     * and its destructor ran at shutdown. `alwaysinline`, so the resume
+     * becomes the caller's own unwind edge.
+     */
+    private function ctorCallIr(string $cr, string $class, string $target, string $argList): string
+    {
+        $callee = '@manticore_' . $this->mangle($target);
+        if ($this->nothrow !== null && $this->nothrow->nothrow($target)) {
+            return '  ' . $cr . ' = call i64 ' . $callee . '(' . $argList . ")\n";
+        }
+        $arity = \substr_count($argList, 'i64 ');
+        $sym = '@__mc_ctorg.' . $this->mangle($class) . '.' . (string)$arity;
+        $key = 'ctorg:' . $sym;
+        if (!isset($this->dynamicMethodHelpers[$key])) {
+            $this->rt->needsExceptions = true;
+            $params = [];
+            for ($i = 0; $i < $arity; $i = $i + 1) { $params[] = 'i64 %a' . (string)$i; }
+            $pl = \implode(', ', $params);
+            $oldSsa = $this->ssa;
+            $this->ssa = new \Compile\Mir\SsaBuilder();
+            $body = 'define linkonce_odr i64 ' . $sym . '(' . $pl . ') alwaysinline'
+                . \Compile\Runtime\UnwindRuntime::PERSONALITY . " {\nentry:\n"
+                . '  %r = invoke i64 ' . $callee . '(' . $pl . ") to label %ok unwind label %lp\n"
+                . "ok:\n  ret i64 %r\nlp:\n  %l = landingpad { ptr, i32 } cleanup\n";
+            if ($this->resolveMethodClass($class, '__destruct') !== '') {
+                $body .= "  %p = inttoptr i64 %a0 to ptr\n"
+                    . "  call i1 @__mir_dtor_unreg(ptr %p)\n"
+                    . "  %hp = getelementptr i8, ptr %p, i64 8\n"
+                    . "  %h0 = load i64, ptr %hp\n"
+                    . '  %h1 = or i64 %h0, ' . (string)\Compile\MemoryAbi::DTOR_CALLED_MASK . "\n"
+                    . "  store i64 %h1, ptr %hp\n";
+            }
+            $body .= $this->rcReleaseReg('%a0', 'obj') . "  resume { ptr, i32 } %l\n}\n\n";
+            $this->ssa = $oldSsa;
+            $this->dynamicMethodHelpers[$key] = $body;
+        }
+        return '  ' . $cr . ' = call i64 ' . $sym . '(' . $argList . ")\n";
     }
 
     /**
@@ -1116,6 +1159,7 @@ trait EmitLlvmObjects
         $rcGep = $this->ssa->allocReg();
         $out .= '  ' . $rcGep . ' = getelementptr inbounds i64, ptr ' . $new . ", i64 1\n";
         $out .= '  store i64 1, ptr ' . $rcGep . "\n";
+        $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $new . ")\n";
         if ($this->resolveMethodClass($cd->name, '__destruct') !== '') {
             $out .= '  call void @__mir_dtor_reg(ptr ' . $new . ")\n";
         }
@@ -6965,6 +7009,17 @@ trait EmitLlvmObjects
                     if ($owned) {
                         $out .= $this->ownedBoxReleaseIr($name, false);
                     }
+                    // `$v = &$a[$k]; unset($v);` — the frame's count on the
+                    // ELEMENT's box goes too, now, not at the frame's exit: held
+                    // until then it kept the element a shared reference, and a
+                    // copy of `$a` aliased it (#548).
+                    if (isset($this->locals->elemRefBoxes[$name])) {
+                        $eo = $this->locals->elemRefBoxes[$name];
+                        $eb = $this->ssa->allocReg();
+                        $out .= '  ' . $eb . ' = load ptr, ptr ' . $eo . "\n";
+                        $out .= '  call void @__mir_ref_release(ptr ' . $eb . ")\n";
+                        $out .= '  store ptr null, ptr ' . $eo . "\n";
+                    }
                     $nb = $this->ssa->allocReg();
                     $out .= '  ' . $nb . ' = call ptr @__mir_ref_new(i64 '
                           . (string)\Compile\MemoryAbi::CELL_NULL . ")\n";
@@ -9347,8 +9402,11 @@ trait EmitLlvmObjects
         // (`$x[...]` → `offsetGet`, `$o(...)` → `__invoke`) never met
         // ResolveOverloads, so the same rule decides it now; its node type is
         // still the spec's, so an erased (cell) result is decoded to it.
+        // The erased thunk has just checked its claims itself: its own call to the
+        // spec method must not route back through it.
         $route = $mc->direct !== '' ? $mc->direct
-            : ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes);
+            : (\str_ends_with($this->frame->name, '$erased') ? ''
+                : ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes));
         if ($route !== '') {
             $dArgs = [$mc->object];
             foreach ($mc->args as $a) { $dArgs[] = $a; }

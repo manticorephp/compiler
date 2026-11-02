@@ -635,7 +635,7 @@ final class EscapeSummaries
                 'array_product', 'array_count_values', 'array_is_list', 'array_search',
                 'in_array', 'range', 'min', 'max', 'preg_match', 'preg_match_all',
                 'preg_replace', 'preg_split', 'preg_quote', 'preg_last_error', 'dirname',
-                'basename', 'pathinfo', 'microtime', 'hrtime', 'time', 'spl_object_id',
+                'basename', 'pathinfo', 'microtime', 'hrtime', 'time', 'spl_object_id', '__mc_obj_addr',
                 'spl_object_hash', 'get_class', 'get_parent_class', 'get_debug_type',
                 'gettype', 'method_exists', 'property_exists', 'class_exists',
                 'function_exists', 'is_a', 'is_subclass_of', 'fmod', 'pow', 'log', 'exp',

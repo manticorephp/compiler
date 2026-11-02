@@ -74,6 +74,7 @@ final class ResolveOverloads implements Pass
     {
         if ($n->kind === Node::KIND_CALL) { $this->resolve($n); }
         if ($n->kind === Node::KIND_METHOD_CALL) { $this->resolveClaim($n); }
+        if ($n->kind === Node::KIND_NEW_OBJ) { $this->checkClaimedNew($n); }
         foreach (Walk::children($n) as $c) { $this->visit($c); }
     }
 
@@ -84,11 +85,43 @@ final class ResolveOverloads implements Pass
     }
 
     /**
+     * `new Box(5)` bound `Box<string>`: the specialization's constructor takes a
+     * raw string, and no erased body can build the object, so an argument that
+     * provably does not fit the binding's claim throws instead of being converted.
+     * An argument of erased type is not provable here and keeps its coercion.
+     */
+    private function checkClaimedNew(\Compile\Mir\NewObj $no): void
+    {
+        $fn = self::claimedMethod($no->class, '__construct', $this->claimed, $this->classes);
+        if ($fn === null) { return; }
+        foreach ($fn->claimParams as $i => $ct) {
+            $a = $no->args[$i - 1] ?? null;
+            if ($a === null || $a->kind === Node::KIND_SPREAD || !self::claimMisfits($a->type, $ct, $this->classes)) { continue; }
+            $origin = ($this->classes[$no->class]->originClass ?? '') ?: $no->class;
+            $msg = 'Argument #' . (string)$i . ' ($' . $fn->params[$i]->name . ') of ' . $origin . '::__construct() does not fit the type its binding claims';
+            $no->args[$i - 1] = new \Compile\Mir\Throw_(new \Compile\Mir\NewObj('TypeError', [
+                new \Compile\Mir\StringConst($msg, Type::string_()),
+            ], Type::obj('TypeError')), $ct);
+        }
+    }
+
+    /** `$given` is a concrete type that is certainly not what a `$want` claim holds. */
+    private static function claimMisfits(Type $given, Type $want, array $classes): bool
+    {
+        $gk = $given->kind;
+        if ($gk === Type::KIND_CELL || $gk === Type::KIND_UNKNOWN || $gk === Type::KIND_UNION
+            || $gk === Type::KIND_TYPEVAR) {
+            return false;
+        }
+        return !self::claimFits($given, $want, $classes);
+    }
+
+    /**
      * A reified receiver (`Map<string,int>` → `Map__of__string__int`) runs its
      * spec method only when every argument provably fits what the binding
-     * claimed for an erased param; otherwise the ORIGIN's erased body runs, as
-     * on an unbound receiver — the claim never converts or reinterprets. Returns
-     * that origin, or '' for ordinary dispatch. Shared with EmitLlvm, which
+     * claimed for an erased param; otherwise the erased thunk checks it at run
+     * time and throws a TypeError on a misfit — the claim never converts or
+     * reinterprets. Returns that thunk, or '' for ordinary dispatch. Shared with EmitLlvm, which
      * builds `$x[...]` / `__invoke` method calls after this pass has run.
      *
      * @param array<string, FunctionDef> $claimed spec method name → its def, each with claimed params

@@ -2011,6 +2011,10 @@ final class UnifiedArrayRuntime
         // exactly. Retain and release read the SAME nibble: one side alone is a
         // leak, the other a double free.
         $elemHint = $this->ownedElemHint($bump, $flags, $valueFlavor);
+        // ADOPT owns a fresh copy's slots: a reference only the source holds
+        // becomes its value there, as in the COW clone ({@see loadElemForCopy}).
+        // A RETAIN shares the buffer itself and must leave every slot alone.
+        $cellSlots = (!$bumpRc && $valueFlavor !== '') ? $this->cellHintIr($bump, $flags) : null;
         $hhead = $fn->block('rt_hhead');
         if ($valueFlavor === '') {
             $bump->brIf($isH, $hhead, $ret);
@@ -2022,7 +2026,7 @@ final class UnifiedArrayRuntime
             $pgate->brIf($hasCells, $phead, $ret);
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
-            $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
+            [$pbody, $pv] = $this->loadElemForCopy($fn, $pbody, $this->packedSlot($pbody, $arr, $pi), $cellSlots, 'arp');
             $pbody->call('__mir_elem_retain_auto', Type::void(), [$pv, $flags]);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
@@ -2032,7 +2036,7 @@ final class UnifiedArrayRuntime
             $bump->brIf($isH, $hhead, $phead);
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
-            $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $arr, $pi));
+            [$pbody, $pv] = $this->loadElemForCopy($fn, $pbody, $this->packedSlot($pbody, $arr, $pi), $cellSlots, 'acp');
             $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'rtp', $elemHint);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
@@ -2059,14 +2063,14 @@ final class UnifiedArrayRuntime
             $hadv = $fn->block('rt_hadv');
             $hvret = $fn->block('rt_hvret');
             $hval->brIf($hasCells, $hvret, $hadv);
-            $vv = $hvret->load(Type::i64(), $this->entryAddr($hvret, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+            [$hvret, $vv] = $this->loadElemForCopy($fn, $hvret, $this->entryAddr($hvret, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), $cellSlots, 'arh');
             $hvret->call('__mir_elem_retain_auto', Type::void(), [$vv, $flags]);
             $hvret->br($hadv);
             $hadv->store($hadv->add($hi, Value::int(Type::i64(), 1)), $iSlot);
             $hadv->br($hhead);
         } else {
             if ($valueFlavor !== '') {
-                $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+                [$hval, $vv] = $this->loadElemForCopy($fn, $hval, $this->entryAddr($hval, $arr, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), $cellSlots, 'ach');
                 $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'rth', $elemHint);
             }
             $hval->store($hval->add($hi, Value::int(Type::i64(), 1)), $iSlot);
@@ -3709,6 +3713,9 @@ final class UnifiedArrayRuntime
         $repr = ($valueFlavor === 'repr');
         $reprBits = $repr ? $clone->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_REPR_MASK)) : null;
         $hasCells = $repr ? $this->reprOrHintIr($clone, $flags) : null;
+        // A reference only the source holds becomes its value in the clone
+        // ({@see loadElemForCopy}).
+        $cellSlots = $valueFlavor !== '' ? $this->cellHintIr($clone, $flags) : null;
         $hhead = $fn->block('cow_hhead');
         if ($valueFlavor === '') {
             // PACKED scalars share nothing rc'd → done. HASHED: retain keys.
@@ -3721,7 +3728,7 @@ final class UnifiedArrayRuntime
             $pgate->brIf($hasCells, $phead, $ret);
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
-            $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $copy, $pi));
+            [$pbody, $pv] = $this->loadElemForCopy($fn, $pbody, $this->packedSlot($pbody, $copy, $pi), $cellSlots, 'rp');
             $pbody->call('__mir_elem_retain_auto', Type::void(), [$pv, $flags]);
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
@@ -3731,7 +3738,7 @@ final class UnifiedArrayRuntime
             $clone->brIf($isH, $hhead, $phead);
             $pi = $phead->load(Type::i64(), $iSlot);
             $phead->brIf($phead->icmp('sge', $pi, $len), $ret, $pbody);
-            $pv = $pbody->load(Type::i64(), $this->packedSlot($pbody, $copy, $pi));
+            [$pbody, $pv] = $this->loadElemForCopy($fn, $pbody, $this->packedSlot($pbody, $copy, $pi), $cellSlots, 'cp');
             $pbody = $this->emitRetainValue($fn, $pbody, $pv, $valueFlavor, 'cowp', $this->ownedElemHint($pbody, $flags, $valueFlavor));
             $pbody->store($pbody->add($pi, Value::int(Type::i64(), 1)), $iSlot);
             $pbody->br($phead);
@@ -3759,14 +3766,14 @@ final class UnifiedArrayRuntime
             $hadv = $fn->block('cow_hadv');
             $hvret = $fn->block('cow_hvret');
             $hval->brIf($hasCells, $hvret, $hadv);
-            $vv = $hvret->load(Type::i64(), $this->entryAddr($hvret, $copy, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+            [$hvret, $vv] = $this->loadElemForCopy($fn, $hvret, $this->entryAddr($hvret, $copy, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), $cellSlots, 'rh');
             $hvret->call('__mir_elem_retain_auto', Type::void(), [$vv, $flags]);
             $hvret->br($hadv);
             $hadv->store($hadv->add($hi, Value::int(Type::i64(), 1)), $iSlot);
             $hadv->br($hhead);
         } else {
             if ($valueFlavor !== '') {
-                $vv = $hval->load(Type::i64(), $this->entryAddr($hval, $copy, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
+                [$hval, $vv] = $this->loadElemForCopy($fn, $hval, $this->entryAddr($hval, $copy, $hi, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET), $cellSlots, 'ch');
                 $hval = $this->emitRetainValue($fn, $hval, $vv, $valueFlavor, 'cowh', $this->ownedElemHint($hval, $flags, $valueFlavor));
             }
             $hval->store($hval->add($hi, Value::int(Type::i64(), 1)), $iSlot);
@@ -3778,6 +3785,52 @@ final class UnifiedArrayRuntime
         }
         $ret->ret($copy);
         $keep->ret($arr);
+    }
+
+    /**
+     * Load a fresh copy's element word at `$slot` (a COW clone, an adopt); a
+     * REF element whose box only the source still holds (`__mir_ref_shared`
+     * false) is replaced in the copy by the box's value — php's
+     * `zend_array_dup` unwraps a reference of refcount 1 the same way.
+     * Without it a reference that is gone (`$r = [&$a[0]]; unset($r);`, or
+     * every by-ref spread) left the element a box both copies shared, and a
+     * write to the copy wrote the original (#548). The copy then co-owns the
+     * VALUE, not the box: the caller retains the answered word.
+     * `$cellSlots` (i1, {@see cellHintIr}) gates the test: a REF word lives
+     * only under a CELL hint (`__mir_array_ref_box*` cellifies the buffer
+     * before promoting), and a raw int slot may hold the same bit pattern.
+     * Null = the walk owns nothing, a plain load. Returns [continuation, word].
+     *
+     * @return array{0: Block, 1: Value}
+     */
+    private function loadElemForCopy(FunctionDef $fn, Block $b, Value $slot, ?Value $cellSlots, string $tag): array
+    {
+        $v = $b->load(Type::i64(), $slot);
+        if ($cellSlots === null) { return [$b, $v]; }
+        $chk = $fn->block('cu_chk_' . $tag);
+        $un = $fn->block('cu_un_' . $tag);
+        $join = $fn->block('cu_join_' . $tag);
+        $isRef = $b->and_($cellSlots, $b->icmp('eq',
+            $b->and_($v, Value::int(Type::i64(), ~MemoryAbi::CELL_PAYLOAD_MASK)),
+            Value::int(Type::i64(), MemoryAbi::CELL_REF_TAG_BITS)));
+        $b->brIf($isRef, $chk, $join);
+        $p = $chk->inttoptr($chk->and_($v, Value::int(Type::i64(), MemoryAbi::CELL_PAYLOAD_MASK)), Type::ptr());
+        $chk->brIf($chk->call('__mir_ref_shared', Type::i1(), [$p]), $join, $un);
+        $inner = $un->load(Type::i64(), $p);
+        $un->store($inner, $slot);
+        $un->br($join);
+        $phi = $join->phi(Type::i64());
+        $phi->addIncoming($v, $b);
+        $phi->addIncoming($v, $chk);
+        $phi->addIncoming($inner, $un);
+        return [$join, $phi->value()];
+    }
+
+    /** i1: the buffer's element hint says its slots are cells. */
+    private function cellHintIr(Block $b, Value $flags): Value
+    {
+        return $b->icmp('eq', $b->and_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_MASK)),
+            Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL));
     }
 
     /**

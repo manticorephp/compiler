@@ -453,7 +453,7 @@ trait LowerFns
             || $n === 'implode' || $n === 'join'
             || $n === 'sprintf' || $n === 'printf'
             || $n === 'exit' || $n === 'die' || $n === 'error_log'
-            || $n === 'gc_collect_cycles' || $n === 'spl_object_id'
+            || $n === 'gc_collect_cycles' || $n === 'spl_object_id' || $n === '__mc_obj_addr'
             || $n === 'get_class' || $n === 'array_pop' || $n === 'array_shift'
             || $n === 'array_unshift' || $n === 'addslashes' || $n === 'getenv'
             || $n === 'putenv' || $n === '__mir_fn_exists'
@@ -919,7 +919,20 @@ trait LowerFns
         $args = [];
         $names = [];
         $anyNamed = false;
+        /** @var Node[] $pro */
+        $pro = [];
         foreach ($expr->args as $a) {
+            // `$o->$m(...$xs)`: the callee is chosen at run time, so its by-ref
+            // parameters are unknown here — unpack by reference always. Harmless
+            // for a by-value callee: the boxes are `$xs`'s alone afterwards, and a
+            // copy of `$xs` unwraps them (#548, #511). Only the promotion runs
+            // ahead of the call; the argument stays the plain `...$xs` every
+            // dynamic dispatch path reads.
+            $ra = $ck === 'DynProp' && $a->kind === 'Spread' ? $this->lowerRefSpread($a) : null;
+            if ($ra instanceof \Compile\Mir\Spread_ && $ra->operand instanceof Block) {
+                $rs = $ra->operand->stmts;
+                for ($pi = 0; $pi < \count($rs) - 1; $pi = $pi + 1) { $pro[] = $rs[$pi]; }
+            }
             $args[] = $this->lowerExpr($a);
             if ($a->kind === 'NamedArg') {
                 $names[] = $this->namedArgName($a);
@@ -932,6 +945,10 @@ trait LowerFns
         if ($anyNamed) {
             $inv->argNames = $names;
             $this->module->namedInvokes = true;
+        }
+        if ($pro !== []) {
+            $pro[] = $inv;
+            return new Block($pro, Type::unknown());
         }
         return $inv;
     }
@@ -1124,7 +1141,7 @@ trait LowerFns
             return new \Compile\Mir\RefCell_($lv, Type::cell());
         }
         if ($k === 'Spread') {
-            $rs = $this->lowerRefSpread($a);
+            $rs = $this->lowerRefSpread($a, true);
             if ($rs !== null) { return $rs; }
         }
         return $this->lowerExpr($a);
@@ -1136,8 +1153,13 @@ trait LowerFns
      * as `$t = []; foreach ($xs as $k => &$v) { $t[$k] = &$v; }` and `...$t`:
      * the spread keeps a reference another binding still names. Only a plain
      * variable is unpacked by reference — php passes any other operand's values.
+     *
+     * `$intoPack`: the elements land in a by-ref variadic PACK, whose literal
+     * keeps a REF element only while another binding names it — `$t` is that
+     * binding and stays to the end of the scope (an alias left behind, the
+     * #548 shape, until the pack can take the references unconditionally).
      */
-    private function lowerRefSpread(\Parser\Ast\Expr $a): ?Node
+    private function lowerRefSpread(\Parser\Ast\Expr $a, bool $intoPack = false): ?Node
     {
         if (!\Compile\Debug::$refCells) { return null; }
         $sv = $this->spreadValueOf($a);
@@ -1153,10 +1175,17 @@ trait LowerFns
             \Parser\Ast\Expr::variable($vn, $span), $span));
         $loop = $this->foreachBindRef($this->lowerExpr($sv), $kn, $vn, new Block([$bind], Type::void()));
         $this->module->hasRefCells = true;
+        // The loop promotes every element of `$xs` to a reference box in place;
+        // `$t` and `$v` are dropped before the call, so `$xs` is the boxes' only
+        // holder and the spread of `$xs` itself binds each by-ref parameter to
+        // one. A temp still holding them would keep every element shared after
+        // the call, and the next copy of `$xs` would alias it (#548).
+        $vLoad = $this->lowerExpr(\Parser\Ast\Expr::variable($vn, $span));
         return new \Compile\Mir\Spread_(new Block([
             $this->lowerExpr(\Parser\Ast\Expr::assign($t, \Parser\Ast\Expr::arrayLit([], $span), $span)),
             $loop,
-            $this->lowerExpr($t),
+            new \Compile\Mir\Unset_($intoPack ? [$vLoad] : [$this->lowerExpr($t), $vLoad], Type::void()),
+            $this->lowerExpr($intoPack ? $t : $sv),
         ], Type::unknown()), Type::unknown());
     }
 

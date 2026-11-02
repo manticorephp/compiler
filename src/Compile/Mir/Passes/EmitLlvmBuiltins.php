@@ -423,6 +423,7 @@ trait EmitLlvmBuiltins
         if ($name === 'error_log')                    { return $this->biErrorLog($args); }
         if ($name === 'gc_collect_cycles')            { return $this->biGcCollect(); }
         if ($name === 'spl_object_id')                { return $this->biSplObjectId($args); }
+        if ($name === '__mc_obj_addr')               { return $this->biObjAddr($args); }
         // Reflection Tier-2 metadata reads. Internal (`__mc_` prefix) — the
         // public surface is prelude/reflection.php, which is generic code over
         // the data these return.
@@ -2718,6 +2719,9 @@ trait EmitLlvmBuiltins
             } else {
                 $v = $this->ssa->allocReg();
                 $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";
+                // A call result is +1 for every consumer (Ownership::storedOwned); the
+                // slot keeps its own count, so hand out a retained copy.
+                $out .= '  call void @__mir_cell_retain(i64 ' . $v . ")\n";
                 $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
             }
             $out .= '  br label %' . $endL . "\n";
@@ -2726,6 +2730,9 @@ trait EmitLlvmBuiltins
         $out .= $this->inclRuntimeFallback($pathP, $res, $req);
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
+        // realpath(.., NULL) mallocs its answer; every call leaked it.
+        $this->libcExtra['free'] = 'declare void @free(ptr)';
+        $out .= '  call void @free(ptr ' . $rp . ")\n";
         $loaded = $this->ssa->allocReg();
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         // NOT marked. Two of three stores into $res box by construction
@@ -6179,6 +6186,10 @@ trait EmitLlvmBuiltins
         // `var_dump(f(1), f(2))` shows both calls' output ahead of the dumps.
         /** @var array<int, array{0: bool, 1: string}> float? + the value register */
         $vals = [];
+        /** @var string[] */
+        $freshObjs = [];
+        /** @var array<int, array{0: string, 1: string}> */
+        $freshCells = [];
         foreach ($args as $a) {
             if ($a->type->kind === Type::KIND_FLOAT) {
                 $out .= $this->emitNode($a);
@@ -6190,6 +6201,29 @@ trait EmitLlvmBuiltins
                 $vals[] = [true, ''];
             } else {
                 $out .= $this->emitNode($a);
+                // An OWNED object temp (`var_dump(new C)`, `var_dump(mk())`) is given
+                // back once dumped; stranding it ran its destructor at exit and kept
+                // its handle out of the free list.
+                if (($a->type->kind === Type::KIND_OBJ || $a->type->kind === Type::KIND_UNION)
+                    && ($this->lastValueType === 'ptr' || $this->lastValueType === 'i64')
+                    && \str_starts_with($this->lastValue, '%')
+                    && ($this->freshRcArgFlavor($a) === 'obj'
+                        || ($a->kind === Node::KIND_CALL && !$this->lastCallWasBuiltin && $a->type->kind === Type::KIND_OBJ))) {
+                    $fp = $this->lastValue;
+                    if ($this->lastValueType === 'i64') {
+                        $fp = $this->ssa->allocReg();
+                        $out .= '  ' . $fp . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+                    }
+                    $freshObjs[] = $fp;
+                } elseif ($a->type->kind === Type::KIND_CELL && \str_starts_with($this->lastValue, '%')) {
+                    // …and so is an owned CELL temp: `var_dump(f() ?: 'x')`, a
+                    // mixed-returning call. A cell boxes to itself below.
+                    $cf = $this->freshRcArgFlavor($a);
+                    if ($cf !== '') {
+                        $out .= $this->coerceToI64();
+                        $freshCells[] = [$this->lastValue, $cf];
+                    }
+                }
                 // An erased value may already BE a cell (array_shift over a
                 // bare-`array` answers a boxed NULL on empty); box_int would
                 // re-box it and print the carrier as an integer.
@@ -6219,6 +6253,9 @@ trait EmitLlvmBuiltins
                 $out .= '  call i64 @manticore___mir_var_dump(i64 ' . $v[1] . ', i64 0)' . "\n";
             }
         }
+        if ($freshObjs !== []) { $this->rt->needsRc = true; }
+        foreach ($freshObjs as $fo) { $out .= '  call void @__mir_rc_release(ptr ' . $fo . ")\n"; }
+        foreach ($freshCells as $fc) { $out .= $this->rcReleaseReg($fc[0], $fc[1]); }
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
         return $out;
@@ -7542,13 +7579,48 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /** @param Node[] $args  __mc_obj_addr($o) — the object ADDRESS, what the weak
+     *  registry keys by and its death hook is handed. Not the php handle. */
+    private function biObjAddr(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0], true);
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
     /** @param Node[] $args  spl_object_id($o) — the object pointer as a
      * stable per-object int (unique among live objects). */
     private function biSplObjectId(array $args): string
     {
         $out = $this->emitPtrArg($args[0], true);
+        $p = $this->lastValue;
+        // An ordinary object answers its php-style handle (header word). Anything
+        // else that reaches here (an enum case singleton, a closure env, a
+        // #[Struct] value) has no such word and keeps its address.
+        $mp = $this->ssa->allocReg();
+        $out .= '  ' . $mp . ' = getelementptr inbounds i8, ptr ' . $p . ", i64 -8\n";
+        $mw = $this->ssa->allocReg();
+        $out .= '  ' . $mw . ' = load i64, ptr ' . $mp . "\n";
+        $isO = $this->ssa->allocReg();
+        $out .= '  ' . $isO . ' = icmp eq i64 ' . $mw . ', ' . (string)\Compile\MemoryAbi::RC_TAG_MAGIC . "\n";
+        $oL = $this->ssa->allocLabel('oid.obj');
+        $aL = $this->ssa->allocLabel('oid.addr');
+        $eL = $this->ssa->allocLabel('oid.end');
+        $out .= '  br i1 ' . $isO . ', label %' . $oL . ', label %' . $aL . "\n";
+        $out .= $oL . ":\n";
+        $hp = $this->ssa->allocReg();
+        $out .= '  ' . $hp . ' = getelementptr inbounds i8, ptr ' . $p . ', i64 ' . (string)\Compile\MemoryAbi::OBJECT_HANDLE_OFFSET . "\n";
+        $hv = $this->ssa->allocReg();
+        $out .= '  ' . $hv . ' = load i64, ptr ' . $hp . "\n";
+        $out .= '  br label %' . $eL . "\n";
+        $out .= $aL . ":\n";
+        $av = $this->ssa->allocReg();
+        $out .= '  ' . $av . ' = ptrtoint ptr ' . $p . " to i64\n";
+        $out .= '  br label %' . $eL . "\n";
+        $out .= $eL . ":\n";
         $reg = $this->ssa->allocReg();
-        $out .= '  ' . $reg . ' = ptrtoint ptr ' . $this->lastValue . " to i64\n";
+        $out .= '  ' . $reg . ' = phi i64 [ ' . $hv . ', %' . $oL . ' ], [ ' . $av . ', %' . $aL . " ]\n";
         return $this->finishI64($out, $reg);
     }
 
