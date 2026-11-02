@@ -6960,6 +6960,17 @@ trait EmitLlvmObjects
                     if ($owned) {
                         $out .= $this->ownedBoxReleaseIr($name, false);
                     }
+                    // `$v = &$a[$k]; unset($v);` — the frame's count on the
+                    // ELEMENT's box goes too, now, not at the frame's exit: held
+                    // until then it kept the element a shared reference, and a
+                    // copy of `$a` aliased it (#548).
+                    if (isset($this->locals->elemRefBoxes[$name])) {
+                        $eo = $this->locals->elemRefBoxes[$name];
+                        $eb = $this->ssa->allocReg();
+                        $out .= '  ' . $eb . ' = load ptr, ptr ' . $eo . "\n";
+                        $out .= '  call void @__mir_ref_release(ptr ' . $eb . ")\n";
+                        $out .= '  store ptr null, ptr ' . $eo . "\n";
+                    }
                     $nb = $this->ssa->allocReg();
                     $out .= '  ' . $nb . ' = call ptr @__mir_ref_new(i64 '
                           . (string)\Compile\MemoryAbi::CELL_NULL . ")\n";
