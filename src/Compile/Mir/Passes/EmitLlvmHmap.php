@@ -75,6 +75,9 @@ trait EmitLlvmHmap
     {
         $op = HmapInline::call($mc);
         if ($op === null) { return null; }
+        // An argument the binding's claim does not provably hold is checked by
+        // the erased thunk; the inline probe would store it unchecked.
+        if ($mc->direct !== '' || (!\str_ends_with($this->frame->name, '$erased') && ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes) !== '')) { return null; }
         $cls = \ltrim((string)($mc->object->type->class ?? ''), '\\');
         if (!isset($this->classes[$cls])) { return null; }
         $off = $this->classes[$cls]->propertyOffset('__mcbuf');

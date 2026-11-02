@@ -170,11 +170,11 @@ final class FunctionDef
     public array $ownGenParams = [];
 
     /**
-     * A reified method ({@see Passes\LowerReify}): the ORIGIN's erased body, and
+     * A reified method ({@see Passes\LowerReify}): its erased thunk, and
      * the params whose concrete type came only from the template binding (a
      * docblock claim over a `mixed`/untyped native hint), index → that type. A
-     * call whose argument does not provably fit one of them runs the origin
-     * instead ({@see Passes\ResolveOverloads}). '' / [] for everything else.
+     * call whose argument does not provably fit one of them runs the thunk
+     * instead, which throws on a misfit ({@see Passes\ResolveOverloads}). '' / [] for everything else.
      */
     public string $claimOrigin = '';
     /** @var array<int, Type> */

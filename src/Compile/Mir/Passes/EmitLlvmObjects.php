@@ -9339,8 +9339,11 @@ trait EmitLlvmObjects
         // (`$x[...]` → `offsetGet`, `$o(...)` → `__invoke`) never met
         // ResolveOverloads, so the same rule decides it now; its node type is
         // still the spec's, so an erased (cell) result is decoded to it.
+        // The erased thunk has just checked its claims itself: its own call to the
+        // spec method must not route back through it.
         $route = $mc->direct !== '' ? $mc->direct
-            : ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes);
+            : (\str_ends_with($this->frame->name, '$erased') ? ''
+                : ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes));
         if ($route !== '') {
             $dArgs = [$mc->object];
             foreach ($mc->args as $a) { $dArgs[] = $a; }
