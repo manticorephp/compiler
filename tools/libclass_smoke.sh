@@ -119,6 +119,8 @@ PHP
 php -r '
 $fix = $argv[1]; $work = $argv[2];
 $m = json_decode(file_get_contents($fix . "/manticore.json"), true);
+$m["libraries"][0]["src"]      = $fix . "/lib";
+$m["libraries"][0]["output"]   = $work . "/acme.o";
 $m["applications"][0]["src"]     = $work . "/collide/app";
 $m["applications"][0]["entry"]   = $work . "/collide/app/main.php";
 $m["applications"][0]["output"]  = $work . "/collide/collideapp";

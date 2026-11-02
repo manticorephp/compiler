@@ -9,13 +9,13 @@
     "#[Ffi\\Library] names, or one whose flags are not a bare -l."
   ],
   "extensions": {
-    "zlib": { "src": "ext/zlib", "link": [], "static": false }
+    "zlib": { "src": "../zlib", "link": [], "static": false }
   },
   "applications": [{
     "name": "zlibtest_attrlink",
-    "src": "ext/zlib_test",
+    "src": ".",
     "output": "/tmp/zlibtest_attrlink_bin",
-    "entry": "ext/zlib_test/main.php",
+    "entry": "main.php",
     "libraries": [],
     "extensions": ["zlib"]
   }]
