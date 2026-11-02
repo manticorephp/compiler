@@ -234,6 +234,8 @@ trait EmitLlvmBuiltins
         $name = \strtolower($c->function);
         if ($name === "runtime\\libc\\strlen") {
             $name = "strlen";
+        } elseif ($name === "manticore\\wrapping_add" || $name === "manticore\\wrapping_sub" || $name === "manticore\\wrapping_mul") {
+            return $this->biWrapping(\substr($name, 19), $c->args);
         } elseif (\str_contains($name, '\\')) {
             // A leading slash is PHP's explicit global-namespace spelling.
             // Any other namespace segment denotes a distinct user function.
@@ -4223,6 +4225,25 @@ trait EmitLlvmBuiltins
             return $out;
         }
         return $this->coerceArithOperand($arg, false);
+    }
+
+    /**
+     * `Manticore\wrapping_{add,sub,mul}(int, int): int` — the plain two's-complement
+     * instruction, which the checked `+ - *` deliberately is not. Each has a same-named
+     * stdlib body ({@see src/Runtime/Stdlib/Wrapping.php}) the previous compiler links.
+     * @param Node[] $args
+     */
+    private function biWrapping(string $op, array $args): string
+    {
+        $out = $this->emitIntArg($args[0]);
+        $a = $this->lastValue;
+        $out .= $this->emitIntArg($args[1]);
+        $b = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = ' . $op . ' i64 ' . $a . ', ' . $b . "\n";
+        $this->lastValue = $reg;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /** @param Node[] $args */

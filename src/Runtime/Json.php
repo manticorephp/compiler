@@ -520,13 +520,11 @@ function __mc_log10pow5(int $e): int {
 
 /** multipleOfPowerOf5(value, p): value is divisible by 5^p (Ryu pow5Factor). */
 function __mc_multiple_pow5(int $value, int $p): bool {
-    // 5 * m_inv_5 == 1 (mod 2^64); m_inv_5 as its signed-i64 bit pattern.
-    $mInv5 = -3689348814741910323;
-    $nDiv5 = 3689348814741910323;              // 2^64 / 5
+    // Ryu's pow5Factor: the multiplicity of 5 in a positive mantissa (< 2^55). Plain division;
+    // the reference's modular-inverse trick needs a wrapping multiply.
     $count = 0;
-    while (true) {
-        $value = $value * $mInv5;              // wraps mod 2^64 (native)
-        if (\__ugt($value, $nDiv5)) { break; } // unsigned compare
+    while ($value > 0 && $value % 5 === 0) {
+        $value = \intdiv($value, 5);
         $count = $count + 1;
     }
     return $count >= $p;
