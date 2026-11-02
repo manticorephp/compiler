@@ -3063,7 +3063,11 @@ trait InferScans
                     continue;
                 }
                 if (!$this->isByRefRetypeKind($p->type)) { continue; }
-                if (!$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)
+                // A param the body keeps a reference to is handed the caller's REF cell (a
+                // property slot retyped by scanRefCellProps): a raw scalar param would be fed a
+                // scratch copy written back only on a normal return.
+                if (!($module->refStoringParams[$fn->name . '#' . (string)$idx] ?? false)
+                    && !$this->refWordForeign($fn->body, $p->name, $p->type->kind, 0)
                     && !$this->refCellOfLocal($fn->body, $p->name)) { continue; }
                 $this->retypeByRefParamCell($fn, $p);
                 $changed = true;

@@ -193,6 +193,12 @@ final class VivifyRefArgs implements Pass
         }
         $module->refStoredPropNames = $this->storedProps;
         $module->refStoredProps = $this->storedPropKeys;
+        $module->refStoringParams = [];
+        foreach ($this->refStoring as $fname => $per) {
+            foreach ($per as $pi => $on) {
+                if ($on) { $module->refStoringParams[$fname . '#' . (string)$pi] = true; }
+            }
+        }
         if ($this->storedProps !== [] || $this->storedElems) { $module->hasRefCells = true; }
         $module->markPassApplied(self::NAME);
         return $module;
