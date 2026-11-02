@@ -4132,6 +4132,7 @@ trait EmitLlvmExpr
                 $nrc = $this->ssa->allocReg();
                 $out .= '  ' . $nrc . ' = getelementptr inbounds i64, ptr ' . $nobj . ", i64 1\n";
                 $out .= '  store i64 1, ptr ' . $nrc . "\n";
+                $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $nobj . ")\n";
                 $nbg = $this->ssa->allocReg();
                 $out .= '  ' . $nbg . ' = getelementptr inbounds i8, ptr ' . $nobj . ', i64 ' . (string)$bagOff . "\n";
                 $out .= '  store i64 ' . $bagW . ', ptr ' . $nbg . "\n";
@@ -4165,6 +4166,7 @@ trait EmitLlvmExpr
             $rcg = $this->ssa->allocReg();
             $out .= '  ' . $rcg . ' = getelementptr inbounds i64, ptr ' . $obj . ", i64 1\n";
             $out .= '  store i64 1, ptr ' . $rcg . "\n";
+            $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $obj . ")\n";
             $bg = $this->ssa->allocReg();
             $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$bagOff . "\n";
             $out .= '  store i64 ' . $bagI . ', ptr ' . $bg . "\n";

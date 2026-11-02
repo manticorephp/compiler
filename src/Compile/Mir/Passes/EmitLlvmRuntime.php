@@ -306,6 +306,72 @@ trait EmitLlvmRuntime
         return $out;
     }
 
+    /**
+     * php's object handle table: a handle is a small int, 1,2,3.., handed out at
+     * `new` and REUSED (LIFO) once its object is freed — what `spl_object_id` and
+     * `var_dump`'s `#N` answer. The handle lives in the object header
+     * (`OBJECT_HANDLE_OFFSET`); the table is only the free list, threaded through
+     * `links[handle]` like Zend's `objects_store`. Both bodies are idempotent-safe:
+     * `free` zeroes the handle word, so a second free of one object is a no-op.
+     */
+    private function objHandleRuntime(): string
+    {
+        $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
+        $h = (string)\Compile\MemoryAbi::OBJECT_HANDLE_OFFSET;
+        $o = "@__mc_oh_next = linkonce_odr global i64 0\n";
+        $o .= "@__mc_oh_free = linkonce_odr global i64 0\n";
+        $o .= "@__mc_oh_cap = linkonce_odr global i64 0\n";
+        $o .= "@__mc_oh_tab = linkonce_odr global ptr null\n";
+        $o .= "define void @__mir_obj_handle_alloc(ptr %p) {\nentry:\n";
+        $o .= "  %hp = getelementptr i8, ptr %p, i64 " . $h . "\n";
+        $o .= "  %fh = load i64, ptr @__mc_oh_free\n";
+        $o .= "  %hasf = icmp ne i64 %fh, 0\n";
+        $o .= "  br i1 %hasf, label %reuse, label %fresh\n";
+        $o .= "reuse:\n";
+        $o .= "  %tab0 = load ptr, ptr @__mc_oh_tab\n";
+        $o .= "  %lp = getelementptr i32, ptr %tab0, i64 %fh\n";
+        $o .= "  %nx32 = load i32, ptr %lp\n";
+        $o .= "  %nx = zext i32 %nx32 to i64\n";
+        $o .= "  store i64 %nx, ptr @__mc_oh_free\n";
+        $o .= "  store i64 %fh, ptr %hp\n";
+        $o .= "  ret void\n";
+        $o .= "fresh:\n";
+        $o .= "  %n0 = load i64, ptr @__mc_oh_next\n";
+        $o .= "  %n1 = add i64 %n0, 1\n";
+        $o .= "  store i64 %n1, ptr @__mc_oh_next\n";
+        $o .= "  %cap = load i64, ptr @__mc_oh_cap\n";
+        $o .= "  %need = icmp uge i64 %n1, %cap\n";
+        $o .= "  br i1 %need, label %grow, label %done\n";
+        $o .= "grow:\n";
+        $o .= "  %c2 = shl i64 %cap, 1\n";
+        $o .= "  %small = icmp ult i64 %c2, 256\n";
+        $o .= "  %nc = select i1 %small, i64 256, i64 %c2\n";
+        $o .= "  %nb = shl i64 %nc, 2\n";
+        $o .= "  %told = load ptr, ptr @__mc_oh_tab\n";
+        $o .= "  %tnew = call ptr @realloc(ptr %told, i64 %nb)\n";
+        $o .= "  store ptr %tnew, ptr @__mc_oh_tab\n";
+        $o .= "  store i64 %nc, ptr @__mc_oh_cap\n";
+        $o .= "  br label %done\n";
+        $o .= "done:\n";
+        $o .= "  store i64 %n1, ptr %hp\n";
+        $o .= "  ret void\n}\n";
+        $o .= "define void @__mir_obj_handle_free(ptr %p) {\nentry:\n";
+        $o .= "  %hp = getelementptr i8, ptr %p, i64 " . $h . "\n";
+        $o .= "  %h = load i64, ptr %hp\n";
+        $o .= "  %hz = icmp eq i64 %h, 0\n";
+        $o .= "  br i1 %hz, label %out, label %rel\n";
+        $o .= "rel:\n";
+        $o .= "  store i64 0, ptr %hp\n";
+        $o .= "  %tab = load ptr, ptr @__mc_oh_tab\n";
+        $o .= "  %lp = getelementptr i32, ptr %tab, i64 %h\n";
+        $o .= "  %fh = load i64, ptr @__mc_oh_free\n";
+        $o .= "  %fh32 = trunc i64 %fh to i32\n";
+        $o .= "  store i32 %fh32, ptr %lp\n";
+        $o .= "  store i64 %h, ptr @__mc_oh_free\n";
+        $o .= "  br label %out\n";
+        $o .= "out:\n  ret void\n}\n";
+        return $o;
+    }
     private function allocRuntime(): string
     {
         $out  = $this->poolRuntime();
@@ -354,6 +420,7 @@ trait EmitLlvmRuntime
         }
         $out .= "  ret ptr %d\n";
         $out .= "}\n";
+        $out .= $this->objHandleRuntime();
         // Tagged realloc (vec grow): realloc the BASE (ptr-8), the tag
         // rides along in the copied bytes; return new base+8.
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
@@ -918,6 +985,7 @@ trait EmitLlvmRuntime
             $out .= "  %alive2 = icmp sgt i64 %rsg2, 0\n";
             $out .= "  br i1 %alive2, label %done, label %reallyfree\n";
             $out .= "reallyfree:\n";
+            $out .= "  call void @__mir_obj_handle_free(ptr %p)\n";
             $out .= "  %obase = getelementptr i8, ptr %p, i64 -8\n";
             $out .= $this->poolFreeCall('%obase');
             $out .= "  br label %done\n";
@@ -3877,6 +3945,7 @@ end:
         $out .= "  call void @__manticore_cc_drop_strings(ptr %s)\n";
         $out .= "  br label %go\n";
         $out .= "go:\n";
+        $out .= "  call void @__mir_obj_handle_free(ptr %s)\n";
         $out .= "  %base = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
         $out .= $this->poolFreeCall('%base');
@@ -3957,6 +4026,7 @@ end:
         $out .= "  %shfr = load i64, ptr @__manticore_cc_freed\n";
         $out .= "  %shfr1 = add i64 %shfr, 1\n";
         $out .= "  store i64 %shfr1, ptr @__manticore_cc_freed\n";
+        $out .= "  call void @__mir_obj_handle_free(ptr %s)\n";
         $out .= "  %shbase = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->poolFreeCall('%shbase');
         $out .= "  br label %mrn\n";
@@ -3976,6 +4046,7 @@ end:
         $out .= "  %mf0 = load i64, ptr @__manticore_cc_freed\n";
         $out .= "  %mf1 = add i64 %mf0, 1\n";
         $out .= "  store i64 %mf1, ptr @__manticore_cc_freed\n";
+        $out .= "  call void @__mir_obj_handle_free(ptr %s)\n";
         $out .= "  %fbase = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
         $out .= $this->poolFreeCall('%fbase');

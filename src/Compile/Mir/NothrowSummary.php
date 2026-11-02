@@ -631,7 +631,7 @@ final class NothrowSummary
             'poke_i32', 'poke_i64', 'poke_i8'] as $pred) {
             if ($pred === $fn) { return true; }
         }
-        if ($fn === 'spl_object_id' || $fn === 'spl_object_hash' || $fn === 'get_class') {
+        if ($fn === 'spl_object_id' || $fn === '__mc_obj_addr' || $fn === 'spl_object_hash' || $fn === 'get_class') {
             return \count($args) === 1 && $args[0]->type->kind === Type::KIND_OBJ;
         }
         if ($fn === 'count' || $fn === 'sizeof') {
