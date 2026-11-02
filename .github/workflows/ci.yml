@@ -21,8 +21,12 @@
 name: ci
 
 # The line is not "documentation versus everything else", it is "cannot change
-# what the build produces". `tools/` is NOT here: gate.sh and install_smoke.sh
-# live there and they ARE the test. Neither is `install.sh`, nor any Dockerfile,
+# what the build produces". `tools/` is NOT here as a whole: gate.sh,
+# install_smoke.sh, difftest.sh and the other scripts the gate calls live there and
+# they ARE the test. Only the dev-only tool paths listed below (profilers, audits,
+# benches, one-off probes and generators that no workflow, gate.sh, bin/build or
+# tests/**/run.sh calls) are skipped; a NEW tools/ script runs CI until it is added
+# here on purpose. Neither is `install.sh`, nor any Dockerfile,
 # nor the workflows themselves. A push that touches a listed path AND a real one
 # still runs — paths-ignore only skips when every changed file matches.
 #
@@ -46,11 +50,61 @@ on:
       - '.gitattributes'
       - '.claude/**'
       - 'site/**'
+      - 'tools/prof/**'
+      - 'tools/audit/**'
+      - 'tools/bench/**'
+      - 'tools/autobahn.sh'
+      - 'tools/autobahn_client.php'
+      - 'tools/builtins_audit.php'
+      - 'tools/cellguard_scan.sh'
+      - 'tools/cellguard_baseline.txt'
+      - 'tools/check_ir_arity.php'
+      - 'tools/check_offload_abi.php'
+      - 'tools/compile_user_mir.php'
+      - 'tools/ds_polyfill.php'
+      - 'tools/ext_smoke.sh'
+      - 'tools/fiber_ceiling.sh'
+      - 'tools/fiber_ceiling.php'
+      - 'tools/file_bug.sh'
+      - 'tools/gen_mbstring_tables.php'
+      - 'tools/gen_tokenizer_tables.php'
+      - 'tools/libclass_smoke.sh'
+      - 'tools/mbstring_diff.php'
+      - 'tools/offload_bench.php'
+      - 'tools/ownflow_check.sh'
+      - 'tools/ownflow_dump.php'
+      - 'tools/ownership_probe.php'
+      - 'tools/tokenizer_diff.php'
   pull_request:
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - 'site/**'
+      - 'tools/prof/**'
+      - 'tools/audit/**'
+      - 'tools/bench/**'
+      - 'tools/autobahn.sh'
+      - 'tools/autobahn_client.php'
+      - 'tools/builtins_audit.php'
+      - 'tools/cellguard_scan.sh'
+      - 'tools/cellguard_baseline.txt'
+      - 'tools/check_ir_arity.php'
+      - 'tools/check_offload_abi.php'
+      - 'tools/compile_user_mir.php'
+      - 'tools/ds_polyfill.php'
+      - 'tools/ext_smoke.sh'
+      - 'tools/fiber_ceiling.sh'
+      - 'tools/fiber_ceiling.php'
+      - 'tools/file_bug.sh'
+      - 'tools/gen_mbstring_tables.php'
+      - 'tools/gen_tokenizer_tables.php'
+      - 'tools/libclass_smoke.sh'
+      - 'tools/mbstring_diff.php'
+      - 'tools/offload_bench.php'
+      - 'tools/ownflow_check.sh'
+      - 'tools/ownflow_dump.php'
+      - 'tools/ownership_probe.php'
+      - 'tools/tokenizer_diff.php'
   workflow_dispatch:
 
 env:
