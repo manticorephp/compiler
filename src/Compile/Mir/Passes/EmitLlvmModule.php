@@ -2984,6 +2984,13 @@ trait EmitLlvmModule
                 && $this->frame->returnType->kind === Type::KIND_INT) {
                 $out .= $this->coerceTo('i64');
             }
+            // …and an INT from a `: float` one is CONVERTED the same way: the
+            // carrier bitcasts, so the caller read the integer's bits as a double.
+            if ($v->type->kind === Type::KIND_INT
+                && $this->frame->returnType !== null
+                && $this->frame->returnType->kind === Type::KIND_FLOAT) {
+                $out .= $this->coerceTo('double');
+            }
             // ABI: every fn returns i64. Coerce float / ptr through
             // the i64 carrier.
             $out .= $this->coerceToI64();
