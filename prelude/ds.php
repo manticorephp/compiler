@@ -908,7 +908,7 @@ namespace Manticore\Ds {
             if ($bits >= 0) { return (string)$bits; }
             // Unsigned divide by ten: halve as unsigned, divide by five.
             $q = \intdiv(($bits >> 1) & \PHP_INT_MAX, 5);
-            return (string)$q . (string)($bits - $q * 10);
+            return (string)$q . (string)\Manticore\wrapping_sub($bits, \Manticore\wrapping_mul($q, 10));
         }
 
         protected function coerce(mixed $value): mixed
@@ -942,7 +942,7 @@ namespace Manticore\Ds {
             if ($n === 0) { return 0; }
             if ($n > 20 || ($n === 20 && \strcmp($d, '18446744073709551615') > 0)) { $this->outOfRange($d); }
             $v = 0;
-            for ($k = 0; $k < $n; $k++) { $v = $v * 10 + (\ord($d[$k]) - 48); }
+            for ($k = 0; $k < $n; $k++) { $v = \Manticore\wrapping_add(\Manticore\wrapping_mul($v, 10), \ord($d[$k]) - 48); }
             return $v;
         }
 

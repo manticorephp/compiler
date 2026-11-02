@@ -3282,6 +3282,11 @@ trait EmitLlvmObjects
         $propType = ($pcls !== '' && isset($this->classes[$pcls]))
             ? ($this->classes[$pcls]->propertyTypes[$n->property] ?? null)
             : null;
+        // An INT stored into a `float` slot converts (php coerces on assignment); the raw
+        // store left the integer's bits to be read back as a double.
+        if ($propType !== null && $propType->kind === Type::KIND_FLOAT && $n->value->type->kind === Type::KIND_INT) {
+            $n->value = new \Compile\Mir\Cast('float', $n->value, Type::float_());
+        }
         $out .= $this->emitNode($n->value);
         // A self-describing cell property (scalar-nullable OR a `mixed` prop
         // whose every store boxes in place) NaN-boxes the value so the slot is
@@ -7312,6 +7317,9 @@ trait EmitLlvmObjects
 
     private function emitStoreStaticProp(\Compile\Mir\StoreStaticProp_ $n): string
     {
+        if ($n->declared !== null && $n->declared->kind === Type::KIND_FLOAT && $n->value->type->kind === Type::KIND_INT) {
+            $n->value = new \Compile\Mir\Cast('float', $n->value, Type::float_());
+        }
         $out = $this->emitNode($n->value);
         // A CELL-declared slot (`public static mixed $x`) is self-describing: the
         // READ side decodes it by tag, so the store must NaN-box. Storing raw made

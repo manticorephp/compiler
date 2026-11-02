@@ -284,6 +284,25 @@ PHP gives you a refcount you cannot see and a GC you cannot steer. Here the mode
 Selected with `MANTICORE_MEMORY`; finer-grained control (a per-function `#[Arena]`, explicit
 scopes) is designed, not wired.
 
+### Wrapping integer arithmetic
+
+Hash mixing, PRNGs and checksums want two's-complement `+ - *`: the int result modulo 2^64,
+never a float. Three functions say so explicitly:
+
+```php
+use function Manticore\{wrapping_add, wrapping_sub, wrapping_mul};
+
+wrapping_add(PHP_INT_MAX, 1);                    // int(PHP_INT_MIN)
+wrapping_sub(PHP_INT_MIN, 1);                    // int(PHP_INT_MAX)
+wrapping_mul(0x5851F42D4C957F2D, 6364136223846793005);   // low 64 bits of the product
+```
+
+Each is one `add` / `sub` / `mul i64` instruction (a same-named 32-bit-limb PHP body in the
+stdlib backs an older compiler). Manticore-only: php has no such function. Arguments are `int`;
+the result is always `int`.
+
+Verified by `tests/aot/cases/wrapping_builtins.php` (hand-written expected).
+
 ---
 
 ## 7. Libraries — the superset you call, not compile

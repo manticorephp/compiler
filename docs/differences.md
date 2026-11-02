@@ -24,7 +24,7 @@ name: [builtins.md](builtins.md).
 | `"12"` passed to an `int` / `float` parameter, property or return | converted (weak mode) | **not converted** — the value is garbage ([why](#declared-scalar-types-are-trusted-not-enforced)) | bug / gap |
 | Reading an undefined variable | warning, `null` | compile error ([details](#undefined-variables)) | by design |
 | A local assigned in only one branch, then `isset()` | `false` when the branch did not run | `true` | gap |
-| `PHP_INT_MAX + 1` computed at run time | `float` | wraps to `PHP_INT_MIN` ([details](#integer-overflow-wraps)) | known gap |
+| `PHP_INT_MAX + 1` computed at run time on `int` operands | `float` | throws `ArithmeticError` unless the result goes straight into a float ([details](#integer-overflow-throws)) | by design |
 | Undefined array key / property / `null[...]` read | warning, `null` | **silent**; the value is `null` or a zero of the inferred type ([details](#warnings-and-notices)) | by design / gap |
 | Other engine warnings and notices | printed, execution continues | not printed; some become exceptions | by design |
 | `set_error_handler` | receives engine warnings | receives only `trigger_error()` | by design |
@@ -95,22 +95,30 @@ echo f(true), f(false);     // php: setunset     Manticore: setset
 
 Initialise to `null` before the branch and test `$v !== null`.
 
-### Integer overflow wraps
+### Integer overflow throws
 
 ```php
-$a = PHP_INT_MAX; $a++;            var_dump($a);   // php: float(9.2233720368547758E+18)   here: int(-9223372036854775808)
 function f(int $x) { return $x * 3037000500; }
-var_dump(f(3037000500));                           // php: float(9.22337203700025E+18)     here: int(-9223372036709301616)
-var_dump(2 ** 63);                                 // php: float(9.2233720368547758E+18)   here: int(-9223372036854775808)
+var_dump(f(3037000500));   // php: float(9.22337203700025E+18)   here: ArithmeticError: Integer overflow
+$a = PHP_INT_MAX; $a++;    // php: float(9.2233720368547758E+18)   here: ArithmeticError: Integer overflow
+function g(int $x): float { return $x * 3037000500; }
+var_dump(g(3037000500));   // both: float(9.22337203700025E+18)
 ```
 
-Arithmetic on values the compiler types as `int` is two's-complement. Constant
-expressions that overflow (`PHP_INT_MAX + 1` written out) *are* folded to `float`;
-the difference shows in code the compiler types as `int` (a loop counter, a typed
-parameter). Promoting to float needs value-range analysis and is a [known gap](gaps.md#tier-1--correctness) and a
-[roadmap item](ROADMAP.md). If your code can legitimately overflow (hash mixing,
-factorials, `PHP_INT_MAX` sentinels), use `bcmath`, `float`, or check with
-`intdiv`/comparisons before the operation.
+A statically `int` `+ - *`, `++`/`--`, unary `-` and `abs()` is a checked operation. php would answer
+a `float` and carry on; a compiled `int` slot cannot hold one, and the old silent two's-complement
+wrap printed a wrong number. Where the result goes **straight into a float** — a `float` return,
+parameter, property or slot, a `(float)` cast, float arithmetic or `/` — the overflow is computed
+in `double`, exactly as php does. Constant expressions are folded to `float`, and an `int|float`
+value (a numeric cell) already promotes at run time.
+
+The check costs about two instructions per operation and LLVM removes the ones it can prove (a
+loop counter under `$i < $n`, masked operands). Measured on a tight 1e8-iteration loop: a vectorisable
+reduction slows 2.4x, a multiply-add hash chain by a third; array and call-bound code is unchanged.
+
+Code that *wants* the wrap (hash mixing, PRNGs) says so: `Manticore\wrapping_add/sub/mul`
+([docs/superset.md](superset.md#wrapping-integer-arithmetic)). Promoting an int-context overflow to
+float needs value-range analysis and is a [roadmap item](ROADMAP.md); `**` on ints still wraps.
 
 ### Visibility is enforced where the class is known
 

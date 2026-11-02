@@ -807,9 +807,9 @@ trait EmitLlvmModule
             $out .= $this->taggedEqRuntime();
         }
         if ($this->rt->needsTaggedArith) {
-            $out .= "declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)\n";
-            $out .= "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n";
-            $out .= "declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n";
+            if (!isset($this->libcExtra['llvm.sadd.with.overflow.i64'])) { $out .= "declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)\n"; }
+            if (!isset($this->libcExtra['llvm.ssub.with.overflow.i64'])) { $out .= "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\n"; }
+            if (!isset($this->libcExtra['llvm.smul.with.overflow.i64'])) { $out .= "declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n"; }
             $out .= $this->taggedArithRuntime();
         }
         if ($this->rt->needsTaggedTruthy) {
@@ -2794,7 +2794,8 @@ trait EmitLlvmModule
         if ($this->own->returnCondNormalized($v, $this->frame->erasedArrayReturn) && !$this->own->condOwnedTemp($v)) {
             $this->frame->erasedCond = $v;
         }
-        $out = $this->emitNode($v);
+        $out = ($this->frame->returnType !== null && $this->frame->returnType->kind === Type::KIND_FLOAT)
+            ? $this->emitNodeFloatSink($v) : $this->emitNode($v);
         $this->frame->erasedCond = null;
         // Uniform closure ABI: a closure returns a scalar as a tagged cell, so a
         // dynamic `callable` caller reads it by tag and a known caller unboxes to
@@ -2983,6 +2984,13 @@ trait EmitLlvmModule
                 && $this->frame->returnType !== null
                 && $this->frame->returnType->kind === Type::KIND_INT) {
                 $out .= $this->coerceTo('i64');
+            }
+            // …and an INT from a `: float` one is CONVERTED the same way: the
+            // carrier bitcasts, so the caller read the integer's bits as a double.
+            if ($v->type->kind === Type::KIND_INT
+                && $this->frame->returnType !== null
+                && $this->frame->returnType->kind === Type::KIND_FLOAT) {
+                $out .= $this->coerceTo('double');
             }
             // ABI: every fn returns i64. Coerce float / ptr through
             // the i64 carrier.

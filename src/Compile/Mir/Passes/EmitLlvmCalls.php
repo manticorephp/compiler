@@ -5353,7 +5353,7 @@ trait EmitLlvmCalls
         $wasCalleeElem = $this->litElemCalleeElem;
         $this->litElemCollect = $collect && $a->kind === Node::KIND_ARRAY_LIT;
         $this->litElemCalleeElem = ($paramType !== null && $paramType->isArray()) ? $paramType->element : null;
-        $out = $this->emitNode($a);
+        $out = ($paramType !== null && $paramType->kind === Type::KIND_FLOAT) ? $this->emitNodeFloatSink($a) : $this->emitNode($a);
         $this->litElemCollect = $wasCollect;
         $this->litElemCalleeElem = $wasCalleeElem;
         // A variadic pack is a literal of the written args; cell (mixed) args make it
@@ -5386,7 +5386,8 @@ trait EmitLlvmCalls
         // and the callee reads a garbage double. Every call path (function,
         // ctor, static, method) funnels its by-value args through here.
         if ($paramType !== null && $paramType->kind === Type::KIND_FLOAT
-            && ($a->type->kind === Type::KIND_INT || $a->type->kind === Type::KIND_BOOL)) {
+            && ($a->type->kind === Type::KIND_INT || $a->type->kind === Type::KIND_BOOL)
+            && $this->lastValueType !== 'double') {
             $out .= $this->coerceToI64();
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = sitofp i64 ' . $this->lastValue . " to double\n";
