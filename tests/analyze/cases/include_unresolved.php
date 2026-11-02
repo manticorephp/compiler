@@ -5,3 +5,5 @@ include_once __DIR__ . '/arith_string.php';
 require_once __DIR__ . '/no_such_file.php';
 include __DIR__ . '/no_such_file.php';
 require __DIR__ . '/include_unresolved.php';
+require dirname(__DIR__) . '/cases/arith_string.php';
+require dirname(__DIR__ . '/x') . '/vendor/autoload.php';
