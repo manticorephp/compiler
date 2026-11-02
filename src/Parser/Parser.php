@@ -3074,7 +3074,8 @@ final class Parser
             if ($lower === 'require' || $lower === 'require_once'
                     || $lower === 'include' || $lower === 'include_once') {
                 $this->advance();
-                return Expr::call('__mc_require_value', [$this->parseExpression()], $this->end($span));
+                $req = ($lower === 'require' || $lower === 'require_once') ? 1 : 0;
+                return Expr::call('__mc_require_value', [$this->parseExpression(), Expr::int($req, $span)], $this->end($span));
             }
             // Legacy long-array syntax `array(a, b, k => v)` — identical to
             // `[a, b, k => v]`; still common in generated / data files.
@@ -3375,7 +3376,8 @@ final class Parser
         }
         // A valid identifier (LLVM symbol-safe) — PHP's `class@anonymous` form
         // carries an `@` that the mangler can't emit.
-        $name = '__anon_class_' . (string)$this->anonClassCounter;
+        // The counter is per file: a file hash keeps the symbol unique across files.
+        $name = '__anon_class_' . ($this->sourceFile === '' ? '' : \dechex(\crc32($this->sourceFile)) . '_') . (string)$this->anonClassCounter;
         $this->anonClassCounter = $this->anonClassCounter + 1;
         if ($this->currentNamespace !== '') {
             $name = $this->currentNamespace . '\\' . $name;
@@ -3757,6 +3759,7 @@ final class Parser
             if ($c === '\\') { $i = $i + 2; continue; }
             if ($c === '$' && $i + 1 < $n - 1 && $this->isIdentStart(\substr($lex, $i + 1, 1))) { return true; }
             if ($c === '{' && $i + 1 < $n - 1 && \substr($lex, $i + 1, 1) === '$') { return true; }
+            if ($c === '$' && $i + 1 < $n - 1 && \substr($lex, $i + 1, 1) === '{') { return true; }
             $i = $i + 1;
         }
         return false;
@@ -3784,16 +3787,25 @@ final class Parser
             // Complex: {$expr}
             if ($c === '{' && $i + 1 < $n && \substr($body, $i + 1, 1) === '$') {
                 if ($lit !== '') { $parts[] = Expr::string($lit, $span); $lit = ''; }
-                $depth = 1;
-                $j = $i + 1;
-                while ($j < $n) {
-                    $cj = \substr($body, $j, 1);
-                    if ($cj === '{') { $depth = $depth + 1; }
-                    if ($cj === '}') { $depth = $depth - 1; if ($depth === 0) { break; } }
-                    $j = $j + 1;
-                }
+                $j = $this->interpClose($body, $n, $i + 1);
                 $inner = \substr($body, $i + 1, $j - $i - 1);
                 $parts[] = $this->parseSubExpr($inner, $span);
+                $i = $j + 1;
+                continue;
+            }
+            // Legacy: ${name}, ${name[expr]}, ${expr}
+            if ($c === '$' && $i + 1 < $n && \substr($body, $i + 1, 1) === '{') {
+                if ($lit !== '') { $parts[] = Expr::string($lit, $span); $lit = ''; }
+                $j = $this->interpClose($body, $n, $i + 2);
+                $inner = \substr($body, $i + 2, $j - $i - 2);
+                $k = 0;
+                $il = \strlen($inner);
+                while ($k < $il && $this->isIdentChar(\substr($inner, $k, 1))) { $k = $k + 1; }
+                if ($k > 0 && $this->isIdentStart(\substr($inner, 0, 1)) && ($k === $il || \substr($inner, $k, 1) === '[')) {
+                    $parts[] = $this->parseSubExpr('$' . $inner, $span);
+                } else {
+                    $parts[] = $this->parseSubExpr('${' . $inner . '}', $span);
+                }
                 $i = $j + 1;
                 continue;
             }
@@ -3833,6 +3845,30 @@ final class Parser
             $k = $k + 1;
         }
         return $result;
+    }
+
+    /** Index of the `}` closing an interpolation opened before $from; nested quoted strings are skipped. */
+    private function interpClose(string $body, int $n, int $from): int
+    {
+        $depth = 1;
+        $j = $from;
+        while ($j < $n) {
+            $cj = \substr($body, $j, 1);
+            if ($cj === '"' || $cj === "'") {
+                $j = $j + 1;
+                while ($j < $n && \substr($body, $j, 1) !== $cj) {
+                    if (\substr($body, $j, 1) === '\\') { $j = $j + 1; }
+                    $j = $j + 1;
+                }
+            } elseif ($cj === '{') {
+                $depth = $depth + 1;
+            } elseif ($cj === '}') {
+                $depth = $depth - 1;
+                if ($depth === 0) { break; }
+            }
+            $j = $j + 1;
+        }
+        return $j;
     }
 
     /** Simple-syntax array key: `$var` → variable, all-digits → int, else bareword string. */

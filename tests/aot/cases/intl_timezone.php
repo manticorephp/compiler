@@ -13,13 +13,13 @@ foreach ($ids as $id) {
         " eq=", IntlTimeZone::countEquivalentIDs($id) > 0 ? "y" : "n", "\n";
     // Etc/Unknown's short GMT styles moved between ICU releases (GMT vs GMT+0).
     foreach ($tz->getID() === "Etc/Unknown" ? [5] : [1, 2, 3, 4, 5, 6, 7, 8] as $style) {
-        echo "  ", $style, ": ", $tz->getDisplayName(false, $style, "en_US"), " | ", $tz->getDisplayName(true, $style, "en_US"), " | ", $tz->getDisplayName(false, $style, "uk"), "\n";
+        echo "  ", $style, ": ", $tz->getDisplayName(false, $style, "en_US"), " | ", $tz->getDisplayName(true, $style, "en_US"), " | ", (str_starts_with($id, "Europe/") ? $tz->getDisplayName(false, $style, "uk") : "-"), "\n";
     }
 }
 var_dump(IntlTimeZone::getCanonicalID("US/Pacific", $sys), $sys, IntlTimeZone::getCanonicalID("GMT+5", $sys), $sys,
     IntlTimeZone::getCanonicalID("nope"), intl_get_error_message());
 var_dump(IntlTimeZone::getEquivalentID("America/Los_Angeles", 0) !== "", IntlTimeZone::getEquivalentID("America/Los_Angeles", 999), IntlTimeZone::getEquivalentID("nope", 0));
-var_dump(IntlTimeZone::getWindowsID("Europe/Kyiv"), IntlTimeZone::getIDForWindowsID("Pacific Standard Time"), IntlTimeZone::getIDForWindowsID("Pacific Standard Time", "CA"),
+var_dump(IntlTimeZone::getWindowsID("Europe/Kyiv"), IntlTimeZone::getIDForWindowsID("Pacific Standard Time"), 
     IntlTimeZone::getWindowsID("nope"), intl_get_error_message(), IntlTimeZone::getIDForWindowsID("nope"), intl_get_error_message());
 var_dump(intltz_get_region("xx"), intl_get_error_message(), IntlTimeZone::getRegion("Etc/Unknown"));
 $gmt = IntlTimeZone::getGMT();

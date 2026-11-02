@@ -6,7 +6,7 @@
 # CI green and a local green mean the same thing. This file only supplies a
 # machine, the image, the cache and the environment.
 #
-# BUILD ONCE, TEST IN SLICES. `build-<tag>` / `macos-build` make the compiler and
+# BUILD ONCE, TEST IN SLICES. `target-<tag> / build` and `macos-build` make the compiler and
 # hand it on as an artifact; the suite shards, pdo-net and the seed publication
 # unpack it (gate.sh sees an up-to-date cache and does not rebuild). Each row's
 # suite is cut into 4 shards run in parallel, and `rows` turns the shards back into
@@ -73,247 +73,36 @@ jobs:
       - name: COMPILER_VERSION is consistent
         run: bash tools/check_version.sh
 
-  # The compiler is built ONCE per tag. The suite shards, pdo-net and the seed
-  # publication take it from the artifact below; gate.sh sees a cache whose
-  # src.sha is this tree's and reuses it instead of rebuilding (it also runs the
-  # install/CLI smokes here, once, rather than in every shard).
-  build:
-    name: build-${{ matrix.tag }}
-    runs-on: ${{ matrix.runner }}
+  # Each Linux target is its own build -> test (-> pdo-net, mysqli-net) pipeline
+  # (linux-target.yml), so a target's shards start when ITS build is done, not
+  # when the slowest of the four is. `tag` names what a row reads and writes —
+  # cache key, published seed, logs — so a glibc compiler never reaches a musl
+  # container: the loader would refuse it, and a refusal is not a diagnosis.
+  # A PR runs pdo-net / mysqli-net only when it touches what they are made of
+  # (see `changes`); every push to main and a manual run runs them. Neither is a
+  # required check, so a skipped one blocks nothing. They run for glibc tags only.
+  linux:
+    name: target-${{ matrix.tag }}
+    needs: changes
     permissions:
       contents: read
       packages: write
-    timeout-minutes: 120
     strategy:
       fail-fast: false
-      # glibc (Debian) and musl (Alpine), each on both arches. `tag` names what a
-      # row reads and writes — cache key, published seed, logs — so a glibc
-      # compiler never reaches a musl container: the loader would refuse it, and
-      # a refusal is not a diagnosis.
       matrix:
         include:
           - {tag: arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile}
           - {tag: amd64, runner: ubuntu-latest, dockerfile: Dockerfile}
           - {tag: alpine-arm64, runner: ubuntu-24.04-arm, dockerfile: Dockerfile.alpine}
           - {tag: alpine-amd64, runner: ubuntu-latest, dockerfile: Dockerfile.alpine}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      # The repo's own Dockerfile, `toolchain` target — the same image an end
-      # user builds and the same one run_tests.sh builds. php 8.5 + latest clang
-      # come from it, so the toolchain is not a CI-only fiction.
-      - name: Build the toolchain image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          target: toolchain
-          tags: manticore-toolchain:${{ matrix.tag }}
-          load: true
-          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
-          cache-to: type=gha,mode=max,scope=toolchain-${{ matrix.tag }}
-
-      # ~15 MB: bin/manticore + lib/*.o + lib/prelude. The key is unique per run
-      # (a cache entry is immutable), so the restore-keys prefix is what actually
-      # hits — the newest entry for this arch and this image definition.
-      - name: Restore the compiler cache
-        id: cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ci-cache
-          key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-${{ github.run_id }}
-          restore-keys: |
-            mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-
-
-      # Second warm source, reached only when the cache missed — which it does on
-      # every Dockerfile change, after a week of not being touched (GitHub evicts
-      # it), and on any branch that cannot see main's. The published image does
-      # not evict, and it is newer than the pin, so a cache miss does not have to
-      # walk up from the last release. A miss here is not an error — `|| true`,
-      # and gate.sh falls through to the pinned release.
-      - name: Fetch the published compiler
-        if: steps.cache.outputs.cache-matched-key == ''
-        run: |
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          if docker pull -q "$IMAGE:main-${{ matrix.tag }}" 2>/dev/null; then
-            cid="$(docker create "$IMAGE:main-${{ matrix.tag }}")"
-            mkdir -p ci-seed
-            docker cp "$cid:/opt/manticore/bin" ci-seed/bin
-            docker cp "$cid:/opt/manticore/lib" ci-seed/lib
-            docker rm "$cid" > /dev/null
-            chmod -R 777 ci-seed
-            echo "seed: $IMAGE:main-${{ matrix.tag }}"
-          else
-            echo "seed: nothing published for ${{ matrix.tag }} yet — the pinned release it is"
-          fi || true
-
-      # /logs and /compiler-cache are mounts the unprivileged container user
-      # (uid 1000) must be able to write; /build stays inside the container (the
-      # gate copies the tree into it, and that copy has no business crossing a
-      # bind mount).
-      - name: Build the compiler
-        run: |
-          # -R, not just the top directory: actions/cache restores the tree as the
-          # RUNNER, and the container is uid 1000 — unlinking an entry needs write
-          # permission on the directory that holds it, so a restored lib/ is
-          # unremovable from inside without this and the cache never updates.
-          mkdir -p ci-logs ci-cache ci-seed && chmod -R 777 ci-logs ci-cache ci-seed
-          docker run --rm \
-            -v "$PWD":/repo:ro \
-            -v "$PWD/ci-logs":/logs \
-            -v "$PWD/ci-cache":/compiler-cache \
-            -v "$PWD/ci-seed":/seed:ro \
-            -e MC_GATE=0 \
-            -e MC_JOBS=0 \
-            -e MC_LOGDIR=/logs \
-            -e MC_COMPILER_CACHE=/compiler-cache \
-            -e MC_SEED_DIR=/seed \
-            -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
-            -e MC_SUITE=0 \
-            -e MC_XFAIL=0 \
-            manticore-toolchain:${{ matrix.tag }} \
-            /bin/bash /repo/tools/docker/gate.sh
-
-      # A failed smoke on top of a good build still leaves a compiler worth keeping —
-      # save before the job's result is decided, not after.
-      - name: Save the compiler cache
-        if: always() && hashFiles('ci-cache/bin/manticore') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: ci-cache
-          key: mc-compiler-${{ matrix.tag }}-${{ hashFiles(matrix.dockerfile) }}-${{ github.run_id }}
-
-      # tar, not the directory: an artifact loses the executable bit.
-      - name: Hand the compiler to the other jobs
-        run: tar -C ci-cache -cf compiler.tar .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: compiler-${{ matrix.tag }}
-          path: compiler.tar
-          if-no-files-found: error
-          retention-days: 3
-
-      - name: Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-build-${{ matrix.tag }}
-          path: ci-logs/
-          if-no-files-found: warn
-
-  linux:
-    name: linux-${{ matrix.tag }} (${{ matrix.shard }}/4)
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-    needs: build
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      # glibc (Debian) and musl (Alpine), each on both arches. `tag` names what a
-      # row reads and writes — cache key, published seed, logs — so a glibc
-      # compiler never reaches a musl container: the loader would refuse it, and
-      # a refusal is not a diagnosis.
-      # Each row is split into SHARDS slices of the suite (the native runner, --shard i/n;
-      # run.sh has the same flag); every slice builds the compiler itself — warm, from the
-      # cache — and runs 1/N of the cases, so the wall clock is build + suite/N.
-      matrix:
-        row: [arm64, amd64, alpine-arm64, alpine-amd64]
-        shard: [1, 2, 3, 4]
-        include:
-          - row: arm64
-            arch: arm64
-            runner: ubuntu-24.04-arm
-            tag: arm64
-            dockerfile: Dockerfile
-          - row: amd64
-            arch: amd64
-            runner: ubuntu-latest
-            tag: amd64
-            dockerfile: Dockerfile
-          - row: alpine-arm64
-            arch: arm64
-            runner: ubuntu-24.04-arm
-            tag: alpine-arm64
-            dockerfile: Dockerfile.alpine
-          - row: alpine-amd64
-            arch: amd64
-            runner: ubuntu-latest
-            tag: alpine-amd64
-            dockerfile: Dockerfile.alpine
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      # The repo's own Dockerfile, `toolchain` target — the same image an end
-      # user builds and the same one run_tests.sh builds. php 8.5 + latest clang
-      # come from it, so the toolchain is not a CI-only fiction.
-      - name: Build the toolchain image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          target: toolchain
-          tags: manticore-toolchain:${{ matrix.tag }}
-          load: true
-          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: compiler-${{ matrix.tag }}
-      - name: Unpack the compiler
-        run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
-      # /logs and /compiler-cache are mounts the unprivileged container user
-      # (uid 1000) must be able to write; /build stays inside the container (the
-      # gate copies the tree into it, and that copy has no business crossing a
-      # bind mount).
-      - name: Build + suite
-        run: |
-          # -R, not just the top directory: actions/cache restores the tree as the
-          # RUNNER, and the container is uid 1000 — unlinking an entry needs write
-          # permission on the directory that holds it, so a restored lib/ is
-          # unremovable from inside without this and the cache never updates.
-          mkdir -p ci-logs && chmod -R 777 ci-logs ci-cache
-          docker run --rm \
-            -v "$PWD":/repo:ro \
-            -v "$PWD/ci-logs":/logs \
-            -v "$PWD/ci-cache":/compiler-cache \
-            -e MC_GATE=0 \
-            -e MC_JOBS=0 \
-            -e MC_LOGDIR=/logs \
-            -e MC_COMPILER_CACHE=/compiler-cache \
-            -e MC_SMOKES=0 \
-            -e MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
-            -e MC_RUNNER=native \
-            -e MC_SHARD=${{ matrix.shard }}/4 \
-            -e MC_XFAIL=${{ matrix.shard == 1 && 1 || 0 }} \
-            manticore-toolchain:${{ matrix.tag }} \
-            /bin/bash /repo/tools/docker/gate.sh
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo "## linux-${{ matrix.tag }} shard ${{ matrix.shard }}/4 — \`${GITHUB_SHA::12}\`"
-            echo '```'
-            tail -15 ci-logs/suite.log 2>/dev/null || echo 'no suite log'
-            echo '```'
-            echo 'known bugs (tests/aot/xfail.sh): an XPASS is a tracked bug this commit fixed — promote its repro and close the issue'
-            echo '```'
-            grep -E '^(XPASS|xfail:)' ci-logs/xfail.log 2>/dev/null || echo 'no known-bug log'
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-${{ matrix.tag }}-${{ matrix.shard }}
-          path: ci-logs/
-          if-no-files-found: warn
+    uses: ./.github/workflows/linux-target.yml
+    with:
+      tag: ${{ matrix.tag }}
+      runner: ${{ matrix.runner }}
+      dockerfile: ${{ matrix.dockerfile }}
+      pdo: ${{ github.event_name != 'pull_request' || needs.changes.outputs.pdo == 'true' }}
+      mysqli: ${{ github.event_name != 'pull_request' || needs.changes.outputs.mysqli == 'true' }}
+    secrets: inherit
 
   macos-build:
     name: macos-build
@@ -469,150 +258,6 @@ jobs:
           echo "pdo=$pdo" >> "$GITHUB_OUTPUT"
           echo "mysqli=$mysqli" >> "$GITHUB_OUTPUT"
 
-  # PDO network drivers (pgsql, mysql, mariadb) against live servers, graded
-  # against php's own pdo_pgsql / pdo_mysql. The servers run on the runner via
-  # tests/pdo_net/up.sh; the toolchain container shares its network (host) and
-  # gate.sh stops after the build when MC_PDO_NET is set. Reads the compiler
-  # cache of the `linux` rows and never writes it.
-  pdo-net:
-    name: pdo-net-${{ matrix.tag }}-${{ matrix.server }} (${{ matrix.shard }}/4)
-    needs: [changes, build]
-    if: github.event_name != 'pull_request' || needs.changes.outputs.pdo == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        tag: [arm64, amd64]
-        server: [mysql, mariadb]
-        shard: [1, 2, 3, 4]
-        include:
-          - tag: arm64
-            runner: ubuntu-24.04-arm
-          - tag: amd64
-            runner: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build the toolchain image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          target: toolchain
-          tags: manticore-toolchain:${{ matrix.tag }}
-          load: true
-          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: compiler-${{ matrix.tag }}
-      - name: Unpack the compiler
-        run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
-
-      # postgres 16, mysql 8.4 (plain, TLS, native-password, isolated) and mariadb 11,
-      # with the throwaway TLS certificates; then the CA mysql made for itself.
-      - name: Start the database servers
-        run: |
-          bash tests/pdo_net/up.sh
-          mkdir -p ci-pdo && docker cp mc-my:/var/lib/mysql/ca.pem ci-pdo/my_ca.pem && chmod -R a+rX ci-pdo tests/pdo_net/.certs
-
-      - name: Build + pdo_net
-        run: |
-          mkdir -p ci-logs && chmod -R 777 ci-logs ci-cache
-          docker run --rm --network host \
-            -v "$PWD":/repo:ro \
-            -v "$PWD/ci-logs":/logs \
-            -v "$PWD/ci-cache":/compiler-cache \
-            -v "$PWD/ci-pdo":/pdo-net:ro \
-            -e MC_GATE=0 \
-            -e MC_LOGDIR=/logs \
-            -e MC_COMPILER_CACHE=/compiler-cache \
-            -e MC_PDO_NET=${{ matrix.server }} \
-            -e MC_PDO_NET_ARGS="${{ matrix.server == 'mariadb' && '--no-pgsql' || '' }} --shard ${{ matrix.shard }}/4" \
-            -e PDO_MY_SSL_CA=/pdo-net/my_ca.pem \
-            manticore-toolchain:${{ matrix.tag }} \
-            /bin/bash /repo/tools/docker/gate.sh
-
-      - name: Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-pdo-net-${{ matrix.tag }}-${{ matrix.server }}-${{ matrix.shard }}
-          path: ci-logs/
-          if-no-files-found: warn
-
-  # mysqli against live mysql 8.4 / mariadb 11, graded against php's own mysqli (tests/mysqli_net). Same shape as
-  # pdo-net: the servers come from tests/pdo_net/up.sh; gate.sh stops after the build when MC_MYSQLI_NET is set.
-  # The server-less surface audit and stub cases run in the suite (tests/aot/cases/mysqli_*).
-  mysqli-net:
-    name: mysqli-net-${{ matrix.tag }}-${{ matrix.server }} (${{ matrix.shard }}/2)
-    needs: [changes, build]
-    if: github.event_name != 'pull_request' || needs.changes.outputs.mysqli == 'true'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        tag: [arm64, amd64]
-        server: [mysql, mariadb]
-        shard: [1, 2]
-        include:
-          - tag: arm64
-            runner: ubuntu-24.04-arm
-          - tag: amd64
-            runner: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build the toolchain image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          target: toolchain
-          tags: manticore-toolchain:${{ matrix.tag }}
-          load: true
-          cache-from: type=gha,scope=toolchain-${{ matrix.tag }}
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: compiler-${{ matrix.tag }}
-      - name: Unpack the compiler
-        run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
-
-      # up.sh starts every pdo_net server; mysqli_net needs only mysql (mc-my) and mariadb (mc-maria). Its TLS case
-      # does not verify the certificate, so no CA is handed to the container.
-      - name: Start the database servers
-        run: bash tests/pdo_net/up.sh
-
-      - name: Build + mysqli_net
-        run: |
-          mkdir -p ci-logs && chmod -R 777 ci-logs ci-cache
-          docker run --rm --network host \
-            -v "$PWD":/repo:ro \
-            -v "$PWD/ci-logs":/logs \
-            -v "$PWD/ci-cache":/compiler-cache \
-            -e MC_GATE=0 \
-            -e MC_LOGDIR=/logs \
-            -e MC_COMPILER_CACHE=/compiler-cache \
-            -e MC_MYSQLI_NET=${{ matrix.server }} \
-            -e MC_MYSQLI_NET_ARGS="--shard ${{ matrix.shard }}/2" \
-            manticore-toolchain:${{ matrix.tag }} \
-            /bin/bash /repo/tools/docker/gate.sh
-
-      - name: Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: logs-mysqli-net-${{ matrix.tag }}-${{ matrix.server }}-${{ matrix.shard }}
-          path: ci-logs/
-          if-no-files-found: warn
-
   # The bootstrap rule, checked on every push: this tree must build from the
   # PINNED release alone — no cache, no published `main`, no Zend. A merge that
   # uses a feature newer than BOOTSTRAP_VERSION goes red HERE, while every other
@@ -660,7 +305,8 @@ jobs:
   # digest — nothing is rebuilt and nothing is emulated, and `docker pull
   # ghcr.io/manticorephp/compiler:main` resolves to the right architecture.
   # One check per row, under the name the "Protected branches" ruleset requires
-  # (linux-arm64, …, macos-arm64): green only when EVERY shard of that row is. The
+  # (linux-arm64, …, macos-arm64): green only when EVERY shard of that row is. Linux shards
+# are jobs of a called workflow, named "target-<tag> / test (i/4)". The
   # shard count can change without touching the ruleset.
   rows:
     name: ${{ matrix.row }}
@@ -673,13 +319,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        row: [linux-arm64, linux-amd64, linux-alpine-arm64, linux-alpine-amd64, macos-arm64]
+        include:
+          - {row: linux-arm64, prefix: 'target-arm64 / test ('}
+          - {row: linux-amd64, prefix: 'target-amd64 / test ('}
+          - {row: linux-alpine-arm64, prefix: 'target-alpine-arm64 / test ('}
+          - {row: linux-alpine-amd64, prefix: 'target-alpine-amd64 / test ('}
+          - {row: macos-arm64, prefix: 'macos-arm64 ('}
     steps:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
           jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
-            --jq '.jobs[] | select(.name | startswith("${{ matrix.row }} (")) | "\(.conclusion)\t\(.name)"')"
+            --jq '.jobs[] | select(.name | startswith("${{ matrix.prefix }}")) | "\(.conclusion)\t\(.name)"')"
           echo "$jobs"
           [ "$(echo "$jobs" | grep -c .)" = 4 ] || { echo "expected 4 shards"; exit 1; }
           ! echo "$jobs" | grep -qv '^success'

@@ -61,7 +61,8 @@ behaviour() {
     run "dump-ast with compile-only flag" "$MC" dump-ast --analyze "f.php"
     run "compile bad -O"           "$MC" compile "f.php" -o "x" -O9
     run "compile bad --memory"     "$MC" compile "f.php" -o "x" --memory bogus
-    run "compile bad --progress"   "$MC" compile "f.php" -o "x" --progress=bogus
+    run "compile bad --strict"     "$MC" compile "f.php" -o "x" --strict=bogus
+    run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir
     run "build missing manifest"   "$MC" build "nope.json"
@@ -219,6 +220,59 @@ helps() {
     done
 }
 
+stdout_check() { # echo/fwrite(STDOUT) reach a pipe at once: ordered vs stderr, and not lost on SIGTERM (#544)
+    cat > "$WORK/so.php" <<'PHP'
+<?php
+fwrite(STDOUT, "1\n");
+echo "2\n";
+fwrite(STDERR, "3\n");
+sleep(30);
+PHP
+    "$MC" compile so.php -o so >/dev/null 2>&1 || { echo "stdout FAIL: compile"; fail=1; return; }
+    ./so >"$WORK/so.out" 2>&1 &
+    local pid=$! i
+    for i in 1 2 3 4 5 6 7 8 9 10; do [ "$(wc -l < "$WORK/so.out")" -ge 3 ] && break; sleep 0.3; done
+    kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    [ "$(tr -d '\n' < "$WORK/so.out")" = "123" ] || { echo "stdout FAIL: got '$(tr '\n' ' ' < "$WORK/so.out")'"; fail=1; }
+}
+# stdout is stdio-buffered and drained at the points output could otherwise be seen late or out of order (#544)
+flush_check() {
+    local n=0 name body want got pid i
+    # ordered: run to the end, stdout+stderr into ONE file, byte-exact
+    while IFS='|' read -r name want body; do
+        printf '<?php\n%s\n' "$body" > "$WORK/fo.php"
+        "$MC" compile "$WORK/fo.php" -o "$WORK/fo" >/dev/null 2>&1 || { echo "flush FAIL: compile $name"; fail=1; continue; }
+        (cd "$WORK" && ./fo >fo.out 2>&1 </dev/null)
+        got="$(head -c 200 "$WORK/fo.out" | head -n 3 | tr '\n' ',')"
+        [ "$got" = "$want" ] || { echo "flush FAIL: $name: got '$got' want '$want'"; fail=1; }
+    done <<'CASES'
+exit|a,b,c,|echo "a\n"; fwrite(STDERR, "b\n"); echo "c\n"; exit(3);
+errlog|a,b,c,|echo "a\n"; error_log("b"); echo "c\n";
+usleep|a,b,c,|echo "a\n"; usleep(1000); fwrite(STDERR, "b\n"); echo "c\n";
+uncaught|a,PHP Fatal error:  Uncaught Exception: x,|echo "a\n"; throw new Exception("x");
+fwritemix|a,b,c,|fwrite(STDOUT, "a\n"); echo "b\n"; print "c\n";
+CASES
+    # late: the program blocks for 20 s after printing; the line must be on the pipe within ~3 s
+    mkfifo "$WORK/ff"; exec 3<>"$WORK/ff"
+    while IFS='|' read -r name want body; do
+        printf '<?php\n%s\n' "$body" > "$WORK/fo.php"
+        "$MC" compile "$WORK/fo.php" -o "$WORK/fo" >/dev/null 2>&1 || { echo "flush FAIL: compile $name"; fail=1; continue; }
+        : > "$WORK/fo.out"
+        (cd "$WORK" && exec ./fo >fo.out 2>&1 <&3) &
+        pid=$!
+        for i in 1 2 3 4 5 6 7 8 9 10; do [ "$(tr '\n' ',' < "$WORK/fo.out")" = "$want" ] && break; sleep 0.3; done
+        got="$(tr '\n' ',' < "$WORK/fo.out")"
+        kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+        [ "$got" = "$want" ] || { echo "flush FAIL: late $name: got '$got'"; fail=1; }
+    done <<'CASES'
+usleep|hb,|echo "hb\n"; usleep(20000000);
+sleep|hb,|echo "hb\n"; sleep(20);
+select|hb,|echo "hb\n"; $r = [STDIN]; $w = null; $e = null; stream_select($r, $w, $e, 20);
+fgets|hb,|echo "hb\n"; fgets(STDIN);
+cpu|a,b,c,|echo "a\n"; echo "b\n"; for ($u = microtime(true); microtime(true) - $u < 0.3;) {} echo "c\n"; for ($u = microtime(true); microtime(true) - $u < 20;) {}
+CASES
+    exec 3<&-
+}
 completions_check() {
     local sh
     for sh in bash zsh fish; do
@@ -246,5 +300,7 @@ if [ -f "$HERE/help.txt" ]; then
     diff -u "$HERE/help.txt" "$WORK/help.got" || fail=1
 fi
 progress_check
+stdout_check
+flush_check
 completions_check
 [ "$fail" = 0 ] && echo "=== cli golden: ok ===" || { echo "=== cli golden: FAILED ==="; exit 1; }

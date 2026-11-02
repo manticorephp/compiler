@@ -252,6 +252,25 @@ final class VecCopyOnAssign
         if ($n->kind === Node::KIND_CALL) {
             foreach ($n->args as $a) { self::markElemBase($a, $out, $anyType); }
         }
+        // An array local handed to a user function's BY-REF parameter is written
+        // through by the callee: the same mutation the emitter records
+        // ({@see \Compile\Mir\Passes\EmitLlvmMemory::collectByRefArrayArgs}), so the
+        // ownership plan and the emitter agree on whether `$r = $set` copies.
+        if (!$anyType && $n->kind === Node::KIND_CALL) {
+            $fname = $n->function;
+            $mp = \strpos($fname, '$mono$');
+            if ($mp !== false) { $fname = \substr($fname, 0, $mp); }
+            $mask = self::$refMasks[$fname] ?? null;
+            if ($mask !== null) {
+                $i = 0;
+                foreach ($n->args as $a) {
+                    if (($mask[$i] ?? false) && $a->kind === Node::KIND_LOAD_LOCAL && $a->type->isArray()) {
+                        $out[$a->name] = true;
+                    }
+                    $i = $i + 1;
+                }
+            }
+        }
         if ($n->kind === Node::KIND_METHOD_CALL) {
             foreach ($n->args as $a) { self::markElemBase($a, $out, $anyType); }
         }

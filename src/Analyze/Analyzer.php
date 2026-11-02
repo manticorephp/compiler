@@ -38,6 +38,13 @@ final class Analyzer
         $index = Index::build($all);
         $index->addExternFunctions($stdlibFns);
 
+        /** @var array<string, bool> $unitPaths */
+        $unitPaths = [];
+        foreach ($files as $pf) {
+            $rp = \realpath($pf->path);
+            if ($rp !== false) { $unitPaths[$rp] = true; }
+        }
+
         foreach ($files as $pf) {
             $argCount = new \Analyze\Rules\ArgCount();
             foreach ($argCount->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
@@ -66,6 +73,9 @@ final class Analyzer
             // safe even in single-file mode.
             $undefMethod = new \Analyze\Rules\UndefinedMethod();
             foreach ($undefMethod->run($pf, $index) as $d) { $this->diagnostics[] = $d; }
+
+            $unresolvedInc = new \Analyze\Rules\UnresolvedInclude();
+            foreach ($unresolvedInc->run($pf, $unitPaths) as $d) { $this->diagnostics[] = $d; }
 
             if ($checkUndefined) {
                 $undefClass = new \Analyze\Rules\UndefinedClass();

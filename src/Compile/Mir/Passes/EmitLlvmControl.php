@@ -1461,7 +1461,8 @@ trait EmitLlvmControl
         if (!$fe->byRef && $at0->kind === Type::KIND_OBJ && ($at0->class ?? '') !== '') {
             // A plain object: walk its properties (declared, then dynamic), the
             // array get_object_vars() builds.
-            $fe->array = new \Compile\Mir\Call('get_object_vars', [$fe->array],
+            // Outside any class only the public ones are visible (LowerExprs does the same for a written call).
+            $fe->array = new \Compile\Mir\Call($this->accessScope() === '' ? '__mc_public_object_vars' : 'get_object_vars', [$fe->array],
                 Type::assoc(Type::cell(), Type::cell()));
         }
         $out = '';

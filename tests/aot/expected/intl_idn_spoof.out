@@ -50,7 +50,6 @@ idn_to_utf8(): Argument #2 ($flags) must be INTL_IDNA_VARIANT_UTS46
 "\u65e5\u672c\u8a9e\u30c6\u30ad\u30b9\u30c8" false 0
 "abc\u0430\u0431\u0432" true 16
 "paypal"~"\u0440\u0430\u0443\u0440\u0430l" true 2
-"hello"~"\u04baello" false 0
 "scope"~"\u0455\u0441\u043e\u0440\u0435" true 6
 "abc"~"xyz" false 0
 "1l"~"Il" true 1

@@ -303,7 +303,7 @@ trait InferNodes
         $this->localTypes = [];
         $this->narrowSlots = [];
         $this->kindAliasOf = [];
-        $this->currentParamTypes = [];
+        $this->currentParamTypes = []; $this->arrayHintedParamNames = [];
         // Computed BEFORE the walk, not after it: a store re-derives its local's
         // type as it is visited, so a force applied at the end of the pass is
         // undone by `$a = 1` on the next round and the fixpoint never carries it.
@@ -346,7 +346,7 @@ trait InferNodes
                 $pt = Type::cell();
             }
             $this->localTypes[$p->name] = $pt;
-            $this->currentParamTypes[$p->name] = $pt;
+            $this->currentParamTypes[$p->name] = $pt; if ($p->arrayHinted && !$p->byRef) { $this->arrayHintedParamNames[$p->name] = true; }
         }
         // Closure body: seed its capture params (the first N) with the value
         // types observed at the capture site (recorded in pass 1). Safe — this
@@ -576,6 +576,7 @@ trait InferNodes
         $this->genValueType = null;
         $this->genKeyType = null;
         $this->fnReturnUnion = null;
+        $this->fnBareReturn = false;
         $this->cellMergeLocals = [];
         $this->globalBackedNames = [];
         $this->globalCellBound = [];
@@ -670,8 +671,12 @@ trait InferNodes
         if ($rk === Type::KIND_UNKNOWN && $u !== null
             && ($u->kind === Type::KIND_STRING || $u->kind === Type::KIND_INT
                 || $u->kind === Type::KIND_FLOAT || $u->kind === Type::KIND_BOOL)) {
-            $fn->returnType = $u;
-            $this->sigs[$fn->name] = $u;
+            // A path that falls off the end (or a bare `return;`) yields NULL, which
+            // no raw scalar can carry: the result is a tagged cell.
+            $nullPath = !$fn->isGenerator && ($this->fnBareReturn || !$this->alwaysExits($fn->body));
+            $adopt = $nullPath ? Type::cell() : $u;
+            $fn->returnType = $adopt;
+            $this->sigs[$fn->name] = $adopt;
         }
         // An un-hinted factory whose every return is the SAME concrete object
         // class (`static function create() { return new static(); }`) keeps an
@@ -1380,11 +1385,25 @@ trait InferNodes
         return $known->isAssoc() ? Type::assoc($known->key ?? Type::string_(), Type::cell()) : Type::vec(Type::cell());
     }
 
+    private function isArrayHintedParamLoad(Node $n): bool
+    {
+        return $n->kind === Node::KIND_LOAD_LOCAL && isset($this->arrayHintedParamNames[$n->name])
+            && ($this->currentParamTypes[$n->name] ?? null) !== null
+            && !$n->type->isArray();
+    }
+
     private function arrayUnionType(Node $left, Node $right): ?Type
     {
         $lt = $this->inferNode($left);
         $rt = $this->inferNode($right);
-        if (!$lt->isArray() && !$rt->isArray()) { return null; }
+        if (!$lt->isArray() && !$rt->isArray()) {
+            // Two bare `array` params erase to unknown, but PHP guarantees arrays:
+            // `+` is the union, not `add i64` over two pointers.
+            if ($this->isArrayHintedParamLoad($left) && $this->isArrayHintedParamLoad($right)) {
+                return Type::assoc(Type::cell(), Type::cell());
+            }
+            return null;
+        }
         // Only one side typed as an array: the other is erased (unknown/cell).
         // Its buffer may carry another element hint, and then the runtime
         // union is a CELL buffer ({@see UnifiedArrayRuntime::emitArrayUnion}) —
@@ -1569,6 +1588,7 @@ trait InferNodes
     private function inferReturn(Return_ $node): Type
     {
         $value = $node->value;
+        if ($value === null) { $this->fnBareReturn = true; }
         if ($value !== null) {
             $rt = $this->inferNode($value);
             if ($this->fnReturnUnion === null) {
@@ -1624,9 +1644,10 @@ trait InferNodes
         foreach ($node->stmts as $s) {
             $last = $this->inferNode($s);
         }
-        // A VALUE block built untyped (LowerFromAst::wrapCallPost) is its last
-        // node's value; every other block is constructed with its type.
-        if ($node->type->kind === Type::KIND_UNKNOWN && $last !== null) { $node->type = $last; }
+        // A VALUE block built untyped (LowerFromAst::wrapCallPost, hoistLvalueExpr)
+        // is its last node's value on every run — a later run may re-type that node
+        // (obj -> cell), and a stale block type boxes the new word as the old kind.
+        if (($node->fromLast || $node->type->kind === Type::KIND_UNKNOWN) && $last !== null) { $node->type = $last; }
         return $node->type;
     }
 

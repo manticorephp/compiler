@@ -50,7 +50,7 @@ final class CompileCommand extends Command
             return 64;
         }
         $analyze = !$args->flag("no-analyze");
-        $strict = $args->flag("analyze-strict");
+        $strict = \Manticore\CompileArgs::$strictAnalyze;
         $output = \Manticore\CompileArgs::$output;
 
         // Read once, as SourceFile[] (path + contents), so every downstream stage

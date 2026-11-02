@@ -1133,11 +1133,15 @@ trait EmitLlvmExpr
      * double's bits are re-boxed through box_float so a signaling NaN can't
      * collide with the tagged range (0xFFF1..0xFFF8).
      */
-    /** `%<out> = <raw> as a cell`: by the chain, or by `%<arr>`'s buffer hint
-     *  when the chain is {@see EK_HINT}. */
+    /** `%<out> = <raw> as a cell`: by the chain, or by `%<arr>`'s buffer hint when
+     *  the chain is {@see EK_HINT} or {@see EK_CELL} — a cell-typed channel may be
+     *  backed by a raw-hinted buffer (docs/design/value-channels.md), so the hint,
+     *  not the static type, says what the word is; a CELL-hinted buffer decodes to itself. */
     private static function elemToCellByChain(string $arr, string $raw, string $ek, string $out): string
     {
-        return '  %' . $out . 'h = icmp eq i64 %' . $ek . ', ' . (string)self::EK_HINT . "\n"
+        return '  %' . $out . 'h6 = icmp eq i64 %' . $ek . ', ' . (string)self::EK_HINT . "\n"
+            . '  %' . $out . 'h0 = icmp eq i64 %' . $ek . ', ' . (string)self::EK_CELL . "\n"
+            . '  %' . $out . 'h = or i1 %' . $out . 'h6, %' . $out . "h0\n"
             . '  br i1 %' . $out . 'h, label %' . $out . 'dec, label %' . $out . "chn\n"
             . $out . "dec:\n"
             . '  %' . $out . 'd = call i64 @__mir_elem_decode(ptr %' . $arr . ', i64 %' . $raw . ")\n"
@@ -6688,7 +6692,7 @@ trait EmitLlvmExpr
      * (`false given`): without it the unbox masked the tag off and the callee read a null object.
      * Only TAGGED words are judged — an untagged word may be a raw object pointer the claim never boxed.
      */
-    private function emitObjArgGuard(string $head): string
+    private function emitObjArgGuard(string $head, string $given = ' given', string $cls = 'TypeError'): string
     {
         $v = $this->lastValue;
         $vt = $this->lastValueType;
@@ -6697,7 +6701,7 @@ trait EmitLlvmExpr
         foreach ([[1, 'int'], [4, 'string']] as $tn) {
             $c = $this->ssa->allocReg();
             $out .= '  ' . $c . ' = icmp eq i64 ' . $tag . ', ' . (string)$tn[0] . "\n";
-            $out .= $this->emitThrowIf($c, 'TypeError', $head . $tn[1] . ' given');
+            $out .= $this->emitThrowIf($c, $cls, $head . $tn[1] . $given);
         }
         $isB = $this->ssa->allocReg();
         $bit = $this->ssa->allocReg();
@@ -6711,8 +6715,8 @@ trait EmitLlvmExpr
         $out .= '  ' . $t . ' = icmp eq i64 ' . $bit . ", 1\n";
         $out .= '  ' . $isF . ' = and i1 ' . $isB . ', ' . $f . "\n";
         $out .= '  ' . $isT . ' = and i1 ' . $isB . ', ' . $t . "\n";
-        $out .= $this->emitThrowIf($isF, 'TypeError', $head . 'false given');
-        $out .= $this->emitThrowIf($isT, 'TypeError', $head . 'true given');
+        $out .= $this->emitThrowIf($isF, $cls, $head . 'false' . $given);
+        $out .= $this->emitThrowIf($isT, $cls, $head . 'true' . $given);
         $this->lastValue = $v;
         $this->lastValueType = $vt;
         return $out;

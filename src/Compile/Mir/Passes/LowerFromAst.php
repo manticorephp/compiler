@@ -1359,6 +1359,10 @@ final class LowerFromAst implements Pass
         foreach ($stmts as $stmt) {
             $this->registerGuardedDefines($stmt);
         }
+        // Every other `define("N", v)` with a literal name (in a branch, used as an
+        // expression, or inside a function / method body) gets a run-time cell:
+        // the call stores into it and later bare / constant() / defined() reads see it.
+        $this->registerRuntimeDefines($stmts);
         // Constants a dependency exports. AFTER the local scan and guarded, so a
         // program that defines the name itself keeps its own value — the same
         // precedence the imported-FUNCTION path uses, and the one that lets a
@@ -3713,6 +3717,24 @@ final class LowerFromAst implements Pass
             (bool)($expr->returnsByRef ?? false), $clUsesFa, null, false, $expr->isStatic);
     }
 
+    /** The class a by-value param of the scope being lowered is declared as, '' when it is no plain class. */
+    private function paramClassHint(string $name): string
+    {
+        $i = \array_search($name, $this->currentLowerParams, true);
+        if ($i === false) { return ''; }
+        $h = \ltrim((string)($this->currentLowerParamHints[$i] ?? ''), '\\');
+        return isset($this->classDecls[$h]) ? $h : '';
+    }
+
+    /** @param \Parser\Ast\Expr[] $args */
+    private function spreadVariableArg(array $args): bool
+    {
+        foreach ($args as $a) {
+            if ($a->kind === 'Spread' && $a->value->kind === 'Variable') { return true; }
+        }
+        return false;
+    }
+
     /** Whether `$name`, read in the scope being lowered, is a bare-`array` param or a capture of one. */
     private function enclosingArrayName(string $name): bool
     {
@@ -4317,6 +4339,72 @@ final class LowerFromAst implements Pass
         }
     }
 
+    /**
+     * Register a run-time cell for every literal-named `define()` not already
+     * known. Function and method bodies are still unparsed (lazy) here, so their
+     * source slice is scanned textually; everything else is walked.
+     *
+     * @param \Parser\Ast\Stmt[] $stmts
+     */
+    private function registerRuntimeDefines(array $stmts): void
+    {
+        $names = [];
+        $w = new \Analyze\AstWalk(false);
+        $w->stmts($stmts);
+        foreach ($w->exprs as $e) {
+            if ($e->kind !== 'Call' || \count($e->args) < 2 || $e->args[0]->kind !== 'StringLiteral') { continue; }
+            if (\strtolower($this->constBareName($e->function)) !== 'define') { continue; }
+            $names[$this->constBareName($this->stringLitValue($e->args[0]))] = true;
+        }
+        $names = $names + $this->collectLazyDefineNames($stmts);
+        foreach ($names as $n => $_) {
+            if (isset($this->userConstants[$n]) || isset($this->runtimeConstants[$n])) { continue; }
+            $this->registerRuntimeConstantCell($n);
+        }
+    }
+
+    /**
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @return array<string, bool>
+     */
+    private function collectLazyDefineNames(array $stmts): array
+    {
+        $names = [];
+        foreach ($stmts as $stmt) {
+            if ($stmt->kind === 'Namespace' && $stmt->body !== null) {
+                $names = $names + $this->collectLazyDefineNames($stmt->body->statements);
+            } elseif ($stmt->kind === 'Function') {
+                $names = $names + $this->scanLazyBody($stmt->decl->lazyBody);
+            } elseif ($stmt->kind === 'Class') {
+                foreach ($stmt->decl->methods as $m) { $names = $names + $this->scanLazyBody($m->lazyBody); }
+            }
+        }
+        return $names;
+    }
+
+    /** @return array<string, bool> */
+    private function scanLazyBody(?\Parser\Ast\LazyBody $lb): array
+    {
+        $names = [];
+        if ($lb === null || $lb->source === '') { return $names; }
+        $slice = \substr($lb->source, $lb->start, $lb->end - $lb->start);
+        if (\strpos($slice, 'define') === false) { return $names; }
+        if (\preg_match_all('/\bdefine\s*\(\s*(?:\'([A-Za-z_][A-Za-z0-9_\\\\]*)\'|"([A-Za-z_][A-Za-z0-9_\\\\]*)")\s*,/', $slice, $mm, \PREG_SET_ORDER) === false) { return $names; }
+        foreach ($mm as $m) {
+            $n = $m[1] !== '' ? $m[1] : ($m[2] ?? '');
+            if ($n !== '') { $names[$this->constBareName($n)] = true; }
+        }
+        return $names;
+    }
+
+    private function registerRuntimeConstantCell(string $name): void
+    {
+        $cell = '@const_' . $this->sanitizeSym($name);
+        $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
+        $this->module->addGlobalCell($cell . '_set', new IntConst(0, Type::int_()));
+        $this->runtimeConstants[$name] = $cell;
+    }
+
     /** Record `define(N, <value>)`: inlined when constant, a module cell when the value is run-time. */
     private function registerDefinedConstant(string $name, \Parser\Ast\Expr $value): void
     {
@@ -4332,10 +4420,7 @@ final class LowerFromAst implements Pass
             }
         }
         if (!$runtime) { $this->userConstants[$name] = $value; return; }
-        $cell = '@const_' . $this->sanitizeSym($name);
-        $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
-        $this->module->addGlobalCell($cell . '_set', new IntConst(0, Type::int_()));
-        $this->runtimeConstants[$name] = $cell;
+        $this->registerRuntimeConstantCell($name);
     }
     private function constBareName(string $raw): string
     {
@@ -7429,6 +7514,15 @@ final class LowerFromAst implements Pass
             if ($hint !== '') {
                 $params = $this->resolveMethodParams($hint, $expr->method);
                 if ($params !== null) { $mcClass = $hint; }
+            }
+        }
+        // `$o->m(...$args)` on a receiver typed by its own parameter: the method's by-ref
+        // parameters decide how the spread unpacks ({@see lowerRefSpread}).
+        if ($params === null && $expr->object->kind === 'Variable') {
+            $pc = $this->paramClassHint($this->varName($expr->object));
+            if ($pc !== '' && $this->spreadVariableArg($expr->args)) {
+                $params = $this->resolveMethodParams($pc, $expr->method);
+                if ($params !== null) { $mcClass = $pc; }
             }
         }
         // A variable-receiver variadic call (`$x->m(a,b,c)`) must STILL pack its

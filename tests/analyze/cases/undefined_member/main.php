@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 $b = new Box();
 $b->open();               // ok

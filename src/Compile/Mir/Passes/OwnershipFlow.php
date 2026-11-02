@@ -1175,6 +1175,18 @@ final class OwnershipFlow implements Pass
         if ($ks === '') {
             $nullish = $v->kind === Node::KIND_NULL_CONST || $v->type->kind === Type::KIND_NULL
                 || $slotT->kind === Type::KIND_NULL || $slotT->kind === Type::KIND_VOID;
+            // An erased word (a bare-`array` param) stored beside an owned CELL
+            // in the same name: it meets that cell as a Borrow of its class,
+            // not as a scalar (as for a foreach element, {@see scanForeach}).
+            if (!$nullish && !$isMixed && $slotT->kind === Type::KIND_UNKNOWN
+                && self::storesCell($this->fnBody ?? $sl, $name)) {
+                $ck = $this->intern($name, 'cell', Type::cell());
+                $lat->storeName[$id] = $name;
+                $lat->storeKey[$id] = $ck;
+                $lat->storeState[$id] = OwnLattice::borrow($ck);
+                $lat->storeMode[$id] = OwnLattice::PLAIN;
+                return;
+            }
             // A MIXED slot's release reads its representation flag, which
             // this store sets to "not a raw rc pointer": nothing to avoid.
             $st = ($nullish || $isMixed) ? OwnLattice::EMPTY : OwnLattice::SCALAR;

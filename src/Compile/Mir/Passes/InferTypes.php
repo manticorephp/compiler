@@ -516,6 +516,8 @@ final class InferTypes implements Pass
      *  concrete-element array param stays authoritative across a store: a
      *  cell-array value assigned to it de-cellifies (see inferStoreLocal). */
     private array $currentParamTypes = [];
+    /** @var array<string, bool> by-value bare-`array` params of the function being inferred */
+    private array $arrayHintedParamNames = [];
     /** @var array<string,string> kind-alias local → object local: a `$k = $obj->kind`
      *  binding, so a later `$k === Node::KIND_X` narrows $obj (the `$k = $n->kind`
      *  dispatch idiom). Reset per function; a re-store to $k drops its entry. */
@@ -1278,6 +1280,8 @@ final class InferTypes implements Pass
 
     /** @var ?Type running union of return-value types in the current fn body */
     private ?Type $fnReturnUnion = null;
+    /** A value-less `return;` was seen in the function being inferred. */
+    private bool $fnBareReturn = false;
 
     /** @var ?Type accumulated union of the current generator's yield values */
     private ?Type $genValueType = null;
@@ -2329,6 +2333,23 @@ final class InferTypes implements Pass
     }
 
     /** A statement/block that always exits its enclosing flow (return/throw). */
+    /** Every path through $n ends in return/throw (conservative: false when unsure). */
+    private function alwaysExits(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_RETURN || $k === Node::KIND_THROW) { return true; }
+        if ($k === Node::KIND_BLOCK) {
+            foreach ($n->stmts as $s) {
+                if ($this->alwaysExits($s)) { return true; }
+            }
+            return false;
+        }
+        if ($k === Node::KIND_IF) {
+            return $n->else !== null && $this->alwaysExits($n->then) && $this->alwaysExits($n->else);
+        }
+        return false;
+    }
+
     private function blockDiverges(Node $n): bool
     {
         $k = $n->kind;

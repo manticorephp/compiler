@@ -164,6 +164,9 @@ public bool $needsClosureRc = false;
      */
     public bool $needsMethodExists = false;
 
+    /** `get_class_methods($name)` with a RUNTIME class name — emit the closed-world (class → method names) table and its lookup. */
+    public bool $needsClassMethods = false;
+
     /** As {@see $needsMethodExists}, for `property_exists`. */
     public bool $needsPropExists = false;
 

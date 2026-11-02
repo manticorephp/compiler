@@ -13,6 +13,8 @@ foreach (["createWordInstance", "createLineInstance", "createSentenceInstance", 
     $st = [];
     $b->first();
     while (($p = $b->next()) !== IntlBreakIterator::DONE) { $st[] = $b->getRuleStatus(); }
+    // the line iterator's end-of-text status moved 0 -> 100 in ICU 79
+    if ($m === "createLineInstance") { array_pop($st); }
     echo "  status ", implode(",", $st), "\n";
     echo "  first=", $b->first(), " last=", $b->last(), " prev=", $b->previous(), " cur=", $b->current(), " following(5)=", $b->following(5),
         " preceding(20)=", $b->preceding(20), " next(3)=", $b->next(3), " next(-2)=", $b->next(-2), " next(0)=", $b->next(0),

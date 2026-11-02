@@ -987,7 +987,13 @@ trait InferScans
                 // cell site then reads cells directly and Monomorphize clones
                 // each CONCRETE site off this erased-cell param (m8). Idempotent:
                 // skip when the param already carries a cell element.
-                if (isset($sawCell[$key])) {
+                //
+                // A PRELUDE callee fed an ERASED arg (one whose elements nobody can
+                // see: an untyped fused-closure result, a bare-`array` property) has
+                // the same floor. Its body is linkonce_odr, so no module may guess
+                // an element repr for it; the guess it started from (vec[string])
+                // read an int buffer's raw words as string pointers.
+                if (isset($sawCell[$key]) || ($fn->isPrelude && isset($erasedArg[$key]))) {
                     $cur = $p->type;
                     $already = $cur->isArray() && $cur->element !== null
                         && $cur->element->kind === Type::KIND_CELL;
@@ -2514,6 +2520,18 @@ trait InferScans
                     $t = $this->srcToken($o, $pname, $paramIdx, $paramVariadic);
                     if ($t !== null) { $tokens[$t] = true; }
                 }
+            }
+        } elseif ($n instanceof \Compile\Mir\RefAddr_ || $n instanceof \Compile\Mir\RefCell_) {
+            // A reference to an element (`$r = &$a[$k]`, `[&$a[$k]]`) promotes the
+            // slot to a reference box: the buffer becomes a cell channel, so the
+            // caller's array must carry cell elements.
+            $src = $n instanceof \Compile\Mir\RefAddr_ ? $n->lvalue : $n->refSource;
+            $b = $src;
+            $guard = 0;
+            while ($b !== null && $b->kind === Node::KIND_ARRAY_ACCESS && $guard < 16) { $b = $b->array; $guard = $guard + 1; }
+            if ($src !== null && $src->kind === Node::KIND_ARRAY_ACCESS && $b !== null
+                && $b->kind === Node::KIND_LOAD_LOCAL && $b->name === $pname) {
+                $tokens['k:' . Type::KIND_CELL] = true;
             }
         } elseif ($n->kind === Node::KIND_CALL || $n->kind === Node::KIND_STATIC_CALL
             || $n->kind === Node::KIND_METHOD_CALL || $n->kind === Node::KIND_NEW_OBJ) {

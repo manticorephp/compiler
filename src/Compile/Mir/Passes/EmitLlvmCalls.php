@@ -112,6 +112,28 @@ trait EmitLlvmCalls
     }
 
     /**
+     * How an FFI call to C symbol `$c` meets stdout's stdio buffer. 1 = drain it
+     * first: the call blocks (sleep, poll, accept, recv, read, waitpid, curl,
+     * TLS), spawns or ends a process (fork, exec, popen, _exit, kill), or writes
+     * an fd directly (`write`) — bytes left buffered across any of those arrive
+     * late or out of order. 2 = a stream write whose LAST argument is the FILE*:
+     * stderr drains stdout, stdout marks it dirty. 3 = `puts`, always stdout. 0 = untouched. This is the one
+     * funnel every `#[Ffi\Symbol]` binding passes through ({@see emitFfiWrapper}).
+     */
+    private function ffiOutSyncKind(string $c): int
+    {
+        if ($c === 'fwrite') { return 2; }
+        if ($c === 'puts') { return 3; }
+        return \in_array($c, [
+            'write', 'read', 'fread', 'fgets', 'popen', 'pclose', 'fork', 'waitpid', 'execv', 'execvp',
+            '_exit', 'kill', 'flock', 'connect', 'accept', 'recv', 'recvfrom', 'recvmsg', 'poll',
+            'usleep', 'nanosleep', 'sigwait', 'getaddrinfo', 'getnameinfo', 'epoll_wait', 'kevent',
+            'curl_easy_perform', 'curl_multi_perform', 'curl_multi_poll',
+            'SSL_accept', 'SSL_connect', 'SSL_read',
+        ], true) ? 1 : 0;
+    }
+
+    /**
      * Emit an FFI function as a thin wrapper forwarding to its C symbol.
      * The outer signature is the uniform MIR ABI (i64 params / i64 return);
      * each arg is coerced from its i64 carrier to the extern's C type, the
@@ -237,6 +259,17 @@ trait EmitLlvmCalls
             $this->ffiDeclOwner[$cSym] = $fn->name;
         }
         $callArgs = \implode(', ', $cargs);
+        $syncKind = $this->ffiOutSyncKind($cSym);
+        if ($syncKind === 3) {
+            $this->rt->needsOutBuf = true;
+            $out .= "  call void @__mir_out_note()\n";
+        } elseif ($syncKind === 1) {
+            $this->rt->needsOutBuf = true;
+            $out .= "  call void @__mir_out_sync()\n";
+        } elseif ($syncKind === 2 && $cargs !== []) {
+            $this->rt->needsOutBuf = true;
+            $out .= '  call void @__mir_out_stream(' . $cargs[\count($cargs) - 1] . ")\n";
+        }
         if ($ret === 'void') {
             $out .= '  call ' . $callTypeTok . ' @' . $cSym . '(' . $callArgs . ")\n";
             $out .= "  ret i64 0\n";
@@ -3472,6 +3505,8 @@ trait EmitLlvmCalls
      *  mirrors {@see EmitLlvm::$classIdReg}). */
     private string $refBoxSlot = '';
     private string $refBoxTmp = '';
+    /** @var array<string, bool> scratch slot (SSA name) → holds a typed COPY of a cell array. */
+    private array $byRefDecelled = [];
 
 
     /**
@@ -3567,6 +3602,7 @@ trait EmitLlvmCalls
             $out .= '  ' . $dv . ' = call i64 @__mir_elem_decode(ptr ' . $this->lastValue . ', i64 ' . $cv . ")\n";
             $cv = $dv;
         }
+        $decelled = false;
         $scalar = $pt !== null && $this->isByRefScalarParam($pt);
         // A STRING param decodes too: php coerces the argument on entry, and the
         // bare payload of an int cell handed to `string &$s` was dereferenced
@@ -3592,9 +3628,22 @@ trait EmitLlvmCalls
         } else {
             $raw = $this->ssa->allocReg();
             $out .= '  ' . $raw . ' = and i64 ' . $cv . ", 281474976710655\n";
+            // A cell array bound to a CONCRETE-element array param: the callee reads
+            // raw words, but the buffer behind the cell is described by its OWN hint
+            // (a cell-element container stores boxed elements). Hand it a typed copy
+            // decoded by that hint; the rebox gives the slot's old buffer back.
+            if ($elemBase === '' && $pt !== null && $this->needsDeCellify($pt, Type::vec(Type::cell()))) {
+                $this->lastValue = $raw;
+                $this->lastValueType = 'i64';
+                $out .= $this->emitCellArrayToTyped($pt, true);
+                $out .= $this->coerceToI64();
+                $raw = $this->lastValue;
+                $decelled = true;
+            }
         }
         $tmp = $this->ssa->allocReg();
         $out .= '  ' . $tmp . " = alloca i64\n";
+        $this->byRefDecelled[$tmp] = $decelled;
         // Written for EVERY scratch, scalar or not: the key is an SSA register
         // name, which the next function reuses. A stale scalar entry re-boxed
         // parse_str's nested array as an INT (`int(4387692744)`).
@@ -3655,6 +3704,11 @@ trait EmitLlvmCalls
             }
             $sp = $this->ssa->allocReg();
             $out .= '  ' . $sp . ' = inttoptr i64 ' . $slots[$bi] . " to ptr\n";
+            if ($this->byRefDecelled[$tmp] ?? false) {
+                $old = $this->ssa->allocReg();
+                $out .= '  ' . $old . ' = load i64, ptr ' . $sp . "\n";
+                $out .= '  call void @__mir_cell_drop(i64 ' . $old . ")\n";
+            }
             $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $sp . "\n";
             $bi = $bi + 1;
         }
