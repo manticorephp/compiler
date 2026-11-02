@@ -1017,7 +1017,7 @@ function clang_opt_level(): string
 function clang_tuning_flags(): string
 {
     if (\Compile\Debug::$asan) {
-        return ' -fsanitize=address -mllvm -asan-stack=0';
+        return ' -fsanitize=address -mllvm -asan-stack=0 -mllvm -asan-globals=0';
     }
     $e = \getenv("MANTICORE_FAT_FUNCTION_SPLIT");
     if ($e !== false && $e !== "" && $e !== "0" && $e !== "off") {
