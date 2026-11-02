@@ -147,6 +147,7 @@ final class BuildCommand extends Command
             // `"App\\": "src/"` map does not double-scan.
             $composer = isset($app["composer"]) ? $app["composer"] : false;
             $composerOn = ($composer === true) || \is_array($composer);
+            if ($composerOn) { \Manticore\CompileArgs::$composerBuild = true; }
             if ($composerOn) {
                 $withVendor = !(\is_array($composer) && isset($composer["vendor"]) && $composer["vendor"] === false);
                 $withVendorBootstrap = $withVendor || (\is_array(

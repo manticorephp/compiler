@@ -2309,6 +2309,9 @@ final class CompileArgs
      */
     public static array $demandLoadedPaths = [];
 
+    /** A `composer: true` build: `vendor/autoload.php` and composer's generated files are built in ({@see \Parser\IncludePath::isComposerGenerated}). */
+    public static bool $composerBuild = false;
+
     /** @var array<string, \Parser\Ast\Expr> */
     public static array $externConstants = [];
 

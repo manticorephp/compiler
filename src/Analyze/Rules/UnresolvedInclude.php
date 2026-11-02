@@ -34,6 +34,7 @@ final class UnresolvedInclude
             $path = self::constPath($e->args[0]);
             if ($path === null) { continue; }
             $required = isset($e->args[1]) && $e->args[1] instanceof \Parser\Ast\IntLiteral && $e->args[1]->value === 1;
+            if (\Parser\IncludePath::isComposerGenerated($path)) { continue; }
             $real = \realpath($path);
             if ($real === false) {
                 if (!$required) { continue; }
@@ -62,12 +63,6 @@ final class UnresolvedInclude
 
     private static function constPath(Expr $e): ?string
     {
-        if ($e instanceof StringLiteral) { return $e->value; }
-        if ($e instanceof BinaryOp && $e->op === '.') {
-            $l = self::constPath($e->left);
-            $r = $l === null ? null : self::constPath($e->right);
-            return $r === null ? null : $l . $r;
-        }
-        return null;
+        return \Parser\IncludePath::fold($e);
     }
 }
