@@ -410,11 +410,21 @@ final class NarrowReturns implements Pass
             // Monotone: unknown -> concrete, after which only the cell widen moves.
             $refine = $rt->element !== null && $rt->element->kind === Type::KIND_UNKNOWN
                 && $result->element !== null && $result->element->kind !== Type::KIND_UNKNOWN;
+            // The same absence one level down: a sweep that ran before a local
+            // settled locked `assoc[string, assoc[string, unknown]]` for a body
+            // that returns `assoc[string, assoc[string, assoc[string, cell]]]`.
+            // The caller then walked the real nested arrays under the stale
+            // shorter type (empty rows, SIGSEGV, double free). Monotone: once
+            // the claim holds no unknown the refinement stops firing.
+            if (!$refine && $rt->element !== null && $result->element !== null
+                && $this->hasUnknownDeep($rt->element) && !$this->hasUnknownDeep($result->element)) {
+                $refine = true;
+            }
             if (!$keyFix && !$refine
                 && ($result->element === null || $result->element->kind !== Type::KIND_CELL)) {
                 return false;
             }
-            if (!$keyFix
+            if (!$keyFix && !$refine
                 && $rt->element !== null && $rt->element->kind === $result->element->kind) {
                 return false;
             }
@@ -590,6 +600,15 @@ final class NarrowReturns implements Pass
             if ($key === null || !$this->isConcreteElem($key)) { return false; }
         }
         return true;
+    }
+
+    /** An UNKNOWN anywhere in the element / key chain of an array type. */
+    private function hasUnknownDeep(Type $t): bool
+    {
+        if ($t->kind === Type::KIND_UNKNOWN) { return true; }
+        if (!$t->isArray()) { return false; }
+        if ($t->element !== null && $this->hasUnknownDeep($t->element)) { return true; }
+        return $t->key !== null && $this->hasUnknownDeep($t->key);
     }
 
     private function isConcreteElem(Type $t): bool
