@@ -60,7 +60,9 @@ show('self', $a->getNotify(PDO::FETCH_ASSOC, 2000), $pids);
 // a big and a multibyte payload
 $big = str_repeat('é', 3900);
 $b->exec("NOTIFY mc_t9_one, '$big'");
-$r = $a->getNotify(PDO::FETCH_ASSOC, 2000);
+// php's pdo_pgsql polls the socket once and reads once: a 7.8 KB payload that arrives in two TCP segments
+// makes its first call answer false, so both drivers retry until the whole notification is in
+for ($try = 0; ($r = $a->getNotify(PDO::FETCH_ASSOC, 2000)) === false && $try < 5; $try++) { }
 echo 'big ', $r['payload'] === $big ? 'same' : 'DIFFERENT', ' ', strlen($r['payload']), "\n";
 
 // argument checks
