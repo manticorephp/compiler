@@ -851,6 +851,7 @@ function with_frame_pointers(string $ir): string
         return $ir;
     }
     $lines = \explode("\n", $ir);
+    $total = \count($lines);
     $n = 0;
     foreach ($lines as $i => $l) {
         if (\substr($l, 0, 7) !== "define ") {
@@ -859,13 +860,22 @@ function with_frame_pointers(string $ir): string
         if (\substr($l, -3) !== ") {") {
             continue;
         }
-        $lines[$i] = \substr($l, 0, -2) . "#0 {";
+        // ASan: the 870k-line dispatchers (`__mir_dyninl_*`, `__mc_static_callable`) overflow clang's
+        // own stack in the instrumentation pass; they get the frame pointer only (`#1`).
+        $group = '#0';
+        if (\Compile\Debug::$asan) {
+            $j = $i + 1;
+            while ($j < $total && $j - $i <= 30000 && $lines[$j] !== '}') { $j++; }
+            if ($j - $i > 30000) { $group = '#1'; }
+        }
+        $lines[$i] = \substr($l, 0, -2) . $group . " {";
         $n++;
     }
     if ($n === 0) {
         return $ir;
     }
-    return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\"" . (\Compile\Debug::$asan ? ' sanitize_address' : '') . " }\n";
+    return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\""
+        . (\Compile\Debug::$asan ? ' sanitize_address' : '') . " }\nattributes #1 = { \"frame-pointer\"=\"all\" }\n";
 }
 
 /**
