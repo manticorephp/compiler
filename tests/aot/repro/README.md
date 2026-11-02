@@ -13,9 +13,9 @@ the same source. No `.expected` (a superset repro with no Zend oracle) ⇒ `SKIP
 ## w4/ — the W4 value-channel producers (EMPTY: the epic is closed)
 
 One repro per producer that stores a RAW word into a `cell` channel, with the php
-oracle output beside it as `<name>.expected`. `bash tools/w4_repros.sh` is their gate;
+oracle output beside it as `<name>.expected`. Compile and diff each by hand against it;
 a passing one is promoted into `cases/` + `expected/`. Every producer P1–P7 is
-closed and promoted, so the directory is empty and the gate reports it — a NEW
+closed and promoted, so the directory is empty — a NEW
 one goes here. See `docs/design/value-channels.md`.
 
 ## wrong/ · crash/ · leak/ — one file per open issue
