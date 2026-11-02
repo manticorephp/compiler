@@ -5062,7 +5062,7 @@ trait EmitLlvmObjects
         $this->locals->slots['__mc_dyn_obj'] = $objSlot;
         $this->locals->slots['__mc_dyn_name'] = $nameSlot;
         $this->locals->slots['__mc_dyn_args'] = $argsSlot;
-        $body = 'define internal i64 ' . $sym . "(i64 %obj, ptr %name, ptr %args) {\nentry:\n";
+        $body = 'define hidden i64 ' . $sym . "(i64 %obj, ptr %name, ptr %args) {\nentry:\n";
         $body .= '  ' . $objSlot . " = alloca i64\n  store i64 %obj, ptr " . $objSlot . "\n";
         $body .= '  ' . $nameSlot . " = alloca i64\n";
         $body .= "  %nameI = ptrtoint ptr %name to i64\n  store i64 %nameI, ptr " . $nameSlot . "\n";
