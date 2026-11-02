@@ -82,6 +82,7 @@ final class BuildCommand extends Command
         // Manifest paths (src, entry, output, composer root) are relative to the
         // manifest's own directory, not the caller's cwd.
         $manifestDir = \dirname($manifestPath);
+        \Manticore\self_dir();
         if ($manifestDir !== "." && !\chdir($manifestDir)) {
             \Manticore\dprint("build: cannot enter manifest directory: " . $manifestDir);
             return 66;
