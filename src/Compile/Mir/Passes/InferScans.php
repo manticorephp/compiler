@@ -3028,6 +3028,15 @@ trait InferScans
             foreach ($fn->params as $p) {
                 $idx = $idx + 1;
                 if (!$p->byRef || $p->variadic) { continue; }
+                // A GENERATOR's by-ref param outlives the call: its body runs after the
+                // caller's write-back of a representation-converting scratch slot, so the
+                // lazy write landed in the scratch (#187). The cell is the repr every
+                // caller's slot can share by address. A capture binds an address already.
+                if ($fn->isGenerator && $idx >= $caps && $p->type->kind !== Type::KIND_CELL) {
+                    $this->retypeByRefParamCell($fn, $p);
+                    $changed = true;
+                    continue;
+                }
                 // An ARRAY param the body rebinds (`$array = &$array[$k]`) names slots of two
                 // representations — the caller's raw array, then an element cell — and the
                 // emitter types the local once, so the first access wrote a boxed word into
@@ -3050,6 +3059,7 @@ trait InferScans
             if ($fn->isExtern || !isset($methodOf[$fn->name])) { continue; }
             $m = $methodOf[$fn->name];
             $idx = -1;
+            $caps = $module->closureCaptures[$fn->name] ?? 0;
             foreach ($fn->params as $p) {
                 $idx = $idx + 1;
                 if (!$p->byRef || $p->variadic || !$this->isByRefRetypeKind($p->type)) { continue; }
