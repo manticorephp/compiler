@@ -1,6 +1,7 @@
 name: ci-docs-only
 
-# Companion of ci.yml. ci.yml skips a PR that only touches docs, markdown or site/**, and a required
+# Companion of ci.yml. ci.yml skips a PR that only touches docs, markdown, site/** or the dev-only tools/ paths
+# (keep the list identical to ci.yml's paths-ignore), and a required
 # check a skipped workflow never reports leaves that PR unmergeable. This reports
 # the same names green. A PR that also touches real code runs both; ci.yml's rows
 # still gate it.
@@ -10,6 +11,31 @@ on:
       - '**.md'
       - 'docs/**'
       - 'site/**'
+      - 'tools/prof/**'
+      - 'tools/audit/**'
+      - 'tools/bench/**'
+      - 'tools/autobahn.sh'
+      - 'tools/autobahn_client.php'
+      - 'tools/builtins_audit.php'
+      - 'tools/cellguard_scan.sh'
+      - 'tools/cellguard_baseline.txt'
+      - 'tools/check_ir_arity.php'
+      - 'tools/check_offload_abi.php'
+      - 'tools/compile_user_mir.php'
+      - 'tools/ds_polyfill.php'
+      - 'tools/ext_smoke.sh'
+      - 'tools/fiber_ceiling.sh'
+      - 'tools/fiber_ceiling.php'
+      - 'tools/file_bug.sh'
+      - 'tools/gen_mbstring_tables.php'
+      - 'tools/gen_tokenizer_tables.php'
+      - 'tools/libclass_smoke.sh'
+      - 'tools/mbstring_diff.php'
+      - 'tools/offload_bench.php'
+      - 'tools/ownflow_check.sh'
+      - 'tools/ownflow_dump.php'
+      - 'tools/ownership_probe.php'
+      - 'tools/tokenizer_diff.php'
 
 jobs:
   stub:
@@ -19,4 +45,4 @@ jobs:
       matrix:
         check: [linux-arm64, linux-amd64, linux-alpine-arm64, linux-alpine-amd64, macos-arm64, bootstrap-from-pin]
     steps:
-      - run: echo "docs/site-only change, compiler CI not needed"
+      - run: echo "docs/site/dev-tools-only change, compiler CI not needed"

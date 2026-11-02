@@ -35,7 +35,7 @@ Consequences the rule forces, each a former "by design" exception:
 
 ## Producers — the repro set is the exit gate
 
-`bash tools/w4_repros.sh` compiles every `tests/aot/repro/w4/*.php` and diffs it
+Every `tests/aot/repro/w4/*.php` was compiled and diffed
 against the php oracle recorded beside it. A passing repro is promoted into
 `tests/aot/cases/` + `expected/`. The epic exits when the directory is empty,
 `arithType`'s `false &&` is gone, and `MANTICORE_TYPECHECK` is on by default.
@@ -331,6 +331,6 @@ by-ref call into an erased param.
    need the erased producers to become self-describing first — a separate epic,
    tracked in ROADMAP.
 
-Every step: `tools/w4_repros.sh` + `tests/aot/run.sh -j 0` + difftest before
+Every step: `tests/aot/run.sh -j 0` + difftest before
 merge; a repr change shows only in the generation AFTER the one that emits it,
 so two self-builds before believing a green.
