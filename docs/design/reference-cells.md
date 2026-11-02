@@ -232,8 +232,10 @@ call site made to convert a representation, a property slot or a buffer element.
 None of those outlives the reference. Two halves make it safe:
 
 1. **The caller boxes** (`VivifyRefArgs`). A local at such a position becomes a
-   ref-cell target (a counted frame box); a TYPED property there is NOT promoted (stale copy, #353); an untyped one joins
-   `refCellPropNames` (promoted in place); an element is marked
+   ref-cell target (a counted frame box); a property there joins
+   `refCellPropNames` (promoted in place) and, when the receiver's class is known,
+   `Module::$refStoredProps`, which retypes the slot to a cell even when it is
+   TYPED (`scanRefCellProps`, the `[&$o->p]` rule — #353); an element is marked
    `ArrayAccess_::$refStored` and handed over as its box (`elemRefBoxAddr`).
    The analysis is conservative: a dispatched call asks every holder of the
    method NAME, a run-time callee (closure value, callable, function name,
@@ -270,3 +272,21 @@ caller's receiver to null.
 
 A frame's boxes are released on the unwind too: every cleanup pad of a frame
 that owns one gives the counts back (`EmitLlvmExceptions::ehBoxReleases`).
+
+## The 2026-11 cluster: one rule, four causes
+
+Issues #353, #187, #488, #511, #41, #495, #515 were filed under "a reference
+must agree with its target's representation". Reproduced on `fix/backlog-sweep`,
+they split into four causes, not one:
+
+| cause | issues | fix |
+|---|---|---|
+| **A. the callee outlives a representation-converting scratch slot.** When the caller's slot and the by-ref param disagree on repr, the call site hands over a scratch slot and writes it back after the call (`emitByRefCellBox`). A callee whose use of the address outlives the call — a GENERATOR body, a stored reference to a TYPED property — writes into a dead scratch. | #187, #353 (typed property) | Make the two agree instead of converting: a generator's by-ref param is retyped to a cell (`scanByRefParamRetype`; callers follow through `scanRefCellArgWiden`), and a property handed to a reference-storing param is retyped to a cell (`Module::$refStoredProps` → `scanRefCellProps`, the existing `[&$o->p]` rule). No new mechanism: both reuse the "one slot, one representation" retype. |
+| **B. a body that rebinds a param / binds a foreach var through a box the emitter does not read.** | #488, #495, #515 | Already fixed on `laravel` (92606c34, f3f00284, 8426bead); cherry-picked. |
+| **C. an rc-1 REF element is shared on array copy.** php's `zend_array_dup` unwraps a reference only one slot holds; Manticore's COW clone retains the box, so `$r = [&$a[0]]; unset($r); $b = $a; $b[0] = 9;` writes `$a[0]`. Every ref-spread leaves such elements behind. | #548, blocks #511 (dynamic) | Not done. Fix belongs in the COW clone (`emitCowVariant`): after the deep retain, a REF element whose box count is 2 (source + clone) is replaced in the clone by its value. Needs a cheap gate (an array-header bit set by `__mir_array_ref_box*`, so an array that never held a reference pays nothing) — a `MemoryAbi` change. Only after that can `$o->$m(...$args)` take the ref-spread conservatively (the callee is chosen at run time); doing it first would turn every such array into a permanent alias. |
+| **D. a by-ref foreach follows the KEY, php follows the ELEMENT.** The live loop writes `$v` back by key and re-finds its position by key; `array_shift` renumbers keys, so the step writes the old value into the element that slid into the key. | #41 | Not done. Needs php's iterator-position update: the live loop must notice that the array was shifted under it (the v22 head gap moves the header, not the elements, so an element's slot address is stable across a shift) and treat the shifted-out element as gone. |
+
+Still open as well: #353's dynamic property name through a first-class
+callable (`$f($o->$n)`) — no static name to promote; it needs a name-dispatched
+`byRefAddrOf` for `DynProp_` plus promoting every declared property of the
+receiver class, a cost to measure before paying it.
