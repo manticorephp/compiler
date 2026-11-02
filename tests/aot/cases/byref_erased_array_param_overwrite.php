@@ -1,6 +1,5 @@
 <?php
 // socket_select overwriting its untyped by-ref array parameter leaks the caller's previous array on every call.
-// issue: #547
 socket_create_pair(AF_UNIX, SOCK_STREAM, 0, $p);
 $m0 = memory_get_peak_usage();
 for ($i = 0; $i < 100000; $i++) {
