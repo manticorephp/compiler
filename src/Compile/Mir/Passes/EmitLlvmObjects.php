@@ -5054,7 +5054,8 @@ trait EmitLlvmObjects
                 $i = $i + 1;
             }
         }
-        $body = 'define internal i64 ' . $sym . '(' . $params . ") {\nentry:\n";
+        // linkonce_odr for the same reason as __mir_dyninl_*: one copy per module, not one per part.
+        $body = 'define linkonce_odr i64 ' . $sym . '(' . $params . ") {\nentry:\n";
         $body .= '  ' . $slot . " = alloca i64\n";
         $body .= '  store i64 %obj, ptr ' . $slot . "\n";
         $objLoad = $this->ssa->allocReg();
