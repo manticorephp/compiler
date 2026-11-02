@@ -75,6 +75,11 @@ function __mc_weak_arm(): void
 {
 }
 
+function __mc_obj_addr(object $o): int
+{
+    return \spl_object_id($o);
+}
+
 function __mc_obj_from_addr(int $addr): mixed
 {
     throw new \Error('WeakMap/WeakReference need a compiler that knows __mc_obj_from_addr');

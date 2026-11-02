@@ -128,6 +128,16 @@ boxing outside the erased thunks. Properties:
   gets a second entry (the erased thunk) that boxes its result / unboxes its args;
   the dispatch switch calls the thunk when the receiver is erased.
 
+**A binding is a claim; a misfit never converts or reinterprets.** An argument that does not
+fit what the binding claimed (`5` into `Bag<float>::add`) either keeps its own type or throws
+`TypeError`. It is kept when the origin's erased body can take it (a method that never hands the
+claimed type back, e.g. a `Map<string,int>` key). It throws when the specialization could not
+read it back as itself: the layout moved (`Bag<float>`'s items are raw doubles), the claimed type
+also comes out of a method (`Map<string,int>::set($k, "x")`), or it is a bound `new Box(5)` for
+`Box<string>` (checked from the argument's static type; an erased argument keeps its coercion).
+The bare-origin receiver is checked at run time by the erased thunk. Zend, which never checks a
+docblock, would keep every value (`generics_reified_misfit_arg.php`, `ds_reified_map_misfit_value.php`).
+
 **A type hint may NOT name a specialization it does not construct.** A slot typed
 `Box<float>` that is *handed* an object from elsewhere (which may be an erased
 instance) stays **erased** and goes through the thunks. Only the `@var … = new …`

@@ -260,7 +260,7 @@ final class ClassDef
     /** Header bytes before the first property (0 for `#[Struct]`). */
     public function headerSize(): int
     {
-        return $this->isStruct ? 0 : 16;
+        return $this->isStruct ? 0 : \Compile\MemoryAbi::OBJECT_HEADER_SIZE;
     }
 
     /** Slots narrower than a word: property name → 1 / 2 / 4, from the `repr` of

@@ -470,7 +470,7 @@ trait LowerPrelude
             if ($this->declaresMethod($cname, '__debugInfo')) {
                 $sawDebugInfo = true;
                 $body .= "    \$d = \$v->__debugInfo();\n"
-                    . "    echo 'object(" . $cd->display() . ")#1 (', (string)count(\$d), \") {\\n\";\n"
+                    . "    echo 'object(" . $cd->display() . ")#', (string)spl_object_id(\$v), ' (', (string)count(\$d), \") {\\n\";\n"
                     . "    __mir_dump_debug_body(\$d, \$indent);\n"
                     . "    echo \$pad, \"}\\n\"; return;\n  }\n}\n";
             } else {
@@ -486,9 +486,9 @@ trait LowerPrelude
                 if ($cd->usesBag()) {
                     $pcx = $maybe !== [] ? '$cnt' : $pc;
                     $body .= "    \$bag = \\__mir_obj_bag(\$v);\n"
-                        . "    echo 'object(" . $cd->display() . ")#1 (', (string)(" . $pcx . " + count(\$bag)), \") {\\n\";\n";
+                        . "    echo 'object(" . $cd->display() . ")#', (string)spl_object_id(\$v), ' (', (string)(" . $pcx . " + count(\$bag)), \") {\\n\";\n";
                 } else {
-                    $body .= "    echo 'object(" . $cd->display() . ")#1 (" . $pc . ") {' . \"\\n\";\n";
+                    $body .= "    echo 'object(" . $cd->display() . ")#' . (string)spl_object_id(\$v) . ' (" . $pc . ") {' . \"\\n\";\n";
                 }
                 foreach ($props as $p) {
                     // php marks a non-public slot: `["p":protected]`, `["p":"Declaring":private]`.
@@ -532,7 +532,7 @@ trait LowerPrelude
         }
         $dispatch .= "  }\n"
             . "  \$arr = \\__mir_obj_bag(\$v);\n"
-            . "  echo 'object(stdClass)#1 (', (string)count(\$arr), \") {\\n\";\n"
+            . "  echo 'object(stdClass)#', (string)spl_object_id(\$v), ' (', (string)count(\$arr), \") {\\n\";\n"
             . "  foreach (\$arr as \$k => \$val) {\n"
             . "    echo \$pad, '  [\"', \$k, \"\\\"]=>\\n\", \$pad, '  ';\n"
             . "    __mir_var_dump(\$val, \$indent + 1);\n"

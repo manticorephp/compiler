@@ -356,8 +356,6 @@ the index slot would remove the dereferences; that is a layout change, deferred.
 
 ### Known open issues
 
-- #137: a bound `V` (`Map<string,int>`) is a static claim; a stored value that
-  does not fit `V` is reinterpreted when read back.
 - #140: by-ref `foreach` over a by-value `Generator` iterates instead of
   throwing (the `Map` case throws correctly).
 - #143, #144, #145: general throw-path leaks (method-argument receiver,

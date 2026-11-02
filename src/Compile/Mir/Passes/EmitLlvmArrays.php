@@ -1154,9 +1154,12 @@ trait EmitLlvmArrays
         if ($se->array->type->kind === Type::KIND_OBJ
             && $this->classImplements($se->array->type->class ?? '', 'ArrayAccess')) {
             $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$this->keyAsWritten($se->array, $se->index), $se->value], Type::void());
-            $fast = $se->index->kind === Node::KIND_NULL_CONST
+            // A value the binding's claim does not provably hold goes through the
+            // erased thunk (a check), not the inline store.
+            $claimed = ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes) !== '';
+            $fast = $claimed ? null : ($se->index->kind === Node::KIND_NULL_CONST
                 ? $this->emitNbufAppend($se->array, $se->value, $mc)
-                : $this->emitNbufSet($se->array, $se->index, $se->value, $mc);
+                : $this->emitNbufSet($se->array, $se->index, $se->value, $mc));
             if ($fast !== null) { return $fast . $this->offsetSetResult($se); }
             if (!$this->offsetSetValueIsReadable($se->value)
                 && $this->offsetSetValueIsScalar($se->value) && $this->offsetSetOperandsScalar($se)) {

@@ -221,7 +221,7 @@ namespace Manticore\Ds {
          * Array-access form of {@see set()}: `$map[$offset] = $value`.
          *
          * @param mixed $offset  the key
-         * @param mixed $value  the value to store
+         * @param V $value  the value to store
          * @throws \Error  on `$map[] = $value`: a map has no append, use `set()`
          */
         public function offsetSet(mixed $offset, mixed $value): void
@@ -695,7 +695,7 @@ namespace Manticore\Ds {
          * Replaces the element at `$offset`: `$v[$offset] = $value`; with a `null` offset (`$v[] = $value`) it appends.
          *
          * @param mixed $offset  the index, or null to append
-         * @param mixed $value  the new element
+         * @param T $value  the new element
          * @throws \OutOfBoundsException  when the index is outside `0..count-1`
          * @throws \TypeError  when the index is not an int
          */

@@ -97,6 +97,7 @@ trait EmitLlvmObjects
             $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
             $out .= '  call ptr @memcpy(ptr ' . $obj . ', ptr ' . $tmpl
                   . ', i64 ' . (string)$size . ")\n";
+            $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $obj . ")\n";
             $this->lastValue = $obj;
             $this->lastValueType = 'ptr';
             return $out;
@@ -164,6 +165,7 @@ trait EmitLlvmObjects
                 $out .= '  store i64 0, ptr ' . $mGep . "\n";
             }
         }
+        if (!$isStruct) { $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $obj . ")\n"; }
         $this->lastValue = $obj;
         $this->lastValueType = 'ptr';
         return $out;
@@ -1116,6 +1118,7 @@ trait EmitLlvmObjects
         $rcGep = $this->ssa->allocReg();
         $out .= '  ' . $rcGep . ' = getelementptr inbounds i64, ptr ' . $new . ", i64 1\n";
         $out .= '  store i64 1, ptr ' . $rcGep . "\n";
+        $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $new . ")\n";
         if ($this->resolveMethodClass($cd->name, '__destruct') !== '') {
             $out .= '  call void @__mir_dtor_reg(ptr ' . $new . ")\n";
         }
@@ -9350,8 +9353,11 @@ trait EmitLlvmObjects
         // (`$x[...]` → `offsetGet`, `$o(...)` → `__invoke`) never met
         // ResolveOverloads, so the same rule decides it now; its node type is
         // still the spec's, so an erased (cell) result is decoded to it.
+        // The erased thunk has just checked its claims itself: its own call to the
+        // spec method must not route back through it.
         $route = $mc->direct !== '' ? $mc->direct
-            : ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes);
+            : (\str_ends_with($this->frame->name, '$erased') ? ''
+                : ResolveOverloads::claimRoute($mc, $this->claimedFns, $this->classes));
         if ($route !== '') {
             $dArgs = [$mc->object];
             foreach ($mc->args as $a) { $dArgs[] = $a; }
