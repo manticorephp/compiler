@@ -1027,6 +1027,7 @@ trait EmitLlvmControl
         } else {
             $out .= $this->emitCondVal($t->cond);
             $cond = $this->lastValue;
+            $out .= $this->ternaryCondDrop($t);
         }
         $thenLabel = $this->ssa->allocLabel('tern.then');
         $elseLabel = $this->ssa->allocLabel('tern.else');

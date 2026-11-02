@@ -3032,10 +3032,84 @@ final class EmitLlvm implements EmitVisitor
                 return '';
             }
         }
-        if ($this->ehOn) { return $this->emitNodeEh($n); }
-        if ($this->irCensus) { return $this->emitNodeCensus($n); }
-        $out = $n->accept($this);
-        if ($this->cellGuard) { $this->markCellCalleeResult($n); }
+        if ($this->ehOn) {
+            $out = $this->emitNodeEh($n);
+        } elseif ($this->irCensus) {
+            $out = $this->emitNodeCensus($n);
+        } else {
+            $out = $n->accept($this);
+            if ($this->cellGuard) { $this->markCellCalleeResult($n); }
+        }
+        foreach ($this->consumedOperands($n) as $op) {
+            if ($op instanceof StoreLocal && \str_starts_with($op->name, '__fb_')) {
+                $out .= $this->consumedSpillDrop($op);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * The operands a scalar consumer reads and drops, where a fresh one was
+     * spilled into a hidden local ({@see SpillFreshBases::rewriteConsumed}).
+     * Only consumers whose result cannot be the operand: `(bool)`, `!`, a
+     * comparison, `instanceof`, a one-argument call answering bool.
+     *
+     * @return Node[]
+     */
+    private function consumedOperands(Node $n): array
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CAST && $n instanceof Cast) {
+            return $n->target === 'bool' ? [$n->operand] : [];
+        }
+        if ($k === Node::KIND_NOT && $n instanceof Not_) { return [$n->operand]; }
+        if ($k === Node::KIND_INSTANCEOF && $n instanceof Instanceof_) { return [$n->operand]; }
+        if ($k === Node::KIND_CMP && $n instanceof Cmp) { return [$n->left, $n->right]; }
+        if ($k === Node::KIND_SPACESHIP && $n instanceof \Compile\Mir\Spaceship) { return [$n->left, $n->right]; }
+        if ($k === Node::KIND_CALL && $n instanceof Call && $n->type->kind === Type::KIND_BOOL
+            && \count($n->args) === 1) {
+            return [$n->args[0]];
+        }
+        return [];
+    }
+
+    /**
+     * A full ternary's condition, spilled, is spent once it has chosen an arm
+     * (released before the arms run), unless an arm reads the spill — a
+     * nullsafe desugar reads through it.
+     */
+    private function ternaryCondDrop(Ternary $n): string
+    {
+        $c = $n->cond;
+        if ($n->then === null || !($c instanceof StoreLocal) || !\str_starts_with($c->name, '__fb_')) { return ''; }
+        if ($this->readsLocal($n->then, $c->name) || $this->readsLocal($n->else_, $c->name)) { return ''; }
+        return $this->consumedSpillDrop($c);
+    }
+
+    private function readsLocal(Node $n, string $name): bool
+    {
+        if ($n instanceof LoadLocal && $n->name === $name) { return true; }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->readsLocal($c, $name)) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * php frees a consumed temporary as soon as the consumer has answered, not
+     * at the end of the statement: `var_dump((bool)f(), new C)` hands the second
+     * object the first one's handle. Release the spill's slot and zero it, so the
+     * statement's own drop finds nothing; a slot the flow does not own is left alone.
+     */
+    private function consumedSpillDrop(StoreLocal $sp): string
+    {
+        $lv = $this->lastValue;
+        $lt = $this->lastValueType;
+        $t = $sp->type;
+        $out = $this->emitMemoryOp(new \Compile\Mir\MemoryOp_('drop', $this->discardReleaseFlavor($t),
+            new \Compile\Mir\LoadLocal($sp->name, $t), Type::void()));
+        $this->lastValue = $lv;
+        $this->lastValueType = $lt;
         return $out;
     }
 
