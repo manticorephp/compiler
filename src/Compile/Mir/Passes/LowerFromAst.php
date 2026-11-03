@@ -6425,7 +6425,9 @@ final class LowerFromAst implements Pass
      */
     private function classUsesSrc(): string
     {
-        $arms = '';
+        /** @var array<string, string> $bodies lowercased name => the statement that answers it */
+        $bodies = [];
+        $names = [];
         $decls = [];
         foreach ($this->classDecls as $d) { $decls[$d->name] = $d; }
         foreach ($this->traitTable as $d) { $decls[$d->name] = $d; }
@@ -6435,13 +6437,16 @@ final class LowerFromAst implements Pass
                 $tn = \ltrim($t, '\\');
                 $lit[] = "'" . \addcslashes($tn, "'\\") . "' => '" . \addcslashes($tn, "'\\") . "'";
             }
-            $key = \addcslashes(\strtolower(\ltrim($name, '\\')), "'\\");
-            $arms .= "    case '" . $key . "': return [" . \implode(', ', $lit) . "];\n";
+            $key = \strtolower(\ltrim($name, '\\'));
+            if (!isset($bodies[$key])) { $names[] = $key; }
+            $bodies[$key] = 'return [' . \implode(', ', $lit) . '];';
         }
+        // O(log N) crc32 tree, not a switch: a model calls this several times per attribute.
+        $tree = $this->nameTreeSrc('$__k', $names, function (string $n) use ($bodies): string { return $bodies[$n]; }, '  ');
         return "function class_uses(object|string \$object_or_class, bool \$autoload = true): array|false {\n"
             . "  \$n = \\is_object(\$object_or_class) ? \\get_class(\$object_or_class) : \$object_or_class;\n"
-            . "  switch (\\strtolower(\\ltrim(\$n, '\\\\'))) {\n" . $arms
-            . "  }\n  return false;\n}\n";
+            . "  \$__k = \\strtolower(\\ltrim(\$n, '\\\\'));\n" . $tree
+            . "  return false;\n}\n";
     }
 
     /**
