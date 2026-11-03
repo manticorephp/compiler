@@ -627,10 +627,6 @@ final class Lexer
                 $this->advance();
                 return true;
             }
-            if ($quoteOrd === \ord('"') && $c === \ord('{') && $this->peekByte(1) === \ord('$')) {
-                $this->skipInterpBraces();
-                continue;
-            }
             if ($quoteOrd === 34 && ($c === 123 || $c === 36) && $this->pos + 1 < $this->len
                 && \ord($this->src[$this->pos + 1]) === ($c === 123 ? 36 : 123)) {
                 $this->skipInterpBraces();
@@ -639,26 +635,6 @@ final class Lexer
             $this->advance();
         }
         return false;
-    }
-
-    /** Advance past a balanced `{…}` whose inner strings may contain braces. */
-    private function skipInterpBraces(): void
-    {
-        $depth = 0;
-        while ($this->pos < $this->len) {
-            $c = \ord($this->src[$this->pos]);
-            $this->advance();
-            if ($c === \ord('{')) {
-                $depth = $depth + 1;
-            } elseif ($c === \ord('}')) {
-                $depth = $depth - 1;
-                if ($depth === 0) {
-                    return;
-                }
-            } elseif ($c === \ord("'") || $c === \ord('"')) {
-                $this->skipQuotedBody($c);
-            }
-        }
     }
 
     /**
