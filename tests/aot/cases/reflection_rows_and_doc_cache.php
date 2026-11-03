@@ -8,10 +8,12 @@ abstract class Base implements Shape {
     /** The id. */
     protected int $id = 1;
     public static int $count = 0;
+    private string $secret = 's';
     /** Base method doc. */
     public function id(): int { return $this->id; }
     abstract public function area(): float;
     protected static function helper(): void {}
+    private function hidden(): int { return 1; }
 }
 
 /** Square docs. */
@@ -58,6 +60,9 @@ for ($i = 0; $i < 3; $i++) {
 // a member made by name still works after members made from rows
 $m = new ReflectionMethod('Square', 'make');
 echo $m->isStatic() ? 'static ' : 'inst ', $m->class, ' ', (new ReflectionProperty('Square', 'id'))->class, "\n";
-try { new ReflectionMethod('Square', 'nope'); } catch (ReflectionException $e) { echo get_class($e), "\n"; }
-try { new ReflectionProperty('Square', 'nope'); } catch (ReflectionException $e) { echo get_class($e), "\n"; }
+try { new ReflectionMethod('Square', 'nope'); } catch (ReflectionException $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+try { new ReflectionProperty('Square', 'nope'); } catch (ReflectionException $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+try { new ReflectionMethod('NoSuchClass', 'x'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+// a parent's private member is not listed on the child, but is on the parent
+echo count((new ReflectionClass('Base'))->getMethods()) - count((new ReflectionClass('Square'))->getMethods()), ' ', count((new ReflectionClass('Base'))->getProperties()) - count((new ReflectionClass('Square'))->getProperties()), "\n";
 echo (new ReflectionMethod('Square', 'area'))->isFinal() ? 'f' : 'nf', "\n";

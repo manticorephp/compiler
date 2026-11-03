@@ -57,7 +57,7 @@ function __mc_refl_last_sep(string $s): int
 {
     $i = \strlen($s) - 1;
     while ($i >= 0) {
-        if (\substr($s, $i, 1) === "\\") { return $i; }
+        if ($s[$i] === "\\") { return $i; }
         $i = $i - 1;
     }
     return -1;
@@ -560,7 +560,13 @@ class ReflectionClass
         $i = 0;
         while ($i < $n) {
             ReflectionMethod::$__row = __mc_refl_row_at($base, $i);
+            ReflectionMethod::$__h = $this->h;
             $m = new ReflectionMethod($this->name, __mc_refl_row_name($base, $i));
+            // php lists a parent's PRIVATE methods nowhere but on the parent.
+            if ($m->isPrivate() && \strtolower($m->class) !== \strtolower($this->name)) {
+                $i = $i + 1;
+                continue;
+            }
             if ($filter === null || ($m->getModifiers() & $filter) !== 0) {
                 $out[] = $m;
             }
@@ -582,7 +588,13 @@ class ReflectionClass
         $i = 0;
         while ($i < $n) {
             ReflectionProperty::$__row = __mc_refl_row_at($base, $i);
+            ReflectionProperty::$__h = $this->h;
             $p = new ReflectionProperty($this->name, __mc_refl_row_name($base, $i));
+            // …and a parent's PRIVATE properties likewise.
+            if ($p->isPrivate() && \strtolower($p->class) !== \strtolower($this->name)) {
+                $i = $i + 1;
+                continue;
+            }
             if ($filter === null || ($p->getModifiers() & $filter) !== 0) {
                 $out[] = $p;
             }
@@ -826,12 +838,18 @@ class ReflectionClass
      */
     public function __docInfo(): array
     {
-        // The generated function builds the doc/line/trait table of the WHOLE class on
-        // every call; it is immutable, so build it once per class.
-        if (isset(self::$__docCache[$this->h])) { return self::$__docCache[$this->h]; }
-        $fn = __mc_refl_doc_fn($this->h);
+        return self::__docByHandle($this->h);
+    }
+
+    /** The doc/line/trait table of the class with rmeta handle `$h`. Internal. */
+    public static function __docByHandle(int $h): array
+    {
+        // The generated function builds the table of the WHOLE class on every call; it is
+        // immutable, so build it once per class.
+        if (isset(self::$__docCache[$h])) { return self::$__docCache[$h]; }
+        $fn = __mc_refl_doc_fn($h);
         $info = $fn === 0 ? [] : __mc_refl_call0($fn);
-        self::$__docCache[$this->h] = $info;
+        self::$__docCache[$h] = $info;
         return $info;
     }
 
@@ -957,12 +975,21 @@ class ReflectionMethod extends ReflectionFunctionAbstract
      *  need not find it by name. Consumed and cleared by the next constructor call. */
     public static int $__row = 0;
 
+    /** Internal: the class handle that goes with {@see $__row}. */
+    public static int $__h = 0;
+
     /** `new ReflectionMethod('Class', 'method')` or `(…, $obj, 'method')`. */
     public function __construct(object|string $objectOrClass, string $method)
     {
         $hint = self::$__row;
+        $hintH = self::$__h;
         self::$__row = 0;
-        if (\is_string($objectOrClass)) {
+        self::$__h = 0;
+        if ($hint !== 0 && $hintH !== 0 && \is_string($objectOrClass)) {
+            // getMethods: the class is the one that was just reflected.
+            $cls = $objectOrClass;
+            $h = $hintH;
+        } elseif (\is_string($objectOrClass)) {
             $cls = __mc_refl_unqualify($objectOrClass);
             $h = __mc_refl_find($cls);
         } else {
@@ -970,18 +997,14 @@ class ReflectionMethod extends ReflectionFunctionAbstract
             $cls = __mc_refl_name($h);
         }
         if ($h === 0) {
-            throw new ReflectionException("Class does not exist");
+            throw new ReflectionException("Class \"" . (\is_string($objectOrClass) ? $objectOrClass : "") . "\" does not exist");
         }
-        if ($hint !== 0) {
-            $this->tramp = __mc_refl_row_tramp($hint);
-            $this->row = $hint;
-        } else {
-            if (__mc_refl_member($h, $method, 1) === 0) {
-                throw new ReflectionException("Method " . $method . " does not exist");
-            }
-            $this->tramp = __mc_refl_tramp($h, $method);
-            $this->row = __mc_refl_mrow($h, $method);
+        $row = $hint !== 0 ? $hint : __mc_refl_mrow($h, $method);
+        if ($row === 0) {
+            throw new ReflectionException("Method " . __mc_refl_name($h) . "::" . $method . "() does not exist");
         }
+        $this->tramp = __mc_refl_row_tramp($row);
+        $this->row = $row;
         $this->h = $h;
         $this->class = $cls;
         $this->name = $method;
@@ -1166,16 +1189,15 @@ class ReflectionMethod extends ReflectionFunctionAbstract
      */
     private function docEntry(): array
     {
-        $cls = $this->class;
+        // From the class the method was asked of, up: the first one that declares it owns the entry.
+        $h = $this->h;
         $key = \strtolower($this->name);
-        while (true) {
-            $rc = new ReflectionClass($cls);
-            $i = $rc->__docInfo();
+        while ($h !== 0) {
+            $i = ReflectionClass::__docByHandle($h);
             if (isset($i['m'][$key])) { return $i['m'][$key]; }
-            $p = $rc->getParentClass();
-            if ($p === false) { return []; }
-            $cls = $p->getName();
+            $h = __mc_refl_parent($h);
         }
+        return [];
     }
 
     public function getDocComment(): string|false
@@ -1340,12 +1362,19 @@ class ReflectionProperty
     /** Internal: the property row a caller already holds (getProperties). See ReflectionMethod::$__row. */
     public static int $__row = 0;
 
+    /** Internal: the class handle that goes with {@see $__row}. */
+    public static int $__h = 0;
+
     /** `new ReflectionProperty('Class', 'prop')` or `(…, $obj, 'prop')`. */
     public function __construct(object|string $objectOrClass, string $property)
     {
         $hint = self::$__row;
+        $hintH = self::$__h;
         self::$__row = 0;
-        if (\is_string($objectOrClass)) {
+        self::$__h = 0;
+        if ($hint !== 0 && $hintH !== 0 && \is_string($objectOrClass)) {
+            $h = $hintH;
+        } elseif (\is_string($objectOrClass)) {
             $h = __mc_refl_find(__mc_refl_unqualify($objectOrClass));
         } else {
             $h = __mc_refl_of($objectOrClass);
@@ -1365,27 +1394,31 @@ class ReflectionProperty
         // untyped `protected static` like symfony's Command::$defaultName — so
         // search UP first, then climb.
         $owner = $h;
-        $origH = $h;
-        $fl = $hint !== 0 ? __mc_refl_row_flags($hint) + 1 : __mc_refl_member($owner, $property, 0);
-        while ($fl === 0) {
+        $row = $hint !== 0 ? $hint : __mc_refl_prow($owner, $property);
+        while ($row === 0) {
             $owner = __mc_refl_parent($owner);
             if ($owner === 0) {
                 throw new ReflectionException(
                     "Property " . __mc_refl_name($h) . "::$" . $property . " does not exist");
             }
-            $fl = __mc_refl_member($owner, $property, 0);
+            $row = __mc_refl_prow($owner, $property);
         }
+        // The flags are those of the first row found; the row (and the class) are the declaring ones.
+        $fl = __mc_refl_row_flags($row);
         $p = __mc_refl_parent($owner);
-        while ($p !== 0 && __mc_refl_member($p, $property, 0) !== 0) {
+        while ($p !== 0) {
+            $pr = __mc_refl_prow($p, $property);
+            if ($pr === 0) { break; }
             $owner = $p;
+            $row = $pr;
             $p = __mc_refl_parent($p);
         }
         $h = $owner;
         $this->h = $h;
         $this->class = __mc_refl_name($h);
         $this->name = $property;
-        $this->flags = $fl - 1;
-        $this->row = ($hint !== 0 && $h === $origH) ? $hint : __mc_refl_prow($h, $property);
+        $this->flags = $fl;
+        $this->row = $row;
         $this->extra = __mc_refl_row_params($this->row);
         $this->getter = __mc_refl_prop_getter($this->extra);
         $this->setter = __mc_refl_prop_setter($this->extra);
@@ -1556,7 +1589,7 @@ class ReflectionProperty
 
     public function getDocComment(): string|false
     {
-        $i = (new ReflectionClass($this->class))->__docInfo();
+        $i = ReflectionClass::__docByHandle($this->h);
         return $i['p'][$this->name][0] ?? false;
     }
 

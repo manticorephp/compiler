@@ -6,6 +6,8 @@ Base::count:su Base::id:o Square::label:u Square::side:u
 '/** Square docs. */' '/** Area doc. */' '/** Base method doc. */' false '/** Side doc. */' '/** The id. */'
 '/** Square docs. */' '/** Area doc. */' '/** Base method doc. */' false '/** Side doc. */' '/** The id. */'
 static Square Base
-ReflectionException
-ReflectionException
+ReflectionException: Method Square::nope() does not exist
+ReflectionException: Property Square::$nope does not exist
+Class "NoSuchClass" does not exist
+-1 -1
 nf
