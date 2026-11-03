@@ -1228,11 +1228,48 @@ trait LowerPrelude
     {
         $src = "function __mc_refl_alloc(string \$cls): mixed {\n"
              . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
-        foreach ($this->walkableClassesDerivedFirst() as $cname) {
-            $src .= "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
-                 . $this->dqBody($cname) . "\"); }\n";
-        }
+        $src .= $this->nameTreeSrc('$cls', $this->walkableClassesDerivedFirst(), 'return __mc_new_uninit("%s");', '  ');
         return $src . "  return null;\n}\n";
+    }
+
+    /**
+     * PHP source that picks the arm of one class NAME: a balanced tree of `strcmp`s, not
+     * a chain of `===`. The chain made `newInstanceWithoutConstructor` and `unserialize`
+     * cost O(classes) — 4-12 us at 3000 classes against php's 50 ns. A match falls out of
+     * its leaf (the leaf `return`s); no match falls out of the tree to what follows it.
+     *
+     * @param string[] $names
+     * @param string   $leaf  statement(s) for a match; `%s` is the quoted class name
+     */
+    private function nameTreeSrc(string $var, array $names, string $leaf, string $pad): string
+    {
+        $sorted = $names;
+        \usort($sorted, fn (string $x, string $y): int => \strcmp($x, $y));
+        return $this->nameTreeRange($var, $sorted, 0, \count($sorted), $leaf, $pad);
+    }
+
+    /** @param string[] $s sorted names */
+    private function nameTreeRange(string $var, array $s, int $lo, int $hi, string $leaf, string $pad): string
+    {
+        if ($hi <= $lo) { return ''; }
+        if ($hi - $lo <= 3) {
+            $o = '';
+            for ($i = $lo; $i < $hi; $i = $i + 1) {
+                $q = $this->dqBody($s[$i]);
+                $o .= $pad . 'if (' . $var . ' === "' . $q . '") { ' . \str_replace('%s', $q, $leaf) . " }\n";
+            }
+            return $o;
+        }
+        $mid = \intdiv($lo + $hi, 2);
+        $q = $this->dqBody($s[$mid]);
+        $o = $pad . '$__nt = \\strcmp(' . $var . ', "' . $q . "\");\n";
+        $o .= $pad . 'if ($__nt === 0) { ' . \str_replace('%s', $q, $leaf) . " }\n";
+        $o .= $pad . "if (\$__nt < 0) {\n";
+        $o .= $this->nameTreeRange($var, $s, $lo, $mid, $leaf, $pad . '  ');
+        $o .= $pad . "} else {\n";
+        $o .= $this->nameTreeRange($var, $s, $mid + 1, $hi, $leaf, $pad . '  ');
+        $o .= $pad . "}\n";
+        return $o;
     }
 
     private function unserSrc(): string
@@ -1245,10 +1282,7 @@ trait LowerPrelude
             // chain onto the same __PHP_Incomplete_Class.
             . "  if (!\$st->allowAll && !isset(\$st->allowed[\$cls])) { return __mc_incomplete(\$cls); }\n"
             . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
-        foreach ($names as $cname) {
-            $alloc .= "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
-                . $this->dqBody($cname) . "\"); }\n";
-        }
+        $alloc .= $this->nameTreeSrc('$cls', $names, 'return __mc_new_uninit("%s");', '  ');
         $alloc .= "  return __mc_unser_unknown(\$cls, \$st);\n}\n";
 
         // ONE KEY AT A TIME, with the value as a `mixed` PARAMETER — not a
