@@ -7011,7 +7011,7 @@ trait EmitLlvmBuiltins
     private function biMcReflFind(array $args): string
     {
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[0]);
         $sp = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mc_refl_find(ptr ' . $sp . ")\n";
@@ -7028,7 +7028,7 @@ trait EmitLlvmBuiltins
     private function biMcReflFnFind(array $args): string
     {
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[0]);
         $sp = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mc_refl_fn_find(ptr ' . $sp . ")\n";
@@ -7044,7 +7044,7 @@ trait EmitLlvmBuiltins
     private function biMcReflCloFind(array $args): string
     {
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[0]);
         $env = $this->lastValue;
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = load i64, ptr ' . $env . "\n";
@@ -7063,7 +7063,7 @@ trait EmitLlvmBuiltins
     private function biMcReflCloThis(array $args): string
     {
         $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[0]);
         $env = $this->lastValue;
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
@@ -7109,6 +7109,27 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * The value just emitted for a name argument, as a raw string pointer. A
+     * property a reference retyped to a CELL (`ReflectionMethod::$name`, see
+     * InferScans::scanRefCellProps) arrives boxed: `coerceToPtr` alone handed
+     * the TAGGED word to strcmp.
+     */
+    private function coerceToNamePtr(Node $arg): string
+    {
+        if ($arg->type->kind !== Type::KIND_CELL && $arg->type->kind !== Type::KIND_UNKNOWN) {
+            return $this->coerceToPtr();
+        }
+        $out = $this->coerceToI64();
+        $m = $this->ssa->allocReg();
+        $out .= '  ' . $m . ' = and i64 ' . $this->lastValue . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+        $p = $this->ssa->allocReg();
+        $out .= '  ' . $p . ' = inttoptr i64 ' . $m . " to ptr\n";
+        $this->lastValue = $p;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /**
      * `__mc_refl_member($h, $name, $wantMethods)` — a member's flags + 1, or 0
      * when absent. The `+1` keeps one i64 answering both "present?" and "what?"
      * (a public non-static member's flags are 0).
@@ -7120,7 +7141,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $h = $this->lastValue;
         $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[1]);
         $np = $this->lastValue;
         $out .= $this->emitNode($args[2]);
         $w = $this->lastValue;
@@ -7178,7 +7199,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $h = $this->lastValue;
         $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[1]);
         $np = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mc_refl_mrow(i64 ' . $h . ', ptr ' . $np . ")\n";
@@ -7198,7 +7219,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $h = $this->lastValue;
         $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[1]);
         $np = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mc_refl_prow(i64 ' . $h . ', ptr ' . $np . ")\n";
@@ -7410,7 +7431,7 @@ trait EmitLlvmBuiltins
         $out = $this->emitNode($args[0]);
         $h = $this->lastValue;
         $out .= $this->emitNode($args[1]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[1]);
         $np = $this->lastValue;
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = call i64 @__mc_refl_tramp(i64 ' . $h . ', ptr ' . $np . ")\n";
@@ -7476,7 +7497,7 @@ trait EmitLlvmBuiltins
         $out .= $this->coerceToI64();
         $recv = $this->lastValue;
         $out .= $this->emitNode($args[2]);
-        $out .= $this->coerceToPtr();
+        $out .= $this->coerceToNamePtr($args[2]);
         $ap = $this->lastValue;
         $argsI = $this->ssa->allocReg();
         $out .= '  ' . $argsI . ' = ptrtoint ptr ' . $ap . " to i64\n";
