@@ -1241,9 +1241,9 @@ trait LowerPrelude
      * leaf `return`s); no match falls out of the tree to what follows it.
      *
      * @param string[] $names
-     * @param string   $leaf  statement(s) for a match; `%s` is the quoted class name
+     * @param string|callable $leaf  statement(s) for a match; `%s` is the quoted class name, or a callable taking the (unquoted) name
      */
-    private function nameTreeSrc(string $var, array $names, string $leaf, string $pad): string
+    private function nameTreeSrc(string $var, array $names, $leaf, string $pad): string
     {
         /** @var array<int, string[]> $groups crc32 => the names with it */
         $groups = [];
@@ -1263,7 +1263,7 @@ trait LowerPrelude
      * @param int[]                $keys   the crc32 values, ascending
      * @param array<int, string[]> $groups
      */
-    private function nameTreeRange(string $var, array $keys, array $groups, int $lo, int $hi, string $leaf, string $pad): string
+    private function nameTreeRange(string $var, array $keys, array $groups, int $lo, int $hi, $leaf, string $pad): string
     {
         if ($hi <= $lo) { return ''; }
         if ($hi - $lo <= 2) {
@@ -1284,12 +1284,13 @@ trait LowerPrelude
     }
 
     /** @param string[] $names the names sharing one crc32 */
-    private function nameGroupSrc(string $var, array $names, string $leaf, string $pad): string
+    private function nameGroupSrc(string $var, array $names, $leaf, string $pad): string
     {
         $o = '';
         foreach ($names as $n) {
             $q = $this->dqBody($n);
-            $o .= $pad . 'if (' . $var . ' === "' . $q . '") { ' . \str_replace('%s', $q, $leaf) . " }\n";
+            $stmt = \is_string($leaf) ? \str_replace('%s', $q, $leaf) : $leaf($n);
+            $o .= $pad . 'if (' . $var . ' === "' . $q . '") { ' . $stmt . " }\n";
         }
         return $o;
     }
