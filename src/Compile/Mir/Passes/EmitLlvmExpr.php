@@ -3295,7 +3295,9 @@ trait EmitLlvmExpr
             $out .= $useR . ":\n";
             if ($pre !== null) { $out .= $this->coalesceMissRelease($nc->left, $pre); }
             if (!$fused) { $out .= $peRelKey . $this->peBaseRelease($peBase, false); }
+            $litMark = \count($this->litElemDropRegs);
             $out .= $this->emitNode($nc->right);
+            $this->dropArmLitElems($litMark);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->right);
                 $out .= $this->boxToCell($nc->right->type, $nc->right);
@@ -3403,7 +3405,9 @@ trait EmitLlvmExpr
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
+        $litMark = \count($this->litElemDropRegs);
         $out .= $this->emitNode($nc->right);
+        $this->dropArmLitElems($litMark);
         if ($wantCell) {
             $out .= $this->armRetainPreBox($n, $nc->right);
             $out .= $this->boxToCell($nc->right->type, $nc->right);
@@ -3522,7 +3526,9 @@ trait EmitLlvmExpr
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
+        $litMark = \count($this->litElemDropRegs);
         $out .= $this->emitNode($nc->right);
+        $this->dropArmLitElems($litMark);
         if ($wantCell) {
             $out .= $this->armRetainPreBox($nc, $nc->right);
             $out .= $this->boxToCell($nc->right->type);

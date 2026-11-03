@@ -5472,6 +5472,19 @@ trait EmitLlvmCalls
         }
     }
 
+    /**
+     * Forget the literal-element drops a CONDITIONAL arm registered: the elements'
+     * registers are defined in that arm only, so a call after the join must not
+     * name them. They stay owned by the arm's buffer.
+     */
+    private function dropArmLitElems(int $mark): void
+    {
+        while (\count($this->litElemDropRegs) > $mark) {
+            \array_pop($this->litElemDropRegs);
+            \array_pop($this->litElemDropFlavors);
+        }
+    }
+
     private function emitCall(Call $n): string
     {
         $c = $n;
