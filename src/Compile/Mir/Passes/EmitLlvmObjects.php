@@ -255,6 +255,11 @@ trait EmitLlvmObjects
 
         $viaTable = $this->emitNewDynByTable($n, $namePtr);
         if ($viaTable !== null) { return $out . $viaTable; }
+        if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
+            $ak = '';
+            foreach ($n->args as $ta) { $ak .= ($ak === '' ? '' : ',') . $ta->kind . ':' . $ta->type->toString(); }
+            \error_log('NEWDYN chain ' . $this->frame->name . ' table=' . (string)\count($this->newDynTable()[2]) . ' args=' . $ak);
+        }
 
         $argRegs = [];
         $argKinds = [];
@@ -531,21 +536,52 @@ trait EmitLlvmObjects
         if ($count === 0) { return null; }
         $pack = null;
         $packElem = null;
+        $packCell = false;
+        $packErased = false;
         foreach ($n->args as $a) {
             if ($a->kind !== Node::KIND_SPREAD) { continue; }
             if (\count($n->args) !== 1) { return null; }
             $op = $this->asSpreadNode($a)->operand;
             $pt = $op->type;
-            if (!$pt->isVec() || $op->kind !== Node::KIND_LOAD_LOCAL) { return null; }
+            // An untyped `$parameters` (a cell) or a bare `array` (erased) rides as the pack the
+            // trampolines take, as in the dynamic-method table; the operand is read ONCE, before the
+            // lookup, so a plain property / element read is as good as a local.
+            $packCell = $pt->kind === Type::KIND_CELL;
+            $packErased = $pt->kind === Type::KIND_UNKNOWN;
+            $plain = $op->kind === Node::KIND_LOAD_LOCAL
+                || $op->kind === Node::KIND_PROPERTY_ACCESS || $op->kind === Node::KIND_ARRAY_ACCESS;
+            if ((!$pt->isVec() && !$packCell && !$packErased) || !$plain) { return null; }
             $el = $pt->element;
-            if ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
+            if (!$packCell && !$packErased && $el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
                 $packElem = $el;
             }
             $pack = $op;
         }
         $out = '';
         $fresh = $pack === null || $packElem !== null;
-        if ($pack !== null) {
+        if ($pack !== null && $packErased) {
+            $out .= $this->emitNode($pack);
+            $out .= $this->cellToPtr();
+        } elseif ($pack !== null && $packCell) {
+            $out .= $this->emitNode($pack);
+            $out .= $this->coerceToI64();
+            $packCellReg = $this->lastValue;
+            $out .= $this->cellTagIr($packCellReg);
+            $isArr = $this->ssa->allocReg();
+            $out .= '  ' . $isArr . ' = icmp eq i64 ' . $this->cellTagReg . ", 7\n";
+            $packGood = $this->ssa->allocLabel('newdyn.array');
+            $packBad = $this->ssa->allocLabel('newdyn.nonarray');
+            $out .= '  br i1 ' . $isArr . ', label %' . $packGood . ', label %' . $packBad . "\n";
+            $out .= $packBad . ":\n";
+            $out .= $this->emitNamedFatal('PHP Fatal error: Only arrays and Traversables can be unpacked');
+            $out .= "  unreachable\n";
+            $out .= $packGood . ":\n";
+            $payload = $this->ssa->allocReg();
+            $out .= '  ' . $payload . ' = and i64 ' . $packCellReg . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $argsPtr = $this->ssa->allocReg();
+            $out .= '  ' . $argsPtr . ' = inttoptr i64 ' . $payload . " to ptr\n";
+            $this->lastValue = $argsPtr;
+        } elseif ($pack !== null) {
             $out .= $this->emitNode($pack);
             $out .= $this->coerceToPtr();
             if ($packElem !== null) {
