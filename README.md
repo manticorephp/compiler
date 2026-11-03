@@ -433,6 +433,8 @@ PHP source
   → cc                link (libc + pcre2 + openssl, + FFI-bound libraries on demand)
 ```
 
+**Profiling** ([`docs/profiling.md`](docs/profiling.md)): where a compiled server spends a request, with one command.
+
 **Memory** ([`docs/memory.md`](docs/memory.md)): reference counting on strings,
 objects, vecs and assoc arrays with copy-on-write, so frees are deterministic and there
 are no GC pauses; a synchronous Bacon–Rajan cycle collector that runs automatically at allocations
