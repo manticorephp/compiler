@@ -1,0 +1,25 @@
+A         A 1 A 1
+AB        AB 2 AB 2
+ABC       ABC 3 ABC 3
+A_        A_ 4 A_ 4
+B         B 5 B 5
+Z         Z 6 Z 6
+a1        a1 7 a1 7
+_under    _under 8 _under 8
+Mid       Mid 9 Mid 9
+Mid2      Mid2 10 Mid2 10
+Zebra     Zebra 11 Zebra 11
+N1\A      N1\A 12 N1\A 12
+N1\AB     N1\AB 13 N1\AB 13
+N1\Sub\A  N1\Sub\A 14 N1\Sub\A 14
+N1\Sub\Zz N1\Sub\Zz 15 N1\Sub\Zz 15
+N2\A      N2\A 16 N2\A 16
+N2\Last   N2\Last 17 N2\Last 17
+: ReflectionException
+AA: ReflectionException
+ABCD: ReflectionException
+A\B: ReflectionException
+N1: ReflectionException
+N1\Sub: ReflectionException
+zebra2: ReflectionException
+N3\A: ReflectionException

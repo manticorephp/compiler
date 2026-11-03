@@ -256,7 +256,10 @@ trait EmitLlvmModule
         $fnNamesRows = '';
         $fnNamesCount = 0;
         if ($this->rt->needsFnExists) {
-            foreach ($this->knownFnNames as $fname) {
+            // Sorted by strcmp order: `__mir_fn_exists` binary-searches the table.
+            $sortedFnNames = $this->knownFnNames;
+            \usort($sortedFnNames, fn (string $x, string $y): int => \strcmp($x, $y));
+            foreach ($sortedFnNames as $fname) {
                 if ($fnNamesCount > 0) { $fnNamesRows .= ', '; }
                 $fnNamesRows .= 'ptr ' . $this->litStr($fname);
                 $fnNamesCount = $fnNamesCount + 1;
@@ -498,10 +501,11 @@ trait EmitLlvmModule
             $out .= "  ret i64 %x\n}\n";
         }
         if ($this->rt->needsFnExists && $fnNamesCount > 0) {
-            // The closed-world function-name table, for `function_exists($var)`.
-            // A flat array plus a scan rather than an unrolled strcmp chain:
-            // the set runs to ~a thousand names, and this is never hot — one
-            // presence check is not worth a thousand emitted basic blocks.
+            // The closed-world function-name table, for `function_exists($var)`, sorted
+            // in strcmp order and BINARY-searched. It used to be a scan: ~1.9 thousand
+            // strcmp calls on every miss, and a miss is the common answer — symfony's
+            // ControllerResolver asks `function_exists('App\Controller\X')` for an
+            // invokable controller on every request (3% of it).
             // The rows were interned above, before the pool was rendered.
             $n = $fnNamesCount;
             $out .= '@__mir_fn_names = internal constant [' . (string)$n . ' x ptr] ['
@@ -511,18 +515,26 @@ trait EmitLlvmModule
             $out .= "  %isnull = icmp eq ptr %name, null\n";
             $out .= "  br i1 %isnull, label %miss, label %loop\n";
             $out .= "loop:\n";
-            $out .= "  %i = phi i64 [0, %entry], [%i1, %next]\n";
-            $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+            $out .= "  %lo = phi i64 [0, %entry], [%lo2, %next]\n";
+            $out .= '  %hi = phi i64 [' . (string)$n . ", %entry], [%hi2, %next]\n";
+            $out .= "  %done = icmp sge i64 %lo, %hi\n";
             $out .= "  br i1 %done, label %miss, label %body\n";
             $out .= "body:\n";
+            $out .= "  %sum = add i64 %lo, %hi\n";
+            $out .= "  %mid = lshr i64 %sum, 1\n";
             $out .= '  %p = getelementptr inbounds [' . (string)$n
-                  . " x ptr], ptr @__mir_fn_names, i64 0, i64 %i\n";
+                  . " x ptr], ptr @__mir_fn_names, i64 0, i64 %mid\n";
             $out .= "  %cand = load ptr, ptr %p\n";
             $out .= "  %c = call i32 @strcmp(ptr %name, ptr %cand)\n";
             $out .= "  %eq = icmp eq i32 %c, 0\n";
-            $out .= "  br i1 %eq, label %hit, label %next\n";
+            $out .= "  br i1 %eq, label %hit, label %dir\n";
+            $out .= "dir:\n";
+            $out .= "  %lt = icmp slt i32 %c, 0\n";
+            $out .= "  %mid1 = add i64 %mid, 1\n";
+            $out .= "  %hi2 = select i1 %lt, i64 %mid, i64 %hi\n";
+            $out .= "  %lo2 = select i1 %lt, i64 %lo, i64 %mid1\n";
+            $out .= "  br label %next\n";
             $out .= "next:\n";
-            $out .= "  %i1 = add i64 %i, 1\n";
             $out .= "  br label %loop\n";
             $out .= "hit:\n";
             $out .= "  ret i64 1\n";

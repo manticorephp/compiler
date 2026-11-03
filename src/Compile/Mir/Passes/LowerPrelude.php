@@ -1228,13 +1228,71 @@ trait LowerPrelude
     {
         $src = "function __mc_refl_alloc(string \$cls): mixed {\n"
              . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
-        foreach ($this->walkableClassesDerivedFirst() as $cname) {
-            $src .= "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
-                 . $this->dqBody($cname) . "\"); }\n";
-        }
+        $src .= $this->nameTreeSrc('$cls', $this->walkableClassesDerivedFirst(), 'return __mc_new_uninit("%s");', '  ');
         return $src . "  return null;\n}\n";
     }
 
+    /**
+     * PHP source that picks the arm of one class NAME in O(log N) integer compares: the
+     * name's crc32 walks a balanced tree, and only the group of names sharing that crc
+     * is compared as strings. A chain of `===` made `newInstanceWithoutConstructor` and
+     * `unserialize` cost O(classes) — 4-12 us at 3000 classes against php's 50 ns — and a
+     * tree of `strcmp`s still paid ~12 string compares. A match falls out of its leaf (the
+     * leaf `return`s); no match falls out of the tree to what follows it.
+     *
+     * @param string[] $names
+     * @param string   $leaf  statement(s) for a match; `%s` is the quoted class name
+     */
+    private function nameTreeSrc(string $var, array $names, string $leaf, string $pad): string
+    {
+        /** @var array<int, string[]> $groups crc32 => the names with it */
+        $groups = [];
+        foreach ($names as $n) {
+            $c = \crc32($n);
+            if (!isset($groups[$c])) { $groups[$c] = []; }
+            $groups[$c][] = $n;
+        }
+        \ksort($groups);
+        /** @var int[] $keys */
+        $keys = \array_keys($groups);
+        $o = $pad . '$__nh = \\crc32(' . $var . ");\n";
+        return $o . $this->nameTreeRange($var, $keys, $groups, 0, \count($keys), $leaf, $pad);
+    }
+
+    /**
+     * @param int[]                $keys   the crc32 values, ascending
+     * @param array<int, string[]> $groups
+     */
+    private function nameTreeRange(string $var, array $keys, array $groups, int $lo, int $hi, string $leaf, string $pad): string
+    {
+        if ($hi <= $lo) { return ''; }
+        if ($hi - $lo <= 2) {
+            $o = '';
+            for ($i = $lo; $i < $hi; $i = $i + 1) {
+                $o .= $pad . 'if ($__nh === ' . (string)$keys[$i] . ") {\n" . $this->nameGroupSrc($var, $groups[$keys[$i]], $leaf, $pad . '  ') . $pad . "}\n";
+            }
+            return $o;
+        }
+        $mid = \intdiv($lo + $hi, 2);
+        $o = $pad . 'if ($__nh === ' . (string)$keys[$mid] . ") {\n" . $this->nameGroupSrc($var, $groups[$keys[$mid]], $leaf, $pad . '  ') . $pad . "}\n";
+        $o .= $pad . 'if ($__nh < ' . (string)$keys[$mid] . ") {\n";
+        $o .= $this->nameTreeRange($var, $keys, $groups, $lo, $mid, $leaf, $pad . '  ');
+        $o .= $pad . "} else {\n";
+        $o .= $this->nameTreeRange($var, $keys, $groups, $mid + 1, $hi, $leaf, $pad . '  ');
+        $o .= $pad . "}\n";
+        return $o;
+    }
+
+    /** @param string[] $names the names sharing one crc32 */
+    private function nameGroupSrc(string $var, array $names, string $leaf, string $pad): string
+    {
+        $o = '';
+        foreach ($names as $n) {
+            $q = $this->dqBody($n);
+            $o .= $pad . 'if (' . $var . ' === "' . $q . '") { ' . \str_replace('%s', $q, $leaf) . " }\n";
+        }
+        return $o;
+    }
     private function unserSrc(): string
     {
         $names = $this->walkableClassesDerivedFirst();
@@ -1245,10 +1303,7 @@ trait LowerPrelude
             // chain onto the same __PHP_Incomplete_Class.
             . "  if (!\$st->allowAll && !isset(\$st->allowed[\$cls])) { return __mc_incomplete(\$cls); }\n"
             . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
-        foreach ($names as $cname) {
-            $alloc .= "  if (\$cls === \"" . $this->dqBody($cname) . "\") { return __mc_new_uninit(\""
-                . $this->dqBody($cname) . "\"); }\n";
-        }
+        $alloc .= $this->nameTreeSrc('$cls', $names, 'return __mc_new_uninit("%s");', '  ');
         $alloc .= "  return __mc_unser_unknown(\$cls, \$st);\n}\n";
 
         // ONE KEY AT A TIME, with the value as a `mixed` PARAMETER — not a
