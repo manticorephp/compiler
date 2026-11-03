@@ -625,6 +625,20 @@ final class Debug
      */
     public static bool $asan = false;
 
+    /**
+     * `MANTICORE_REF_QUARANTINE=1` — `__mir_ref_free` poisons a reference box's value word and never
+     * returns it to the allocator, so a stale holder that still touches it reads poison instead of
+     * corrupting whatever reused the block. A MEASUREMENT build only.
+     */
+    public static bool $refQuarantine = false;
+
+    /**
+     * `MANTICORE_POOL_POISON=1` — a freed small-object pool block is filled with 0xDE and never reused,
+     * so a use after free reads poison. Unlike the quarantine it adds no linker flag: exceptions keep
+     * unwinding. A MEASUREMENT build only.
+     */
+    public static bool $poolPoison = false;
+
     public static function applyMemoryMode(string $mode): bool
     {
         if ($mode === self::MEM_RC || $mode === self::MEM_ARENA || $mode === self::MEM_HYBRID) {
@@ -722,6 +736,14 @@ final class Debug
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
+        }
+        $env = \getenv('MANTICORE_REF_QUARANTINE');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$refQuarantine = true;
+        }
+        $env = \getenv('MANTICORE_POOL_POISON');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$poolPoison = true;
         }
         $env = \getenv('MANTICORE_ASAN');
         if ($env !== false && $env !== '0' && $env !== '') {

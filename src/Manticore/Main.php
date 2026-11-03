@@ -2629,7 +2629,7 @@ function target_os_family(): string
 function unwind_link_flags(): string
 {
     // Both link sites append this, so the ASan runtime (MANTICORE_ASAN=1) rides along here.
-    return (is_darwin() ? "" : " -static-libgcc") . (\Compile\Debug::$asan ? " -fsanitize=address" : "");
+    return (is_darwin() ? "" : " -static-libgcc") . (\Compile\Debug::$asan ? " -fsanitize=address" : "") . ((\Compile\Debug::$asan || \Compile\Debug::$refQuarantine) && is_darwin() ? " -Wl,-no_compact_unwind" : "");
 }
 
 /** True when the compile target is Darwin/macOS. */

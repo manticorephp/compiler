@@ -213,6 +213,14 @@ trait EmitLlvmRuntime
         $out .= "  %sp = inttoptr i64 %sb to ptr\n";
         $out .= "  %idx = load i64, ptr %sp\n";
         $out .= "  %lp = getelementptr inbounds [" . $nCls . " x ptr], ptr @__mir_pool_list, i64 0, i64 %idx\n";
+        if (\Compile\Debug::$refQuarantine || \Compile\Debug::$poolPoison) {
+            // Measurement build: a freed pooled block is poisoned and never handed out again,
+            // so a use after free reads 0xDEDE… instead of a live neighbour's bytes.
+            $out .= "  %qsz = shl i64 %idx, " . (string)$shift . "\n";
+            $out .= "  call ptr @memset(ptr %p, i32 222, i64 %qsz)\n";
+            $out .= "  ret void\n";
+            $out .= "qdead:\n";
+        }
         if (\Compile\Debug::$verify) {
             // libc used to catch a double free for us and abort with a name.
             // A pooled block would instead be pushed onto its class list twice,
