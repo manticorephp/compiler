@@ -1,0 +1,27 @@
+Plain: {}
+One: {"a":5}
+One: ArgumentCountError
+Def: {"a":1,"b":"d"}
+Def: {"a":7,"b":"d"}
+Def: {"a":7,"b":"x"}
+Def: {"a":1,"b":"nm"}
+Two: {"x":3,"y":"yy"}
+Two: {"x":3,"y":"z"}
+Two: {"x":9,"y":"k"}
+Child: {"x":4,"y":"yy"}
+Str: {"s":"s","f":1.5}
+Str: {"s":"s","f":2.5}
+G0: {"p":1,"q":0}
+G7: {"p":1,"q":2}
+G21: {"p":3,"q":21}
+{"x":1,"y":"yy"}{"x":1,"y":"q"}{"p":1,"q":2}
+Plain: {} {}
+One: {"a":5} {"a":5}
+One: ArgumentCountError ArgumentCountError
+Def: {"a":7,"b":"x"} {"a":7,"b":"x"}
+Two: {"x":3,"y":"z"} {"x":3,"y":"z"}
+Child: {"x":4,"y":"yy"} {"x":4,"y":"yy"}
+Str: {"s":"s","f":2.5} {"s":"s","f":2.5}
+G5: {"p":1,"q":5} {"p":1,"q":5}
+G20: {"p":1,"q":2} {"p":1,"q":2}
+{"x":9,"y":"k"}{"a":1,"b":"nm"}
