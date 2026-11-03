@@ -10,6 +10,8 @@ require_once dirname(__DIR__).'/vendor/autoload.php';
 
 $app = require_once dirname(__DIR__).'/bootstrap/app.php';
 $kernel = $app->make(Kernel::class);
+// Boot once, before the first connection: two requests racing through a lazy bootstrap saw a half-built container.
+$kernel->bootstrap();
 
 (new Server('tcp://127.0.0.1:' . (getenv('PORT') ?: '8181')))
     ->workers((int)(getenv('WORKERS') ?: 1))
