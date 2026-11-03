@@ -2143,6 +2143,14 @@ final class Parser
                 $this->end($target->span),
             );
         }
+        // A cast binds tighter than `=` too: `(int) $pos = strpos(…)` is `(int) ($pos = strpos(…))`.
+        if ($target->kind === 'Cast') {
+            return Expr::cast(
+                $target->cast,
+                $this->buildAssign($op, $target->operand, $value, $span),
+                $this->end($target->span),
+            );
+        }
         if ($op === '=')  { return Expr::assign($target, $value, $this->end($span, $target)); }
         if ($op === '=&') { return Expr::refAssign($target, $value, $this->end($span, $target)); }
         return Expr::compoundAssign($op, $target, $value, $this->end($span, $target));
