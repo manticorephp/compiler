@@ -257,7 +257,7 @@ trait EmitLlvmObjects
         if ($viaTable !== null) { return $out . $viaTable; }
         if (\getenv('MANTICORE_DYNM_TRACE') !== false) {
             $ak = '';
-            foreach ($n->args as $ta) { $ak .= ($ak === '' ? '' : ',') . $ta->kind . ':' . $ta->type->toString(); }
+            foreach ($n->args as $ta) { $ak .= ($ak === '' ? '' : ',') . $ta->kind . ':' . $ta->type->toString() . ($ta->kind === Node::KIND_SPREAD ? '(' . $this->asSpreadNode($ta)->operand->kind . ')' : ''); }
             \error_log('NEWDYN chain ' . $this->frame->name . ' table=' . (string)\count($this->newDynTable()[2]) . ' args=' . $ak);
         }
 
@@ -538,6 +538,7 @@ trait EmitLlvmObjects
         $packElem = null;
         $packCell = false;
         $packErased = false;
+        $plain = true;
         foreach ($n->args as $a) {
             if ($a->kind !== Node::KIND_SPREAD) { continue; }
             if (\count($n->args) !== 1) { return null; }
@@ -550,22 +551,32 @@ trait EmitLlvmObjects
             $packErased = $pt->kind === Type::KIND_UNKNOWN;
             $plain = $op->kind === Node::KIND_LOAD_LOCAL
                 || $op->kind === Node::KIND_PROPERTY_ACCESS || $op->kind === Node::KIND_ARRAY_ACCESS;
-            if ((!$pt->isVec() && !$packCell && !$packErased) || !$plain) { return null; }
+            if (!$pt->isVec() && !$packCell && !$packErased) { return null; }
             $el = $pt->element;
             if (!$packCell && !$packErased && $el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN) {
                 $packElem = $el;
             }
             $pack = $op;
         }
+        // A pack that is not a plain read (a call, a cast, a ternary) may be an owned temp: the operand
+        // is evaluated once, here, and given back after the construction by whatever flavor says so.
+        if ($pack !== null && !$plain && $packElem !== null) { return null; }
+        $ownFlavor = '';
+        $ownReg = '';
         $out = '';
         $fresh = $pack === null || $packElem !== null;
         if ($pack !== null && $packErased) {
             $out .= $this->emitNode($pack);
+            $out .= $this->coerceToI64();
+            $ownReg = $this->lastValue;
+            $ownFlavor = $plain ? '' : $this->freshRcArgFlavor($pack);
             $out .= $this->cellToPtr();
         } elseif ($pack !== null && $packCell) {
             $out .= $this->emitNode($pack);
             $out .= $this->coerceToI64();
             $packCellReg = $this->lastValue;
+            $ownReg = $packCellReg;
+            $ownFlavor = $plain ? '' : $this->freshRcArgFlavor($pack);
             $out .= $this->cellTagIr($packCellReg);
             $isArr = $this->ssa->allocReg();
             $out .= '  ' . $isArr . ' = icmp eq i64 ' . $this->cellTagReg . ", 7\n";
@@ -583,6 +594,9 @@ trait EmitLlvmObjects
             $this->lastValue = $argsPtr;
         } elseif ($pack !== null) {
             $out .= $this->emitNode($pack);
+            $ownFlavor = $plain ? '' : $this->freshRcArgFlavor($pack);
+            $out .= $this->coerceToI64();
+            $ownReg = $this->lastValue;
             $out .= $this->coerceToPtr();
             if ($packElem !== null) {
                 $out .= $this->emitVecToCellArray($packElem);
@@ -638,6 +652,7 @@ trait EmitLlvmObjects
             $out .= '  ' . $ri . ' = ptrtoint ptr ' . $argsP . " to i64\n";
             $out .= $this->rcReleaseReg($ri, 'veccell');
         }
+        if ($ownFlavor !== '' && $ownReg !== '') { $out .= $this->rcReleaseReg($ownReg, $ownFlavor); }
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . ' = load i64, ptr ' . $slot . "\n";
         $this->lastValue = $res;

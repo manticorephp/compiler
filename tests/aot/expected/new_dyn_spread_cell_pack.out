@@ -1,3 +1,6 @@
 P0 P1(7) P2(q,dflt) P3([1,"two",[3]])
 P1(9) P2(a,b)
 P2(x,y)
+P1(3) P1(4) P2(u,v) P2(t,dflt) P2(f,g)
+done
+p+q
