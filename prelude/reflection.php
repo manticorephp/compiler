@@ -130,7 +130,7 @@ function __mc_get_class_vars(string $class, string $scope): array
     }
     $rc = new ReflectionClass($class);
     $out = [];
-    $all = $rc->getProperties();
+    $all = $rc->__props(null, true);
     $name = $rc->getName();
     foreach ([[false, true], [false, false], [true, true], [true, false]] as $pass) {
         // php lists the class's own properties before the inherited ones.
@@ -234,7 +234,7 @@ function get_mangled_object_vars(object $object): array
 {
     $out = [];
     $declared = [];
-    foreach ((new \ReflectionClass($object))->getProperties() as $p) {
+    foreach ((new \ReflectionClass($object))->__props(null, true) as $p) {
         if ($p->isStatic()) { continue; }
         $n = $p->getName();
         $declared[$n] = true;
@@ -606,6 +606,12 @@ class ReflectionClass
      */
     public function getProperties(?int $filter = null): array
     {
+        return $this->__props($filter, false);
+    }
+
+    /** getProperties(), optionally keeping a parent's private slots (instance layout walkers). @return ReflectionProperty[] */
+    public function __props(?int $filter, bool $parentPrivate): array
+    {
         $n = __mc_refl_nprops($this->h);
         $base = __mc_refl_props_base($this->h);
         $out = [];
@@ -615,7 +621,7 @@ class ReflectionClass
             ReflectionProperty::$__h = $this->h;
             $p = new ReflectionProperty($this->name, __mc_refl_row_name($base, $i));
             // …and a parent's PRIVATE properties likewise.
-            if ($p->isPrivate() && \strtolower($p->class) !== \strtolower($this->name)) {
+            if (!$parentPrivate && $p->isPrivate() && \strtolower($p->class) !== \strtolower($this->name)) {
                 $i = $i + 1;
                 continue;
             }
