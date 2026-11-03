@@ -51,6 +51,11 @@ Everything below is in this directory:
 - `public/index.php` is the program entry. It boots the HTTP kernel **once**, before the
   server starts, and serves each request through `$kernel->handle()` from Manticore's
   `Http\Server`; `php artisan serve` and `php-fpm` are not involved.
+- Each worker runs **one request at a time** through the kernel (an `Async\Mutex` around
+  `handle()`); the next connection is read while it waits. Laravel keeps per-request state in
+  objects every request shares (the matched `Route`, request-scoped container instances), and
+  two requests interleaving at an I/O wait freed an array the other still used. php-fpm has the
+  same rule; Octane clones that state per request. Concurrency comes from `WORKERS`.
 - `aot/compile-views.php` runs under Zend before the build. It takes the Blade compiler's
   output for every view the application can reach (its own and the framework's) and writes
   each as a function `aot_v_<hash>(array $__data): string` under `app/AotViews/`
