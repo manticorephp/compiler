@@ -5727,7 +5727,7 @@ trait EmitLlvmObjects
         }
         $canExtract = $argsOk
             && ($dirty === [] || $reEmitSafe)
-            && $recv->kind === Node::KIND_LOAD_LOCAL
+            && ($dirty === [] || $recv->kind === Node::KIND_LOAD_LOCAL)
             && ($recv->type->kind === Type::KIND_CELL
                 || $recv->type->kind === Type::KIND_UNKNOWN
                 || $recv->type->kind === Type::KIND_UNION)
