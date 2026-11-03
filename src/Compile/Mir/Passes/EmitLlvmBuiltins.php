@@ -2731,6 +2731,8 @@ trait EmitLlvmBuiltins
                 $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";
                 // A call result is +1 for every consumer (Ownership::storedOwned); the
                 // slot keeps its own count, so hand out a retained copy.
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
                 $out .= '  call void @__mir_cell_retain(i64 ' . $v . ")\n";
                 $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
             }
