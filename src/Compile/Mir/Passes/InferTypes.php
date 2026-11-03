@@ -1348,6 +1348,12 @@ final class InferTypes implements Pass
             $this->rescanPropagating($module, 'byref_capture_post');
             $guard = $guard + 1;
         }
+        // A static slot's default never belongs to a function: `self::D + [...]` would stay an int `+`.
+        foreach ($module->globalDefaults as $gd) {
+            if ($gd->kind !== Node::KIND_ADD) { continue; }
+            $this->inferFunction(new \Compile\Mir\FunctionDef('__global_default', [], Type::unknown(),
+                new Block([new Return_($gd, Type::void())], Type::void())));
+        }
         if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }
         $module->inferByRefCellElemLocals = $this->byRefCellElemLocals;
         $module->inferByRefElemRetyped = $this->byRefElemRetyped;
