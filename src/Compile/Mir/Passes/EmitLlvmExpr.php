@@ -3571,6 +3571,18 @@ trait EmitLlvmExpr
             }
             return $this->emitClassIdTest($n->operand, [], true);
         }
+        // A statically typed enum value is a bare ordinal, with no object to read a class id from.
+        $ot = $n->operand->type;
+        if ($this->isEnumType($ot)) {
+            $ed = $this->enums[$ot->class];
+            $want = \strtolower(\ltrim($n->class, '\\'));
+            $yes = \strtolower($ed->name) === $want || $want === 'unitenum'
+                || ($want === 'backedenum' && $ed->backing !== '');
+            $out = $this->emitNode($n->operand);
+            $this->lastValue = $yes ? '1' : '0';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         $genToo = $low === 'iterator' || $low === 'traversable';
         return $this->emitClassIdTest($n->operand, $this->instanceofMatchIds($n->class), $genToo);
     }

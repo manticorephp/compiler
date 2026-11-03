@@ -6706,6 +6706,14 @@ final class LowerFromAst implements Pass
             if ($this->isTypeDef($cname)) { continue; }
             if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
         }
+        // `$enumClass::cases()` / `::from()` / `::tryFrom()` are built in, so no method table names them.
+        $lm = \strtolower($method);
+        if ($lm === 'cases' || $lm === 'from' || $lm === 'tryfrom') {
+            foreach ($this->enumTable as $en => $ed) {
+                if ($lm !== 'cases' && $ed->backing === '') { continue; }
+                if (!\in_array($en, $names, true)) { $names[] = $en; }
+            }
+        }
         $tmp = '__dynrc' . (string)$this->destrCounter;
         $this->destrCounter = $this->destrCounter + 1;
         $chain = \Parser\Ast\Expr::null($span);

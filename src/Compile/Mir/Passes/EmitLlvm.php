@@ -3439,6 +3439,13 @@ final class EmitLlvm implements EmitVisitor
         // singletons all carry the enum's own class_id (see biEnumName), which is
         // exactly the id to accept here.
         if (isset($this->enums[$target])) { $ids[] = $this->enums[$target]->classId; }
+        // Every enum is a UnitEnum; a backed one is also a BackedEnum.
+        $lt = \strtolower(\ltrim($target, '\\'));
+        if ($lt === 'unitenum' || $lt === 'backedenum') {
+            foreach ($this->enums as $ed) {
+                if ($lt === 'unitenum' || $ed->backing !== '') { $ids[] = $ed->classId; }
+            }
+        }
         return $ids;
     }
 

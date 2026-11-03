@@ -85,6 +85,9 @@ trait InferNarrow
     {
         if ($cond->kind === Node::KIND_INSTANCEOF) {
             $io = $cond;
+            // UnitEnum / BackedEnum are no class of ours: narrowing to them would type the value as an unknown object.
+            $ioLow = \strtolower(\ltrim($io->class, '\\'));
+            if ($ioLow === 'unitenum' || $ioLow === 'backedenum') { return; }
             if ($io->operand->kind === Node::KIND_LOAD_LOCAL) {
                 $name = $io->operand->name;
                 // Narrowing never WIDENS: a local already typed as a class that
