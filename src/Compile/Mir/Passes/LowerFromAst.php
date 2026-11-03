@@ -1019,6 +1019,42 @@ final class LowerFromAst implements Pass
         // a broken binding there should fail at once rather than only when some
         // user program happens to pull that prelude tier in.
         $this->checkFfiAttrs($stmts);
+        // Constants first: a class's static-property default (`static $c = [FOO]`) is lowered
+        // inside buildClassDef and must already see every `define()` / `const`.
+        // Pre-pass: register every top-level `define("NAME", <const-expr>)` so a
+        // later bareword reference / `constant()` / `defined()` resolves at
+        // compile time, regardless of source order. Non-literal-name defines are
+        // not registered (no runtime registry).
+        $this->registerUnconditionalDefines($stmts);
+        // the guarded form `if (!defined('N')) { define('N', <const-expr>); }`.
+        // This is THE polyfill idiom — every one of the 45 guarded defines across
+        // the tier-1 packages has exactly this shape, with no version conditional
+        // among them — and without it the whole polyfill layer is unreachable
+        // (`unknown constant IDNA_DEFAULT`, reached through a DEFAULT PARAMETER
+        // VALUE, which must be a compile-time constant).
+        //
+        // Only this shape is admitted, and only for the SAME name the guard
+        // tests. That is what makes it sound without evaluating anything: the
+        // constant world is closed at compile time, so "nobody else defined N"
+        // is decidable, and the guard says the author's intent is exactly
+        // "define it if nobody did". A define under any OTHER condition stays
+        // unregistered — registering one from a branch that would not run is
+        // the shape of bug this compiler has paid for before.
+        foreach ($stmts as $stmt) {
+            $this->registerGuardedDefines($stmt);
+        }
+        // Every other `define("N", v)` with a literal name (in a branch, used as an
+        // expression, or inside a function / method body) gets a run-time cell:
+        // the call stores into it and later bare / constant() / defined() reads see it.
+        $this->registerRuntimeDefines($stmts);
+        // Constants a dependency exports. AFTER the local scan and guarded, so a
+        // program that defines the name itself keeps its own value — the same
+        // precedence the imported-FUNCTION path uses, and the one that lets a
+        // program shadow a library's default without renaming it.
+        foreach ($this->externConstants as $xn => $xv) {
+            if (isset($this->userConstants[$xn])) { continue; }
+            $this->userConstants[$xn] = $xv;
+        }
         // Same [0, $preludeCount) window the method loop below uses for
         // FunctionDef::$isPrelude — here it decides the LINKAGE of a class's
         // static-prop cells, which are registered inside buildClassDef.
@@ -1316,40 +1352,6 @@ final class LowerFromAst implements Pass
             }
         }
 
-        // Pre-pass: register every top-level `define("NAME", <const-expr>)` so a
-        // later bareword reference / `constant()` / `defined()` resolves at
-        // compile time, regardless of source order. Non-literal-name defines are
-        // not registered (no runtime registry).
-        $this->registerUnconditionalDefines($stmts);
-        // the guarded form `if (!defined('N')) { define('N', <const-expr>); }`.
-        // This is THE polyfill idiom — every one of the 45 guarded defines across
-        // the tier-1 packages has exactly this shape, with no version conditional
-        // among them — and without it the whole polyfill layer is unreachable
-        // (`unknown constant IDNA_DEFAULT`, reached through a DEFAULT PARAMETER
-        // VALUE, which must be a compile-time constant).
-        //
-        // Only this shape is admitted, and only for the SAME name the guard
-        // tests. That is what makes it sound without evaluating anything: the
-        // constant world is closed at compile time, so "nobody else defined N"
-        // is decidable, and the guard says the author's intent is exactly
-        // "define it if nobody did". A define under any OTHER condition stays
-        // unregistered — registering one from a branch that would not run is
-        // the shape of bug this compiler has paid for before.
-        foreach ($stmts as $stmt) {
-            $this->registerGuardedDefines($stmt);
-        }
-        // Every other `define("N", v)` with a literal name (in a branch, used as an
-        // expression, or inside a function / method body) gets a run-time cell:
-        // the call stores into it and later bare / constant() / defined() reads see it.
-        $this->registerRuntimeDefines($stmts);
-        // Constants a dependency exports. AFTER the local scan and guarded, so a
-        // program that defines the name itself keeps its own value — the same
-        // precedence the imported-FUNCTION path uses, and the one that lets a
-        // program shadow a library's default without renaming it.
-        foreach ($this->externConstants as $xn => $xv) {
-            if (isset($this->userConstants[$xn])) { continue; }
-            $this->userConstants[$xn] = $xv;
-        }
         // The synthesized reflection factories, lowered now that every constant
         // a body of theirs might name is known — see the registration above.
         foreach ($this->pendingSynthFns as $decl) {
