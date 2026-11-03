@@ -1,0 +1,11 @@
+Base::helper:so Base::id:u Square::area:u Square::label:u Square::make:su
+Base::id:u Square::area:u Square::label:u Square::make:su
+Base::helper:so Square::make:su
+Base::count:su Base::id:o Square::label:u Square::side:u
+'/** Square docs. */' '/** Area doc. */' '/** Base method doc. */' false '/** Side doc. */' '/** The id. */'
+'/** Square docs. */' '/** Area doc. */' '/** Base method doc. */' false '/** Side doc. */' '/** The id. */'
+'/** Square docs. */' '/** Area doc. */' '/** Base method doc. */' false '/** Side doc. */' '/** The id. */'
+static Square Base
+ReflectionException
+ReflectionException
+nf
