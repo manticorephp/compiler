@@ -9,6 +9,7 @@ host profiler needs to be useful.
 |---|---|---|
 | `scale.sh` | does peak RSS track input size? | `/usr/bin/time` |
 | `cpu.sh` | which PHP function burns the wall clock? | macOS `sample` |
+| `serve.sh` | where does a compiled SERVER spend a request? (self + inclusive, per thread) | `sample` + `wrk` |
 | `live.sh` | which PHP function holds the peak live set? | macOS `MallocStackLogging` + `heap` |
 | `../docker/prof/run.sh` | the same, on Linux | `heaptrack` in the gate toolchain image |
 | `report.php` | folds any of the above into PHP names | — |

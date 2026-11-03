@@ -9,6 +9,7 @@
  *   php tools/prof/report.php heaptrack <heaptrack_print.txt> [top]
  *   php tools/prof/report.php phase <stats.txt> <elapsed-ms>    # which pass ran then
  *   php tools/prof/report.php callers <sample.txt> <symbol>    # who reaches <symbol>
+ *   php tools/prof/report.php thread <sample.txt> [top] [thread] # one thread's self + inclusive time
  *
  * Every front-end feeds the SAME back-end: demangle → fold → render. The
  * binary carries no DWARF (`-g` is never passed, Main.php:526), so the symbol
@@ -352,6 +353,73 @@ if ($mode === 'callers') {
     echo "callers of '" . $needle . "'\n";
     echo "truncated (no frame record to unwind): " . number_format($truncated) . " samples\n\n";
     prof_render($out, [], 'samples', '', $top, 'count');
+    exit(0);
+}
+
+/**
+ * One thread's self and inclusive time, from `sample`'s call-graph tree.
+ *
+ *   php tools/prof/report.php thread <sample.txt> [top] [thread-substring]
+ *
+ * The "Sort by top of stack" table that `sample` mode reads sums EVERY thread, so
+ * a server's idle pool (blocked in `read`) drowns the one thread doing the work.
+ * This keeps the tree of the thread whose header line contains the substring
+ * (default `main-thread`) and prints, per function, SELF samples (on top of the
+ * stack) and INCLUSIVE samples (anywhere in a stack, counted once per stack) —
+ * inclusive is the number that answers "how much of a request is Foo".
+ */
+if ($mode === 'thread') {
+    $want = isset($argv[4]) ? (string)$argv[4] : 'main-thread';
+    $top = isset($argv[3]) ? (int)$argv[3] : 40;
+    /** @var array<string,int> $selfT */
+    $selfT = [];
+    /** @var array<string,int> $inclT */
+    $inclT = [];
+    $total = 0;
+    $in = false;
+    /** @var array<int,array{0:string,1:int,2:int}> $stack  col => [symbol, samples, children] */
+    $stack = [];
+    $close = static function (int $col) use (&$stack, &$selfT, &$inclT): void {
+        foreach (array_keys($stack) as $c) {
+            if ($c < $col) { continue; }
+            [$sym, $n, $kids] = $stack[$c];
+            $selfT[$sym] = ($selfT[$sym] ?? 0) + ($n - $kids);
+            unset($stack[$c]);
+        }
+    };
+    foreach (explode("\n", $text) as $ln) {
+        if (preg_match('/^    (\d+) (Thread_\S+)/', $ln, $t)) {
+            $close(0);
+            $in = str_contains($ln, $want);
+            if ($in) { $total = (int)$t[1]; }
+            continue;
+        }
+        if (!$in) { continue; }
+        if (!preg_match('/^([ +!:|]*)(\d+)\s+(.+?)\s+\(in\s/', $ln, $m)) { continue; }
+        $col = strlen($m[1]);
+        $n = (int)$m[2];
+        $sym = prof_demangle(trim($m[3]));
+        $close($col);
+        $parentCol = -1;
+        foreach (array_keys($stack) as $c) { if ($c < $col && $c > $parentCol) { $parentCol = $c; } }
+        if ($parentCol >= 0) { $stack[$parentCol][2] += $n; }
+        $stack[$col] = [$sym, $n, 0];
+        // inclusive: a frame's count already covers its callees; a symbol that is
+        // already open higher in this stack (recursion) must not be added twice
+        $open = false;
+        foreach ($stack as $c => $fr) { if ($c < $col && $fr[0] === $sym) { $open = true; break; } }
+        if (!$open) { $inclT[$sym] = ($inclT[$sym] ?? 0) + $n; }
+    }
+    $close(0);
+    echo "thread '" . $want . "': " . number_format($total) . " samples\n\nSELF\n";
+    prof_render($selfT, [], 'samples', '', $top, 'count');
+    echo "\nINCLUSIVE (% of the thread; a function and its callees both count, so rows overlap)\n";
+    arsort($inclT);
+    $i = 0;
+    foreach ($inclT as $sym => $n) {
+        if (++$i > $top) { break; }
+        printf("%-4d %-64s %8s %6.1f%%\n", $i, substr($sym, 0, 64), number_format($n), $total > 0 ? 100 * $n / $total : 0);
+    }
     exit(0);
 }
 
