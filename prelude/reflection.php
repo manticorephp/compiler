@@ -937,6 +937,11 @@ class ReflectionMethod extends ReflectionFunctionAbstract
     public string $name = "";
     public string $class = "";
 
+    /** No-op since PHP 8.1: every member is accessible to reflection. */
+    public function setAccessible(bool $accessible): void
+    {
+    }
+
     /** The owning class's rmeta handle, the method's trampoline (0 = not
      *  invokable), and its method-row address (for the parameter table). Raw
      *  addresses carried as ints — nothing retains them. */
@@ -1306,6 +1311,11 @@ class ReflectionProperty
 
     public string $name = "";
     public string $class = "";
+
+    /** No-op since PHP 8.1: every member is accessible to reflection. */
+    public function setAccessible(bool $accessible): void
+    {
+    }
 
     /** Owning class rmeta handle; the property row; the `{type,getter,setter}`
      *  extra base; the member flags; the accessor pointers. Raw addresses as
