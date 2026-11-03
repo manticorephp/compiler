@@ -294,6 +294,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_pool_start')              { return $this->biPoolStart($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
         if ($name === '__mir_throw_error')     { return $this->biThrowError($args); }
+        if ($name === '__mir_member_call_error') { return $this->biMemberCallError($args); }
         if ($name === '__mir_throw_type_error') { return $this->biThrowError($args, 'TypeError'); }
         if ($name === '__mir_throw_argcount_error') { return $this->biThrowError($args, 'ArgumentCountError'); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
@@ -8410,6 +8411,86 @@ trait EmitLlvmBuiltins
      * Static detection is not lost — the analyzer reports `undefined.constant`
      * for exactly this, and it runs closed-world over the whole source set.
      */
+    /**
+     * `Call to undefined method C::m()` / `Call to a member function m() on <type>`
+     * for an erased receiver, as ONE cold helper per method name: the get_class /
+     * get_debug_type select chains and the Error construction were spliced
+     * (~570 IR lines) into every erased call site.
+     */
+    private function biMemberCallError(array $args): string
+    {
+        $m = $this->reflLitStr($args[1]);
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $v = $this->lastValue;
+        $key = '__mir_mcerr|' . $m;
+        $sym = '@' . $this->mirHelperSym('__mir_mcerr_' . \dechex($this->fnvHash64($m)));
+        if (!isset($this->dynamicMethodHelpers[$key])) {
+            $this->dynamicMethodHelpers[$key] = '';
+            $oldSsa = $this->ssa;
+            $oldLocals = $this->locals;
+            $oldCf = $this->cf;
+            $oldArena = $this->arena;
+            $oldLast = $this->lastValue;
+            $oldLastType = $this->lastValueType;
+            $oldVdResult = $this->vdResult;
+            $oldVdArm = $this->vdArmList;
+            $oldVdArgc = $this->vdSiteArgc;
+            $oldSpread = $this->spreadTail;
+            $oldPad = $this->lastPadArgs;
+            $oldNeedsBacktrace = $this->rt->needsBacktrace;
+            $oldCellProv = $this->cellProv;
+            $oldCellSinkOrd = $this->cellSinkOrd;
+            $oldCellSinkFn = $this->cellSinkFnOverride;
+            $this->ssa = new \Compile\Mir\SsaBuilder();
+            $this->ssa->reset();
+            $this->resetCellGuardFrame();
+            $this->cellSinkFnOverride = \ltrim($sym, '@');
+            $this->locals = new \Compile\Mir\LocalSlots();
+            $this->cf = new \Compile\Mir\ControlFlow();
+            $this->arena = new \Compile\Mir\ArenaContext();
+            $this->spreadTail = null;
+            $this->lastPadArgs = '';
+            $slot = $this->ssa->allocReg();
+            $this->locals->slots['__mc_mce'] = $slot;
+            $body = 'define hidden i64 ' . $sym . "(i64 %v) noinline cold {\nentry:\n";
+            $body .= '  ' . $slot . " = alloca i64\n  store i64 %v, ptr " . $slot . "\n";
+            $cell = Type::cell();
+            $str = fn (string $x): Node => new \Compile\Mir\StringConst($x, Type::string_());
+            $t = fn (): Node => new \Compile\Mir\LoadLocal('__mc_mce', $cell);
+            $call = fn (string $fn, array $a, Type $ty): Node => new \Compile\Mir\Call($fn, $a, $ty);
+            $missing = new \Compile\Mir\Ternary($call('is_object', [$t()], Type::bool_()),
+                new \Compile\Mir\Concat(new \Compile\Mir\Concat($str('Call to undefined method '),
+                    $call('get_class', [$t()], Type::string_())), $str('::' . $m . '()')),
+                new \Compile\Mir\Concat($str('Call to a member function ' . $m . '() on '),
+                    $call('get_debug_type', [$t()], Type::string_())),
+                Type::string_());
+            $body .= $this->emitNode($call('__mir_throw_error', [$missing], $cell));
+            $body .= $this->coerceToI64();
+            $body .= '  ret i64 ' . $this->lastValue . "\n}\n\n";
+            $this->dynamicMethodHelpers[$key] = $body;
+            $this->ssa = $oldSsa;
+            $this->locals = $oldLocals;
+            $this->cf = $oldCf;
+            $this->arena = $oldArena;
+            $this->lastValue = $oldLast;
+            $this->lastValueType = $oldLastType;
+            $this->vdResult = $oldVdResult;
+            $this->vdArmList = $oldVdArm;
+            $this->vdSiteArgc = $oldVdArgc;
+            $this->spreadTail = $oldSpread;
+            $this->lastPadArgs = $oldPad;
+            $this->rt->needsBacktrace = $oldNeedsBacktrace;
+            $this->cellProv = $oldCellProv;
+            $this->cellSinkOrd = $oldCellSinkOrd;
+            $this->cellSinkFnOverride = $oldCellSinkFn;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $v . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
     private function biThrowError(array $args, string $cls = 'Error'): string
     {
         // The message is the ARGUMENT NODE, not a re-wrapped literal. It used to

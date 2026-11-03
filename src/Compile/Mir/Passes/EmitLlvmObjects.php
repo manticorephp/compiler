@@ -9820,13 +9820,7 @@ trait EmitLlvmObjects
         $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
         $magic = $this->anyClassDeclares('__call');
         $isObj = $call('is_object', [$t()], Type::bool_());
-        $missing = new \Compile\Mir\Ternary($isObj,
-            new \Compile\Mir\Concat(new \Compile\Mir\Concat($str('Call to undefined method '),
-                $call('get_class', [$t()], Type::string_())), $str('::' . $mc->method . '()')),
-            new \Compile\Mir\Concat($str('Call to a member function ' . $mc->method . '() on '),
-                $call('get_debug_type', [$t()], Type::string_())),
-            Type::string_());
-        $rest = $err($missing);
+        $rest = $call('__mir_member_call_error', [$t(), $str($mc->method)], $cell);
         if ($magic) {
             $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
             $hasMagic = new \Compile\Mir\Ternary($isObj, $call('method_exists', [$t(), $str('__call')], Type::bool_()),

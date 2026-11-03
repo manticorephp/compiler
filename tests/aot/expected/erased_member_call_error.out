@@ -1,0 +1,8 @@
+Error: Call to undefined method Plain::undefinedThing() | Error: Call to undefined method Plain::otherName()
+magic:undefinedThing | magic:otherName
+Error: Call to a member function undefinedThing() on null | Error: Call to a member function otherName() on null
+Error: Call to a member function undefinedThing() on int | Error: Call to a member function otherName() on int
+Error: Call to a member function undefinedThing() on float | Error: Call to a member function otherName() on float
+Error: Call to a member function undefinedThing() on string | Error: Call to a member function otherName() on string
+Error: Call to a member function undefinedThing() on array | Error: Call to a member function otherName() on array
+Error: Call to undefined method stdClass::undefinedThing() | Error: Call to undefined method stdClass::otherName()
