@@ -5122,25 +5122,15 @@ trait EmitLlvmObjects
 
         $recv = new \Compile\Mir\LoadLocal('__mc_dyn_obj', $rt);
         $name = new \Compile\Mir\LoadLocal('__mc_dyn_name', Type::string_());
-        $vecT = Type::vec(Type::cell());
         $hdp = new \Compile\Mir\DynProp_($recv, $name, $dp->type);
         $hdp->scope = $dp->scope;
         $hdp->line = $dp->line;
-        $armArgs = [];
-        if ($fixedN < 0) {
-            $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT), Type::cell());
-        } else {
-            for ($i = 0; $i < $fixedN; $i++) {
-                $armArgs[] = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT),
-                    new \Compile\Mir\IntConst($i, Type::int_()), Type::cell());
-            }
-        }
-        $iv = new \Compile\Mir\Invoke_($hdp, $armArgs, $resT);
+        $iv = new \Compile\Mir\Invoke_($hdp, $this->dynSpreadArmArgs($fixedN), $resT);
         // Call the old inline implementation directly. Re-entering
         // emitDynMethodCall here would re-run candidate inference against the
         // synthetic nodes and can observe the helper's temporary LocalSlots as
         // if they were a real source call.
-        $body .= $this->emitDynMethodInlineFallback($hdp, $iv, $methods);
+        $body .= $this->emitDynMethodInlineFallback($hdp, $iv, $methods, $fixedN);
         $body .= $this->coerceToI64();
         $result = $this->lastValue;
         $body .= '  ret i64 ' . $result . "\n}\n\n";
@@ -5171,6 +5161,124 @@ trait EmitLlvmObjects
         return $this->dynInlSyms[$key];
     }
 
+    /** @return Node[] the arm's arguments, read out of the packed `__mc_dyn_args` local */
+    private function dynSpreadArmArgs(int $fixedN): array
+    {
+        $vecT = Type::vec(Type::cell());
+        $armArgs = [];
+        if ($fixedN < 0) {
+            $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT), Type::cell());
+        } else {
+            for ($i = 0; $i < $fixedN; $i++) {
+                $armArgs[] = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT),
+                    new \Compile\Mir\IntConst($i, Type::int_()), Type::cell());
+            }
+        }
+        return $armArgs;
+    }
+
+    /** Set while an arm helper body is emitted: its own spread call must stay inline. */
+    private bool $noSpreadRoute = false;
+
+    /** @var array<string, string> per-(name, receiver, arity) arm helper key => symbol, '' when not served */
+    private array $dynArmSyms = [];
+
+    /**
+     * One arm of {@see dynamicMethodSpreadFallbackHelper} as its own helper
+     * `i64 (i64 recv, ptr args)`: the virtual dispatch and argument unpack for
+     * ONE method name do not depend on the other names in the shape, so every
+     * shape helper that mentions the name shares this body instead of
+     * splicing a copy (~210 IR lines per arm, 1 850 arms per shape, 39 shapes).
+     * '' when the body is not closed; the caller then inlines the arm.
+     */
+    private function dynamicMethodSpreadArmHelper(Type $rt, int $fixedN, string $m, Type $retT, int $srcArgc = -1): string
+    {
+        $recvKey = $rt->class ?? '';
+        if ($rt->kind === Type::KIND_UNION) {
+            foreach ($rt->atoms as $at) { $recvKey .= ($at->class ?? '') . '|'; }
+        }
+        $key = 'inlarm|' . $rt->kind . ':' . $recvKey . '|' . (string)$fixedN . '|' . $retT->kind . ':' . ($retT->class ?? '') . '|' . $m . '|' . (string)$srcArgc;
+        if (isset($this->dynArmSyms[$key])) { return $this->dynArmSyms[$key]; }
+        $sym = '@' . $this->mirHelperSym('__mir_dynarm_' . (string)\count($this->dynArmSyms));
+        $this->dynArmSyms[$key] = $sym;
+
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $oldRawRef = $this->rawRefCall;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
+        $oldAbiDisabled = $this->dynamicMethodAbiDisabled;
+        $oldNoSpreadRoute = $this->noSpreadRoute;
+        $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldCellProv = $this->cellProv;
+
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        $this->locals = new LocalSlots();
+        $this->cf = new ControlFlow();
+        $this->arena = new ArenaContext();
+        $this->rawRefCall = false;
+        $this->spreadTail = null;
+        $this->lastPadArgs = '';
+        $this->vdResult = '';
+        $this->vdArmList = '';
+        $this->vdSiteArgc = 0;
+        $this->dynamicMethodAbiDisabled = true;
+        $this->noSpreadRoute = true;
+
+        $objSlot = $this->ssa->allocReg();
+        $argsSlot = $this->ssa->allocReg();
+        $this->locals->slots['__mc_dyn_obj'] = $objSlot;
+        $this->locals->slots['__mc_dyn_args'] = $argsSlot;
+        $body = 'define hidden i64 ' . $sym . "(i64 %obj, ptr %args) {\nentry:\n";
+        $body .= '  ' . $objSlot . " = alloca i64\n  store i64 %obj, ptr " . $objSlot . "\n";
+        $body .= '  ' . $argsSlot . " = alloca i64\n";
+        $body .= "  %argsI = ptrtoint ptr %args to i64\n  store i64 %argsI, ptr " . $argsSlot . "\n";
+        $recv = new \Compile\Mir\LoadLocal('__mc_dyn_obj', $rt);
+        $call = new \Compile\Mir\MethodCall_($recv, $m, $this->packDynVariadicArgs($recv, $m, $this->dynSpreadArmArgs($fixedN)), $retT);
+        $call->srcArgc = $srcArgc;
+        $body .= $this->emitMethodCall($call);
+        $body .= $this->boxToCell($retT);
+        $body .= '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        if ($this->irIsClosed($body)) {
+            $this->dynamicMethodHelpers[$key] = $body;
+        } else {
+            $this->dynArmSyms[$key] = '';
+        }
+
+        $this->noSpreadRoute = $oldNoSpreadRoute;
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        $this->rawRefCall = $oldRawRef;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
+        $this->dynamicMethodAbiDisabled = $oldAbiDisabled;
+        $this->rt->needsBacktrace = $oldNeedsBacktrace;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        return $this->dynArmSyms[$key];
+    }
     /** Some operand of the dynamic call is not a local yet, and every such one
      *  is a read {@see dynHoistableRead} can take once. */
     private function dynOperandsNeedHoist(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv): bool
@@ -6140,7 +6248,7 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    private function emitDynMethodInlineFallback(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods): string
+    private function emitDynMethodInlineFallback(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods, ?int $armFixedN = null): string
     {
         $recv = $dp->object;
         $nameNode = $dp->name;
@@ -6160,6 +6268,21 @@ trait EmitLlvmObjects
             $out .= '  ' . $eq . ' = icmp eq i32 ' . $cmp . ", 0\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
+            $armSym = $armFixedN === null ? '' : $this->dynamicMethodSpreadArmHelper($recv->type, $armFixedN, (string)$m, $retT);
+            if ($armSym !== '') {
+                $ro = $this->ssa->allocReg();
+                $out .= '  ' . $ro . ' = load i64, ptr ' . $this->locals->slots['__mc_dyn_obj'] . "\n";
+                $ra = $this->ssa->allocReg();
+                $out .= '  ' . $ra . ' = load i64, ptr ' . $this->locals->slots['__mc_dyn_args'] . "\n";
+                $rp = $this->ssa->allocReg();
+                $out .= '  ' . $rp . ' = inttoptr i64 ' . $ra . " to ptr\n";
+                $rv = $this->ssa->allocReg();
+                $out .= '  ' . $rv . ' = call i64 ' . $armSym . '(i64 ' . $ro . ', ptr ' . $rp . ")\n";
+                $out .= '  store i64 ' . $rv . ', ptr ' . $res . "\n";
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+                continue;
+            }
             // $recv keeps its type (single class OR union), so emitMethodCall
             // dispatches monomorphically or via the runtime class_id switch.
             $call = new \Compile\Mir\MethodCall_($recv, $m, $this->packDynVariadicArgs($recv, (string)$m, $iv->args), $retT);
@@ -9318,6 +9441,8 @@ trait EmitLlvmObjects
 
     private function emitMethodCallUnguarded(\Compile\Mir\MethodCall_ $n): string
     {
+        $sp = $this->emitErasedSpreadMethodCall($n);
+        if ($sp !== null) { return $sp; }
         $hm = $this->emitHmapCall($n);
         if ($hm !== null) { return $hm; }
         $depDiag = $this->deprecatedMethodDiag($this->staticClassOf($n->object), $n->method, $n->line);
@@ -9325,6 +9450,49 @@ trait EmitLlvmObjects
         return $this->emitMethodCallInner($n);
     }
 
+    /**
+     * `$erased->m(...$pack)` where many classes declare `m`: the per-class
+     * virtual dispatch and the per-arm unpack of the pack are the shared
+     * {@see dynamicMethodSpreadArmHelper} (symfony's `->m(...\func_get_args())`
+     * proxies spliced ~260 KB of IR each). Null = keep the inline path.
+     */
+    private function emitErasedSpreadMethodCall(\Compile\Mir\MethodCall_ $n): ?string
+    {
+        if ($this->noSpreadRoute || \count($n->args) !== 1 || $n->args[0]->kind !== Node::KIND_SPREAD) { return null; }
+        $rk = $n->object->type->kind;
+        if ($rk !== Type::KIND_CELL && $rk !== Type::KIND_UNKNOWN) { return null; }
+        $op = $this->asSpreadNode($n->args[0])->operand;
+        $pt = $op->type;
+        $erasedPack = $pt->kind === Type::KIND_UNKNOWN;
+        if (!$erasedPack) {
+            $el = $pt->element;
+            if (!$pt->isVec() || ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN)) { return null; }
+        }
+        if ($op->kind !== Node::KIND_LOAD_LOCAL && $op->kind !== Node::KIND_STORE_LOCAL) { return null; }
+        if (\count($this->methodHolders($n->method)) < 8 || $this->dynMethodNameHasRefParam($n->method, -1)) { return null; }
+        $sym = $this->dynamicMethodSpreadArmHelper($n->object->type, -1, $n->method, Type::cell(), $n->srcArgc);
+        if ($sym === '') { return null; }
+        $out = $this->emitNode($n->object);
+        $out .= $this->coerceToI64();
+        $recv = $this->lastValue;
+        $out .= $this->emitNode($op);
+        if ($erasedPack) {
+            $out .= $this->cellToPtr();
+        } else {
+            $out .= $this->coerceToPtr();
+        }
+        $argsP = $this->lastValue;
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $recv . ', ptr ' . $argsP . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellOpaque($r);
+        if ($n->type->kind !== Type::KIND_CELL && $n->type->kind !== Type::KIND_UNKNOWN
+            && $n->type->kind !== Type::KIND_VOID) {
+            $out .= $this->unboxCellToType($n->type);
+        }
+        return $out;
+    }
     /**
      * `$r->m(...)` on an ERASED receiver when no class declares `m` but some
      * class has `__call`. The receiver is not necessarily one of those classes:

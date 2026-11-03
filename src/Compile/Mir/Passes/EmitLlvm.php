@@ -923,6 +923,7 @@ final class EmitLlvm implements EmitVisitor
         $this->cloneErasedSym = '';
         $this->dynmSyms = [];
         $this->dynInlSyms = [];
+        $this->dynArmSyms = [];
         $this->dynmExtraBodies = '';
         $this->scmpSyms = [];
         $this->scmpExtraBodies = '';
