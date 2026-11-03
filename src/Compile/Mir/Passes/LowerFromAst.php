@@ -1051,6 +1051,7 @@ final class LowerFromAst implements Pass
                     continue;
                 }
                 if ($dkind !== 'class') { continue; }
+                $this->buildHoistedAncestors($decl, $module);
                 $cd = $this->buildClassDef($decl, $this->stableClassId(\ltrim($this->declName($decl), '\\')));
                 $cd->isPreludeClass = $this->inPreludeClass;
                 $cd->isInternal = $this->inPreludeClass || $this->exportRuntimeTypes
@@ -5681,12 +5682,43 @@ final class LowerFromAst implements Pass
                 continue;
             }
             if ($name === '' || isset($this->classTable[$name])) { continue; }
-            $cd = $this->buildClassDef($cdecl, $this->stableClassId(\ltrim($name, '\\')));
-            $cd->isPreludeClass = false;
-            $this->classTable[$cd->name] = $cd;
-            $module->addClass($cd);
+            $this->buildHoistedAncestors($cdecl, $module);
+            $this->buildHoistedClassDef($cdecl, $module);
         }
         $this->hoistedClassDecls = [];
+    }
+
+    private function buildHoistedClassDef(\Parser\Ast\ClassDecl $cdecl, Module $module): void
+    {
+        $name = $this->declName($cdecl);
+        if ($name === '' || isset($this->classTable[$name])) { return; }
+        $wasPrelude = $this->inPreludeClass;
+        $this->inPreludeClass = false;
+        $cd = $this->buildClassDef($cdecl, $this->stableClassId(\ltrim($name, '\\')));
+        $this->inPreludeClass = $wasPrelude;
+        $cd->isPreludeClass = false;
+        $this->classTable[$cd->name] = $cd;
+        $module->addClass($cd);
+    }
+
+    /**
+     * A class hoisted out of a folded `if` is built after the main class-table pass, but a
+     * top-level class may extend it: built first, the child would copy NO inherited slots and
+     * allocate fewer bytes than its inherited methods write. Build the hoisted ancestors of
+     * `$decl` first.
+     */
+    private function buildHoistedAncestors(\Parser\Ast\ClassDecl $decl, Module $module): void
+    {
+        foreach ($this->classDeclExtends($decl) as $parentName) {
+            $pn = \ltrim($parentName, '\\');
+            if (isset($this->classTable[$pn])) { continue; }
+            foreach ($this->hoistedClassDecls as $h) {
+                if (($h->kind ?? 'class') !== 'class' || \ltrim($this->declName($h), '\\') !== $pn) { continue; }
+                $this->buildHoistedAncestors($h, $module);
+                $this->buildHoistedClassDef($h, $module);
+                break;
+            }
+        }
     }
 
     /** foldGuard: not statically foldable — the guard stays for runtime. */
