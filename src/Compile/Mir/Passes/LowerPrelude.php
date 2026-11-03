@@ -1233,45 +1233,66 @@ trait LowerPrelude
     }
 
     /**
-     * PHP source that picks the arm of one class NAME: a balanced tree of `strcmp`s, not
-     * a chain of `===`. The chain made `newInstanceWithoutConstructor` and `unserialize`
-     * cost O(classes) — 4-12 us at 3000 classes against php's 50 ns. A match falls out of
-     * its leaf (the leaf `return`s); no match falls out of the tree to what follows it.
+     * PHP source that picks the arm of one class NAME in O(log N) integer compares: the
+     * name's crc32 walks a balanced tree, and only the group of names sharing that crc
+     * is compared as strings. A chain of `===` made `newInstanceWithoutConstructor` and
+     * `unserialize` cost O(classes) — 4-12 us at 3000 classes against php's 50 ns — and a
+     * tree of `strcmp`s still paid ~12 string compares. A match falls out of its leaf (the
+     * leaf `return`s); no match falls out of the tree to what follows it.
      *
      * @param string[] $names
      * @param string   $leaf  statement(s) for a match; `%s` is the quoted class name
      */
     private function nameTreeSrc(string $var, array $names, string $leaf, string $pad): string
     {
-        $sorted = $names;
-        \usort($sorted, fn (string $x, string $y): int => \strcmp($x, $y));
-        return $this->nameTreeRange($var, $sorted, 0, \count($sorted), $leaf, $pad);
+        /** @var array<int, string[]> $groups crc32 => the names with it */
+        $groups = [];
+        foreach ($names as $n) {
+            $c = \crc32($n);
+            if (!isset($groups[$c])) { $groups[$c] = []; }
+            $groups[$c][] = $n;
+        }
+        \ksort($groups);
+        /** @var int[] $keys */
+        $keys = \array_keys($groups);
+        $o = $pad . '$__nh = \\crc32(' . $var . ");\n";
+        return $o . $this->nameTreeRange($var, $keys, $groups, 0, \count($keys), $leaf, $pad);
     }
 
-    /** @param string[] $s sorted names */
-    private function nameTreeRange(string $var, array $s, int $lo, int $hi, string $leaf, string $pad): string
+    /**
+     * @param int[]                $keys   the crc32 values, ascending
+     * @param array<int, string[]> $groups
+     */
+    private function nameTreeRange(string $var, array $keys, array $groups, int $lo, int $hi, string $leaf, string $pad): string
     {
         if ($hi <= $lo) { return ''; }
-        if ($hi - $lo <= 3) {
+        if ($hi - $lo <= 2) {
             $o = '';
             for ($i = $lo; $i < $hi; $i = $i + 1) {
-                $q = $this->dqBody($s[$i]);
-                $o .= $pad . 'if (' . $var . ' === "' . $q . '") { ' . \str_replace('%s', $q, $leaf) . " }\n";
+                $o .= $pad . 'if ($__nh === ' . (string)$keys[$i] . ") {\n" . $this->nameGroupSrc($var, $groups[$keys[$i]], $leaf, $pad . '  ') . $pad . "}\n";
             }
             return $o;
         }
         $mid = \intdiv($lo + $hi, 2);
-        $q = $this->dqBody($s[$mid]);
-        $o = $pad . '$__nt = \\strcmp(' . $var . ', "' . $q . "\");\n";
-        $o .= $pad . 'if ($__nt === 0) { ' . \str_replace('%s', $q, $leaf) . " }\n";
-        $o .= $pad . "if (\$__nt < 0) {\n";
-        $o .= $this->nameTreeRange($var, $s, $lo, $mid, $leaf, $pad . '  ');
+        $o = $pad . 'if ($__nh === ' . (string)$keys[$mid] . ") {\n" . $this->nameGroupSrc($var, $groups[$keys[$mid]], $leaf, $pad . '  ') . $pad . "}\n";
+        $o .= $pad . 'if ($__nh < ' . (string)$keys[$mid] . ") {\n";
+        $o .= $this->nameTreeRange($var, $keys, $groups, $lo, $mid, $leaf, $pad . '  ');
         $o .= $pad . "} else {\n";
-        $o .= $this->nameTreeRange($var, $s, $mid + 1, $hi, $leaf, $pad . '  ');
+        $o .= $this->nameTreeRange($var, $keys, $groups, $mid + 1, $hi, $leaf, $pad . '  ');
         $o .= $pad . "}\n";
         return $o;
     }
 
+    /** @param string[] $names the names sharing one crc32 */
+    private function nameGroupSrc(string $var, array $names, string $leaf, string $pad): string
+    {
+        $o = '';
+        foreach ($names as $n) {
+            $q = $this->dqBody($n);
+            $o .= $pad . 'if (' . $var . ' === "' . $q . '") { ' . \str_replace('%s', $q, $leaf) . " }\n";
+        }
+        return $o;
+    }
     private function unserSrc(): string
     {
         $names = $this->walkableClassesDerivedFirst();

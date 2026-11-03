@@ -11,3 +11,8 @@ ReflectionException: Property Square::$nope does not exist
 Class "NoSuchClass" does not exist
 -1 -1
 nf
+Square Base Square Base
+no ctor Base root
+Method Square::nope() does not exist
+Property Square::$nope does not exist
+Square Closure

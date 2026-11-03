@@ -334,26 +334,43 @@ class ReflectionClass
      * A string goes through the runtime registry; an object reads its own
      * descriptor, which needs no lookup at all.
      */
+    /** Internal: the class handle a caller already holds (getParentClass); consumed by the next constructor call. */
+    public static int $__h = 0;
+
     public function __construct(object|string $objectOrClass)
     {
+        $hintH = self::$__h;
+        self::$__h = 0;
+        if ($hintH !== 0 && \is_string($objectOrClass)) {
+            $this->h = $hintH;
+            $this->name = $objectOrClass;
+            return;
+        }
+        $closure = false;
         if (\is_string($objectOrClass)) {
             // A leading `\` is not part of the name the compiler recorded.
             $n = __mc_refl_unqualify($objectOrClass);
             $h = __mc_refl_find($n);
             if ($h === 0 && \strtolower($n) === 'closure') {
                 $h = __mc_refl_find('__MC_ClosureShape');
+                $closure = true;
             }
             if ($h === 0) {
                 throw new ReflectionException("Class \"" . $n . "\" does not exist");
             }
         } else {
-            $h = $objectOrClass instanceof \Closure ? __mc_refl_find('__MC_ClosureShape') : __mc_refl_of($objectOrClass);
+            if ($objectOrClass instanceof \Closure) {
+                $h = __mc_refl_find('__MC_ClosureShape');
+                $closure = true;
+            } else {
+                $h = __mc_refl_of($objectOrClass);
+            }
             if ($h === 0) {
                 throw new ReflectionException("Class does not exist");
             }
         }
         $this->h = $h;
-        $this->name = $h === __mc_refl_find('__MC_ClosureShape') ? 'Closure' : __mc_refl_name($h);
+        $this->name = $closure ? 'Closure' : __mc_refl_name($h);
     }
 
     public function getName(): string
@@ -439,6 +456,7 @@ class ReflectionClass
     {
         $p = __mc_refl_parent($this->h);
         if ($p === 0) { return false; }
+        self::$__h = $p;
         return new ReflectionClass(__mc_refl_name($p));
     }
 
@@ -534,16 +552,22 @@ class ReflectionClass
     /** The constructor as a ReflectionMethod, or null when none is declared. */
     public function getConstructor(): ReflectionMethod|null
     {
-        if (__mc_refl_member($this->h, "__construct", 1) === 0) { return null; }
+        $row = __mc_refl_mrow($this->h, "__construct");
+        if ($row === 0) { return null; }
+        ReflectionMethod::$__row = $row;
+        ReflectionMethod::$__h = $this->h;
         return new ReflectionMethod($this->name, "__construct");
     }
 
     /** A method by name; throws when the class has no such method. */
     public function getMethod(string $name): ReflectionMethod
     {
-        if (__mc_refl_member($this->h, $name, 1) === 0) {
-            throw new ReflectionException("Method " . $name . " does not exist");
+        $row = __mc_refl_mrow($this->h, $name);
+        if ($row === 0) {
+            throw new ReflectionException("Method " . $this->name . "::" . $name . "() does not exist");
         }
+        ReflectionMethod::$__row = $row;
+        ReflectionMethod::$__h = $this->h;
         return new ReflectionMethod($this->name, $name);
     }
 
@@ -606,9 +630,12 @@ class ReflectionClass
     /** A property by name; throws when the class has no such property. */
     public function getProperty(string $name): ReflectionProperty
     {
-        if (__mc_refl_member($this->h, $name, 0) === 0) {
-            throw new ReflectionException("Property " . $name . " does not exist");
+        $row = __mc_refl_prow($this->h, $name);
+        if ($row === 0) {
+            throw new ReflectionException("Property " . $this->name . "::$" . $name . " does not exist");
         }
+        ReflectionProperty::$__row = $row;
+        ReflectionProperty::$__h = $this->h;
         return new ReflectionProperty($this->name, $name);
     }
 

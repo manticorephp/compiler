@@ -66,3 +66,11 @@ try { new ReflectionMethod('NoSuchClass', 'x'); } catch (ReflectionException $e)
 // a parent's private member is not listed on the child, but is on the parent
 echo count((new ReflectionClass('Base'))->getMethods()) - count((new ReflectionClass('Square'))->getMethods()), ' ', count((new ReflectionClass('Base'))->getProperties()) - count((new ReflectionClass('Square'))->getProperties()), "\n";
 echo (new ReflectionMethod('Square', 'area'))->isFinal() ? 'f' : 'nf', "\n";
+
+// members fetched by name through the class
+$sq = new ReflectionClass('Square');
+echo $sq->getMethod('area')->class, ' ', $sq->getMethod('id')->class, ' ', $sq->getProperty('side')->class, ' ', $sq->getProperty('id')->class, "\n";
+echo $sq->getConstructor() === null ? 'no ctor' : 'ctor', ' ', $sq->getParentClass()->getName(), ' ', $sq->getParentClass()->getParentClass() === false ? 'root' : 'deeper', "\n";
+try { $sq->getMethod('nope'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+try { $sq->getProperty('nope'); } catch (ReflectionException $e) { echo $e->getMessage(), "\n"; }
+echo (new ReflectionClass(new Square))->getShortName(), ' ', (new ReflectionClass(Closure::fromCallable('strlen')))->getName(), "\n";
