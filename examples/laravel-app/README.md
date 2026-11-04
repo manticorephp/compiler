@@ -78,6 +78,13 @@ migrations), `php aot/compile-views.php` for a view change, then `manticore buil
 Artisan commands, queues and the scheduler are not part of the binary: a console is a
 separate program, run `php artisan` as usual for those.
 
+## Known issue
+
+About one process start in three dies with a `libmalloc` free-list abort (exit 133, `SIGTRAP`) on its first
+Eloquent request; a process that survives it serves normally. A supervisor (`WORKERS=N`) restarts a dead
+worker, so a deployment recovers, but the request that hit it is lost. Tracked in
+[#568](https://github.com/manticorephp/compiler/issues/568) with what has been ruled out.
+
 ## Troubleshooting
 
 - **`Target class [config] does not exist`, `Call to undefined method …` right after
