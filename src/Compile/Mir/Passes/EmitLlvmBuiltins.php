@@ -9252,6 +9252,26 @@ trait EmitLlvmBuiltins
      *  before the fold. */
     private function biIsA(array $args, bool $strict, ?bool $allowString = true): string
     {
+        // An ERASED local subject with allow_string on is a string or an object, known only at run time: pick the
+        // arm by tag. `is_a($class, VoterInterface::class, true)` over a `mixed` class name read false.
+        $sk = $args[0]->type->kind;
+        if ($allowString === true && ($sk === Type::KIND_CELL || $sk === Type::KIND_UNKNOWN)
+            && $args[0]->kind === Node::KIND_LOAD_LOCAL && $this->reflClassName($args[1]) !== '') {
+            $fn = $strict ? 'is_subclass_of' : 'is_a';
+            $bool = Type::bool_();
+            $strArm = new \Compile\Mir\Call($fn, [
+                new \Compile\Mir\Call('strval', [$args[0]], Type::string_()),
+                $args[1],
+                new \Compile\Mir\BoolConst(true, $bool),
+            ], $bool);
+            $objArm = new \Compile\Mir\Call($fn, [
+                $args[0],
+                $args[1],
+                new \Compile\Mir\BoolConst(false, $bool),
+            ], $bool);
+            $isStr = new \Compile\Mir\Call('is_string', [$args[0]], $bool);
+            return $this->emitNode(new \Compile\Mir\Ternary($isStr, $strArm, $objArm, $bool));
+        }
         // allow_string only ever matters for a STRING subject: an object is
         // resolved either way.
         if ($this->subjectIsString($args[0])) {
