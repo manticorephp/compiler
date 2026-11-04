@@ -1200,8 +1200,40 @@ final class Ownership
      */
     public static function erasedArrayReturn(FunctionDef $fn): bool
     {
-        return $fn->returnArrayHinted && !$fn->isGenerator && !$fn->returnsByRef && $fn->ffiSymbol === null;
+        if ($fn->isGenerator || $fn->returnsByRef || $fn->ffiSymbol !== null) { return false; }
+        return $fn->returnArrayHinted || self::returnsArrayParam($fn);
     }
+
+    /**
+     * Does `$fn` hand one of its bare `array` parameters straight back (`return $v`)? Declared return or not, the
+     * value is the caller's own buffer: unless the return takes a count on it, a caller that stores the result over
+     * the very variable it passed (`$value = $f($value)`) releases its old value and frees what it just received.
+     */
+    private static function returnsArrayParam(FunctionDef $fn): bool
+    {
+        /** @var array<string,bool> $names */
+        $names = [];
+        foreach ($fn->params as $p) {
+            if (!$p->byRef && !$p->variadic && $p->arrayHinted && $p->type->kind === Type::KIND_UNKNOWN) { $names[$p->name] = true; }
+        }
+        if ($names === []) { return false; }
+        return self::bodyReturnsLocal($fn->body, $names);
+    }
+
+    /** @param array<string,bool> $names */
+    private static function bodyReturnsLocal(Node $n, array $names): bool
+    {
+        if ($n->kind === Node::KIND_RETURN) {
+            $rv = self::asReturnNode($n)->value;
+            if ($rv !== null && $rv->kind === Node::KIND_LOAD_LOCAL && isset($names[self::asLoadLocal($rv)->name])) { return true; }
+        }
+        foreach (Walk::children($n) as $c) {
+            if (self::bodyReturnsLocal($c, $names)) { return true; }
+        }
+        return false;
+    }
+
+    private static function asReturnNode(Node $n): Return_ { return $n; }
 
     /** A call whose erased result is +1 by {@see erasedArrayReturn}: the callee
      *  is resolved to its declaration (a free function, a method or static

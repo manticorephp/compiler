@@ -1690,29 +1690,6 @@ trait EmitLlvmCalls
         $body .= $this->emitNode(new Call($fname, $callArgs, $rt));
         $body .= $this->boxToCell($rt);
         $ret = $this->lastValue;
-        // A callee may hand a BORROWED parameter straight back (`return $v`). Direct call sites know that from the
-        // callee's analysis; this thunk serves callers that do not (`$value = $f($value)`), whose own release of the
-        // argument would then free the result. Give the result a count of its own when it is one of the arguments.
-        $rk = $rt->kind;
-        if ($rk !== Type::KIND_INT && $rk !== Type::KIND_FLOAT && $rk !== Type::KIND_BOOL
-            && $rk !== Type::KIND_VOID && $rk !== Type::KIND_NULL) {
-            $mask = '281474976710655';
-            $rp = $this->ssa->allocReg();
-            $body .= '  ' . $rp . ' = and i64 ' . $ret . ', ' . $mask . "\n";
-            for ($i = 0; $i < $argc; $i = $i + 1) {
-                $ap = $this->ssa->allocReg();
-                $same = $this->ssa->allocReg();
-                $retL = $this->ssa->allocLabel('dft.ret');
-                $nextL = $this->ssa->allocLabel('dft.next');
-                $body .= '  ' . $ap . ' = and i64 %ft.a' . (string)$i . ', ' . $mask . "\n";
-                $body .= '  ' . $same . ' = icmp eq i64 ' . $rp . ', ' . $ap . "\n";
-                $body .= '  br i1 ' . $same . ', label %' . $retL . ', label %' . $nextL . "\n";
-                $body .= $retL . ":\n";
-                $body .= '  call void @__mir_cell_retain(i64 ' . $ret . ")\n";
-                $body .= '  br label %' . $nextL . "\n";
-                $body .= $nextL . ":\n";
-            }
-        }
         $closed = $this->irIsClosed($body . '  ret i64 ' . $ret . "\n");
 
         $this->ssa = $oldSsa;
