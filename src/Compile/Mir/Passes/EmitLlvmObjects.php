@@ -9152,7 +9152,7 @@ trait EmitLlvmObjects
      * @return array<string, string>
      */
     /** Can `$holder`'s `$method` take `$argc` arguments (the receiver included)? */
-    private function holderTakesArgs(string $holder, string $method, int $argc): bool
+    private function holderTakesArgs(string $holder, string $method, int $argc, bool $viaVariadic = true): bool
     {
         $key = $holder . '__' . $method;
         $n = \count($this->sigs->paramTypes[$key] ?? []);
@@ -9167,6 +9167,7 @@ trait EmitLlvmObjects
             if (($pdefs[$i] ?? null) === null && !($vmask[$i] ?? false)) { return false; }
         }
         if ($n >= $argc) { return true; }
+        if (!$viaVariadic) { return false; }
         foreach ($vmask as $v) {
             if ($v) { return true; }
         }
@@ -10264,10 +10265,19 @@ trait EmitLlvmObjects
         // IntlBreakIterator::next(?int), which then read its default.
         if ($fallback !== '' && ($static === '' || !isset($this->classes[$static]))) {
             $argc = \count($mc->args) + 1;
-            if (!$this->holderTakesArgs($fallback, $mc->method, $argc) || $this->holderIsStaticMethod($fallback, $mc->method)) {
+            // A variadic holder "takes" any count, yet trims the site to ITS arity: while another holder takes the
+            // arguments by name, that one decides (`addTag(Tag ...$t)` first made `Definition::addTag($n, $attrs)` lose $attrs).
+            if (!$this->holderTakesArgs($fallback, $mc->method, $argc, false) || $this->holderIsStaticMethod($fallback, $mc->method)) {
+                $direct = false;
                 foreach ($this->methodHolders($mc->method) as $cn => $r) {
                     if ($static !== '' && !$this->classImplementsIface($cn, $static)) { continue; }
-                    if ($this->holderTakesArgs($r, $mc->method, $argc) && !$this->holderIsStaticMethod($r, $mc->method)) { $fallback = $r; break; }
+                    if ($this->holderTakesArgs($r, $mc->method, $argc, false) && !$this->holderIsStaticMethod($r, $mc->method)) { $fallback = $r; $direct = true; break; }
+                }
+                if (!$direct && (!$this->holderTakesArgs($fallback, $mc->method, $argc) || $this->holderIsStaticMethod($fallback, $mc->method))) {
+                    foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                        if ($static !== '' && !$this->classImplementsIface($cn, $static)) { continue; }
+                        if ($this->holderTakesArgs($r, $mc->method, $argc) && !$this->holderIsStaticMethod($r, $mc->method)) { $fallback = $r; break; }
+                    }
                 }
             }
         }
