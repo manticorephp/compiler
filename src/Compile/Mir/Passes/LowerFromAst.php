@@ -2570,6 +2570,8 @@ final class LowerFromAst implements Pass
                         [\Parser\Ast\Expr::arrayLit($elems, $span)], $span),
                     $span),
             ]);
+            // Lowered in the declaring class's scope: an argument may name `self::HELP`.
+            $this->synthFnScope[\Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false)] = $class;
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false),
                 [], 'mixed', $argsBody, $span);
@@ -2583,6 +2585,7 @@ final class LowerFromAst implements Pass
             $newBody = new \Parser\Ast\Block([
                 \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::new_($attr->name, $attr->args, $span), $span),
             ]);
+            $this->synthFnScope[\Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true)] = $class;
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
                 [], 'mixed', $newBody, $span);
