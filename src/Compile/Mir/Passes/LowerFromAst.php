@@ -5664,6 +5664,8 @@ final class LowerFromAst implements Pass
         $dkind = $cdecl->kind ?? 'class';
         if ($dkind === 'trait') {
             $this->traitTable[$this->declName($cdecl)] = $cdecl;
+            // Reflection and trait_exists() know a trait by this table; a hoisted one was missing from it.
+            $this->module->traitNames[\ltrim($this->declName($cdecl), '\\')] = true;
             return;
         }
         $cname = $this->classDeclName($cdecl);
