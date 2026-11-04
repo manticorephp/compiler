@@ -1,5 +1,4 @@
 <?php
-// ReflectionClass::getFileName() is false for a class declared inside `if (...) { class X } else { class X }`.
 // issue: #566
 if (method_exists(Exception::class, 'getMessage')) {
     class CondBundle {}

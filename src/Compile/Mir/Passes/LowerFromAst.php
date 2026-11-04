@@ -1145,6 +1145,85 @@ final class LowerFromAst implements Pass
             $module->addClass($std);
         }
 
+        // Declarations first, then the class table's hoisted classes: every walker synthesized below (var_dump, print_r,
+        // serialize, reflection, ...) is written from the class table, so a class hoisted out of a guarded `if` must be in it.
+        // Pre-pass: capture every function's params so call sites can
+        // fill defaults + reorder named args regardless of source order.
+        foreach ($stmts as $stmt) {
+            if ($stmt->kind === 'Function') {
+                $fqn = $stmt->decl->name;
+                $this->declareFn($fqn, $stmt->decl);
+                $this->noteSourceFnAlias($fqn);
+            }
+        }
+
+        // Inject bundled-stdlib signatures as declare-only externs. Skipped
+        // when the program defines the name itself (the compiler's own source
+        // ships the stdlib) or a codegen builtin handles it inline — in both
+        // cases the user object is self-contained and stdlib.o is not linked.
+        foreach ($this->externDecls as $extDecl) {
+            $name = $extDecl->name;
+            // A method of an imported class: the class import already declares
+            // it, with the implicit `$this` in slot 0 that a plain function
+            // signature has no way to reconstruct.
+            if (isset($this->externMethodSyms[$name])) { continue; }
+            if (isset($this->fnDecls[$name])) { continue; }
+            // A codegen builtin's stdlib twin is still DECLARED — not
+            // registered for direct calls (those stay inline, emitBuiltin is
+            // asked first), but present so a call by RUNTIME NAME finds a
+            // symbol: `self::VALIDATION_FUNCTIONS[$type]($value)` reached no
+            // `is_string` and symfony OptionsResolver rejected every option.
+            if ($this->isCodegenBuiltin($name)) {
+                $req = 0;
+                foreach ($extDecl->params as $bp) {
+                    if (!($bp->default instanceof \Parser\Ast\Expr) && !$bp->variadic) { $req = $req + 1; }
+                }
+                $module->builtinTwinReq[$name] = $req;
+                $module->builtinTwinTot[$name] = \count($extDecl->params);
+                // The HINT, not a lowered Type: lowering a type hint registers
+                // what it names, and this runs for every builtin twin in the
+                // stdlib whether or not the program ever calls one by name.
+                $module->builtinTwinRet[$name] = $extDecl->returnType ?? '';
+                $hints = [];
+                foreach ($extDecl->params as $bp) { $hints[] = \strtolower($bp->typeHint ?? ''); }
+                $module->builtinTwinParams[$name] = $hints;
+                foreach ($extDecl->params as $bp) {
+                    if ($bp->byRef) { $module->builtinTwinRef[$name] = true; }
+                }
+                continue;
+            }
+            $this->declareFn($name, $extDecl);
+            // Register the bare-name alias for a namespaced import, exactly as
+            // the in-source pre-pass does, so an unqualified `strncmp()` in the
+            // consumer resolves to the imported `Runtime\Libc\strncmp` instead
+            // of mis-mangling to an undefined global `@manticore_strncmp`.
+            $pos = \strrpos($name, '\\');
+            if ($pos !== false && $pos >= 0) {
+                $bare = \substr($name, $pos + 1);
+                $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare])
+                    ? '' : $name;
+            }
+            $fn = $this->lowerFunctionSignature($extDecl);
+            $fn->isExtern = true;
+            $module->addFunction($fn);
+            $this->externInjected = true;
+        }
+
+        // Fold polyfill-style declaration guards: expand a top-level `if
+        // (compile-time predicate) { … }` into its live branch, so a declaration
+        // it guards — `if (!function_exists('X')) { function X() {…} }` — hoists to
+        // the top level when live, or is dropped when X already exists. Runs after
+        // the stdlib externs are in `$fnDecls` (so function_exists sees native
+        // functions) and only over the user portion (the prelude window stays put).
+        if ($preludeCount < \count($stmts)) {
+            $head = \array_slice($stmts, 0, $preludeCount);
+            $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
+            $stmts = \array_merge($head, $tail);
+            // Every hoisted class's DECL is registered by now; give them their
+            // ClassDefs before anything lowers a method body against one.
+            $this->buildHoistedClassDefs($module);
+        }
+
         // Synthesize `__mir_dump_object` from the now-complete class table: a
         // class-aware var_dump for typed objects (the prelude's is_object branch
         // calls it). Generated HERE, not in the prelude (which is parsed before
@@ -1342,89 +1421,12 @@ final class LowerFromAst implements Pass
             }
         }
 
-        // Pre-pass: capture every function's params so call sites can
-        // fill defaults + reorder named args regardless of source order.
-        foreach ($stmts as $stmt) {
-            if ($stmt->kind === 'Function') {
-                $fqn = $stmt->decl->name;
-                $this->declareFn($fqn, $stmt->decl);
-                $this->noteSourceFnAlias($fqn);
-            }
-        }
-
         // The synthesized reflection factories, lowered now that every constant
         // a body of theirs might name is known — see the registration above.
         foreach ($this->pendingSynthFns as $decl) {
             $module->addFunction($this->lowerFunction($decl));
         }
         $this->pendingSynthFns = [];
-
-        // Inject bundled-stdlib signatures as declare-only externs. Skipped
-        // when the program defines the name itself (the compiler's own source
-        // ships the stdlib) or a codegen builtin handles it inline — in both
-        // cases the user object is self-contained and stdlib.o is not linked.
-        foreach ($this->externDecls as $extDecl) {
-            $name = $extDecl->name;
-            // A method of an imported class: the class import already declares
-            // it, with the implicit `$this` in slot 0 that a plain function
-            // signature has no way to reconstruct.
-            if (isset($this->externMethodSyms[$name])) { continue; }
-            if (isset($this->fnDecls[$name])) { continue; }
-            // A codegen builtin's stdlib twin is still DECLARED — not
-            // registered for direct calls (those stay inline, emitBuiltin is
-            // asked first), but present so a call by RUNTIME NAME finds a
-            // symbol: `self::VALIDATION_FUNCTIONS[$type]($value)` reached no
-            // `is_string` and symfony OptionsResolver rejected every option.
-            if ($this->isCodegenBuiltin($name)) {
-                $req = 0;
-                foreach ($extDecl->params as $bp) {
-                    if (!($bp->default instanceof \Parser\Ast\Expr) && !$bp->variadic) { $req = $req + 1; }
-                }
-                $module->builtinTwinReq[$name] = $req;
-                $module->builtinTwinTot[$name] = \count($extDecl->params);
-                // The HINT, not a lowered Type: lowering a type hint registers
-                // what it names, and this runs for every builtin twin in the
-                // stdlib whether or not the program ever calls one by name.
-                $module->builtinTwinRet[$name] = $extDecl->returnType ?? '';
-                $hints = [];
-                foreach ($extDecl->params as $bp) { $hints[] = \strtolower($bp->typeHint ?? ''); }
-                $module->builtinTwinParams[$name] = $hints;
-                foreach ($extDecl->params as $bp) {
-                    if ($bp->byRef) { $module->builtinTwinRef[$name] = true; }
-                }
-                continue;
-            }
-            $this->declareFn($name, $extDecl);
-            // Register the bare-name alias for a namespaced import, exactly as
-            // the in-source pre-pass does, so an unqualified `strncmp()` in the
-            // consumer resolves to the imported `Runtime\Libc\strncmp` instead
-            // of mis-mangling to an undefined global `@manticore_strncmp`.
-            $pos = \strrpos($name, '\\');
-            if ($pos !== false && $pos >= 0) {
-                $bare = \substr($name, $pos + 1);
-                $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare])
-                    ? '' : $name;
-            }
-            $fn = $this->lowerFunctionSignature($extDecl);
-            $fn->isExtern = true;
-            $module->addFunction($fn);
-            $this->externInjected = true;
-        }
-
-        // Fold polyfill-style declaration guards: expand a top-level `if
-        // (compile-time predicate) { … }` into its live branch, so a declaration
-        // it guards — `if (!function_exists('X')) { function X() {…} }` — hoists to
-        // the top level when live, or is dropped when X already exists. Runs after
-        // the stdlib externs are in `$fnDecls` (so function_exists sees native
-        // functions) and only over the user portion (the prelude window stays put).
-        if ($preludeCount < \count($stmts)) {
-            $head = \array_slice($stmts, 0, $preludeCount);
-            $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
-            $stmts = \array_merge($head, $tail);
-            // Every hoisted class's DECL is registered by now; give them their
-            // ClassDefs before anything lowers a method body against one.
-            $this->buildHoistedClassDefs($module);
-        }
 
         $mainStmts = [];
         $stmtIdx = 0;
