@@ -1,0 +1,5 @@
+
+Fatal error: Uncaught Error: Class "H" not found in /Users/taras/var/projects/manticore-sf-demo/tests/aot/cases/syslog_constants_param_default.php:3
+Stack trace:
+#0 {main}
+  thrown in /Users/taras/var/projects/manticore-sf-demo/tests/aot/cases/syslog_constants_param_default.php on line 3
