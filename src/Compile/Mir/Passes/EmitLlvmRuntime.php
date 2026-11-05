@@ -2820,8 +2820,16 @@ trait EmitLlvmRuntime
             if (isset($this->enums[$cls->name])) { $flags = $flags | \Compile\MemoryAbi::RMETA_FLAG_ENUM; }
             $parentId = 0;
             $parentNameFld = 'ptr null';
-            if ($cls->parent !== '' && isset($this->classes[$cls->parent])) {
-                $pcd = $this->classes[$cls->parent];
+            // A reified specialization (`Voter$of$string`) reports its ORIGIN's name, and its parent is that origin: a
+            // name-keyed lookup of the parent would find the specialization again and `getParentClass()` would never end.
+            // php sees one class, so skip to the first ancestor with another name.
+            $pcd = ($cls->parent !== '' && isset($this->classes[$cls->parent])) ? $this->classes[$cls->parent] : null;
+            $hops = 0;
+            while ($pcd !== null && $pcd->display() === $cls->display() && $hops < 8) {
+                $pcd = ($pcd->parent !== '' && isset($this->classes[$pcd->parent])) ? $this->classes[$pcd->parent] : null;
+                $hops = $hops + 1;
+            }
+            if ($pcd !== null && $pcd->display() !== $cls->display()) {
                 $parentId = $pcd->classId;
                 // The parent's name, so getParentClass() is find(parent_name) —
                 // the registry is name-keyed, and this saves a second lookup
