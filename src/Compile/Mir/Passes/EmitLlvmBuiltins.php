@@ -9256,7 +9256,7 @@ trait EmitLlvmBuiltins
         // arm by tag. `is_a($class, VoterInterface::class, true)` over a `mixed` class name read false.
         $sk = $args[0]->type->kind;
         if ($allowString === true && ($sk === Type::KIND_CELL || $sk === Type::KIND_UNKNOWN)
-            && $args[0]->kind === Node::KIND_LOAD_LOCAL && $this->reflClassName($args[1]) !== '') {
+            && $args[0]->kind === Node::KIND_LOAD_LOCAL) {
             $fn = $strict ? 'is_subclass_of' : 'is_a';
             $bool = Type::bool_();
             $strArm = new \Compile\Mir\Call($fn, [
