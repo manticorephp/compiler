@@ -615,6 +615,18 @@ final class Debug
      */
     public static bool $framePointers = false;
 
+    /**
+     * The `#0` attribute group every emitted function body carries. `probe-stack` makes a frame
+     * larger than a page touch each page on the way down, so a fiber stack that overflows hits its
+     * PROT_NONE guard (named by the SIGSEGV handler) instead of jumping over it into whatever is
+     * mapped below — a heap, a library — and writing there. The frame-pointer half is the profiler's.
+     */
+    public static function bodyAttrGroup(): string
+    {
+        return 'attributes #0 = { "probe-stack"="inline-asm"'
+            . (self::$framePointers ? ' "frame-pointer"="all"' : '') . ' }';
+    }
+
     public static function applyMemoryMode(string $mode): bool
     {
         if ($mode === self::MEM_RC || $mode === self::MEM_ARENA || $mode === self::MEM_HYBRID) {

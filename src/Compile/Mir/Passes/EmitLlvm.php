@@ -1374,9 +1374,7 @@ final class EmitLlvm implements EmitVisitor
                 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
                 throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
             }
-            if (\Compile\Debug::$framePointers
-                && !\Manticore\append_file_bytes($this->streamIrPath,
-                    "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n")) {
+            if (!\Manticore\append_file_bytes($this->streamIrPath, "\n" . \Compile\Debug::bodyAttrGroup() . "\n")) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged IR attributes');
             }
             \Manticore\sys_unlink($bodyPath);
