@@ -4278,6 +4278,15 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                     break;
                 }
             }
+            // A declaring statement that also holds a `return` (php-parser's `if (PHP_VERSION_ID >= 80000) { class T {} return; }`)
+            // would go into `__main` whole, and its `return` would end the PROGRAM. Such a file takes the eager path below,
+            // where each return becomes a jump past the file.
+            foreach ($topStmts as $s) {
+                if (__mc_stmt_declares($s) && __mc_file_return_kind([$s]) > 0) {
+                    $effects = false;
+                    break;
+                }
+            }
             if ($effects) {
                 $unitName = '__mc_unit_' . (string)$i;
                 $includeSlots[$incAbs] = $incSlot;
