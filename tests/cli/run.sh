@@ -67,6 +67,27 @@ behaviour() {
     printf '== ctor spread stays shared\n'
     n="$("$MC" dump-llvm-mir "$WORK/spread.php" 2>/dev/null | awk '/^define .*@manticore_mk\(/{p=1} p{n++} p&&/^}/{print n; exit}')"
     if [ -n "$n" ] && [ "$n" -lt 400 ]; then echo "ok"; else echo "BAD: mk body ${n:-missing} lines"; fi
+    # `$this` handed to an unresolved call (`$r($this)`) is never a reference target, even when some function of
+    # the program keeps the reference to its by-ref parameter: it stayed a ref-cell local (a `cell`), the receiver of
+    # every `$this->m()` lost its class and OwnershipFlow treated all their arguments as by-ref (Laravel's
+    # Model::__call released its pack twice).
+    cat > "$WORK/thisref.php" <<'PHP'
+<?php
+function keep(&$x) { $GLOBALS['k'][] = &$x; }
+class M {
+    public static $r = [];
+    public function g($a) { return self::$r[$a] ?? null; }
+    public function h($a) { return 1; }
+    public function f($a) { if ($r = $this->g($a)) { return $r($this); } return $this->h($a); }
+}
+$x = 1; keep($x);
+echo (new M)->f(1), "\n";
+PHP
+    printf '== this is no ref cell\n'
+    mir="$("$MC" dump-mir "$WORK/thisref.php" 2>/dev/null)"
+    if ! printf '%s\n' "$mir" | grep -q '^fn M__f'; then echo "BAD: no MIR for M::f"
+    elif printf '%s\n' "$mir" | grep -q 'load_local this : cell'; then echo "BAD: \$this typed cell"
+    else echo "ok"; fi
     shape "analyze json"  "["          "]"                     "$MC" analyze --json "f.php"
     run "dump-ast bogus flag"      "$MC" dump-ast --bogus "f.php"
     run "dump-ast missing file"    "$MC" dump-ast "nope.php"
