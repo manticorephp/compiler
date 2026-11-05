@@ -8686,7 +8686,7 @@ trait EmitLlvmBuiltins
         if ($kind === 'enum') { $exists = isset($this->enums[$name]); }
         elseif ($kind === 'interface') { $exists = isset($this->interfaceNames[$name]); }
         elseif ($kind === 'trait') { $exists = isset($this->traitNames[$name]); }
-        else { $exists = isset($this->classes[$name]) || isset($this->enums[$name]); }
+        else { $exists = isset($this->classes[$name]) || isset($this->enums[$name]) || \strcasecmp($name, 'Closure') === 0 || \strcasecmp($name, 'Generator') === 0; }
         return $this->biConstBool($out, $exists);
     }
 
@@ -8711,8 +8711,9 @@ trait EmitLlvmBuiltins
         // inttoptr the tag bits and __mc_refl_find would walk a bogus pointer.
         $out .= $arg->type->kind === Type::KIND_CELL
             ? $this->cellToPtr() : $this->coerceToPtr();
+        $nameP = $this->lastValue;
         $h = $this->ssa->allocReg();
-        $out .= '  ' . $h . ' = call i64 @__mc_refl_find(ptr ' . $this->lastValue . ")\n";
+        $out .= '  ' . $h . ' = call i64 @__mc_refl_find(ptr ' . $nameP . ")\n";
         $found = $this->ssa->allocReg();
         $out .= '  ' . $found . ' = icmp ne i64 ' . $h . ", 0\n";
         $lbl = \str_replace('%', '', (string)$this->ssa->allocReg());
@@ -8724,6 +8725,22 @@ trait EmitLlvmBuiltins
         // not something this function can name.
         $out .= '  br i1 ' . $found . ', label %' . $okL . ', label %' . $noL . "\n";
         $out .= $noL . ":\n";
+        // Closure and Generator are engine classes with no registry row.
+        $nob = '0';
+        if ($kind === '' || $kind === 'class') {
+            $c1 = $this->ssa->allocReg();
+            $out .= '  ' . $c1 . ' = call i32 @strcasecmp(ptr ' . $nameP . ', ptr ' . $this->strLitId($this->pool->intern('Closure')) . ")\n";
+            $c2 = $this->ssa->allocReg();
+            $out .= '  ' . $c2 . ' = call i32 @strcasecmp(ptr ' . $nameP . ', ptr ' . $this->strLitId($this->pool->intern('Generator')) . ")\n";
+            $e1 = $this->ssa->allocReg();
+            $out .= '  ' . $e1 . ' = icmp eq i32 ' . $c1 . ", 0\n";
+            $e2 = $this->ssa->allocReg();
+            $out .= '  ' . $e2 . ' = icmp eq i32 ' . $c2 . ", 0\n";
+            $e3 = $this->ssa->allocReg();
+            $out .= '  ' . $e3 . ' = or i1 ' . $e1 . ', ' . $e2 . "\n";
+            $nob = $this->ssa->allocReg();
+            $out .= '  ' . $nob . ' = zext i1 ' . $e3 . " to i64\n";
+        }
         $out .= '  br label %' . $endL . "\n";
         $out .= $okL . ":\n";
         // Load the flags inline. `__mc_refl_flags` is a BUILTIN — it emits IR at
@@ -8763,7 +8780,7 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $endL . "\n";
         $out .= $endL . ":\n";
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = phi i64 [ 0, %' . $noL . ' ], [ ' . $bit64 . ', %' . $okL . " ]\n";
+        $out .= '  ' . $r . ' = phi i64 [ ' . $nob . ', %' . $noL . ' ], [ ' . $bit64 . ', %' . $okL . " ]\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;
