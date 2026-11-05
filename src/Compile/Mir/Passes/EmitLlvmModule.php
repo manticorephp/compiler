@@ -323,6 +323,12 @@ trait EmitLlvmModule
                     if (!$this->classIsA($cd->name, $cd2->name)) { continue; }
                     $isaPairs[] = [$sub, $this->displayClassName($cd2->name)];
                 }
+                // An interface is no ClassDef here, yet it is the usual target
+                // (`is_subclass_of($class, ServiceSubscriberInterface::class)`).
+                foreach ($this->interfaceNames as $iname => $unused) {
+                    if (isset($this->classes[$iname]) || !$this->classIsA($cd->name, (string)$iname)) { continue; }
+                    $isaPairs[] = [$sub, $this->displayClassName((string)$iname)];
+                }
             }
             $isaCount = $this->memberRowsSorted($isaPairs, true, $isaSubRows, $isaAncRows);
         }
