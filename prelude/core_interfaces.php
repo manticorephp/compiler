@@ -2,7 +2,7 @@
 
 /**
  * php's core interfaces — Traversable, Iterator, IteratorAggregate, ArrayAccess,
- * Countable, JsonSerializable, Stringable. Interfaces ONLY, injected into EVERY
+ * Countable, JsonSerializable, Serializable, Stringable. Interfaces ONLY, injected into EVERY
  * program ahead of exceptions.php: any class may implement one, and Throwable
  * extends Stringable. The SPL classes built on them live in spl_iterators.php,
  * demand-gated.
@@ -60,3 +60,10 @@ interface Stringable
     public function __toString(): string;
 }
 
+
+interface Serializable
+{
+    public function serialize();
+
+    public function unserialize(string $data);
+}
