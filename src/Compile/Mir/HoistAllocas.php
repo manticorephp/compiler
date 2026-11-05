@@ -50,7 +50,6 @@ final class HoistAllocas
      */
     public static function withFrameRecord(string $line): string
     {
-        if (!\Compile\Debug::$framePointers) { return $line; }
         $nl = \substr($line, -1) === "\n" ? "\n" : '';
         $core = $nl === '' ? $line : \substr($line, 0, -1);
         if (\substr($core, -2) !== ' {' || \str_contains($core, '#0')) { return $line; }

@@ -7,9 +7,9 @@ ok rc=0 first='; passes:' markers='add('
 == dump-sig
 ok rc=0 first='{"schema":' markers='"functions":['
 == dump-llvm-mir
-ok rc=0 first='; ModuleID' markers='source_filename define'
+ok rc=0 first='; ModuleID' markers='source_filename define probe-stack'
 == dump-llvm
-ok rc=0 first='; ModuleID' markers='source_filename define'
+ok rc=0 first='; ModuleID' markers='source_filename define probe-stack'
 == analyze json
 ok rc=0 first='[' markers=']'
 == dump-ast bogus flag

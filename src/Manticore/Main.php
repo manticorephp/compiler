@@ -839,8 +839,9 @@ function host_jobs(): int
  * also covers {@see \Compile\Mir\RuntimeLibrary}'s hand-written bodies, unlike a
  * change at the dozens of `"\ndefine …"` emission sites.
  *
- * Off by default, and the transform is skipped entirely when off, so the emitted
- * IR is byte-identical unless the variable is set. Every `define` this compiler
+ * With the flag off only the attribute group is appended (probe-stack, see
+ * {@see \Compile\Debug::bodyAttrGroup}); the per-line tagging below runs only when
+ * it is on. Every `define` this compiler
  * emits is one line ending in `") {"` (4 107 checked across 40 programs) and no
  * module carries an attribute group of its own, so `#0` is free; a define that
  * ever stops matching is simply left alone rather than mangled.
@@ -848,7 +849,9 @@ function host_jobs(): int
 function with_frame_pointers(string $ir): string
 {
     if (!\Compile\Debug::$framePointers && !\Compile\Debug::$asan) {
-        return $ir;
+        // The bodies already carry `#0` ({@see \Compile\Mir\HoistAllocas::withFrameRecord});
+        // only the group is missing.
+        return $ir . "\n" . \Compile\Debug::bodyAttrGroup() . "\n";
     }
     $lines = \explode("\n", $ir);
     $total = \count($lines);
@@ -871,11 +874,7 @@ function with_frame_pointers(string $ir): string
         $lines[$i] = \substr($l, 0, -2) . $group . " {";
         $n++;
     }
-    if ($n === 0) {
-        return $ir;
-    }
-    return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\""
-        . (\Compile\Debug::$asan ? ' sanitize_address' : '') . " }\nattributes #1 = { \"frame-pointer\"=\"all\" }\n";
+    return \implode("\n", $lines) . "\n" . \Compile\Debug::bodyAttrGroup() . "\n";
 }
 
 /**
