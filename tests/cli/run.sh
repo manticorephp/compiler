@@ -55,6 +55,18 @@ behaviour() {
     shape "dump-sig"      "{\"schema\":" "\"functions\":["    "$MC" dump-sig "f.php"
     shape "dump-llvm-mir" "; ModuleID" "source_filename define probe-stack" "$MC" dump-llvm-mir "f.php"
     shape "dump-llvm"     "; ModuleID" "source_filename define probe-stack" "$MC" dump-llvm "f.php"
+    # `$o->__construct(...$a)` on an erased receiver is ONE call to a shared helper even when a single class takes a
+    # by-ref constructor parameter (that veto once spliced every class's arm into the caller: a 419 KiB -O0 frame).
+    {
+        echo '<?php'
+        for i in $(seq 0 299); do echo "class C$i { public function __construct(public int \$a = 0, public string \$b = \"\") {} }"; done
+        echo 'class R { public function __construct(array &$x = []) {} }'
+        echo 'function mk(string $c, array $a) { $o = new $c(); $o->__construct(...$a); return $o; }'
+        echo 'echo mk("C3", [1, "x"])->a, "\n"; $z = []; new R($z);'
+    } > "$WORK/spread.php"
+    printf '== ctor spread stays shared\n'
+    n="$("$MC" dump-llvm-mir "$WORK/spread.php" 2>/dev/null | awk '/^define .*@manticore_mk\(/{p=1} p{n++} p&&/^}/{print n; exit}')"
+    if [ -n "$n" ] && [ "$n" -lt 400 ]; then echo "ok"; else echo "BAD: mk body ${n:-missing} lines"; fi
     shape "analyze json"  "["          "]"                     "$MC" analyze --json "f.php"
     run "dump-ast bogus flag"      "$MC" dump-ast --bogus "f.php"
     run "dump-ast missing file"    "$MC" dump-ast "nope.php"

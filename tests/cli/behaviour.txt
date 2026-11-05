@@ -10,6 +10,8 @@ ok rc=0 first='{"schema":' markers='"functions":['
 ok rc=0 first='; ModuleID' markers='source_filename define probe-stack'
 == dump-llvm
 ok rc=0 first='; ModuleID' markers='source_filename define probe-stack'
+== ctor spread stays shared
+ok
 == analyze json
 ok rc=0 first='[' markers=']'
 == dump-ast bogus flag

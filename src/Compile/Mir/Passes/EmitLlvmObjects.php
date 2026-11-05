@@ -9665,7 +9665,12 @@ trait EmitLlvmObjects
             if (!$pt->isVec() || ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN)) { return null; }
         }
         if ($op->kind !== Node::KIND_LOAD_LOCAL && $op->kind !== Node::KIND_STORE_LOCAL) { return null; }
-        if (\count($this->methodHolders($n->method)) < 8 || $this->dynMethodNameHasRefParam($n->method, -1)) { return null; }
+        // No by-ref veto: the site's only argument is the spread, and a pack element reaches a
+        // parameter by VALUE on the inline path as well ({@see emitSpreadFill}), so a by-ref
+        // parameter on some class changes nothing the helper could carry differently. Vetoing the
+        // NAME let one by-ref constructor anywhere in the program keep every `->__construct(...$a)`
+        // inline: PDOStatement::makeObject spliced ~5 000 arms and a 419 KiB -O0 frame.
+        if (\count($this->methodHolders($n->method)) < 8) { return null; }
         $sym = $this->dynamicMethodSpreadArmHelper($n->object->type, -1, $n->method, Type::cell(), $n->srcArgc);
         if ($sym === '') { return null; }
         $out = $this->emitNode($n->object);
