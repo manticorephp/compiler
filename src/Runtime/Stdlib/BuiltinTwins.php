@@ -179,3 +179,15 @@ function mctwin_sprintf(string $format, mixed ...$values): string
 {
     return \vsprintf($format, $values);
 }
+
+function array_first(array $array): mixed
+{
+    foreach ($array as $value) { return $value; }
+    return null;
+}
+
+function array_last(array $array): mixed
+{
+    $key = \array_key_last($array);
+    return $key === null ? null : $array[$key];
+}
