@@ -9680,6 +9680,18 @@ trait EmitLlvmObjects
 
     private function emitMethodCallUnguarded(\Compile\Mir\MethodCall_ $n): string
     {
+        // A static method reached through an object (`$o->m()`, `$this->m(...)` closure body):
+        // there is no receiver parameter, so passing it shifted every argument. Evaluate the
+        // receiver for its side effects and call the static symbol.
+        $statCls = $this->staticClassOf($n->object);
+        if ($statCls !== '' && isset($this->classes[$statCls])) {
+            $smm = $this->classes[$statCls]->methodMeta[$n->method] ?? null;
+            if ($smm !== null && $smm->isStatic) {
+                $sdecl = $smm->declaringClass !== '' ? $smm->declaringClass : $statCls;
+                return $this->emitNode($n->object)
+                    . $this->emitNode(new \Compile\Mir\StaticCall_($sdecl, $n->method, $n->args, $n->type, $statCls));
+            }
+        }
         $sp = $this->emitErasedSpreadMethodCall($n);
         if ($sp !== null) { return $sp; }
         $hm = $this->emitHmapCall($n);
