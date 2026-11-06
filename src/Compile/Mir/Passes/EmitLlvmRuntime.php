@@ -2198,6 +2198,8 @@ trait EmitLlvmRuntime
         $defs = '';
         $i = 0;
         foreach ($cls->propertyMeta as $pn => $pm) {
+            // An ancestor's redeclared private: php does not list it on this class.
+            if ($pn !== $pm->name) { continue; }
             // The throwables' stack storage is ours, not php's property set.
             if (($pn === 'traceNames' || $pn === 'traceLines')
                 && \in_array($pm->declaringClass !== '' ? $pm->declaringClass : $cls->name, ['Exception', 'Error'], true)) {
@@ -2232,7 +2234,8 @@ trait EmitLlvmRuntime
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($sym),
                 $this->memberFlags($pm->visibility, $pm->isStatic, false, false, $pm->isReadonly)
-                    | ($pm->hasDefault ? \Compile\MemoryAbi::RMETA_MEM_HAS_DEFAULT : 0),
+                    | ($pm->hasDefault ? \Compile\MemoryAbi::RMETA_MEM_HAS_DEFAULT : 0)
+                    | ($pm->declaringClass === '' || $pm->declaringClass === $cls->name ? \Compile\MemoryAbi::RMETA_MEM_DECLARED_HERE : 0),
                 'null', 0, 0, $extra,
                 $ap[1], $ap[2]);
             $i = $i + 1;

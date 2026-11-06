@@ -1,6 +1,5 @@
 <?php
 // A private property redeclared in a subclass is a separate slot; the two classes share one slot instead.
-// issue: #576
 class P { private array $r = []; private string $name = 'parent';
   public function add($x): void { $this->r[] = $x; }
   public function p(): string { return count($this->r) . ':' . $this->name; }

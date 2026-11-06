@@ -1449,7 +1449,8 @@ class ReflectionProperty
         // The flags are those of the first row found; the row (and the class) are the declaring ones.
         $fl = __mc_refl_row_flags($row);
         $p = __mc_refl_parent($owner);
-        while ($p !== 0) {
+        // A class that declares the name itself is the declarer, whatever its ancestors call a property (RMETA_MEM_DECLARED_HERE).
+        while ($p !== 0 && (__mc_refl_row_flags($row) & 256) === 0) {
             $pr = __mc_refl_prow($p, $property);
             if ($pr === 0) { break; }
             $owner = $p;

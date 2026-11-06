@@ -9207,6 +9207,7 @@ trait EmitLlvmBuiltins
             $cd = $this->classes[$c] ?? null;
             if ($cd === null) { break; }
             foreach ($cd->propertyNames as $p) {
+                if ($cd->isShadowSlot($p)) { continue; }
                 if (!isset($seen[$p])) { $seen[$p] = true; $names[] = $p; }
             }
             foreach ($cd->staticPropNames as $p) {
@@ -9796,7 +9797,7 @@ trait EmitLlvmBuiltins
         if ($pm === null || $pm->visibility === 'public') { return $pn; }
         if ($pm->visibility === 'protected') { return "\0*\0" . $pn; }
         $decl = \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cd->name, '\\');
-        return "\0" . $decl . "\0" . $pn;
+        return "\0" . $decl . "\0" . $pm->name;
     }
 
     private function emitObjectVarsOfPtr(string $objPtr, bool $mangle = false): string
@@ -10187,6 +10188,7 @@ trait EmitLlvmBuiltins
             $keyed = $forCompare ? $this->cmpKeyProps($cd) : [];
             foreach ($cd->propertyNames as $pn) {
                 if (($cd->propertyTypes[$pn] ?? null) === null) { continue; }
+                if (!$mangle && !$forCompare && $cd->isShadowSlot($pn)) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
                 if ($mangle && isset($cd->virtualProps[$pn])) { continue; }
                 if ($this->isBufSlot($cd, $pn) || $this->isThrowableTraceSlot($cd, $pn)) { continue; }
@@ -10208,6 +10210,7 @@ trait EmitLlvmBuiltins
             foreach ($cd->propertyNames as $pn) {
                 $pt = $cd->propertyTypes[$pn] ?? null;
                 if ($pt === null) { continue; }
+                if (!$mangle && !$forCompare && $cd->isShadowSlot($pn)) { continue; }
                 if ($keyed !== [] && !isset($keyed[$pn])) { continue; }
                 if ($mangle && isset($cd->virtualProps[$pn])) { continue; }
                 if ($this->isBufSlot($cd, $pn) || $this->isThrowableTraceSlot($cd, $pn)) { continue; }

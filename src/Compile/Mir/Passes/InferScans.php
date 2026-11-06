@@ -138,15 +138,18 @@ trait InferScans
         if (!$tCell) { return; }
         $idx = \array_search($prop, $cd->propertyNames, true);
         if ($idx === false) { return; }
+        $bare = $cd->propDisplayName($prop);
         $root = $cd;
         while ($root->parent !== '') {
             $p = $this->classes[$root->parent] ?? null;
-            if ($p === null || \array_search($prop, $p->propertyNames, true) !== $idx) { break; }
+            if ($p === null || $p->propDisplayName($p->propertyNames[$idx] ?? '') !== $bare) { break; }
             $root = $p;
         }
         foreach ($this->classes as $other) {
             if ($other === $cd) { continue; }
-            if (\array_search($prop, $other->propertyNames, true) !== $idx) { continue; }
+            // A subclass that redeclared the private calls this slot by another name.
+            $slot = $other->propertyNames[$idx] ?? '';
+            if ($other->propDisplayName($slot) !== $bare) { continue; }
             $c = $other;
             $shares = false;
             while (true) {
@@ -157,11 +160,11 @@ trait InferScans
                 $c = $up;
             }
             if (!$shares) { continue; }
-            $cur = $other->propertyTypes[$prop] ?? null;
+            $cur = $other->propertyTypes[$slot] ?? null;
             if ($cur !== null && ($cur->kind === Type::KIND_CELL
                 || ($cur->isArray() && ($cur->element->kind ?? '') === Type::KIND_CELL))) { continue; }
             // Keep the sibling's own key shape; only its element joins to cell.
-            $other->propertyTypes[$prop] = ($t->isArray() && $cur !== null && $cur->isArray() && $cur->key !== null)
+            $other->propertyTypes[$slot] = ($t->isArray() && $cur !== null && $cur->isArray() && $cur->key !== null)
                 ? Type::assoc($cur->key, Type::cell())
                 : $t;
         }
