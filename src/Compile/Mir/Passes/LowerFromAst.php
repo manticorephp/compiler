@@ -7557,6 +7557,20 @@ final class LowerFromAst implements Pass
                     return $params;
                 }
             }
+            // A method the class mixes in from a trait (doctrine's `JoinColumn` takes its promoted
+            // constructor from `JoinColumnProperties`): without its signature a named argument is
+            // lowered blind and its NAME is lost.
+            foreach ($this->usedTraitsFlat($cd) as $tname) {
+                $td = $this->traitTable[\ltrim($tname, '\\')] ?? null;
+                if ($td === null) { continue; }
+                foreach ($this->classDeclMethods($td) as $tm) {
+                    if ($this->methodDeclName($tm) === $method) {
+                        $tparams = $this->methodDeclParams($tm);
+                        $this->methodParamsCache[$key] = $tparams;
+                        return $tparams;
+                    }
+                }
+            }
             $ext = $this->classDeclExtends($cd);
             $c = ($ext !== []) ? $ext[0] : '';
         }
