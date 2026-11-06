@@ -7109,11 +7109,22 @@ final class LowerFromAst implements Pass
                 true,
             );
         }
+        $elemProp = $e->left->kind === 'PropertyAccess' ? $this->coalesceElementProp($e->left) : null;
         return new NullCoalesce_(
-            $this->markProbe($this->lowerExpr($e->left)),
+            $elemProp ?? $this->markProbe($this->lowerExpr($e->left)),
             $this->lowerExpr($e->right),
             Type::unknown(),
         );
+    }
+
+    /** `$map[$k]->p ?? $d`: a missing element is null, and `??` of anything behind a null is the default. */
+    private function coalesceElementProp(\Parser\Ast\PropertyAccess $pa): ?Node
+    {
+        if ($pa->object->kind !== 'ArrayAccess') { return null; }
+        // The inner `??` is the presence test: a missing key's probe word is not a null value.
+        $elem = new NullCoalesce_(
+            $this->markProbe($this->lowerExpr($pa->object)), new NullConst(Type::null_()), Type::unknown());
+        return $this->nullsafeRead($elem, $pa->property);
     }
 
     /**
@@ -7637,12 +7648,16 @@ final class LowerFromAst implements Pass
      */
     private function lowerNullsafeProp(\Parser\Ast\PropertyAccess $expr): Node
     {
-        $obj = $this->lowerExpr($expr->object);
+        return $this->nullsafeRead($this->lowerExpr($expr->object), $expr->property);
+    }
+
+    private function nullsafeRead(Node $obj, string $property): Node
+    {
         $tmp = '__ns_' . (string)$this->destrCounter;
         $this->destrCounter = $this->destrCounter + 1;
         $store = new StoreLocal($tmp, $obj, $obj->type);
         $cond = new Cmp($store, new NullConst(Type::null_()), '===');
-        $prop = new PropertyAccess_(new LoadLocal($tmp, $obj->type), $expr->property, Type::unknown());
+        $prop = new PropertyAccess_(new LoadLocal($tmp, $obj->type), $property, Type::unknown());
         return new Ternary($cond, new NullConst(Type::null_()), $prop, Type::unknown(), true);
     }
 
