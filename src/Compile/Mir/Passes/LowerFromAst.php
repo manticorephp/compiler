@@ -7689,8 +7689,72 @@ final class LowerFromAst implements Pass
         return $this->fnCanon[\strtolower($name)] ?? $name;
     }
 
+    private function mcNullsafe(\Parser\Ast\MethodCallExpr $m): bool { return $m->nullsafe; }
+    private function mcObject(\Parser\Ast\MethodCallExpr $m): \Parser\Ast\Expr { return $m->object; }
+    private function paNullsafe(\Parser\Ast\PropertyAccess $p): bool { return $p->nullsafe; }
+    private function paObject(\Parser\Ast\PropertyAccess $p): \Parser\Ast\Expr { return $p->object; }
+
+    /** The same call/access with another receiver (and `nullsafe` off when asked). */
+    private function withReceiver(\Parser\Ast\Expr $node, \Parser\Ast\Expr $recv, bool $nullsafe): \Parser\Ast\Expr
+    {
+        if ($node->kind === 'MethodCall') {
+            $m = $node;
+            return new \Parser\Ast\MethodCallExpr($recv, $this->mcMethod($m), $this->mcArgs($m), $nullsafe, $this->mcSpan($m));
+        }
+        $p = $node;
+        return new \Parser\Ast\PropertyAccess($recv, $this->paProp($p), $nullsafe, $this->paSpan($p));
+    }
+    private function mcMethod(\Parser\Ast\MethodCallExpr $m): string { return $m->method; }
+    /** @return \Parser\Ast\Expr[] */
+    private function mcArgs(\Parser\Ast\MethodCallExpr $m): array { return $m->args; }
+    private function mcSpan(\Parser\Ast\MethodCallExpr $m): \Parser\Ast\Span { return $m->span; }
+    private function paProp(\Parser\Ast\PropertyAccess $p): string { return $p->property; }
+    private function paSpan(\Parser\Ast\PropertyAccess $p): \Parser\Ast\Span { return $p->span; }
+
+    /**
+     * `$a?->b()->c()`: when `$a` is null php skips the WHOLE rest of the chain. The `?->` desugar
+     * covers only its own call, so the outer `->c()` ran on null. For a call/access that is NOT
+     * itself nullsafe but sits on a chain holding one, evaluate the deepest nullsafe receiver once
+     * and run the chain on it: `($t = $a) === null ? null : $t->b()->c()`. Null = no nullsafe link.
+     */
+    private function nullsafeChainTail(\Parser\Ast\Expr $expr): ?Node
+    {
+        /** @var \Parser\Ast\Expr[] $chain */
+        $chain = [];
+        $cur = $expr;
+        while ($cur->kind === 'MethodCall' || $cur->kind === 'PropertyAccess') {
+            $chain[] = $cur;
+            $cur = $cur->kind === 'MethodCall' ? $this->mcObject($cur) : $this->paObject($cur);
+        }
+        $k = -1;
+        for ($i = 1; $i < \count($chain); $i = $i + 1) {
+            $c = $chain[$i];
+            $ns = $c->kind === 'MethodCall' ? $this->mcNullsafe($c) : $this->paNullsafe($c);
+            if ($ns) { $k = $i; }
+        }
+        if ($k < 0) { return null; }
+        $n = $chain[$k];
+        $baseObj = $n->kind === 'MethodCall' ? $this->mcObject($n) : $this->paObject($n);
+        $tmp = '__nsc_' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $rebuilt = $this->withReceiver($n, \Parser\Ast\Expr::variable($tmp, $n->span), false);
+        for ($i = $k - 1; $i >= 0; $i = $i - 1) {
+            $c = $chain[$i];
+            $cns = $c->kind === 'MethodCall' ? $this->mcNullsafe($c) : $this->paNullsafe($c);
+            $rebuilt = $this->withReceiver($c, $rebuilt, $cns);
+        }
+        $obj = $this->lowerExpr($baseObj);
+        $store = new StoreLocal($tmp, $obj, $obj->type);
+        $cond = new Cmp($store, new NullConst(Type::null_()), '===');
+        return new Ternary($cond, new NullConst(Type::null_()), $this->lowerExpr($rebuilt), Type::unknown());
+    }
+
     private function lowerMethodCall(\Parser\Ast\MethodCallExpr $expr): Node
     {
+        if (!$this->mcNullsafe($expr)) {
+            $chainTail = $this->nullsafeChainTail($expr);
+            if ($chainTail !== null) { return $chainTail; }
+        }
         $canon = $this->canonMethodName($expr->method);
         if ($canon !== $expr->method) {
             return $this->lowerMethodCall(new \Parser\Ast\MethodCallExpr($expr->object, $canon, $expr->args, $expr->nullsafe, $expr->span));

@@ -853,7 +853,9 @@ trait LowerExprs
             // so a base read returns garbage and routes EVERY `->prop` through the
             // nullsafe desugar.
             $pa = $expr;
-            return $pa->nullsafe ? $this->lowerNullsafeProp($pa) : $this->lowerPropertyAccess($pa);
+            if ($pa->nullsafe) { return $this->lowerNullsafeProp($pa); }
+            $chainTail = $this->nullsafeChainTail($pa);
+            return $chainTail !== null ? $chainTail : $this->lowerPropertyAccess($pa);
         }
         if ($expr->kind === 'DynProp') {
             $dyn = new DynProp_($this->lowerExpr($this->dynPropObject($expr)), $this->lowerExpr($this->dynPropName($expr)), Type::cell());
