@@ -102,7 +102,10 @@ trait InferNarrow
                     && $this->classImplementsT((string)$cur->class, $io->class)) {
                     return;
                 }
-                if ($cur !== null && $cur->kind !== Type::KIND_OBJ && !isset($this->narrowSlots[$name])) {
+                // An object narrowed to ANOTHER class is a read-narrowing too: past the merge the slot is
+                // what it entered as. `if (! $m instanceof B) { …; continue; }` otherwise left $m typed
+                // as B∪A = their parent for the rest of the loop body (dynamic stores then missed A's slots).
+                if ($cur !== null && !isset($this->narrowSlots[$name])) {
                     $this->narrowSlots[$name] = $this->localTypes[$name];
                 }
                 $this->localTypes[$name] = Type::obj($io->class);
