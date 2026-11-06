@@ -3815,6 +3815,15 @@ final class LowerFromAst implements Pass
     }
 
     /** @param \Parser\Ast\Expr[] $args */
+    private function hasNamedArg(array $args): bool
+    {
+        foreach ($args as $a) {
+            if ($a->kind === 'NamedArg') { return true; }
+        }
+        return false;
+    }
+
+    /** @param \Parser\Ast\Expr[] $args */
     private function spreadVariableArg(array $args): bool
     {
         foreach ($args as $a) {
@@ -7724,9 +7733,11 @@ final class LowerFromAst implements Pass
         }
         // `$o->m(...$args)` on a receiver typed by its own parameter: the method's by-ref
         // parameters decide how the spread unpacks ({@see lowerRefSpread}).
+        // A named argument needs the signature just as much: lowered blind, its NAME is lost
+        // (`$record->with(message: …)` on a variadic reached the callee as a positional string).
         if ($params === null && $expr->object->kind === 'Variable') {
             $pc = $this->paramClassHint($this->varName($expr->object));
-            if ($pc !== '' && $this->spreadVariableArg($expr->args)) {
+            if ($pc !== '' && ($this->spreadVariableArg($expr->args) || $this->hasNamedArg($expr->args))) {
                 $params = $this->resolveMethodParams($pc, $expr->method);
                 if ($params !== null) { $mcClass = $pc; }
             }
