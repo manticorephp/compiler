@@ -7174,6 +7174,19 @@ trait EmitLlvmObjects
             } else {
                 $objNode = $t;
             }
+            // `isset($map[$k]->prop)`: a missing element is null, and isset() of anything behind a null is
+            // false, never an error. Fetch the element ONCE into a hidden local, then take the local path.
+            if ($t->kind === Node::KIND_PROPERTY_ACCESS && $objNode->kind === Node::KIND_ARRAY_ACCESS) {
+                $hn = '__isetr' . \str_replace('%', '', (string)$this->ssa->allocReg());
+                $hs = $this->ssa->allocReg();
+                $this->locals->slots[$hn] = $hs;
+                $pre = $this->localVarSlot($hs);
+                $pre .= $this->emitNode($objNode);
+                $pre .= $this->coerceToI64();
+                $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $hs . "\n";
+                $hl = new \Compile\Mir\LoadLocal($hn, $objNode->type);
+                return $pre . $this->emitIssetTarget(new \Compile\Mir\PropertyAccess_($hl, $t->property, $t->type));
+            }
             if ($objNode->kind === Node::KIND_LOAD_LOCAL) {
                 $rSlot = $this->ssa->allocReg();
                 $out = '  ' . $rSlot . " = alloca i64\n";
