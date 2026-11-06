@@ -7507,7 +7507,7 @@ trait EmitLlvmObjects
                     } elseif ($keyIsCell) {
                         $this->rt->needsCellKey = true;
                         $out .= '  call void @__mir_array_unset_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
-                    } elseif ($keyIsString && $aa->array->kind === Node::KIND_LOAD_LOCAL
+                    } elseif ($keyIsString && $aa->array->kind !== Node::KIND_ARRAY_ACCESS
                         && $this->unsetBaseIsWritable($aa->array)) {
                         // A canonical int-string key unsets the INT key, which on a
                         // PACKED buffer promotes (relocates) like the int path. A nested
