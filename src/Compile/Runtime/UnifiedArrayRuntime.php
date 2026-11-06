@@ -7180,8 +7180,20 @@ final class UnifiedArrayRuntime
         $h0->brIf($isClo, $h0clo, $h0plain);
         $h0clo->call('__mir_array_cellify_inplace', Type::void(), [$arr, Value::int(Type::i64(), 0)]);
         $h0clo->ret($cell);
-        $h0plain->store($h0plain->or_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $fp);
-        $h0plain->ret($cell);
+        // The shared immortal empty array (and any immortal literal) is never
+        // written: stamping CELL on the singleton made every later `[]` that was
+        // cow-copied from it inherit a CELL hint, so an `int[]` built from `[]`
+        // stored tagged words a raw reader then misread (`$w < 0` marker in
+        // mb_ucfirst, a double free of the boxed word). The private copy the
+        // writer is about to make gets its own stamp.
+        $h0stamp = $fn->block('h0stamp');
+        $h0plain->brIf(
+            $h0plain->icmp('sgt', $h0plain->load(Type::i64(), $this->hdr($h0plain, $arr, MemoryAbi::ARRAY_RC_OFFSET)), Value::int(Type::i64(), 1 << 61)),
+            $asis,
+            $h0stamp,
+        );
+        $h0stamp->store($h0stamp->or_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $fp);
+        $h0stamp->ret($cell);
         $mism->call('__mir_array_cellify_inplace', Type::void(), [$arr, $hint]);
         $mism->ret($cell);
     }
