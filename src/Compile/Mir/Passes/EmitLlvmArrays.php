@@ -1346,6 +1346,32 @@ trait EmitLlvmArrays
         if (!$this->erasedBaseMayBeObject($se->array)) {
             return $this->emitStoreElementUnified($se);
         }
+        // The store is also an EXPRESSION (`return $this->cache[$k] = $v;`): its value must be what
+        // was assigned, not 0. Evaluate the value once into a hidden slot, store from the slot in both
+        // arms, and read it back at the end. Only for a pure key (evaluation order) and a value kind
+        // whose word survives a trip through an i64 slot.
+        $vk = $se->value->type->kind;
+        $ik = $se->index->kind;
+        $keyPure = $ik === Node::KIND_NULL_CONST || $ik === Node::KIND_INT_CONST
+            || $ik === Node::KIND_STRING_CONST || $ik === Node::KIND_LOAD_LOCAL;
+        if ($keyPure && ($vk === Type::KIND_STRING || $vk === Type::KIND_INT || $vk === Type::KIND_BOOL
+            || $vk === Type::KIND_CELL || $vk === Type::KIND_OBJ)) {
+            $hname = '__ses' . \str_replace('%', '', (string)$this->ssa->allocReg());
+            $hslot = $this->ssa->allocReg();
+            $this->locals->slots[$hname] = $hslot;
+            $pre = $this->localVarSlot($hslot);
+            $pre .= $this->emitNode($se->value);
+            $pre .= $this->coerceToI64();
+            $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $hslot . "\n";
+            $hload = new \Compile\Mir\LoadLocal($hname, $se->value->type);
+            $inner = $this->emitStoreElementErasedArms(new StoreElement($se->array, $se->index, $hload, $se->type));
+            return $pre . $inner . $this->emitNode($hload);
+        }
+        return $this->emitStoreElementErasedArms($se);
+    }
+
+    private function emitStoreElementErasedArms(StoreElement $se): string
+    {
         $out = $this->erasedBaseObjTest($se->array);
         $isObj = $this->objTestReg;
         $objL = $this->ssa->allocLabel('eset.obj');
