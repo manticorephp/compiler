@@ -10178,6 +10178,19 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsTagged = true;
         $out = '';
+        // `(array)` of a date is php's public state, not the slots that hold it.
+        $stateOf = $mangle ? $this->resolveMethodClass($cls, '__mcJson') : '';
+        if ($stateOf !== '' && $this->hasEmittedFunction($stateOf . '____mcJson')) {
+            $oi = $this->ssa->allocReg();
+            $r = $this->ssa->allocReg();
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $oi . ' = ptrtoint ptr ' . $objp . " to i64\n"
+                . '  ' . $r . ' = call i64 @manticore_' . $this->mangle($stateOf) . '____mcJson(i64 ' . $oi . ")\n"
+                . '  ' . $p . ' = inttoptr i64 ' . $r . " to ptr\n";
+            $this->lastValue = $p;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         // Sized and HASHED from the start: the map is string-keyed by
         // construction, and growing from capacity 0 cost a realloc per
         // property plus the promotion to hashed — per object, on every
