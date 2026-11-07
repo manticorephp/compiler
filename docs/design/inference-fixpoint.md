@@ -19,6 +19,10 @@ The cheap work is done (PR #585). What is left is flat in the profile and comes 
 | `MANTICORE_INFER_DIFF`: full pass after a scoped one | 98→0 and 75→11→0→0 functions of 36k move, alongside 2, then 27, then 2 property retypes only the full pass finds | Divergence is narrow and appears to come through property slots |
 | Fewer closing rounds in `NarrowReturns` | 137 fewer `cell` nodes, CPU down | More rounds were not buying precision |
 | Interning shape `Type`s | CPU within noise, RSS not better | Not the bottleneck |
+| Time inside each of the six full runs | Pre-scans 2 s, walk 6 s, post-walk 24 s in total | The walk over all functions costs ~1 s per run. **Almost all the time is after it** |
+| Profile of `InferTypes::run` | `inferFunction` from post-walk re-inference 37%, from the walk 19%; scans ~40% | Re-inference triggered by scans and the scans themselves are the cost |
+| Functions whose types change between runs | 257 to 4576 of ~34k (0.8-13%) | Scans mostly re-read bodies that did not change |
+| Arrays with an `unknown` element | 17058 of 120940 erased (14%), 7004 of them literal `[]`; about 1071 local nodes have the same local concrete elsewhere | `bottom` has little to recover |
 
 Scoped mode targets 16-21k of 36k functions per round (`would-target`), so its static dependency edges are too wide to save time. They are keyed by bare method name, and dispatch on a common name reaches much of the module.
 
@@ -26,7 +30,7 @@ Scoped mode targets 16-21k of 36k functions per round (`would-target`), so its s
 
 **1. Two directions at once.** Returns start erased and narrow downward; properties start narrow and widen to `cell`. Neither pass reaches a fixpoint of the other, hence the rounds. A descending analysis is also pessimistic: it can only keep what its first, least informed answer allowed.
 
-**2. `unknown` means two things:** "no information yet" and "erased". This also shows up as `[]` being `vec[unknown]`, and a loop-carried first append keeps that type on its base load even when every store is a string.
+**2. `unknown` means two things,** "no information yet" and "erased", but this is minor. `Type::joinElement` already treats an `unknown` element as an identity, so for array elements it behaves as a bottom today, and few nodes depend on the difference (see the table).
 
 **3. Static dependencies.** Edges are guessed from the shape of the code instead of recorded from what inference read.
 
@@ -56,24 +60,28 @@ Scoped mode targets 16-21k of 36k functions per round (`would-target`), so its s
 
 Every phase lands alone and must pass the full suite and difftest, with `precision:` no worse and CPU no worse.
 
-1. **Split `bottom` from `unknown`.** Smallest change that can show the precision gain. Includes `[]` and the base of a first append. Needs a soundness check on by-ref and dynamic writes, and on the runtime element hint in `emitStoreElementUnified`.
-2. **Record dependencies in shadow mode.** Build the read table next to the current code and report what a re-run moved that no recorded edge predicted. Target: zero, on symfony-app, Laravel and the demo.
-3. **Move mutation out of inference.**
-4. **Replace `NarrowReturns` with the fixpoint for returns,** using the queue. This should retire most full runs.
-5. **Move scans into transfer functions** one at a time, most expensive first. Each is its own commit and can be measured alone.
+The first version of this plan started by splitting `bottom` from `unknown`. Measurement rejected that, and also the idea that fewer walks are the main saving: the walk is about 19% of a run.
+
+1. **Semi-naive scans.** Split each scan into per-function fact extraction and a reduce, and re-extract only from functions whose types changed since the last run. Needs no new architecture, and staged IR must stay byte-identical, which makes each step verifiable. Scans fold in module order and some keep the first observation, so the reduce must preserve that order. One scan at a time, most expensive first: `scanCallSiteArrayElems`, `scanByRefElemWiden`, `scanDocListKeyPromote`, `scanRefCellArgWiden`.
+2. **Find why post-walk re-inference is so large.** It costs about twice the walk. Count, per reason, how many re-inferred functions actually changed type.
+3. **Record dependencies in shadow mode.** Build the read table next to the current code and report what a re-run moved that no recorded edge predicted. Target: zero, on symfony-app, Laravel and the demo.
+4. **Move mutation out of inference.**
+5. **Replace `NarrowReturns` with the fixpoint for returns,** using the queue.
 6. **Bring `Monomorphize` onto the queue.**
 7. **Function summaries and the cache,** with a warm == cold byte-identity test (#498).
+
+Phases 3-7 stay proposals: decide on them after 1 and 2 show what is left. Phases 3 and 7 are what #498 needs regardless of time saved.
 
 ## Risks
 
 - **Monotonicity may not hold.** A retype that legitimately narrows something (a `declared` claim withdrawn, say) breaks termination. Phase 2 should count these; the fallback is a per-slot visit cap, and a capped slot goes to `cell`.
-- **`unknown` is load-bearing.** `KIND_UNKNOWN` appears on 435 lines in the passes alone, some relying on "not yet known" and some on "erased". Phase 1 will show how entangled this is, and is the go/no-go point for the whole plan.
+- **`unknown` is load-bearing.** `KIND_UNKNOWN` appears on 435 lines in the passes alone. An ascending fixpoint needs a real `bottom`, so this cost returns at phase 5.
 - **Too-narrow types are miscompiles,** not just slowdowns: a raw word read as a typed value. An optimistic start has more ways to be wrong than a pessimistic one if a store goes unseen, so the "unseen writer" channels (references, dynamic properties, `extract`, reflection) must force their slots to `cell` up front.
 - **Long-lived branches conflict.** `InferTypes` is touched by most bug fixes, which is why each phase is small and merges on its own.
 
 ## Expected gain
 
-An estimate, not a measurement: the six full runs become one walk plus re-queued readers, so inference could fall by half or more on symfony-app. Phase 2's shadow table will give a real number (total functions re-queued against 6 × 36k) before the expensive phases start.
+An estimate, not a measurement: scans are about 40% of the 32 s spent in full runs on symfony-app, so semi-naive scans could save up to roughly a third of that, and phase 2 may add to it. Laravel is more post-heavy, so it should gain more. The precision benefit of an optimistic start is unmeasured, and the `unknown` numbers above weaken it for array elements.
 
 ## What this does not fix
 
