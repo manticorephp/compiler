@@ -203,6 +203,22 @@ final class EmitLlvm implements EmitVisitor
     private int $switchCounter = 0;
     /** Sequence for private per-function raw text sink files. */
     private int $functionTextCounter = 0;
+    private string $bodyPend = '';
+
+    private function bodyAppend(string $path, string $s): void
+    {
+        $this->bodyPend .= $s;
+        if (\strlen($this->bodyPend) >= 1048576) { $this->bodyFlush($path); }
+    }
+
+    private function bodyFlush(string $path): void
+    {
+        if ($this->bodyPend === '') { return; }
+        if (!\Manticore\append_file_bytes($path, $this->bodyPend)) {
+            throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $path);
+        }
+        $this->bodyPend = '';
+    }
 
     /** {@see EmitLlvmObjects::methodHolders}: method => [class => resolved holder].
      *  @var array<string, array<string, string>> */
@@ -959,6 +975,7 @@ final class EmitLlvm implements EmitVisitor
         $fileHoistThreshold = 262144;
         $fileHoistedBodies = 0;
         $fileHoistedBytes = 0;
+        $this->bodyPend = '';
         if ($streaming && !\Manticore\write_file($bodyPath, '')) {
             throw new \RuntimeException('EmitLlvm: cannot create staged body file ' . $bodyPath);
         }
@@ -1061,6 +1078,20 @@ final class EmitLlvm implements EmitVisitor
                     // both temporary paths immediately.
                     $hoistedPath = $rawBodyPath . '.hoisted';
                     $h = new \Compile\Mir\HoistAllocas();
+                    $rawSz = \filesize($rawBodyPath);
+                    $rawTxt = ($rawSz !== false && $rawSz <= 67108864) ? \file_get_contents($rawBodyPath) : false;
+                    if ($rawTxt !== false) {
+                        $hoistedTxt = $h->runFast($rawTxt);
+                        unset($rawTxt);
+                        $hoistedAllocas += $h->moved;
+                        $fileHoistedBodies += 1;
+                        $fileHoistedBytes += $rawBodyBytes;
+                        $this->bodyAppend($bodyPath, $hoistedTxt . "\n\n");
+                        unset($hoistedTxt);
+                        \Manticore\sys_unlink($rawBodyPath);
+                        $bodyBytes += $rawBodyBytes;
+                    } else {
+                    $this->bodyFlush($bodyPath);
                     if (!$h->runFile($rawBodyPath, $hoistedPath)) {
                         throw new \RuntimeException('EmitLlvm: cannot hoist sink file ' . $rawBodyPath);
                     }
@@ -1084,6 +1115,7 @@ final class EmitLlvm implements EmitVisitor
                     \Manticore\sys_unlink($rawBodyPath);
                     \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $rawBodyBytes;
+                    }
                 } elseif ($rawBodyBytes < $fileHoistThreshold) {
                     // Small functions do not justify a filesystem round-trip. Keep
                 // their bounded in-memory rewrite; only fat bodies use the file
@@ -1092,9 +1124,7 @@ final class EmitLlvm implements EmitVisitor
                 $h = new \Compile\Mir\HoistAllocas();
                 $body = $h->runFast($body);
                 $hoistedAllocas += $h->moved;
-                if (!\Manticore\append_file_bytes($bodyPath, $body)) {
-                    throw new \RuntimeException('EmitLlvm: cannot append in-memory body');
-                }
+                $this->bodyAppend($bodyPath, $body);
                 unset($body);
                 $bodyBytes += $rawBodyBytes;
                 } else {
@@ -1104,6 +1134,17 @@ final class EmitLlvm implements EmitVisitor
                     // copy. The old path materialized `$body`, then `run()` exploded
                     // it into lines and joined a second full string. For a large
                     // Doctrine function that creates a needless two-body peak.
+                    if ($rawBodyBytes <= 67108864) {
+                        $h = new \Compile\Mir\HoistAllocas();
+                        $body = $h->runFast($body);
+                        $hoistedAllocas += $h->moved;
+                        $fileHoistedBodies += 1;
+                        $fileHoistedBytes += $rawBodyBytes;
+                        $this->bodyAppend($bodyPath, $body);
+                        unset($body);
+                        $bodyBytes += $rawBodyBytes;
+                    } else {
+                    $this->bodyFlush($bodyPath);
                     $fnPath = $bodyPath . '.fn.' . (string)$emitIndex;
                     $hoistedPath = $fnPath . '.hoisted';
                     if (!\Manticore\write_file($fnPath, $body)) {
@@ -1129,6 +1170,7 @@ final class EmitLlvm implements EmitVisitor
                     \Manticore\sys_unlink($fnPath);
                     \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $nBody;
+                    }
                 }
             } else {
                 $functionBodyChunks[] = $body;
@@ -1276,6 +1318,18 @@ final class EmitLlvm implements EmitVisitor
             // compiler lifetime; the emitted LLVM order and target ABI are stable.
             $appendStreamedBody = function (string $rawBody, string $label) use (&$bodyBytes, &$hoistedAllocas, &$fileHoistedBodies, &$fileHoistedBytes, $bodyPath): void {
                 if ($rawBody === '') { return; }
+                if (\strlen($rawBody) <= 67108864) {
+                    $h = new \Compile\Mir\HoistAllocas();
+                    $nBody = \strlen($rawBody);
+                    $rawBody = $h->runFast($rawBody);
+                    $hoistedAllocas += $h->moved;
+                    $fileHoistedBodies += 1;
+                    $fileHoistedBytes += $nBody;
+                    $this->bodyAppend($bodyPath, $rawBody);
+                    $bodyBytes += $nBody;
+                    return;
+                }
+                $this->bodyFlush($bodyPath);
                 $id = (string)(++$this->functionTextCounter);
                 $rawPath = $bodyPath . '.helper.' . $id;
                 $hoistedPath = $rawPath . '.hoisted';
@@ -1302,9 +1356,7 @@ final class EmitLlvm implements EmitVisitor
             $extraBodies = $h->runFast($extraBodies);
             \Compile\Stats::line('IR: extra bodies hoisted');
             $hoistedAllocas += $h->moved;
-            if (!\Manticore\append_file_bytes($bodyPath, $extraBodies)) {
-                throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
-            }
+            $this->bodyAppend($bodyPath, $extraBodies);
             $bodyBytes += \strlen($extraBodies);
             unset($extraBodies);
             \Compile\Stats::line('IR: extra bodies appended');
@@ -1358,6 +1410,7 @@ final class EmitLlvm implements EmitVisitor
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {
+            $this->bodyFlush($bodyPath);
             $statT = \Compile\Stats::begin('  hoist allocas (streamed)');
             $preambleBytes = \strlen($preamble);
             if ($spooled) {
