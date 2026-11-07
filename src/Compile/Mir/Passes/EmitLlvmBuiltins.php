@@ -6463,7 +6463,8 @@ trait EmitLlvmBuiltins
                 }
                 continue;
             }
-            if ($ck !== Type::KIND_STRING && $ck !== Type::KIND_CELL && $ck !== Type::KIND_UNKNOWN) {
+            // A cell may hold a number, which `__manticore_tagged_to_str` renders: the engine gives that back.
+            if ($ck !== Type::KIND_STRING && $ck !== Type::KIND_UNKNOWN) {
                 return $this->biFormatRuntime($args, $toStdout);
             }
         }
@@ -6664,6 +6665,7 @@ trait EmitLlvmBuiltins
     {
         if (\count($args) !== 2) { return null; }
         $this->libcExtra['snprintf'] = 'declare i32 @snprintf(ptr, i64, ptr, ...)';
+        $rendered = '';
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToPtr();
         $fmtPtr = $this->lastValue;
@@ -6689,8 +6691,16 @@ trait EmitLlvmBuiltins
             if ($tagged) {
                 $this->rt->needsTaggedToStr = true;
                 $out .= $this->coerceToI64();
+                $cw = $this->lastValue;
                 $s = $this->ssa->allocReg();
-                $out .= '  ' . $s . ' = call ptr @__manticore_tagged_to_str(i64 ' . $this->lastValue . ")\n";
+                $out .= '  ' . $s . ' = call ptr @__manticore_tagged_to_str(i64 ' . $cw . ")\n";
+                // A string cell answers its own payload; a number is RENDERED, and that buffer is ours.
+                $pm = $this->ssa->allocReg();
+                $out .= '  ' . $pm . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $pp = $this->ssa->allocReg();
+                $out .= '  ' . $pp . ' = inttoptr i64 ' . $pm . " to ptr\n";
+                $rendered = $this->ssa->allocReg();
+                $out .= '  ' . $rendered . ' = icmp ne ptr ' . $s . ', ' . $pp . "\n";
                 $this->lastValue = $s; $this->lastValueType = 'ptr';
             } else {
                 $out .= $this->coerceToPtr();
@@ -6729,6 +6739,14 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $tmp . ' = call i32 (ptr, i64, ptr, ...) @snprintf(ptr ' . $buf
               . ', i64 ' . $cap . ', ptr ' . $fmtPtr . ', ' . $vtype . ' ' . $val . ")\n";
         $out .= '  call void @__mir_str_set_len(ptr ' . $buf . ', i64 ' . $cl . ")\n";
+        if ($rendered !== '') {
+            $this->rt->needsStrRc = true;
+            $dropL = $this->ssa->allocLabel('fmt.rendered');
+            $doneL = $this->ssa->allocLabel('fmt.done');
+            $out .= '  br i1 ' . $rendered . ', label %' . $dropL . ', label %' . $doneL . "\n";
+            $out .= $dropL . ":\n  call void @__mir_rc_release_str(ptr " . $val . ")\n  br label %" . $doneL . "\n";
+            $out .= $doneL . ":\n";
+        }
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
         return $out;
     }
