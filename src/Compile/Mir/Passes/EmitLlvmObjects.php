@@ -7905,9 +7905,27 @@ trait EmitLlvmObjects
         $ed = $this->enums[$enum];
         $n = \count($ed->caseNames);
         $isStr = $this->edBacking($ed) === 'string';
+        // The scan compares raw words: an erased argument (`$d['type'] ?? 'js'`) is converted
+        // first, as php coerces it, or the compare reads the tag bits as a pointer.
+        $backing = $isStr ? Type::string_() : Type::int_();
+        if ($arg->type->kind !== $backing->kind) {
+            $arg = new \Compile\Mir\Cast($isStr ? 'string' : 'int', $arg, $backing);
+        }
         $out = $this->emitNode($arg);
         $out .= $isStr ? $this->coerceToPtr() : $this->coerceToI64();
         $needle = $this->lastValue;
+        // Evaluated once: the miss path's message reads it back.
+        $sn = '__efrom' . \substr($this->ssa->allocReg(), 2);
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        if ($isStr) {
+            $wi = $this->ssa->allocReg();
+            $out .= '  ' . $wi . ' = ptrtoint ptr ' . $needle . " to i64\n" . '  store i64 ' . $wi . ', ptr ' . $slot . "\n";
+        } else {
+            $out .= '  store i64 ' . $needle . ', ptr ' . $slot . "\n";
+        }
+        $this->locals->slots[$sn] = $slot;
+        $arg = new \Compile\Mir\LoadLocal($sn, $backing);
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $done = $this->ssa->allocLabel('efrom.done');
@@ -7952,7 +7970,7 @@ trait EmitLlvmObjects
         } else {
             // PHP's exact message: `"<v>" is not a valid backing value for enum
             // <Name>` (string values quoted; int values bare) — built at runtime
-            // so getMessage() matches. Re-emits $arg (miss path only).
+            // so getMessage() matches.
             $tail = new \Compile\Mir\StringConst(
                 ' is not a valid backing value for enum ' . $enum, Type::string_());
             if ($isStr) {

@@ -1,0 +1,6 @@
+B B Two Two One N
+A A One One Two null
+ANNULL
+[eval]"nope" is not a valid backing value for enum S
+[eval]9 is not a valid backing value for enum I
+[eval]"9" is not a valid backing value for enum S
