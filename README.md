@@ -398,6 +398,10 @@ are compiled as source; the generated binary does not load `vendor/autoload.php`
 dependency injection, HTTP kernel) served from one native binary. Its README lists what differs
 from a stock skeleton and how to build it.
 
+[`laravel-app/`](examples/laravel-app/) is a Laravel application (Eloquent over SQLite, sessions,
+Blade, Carbon, Monolog) served the same way. Its README has the build steps and what differs from a
+stock skeleton.
+
 ## How it is built
 
 ```

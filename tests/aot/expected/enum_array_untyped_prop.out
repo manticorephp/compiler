@@ -1,0 +1,12 @@
+enum Debug enum Info
+array(2) {
+  ["d"]=>
+  enum(Level::Debug)
+  ["i"]=>
+  enum(Level::Info)
+}
+array(1) {
+  [0]=>
+  enum(Level::Info)
+}
+enum Info

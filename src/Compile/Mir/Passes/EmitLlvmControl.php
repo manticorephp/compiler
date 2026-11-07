@@ -2561,7 +2561,12 @@ trait EmitLlvmControl
                             $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
                             $cp = $this->ssa->allocReg();
                             $out .= '  ' . $cp . ' = inttoptr i64 ' . $cv . " to ptr\n";
-                            $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+                            $seq = $this->ssa->allocReg();
+                            $out .= '  ' . $seq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+                            // null === null: two absent strings are the same word, which str_eq does not accept.
+                            $same = $this->ssa->allocReg();
+                            $out .= '  ' . $same . ' = icmp eq i64 ' . $subj . ', ' . $cv . "\n";
+                            $out .= '  ' . $eq . ' = or i1 ' . $seq . ', ' . $same . "\n";
                         } elseif ($vk === Type::KIND_CELL && $this->isObjishType($m->subject->type)) {
                             // An object subject against a cell cond: identity by payload.
                             $out .= $this->objCellSameIr($subj, $cv);

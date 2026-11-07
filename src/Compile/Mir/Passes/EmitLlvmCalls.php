@@ -331,6 +331,20 @@ trait EmitLlvmCalls
      * The closure value is the struct ptr; the fn itself is the
      * top-level `__closure_N` synthesised at lowering.
      */
+    /** How a closure env word of static type `$t` is read back into a cell ({@see biMcReflCloCap}). */
+    private function capKindOf(Type $t): int
+    {
+        $k = $t->kind;
+        if ($k === Type::KIND_INT) { return \Compile\MemoryAbi::RMETA_CAP_INT; }
+        if ($k === Type::KIND_FLOAT) { return \Compile\MemoryAbi::RMETA_CAP_FLOAT; }
+        if ($k === Type::KIND_BOOL) { return \Compile\MemoryAbi::RMETA_CAP_BOOL; }
+        if ($k === Type::KIND_STRING) { return \Compile\MemoryAbi::RMETA_CAP_STRING; }
+        if ($k === Type::KIND_ARRAY) { return \Compile\MemoryAbi::RMETA_CAP_ARRAY; }
+        if ($k === Type::KIND_CLOSURE || ($k === Type::KIND_OBJ && !$this->isEnumType($t))) { return \Compile\MemoryAbi::RMETA_CAP_OBJECT; }
+        if ($k === Type::KIND_CELL) { return \Compile\MemoryAbi::RMETA_CAP_CELL; }
+        return \Compile\MemoryAbi::RMETA_CAP_UNSUPPORTED;
+    }
+
     private function emitClosure(Closure_ $n): string
     {
         $cl = $n;
@@ -436,6 +450,7 @@ trait EmitLlvmCalls
             $gep = $this->ssa->allocReg();
             $out .= '  ' . $gep . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)($i + 1) . "\n";
             $out .= '  store i64 ' . $capV . ', ptr ' . $gep . "\n";
+            $this->closureCapKinds[$fnName][$i] = ($cl->captureByRef[$i] ?? false) ? \Compile\MemoryAbi::RMETA_CAP_UNSUPPORTED : $this->capKindOf($c->type);
             $i = $i + 1;
         }
         $this->lastValue = $buf;
@@ -1425,34 +1440,22 @@ trait EmitLlvmCalls
      * `ptr @__mc_dynf_lookup(ptr name, ptr rows, i64 count)` — the generic probe
      * over a `{ ptr name, ptr fn }` row array, emitted once per module.
      *
-     * First match wins and a miss answers null, which is exactly the chain's own
-     * semantics: a candidate set is keyed by NAME, so at most one row can match
-     * and the scan order is not observable.
+     * A binary search: every row table is sorted by lower-cased name ({@see dynfTable},
+     * {@see newDynTable}). A miss answers null, which is the chain's own semantics: a
+     * candidate set is keyed by NAME, so at most one row can match.
      */
     private function dynfLookupFn(): string
     {
         if ($this->dynfLookupEmitted) { return ''; }
         $this->dynfLookupEmitted = true;
-        $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
-        $out = $this->dynfIcmpFn() . "define linkonce_odr ptr @__mc_dynf_lookup(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
-        $out .= "  %z = icmp eq i64 %cnt, 0\n";
-        $out .= "  br i1 %z, label %miss, label %loop\n";
-        $out .= "loop:\n";
-        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
-        $out .= "  %off = mul i64 %i, 16\n";
-        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
-        $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %cmp = call i32 @__mc_dynf_icmp(ptr %np, ptr %name)\n";
-        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
-        $out .= "  br i1 %eq, label %hit, label %next\n";
+        $out = $this->dynfBsearchFn() . "define linkonce_odr ptr @__mc_dynf_lookup(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
+        $out .= "  %row = call ptr @__mc_dynf_bsearch(ptr %name, ptr %rows, i64 %cnt)\n";
+        $out .= "  %z = icmp eq ptr %row, null\n";
+        $out .= "  br i1 %z, label %miss, label %hit\n";
         $out .= "hit:\n";
         $out .= "  %fp = getelementptr i8, ptr %row, i64 8\n";
         $out .= "  %fv = load ptr, ptr %fp\n";
         $out .= "  ret ptr %fv\n";
-        $out .= "next:\n";
-        $out .= "  %i1 = add i64 %i, 1\n";
-        $out .= "  %done = icmp eq i64 %i1, %cnt\n";
-        $out .= "  br i1 %done, label %miss, label %loop\n";
         $out .= "miss:\n  ret ptr null\n}\n\n";
         return $out;
     }
@@ -2126,7 +2129,7 @@ trait EmitLlvmCalls
         // one strcmp arm each, an erased-receiver method call by runtime class.
         // The callee is re-read per arm, so only a pure one qualifies.
         $staticCallable = isset($this->sigs->paramTypes['__mc_static_callable']);
-        if ($this->callableArrayMethods !== [] || $staticCallable) {
+        if (($this->callableArrayMethods !== [] || $this->callableArrayAnyName || $staticCallable) && $n->srcArgc !== -2) {
             $isArrT = $this->ssa->allocReg();
             $out .= '  ' . $isArrT . ' = icmp eq i64 ' . $tag . ", 7\n";
             $arrL = $this->ssa->allocLabel('erinv.arr');
@@ -2146,7 +2149,7 @@ trait EmitLlvmCalls
             if ($staticCallable) {
                 $out .= $this->emitStaticCallableArm($n, $avName, $res, $endL);
             }
-            if ($this->callableArrayMethods !== []) {
+            if ($this->callableArrayMethods !== [] || $this->callableArrayAnyName) {
                 $out .= $this->emitInstanceCallableArm($n, $avName, $res, $endL);
             }
             $out .= '  br label %' . $endL . "\n";
@@ -4179,7 +4182,14 @@ trait EmitLlvmCalls
     private function emitDynClosureSpread(string $struct, array $args, int $spreadPos, Type $retType): string
     {
         if ($spreadPos !== \count($args) - 1) {
-            throw new \RuntimeException('only a single trailing spread into a dynamic closure is supported');
+            $shape = [];
+            $line = 0;
+            foreach ($args as $a) {
+                $shape[] = $a->kind === Node::KIND_SPREAD ? '...' : '_';
+                if ($line === 0) { $line = $a->line; }
+            }
+            throw new \RuntimeException('only a single trailing spread into a dynamic closure is supported (args '
+                . \implode(',', $shape) . ', line ' . (string)$line . ')');
         }
         // A spread builds each arity arm's argument list directly, so the
         // by-ref `select` the fixed-arity path uses has nowhere to go — and the

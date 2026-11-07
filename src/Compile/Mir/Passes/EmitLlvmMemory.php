@@ -1023,7 +1023,7 @@ trait EmitLlvmMemory
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
             $fk = $fallback->kind;
             if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY
-                || $fk === Type::KIND_STRING) {
+                || $fk === Type::KIND_STRING || $fk === Type::KIND_CLOSURE) {
                 $tk = $fk;
                 $cls = $fallback->class ?? '';
             }

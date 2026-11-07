@@ -141,6 +141,8 @@ trait LowerClassDeclChecks
                 : 'Cannot make non static method ' . $inh->declClass . '::' . $inh->name . '() static in class ' . $cls,
                 $mspan);
         }
+        // Zend runs no further inheritance check on a constructor unless the parent's is abstract.
+        if ($key === '__construct' && !$inh->isAbstract) { return; }
         $this->checkVisibility($cls . '::' . $mname . '()', $vis, $inh, $mspan);
         if ($m->isAbstract && !$inh->isAbstract && !$this->lspSkipClass($inh->declClass)) {
             $this->declFail('Cannot make non abstract method ' . $inh->declClass . '::' . $inh->name

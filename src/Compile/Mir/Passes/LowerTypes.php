@@ -461,7 +461,7 @@ trait LowerTypes
                 && $elem[\strlen($elem) - 1] === ')') {
                 $elem = \substr($elem, 1, \strlen($elem) - 2);
             }
-            return Type::vec($this->lowerTypeHint($elem));
+            return Type::vec($this->lowerElemHint($elem));
         }
         // Generic array: `array<V>` → vec[V]; `array<K, V>` → assoc[V].
         // An array SHAPE — `array{0:Node,1:bool}`, `array{name:string,age:int}`
@@ -489,7 +489,7 @@ trait LowerTypes
         if (\strncmp($low, 'list<', 5) === 0 || \strncmp($low, 'non-empty-list<', 15) === 0) {
             $base = \ltrim($hint, '?\\');
             $lt = \strpos($base, '<');
-            return Type::vec($this->lowerTypeHint(\trim(\substr($base, $lt + 1, \strlen($base) - $lt - 2))));
+            return Type::vec($this->lowerElemHint(\trim(\substr($base, $lt + 1, \strlen($base) - $lt - 2))));
         }
         // `int<0, max>` / `int<min, -1>` — phpstan's integer range is an int,
         // and its refined scalars are their base type.
@@ -512,7 +512,7 @@ trait LowerTypes
             $inner = \substr($base, $lt + 1, \strlen($base) - $lt - 2);
             $kv = $this->splitTopLevel($inner, ',');
             if (\count($kv) < 2) {
-                return Type::vec($this->lowerTypeHint($kv[0]));
+                return Type::vec($this->lowerElemHint($kv[0]));
             }
             $keyStr = $kv[0];
             $valStr = $kv[1];
@@ -543,7 +543,7 @@ trait LowerTypes
             // second root and it is NOT this one.
             $kt = $this->lowerTypeHint($keyStr);
             if (\str_contains($keyStr, '::')) { $kt = Type::cell(); }
-            return Type::assoc($kt, $this->lowerTypeHint($valStr));
+            return Type::assoc($kt, $this->lowerElemHint($valStr));
         }
         // `Generator` / `Generator<V>` / `Generator<K, V>` → a Generator whose
         // yielded value is V (the 2nd param when keyed, mirroring PHP's
@@ -723,8 +723,9 @@ trait LowerTypes
     private function isBareArrayHint(?string $hint): bool
     {
         if ($hint === null) { return false; }
-        $low = \strtolower(\ltrim($hint, '?\\'));
-        return $low === 'array';
+        // `array|null` is `?array` spelled out: it erases the same way.
+        $low = \strtolower(\str_replace(' ', '', \ltrim($hint, '?\\')));
+        return $low === 'array' || $low === 'array|null' || $low === 'null|array';
     }
 
     /** A RETURN hint the +1 erased-array convention covers
@@ -905,6 +906,39 @@ trait LowerTypes
         }
         return null;
     }
+
+    /**
+     * {@see lowerTypeHint} for the ELEMENT of a docblock collection. `callable`
+     * is a union — a Closure, a function-name string, a `[class, method]` pair —
+     * so a slot of them is a cell: lowered as `closure` (the hint for a lone
+     * `callable` parameter) every string or pair read back out was treated as
+     * an env pointer, and a nested append through the property faulted
+     * (symfony's `@var array<string, list<callable>> $casters`).
+     */
+    private function lowerElemHint(string $elem): Type
+    {
+        if (\strtolower(\ltrim(\trim($elem), '\\')) === 'callable') { return Type::cell(); }
+        return $this->lowerTypeHint($elem);
+    }
+
+    /**
+     * {@see effectiveHint} for a RETURN. An unhinted function's body already
+     * says what it returns (NarrowReturns), so a docblock naming only scalars
+     * is not allowed to override it: Laravel's `level()` is documented
+     * `@return int` and returns a `Monolog\Level`, which the signature then
+     * typed `int` and handed the enum's singleton pointer to every caller as a
+     * number. Class, array and type-parameter docs still carry what the body
+     * cannot show.
+     */
+    private function effectiveReturnHint(?string $hint, ?string $docType): ?string
+    {
+        if ($hint === null && $docType !== null
+            && \preg_match('/^\??(?:int|integer|float|double|string|bool|boolean|null|false|true)(?:\|(?:int|integer|float|double|string|bool|boolean|null|false|true))*$/i', $docType) === 1) {
+            return null;
+        }
+        return $this->effectiveHint($hint, $docType);
+    }
+
 
     /**
      * Lower a type hint, recovering a bare `array`'s element type from a
@@ -1268,6 +1302,14 @@ trait LowerTypes
         if ($j < $n && \substr($h, $j, 1) === ':') {
             $j = $this->skipDocSpaces($h, $j + 1, $n);
             $rt = \trim(\substr($h, $j, $n - $j));
+            // The return type is ONE atom: in `\Closure(A): T|class-string<T>` the
+            // `|` closes the signature and starts an outer union (phpdoc-parser's
+            // callable return is a single atomic type). A union with a non-null
+            // arm is a tagged cell — typed `closure`, Laravel's
+            // `Container::build($concrete)` took a class-name string as a closure env.
+            foreach (\array_slice($this->topLevelUnionArms($rt), 1) as $arm) {
+                if (\strtolower(\trim($arm)) !== 'null') { return Type::cell(); }
+            }
             if ($rt !== '') { $ret = $this->lowerTypeHint($rt); }
         }
         return Type::closureOf($ret, $params);

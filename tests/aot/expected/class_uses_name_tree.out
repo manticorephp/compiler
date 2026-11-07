@@ -1,0 +1,13 @@
+'App\\Deep\\A' => {"App\\Deep\\T1":"App\\Deep\\T1"}
+'app\\deep\\a' => {"App\\Deep\\T1":"App\\Deep\\T1"}
+'\\App\\Deep\\A' => {"App\\Deep\\T1":"App\\Deep\\T1"}
+'App\\Deep\\B' => {"App\\Deep\\T2":"App\\Deep\\T2","App\\Deep\\T1":"App\\Deep\\T1"}
+'app\\deep\\b' => {"App\\Deep\\T2":"App\\Deep\\T2","App\\Deep\\T1":"App\\Deep\\T1"}
+'App\\Deep\\C' => []
+'App\\Deep\\E' => {"App\\Deep\\T1":"App\\Deep\\T1"}
+'App\\Deep\\T2' => {"App\\Deep\\T1":"App\\Deep\\T1"}
+'App\\Deep\\T1' => []
+'Nope' => false
+'App\\Deep\\Nope' => false
+'' => false
+{"App\\Deep\\T2":"App\\Deep\\T2","App\\Deep\\T1":"App\\Deep\\T1"}[]

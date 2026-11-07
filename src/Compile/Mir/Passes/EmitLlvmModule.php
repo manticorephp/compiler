@@ -346,7 +346,13 @@ trait EmitLlvmModule
             foreach ($this->enums as $name => $ed) {
                 if (!isset($targets[$name])) { $targets[$name] = $ed->classId; }
             }
-            foreach ($targets as $name => $own) {
+            // Sorted by lower-cased name for the binary search in {@see isaDynTable}.
+            /** @var string[] $targetNames */
+            $targetNames = [];
+            foreach ($targets as $name => $unused) { $targetNames[] = (string)$name; }
+            \usort($targetNames, fn (string $x, string $y): int => \strcmp(\strtolower($x), \strtolower($y)));
+            foreach ($targetNames as $name) {
+                $own = $targets[$name];
                 $ids = $this->instanceofMatchIds((string)$name);
                 if ($ids === []) { continue; }
                 if ($isdN > 0) { $isdNames .= ', '; $isdOwn .= ', '; }
@@ -545,7 +551,7 @@ trait EmitLlvmModule
         if ($this->rt->needsMethodExists) {
             // php resolves a METHOD name case-insensitively.
             $out .= $this->memberExistsTable('mx', '__mir_method_exists',
-                $mxClsRows, $mxMthRows, $mxCount, 'strcasecmp');
+                $mxClsRows, $mxMthRows, $mxCount, '__mir_name_icmp');
         }
         if ($this->rt->needsClassMethods) {
             $out .= $this->classMethodsTable($gcmCls, $gcmStart, $gcmCnt, $gcmMem, $gcmCount, $gcmTotal);
@@ -554,7 +560,7 @@ trait EmitLlvmModule
             // Both class names are runtime strings, so both compare
             // case-insensitively — php resolves a class name that way.
             $out .= $this->memberExistsTable('isa', '__mir_class_isa',
-                $isaSubRows, $isaAncRows, $isaCount, 'strcasecmp');
+                $isaSubRows, $isaAncRows, $isaCount, '__mir_name_icmp');
         }
         if ($this->rt->needsIsaDyn) {
             $out .= $this->isaDynTable($isdNames, $isdOff, $isdOwn, $isdIds, $isdN, $isdM);
@@ -976,9 +982,18 @@ trait EmitLlvmModule
     /** An emit failure names the function it came from. */
     private function emitFunction(FunctionDef $fn): string
     {
+        if ($this->dumpMirOnly === null) {
+            $dm = \getenv('MANTICORE_DUMP_MIR');
+            $this->dumpMirOnly = \is_string($dm) ? $dm : '';
+        }
+        if ($this->dumpMirOnly !== '' && \str_contains($fn->name, $this->dumpMirOnly)) {
+            \error_log(\Compile\Mir\Dump::fn($fn));
+        }
         try {
             return $this->emitFunctionBody($fn);
-        } catch (\RuntimeException $e) {
+        } catch (\Throwable $e) {
+            $want = \getenv('MANTICORE_DUMP_FN');
+            if (\is_string($want) && $want !== '' && \str_contains($fn->name, $want)) { \error_log(\Compile\Mir\Dump::fn($fn)); }
             throw new \RuntimeException($e->getMessage() . ' (in ' . $fn->name . ')');
         }
     }
@@ -1405,11 +1420,22 @@ trait EmitLlvmModule
      * `$cmp` is the member comparison: php matches a METHOD name
      * case-insensitively and a PROPERTY name exactly.
      */
+    /** {@see RuntimeLibrary::nameIcmp}, once per module. */
+    private function nameIcmpFn(): string
+    {
+        if ($this->nameIcmpEmitted) { return ''; }
+        $this->nameIcmpEmitted = true;
+        return \Compile\Mir\RuntimeLibrary::nameIcmp();
+    }
+
     /**
      * `__mir_isa_dyn_m<token>(cid, name, strict)`: is an object of class id `cid` an
      * instance of the class / interface / enum NAMED `name`? One case-insensitive
-     * scan of the names (php resolves a class name that way; a leading `\` is
-     * skipped), then a scan of that name's is-a ids. `strict` refuses the
+     * binary search of the names, sorted lower-cased (php resolves a class name that
+     * way; a leading `\` is skipped), then a scan of that name's is-a ids. A linear
+     * scan here was 78% of a Laravel request: `Container::getCallbacksForType` runs
+     * `$object instanceof $type` per callback type per resolved binding, over every
+     * class in the program. `strict` refuses the
      * target's own id — is_subclass_of is proper.
      */
     private function isaDynTable(string $names, string $off, string $own, string $ids, int $n, int $m): string
@@ -1422,7 +1448,13 @@ trait EmitLlvmModule
         $out .= '@__mir_isd_ids = internal constant [' . (string)$lm . ' x i64] [' . ($m > 0 ? $ids : 'i64 -1') . "]\n";
         // Named per MODULE: the preamble's bodies are linkonce_odr, and this one
         // reads this module's own tables.
-        $out .= 'define i64 @' . $this->mirHelperSym('__mir_isa_dyn') . "(i64 %cid, ptr %name0, i64 %strict) {\n";
+        // The row of a runtime class name, -1 for none: php resolves it case-insensitively and
+        // skips a leading `\`. ASCII folding, not libc's locale-aware strcasecmp.
+        $find = '@' . $this->mirHelperSym('__mir_isd_find');
+        $out .= "@__mir_isd_mk = internal global [256 x ptr] zeroinitializer\n";
+        $out .= "@__mir_isd_mv = internal global [256 x i64] zeroinitializer\n";
+        $out .= $this->nameIcmpFn();
+        $out .= 'define i64 ' . $find . "(ptr %name0) {\n";
         $out .= "entry:\n";
         $out .= "  %isnull = icmp eq ptr %name0, null\n";
         $out .= "  br i1 %isnull, label %miss, label %strip\n";
@@ -1431,20 +1463,67 @@ trait EmitLlvmModule
         $out .= "  %bs = icmp eq i8 %c0, 92\n";
         $out .= "  %name1 = getelementptr inbounds i8, ptr %name0, i64 1\n";
         $out .= "  %name = select i1 %bs, ptr %name1, ptr %name0\n";
-        $out .= "  br label %loop\n";
+        // A name is usually a long-lived string (an array key, a class constant): remember its row
+        // by address, re-checked against the content because a freed string's address comes back.
+        // `$object instanceof $type` per callback type per resolved binding is 9% of a Laravel request.
+        $out .= "  %hp = ptrtoint ptr %name to i64\n";
+        $out .= "  %hs4 = lshr i64 %hp, 4\n";
+        $out .= "  %hs12 = lshr i64 %hp, 12\n";
+        $out .= "  %hx = xor i64 %hs4, %hs12\n";
+        $out .= "  %mi = and i64 %hx, 255\n";
+        $out .= "  %kp = getelementptr inbounds [256 x ptr], ptr @__mir_isd_mk, i64 0, i64 %mi\n";
+        $out .= "  %vp = getelementptr inbounds [256 x i64], ptr @__mir_isd_mv, i64 0, i64 %mi\n";
+        $out .= "  %k = load ptr, ptr %kp\n";
+        $out .= "  %kq = icmp eq ptr %k, %name\n";
+        $out .= "  br i1 %kq, label %memo, label %loop\n";
+        $out .= "memo:\n";
+        $out .= "  %mv = load i64, ptr %vp\n";
+        $out .= '  %mnp = getelementptr inbounds [' . (string)$ln . " x ptr], ptr @__mir_isd_names, i64 0, i64 %mv\n";
+        $out .= "  %mc = load ptr, ptr %mnp\n";
+        $out .= "  %mcmp = call i32 @__mir_name_icmp(ptr %name, ptr %mc)\n";
+        $out .= "  %mok = icmp eq i32 %mcmp, 0\n";
+        $out .= "  br i1 %mok, label %memohit, label %loop\n";
+        $out .= "memohit:\n  ret i64 %mv\n";
         $out .= "loop:\n";
-        $out .= "  %i = phi i64 [0, %strip], [%i1, %next]\n";
-        $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+        $out .= "  %blo = phi i64 [0, %strip], [0, %memo], [%blo2, %next]\n";
+        $out .= '  %bhi = phi i64 [' . (string)$n . ", %strip], [" . (string)$n . ", %memo], [%bhi2, %next]\n";
+        $out .= "  %done = icmp sge i64 %blo, %bhi\n";
         $out .= "  br i1 %done, label %miss, label %body\n";
         $out .= "body:\n";
+        $out .= "  %bsum = add i64 %blo, %bhi\n";
+        $out .= "  %i = lshr i64 %bsum, 1\n";
         $out .= '  %np = getelementptr inbounds [' . (string)$ln . " x ptr], ptr @__mir_isd_names, i64 0, i64 %i\n";
         $out .= "  %cand = load ptr, ptr %np\n";
-        $out .= "  %c = call i32 @strcasecmp(ptr %name, ptr %cand)\n";
+        $out .= "  %c = call i32 @__mir_name_icmp(ptr %name, ptr %cand)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
-        $out .= "  br i1 %eq, label %found, label %next\n";
+        $out .= "  br i1 %eq, label %hit, label %next\n";
         $out .= "next:\n";
+        $out .= "  %blt = icmp slt i32 %c, 0\n";
         $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %bhi2 = select i1 %blt, i64 %i, i64 %bhi\n";
+        $out .= "  %blo2 = select i1 %blt, i64 %blo, i64 %i1\n";
         $out .= "  br label %loop\n";
+        $out .= "hit:\n";
+        $out .= "  store i64 %i, ptr %vp\n";
+        $out .= "  store ptr %name, ptr %kp\n";
+        $out .= "  ret i64 %i\n";
+        $out .= "miss:\n  ret i64 -1\n}\n";
+        // The declared spelling of a runtime class name, null when no class has it: what `new $name` needs.
+        $out .= 'define ptr @' . $this->mirHelperSym('__mir_class_canon') . "(ptr %name0) {\n";
+        $out .= "entry:\n";
+        $out .= '  %i = call i64 ' . $find . "(ptr %name0)\n";
+        $out .= "  %none = icmp slt i64 %i, 0\n";
+        $out .= "  br i1 %none, label %miss, label %hit\n";
+        $out .= "hit:\n";
+        $out .= '  %np = getelementptr inbounds [' . (string)$ln . " x ptr], ptr @__mir_isd_names, i64 0, i64 %i\n";
+        $out .= "  %cand = load ptr, ptr %np\n";
+        $out .= "  ret ptr %cand\n";
+        $out .= "miss:\n  ret ptr null\n}\n";
+        $out .= 'define i64 @' . $this->mirHelperSym('__mir_isa_dyn') . "(i64 %cid, ptr %name0, i64 %strict) {\n";
+        $out .= "entry:\n";
+        $out .= '  %i = call i64 ' . $find . "(ptr %name0)\n";
+        $out .= "  %none = icmp slt i64 %i, 0\n";
+        $out .= "  br i1 %none, label %miss, label %found\n";
         $out .= "found:\n";
         $out .= '  %op = getelementptr inbounds [' . (string)$ln . " x i64], ptr @__mir_isd_own, i64 0, i64 %i\n";
         $out .= "  %own = load i64, ptr %op\n";
@@ -1554,7 +1633,7 @@ trait EmitLlvmModule
         $len = $n > 0 ? $n : 1;
         $mlen = $total > 0 ? $total : 1;
         $L = (string)$len;
-        $out = '@__mir_gcm_cls = internal constant [' . $L . ' x ptr] [' . ($n > 0 ? $cls : 'ptr null') . "]\n";
+        $out = $this->nameIcmpFn() . '@__mir_gcm_cls = internal constant [' . $L . ' x ptr] [' . ($n > 0 ? $cls : 'ptr null') . "]\n";
         $out .= '@__mir_gcm_start = internal constant [' . $L . ' x i64] [' . ($n > 0 ? $start : 'i64 0') . "]\n";
         $out .= '@__mir_gcm_cnt = internal constant [' . $L . ' x i64] [' . ($n > 0 ? $cnt : 'i64 0') . "]\n";
         $out .= '@__mir_gcm_mem = internal constant [' . (string)$mlen . ' x ptr] [' . ($total > 0 ? $mem : 'ptr null') . "]\n";
@@ -1572,7 +1651,7 @@ trait EmitLlvmModule
         $out .= "  %mid = lshr i64 %sum, 1\n";
         $out .= '  %cp = getelementptr inbounds [' . $L . " x ptr], ptr @__mir_gcm_cls, i64 0, i64 %mid\n";
         $out .= "  %ccand = load ptr, ptr %cp\n";
-        $out .= "  %cc = call i32 @strcasecmp(ptr %cls, ptr %ccand)\n";
+        $out .= "  %cc = call i32 @__mir_name_icmp(ptr %cls, ptr %ccand)\n";
         $out .= "  %ceq = icmp eq i32 %cc, 0\n";
         $out .= "  br i1 %ceq, label %hit, label %cdir\n";
         $out .= "cdir:\n";
@@ -1619,7 +1698,7 @@ trait EmitLlvmModule
         $len = $n > 0 ? $n : 1;
         $cls = '@__mir_' . $prefix . '_cls';
         $mem = '@__mir_' . $prefix . '_mem';
-        $out = $cls . ' = internal constant [' . (string)$len . ' x ptr] ['
+        $out = $this->nameIcmpFn() . $cls . ' = internal constant [' . (string)$len . ' x ptr] ['
              . ($n > 0 ? $clsRows : 'ptr null') . "]\n";
         $out .= $mem . ' = internal constant [' . (string)$len . ' x ptr] ['
              . ($n > 0 ? $memRows : 'ptr null') . "]\n";
@@ -1644,7 +1723,7 @@ trait EmitLlvmModule
               . ' x ptr], ptr ' . $cls . ", i64 0, i64 %mid\n";
         $out .= "  %ccand = load ptr, ptr %cp\n";
         // The CLASS name is case-insensitive in php whichever member is asked about.
-        $out .= "  %cc = call i32 @strcasecmp(ptr %cls, ptr %ccand)\n";
+        $out .= "  %cc = call i32 @__mir_name_icmp(ptr %cls, ptr %ccand)\n";
         $out .= "  %ceq = icmp eq i32 %cc, 0\n";
         $out .= "  br i1 %ceq, label %mtest, label %cdir\n";
         $out .= "cdir:\n";

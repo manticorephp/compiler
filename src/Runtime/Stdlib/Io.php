@@ -122,6 +122,9 @@ function file_get_contents(string $path, bool $use_include_path = false, ?\Resou
         }
         return \__mc_http_get($path);
     }
+    if ($scheme === 'php' && \strtolower($path) === 'php://input') {
+        return \__mc_input();
+    }
     if ($scheme !== 'file') {
         return false;
     }
@@ -1485,6 +1488,14 @@ function stream_context_set_options(\Resource $context, array $options): bool
  * Open a file. Returns a file resource, or false on failure.
  * @return \Resource|false
  */
+/** The raw request body `php://input` reads; `$set` publishes a new one. */
+function __mc_input(?string $set = null): string
+{
+    static $body = '';
+    if ($set !== null) { $body = $set; }
+    return $body;
+}
+
 function fopen(string $filename, string $mode)
 {
     $scheme = \__mc_scheme_of($filename);
@@ -1505,6 +1516,14 @@ function fopen(string $filename, string $mode)
         if ($lower === 'php://stdout') { return \STDOUT; }
         if ($lower === 'php://stderr') { return \STDERR; }
         if ($lower === 'php://stdin') { return \STDIN; }
+        // php://input: the live request's raw body, published by the SAPI layer
+        // (`Manticore\Sapi\requestBegin`); empty outside a request.
+        if ($lower === 'php://input') {
+            $res = new \Resource(\Resource::KIND_MEMFILE, 'stream', 0);
+            \fwrite($res, \__mc_input());
+            \rewind($res);
+            return $res;
+        }
         // php://output: the path a RUNTIME-computed name takes — LowerPrelude
         // folds only a literal, so `$n = 'php://output'; fopen($n, 'w')` would
         // otherwise fall through to the `return false` below.

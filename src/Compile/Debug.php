@@ -615,6 +615,43 @@ final class Debug
      */
     public static bool $framePointers = false;
 
+    /**
+     * `MANTICORE_ASAN=1` — a HEAP AddressSanitizer build: every function gets the `sanitize_address`
+     * attribute (spliced into the IR text like the frame-pointer one, because `-fsanitize=address`
+     * instruments nothing for `-x ir` input), and clang/the link get `-fsanitize=address`. Stack
+     * instrumentation is off (`-asan-stack=0`): fibers switch stacks and exceptions unwind with
+     * setjmp, which ASan's stack poisoning reports as false positives. A MEASUREMENT build only —
+     * use with `-O 0`.
+     */
+    public static bool $asan = false;
+
+    /**
+     * `MANTICORE_REF_QUARANTINE=1` — `__mir_ref_free` poisons a reference box's value word and never
+     * returns it to the allocator, so a stale holder that still touches it reads poison instead of
+     * corrupting whatever reused the block. A MEASUREMENT build only.
+     */
+    public static bool $refQuarantine = false;
+
+    /**
+     * `MANTICORE_POOL_POISON=1` — a freed small-object pool block is filled with 0xDE and never reused,
+     * so a use after free reads poison. Unlike the quarantine it adds no linker flag: exceptions keep
+     * unwinding. A MEASUREMENT build only.
+     */
+    public static bool $poolPoison = false;
+
+    /**
+     * The `#0` (and, for the ASan build's 870k-line dispatchers, `#1`) attribute group every emitted function body carries. `probe-stack` makes a frame
+     * larger than a page touch each page on the way down, so a fiber stack that overflows hits its
+     * PROT_NONE guard (named by the SIGSEGV handler) instead of jumping over it into whatever is
+     * mapped below — a heap, a library — and writing there. The frame-pointer half is the profiler's.
+     */
+    public static function bodyAttrGroup(): string
+    {
+        $fp = self::$framePointers ? ' "frame-pointer"="all"' : '';
+        return 'attributes #0 = { "probe-stack"="inline-asm"' . $fp . (self::$asan ? ' sanitize_address' : '') . " }\n"
+            . 'attributes #1 = { "probe-stack"="inline-asm"' . $fp . ' }';
+    }
+
     public static function applyMemoryMode(string $mode): bool
     {
         if ($mode === self::MEM_RC || $mode === self::MEM_ARENA || $mode === self::MEM_HYBRID) {
@@ -712,6 +749,19 @@ final class Debug
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
+        }
+        $env = \getenv('MANTICORE_REF_QUARANTINE');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$refQuarantine = true;
+        }
+        $env = \getenv('MANTICORE_POOL_POISON');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$poolPoison = true;
+        }
+        $env = \getenv('MANTICORE_ASAN');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$asan = true;
+            self::$framePointers = true;
         }
         $env = \getenv('MANTICORE_FRAME_POINTERS');
         if ($env !== false && $env !== '0' && $env !== '') {

@@ -132,7 +132,7 @@ final class Builtins
             '__mc_refl_attr_new', '__mc_refl_attr_repeated', '__mc_refl_attr_target',
             '__mc_refl_call0', '__mc_refl_call1', '__mc_refl_class_attrs',
             '__mc_refl_class_nattrs', '__mc_refl_consts_fn', '__mc_refl_file_fn', '__mc_refl_doc_fn', '__mc_refl_ctor',
-            '__mc_refl_clo_find', '__mc_refl_clo_this', '__mc_refl_fn_find', '__mc_refl_ifaces_fn', '__mc_refl_invoke',
+            '__mc_refl_clo_find', '__mc_refl_clo_this', '__mc_refl_clo_cap', '__mc_refl_row_caps', '__mc_refl_caps_count', '__mc_refl_caps_name', '__mc_refl_caps_kind', '__mc_refl_fn_find', '__mc_refl_ifaces_fn', '__mc_refl_invoke',
             '__mc_refl_methods_base', '__mc_refl_mrow', '__mc_refl_nmethods',
             '__mc_refl_nprops', '__mc_refl_row_at', '__mc_refl_nconsts', '__mc_refl_consts_base', '__mc_refl_param_flags', '__mc_refl_param_name',
             '__mc_refl_param_type', '__mc_refl_prop_getter', '__mc_refl_prop_set',

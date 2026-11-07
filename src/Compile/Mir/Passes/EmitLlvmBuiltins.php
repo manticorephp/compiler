@@ -294,6 +294,7 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_pool_start')              { return $this->biPoolStart($args); }
         if ($name === '__mir_to_cell')                { return $this->biToCell($args); }
         if ($name === '__mir_throw_error')     { return $this->biThrowError($args); }
+        if ($name === '__mir_member_call_error') { return $this->biMemberCallError($args); }
         if ($name === '__mir_throw_type_error') { return $this->biThrowError($args, 'TypeError'); }
         if ($name === '__mir_throw_argcount_error') { return $this->biThrowError($args, 'ArgumentCountError'); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
@@ -327,6 +328,7 @@ trait EmitLlvmBuiltins
             if ($cm !== null) { return $cm; }
         }
         if ($name === 'ord')                          { return $this->biOrd($args); }
+        if ($name === '__mc_str_cmp_bytes')           { return $this->biStrCmpBytes($args); }
         if ($name === 'chr')                          { return $this->biChr($args); }
         if ($name === 'abs')                          { return $this->biAbs($args); }
         if ($name === 'pow')                          { return $this->biPow($args); }
@@ -488,6 +490,11 @@ trait EmitLlvmBuiltins
         if ($name === '__mc_refl_row_tramp')          { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_TRAMP_OFFSET, true); }
         if ($name === '__mc_refl_fn_find')            { return $this->biMcReflFnFind($args); }
         if ($name === '__mc_refl_clo_find')           { return $this->biMcReflCloFind($args); }
+        if ($name === '__mc_refl_row_caps')           { return $this->emitReflFieldI64($args, \Compile\MemoryAbi::RMETA_ROW_CAPS_OFFSET, true); }
+        if ($name === '__mc_refl_caps_count')         { return $this->emitReflFieldI64($args, 0, false); }
+        if ($name === '__mc_refl_caps_name')          { return $this->emitReflParamField($args, 0, true, \Compile\MemoryAbi::RMETA_CAP_ENTRY_SIZE); }
+        if ($name === '__mc_refl_caps_kind')          { return $this->emitReflParamField($args, 8, false, \Compile\MemoryAbi::RMETA_CAP_ENTRY_SIZE); }
+        if ($name === '__mc_refl_clo_cap')            { return $this->biMcReflCloCap($args); }
         if ($name === '__mc_refl_clo_this')           { return $this->biMcReflCloThis($args); }
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_object_class_id')          { return $this->biObjectClassId($args); }
@@ -2716,11 +2723,18 @@ trait EmitLlvmBuiltins
                 $one = $this->ssa->allocReg();
                 $out .= '  ' . $one . " = call i64 @__manticore_box_int(i64 1)\n";
                 $out .= '  store i64 ' . $one . ', ptr ' . $res . "\n";
+            } elseif (isset($this->includeUnits[$absPath]) && isset($this->definedFns[$this->mangle($this->includeUnits[$absPath])])) {
+                // A file whose top level runs when it is first required.
+                $v = $this->ssa->allocReg();
+                $out .= '  ' . $v . ' = call i64 @manticore_' . $this->mangle($this->includeUnits[$absPath]) . "()\n";
+                $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
             } else {
                 $v = $this->ssa->allocReg();
                 $out .= '  ' . $v . ' = load i64, ptr @g_' . $slot . "\n";
                 // A call result is +1 for every consumer (Ownership::storedOwned); the
                 // slot keeps its own count, so hand out a retained copy.
+                $this->rt->needsRc = true;
+                $this->rt->needsStrRc = true;
                 $out .= '  call void @__mir_cell_retain(i64 ' . $v . ")\n";
                 $out .= '  store i64 ' . $v . ', ptr ' . $res . "\n";
             }
@@ -2890,6 +2904,25 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__mc_pool_start(i64 ' . $sub . ', i64 ' . $done . ")\n";
         return $this->finishI64($out, $r);
+    }
+
+    private function biStrCmpBytes(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $a = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $b = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceToI64();
+        $lim = $this->lastValue;
+        $out .= $this->emitNode($args[3]);
+        $out .= $this->coerceToI64();
+        $fold = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_str_cmp_bytes(ptr ' . $a . ', ptr ' . $b . ', i64 ' . $lim . ', i64 ' . $fold . ")\n";
+        $out .= $this->freeStrTemp($args[0], $a);
+        $out .= $this->freeStrTemp($args[1], $b);
+        return $this->finishI64($out, $reg);
     }
 
     private function biStrlen(array $args): string
@@ -7109,6 +7142,79 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * `__mc_refl_clo_cap($closure, $kind, $i)` — the `$i`-th captured value of a
+     * closure env as a counted cell, boxed by the capture-table `$kind`
+     * ({@see \Compile\MemoryAbi::RMETA_CAP_INT} …): the env keeps each capture in
+     * the representation of its static type, so the reader needs the kind the
+     * metadata row recorded. The null cell for an unsupported (by-ref) capture.
+     *
+     * @param Node[] $args
+     */
+    private function biMcReflCloCap(array $args): string
+    {
+        $this->rt->needsTagged = true;
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToPtr();
+        $env = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $kind = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceToI64();
+        $idx = $this->lastValue;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . ' = add i64 ' . $idx . ", 1\n";
+        $gp = $this->ssa->allocReg();
+        $out .= '  ' . $gp . ' = getelementptr inbounds i64, ptr ' . $env . ', i64 ' . $slot . "\n";
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = load i64, ptr ' . $gp . "\n";
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n";
+        $nullV = $this->ssa->allocReg();
+        $out .= '  ' . $nullV . " = call i64 @__manticore_box_null()\n";
+        $out .= '  store i64 ' . $nullV . ', ptr ' . $res . "\n";
+        $done = $this->ssa->allocLabel('ccap.done');
+        $labels = [];
+        $sw = '  switch i64 ' . $kind . ', label %' . $done . " [\n";
+        foreach ([1, 2, 3, 4, 5, 6, 7] as $k) {
+            $labels[$k] = $this->ssa->allocLabel('ccap.k' . (string)$k);
+            $sw .= '    i64 ' . (string)$k . ', label %' . $labels[$k] . "\n";
+        }
+        $out .= $sw . "  ]\n";
+        foreach ($labels as $k => $lbl) {
+            $out .= $lbl . ":\n";
+            $b = $this->ssa->allocReg();
+            if ($k === 1) {
+                $out .= '  ' . $b . ' = call i64 @__manticore_box_int(i64 ' . $w . ")\n";
+            } elseif ($k === 2) {
+                $d = $this->ssa->allocReg();
+                $out .= '  ' . $d . ' = bitcast i64 ' . $w . " to double\n";
+                $out .= '  ' . $b . ' = call i64 @__manticore_box_float(double ' . $d . ")\n";
+            } elseif ($k === 3) {
+                $out .= '  ' . $b . ' = call i64 @__manticore_box_bool(i64 ' . $w . ")\n";
+            } elseif ($k === 7) {
+                $b = $w;
+            } else {
+                $p = $this->ssa->allocReg();
+                $out .= '  ' . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+                $fn = $k === 4 ? '__manticore_box_ptr' : ($k === 5 ? '__manticore_box_array' : '__manticore_box_object');
+                $out .= '  ' . $b . ' = call i64 @' . $fn . '(ptr ' . $p . ")\n";
+            }
+            if ($k >= 4) { $out .= '  call void @__mir_cell_retain(i64 ' . $b . ")\n"; }
+            $out .= '  store i64 ' . $b . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $done . "\n";
+        }
+        $out .= $done . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $out = $this->finishI64($out, $r);
+        $this->markCellOpaque($this->lastValue);
+        return $out;
+    }
+
+    /**
      * The value just emitted for a name argument, as a raw string pointer. A
      * property a reference retyped to a CELL (`ReflectionMethod::$name`, see
      * InferScans::scanRefCellProps) arrives boxed: `coerceToPtr` alone handed
@@ -8325,6 +8431,86 @@ trait EmitLlvmBuiltins
      * Static detection is not lost — the analyzer reports `undefined.constant`
      * for exactly this, and it runs closed-world over the whole source set.
      */
+    /**
+     * `Call to undefined method C::m()` / `Call to a member function m() on <type>`
+     * for an erased receiver, as ONE cold helper per method name: the get_class /
+     * get_debug_type select chains and the Error construction were spliced
+     * (~570 IR lines) into every erased call site.
+     */
+    private function biMemberCallError(array $args): string
+    {
+        $m = $this->reflLitStr($args[1]);
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $v = $this->lastValue;
+        $key = '__mir_mcerr|' . $m;
+        $sym = '@' . $this->mirHelperSym('__mir_mcerr_' . \dechex($this->fnvHash64($m)));
+        if (!isset($this->dynamicMethodHelpers[$key])) {
+            $this->dynamicMethodHelpers[$key] = '';
+            $oldSsa = $this->ssa;
+            $oldLocals = $this->locals;
+            $oldCf = $this->cf;
+            $oldArena = $this->arena;
+            $oldLast = $this->lastValue;
+            $oldLastType = $this->lastValueType;
+            $oldVdResult = $this->vdResult;
+            $oldVdArm = $this->vdArmList;
+            $oldVdArgc = $this->vdSiteArgc;
+            $oldSpread = $this->spreadTail;
+            $oldPad = $this->lastPadArgs;
+            $oldNeedsBacktrace = $this->rt->needsBacktrace;
+            $oldCellProv = $this->cellProv;
+            $oldCellSinkOrd = $this->cellSinkOrd;
+            $oldCellSinkFn = $this->cellSinkFnOverride;
+            $this->ssa = new \Compile\Mir\SsaBuilder();
+            $this->ssa->reset();
+            $this->resetCellGuardFrame();
+            $this->cellSinkFnOverride = \ltrim($sym, '@');
+            $this->locals = new \Compile\Mir\LocalSlots();
+            $this->cf = new \Compile\Mir\ControlFlow();
+            $this->arena = new \Compile\Mir\ArenaContext();
+            $this->spreadTail = null;
+            $this->lastPadArgs = '';
+            $slot = $this->ssa->allocReg();
+            $this->locals->slots['__mc_mce'] = $slot;
+            $body = 'define hidden i64 ' . $sym . "(i64 %v) noinline cold {\nentry:\n";
+            $body .= '  ' . $slot . " = alloca i64\n  store i64 %v, ptr " . $slot . "\n";
+            $cell = Type::cell();
+            $str = fn (string $x): Node => new \Compile\Mir\StringConst($x, Type::string_());
+            $t = fn (): Node => new \Compile\Mir\LoadLocal('__mc_mce', $cell);
+            $call = fn (string $fn, array $a, Type $ty): Node => new \Compile\Mir\Call($fn, $a, $ty);
+            $missing = new \Compile\Mir\Ternary($call('is_object', [$t()], Type::bool_()),
+                new \Compile\Mir\Concat(new \Compile\Mir\Concat($str('Call to undefined method '),
+                    $call('get_class', [$t()], Type::string_())), $str('::' . $m . '()')),
+                new \Compile\Mir\Concat($str('Call to a member function ' . $m . '() on '),
+                    $call('get_debug_type', [$t()], Type::string_())),
+                Type::string_());
+            $body .= $this->emitNode($call('__mir_throw_error', [$missing], $cell));
+            $body .= $this->coerceToI64();
+            $body .= '  ret i64 ' . $this->lastValue . "\n}\n\n";
+            $this->dynamicMethodHelpers[$key] = $body;
+            $this->ssa = $oldSsa;
+            $this->locals = $oldLocals;
+            $this->cf = $oldCf;
+            $this->arena = $oldArena;
+            $this->lastValue = $oldLast;
+            $this->lastValueType = $oldLastType;
+            $this->vdResult = $oldVdResult;
+            $this->vdArmList = $oldVdArm;
+            $this->vdSiteArgc = $oldVdArgc;
+            $this->spreadTail = $oldSpread;
+            $this->lastPadArgs = $oldPad;
+            $this->rt->needsBacktrace = $oldNeedsBacktrace;
+            $this->cellProv = $oldCellProv;
+            $this->cellSinkOrd = $oldCellSinkOrd;
+            $this->cellSinkFnOverride = $oldCellSinkFn;
+        }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $v . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
     private function biThrowError(array $args, string $cls = 'Error'): string
     {
         // The message is the ARGUMENT NODE, not a re-wrapped literal. It used to
@@ -9201,7 +9387,7 @@ trait EmitLlvmBuiltins
             // name equal to the target loses.
             $this->rt->needsStrcmp = true;
             $same = $this->ssa->allocReg();
-            $out .= '  ' . $same . ' = call i32 @strcasecmp(ptr ' . $subP
+            $out .= '  ' . $same . ' = call i32 @__mir_name_icmp(ptr ' . $subP
                   . ', ptr ' . $tgtP . ")\n";
             $isSame = $this->ssa->allocReg();
             $out .= '  ' . $isSame . ' = icmp eq i32 ' . $same . ", 0\n";
@@ -9596,7 +9782,7 @@ trait EmitLlvmBuiltins
         $out .= $endL . ":\n";
         $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load ptr, ptr ' . $res . "\n";
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_get_class') . "(i64 %gcf.cid) noinline optnone {\nentry:\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_get_class') . "(i64 %gcf.cid) noinline {\nentry:\n"
             . $out . '  ret ptr ' . $ld . "\n}\n\n";
     }
 
@@ -9605,12 +9791,10 @@ trait EmitLlvmBuiltins
     private function emitObjectVarsFn(bool $mangle = false): string
     {
         $body = $this->emitObjectVarsInline('%gov.obj', $mangle);
-        // `optnone` on top: this walk is a REFLECTIVE fallback (an erased receiver),
-        // cold by construction, and at 1.2 MB it was the single most expensive
-        // function in the whole backend — 7.22 s of clang's 136.7 s of
-        // per-function optimization (5.3%), measured with `-ftime-trace`.
-        // Optimizing a cold dispatcher buys nothing at runtime.
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . "(ptr %gov.obj) noinline optnone {\n"
+        // Not `optnone`, for all it costs clang: unoptimized, the switch below is a chain of
+        // compares over every class, and Eloquent's `(array) $row` on a stdClass per fetched
+        // row walked all of it (5% of a request).
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . "(ptr %gov.obj) noinline {\n"
             . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 

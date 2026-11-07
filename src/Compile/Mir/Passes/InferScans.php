@@ -107,6 +107,8 @@ trait InferScans
         $cur = $cd->propertyTypes[$prop] ?? null;
         if ($cur !== null && $cur->exactString() === $t->exactString()) { return false; }
         $cd->propertyTypes[$prop] = $t;
+        $this->retypedProps[$prop] = true;
+        $this->rescanProps[$prop] = true;
         $this->setInheritedPropType($cd, $prop, $t);
         if ($this->ctx !== null) { $this->ctx->changes->addProp($prop); }
         return true;
@@ -671,7 +673,8 @@ trait InferScans
         $observed = [];   // global cell symbol → element Type (cell when mixed)
         $unusable = [];   // global cell symbol → true
         foreach ($module->functions as $fn) {
-            if (!$this->bodyHas($fn, 'se:' . Node::KIND_STATIC_PROP)) { continue; }
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_STATIC_PROP)
+                && !$this->bodyHas($fn, 'se:' . Node::KIND_ARRAY_ACCESS)) { continue; }
             $this->collectStaticPropElemStores($fn->body, $observed, $unusable);
         }
         /** @var array<string, Type> $targets */
@@ -689,9 +692,10 @@ trait InferScans
         // ONE walk for every retyped slot — a walk per slot was the module
         // times the static properties that have stores.
         $changed = false;
+        $this->rescanTouched = [];
         foreach ($module->functions as $fn) {
             if (!$this->bodyHas($fn, Node::KIND_STATIC_PROP)) { continue; }
-            if ($this->retypeStaticPropNodes($fn->body, $targets)) { $changed = true; }
+            if ($this->retypeStaticPropNodes($fn->body, $targets)) { $changed = true; $this->rescanTouched[$fn->name] = true; }
         }
         if ($changed && $this->ctx !== null) {
             foreach ($targets as $g => $unused) { $this->ctx->changes->addProp($g); }
@@ -714,6 +718,17 @@ trait InferScans
             $cur = $n->type;
             if ($this->isErasedArrayType($cur)) {
                 $keyT = $cur->isArray() ? $cur->key : null;
+                $n->type = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
+                $changed = true;
+            }
+            // A docblock that lies: Laravel's `@var array<string, string> $snakeCache`
+            // is written `$snakeCache[$k][$j] = v` — what the program STORES says
+            // the element is an array, and a scalar element type would index a
+            // string. Writes that prove a cell element win over a scalar claim.
+            elseif ($elem->kind === Type::KIND_CELL && $cur->isArray() && $cur->element !== null
+                && ($cur->element->kind === Type::KIND_STRING || $cur->element->kind === Type::KIND_INT
+                    || $cur->element->kind === Type::KIND_FLOAT || $cur->element->kind === Type::KIND_BOOL)) {
+                $keyT = $cur->key;
                 $n->type = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
                 $changed = true;
             }
@@ -987,6 +1002,29 @@ trait InferScans
                 }
             }
         }
+        // An LSB copy (`Owner__m__lsbScope`) is reached through the same dispatcher as its
+        // original, never by name, so no call site ever observes it. It must still end up
+        // speaking the original's parameter ABI: the dispatcher hands every arm the one argument
+        // list, and a copy left at its declared `vec[obj]` read the original's `vec[cell]` as raw
+        // object pointers.
+        foreach ($module->functions as $cfn) {
+            $lp = \strpos($cfn->name, '__lsb');
+            if ($lp === false || $lp === 0) { continue; }
+            $baseName = \substr($cfn->name, 0, $lp);
+            $ci = 0;
+            foreach ($cfn->params as $cp) {
+                $bk = $baseName . '#' . (string)$ci;
+                $ck = $cfn->name . '#' . (string)$ci;
+                $ci = $ci + 1;
+                if (!isset($cand[$bk]) || !isset($cand[$ck])) { continue; }
+                if (isset($observed[$bk])) { $observed[$ck] = $observed[$bk]; }
+                if (isset($conflict[$bk])) { $conflict[$ck] = true; }
+                if (isset($assocKey[$bk])) { $assocKey[$ck] = $assocKey[$bk]; }
+                if (isset($shape[$bk])) { $shape[$ck] = $shape[$bk]; }
+                if (isset($sawCell[$bk])) { $sawCell[$ck] = true; }
+                if (isset($erasedArg[$bk])) { $erasedArg[$ck] = true; }
+            }
+        }
         $changed = false;
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
@@ -1140,6 +1178,8 @@ trait InferScans
      */
     private function scanDocListKeyPromote(Module $module): bool
     {
+        $this->rescanTouched = [];
+        $this->rescanProps = [];
         $cand = [];                      // "fn#idx" → true
         foreach ($module->functions as $fn) {
             if ($fn->isExtern || $fn->isPrelude) { continue; }
@@ -1197,6 +1237,7 @@ trait InferScans
                 $newT = Type::assoc(Type::cell(), $elem === null ? Type::unknown() : $elem);
                 if ($param->type->exactString() === $newT->exactString()) { continue; }
                 $param->type = $newT;
+                $this->rescanTouched[$fn->name] = true;
                 $changed = true;
             }
         }
@@ -1209,7 +1250,7 @@ trait InferScans
                 if ($this->setPropType($cd, $prop, Type::assoc(
                     Type::cell(),
                     $elem === null ? Type::unknown() : $elem,
-                ))) { $changed = true; }
+                ))) { $this->rescanProps[$prop] = true; $changed = true; }
             }
         }
         return $changed;
@@ -1726,6 +1767,7 @@ trait InferScans
         $byName = [];
         foreach ($module->functions as $f) { $byName[$f->name] = $f; }
         $changed = false;
+        $this->rescanTouched = [];
         foreach ($module->functions as $fn) {
             // A prelude body is linkonce_odr and shared across modules — never
             // specialize one from this module's capture sites.
@@ -1761,6 +1803,8 @@ trait InferScans
                     && !isset($this->byRefCaptureCellLocals[$clName][$pn])) {
                     $this->byRefCaptureCellLocals[$clName][$pn] = true;
                     $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                 }
                 if ($this->byRefCaptureDisagrees($cl, $pn, $siteKind)
                     || $this->byRefCaptureDisagrees($fn, $local, $siteKind)) {
@@ -1768,10 +1812,14 @@ trait InferScans
                         $this->byRefCaptureCellLocals[$fn->name][$local] = true;
                         $this->boxParamAtEntry($fn, $local);
                         $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                     }
                     if (!isset($this->byRefCaptureCellLocals[$clName][$pn])) {
                         $this->byRefCaptureCellLocals[$clName][$pn] = true;
                         $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                     }
                     continue;
                 }
@@ -1786,11 +1834,15 @@ trait InferScans
                     $this->forcedCellElemLocals[$fn->name][$local] = true;
                     $this->byRefCaptureElemLocals[$fn->name][$local] = true;
                     $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                 }
                 if (!isset($this->forcedCellElemLocals[$clName][$pn])) {
                     $this->forcedCellElemLocals[$clName][$pn] = true;
                     $this->byRefCaptureElemLocals[$clName][$pn] = true;
                     $changed = true;
+                    $this->rescanTouched[$fn->name] = true;
+                    $this->rescanTouched[$clName] = true;
                 }
             }
         }

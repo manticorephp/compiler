@@ -1,0 +1,42 @@
+A->m0: 'A.m0(1)'
+A->m1: 'A.m1(1,d)'
+A->m1: 'A.m1(1,2)'
+A->m2: 'A.m2'
+A->m3: 3
+A->m3: 'ArgumentCountError'
+A->m4: 'A.m4:1,2,3'
+A->m5: 42
+A->m19: 'A.m19(z)'
+A->nope: 'Error: Call to undefined method A::nope()'
+B->m0: 'B.m0(1)'
+B->m1: 'A.m1(1,d)'
+B->m1: 'A.m1(1,2)'
+B->m2: 'B.m2'
+B->m3: 3
+B->m3: 'ArgumentCountError'
+B->m4: 'A.m4:1,2,3'
+B->m5: 42
+B->m19: 'A.m19(z)'
+B->nope: 'Error: Call to undefined method B::nope()'
+C->m0: 'C.m0(1)'
+C->m1: 'C.m1(1,cd)'
+C->m1: 'C.m1(1,2)'
+C->m2: 'B.m2'
+C->m3: 3
+C->m3: 'ArgumentCountError'
+C->m4: 'A.m4:1,2,3'
+C->m5: 42
+C->m19: 'A.m19(z)'
+C->nope: 'Error: Call to undefined method C::nope()'
+M->m0: 'M.m0(1)'
+M->m1: 'M.__call(m1,1)'
+M->m1: 'M.__call(m1,1,2)'
+M->m2: 'M.__call(m2,)'
+M->m3: 'M.__call(m3,1,2)'
+M->m3: 'M.__call(m3,1)'
+M->m4: 'M.__call(m4,1,2,3)'
+M->m5: 'M.__call(m5,21)'
+M->m19: 'M.__call(m19,z)'
+M->nope: 'M.__call(nope,1)'
+A.m0(5)
+C.m0(5)

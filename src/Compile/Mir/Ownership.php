@@ -1693,6 +1693,8 @@ final class Ownership
         if ($tk === Type::KIND_CLOSURE || ($tk === Type::KIND_OBJ && self::isClosureClass($cls))) { return true; }
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
             $fk = $fallback->kind;
+            // An erased value stored into a closure-typed slot co-owns the env, as a closure does.
+            if ($fk === Type::KIND_CLOSURE) { return true; }
             if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY || $fk === Type::KIND_STRING) {
                 $tk = $fk;
                 $cls = $fallback->class ?? '';

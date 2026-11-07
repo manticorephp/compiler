@@ -125,7 +125,8 @@ trait LowerFns
                 variadic: $isVariadic,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
-            $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $fp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $this->isBareArrayHint($effHint) || $pt->isArray();
+            $fp->docOnly = ($p->typeHint === null || $p->typeHint === '') && !($p->variadic ?? false) && $pt->isArray();
             $fp->refPack = $this->paramIsRefPack($p);
             // A VARIADIC pack is genuinely 0..n — its vec is the compiler's own
             // and its keys are not in question.
@@ -214,7 +215,7 @@ trait LowerFns
         $fn = new FunctionDef(
             name: $decl->name,
             params: $params,
-            returnType: $this->lowerTypeHint($this->effectiveHint(
+            returnType: $this->lowerTypeHint($this->effectiveReturnHint(
                 $decl->returnType,
                 $this->docTagType($decl->docComment, '@return', ''),
             )),
@@ -297,7 +298,7 @@ trait LowerFns
         $ext = new FunctionDef(
             name: $decl->name,
             params: $params,
-            returnType: $this->lowerTypeHint($this->effectiveHint(
+            returnType: $this->lowerTypeHint($this->effectiveReturnHint(
                 $decl->returnType,
                 $this->docTagType($decl->docComment, '@return', ''),
             )),
@@ -597,6 +598,7 @@ trait LowerFns
         if ($this->currentLowerClass === '') { $this->module->unscopedClosures[$fnName] = true; }
         if ($this->includeReflection) {
             $this->module->reflClosureMeta[$fnName] = $this->closureMethodMeta($fnName, $declParams, $retHint);
+            $this->module->closureCapNames[$fnName] = $capNames;
             $this->queueClosureFactories($fnName, $declParams);
         }
         // Record whether capture slot 0 is `$this` — Closure::bind/->bindTo/
@@ -1100,7 +1102,7 @@ trait LowerFns
             foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }
             return $out;
         }
-        if ($k === 'DynamicStaticProp') { return $this->collectVars($e->nameExpr); }
+        if ($k === 'DynamicStaticProp' || $k === 'VarVar') { return $this->collectVars($e->nameExpr); }
         if ($k === 'DynamicStaticMethodCall') {
             $out = $this->collectVars($e->nameExpr);
             foreach ($e->args as $a) { $out = \array_merge($out, $this->collectVars($a)); }

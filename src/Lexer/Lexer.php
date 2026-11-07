@@ -603,9 +603,17 @@ final class Lexer
         // strict-equal against a string literal would try to deref
         // that integer as a ptr. ord() round-trips cleanly here.
         $quoteOrd = \ord($quote);
-        $bs = \ord('\\');
-        $closed = false;
         $this->advance(); // opening quote
+        $closed = $this->skipQuotedBody($quoteOrd);
+        if (!$closed && $this->tolerant === 1) { $this->unterminated('string', $line, $col); }
+        $lex = substr($this->src, $start, $this->pos - $start);
+        $this->tokens[] = $this->token(TokenKind::StringLiteral, $lex, $line, $col);
+    }
+
+    /** Advance past a quoted body (opening quote consumed). A `{$…}` in a `"` string may hold strings of its own. */
+    private function skipQuotedBody(int $quoteOrd): bool
+    {
+        $bs = \ord('\\');
         while ($this->pos < $this->len) {
             $c = \ord($this->src[$this->pos]);
             if ($c === $bs) {
@@ -617,8 +625,7 @@ final class Lexer
             }
             if ($c === $quoteOrd) {
                 $this->advance();
-                $closed = true;
-                break;
+                return true;
             }
             if ($quoteOrd === 34 && ($c === 123 || $c === 36) && $this->pos + 1 < $this->len
                 && \ord($this->src[$this->pos + 1]) === ($c === 123 ? 36 : 123)) {
@@ -627,9 +634,7 @@ final class Lexer
             }
             $this->advance();
         }
-        if (!$closed && $this->tolerant === 1) { $this->unterminated('string', $line, $col); }
-        $lex = substr($this->src, $start, $this->pos - $start);
-        $this->tokens[] = $this->token(TokenKind::StringLiteral, $lex, $line, $col);
+        return false;
     }
 
     /**

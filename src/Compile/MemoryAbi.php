@@ -661,7 +661,22 @@ final class MemoryAbi
     /** `ptr` — a METHOD row's declaring class name (the class that wrote the
      *  body, not the one reached through); ReflectionMethod::$class reads it. */
     public const RMETA_ROW_DECLCLASS_OFFSET = 72;
-    public const RMETA_ROW_SIZE = 80;
+    /** `ptr` — a CLOSURE row's capture table `{ i64 n, [n x { ptr name, i64 kind }] }`
+     *  (null when it captures nothing, or on any other row);
+     *  ReflectionFunctionAbstract::getClosureUsedVariables() reads it. Kind codes:
+     *  {@see RMETA_CAP_*}. */
+    public const RMETA_ROW_CAPS_OFFSET = 80;
+    public const RMETA_CAP_UNSUPPORTED = 0;
+    public const RMETA_CAP_INT = 1;
+    public const RMETA_CAP_FLOAT = 2;
+    public const RMETA_CAP_BOOL = 3;
+    public const RMETA_CAP_STRING = 4;
+    public const RMETA_CAP_ARRAY = 5;
+    public const RMETA_CAP_OBJECT = 6;
+    public const RMETA_CAP_CELL = 7;
+    /** One capture-table entry: `{ ptr name, i64 kind }`. */
+    public const RMETA_CAP_ENTRY_SIZE = 16;
+    public const RMETA_ROW_SIZE = 88;
 
     /** One parameter entry of a method's param table:
      *  `{ ptr name, ptr type, i64 flags, ptr attrs, i64 nattrs, ptr default_fn }`.
