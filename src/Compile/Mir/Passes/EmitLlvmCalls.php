@@ -1964,13 +1964,24 @@ trait EmitLlvmCalls
     private function emitErasedInvoke(Invoke_ $n): string
     {
         $out = $this->emitNode($n->callee);
+        // The `[$c, $m]` of `$c::$m()` has no other owner. Only an array: a generator keeps borrowing
+        // the closure that made it, and an erased result does not say whether it is one.
+        $calleeFlavor = $n->callee->type->isArray() ? $this->freshRcArgFlavor($n->callee) : '';
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         /** @var array<string, string> $owned */
         $owned = [];
         $n = $this->hoistFreshInvokeArgs($n, $out, $owned);
         $out .= $this->emitErasedInvokeArms($n, $raw);
-        return $out . $this->releaseHoistedArgs($owned);
+        $out .= $this->releaseHoistedArgs($owned);
+        if ($calleeFlavor !== '' && \str_starts_with($raw, '%')) {
+            $resReg = $this->lastValue;
+            $resTy = $this->lastValueType;
+            $out .= $this->rcReleaseReg($raw, $calleeFlavor);
+            $this->lastValue = $resReg;
+            $this->lastValueType = $resTy;
+        }
+        return $out;
     }
 
     /**

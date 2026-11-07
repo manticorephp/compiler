@@ -505,7 +505,7 @@ trait EmitLlvmBuiltins
         if ($name === 'array_keys') {
             return \count($args) >= 2 ? $this->biArrayKeysSearch($args) : $this->biArrayKeys($args);
         }
-        if ($name === 'debug_backtrace')              { return $this->biDebugBacktrace(); }
+        if ($name === 'debug_backtrace')              { return $this->biDebugBacktrace($args); }
         if ($name === 'array_first' && \count($args) === 1)     { return $this->biArrayEndpoint($args, false, false); }
         if ($name === 'array_last' && \count($args) === 1)      { return $this->biArrayEndpoint($args, true, false); }
         if ($name === 'array_is_list' && \count($args) === 1) { return $this->biArrayIsList($args); }
@@ -1954,12 +1954,22 @@ trait EmitLlvmBuiltins
      * V1 returns vec[string] of names (not PHP's assoc frames); count() and
      * `[0]` work. Reads @__mir_bt_depth / @__mir_bt_name filled by btPush.
      */
-    private function biDebugBacktrace(): string
+    /** @param Node[] $args */
+    private function biDebugBacktrace(array $args): string
     {
         // Build the raw name + line vecs (innermost first), then hand them to
         // the prelude frame builder so the result matches getTrace()/PHP:
         // a list of {file, line, function[, class, type]} assoc frames.
-        $out = $this->emitBtVec('@__mir_bt_name');
+        $out = '';
+        $limit = '0';
+        foreach ($args as $i => $a) {
+            $out .= $this->emitNode($a);
+            if ($i !== 1) { continue; }
+            if ($a->type->kind === Type::KIND_CELL) { $out .= $this->coerceToI64() . $this->unboxCellToType(Type::int_()); }
+            $out .= $this->coerceToI64();
+            $limit = $this->lastValue;
+        }
+        $out .= $this->emitBtVec('@__mir_bt_name');
         $names = $this->lastValue;
         $out .= $this->emitBtVec('@__mir_bt_line');
         $lines = $this->lastValue;
@@ -1968,7 +1978,9 @@ trait EmitLlvmBuiltins
               . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore___mir_bt_frames(i64 '
-              . $names . ', i64 ' . $lines . ', i64 ' . $fp . ")\n";
+              . $names . ', i64 ' . $lines . ', i64 ' . $fp . ', i64 ' . $limit . ")\n";
+        // The frames copied what they read, and the vecs' elements are uncounted words.
+        $out .= $this->rcReleaseReg($names, 'vecbuf') . $this->rcReleaseReg($lines, 'vecbuf');
         return $this->finishI64($out, $r);
     }
 

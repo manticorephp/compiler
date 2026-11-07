@@ -1650,6 +1650,7 @@ trait LowerPrelude
             // round modes
             'PHP_ROUND_HALF_UP' => 1, 'PHP_ROUND_HALF_DOWN' => 2,
             'PHP_ROUND_HALF_EVEN' => 3, 'PHP_ROUND_HALF_ODD' => 4,
+            'DEBUG_BACKTRACE_PROVIDE_OBJECT' => 1, 'DEBUG_BACKTRACE_IGNORE_ARGS' => 2,
             // error reporting levels
             'E_ERROR' => 1, 'E_WARNING' => 2, 'E_PARSE' => 4, 'E_NOTICE' => 8,
             'E_CORE_ERROR' => 16, 'E_CORE_WARNING' => 32, 'E_COMPILE_ERROR' => 64,
