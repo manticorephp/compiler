@@ -38,7 +38,7 @@ $n = new Post(5, 'normal'); echo $n->title(), $n->id(), "\n";
 function typed(Post $p): array { return $p->tags; }
 $h = $rc->newLazyGhost(function (Post $o) { $o->setTitle('in init'); });
 try { echo json_encode(typed($h)), "\n"; } catch (Error $x) { echo $x->getMessage(), "\n"; }
-$i = $make(20); echo json_encode($i->tags), json_encode(isset($make(21)->tags)), "\n";
+$i = $make(20); $i2 = $make(21); echo json_encode($i->tags), json_encode(isset($i2->tags)), "\n";
 class Q { private ?string $v = 'dflt'; public string $w; public function v(): string { return $this->v ?? 'none'; } public function has(): bool { return isset($this->w); } }
 $qc = new ReflectionClass(Q::class);
 $q1 = $qc->newLazyGhost(function (Q $o) use (&$log) { $log[] = 'q1'; $o->w = 'set'; }); echo json_encode([$q1->has(), $log[count($log) - 1]]), "\n";

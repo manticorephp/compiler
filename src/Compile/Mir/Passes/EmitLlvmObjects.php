@@ -7437,6 +7437,11 @@ trait EmitLlvmObjects
                 $out .= '  br i1 ' . $isnull . ', label %' . $lNull
                       . ', label %' . $lRead . "\n";
                 $out .= $lRead . ":\n";
+                // A ghost answers for its initialized self: before the slot is read.
+                if ($t->kind === Node::KIND_PROPERTY_ACCESS) {
+                    $out .= $this->emitLazyStoreGate($objPtr, $this->slotHolder($t->object, $t->property), $t->property,
+                        $this->propertyOffsetOrNull($t->object, $t->property) ?? -1, '');
+                }
                 $out .= $this->emitNode($t);
                 $out .= $this->coerceToI64();
                 $rv = $this->lastValue;
@@ -7455,8 +7460,6 @@ trait EmitLlvmObjects
                     $ih = $this->slotHolder($t->object, $t->property);
                     $ini = '';
                     if ($ih !== null && $ih->initChecked($t->property)) {
-                        $out .= $this->emitLazyStoreGate($objPtr, $ih, $t->property,
-                            $this->propertyOffsetOrNull($t->object, $t->property) ?? -1, '');
                         $ini = $this->emitInitTest($objPtr, $ih, $t->property,
                             $this->propertyOffsetOrNull($t->object, $t->property) ?? -1, '', $out);
                     }
