@@ -111,6 +111,7 @@ final class NarrowReturns implements Pass
         // right after it. The late one must. A module scan in a closing run can still
         // retype a property, and stopping early leaves it narrower than its stores.
         $closeOnFull = !$this->concreteOnly;
+        $lastRunMoved = false;
         $max = \count($module->functions) + 2;
         while ($iters < $max) {
             $iters = $iters + 1;
@@ -143,7 +144,10 @@ final class NarrowReturns implements Pass
                 if ($lastLight && $this->analysis === null) {
                     if (!$closeOnFull) { break; }
                 } elseif (!$lastLight) {
-                    $mustInfer = $this->needsFullInfer && !$this->moduleTyped;
+                    // Nothing narrowing is not yet a fixpoint: a scan in the last run
+                    // can have changed facts after its walk. The last full run has to
+                    // have moved nothing.
+                    $mustInfer = $this->needsFullInfer && (!$this->moduleTyped || $lastRunMoved);
                     if (!$mustInfer) {
                         if (!$this->targetedInfer || $this->analysis === null || $sawFull) { break; }
                         $closing = true;
@@ -191,7 +195,9 @@ final class NarrowReturns implements Pass
             // inference moves.
             if ($this->analysis !== null) { $this->analysis->beginRound(); }
             $infer = new InferTypes($scope, $this->analysis);
+            $typesBefore = $this->needsFullInfer ? $infer->fingerprintAll($module) : [];
             $infer->run($module);
+            $lastRunMoved = $this->needsFullInfer && $infer->fingerprintAll($module) !== $typesBefore;
             $this->moduleTyped = $scope === null;
             $lastLight = false;
             $light = ($scope === null && $this->analysis === null) ? $infer : null;
