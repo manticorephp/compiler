@@ -67,3 +67,13 @@ interface Serializable
 
     public function unserialize(string $data);
 }
+
+function is_iterable(mixed $value): bool
+{
+    return \is_array($value) || $value instanceof \Traversable;
+}
+
+function is_countable(mixed $value): bool
+{
+    return \is_array($value) || $value instanceof \Countable;
+}

@@ -1548,11 +1548,12 @@ final class UnifiedArrayRuntime
 
         $bi = $body->load(Type::i64(), $iSlot);
         // A PACKED source has implicit int keys; a HASHED one carries the kind
-        // per entry.
-        $kind = $body->select($bhashed,
-            $body->load(Type::i64(), $this->entryAddr($body, $b, $bi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET)),
-            Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_INT));
-        $body->brIf($body->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $strk, $intk);
+        // per entry — read only then: a packed slot is 8 bytes, so the entry
+        // stride walks off the end of the buffer.
+        $bkind = $fn->block('bkind');
+        $body->brIf($bhashed, $bkind, $intk);
+        $kind = $bkind->load(Type::i64(), $this->entryAddr($bkind, $b, $bi, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $bkind->brIf($bkind->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $strk, $intk);
 
         // ── string key ──
         $sres = $strk->load(Type::ptr(), $resSlot);
