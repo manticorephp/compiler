@@ -5400,9 +5400,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $narrowConcrete = new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext, $worklistMode === 'on');
         $module = $narrowConcrete->run($module);
         \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
-        // A narrowing pass that closed on a full inference leaves nothing for a
-        // second one to move: the module is the one that run just typed.
-        if (!$narrowConcrete->endedOnFullInfer) {
+        // A narrowing pass that ran a full inference leaves nothing for a second
+        // one to type: InferTypes #3 re-infers after InlineClosures anyway.
+        if (!$narrowConcrete->moduleTyped) {
             $statT = \Compile\Stats::begin('InferTypes #2');
             $infer2 = new \Compile\Mir\Passes\InferTypes(
                 ($analysisContext !== null && $worklistMode === 'on')
@@ -5439,6 +5439,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $mono = new \Compile\Mir\Passes\Monomorphize($analysisContext);
         $module = $mono->run($module);
         \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
+        $monoLight = $mono->lightRoundRan;
         $mono = null;
         \Manticore\Allocator::release('after-monomorphize');
         // Fuse implode(explode()) split-join round-trips into one native
@@ -5511,6 +5512,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         \Manticore\Allocator::release('after-typecheck');
         $statT = \Compile\Stats::begin('NarrowReturns (full)');
         $narrow = new \Compile\Mir\Passes\NarrowReturns(false, $analysisContext, $worklistMode === 'on');
+        $narrow->needsFullInfer = $monoLight;
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
         $narrow = null;
@@ -5614,6 +5616,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $module = $verify->run($module);
         \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
         $verify = null;
+        if (\Compile\Stats::reporting()) { \Compile\Stats::line(\Compile\Mir\PrecisionCensus::line($module)); }
         \Manticore\Allocator::release('before-emit');
         if ($analysisContext !== null) {
             $finalScope = $analysisContext->scope();

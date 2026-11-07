@@ -60,11 +60,17 @@ final class NarrowReturns implements Pass
      *   narrows every agreeing array return.
      */
     /**
-     * The pass ended on a FULL inference over the module exactly as it leaves
-     * it: the last round narrowed nothing, so nothing moved after that run. A
-     * caller about to re-infer the unchanged module can skip it.
+     * A FULL inference ran during this pass, and only light rounds followed it:
+     * each of those re-inferred the callers of what it narrowed. A caller about
+     * to re-infer the module only to type it can skip that.
      */
-    public bool $endedOnFullInfer = false;
+    public bool $moduleTyped = false;
+
+    /**
+     * The incoming module has bodies no full inference has scanned (a light
+     * Monomorphize round), so the pass runs one even if nothing narrows.
+     */
+    public bool $needsFullInfer = false;
 
     public function __construct(private bool $concreteOnly = false, private ?\Compile\Mir\AnalysisContext $analysis = null, private bool $targetedInfer = false) {}
 
@@ -101,6 +107,11 @@ final class NarrowReturns implements Pass
         // exactly as before — instead of a full inference per narrowed chain link.
         $light = null;
         $lastLight = false;
+        // Full inferences that may re-open the fixpoint after light rounds settle.
+        // What one finds is a handful of getters (29 of ~2,000 on Laravel), so
+        // more of them cost 15-30 s each for nothing. The early pass needs none:
+        // the pipeline re-infers right after it.
+        $closes = $this->concreteOnly ? 0 : 1;
         $max = \count($module->functions) + 2;
         while ($iters < $max) {
             $iters = $iters + 1;
@@ -130,10 +141,16 @@ final class NarrowReturns implements Pass
                 // full inference and let the loop have another go; a second
                 // no-change round after a FULL inference is the real fixpoint.
                 // A light round is scoped the same way, so it closes the same way.
-                if (!$lastLight) {
-                    if (!$this->targetedInfer || $this->analysis === null || $sawFull) { break; }
-                    $closing = true;
-                    $sawFull = true;
+                if ($lastLight && $this->analysis === null) {
+                    if ($closes === 0) { break; }
+                    $closes = $closes - 1;
+                } elseif (!$lastLight) {
+                    $mustInfer = $this->needsFullInfer && !$this->moduleTyped;
+                    if (!$mustInfer) {
+                        if (!$this->targetedInfer || $this->analysis === null || $sawFull) { break; }
+                        $closing = true;
+                        $sawFull = true;
+                    }
                 }
             } else {
                 $sawFull = false;
@@ -142,7 +159,6 @@ final class NarrowReturns implements Pass
                     $inferT = \Compile\Stats::begin($stage);
                     $light->reinferAfterNarrow($module, $narrowedNames);
                     $lastLight = true;
-                    $this->endedOnFullInfer = false;
                     \Compile\Stats::step($stage, $inferT, -1, -1);
                     continue;
                 }
@@ -178,7 +194,7 @@ final class NarrowReturns implements Pass
             if ($this->analysis !== null) { $this->analysis->beginRound(); }
             $infer = new InferTypes($scope, $this->analysis);
             $infer->run($module);
-            $this->endedOnFullInfer = $scope === null;
+            $this->moduleTyped = $scope === null;
             $lastLight = false;
             $light = ($scope === null && $this->analysis === null) ? $infer : null;
             // THE HARNESS. `MANTICORE_INFER_DIFF=1` asks the one question three
