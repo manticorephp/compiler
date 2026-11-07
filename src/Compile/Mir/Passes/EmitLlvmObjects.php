@@ -9893,9 +9893,13 @@ trait EmitLlvmObjects
             $impure = false;
             foreach ($mc->args as $a) { if (!$this->indirectOperandIsPure($a)) { $impure = true; } }
             if ($impure) {
+                $release = '';
                 foreach ($nodes as $nd) {
                     if ($this->indirectOperandIsPure($nd)) { continue; }
+                    $litMark = \count($this->litElemDropRegs);
                     $pre .= $this->emitNode($nd);
+                    $pre .= $this->preEvalTempOwner($nd, $litMark);
+                    $release = $this->preEvalRelease . $release;
                     $this->preEvalNodes[] = $nd;
                     $this->preEvalRegs[] = $this->lastValue;
                     $this->preEvalTypes[] = $this->lastValueType;
@@ -9906,10 +9910,50 @@ trait EmitLlvmObjects
                 $this->popPreEval($mark);
                 $this->lastValue = $rv;
                 $this->lastValueType = $rt;
-                return $pre . $body;
+                return $pre . $body . $release;
             }
         }
         return $this->emitMethodCallInnerBody($mc);
+    }
+
+    private string $preEvalRelease = '';
+
+    /**
+     * A pre-evaluated node reads as BORROWED to every release predicate, so the
+     * site that pre-evaluates a fresh temp owns its +1. Asked BEFORE the node is
+     * registered, while the predicates still answer for it: left in
+     * {@see $preEvalRelease} for after the call. Unreleased, `(new
+     * Collection($p))->contains(fn …)` stranded the receiver, the closure and
+     * everything the closure captured, once per call.
+     */
+    private function preEvalTempOwner(Node $nd, int $litMark): string
+    {
+        $this->preEvalRelease = '';
+        if ($this->isFreshStringTemp($nd)) {
+            $out = $this->coerceToPtr();
+            $this->preEvalRelease = $this->freeStrTemp($nd, $this->lastValue);
+            return $out;
+        }
+        $flavor = $this->freshRcArgFlavor($nd);
+        $out = '';
+        $regs = [];
+        $flavs = [];
+        $owned = false;
+        if ($flavor !== '') {
+            $out = $this->coerceToI64();
+            $owned = \str_starts_with($this->lastValue, '%');
+            if ($owned) {
+                $regs[] = $this->lastValue;
+                $flavs[] = $flavor;
+            }
+        }
+        $this->takeLitElemDrops($litMark, $owned, $regs, $flavs, $owned ? $this->lastValue : '');
+        $i = 0;
+        foreach ($regs as $r) {
+            $this->preEvalRelease .= $this->rcReleaseReg($r, $flavs[$i]);
+            $i = $i + 1;
+        }
+        return $out;
     }
 
     /** Does some class that may answer `$mc` read `func_get_args()` with fewer parameters than the call passes? */
