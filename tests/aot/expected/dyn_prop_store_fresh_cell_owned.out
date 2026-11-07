@@ -1,0 +1,15 @@
+kept borrow
+drop borrow
+== t2
+int(2)
+thru
+drop thru
+int(3)
+== t4
+xyyyyy
+== t6
+cloned a
+drop a
+drop b
+== t8
+flat

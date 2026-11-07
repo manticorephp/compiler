@@ -2561,7 +2561,9 @@ trait EmitLlvmObjects
         if ($k === Type::KIND_CELL || $k === Type::KIND_UNKNOWN) {
             $out .= $this->coerceToI64();
             $raw = $this->lastValue;
-            $out .= $this->byRefValueCopyRetainIr($raw);
+            // A fresh cell's +1 moves into the bag; only a borrow needs a count of its own.
+            // `$o->$k = $stmt->value($i)` stranded every column of a PDO::FETCH_OBJ row.
+            if (!$this->isFreshCellTemp($value)) { $out .= $this->byRefValueCopyRetainIr($raw); }
             $this->lastValue = $raw;
             $this->lastValueType = 'i64';
         } elseif ($k === Type::KIND_OBJ || $k === Type::KIND_ARRAY
