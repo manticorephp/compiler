@@ -1420,6 +1420,14 @@ trait EmitLlvmModule
      * `$cmp` is the member comparison: php matches a METHOD name
      * case-insensitively and a PROPERTY name exactly.
      */
+    /** {@see RuntimeLibrary::nameIcmp}, once per module. */
+    private function nameIcmpFn(): string
+    {
+        if ($this->nameIcmpEmitted) { return ''; }
+        $this->nameIcmpEmitted = true;
+        return \Compile\Mir\RuntimeLibrary::nameIcmp();
+    }
+
     /**
      * `__mir_isa_dyn_m<token>(cid, name, strict)`: is an object of class id `cid` an
      * instance of the class / interface / enum NAMED `name`? One case-insensitive
@@ -1440,7 +1448,11 @@ trait EmitLlvmModule
         $out .= '@__mir_isd_ids = internal constant [' . (string)$lm . ' x i64] [' . ($m > 0 ? $ids : 'i64 -1') . "]\n";
         // Named per MODULE: the preamble's bodies are linkonce_odr, and this one
         // reads this module's own tables.
-        $out .= 'define i64 @' . $this->mirHelperSym('__mir_isa_dyn') . "(i64 %cid, ptr %name0, i64 %strict) {\n";
+        // The row of a runtime class name, -1 for none: php resolves it case-insensitively and
+        // skips a leading `\`. ASCII folding, not libc's locale-aware strcasecmp.
+        $find = '@' . $this->mirHelperSym('__mir_isd_find');
+        $out .= $this->nameIcmpFn();
+        $out .= 'define i64 ' . $find . "(ptr %name0) {\n";
         $out .= "entry:\n";
         $out .= "  %isnull = icmp eq ptr %name0, null\n";
         $out .= "  br i1 %isnull, label %miss, label %strip\n";
@@ -1460,15 +1472,33 @@ trait EmitLlvmModule
         $out .= "  %i = lshr i64 %bsum, 1\n";
         $out .= '  %np = getelementptr inbounds [' . (string)$ln . " x ptr], ptr @__mir_isd_names, i64 0, i64 %i\n";
         $out .= "  %cand = load ptr, ptr %np\n";
-        $out .= "  %c = call i32 @strcasecmp(ptr %name, ptr %cand)\n";
+        $out .= "  %c = call i32 @__mir_name_icmp(ptr %name, ptr %cand)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
-        $out .= "  br i1 %eq, label %found, label %next\n";
+        $out .= "  br i1 %eq, label %hit, label %next\n";
         $out .= "next:\n";
         $out .= "  %blt = icmp slt i32 %c, 0\n";
         $out .= "  %i1 = add i64 %i, 1\n";
         $out .= "  %bhi2 = select i1 %blt, i64 %i, i64 %bhi\n";
         $out .= "  %blo2 = select i1 %blt, i64 %blo, i64 %i1\n";
         $out .= "  br label %loop\n";
+        $out .= "hit:\n  ret i64 %i\n";
+        $out .= "miss:\n  ret i64 -1\n}\n";
+        // The declared spelling of a runtime class name, null when no class has it: what `new $name` needs.
+        $out .= 'define ptr @' . $this->mirHelperSym('__mir_class_canon') . "(ptr %name0) {\n";
+        $out .= "entry:\n";
+        $out .= '  %i = call i64 ' . $find . "(ptr %name0)\n";
+        $out .= "  %none = icmp slt i64 %i, 0\n";
+        $out .= "  br i1 %none, label %miss, label %hit\n";
+        $out .= "hit:\n";
+        $out .= '  %np = getelementptr inbounds [' . (string)$ln . " x ptr], ptr @__mir_isd_names, i64 0, i64 %i\n";
+        $out .= "  %cand = load ptr, ptr %np\n";
+        $out .= "  ret ptr %cand\n";
+        $out .= "miss:\n  ret ptr null\n}\n";
+        $out .= 'define i64 @' . $this->mirHelperSym('__mir_isa_dyn') . "(i64 %cid, ptr %name0, i64 %strict) {\n";
+        $out .= "entry:\n";
+        $out .= '  %i = call i64 ' . $find . "(ptr %name0)\n";
+        $out .= "  %none = icmp slt i64 %i, 0\n";
+        $out .= "  br i1 %none, label %miss, label %found\n";
         $out .= "found:\n";
         $out .= '  %op = getelementptr inbounds [' . (string)$ln . " x i64], ptr @__mir_isd_own, i64 0, i64 %i\n";
         $out .= "  %own = load i64, ptr %op\n";

@@ -249,9 +249,34 @@ trait EmitLlvmObjects
         }
         $out .= $this->coerceToI64();
         $nameI = $this->lastValue;
-        $namePtr = $this->ssa->allocReg();
-        $out .= '  ' . $namePtr . ' = inttoptr i64 ' . $nameI . " to ptr\n";
+        $rawName = $this->ssa->allocReg();
+        $out .= '  ' . $rawName . ' = inttoptr i64 ' . $nameI . " to ptr\n";
         $this->rt->needsStrcmp = true;
+        // php resolves a class name case-insensitively, past a leading `\`, and throws for none. The
+        // table and the chains compare the declared spelling, so look that up first: a miss here
+        // answered a null object, which the next member access took down with SIGSEGV.
+        $this->rt->needsIsaDyn = true;
+        $namePtr = $this->ssa->allocReg();
+        $out .= '  ' . $namePtr . ' = call ptr @' . $this->mirHelperSym('__mir_class_canon') . '(ptr ' . $rawName . ")\n";
+        $none = $this->ssa->allocReg();
+        $out .= '  ' . $none . ' = icmp eq ptr ' . $namePtr . ", null\n";
+        $noneL = $this->ssa->allocLabel('newdyn.noclass');
+        $knownL = $this->ssa->allocLabel('newdyn.known');
+        $out .= '  br i1 ' . $none . ', label %' . $noneL . ', label %' . $knownL . "\n";
+        $out .= $noneL . ":\n";
+        $nameSlot = $this->ssa->allocReg();
+        $out .= '  ' . $nameSlot . " = alloca i64\n";
+        $out .= '  store i64 ' . $nameI . ', ptr ' . $nameSlot . "\n";
+        $this->locals->slots['__mc_newdyn_name'] = $nameSlot;
+        $out .= $this->emitNode(new \Compile\Mir\Call('__mir_throw_error', [
+            new \Compile\Mir\Concat(new \Compile\Mir\Concat(
+                new \Compile\Mir\StringConst('Class "', Type::string_()),
+                new \Compile\Mir\LoadLocal('__mc_newdyn_name', Type::string_())),
+                new \Compile\Mir\StringConst('" not found', Type::string_())),
+        ], Type::cell()));
+        unset($this->locals->slots['__mc_newdyn_name']);
+        $out .= "  unreachable\n";
+        $out .= $knownL . ":\n";
 
         $viaTable = $this->emitNewDynByTable($n, $namePtr);
         if ($viaTable !== null) { return $out . $viaTable; }

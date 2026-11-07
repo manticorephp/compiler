@@ -1966,7 +1966,18 @@ trait EmitLlvmRuntime
         $rows = [];
         $defs = '';
         $i = 0;
-        foreach ($cls->methodMeta as $mn => $mm) {
+        // Sorted by lower-cased name for {@see RuntimeLibrary::dynamicMethodRuntime}'s binary search.
+        // php's method names are case-insensitive: an override spelled differently from its parent's
+        // is one method, and the class's own row comes first in methodMeta.
+        /** @var array<string, string> $byLower */
+        $byLower = [];
+        foreach ($cls->methodMeta as $mn => $unused) {
+            $lower = \strtolower((string)$mn);
+            if (!isset($byLower[$lower])) { $byLower[$lower] = (string)$mn; }
+        }
+        \ksort($byLower, SORT_STRING);
+        foreach ($byLower as $mn) {
+            $mm = $cls->methodMeta[$mn];
             if ($mn === '__construct' || $mn === '__call') { continue; }
             $nameSym = '@.dynm.name.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($nameSym, $mn);
@@ -2882,7 +2893,7 @@ trait EmitLlvmRuntime
         $dynRuntime = '';
         if ($this->dynamicMethodMeta) {
             $this->rt->needsStrcmp = true;
-            $dynRuntime = \Compile\Mir\RuntimeLibrary::dynamicMethodRuntime();
+            $dynRuntime = $this->nameIcmpFn() . \Compile\Mir\RuntimeLibrary::dynamicMethodRuntime();
         }
         // The weak-reference death hook (prelude/weak.php): null until a
         // WeakMap / WeakReference first enrolls an object, then the prelude's

@@ -906,35 +906,68 @@ final class RuntimeLibrary
      * vector; the method row resolves the compiler-owned trampoline once and the
      * trampoline performs the typed call/default handling.
      */
+    /** `i32 @__mir_name_icmp(a, b)`: php's name comparison — ASCII case folding, lower-cased byte order. Not libc's strcasecmp: that is locale-aware, and a name table is sorted once, at compile time. */
+    public static function nameIcmp(): string
+    {
+        $out = "define i32 @__mir_name_icmp(ptr %a, ptr %b) {\nentry:\n  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
+        $out .= "  %pa = getelementptr i8, ptr %a, i64 %i\n  %pb = getelementptr i8, ptr %b, i64 %i\n";
+        $out .= "  %ca = load i8, ptr %pa\n  %cb = load i8, ptr %pb\n";
+        $out .= "  %ua = sub i8 %ca, 65\n  %ia = icmp ult i8 %ua, 26\n  %oa = or i8 %ca, 32\n  %la = select i1 %ia, i8 %oa, i8 %ca\n";
+        $out .= "  %ub = sub i8 %cb, 65\n  %ib = icmp ult i8 %ub, 26\n  %ob = or i8 %cb, 32\n  %lb = select i1 %ib, i8 %ob, i8 %cb\n";
+        $out .= "  %ne = icmp ne i8 %la, %lb\n  br i1 %ne, label %diff, label %same\n";
+        $out .= "same:\n  %z = icmp eq i8 %la, 0\n  br i1 %z, label %eq, label %next\n";
+        $out .= "next:\n  %i1 = add i64 %i, 1\n  br label %loop\n";
+        $out .= "eq:\n  ret i32 0\n";
+        $out .= "diff:\n  %wa = zext i8 %la to i32\n  %wb = zext i8 %lb to i32\n  %d = sub i32 %wa, %wb\n  ret i32 %d\n}\n";
+        return $out;
+    }
+
     /** Runtime lookup in a lightweight `{ count, rows }` method table. */
     public static function dynamicMethodRuntime(): string
     {
-        $out = "define i64 @__mc_dyn_method_lookup(i64 %table, ptr %name) {\nentry:\n";
+        // The rows are sorted by lower-cased name: a method name is case-insensitive in php,
+        // and an Eloquent model has hundreds of them, walked per `$o->$m()`.
+        $rs = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_SIZE;
+        $out = "define ptr @__mc_dyn_method_row(ptr %rows, i64 %cnt, ptr %name) {\nentry:\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %lo = phi i64 [ 0, %entry ], [ %lo2, %next ]\n";
+        $out .= "  %hi = phi i64 [ %cnt, %entry ], [ %hi2, %next ]\n";
+        $out .= "  %more = icmp ult i64 %lo, %hi\n";
+        $out .= "  br i1 %more, label %check, label %miss\n";
+        $out .= "check:\n";
+        $out .= "  %sum = add i64 %lo, %hi\n";
+        $out .= "  %mid = lshr i64 %sum, 1\n";
+        $out .= '  %off = mul i64 %mid, ' . $rs . "\n";
+        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
+        $out .= "  %np = load ptr, ptr %row\n";
+        $out .= "  %cmp = call i32 @__mir_name_icmp(ptr %name, ptr %np)\n";
+        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
+        $out .= "  br i1 %eq, label %hit, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %lt = icmp slt i32 %cmp, 0\n";
+        $out .= "  %mid1 = add i64 %mid, 1\n";
+        $out .= "  %lo2 = select i1 %lt, i64 %lo, i64 %mid1\n";
+        $out .= "  %hi2 = select i1 %lt, i64 %mid, i64 %hi\n";
+        $out .= "  br label %loop\n";
+        $out .= "hit:\n  ret ptr %row\n";
+        $out .= "miss:\n  ret ptr null\n}\n";
+        $out .= "define i64 @__mc_dyn_method_lookup(i64 %table, ptr %name) {\nentry:\n";
         $out .= "  %tp = inttoptr i64 %table to ptr\n";
         $out .= "  %cp = getelementptr i8, ptr %tp, i64 0\n";
         $out .= "  %cnt = load i64, ptr %cp\n";
         $out .= "  %rp = getelementptr i8, ptr %tp, i64 8\n";
         $out .= "  %rows = load ptr, ptr %rp\n";
-        $out .= "  br label %loop\n";
-        $out .= "loop:\n";
-        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
-        $out .= "  %done = icmp uge i64 %i, %cnt\n";
-        $out .= "  br i1 %done, label %miss, label %check\n";
-        $out .= "check:\n";
-        $out .= '  %off = mul i64 %i, ' . (string)\Compile\MemoryAbi::DYN_METHOD_ROW_SIZE . "\n";
-        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
-        $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %cmp = call i32 @strcmp(ptr %np, ptr %name)\n";
-        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
-        $out .= "  br i1 %eq, label %hit, label %next\n";
+        $out .= "  %row = call ptr @__mc_dyn_method_row(ptr %rows, i64 %cnt, ptr %name)\n";
+        $out .= "  %none = icmp eq ptr %row, null\n";
+        $out .= "  br i1 %none, label %miss, label %hit\n";
         $out .= "hit:\n";
         $out .= '  %fp = getelementptr i8, ptr %row, i64 ' . (string)\Compile\MemoryAbi::DYN_METHOD_ROW_TRAMP_OFFSET . "\n";
         $out .= "  %fv = load ptr, ptr %fp\n";
         $out .= "  %fi = ptrtoint ptr %fv to i64\n";
         $out .= "  ret i64 %fi\n";
-        $out .= "next:\n";
-        $out .= "  %i1 = add i64 %i, 1\n";
-        $out .= "  br label %loop\n";
         $out .= "miss:\n  ret i64 0\n}\n";
         // A null trampoline means "declared but not eligible for the uniform
         // ABI". This predicate keeps that case separate from a genuinely absent
@@ -946,23 +979,9 @@ final class RuntimeLibrary
         $out .= "  %cnt = load i64, ptr %cntp\n";
         $out .= "  %rp = getelementptr i8, ptr %tp, i64 8\n";
         $out .= "  %rows = load ptr, ptr %rp\n";
-        $out .= "  br label %hloop\n";
-        $out .= "hloop:\n";
-        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %hnext ]\n";
-        $out .= "  %done = icmp uge i64 %i, %cnt\n";
-        $out .= "  br i1 %done, label %hmiss, label %hcheck\n";
-        $out .= "hcheck:\n";
-        $out .= '  %off = mul i64 %i, ' . (string)\Compile\MemoryAbi::DYN_METHOD_ROW_SIZE . "\n";
-        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
-        $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %cmp = call i32 @strcmp(ptr %np, ptr %name)\n";
-        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
-        $out .= "  br i1 %eq, label %hhit, label %hnext\n";
-        $out .= "hhit:\n  ret i1 true\n";
-        $out .= "hnext:\n";
-        $out .= "  %i1 = add i64 %i, 1\n";
-        $out .= "  br label %hloop\n";
-        $out .= "hmiss:\n  ret i1 false\n}\n";
+        $out .= "  %row = call ptr @__mc_dyn_method_row(ptr %rows, i64 %cnt, ptr %name)\n";
+        $out .= "  %has = icmp ne ptr %row, null\n";
+        $out .= "  ret i1 %has\n}\n";
         $descOff = (string)\Compile\MemoryAbi::DESCRIPTOR_DYN_METHODS_OFFSET;
         // Try-call is the semantics-preserving boundary for erased callers:
         // ordinary rows and the class-specific __call fallback write the result
@@ -1061,7 +1080,6 @@ final class RuntimeLibrary
      */
     private static function dynamicMethodDispatch(): string
     {
-        $rs = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_SIZE;
         $tr = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_TRAMP_OFFSET;
         $dc = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_DECL_OFFSET;
         $vs = (string)\Compile\MemoryAbi::DYN_METHOD_ROW_VIS_OFFSET;
@@ -1081,21 +1099,9 @@ final class RuntimeLibrary
         $out .= "  %cnt = load i64, ptr %dyn\n";
         $out .= "  %rowsP = getelementptr i8, ptr %dyn, i64 8\n";
         $out .= "  %rows = load ptr, ptr %rowsP\n";
-        $out .= "  br label %loop\n";
-        $out .= "loop:\n";
-        $out .= "  %i = phi i64 [ 0, %scan ], [ %i1, %next ]\n";
-        $out .= "  %done = icmp uge i64 %i, %cnt\n";
-        $out .= "  br i1 %done, label %absent, label %check\n";
-        $out .= "check:\n";
-        $out .= '  %off = mul i64 %i, ' . $rs . "\n";
-        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
-        $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %c = call i32 @strcmp(ptr %np, ptr %name)\n";
-        $out .= "  %eq = icmp eq i32 %c, 0\n";
-        $out .= "  br i1 %eq, label %found, label %next\n";
-        $out .= "next:\n";
-        $out .= "  %i1 = add i64 %i, 1\n";
-        $out .= "  br label %loop\n";
+        $out .= "  %row = call ptr @__mc_dyn_method_row(ptr %rows, i64 %cnt, ptr %name)\n";
+        $out .= "  %none = icmp eq ptr %row, null\n";
+        $out .= "  br i1 %none, label %absent, label %found\n";
         $out .= "found:\n";
         $out .= '  %visP = getelementptr i8, ptr %row, i64 ' . $vs . "\n";
         $out .= "  %vis = load i64, ptr %visP\n";

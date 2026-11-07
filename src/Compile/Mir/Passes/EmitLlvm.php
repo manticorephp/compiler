@@ -2384,6 +2384,9 @@ final class EmitLlvm implements EmitVisitor
     /** Thunk bodies + row globals for the table path, flushed with the others. */
     private string $dynfExtraBodies = '';
 
+    /** The module's preamble already carries `__mir_name_icmp`. */
+    private bool $nameIcmpEmitted = false;
+
     /** {@see EmitLlvmArrays::litConstTable} globals, flushed with the helper bodies. */
     private string $litTableBodies = '';
 

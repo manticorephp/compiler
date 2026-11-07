@@ -1,6 +1,5 @@
 <?php
 // `$o->$m()` throws "undefined method" when the runtime method name differs in case from the declaration; php resolves it case-insensitively.
-// issue: #581
 class Multi {
     public function Zed() { return 'Zed'; }
     public function alpha() { return 'alpha'; }
