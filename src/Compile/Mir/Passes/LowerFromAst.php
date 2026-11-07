@@ -1654,7 +1654,8 @@ final class LowerFromAst implements Pass
                 $module->addFunction($this->lowerFunction($cfs->decl));
             }
         }
-        $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
+        $hasDynamicMethodInvoke = $this->runtimeNamedCallable || $this->moduleHasDynamicMethodInvoke($module);
+        $module->callableArrayAnyName = $this->runtimeNamedCallable;
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
             // Keep the complete slow spread dispatcher in one compiler-owned
@@ -1850,8 +1851,57 @@ final class LowerFromAst implements Pass
                 }
             }
         }
+        $this->noteRuntimeNamedCallable($node);
         foreach (Walk::children($node) as $child) { $this->collectCallableArrayMethods($child, $module); }
     }
+
+    /** Some `[$x, $name]` is called: an object in it reaches any method through the method tables. */
+    private bool $runtimeNamedCallable = false;
+    /** Locals assigned a `[$x, $name]` literal, and locals invoked: their overlap is a callable. @var array<string, bool> */
+    private array $runtimeCallableLocals = [];
+    /** @var array<string, bool> */
+    private array $invokedLocals = [];
+
+    /** `[$x, $name]`: a two-element list whose method name only exists at run time. */
+    private function isRuntimeNamedPair(Node $n): bool
+    {
+        if (!($n instanceof \Compile\Mir\ArrayLit) || \count($n->elements) !== 2) { return false; }
+        $e0 = $n->elements[0];
+        $e1 = $n->elements[1];
+        return $e0->key === null && $e1->key === null && !($e1->value instanceof \Compile\Mir\StringConst);
+    }
+
+    /**
+     * A callable whose method name is a runtime string can reach ANY static method, so it needs the
+     * arm for every one, as `$c::$m()` does ({@see synthStaticCallable}). Without the dispatcher the
+     * erased invoke took the array for a closure and jumped to its length word. Only where the pair
+     * is visibly CALLED: every `[$a, $b]` tuple in a program must not cost it a dispatcher.
+     */
+    private function noteRuntimeNamedCallable(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\Invoke_) {
+            if ($this->isRuntimeNamedPair($n->callee)) { $this->dynStaticAnyMethod = true; $this->runtimeNamedCallable = true; }
+            if ($n->callee->kind === Node::KIND_LOAD_LOCAL) {
+                $name = $n->callee->name;
+                $this->invokedLocals[$name] = true;
+                if (isset($this->runtimeCallableLocals[$name])) { $this->dynStaticAnyMethod = true; $this->runtimeNamedCallable = true; }
+            }
+        } elseif ($n->kind === Node::KIND_STORE_LOCAL && $this->isRuntimeNamedPair($n->value)) {
+            $name = $n->name;
+            $this->runtimeCallableLocals[$name] = true;
+            if (isset($this->invokedLocals[$name])) { $this->dynStaticAnyMethod = true; $this->runtimeNamedCallable = true; }
+        } elseif ($n instanceof \Compile\Mir\Call && isset(self::CALLBACK_TAKING[\strtolower($n->function)])) {
+            foreach ($n->args as $a) {
+                if ($this->isRuntimeNamedPair($a)) { $this->dynStaticAnyMethod = true; $this->runtimeNamedCallable = true; }
+            }
+        }
+    }
+
+    private const CALLBACK_TAKING = [
+        'array_map' => true, 'array_filter' => true, 'array_walk' => true, 'array_reduce' => true,
+        'usort' => true, 'uasort' => true, 'uksort' => true, 'iterator_apply' => true,
+        'preg_replace_callback' => true, 'register_shutdown_function' => true,
+    ];
 
     /**
      * `__mc_static_callable` ({@see TrampolineSynth::staticCallableSource}): one arm

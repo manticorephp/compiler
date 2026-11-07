@@ -239,6 +239,9 @@ final class Module
     /** @var array<string, bool> method names `[$obj, 'name']` literals spell */
     public array $callableArrayMethods = [];
 
+    /** Some `[$x, $name]` with a runtime name is called: an erased invoke of an array needs its instance arm whatever the literals spell. */
+    public bool $callableArrayAnyName = false;
+
     /** @var array<string, bool> `'Class::method'` string literals the module spells */
     public array $callableStaticStrings = [];
 

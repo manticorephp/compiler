@@ -2129,7 +2129,7 @@ trait EmitLlvmCalls
         // one strcmp arm each, an erased-receiver method call by runtime class.
         // The callee is re-read per arm, so only a pure one qualifies.
         $staticCallable = isset($this->sigs->paramTypes['__mc_static_callable']);
-        if (($this->callableArrayMethods !== [] || $staticCallable) && $n->srcArgc !== -2) {
+        if (($this->callableArrayMethods !== [] || $this->callableArrayAnyName || $staticCallable) && $n->srcArgc !== -2) {
             $isArrT = $this->ssa->allocReg();
             $out .= '  ' . $isArrT . ' = icmp eq i64 ' . $tag . ", 7\n";
             $arrL = $this->ssa->allocLabel('erinv.arr');
@@ -2149,7 +2149,7 @@ trait EmitLlvmCalls
             if ($staticCallable) {
                 $out .= $this->emitStaticCallableArm($n, $avName, $res, $endL);
             }
-            if ($this->callableArrayMethods !== []) {
+            if ($this->callableArrayMethods !== [] || $this->callableArrayAnyName) {
                 $out .= $this->emitInstanceCallableArm($n, $avName, $res, $endL);
             }
             $out .= '  br label %' . $endL . "\n";

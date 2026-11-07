@@ -319,6 +319,7 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, bool> {@see Module::$callableArrayMethods} */
     private array $callableArrayMethods = [];
+    private bool $callableArrayAnyName = false;
 
     /** @var array<string, bool> {@see Module::$callableStaticStrings} */
     private array $callableStaticStrings = [];
@@ -741,6 +742,7 @@ final class EmitLlvm implements EmitVisitor
         $this->hasClassAlias = $module->hasClassAlias;
         $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
         $this->callableArrayMethods = $module->callableArrayMethods;
+        $this->callableArrayAnyName = $module->callableArrayAnyName;
         $this->callableStaticStrings = $module->callableStaticStrings;
         $this->enums = $module->enums;
         $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
