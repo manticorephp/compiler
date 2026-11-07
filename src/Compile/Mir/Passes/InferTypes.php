@@ -3427,6 +3427,11 @@ final class InferTypes implements Pass
             return $a->class !== null && $b->class !== null && $a->class !== $b->class
                 && $this->unionTypes($a, $b)->kind === Type::KIND_CELL;
         }
+        // An all-object union is a raw object word too: beside another object it joins as
+        // two objects do, beside anything else it boxes.
+        $ao = $a->kind === Type::KIND_OBJ || $this->isObjectUnion($a);
+        $bo = $b->kind === Type::KIND_OBJ || $this->isObjectUnion($b);
+        if ($ao && $bo) { return $this->unionTypes($a, $b)->kind === Type::KIND_CELL; }
         if ($a->kind === $b->kind) { return false; }
         // A closure value and a closure literal's `obj<__closure_N>` handle are
         // one env pointer.
@@ -3545,7 +3550,16 @@ final class InferTypes implements Pass
     private function cellCarries(Type $t): bool
     {
         return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ
-            || $t->kind === Type::KIND_CLOSURE;
+            || $t->kind === Type::KIND_CLOSURE || $this->isObjectUnion($t);
+    }
+
+    private function isObjectUnion(Type $t): bool
+    {
+        if ($t->kind !== Type::KIND_UNION) { return false; }
+        foreach ($t->atoms as $at) {
+            if ($at->kind !== Type::KIND_OBJ) { return false; }
+        }
+        return true;
     }
 
     /** @param Node[] $stmts  Ends in return/throw: never reaches the join after it. */
