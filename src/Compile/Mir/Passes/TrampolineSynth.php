@@ -216,10 +216,11 @@ final class TrampolineSynth
         // One small function per arm, and the dispatcher only compares names: a program with a
         // dynamic `$c::$m()` gets an arm for EVERY static method (symfony/laravel: ~9 000), and
         // inlining each arm's argument unpacking made this one function 900k IR lines and ~10k
-        // allocas, which clang optimises super-linearly. Grouped by class, so the class name is
-        // compared once per class and the method name only among that class's arms.
+        // allocas, which clang optimises super-linearly. Grouped by class, and each level a balanced
+        // tree of comparisons ({@see nameTree}): a chain compared the name against every class on
+        // every call, ~10% of a Laravel request (Carbon's `Date::` calls go through here).
         $fns = "function __mc_static_callable_box(mixed \$v): mixed { return \$v; }\n";
-        /** @var array<string, string> $byClass lower-case class → its `if ($lm === …)` lines */
+        /** @var array<string, array<string, string>> $byClass lower-case class → lower-case method → its call */
         $byClass = [];
         $n = 0;
         foreach ($arms as $arm) {
@@ -235,17 +236,55 @@ final class TrampolineSynth
             $fns .= self::ARGS_HINT . 'function ' . $name . "(array \$a): mixed { "
                   . ($arm[2] ? $call . '; return __mc_static_callable_box(null);' : 'return __mc_static_callable_box(' . $call . ');') . " }\n";
             $lc = \strtolower(\ltrim($arm[0], '\\'));
-            if (!isset($byClass[$lc])) { $byClass[$lc] = ''; }
-            $byClass[$lc] .= '    if ($lm === ' . \var_export(\strtolower($arm[1]), true) . ') { return ' . $name . "(\$a); }\n";
+            $lm = \strtolower($arm[1]);
+            if (!isset($byClass[$lc])) { $byClass[$lc] = []; }
+            if (!isset($byClass[$lc][$lm])) { $byClass[$lc][$lm] = 'return ' . $name . '($a);'; }
         }
         $out = $fns . self::ARGS_HINT . "function __mc_static_callable(string \$c, string \$m, array \$a): mixed {\n"
              . "  \$lc = \\strtolower(\\ltrim(\$c, '\\\\'));\n  \$lm = \\strtolower(\$m);\n";
-        foreach ($byClass as $lc => $lines) {
-            $out .= '  if ($lc === ' . \var_export((string)$lc, true) . ") {\n" . $lines . "  }\n";
+        /** @var array<string, string> $classBodies */
+        $classBodies = [];
+        foreach ($byClass as $lc => $methods) {
+            $classBodies[(string)$lc] = self::nameTree('$lm', $methods);
         }
+        $out .= self::nameTree('$lc', $classBodies);
         // A subclass the program names but no arm covers runs its parent's method.
         $out .= "  \$p = \\get_parent_class(\$c);\n  if (\$p !== false) { return __mc_static_callable(\$p, \$m, \$a); }\n";
         return $out . "  throw new \\Error('Call to undefined method ' . \\ltrim(\$c, '\\\\') . '::' . \$m . '()');\n}\n";
+    }
+
+    /**
+     * `$var` against sorted names as a balanced tree of `strcmp`s, each leaf `$var === name` running
+     * its body. A body that does not return falls out past the tree, like the chain it replaces.
+     *
+     * @param array<string, string> $bodies name => PHP statements
+     */
+    private static function nameTree(string $var, array $bodies): string
+    {
+        /** @var string[] $names */
+        $names = [];
+        foreach ($bodies as $name => $unused) { $names[] = (string)$name; }
+        \usort($names, fn (string $x, string $y): int => \strcmp($x, $y));
+        return self::nameTreeRange($var, $names, 0, \count($names), $bodies);
+    }
+
+    /**
+     * @param string[]              $names
+     * @param array<string, string> $bodies
+     */
+    private static function nameTreeRange(string $var, array $names, int $lo, int $hi, array $bodies): string
+    {
+        if ($hi - $lo <= 2) {
+            $out = '';
+            for ($i = $lo; $i < $hi; $i = $i + 1) {
+                $out .= 'if (' . $var . ' === ' . \var_export($names[$i], true) . ') { ' . $bodies[$names[$i]] . " }\n";
+            }
+            return $out;
+        }
+        $mid = $lo + (int)(($hi - $lo) / 2);
+        return 'if (\\strcmp(' . $var . ', ' . \var_export($names[$mid], true) . ") < 0) {\n"
+            . self::nameTreeRange($var, $names, $lo, $mid, $bodies) . "} else {\n"
+            . self::nameTreeRange($var, $names, $mid, $hi, $bodies) . "}\n";
     }
 
     /**
