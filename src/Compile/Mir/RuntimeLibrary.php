@@ -1333,6 +1333,38 @@ final class RuntimeLibrary
         $out .= "  %d = sub i64 %la, %lb\n";
         $out .= "  ret i64 %d\n}\n";
 
+        // First offset of [from, to) with a byte >= 0x80, a word at a time. Unaligned loads are fine
+        // on every target in the matrix.
+        $out .= "\ndefine i64 @__mir_ascii_run(ptr %s, i64 %from, i64 %to) {\nentry:\n";
+        $out .= "  br label %words\n";
+        $out .= "words:\n";
+        $out .= "  %i = phi i64 [ %from, %entry ], [ %i8, %wnext ]\n";
+        $out .= "  %i8 = add i64 %i, 8\n";
+        $out .= "  %fits = icmp sle i64 %i8, %to\n";
+        $out .= "  br i1 %fits, label %wload, label %bytes\n";
+        $out .= "wload:\n";
+        $out .= "  %wp = getelementptr i8, ptr %s, i64 %i\n";
+        $out .= "  %w = load i64, ptr %wp, align 1\n";
+        $out .= "  %hi = and i64 %w, -9187201950435737472\n";
+        $out .= "  %clean = icmp eq i64 %hi, 0\n";
+        $out .= "  br i1 %clean, label %wnext, label %bytes\n";
+        $out .= "wnext:\n";
+        $out .= "  br label %words\n";
+        $out .= "bytes:\n";
+        $out .= "  %j = phi i64 [ %i, %words ], [ %i, %wload ], [ %j1, %bnext ]\n";
+        $out .= "  %more = icmp slt i64 %j, %to\n";
+        $out .= "  br i1 %more, label %bload, label %done\n";
+        $out .= "bload:\n";
+        $out .= "  %bp = getelementptr i8, ptr %s, i64 %j\n";
+        $out .= "  %b = load i8, ptr %bp\n";
+        $out .= "  %ascii = icmp sge i8 %b, 0\n";
+        $out .= "  br i1 %ascii, label %bnext, label %done\n";
+        $out .= "bnext:\n";
+        $out .= "  %j1 = add i64 %j, 1\n";
+        $out .= "  br label %bytes\n";
+        $out .= "done:\n";
+        $out .= "  ret i64 %j\n}\n";
+
         // strcmp & co. in php's terms: the byte difference at the first mismatch, -1 / 1 for a
         // prefix. `limit` < 0 compares everything; `fold` != 0 folds ASCII case.
         $out .= "\ndefine i64 @__mir_str_cmp_bytes(ptr %a, ptr %b, i64 %limit, i64 %fold) {\nentry:\n";

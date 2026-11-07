@@ -329,6 +329,7 @@ trait EmitLlvmBuiltins
         }
         if ($name === 'ord')                          { return $this->biOrd($args); }
         if ($name === '__mc_str_cmp_bytes')           { return $this->biStrCmpBytes($args); }
+        if ($name === '__mc_mb_ascii_run')            { return $this->biMbAsciiRun($args); }
         if ($name === 'chr')                          { return $this->biChr($args); }
         if ($name === 'abs')                          { return $this->biAbs($args); }
         if ($name === 'pow')                          { return $this->biPow($args); }
@@ -2904,6 +2905,22 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__mc_pool_start(i64 ' . $sub . ', i64 ' . $done . ")\n";
         return $this->finishI64($out, $r);
+    }
+
+    private function biMbAsciiRun(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $s = $this->lastValue;
+        $out .= $this->emitNode($args[1]);
+        $out .= $this->coerceToI64();
+        $from = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceToI64();
+        $to = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_ascii_run(ptr ' . $s . ', i64 ' . $from . ', i64 ' . $to . ")\n";
+        $out .= $this->freeStrTemp($args[0], $s);
+        return $this->finishI64($out, $reg);
     }
 
     private function biStrCmpBytes(array $args): string
