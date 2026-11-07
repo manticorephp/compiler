@@ -297,6 +297,8 @@ final class InferTypes implements Pass
      * @var array<string, bool>
      */
     private array $rescanTouched = [];
+    /** @var array<string, bool> properties {@see setPropType} retyped since the last {@see inferAfterPropScan} */
+    private array $retypedProps = [];
     /** @var array<string, string[]> "fn#idx" → caller candidate params its erased sites forward */
     private array $callArgForward = [];
     private string $callArgScanFn = '';
@@ -312,6 +314,26 @@ final class InferTypes implements Pass
      * graph is one walk against the twelve full re-inferences it replaces.
      * @return array<string, bool>|null
      */
+    /**
+     * Re-infer after a property scan: the readers of what it retyped, following a change only as far
+     * as types keep moving. A scan that changed something without naming a property re-infers all.
+     */
+    private function inferAfterPropScan(Module $module, string $reason): void
+    {
+        $props = $this->retypedProps;
+        $this->retypedProps = [];
+        if ($props === []) {
+            $this->inferFunctionsForScope($module, $reason);
+            return;
+        }
+        $seed = [];
+        $graph = $this->depGraph($module);
+        foreach ($props as $p => $_) {
+            foreach ($graph->usersOfProp((string)$p) as $u => $__) { $seed[$u] = true; }
+        }
+        $this->inferPropagating($module, $reason, $seed);
+    }
+
     private function rescanScope(Module $module): ?array
     {
         if ($this->rescanTouched === []) { return null; }
@@ -321,6 +343,21 @@ final class InferTypes implements Pass
         }
         foreach ($this->rescanTouched as $name => $_) { $out[$name] = true; }
         return $out;
+    }
+
+    /**
+     * Re-infer what a scan touched, and follow the change only as far as types keep moving
+     * ({@see inferPropagating}): the touched functions plus the readers of the properties it
+     * retyped. Whole-module rescans cost 2.3 s per pass on 130k functions for a handful of moves.
+     */
+    private function rescanPropagating(Module $module, string $reason): void
+    {
+        $seed = $this->rescanTouched;
+        foreach ($this->rescanProps as $prop => $unused) {
+            foreach ($this->depGraph($module)->usersOfProp((string)$prop) as $u => $unused2) { $seed[$u] = true; }
+        }
+        $this->rescanProps = [];
+        $this->inferPropagating($module, $reason, $seed);
     }
 
     /**
@@ -417,6 +454,7 @@ final class InferTypes implements Pass
         if (\Compile\Stats::$on) {
             \Compile\Stats::bump('infer.rescan.' . $reason . '.calls', 1);
             \Compile\Stats::bump('infer.rescan.' . $reason . '.functions', \count($queue));
+            \Compile\Stats::line('    propagate ' . $reason . ' seed=' . (string)\count($seed) . ' visited=' . (string)\count($queue));
         }
     }
 
@@ -436,6 +474,36 @@ final class InferTypes implements Pass
             foreach ($this->depGraph($module)->neighbors($fn->name) as $nb => $unused) { $seed[$nb] = true; }
         }
         $this->inferPropagating($module, 'narrow_light', $seed);
+    }
+
+    /**
+     * A LIGHT round after {@see Monomorphize} spliced new functions `$seed` into
+     * the module: register them, then re-infer them and everything that calls
+     * them, with the tables of this instance's last {@see run}. No module scan
+     * runs; the next full inference covers these bodies.
+     * @param array<string, bool> $seed
+     */
+    public function reinferAfterSplice(Module $module, array $seed): void
+    {
+        foreach ($module->functions as $fn) {
+            if (!isset($seed[$fn->name])) { continue; }
+            if (!isset($module->declaredReturnTypes[$fn->name])) {
+                $module->declaredReturnTypes[$fn->name] = $fn->returnType;
+            }
+            $this->sigs[$fn->name] = $fn->returnType;
+            $this->fnByName[$fn->name] = $fn;
+            if ($fn->returnType->kind === Type::KIND_UNKNOWN && !$fn->isExtern) {
+                $this->undeclaredReturnFns[$fn->name] = true;
+            }
+        }
+        $this->declaredReturns = $module->declaredReturnTypes;
+        $this->callGraph = null;
+        $this->bodyKinds = [];
+        $all = $seed;
+        foreach ($seed as $name => $unused) {
+            foreach ($this->depGraph($module)->neighbors($name) as $nb => $alsoUnused) { $all[$nb] = true; }
+        }
+        $this->inferPropagating($module, 'mono_light', $all);
     }
 
     /**
@@ -502,8 +570,9 @@ final class InferTypes implements Pass
         }
         foreach ($functions as $fn) { $this->inferFunction($fn); $this->noteTypeChange($fn); }
         if (\Compile\Stats::$on) {
-            \Compile\Stats::bump('infer.rescan.' . $reason . '.ms',
-                \intdiv(\Compile\Stats::now() - $startNs, 1000000));
+            $ms = \intdiv(\Compile\Stats::now() - $startNs, 1000000);
+            \Compile\Stats::bump('infer.rescan.' . $reason . '.ms', $ms);
+            \Compile\Stats::line('    rescan ' . $reason . ' fns=' . (string)\count($functions) . ' ms=' . (string)$ms);
         }
     }
 
@@ -731,6 +800,9 @@ final class InferTypes implements Pass
     /** @var array<string, string[]> `Recv::method` → the classes whose body a virtual call can reach */
     private array $virtualBodies = [];
 
+    /** @var array<string, bool> method name → is it answered by `__call` alone ({@see erasedMagicCallReturn}) */
+    private array $erasedMagicAnswers = [];
+
     /** @var array<string, string[]> class/interface name → every class under it, itself included */
     private array $subtypesOf = [];
     private bool $subtypeIndexBuilt = false;
@@ -874,6 +946,7 @@ final class InferTypes implements Pass
 
     public function run(Module $module): Module
     {
+        $tRun = \Compile\Stats::now();
         $this->sigs = [];
         $this->callGraph = null;
         $this->rescanTouched = [];
@@ -962,6 +1035,7 @@ final class InferTypes implements Pass
         // rule the local promotion follows, and the same reason it is computed
         // up front rather than forced afterwards.
         $this->scanRefCellProps($module);
+        $tWalk = \Compile\Stats::now();
         if ($this->scopeNames === null || $this->ctx === null) {
             foreach ($this->functionsForScope($module) as $fn) {
                 $this->inferFunction($fn);
@@ -970,6 +1044,7 @@ final class InferTypes implements Pass
         } else {
             $this->inferScopedWorklist($module);
         }
+        $tPost = \Compile\Stats::now();
         // A local array passed BY-REF to a callee that APPENDS a FOREIGN element
         // (`push_str(array &$a){ $a[]='tail'; }` over `[1,2,3]`) is really a
         // MIXED array: left alone, the callee is narrowed to the caller's
@@ -982,7 +1057,7 @@ final class InferTypes implements Pass
         // their own rebuild buffer is typed. Bounded: a seed only widens to cell.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefElemWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_elem', $this->rescanScope($module));
+            $this->rescanPropagating($module, 'byref_elem');
             $guard = $guard + 1;
         }
         // Call-site element inference: refine a bare-`array` param to vec[T]
@@ -992,7 +1067,7 @@ final class InferTypes implements Pass
         // element-used-as-key lands under a positional int. Externs (the
         // separately-linked stdlib) can't be specialized this way.
         if ($this->scanCallSiteArrayElems($module)) {
-            $this->inferFunctionsForScope($module, 'callsite_array', $this->rescanScope($module));
+            $this->rescanPropagating($module, 'callsite_array');
         }
         // A doc-declared `T[]` / `array<V>` param handed a STRING-KEYED array by
         // some call site: move it to the tagged key channel instead of refusing
@@ -1005,7 +1080,7 @@ final class InferTypes implements Pass
         // guard is a backstop, not the termination argument.
         $docGuard = 0;
         while ($docGuard < 4 && $this->scanDocListKeyPromote($module)) {
-            $this->inferFunctionsForScope($module, 'doc_list_key');
+            $this->rescanPropagating($module, 'doc_list_key');
             $docGuard = $docGuard + 1;
         }
         // Property-type inference from a whole-array assignment: `$this->p =
@@ -1013,8 +1088,9 @@ final class InferTypes implements Pass
         // the DECLARED property type so a later `$this->p[$i]` / foreach reads a
         // tagged cell instead of a raw i64 (the property analogue of a typed
         // local literal). Runs before the element scan so the shape is set first.
+        $this->retypedProps = [];
         if ($this->scanPropTypeFromArrayAssign($module)) {
-            $this->inferFunctionsForScope($module, 'prop_type');
+            $this->inferAfterPropScan($module, 'prop_type');
         }
         // Property-element inference from stores: a bare-`array` property that
         // only ever receives element stores of ONE concrete scalar/object type
@@ -1023,14 +1099,17 @@ final class InferTypes implements Pass
         // sourced from a now-typed param is seen concrete, not unknown. Without
         // it the property element stays erased and a read-back bitcasts each raw
         // i64 to a garbage double.
+        $this->retypedProps = [];
         if ($this->scanPropElemFromStores($module)) {
-            $this->inferFunctionsForScope($module, 'prop_elem');
+            $this->inferAfterPropScan($module, 'prop_elem');
         }
         // The same, for a STATIC property. Its stores mostly sit outside the
         // declaring class, so neither the lowering-time AST scan nor the
         // instance scan above can reach them.
+        $this->retypedProps = [];
         if ($this->scanStaticPropElemFromStores($module)) {
-            $this->inferFunctionsForScope($module, 'static_prop_elem');
+            $this->rescanProps = [];
+            $this->rescanPropagating($module, 'static_prop_elem');
         }
         // By-ref param type inference: an UNTYPED (`cell`) `&$p` holds the
         // caller's RAW slot value (a string/array pointer), but a cell type
@@ -1123,7 +1202,7 @@ final class InferTypes implements Pass
             // A callee the call-site scans pinned to the pre-widening element
             // (`array_reverse($t)`) is re-observed against the widened local.
             if ($this->scanCallSiteArrayElems($module)) {
-                $this->inferFunctionsForScope($module, 'nested_elem_callsite_array');
+                $this->rescanPropagating($module, 'nested_elem_callsite_array');
             }
             $guard = $guard + 1;
         }
@@ -1142,7 +1221,7 @@ final class InferTypes implements Pass
         while ($guard < 4 && $this->scanByRefElemWiden($module)) {
             $this->inferFunctionsForScope($module, 'byref_elem_second');
             if ($this->scanCallSiteArrayElems($module)) {
-                $this->inferFunctionsForScope($module, 'byref_elem_callsite_array');
+                $this->rescanPropagating($module, 'byref_elem_callsite_array');
             }
             $guard = $guard + 1;
         }
@@ -1152,7 +1231,7 @@ final class InferTypes implements Pass
         // capture site and the closure body have been typed once.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefCaptureWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_capture');
+            $this->rescanPropagating($module, 'byref_capture');
             $guard = $guard + 1;
         }
         // A local handed to a `mixed &` parameter is likewise one word two
@@ -1185,7 +1264,7 @@ final class InferTypes implements Pass
             // A retyped param captured `use (&$i)` is a cell at the capture
             // site now, and the closure's side of that word must follow.
             $captured = $retyped && $this->scanByRefCaptureWiden($module);
-            if ($captured) { $this->inferFunctionsForScope($module, 'byref_capture'); }
+            if ($captured) { $this->rescanPropagating($module, 'byref_capture'); }
             if (!$retyped && !$widened && !$captured) { break; }
             $rounds = $rounds + 1;
             if ($rounds > $cap) {
@@ -1201,6 +1280,8 @@ final class InferTypes implements Pass
         // When it changes a property type, re-run inference so the new
         // element type propagates into reads (`foreach $obj->prop as $x`
         // and the subsequent append now see obj elements → rc them).
+        $this->rescanTouched = [];
+        $this->rescanProps = [];
         $changed = $this->scanCtorPropContainers($module);
         // Second assoc-prop scan now that node types are inferred: a
         // string-keyed store whose key is a property read / method call
@@ -1210,7 +1291,7 @@ final class InferTypes implements Pass
         // the assoc path → assoc_cow reads past the 16-byte vec buffer.
         if ($this->scanAssocProps($module)) { $changed = true; }
         if ($changed) {
-            $this->inferFunctionsForScope($module, 'assoc_prop');
+            $this->rescanPropagating($module, 'assoc_prop');
         }
         // Second pass once capture sites are typed: closure bodies re-infer
         // with their capture locals seeded (see inferFunction) — a captured
@@ -1265,7 +1346,7 @@ final class InferTypes implements Pass
         // add as `unknown` and found no disagreement; this one sees the cell.
         $guard = 0;
         while ($guard < 4 && $this->scanByRefCaptureWiden($module)) {
-            $this->inferFunctionsForScope($module, 'byref_capture_post');
+            $this->rescanPropagating($module, 'byref_capture_post');
             $guard = $guard + 1;
         }
         if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }
@@ -1275,6 +1356,12 @@ final class InferTypes implements Pass
         $module->inferGlobalVarTypes = $this->globalVarTypes;
         $module->inferByRefCaptureElemLocals = $this->byRefCaptureElemLocals;
         $module->markPassApplied(self::NAME);
+        if (\Compile\Stats::$on) {
+            \Compile\Stats::bump('infer.t.pre_scans_ms', \intdiv($tWalk - $tRun, 1000000));
+            \Compile\Stats::bump('infer.t.walk_ms', \intdiv($tPost - $tWalk, 1000000));
+            \Compile\Stats::bump('infer.t.post_ms', \intdiv(\Compile\Stats::now() - $tPost, 1000000));
+            \Compile\Stats::bump('infer.t.runs', 1);
+        }
         return $module;
     }
 

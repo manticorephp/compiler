@@ -123,6 +123,12 @@ final class Monomorphize implements Pass
         return $module;
     }
 
+    /** The instance of round 1's full inference, whose tables the light rounds reuse. */
+    private ?InferTypes $infer = null;
+
+    /** Some round re-typed only its clones and their callers. */
+    public bool $lightRoundRan = false;
+
     /** One specialization round. Returns true if anything was specialized
      *  (and the module re-typed), false at the fixpoint. */
     private function runOnce(Module $module): bool
@@ -139,7 +145,7 @@ final class Monomorphize implements Pass
             $this->collectCalls($fn->body);
         }
 
-        // originalName → [ specializedFunctionDef, ... ]
+        /** @var array<string, FunctionDef[]> $clonesByOrig originalName → its specializations */
         $clonesByOrig = [];
         $changed = false;
 
@@ -181,8 +187,23 @@ final class Monomorphize implements Pass
         // With the analysis context, so what a round moves — the clones, the
         // repointed callers — is in the change set the next scoped pass reads.
         if ($this->ctx !== null) { $this->ctx->refresh($module); }
-        $infer = new InferTypes(null, $this->ctx);
-        $infer->run($module);
+        // Round 1 specializes most of what will ever be specialized and gets a
+        // full inference; later rounds add a handful of clones, so re-infer those
+        // and what calls them. The module scans have not seen those bodies until
+        // the next full inference: {@see $lightRoundRan} makes NarrowReturns run one.
+        if ($this->infer === null || $this->ctx !== null) {
+            $this->infer = new InferTypes(null, $this->ctx);
+            $this->infer->run($module);
+            return true;
+        }
+        /** @var array<string, bool> $seed */
+        $seed = [];
+        foreach ($clonesByOrig as $clones) {
+            foreach ($clones as $clone) { $seed[$clone->name] = true; }
+        }
+        foreach ($this->newClosureFns as $clFn) { $seed[$clFn->name] = true; }
+        $this->infer->reinferAfterSplice($module, $seed);
+        $this->lightRoundRan = true;
         return true;
     }
 
@@ -850,6 +871,10 @@ final class Monomorphize implements Pass
     private function isCandidate(FunctionDef $fn): bool
     {
         if ($fn->name === '__main') { return false; }
+        // A same-named codegen builtin shadows this body at every direct call; a `$mono$`
+        // renames the call, so the emitter never asks the builtin and the slow body runs.
+        if ($fn->name === 'array_key_exists' || $fn->name === 'in_array' || $fn->name === 'array_keys'
+            || $fn->name === 'array_values' || $fn->name === 'array_is_list') { return false; }
         if ($fn->isExtern || $fn->isGenerator) { return false; }
         if ($fn->ffiSymbol !== null) { return false; }
         // Already a specialization (`f$mono$…`) — its params are concrete, so

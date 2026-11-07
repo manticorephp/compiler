@@ -77,6 +77,18 @@ final class SplitModule
     /** @var array<string, array<string, bool>> */
     private array $refsCache = [];
 
+    /** @var array<string, string> global name => globalClass(), computed once */
+    private array $gcls = [];
+
+    /** @var array<string, int> definition symbol => index in defOrder */
+    private array $defPos = [];
+
+    /** @var array<string, int> global name => index in globalOrder */
+    private array $gpos = [];
+
+    /** @var array<int, string[]> part => its own non-internal definitions in defOrder order */
+    private array $partMine = [];
+
     /**
      * @return string[] one complete module text per part
      */
@@ -165,6 +177,7 @@ final class SplitModule
         $this->sharedDefs = \count($shared);
         $this->internalDefs = \count($internal);
 
+        $this->indexModule($defOrder, $globalOrder, $globals);
         $assign = $this->assignParts($shared, $defOrder, $defSize, $defRefs, $internal, $parts);
         // Threaded through the part loop: the first part that reaches a
         // coalesced global defines it, every later part declares it.
@@ -200,6 +213,42 @@ final class SplitModule
             $out[] = $this->lineTablePart($headerText, $lineTable, $globals);
         }
         return $out;
+    }
+
+    /**
+     * Insert $v into the sorted tail of $a starting at $from.
+     *
+     * @param int[] $a
+     */
+    private function sortedInsert(array &$a, int $from, int $v): void
+    {
+        $lo = $from;
+        $hi = \count($a);
+        while ($lo < $hi) {
+            $mid = ($lo + $hi) >> 1;
+            if ($a[$mid] < $v) { $lo = $mid + 1; } else { $hi = $mid; }
+        }
+        \array_splice($a, $lo, 0, [$v]);
+    }
+
+    /**
+     * @param string[]              $defOrder
+     * @param string[]              $globalOrder
+     * @param array<string, string> $globals
+     */
+    private function indexModule(array $defOrder, array $globalOrder, array $globals): void
+    {
+        $this->gcls = [];
+        $this->gpos = [];
+        $k = 0;
+        foreach ($globalOrder as $g) {
+            $this->gcls[$g] = $this->globalClass($globals[$g]);
+            $this->gpos[$g] = $k;
+            $k = $k + 1;
+        }
+        $this->defPos = [];
+        $i = 0;
+        foreach ($defOrder as $s) { $this->defPos[$s] = $i; $i = $i + 1; }
     }
 
     /**
@@ -480,12 +529,16 @@ final class SplitModule
                                array $assign, array $internal, array $globalOrder,
                                array $globals, array &$owned): PartPlan
     {
-        /** @var string[] */
-        $mine = [];
-        foreach ($defOrder as $s) {
-            if (isset($internal[$s])) { continue; }
-            if (($assign[$s] ?? -1) === $p) { $mine[] = $s; }
+        if ($p === 0) {
+            $this->partMine = [];
+            foreach ($defOrder as $s) {
+                if (isset($internal[$s])) { continue; }
+                $a = $assign[$s] ?? -1;
+                if ($a >= 0) { $this->partMine[$a][] = $s; }
+            }
         }
+        /** @var string[] */
+        $mine = $this->partMine[$p] ?? [];
         /** @var array<string, bool> */
         $refs = [];
         foreach ($mine as $s) {
@@ -524,8 +577,12 @@ final class SplitModule
         }
         /** @var string[] */
         $avail = [];
-        foreach ($defOrder as $s) {
-            if (!isset($availSet[$s])) { continue; }
+        /** @var int[] */
+        $availPos = [];
+        foreach ($availSet as $s => $_) { $availPos[] = $this->defPos[$s]; }
+        \sort($availPos);
+        foreach ($availPos as $i) {
+            $s = $defOrder[$i];
             $avail[] = $s;
             foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
         }
@@ -546,7 +603,7 @@ final class SplitModule
         // (`@E__fqns` -> `@E__fqn_0`) and would otherwise be emitted without it.
         if ($p === 0) {
             foreach ($globalOrder as $g) {
-                if ($this->globalClass($globals[$g]) === 'strong') { $refs[$g] = true; }
+                if ($this->gcls[$g] === 'strong') { $refs[$g] = true; }
             }
         }
         // ⚠ The closure follows a global's INITIALIZER only where this part
@@ -560,45 +617,84 @@ final class SplitModule
         $needG = [];
         /** @var array<string, bool> */
         $ownG = [];
-        $progress = true;
-        while ($progress) {
-        $progress = false;
-        $changed = true;
-        while ($changed) {
-            $changed = false;
-            foreach ($defOrder as $s) {
-                if (!isset($internal[$s]) || isset($haveInternal[$s]) || !isset($refs[$s])) { continue; }
-                $haveInternal[$s] = true;
-                foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
-                $changed = true;
-                $progress = true;
-            }
+        // Worklist form of the joint fixpoint. It visits names in exactly the
+        // order the old defOrder/globalOrder sweeps did (a name reached ahead of
+        // the sweep cursor is taken in the same sweep, one behind it in the next),
+        // because `$refs` insertion order decides the order of the `declare`s.
+        /** @var int[] */
+        $pendI = [];
+        /** @var int[] */
+        $pendG = [];
+        foreach ($refs as $r => $_) {
+            $r = (string)$r;
+            if (isset($internal[$r])) { $pendI[] = $this->defPos[$r]; $haveInternal[$r] = false; }
+            elseif (isset($this->gcls[$r])) { $pendG[] = $this->gpos[$r]; $needG[$r] = false; }
         }
-        $changed = true;
-        while ($changed) {
-            $changed = false;
-            foreach ($globalOrder as $g) {
-                if (!isset($refs[$g]) || isset($needG[$g])) { continue; }
-                $needG[$g] = true;
-                $cls = $this->globalClass($globals[$g]);
-                if ($cls === 'coalesced') {
-                    if (isset($owned[$g])) { continue; }
-                    $owned[$g] = true;
-                    $ownG[$g] = true;
-                } elseif ($cls === 'strong' && $p !== 0) {
-                    // Part 0 defines every strong global; here it is a bare
-                    // `external` with no initializer to follow.
-                    continue;
+        while ($pendI !== [] || $pendG !== []) {
+            while ($pendI !== []) {
+                $cur = $pendI;
+                $pendI = [];
+                \sort($cur);
+                $idx = 0;
+                while ($idx < \count($cur)) {
+                    $i = $cur[$idx];
+                    $idx = $idx + 1;
+                    $sym = $defOrder[$i];
+                    $haveInternal[$sym] = true;
+                    foreach ($defRefs[$sym] as $r => $_) {
+                        if (isset($refs[$r])) { continue; }
+                        $refs[$r] = true;
+                        $r = (string)$r;
+                        if (isset($internal[$r])) {
+                            $haveInternal[$r] = false;
+                            $j = $this->defPos[$r];
+                            if ($j > $i) { $this->sortedInsert($cur, $idx, $j); } else { $pendI[] = $j; }
+                        } elseif (isset($this->gcls[$r])) {
+                            $needG[$r] = false;
+                            $pendG[] = $this->gpos[$r];
+                        }
+                    }
                 }
-                foreach ($this->refsOf('global:' . $g, $globals[$g]) as $r => $_) { $refs[$r] = true; }
-                $changed = true;
-                $progress = true;
+            }
+            while ($pendG !== []) {
+                $cur = $pendG;
+                $pendG = [];
+                \sort($cur);
+                $idx = 0;
+                while ($idx < \count($cur)) {
+                    $i = $cur[$idx];
+                    $idx = $idx + 1;
+                    $g = $globalOrder[$i];
+                    $needG[$g] = true;
+                    $cls = $this->gcls[$g];
+                    if ($cls === 'coalesced') {
+                        if (isset($owned[$g])) { continue; }
+                        $owned[$g] = true;
+                        $ownG[$g] = true;
+                    } elseif ($cls === 'strong' && $p !== 0) {
+                        continue;
+                    }
+                    foreach ($this->refsOf('global:' . $g, $globals[$g]) as $r => $_) {
+                        if (isset($refs[$r])) { continue; }
+                        $refs[$r] = true;
+                        $r = (string)$r;
+                        if (isset($internal[$r])) {
+                            $haveInternal[$r] = false;
+                            $pendI[] = $this->defPos[$r];
+                        } elseif (isset($this->gcls[$r])) {
+                            $needG[$r] = false;
+                            $j = $this->gpos[$r];
+                            if ($j > $i) { $this->sortedInsert($cur, $idx, $j); } else { $pendG[] = $j; }
+                        }
+                    }
+                }
             }
         }
-        }
-        foreach ($defOrder as $s) {
-            if (isset($haveInternal[$s])) { $mine[] = $s; }
-        }
+        /** @var int[] */
+        $hp = [];
+        foreach ($haveInternal as $s => $_) { $hp[] = $this->defPos[$s]; }
+        \sort($hp);
+        foreach ($hp as $i) { $mine[] = $defOrder[$i]; }
         $plan = new PartPlan();
         $plan->mine = $mine;
         $plan->avail = $avail;
@@ -625,7 +721,7 @@ final class SplitModule
         $gtext = '';
         foreach ($globalOrder as $g) {
             $gl = $globals[$g];
-            $cls = $this->globalClass($gl);
+            $cls = $this->gcls[$g];
             if ($cls === 'local') {
                 if (!isset($needG[$g])) { continue; }
                 $gtext = $gtext . $this->promoteGlobal($gl) . "\n";
@@ -816,6 +912,7 @@ final class SplitModule
         }
         $this->sharedDefs = \count($shared);
         $this->internalDefs = \count($internal);
+        $this->indexModule($defOrder, $globalOrder, $globals);
         $assign = $this->assignParts($shared, $defOrder, $defSize, $defRefs, $internal, $parts);
         // Threaded through the part loop: the first part that reaches a
         // coalesced global defines it, every later part declares it.

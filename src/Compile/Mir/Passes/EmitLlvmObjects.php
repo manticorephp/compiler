@@ -4949,6 +4949,8 @@ trait EmitLlvmObjects
         $targets = [];
         $erasedSyms = [];
         $distinct = [];
+        /** @var array<string, bool> $seenTargets */
+        $seenTargets = [];
         $fallback = '';
         foreach ($this->methodHolders($method) as $cn => $decl) {
             $cd = $this->classes[$cn];
@@ -4960,7 +4962,7 @@ trait EmitLlvmObjects
             if (!$this->hasEmittedFunction($full)) { continue; }
             $cands[] = $cd->name;
             $targets[$cd->name] = $full;
-            if (!\in_array($full, $distinct, true)) { $distinct[] = $full; }
+            if (!isset($seenTargets[$full])) { $seenTargets[$full] = true; $distinct[] = $full; }
         }
         if ($fallback === '' || $distinct === []) {
             $body .= "  ret i64 0\n}\n\n";
@@ -9957,6 +9959,8 @@ trait EmitLlvmObjects
         // override (so `static::` binds to the real object's class).
         $targets = [];
         $distinct = [];
+        /** @var array<string, bool> $seenTargets */
+        $seenTargets = [];
         $liveCands = [];
         // Symbols that are ERASED THUNKS (erasedEntry rewrote them): a thunk
         // already boxes its result to a cell, so the per-arm cell-boxing below
@@ -9989,8 +9993,7 @@ trait EmitLlvmObjects
             if (!$this->hasEmittedFunction($full)) { continue; }
             $liveCands[] = $c;
             $targets[$c] = $full;
-            if (\Compile\Stats::$on) { \Compile\Stats::bump('dispatch.in_array_probes', \count($distinct)); }
-            if (!\in_array($full, $distinct, true)) { $distinct[] = $full; }
+            if (!isset($seenTargets[$full])) { $seenTargets[$full] = true; $distinct[] = $full; }
         }
         \Compile\Stats::bump('dispatch.arms_emitted', \count($distinct));
         $fallbackFull = $this->lsbTarget($fallback, $mc->method, $static);
