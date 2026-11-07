@@ -892,12 +892,13 @@ trait EmitLlvmControl
      */
     private function armIsFresh(Node $arm, string $flavor): bool
     {
+        $arm = \Compile\Mir\Ownership::promotedInvoke($arm);
         if ($arm->type->kind === Type::KIND_NULL) { return true; }
         $k = $arm->kind;
         if ($k === Node::KIND_THROW) { return true; }
         if ($k === Node::KIND_STRING_CONST || $k === Node::KIND_CONCAT
             || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
-            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ || $k === Node::KIND_CLONE
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE || \Compile\Mir\BitOp::mintsFresh($arm)) {
             return true;

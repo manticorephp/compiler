@@ -1378,6 +1378,7 @@ final class SpillFreshBases
             $aa = $this->asArrayAccess($b);
             return !$aa->probe && \Compile\Mir\Ownership::userOffsetGetBase($aa->array->type, $this->classDefs);
         }
+        if ($k === Node::KIND_NEW_DYN_OBJ) { return true; }
         if ($t->kind !== Type::KIND_OBJ) { return false; }
         return $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
     }

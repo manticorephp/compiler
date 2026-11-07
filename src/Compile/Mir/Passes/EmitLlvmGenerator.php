@@ -469,6 +469,7 @@ trait EmitLlvmGenerator
      */
     private function yieldValueFresh(Node $v): bool
     {
+        $v = \Compile\Mir\Ownership::promotedInvoke($v);
         $k = $v->type->kind;
         if ($k === Type::KIND_STRING) { return $this->isFreshStringTemp($v); }
         if ($k === Type::KIND_OBJ || $k === Type::KIND_ARRAY) {
@@ -479,7 +480,7 @@ trait EmitLlvmGenerator
         $vk = $v->kind;
         return $vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
             || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
-            || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ
+            || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ || $vk === Node::KIND_NEW_DYN_OBJ
             || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT
             || $vk === Node::KIND_CLOSURE || \Compile\Mir\BitOp::mintsFresh($v);
     }

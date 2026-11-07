@@ -4161,7 +4161,7 @@ final class EmitLlvm implements EmitVisitor
             if ($this->condOwnsResult($src)) { return ''; }
             if ($vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
                 || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
-                || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ
+                || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ || $vk === Node::KIND_NEW_DYN_OBJ
                 || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT
                 || \Compile\Mir\BitOp::mintsFresh($src)) {
                 return '';
@@ -4205,6 +4205,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function cellBoxSource(Node $value): Node
     {
+        $value = \Compile\Mir\Ownership::promotedInvoke($value);
         if ($value->kind !== Node::KIND_CALL) { return $value; }
         if (\ltrim($value->function, '\\') !== '__mir_to_cell') { return $value; }
         $args = $value->args;
