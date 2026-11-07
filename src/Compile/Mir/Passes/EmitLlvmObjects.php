@@ -7064,6 +7064,8 @@ trait EmitLlvmObjects
             $spine = [];
             $b = $t;
             while ($b->kind === Node::KIND_ARRAY_ACCESS) { $spine[] = $b; $b = $b->array; }
+            // SpillFreshBases parks a read base in a hidden local; here it is read once anyway.
+            if ($b->kind === Node::KIND_STORE_LOCAL) { $b = $b->value; }
             if ($b->kind === Node::KIND_PROPERTY_ACCESS && $b->object->kind === Node::KIND_ARRAY_ACCESS) {
                 $hn = '__isetr' . \str_replace('%', '', (string)$this->ssa->allocReg());
                 $hs = $this->ssa->allocReg();
