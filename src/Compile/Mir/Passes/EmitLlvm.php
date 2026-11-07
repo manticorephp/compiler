@@ -1377,17 +1377,29 @@ final class EmitLlvm implements EmitVisitor
             if ($spooled) {
                 try {
                     $preambleBytes = $this->writeSpooledPreamble($preamble, $this->streamIrPath);
-                    if ($preambleBytes < 0 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
+                    if ($preambleBytes < 0) {
                         throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
                     }
                 } catch (\Throwable $e) {
                     $this->dropPreambleSpools();
                     throw $e;
                 }
-            } elseif (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
+            } elseif (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))) {
+                throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
+            }
+            // The runtime helpers need the hoist the bodies got: an alloca written after a
+            // call falls out of the entry block when that call is inlined and the block
+            // splits. LLVM then lowers it as a dynamic alloca, and under "probe-stack" (which
+            // inlining a probed callee hands to the caller) sp moves by the bare 8 bytes: the
+            // next sp-relative access is an alignment fault on arm64 darwin.
+            $hoistedPreamble = $this->streamIrPath . '.hoisted';
+            $h = new \Compile\Mir\HoistAllocas();
+            if (!$h->runFile($this->streamIrPath, $hoistedPreamble)
+                || \Manticore\sys_rename($hoistedPreamble, $this->streamIrPath) !== 0
                 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
                 throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
             }
+            $hoistedAllocas += $h->moved;
             if (!\Manticore\append_file_bytes($this->streamIrPath, "\n" . \Compile\Debug::bodyAttrGroup() . "\n")) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged IR attributes');
             }
