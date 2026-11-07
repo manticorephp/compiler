@@ -8929,6 +8929,20 @@ trait EmitLlvmObjects
         }
         return $k;
     }
+    /** A dispatch arm's result in a cell-typed call: an enum body returns its ordinal, and a cell holds the case singleton. */
+    private function boxDispatchReturn(string $ev, ?Type $t): string
+    {
+        if ($t === null || !$this->isEnumType($t)) { return $this->boxRawValue($ev, $t); }
+        $pp = '';
+        $out = $this->emitEnumSingletonPtr((string)$t->class, $ev, $pp);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellBoxed($r);
+        return $out;
+    }
+
     private function emitVirtualDispatchInline(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = [], array $argOutTypes = []): string
     {
         $objp = $this->ssa->allocReg();
@@ -9017,7 +9031,7 @@ trait EmitLlvmObjects
             if ($boxCell && !isset($erasedSyms[$targets[$c]])) {
                 $rc = $this->resolveMethodClass($c, $method);
                 $rt = ($rc !== '' ? ($this->sigs->returnType[$rc . '__' . $method] ?? null) : null);
-                $bodyChunks[] = $this->boxRawValue($r, $rt);
+                $bodyChunks[] = $this->boxDispatchReturn($r, $rt);
                 $r = $this->lastValue;
             }
             $bodyChunks[] = '  store i64 ' . $r . ', ptr ' . $res . "\n";
@@ -9034,7 +9048,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
               . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
         if ($boxCell) {
-            $out .= $this->boxRawValue($rd, $this->sigs->returnType[$fallback] ?? null);
+            $out .= $this->boxDispatchReturn($rd, $this->sigs->returnType[$fallback] ?? null);
             $rd = $this->lastValue;
         }
         $out .= '  store i64 ' . $rd . ', ptr ' . $res . "\n";
@@ -10723,7 +10737,7 @@ trait EmitLlvmObjects
                   . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
             // An erased thunk already returns a cell; boxing it again double-boxes.
             if ($boxCell && !isset($erasedSyms[$sym])) {
-                $out .= $this->boxRawValue($reg, $this->sigs->returnType[$sym] ?? null);
+                $out .= $this->boxDispatchReturn($reg, $this->sigs->returnType[$sym] ?? null);
                 $reg = $this->lastValue;
             }
         } else {
