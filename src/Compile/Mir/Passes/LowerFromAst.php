@@ -7830,10 +7830,12 @@ final class LowerFromAst implements Pass
         if ($params === null && $magicHint === '') {
             $params = $this->variadicMethodParams($expr->method);
         }
+        $argsUnbound = false;
         if ($params !== null) {
             $selfCls = $mcClass !== '' ? $this->resolveMethodDeclClass($mcClass, $expr->method) : '';
             $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
         } else {
+            $argsUnbound = $magicHint === '';
             $args = [];
             // A receiver whose class is only known after inference (`?C`, an untyped value): its
             // parameter NAMES are not known here either, so the named arguments ride one string-keyed
@@ -7886,6 +7888,7 @@ final class LowerFromAst implements Pass
         }
         if (\strtolower($expr->method) === 'bindto' || \strtolower($expr->method) === 'call') { $this->module->closureRebinds = true; }
         $mc = new MethodCall_($obj, $expr->method, $args, Type::unknown());
+        $mc->argsUnbound = $argsUnbound;
         $mc->srcArgc = \count($expr->args);
         return $mc;
     }
