@@ -4943,6 +4943,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // because the DOM class tree is the larger half and most SimpleXML programs
     // never touch it.
     $useXmlDom = $demand->mentionsAny([
+            'HTMLDocument',
+            'Dom\\HTMLDocument',
             'DOMDocument',
             'DOMNode',
             'DOMElement',

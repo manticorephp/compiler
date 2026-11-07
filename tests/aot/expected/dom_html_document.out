@@ -1,0 +1,103 @@
+== 0
+html
+ head
+ body
+  h2
+   #text "Title & more"
+  p
+   #text "one "
+   strong
+    #text "two"
+   #text " "
+   em
+    #text "three"
+   br
+   #text "four"
+  p
+   #text "five"
+  p
+   #text "six"
+  ul
+   li
+    #text "a"
+   li
+    #text "b"
+  hr
+  pre
+   #text "code <x>"
+== 1
+html
+ head
+ body
+  p [class=a b data-x=1 disabled= href=q]
+   #text "x"
+  img [alt=a"b src=i.png]
+  a [href=/u?a=1&b=2]
+   #text "l"
+  #comment " c "
+  blockquote
+   p
+    #text "q"
+== 2
+html [lang=en]
+ head
+  title
+   #text "T & t"
+  meta [charset=utf-8]
+  style
+   #text "p > a { }"
+  script
+   #text "if (a<b) { x(\"<\/p>\"); }"
+ body [class=k]
+  #text "t"
+== 3
+html
+ head
+ body
+  #text "plain 1 < 2 \u00a9 "
+  b
+   #text "bold"
+  p
+  #text " after"
+== 4
+html
+ head
+ body
+  table
+   tbody
+    tr
+     td
+      #text "1"
+     td
+      #text "2"
+    tr
+     th
+      #text "3"
+  dl
+   dt
+    #text "a"
+   dd
+    #text "b"
+   dt
+    #text "c"
+  select
+   option
+    #text "x"
+   option
+    #text "y"
+  textarea
+   #text "<b>r<\/b> &"
+== 5
+html
+ head
+ body
+  h1
+   #text "a"
+  h2
+   #text "b"
+  div
+   p
+    #text "in"
+  #text "out"
+bool(true)
+bool(true)
