@@ -3321,7 +3321,8 @@ trait EmitLlvmObjects
             // accessDenied does; a closure written at top level has the global scope and is not.
             $roScopeOk = $this->frame->isClosure && !$this->frame->isPrelude && $this->accessScope() === null;
             if ($roDecl !== '' && !$roScopeOk && !\str_starts_with($this->frame->name, $roDecl . '__')
-                && !\str_starts_with($this->frame->name, '__mc_unser_set')) {
+                && !\str_starts_with($this->frame->name, '__mc_unser_set')
+                && !\str_starts_with($this->frame->name, '__mc_pset_')) {
                 $out = $this->emitNode($n->value);
                 $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $n->property;
                 // Supply every ctor arg — emitNewObj does NOT pad defaults (that

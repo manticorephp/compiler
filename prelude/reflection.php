@@ -1250,6 +1250,12 @@ class ReflectionMethod extends ReflectionFunctionAbstract
         return $e[1] ?? false;
     }
 
+    /** ponytail: declarations carry no end position, so the end reads as the start; record the span's end when a caller needs the extent. */
+    public function getEndLine(): int|false
+    {
+        return $this->getStartLine();
+    }
+
     public function isConstructor(): bool
     {
         return \strtolower($this->name) === '__construct';
@@ -1371,6 +1377,12 @@ class ReflectionMethod extends ReflectionFunctionAbstract
  * normally, so a typed slot boxes/unboxes correctly — the same indirect-call
  * shape as ReflectionMethod::invoke).
  */
+enum PropertyHookType: string
+{
+    case Get = 'get';
+    case Set = 'set';
+}
+
 class ReflectionProperty
 {
     public const IS_STATIC = 16;
@@ -1682,6 +1694,16 @@ class ReflectionProperty
     public function getHooks(): array
     {
         return [];
+    }
+
+    public function hasHooks(): bool
+    {
+        return $this->hasHook(PropertyHookType::Get) || $this->hasHook(PropertyHookType::Set);
+    }
+
+    public function hasHook(PropertyHookType $type): bool
+    {
+        return \method_exists($this->class, '__hook_' . $this->name . '_' . $type->value);
     }
 
     /** Lazy objects are not supported, so nothing is ever lazy. */
