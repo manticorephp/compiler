@@ -535,6 +535,9 @@ final class VivifyRefArgs implements Pass
                 // SOME declarer of the method, and so does this pass — otherwise the out-variable is never defined.
                 $target = $this->anyDeclarer[$mc->method] ?? '';
             }
+            // The one declarer picked for an erased receiver says nothing about the rest:
+            // any holder of the name may be the one that keeps the reference.
+            if ($recv === '') { $this->holdShimArgs($mc->method, $mc->args); }
             if ($target !== '') {
                 $this->scanArgs($target, $mc->args, 1, $mc->method);
             } elseif ($recv !== '') {

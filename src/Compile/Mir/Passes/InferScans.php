@@ -3110,12 +3110,10 @@ trait InferScans
         $changed = false;
         /** @var array<string, string> $methodOf fn name → method name */
         $methodOf = [];
-        /** @var array<string, string> $classOf fn name → declaring class */
-        $classOf = [];
         foreach ($this->classes as $cn => $cd) {
             foreach ($cd->methodNames as $mm => $unused) {
                 $fk = $cn . '__' . $mm;
-                if (isset($this->fnByName[$fk])) { $methodOf[$fk] = $mm; $classOf[$fk] = $cn; }
+                if (isset($this->fnByName[$fk])) { $methodOf[$fk] = $mm; }
             }
         }
         /** @var array<string, bool> $retyped "fn#idx" of every method param widened here */
@@ -3174,8 +3172,9 @@ trait InferScans
                     $cut = \strrpos($rk, '#');
                     if ($cut === false || \substr($rk, $cut + 1) !== (string)$idx) { continue; }
                     $rf = \substr($rk, 0, $cut);
+                    // By name, whatever the classes: an erased receiver dispatches to unrelated
+                    // holders too, and they all read the one address the site hands over.
                     if (($methodOf[$rf] ?? '') !== $m) { continue; }
-                    if (!$this->sameMethodFamily($classOf[$fn->name], $classOf[$rf] ?? '', $m)) { continue; }
                     $this->retypeByRefParamCell($fn, $p);
                     $changed = true;
                     break;
@@ -3321,39 +3320,6 @@ trait InferScans
             $this->overrideBodyMemo[$key] = $name;
         }
         return $name === '' ? null : ($this->fnByName[$name] ?? null);
-    }
-
-    /** Do `$a` and `$b` share a supertype (themselves included — a parent, an
-     *  interface) that has method `$m`? Then one call site can reach both. */
-    private function sameMethodFamily(string $a, string $b, string $m): bool
-    {
-        if ($a === '' || $b === '') { return false; }
-        if ($a === $b) { return true; }
-        $sa = $this->supertypesWith($a, $m);
-        foreach ($this->supertypesWith($b, $m) as $s => $unused) {
-            if (isset($sa[$s])) { return true; }
-        }
-        return false;
-    }
-
-    /** @return array<string, bool> `$cls` and every parent / interface of it
-     *  that has method `$m` */
-    private function supertypesWith(string $cls, string $m): array
-    {
-        $out = [];
-        $seen = [];
-        $stack = [$cls];
-        while ($stack !== []) {
-            $c = \array_pop($stack);
-            if ($c === '' || isset($seen[$c])) { continue; }
-            $seen[$c] = true;
-            $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { continue; }
-            if (isset($cd->methodNames[$m])) { $out[$c] = true; }
-            if ($cd->parent !== '') { $stack[] = $cd->parent; }
-            foreach ($cd->interfaces as $i) { $stack[] = $i; }
-        }
-        return $out;
     }
 
     /**
