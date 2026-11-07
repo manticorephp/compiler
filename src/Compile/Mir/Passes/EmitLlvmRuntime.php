@@ -1504,17 +1504,24 @@ trait EmitLlvmRuntime
         $hdr   = (string)\Compile\MemoryAbi::STRING_HEADER_SIZE;
         $mOff  = (string)\Compile\MemoryAbi::STRING_HASH_OFFSET;
         $dOff  = (string)\Compile\MemoryAbi::CLOSURE_DROP_OFFSET;
-        // Only a plain heap address can carry the header: null, a small
-        // sentinel or a NaN-tagged word (a cell that reached a closure-typed
-        // slot unboxed) is left alone before `p-32` is read.
+        // Only a plain heap address can carry the header: null or a small
+        // sentinel is left alone before `p-32` is read. A NaN-tagged word is a
+        // cell that reached a closure-typed slot unboxed — a `callable` returned
+        // out of a cell property — and counts as the cell it is: left alone
+        // here, a cell-typed local's drop of that word released a count nobody
+        // took, and the array freed itself under its owner.
         $guard  = "  %pi = ptrtoint ptr %p to i64\n";
         $guard .= "  %lo = icmp ult i64 %pi, 65536\n";
+        $guard .= "  br i1 %lo, label %done, label %chkhi\n";
+        $guard .= "chkhi:\n";
         $guard .= "  %hi = icmp ugt i64 %pi, " . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
-        $guard .= "  %bad = or i1 %lo, %hi\n";
-        $guard .= "  br i1 %bad, label %done, label %hdr\n";
+        $guard .= "  br i1 %hi, label %cell, label %hdr\n";
         $out  = "define void @__mir_closure_retain(ptr %p) {\n";
         $out .= "entry:\n";
         $out .= $guard;
+        $out .= "cell:\n";
+        $out .= "  call void @__mir_cell_retain(i64 %pi)\n";
+        $out .= "  br label %done\n";
         $out .= "hdr:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";
@@ -1563,6 +1570,9 @@ trait EmitLlvmRuntime
         $out .= "define void @__mir_closure_release(ptr %p) {\n";
         $out .= "entry:\n";
         $out .= $guard;
+        $out .= "cell:\n";
+        $out .= "  call void @__mir_cell_drop(i64 %pi)\n";
+        $out .= "  br label %done\n";
         $out .= "hdr:\n";
         $out .= "  %mp = getelementptr inbounds i8, ptr %p, i64 " . $mOff . "\n";
         $out .= "  %m = load i64, ptr %mp\n";

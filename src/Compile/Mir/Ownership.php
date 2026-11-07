@@ -1505,7 +1505,10 @@ final class Ownership
             if ($vk === Type::KIND_UNKNOWN && $this->returnBorrowsCell($v, $moved, $erasedArray)) { return self::RET_CELL_TAG; }
             return self::RET_NONE;
         }
-        if ($retCell && $vk === Type::KIND_CELL && $this->returnBorrowsCell($v, $moved, $erasedArray)) {
+        // A `callable` return of a cell (`return $this->controller;`) hands the
+        // value out too: a caller's cell-typed local drops what it receives.
+        if (($retCell || ($retType !== null && $retType->kind === Type::KIND_CLOSURE))
+            && $vk === Type::KIND_CELL && $this->returnBorrowsCell($v, $moved, $erasedArray)) {
             return self::RET_CELL_TAG;
         }
         if (self::callHandsBorrow($v)) { return self::RET_OBJ; }

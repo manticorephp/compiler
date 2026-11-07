@@ -5919,6 +5919,17 @@ trait EmitLlvmExpr
         // at RUNTIME instead, so neither shape is guessed at.
         $lCellish = $lk === Type::KIND_CELL || $lk === Type::KIND_UNKNOWN;
         $rCellish = $rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN;
+        // A `callable` against a cell: the callable's word may be raw, the cell's
+        // never is, so the same array compared unequal to itself.
+        if ($strictEq && $lk === Type::KIND_CLOSURE && $rCellish) {
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $chunks[] = $this->boxToCell($c->left->type);
+            $l = $this->lastValue; $lt = $this->lastValueType; $lk = Type::KIND_CELL; $lCellish = true;
+        } elseif ($strictEq && $rk === Type::KIND_CLOSURE && $lCellish) {
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $chunks[] = $this->boxToCell($c->right->type);
+            $r = $this->lastValue; $rt = $this->lastValueType; $rk = Type::KIND_CELL; $rCellish = true;
+        }
         if ($strictEq
             && (($lk === Type::KIND_STRING && $rCellish)
                 || ($lCellish && $rk === Type::KIND_STRING))) {
