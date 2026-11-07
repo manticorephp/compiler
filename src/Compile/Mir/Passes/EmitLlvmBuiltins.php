@@ -328,6 +328,7 @@ trait EmitLlvmBuiltins
             if ($cm !== null) { return $cm; }
         }
         if ($name === 'ord')                          { return $this->biOrd($args); }
+        if ($name === '__mc_str_cmp_bytes')           { return $this->biStrCmpBytes($args); }
         if ($name === 'chr')                          { return $this->biChr($args); }
         if ($name === 'abs')                          { return $this->biAbs($args); }
         if ($name === 'pow')                          { return $this->biPow($args); }
@@ -2903,6 +2904,25 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @__mc_pool_start(i64 ' . $sub . ', i64 ' . $done . ")\n";
         return $this->finishI64($out, $r);
+    }
+
+    private function biStrCmpBytes(array $args): string
+    {
+        $out = $this->emitPtrArg($args[0]);
+        $a = $this->lastValue;
+        $out .= $this->emitPtrArg($args[1]);
+        $b = $this->lastValue;
+        $out .= $this->emitNode($args[2]);
+        $out .= $this->coerceToI64();
+        $lim = $this->lastValue;
+        $out .= $this->emitNode($args[3]);
+        $out .= $this->coerceToI64();
+        $fold = $this->lastValue;
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = call i64 @__mir_str_cmp_bytes(ptr ' . $a . ', ptr ' . $b . ', i64 ' . $lim . ', i64 ' . $fold . ")\n";
+        $out .= $this->freeStrTemp($args[0], $a);
+        $out .= $this->freeStrTemp($args[1], $b);
+        return $this->finishI64($out, $reg);
     }
 
     private function biStrlen(array $args): string
@@ -9367,7 +9387,7 @@ trait EmitLlvmBuiltins
             // name equal to the target loses.
             $this->rt->needsStrcmp = true;
             $same = $this->ssa->allocReg();
-            $out .= '  ' . $same . ' = call i32 @strcasecmp(ptr ' . $subP
+            $out .= '  ' . $same . ' = call i32 @__mir_name_icmp(ptr ' . $subP
                   . ', ptr ' . $tgtP . ")\n";
             $isSame = $this->ssa->allocReg();
             $out .= '  ' . $isSame . ' = icmp eq i32 ' . $same . ", 0\n";
@@ -9762,7 +9782,7 @@ trait EmitLlvmBuiltins
         $out .= $endL . ":\n";
         $ld = $this->ssa->allocReg();
         $out .= '  ' . $ld . ' = load ptr, ptr ' . $res . "\n";
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_get_class') . "(i64 %gcf.cid) noinline optnone {\nentry:\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_get_class') . "(i64 %gcf.cid) noinline {\nentry:\n"
             . $out . '  ret ptr ' . $ld . "\n}\n\n";
     }
 
@@ -9771,12 +9791,10 @@ trait EmitLlvmBuiltins
     private function emitObjectVarsFn(bool $mangle = false): string
     {
         $body = $this->emitObjectVarsInline('%gov.obj', $mangle);
-        // `optnone` on top: this walk is a REFLECTIVE fallback (an erased receiver),
-        // cold by construction, and at 1.2 MB it was the single most expensive
-        // function in the whole backend — 7.22 s of clang's 136.7 s of
-        // per-function optimization (5.3%), measured with `-ftime-trace`.
-        // Optimizing a cold dispatcher buys nothing at runtime.
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . "(ptr %gov.obj) noinline optnone {\n"
+        // Not `optnone`, for all it costs clang: unoptimized, the switch below is a chain of
+        // compares over every class, and Eloquent's `(array) $row` on a stdClass per fetched
+        // row walked all of it (5% of a request).
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . "(ptr %gov.obj) noinline {\n"
             . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 

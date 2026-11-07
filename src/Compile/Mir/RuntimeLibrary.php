@@ -1333,6 +1333,57 @@ final class RuntimeLibrary
         $out .= "  %d = sub i64 %la, %lb\n";
         $out .= "  ret i64 %d\n}\n";
 
+        // strcmp & co. in php's terms: the byte difference at the first mismatch, -1 / 1 for a
+        // prefix. `limit` < 0 compares everything; `fold` != 0 folds ASCII case.
+        $out .= "\ndefine i64 @__mir_str_cmp_bytes(ptr %a, ptr %b, i64 %limit, i64 %fold) {\nentry:\n";
+        $out .= "  %la0 = call i64 @__mir_strlen(ptr %a)\n";
+        $out .= "  %lb0 = call i64 @__mir_strlen(ptr %b)\n";
+        $out .= "  %lim = icmp sge i64 %limit, 0\n";
+        $out .= "  %ca0 = icmp sgt i64 %la0, %limit\n";
+        $out .= "  %cb0 = icmp sgt i64 %lb0, %limit\n";
+        $out .= "  %capa = and i1 %lim, %ca0\n";
+        $out .= "  %capb = and i1 %lim, %cb0\n";
+        $out .= "  %la = select i1 %capa, i64 %limit, i64 %la0\n";
+        $out .= "  %lb = select i1 %capb, i64 %limit, i64 %lb0\n";
+        $out .= "  %alt = icmp slt i64 %la, %lb\n";
+        $out .= "  %n = select i1 %alt, i64 %la, i64 %lb\n";
+        $out .= "  %f = icmp ne i64 %fold, 0\n";
+        $out .= "  br label %loop\n";
+        $out .= "loop:\n";
+        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
+        $out .= "  %more = icmp slt i64 %i, %n\n";
+        $out .= "  br i1 %more, label %body, label %tie\n";
+        $out .= "body:\n";
+        $out .= "  %pa = getelementptr i8, ptr %a, i64 %i\n";
+        $out .= "  %pb = getelementptr i8, ptr %b, i64 %i\n";
+        $out .= "  %ca = load i8, ptr %pa\n";
+        $out .= "  %cb = load i8, ptr %pb\n";
+        $out .= "  %ua = sub i8 %ca, 65\n";
+        $out .= "  %ia0 = icmp ult i8 %ua, 26\n";
+        $out .= "  %ia = and i1 %ia0, %f\n";
+        $out .= "  %oa = or i8 %ca, 32\n";
+        $out .= "  %xa = select i1 %ia, i8 %oa, i8 %ca\n";
+        $out .= "  %ub = sub i8 %cb, 65\n";
+        $out .= "  %ib0 = icmp ult i8 %ub, 26\n";
+        $out .= "  %ib = and i1 %ib0, %f\n";
+        $out .= "  %ob = or i8 %cb, 32\n";
+        $out .= "  %xb = select i1 %ib, i8 %ob, i8 %cb\n";
+        $out .= "  %ne = icmp ne i8 %xa, %xb\n";
+        $out .= "  br i1 %ne, label %diff, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  br label %loop\n";
+        $out .= "diff:\n";
+        $out .= "  %wa = zext i8 %xa to i64\n";
+        $out .= "  %wb = zext i8 %xb to i64\n";
+        $out .= "  %d = sub i64 %wa, %wb\n";
+        $out .= "  ret i64 %d\n";
+        $out .= "tie:\n";
+        $out .= "  %same = icmp eq i64 %la, %lb\n";
+        $out .= "  %sgn = select i1 %alt, i64 -1, i64 1\n";
+        $out .= "  %r = select i1 %same, i64 0, i64 %sgn\n";
+        $out .= "  ret i64 %r\n}\n";
+
         $out .= "\ndefine i1 @__mir_str_eq(ptr %a, ptr %b) {\nentry:\n";
         // Pointer-equality fast path: the SAME buffer is trivially equal. Hits
         // for interned / literal keys (a repeated `\$x[\"lit\"]` resolves to one

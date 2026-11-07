@@ -358,7 +358,7 @@ trait InferCalls
         if ($n === 'str_bytes' || $n === 'manticore_raw_str_bytes') { return Type::int_(); }
 
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
-            || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
+            || $n === 'ord' || $n === '__mc_str_cmp_bytes' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id' || $n === '__mc_obj_addr' || $n === 'gc_collect_cycles'
             || $n === 'strcspn' || $n === '__mc_crc32b'
             || $n === '__mc_b64_ok' || $n === '__mc_hex_ok'

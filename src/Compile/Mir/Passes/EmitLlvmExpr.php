@@ -3921,7 +3921,7 @@ trait EmitLlvmExpr
     private function emitBagOfFn(): string
     {
         $body = $this->emitBagOfUnknownClassInline('%bagf.obj');
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_bag_of') . "(ptr %bagf.obj) noinline optnone {\nentry:\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_bag_of') . "(ptr %bagf.obj) noinline {\nentry:\n"
             . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 
