@@ -13,3 +13,12 @@ $s = []; run($s); echo json_encode($s), "\n";
 foreach ([new Ot, new Oz] as $o) { if ($o instanceof Ot) { $o->initialize(new stdClass); } else { $o->initialize(); } }
 function any(mixed $o, array &$a) { $o->initialize($a); }
 $z = []; any(new AB, $z); any(new FB, $z); any(new VV, $z); echo json_encode($z), "\n";
+// a cell lvalue through an erased receiver: a keeper, a raw by-ref holder, and a typed by-value holder of one name
+class Keep { public array $k = []; public function bind(array &$a): void { $this->k = &$a; } }
+class Raw { public function bind(array &$a): void { $a['raw'] = 1; } }
+class Typed { public function bind(object $o): void { echo "typed\n"; } }
+class TV { public function bind(array $a): void { echo count($a), "\n"; } }
+function each_(array $hs): void { foreach ($hs as $h) { $key = 'b' . get_class($h); $_SESSION[$key] = []; $h->bind($_SESSION[$key]); if ($h instanceof Keep) { $h->k['x'] = 1; } } }
+$_SESSION = [];
+each_([new Keep, new Raw, new TV]);
+echo json_encode($_SESSION), "\n";

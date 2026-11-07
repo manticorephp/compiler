@@ -8602,6 +8602,31 @@ trait EmitLlvmObjects
                         $pre .= '  ' . $ta . ' = ptrtoint ptr ' . $tmp . " to i64\n";
                         $post .= $this->emitByRefCellWriteBack($tmp, $slotAddr, $wt);
                         $wp[$wi] = 'i64 ' . $ta;
+                    } elseif ($pt !== null && $ck === Type::KIND_CELL && $pt->isArray()) {
+                        // By-ref arm with a raw array param, cell slot: lend the unboxed buffer, box what it left.
+                        $slotAddr = \substr($wp[$wi], 4);
+                        $sp = $this->ssa->allocReg();
+                        $rv = $this->ssa->allocReg();
+                        $pre .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+                        $pre .= '  ' . $rv . ' = load i64, ptr ' . $sp . "\n";
+                        $this->lastValue = $rv;
+                        $this->lastValueType = 'i64';
+                        $pre .= $this->unboxCellToType($pt) . $this->coerceToI64();
+                        $tmp = $this->ssa->allocReg();
+                        $ta = $this->ssa->allocReg();
+                        $pre .= '  ' . $tmp . " = alloca i64\n";
+                        $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+                        $pre .= '  ' . $ta . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+                        $bp = $this->ssa->allocReg();
+                        $bv = $this->ssa->allocReg();
+                        $bc = $this->ssa->allocReg();
+                        $bs = $this->ssa->allocReg();
+                        $post .= '  ' . $bv . ' = load i64, ptr ' . $tmp . "\n"
+                            . '  ' . $bp . ' = inttoptr i64 ' . $bv . " to ptr\n"
+                            . '  ' . $bc . ' = call i64 @__manticore_box_array(ptr ' . $bp . ")\n"
+                            . '  ' . $bs . ' = inttoptr i64 ' . $slotAddr . " to ptr\n"
+                            . '  store i64 ' . $bc . ', ptr ' . $bs . "\n";
+                        $wp[$wi] = 'i64 ' . $ta;
                     }
                     continue;
                 }
@@ -8614,6 +8639,20 @@ trait EmitLlvmObjects
             }
             $argList = \implode(', ', $wp);
         }
+        if ($this->vdAddrLoad !== [] && $sym !== '') {
+            $lp = \explode(', ', $argList);
+            $lm = $this->sigs->refParams[$sym] ?? [];
+            foreach ($this->vdAddrLoad as $li => $lt) {
+                if (($lm[$li] ?? false) || !isset($lp[$li]) || !isset($this->sigs->paramTypes[$sym][$li])) { continue; }
+                $lptr = $this->ssa->allocReg();
+                $lval = $this->ssa->allocReg();
+                $pre .= '  ' . $lptr . ' = inttoptr i64 ' . \substr($lp[$li], 4) . " to ptr\n";
+                $pre .= '  ' . $lval . ' = load i64, ptr ' . $lptr . "\n";
+                $lp[$li] = 'i64 ' . $lval;
+                $srcTypes[$li] = $lt;
+            }
+            $argList = \implode(', ', $lp);
+        }
         $r = $pre . $this->vdArmArgsBase($argList, $srcTypes, $cTypes, $sym);
         $this->vdArmDrops .= $post;
         return $r;
@@ -8621,10 +8660,12 @@ trait EmitLlvmObjects
 
     /** @var array<int, Type> params the site passed by address for another candidate's by-ref */
     private array $vdWiden = [];
+    /** @var array<int, Type> params passed by address for the fallback's by-ref, by what the address holds */
+    private array $vdAddrLoad = [];
 
     /** Param indices any candidate of an erased / union receiver takes by reference.
      *  @return array<int, bool> */
-    private function siteRefUnion(Type $rt, string $method): array
+    private function siteRefUnion(Type $rt, string $method, bool $anyArmType = false): array
     {
         $cls = [];
         if ($rt->kind === Type::KIND_UNION) {
@@ -8648,6 +8689,7 @@ trait EmitLlvmObjects
                 if ($pt->kind !== Type::KIND_CELL && $pt->kind !== Type::KIND_UNKNOWN) { $typed[$i] = true; }
             }
         }
+        if ($anyArmType) { return $u; }
         foreach ($typed as $i => $_t) { unset($u[$i]); }
         return $u;
     }
@@ -8927,6 +8969,9 @@ trait EmitLlvmObjects
             $t = $argOutTypes[$i] ?? null;
             $k .= ($t === null ? '-' : (string)$t->id) . ',';
         }
+        // The arms read an address differently from a value: two sites apart on it share no body.
+        foreach ($this->vdWiden as $wi => $wt) { $k .= 'w' . (string)$wi . ':' . (string)$wt->id . ','; }
+        foreach ($this->vdAddrLoad as $li => $lt) { $k .= 'l' . (string)$li . ':' . (string)$lt->id . ','; }
         return $k;
     }
     /** A dispatch arm's result in a cell-typed call: an enum body returns its ordinal, and a cell holds the case singleton. */
@@ -10411,7 +10456,14 @@ trait EmitLlvmObjects
         // the site passes the address and a by-value arm loads it (see vdArmArgs).
         $widenRef = ($mc->object->type->kind === Type::KIND_UNION || !isset($this->classes[$static]))
             ? $this->siteRefUnion($mc->object->type, $mc->method) : [];
+        // A cell argument reads back at every arm's type, so a by-value holder's typed param
+        // does not cost a by-ref holder its address (`$bag->initialize($_SESSION[$k])` beside
+        // an unrelated `initialize(object $o)`).
+        $widenCell = $widenRef === [] && ($mc->object->type->kind === Type::KIND_UNION || !isset($this->classes[$static]))
+            ? $this->siteRefUnion($mc->object->type, $mc->method, true) : [];
         $widen = [];
+        // The same address when the FALLBACK takes the param by reference: a by-value arm still reads through it.
+        $addrLoad = [];
         // Raw caller lvalue → cell by-ref param: scratch slots to write back
         // after the call, parallel with the caller's own types.
         $cellBoxSlots = [];
@@ -10432,7 +10484,9 @@ trait EmitLlvmObjects
                 $ai = \count($ptypes) - 1;
                 continue;
             }
-            if (!($mask[$ai + 1] ?? false) && ($widenRef[$ai + 1] ?? false) && $this->isByRefAddressable($a)) {
+            if (!($mask[$ai + 1] ?? false)
+                && (($widenRef[$ai + 1] ?? false) || (($widenCell[$ai + 1] ?? false) && $a->type->kind === Type::KIND_CELL))
+                && $this->isByRefAddressable($a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
                 $widen[$ai + 1] = $a->type;
@@ -10449,6 +10503,7 @@ trait EmitLlvmObjects
                 $argList .= ', i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
                 $reboxTmps[] = $this->refBoxTmp;
+                $addrLoad[$ai + 1] = $ptypes[$ai + 1] ?? $a->type;
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)
                 && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)
@@ -10462,9 +10517,11 @@ trait EmitLlvmObjects
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
                 $cellBoxTypes[] = $a->type;
+                $addrLoad[$ai + 1] = Type::cell();
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
+                $addrLoad[$ai + 1] = $a->type;
             } elseif ($mask[$ai + 1] ?? false) {
                 $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai, $ahmask[$ai + 1] ?? false,
                     $fallback . '__' . $mc->method, $ai + 1);
@@ -10695,6 +10752,7 @@ trait EmitLlvmObjects
         // merge would mis-read). The result is then a uniform self-describing cell.
         $boxCell = $n->type->kind === Type::KIND_CELL;
         $this->vdWiden = $widen;
+        $this->vdAddrLoad = $addrLoad;
         if (\count($distinct) <= 1) {
             $sym = $distinct[0] ?? $fallbackFull;
             // The fallback is derived from the static type before the candidate
@@ -10746,6 +10804,7 @@ trait EmitLlvmObjects
         }
         $this->spreadTail = null;
         $this->vdWiden = [];
+        $this->vdAddrLoad = [];
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $refSlotDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
