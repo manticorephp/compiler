@@ -73,6 +73,9 @@ final class SplitModule
      */
     public bool $stable = false;
 
+    /** Size from which a file-local global gets one definition per module. */
+    private const SHARED_LOCAL_BYTES = 4096;
+
     /** Cached symbol references for definitions reused by several parts. */
     /** @var array<string, array<string, bool>> */
     private array $refsCache = [];
@@ -735,7 +738,7 @@ final class SplitModule
                 // — every other part would then hold an unresolved external.
                 // weak_odr is the same coalescing with no discard.
                 if (isset($plan->ownG[$g])) {
-                    $gtext = $gtext . $this->pinGlobal($gl) . "\n";
+                    $gtext = $gtext . $this->pinGlobal($this->promoteGlobal($gl)) . "\n";
                     continue;
                 }
                 $gtext = $gtext . $this->externGlobal($gl) . "\n";
@@ -1036,13 +1039,21 @@ final class SplitModule
         return $this->readSymbol($line, 1);
     }
 
-    /** 'local' (file-local), 'coalesced' (discardable if unused) or 'strong'. */
+    /**
+     * 'local' (file-local), 'coalesced' (discardable if unused) or 'strong'.
+     *
+     * A big file-local table is coalesced too. Copied into every part that names it,
+     * three dispatch tables alone cost 3.2 MB per part. A small one stays local: the
+     * optimizer reads a short string's bytes, which a declaration would hide from it.
+     */
     private function globalClass(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return 'strong'; }
         $rest = \substr($line, $eq + 3);
-        if (\str_starts_with($rest, 'internal ') || \str_starts_with($rest, 'private ')) { return 'local'; }
+        if (\str_starts_with($rest, 'internal ') || \str_starts_with($rest, 'private ')) {
+            return \strlen($line) >= self::SHARED_LOCAL_BYTES ? 'coalesced' : 'local';
+        }
         if (\str_starts_with($rest, 'linkonce_odr ') || \str_starts_with($rest, 'weak_odr ')
             || \str_starts_with($rest, 'linkonce ') || \str_starts_with($rest, 'weak ')) { return 'coalesced'; }
         return 'strong';
