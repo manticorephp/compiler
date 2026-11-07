@@ -1553,19 +1553,36 @@ function fopen(string $filename, string $mode)
     if ($scheme !== 'file') {
         return false;   // no wrapper for it (yet) — php: "Unable to find the wrapper"
     }
-    if (\__mc_offload_active()) {
-        \__mc_offload_cancel_point();
-        $fpAddr = \__mc_offload_path2(__MC_OFF_FOPEN, \__mc_file_path($filename), $mode);
-        if ($fpAddr === 0) {
-            return false;
-        }
-        return \__mc_pooled_res(\Resource::KIND_FILE, $fpAddr);
+    $path = \__mc_file_path($filename);
+    $kind = $mode === '' ? '' : $mode[0];
+    $plus = \strpos($mode, '+') !== false;
+    if ($kind === 'x') {
+        // C11's exclusive mode: fails when the file exists, as php's x does.
+        $fpAddr = \__mc_fopen_raw($path, $plus ? 'w+x' : 'wx');
+    } elseif ($kind === 'c') {
+        // ponytail: `c` also opens readable (r+), a write-only descriptor needs open(2) + fdopen.
+        $fpAddr = \__mc_fopen_raw($path, 'r+');
+        if ($fpAddr === 0) { $fpAddr = \__mc_fopen_raw($path, 'w+x'); }
+        // Lost the race to another creator: it exists now.
+        if ($fpAddr === 0) { $fpAddr = \__mc_fopen_raw($path, 'r+'); }
+    } else {
+        $fpAddr = \__mc_fopen_raw($path, $mode);
     }
-    $fp = \Runtime\Libc\fopen(\__mc_file_path($filename), $mode);
-    if ($fp === null) {
+    if ($fpAddr === 0) {
         return false;
     }
-    return \__mc_pooled_res(\Resource::KIND_FILE, \ptr_to_int($fp));
+    return \__mc_pooled_res(\Resource::KIND_FILE, $fpAddr);
+}
+
+/** libc fopen, off the fiber's thread when offload is on; 0 on failure. */
+function __mc_fopen_raw(string $path, string $mode): int
+{
+    if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
+        return \__mc_offload_path2(__MC_OFF_FOPEN, $path, $mode);
+    }
+    $fp = \Runtime\Libc\fopen($path, $mode);
+    return $fp === null ? 0 : \ptr_to_int($fp);
 }
 
 /**
