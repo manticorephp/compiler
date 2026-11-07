@@ -4905,9 +4905,7 @@ final class EmitLlvm implements EmitVisitor
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
             if ($this->arrayElemAddressable($a)) { return true; }
             // An element a callee keeps a reference to is handed over as its box, whatever the base's static type.
-            $sek = $a->array->type->element->kind ?? Type::KIND_UNKNOWN;
-            return $a->refStored && ($sek === Type::KIND_CELL || $sek === Type::KIND_UNKNOWN)
-                && $this->containerAddressable($a->array);
+            return $a->refStored && $this->elemRefBoxable($a);
         }
         // A static property is an external-linkage global, and
         // {@see EmitLlvmLocals::byRefAddrOf} hands its address over. Not listed
@@ -4917,6 +4915,20 @@ final class EmitLlvm implements EmitVisitor
             return true;
         }
         return false;
+    }
+
+    /** Will {@see EmitLlvmObjects::elemRefBoxAddr} answer a box for this element? Its refusals, in its order. */
+    private function elemRefBoxable(Node $a): bool
+    {
+        $sek = $a->array->type->element->kind ?? Type::KIND_UNKNOWN;
+        if ($sek !== Type::KIND_CELL && $sek !== Type::KIND_UNKNOWN) { return false; }
+        if ($a->index->kind !== Node::KIND_NULL_CONST && $this->arrayElemKeyKind($a->index) === null
+            && !$this->keyRidesCellChannel($a->index)) { return false; }
+        if (!$this->containerAddressable($a->array)) { return false; }
+        $bk = $a->array->type->kind;
+        if (!$a->array->type->isArray() && $bk !== Type::KIND_CELL && $bk !== Type::KIND_UNKNOWN) { return false; }
+        // A nested container is opened through its own address.
+        return $a->array->kind !== Node::KIND_ARRAY_ACCESS || $this->isByRefAddressable($a->array);
     }
 
     /** Pure predicate: `$base` has a stable i64 cell holding its array pointer
