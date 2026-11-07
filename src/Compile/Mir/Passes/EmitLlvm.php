@@ -2563,6 +2563,16 @@ final class EmitLlvm implements EmitVisitor
                 }
             }
         }
+        // A lazy ghost starts with every property unset, and the read of an unset one
+        // is what starts its initializer ({@see EmitLlvmObjects::emitInitReadCheck}).
+        if (\Compile\Debug::$lazyObjects) {
+            foreach ($this->classes as $name => $cd) {
+                if ($cd->isPreludeClass || !$this->lazyCandidateName((string)$name)) { continue; }
+                foreach ($cd->propertyMeta as $pn => $pm) {
+                    if (!$pm->isStatic) { $cd->propertyMaybeUninit[$pn] = true; }
+                }
+            }
+        }
         // A read through a base type sees every subclass's instances: a property
         // a subclass's own constructor may leave unwritten is checked on the
         // ancestors that declare it too.
@@ -2637,6 +2647,15 @@ final class EmitLlvm implements EmitVisitor
                 $cd->initMapProps = $set;
             }
         }
+    }
+
+    private function lazyCandidateName(string $name): bool
+    {
+        if (\Compile\Debug::$lazyPrefixes === []) { return true; }
+        foreach (\Compile\Debug::$lazyPrefixes as $p) {
+            if (\str_starts_with($name, (string)$p)) { return true; }
+        }
+        return false;
     }
 
     /** Names of the properties some `unset($x->p)` in `$n` targets.

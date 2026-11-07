@@ -3211,6 +3211,23 @@ trait EmitLlvmExpr
     }
     private function emitNullCoalesce(NullCoalesce_ $n): string
     {
+        // `$ghost->p ?? d` answers for the initialized object.
+        $l = $n->left;
+        if (\Compile\Debug::$lazyObjects && $l->kind === Node::KIND_PROPERTY_ACCESS
+            && $l->object->kind === Node::KIND_LOAD_LOCAL && $l->object->type->kind === Type::KIND_OBJ) {
+            $h = $this->slotHolder($l->object, $l->property);
+            if ($h !== null && $h->initChecked($l->property)) {
+                $pre = $this->emitNode($l->object) . $this->coerceToPtr();
+                $pre .= $this->emitLazyStoreGate($this->lastValue, $h, $l->property,
+                    $this->propertyOffsetOrNull($l->object, $l->property) ?? -1, '');
+                return $pre . $this->emitNullCoalesceBody($n);
+            }
+        }
+        return $this->emitNullCoalesceBody($n);
+    }
+
+    private function emitNullCoalesceBody(NullCoalesce_ $n): string
+    {
         $nc = $n;
         if ($nc->left->kind === Node::KIND_DYN_PROP) { $this->dynQuietRead = $nc->left; }
         if ($nc->left->kind === Node::KIND_PROPERTY_ACCESS) {

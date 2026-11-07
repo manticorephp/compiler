@@ -1,0 +1,26 @@
+bool(true)
+bool(true)
+string(4) "Post"
+string(4) "Post"
+bool(true)
+[]
+1
+bool(true)
+title1["init 1"]
+bool(false)
+["t"]0
+["init 1"]
+written["init 1","init 2"]
+bool(false)
+title3
+bool(false)
+dflt3
+boom
+bool(true)
+in init
+title10 title11 title12 
+normal5
+Typed property Post::$tags must not be accessed before initialization
+["t"]true
+[true,"q1"]
+dfltq2

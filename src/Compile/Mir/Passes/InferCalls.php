@@ -312,6 +312,7 @@ trait InferCalls
             || $n === '__mir_fiber_guard_install') { return Type::void(); }
         if ($n === '__mir_object_class_id') { return Type::int_(); }
         if ($n === '__mir_prop_inited') { return Type::bool_(); }
+        if ($n === '__mir_init_map_ptr' || $n === '__mir_init_map_words') { return Type::int_(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
         // Reflection Tier-2: an rmeta HANDLE is a raw address carried as an int
         // (the Ffi\Ptr::$address idiom), never an obj — nothing may retain,

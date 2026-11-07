@@ -1697,6 +1697,21 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('pr.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
+            // An erased receiver may hold a lazy ghost. Nothing is thrown here: this helper
+            // also serves isset / `??`, which test a still-unset slot rather than fail on it.
+            if (\Compile\Debug::$lazyObjects && $cd->initChecked($prop)) {
+                $lzOut = '';
+                $lzC = $this->emitInitTest($obj, $cd, $prop, $cd->propertyOffset($prop), '', $lzOut);
+                if ($lzC !== '') {
+                    $lzL = $this->ssa->allocLabel('pr.lazy');
+                    $lzE = $this->ssa->allocLabel('pr.lazyend');
+                    $lzW = $this->ssa->allocReg();
+                    $bodies .= $lzOut . '  br i1 ' . $lzC . ', label %' . $lzE . ', label %' . $lzL . "\n" . $lzL . ":\n";
+                    $bodies .= '  ' . $lzW . ' = ptrtoint ptr ' . $obj . " to i64\n";
+                    $bodies .= '  call i64 @manticore___mc_lazy_init(i64 ' . $lzW . ")\n";
+                    $bodies .= '  br label %' . $lzE . "\n" . $lzE . ":\n";
+                }
+            }
             $bodies .= $this->emitFixedPropLoad($obj, $cd, $prop);
             $fv = $this->lastValue;
             if ($fresh) { $bodies .= $this->rcRetainReg($fv, 'cell'); }
@@ -3573,6 +3588,8 @@ trait EmitLlvmObjects
         }
         $out .= $this->propSlotGep($n->object, $objPtr, $n->property);
         $gep = $this->lastValue;
+        $out .= $this->emitLazyStoreGate($objPtr, $this->initMapHolder($n->object, $n->property), $n->property,
+            $this->propertyOffsetOrNull($n->object, $n->property) ?? -1, $gep);
         $out .= $this->emitReadonlyReinitGuard($n, $objPtr, $gep);
         // Release-before-overwrite. A LOCAL slot has always dropped its previous
         // value; a property slot never has, so every rc value an overwritten
@@ -7438,6 +7455,8 @@ trait EmitLlvmObjects
                     $ih = $this->slotHolder($t->object, $t->property);
                     $ini = '';
                     if ($ih !== null && $ih->initChecked($t->property)) {
+                        $out .= $this->emitLazyStoreGate($objPtr, $ih, $t->property,
+                            $this->propertyOffsetOrNull($t->object, $t->property) ?? -1, '');
                         $ini = $this->emitInitTest($objPtr, $ih, $t->property,
                             $this->propertyOffsetOrNull($t->object, $t->property) ?? -1, '', $out);
                     }
@@ -11687,6 +11706,44 @@ trait EmitLlvmObjects
         return $this->sigs->refParams[$decl . '__' . $method] ?? null;
     }
 
+    /** Run the lazy initializer of the object `$objPtr`, if it has one pending. */
+    private function emitLazyInitCall(string $objPtr, string $cls): string
+    {
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $hn = '__lazyo' . \str_replace('%', '', (string)$this->ssa->allocReg());
+        $hs = $this->ssa->allocReg();
+        $this->locals->slots[$hn] = $hs;
+        $out = $this->localVarSlot($hs);
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+        $out .= '  store i64 ' . $w . ', ptr ' . $hs . "\n";
+        $out .= $this->emitNode(new \Compile\Mir\Call('__mc_lazy_init',
+            [new \Compile\Mir\LoadLocal($hn, Type::obj($cls))], Type::void()));
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
+        return $out;
+    }
+
+    /** A write to an unset slot of a lazy ghost initializes it first: php's order, or the
+     *  initializer would overwrite the new value. isset / `??` go through here too: they answer
+     *  for the initialized object. Built-in code writes raw. */
+    private function emitLazyStoreGate(string $objPtr, ?ClassDef $h, string $prop, int $off, string $gep): string
+    {
+        if (!\Compile\Debug::$lazyObjects || $h === null || !$h->initChecked($prop)
+            || $this->initReadsExempt($this->frame->name) || $this->frame->isPrelude) {
+            return '';
+        }
+        $out = '';
+        $c = $this->emitInitTest($objPtr, $h, $prop, $off, $gep, $out);
+        if ($c === '') { return ''; }
+        $lz = $this->ssa->allocLabel('lazyw.init');
+        $ok = $this->ssa->allocLabel('lazyw.ok');
+        $out .= '  br i1 ' . $c . ', label %' . $ok . ', label %' . $lz . "\n" . $lz . ":\n";
+        $out .= $this->emitLazyInitCall($objPtr, $h->name);
+        return $out . '  br label %' . $ok . "\n" . $ok . ":\n";
+    }
+
     /** `Typed property C::$p must not be accessed before initialization` when
      *  `$prop` is still unset on `$objPtr`; '' when no check applies. */
     private function emitInitReadCheck(string $objPtr, ?ClassDef $h, string $prop, int $off, string $gep): string
@@ -11700,6 +11757,19 @@ trait EmitLlvmObjects
         $decl = $h->propertyMeta[$prop]->declaringClass ?? '';
         if ($decl === '') { $decl = $h->name; }
         $shown = isset($this->classes[$decl]) ? $this->classes[$decl]->display() : $decl;
+        // An unset slot of a lazy ghost runs its initializer; still unset after that is php's Error.
+        if (\Compile\Debug::$lazyObjects) {
+            $lz = $this->ssa->allocLabel('lazy.init');
+            $ok = $this->ssa->allocLabel('lazy.ok');
+            $out .= '  br i1 ' . $u . ', label %' . $lz . ', label %' . $ok . "\n" . $lz . ":\n";
+            $out .= $this->emitLazyInitCall($objPtr, $h->name);
+            $c2 = $this->emitInitTest($objPtr, $h, $prop, $off, $gep, $out);
+            $u2 = $this->ssa->allocReg();
+            $out .= '  ' . $u2 . ' = xor i1 ' . $c2 . ", true\n";
+            $out .= $this->emitThrowIf($u2, 'Error',
+                'Typed property ' . \ltrim($shown, '\\') . '::$' . $prop . ' must not be accessed before initialization');
+            return $out . '  br label %' . $ok . "\n" . $ok . ":\n";
+        }
         return $out . $this->emitThrowIf($u, 'Error',
             'Typed property ' . \ltrim($shown, '\\') . '::$' . $prop . ' must not be accessed before initialization');
     }

@@ -152,6 +152,77 @@ function __mc_get_class_vars(string $class, string $scope): array
     return $out;
 }
 
+/**
+ * Pending lazy ghosts: object => its initializer and the init bitmap of its defaults. A ghost's
+ * bitmap is empty, and the read of an unset slot calls {@see __mc_lazy_init}.
+ * ponytail: `(array)`, get_object_vars, var_dump, foreach, isset and `??` do not start the
+ * initializer, they see only what was set raw. Hook the walkers when a program relies on it.
+ */
+final class __McLazy
+{
+    public static ?\WeakMap $m = null;
+}
+
+function __mc_lazy_make(object $o, mixed $init): object
+{
+    $n = \__mir_init_map_words($o);
+    if ($n === 0) {
+        throw new ReflectionException("Class " . \get_class($o) . " is not lazy in this build: add it to the manifest's \"lazy\"");
+    }
+    $p = \int_to_ptr(\__mir_init_map_ptr($o));
+    $saved = [];
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $saved[] = \peek_i64($p, $i * 8);
+        \poke_i64($p, $i * 8, 0);
+    }
+    __McLazy::$m ??= new \WeakMap();
+    __McLazy::$m[$o] = ['init' => $init, 'map' => $saved, 'run' => false];
+    return $o;
+}
+
+function __mc_lazy_pending(object $o): bool
+{
+    return __McLazy::$m !== null && isset(__McLazy::$m[$o]);
+}
+
+/** The defaults count as set again; what was set raw stays. */
+function __mc_lazy_restore(object $o, array $saved): void
+{
+    $p = \int_to_ptr(\__mir_init_map_ptr($o));
+    foreach ($saved as $i => $w) {
+        \poke_i64($p, $i * 8, \peek_i64($p, $i * 8) | $w);
+    }
+}
+
+function __mc_lazy_init(object $o): void
+{
+    if (!__mc_lazy_pending($o)) { return; }
+    $e = __McLazy::$m[$o];
+    if ($e['run']) { return; }
+    $e['run'] = true;
+    __McLazy::$m[$o] = $e;
+    __mc_lazy_restore($o, $e['map']);
+    $init = $e['init'];
+    try {
+        $init($o);
+    } catch (\Throwable $t) {
+        if (__mc_lazy_pending($o)) {
+            $e['run'] = false;
+            __McLazy::$m[$o] = $e;
+        }
+        throw $t;
+    }
+    unset(__McLazy::$m[$o]);
+}
+
+function __mc_lazy_mark(object $o): void
+{
+    if (!__mc_lazy_pending($o)) { return; }
+    $e = __McLazy::$m[$o];
+    if (!$e['run']) { __mc_lazy_restore($o, $e['map']); }
+    unset(__McLazy::$m[$o]);
+}
+
 /** @return string[] */
 function get_declared_classes(): array
 {
@@ -321,6 +392,8 @@ class ReflectionClass
     public const IS_EXPLICIT_ABSTRACT = 64;
     public const IS_FINAL = 32;
     public const IS_READONLY = 65536;
+    public const SKIP_INITIALIZATION_ON_SERIALIZE = 8;
+    public const SKIP_DESTRUCTOR = 16;
 
     /** PHP exposes the class name as a public property, not just getName(). */
     public string $name = "";
@@ -504,28 +577,28 @@ class ReflectionClass
     }
 
     /**
-     * PHP 8.4 lazy objects. A compiled program has none: every object is fully initialized, so the
-     * object itself is the "real instance" and nothing is uninitialized. Creating lazy objects
-     * (newLazyGhost / newLazyProxy / resetAsLazy*) is not supported.
+     * PHP 8.4 lazy objects: ghosts. newLazyProxy / resetAsLazy* are not supported.
      */
     public function isUninitializedLazyObject(object $object): bool
     {
-        return false;
+        return __mc_lazy_pending($object);
     }
 
     public function initializeLazyObject(object $object): object
     {
+        __mc_lazy_init($object);
         return $object;
     }
 
     public function markLazyObjectAsInitialized(object $object): object
     {
+        __mc_lazy_mark($object);
         return $object;
     }
 
     public function newLazyGhost(callable $initializer, int $options = 0): object
     {
-        throw new ReflectionException("Lazy objects are not supported");
+        return __mc_lazy_make($this->newInstanceWithoutConstructor(), $initializer);
     }
 
     public function newLazyProxy(callable $factory, int $options = 0): object
@@ -1709,7 +1782,7 @@ class ReflectionProperty
     /** Lazy objects are not supported, so nothing is ever lazy. */
     public function isLazy(object $object): bool
     {
-        return false;
+        return __mc_lazy_pending($object) && !$this->isInitialized($object);
     }
 
     /** The key php uses for the property in an `(array)` cast: `\0Class\0name` / `\0*\0name` / `name`. */
@@ -1721,6 +1794,12 @@ class ReflectionProperty
     }
 
     /** No lazy initialization to skip: same as setRawValue. */
+    /** ponytail: reads through a get hook; bypass it when a hooked lazy class needs that. */
+    public function getRawValue(object $object): mixed
+    {
+        return $this->getValue($object);
+    }
+
     public function setRawValueWithoutLazyInitialization(object $object, mixed $value): void
     {
         $this->setRawValue($object, $value);

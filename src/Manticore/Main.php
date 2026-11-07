@@ -5142,7 +5142,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
 
         || $demand->mentionsAny(['Normalizer', 'IntlException', 'IntlIterator']);
     // WeakMap / WeakReference: two global class names php owns outright.
-    $useWeak = $demand->mentionsAny(['WeakMap', 'WeakReference']);
+    \Compile\Debug::$lazyObjects = $demand->mentionsAny(['newLazyGhost']);
+    $useWeak = \Compile\Debug::$lazyObjects || $demand->mentionsAny(['WeakMap', 'WeakReference']);
     $useVarDump = $demand->calls('var_dump');
     $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');

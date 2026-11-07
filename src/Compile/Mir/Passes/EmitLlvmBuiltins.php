@@ -500,6 +500,8 @@ trait EmitLlvmBuiltins
         if ($name === 'var_dump')                     { return $this->biVarDump($args); }
         if ($name === '__mir_object_class_id')          { return $this->biObjectClassId($args); }
         if ($name === '__mir_prop_inited')             { return $this->biPropInited($args); }
+        if ($name === '__mir_init_map_ptr')            { return $this->biInitMap($args, true); }
+        if ($name === '__mir_init_map_words')          { return $this->biInitMap($args, false); }
         if ($name === '__mir_enum_name')              { return $this->biEnumName($args); }
         if ($name === 'get_class')                    { return $this->biGetClass($args); }
         if ($name === 'array_keys') {
@@ -690,6 +692,44 @@ trait EmitLlvmBuiltins
         $ini = $this->emitInitTest($this->lastValue, $cd, $prop, $cd->propertyOffset($prop), '', $out);
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = zext i1 ' . $ini . " to i64\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /**
+     * `__mir_init_map_ptr($o)` the address of the object's init bitmap, `__mir_init_map_words($o)`
+     * its length; 0 for a class without one. By runtime class: lazy objects are made through a
+     * base-typed reflection call.
+     * @param Node[] $args
+     */
+    private function biInitMap(array $args, bool $wantPtr): string
+    {
+        $out = $this->emitObjPtrOf($args[0]);
+        $p = $this->lastValue;
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $res . " = alloca i64\n  store i64 0, ptr " . $res . "\n";
+        $out .= $this->emitLoadClassId($p);
+        $end = $this->ssa->allocLabel('imap.end');
+        $switch = '  switch i64 ' . $this->classIdReg . ', label %' . $end . " [\n";
+        $bodies = '';
+        foreach ($this->classes as $cd) {
+            if ($cd->initMapWords <= 0) { continue; }
+            $l = $this->ssa->allocLabel('imap.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $l . "\n";
+            $bodies .= $l . ":\n";
+            if ($wantPtr) {
+                $g = $this->ssa->allocReg();
+                $i = $this->ssa->allocReg();
+                $bodies .= '  ' . $g . ' = getelementptr inbounds i8, ptr ' . $p . ', i64 ' . (string)$cd->initMapOffset . "\n";
+                $bodies .= '  ' . $i . ' = ptrtoint ptr ' . $g . " to i64\n";
+                $bodies .= '  store i64 ' . $i . ', ptr ' . $res . "\n";
+            } else {
+                $bodies .= '  store i64 ' . (string)$cd->initMapWords . ', ptr ' . $res . "\n";
+            }
+            $bodies .= '  br label %' . $end . "\n";
+        }
+        $out .= $switch . "  ]\n" . $bodies . $end . ":\n";
+        $reg = $this->ssa->allocReg();
+        $out .= '  ' . $reg . ' = load i64, ptr ' . $res . "\n";
         return $this->finishI64($out, $reg);
     }
 
