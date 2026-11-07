@@ -667,6 +667,16 @@ class DOMDocument extends DOMNode
         return \__mc_xml_dump_node($node->__d, $node->__n, 0);
     }
 
+    public function saveHTML(?DOMNode $node = null): string|false
+    {
+        $xml = $this->saveXML($node);
+        if (!\is_string($xml)) { return false; }
+        if ($node === null) { $xml = \preg_replace('/^<\?xml[^>]*\?>\s*/', '', $xml); }
+        // HTML has no self-closing form: a void element stands alone, any other closes.
+        $xml = \preg_replace('~<(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)((?:\s[^<>]*?)?)\s*/>~i', '<$1$2>', $xml);
+        return \preg_replace('~<([A-Za-z_][\w:.-]*)((?:\s[^<>]*?)?)\s*/>~', '<$1$2></$1>', $xml);
+    }
+
     public function save(string $filename, int $options = 0): int|bool
     {
         $xml = \__mc_xml_dump_doc($this->__d);
