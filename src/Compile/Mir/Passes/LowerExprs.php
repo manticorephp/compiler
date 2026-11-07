@@ -401,6 +401,20 @@ trait LowerExprs
                 return new Call('__mc_public_object_vars', [$this->lowerExpr($expr->args[0])],
                     Type::assoc(Type::string_(), Type::cell()));
             }
+            // Inside a class any object answers by that class's visibility, and by its RUNTIME
+            // class (an inherited method lists the subclass's properties). `$this` in a closure
+            // keeps the plain builtin: the closure may be bound to any object.
+            // ponytail: a closure's scope is taken as lexical; `Closure::bind(fn ($o) => get_object_vars($o), null, C::class)`
+            // over another object sees C's lexical scope, not C. Carry the bound scope when a program needs it.
+            if ($fnBare === 'get_object_vars' && \count($expr->args) === 1
+                && $this->currentLowerClass !== ''
+                && !($this->classTable[$this->currentLowerClass]->isPreludeClass ?? false)
+                && !($this->closureMagic !== '' && $expr->args[0]->kind === 'Variable' && $expr->args[0]->name === 'this')) {
+                return new Call('__mc_scoped_object_vars', [
+                    $this->lowerExpr($expr->args[0]),
+                    new StringConst($this->currentLowerClass, Type::string_()),
+                ], Type::assoc(Type::string_(), Type::cell()));
+            }
             // `array_multisort($a, SORT_DESC, $b, …)` — every array argument is
             // BY REF and the SORT_* flags are interleaved positionally, which
             // needs a by-ref VARIADIC pack; that does not exist (the caller

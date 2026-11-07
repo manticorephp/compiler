@@ -99,3 +99,25 @@ function __mc_iter_any(mixed $it): \Generator
         }
     }
 }
+
+/**
+ * `get_object_vars($o)` from inside class `$scope`: `(array)` carries each property's
+ * visibility in its key (`"\0*\0p"` protected, `"\0C\0p"` private).
+ * @return array<string, mixed>
+ */
+function __mc_scoped_object_vars(object $o, string $scope): array
+{
+    $related = $o instanceof $scope || \is_a($scope, \get_class($o), true);
+    $out = [];
+    foreach ((array)$o as $k => $v) {
+        $k = (string)$k;
+        if ($k !== '' && $k[0] === "\0") {
+            $end = \strpos($k, "\0", 1);
+            $owner = \substr($k, 1, $end - 1);
+            if ($owner === '*' ? !$related : $owner !== $scope) { continue; }
+            $k = \substr($k, $end + 1);
+        }
+        $out[$k] = $v;
+    }
+    return $out;
+}
