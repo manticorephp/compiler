@@ -17,11 +17,12 @@ The cheap work is done (PR #585). What is left is flat in the profile and comes 
 | Callees-first SCC order for the walk | Same rounds, same narrow counts, 16 more `cell` nodes | Order alone cannot help: returns narrow in `NarrowReturns`, between runs, not during the walk |
 | Existing scoped mode, `MANTICORE_WORKLIST=on` | ~55% more CPU, 218 more `cell` nodes | Do not build on it |
 | `MANTICORE_INFER_DIFF`: full pass after a scoped one | 98→0 and 75→11→0→0 functions of 36k move, alongside 2, then 27, then 2 property retypes only the full pass finds | Divergence is narrow and appears to come through property slots |
-| Fewer closing rounds in `NarrowReturns` | 137 fewer `cell` nodes, CPU down | More rounds were not buying precision |
 | Interning shape `Type`s | CPU within noise, RSS not better | Not the bottleneck |
 | Time inside each of the six full runs | Pre-scans 2 s, walk 6 s, post-walk 24 s in total | The walk over all functions costs ~1 s per run. **Almost all the time is after it** |
 | Profile of `InferTypes::run` | `inferFunction` from post-walk re-inference 37%, from the walk 19%; scans ~40% | Re-inference triggered by scans and the scans themselves are the cost |
 | Functions whose types change between runs | 257 to 4576 of ~34k (0.8-13%) | Scans mostly re-read bodies that did not change |
+| Precise reads in shadow mode (`MANTICORE_DEPS_SHADOW`) | Slots that moved between runs have 3-1880 recorded readers out of 34k, against 16-21k targeted by the name-keyed edges; 4-260 changed bodies were not predicted, among 7-1812 changed | Resolved edges cut the fan-out by an order of magnitude. Misses seen so far are mostly property readers, where a scan retyped the property after the walk |
+| Stopping `NarrowReturns` after one closing inference | One more inference still moved 9 returns, 1 param and 5 properties; on `main` it moves nothing | Closing rounds are load-bearing, not waste: a property stays narrower than its stores. Fixed; shadow mode now asserts the module ends at a fixpoint |
 | Arrays with an `unknown` element | 17058 of 120940 erased (14%), 7004 of them literal `[]`; about 1071 local nodes have the same local concrete elsewhere | `bottom` has little to recover |
 
 Scoped mode targets 16-21k of 36k functions per round (`would-target`), so its static dependency edges are too wide to save time. They are keyed by bare method name, and dispatch on a common name reaches much of the module.
@@ -44,9 +45,13 @@ Scoped mode targets 16-21k of 36k functions per round (`would-target`), so its s
 
 **One ascending fixpoint.** Every slot starts at a new `bottom`, distinct from `unknown`, and only moves up by `join`; declared types bound it from above. There is no separate narrowing pass, because a return is simply the join of what its body returns. This is the optimistic style of SCCP: a recursive function's return can settle on a precise type a pessimistic start would never recover, so precision should improve rather than merely hold.
 
-**Recorded dependencies.** Inferring a function records each slot it reads. When a slot changes, exactly its recorded readers are re-queued, as in Salsa and rustc's query system. HHBBC, the closest precedent for PHP, also tracks dependencies per function (from memory, to be checked against its source before phase 2). Nothing is guessed from method names; a dispatch reads the slots of the candidates it actually resolved.
+**Recorded dependencies.** Inferring a function records each slot it reads, against the resolved target. HHBBC does exactly this (`add_dependency` from `lookup_return_type`, with a `Dep` bitmask of what was read): a virtual call depends on a `FuncFamily`, the set of overrides, and is woken only when that family's cached return changes. Nothing is guessed from method names.
 
-**SCC order as a scheduler.** The queue is ordered callees first, by a graph that recorded reads refine. The experiment above showed no gain because returns did not settle during the walk; here they do. Order then should affect speed, not the result.
+**Read-only rounds, then an update step.** HHBBC's rounds (`analyze_iteratively`) analyse functions against a read-only index and apply results afterwards (`refine_return_info`, `update_func`), with the next round's work coming from `find_deps` on what changed. This also answers mutation during inference, and makes the walk parallelisable. SCC order is optional on top: opcache has none either (`zend_sort_op_arrays` is a stub), and our experiment showed none is needed to stop re-inferring.
+
+**Early cutoff on the slot value.** Readers wake only when a slot's value changes, compared structurally, with the direction asserted (HHBBC `strictlyMoreRefined`) and a per-slot limit that widens at the cap. Salsa calls this backdating. Hashing bodies is the wrong key.
+
+**Unseen writers, by what is unknown.** A write with a known property name and unknown receiver joins a per-name slot that every read of that name also reads; an unknown name (`$o->$n =`, `extract`, reflection `setValue`, a reference to a property) poisons every non-private slot to `cell`. This follows HHBBC's `mergeUnknownClass` and `mergeUnknown`. Slots start from the declared type, and only ones proven closed may start low.
 
 **Scans become transfer functions.** A store to a property joins into that property's slot when the store is inferred, so each scan is removed as its fact moves into the walk.
 
@@ -54,7 +59,7 @@ Scoped mode targets 16-21k of 36k functions per round (`would-target`), so its s
 
 **Mutation moves out.** Box-back stores and similar rewrites run once after the fixpoint, from final types. Inference itself only writes node types and slots.
 
-**Summaries, then #498.** A function's inputs are the slots it read, so hashing body + inputs gives a cache key for its output and its written slots. Warm rebuilds then skip unchanged functions instead of re-running the program.
+**Summaries, then #498.** A function's inputs are the slots it read, so body hash + the values of those slots key its output. Because a fixpoint's path depends on order, cache final slot values and re-verify with a read-only round that must move nothing. Vendor and stdlib get a higher durability tier, as in Salsa, and are skipped unless their hash changes. Salsa validates lazily by pull; a whole-program compile has no demand order, so here it would be one verification round.
 
 ## Plan
 
@@ -63,7 +68,7 @@ Every phase lands alone and must pass the full suite and difftest, with `precisi
 The first version of this plan started by splitting `bottom` from `unknown`. Measurement rejected that, and also the idea that fewer walks are the main saving: the walk is about 19% of a run.
 
 1. **Trim post-walk re-inference.** Done in part: propagation visited 10-40 times more functions than moved, and a body whose signature held still now wakes only its callees; settled element-as-key bodies are skipped. Together about 15% of CPU on symfony-app.
-2. **Record dependencies in shadow mode.** Build the read table next to the current code and report what a re-run moved that no recorded edge predicted. Target: zero, on symfony-app, Laravel and the demo.
+2. **Record dependencies in shadow mode.** Started: `MANTICORE_DEPS_SHADOW=1` builds the read table from final node types and reports what a re-run moved that no edge predicted. Target: zero misses, on symfony-app, Laravel and the demo. Next: separate misses caused by a retype after the walk, add `FuncFamily`-style nodes, and read at lookup time rather than from final types.
 3. **Semi-naive scans, on top of those dependencies.** Split each scan into per-function fact extraction and a reduce, re-extracting only where an input changed. Gating on the function's own types is not enough: `scanRefCellArgNode` reads the callee's parameter types and body, and `scanByRefElemWiden` reads a module-wide map, so a stale skip misses a widening to `cell`, which is a miscompile. Scans also fold in module order, and some keep the first observation, so the reduce must preserve that order.
 4. **Move mutation out of inference.**
 5. **Replace `NarrowReturns` with the fixpoint for returns,** using the queue.
