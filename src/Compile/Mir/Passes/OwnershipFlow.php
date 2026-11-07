@@ -325,6 +325,15 @@ final class OwnershipFlow implements Pass
                 $this->noteOwnKey($p->name, $k);
                 continue;
             }
+            // A generator's frame outlives its creator, and a fresh literal the
+            // caller drops right after the call would be gone by the first resume.
+            if ($ks === '' && $fn->isGenerator && isset($this->erasedParams[$p->name]) && !isset($this->mixedHere[$p->name])) {
+                $k = $this->intern($p->name, Ownership::ERASED_ARR, $p->type);
+                $entry[$p->name] = $k;
+                $this->noteOwnKey($p->name, $k);
+                $genParams[$p->name] = $k;
+                continue;
+            }
             if ($ks === '') { continue; }
             $k = $this->intern($p->name, $ks, $p->type);
             // A generator's frame outlives the call that made it, so it owns
