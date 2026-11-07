@@ -5430,13 +5430,15 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // below re-derives each retargeted call's type from its overload.
         $module = (new \Compile\Mir\Passes\ResolveOverloads())->run($module);
         $statT = \Compile\Stats::begin('InferTypes #3');
-        $module = (new \Compile\Mir\Passes\InferTypes(null, $analysisContext))->run($module);
+        $infer3 = new \Compile\Mir\Passes\InferTypes(null, $analysisContext);
+        $module = $infer3->run($module);
         \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
         // Specialize erased-array / polymorphic functions per call-site
         // argument shape (runs after InferTypes so call-arg types are known;
         // re-runs InferTypes internally when it specializes anything).
         $statT = \Compile\Stats::begin('Monomorphize');
-        $mono = new \Compile\Mir\Passes\Monomorphize($analysisContext);
+        $mono = new \Compile\Mir\Passes\Monomorphize($analysisContext, $infer3);
+        $infer3 = null;
         $module = $mono->run($module);
         \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
         $monoLight = $mono->lightRoundRan;

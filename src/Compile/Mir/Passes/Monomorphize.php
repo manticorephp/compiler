@@ -79,7 +79,8 @@ final class Monomorphize implements Pass
     /** @var string[] index-parallel to {@see $pendingRepointCalls}. */
     private array $pendingRepointNames = [];
 
-    public function __construct(private ?\Compile\Mir\AnalysisContext $ctx = null) {}
+    /** @param InferTypes|null $infer the full inference the pipeline just ran, whose tables the rounds reuse */
+    public function __construct(private ?\Compile\Mir\AnalysisContext $ctx = null, private ?InferTypes $infer = null) {}
 
     public function name(): string { return self::NAME; }
 
@@ -123,8 +124,6 @@ final class Monomorphize implements Pass
         return $module;
     }
 
-    /** The instance of round 1's full inference, whose tables the light rounds reuse. */
-    private ?InferTypes $infer = null;
 
     /** Some round re-typed only its clones and their callers. */
     public bool $lightRoundRan = false;
@@ -187,10 +186,10 @@ final class Monomorphize implements Pass
         // With the analysis context, so what a round moves — the clones, the
         // repointed callers — is in the change set the next scoped pass reads.
         if ($this->ctx !== null) { $this->ctx->refresh($module); }
-        // Round 1 specializes most of what will ever be specialized and gets a
-        // full inference; later rounds add a handful of clones, so re-infer those
-        // and what calls them. The module scans have not seen those bodies until
-        // the next full inference: {@see $lightRoundRan} makes NarrowReturns run one.
+        // Re-infer the clones and what calls them, on the tables of the inference
+        // the pipeline ran just before this pass. The module scans have not seen
+        // those bodies until the next full inference: {@see $lightRoundRan} makes
+        // NarrowReturns run one, and it closes on a fixpoint.
         if ($this->infer === null || $this->ctx !== null) {
             $this->infer = new InferTypes(null, $this->ctx);
             $this->infer->run($module);
