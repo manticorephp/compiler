@@ -1561,6 +1561,9 @@ final class InferTypes implements Pass
      * @param array<string, Type> $observed
      * @param array<string, bool> $unusable
      */
+    /** @var array<string, bool> `Class::prop` stored through a key not provably an int */
+    private array $propElemDynKey = [];
+
     private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$unusable): void
     {
         // A WHOLE-property store of an array is evidence about the elements
@@ -1593,6 +1596,10 @@ final class InferTypes implements Pass
                 if ($owner !== '') {
                     $key = $owner . '::' . $se->array->property;
                     $vt = $se->value->type;
+                    // A key that is not provably an int: the slot is no list, whatever its values say.
+                    if ($se->index->kind !== Node::KIND_NULL_CONST && $se->index->type->kind !== Type::KIND_INT) {
+                        $this->propElemDynKey[$key] = true;
+                    }
                     if (!$this->isBoxablePropElem($vt)) {
                         $unusable[$key] = true;
                     } elseif (!isset($observed[$key])) {

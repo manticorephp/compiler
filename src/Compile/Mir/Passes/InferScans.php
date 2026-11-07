@@ -681,6 +681,7 @@ trait InferScans
                     && ($cur->element === null || $cur->element->kind === Type::KIND_UNKNOWN));
             if (!$isErased) { continue; }
             $keyT = ($cur !== null && $cur->isArray()) ? $cur->key : null;
+            if ($keyT === null && isset($this->propElemDynKey[$key])) { $keyT = Type::cell(); }
             if ($this->setPropType($cd, $prop, $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem))) { $changed = true; }
         }
         return $changed;
