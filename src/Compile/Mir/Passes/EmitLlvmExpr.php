@@ -3213,7 +3213,7 @@ trait EmitLlvmExpr
     {
         // `$ghost->p ?? d` answers for the initialized object.
         $l = $n->left;
-        if (\Compile\Debug::$lazyObjects && $l->kind === Node::KIND_PROPERTY_ACCESS
+        if ($this->lazyHolders !== [] && $l->kind === Node::KIND_PROPERTY_ACCESS
             && $l->object->kind === Node::KIND_LOAD_LOCAL && $l->object->type->kind === Type::KIND_OBJ) {
             $h = $this->slotHolder($l->object, $l->property);
             if ($h !== null && $h->initChecked($l->property)) {

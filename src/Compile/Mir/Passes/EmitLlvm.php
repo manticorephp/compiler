@@ -233,6 +233,8 @@ final class EmitLlvm implements EmitVisitor
     private array $propertyReadHelpers = [];
     /** @var array<string, string> scope|magic => deny-helper symbol, '' when nothing is denied */
     private array $propDenyHelpers = [];
+    /** @var array<string, bool> classes a lazy ghost's slots are read through */
+    private array $lazyHolders = [];
     /** The `$o->$name` an isset / `??` is testing: inaccessible reads as unset there, not an Error. */
     private ?Node $dynQuietRead = null;
     /** @var array<string, string> erased dynamic-method helper bodies */
@@ -2571,6 +2573,11 @@ final class EmitLlvm implements EmitVisitor
                 foreach ($cd->propertyMeta as $pn => $pm) {
                     if (!$pm->isStatic) { $cd->propertyMaybeUninit[$pn] = true; }
                 }
+                // A method of an ancestor reads a ghost's slots through the ancestor's type.
+                for ($h = (string)$name, $g = 0; $h !== '' && isset($this->classes[$h]) && $g < 256; $g = $g + 1) {
+                    $this->lazyHolders[$h] = true;
+                    $h = $this->classes[$h]->parent;
+                }
             }
         }
         // A read through a base type sees every subclass's instances: a property
@@ -2647,6 +2654,12 @@ final class EmitLlvm implements EmitVisitor
                 $cd->initMapProps = $set;
             }
         }
+    }
+
+    /** Whether a slot read through `$h` can meet a lazy ghost. */
+    private function lazyHolder(?ClassDef $h): bool
+    {
+        return $h !== null && isset($this->lazyHolders[$h->name]);
     }
 
     private function lazyCandidateName(string $name): bool

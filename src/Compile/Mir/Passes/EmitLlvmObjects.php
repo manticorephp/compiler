@@ -1699,7 +1699,7 @@ trait EmitLlvmObjects
             $bodies .= $lbl . ":\n";
             // An erased receiver may hold a lazy ghost. Nothing is thrown here: this helper
             // also serves isset / `??`, which test a still-unset slot rather than fail on it.
-            if (\Compile\Debug::$lazyObjects && $cd->initChecked($prop)) {
+            if ($this->lazyHolder($cd) && $cd->initChecked($prop)) {
                 $lzOut = '';
                 $lzC = $this->emitInitTest($obj, $cd, $prop, $cd->propertyOffset($prop), '', $lzOut);
                 if ($lzC !== '') {
@@ -11733,7 +11733,7 @@ trait EmitLlvmObjects
      *  for the initialized object. Built-in code writes raw. */
     private function emitLazyStoreGate(string $objPtr, ?ClassDef $h, string $prop, int $off, string $gep): string
     {
-        if (!\Compile\Debug::$lazyObjects || $h === null || !$h->initChecked($prop)
+        if (!$this->lazyHolder($h) || !$h->initChecked($prop)
             || $this->initReadsExempt($this->frame->name) || $this->frame->isPrelude) {
             return '';
         }
@@ -11761,7 +11761,7 @@ trait EmitLlvmObjects
         if ($decl === '') { $decl = $h->name; }
         $shown = isset($this->classes[$decl]) ? $this->classes[$decl]->display() : $decl;
         // An unset slot of a lazy ghost runs its initializer; still unset after that is php's Error.
-        if (\Compile\Debug::$lazyObjects) {
+        if ($this->lazyHolder($h)) {
             $lz = $this->ssa->allocLabel('lazy.init');
             $ok = $this->ssa->allocLabel('lazy.ok');
             $out .= '  br i1 ' . $u . ', label %' . $lz . ', label %' . $ok . "\n" . $lz . ":\n";
