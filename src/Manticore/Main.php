@@ -5515,6 +5515,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $narrow->needsFullInfer = $monoLight;
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
+        // The report's last `deps run` line must move nothing: the pass above has to
+        // leave a true fixpoint, or a property stays narrower than what is stored in it.
+        if (\Compile\Mir\ShadowDeps::enabled()) { $module = (new \Compile\Mir\Passes\InferTypes(null, $analysisContext))->run($module); }
         $narrow = null;
         // NarrowReturns sharpened erased call results to objects: a string param they
         // reach needs its `__toString` cast, which the first check could not see.

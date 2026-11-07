@@ -1412,6 +1412,7 @@ final class InferTypes implements Pass
         $module->inferByRefCaptureCellLocals = $this->byRefCaptureCellLocals;
         $module->inferGlobalVarTypes = $this->globalVarTypes;
         $module->inferByRefCaptureElemLocals = $this->byRefCaptureElemLocals;
+        if ($this->scopeNames === null && \Compile\Mir\ShadowDeps::enabled()) { \Compile\Mir\ShadowDeps::observe($module); }
         $module->markPassApplied(self::NAME);
         if (\Compile\Stats::$on) {
             \Compile\Stats::bump('infer.t.pre_scans_ms', \intdiv($tWalk - $tRun, 1000000));
