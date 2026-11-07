@@ -9519,21 +9519,17 @@ trait EmitLlvmObjects
             $el = $pt->element;
             if (!$pt->isVec() || ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN)) { return null; }
         }
-        // A by-ref parameter binds an element of a pack that is a variable, so that needs the
-        // caller's frame. An owned temp pack has no observer of the write.
-        $plainPack = $op->kind === Node::KIND_LOAD_LOCAL || $op->kind === Node::KIND_STORE_LOCAL;
-        if (\count($this->methodHolders($n->method)) < 8 || ($plainPack && $this->dynMethodNameHasRefParam($n->method, -1))) { return null; }
+        if ($op->kind !== Node::KIND_LOAD_LOCAL && $op->kind !== Node::KIND_STORE_LOCAL) { return null; }
+        // A by-ref parameter binds an element of a pack held in a variable, which needs the
+        // caller's frame. The lowering's own temp for `...f()` has no observer of the write.
+        $tempPack = $op->kind === Node::KIND_STORE_LOCAL && \str_starts_with($op->name, '__fb_');
+        if (\count($this->methodHolders($n->method)) < 8 || (!$tempPack && $this->dynMethodNameHasRefParam($n->method, -1))) { return null; }
         $sym = $this->dynamicMethodSpreadArmHelper($n->object->type, -1, $n->method, Type::cell(), $n->srcArgc);
         if ($sym === '') { return null; }
         $out = $this->emitNode($n->object);
         $out .= $this->coerceToI64();
         $recv = $this->lastValue;
         $out .= $this->emitNode($op);
-        // A pack that is not a plain read (`...\func_get_args()`) may be an owned temp,
-        // given back after the call by whatever flavor says so.
-        $ownFlavor = $plainPack ? '' : $this->freshRcArgFlavor($op);
-        $out .= $this->coerceToI64();
-        $ownReg = $this->lastValue;
         if ($erasedPack) {
             $out .= $this->cellToPtr();
         } else {
@@ -9542,7 +9538,6 @@ trait EmitLlvmObjects
         $argsP = $this->lastValue;
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $recv . ', ptr ' . $argsP . ")\n";
-        if ($ownFlavor !== '') { $out .= $this->rcReleaseReg($ownReg, $ownFlavor); }
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
