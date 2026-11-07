@@ -107,11 +107,10 @@ final class NarrowReturns implements Pass
         // exactly as before — instead of a full inference per narrowed chain link.
         $light = null;
         $lastLight = false;
-        // Full inferences that may re-open the fixpoint after light rounds settle.
-        // What one finds is a handful of getters (29 of ~2,000 on Laravel), so
-        // more of them cost 15-30 s each for nothing. The early pass needs none:
-        // the pipeline re-infers right after it.
-        $closes = $this->concreteOnly ? 0 : 1;
+        // The early pass need not close on a full inference: the pipeline re-infers
+        // right after it. The late one must. A module scan in a closing run can still
+        // retype a property, and stopping early leaves it narrower than its stores.
+        $closeOnFull = !$this->concreteOnly;
         $max = \count($module->functions) + 2;
         while ($iters < $max) {
             $iters = $iters + 1;
@@ -142,8 +141,7 @@ final class NarrowReturns implements Pass
                 // no-change round after a FULL inference is the real fixpoint.
                 // A light round is scoped the same way, so it closes the same way.
                 if ($lastLight && $this->analysis === null) {
-                    if ($closes === 0) { break; }
-                    $closes = $closes - 1;
+                    if (!$closeOnFull) { break; }
                 } elseif (!$lastLight) {
                     $mustInfer = $this->needsFullInfer && !$this->moduleTyped;
                     if (!$mustInfer) {
