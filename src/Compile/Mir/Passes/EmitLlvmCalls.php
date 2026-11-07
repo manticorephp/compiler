@@ -1440,34 +1440,22 @@ trait EmitLlvmCalls
      * `ptr @__mc_dynf_lookup(ptr name, ptr rows, i64 count)` — the generic probe
      * over a `{ ptr name, ptr fn }` row array, emitted once per module.
      *
-     * First match wins and a miss answers null, which is exactly the chain's own
-     * semantics: a candidate set is keyed by NAME, so at most one row can match
-     * and the scan order is not observable.
+     * A binary search: every row table is sorted by lower-cased name ({@see dynfTable},
+     * {@see newDynTable}). A miss answers null, which is the chain's own semantics: a
+     * candidate set is keyed by NAME, so at most one row can match.
      */
     private function dynfLookupFn(): string
     {
         if ($this->dynfLookupEmitted) { return ''; }
         $this->dynfLookupEmitted = true;
-        $this->libcExtra['strcasecmp'] = 'declare i32 @strcasecmp(ptr, ptr)';
-        $out = $this->dynfIcmpFn() . "define linkonce_odr ptr @__mc_dynf_lookup(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
-        $out .= "  %z = icmp eq i64 %cnt, 0\n";
-        $out .= "  br i1 %z, label %miss, label %loop\n";
-        $out .= "loop:\n";
-        $out .= "  %i = phi i64 [ 0, %entry ], [ %i1, %next ]\n";
-        $out .= "  %off = mul i64 %i, 16\n";
-        $out .= "  %row = getelementptr i8, ptr %rows, i64 %off\n";
-        $out .= "  %np = load ptr, ptr %row\n";
-        $out .= "  %cmp = call i32 @__mc_dynf_icmp(ptr %np, ptr %name)\n";
-        $out .= "  %eq = icmp eq i32 %cmp, 0\n";
-        $out .= "  br i1 %eq, label %hit, label %next\n";
+        $out = $this->dynfBsearchFn() . "define linkonce_odr ptr @__mc_dynf_lookup(ptr %name, ptr %rows, i64 %cnt) {\nentry:\n";
+        $out .= "  %row = call ptr @__mc_dynf_bsearch(ptr %name, ptr %rows, i64 %cnt)\n";
+        $out .= "  %z = icmp eq ptr %row, null\n";
+        $out .= "  br i1 %z, label %miss, label %hit\n";
         $out .= "hit:\n";
         $out .= "  %fp = getelementptr i8, ptr %row, i64 8\n";
         $out .= "  %fv = load ptr, ptr %fp\n";
         $out .= "  ret ptr %fv\n";
-        $out .= "next:\n";
-        $out .= "  %i1 = add i64 %i, 1\n";
-        $out .= "  %done = icmp eq i64 %i1, %cnt\n";
-        $out .= "  br i1 %done, label %miss, label %loop\n";
         $out .= "miss:\n  ret ptr null\n}\n\n";
         return $out;
     }

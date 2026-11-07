@@ -670,7 +670,8 @@ trait EmitLlvmObjects
     private function newDynTable(): array
     {
         if ($this->newDynTableCache !== null) { return $this->newDynTableCache; }
-        $rows = [];
+        /** @var array<string, string> $byLower lower-cased class name => row */
+        $byLower = [];
         $in = [];
         foreach ($this->classes as $cd) {
             if ($cd->isStruct || $cd->isAbstract || $cd->isPreludeClass) { continue; }
@@ -681,10 +682,16 @@ trait EmitLlvmObjects
                 $mm = $this->classes[$ctorCls]->methodMeta['__construct'] ?? null;
                 if ($mm === null || !\Compile\Mir\Passes\TrampolineSynth::invokable($mm)) { continue; }
             }
-            $rows[] = '{ ptr, ptr } { ptr ' . $this->strLitId($this->pool->intern($cd->name))
+            $byLower[\strtolower($cd->name)] = '{ ptr, ptr } { ptr ' . $this->strLitId($this->pool->intern($cd->name))
                     . ', ptr @manticore_' . $this->mangle($tramp) . ' }';
             $in[$cd->name] = true;
         }
+        // Sorted for {@see dynfLookupFn}'s binary search: a scan of every class in the program
+        // per `new $class` was 11% of a Laravel request, one per fetched row in PDO's FETCH_CLASS.
+        \ksort($byLower, SORT_STRING);
+        /** @var string[] $rows */
+        $rows = [];
+        foreach ($byLower as $row) { $rows[] = $row; }
         if ($rows === []) {
             $this->newDynTableCache = ['', 0, []];
             return $this->newDynTableCache;
