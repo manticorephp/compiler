@@ -3212,6 +3212,7 @@ trait EmitLlvmExpr
     private function emitNullCoalesce(NullCoalesce_ $n): string
     {
         $nc = $n;
+        if ($nc->left->kind === Node::KIND_DYN_PROP) { $this->dynQuietRead = $nc->left; }
         if ($nc->left->kind === Node::KIND_PROPERTY_ACCESS) {
             $lpa = $nc->left;
             if ($lpa->object->kind === Node::KIND_PROPERTY_ACCESS

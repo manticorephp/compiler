@@ -231,6 +231,10 @@ final class EmitLlvm implements EmitVisitor
     private array $hookPropertyHoldersCache = [];
     /** @var array<string, string> helper symbol → emitted LLVM body */
     private array $propertyReadHelpers = [];
+    /** @var array<string, string> scope|magic => deny-helper symbol, '' when nothing is denied */
+    private array $propDenyHelpers = [];
+    /** The `$o->$name` an isset / `??` is testing: inaccessible reads as unset there, not an Error. */
+    private ?Node $dynQuietRead = null;
     /** @var array<string, string> erased dynamic-method helper bodies */
     private array $dynamicMethodHelpers = [];
     /** Prevent recursive uniform-ABI selection while emitting an extracted fallback. */
@@ -734,6 +738,7 @@ final class EmitLlvm implements EmitVisitor
         $this->magicPropertyHoldersCache = [];
         $this->hookPropertyHoldersCache = [];
         $this->propertyReadHelpers = [];
+        $this->propDenyHelpers = [];
         $this->dynamicMethodHelpers = [];
         $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;

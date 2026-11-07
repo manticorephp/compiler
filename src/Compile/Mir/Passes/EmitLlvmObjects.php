@@ -4295,8 +4295,148 @@ trait EmitLlvmObjects
             && $this->frame->isClosure && !$this->frame->isPrelude
             && !isset($this->unscopedClosures[$this->frame->name]);
     }
-    /** `$o->$name` — read the boxed value from the bag by runtime key. */
+    /**
+     * The symbol of `(ptr obj, ptr name) -> i64`: php's "Cannot access" message when
+     * the current scope may not reach that property of the object's class, else 0.
+     * '' when nothing in the program is out of reach. A class with the magic method
+     * is left out.
+     * ponytail: php calls the magic for an inaccessible name; here the slot is still
+     * read directly, as before this check. Route denied names to the magic when a
+     * program depends on it.
+     */
+    private function propDenyHelper(string $scope, string $magic): string
+    {
+        $key = '__mc_prop_deny_' . $this->mangle($scope) . $magic;
+        if (isset($this->propDenyHelpers[$key])) { return $this->propDenyHelpers[$key]; }
+        $holders = $this->methodHolders($magic);
+        $rows = [];
+        foreach ($this->classes as $cn => $cd) {
+            if (isset($holders[$cn])) { continue; }
+            foreach ($cd->propertyMeta as $p => $_pm) {
+                $msg = $cd->isShadowSlot((string)$p) ? '' : $this->propAccessError((string)$cn, (string)$p);
+                if ($msg !== '') { $rows[$cd->classId][(string)$p] = $msg; }
+            }
+        }
+        if ($rows === []) { return $this->propDenyHelpers[$key] = ''; }
+
+        $this->rt->needsStrcmp = true;
+        $sym = '@manticore_' . $key;
+        $oldSsa = $this->ssa;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $out = 'define internal i64 ' . $sym . "(ptr %obj, ptr %key) {\nentry:\n";
+        $out .= "  %pi = ptrtoint ptr %obj to i64\n  %low = icmp ult i64 %pi, 65536\n";
+        $out .= "  br i1 %low, label %none, label %go\ngo:\n";
+        $out .= $this->emitLoadClassId('%obj');
+        $switch = '  switch i64 ' . $this->classIdReg . ", label %none [\n";
+        $bodies = '';
+        foreach ($rows as $cid => $props) {
+            $lbl = $this->ssa->allocLabel('deny.class');
+            $switch .= '    i64 ' . (string)$cid . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            foreach ($props as $p => $msg) {
+                $c = $this->ssa->allocReg();
+                $e = $this->ssa->allocReg();
+                $hit = $this->ssa->allocLabel('deny.hit');
+                $next = $this->ssa->allocLabel('deny.next');
+                $bodies .= '  ' . $c . ' = call i32 @strcmp(ptr %key, ptr ' . $this->litStr((string)$p) . ")\n";
+                $bodies .= '  ' . $e . ' = icmp eq i32 ' . $c . ", 0\n";
+                $bodies .= '  br i1 ' . $e . ', label %' . $hit . ', label %' . $next . "\n";
+                $bodies .= $hit . ":\n  ret i64 ptrtoint (ptr " . $this->litStr($msg) . " to i64)\n";
+                $bodies .= $next . ":\n";
+            }
+            $bodies .= "  br label %none\n";
+        }
+        $out .= $switch . "  ]\n" . $bodies . "none:\n  ret i64 0\n}\n\n";
+        $this->ssa = $oldSsa;
+        $this->classIdReg = $oldClassId;
+        $this->propertyReadHelpers[$key] = $out;
+        return $this->propDenyHelpers[$key] = $sym;
+    }
+
+    /**
+     * Ask {@see propDenyHelper} about `$object->$name`; lastValue = the message word.
+     * '' when the scope is unknowable (a rebindable closure, built-in code) or nothing
+     * is denied.
+     * ponytail: only plain operands, which can be emitted twice; `f()->$n` stays
+     * unchecked. Hoist the operands when such a site matters.
+     */
+    private function dynPropDenyCheck(Node $object, Node $name, string $magic): string
+    {
+        $scope = $this->accessScope();
+        if ($scope === null || $object->kind !== Node::KIND_LOAD_LOCAL
+            || ($name->kind !== Node::KIND_LOAD_LOCAL && $name->kind !== Node::KIND_STRING_CONST)) {
+            return '';
+        }
+        $k = $object->type->kind;
+        if ($k !== Type::KIND_OBJ && $k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN && $k !== Type::KIND_UNION) {
+            return '';
+        }
+        $h = $this->propDenyHelper($scope, $magic);
+        if ($h === '') { return ''; }
+        $out = $this->emitDynMemberKey($name);
+        $keyP = $this->lastValue;
+        $out .= $this->emitObjPtrOf($object);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $h . '(ptr ' . $this->lastValue . ', ptr ' . $keyP . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Throw php's Error carrying the message word `$msg` when it is not 0. */
+    private function emitDynDeniedThrow(string $msg): string
+    {
+        $hn = '__pdeny' . \str_replace('%', '', (string)$this->ssa->allocReg());
+        $hs = $this->ssa->allocReg();
+        $this->locals->slots[$hn] = $hs;
+        $out = $this->localVarSlot($hs);
+        $out .= '  store i64 ' . $msg . ', ptr ' . $hs . "\n";
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = icmp ne i64 ' . $msg . ", 0\n";
+        $thr = $this->ssa->allocLabel('deny.throw');
+        $ok = $this->ssa->allocLabel('deny.ok');
+        $out .= '  br i1 ' . $c . ', label %' . $thr . ', label %' . $ok . "\n" . $thr . ":\n";
+        $out .= $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                new \Compile\Mir\LoadLocal($hn, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        ));
+        return $out . '  br label %' . $ok . "\n" . $ok . ":\n";
+    }
+
+    /** `$o->$name` — a read php refuses from this scope throws; under isset / `??` it is unset. */
     private function emitDynProp(DynProp_ $n): string
+    {
+        $quiet = $this->dynQuietRead === $n;
+        if ($quiet) { $this->dynQuietRead = null; }
+        $chk = $this->dynPropDenyCheck($n->object, $n->name, $quiet ? '__isset' : '__get');
+        if ($chk === '') { return $this->emitDynPropRead($n); }
+        $msg = $this->lastValue;
+        if (!$quiet) { return $chk . $this->emitDynDeniedThrow($msg) . $this->emitDynPropRead($n); }
+        $slot = $this->ssa->allocReg();
+        $c = $this->ssa->allocReg();
+        $read = $this->ssa->allocLabel('deny.read');
+        $end = $this->ssa->allocLabel('deny.end');
+        $out = $chk . '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ', ptr ' . $slot . "\n";
+        $out .= '  ' . $c . ' = icmp ne i64 ' . $msg . ", 0\n";
+        $out .= '  br i1 ' . $c . ', label %' . $end . ', label %' . $read . "\n" . $read . ":\n";
+        $out .= $this->emitDynPropRead($n) . $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $end . "\n" . $end . ":\n";
+        $v = $this->ssa->allocReg();
+        $out .= '  ' . $v . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $v;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    private function emitDynPropRead(DynProp_ $n): string
     {
         // A statically-typed receiver: `$o->$name` reads a DECLARED property when
         // the runtime name matches one (PHP checks declared slots before the
@@ -6533,8 +6673,16 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    /** `$o->$name = v` — set the boxed value in the bag by runtime key. */
+    /** `$o->$name = v` — a write php refuses from this scope throws. */
     private function emitStoreDynProp(StoreDynProp_ $n): string
+    {
+        $chk = $this->dynPropDenyCheck($n->object, $n->name, '__set');
+        return $chk === ''
+            ? $this->emitStoreDynPropWrite($n)
+            : $chk . $this->emitDynDeniedThrow($this->lastValue) . $this->emitStoreDynPropWrite($n);
+    }
+
+    private function emitStoreDynPropWrite(StoreDynProp_ $n): string
     {
         // Typed receiver: a runtime name matching a DECLARED property writes that
         // slot (with the full store semantics — readonly guard, rc retain, float
@@ -7067,6 +7215,7 @@ trait EmitLlvmObjects
 
     private function emitIssetTarget(Node $t): string
     {
+        if ($t->kind === Node::KIND_DYN_PROP) { $this->dynQuietRead = $t; }
         // `isset($map[$k]->p[$x])`: nothing behind a missing element is set. The element once
         // into a hidden local, its property's own isset guards the index below it.
         if ($t->kind === Node::KIND_ARRAY_ACCESS) {
