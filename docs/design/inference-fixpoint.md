@@ -62,15 +62,15 @@ Every phase lands alone and must pass the full suite and difftest, with `precisi
 
 The first version of this plan started by splitting `bottom` from `unknown`. Measurement rejected that, and also the idea that fewer walks are the main saving: the walk is about 19% of a run.
 
-1. **Semi-naive scans.** Split each scan into per-function fact extraction and a reduce, and re-extract only from functions whose types changed since the last run. Needs no new architecture, and staged IR must stay byte-identical, which makes each step verifiable. Scans fold in module order and some keep the first observation, so the reduce must preserve that order. One scan at a time, most expensive first: `scanCallSiteArrayElems`, `scanByRefElemWiden`, `scanDocListKeyPromote`, `scanRefCellArgWiden`.
-2. **Find why post-walk re-inference is so large.** It costs about twice the walk. Count, per reason, how many re-inferred functions actually changed type.
-3. **Record dependencies in shadow mode.** Build the read table next to the current code and report what a re-run moved that no recorded edge predicted. Target: zero, on symfony-app, Laravel and the demo.
+1. **Trim post-walk re-inference.** Done in part: propagation visited 10-40 times more functions than moved, and a body whose signature held still now wakes only its callees; settled element-as-key bodies are skipped. Together about 15% of CPU on symfony-app.
+2. **Record dependencies in shadow mode.** Build the read table next to the current code and report what a re-run moved that no recorded edge predicted. Target: zero, on symfony-app, Laravel and the demo.
+3. **Semi-naive scans, on top of those dependencies.** Split each scan into per-function fact extraction and a reduce, re-extracting only where an input changed. Gating on the function's own types is not enough: `scanRefCellArgNode` reads the callee's parameter types and body, and `scanByRefElemWiden` reads a module-wide map, so a stale skip misses a widening to `cell`, which is a miscompile. Scans also fold in module order, and some keep the first observation, so the reduce must preserve that order.
 4. **Move mutation out of inference.**
 5. **Replace `NarrowReturns` with the fixpoint for returns,** using the queue.
 6. **Bring `Monomorphize` onto the queue.**
 7. **Function summaries and the cache,** with a warm == cold byte-identity test (#498).
 
-Phases 3-7 stay proposals: decide on them after 1 and 2 show what is left. Phases 3 and 7 are what #498 needs regardless of time saved.
+Phases 4-7 stay proposals: decide on them after 2 and 3 show what is left. Phases 2 and 7 are what #498 needs regardless of time saved.
 
 ## Risks
 
@@ -81,7 +81,7 @@ Phases 3-7 stay proposals: decide on them after 1 and 2 show what is left. Phase
 
 ## Expected gain
 
-An estimate, not a measurement: scans are about 40% of the 32 s spent in full runs on symfony-app, so semi-naive scans could save up to roughly a third of that, and phase 2 may add to it. Laravel is more post-heavy, so it should gain more. The precision benefit of an optimistic start is unmeasured, and the `unknown` numbers above weaken it for array elements.
+An estimate, not a measurement: scans are about 40% of the 32 s spent in full runs on symfony-app, so semi-naive scans could save up to roughly a third of that. Laravel is more post-heavy, so it should gain more. The precision benefit of an optimistic start is unmeasured, and the `unknown` numbers above weaken it for array elements.
 
 ## What this does not fix
 
