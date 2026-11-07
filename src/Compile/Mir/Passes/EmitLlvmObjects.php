@@ -1113,7 +1113,8 @@ trait EmitLlvmObjects
     private function emitClone(\Compile\Mir\Clone_ $n): string
     {
         $rk = $n->object->type->kind;
-        if ($rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN) {
+        // A union names no one layout either: the runtime class decides.
+        if ($rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN || $rk === Type::KIND_UNION) {
             return $this->emitCloneErased($n);
         }
         $cls = $n->object->type->class ?? '';
@@ -7042,8 +7043,64 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** An object-typed element may hold a boxed null (`['x' => null]` beside objects): the hidden local's null guard tests 0. */
+    private function issetElemWord(Type $t): string
+    {
+        if ($t->kind !== Type::KIND_OBJ) { return ''; }
+        $w = $this->lastValue;
+        $n = $this->ssa->allocReg();
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return '  ' . $n . ' = icmp eq i64 ' . $w . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n"
+            . '  ' . $r . ' = select i1 ' . $n . ', i64 0, i64 ' . $w . "\n";
+    }
+
     private function emitIssetTarget(Node $t): string
     {
+        // `isset($map[$k]->p[$x])`: nothing behind a missing element is set. The element once
+        // into a hidden local, its property's own isset guards the index below it.
+        if ($t->kind === Node::KIND_ARRAY_ACCESS) {
+            $spine = [];
+            $b = $t;
+            while ($b->kind === Node::KIND_ARRAY_ACCESS) { $spine[] = $b; $b = $b->array; }
+            if ($b->kind === Node::KIND_PROPERTY_ACCESS && $b->object->kind === Node::KIND_ARRAY_ACCESS) {
+                $hn = '__isetr' . \str_replace('%', '', (string)$this->ssa->allocReg());
+                $hs = $this->ssa->allocReg();
+                $this->locals->slots[$hn] = $hs;
+                $pre = $this->localVarSlot($hs);
+                $pre .= $this->emitNode($b->object);
+                $pre .= $this->coerceToI64();
+                $pre .= $this->issetElemWord($b->object->type);
+                $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $hs . "\n";
+                $pa = new \Compile\Mir\PropertyAccess_(new \Compile\Mir\LoadLocal($hn, $b->object->type), $b->property, $b->type);
+                $res = $this->ssa->allocReg();
+                $pre .= '  ' . $res . " = alloca i64\n";
+                $pre .= $this->emitIssetTarget($pa);
+                $v0 = $this->lastValue;
+                $pre .= '  store i64 ' . $v0 . ', ptr ' . $res . "\n";
+                $bit = $this->ssa->allocReg();
+                $pre .= '  ' . $bit . ' = icmp ne i64 ' . $v0 . ", 0\n";
+                $setL = $this->ssa->allocLabel('isx.set');
+                $endL = $this->ssa->allocLabel('isx.end');
+                $pre .= '  br i1 ' . $bit . ', label %' . $setL . ', label %' . $endL . "\n" . $setL . ":\n";
+                $cur = $pa;
+                for ($si = \count($spine) - 1; $si >= 0; $si = $si - 1) {
+                    $c = clone $spine[$si];
+                    $c->array = $cur;
+                    $cur = $c;
+                }
+                $pre .= $this->emitIssetTarget($cur);
+                $pre .= $this->coerceToI64();
+                $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $pre .= '  br label %' . $endL . "\n" . $endL . ":\n";
+                $rv = $this->ssa->allocReg();
+                $pre .= '  ' . $rv . ' = load i64, ptr ' . $res . "\n";
+                $this->lastValue = $rv;
+                $this->lastValueType = 'i64';
+                return $pre;
+            }
+        }
         if ($t->kind === Node::KIND_ARRAY_ACCESS) {
             $aa = $t;
             // `isset($obj[$k])` on an ArrayAccess object → `offsetExists()`.
@@ -7184,6 +7241,7 @@ trait EmitLlvmObjects
                 $pre = $this->localVarSlot($hs);
                 $pre .= $this->emitNode($objNode);
                 $pre .= $this->coerceToI64();
+                $pre .= $this->issetElemWord($objNode->type);
                 $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $hs . "\n";
                 $hl = new \Compile\Mir\LoadLocal($hn, $objNode->type);
                 return $pre . $this->emitIssetTarget(new \Compile\Mir\PropertyAccess_($hl, $t->property, $t->type));
@@ -10999,8 +11057,9 @@ trait EmitLlvmObjects
     /** The set-hook symbol class `$cls` runs for a union store, or ''. */
     private function unionSetHook(string $cls, \Compile\Mir\StoreProperty $n): string
     {
-        if ($n->bypassHook || !isset($this->classes[$cls]->propHooks[$n->property])) { return ''; }
-        $hk = $this->classes[$cls]->propHooks[$n->property];
+        $cd = $this->classes[$cls] ?? null;
+        if ($n->bypassHook || $cd === null || !isset($cd->propHooks[$n->property])) { return ''; }
+        $hk = $cd->propHooks[$n->property];
         return ($hk['set'] !== '' && !$this->insideOwnHook($hk)) ? $hk['set'] : '';
     }
 

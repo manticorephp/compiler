@@ -4981,6 +4981,13 @@ trait EmitLlvmBuiltins
     private function biIsType(array $args, int $wantTag, string $kind): string
     {
         $a = $args[0];
+        // An object union is an object, whichever it holds.
+        if ($a->type->kind === Type::KIND_UNION && $kind === Type::KIND_OBJ) {
+            $out = $this->emitNode($a);
+            $this->lastValue = '1';
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // Kinds a RAW carrier can be identified as, from the allocator tag at
         // ptr-8. Only containers stamp one, so a raw string / int / null cannot
         // be told apart and keeps the constant answer.
@@ -5200,6 +5207,19 @@ trait EmitLlvmBuiltins
             return $out;
         }
         $k = $a->type->kind;
+        // An object union: the object's own answer, as for a cell holding it.
+        if ($k === Type::KIND_UNION) {
+            $this->rt->needsTagged = true;
+            $out = $this->emitNode($a);
+            $out .= $this->boxToCell($a->type, $a);
+            $uName = $this->ssa->allocReg();
+            $out .= '  ' . $uName . ' = call i64 @manticore___mir_obj_type_name(i64 ' . $this->lastValue . ', i64 ' . ($debug ? '1' : '0') . ")\n";
+            $uPtr = $this->ssa->allocReg();
+            $out .= '  ' . $uPtr . ' = inttoptr i64 ' . $uName . " to ptr\n";
+            $this->lastValue = $uPtr;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         // A string or an array slot holds its null as ptr 0 ({@see biIsType}).
         if ($k === Type::KIND_STRING || $k === Type::KIND_ARRAY) {
             $out = $this->emitNode($a);

@@ -13,3 +13,14 @@ function t(MD $metadata, \ReflectionProperty $property, string $declaringClass):
 }
 class Q { public $a; public $zz; }
 var_dump(t($m, new ReflectionProperty('Q', 'a'), 'X'), t($m, new ReflectionProperty('Q', 'zz'), 'X'));
+
+// an index behind the property
+final class WithList { public array $l = ['k' => 1, 'n' => null, 'd' => ['e' => 2]]; public ?array $none = null; }
+function behind(): void {
+    /** @var array<string, WithList> $wm */
+    $wm = ['a' => new WithList];
+    foreach (['a', 'gone'] as $i) {
+        var_dump(isset($wm[$i]->l['k']), isset($wm[$i]->l['n']), isset($wm[$i]->l['zz']), isset($wm[$i]->l['d']['e']), isset($wm[$i]->l['d']['q']), isset($wm[$i]->none['k']));
+    }
+}
+behind();

@@ -4346,7 +4346,12 @@ final class EmitLlvm implements EmitVisitor
             $cls = $at->kind === Type::KIND_OBJ ? ($at->class ?? '') : '';
             if ($cls === '') { return ''; }
             $ts = $this->resolveMethodClass($cls, '__toString');
-            if ($ts === '') { return ''; }
+            // An atom naming no body (an interface a guard narrowed to): the runtime class answers.
+            if ($ts === '') {
+                $this->rt->needsTagged = true;
+                $out = $this->boxToCell($t);
+                return $out . $this->coerceCellToStr($this->lastValue);
+            }
             if ($first === '') { $first = $ts; }
             foreach ($this->toStringCandidates($cls, $ts) as $c) {
                 if (!\in_array($c, $cands, true)) { $cands[] = $c; }

@@ -6676,7 +6676,11 @@ trait EmitLlvmExpr
         $kind = $e->type->kind;
         // Stringable object → __toString, then print as a string.
         $ts = $this->toStringClassOf($e);
-        if ($ts !== '') {
+        $us = $ts === '' && $kind === Type::KIND_UNION ? $this->emitUnionToString($e->type) : '';
+        if ($us !== '') {
+            $out .= $us;
+            $kind = Type::KIND_STRING;
+        } elseif ($ts !== '') {
             $out .= $this->emitToStringCall($ts, $this->staticClassOf($e));
             $kind = Type::KIND_STRING;
         } else {

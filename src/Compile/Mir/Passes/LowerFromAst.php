@@ -4847,7 +4847,51 @@ final class LowerFromAst implements Pass
                 new LoadLocal($vtmp, $value->type),
             ], $value->type);
         }
-        return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
+        $value = $this->lowerExpr($expr->value);
+        // `$a[$k] = $a`: php takes the value first, so the store separates the array from it.
+        // The element store runs its copy-on-write BEFORE it evaluates the value: rc 1, no
+        // copy, and the array held itself (Twig's `$context['_parent'] = $context`).
+        if ($expr->target->kind === 'ArrayAccess' && $this->valueHoldsStoreRoot($value, $expr->target)) {
+            $vtmp = '__av_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            return new Block([
+                new StoreLocal($vtmp, $value, $value->type),
+                $this->storeToTarget($expr->target, new LoadLocal($vtmp, $value->type)),
+                new LoadLocal($vtmp, $value->type),
+            ], $value->type);
+        }
+        return $this->storeToTarget($expr->target, $value);
+    }
+
+    /** Can `$value` carry the whole array `$target` writes into? A read of one of its elements cannot. */
+    private function valueHoldsStoreRoot(Node $value, \Parser\Ast\Expr $target): bool
+    {
+        $cur = $target;
+        while ($cur->kind === 'ArrayAccess') { $cur = $this->arrayAccessBase($this->asArrayAccess($cur)); }
+        if ($cur->kind === 'Variable') { return $this->nodeReadsWhole($value, 'l', $this->varName($this->asVariable($cur))); }
+        if ($cur->kind === 'PropertyAccess') { return $this->nodeReadsWhole($value, 'p', $this->asPropAst($cur)->property); }
+        if ($cur->kind === 'StaticAccess') { return $this->nodeReadsWhole($value, 's', ''); }
+        return false;
+    }
+
+    private function asPropAst(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess
+    {
+        /** @var \Parser\Ast\PropertyAccess $e */
+        return $e;
+    }
+
+    private function nodeReadsWhole(Node $n, string $rootKind, string $name): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CLOSURE) { return false; }
+        if ($k === Node::KIND_LOAD_LOCAL) { return $rootKind === 'l' && $n->name === $name; }
+        if ($k === Node::KIND_PROPERTY_ACCESS) { return $rootKind === 'p' && $n->property === $name; }
+        if ($k === Node::KIND_STATIC_PROP) { return $rootKind === 's'; }
+        if ($k === Node::KIND_ARRAY_ACCESS) { return $this->nodeReadsWhole($n->index, $rootKind, $name); }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->nodeReadsWhole($c, $rootKind, $name)) { return true; }
+        }
+        return false;
     }
 
     /**
