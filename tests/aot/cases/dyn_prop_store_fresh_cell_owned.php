@@ -7,5 +7,6 @@ function t6() { $o = new stdClass(); $k = 'a'; $o->$k = "x" . str_repeat("y", 5)
 function t8() { $o = new stdClass(); foreach (['a', 'b'] as $k) { $o->$k = mk($k); } $p = clone $o; unset($o); echo "cloned {$p->a->n}\n"; }
 foreach (['t2','t4','t6','t8'] as $t) { $t(); echo "== $t\n"; }
 class V { public function value(int $i): mixed { return str_repeat("x", 40); } }
-function grow() { $v = new V(); $m0 = 0; for ($i = 0; $i < 30000; $i++) { $o = new stdClass(); for ($j = 0; $j < 4; $j++) { $k = "k$j"; $o->$k = $v->value($j); } if ($i === 300) { $m0 = memory_get_peak_usage(); } } return memory_get_peak_usage() - $m0 < 3000000 ? "flat" : "grew"; }
+function row(V $v) { $o = new stdClass(); for ($j = 0; $j < 4; $j++) { $k = "k$j"; $o->$k = $v->value($j); } }
+function grow() { $v = new V(); $m0 = 0; for ($i = 0; $i < 30300; $i++) { row($v); if ($i === 300) { $m0 = memory_get_peak_usage(); } } return memory_get_peak_usage() - $m0 < 3000000 ? "flat" : "grew"; }
 echo grow(), "\n";

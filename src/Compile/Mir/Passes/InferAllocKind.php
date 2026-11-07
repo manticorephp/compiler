@@ -321,7 +321,9 @@ final class InferAllocKind implements Pass
         if ($k === Node::KIND_STORE_DYN_PROP) {
             $sd = $n;
             $this->traverse($sd->object, false, $collecting);
-            $this->traverse($sd->name, false, $collecting);
+            // The bag keeps the name by pointer. On the arena, `$k = "key$j"` in a loop reused one buffer,
+            // so every iteration wrote the same key, and a returned object read a freed one.
+            $this->traverse($sd->name, true, $collecting);
             $this->traverse($sd->value, true, $collecting);
             return;
         }
