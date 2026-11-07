@@ -1702,53 +1702,116 @@ trait EmitLlvmModule
              . ($n > 0 ? $clsRows : 'ptr null') . "]\n";
         $out .= $mem . ' = internal constant [' . (string)$len . ' x ptr] ['
              . ($n > 0 ? $memRows : 'ptr null') . "]\n";
+        // The rows are sorted by (class lower-cased, member — lower-cased when `$cmp` folds case).
+        // Two searches: the class's run of rows, remembered by the name's address (re-checked by
+        // content, a freed string's address comes back), then the member inside it. One search over
+        // both compared the long shared namespace prefixes on every probe, 15% of a Laravel request.
+        $mk = '@__mir_' . $prefix . '_mk';
+        $mlo = '@__mir_' . $prefix . '_mlo';
+        $mhi = '@__mir_' . $prefix . '_mhi';
+        $rowOf = fn (string $tab, string $reg, string $idx): string =>
+            '  ' . $reg . ' = getelementptr inbounds [' . (string)$len . ' x ptr], ptr ' . $tab . ', i64 0, i64 ' . $idx . "\n";
+        $out .= $mk . " = internal global [256 x ptr] zeroinitializer\n";
+        $out .= $mlo . " = internal global [256 x i64] zeroinitializer\n";
+        $out .= $mhi . " = internal global [256 x i64] zeroinitializer\n";
         $out .= 'define i64 @' . $fn . "(ptr %cls, ptr %m) {\n";
         $out .= "entry:\n";
         $out .= "  %cnull = icmp eq ptr %cls, null\n";
         $out .= "  %mnull = icmp eq ptr %m, null\n";
         $out .= "  %anynull = or i1 %cnull, %mnull\n";
-        $out .= "  br i1 %anynull, label %miss, label %loop\n";
-        // The rows are sorted by (class lower-cased, member — lower-cased when `$cmp` folds
-        // case): a BINARY search, not a scan. Walking every (class, method) row with
-        // `strcasecmp` cost php-cs-fixer 4% and Symfony's `is_callable([$obj, $m])` ~9% of a request.
+        $out .= "  br i1 %anynull, label %miss, label %memo\n";
+        $out .= "memo:\n";
+        $out .= "  %hp = ptrtoint ptr %cls to i64\n";
+        $out .= "  %hs4 = lshr i64 %hp, 4\n";
+        $out .= "  %hs12 = lshr i64 %hp, 12\n";
+        $out .= "  %hx = xor i64 %hs4, %hs12\n";
+        $out .= "  %mi = and i64 %hx, 255\n";
+        $out .= '  %kp = getelementptr inbounds [256 x ptr], ptr ' . $mk . ", i64 0, i64 %mi\n";
+        $out .= '  %lp = getelementptr inbounds [256 x i64], ptr ' . $mlo . ", i64 0, i64 %mi\n";
+        $out .= '  %up = getelementptr inbounds [256 x i64], ptr ' . $mhi . ", i64 0, i64 %mi\n";
+        $out .= "  %k = load ptr, ptr %kp\n";
+        $out .= "  %kq = icmp eq ptr %k, %cls\n";
+        $out .= "  br i1 %kq, label %chk, label %cfind\n";
+        $out .= "chk:\n";
+        $out .= "  %ml = load i64, ptr %lp\n";
+        $out .= "  %mh = load i64, ptr %up\n";
+        $out .= $rowOf($cls, '%mcp', '%ml');
+        $out .= "  %mc = load ptr, ptr %mcp\n";
+        $out .= "  %mcc = call i32 @__mir_name_icmp(ptr %cls, ptr %mc)\n";
+        $out .= "  %mok = icmp eq i32 %mcc, 0\n";
+        $out .= "  br i1 %mok, label %search, label %cfind\n";
+        // first row of the class
+        $out .= "cfind:\n  br label %low\n";
+        $out .= "low:\n";
+        $out .= "  %alo = phi i64 [0, %cfind], [%alo2, %lownext]\n";
+        $out .= "  %ahi = phi i64 [" . (string)$n . ", %cfind], [%ahi2, %lownext]\n";
+        $out .= "  %adone = icmp sge i64 %alo, %ahi\n";
+        $out .= "  br i1 %adone, label %lowdone, label %lownext\n";
+        $out .= "lownext:\n";
+        $out .= "  %asum = add i64 %alo, %ahi\n";
+        $out .= "  %amid = lshr i64 %asum, 1\n";
+        $out .= $rowOf($cls, '%acp', '%amid');
+        $out .= "  %ac = load ptr, ptr %acp\n";
+        $out .= "  %acc = call i32 @__mir_name_icmp(ptr %cls, ptr %ac)\n";
+        $out .= "  %ale = icmp sle i32 %acc, 0\n";
+        $out .= "  %amid1 = add i64 %amid, 1\n";
+        $out .= "  %ahi2 = select i1 %ale, i64 %amid, i64 %ahi\n";
+        $out .= "  %alo2 = select i1 %ale, i64 %alo, i64 %amid1\n";
+        $out .= "  br label %low\n";
+        $out .= "lowdone:\n";
+        $out .= '  %inr = icmp slt i64 %alo, ' . (string)$n . "\n";
+        $out .= "  br i1 %inr, label %lowchk, label %miss\n";
+        $out .= "lowchk:\n";
+        $out .= $rowOf($cls, '%fcp', '%alo');
+        $out .= "  %fc = load ptr, ptr %fcp\n";
+        $out .= "  %fcc = call i32 @__mir_name_icmp(ptr %cls, ptr %fc)\n";
+        $out .= "  %fok = icmp eq i32 %fcc, 0\n";
+        $out .= "  br i1 %fok, label %upper, label %miss\n";
+        // one past its last row
+        $out .= "upper:\n  br label %up0\n";
+        $out .= "up0:\n";
+        $out .= "  %blo = phi i64 [%alo, %upper], [%blo2, %upnext]\n";
+        $out .= "  %bhi = phi i64 [" . (string)$n . ", %upper], [%bhi2, %upnext]\n";
+        $out .= "  %bdone = icmp sge i64 %blo, %bhi\n";
+        $out .= "  br i1 %bdone, label %updone, label %upnext\n";
+        $out .= "upnext:\n";
+        $out .= "  %bsum = add i64 %blo, %bhi\n";
+        $out .= "  %bmid = lshr i64 %bsum, 1\n";
+        $out .= $rowOf($cls, '%bcp', '%bmid');
+        $out .= "  %bc = load ptr, ptr %bcp\n";
+        $out .= "  %bcc = call i32 @__mir_name_icmp(ptr %cls, ptr %bc)\n";
+        $out .= "  %blt = icmp slt i32 %bcc, 0\n";
+        $out .= "  %bmid1 = add i64 %bmid, 1\n";
+        $out .= "  %bhi2 = select i1 %blt, i64 %bmid, i64 %bhi\n";
+        $out .= "  %blo2 = select i1 %blt, i64 %blo, i64 %bmid1\n";
+        $out .= "  br label %up0\n";
+        $out .= "updone:\n";
+        $out .= "  store i64 %alo, ptr %lp\n";
+        $out .= "  store i64 %blo, ptr %up\n";
+        $out .= "  store ptr %cls, ptr %kp\n";
+        $out .= "  br label %search\n";
+        // the member inside the class's rows
+        $out .= "search:\n";
+        $out .= "  %slo = phi i64 [%ml, %chk], [%alo, %updone]\n";
+        $out .= "  %shi = phi i64 [%mh, %chk], [%blo, %updone]\n";
+        $out .= "  br label %loop\n";
         $out .= "loop:\n";
-        $out .= "  %lo = phi i64 [0, %entry], [%lo2, %next]\n";
-        $out .= "  %hi = phi i64 [" . (string)$n . ", %entry], [%hi2, %next]\n";
+        $out .= "  %lo = phi i64 [%slo, %search], [%lo2, %next]\n";
+        $out .= "  %hi = phi i64 [%shi, %search], [%hi2, %next]\n";
         $out .= "  %done = icmp sge i64 %lo, %hi\n";
-        $out .= "  br i1 %done, label %miss, label %body\n";
-        $out .= "body:\n";
+        $out .= "  br i1 %done, label %miss, label %next\n";
+        $out .= "next:\n";
         $out .= "  %sum = add i64 %lo, %hi\n";
         $out .= "  %mid = lshr i64 %sum, 1\n";
-        $out .= '  %cp = getelementptr inbounds [' . (string)$len
-              . ' x ptr], ptr ' . $cls . ", i64 0, i64 %mid\n";
-        $out .= "  %ccand = load ptr, ptr %cp\n";
-        // The CLASS name is case-insensitive in php whichever member is asked about.
-        $out .= "  %cc = call i32 @__mir_name_icmp(ptr %cls, ptr %ccand)\n";
-        $out .= "  %ceq = icmp eq i32 %cc, 0\n";
-        $out .= "  br i1 %ceq, label %mtest, label %cdir\n";
-        $out .= "cdir:\n";
-        $out .= "  %clt = icmp slt i32 %cc, 0\n";
-        $out .= "  %mid1 = add i64 %mid, 1\n";
-        $out .= "  %hiC = select i1 %clt, i64 %mid, i64 %hi\n";
-        $out .= "  %loC = select i1 %clt, i64 %lo, i64 %mid1\n";
-        $out .= "  br label %next\n";
-        $out .= "mtest:\n";
-        $out .= '  %mp = getelementptr inbounds [' . (string)$len
-              . ' x ptr], ptr ' . $mem . ", i64 0, i64 %mid\n";
+        $out .= $rowOf($mem, '%mp', '%mid');
         $out .= "  %mcand = load ptr, ptr %mp\n";
-        $out .= '  %mc = call i32 @' . $cmp . "(ptr %m, ptr %mcand)\n";
-        $out .= "  %meq = icmp eq i32 %mc, 0\n";
-        $out .= "  br i1 %meq, label %hit, label %mdir\n";
-        $out .= "mdir:\n";
-        $out .= "  %mlt = icmp slt i32 %mc, 0\n";
-        $out .= "  %mid2 = add i64 %mid, 1\n";
-        $out .= "  %hiM = select i1 %mlt, i64 %mid, i64 %hi\n";
-        $out .= "  %loM = select i1 %mlt, i64 %lo, i64 %mid2\n";
-        $out .= "  br label %next\n";
-        $out .= "next:\n";
-        $out .= "  %lo2 = phi i64 [%loC, %cdir], [%loM, %mdir]\n";
-        $out .= "  %hi2 = phi i64 [%hiC, %cdir], [%hiM, %mdir]\n";
-        $out .= "  br label %loop\n";
+        $out .= '  %c = call i32 @' . $cmp . "(ptr %m, ptr %mcand)\n";
+        $out .= "  %eq = icmp eq i32 %c, 0\n";
+        $out .= "  %lt = icmp slt i32 %c, 0\n";
+        $out .= "  %mid1 = add i64 %mid, 1\n";
+        $out .= "  %hi2 = select i1 %lt, i64 %mid, i64 %hi\n";
+        $out .= "  %lo2 = select i1 %lt, i64 %lo, i64 %mid1\n";
+        $out .= "  br i1 %eq, label %hit, label %loop\n";
         $out .= "hit:\n";
         $out .= "  ret i64 1\n";
         $out .= "miss:\n";
