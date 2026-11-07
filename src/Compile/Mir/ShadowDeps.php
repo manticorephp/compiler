@@ -32,6 +32,8 @@ final class ShadowDeps
     private static array $subtypes = [];
     /** @var array<string, ClassDef> */
     private static array $classes = [];
+    /** @var array<string, bool> functions woken by what moved in the previous interval: a scan can retype a slot after the walk, so its readers move one run later */
+    private static array $wokenBefore = [];
     private static bool $seeded = false;
     private static int $run = 0;
 
@@ -132,6 +134,9 @@ final class ShadowDeps
         $mutated = 0;
         $fresh = 0;
         $missed = 0;
+        /** @var array<string, int> $missKinds */
+        $missKinds = [];
+        $late = 0;
         /** @var string[] $samples */
         $samples = [];
         foreach ($bodies as $name => $b) {
@@ -140,14 +145,20 @@ final class ShadowDeps
             if (self::$shapes[$name] !== $shapes[$name]) { $mutated = $mutated + 1; continue; }
             $actual = $actual + 1;
             if (isset($predicted[$name])) { continue; }
+            if (isset(self::$wokenBefore[$name])) { $late = $late + 1; continue; }
             $missed = $missed + 1;
-            if (\count($samples) < 10) { $samples[] = $name . ' :: ' . self::firstDiff(self::$bodies[$name], $b); }
+            $diff = self::firstDiff(self::$bodies[$name], $b);
+            $cut = \strpos($diff, ':');
+            $kind = $cut === false ? '?' : \substr($diff, 0, $cut);
+            $missKinds[$kind] = ($missKinds[$kind] ?? 0) + 1;
+            if (\count($samples) < 14 && !\str_starts_with($name, '__mir_') && !\str_starts_with($name, '__mc_')) { $samples[] = $name . ' :: ' . $diff; }
         }
         \Compile\Stats::line('deps run ' . (string)self::$run
             . ': moved ret=' . (string)$retMoved . ' param=' . (string)$paramMoved . ' prop=' . (string)$propMoved
             . ' | bodies changed=' . (string)$actual . ' mutated=' . (string)$mutated . ' new=' . (string)$fresh
             . ' | predicted=' . (string)\count($predicted) . ' of ' . (string)\count($bodies)
-            . ' | MISSED=' . (string)$missed);
+            . ' | late=' . (string)$late . ' MISSED=' . (string)$missed . ' ' . \json_encode($missKinds));
+        self::$wokenBefore = $predicted;
         foreach ($samples as $s) { \Compile\Stats::line('  deps miss ' . $s); }
     }
 
