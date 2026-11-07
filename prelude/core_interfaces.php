@@ -77,3 +77,25 @@ function is_countable(mixed $value): bool
 {
     return \is_array($value) || $value instanceof \Countable;
 }
+
+/** The walk behind a yielding `foreach` over an erased base ({@see \Compile\Mir\Passes\SpillFreshBases}). No foreach here: it would come straight back. */
+function __mc_iter_any(mixed $it): \Generator
+{
+    while ($it instanceof \IteratorAggregate) { $it = $it->getIterator(); }
+    if ($it instanceof \Iterator) {
+        for ($it->rewind(); $it->valid(); $it->next()) {
+            $v = $it->current();
+            yield $it->key() => $v;
+        }
+        return;
+    }
+    if (\is_object($it)) { $it = __mc_public_object_vars($it); }
+    if (\is_array($it)) {
+        $keys = \array_keys($it);
+        $n = \count($keys);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $k = $keys[$i];
+            yield $k => $it[$k];
+        }
+    }
+}
