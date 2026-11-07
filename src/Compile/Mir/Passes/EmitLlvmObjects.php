@@ -5045,8 +5045,17 @@ trait EmitLlvmObjects
      */
     private function emitDynMemberKey(Node $name): string
     {
+        // A property name is a string: `$o->{0}` asks for "0". A cell may hold anything scalar.
+        $k = $name->type->kind;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL) {
+            return $this->emitNode(new \Compile\Mir\Cast('string', $name, Type::string_()));
+        }
         $out = $this->emitNode($name);
-        $out .= $name->type->kind === Type::KIND_STRING
+        if ($k === Type::KIND_CELL) {
+            $out .= $this->coerceToI64();
+            return $out . $this->coerceCellToStr($this->lastValue);
+        }
+        $out .= $k === Type::KIND_STRING
             ? $this->coerceToPtr() : $this->cellToPtr();
         return $out;
     }
