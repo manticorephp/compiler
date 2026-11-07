@@ -5247,7 +5247,9 @@ final class EmitLlvm implements EmitVisitor
         $cellified = $cellVals && $opT->isArray() && $opElem !== null
             && $opElem->kind !== Type::KIND_CELL && $opElem->kind !== Type::KIND_UNKNOWN;
         $iterSym = $this->mangle('__mc_spread_to_array');
-        if ($opT->kind === Type::KIND_OBJ && isset($this->definedFns[$iterSym])) {
+        // A CELL or a union may hold one too, which only the run time can tell.
+        if (($opT->kind === Type::KIND_OBJ || $opT->kind === Type::KIND_CELL || $opT->kind === Type::KIND_UNION)
+            && isset($this->definedFns[$iterSym])) {
             // A TRAVERSABLE operand (a generator, an Iterator, an aggregate) is
             // drained by the prelude into a cell-valued array with php's spread
             // key rules; the merge then takes that array. Handed to the merge
@@ -5255,7 +5257,7 @@ final class EmitLlvm implements EmitVisitor
             // — a generator's elements vanished and an ArrayIterator looped.
             $out .= $this->coerceToI64();
             $word = $this->lastValue;
-            $out .= $this->boxToCell($opT, $sp->operand);
+            if ($opT->kind !== Type::KIND_CELL) { $out .= $this->boxToCell($opT, $sp->operand); }
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @manticore_' . $iterSym . '(i64 ' . $this->lastValue . ")\n";
             $pr = $this->ssa->allocReg();
