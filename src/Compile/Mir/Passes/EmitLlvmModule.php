@@ -346,7 +346,13 @@ trait EmitLlvmModule
             foreach ($this->enums as $name => $ed) {
                 if (!isset($targets[$name])) { $targets[$name] = $ed->classId; }
             }
-            foreach ($targets as $name => $own) {
+            // Sorted by lower-cased name for the binary search in {@see isaDynTable}.
+            /** @var string[] $targetNames */
+            $targetNames = [];
+            foreach ($targets as $name => $unused) { $targetNames[] = (string)$name; }
+            \usort($targetNames, fn (string $x, string $y): int => \strcmp(\strtolower($x), \strtolower($y)));
+            foreach ($targetNames as $name) {
+                $own = $targets[$name];
                 $ids = $this->instanceofMatchIds((string)$name);
                 if ($ids === []) { continue; }
                 if ($isdN > 0) { $isdNames .= ', '; $isdOwn .= ', '; }
@@ -1417,8 +1423,11 @@ trait EmitLlvmModule
     /**
      * `__mir_isa_dyn_m<token>(cid, name, strict)`: is an object of class id `cid` an
      * instance of the class / interface / enum NAMED `name`? One case-insensitive
-     * scan of the names (php resolves a class name that way; a leading `\` is
-     * skipped), then a scan of that name's is-a ids. `strict` refuses the
+     * binary search of the names, sorted lower-cased (php resolves a class name that
+     * way; a leading `\` is skipped), then a scan of that name's is-a ids. A linear
+     * scan here was 78% of a Laravel request: `Container::getCallbacksForType` runs
+     * `$object instanceof $type` per callback type per resolved binding, over every
+     * class in the program. `strict` refuses the
      * target's own id — is_subclass_of is proper.
      */
     private function isaDynTable(string $names, string $off, string $own, string $ids, int $n, int $m): string
@@ -1442,17 +1451,23 @@ trait EmitLlvmModule
         $out .= "  %name = select i1 %bs, ptr %name1, ptr %name0\n";
         $out .= "  br label %loop\n";
         $out .= "loop:\n";
-        $out .= "  %i = phi i64 [0, %strip], [%i1, %next]\n";
-        $out .= '  %done = icmp sge i64 %i, ' . (string)$n . "\n";
+        $out .= "  %blo = phi i64 [0, %strip], [%blo2, %next]\n";
+        $out .= '  %bhi = phi i64 [' . (string)$n . ", %strip], [%bhi2, %next]\n";
+        $out .= "  %done = icmp sge i64 %blo, %bhi\n";
         $out .= "  br i1 %done, label %miss, label %body\n";
         $out .= "body:\n";
+        $out .= "  %bsum = add i64 %blo, %bhi\n";
+        $out .= "  %i = lshr i64 %bsum, 1\n";
         $out .= '  %np = getelementptr inbounds [' . (string)$ln . " x ptr], ptr @__mir_isd_names, i64 0, i64 %i\n";
         $out .= "  %cand = load ptr, ptr %np\n";
         $out .= "  %c = call i32 @strcasecmp(ptr %name, ptr %cand)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  br i1 %eq, label %found, label %next\n";
         $out .= "next:\n";
+        $out .= "  %blt = icmp slt i32 %c, 0\n";
         $out .= "  %i1 = add i64 %i, 1\n";
+        $out .= "  %bhi2 = select i1 %blt, i64 %i, i64 %bhi\n";
+        $out .= "  %blo2 = select i1 %blt, i64 %blo, i64 %i1\n";
         $out .= "  br label %loop\n";
         $out .= "found:\n";
         $out .= '  %op = getelementptr inbounds [' . (string)$ln . " x i64], ptr @__mir_isd_own, i64 0, i64 %i\n";

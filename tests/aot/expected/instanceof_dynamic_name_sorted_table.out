@@ -1,0 +1,24 @@
+Zebra Zebra y y n
+Zebra zebra y y n
+Zebra ZEBRA y y n
+Zebra Base y y y
+Zebra marker y y y
+Zebra apple n n n
+apple APPLE y y n
+apple Marker y y y
+Foo_Bar foo_bar y y n
+Foo_Bar FooBar n n n
+FooBar foobar y y n
+FOOBAZ FooBar y y y
+FOOBAZ foobaz y y n
+FooBar FOOBAZ n n n
+App\Zeta\Leaf App\Zeta\Leaf y y n
+App\Zeta\Leaf app\zeta\LEAF y y n
+App\Zeta\Leaf \App\Zeta\Leaf y y n
+App\Zeta\Leaf Leaf n n n
+Suit Suit y y n
+Suit suit y y n
+Zebra NoSuchClass n n n
+Zebra  n n n
+Zebra A n n n
+Zebra zzzzzz n n n
