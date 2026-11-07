@@ -76,6 +76,8 @@ final class SplitModule
     /** Size from which a file-local global gets one definition per module. */
     private const SHARED_LOCAL_BYTES = 4096;
 
+    private const OPTNONE_DEFAULT_KB = 1024;
+
     /** Cached symbol references for definitions reused by several parts. */
     /** @var array<string, array<string, bool>> */
     private array $refsCache = [];
@@ -327,7 +329,44 @@ final class SplitModule
             $promoted[$s] = \strlen($h);
             $defHead[$s] = \substr($h, 0, $at) . ' hidden ' . \substr($h, $at + 10);
         }
+        $this->markOversized($defOrder, $defSize, $defHead, $promoted);
         return $promoted;
+    }
+
+    /**
+     * Leave a definition of at least {@see OPTNONE_DEFAULT_KB} KB unoptimized:
+     * clang's cost grows faster than a function's size, so a few giants dominate
+     * (78 definitions were 30% of clang's CPU on a Symfony app, and they are mostly
+     * generated dispatch). `MANTICORE_OPTNONE_KB=<n>` moves the bar, 0 turns it off,
+     * and `-O3` asks for everything to be optimized.
+     *
+     * @param string[]              $defOrder
+     * @param array<string, int>    $defSize
+     * @param array<string, string> $defHead
+     * @param array<string, int>    $promoted symbol => length of its head in the file
+     */
+    private function markOversized(array $defOrder, array $defSize, array &$defHead, array &$promoted): void
+    {
+        $env = \getenv('MANTICORE_OPTNONE_KB');
+        $kb = $env === false ? self::OPTNONE_DEFAULT_KB : (int)$env;
+        if ($kb <= 0 || ($env === false && \Manticore\clang_opt_level() === '3')) { return; }
+        foreach ($defOrder as $s) {
+            if (($defSize[$s] ?? 0) < $kb * 1024) { continue; }
+            $h = $defHead[$s];
+            if (\str_contains($h, 'alwaysinline')) { continue; }
+            $open = \strpos($h, '(', (int)\strpos($h, '@'));
+            if ($open === false) { continue; }
+            $depth = 0;
+            $n = \strlen($h);
+            for ($i = $open; $i < $n; $i = $i + 1) {
+                if ($h[$i] === '(') { $depth = $depth + 1; }
+                if ($h[$i] === ')') { $depth = $depth - 1; }
+                if ($depth === 0) { break; }
+            }
+            if ($i >= $n) { continue; }
+            if (!isset($promoted[$s])) { $promoted[$s] = \strlen($h); }
+            $defHead[$s] = \substr($h, 0, $i + 1) . ' noinline optnone' . \substr($h, $i + 1);
+        }
     }
 
 
