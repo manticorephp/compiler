@@ -9780,6 +9780,7 @@ trait EmitLlvmObjects
     private function emitMixedMagicCall(\Compile\Mir\MethodCall_ $mc, bool $boxObject = false): string
     {
         $out = $this->emitNode($mc->object);
+        $recvOwned = $this->freshRcArgFlavor($mc->object) !== '';
         // A typed receiver is a raw object pointer: the guard and the dispatch below speak cells.
         if ($boxObject) { $out .= $this->boxToCell($mc->object->type); }
         $out .= $this->coerceToI64();
@@ -9811,6 +9812,9 @@ trait EmitLlvmObjects
         $plain->srcArgc = $mc->srcArgc;
         $this->mixedMagicDone[\spl_object_id($plain)] = true;
         $out .= $this->emitNode(new \Compile\Mir\Ternary($magicOnly, $viaMagic, $plain, $cell));
+        // Both arms read the receiver through a local, a borrow: the fresh temp is this site's to give back.
+        // `collect($x)->map(…)` takes this path wherever some class has `__call` and no `map`.
+        if ($recvOwned) { $out .= $this->rcReleaseReg($cellV, 'cell'); }
         if ($mc->type->kind !== Type::KIND_CELL && $mc->type->kind !== Type::KIND_UNKNOWN
             && $mc->type->kind !== Type::KIND_VOID) {
             $out .= $this->unboxCellToType($mc->type);
@@ -9820,6 +9824,7 @@ trait EmitLlvmObjects
     private function emitErasedMagicCall(\Compile\Mir\MethodCall_ $mc): string
     {
         $out = $this->emitNode($mc->object);
+        $recvOwned = $this->freshRcArgFlavor($mc->object) !== '';
         $out .= $this->coerceToI64();
         $cellV = $this->lastValue;
         $rawV = $this->ssa->allocReg();
@@ -9867,6 +9872,7 @@ trait EmitLlvmObjects
         $tree = new \Compile\Mir\Ternary(new \Compile\Mir\Instanceof_($t(), 'Closure'), $onClosure,
             $rest, $cell);
         $out .= $this->emitNode($tree);
+        if ($recvOwned) { $out .= $this->rcReleaseReg($cellV, 'cell'); }
         if ($mc->type->kind !== Type::KIND_CELL && $mc->type->kind !== Type::KIND_UNKNOWN
             && $mc->type->kind !== Type::KIND_VOID) {
             $out .= $this->unboxCellToType($mc->type);
@@ -10148,6 +10154,10 @@ trait EmitLlvmObjects
             return $this->emitMethodCall($call);
         }
         $out = $this->emitNode($mc->object);
+        // Asked now: {@see $lastCallWasBuiltin} describes the node just emitted, and the receiver guard
+        // below emits a builtin of its own. Asked after the call, `collect($x)->map(…)` read as a builtin
+        // result, a borrow, and every intermediate Collection of a chain stayed alive.
+        $recvFlavor = \Compile\Debug::$rcRecvTemp ? $this->freshRcArgFlavor($mc->object) : '';
         $out .= $this->coerceToI64();
         $thisArg = $this->lastValue;
         $recvWord = $thisArg;
@@ -10688,10 +10698,7 @@ trait EmitLlvmObjects
         // has finished reading `$this`. Safe for a fluent `return $this`: a
         // borrowed obj return is retained by the callee, so the result carries a
         // reference of its own.
-        if (\Compile\Debug::$rcRecvTemp) {
-            $recvFlavor = $this->freshRcArgFlavor($mc->object);
-            if ($recvFlavor !== '') { $out .= $this->rcReleaseReg($recvWord, $recvFlavor); }
-        }
+        if ($recvFlavor !== '') { $out .= $this->rcReleaseReg($recvWord, $recvFlavor); }
         // By-ref return (`function &m()`): the callee yields the field/slot
         // ADDRESS as i64. In value context deref it; a `$r = &$obj->m()`
         // (rawRefCall) keeps the raw address so RefBind can alias through it.

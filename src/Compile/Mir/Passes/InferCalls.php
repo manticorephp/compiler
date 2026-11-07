@@ -676,7 +676,9 @@ trait InferCalls
         // and method access work — the cell path masks the low 48 bits, which is
         // identity for a real heap pointer. Boxing objects at the closure return
         // would have to be matched by an unmask in every typed callee path.
-        if ($ct->kind === Type::KIND_CELL || $ct->kind === Type::KIND_UNKNOWN) {
+        // `$c::$m()` and `[$c, $m]()`: an array callable takes the same erased invoke, and left
+        // `unknown` its +1 had no owner: every Carbon::now() through DateFactory::__call stayed alive.
+        if ($ct->kind === Type::KIND_CELL || $ct->kind === Type::KIND_UNKNOWN || $ct->isArray()) {
             $node->type = Type::cell();
             return $node->type;
         }
