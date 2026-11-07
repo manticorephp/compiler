@@ -73,11 +73,13 @@ foreach ([fn() => inflate_init(3), fn() => inflate_init(ZLIB_ENCODING_RAW, ['win
 $phpGzip = hex2bin('1f8b08000000000000134b4c4a0600c241243503000000');
 $phpZlib = hex2bin('789c4b4c4a0600024d0127');
 
-function show(string $label, InflateContext $ctx, string $data, int $flush): void
+// `read` is left out once a preset dictionary is involved: zlib 1.4 fixed total_in
+// after Z_NEED_DICT, so the count depends on the libz underneath.
+function show(string $label, InflateContext $ctx, string $data, int $flush, bool $read = true): void
 {
     $r = @inflate_add($ctx, $data, $flush);
     echo $label, ': ', var_export($r, true), ' status=', inflate_get_status($ctx),
-        ' read=', inflate_get_read_len($ctx), "\n";
+        $read ? ' read=' . inflate_get_read_len($ctx) : '', "\n";
 }
 
 // Output is every symbol whose bits have arrived, not every finished block.
@@ -112,15 +114,15 @@ foreach ([8191, 8192, 8193] as $n) {
 
 // A zlib header asking for a preset dictionary (FDICT).
 $z = hex2bin('78bb1a0b045dcb403015c06c003b200691'); // 'hello world hello' over dictionary 'hello world'
-show('fdict none', inflate_init(ZLIB_ENCODING_DEFLATE), $z, ZLIB_SYNC_FLUSH);
+show('fdict none', inflate_init(ZLIB_ENCODING_DEFLATE), $z, ZLIB_SYNC_FLUSH, false);
 $i = inflate_init(ZLIB_ENCODING_DEFLATE, ['dictionary' => 'hello worle']);
-show('fdict wrong', $i, $z, ZLIB_SYNC_FLUSH);
-show('fdict wrong again', $i, $z, ZLIB_SYNC_FLUSH);
+show('fdict wrong', $i, $z, ZLIB_SYNC_FLUSH, false);
+show('fdict wrong again', $i, $z, ZLIB_SYNC_FLUSH, false);
 $i = inflate_init(ZLIB_ENCODING_DEFLATE, ['dictionary' => 'hello world']);
-show('fdict ok', $i, $z, ZLIB_SYNC_FLUSH);
-show('fdict second stream', $i, $z, ZLIB_SYNC_FLUSH);
+show('fdict ok', $i, $z, ZLIB_SYNC_FLUSH, false);
+show('fdict second stream', $i, $z, ZLIB_SYNC_FLUSH, false);
 $i = inflate_init(ZLIB_ENCODING_DEFLATE, ['dictionary' => 'hello world']);
-foreach (str_split($z) as $k => $b) { show("fdict byte $k", $i, $b, ZLIB_SYNC_FLUSH); }
+foreach (str_split($z) as $k => $b) { show("fdict byte $k", $i, $b, ZLIB_SYNC_FLUSH, false); }
 show('dictionary unused', inflate_init(ZLIB_ENCODING_DEFLATE, ['dictionary' => 'xx']), $phpZlib, ZLIB_SYNC_FLUSH);
 
 // A zlib header naming a window larger than the inflater's is corrupt.
