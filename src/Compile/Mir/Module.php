@@ -309,6 +309,13 @@ final class Module
      * @var array<string, array<string, bool>>
      */
     public array $inferByRefCellElemLocals = [];
+
+    /**
+     * Function => body digest at which re-inference last left it unmoved, for the
+     * element-as-key re-inference, across {@see Passes\InferTypes} runs.
+     * @var array<string, int>
+     */
+    public array $inferAssocKeySettled = [];
     /** By-ref array params whose element channel became a cell because the body
      *  hands an element to a by-ref sink of another kind ({@see
      *  Passes\InferScans::scanRefCellArgWiden}); their callers' arrays follow.

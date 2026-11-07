@@ -184,6 +184,13 @@ final class InferTypes implements Pass
         return $acc;
     }
 
+    private function signatureFingerprint(FunctionDef $fn): int
+    {
+        $acc = $this->typeCode($fn->returnType);
+        foreach ($fn->params as $p) { $acc = $this->fpMix($acc, $this->typeCode($p->type)); }
+        return $acc;
+    }
+
     private function fpMix(int $acc, int $v): int
     {
         return (($acc * 131) + $v) & 4503599627370495;
@@ -434,15 +441,23 @@ final class InferTypes implements Pass
         }
         /** @var array<string, int> $visits */
         $visits = [];
+        $startNs = \Compile\Stats::now();
+        $moved = 0;
         for ($i = 0; $i < \count($queue); $i = $i + 1) {
             $fn = $queue[$i];
             unset($pending[$fn->name]);
             $visits[$fn->name] = ($visits[$fn->name] ?? 0) + 1;
             $before = $this->typeFingerprint($fn);
+            $sigBefore = $this->signatureFingerprint($fn);
             $this->inferFunction($fn);
             $this->noteTypeChange($fn);
             if ($this->typeFingerprint($fn) === $before) { continue; }
-            foreach ($graph->neighbors($fn->name) as $nb => $unused) {
+            $moved = $moved + 1;
+            // A signature that held still is invisible to callers: only the types
+            // this body passes down moved, and those reach its callees alone.
+            $next = $this->signatureFingerprint($fn) === $sigBefore
+                ? $graph->calleesOfFn($fn->name) : $graph->neighbors($fn->name);
+            foreach ($next as $nb => $unused) {
                 if (isset($pending[$nb]) || ($visits[$nb] ?? 0) >= 4) { continue; }
                 $nfn = $this->fnByName[$nb] ?? null;
                 if ($nfn === null) { continue; }
@@ -452,6 +467,7 @@ final class InferTypes implements Pass
             }
         }
         if (\Compile\Stats::$on) {
+            \Compile\Stats::line('    propagate ' . $reason . ' seed=' . (string)\count($seed) . ' visits=' . (string)\count($queue) . ' moved=' . (string)$moved . ' ms=' . (string)\intdiv(\Compile\Stats::now() - $startNs, 1000000));
             \Compile\Stats::bump('infer.rescan.' . $reason . '.calls', 1);
             \Compile\Stats::bump('infer.rescan.' . $reason . '.functions', \count($queue));
             \Compile\Stats::line('    propagate ' . $reason . ' seed=' . (string)\count($seed) . ' visited=' . (string)\count($queue));
@@ -523,6 +539,14 @@ final class InferTypes implements Pass
             $acc .= $fn->name . '=' . \implode(',', $this->digestIds) . ';';
         }
         return $acc;
+    }
+
+    /** {@see bodyTypeDigest} of one function, hashed to fit a table that outlives the run. */
+    private function bodyDigest(FunctionDef $fn): int
+    {
+        $this->digestIds = [];
+        $this->digestNode($fn->body);
+        return \crc32(\implode(',', $this->digestIds));
     }
 
     /** @var int[] */
@@ -1165,11 +1189,34 @@ final class InferTypes implements Pass
         $guard = 0;
         while ($guard < 4) {
             $targets = $this->untypedAssocKeyStoreFunctions($module);
+            // A body re-inference left unmoved earlier, and that still has those
+            // types, would only stay put again. These matches are mostly genuine
+            // vecs, so across runs nearly all of the work was this.
+            /** @var array<string, int> $before */
+            $before = [];
+            foreach ($module->functions as $fn) {
+                if (!isset($targets[$fn->name])) { continue; }
+                $d = $this->bodyDigest($fn);
+                if (($module->inferAssocKeySettled[$fn->name] ?? -1) === $d) {
+                    unset($targets[$fn->name]);
+                } else {
+                    $before[$fn->name] = $d;
+                }
+            }
             if (\count($targets) === 0) { break; }
-            $before = $this->bodyTypeDigest($module, $targets);
             $this->inferFunctionsForScope($module, 'assoc_key', $targets);
             $guard = $guard + 1;
-            if ($this->bodyTypeDigest($module, $targets) === $before) { break; }
+            $moved = false;
+            foreach ($module->functions as $fn) {
+                if (!isset($targets[$fn->name])) { continue; }
+                $d = $this->bodyDigest($fn);
+                if ($d === $before[$fn->name]) {
+                    $module->inferAssocKeySettled[$fn->name] = $d;
+                } else {
+                    $moved = true;
+                }
+            }
+            if (!$moved) { break; }
         }
         // Element erasure on a LOCAL: `$out = []` whose only clue is a store of an
         // already-CELL value (`$out[$k] = $v`). The pre-inference scan can't type a
