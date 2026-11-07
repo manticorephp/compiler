@@ -541,12 +541,22 @@ final class InferTypes implements Pass
         return $acc;
     }
 
-    /** {@see bodyTypeDigest} of one function, hashed to fit a table that outlives the run. */
+    /**
+     * A hash of every node's exact type in one function, for a table that
+     * outlives the run. By content, not instance as {@see bodyTypeDigest} is: an
+     * inference rebuilds its shapes, so their ids move while the types do not.
+     */
     private function bodyDigest(FunctionDef $fn): int
     {
-        $this->digestIds = [];
-        $this->digestNode($fn->body);
-        return \crc32(\implode(',', $this->digestIds));
+        $acc = 0;
+        $this->exactDigestNode($fn->body, $acc);
+        return $acc;
+    }
+
+    private function exactDigestNode(Node $n, int &$acc): void
+    {
+        $acc = $this->fpMix($acc, \crc32($n->type->exactString()));
+        foreach (Walk::children($n) as $c) { $this->exactDigestNode($c, $acc); }
     }
 
     /** @var int[] */
