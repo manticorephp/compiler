@@ -4903,7 +4903,11 @@ final class EmitLlvm implements EmitVisitor
             return $cls !== '' && isset($this->classes[$cls]);
         }
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
-            return $this->arrayElemAddressable($a);
+            if ($this->arrayElemAddressable($a)) { return true; }
+            // An element a callee keeps a reference to is handed over as its box, whatever the base's static type.
+            $sek = $a->array->type->element->kind ?? Type::KIND_UNKNOWN;
+            return $a->refStored && ($sek === Type::KIND_CELL || $sek === Type::KIND_UNKNOWN)
+                && $this->containerAddressable($a->array);
         }
         // A static property is an external-linkage global, and
         // {@see EmitLlvmLocals::byRefAddrOf} hands its address over. Not listed

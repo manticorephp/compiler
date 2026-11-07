@@ -175,6 +175,8 @@ final class Module
      *  it BEFORE emit starts; a demand flag set during emit ({@see
      *  RuntimeFeatures::$needsCellKey}) is answered too late for that. */
     public bool $hasRefCells = false;
+    /** Some element argument is {@see ArrayAccess_::$refStored}: its body need not hold a ref cell of its own. */
+    public bool $hasRefStoredElems = false;
 
     /** Property names some call hands BY REF to a parameter its callee keeps a
      *  reference to ({@see Passes\VivifyRefArgs}): promoted like a `[&$o->p]`

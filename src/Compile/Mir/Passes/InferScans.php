@@ -420,16 +420,20 @@ trait InferScans
         // A property handed by ref to a callee that keeps the reference is the same
         // shape; a narrowed slot there keeps the copy the callee makes (no refusal:
         // the program never wrote a `&` of its own).
-        foreach ($module->refStoredProps as $key => $unused) {
+        $soft = $module->refStoredProps;
+        // `$o->p = &$v` binds the slot itself: it needs the same cell, whatever its declared type.
+        foreach ($module->functions as $fn) {
+            if ($fn->isExtern) { continue; }
+            $thisCls = ($fn->params !== [] && $fn->params[0]->name === 'this') ? ($fn->params[0]->type->class ?? '') : '';
+            $this->findRefBoundProps($fn->body, $thisCls, $soft);
+        }
+        foreach ($soft as $key => $unused) {
             if (isset($found[$key])) { continue; }
             $cut = \strpos($key, '::');
             if ($cut === false || $cut < 0) { continue; }
             $cd = $module->classes[\substr($key, 0, $cut)] ?? null;
             $prop = \substr($key, $cut + 2);
             if ($cd === null || !isset($cd->propertyTypes[$prop]) || $cd->propertyWidth($prop) !== 8) { continue; }
-            // An ARRAY slot keeps its buffer repr: its elements carry the references
-            // ({@see retypeByRefParamElems}), and a celled array base breaks them.
-            if ($cd->propertyTypes[$prop]->isArray() || ($cd->propertyArrayHinted[$prop] ?? false)) { continue; }
             $found[$key] = true;
         }
         foreach ($found as $key => $unused) {
@@ -478,6 +482,28 @@ trait InferScans
     }
 
     /**
+     * `Class::prop` keys of every `$o->p = &$v`, with the receiver's class known.
+     * @param array<string, bool> $out
+     */
+    private function findRefBoundProps(Node $n, string $thisCls, array &$out): void
+    {
+        $kids = Walk::children($n);
+        if ($n->kind === Node::KIND_STORE_PROPERTY && $kids !== [] && $kids[\count($kids) - 1]->kind === Node::KIND_REF_CELL) {
+            $cls = $kids[0]->kind === Node::KIND_LOAD_LOCAL && $kids[0]->name === 'this' && $thisCls !== ''
+                ? $thisCls : ($kids[0]->type->class ?? null);
+            if ($cls !== null && $cls !== '') {
+                $out[$cls . '::' . $n->property] = true;
+            } else {
+                // This runs before inference: an untyped receiver may be any class declaring the name.
+                foreach ($this->classes as $cn => $cd) {
+                    if (isset($cd->propertyTypes[$n->property])) { $out[$cn . '::' . $n->property] = true; }
+                }
+            }
+        }
+        foreach ($kids as $c) { $this->findRefBoundProps($c, $thisCls, $out); }
+    }
+
+    /**
      * A STORABLE reference to an element of an array PROPERTY (`[&$o->a[$k]]`,
      * an `&...$xs` argument) promotes that element into a reference box, so
      * the property's element channel is a cell — the property analogue of
@@ -486,8 +512,10 @@ trait InferScans
      */
     private function findRefElemProps(Node $n): void
     {
-        if ($n instanceof \Compile\Mir\RefCell_ && $n->refSource->kind === Node::KIND_ARRAY_ACCESS) {
-            $src = $n->refSource;
+        $src = null;
+        if ($n instanceof \Compile\Mir\RefCell_ && $n->refSource->kind === Node::KIND_ARRAY_ACCESS) { $src = $n->refSource; }
+        elseif ($n instanceof \Compile\Mir\ArrayAccess_ && $n->refStored) { $src = $n; }
+        if ($src !== null) {
             $b = $src;
             $guard = 0;
             while ($b instanceof \Compile\Mir\ArrayAccess_ && $guard < 16) { $b = $b->array; $guard = $guard + 1; }
@@ -519,7 +547,7 @@ trait InferScans
         }
         foreach ($module->functions as $fn) {
             if ($fn->isExtern) { continue; }
-            if (!$this->bodyHas($fn, Node::KIND_REF_CELL)) { continue; }
+            if (!$module->hasRefStoredElems && !$this->bodyHas($fn, Node::KIND_REF_CELL)) { continue; }
             $this->findRefElemProps($fn->body);
         }
         foreach ($this->cellElemPropsFound as $key => $seen) {
@@ -3117,7 +3145,12 @@ trait InferScans
                     $changed = true;
                     continue;
                 }
-                if (!$this->isByRefRetypeKind($p->type)) { continue; }
+                if (!$this->isByRefStoredRetypeKind($p->type)) { continue; }
+                // An array has one reason only: the body keeps a reference to it, and the
+                // holder shares the caller's box. A capture binds an address already.
+                if (!$this->isByRefRetypeKind($p->type) && ($idx < $caps
+                    || (!($module->refStoringParams[$fn->name . '#' . (string)$idx] ?? false)
+                        && !$this->refCellOfLocal($fn->body, $p->name)))) { continue; }
                 // A param the body keeps a reference to is handed the caller's REF cell (a
                 // property slot retyped by scanRefCellProps): a raw scalar param would be fed a
                 // scratch copy written back only on a normal return.
@@ -3136,7 +3169,7 @@ trait InferScans
             $idx = -1;
             foreach ($fn->params as $p) {
                 $idx = $idx + 1;
-                if (!$p->byRef || $p->variadic || !$this->isByRefRetypeKind($p->type)) { continue; }
+                if (!$p->byRef || $p->variadic || !$this->isByRefStoredRetypeKind($p->type)) { continue; }
                 foreach ($retyped as $rk => $unused) {
                     $cut = \strrpos($rk, '#');
                     if ($cut === false || \substr($rk, $cut + 1) !== (string)$idx) { continue; }
@@ -3180,6 +3213,12 @@ trait InferScans
         $k = $t->kind;
         return $k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL
             || $k === Type::KIND_STRING || ($k === Type::KIND_OBJ && !isset($this->enums[$t->class ?? '']));
+    }
+
+    /** {@see isByRefRetypeKind}, plus an array (a bare `array` is KIND_UNKNOWN): a stored reference shares the caller's box. */
+    private function isByRefStoredRetypeKind(Type $t): bool
+    {
+        return $t->isArray() || $t->kind === Type::KIND_UNKNOWN || $this->isByRefRetypeKind($t);
     }
 
     private function retypeByRefParamCell(FunctionDef $fn, \Compile\Mir\Param $p): void

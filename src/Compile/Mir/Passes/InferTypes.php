@@ -1026,6 +1026,7 @@ final class InferTypes implements Pass
         // matter what one getter's return type says, and the getter scan only
         // fires on a still-unknown/bare property, so running this first is what
         // keeps it off. symfony's TableCell has both.
+        $this->hasRefStoredElems = $module->hasRefStoredElems;
         $this->scanCellElemProps($module);
         $this->scanPropElementReturns($module);
         // BEFORE the first inference walk: a property a `&` points at from a

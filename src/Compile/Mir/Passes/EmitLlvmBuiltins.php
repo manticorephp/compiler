@@ -11291,6 +11291,29 @@ trait EmitLlvmBuiltins
             $g = $this->lastValue;
             $asI = $this->ssa->allocReg();
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
+            // A slot a `&` bound holds `cell(REF, box)`: the buffer is the box's, and the
+            // binding stays. The count moved with the buffer, so nothing is dropped here.
+            if ($asCell && isset($this->refCellPropNames[$arrNode->property])) {
+                $w = $this->ssa->allocReg();
+                $hi = $this->ssa->allocReg();
+                $isCell = $this->ssa->allocReg();
+                $tag = $this->ssa->allocReg();
+                $isTag = $this->ssa->allocReg();
+                $isRef = $this->ssa->allocReg();
+                $pay = $this->ssa->allocReg();
+                $box = $this->ssa->allocReg();
+                $to = $this->ssa->allocReg();
+                $out .= '  ' . $w . ' = load i64, ptr ' . $g . "\n"
+                    . '  ' . $isCell . ' = icmp ugt i64 ' . $w . ", -4503599627370496\n"
+                    . '  ' . $hi . ' = lshr i64 ' . $w . ", 48\n"
+                    . '  ' . $tag . ' = and i64 ' . $hi . ", 15\n"
+                    . '  ' . $isTag . ' = icmp eq i64 ' . $tag . ", 9\n"
+                    . '  ' . $isRef . ' = and i1 ' . $isCell . ', ' . $isTag . "\n"
+                    . '  ' . $pay . ' = and i64 ' . $w . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
+                    . '  ' . $box . ' = inttoptr i64 ' . $pay . " to ptr\n"
+                    . '  ' . $to . ' = select i1 ' . $isRef . ', ptr ' . $box . ', ptr ' . $g . "\n";
+                $g = $to;
+            }
             $out .= '  store i64 ' . $asI . ', ptr ' . $g . "\n";
             $out .= $this->emitInitMark($objp, $this->initMapHolder($arrNode->object, $arrNode->property),
                 $arrNode->property, $this->propertyOffsetOrNull($arrNode->object, $arrNode->property) ?? -1, $g);

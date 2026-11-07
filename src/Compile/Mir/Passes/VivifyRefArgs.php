@@ -199,6 +199,7 @@ final class VivifyRefArgs implements Pass
                 if ($on) { $module->refStoringParams[$fname . '#' . (string)$pi] = true; }
             }
         }
+        $module->hasRefStoredElems = $this->storedElems;
         if ($this->storedProps !== [] || $this->storedElems) { $module->hasRefCells = true; }
         $module->markPassApplied(self::NAME);
         return $module;
