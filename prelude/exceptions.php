@@ -44,6 +44,7 @@ class Exception implements Throwable
     protected int $line = 0;
     /** @var string[] */ public array $traceNames = [];
     /** @var int[] */ public array $traceLines = [];
+    /** @var string[] */ public array $traceFiles = [];
     /** php keeps the frames here; ours live in traceNames/traceLines. Declared so reflection (symfony/polyfill-deepclone resets it on a prototype) finds it. */
     private array $trace = [];
     private ?Throwable $previous;
@@ -60,7 +61,7 @@ class Exception implements Throwable
     public function getPrevious(): ?Throwable { return $this->previous; }
     public function getLine(): int { return $this->line; }
     public function getFile(): string { return $this->file; }
-    public function getTrace(): array { return __mir_bt_frames($this->traceNames, $this->traceLines, $this->file); }
+    public function getTrace(): array { return __mir_bt_frames($this->traceNames, $this->traceLines, $this->file, $this->traceFiles); }
     public function __toString(): string { return __mc_throwable_string($this); }
 
     public function getTraceAsString(): string
@@ -69,7 +70,7 @@ class Exception implements Throwable
         $n = \count($this->traceNames);
         $i = 0;
         while ($i < $n) {
-            $s = $s . "#" . $i . " " . $this->file . "(" . $this->traceLines[$i] . "): " . $this->traceNames[$i] . "()\n";
+            $s = $s . "#" . $i . " " . (($this->traceFiles[$i] ?? '') !== '' ? $this->traceFiles[$i] : $this->file) . "(" . $this->traceLines[$i] . "): " . $this->traceNames[$i] . "()\n";
             $i = $i + 1;
         }
         return $s . "#" . $n . " {main}";
@@ -88,6 +89,7 @@ class Error implements Throwable
     protected int $line = 0;
     /** @var string[] */ public array $traceNames = [];
     /** @var int[] */ public array $traceLines = [];
+    /** @var string[] */ public array $traceFiles = [];
     /** php keeps the frames here; ours live in traceNames/traceLines. Declared so reflection (symfony/polyfill-deepclone resets it on a prototype) finds it. */
     private array $trace = [];
     private ?Throwable $previous;
@@ -104,7 +106,7 @@ class Error implements Throwable
     public function getPrevious(): ?Throwable { return $this->previous; }
     public function getLine(): int { return $this->line; }
     public function getFile(): string { return $this->file; }
-    public function getTrace(): array { return __mir_bt_frames($this->traceNames, $this->traceLines, $this->file); }
+    public function getTrace(): array { return __mir_bt_frames($this->traceNames, $this->traceLines, $this->file, $this->traceFiles); }
     public function __toString(): string { return __mc_throwable_string($this); }
 
     public function getTraceAsString(): string
@@ -113,7 +115,7 @@ class Error implements Throwable
         $n = \count($this->traceNames);
         $i = 0;
         while ($i < $n) {
-            $s = $s . "#" . $i . " " . $this->file . "(" . $this->traceLines[$i] . "): " . $this->traceNames[$i] . "()\n";
+            $s = $s . "#" . $i . " " . (($this->traceFiles[$i] ?? '') !== '' ? $this->traceFiles[$i] : $this->file) . "(" . $this->traceLines[$i] . "): " . $this->traceNames[$i] . "()\n";
             $i = $i + 1;
         }
         return $s . "#" . $n . " {main}";

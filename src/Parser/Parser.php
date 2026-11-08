@@ -1204,6 +1204,7 @@ final class Parser
             $returnsByRef,
             $docComment,
             $lazyBody,
+            $this->pos > 0 ? $this->tokens[$this->pos - 1]->line : 0,
         );
     }
 
@@ -2139,6 +2140,14 @@ final class Parser
         if ($target->kind === 'UnaryOp') {
             return Expr::unary(
                 $target->op,
+                $this->buildAssign($op, $target->operand, $value, $span),
+                $this->end($target->span),
+            );
+        }
+        // A cast binds tighter than `=` too: `(int) $pos = strpos(…)` is `(int) ($pos = strpos(…))`.
+        if ($target->kind === 'Cast') {
+            return Expr::cast(
+                $target->cast,
                 $this->buildAssign($op, $target->operand, $value, $span),
                 $this->end($target->span),
             );

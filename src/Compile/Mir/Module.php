@@ -175,6 +175,8 @@ final class Module
      *  it BEFORE emit starts; a demand flag set during emit ({@see
      *  RuntimeFeatures::$needsCellKey}) is answered too late for that. */
     public bool $hasRefCells = false;
+    /** Some element argument is {@see ArrayAccess_::$refStored}: its body need not hold a ref cell of its own. */
+    public bool $hasRefStoredElems = false;
 
     /** Property names some call hands BY REF to a parameter its callee keeps a
      *  reference to ({@see Passes\VivifyRefArgs}): promoted like a `[&$o->p]`
@@ -378,8 +380,13 @@ final class Module
     /** @var array<string, true> Names of passes that have run. */
     public array $passesApplied = [];
 
+    /** The file whose declaration is being lowered: a function added meanwhile was written there.
+     *  ponytail: top-level code from several files is one `__main`, which takes the last one's (the entry). */
+    public string $loweringFile = '';
+
     public function addFunction(FunctionDef $fn): void
     {
+        if ($fn->file === '') { $fn->file = $this->loweringFile; }
         $this->functions[] = $fn;
     }
 

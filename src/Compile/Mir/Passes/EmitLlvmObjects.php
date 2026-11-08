@@ -1007,7 +1007,7 @@ trait EmitLlvmObjects
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fileOff . "\n";
         $fstr = $this->ssa->allocReg();
-        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
+        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->frameFile())) . " to i64\n";
         $out .= '  store i64 ' . $fstr . ', ptr ' . $fp . "\n";
         if (!$withTrace) { return $out; }
         // Two packed vecs of the active frames, innermost first.
@@ -1021,6 +1021,14 @@ trait EmitLlvmObjects
         $lnp = $this->ssa->allocReg();
         $out .= '  ' . $lnp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$lnOff . "\n";
         $out .= '  store i64 ' . $linesVec . ', ptr ' . $lnp . "\n";
+        $fOff = $cd->propertyOffset('traceFiles');
+        if ($fOff >= 0) {
+            $out .= $this->emitBtVec('@__mir_bt_file', true);
+            $fv = $this->lastValue;
+            $fpp = $this->ssa->allocReg();
+            $out .= '  ' . $fpp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fOff . "\n";
+            $out .= '  store i64 ' . $fv . ', ptr ' . $fpp . "\n";
+        }
         return $out;
     }
 
@@ -1113,7 +1121,8 @@ trait EmitLlvmObjects
     private function emitClone(\Compile\Mir\Clone_ $n): string
     {
         $rk = $n->object->type->kind;
-        if ($rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN) {
+        // A union names no one layout either: the runtime class decides.
+        if ($rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN || $rk === Type::KIND_UNION) {
             return $this->emitCloneErased($n);
         }
         $cls = $n->object->type->class ?? '';
@@ -1696,6 +1705,21 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('pr.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
+            // An erased receiver may hold a lazy ghost. Nothing is thrown here: this helper
+            // also serves isset / `??`, which test a still-unset slot rather than fail on it.
+            if ($this->lazyHolder($cd) && $cd->initChecked($prop)) {
+                $lzOut = '';
+                $lzC = $this->emitInitTest($obj, $cd, $prop, $cd->propertyOffset($prop), '', $lzOut);
+                if ($lzC !== '') {
+                    $lzL = $this->ssa->allocLabel('pr.lazy');
+                    $lzE = $this->ssa->allocLabel('pr.lazyend');
+                    $lzW = $this->ssa->allocReg();
+                    $bodies .= $lzOut . '  br i1 ' . $lzC . ', label %' . $lzE . ', label %' . $lzL . "\n" . $lzL . ":\n";
+                    $bodies .= '  ' . $lzW . ' = ptrtoint ptr ' . $obj . " to i64\n";
+                    $bodies .= '  call i64 @manticore___mc_lazy_init(i64 ' . $lzW . ")\n";
+                    $bodies .= '  br label %' . $lzE . "\n" . $lzE . ":\n";
+                }
+            }
             $bodies .= $this->emitFixedPropLoad($obj, $cd, $prop);
             $fv = $this->lastValue;
             if ($fresh) { $bodies .= $this->rcRetainReg($fv, 'cell'); }
@@ -3321,7 +3345,8 @@ trait EmitLlvmObjects
             // accessDenied does; a closure written at top level has the global scope and is not.
             $roScopeOk = $this->frame->isClosure && !$this->frame->isPrelude && $this->accessScope() === null;
             if ($roDecl !== '' && !$roScopeOk && !\str_starts_with($this->frame->name, $roDecl . '__')
-                && !\str_starts_with($this->frame->name, '__mc_unser_set')) {
+                && !\str_starts_with($this->frame->name, '__mc_unser_set')
+                && !\str_starts_with($this->frame->name, '__mc_pset_')) {
                 $out = $this->emitNode($n->value);
                 $msg = 'Cannot modify readonly property ' . $roDecl . '::$' . $n->property;
                 // Supply every ctor arg — emitNewObj does NOT pad defaults (that
@@ -3571,6 +3596,8 @@ trait EmitLlvmObjects
         }
         $out .= $this->propSlotGep($n->object, $objPtr, $n->property);
         $gep = $this->lastValue;
+        $out .= $this->emitLazyStoreGate($objPtr, $this->initMapHolder($n->object, $n->property), $n->property,
+            $this->propertyOffsetOrNull($n->object, $n->property) ?? -1, $gep);
         $out .= $this->emitReadonlyReinitGuard($n, $objPtr, $gep);
         // Release-before-overwrite. A LOCAL slot has always dropped its previous
         // value; a property slot never has, so every rc value an overwritten
@@ -4293,8 +4320,148 @@ trait EmitLlvmObjects
             && $this->frame->isClosure && !$this->frame->isPrelude
             && !isset($this->unscopedClosures[$this->frame->name]);
     }
-    /** `$o->$name` — read the boxed value from the bag by runtime key. */
+    /**
+     * The symbol of `(ptr obj, ptr name) -> i64`: php's "Cannot access" message when
+     * the current scope may not reach that property of the object's class, else 0.
+     * '' when nothing in the program is out of reach. A class with the magic method
+     * is left out.
+     * ponytail: php calls the magic for an inaccessible name; here the slot is still
+     * read directly, as before this check. Route denied names to the magic when a
+     * program depends on it.
+     */
+    private function propDenyHelper(string $scope, string $magic): string
+    {
+        $key = '__mc_prop_deny_' . $this->mangle($scope) . $magic;
+        if (isset($this->propDenyHelpers[$key])) { return $this->propDenyHelpers[$key]; }
+        $holders = $this->methodHolders($magic);
+        $rows = [];
+        foreach ($this->classes as $cn => $cd) {
+            if (isset($holders[$cn])) { continue; }
+            foreach ($cd->propertyMeta as $p => $_pm) {
+                $msg = $cd->isShadowSlot((string)$p) ? '' : $this->propAccessError((string)$cn, (string)$p);
+                if ($msg !== '') { $rows[$cd->classId][(string)$p] = $msg; }
+            }
+        }
+        if ($rows === []) { return $this->propDenyHelpers[$key] = ''; }
+
+        $this->rt->needsStrcmp = true;
+        $sym = '@manticore_' . $key;
+        $oldSsa = $this->ssa;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $out = 'define internal i64 ' . $sym . "(ptr %obj, ptr %key) {\nentry:\n";
+        $out .= "  %pi = ptrtoint ptr %obj to i64\n  %low = icmp ult i64 %pi, 65536\n";
+        $out .= "  br i1 %low, label %none, label %go\ngo:\n";
+        $out .= $this->emitLoadClassId('%obj');
+        $switch = '  switch i64 ' . $this->classIdReg . ", label %none [\n";
+        $bodies = '';
+        foreach ($rows as $cid => $props) {
+            $lbl = $this->ssa->allocLabel('deny.class');
+            $switch .= '    i64 ' . (string)$cid . ', label %' . $lbl . "\n";
+            $bodies .= $lbl . ":\n";
+            foreach ($props as $p => $msg) {
+                $c = $this->ssa->allocReg();
+                $e = $this->ssa->allocReg();
+                $hit = $this->ssa->allocLabel('deny.hit');
+                $next = $this->ssa->allocLabel('deny.next');
+                $bodies .= '  ' . $c . ' = call i32 @strcmp(ptr %key, ptr ' . $this->litStr((string)$p) . ")\n";
+                $bodies .= '  ' . $e . ' = icmp eq i32 ' . $c . ", 0\n";
+                $bodies .= '  br i1 ' . $e . ', label %' . $hit . ', label %' . $next . "\n";
+                $bodies .= $hit . ":\n  ret i64 ptrtoint (ptr " . $this->litStr($msg) . " to i64)\n";
+                $bodies .= $next . ":\n";
+            }
+            $bodies .= "  br label %none\n";
+        }
+        $out .= $switch . "  ]\n" . $bodies . "none:\n  ret i64 0\n}\n\n";
+        $this->ssa = $oldSsa;
+        $this->classIdReg = $oldClassId;
+        $this->propertyReadHelpers[$key] = $out;
+        return $this->propDenyHelpers[$key] = $sym;
+    }
+
+    /**
+     * Ask {@see propDenyHelper} about `$object->$name`; lastValue = the message word.
+     * '' when the scope is unknowable (a rebindable closure, built-in code) or nothing
+     * is denied.
+     * ponytail: only plain operands, which can be emitted twice; `f()->$n` stays
+     * unchecked. Hoist the operands when such a site matters.
+     */
+    private function dynPropDenyCheck(Node $object, Node $name, string $magic): string
+    {
+        $scope = $this->accessScope();
+        if ($scope === null || $object->kind !== Node::KIND_LOAD_LOCAL
+            || ($name->kind !== Node::KIND_LOAD_LOCAL && $name->kind !== Node::KIND_STRING_CONST)) {
+            return '';
+        }
+        $k = $object->type->kind;
+        if ($k !== Type::KIND_OBJ && $k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN && $k !== Type::KIND_UNION) {
+            return '';
+        }
+        $h = $this->propDenyHelper($scope, $magic);
+        if ($h === '') { return ''; }
+        $out = $this->emitDynMemberKey($name);
+        $keyP = $this->lastValue;
+        $out .= $this->emitObjPtrOf($object);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $h . '(ptr ' . $this->lastValue . ', ptr ' . $keyP . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** Throw php's Error carrying the message word `$msg` when it is not 0. */
+    private function emitDynDeniedThrow(string $msg): string
+    {
+        $hn = '__pdeny' . \str_replace('%', '', (string)$this->ssa->allocReg());
+        $hs = $this->ssa->allocReg();
+        $this->locals->slots[$hn] = $hs;
+        $out = $this->localVarSlot($hs);
+        $out .= '  store i64 ' . $msg . ', ptr ' . $hs . "\n";
+        $c = $this->ssa->allocReg();
+        $out .= '  ' . $c . ' = icmp ne i64 ' . $msg . ", 0\n";
+        $thr = $this->ssa->allocLabel('deny.throw');
+        $ok = $this->ssa->allocLabel('deny.ok');
+        $out .= '  br i1 ' . $c . ', label %' . $thr . ', label %' . $ok . "\n" . $thr . ":\n";
+        $out .= $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                new \Compile\Mir\LoadLocal($hn, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        ));
+        return $out . '  br label %' . $ok . "\n" . $ok . ":\n";
+    }
+
+    /** `$o->$name` — a read php refuses from this scope throws; under isset / `??` it is unset. */
     private function emitDynProp(DynProp_ $n): string
+    {
+        $quiet = $this->dynQuietRead === $n;
+        if ($quiet) { $this->dynQuietRead = null; }
+        $chk = $this->dynPropDenyCheck($n->object, $n->name, $quiet ? '__isset' : '__get');
+        if ($chk === '') { return $this->emitDynPropRead($n); }
+        $msg = $this->lastValue;
+        if (!$quiet) { return $chk . $this->emitDynDeniedThrow($msg) . $this->emitDynPropRead($n); }
+        $slot = $this->ssa->allocReg();
+        $c = $this->ssa->allocReg();
+        $read = $this->ssa->allocLabel('deny.read');
+        $end = $this->ssa->allocLabel('deny.end');
+        $out = $chk . '  ' . $slot . " = alloca i64\n";
+        $out .= '  store i64 ' . (string)\Compile\MemoryAbi::CELL_NULL . ', ptr ' . $slot . "\n";
+        $out .= '  ' . $c . ' = icmp ne i64 ' . $msg . ", 0\n";
+        $out .= '  br i1 ' . $c . ', label %' . $end . ', label %' . $read . "\n" . $read . ":\n";
+        $out .= $this->emitDynPropRead($n) . $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $end . "\n" . $end . ":\n";
+        $v = $this->ssa->allocReg();
+        $out .= '  ' . $v . ' = load i64, ptr ' . $slot . "\n";
+        $this->lastValue = $v;
+        $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    private function emitDynPropRead(DynProp_ $n): string
     {
         // A statically-typed receiver: `$o->$name` reads a DECLARED property when
         // the runtime name matches one (PHP checks declared slots before the
@@ -5043,8 +5210,17 @@ trait EmitLlvmObjects
      */
     private function emitDynMemberKey(Node $name): string
     {
+        // A property name is a string: `$o->{0}` asks for "0". A cell may hold anything scalar.
+        $k = $name->type->kind;
+        if ($k === Type::KIND_INT || $k === Type::KIND_FLOAT || $k === Type::KIND_BOOL) {
+            return $this->emitNode(new \Compile\Mir\Cast('string', $name, Type::string_()));
+        }
         $out = $this->emitNode($name);
-        $out .= $name->type->kind === Type::KIND_STRING
+        if ($k === Type::KIND_CELL) {
+            $out .= $this->coerceToI64();
+            return $out . $this->coerceCellToStr($this->lastValue);
+        }
+        $out .= $k === Type::KIND_STRING
             ? $this->coerceToPtr() : $this->cellToPtr();
         return $out;
     }
@@ -5727,7 +5903,7 @@ trait EmitLlvmObjects
         }
         $canExtract = $argsOk
             && ($dirty === [] || $reEmitSafe)
-            && $recv->kind === Node::KIND_LOAD_LOCAL
+            && ($dirty === [] || $recv->kind === Node::KIND_LOAD_LOCAL)
             && ($recv->type->kind === Type::KIND_CELL
                 || $recv->type->kind === Type::KIND_UNKNOWN
                 || $recv->type->kind === Type::KIND_UNION)
@@ -6522,8 +6698,16 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    /** `$o->$name = v` — set the boxed value in the bag by runtime key. */
+    /** `$o->$name = v` — a write php refuses from this scope throws. */
     private function emitStoreDynProp(StoreDynProp_ $n): string
+    {
+        $chk = $this->dynPropDenyCheck($n->object, $n->name, '__set');
+        return $chk === ''
+            ? $this->emitStoreDynPropWrite($n)
+            : $chk . $this->emitDynDeniedThrow($this->lastValue) . $this->emitStoreDynPropWrite($n);
+    }
+
+    private function emitStoreDynPropWrite(StoreDynProp_ $n): string
     {
         // Typed receiver: a runtime name matching a DECLARED property writes that
         // slot (with the full store semantics — readonly guard, rc retain, float
@@ -7041,8 +7225,67 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /** An object-typed element may hold a boxed null (`['x' => null]` beside objects): the hidden local's null guard tests 0. */
+    private function issetElemWord(Type $t): string
+    {
+        if ($t->kind !== Type::KIND_OBJ) { return ''; }
+        $w = $this->lastValue;
+        $n = $this->ssa->allocReg();
+        $r = $this->ssa->allocReg();
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return '  ' . $n . ' = icmp eq i64 ' . $w . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n"
+            . '  ' . $r . ' = select i1 ' . $n . ', i64 0, i64 ' . $w . "\n";
+    }
+
     private function emitIssetTarget(Node $t): string
     {
+        if ($t->kind === Node::KIND_DYN_PROP) { $this->dynQuietRead = $t; }
+        // `isset($map[$k]->p[$x])`: nothing behind a missing element is set. The element once
+        // into a hidden local, its property's own isset guards the index below it.
+        if ($t->kind === Node::KIND_ARRAY_ACCESS) {
+            $spine = [];
+            $b = $t;
+            while ($b->kind === Node::KIND_ARRAY_ACCESS) { $spine[] = $b; $b = $b->array; }
+            // SpillFreshBases parks a read base in a hidden local; here it is read once anyway.
+            if ($b->kind === Node::KIND_STORE_LOCAL) { $b = $b->value; }
+            if ($b->kind === Node::KIND_PROPERTY_ACCESS && $b->object->kind === Node::KIND_ARRAY_ACCESS) {
+                $hn = '__isetr' . \str_replace('%', '', (string)$this->ssa->allocReg());
+                $hs = $this->ssa->allocReg();
+                $this->locals->slots[$hn] = $hs;
+                $pre = $this->localVarSlot($hs);
+                $pre .= $this->emitNode($b->object);
+                $pre .= $this->coerceToI64();
+                $pre .= $this->issetElemWord($b->object->type);
+                $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $hs . "\n";
+                $pa = new \Compile\Mir\PropertyAccess_(new \Compile\Mir\LoadLocal($hn, $b->object->type), $b->property, $b->type);
+                $res = $this->ssa->allocReg();
+                $pre .= '  ' . $res . " = alloca i64\n";
+                $pre .= $this->emitIssetTarget($pa);
+                $v0 = $this->lastValue;
+                $pre .= '  store i64 ' . $v0 . ', ptr ' . $res . "\n";
+                $bit = $this->ssa->allocReg();
+                $pre .= '  ' . $bit . ' = icmp ne i64 ' . $v0 . ", 0\n";
+                $setL = $this->ssa->allocLabel('isx.set');
+                $endL = $this->ssa->allocLabel('isx.end');
+                $pre .= '  br i1 ' . $bit . ', label %' . $setL . ', label %' . $endL . "\n" . $setL . ":\n";
+                $cur = $pa;
+                for ($si = \count($spine) - 1; $si >= 0; $si = $si - 1) {
+                    $c = clone $spine[$si];
+                    $c->array = $cur;
+                    $cur = $c;
+                }
+                $pre .= $this->emitIssetTarget($cur);
+                $pre .= $this->coerceToI64();
+                $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
+                $pre .= '  br label %' . $endL . "\n" . $endL . ":\n";
+                $rv = $this->ssa->allocReg();
+                $pre .= '  ' . $rv . ' = load i64, ptr ' . $res . "\n";
+                $this->lastValue = $rv;
+                $this->lastValueType = 'i64';
+                return $pre;
+            }
+        }
         if ($t->kind === Node::KIND_ARRAY_ACCESS) {
             $aa = $t;
             // `isset($obj[$k])` on an ArrayAccess object → `offsetExists()`.
@@ -7174,6 +7417,20 @@ trait EmitLlvmObjects
             } else {
                 $objNode = $t;
             }
+            // `isset($map[$k]->prop)`: a missing element is null, and isset() of anything behind a null is
+            // false, never an error. Fetch the element ONCE into a hidden local, then take the local path.
+            if ($t->kind === Node::KIND_PROPERTY_ACCESS && $objNode->kind === Node::KIND_ARRAY_ACCESS) {
+                $hn = '__isetr' . \str_replace('%', '', (string)$this->ssa->allocReg());
+                $hs = $this->ssa->allocReg();
+                $this->locals->slots[$hn] = $hs;
+                $pre = $this->localVarSlot($hs);
+                $pre .= $this->emitNode($objNode);
+                $pre .= $this->coerceToI64();
+                $pre .= $this->issetElemWord($objNode->type);
+                $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $hs . "\n";
+                $hl = new \Compile\Mir\LoadLocal($hn, $objNode->type);
+                return $pre . $this->emitIssetTarget(new \Compile\Mir\PropertyAccess_($hl, $t->property, $t->type));
+            }
             if ($objNode->kind === Node::KIND_LOAD_LOCAL) {
                 $rSlot = $this->ssa->allocReg();
                 $out = '  ' . $rSlot . " = alloca i64\n";
@@ -7188,6 +7445,11 @@ trait EmitLlvmObjects
                 $out .= '  br i1 ' . $isnull . ', label %' . $lNull
                       . ', label %' . $lRead . "\n";
                 $out .= $lRead . ":\n";
+                // A ghost answers for its initialized self: before the slot is read.
+                if ($t->kind === Node::KIND_PROPERTY_ACCESS) {
+                    $out .= $this->emitLazyStoreGate($objPtr, $this->slotHolder($t->object, $t->property), $t->property,
+                        $this->propertyOffsetOrNull($t->object, $t->property) ?? -1, '');
+                }
                 $out .= $this->emitNode($t);
                 $out .= $this->coerceToI64();
                 $rv = $this->lastValue;
@@ -7507,7 +7769,7 @@ trait EmitLlvmObjects
                     } elseif ($keyIsCell) {
                         $this->rt->needsCellKey = true;
                         $out .= '  call void @__mir_array_unset_cell(ptr ' . $arrPtr . ', i64 ' . $key . ")\n";
-                    } elseif ($keyIsString && $aa->array->kind === Node::KIND_LOAD_LOCAL
+                    } elseif ($keyIsString && $aa->array->kind !== Node::KIND_ARRAY_ACCESS
                         && $this->unsetBaseIsWritable($aa->array)) {
                         // A canonical int-string key unsets the INT key, which on a
                         // PACKED buffer promotes (relocates) like the int path. A nested
@@ -7892,9 +8154,27 @@ trait EmitLlvmObjects
         $ed = $this->enums[$enum];
         $n = \count($ed->caseNames);
         $isStr = $this->edBacking($ed) === 'string';
+        // The scan compares raw words: an erased argument (`$d['type'] ?? 'js'`) is converted
+        // first, as php coerces it, or the compare reads the tag bits as a pointer.
+        $backing = $isStr ? Type::string_() : Type::int_();
+        if ($arg->type->kind !== $backing->kind) {
+            $arg = new \Compile\Mir\Cast($isStr ? 'string' : 'int', $arg, $backing);
+        }
         $out = $this->emitNode($arg);
         $out .= $isStr ? $this->coerceToPtr() : $this->coerceToI64();
         $needle = $this->lastValue;
+        // Evaluated once: the miss path's message reads it back.
+        $sn = '__efrom' . \substr($this->ssa->allocReg(), 2);
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        if ($isStr) {
+            $wi = $this->ssa->allocReg();
+            $out .= '  ' . $wi . ' = ptrtoint ptr ' . $needle . " to i64\n" . '  store i64 ' . $wi . ', ptr ' . $slot . "\n";
+        } else {
+            $out .= '  store i64 ' . $needle . ', ptr ' . $slot . "\n";
+        }
+        $this->locals->slots[$sn] = $slot;
+        $arg = new \Compile\Mir\LoadLocal($sn, $backing);
         $res = $this->ssa->allocReg();
         $out .= '  ' . $res . " = alloca i64\n";
         $done = $this->ssa->allocLabel('efrom.done');
@@ -7939,7 +8219,7 @@ trait EmitLlvmObjects
         } else {
             // PHP's exact message: `"<v>" is not a valid backing value for enum
             // <Name>` (string values quoted; int values bare) — built at runtime
-            // so getMessage() matches. Re-emits $arg (miss path only).
+            // so getMessage() matches.
             $tail = new \Compile\Mir\StringConst(
                 ' is not a valid backing value for enum ' . $enum, Type::string_());
             if ($isStr) {
@@ -8571,6 +8851,31 @@ trait EmitLlvmObjects
                         $pre .= '  ' . $ta . ' = ptrtoint ptr ' . $tmp . " to i64\n";
                         $post .= $this->emitByRefCellWriteBack($tmp, $slotAddr, $wt);
                         $wp[$wi] = 'i64 ' . $ta;
+                    } elseif ($pt !== null && $ck === Type::KIND_CELL && $pt->isArray()) {
+                        // By-ref arm with a raw array param, cell slot: lend the unboxed buffer, box what it left.
+                        $slotAddr = \substr($wp[$wi], 4);
+                        $sp = $this->ssa->allocReg();
+                        $rv = $this->ssa->allocReg();
+                        $pre .= '  ' . $sp . ' = inttoptr i64 ' . $slotAddr . " to ptr\n";
+                        $pre .= '  ' . $rv . ' = load i64, ptr ' . $sp . "\n";
+                        $this->lastValue = $rv;
+                        $this->lastValueType = 'i64';
+                        $pre .= $this->unboxCellToType($pt) . $this->coerceToI64();
+                        $tmp = $this->ssa->allocReg();
+                        $ta = $this->ssa->allocReg();
+                        $pre .= '  ' . $tmp . " = alloca i64\n";
+                        $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $tmp . "\n";
+                        $pre .= '  ' . $ta . ' = ptrtoint ptr ' . $tmp . " to i64\n";
+                        $bp = $this->ssa->allocReg();
+                        $bv = $this->ssa->allocReg();
+                        $bc = $this->ssa->allocReg();
+                        $bs = $this->ssa->allocReg();
+                        $post .= '  ' . $bv . ' = load i64, ptr ' . $tmp . "\n"
+                            . '  ' . $bp . ' = inttoptr i64 ' . $bv . " to ptr\n"
+                            . '  ' . $bc . ' = call i64 @__manticore_box_array(ptr ' . $bp . ")\n"
+                            . '  ' . $bs . ' = inttoptr i64 ' . $slotAddr . " to ptr\n"
+                            . '  store i64 ' . $bc . ', ptr ' . $bs . "\n";
+                        $wp[$wi] = 'i64 ' . $ta;
                     }
                     continue;
                 }
@@ -8583,6 +8888,20 @@ trait EmitLlvmObjects
             }
             $argList = \implode(', ', $wp);
         }
+        if ($this->vdAddrLoad !== [] && $sym !== '') {
+            $lp = \explode(', ', $argList);
+            $lm = $this->sigs->refParams[$sym] ?? [];
+            foreach ($this->vdAddrLoad as $li => $lt) {
+                if (($lm[$li] ?? false) || !isset($lp[$li]) || !isset($this->sigs->paramTypes[$sym][$li])) { continue; }
+                $lptr = $this->ssa->allocReg();
+                $lval = $this->ssa->allocReg();
+                $pre .= '  ' . $lptr . ' = inttoptr i64 ' . \substr($lp[$li], 4) . " to ptr\n";
+                $pre .= '  ' . $lval . ' = load i64, ptr ' . $lptr . "\n";
+                $lp[$li] = 'i64 ' . $lval;
+                $srcTypes[$li] = $lt;
+            }
+            $argList = \implode(', ', $lp);
+        }
         $r = $pre . $this->vdArmArgsBase($argList, $srcTypes, $cTypes, $sym);
         $this->vdArmDrops .= $post;
         return $r;
@@ -8590,10 +8909,12 @@ trait EmitLlvmObjects
 
     /** @var array<int, Type> params the site passed by address for another candidate's by-ref */
     private array $vdWiden = [];
+    /** @var array<int, Type> params passed by address for the fallback's by-ref, by what the address holds */
+    private array $vdAddrLoad = [];
 
     /** Param indices any candidate of an erased / union receiver takes by reference.
      *  @return array<int, bool> */
-    private function siteRefUnion(Type $rt, string $method): array
+    private function siteRefUnion(Type $rt, string $method, bool $anyArmType = false): array
     {
         $cls = [];
         if ($rt->kind === Type::KIND_UNION) {
@@ -8617,6 +8938,7 @@ trait EmitLlvmObjects
                 if ($pt->kind !== Type::KIND_CELL && $pt->kind !== Type::KIND_UNKNOWN) { $typed[$i] = true; }
             }
         }
+        if ($anyArmType) { return $u; }
         foreach ($typed as $i => $_t) { unset($u[$i]); }
         return $u;
     }
@@ -8896,8 +9218,25 @@ trait EmitLlvmObjects
             $t = $argOutTypes[$i] ?? null;
             $k .= ($t === null ? '-' : (string)$t->id) . ',';
         }
+        // The arms read an address differently from a value: two sites apart on it share no body.
+        foreach ($this->vdWiden as $wi => $wt) { $k .= 'w' . (string)$wi . ':' . (string)$wt->id . ','; }
+        foreach ($this->vdAddrLoad as $li => $lt) { $k .= 'l' . (string)$li . ':' . (string)$lt->id . ','; }
         return $k;
     }
+    /** A dispatch arm's result in a cell-typed call: an enum body returns its ordinal, and a cell holds the case singleton. */
+    private function boxDispatchReturn(string $ev, ?Type $t): string
+    {
+        if ($t === null || !$this->isEnumType($t)) { return $this->boxRawValue($ev, $t); }
+        $pp = '';
+        $out = $this->emitEnumSingletonPtr((string)$t->class, $ev, $pp);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @__manticore_box_object(ptr ' . $pp . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        $this->markCellBoxed($r);
+        return $out;
+    }
+
     private function emitVirtualDispatchInline(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = [], array $argOutTypes = []): string
     {
         $objp = $this->ssa->allocReg();
@@ -8986,7 +9325,7 @@ trait EmitLlvmObjects
             if ($boxCell && !isset($erasedSyms[$targets[$c]])) {
                 $rc = $this->resolveMethodClass($c, $method);
                 $rt = ($rc !== '' ? ($this->sigs->returnType[$rc . '__' . $method] ?? null) : null);
-                $bodyChunks[] = $this->boxRawValue($r, $rt);
+                $bodyChunks[] = $this->boxDispatchReturn($r, $rt);
                 $r = $this->lastValue;
             }
             $bodyChunks[] = '  store i64 ' . $r . ', ptr ' . $res . "\n";
@@ -9003,7 +9342,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $rd . ' = call i64 @manticore_' . $this->mangle($fallback)
               . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
         if ($boxCell) {
-            $out .= $this->boxRawValue($rd, $this->sigs->returnType[$fallback] ?? null);
+            $out .= $this->boxDispatchReturn($rd, $this->sigs->returnType[$fallback] ?? null);
             $rd = $this->lastValue;
         }
         $out .= '  store i64 ' . $rd . ', ptr ' . $res . "\n";
@@ -9152,7 +9491,7 @@ trait EmitLlvmObjects
      * @return array<string, string>
      */
     /** Can `$holder`'s `$method` take `$argc` arguments (the receiver included)? */
-    private function holderTakesArgs(string $holder, string $method, int $argc): bool
+    private function holderTakesArgs(string $holder, string $method, int $argc, bool $viaVariadic = true): bool
     {
         $key = $holder . '__' . $method;
         $n = \count($this->sigs->paramTypes[$key] ?? []);
@@ -9167,6 +9506,7 @@ trait EmitLlvmObjects
             if (($pdefs[$i] ?? null) === null && !($vmask[$i] ?? false)) { return false; }
         }
         if ($n >= $argc) { return true; }
+        if (!$viaVariadic) { return false; }
         foreach ($vmask as $v) {
             if ($v) { return true; }
         }
@@ -9679,6 +10019,18 @@ trait EmitLlvmObjects
 
     private function emitMethodCallUnguarded(\Compile\Mir\MethodCall_ $n): string
     {
+        // A static method reached through an object (`$o->m()`, `$this->m(...)` closure body):
+        // there is no receiver parameter, so passing it shifted every argument. Evaluate the
+        // receiver for its side effects and call the static symbol.
+        $statCls = $this->staticClassOf($n->object);
+        if ($statCls !== '' && isset($this->classes[$statCls])) {
+            $smm = $this->classes[$statCls]->methodMeta[$n->method] ?? null;
+            if ($smm !== null && $smm->isStatic) {
+                $sdecl = $smm->declaringClass !== '' ? $smm->declaringClass : $statCls;
+                return $this->emitNode($n->object)
+                    . $this->emitNode(new \Compile\Mir\StaticCall_($sdecl, $n->method, $n->args, $n->type, $statCls));
+            }
+        }
         $sp = $this->emitErasedSpreadMethodCall($n);
         if ($sp !== null) { return $sp; }
         $hm = $this->emitHmapCall($n);
@@ -10264,10 +10616,19 @@ trait EmitLlvmObjects
         // IntlBreakIterator::next(?int), which then read its default.
         if ($fallback !== '' && ($static === '' || !isset($this->classes[$static]))) {
             $argc = \count($mc->args) + 1;
-            if (!$this->holderTakesArgs($fallback, $mc->method, $argc) || $this->holderIsStaticMethod($fallback, $mc->method)) {
+            // A variadic holder "takes" any count, yet trims the site to ITS arity: while another holder takes the
+            // arguments by name, that one decides (`addTag(Tag ...$t)` first made `Definition::addTag($n, $attrs)` lose $attrs).
+            if (!$this->holderTakesArgs($fallback, $mc->method, $argc, false) || $this->holderIsStaticMethod($fallback, $mc->method)) {
+                $direct = false;
                 foreach ($this->methodHolders($mc->method) as $cn => $r) {
                     if ($static !== '' && !$this->classImplementsIface($cn, $static)) { continue; }
-                    if ($this->holderTakesArgs($r, $mc->method, $argc) && !$this->holderIsStaticMethod($r, $mc->method)) { $fallback = $r; break; }
+                    if ($this->holderTakesArgs($r, $mc->method, $argc, false) && !$this->holderIsStaticMethod($r, $mc->method)) { $fallback = $r; $direct = true; break; }
+                }
+                if (!$direct && (!$this->holderTakesArgs($fallback, $mc->method, $argc) || $this->holderIsStaticMethod($fallback, $mc->method))) {
+                    foreach ($this->methodHolders($mc->method) as $cn => $r) {
+                        if ($static !== '' && !$this->classImplementsIface($cn, $static)) { continue; }
+                        if ($this->holderTakesArgs($r, $mc->method, $argc) && !$this->holderIsStaticMethod($r, $mc->method)) { $fallback = $r; break; }
+                    }
                 }
             }
         }
@@ -10344,7 +10705,14 @@ trait EmitLlvmObjects
         // the site passes the address and a by-value arm loads it (see vdArmArgs).
         $widenRef = ($mc->object->type->kind === Type::KIND_UNION || !isset($this->classes[$static]))
             ? $this->siteRefUnion($mc->object->type, $mc->method) : [];
+        // A cell argument reads back at every arm's type, so a by-value holder's typed param
+        // does not cost a by-ref holder its address (`$bag->initialize($_SESSION[$k])` beside
+        // an unrelated `initialize(object $o)`).
+        $widenCell = $widenRef === [] && ($mc->object->type->kind === Type::KIND_UNION || !isset($this->classes[$static]))
+            ? $this->siteRefUnion($mc->object->type, $mc->method, true) : [];
         $widen = [];
+        // The same address when the FALLBACK takes the param by reference: a by-value arm still reads through it.
+        $addrLoad = [];
         // Raw caller lvalue → cell by-ref param: scratch slots to write back
         // after the call, parallel with the caller's own types.
         $cellBoxSlots = [];
@@ -10365,7 +10733,9 @@ trait EmitLlvmObjects
                 $ai = \count($ptypes) - 1;
                 continue;
             }
-            if (!($mask[$ai + 1] ?? false) && ($widenRef[$ai + 1] ?? false) && $this->isByRefAddressable($a)) {
+            if (!($mask[$ai + 1] ?? false)
+                && (($widenRef[$ai + 1] ?? false) || (($widenCell[$ai + 1] ?? false) && $a->type->kind === Type::KIND_CELL))
+                && $this->isByRefAddressable($a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
                 $widen[$ai + 1] = $a->type;
@@ -10382,6 +10752,7 @@ trait EmitLlvmObjects
                 $argList .= ', i64 ' . $this->lastValue;
                 $reboxSlots[] = $this->refBoxSlot;
                 $reboxTmps[] = $this->refBoxTmp;
+                $addrLoad[$ai + 1] = $ptypes[$ai + 1] ?? $a->type;
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)
                 && $this->isByRefAddressable($a)
                 && $this->byRefNeedsCellBox($a, $ptypes, $ai + 1)
@@ -10395,9 +10766,11 @@ trait EmitLlvmObjects
                 $cellBoxSlots[] = $this->refBoxSlot;
                 $cellBoxTmps[] = $this->refBoxTmp;
                 $cellBoxTypes[] = $a->type;
+                $addrLoad[$ai + 1] = Type::cell();
             } elseif ($this->argIsByRef($mask, $ai + 1, $a)) {
                 $out .= $this->emitByRefArg($a);
                 $argList .= ', i64 ' . $this->lastValue;
+                $addrLoad[$ai + 1] = $a->type;
             } elseif ($mask[$ai + 1] ?? false) {
                 $out .= $this->emitRefValueSlot($a, $ptypes[$ai + 1] ?? null, $mc->srcArgc, $ai, $ahmask[$ai + 1] ?? false,
                     $fallback . '__' . $mc->method, $ai + 1);
@@ -10628,6 +11001,7 @@ trait EmitLlvmObjects
         // merge would mis-read). The result is then a uniform self-describing cell.
         $boxCell = $n->type->kind === Type::KIND_CELL;
         $this->vdWiden = $widen;
+        $this->vdAddrLoad = $addrLoad;
         if (\count($distinct) <= 1) {
             $sym = $distinct[0] ?? $fallbackFull;
             // The fallback is derived from the static type before the candidate
@@ -10670,7 +11044,7 @@ trait EmitLlvmObjects
                   . '(' . $this->vdArmList . ")\n" . $this->vdArmDrops;
             // An erased thunk already returns a cell; boxing it again double-boxes.
             if ($boxCell && !isset($erasedSyms[$sym])) {
-                $out .= $this->boxRawValue($reg, $this->sigs->returnType[$sym] ?? null);
+                $out .= $this->boxDispatchReturn($reg, $this->sigs->returnType[$sym] ?? null);
                 $reg = $this->lastValue;
             }
         } else {
@@ -10679,6 +11053,7 @@ trait EmitLlvmObjects
         }
         $this->spreadTail = null;
         $this->vdWiden = [];
+        $this->vdAddrLoad = [];
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $refSlotDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
@@ -10872,8 +11247,9 @@ trait EmitLlvmObjects
     /** The set-hook symbol class `$cls` runs for a union store, or ''. */
     private function unionSetHook(string $cls, \Compile\Mir\StoreProperty $n): string
     {
-        if ($n->bypassHook || !isset($this->classes[$cls]->propHooks[$n->property])) { return ''; }
-        $hk = $this->classes[$cls]->propHooks[$n->property];
+        $cd = $this->classes[$cls] ?? null;
+        if ($n->bypassHook || $cd === null || !isset($cd->propHooks[$n->property])) { return ''; }
+        $hk = $cd->propHooks[$n->property];
         return ($hk['set'] !== '' && !$this->insideOwnHook($hk)) ? $hk['set'] : '';
     }
 
@@ -11341,6 +11717,44 @@ trait EmitLlvmObjects
         return $this->sigs->refParams[$decl . '__' . $method] ?? null;
     }
 
+    /** Run the lazy initializer of the object `$objPtr`, if it has one pending. */
+    private function emitLazyInitCall(string $objPtr, string $cls): string
+    {
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $hn = '__lazyo' . \str_replace('%', '', (string)$this->ssa->allocReg());
+        $hs = $this->ssa->allocReg();
+        $this->locals->slots[$hn] = $hs;
+        $out = $this->localVarSlot($hs);
+        $w = $this->ssa->allocReg();
+        $out .= '  ' . $w . ' = ptrtoint ptr ' . $objPtr . " to i64\n";
+        $out .= '  store i64 ' . $w . ', ptr ' . $hs . "\n";
+        $out .= $this->emitNode(new \Compile\Mir\Call('__mc_lazy_init',
+            [new \Compile\Mir\LoadLocal($hn, Type::obj($cls))], Type::void()));
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
+        return $out;
+    }
+
+    /** A write to an unset slot of a lazy ghost initializes it first: php's order, or the
+     *  initializer would overwrite the new value. isset / `??` go through here too: they answer
+     *  for the initialized object. Built-in code writes raw. */
+    private function emitLazyStoreGate(string $objPtr, ?ClassDef $h, string $prop, int $off, string $gep): string
+    {
+        if (!$this->lazyHolder($h) || !$h->initChecked($prop)
+            || $this->initReadsExempt($this->frame->name) || $this->frame->isPrelude) {
+            return '';
+        }
+        $out = '';
+        $c = $this->emitInitTest($objPtr, $h, $prop, $off, $gep, $out);
+        if ($c === '') { return ''; }
+        $lz = $this->ssa->allocLabel('lazyw.init');
+        $ok = $this->ssa->allocLabel('lazyw.ok');
+        $out .= '  br i1 ' . $c . ', label %' . $ok . ', label %' . $lz . "\n" . $lz . ":\n";
+        $out .= $this->emitLazyInitCall($objPtr, $h->name);
+        return $out . '  br label %' . $ok . "\n" . $ok . ":\n";
+    }
+
     /** `Typed property C::$p must not be accessed before initialization` when
      *  `$prop` is still unset on `$objPtr`; '' when no check applies. */
     private function emitInitReadCheck(string $objPtr, ?ClassDef $h, string $prop, int $off, string $gep): string
@@ -11354,6 +11768,19 @@ trait EmitLlvmObjects
         $decl = $h->propertyMeta[$prop]->declaringClass ?? '';
         if ($decl === '') { $decl = $h->name; }
         $shown = isset($this->classes[$decl]) ? $this->classes[$decl]->display() : $decl;
+        // An unset slot of a lazy ghost runs its initializer; still unset after that is php's Error.
+        if ($this->lazyHolder($h)) {
+            $lz = $this->ssa->allocLabel('lazy.init');
+            $ok = $this->ssa->allocLabel('lazy.ok');
+            $out .= '  br i1 ' . $u . ', label %' . $lz . ', label %' . $ok . "\n" . $lz . ":\n";
+            $out .= $this->emitLazyInitCall($objPtr, $h->name);
+            $c2 = $this->emitInitTest($objPtr, $h, $prop, $off, $gep, $out);
+            $u2 = $this->ssa->allocReg();
+            $out .= '  ' . $u2 . ' = xor i1 ' . $c2 . ", true\n";
+            $out .= $this->emitThrowIf($u2, 'Error',
+                'Typed property ' . \ltrim($shown, '\\') . '::$' . $prop . ' must not be accessed before initialization');
+            return $out . '  br label %' . $ok . "\n" . $ok . ":\n";
+        }
         return $out . $this->emitThrowIf($u, 'Error',
             'Typed property ' . \ltrim($shown, '\\') . '::$' . $prop . ' must not be accessed before initialization');
     }

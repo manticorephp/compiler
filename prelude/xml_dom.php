@@ -1,4 +1,21 @@
 <?php
+/*
+ * The 8.4 `Dom\` API over the legacy tree: the same nodes answer to both names.
+ * ponytail: markers, not php's separate class tree, so a legacy DOMNode is also `instanceof Dom\Node`
+ * and nodeName stays lower-case where php's HTML document upper-cases it. Split when a program tells them apart.
+ */
+namespace Dom {
+    interface Node {}
+    interface Document extends Node {}
+    interface Element extends Node {}
+    interface Attr extends Node {}
+    interface Text extends Node {}
+    interface CDATASection extends Text {}
+    interface Comment extends Node {}
+    interface ProcessingInstruction extends Node {}
+}
+
+namespace {
 // ext/dom over the SAME __McXmlDoc node table SimpleXML uses — which is what
 // makes simplexml_import_dom / dom_import_simplexml a zero-copy handover rather
 // than a tree conversion. DEMAND-GATED separately from xml.php: the class tree
@@ -19,7 +36,7 @@ class DOMException extends Exception
 {
 }
 
-class DOMNode
+class DOMNode implements \Dom\Node
 {
     /** Names are `__`-prefixed: the DOM property surface is served by __get, so
      *  a real property here would shadow one of its names. */
@@ -389,7 +406,7 @@ class DOMCharacterData extends DOMNode
     }
 }
 
-class DOMText extends DOMCharacterData
+class DOMText extends DOMCharacterData implements \Dom\Text
 {
     public function __construct(string $data = '')
     {
@@ -406,7 +423,7 @@ class DOMText extends DOMCharacterData
     }
 }
 
-class DOMCdataSection extends DOMText
+class DOMCdataSection extends DOMText implements \Dom\CDATASection
 {
     public function __construct(string $data = '')
     {
@@ -419,7 +436,7 @@ class DOMCdataSection extends DOMText
     }
 }
 
-class DOMComment extends DOMCharacterData
+class DOMComment extends DOMCharacterData implements \Dom\Comment
 {
     public function __construct(string $data = '')
     {
@@ -431,7 +448,7 @@ class DOMComment extends DOMCharacterData
     }
 }
 
-class DOMProcessingInstruction extends DOMNode
+class DOMProcessingInstruction extends DOMNode implements \Dom\ProcessingInstruction
 {
     public function __construct(string $name = '', string $value = '')
     {
@@ -443,7 +460,7 @@ class DOMProcessingInstruction extends DOMNode
     }
 }
 
-class DOMAttr extends DOMNode
+class DOMAttr extends DOMNode implements \Dom\Attr
 {
     public function __construct(string $name = '', string $value = '')
     {
@@ -455,7 +472,7 @@ class DOMAttr extends DOMNode
     }
 }
 
-class DOMElement extends DOMNode
+class DOMElement extends DOMNode implements \Dom\Element
 {
     public function __construct(string $qualifiedName = '', ?string $value = null,
                                 string $namespace = '')
@@ -665,6 +682,16 @@ class DOMDocument extends DOMNode
             return \__mc_xml_dump_doc($this->__d);
         }
         return \__mc_xml_dump_node($node->__d, $node->__n, 0);
+    }
+
+    public function saveHTML(?DOMNode $node = null): string|false
+    {
+        $xml = $this->saveXML($node);
+        if (!\is_string($xml)) { return false; }
+        if ($node === null) { $xml = \preg_replace('/^<\?xml[^>]*\?>\s*/', '', $xml); }
+        // HTML has no self-closing form: a void element stands alone, any other closes.
+        $xml = \preg_replace('~<(area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)((?:\s[^<>]*?)?)\s*/>~i', '<$1$2>', $xml);
+        return \preg_replace('~<([A-Za-z_][\w:.-]*)((?:\s[^<>]*?)?)\s*/>~', '<$1$2></$1>', $xml);
     }
 
     public function save(string $filename, int $options = 0): int|bool
@@ -880,6 +907,11 @@ class DOMNodeList implements Countable, Iterator
 
 class DOMNamedNodeMap implements Countable, Iterator
 {
+    public function getIterator(): Iterator
+    {
+        return $this;
+    }
+
     public ?__McXmlDoc $__d = null;
     /** @var int[] */
     public array $__items = [];
@@ -1344,4 +1376,265 @@ function dom_import_simplexml(SimpleXMLElement $node): DOMElement
     $o = new DOMElement(__MC_SXE_RAW);
     $o->__mcInit($d, $n);
     return $o;
+}
+
+}
+
+namespace Dom {
+    /**
+     * `Dom\HTMLDocument`: a tokenizer and the tree-construction rules ordinary markup needs: implied
+     * html/head/body/tbody, void and raw-text elements, the auto-closing of p, li, dd/dt, table parts
+     * and option.
+     * ponytail: no doctype node, no adoption agency or foster parenting, so misnested formatting (`<b><p></b>`) and text
+     * directly inside a table shape differently from php. Add those insertion modes for scraped HTML.
+     */
+    final class HTMLDocument extends \DOMDocument implements Document
+    {
+        private const VOID = ['area' => 1, 'base' => 1, 'br' => 1, 'col' => 1, 'embed' => 1, 'hr' => 1, 'img' => 1, 'input' => 1, 'link' => 1, 'meta' => 1, 'source' => 1, 'track' => 1, 'wbr' => 1];
+        private const HEAD = ['base' => 1, 'link' => 1, 'meta' => 1, 'noscript' => 1, 'script' => 1, 'style' => 1, 'template' => 1, 'title' => 1];
+        private const CLOSES_P = ['address' => 1, 'article' => 1, 'aside' => 1, 'blockquote' => 1, 'center' => 1, 'details' => 1, 'dir' => 1, 'div' => 1, 'dl' => 1, 'fieldset' => 1, 'figcaption' => 1, 'figure' => 1, 'footer' => 1, 'form' => 1, 'h1' => 1, 'h2' => 1, 'h3' => 1, 'h4' => 1, 'h5' => 1, 'h6' => 1, 'header' => 1, 'hgroup' => 1, 'hr' => 1, 'li' => 1, 'dd' => 1, 'dt' => 1, 'listing' => 1, 'main' => 1, 'menu' => 1, 'nav' => 1, 'ol' => 1, 'p' => 1, 'pre' => 1, 'section' => 1, 'summary' => 1, 'table' => 1, 'ul' => 1];
+
+        /** @var \DOMElement[] */
+        private array $__open = [];
+        /** @var string[] */
+        private array $__names = [];
+        private string $__pending = '';
+        private ?\DOMElement $__html = null;
+        private ?\DOMElement $__head = null;
+        private ?\DOMElement $__body = null;
+        private bool $__inBody = false;
+
+        public static function createFromString(string $source, int $options = 0, ?string $overrideEncoding = null): static
+        {
+            $d = new self();
+            $d->__mcParseHtml($source);
+            return $d;
+        }
+
+        private function __mcParseHtml(string $s): void
+        {
+            $this->__html = $this->createElement('html');
+            $this->__head = $this->createElement('head');
+            $this->__body = $this->createElement('body');
+            $this->appendChild($this->__html);
+            $this->__html->appendChild($this->__head);
+            $this->__html->appendChild($this->__body);
+            $this->__open = [$this->__html, $this->__head];
+            $this->__names = ['html', 'head'];
+            $n = \strlen($s);
+            $i = 0;
+            while ($i < $n) {
+                $lt = \strpos($s, '<', $i);
+                if ($lt === false) { $this->__pending .= \substr($s, $i); break; }
+                if ($lt > $i) { $this->__pending .= \substr($s, $i, $lt - $i); }
+                $c = $lt + 1 < $n ? $s[$lt + 1] : '';
+                if (\substr($s, $lt, 4) === '<!--') {
+                    $e = \strpos($s, '-->', $lt + 4);
+                    $this->__mcFlush();
+                    $text = $e === false ? \substr($s, $lt + 4) : \substr($s, $lt + 4, $e - $lt - 4);
+                    $this->__mcTop()->appendChild($this->createComment($text));
+                    $i = $e === false ? $n : $e + 3;
+                } elseif ($c === '!' || $c === '?') {
+                    $e = \strpos($s, '>', $lt);
+                    $i = $e === false ? $n : $e + 1;
+                } elseif ($c === '/' && $lt + 2 < $n && \ctype_alpha($s[$lt + 2])) {
+                    $e = \strpos($s, '>', $lt);
+                    if ($e === false) { break; }
+                    $this->__mcEnd(\strtolower(\rtrim(\substr($s, $lt + 2, \strcspn($s, " \t\r\n\f/>", $lt + 2)))));
+                    $i = $e + 1;
+                } elseif ($c !== '' && \ctype_alpha($c)) {
+                    $i = $this->__mcStart($s, $lt + 1, $n);
+                } else {
+                    $this->__pending .= '<';
+                    $i = $lt + 1;
+                }
+            }
+            $this->__mcFlush();
+        }
+
+        private function __mcTop(): \DOMElement
+        {
+            return $this->__open[\count($this->__open) - 1];
+        }
+
+        private function __mcToBody(): void
+        {
+            if (!$this->__inBody) {
+                $this->__inBody = true;
+                $this->__open = [$this->__html, $this->__body];
+                $this->__names = ['html', 'body'];
+            }
+        }
+
+        private function __mcFlush(): void
+        {
+            if ($this->__pending === '') { return; }
+            $t = $this->__pending;
+            $this->__pending = '';
+            if (!$this->__inBody) {
+                $t = \ltrim($t, " \t\r\n\f");
+                if ($t === '') { return; }
+                $this->__mcToBody();
+            }
+            $this->__mcTop()->appendChild($this->createTextNode(\html_entity_decode($t, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+        }
+
+        private function __mcPop(): void
+        {
+            \array_pop($this->__open);
+            \array_pop($this->__names);
+        }
+
+        /** Close back through the innermost `$name`, stopping at a `$stop` element. */
+        private function __mcCloseOpen(array $names, array $stop): void
+        {
+            for ($k = \count($this->__names) - 1; $k >= 2; $k = $k - 1) {
+                $cur = $this->__names[$k];
+                if (isset($stop[$cur])) { return; }
+                if (isset($names[$cur])) {
+                    while (\count($this->__names) > $k) { $this->__mcPop(); }
+                    return;
+                }
+            }
+        }
+
+        private function __mcStart(string $s, int $p, int $n): int
+        {
+            $len = \strcspn($s, " \t\r\n\f/>", $p);
+            $name = \strtolower(\substr($s, $p, $len));
+            $p = $p + $len;
+            /** @var array<string, string> $attrs */
+            $attrs = [];
+            while ($p < $n) {
+                $p = $p + \strspn($s, " \t\r\n\f/", $p);
+                if ($p >= $n) { break; }
+                if ($s[$p] === '>') { $p = $p + 1; break; }
+                $l = \strcspn($s, " \t\r\n\f/>=", $p);
+                if ($l === 0) { $l = 1; }
+                $an = \strtolower(\substr($s, $p, $l));
+                $p = $p + $l;
+                $p = $p + \strspn($s, " \t\r\n\f", $p);
+                $v = '';
+                if ($p < $n && $s[$p] === '=') {
+                    $p = $p + 1;
+                    $p = $p + \strspn($s, " \t\r\n\f", $p);
+                    if ($p < $n && ($s[$p] === '"' || $s[$p] === "'")) {
+                        $e = \strpos($s, $s[$p], $p + 1);
+                        if ($e === false) { $e = $n; }
+                        $v = \substr($s, $p + 1, $e - $p - 1);
+                        $p = $e + 1;
+                    } else {
+                        $l = \strcspn($s, " \t\r\n\f>", $p);
+                        $v = \substr($s, $p, $l);
+                        $p = $p + $l;
+                    }
+                }
+                if (!isset($attrs[$an])) { $attrs[$an] = \html_entity_decode($v, ENT_QUOTES | ENT_HTML5, 'UTF-8'); }
+            }
+            $this->__mcFlush();
+            if ($name === 'html' || $name === 'head' || $name === 'body') {
+                $tgt = $name === 'html' ? $this->__html : ($name === 'head' ? $this->__head : $this->__body);
+                foreach ($attrs as $k => $v) {
+                    if (!$tgt->hasAttribute((string)$k)) { $tgt->setAttribute((string)$k, $v); }
+                }
+                if ($name === 'body') { $this->__mcToBody(); }
+                return $p;
+            }
+            if (!$this->__inBody && !isset(self::HEAD[$name])) { $this->__mcToBody(); }
+            if ($this->__inBody) { $this->__mcAutoClose($name); }
+            $el = $this->createElement($name);
+            foreach ($attrs as $k => $v) { $el->setAttribute((string)$k, $v); }
+            $this->__mcTop()->appendChild($el);
+            if ($name === 'script' || $name === 'style' || $name === 'title' || $name === 'textarea') {
+                return $this->__mcRawText($s, $p, $n, $name, $el);
+            }
+            if (isset(self::VOID[$name])) { return $p; }
+            $this->__open[] = $el;
+            $this->__names[] = $name;
+            if (($name === 'pre' || $name === 'listing') && $p < $n && $s[$p] === "\n") { $p = $p + 1; }
+            return $p;
+        }
+
+        private function __mcAutoClose(string $name): void
+        {
+            $scope = ['table' => 1, 'td' => 1, 'th' => 1, 'caption' => 1, 'button' => 1, 'object' => 1, 'template' => 1];
+            if ($name === 'li') {
+                $this->__mcCloseOpen(['li' => 1], $scope + ['ul' => 1, 'ol' => 1]);
+            } elseif ($name === 'dd' || $name === 'dt') {
+                $this->__mcCloseOpen(['dd' => 1, 'dt' => 1], $scope + ['dl' => 1]);
+            } elseif ($name === 'option') {
+                $this->__mcCloseOpen(['option' => 1], ['select' => 1]);
+            } elseif ($name === 'optgroup') {
+                $this->__mcCloseOpen(['option' => 1, 'optgroup' => 1], ['select' => 1]);
+            } elseif ($name === 'td' || $name === 'th') {
+                $this->__mcCloseOpen(['td' => 1, 'th' => 1], ['table' => 1, 'tr' => 1]);
+                $this->__mcTableChild('tr', ['tr' => 1]);
+            } elseif ($name === 'tr') {
+                $this->__mcCloseOpen(['tr' => 1], ['table' => 1, 'tbody' => 1, 'thead' => 1, 'tfoot' => 1]);
+                $this->__mcTableChild('tbody', ['tbody' => 1, 'thead' => 1, 'tfoot' => 1]);
+            } elseif ($name === 'tbody' || $name === 'thead' || $name === 'tfoot') {
+                $this->__mcCloseOpen(['tbody' => 1, 'thead' => 1, 'tfoot' => 1], ['table' => 1]);
+            }
+            if (isset(self::CLOSES_P[$name])) { $this->__mcCloseOpen(['p' => 1], $scope); }
+            if ($name[0] === 'h' && \strlen($name) === 2 && \ctype_digit($name[1])) {
+                $top = $this->__names[\count($this->__names) - 1];
+                if ($top[0] === 'h' && \strlen($top) === 2 && \ctype_digit($top[1])) { $this->__mcPop(); }
+            }
+        }
+
+        /** `<table><tr>` implies the tbody, and a cell its tr. */
+        private function __mcTableChild(string $make, array $have): void
+        {
+            $top = $this->__names[\count($this->__names) - 1];
+            if (isset($have[$top])) { return; }
+            if ($top === 'table' || ($make === 'tr' && ($top === 'tbody' || $top === 'thead' || $top === 'tfoot'))) {
+                if ($make === 'tr' && $top === 'table') { $this->__mcTableChild('tbody', ['tbody' => 1]); }
+                $el = $this->createElement($make);
+                $this->__mcTop()->appendChild($el);
+                $this->__open[] = $el;
+                $this->__names[] = $make;
+            }
+        }
+
+        private function __mcRawText(string $s, int $p, int $n, string $name, \DOMElement $el): int
+        {
+            $e = $p;
+            $l = \strlen($name);
+            while (true) {
+                $e = \strpos($s, '</', $e);
+                if ($e === false) { $e = $n; break; }
+                if (\strtolower(\substr($s, $e + 2, $l)) === $name) { break; }
+                $e = $e + 2;
+            }
+            $t = \substr($s, $p, $e - $p);
+            if ($name === 'textarea' && $t !== '' && $t[0] === "\n") { $t = \substr($t, 1); }
+            if ($name === 'title' || $name === 'textarea') { $t = \html_entity_decode($t, ENT_QUOTES | ENT_HTML5, 'UTF-8'); }
+            if ($t !== '') { $el->appendChild($this->createTextNode($t)); }
+            if ($e >= $n) { return $n; }
+            $g = \strpos($s, '>', $e);
+            return $g === false ? $n : $g + 1;
+        }
+
+        private function __mcEnd(string $name): void
+        {
+            $this->__mcFlush();
+            if ($name === 'html' || $name === 'body') { return; }
+            if ($name === 'head') { $this->__mcToBody(); return; }
+            if ($name === 'br') {
+                $this->__mcToBody();
+                $this->__mcTop()->appendChild($this->createElement('br'));
+                return;
+            }
+            for ($k = \count($this->__names) - 1; $k >= 1; $k = $k - 1) {
+                if ($this->__names[$k] === $name) {
+                    while (\count($this->__names) > $k) { $this->__mcPop(); }
+                    return;
+                }
+            }
+            if ($name === 'p') {
+                $this->__mcToBody();
+                $this->__mcTop()->appendChild($this->createElement('p'));
+            }
+        }
+    }
 }

@@ -57,6 +57,30 @@ interface DateTimeInterface
     public function __mcZoneOffset(): int;
 }
 
+/** The zone of a `{date, timezone_type, timezone}` state; php's Error when the state is not one. */
+function __mc_dt_state_zone(array $data, string $cls): DateTimeZone
+{
+    if (!isset($data['date'], $data['timezone_type'], $data['timezone'])
+        || !\is_string($data['date']) || !\is_int($data['timezone_type']) || !\is_string($data['timezone'])) {
+        throw new Error('Invalid serialization data for ' . $cls . ' object');
+    }
+    return new DateTimeZone($data['timezone']);
+}
+
+function __mc_dt_state_ts(string $date, DateTimeZone $tz): int
+{
+    $p = \strpos($date, '.');
+    $t = \__mc_strtotime_core($p === false ? $date : \substr($date, 0, $p), \time(), $tz->__mcId(), 0);
+    // A fixed offset is no zone of the tz database: the core read the wall clock as UTC.
+    return $tz->__mcType() === 1 ? $t - $tz->__mcOffset() : $t;
+}
+
+function __mc_dt_state_us(string $date): int
+{
+    $p = \strpos($date, '.');
+    return $p === false ? 0 : (int)\str_pad(\substr($date, $p + 1, 6), 6, '0');
+}
+
 class DateError extends Error {}
 class DateObjectError extends DateError {}
 class DateRangeError extends DateError {}
@@ -107,6 +131,35 @@ class DateTimeZone
         $this->tzname = $timezone;
         $this->tztype = 3;
         $this->tzid = $zid;
+    }
+
+    /** @return array<string,mixed> */
+    public function __mcJson(): array
+    {
+        return ['timezone_type' => $this->tztype, 'timezone' => $this->tzname];
+    }
+
+    /** @return array<string,mixed> */
+    public function __serialize(): array
+    {
+        return $this->__mcJson();
+    }
+
+    /** @param array<string,mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        if (!isset($data['timezone_type'], $data['timezone']) || !\is_int($data['timezone_type']) || !\is_string($data['timezone'])) {
+            throw new Error('Invalid serialization data for DateTimeZone object');
+        }
+        $this->__construct($data['timezone']);
+    }
+
+    /** @param array<string,mixed> $array */
+    public static function __set_state(array $array): DateTimeZone
+    {
+        $z = new DateTimeZone('UTC');
+        $z->__unserialize($array);
+        return $z;
     }
 
     public function getName(): string
@@ -401,6 +454,14 @@ class DateTime implements DateTimeInterface
         }
     }
 
+    public function __mcSetZone(string $name, int $zid, int $type, int $off): void
+    {
+        $this->zname = $name;
+        $this->zid = $zid;
+        $this->ztype = $type;
+        $this->zoff = $off;
+    }
+
     public function __mcTs(): int { return $this->ts; }
     public function __mcUs(): int { return $this->us; }
     public function __mcZoneName(): string { return $this->zname; }
@@ -417,6 +478,29 @@ class DateTime implements DateTimeInterface
     public function format(string $format): string
     {
         return \__mc_date_fmt($format, $this->ts, $this->us, $this->zid, $this->zname, $this->ztype, $this->zoff);
+    }
+
+    /** @return array<string,mixed> */
+    public function __serialize(): array
+    {
+        return $this->__mcJson();
+    }
+
+    /** @param array<string,mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        $tz = \__mc_dt_state_zone($data, 'DateTime');
+        $this->__mcSetZone($tz->getName(), $tz->__mcId(), $tz->__mcType(), $tz->__mcOffset());
+        $date = (string)$data['date'];
+        $this->__mcSet(\__mc_dt_state_ts($date, $tz), \__mc_dt_state_us($date));
+    }
+
+    /** @param array<string,mixed> $array */
+    public static function __set_state(array $array): DateTime
+    {
+        $d = new DateTime('@0');
+        $d->__unserialize($array);
+        return $d;
     }
 
     /** @return array<string,mixed> */
@@ -636,6 +720,29 @@ class DateTimeImmutable implements DateTimeInterface
     public function format(string $format): string
     {
         return \__mc_date_fmt($format, $this->ts, $this->us, $this->zid, $this->zname, $this->ztype, $this->zoff);
+    }
+
+    /** @return array<string,mixed> */
+    public function __serialize(): array
+    {
+        return $this->__mcJson();
+    }
+
+    /** @param array<string,mixed> $data */
+    public function __unserialize(array $data): void
+    {
+        $tz = \__mc_dt_state_zone($data, 'DateTimeImmutable');
+        $this->__mcSetZone($tz->getName(), $tz->__mcId(), $tz->__mcType(), $tz->__mcOffset());
+        $date = (string)$data['date'];
+        $this->__mcSet(\__mc_dt_state_ts($date, $tz), \__mc_dt_state_us($date));
+    }
+
+    /** @param array<string,mixed> $array */
+    public static function __set_state(array $array): DateTimeImmutable
+    {
+        $d = new DateTimeImmutable('@0');
+        $d->__unserialize($array);
+        return $d;
     }
 
     /** @return array<string,mixed> */

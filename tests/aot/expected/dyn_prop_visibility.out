@@ -1,0 +1,15 @@
+pub isset=true coalesce=1 read=1
+wrote
+pro isset=false coalesce='dflt' read=Error:Cannot access protected property A::$pro
+Error:Cannot access protected property A::$pro
+pri isset=false coalesce='dflt' read=Error:Cannot access private property A::$pri
+Error:Cannot access private property A::$pri
+nul isset=false coalesce='dflt' read=Error:Cannot access private property A::$nul
+Error:Cannot access private property A::$nul
+[true,1][true,1]
+[true,2][true,2]
+[true,3][false,"dflt"]
+[false,"dflt"][false,"dflt"]
+78
+true1
+3

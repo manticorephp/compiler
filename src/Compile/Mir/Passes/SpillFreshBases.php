@@ -385,6 +385,15 @@ final class SpillFreshBases
      * fresh base of every write / reference chain rooted there. A conditional
      * (ternary, `??`, match) and a nested statement block are not entered.
      */
+    private function yields(Node $n): bool
+    {
+        if ($n->kind === Node::KIND_YIELD) { return true; }
+        foreach (Walk::children($n) as $c) {
+            if ($this->yields($c)) { return true; }
+        }
+        return false;
+    }
+
     private function hoistIn(Node $n): void
     {
         $k = $n->kind;
@@ -397,6 +406,15 @@ final class SpillFreshBases
         if ($k === Node::KIND_FOREACH) {
             $fe = $this->asForeach($n);
             if ($fe->byRef) { $fe->array = $this->hoistBottom($fe->array, false); }
+            // An erased base with a yielding body has one body and one resume
+            // point per yield, so no runtime classify can pick an arm for it: it
+            // walks a generator over whatever arrives.
+            // ponytail: an extra resume per element; split the arms when a hot
+            // template loop shows up in a profile.
+            $bk = $fe->array->type->kind;
+            if (!$fe->byRef && ($bk === Type::KIND_CELL || $bk === Type::KIND_UNKNOWN) && $this->yields($fe->body)) {
+                $fe->array = new \Compile\Mir\Call('__mc_iter_any', [$fe->array], Type::obj('Generator'));
+            }
             return;
         }
         if ($k === Node::KIND_STORE_ELEMENT) {

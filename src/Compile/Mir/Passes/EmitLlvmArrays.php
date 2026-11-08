@@ -1346,6 +1346,41 @@ trait EmitLlvmArrays
         if (!$this->erasedBaseMayBeObject($se->array)) {
             return $this->emitStoreElementUnified($se);
         }
+        // The store is also an EXPRESSION (`return $this->cache[$k] = $v;`): its value must be what
+        // was assigned, not 0. Evaluate the value once into a hidden slot, store from the slot in both
+        // arms, and read it back at the end. Only for a pure key (evaluation order) and a value kind
+        // whose word survives a trip through an i64 slot.
+        $vk = $se->value->type->kind;
+        $ik = $se->index->kind;
+        $keyPure = $ik === Node::KIND_NULL_CONST || $ik === Node::KIND_INT_CONST
+            || $ik === Node::KIND_STRING_CONST || $ik === Node::KIND_LOAD_LOCAL;
+        // A pre-evaluated value already IS the expression's result (its owner answers it), and the
+        // store consumes it as is.
+        if ($keyPure && !$this->isPreEvaluated($se->value) && ($vk === Type::KIND_STRING || $vk === Type::KIND_INT || $vk === Type::KIND_BOOL
+            || $vk === Type::KIND_CELL || $vk === Type::KIND_OBJ)) {
+            $hname = '__ses' . \str_replace('%', '', (string)$this->ssa->allocReg());
+            $hslot = $this->ssa->allocReg();
+            $this->locals->slots[$hname] = $hslot;
+            $pre = $this->localVarSlot($hslot);
+            $pre .= $this->emitNode($se->value);
+            // A fresh value is owned by the slot; the arms store a BORROW of it (and count their own).
+            $drop = $vk === Type::KIND_STRING && $this->isFreshStringTemp($se->value) ? 'str'
+                : ($vk === Type::KIND_CELL && $this->isFreshCellTemp($se->value) ? 'cell' : '');
+            $pre .= $this->coerceToI64();
+            $pre .= '  store i64 ' . $this->lastValue . ', ptr ' . $hslot . "\n";
+            $hload = new \Compile\Mir\LoadLocal($hname, $se->value->type);
+            $inner = $this->emitStoreElementErasedArms(new StoreElement($se->array, $se->index, $hload, $se->type));
+            if ($drop !== '') {
+                $dv = $this->ssa->allocReg();
+                $inner .= '  ' . $dv . ' = load i64, ptr ' . $hslot . "\n" . $this->rcReleaseReg($dv, $drop);
+            }
+            return $pre . $inner . $this->emitNode($hload);
+        }
+        return $this->emitStoreElementErasedArms($se);
+    }
+
+    private function emitStoreElementErasedArms(StoreElement $se): string
+    {
         $out = $this->erasedBaseObjTest($se->array);
         $isObj = $this->objTestReg;
         $objL = $this->ssa->allocLabel('eset.obj');

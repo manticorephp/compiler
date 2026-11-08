@@ -179,6 +179,12 @@ final class Debug
      * MANTICORE_DYN_PROP_BAG=0 restores the old layout.
      */
     public static bool $dynPropBag = true;
+    /** The program mentions `newLazyGhost`: candidate classes track every property in the init map. */
+    public static bool $lazyObjects = false;
+    /** The program calls `debug_backtrace`: a method's entry records its `$this` for the frame's `object`. */
+    public static bool $btObjects = false;
+    /** @var string[] manifest `lazy`: class-name prefixes a ghost may be made of; empty = every user class. */
+    public static array $lazyPrefixes = [];
 
     /**
      * `MANTICORE_RC_ELEM_OWNS=1` — do not veto a property slot's element drop

@@ -124,6 +124,7 @@ final class BuildCommand extends Command
             // and appended LAST — its top-level lowers into `__main` after every
             // class/function is registered. Optional: with no `entry`, fall back
             // to the find|sort order (a `zzz_*` driver sorts last by convention).
+            \Compile\Debug::$lazyPrefixes = isset($app["lazy"]) ? (array)$app["lazy"] : [];
             $entry = "";
             if (isset($app["entry"])) {
                 $entry = (string)$app["entry"];

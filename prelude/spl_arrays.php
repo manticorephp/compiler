@@ -420,7 +420,16 @@ function __mc_iter_drive_to_array(\Iterator $it, bool $preserve_keys): array
  */
 function __mc_spread_to_array(mixed $iterator): array
 {
-    if (\is_array($iterator)) { return $iterator; }
+    // An array out of a cell comes back cell-valued: its own buffer may hold raw words.
+    if (\is_array($iterator)) {
+        /** @var array<int|string,mixed> $copy */
+        $copy = [];
+        foreach ($iterator as $k => $v) { $copy[$k] = $v; }
+        return $copy;
+    }
+    if (!($iterator instanceof \Traversable)) {
+        throw new \Error('Only arrays and Traversables can be unpacked, ' . \get_debug_type($iterator) . ' given');
+    }
     if ($iterator instanceof \IteratorAggregate) {
         return __mc_spread_to_array($iterator->getIterator());
     }

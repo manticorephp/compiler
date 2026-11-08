@@ -744,6 +744,8 @@ final class MemoryAbi
     /** #[\Deprecated] on the member — ReflectionFunctionAbstract::isDeprecated(). */
     public const RMETA_MEM_DEPRECATED = 64;
     public const RMETA_MEM_HAS_DEFAULT = 128;
+    /** A property row of the class that declares it, not a copy of an ancestor's. */
+    public const RMETA_MEM_DECLARED_HERE = 256;
 
     /** `i64` — packed `rc | color | buffered`; see {@see RC_MASK}. */
     public const OBJECT_RC_WORD_OFFSET = 8;

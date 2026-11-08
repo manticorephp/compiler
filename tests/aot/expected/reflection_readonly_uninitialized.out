@@ -1,0 +1,17 @@
+bool(false)
+bool(true)
+Typed property Tag::$name must not be accessed before initialization
+bool(true)
+string(1) "x"
+string(1) "x"
+Error:Cannot modify readonly property Tag::$name
+bool(true)
+z
+Cannot modify readonly property Tag::$name
+bool(false)
+[1,2]
+bool(true)
+NULL
+a000
+b111
+c110

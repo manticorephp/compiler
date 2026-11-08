@@ -179,4 +179,6 @@ final class FunctionDef
     public string $claimOrigin = '';
     /** @var array<int, Type> */
     public array $claimParams = [];
+    /** The source file the function was written in ('' = unknown: the module's). */
+    public string $file = '';
 }

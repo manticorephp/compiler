@@ -2758,6 +2758,7 @@ trait EmitLlvmCalls
                 $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
             }
             $fpReg = $fpi;
+            if (\count($argRegs) === $pi) { $out .= $this->emitDynFuncArgsSurplus($fpi, $argRegs); }
             $out .= $this->emitDynClosurePaddedCall($fpi, $argList, $argTypes, $pi, $struct, $argRegs);
             $out .= $padDrops;
             $reg = $this->lastValue;
@@ -2771,6 +2772,7 @@ trait EmitLlvmCalls
                 $out .= '  ' . $fpi . ' = load i64, ptr ' . $struct . "\n";
             }
             $fpReg = $fpi;
+            if ($dynSpread === -1 && \count($argRegs) === $pi) { $out .= $this->emitDynFuncArgsSurplus($fpi, $argRegs); }
             $fp = $this->ssa->allocReg();
             $out .= '  ' . $fp . ' = inttoptr i64 ' . $fpi . " to ptr\n";
             // The arity channel, stored LAST so no argument's own call can
@@ -3260,6 +3262,14 @@ trait EmitLlvmCalls
         // identity across split parts, the prefix travels with every copy.
         $out = $this->closureMetaLoad($fpi, 0);
         $ok = $this->metaOk;
+        // Bits 8-15 of a func-args closure hold its arity, no pack position.
+        $faBit = $this->ssa->allocReg();
+        $out .= '  ' . $faBit . ' = and i64 ' . $this->metaWord . ', ' . (string)self::CLOSURE_META_FUNC_ARGS . "\n";
+        $noFa = $this->ssa->allocReg();
+        $out .= '  ' . $noFa . ' = icmp eq i64 ' . $faBit . ", 0\n";
+        $okPack = $this->ssa->allocReg();
+        $out .= '  ' . $okPack . ' = and i1 ' . $ok . ', ' . $noFa . "\n";
+        $ok = $okPack;
         $sh = $this->ssa->allocReg();
         $out .= '  ' . $sh . ' = lshr i64 ' . $this->metaWord . ", 4\n";
         $vf = $this->ssa->allocReg();
@@ -3388,6 +3398,64 @@ trait EmitLlvmCalls
         return false;
     }
 
+    /** Meta-word bit of a closure that reads func_get_args(). */
+    private const CLOSURE_META_FUNC_ARGS = 2;
+
+    /** The declared arity of a closure whose surplus arguments a dynamic invoke hands over, or -1. */
+    private function closureFuncArgsArity(string $cname, int $capCnt): int
+    {
+        if (!($this->sigs->usesFuncArgs[$cname] ?? false)) { return -1; }
+        if (\in_array(true, $this->sigs->variadicParams[$cname] ?? [], true)) { return -1; }
+        $arity = \count($this->sigs->paramTypes[$cname] ?? []) - $capCnt;
+        return $arity >= 0 && $arity < 255 ? $arity : -1;
+    }
+
+    /**
+     * A dynamic invoke writes more arguments than the callee declares: the closure ABI has no
+     * operand for them, so a callee reading func_get_args() takes them off the overflow channel.
+     * The callee is told by its prefix, a code pointer being no identity across split parts.
+     *
+     * @param string[] $argRegs the argument words, cells on the uniform closure ABI
+     */
+    private function emitDynFuncArgsSurplus(string $fpi, array $argRegs): string
+    {
+        $argc = \count($argRegs);
+        /** @var array<int, bool> $ks */
+        $ks = [];
+        foreach ($this->closureCaptures as $cname => $capCnt) {
+            $k = $this->closureFuncArgsArity($cname, $capCnt);
+            if ($k >= 0 && $k < $argc) { $ks[$k] = true; }
+        }
+        if ($ks === []) { return ''; }
+        $this->rt->needsFuncArgs = true;
+        $out = $this->closureMetaLoad($fpi, 0);
+        $ok = $this->metaOk;
+        $low = $this->ssa->allocReg();
+        $out .= '  ' . $low . ' = and i64 ' . $this->metaWord . ', ' . (string)(0xFF00 | self::CLOSURE_META_FUNC_ARGS) . "\n";
+        foreach ($ks as $k => $_) {
+            $eq = $this->ssa->allocReg();
+            $out .= '  ' . $eq . ' = icmp eq i64 ' . $low . ', ' . (string)((($k + 1) << 8) | self::CLOSURE_META_FUNC_ARGS) . "\n";
+            $hit = $this->ssa->allocReg();
+            $out .= '  ' . $hit . ' = and i1 ' . $ok . ', ' . $eq . "\n";
+            $hitL = $this->ssa->allocLabel('cfa.hit');
+            $nextL = $this->ssa->allocLabel('cfa.next');
+            $out .= '  br i1 ' . $hit . ', label %' . $hitL . ', label %' . $nextL . "\n" . $hitL . ":\n";
+            $elems = [];
+            for ($i = (int)$k; $i < $argc; $i = $i + 1) {
+                $sn = '__cfa' . \substr($this->ssa->allocReg(), 2);
+                $slot = $this->ssa->allocReg();
+                $out .= '  ' . $slot . " = alloca i64\n" . '  store i64 ' . $argRegs[$i] . ', ptr ' . $slot . "\n";
+                $this->locals->slots[$sn] = $slot;
+                $elems[] = new ArrayElement_(null, new \Compile\Mir\LoadLocal($sn, Type::cell()));
+            }
+            $out .= $this->emitNode(new ArrayLit($elems, Type::vec(Type::cell())));
+            $out .= $this->coerceToI64();
+            $out .= '  store i64 ' . $this->lastValue . ", ptr @__mir_fa_argx\n";
+            $out .= '  br label %' . $nextL . "\n" . $nextL . ":\n";
+        }
+        return $out;
+    }
+
     /** Tags the data word placed in front of a closure body that has a by-ref
      *  param or returns by reference. The low bit is "returns by reference". */
     private const CLOSURE_META_MAGIC = 0x4D434C4F52450000;
@@ -3416,6 +3484,10 @@ trait EmitLlvmCalls
         if ($vk >= 0 && $vk < 255) {
             $rr = $rr | (($vk + 1) << 8) | ($this->closurePackElemCode($cname, $capCnt) << 4);
         }
+        // Bit 1 + bits 8-15: a closure reading func_get_args() and 1 + its declared arity, from
+        // which a dynamic invoke knows what is surplus ({@see emitDynFuncArgsSurplus}).
+        $faArity = $this->closureFuncArgsArity($cname, $capCnt);
+        if ($faArity >= 0) { $rr = $rr | self::CLOSURE_META_FUNC_ARGS | (($faArity + 1) << 8); }
         if (isset($this->reflClosureMeta[$cname])) {
             // A reflected closure carries its metadata row in front of its entry:
             // the code pointer is no identity across split parts (each part has
@@ -5466,6 +5538,19 @@ trait EmitLlvmCalls
                 foreach ($addR as $k => $r) { $regs[] = $r; $flavs[] = $addF[$k]; }
             }
         }
+        while (\count($this->litElemDropRegs) > $mark) {
+            \array_pop($this->litElemDropRegs);
+            \array_pop($this->litElemDropFlavors);
+        }
+    }
+
+    /**
+     * Forget the literal-element drops a CONDITIONAL arm registered: the elements'
+     * registers are defined in that arm only, so a call after the join must not
+     * name them. They stay owned by the arm's buffer.
+     */
+    private function dropArmLitElems(int $mark): void
+    {
         while (\count($this->litElemDropRegs) > $mark) {
             \array_pop($this->litElemDropRegs);
             \array_pop($this->litElemDropFlavors);

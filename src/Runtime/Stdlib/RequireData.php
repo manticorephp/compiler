@@ -213,3 +213,15 @@ function __mc_rd_number(string $s, int &$i, int $n, bool &$ok): int|float
     else { $ok = false; return 0; }
     return $neg ? -$v : $v;
 }
+
+/**
+ * `eval()` has no interpreter behind it: the code is NOT run and the result is `null`. A
+ * language construct every php has, so the call resolves instead of trapping; code that
+ * needs the evaluated declarations (Twig's `eval('?>'.$content)` of a freshly compiled
+ * template) must have them in the build ahead of time and fails on its own, loudly, when
+ * they are missing.
+ */
+function eval(string $code): mixed
+{
+    return null;
+}

@@ -2,7 +2,7 @@
 
 /**
  * php's core interfaces — Traversable, Iterator, IteratorAggregate, ArrayAccess,
- * Countable, JsonSerializable, Stringable. Interfaces ONLY, injected into EVERY
+ * Countable, JsonSerializable, Serializable, Stringable. Interfaces ONLY, injected into EVERY
  * program ahead of exceptions.php: any class may implement one, and Throwable
  * extends Stringable. The SPL classes built on them live in spl_iterators.php,
  * demand-gated.
@@ -60,3 +60,64 @@ interface Stringable
     public function __toString(): string;
 }
 
+
+interface Serializable
+{
+    public function serialize();
+
+    public function unserialize(string $data);
+}
+
+function is_iterable(mixed $value): bool
+{
+    return \is_array($value) || $value instanceof \Traversable;
+}
+
+function is_countable(mixed $value): bool
+{
+    return \is_array($value) || $value instanceof \Countable;
+}
+
+/** The walk behind a yielding `foreach` over an erased base ({@see \Compile\Mir\Passes\SpillFreshBases}). No foreach here: it would come straight back. */
+function __mc_iter_any(mixed $it): \Generator
+{
+    while ($it instanceof \IteratorAggregate) { $it = $it->getIterator(); }
+    if ($it instanceof \Iterator) {
+        for ($it->rewind(); $it->valid(); $it->next()) {
+            $v = $it->current();
+            yield $it->key() => $v;
+        }
+        return;
+    }
+    if (\is_object($it)) { $it = __mc_public_object_vars($it); }
+    if (\is_array($it)) {
+        $keys = \array_keys($it);
+        $n = \count($keys);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $k = $keys[$i];
+            yield $k => $it[$k];
+        }
+    }
+}
+
+/**
+ * `get_object_vars($o)` from inside class `$scope`: `(array)` carries each property's
+ * visibility in its key (`"\0*\0p"` protected, `"\0C\0p"` private).
+ * @return array<string, mixed>
+ */
+function __mc_scoped_object_vars(object $o, string $scope): array
+{
+    $related = $o instanceof $scope || \is_a($scope, \get_class($o), true);
+    $out = [];
+    foreach ((array)$o as $k => $v) {
+        $k = (string)$k;
+        if ($k !== '' && $k[0] === "\0") {
+            $end = \strpos($k, "\0", 1);
+            $owner = \substr($k, 1, $end - 1);
+            if ($owner === '*' ? !$related : $owner !== $scope) { continue; }
+            $k = \substr($k, $end + 1);
+        }
+        $out[$k] = $v;
+    }
+    return $out;
+}

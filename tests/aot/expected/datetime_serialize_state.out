@@ -1,0 +1,41 @@
+Array
+(
+    [date] => 2026-01-02 03:04:05.500000
+    [timezone_type] => 3
+    [timezone] => Europe/Kyiv
+)
+O:17:"DateTimeImmutable":3:{s:4:"date";s:26:"2026-01-02 03:04:05.500000";s:13:"timezone_type";i:3;s:8:"timezone";s:11:"Europe/Kyiv";}
+bool(true)
+2026-01-02 03:04:05.500000 Europe/Kyiv
+Array
+(
+    [date] => 2020-07-01 10:00:00.000000
+    [timezone_type] => 3
+    [timezone] => America/New_York
+)
+Array
+(
+    [date] => 2020-07-01 10:00:00.000000
+    [timezone_type] => 3
+    [timezone] => America/New_York
+)
+O:8:"DateTime":3:{s:4:"date";s:26:"2020-07-01 10:00:00.000000";s:13:"timezone_type";i:3;s:8:"timezone";s:16:"America/New_York";}
+2020-07-01T10:00:00-04:00
+2020-02-03T04:05:06.000007+02:00 1580695506
+DateTimeImmutable 2020-02-03T04:05:06+02:00 EET 1580695506
+Array
+(
+    [timezone_type] => 3
+    [timezone] => Asia/Tokyo
+)
+Array
+(
+    [timezone_type] => 3
+    [timezone] => Asia/Tokyo
+)
+O:12:"DateTimeZone":2:{s:13:"timezone_type";i:3;s:8:"timezone";s:10:"Asia/Tokyo";}
+Asia/Tokyo
+-03:00
+Error: Invalid serialization data for DateTimeImmutable object
+Point 2024-03-04T05:06:07+00:00 250000 2024-03-05
+2024-03-04 05:06:07.250000|3|UTC

@@ -290,7 +290,7 @@ function __mc_unser_val(\__McUnSt $st): mixed
             // __unserialize gets the array __serialize returned: its keys as
             // written (an int stays an int), nothing demangled.
             if ($magic) { $props[$k] = $val; }
-            else { __mc_unser_set($o, __mc_un_demangle((string)$k), $val); }
+            else { __mc_unser_set($o, (string)$k, $val); }
             $i = $i + 1;
         }
         __mc_un_ch($st, 125);

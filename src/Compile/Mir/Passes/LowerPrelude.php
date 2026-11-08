@@ -493,6 +493,7 @@ trait LowerPrelude
                 foreach ($props as $p) {
                     // php marks a non-public slot: `["p":protected]`, `["p":"Declaring":private]`.
                     $vis = '';
+                    $shown = $cd->propDisplayName($p);
                     if (isset($cd->propertyMeta[$p])) {
                         $pm = $cd->propertyMeta[$p];
                         if ($pm->visibility === 'protected') { $vis = ':protected'; }
@@ -505,7 +506,7 @@ trait LowerPrelude
                         // An erased #[TypeDef] slot is its carrier scalar: rebuild the
                         // one-field object php prints, from the carrier.
                         $tdd = $this->classTable[$tdc];
-                        $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  ';"
+                        $body .= "    echo \$pad, '  [\"" . $shown . "\"" . $vis . "]=>', \"\\n\", \$pad, '  ';"
                             . " echo 'object(" . $tdd->display() . ")#1 (1) {', \"\\n\", \$pad, '    [\"" . $tdd->typeDefProp . "\"]=>', \"\\n\", \$pad, '    ';"
                             . " __mir_var_dump(\$v->" . $p . "->" . $tdd->typeDefProp . ", \$indent + 2); echo \$pad, \"  }\\n\";\n";
                         continue;
@@ -513,11 +514,11 @@ trait LowerPrelude
                     if (isset($maybe[$p])) {
                         $th = isset($cd->propertyMeta[$p]) ? \ltrim($cd->propertyMeta[$p]->typeHint, '\\') : '';
                         $body .= "    if (__mir_prop_inited(\$v, '" . $p . "')) {\n"
-                            . "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n"
-                            . "    } else { echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  uninitialized(" . $th . ")', \"\\n\"; }\n";
+                            . "    echo \$pad, '  [\"" . $shown . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n"
+                            . "    } else { echo \$pad, '  [\"" . $shown . "\"" . $vis . "]=>', \"\\n\", \$pad, '  uninitialized(" . $th . ")', \"\\n\"; }\n";
                         continue;
                     }
-                    $body .= "    echo \$pad, '  [\"" . $p . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
+                    $body .= "    echo \$pad, '  [\"" . $shown . "\"" . $vis . "]=>', \"\\n\", \$pad, '  '; __mir_var_dump(\$v->" . $p . ", \$indent + 1);\n";
                 }
                 if ($cd->usesBag()) {
                     $body .= "    foreach (\$bag as \$bk => \$bv) {\n"
@@ -748,7 +749,7 @@ trait LowerPrelude
         if ($meta->visibility === 'protected') { return "\0" . '*' . "\0" . $prop; }
         if ($meta->visibility === 'private') {
             $decl = $meta->declaringClass !== '' ? $meta->declaringClass : $cname;
-            return "\0" . $decl . "\0" . $prop;
+            return "\0" . $decl . "\0" . $meta->name;
         }
         return $prop;
     }
@@ -1105,12 +1106,13 @@ trait LowerPrelude
             } else {
                 $body .= "    \$out = \"" . $head . "\\n\" . \$pad . \"(\\n\";\n";
                 foreach ($this->visibleProps($cd) as $p) {
-                    $key = $p;
+                    $shown = $cd->propDisplayName($p);
+                    $key = $shown;
                     if (isset($cd->propertyMeta[$p])) {
                         $pm = $cd->propertyMeta[$p];
-                        if ($pm->visibility === 'protected') { $key = $p . ':protected'; }
+                        if ($pm->visibility === 'protected') { $key = $shown . ':protected'; }
                         if ($pm->visibility === 'private') {
-                            $key = $p . ':' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . ':private';
+                            $key = $shown . ':' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . ':private';
                         }
                     }
                     $line = "\$out = __mir_print_r_line(\$out, \$pad, \"" . $this->dqBody($key) . "\", \$v->"
@@ -1175,7 +1177,7 @@ trait LowerPrelude
                 . "  if (\$v instanceof \\" . $cname . ") {\n"
                 . "  \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
             foreach ($cd->propertyNames as $p) {
-                $line = "\$out = __mir_export_prop(\$out, \$ipad, \"" . $p . "\", \$v->"
+                $line = "\$out = __mir_export_prop(\$out, \$ipad, \"" . $cd->propDisplayName($p) . "\", \$v->"
                     . $p . ", \$indent);";
                 $body .= isset($this->maybeUninitIn($cd)[$p])
                     ? "    if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
@@ -1333,6 +1335,12 @@ trait LowerPrelude
             $fillBody .= "function " . $helper . "(mixed \$o, string \$k, mixed \$v): void {\n"
                 . "  if (\$o instanceof \\" . $cname . ") {\n";
             foreach ($cd->propertyNames as $p) {
+                if (!$cd->isShadowSlot($p)) { continue; }
+                $fillBody .= "  if (\$k === \"" . $this->dqBody($this->serPropKey($cname, $p)) . "\") { \$o->" . $p . " = \$v; return; }\n";
+            }
+            $fillBody .= "  \$k = __mc_un_demangle(\$k);\n";
+            foreach ($cd->propertyNames as $p) {
+                if ($cd->isShadowSlot($p)) { continue; }
                 $fillBody .= "  if (\$k === '" . $p . "') { \$o->" . $p . " = \$v; return; }\n";
             }
             if ($cd->usesBag()) {
@@ -1343,6 +1351,7 @@ trait LowerPrelude
         }
         $fillDispatch = $fillBody . $fillDispatch
             . "  }\n"
+            . "  \$k = __mc_un_demangle(\$k);\n"
             . "  \$o->\$k = \$v;\n}\n";
         foreach ($names as $cname) {
             if (!$this->declaresMethod($cname, '__unserialize')) { continue; }
@@ -1657,6 +1666,7 @@ trait LowerPrelude
             'E_COMPILE_WARNING' => 128, 'E_USER_ERROR' => 256, 'E_USER_WARNING' => 512,
             'E_USER_NOTICE' => 1024, 'E_STRICT' => 2048, 'E_RECOVERABLE_ERROR' => 4096,
             'E_DEPRECATED' => 8192, 'E_USER_DEPRECATED' => 16384, 'E_ALL' => 30719,
+            'DEBUG_BACKTRACE_PROVIDE_OBJECT' => 1, 'DEBUG_BACKTRACE_IGNORE_ARGS' => 2,
             'UPLOAD_ERR_OK' => 0, 'UPLOAD_ERR_INI_SIZE' => 1, 'UPLOAD_ERR_FORM_SIZE' => 2,
             'UPLOAD_ERR_PARTIAL' => 3, 'UPLOAD_ERR_NO_FILE' => 4, 'UPLOAD_ERR_NO_TMP_DIR' => 6,
             'UPLOAD_ERR_CANT_WRITE' => 7, 'UPLOAD_ERR_EXTENSION' => 8,

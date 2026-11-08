@@ -78,18 +78,6 @@ function is_scalar(mixed $value): bool
     return \is_int($value) || \is_float($value) || \is_string($value) || \is_bool($value);
 }
 
-/** True for an array (the Traversable case is not modelled) — PHP `is_iterable`. */
-function is_iterable(mixed $value): bool
-{
-    return \is_array($value);
-}
-
-/** True for an array (the Countable case is not modelled) — PHP `is_countable`. */
-function is_countable(mixed $value): bool
-{
-    return \is_array($value);
-}
-
 /**
  * var_export string quoting: php.net escapes exactly two bytes inside the
  * single quotes — the backslash and the quote itself. Backslash first, or the

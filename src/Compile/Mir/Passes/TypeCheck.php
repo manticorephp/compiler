@@ -318,7 +318,8 @@ final class TypeCheck
         foreach ($pos as $ai) {
             if (!isset($site->args[$ai])) { continue; }
             $arg = $site->args[$ai];
-            if ($arg->kind === Node::KIND_SPREAD || $arg->type->kind !== Type::KIND_OBJ) { continue; }
+            if ($arg->kind === Node::KIND_SPREAD
+                || ($arg->type->kind !== Type::KIND_OBJ && $arg->type->kind !== Type::KIND_UNION)) { continue; }
             $cast = new \Compile\Mir\Cast('string', $arg, Type::string_());
             $cast->line = $arg->line;
             $site->args[$ai] = $cast;
@@ -361,7 +362,7 @@ final class TypeCheck
             // object POINTER, or the raw int (`$this->escape(404)`), as string bytes.
             $ak = $arg->type->kind;
             if ($p->type->kind === Type::KIND_STRING && !$p->byRef
-                && ($ak === Type::KIND_OBJ || $ak === Type::KIND_CELL || $ak === Type::KIND_INT
+                && ($ak === Type::KIND_OBJ || $ak === Type::KIND_UNION || $ak === Type::KIND_CELL || $ak === Type::KIND_INT
                     || $ak === Type::KIND_FLOAT || $ak === Type::KIND_BOOL)
                 && !isset($this->ffiFns[$fnName]) && !isset($this->claimFns[$fnName])
                 && $site->args[$ai] === $arg) {

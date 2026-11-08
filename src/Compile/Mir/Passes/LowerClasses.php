@@ -178,8 +178,11 @@ trait LowerClasses
     {
         $out = [];
         if ($parent !== '' && isset($this->classTable[$parent])) {
-            foreach ($this->classTable[$parent]->propertyMeta as $pn => $pm) {
-                $out[$pn] = $pm;   // preserves the ancestor as declaringClass
+            $own = $this->ownInstancePropNames($decl);
+            $pcd = $this->classTable[$parent];
+            foreach ($pcd->propertyMeta as $pn => $pm) {
+                // preserves the ancestor as declaringClass
+                $out[$pm->isStatic ? $pn : $this->inheritedSlotName($pcd, $pn, $own)] = $pm;
             }
         }
         foreach ($decl->methods as $m) {
@@ -444,6 +447,46 @@ trait LowerClasses
         return false;
     }
 
+    /**
+     * Instance properties `$decl` itself provides: promoted, declared, mixed in.
+     * @return array<string, bool>
+     */
+    private function ownInstancePropNames(\Parser\Ast\ClassDecl $decl): array
+    {
+        $own = [];
+        foreach ($decl->methods as $m) {
+            if ($m->name !== '__construct') { continue; }
+            foreach ($m->params as $p) {
+                if ($p->promoted !== '') { $own[$p->name] = true; }
+            }
+        }
+        foreach ($decl->properties as $prop) {
+            if (!$prop->isStatic) { $own[$prop->name] = true; }
+        }
+        foreach ($this->usedTraitsFlat($decl) as $traitName) {
+            $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
+            if ($td === null) { continue; }
+            foreach ($td->properties as $tprop) {
+                if (!$tprop->isStatic) { $own[$tprop->name] = true; }
+            }
+        }
+        return $own;
+    }
+
+    /**
+     * What `$pcd`'s slot `$pn` is called in a subclass providing `$own`. A
+     * redeclared private is a second property, not the same one (php gives each
+     * class its own slot); anything else keeps its name and shares the slot.
+     * @param array<string, bool> $own
+     */
+    private function inheritedSlotName(ClassDef $pcd, string $pn, array $own): string
+    {
+        if (!isset($own[$pn])) { return $pn; }
+        $pm = $pcd->propertyMeta[$pn] ?? null;
+        if ($pm === null || $pm->visibility !== 'private') { return $pn; }
+        return ClassDef::shadowSlot($pm->declaringClass !== '' ? $pm->declaringClass : $pcd->name, $pn);
+    }
+
     private function buildClassDef(\Parser\Ast\ClassDecl $decl, int $classId): ClassDef
     {
         $this->currentDeclNamespace = $this->nsOf($decl->name);
@@ -489,12 +532,14 @@ trait LowerClasses
         }
         if ($parent !== '' && isset($this->classTable[$parent])) {
             $pcd = $this->classTable[$parent];
+            $own = $this->ownInstancePropNames($decl);
             foreach ($pcd->propertyNames as $pn) {
-                $names[] = $pn;
-                $types[$pn] = $pcd->propertyTypes[$pn] ?? Type::unknown();
-                $arrHinted[$pn] = $pcd->propertyArrayHinted[$pn] ?? false;
-                $neverObj[$pn] = $pcd->propertyNeverObject[$pn] ?? false;
-            $docList[$pn] = $pcd->propertyDocList[$pn] ?? false;
+                $slot = $this->inheritedSlotName($pcd, $pn, $own);
+                $names[] = $slot;
+                $types[$slot] = $pcd->propertyTypes[$pn] ?? Type::unknown();
+                $arrHinted[$slot] = $pcd->propertyArrayHinted[$pn] ?? false;
+                $neverObj[$slot] = $pcd->propertyNeverObject[$pn] ?? false;
+                $docList[$slot] = $pcd->propertyDocList[$pn] ?? false;
                 // readonly is NOT propagated: `readonlyDeclClass` walks the parent
                 // chain so the ORIGINAL declaring class drives the scope check
                 // (only it may write the slot).
@@ -1053,11 +1098,11 @@ trait LowerClasses
     }
 
     /** Default-init store for one inherited (parent-declared) property (typed-param T5). */
-    private function inheritedPropDefaultStore(\Parser\Ast\PropertyDecl $prop, string $className, Type $pt): StoreProperty
+    private function inheritedPropDefaultStore(\Parser\Ast\PropertyDecl $prop, string $className, Type $pt, string $slot): StoreProperty
     {
         return new StoreProperty(
             new LoadLocal('this', Type::obj($className)),
-            $prop->name,
+            $slot,
             $this->lowerExpr($prop->default),
             $pt,
             $prop->hooks !== [],
@@ -1065,11 +1110,11 @@ trait LowerClasses
     }
 
     /** Default-init store for one mixed-in trait property (typed-param T5). */
-    private function traitPropDefaultStore(\Parser\Ast\PropertyDecl $tp, string $className, Type $pt): StoreProperty
+    private function traitPropDefaultStore(\Parser\Ast\PropertyDecl $tp, string $className, Type $pt, string $slot = ''): StoreProperty
     {
         return new StoreProperty(
             new LoadLocal('this', Type::obj($className)),
-            $tp->name,
+            $slot !== '' ? $slot : $tp->name,
             $this->lowerExpr($tp->default),
             $pt,
         );
@@ -1236,6 +1281,7 @@ trait LowerClasses
      */
     private function lowerClassMethods(\Parser\Ast\ClassDecl $decl, Module $module): void
     {
+        if ($decl->span->file !== '') { $module->loweringFile = $decl->span->file; }
         // A plain CLASS with no ClassDef must stop HERE, with its name. Read
         // blind, the null went on to a ClassDef-typed parameter — a TypeError
         // under Zend but a SIGSEGV once self-built, several frames from the
@@ -1299,24 +1345,35 @@ trait LowerClasses
         while ($pname !== '' && isset($this->classDecls[$pname]) && $guard < 256) {
             $pdecl = $this->classDecls[$pname];
             foreach ($pdecl->properties as $pprop) {
-                if (isset($seen[$pprop->name])) { continue; }
-                $seen[$pprop->name] = true;
+                // A redeclared private is a second slot, and it keeps its default.
+                $slot = ClassDef::shadowSlot($pname, $pprop->name);
+                $shadowed = !$pprop->isStatic && isset($cd->propertyMeta[$slot]);
+                if (!$shadowed) {
+                    if (isset($seen[$pprop->name])) { continue; }
+                    $seen[$pprop->name] = true;
+                    $slot = $pprop->name;
+                }
                 if ($pprop->isStatic) { continue; }
                 if ($pprop->default === null) { continue; }
-                $pptype = $cd->propertyTypes[$pprop->name] ?? Type::unknown();
-                $defaultStores[] = $this->inheritedPropDefaultStore($pprop, $decl->name, $pptype);
+                $pptype = $cd->propertyTypes[$slot] ?? Type::unknown();
+                $defaultStores[] = $this->inheritedPropDefaultStore($pprop, $decl->name, $pptype, $slot);
             }
             // …and the defaults the PARENT mixed in from its traits: they live in no ClassDecl
             // property list, so a subclass of a trait-using class left them uninitialised.
             foreach ($this->usedTraitsFlat($pdecl) as $ptraitName) {
                 $ptd = $this->traitTable[\ltrim($ptraitName, '\\')] ?? null;
                 if ($ptd === null) { continue; }
-                foreach ($ptd->properties as $ptprop) {
-                    if (isset($seen[$ptprop->name])) { continue; }
-                    $seen[$ptprop->name] = true;
-                    if ($ptprop->isStatic || !$this->traitPropHasDefault($ptprop)) { continue; }
-                    $ptptype = $cd->propertyTypes[$ptprop->name] ?? Type::unknown();
-                    $defaultStores[] = $this->traitPropDefaultStore($ptprop, $decl->name, $ptptype);
+                foreach ($ptd->properties as $tprop) {
+                    $slot = ClassDef::shadowSlot($pname, $tprop->name);
+                    $shadowed = !$tprop->isStatic && isset($cd->propertyMeta[$slot]);
+                    if (!$shadowed) {
+                        if (isset($seen[$tprop->name])) { continue; }
+                        $seen[$tprop->name] = true;
+                        $slot = $tprop->name;
+                    }
+                    if ($tprop->isStatic || !$this->traitPropHasDefault($tprop)) { continue; }
+                    $tptype = $cd->propertyTypes[$slot] ?? Type::unknown();
+                    $defaultStores[] = $this->traitPropDefaultStore($tprop, $decl->name, $tptype, $slot);
                 }
             }
             $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';

@@ -323,6 +323,12 @@ trait EmitLlvmModule
                     if (!$this->classIsA($cd->name, $cd2->name)) { continue; }
                     $isaPairs[] = [$sub, $this->displayClassName($cd2->name)];
                 }
+                // An interface is no ClassDef here, yet it is the usual target
+                // (`is_subclass_of($class, ServiceSubscriberInterface::class)`).
+                foreach ($this->interfaceNames as $iname => $unused) {
+                    if (isset($this->classes[$iname]) || !$this->classIsA($cd->name, (string)$iname)) { continue; }
+                    $isaPairs[] = [$sub, $this->displayClassName((string)$iname)];
+                }
             }
             $isaCount = $this->memberRowsSorted($isaPairs, true, $isaSubRows, $isaAncRows);
         }
@@ -406,7 +412,14 @@ trait EmitLlvmModule
             $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_line = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_depth = linkonce_odr global i64 0\n";
-            $out .= "define void @__mir_bt_push(ptr %name, i64 %line) alwaysinline {\n";
+            // The file of each frame's call site (a string literal; 0 = none recorded).
+            $out .= "@__mir_bt_file = linkonce_odr global [4096 x i64] zeroinitializer\n";
+            if (\Compile\Debug::$btObjects) {
+                // A frame's `$this`, valid while the name it was stamped beside is still the frame's name.
+                $out .= "@__mir_bt_obj = linkonce_odr global [4096 x i64] zeroinitializer\n";
+                $out .= "@__mir_bt_objn = linkonce_odr global [4096 x i64] zeroinitializer\n";
+            }
+            $out .= "define void @__mir_bt_push(ptr %name, i64 %line, ptr %file) alwaysinline {\n";
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
             $out .= "  %ok = icmp slt i64 %d, 4096\n";
@@ -417,6 +430,9 @@ trait EmitLlvmModule
             $out .= "  store i64 %ni, ptr %np\n";
             $out .= "  %lp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_line, i64 0, i64 %d\n";
             $out .= "  store i64 %line, ptr %lp\n";
+            $out .= "  %fi = ptrtoint ptr %file to i64\n";
+            $out .= "  %fp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_file, i64 0, i64 %d\n";
+            $out .= "  store i64 %fi, ptr %fp\n";
             $out .= "  br label %inc\n";
             $out .= "inc:\n";
             $out .= "  %d1 = add i64 %d, 1\n";
@@ -424,11 +440,11 @@ trait EmitLlvmModule
             $out .= "  ret void\n}\n";
             // The call site's line as an offset from its function's base line,
             // which lives in `@.btl.<fn>` ({@see EmitLlvm::btPush}).
-            $out .= "define void @__mir_bt_push_rel(ptr %name, ptr %base, i64 %delta) alwaysinline {\n";
+            $out .= "define void @__mir_bt_push_rel(ptr %name, ptr %base, i64 %delta, ptr %file) alwaysinline {\n";
             $out .= "entry:\n";
             $out .= "  %b = load i64, ptr %base\n";
             $out .= "  %line = add i64 %b, %delta\n";
-            $out .= "  call void @__mir_bt_push(ptr %name, i64 %line)\n";
+            $out .= "  call void @__mir_bt_push(ptr %name, i64 %line, ptr %file)\n";
             $out .= "  ret void\n}\n";
             // The name of the frame on TOP of that stack, as a `%s` operand.
             //
@@ -1022,6 +1038,7 @@ trait EmitLlvmModule
         $this->clearPtrArgCells();
         $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
+        $this->frame->file = $fn->file;
         $this->own->fnName = $fn->name;
         $this->frame->isPrelude = $fn->isPrelude;
         $this->frame->body = $fn->body;
@@ -1340,7 +1357,8 @@ trait EmitLlvmModule
         // stable receiver class isn't available at the call site under the
         // self-host. Overwrites this frame's name slot (index depth-1).
         if ($this->rt->needsBacktrace && isset($this->methodDisplay[$fn->name])) {
-            $bodySink->write($this->btNameFix($this->methodDisplay[$fn->name]));
+            $thisW = \Compile\Debug::$btObjects && ($fn->params[0]->name ?? '') === 'this' ? '%arg.this' : '';
+            $bodySink->write($this->btNameFix($this->methodDisplay[$fn->name], $thisW));
         }
         // Keep top-level statement fragments separate while the function is
         // emitted. This is the same ordering contract as visitBlock(), but avoids

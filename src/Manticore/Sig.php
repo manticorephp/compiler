@@ -298,7 +298,9 @@ final class Sig
         $all = $cd->propertyNames;
         if (\count($all) < $np) { return null; }
         for ($i = 0; $i < $np; $i = $i + 1) {
-            if ($all[$i] !== $parentNames[$i]) { return null; }
+            // The same slot, unless this class redeclared a private and renamed it.
+            if ($cd->propDisplayName($all[$i]) !== $parentNames[$i]
+                && $all[$i] !== $parentNames[$i]) { return null; }
         }
         $own = [];
         for ($i = $np; $i < \count($all); $i = $i + 1) { $own[] = $all[$i]; }
@@ -494,6 +496,7 @@ final class Sig
             if (!$first) { $out = $out . ','; }
             $first = false;
             $out = $out . "{\"n\":" . self::jsonStr($pm->name)
+                . ($pn !== $pm->name ? ",\"slot\":" . self::jsonStr($pn) : "")
                 . ",\"vis\":" . self::jsonStr($pm->visibility)
                 . ",\"static\":" . self::jsonBool($pm->isStatic)
                 . ",\"ro\":" . self::jsonBool($pm->isReadonly)
@@ -1247,7 +1250,7 @@ final class Sig
             self::truthy($x["hasdef"] ?? false),
             (string)$x["decl"]);
         foreach ($x["attrs"] as $a) { $pm->attributes[] = (string)$a; }
-        $m->propertyMeta[$name] = $pm;
+        $m->propertyMeta[(string)($x["slot"] ?? $name)] = $pm;
     }
 
     /** Rebuild a literal from the `{k,v}` grammar {@see encodeValue} writes. */

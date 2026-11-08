@@ -58,6 +58,7 @@ executable that imports its dependencies' `.sig` and links their `.o`).
 | `stdlib` | *optional* — set `false` to opt OUT of the always-on stdlib runtime. Only the self-contained compiler (which embeds `src/Runtime`) needs this. |
 | `composer` | *optional* — `true` also compiles the Composer view of the project (see below); the object form `{ "vendor": false }` narrows it |
 | `extensions` | *optional* — names of native extensions to bind and link. Every name must exist in the manifest's top-level `extensions` map, or the build fails |
+| `lazy` | *optional* — class-name prefixes `ReflectionClass::newLazyGhost` may make ghosts of (e.g. `["App\\Entity\\"]` for Doctrine). Each class listed, and its ancestors, test an init bit on every property read; omit it and every user class does, if the program mentions `newLazyGhost` at all. A ghost of a class outside the list throws `ReflectionException` |
 
 ### Library fields
 

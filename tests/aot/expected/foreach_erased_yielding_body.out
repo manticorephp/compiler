@@ -1,0 +1,15 @@
+0=1 k="v" end
+0="a" 1="b" end
+x=1 y=2 end
+g=7 h=[8] end
+a=1 b="two" end
+end
+end
+end
+0:[1]
+0:{"p":1}
+EMPTY
+1a 1b 2a 2b
+1 done
+0=6
+q=8
