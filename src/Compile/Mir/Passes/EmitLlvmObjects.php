@@ -1680,12 +1680,12 @@ trait EmitLlvmObjects
             $bodies .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
+        $magicLbl = '';
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {
-            $lbl = $this->ssa->allocLabel('pr.magic');
-            foreach ($magic as $cname => $_decl) {
-                $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
-            }
-            $bodies .= $lbl . ":\n" . $this->magicDispatchCall('__get', $obj, $prop, '0');
+            // Not one case per overloading class (~250 on symfony-demo, in each of
+            // ~4 400 readers): the default arm asks the module's one predicate.
+            $magicLbl = $this->ssa->allocLabel('pr.magic');
+            $bodies .= $magicLbl . ":\n" . $this->magicDispatchCall('__get', $obj, $prop, '0');
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
             $magic = [];
@@ -1700,6 +1700,7 @@ trait EmitLlvmObjects
         }
         $switch .= "  ]\n";
         $out .= $switch . $bodies . $def . ":\n";
+        if ($magicLbl !== '') { $out .= $this->magicHolderBranch('__get', $cid, $magicLbl); }
         if ($hasBag) {
             $out .= $this->emitBagReadByName($prop, $obj);
             $fv = $this->lastValue;
@@ -2874,6 +2875,32 @@ trait EmitLlvmObjects
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
+    }
+
+    /**
+     * In a helper's default arm: branch to `$magicLbl` when the class `$cid` is one
+     * {@see magicDispatchFn} answers for, else fall through to what follows.
+     */
+    private function magicHolderBranch(string $method, string $cid, string $magicLbl): string
+    {
+        $key = '__mc_magic_has_' . $method;
+        $sym = '@' . $this->mirHelperSym($key);
+        if (!isset($this->propertyReadHelpers[$key])) {
+            // linkonce_odr for the reason magicDispatchFn gives.
+            $out = 'define linkonce_odr i1 ' . $sym . "(i64 %cid) {\nentry:\n  switch i64 %cid, label %no [\n";
+            foreach ($this->methodHolders($method) as $cn => $_decl) {
+                $cd = $this->classes[$cn];
+                if ($cd->isStruct || $cd->usesBag()) { continue; }
+                if ($this->isClosureClass($cn) || $this->isEnumClass($cn)) { continue; }
+                $out .= '    i64 ' . (string)$cd->classId . ", label %yes\n";
+            }
+            $out .= "  ]\nyes:\n  ret i1 true\nno:\n  ret i1 false\n}\n\n";
+            $this->propertyReadHelpers[$key] = $out;
+        }
+        $h = $this->ssa->allocReg();
+        $cont = $this->ssa->allocLabel('magic.no');
+        return '  ' . $h . ' = call i1 ' . $sym . '(i64 ' . $cid . ")\n"
+            . '  br i1 ' . $h . ', label %' . $magicLbl . ', label %' . $cont . "\n" . $cont . ":\n";
     }
 
     private function hasEmittedFunction(string $name): bool
@@ -4411,6 +4438,16 @@ trait EmitLlvmObjects
             $bodies .= $this->emitCellSlotStoreDropping($obj, $cd, $prop, $cellVal, $dropOld, $dropBoxed);
             $bodies .= '  br label %' . $end . "\n";
         }
+        $magicLbl = '';
+        if (\count($magic) >= self::MAGIC_SHARED_MIN && $within === '') {
+            // Every holder of `$prop` is a case above, so a class reaching the
+            // default arm overloads `__set` exactly when it is one of `$magic`:
+            // the module's one predicate stands in for a case per class.
+            $magicLbl = $this->ssa->allocLabel('pw.magic');
+            $bodies .= $magicLbl . ":\n" . $this->magicDispatchCall('__set', $obj, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+            $magic = [];
+        }
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {
             $lbl = $this->ssa->allocLabel('pw.magic');
             $any = false;
@@ -4437,6 +4474,7 @@ trait EmitLlvmObjects
         }
         $switch .= "  ]\n";
         $out .= $switch . $bodies . $def . ":\n";
+        if ($magicLbl !== '') { $out .= $this->magicHolderBranch('__set', $cid, $magicLbl); }
         if ($hasBag) { $out .= $this->emitCellBagStoreByName($prop, $obj, $cellVal); }
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n  ret void\n}\n\n";
