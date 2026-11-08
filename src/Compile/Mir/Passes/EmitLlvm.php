@@ -2169,7 +2169,7 @@ final class EmitLlvm implements EmitVisitor
     /** Overwrite the top backtrace frame's name (index depth-1) with `$disp`,
      *  guarded on 0<depth<=4096 (a frame past the ring was never stored). Emitted at a method's entry so the frame carries
      *  the exact "Class->method" / "Class::method" the callee knows. */
-    private function btNameFix(string $disp): string
+    private function btNameFix(string $disp, string $thisWord = ''): string
     {
         $d = $this->ssa->allocReg();
         $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
@@ -2190,6 +2190,16 @@ final class EmitLlvm implements EmitVisitor
         $sv = $this->ssa->allocReg();
         $out .= '  ' . $sv . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($disp)) . " to i64\n";
         $out .= '  store i64 ' . $sv . ', ptr ' . $ep . "\n";
+        if ($thisWord !== '') {
+            $ow = $this->ssa->allocReg();
+            $op = $this->ssa->allocReg();
+            $np = $this->ssa->allocReg();
+            $out .= '  ' . $ow . ' = and i64 ' . $thisWord . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $out .= '  ' . $op . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_obj, i64 0, i64 ' . $i . "\n";
+            $out .= '  store i64 ' . $ow . ', ptr ' . $op . "\n";
+            $out .= '  ' . $np . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_objn, i64 0, i64 ' . $i . "\n";
+            $out .= '  store i64 ' . $sv . ', ptr ' . $np . "\n";
+        }
         $out .= '  br label %' . $end . "\n" . $end . ":\n";
         return $out;
     }

@@ -412,6 +412,11 @@ trait EmitLlvmModule
             $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_line = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_depth = linkonce_odr global i64 0\n";
+            if (\Compile\Debug::$btObjects) {
+                // A frame's `$this`, valid while the name it was stamped beside is still the frame's name.
+                $out .= "@__mir_bt_obj = linkonce_odr global [4096 x i64] zeroinitializer\n";
+                $out .= "@__mir_bt_objn = linkonce_odr global [4096 x i64] zeroinitializer\n";
+            }
             $out .= "define void @__mir_bt_push(ptr %name, i64 %line) alwaysinline {\n";
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
@@ -1346,7 +1351,8 @@ trait EmitLlvmModule
         // stable receiver class isn't available at the call site under the
         // self-host. Overwrites this frame's name slot (index depth-1).
         if ($this->rt->needsBacktrace && isset($this->methodDisplay[$fn->name])) {
-            $bodySink->write($this->btNameFix($this->methodDisplay[$fn->name]));
+            $thisW = \Compile\Debug::$btObjects && ($fn->params[0]->name ?? '') === 'this' ? '%arg.this' : '';
+            $bodySink->write($this->btNameFix($this->methodDisplay[$fn->name], $thisW));
         }
         // Keep top-level statement fragments separate while the function is
         // emitted. This is the same ordering contract as visitBlock(), but avoids

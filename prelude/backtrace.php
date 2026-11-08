@@ -52,6 +52,28 @@ function __mir_bt_frames(array $names, array $lines, string $file, int $limit = 
 }
 
 /**
+ * The `object` of each method frame, from the words its entry recorded: valid while the name it was
+ * recorded beside is still that frame's name (a later function at the same depth overwrote neither).
+ * @param array<int,array<string,mixed>> $frames
+ * @param int[] $names
+ * @param int[] $objs
+ * @param int[] $objn
+ * @return array<int,array<string,mixed>>
+ */
+function __mir_bt_with_objects(array $frames, array $names, array $objs, array $objn, int $flags): array
+{
+    if (($flags & 1) === 0) { return $frames; }
+    $n = \count($frames);
+    for ($i = 0; $i < $n; $i = $i + 1) {
+        $o = $objs[$i] ?? 0;
+        if ($o !== 0 && ($objn[$i] ?? 0) === ($names[$i] ?? -1)) {
+            $frames[$i]['object'] = \__mc_obj_from_addr($o);
+        }
+    }
+    return $frames;
+}
+
+/**
  * `debug_print_backtrace()` — `#N file(line): Class->fn()` per frame, outermost
  * last. Frames carry no argument values here (see the header), so the argument
  * list prints empty and `DEBUG_BACKTRACE_IGNORE_ARGS` changes nothing.

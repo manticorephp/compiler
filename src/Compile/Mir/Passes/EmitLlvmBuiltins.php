@@ -2001,13 +2001,14 @@ trait EmitLlvmBuiltins
         // the prelude frame builder so the result matches getTrace()/PHP:
         // a list of {file, line, function[, class, type]} assoc frames.
         $out = '';
+        $flags = '1';
         $limit = '0';
         foreach ($args as $i => $a) {
             $out .= $this->emitNode($a);
-            if ($i !== 1) { continue; }
+            if ($i > 1) { continue; }
             if ($a->type->kind === Type::KIND_CELL) { $out .= $this->coerceToI64() . $this->unboxCellToType(Type::int_()); }
             $out .= $this->coerceToI64();
-            $limit = $this->lastValue;
+            if ($i === 0) { $flags = $this->lastValue; } else { $limit = $this->lastValue; }
         }
         $out .= $this->emitBtVec('@__mir_bt_name');
         $names = $this->lastValue;
@@ -2019,8 +2020,22 @@ trait EmitLlvmBuiltins
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore___mir_bt_frames(i64 '
               . $names . ', i64 ' . $lines . ', i64 ' . $fp . ', i64 ' . $limit . ")\n";
+        // DEBUG_BACKTRACE_PROVIDE_OBJECT (php's default): each method frame's `$this`.
+        $vecs = [$names, $lines];
+        if (\Compile\Debug::$btObjects) {
+            $out .= $this->emitBtVec('@__mir_bt_obj');
+            $ow = $this->lastValue;
+            $out .= $this->emitBtVec('@__mir_bt_objn');
+            $onw = $this->lastValue;
+            $r2 = $this->ssa->allocReg();
+            $out .= '  ' . $r2 . ' = call i64 @manticore___mir_bt_with_objects(i64 ' . $r . ', i64 ' . $names
+                  . ', i64 ' . $ow . ', i64 ' . $onw . ', i64 ' . $flags . ")\n";
+            $r = $r2;
+            $vecs[] = $ow;
+            $vecs[] = $onw;
+        }
         // The frames copied what they read, and the vecs' elements are uncounted words.
-        $out .= $this->rcReleaseReg($names, 'vecbuf') . $this->rcReleaseReg($lines, 'vecbuf');
+        foreach ($vecs as $v) { $out .= $this->rcReleaseReg($v, 'vecbuf'); }
         return $this->finishI64($out, $r);
     }
 
