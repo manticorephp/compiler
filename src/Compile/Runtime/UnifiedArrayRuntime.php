@@ -1100,6 +1100,11 @@ final class UnifiedArrayRuntime
     private function emitIndexFind(): void
     {
         $fn = $this->module->func('__mir_array_index_find', Type::i64());
+        // Every caller passes wantKind as a constant: inlined, the other key
+        // kind's arm folds away and the probe loop runs in the caller's frame
+        // instead of behind a call that saved twelve registers for the str_eq
+        // path an int probe never takes.
+        $fn->attrs = 'alwaysinline';
         $arr = $fn->param(Type::ptr(), 'arr');
         $wantKind = $fn->param(Type::i64(), 'wantKind');
         $keyptr = $fn->param(Type::ptr(), 'keyptr');
