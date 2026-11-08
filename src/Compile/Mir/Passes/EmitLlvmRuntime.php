@@ -77,6 +77,15 @@ trait EmitLlvmRuntime
         $out .= "  %nope = or i1 %bad, %bad0\n";
         $out .= "  br i1 %nope, label %ret, label %ok\n";
         $out .= "ok:\n";
+        if (!\Manticore\is_darwin()) {
+            // MADV_NOHUGEPAGE (15). Under THP `enabled=always` the first touch of
+            // a span faulted a whole 2 MiB page: every new span cost 2 MiB of
+            // RSS (and of copy-on-write in a forked worker) where malloc's heap
+            // grows by 4 KiB pages. A failure only leaves the default policy.
+            // Declared by RuntimeFeatures beside mmap.
+            $out .= "  %nohp = call i32 @madvise(ptr %m, i64 " . (string)(\Compile\MemoryAbi::POOL_REGION_BYTES
+                  + \Compile\MemoryAbi::POOL_SPAN_SIZE) . ", i32 15)\n";
+        }
         $out .= "  %up = add i64 %mi, " . (string)(\Compile\MemoryAbi::POOL_SPAN_SIZE - 1) . "\n";
         $out .= "  %al = and i64 %up, " . $mask . "\n";
         $out .= "  store i64 %al, ptr @__mir_pool_base\n";

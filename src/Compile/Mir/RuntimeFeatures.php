@@ -253,6 +253,9 @@ public bool $needsClosureRc = false;
         // de-duplicates by symbol.
         if (\Compile\Debug::$pool) {
             $decls['mmap'] = "declare ptr @mmap(ptr, i64, i32, i32, i32, i64)";
+            if (!\Manticore\is_darwin()) {
+                $decls['madvise'] = "declare i32 @madvise(ptr, i64, i32)";
+            }
         }
         // A2 verify mode (MANTICORE_DEBUG_VERIFY): rc helpers abort on an
         // over-release (rc<1 before decrement = double-free / UAF). Gated so
