@@ -24,33 +24,36 @@ function churn(int $n): void
         $_GET = ['fresh' => \str_repeat('f', 200) . $i];
     }
 }
+/** " RssAnon=… RssFile=…" in kB on Linux, '' elsewhere. */
+function rssSplit(): string
+{
+    $s = is_readable('/proc/self/status') ? (string)file_get_contents('/proc/self/status') : '';
+    $o = '';
+    foreach (['RssAnon', 'RssFile'] as $k) {
+        if (preg_match('/^' . $k . ':\s+(\d+)/m', $s, $m)) { $o .= ' ' . $k . '=' . $m[1]; }
+    }
+    return $o;
+}
 $b0 = memory_get_usage();
+$r0 = rssSplit();
 churn(50000);
 $b1 = memory_get_usage();
+$r1 = rssSplit();
 churn(50000);
 $g = memory_get_usage() - $b1;
-echo $g < 1024 * 1024 ? 'growth ok' : 'growth=' . round($g / 1048576, 1) . 'MB, first batch '
-    . round(($b1 - $b0) / 1048576, 1) . 'MB', "\n";
-if ($g >= 1024 * 1024 && is_readable('/proc/self/maps')) {
-    // Where the memory went: the brk heap and every large anonymous mapping.
-    foreach (explode("\n", (string)file_get_contents('/proc/self/maps')) as $l) {
-        $p = explode(' ', $l);
-        $r = explode('-', $p[0] ?? '');
-        if (count($r) !== 2) { continue; }
-        $sz = hexdec($r[1]) - hexdec($r[0]);
-        if (str_contains($l, '[heap]') || ($sz >= 1048576 && trim($p[count($p) - 1]) === '')) {
-            echo 'map ', $p[0], ' ', round($sz / 1048576, 1), "MB\n";
-        }
-    }
-    // Resident size per mapping, the big ones and the sum of the small anonymous ones.
+if ($g < 1024 * 1024) {
+    echo "growth ok\n";
+} else {
+    // ONE line: the gate prints only the tail of this log.
+    $big = '';
     $hdr = '';
-    $small = 0;
     foreach (explode("\n", (string)@file_get_contents('/proc/self/smaps')) as $l) {
         if (preg_match('/^[0-9a-f]+-[0-9a-f]+ /', $l)) { $hdr = $l; continue; }
-        if (!str_starts_with($l, 'Rss:')) { continue; }
-        $kb = (int)trim(substr($l, 4));
-        if ($kb >= 512) { echo 'rss ', $kb, 'kB ', preg_replace('/\s+/', ' ', $hdr), "\n"; }
-        elseif (str_ends_with(rtrim($hdr), '0') || str_contains($hdr, '[heap]')) { $small += $kb; }
+        if (str_starts_with($l, 'Rss:') && (int)trim(substr($l, 4)) >= 512) {
+            $p = preg_split('/\s+/', trim($hdr));
+            $big .= ' ' . basename((string)($p[5] ?? 'anon')) . '=' . (int)trim(substr($l, 4));
+        }
     }
-    echo 'rss small-anon ', $small, "kB\n";
+    echo 'growth=', round($g / 1048576, 1), 'MB, first batch ', round(($b1 - $b0) / 1048576, 1), 'MB;',
+        ' start', $r0, '; mid', $r1, '; end', rssSplit(), ';', $big, "\n";
 }
