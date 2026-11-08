@@ -31,3 +31,18 @@ churn(50000);
 $g = memory_get_usage() - $b1;
 echo $g < 1024 * 1024 ? 'growth ok' : 'growth=' . round($g / 1048576, 1) . 'MB, first batch '
     . round(($b1 - $b0) / 1048576, 1) . 'MB', "\n";
+if ($g >= 1024 * 1024 && is_readable('/proc/self/maps')) {
+    // Where the memory went: the brk heap and every large anonymous mapping.
+    foreach (explode("\n", (string)file_get_contents('/proc/self/maps')) as $l) {
+        $p = explode(' ', $l);
+        $r = explode('-', $p[0] ?? '');
+        if (count($r) !== 2) { continue; }
+        $sz = hexdec($r[1]) - hexdec($r[0]);
+        if (str_contains($l, '[heap]') || ($sz >= 1048576 && trim($p[count($p) - 1]) === '')) {
+            echo 'map ', $p[0], ' ', round($sz / 1048576, 1), "MB\n";
+        }
+    }
+    foreach (explode("\n", (string)@file_get_contents('/proc/self/smaps_rollup')) as $l) {
+        if (str_starts_with($l, 'Rss:') || str_starts_with($l, 'AnonHugePages:')) { echo $l, "\n"; }
+    }
+}
