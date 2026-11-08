@@ -1658,7 +1658,10 @@ trait EmitLlvmObjects
     private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag, bool $fresh = false): string
     {
         $key = '__mc_prop_read_' . $this->mangle($prop) . ($fresh ? '__fresh' : '');
-        $sym = '@manticore_' . $key;
+        // linkonce_odr under the module token, not internal: the module's property tables name
+        // every reader, and a split part copies an internal body with each body naming it, so
+        // the part holding the tables took all of them (51 MB on symfony-demo).
+        $sym = '@' . $this->mirHelperSym('manticore_' . $key);
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
         $oldSsa = $this->ssa;
@@ -1674,7 +1677,7 @@ trait EmitLlvmObjects
         $this->cellSinkFnOverride = \ltrim($sym, '@');
         $obj = '%obj';
         $res = $this->ssa->allocReg();
-        $out = 'define internal i64 ' . $sym . "(ptr %obj) {\nentry:\n";
+        $out = 'define linkonce_odr i64 ' . $sym . "(ptr %obj) {\nentry:\n";
         $out .= $this->emitLoadClassId($obj);
         $cid = $this->classIdReg;
         $out .= '  ' . $res . " = alloca i64\n";
@@ -4478,7 +4481,7 @@ trait EmitLlvmObjects
         $key = '__mc_prop_write_' . $this->mangle($prop) . ($roGuard ? '__ro' : '')
              . ($within === '' ? '' : '__in_' . $this->mangle($within))
              . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '') . ($hooks ? 'h' : '');
-        $sym = '@manticore_' . $key;
+        $sym = '@' . $this->mirHelperSym('manticore_' . $key);
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
         $fixed = $this->fixedPropertyHolders($prop);
@@ -4499,7 +4502,7 @@ trait EmitLlvmObjects
         $this->cellSinkFnOverride = \ltrim($sym, '@');
         $obj = '%obj';
         $cellVal = '%val';
-        $out = 'define internal void ' . $sym . "(ptr %obj, i64 %val) {\nentry:\n";
+        $out = 'define linkonce_odr void ' . $sym . "(ptr %obj, i64 %val) {\nentry:\n";
         $out .= $this->emitLoadClassId($obj);
         $cid = $this->classIdReg;
         $end = $this->ssa->allocLabel('pw.end');
