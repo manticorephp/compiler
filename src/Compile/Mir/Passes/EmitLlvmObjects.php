@@ -7367,8 +7367,16 @@ trait EmitLlvmObjects
                     $nbi = $this->ssa->allocReg();
                     $out .= '  ' . $nbi . ' = ptrtoint ptr ' . $nb . " to i64\n";
                     $out .= '  store i64 ' . $nbi . ', ptr ' . $this->locals->slots[$name] . "\n";
+                    // The fresh box needs an owner: the frame's own box slot, or
+                    // for an element reference the element-box slot just
+                    // emptied — that slot is released at a rebind and at frame
+                    // exit, so the new variable's box goes with it. Without one
+                    // the box leaked once per unset (hidden at -O2 only while
+                    // LLVM could delete an unread malloc).
                     if ($owned) {
                         $out .= '  store ptr ' . $nb . ', ptr ' . $this->locals->ownedBoxes[$name] . "\n";
+                    } elseif (isset($this->locals->elemRefBoxes[$name])) {
+                        $out .= '  store ptr ' . $nb . ', ptr ' . $this->locals->elemRefBoxes[$name] . "\n";
                     }
                     continue;
                 }
