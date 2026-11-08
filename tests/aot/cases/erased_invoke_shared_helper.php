@@ -31,3 +31,7 @@ function viaSlot(mixed $f, mixed $v): mixed { $w = $v; $f($w); return $w; }
 var_export(viaSlot(function (&$x) { $x = 'set'; }, 1)); echo "\n";
 var_export(viaSlot(function ($x) { $x = 'lost'; }, 2)); echo "\n";
 var_export(viaSlot(function (&$x) { $x[] = 'pushed'; }, [0])); echo "\n";
+// The caller's variable is itself a by-reference parameter: the write reaches the outer one.
+function viaRefParam(mixed &$v, mixed $f): void { $f($v); }
+$outer = json_decode('"old"'); viaRefParam($outer, function (&$x) { $x = 'new'; }); echo $outer, "\n";
+$outer2 = json_decode('"kept"'); viaRefParam($outer2, function ($x) { $x = 'lost'; }); echo $outer2, "\n";

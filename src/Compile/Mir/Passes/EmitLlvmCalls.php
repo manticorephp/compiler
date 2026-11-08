@@ -2017,7 +2017,9 @@ trait EmitLlvmCalls
             $k = $a->type->kind;
             // `$this` cannot be reassigned, so no by-reference parameter can write it back.
             $isThis = $a->kind === Node::KIND_LOAD_LOCAL && $a->name === 'this' && $k === Type::KIND_OBJ;
-            if (!$isThis && $this->isByRefAddressable($a)) { return 'lvalue ' . $a->kind . ':' . $k; }
+            if (!$isThis && $this->isByRefAddressable($a)) {
+                return 'lvalue ' . $a->kind . ':' . $k . ($a->kind === Node::KIND_LOAD_LOCAL ? ' ' . $this->erinvLocalFlags($a->name) : '');
+            }
             // An object box takes no reference ({@see boxToCell}); an array box does.
             if ($k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN && $k !== Type::KIND_INT && $k !== Type::KIND_BOOL
                 && $k !== Type::KIND_FLOAT && $k !== Type::KIND_NULL && $k !== Type::KIND_STRING
@@ -2037,11 +2039,37 @@ trait EmitLlvmCalls
         if ($a->kind !== Node::KIND_LOAD_LOCAL || $a->type->kind !== Type::KIND_CELL) { return false; }
         $nm = $a->name;
         $l = $this->locals;
-        return isset($l->slots[$nm]) && !isset($l->refLocals[$nm]) && !isset($l->refParamTypes[$nm])
-            && !isset($l->captureRefs[$nm]) && !isset($l->globalBacked[$nm]) && !isset($l->byRefCaptured[$nm])
-            && !isset($l->unsetNames[$nm]) && !isset($l->aliasLocals[$nm]) && !isset($l->refCellTargets[$nm])
-            && !isset($l->ownedBoxes[$nm]) && !isset($l->byRefParamWb[$nm]) && !isset($l->elemRefTargets[$nm])
-            && !isset($l->elemRefBoxes[$nm]) && !isset($l->aliasBoxNames[$nm]);
+        if (!isset($l->slots[$nm]) && $this->byRefGlobalCellOf($nm) === '') { return false; }
+        // The address {@see byRefAddrOf} answers must be that of a CELL: a by-reference
+        // parameter of another type, or a box the slot does not say it holds, is not one.
+        $rt = $l->refParamTypes[$nm] ?? null;
+        if ($rt !== null && $rt->kind !== Type::KIND_CELL) { return false; }
+        if ((isset($l->refCellTargets[$nm]) || isset($l->ownedBoxes[$nm])) && !isset($l->refLocals[$nm])) { return false; }
+        return !isset($l->captureRefs[$nm]) && !isset($l->byRefCaptured[$nm]) && !isset($l->unsetNames[$nm]) && !isset($l->aliasLocals[$nm])
+            && !isset($l->byRefParamWb[$nm]) && !isset($l->elemRefTargets[$nm]) && !isset($l->elemRefBoxes[$nm])
+            && !isset($l->aliasBoxNames[$nm]);
+    }
+
+    /** For MANTICORE_ERINV_TRACE: the bookkeeping that keeps a local off the slot path. */
+    private function erinvLocalFlags(string $nm): string
+    {
+        $l = $this->locals;
+        $f = [];
+        if (!isset($l->slots[$nm])) { $f[] = 'noslot'; }
+        if (isset($l->refLocals[$nm])) { $f[] = 'refLocals'; }
+        if (isset($l->refParamTypes[$nm])) { $f[] = 'refParamTypes'; }
+        if (isset($l->captureRefs[$nm])) { $f[] = 'captureRefs'; }
+        if (isset($l->globalBacked[$nm])) { $f[] = 'globalBacked'; }
+        if (isset($l->byRefCaptured[$nm])) { $f[] = 'byRefCaptured'; }
+        if (isset($l->unsetNames[$nm])) { $f[] = 'unsetNames'; }
+        if (isset($l->aliasLocals[$nm])) { $f[] = 'aliasLocals'; }
+        if (isset($l->refCellTargets[$nm])) { $f[] = 'refCellTargets'; }
+        if (isset($l->ownedBoxes[$nm])) { $f[] = 'ownedBoxes'; }
+        if (isset($l->byRefParamWb[$nm])) { $f[] = 'byRefParamWb'; }
+        if (isset($l->elemRefTargets[$nm])) { $f[] = 'elemRefTargets'; }
+        if (isset($l->elemRefBoxes[$nm])) { $f[] = 'elemRefBoxes'; }
+        if (isset($l->aliasBoxNames[$nm])) { $f[] = 'aliasBoxNames'; }
+        return \implode(',', $f);
     }
 
     /** The call of the shared helper for `$n`; lastValue as {@see emitErasedInvokeArms} leaves it. */
@@ -2053,8 +2081,9 @@ trait EmitLlvmCalls
         $modes = '';
         foreach ($n->args as $a) {
             if ($this->erinvSlotArg($a)) {
-                $argRegs[] = 'ptr ' . $this->locals->slots[$a->name];
-                $modes .= 's';
+                $out .= $this->byRefAddrOf($a);
+                $argRegs[] = 'i64 ' . $this->lastValue;
+                $modes .= 'r';
                 continue;
             }
             $out .= $this->emitNode($a);
@@ -2179,10 +2208,15 @@ trait EmitLlvmCalls
         $args = [];
         for ($i = 0; $i < $argc; $i = $i + 1) {
             $name = '__mc_erinv_a' . (string)$i;
-            if ($modes[$i] === 's') {
-                // The caller's own slot: a by-reference arm binds the caller's variable.
-                $params .= ', ptr %a' . (string)$i;
-                $this->locals->slots[$name] = '%a' . (string)$i;
+            if ($modes[$i] === 'r') {
+                // The caller's variable by reference, as a `&$x` parameter receives it:
+                // a by-value arm reads through it, a by-reference one binds it.
+                $params .= ', i64 %a' . (string)$i;
+                $slot = $this->ssa->allocReg();
+                $body .= '  ' . $slot . " = alloca i64\n  store i64 %a" . (string)$i . ', ptr ' . $slot . "\n";
+                $this->locals->slots[$name] = $slot;
+                $this->locals->refLocals[$name] = true;
+                $this->locals->refParamTypes[$name] = Type::cell();
                 $args[] = new \Compile\Mir\LoadLocal($name, Type::cell());
                 continue;
             }
