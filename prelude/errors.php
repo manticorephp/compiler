@@ -124,7 +124,18 @@ function set_error_handler(mixed $callback, int $error_levels = 30719): mixed
         return $prev;
     }
     __McErrors::$errorHandlers[] = $callback;
+    // The stdlib's internal warnings ({@see __mc_warn}) reach this stack through one hook.
+    \__mc_warning_hook(static function (int $level, string $message): void { __mc_internal_warning($level, $message); }, 1);
     return $prev;
+}
+
+/** An internal function's warning: offered to the top handler, as php does; no handler, no output. */
+function __mc_internal_warning(int $level, string $message): void
+{
+    __McErrors::$lastError = ['type' => $level, 'message' => $message, 'file' => '', 'line' => 0];
+    $n = \count(__McErrors::$errorHandlers);
+    $cb = $n > 0 ? __McErrors::$errorHandlers[$n - 1] : null;
+    if ($cb !== null) { __mc_call_error_handler($cb, $level, $message, '', 0); }
 }
 
 /** Pop one error handler. True even when the stack is empty, as php does. */

@@ -1569,9 +1569,44 @@ function fopen(string $filename, string $mode)
         $fpAddr = \__mc_fopen_raw($path, $mode);
     }
     if ($fpAddr === 0) {
+        \__mc_warn('fopen(' . $filename . '): Failed to open stream: ' . \__mc_fopen_reason($path, $kind));
         return false;
     }
     return \__mc_pooled_res(\Resource::KIND_FILE, $fpAddr);
+}
+
+/**
+ * Why a local fopen failed, in strerror's words.
+ * ponytail: read off the file system, not errno (no errno binding works on both libcs and
+ * across the offload thread); a race or EACCES on an existing file reads as "Permission denied".
+ */
+function __mc_fopen_reason(string $path, string $kind): string
+{
+    if (\file_exists($path)) { return $kind === 'x' ? 'File exists' : 'Permission denied'; }
+    return \is_dir(\dirname($path)) && $kind !== 'r' ? 'Permission denied' : 'No such file or directory';
+}
+
+/**
+ * The installed error handler, set by set_error_handler (prelude/errors.php): the stdlib cannot
+ * see the prelude's handler stack, so the prelude hands it a callback.
+ */
+function __mc_warning_hook(mixed $callback = null, int $op = 0): mixed
+{
+    static $hook = null;
+    if ($op === 1) { $hook = $callback; }
+    return $hook;
+}
+
+/**
+ * Report an E_WARNING the way php's internal functions do: to the installed error handler, which
+ * may throw it (Symfony's cache retries a temp name on fopen's "File exists" so). With no handler
+ * it stays silent, as before.
+ * ponytail: only fopen reports so far; other functions still fail without a word.
+ */
+function __mc_warn(string $message): void
+{
+    $hook = \__mc_warning_hook();
+    if ($hook !== null) { $hook(2, $message); }
 }
 
 /** libc fopen, off the fiber's thread when offload is on; 0 on failure. */
