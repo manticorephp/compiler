@@ -2144,60 +2144,12 @@ trait EmitLlvmObjects
         // ERASED, so "one class declares __get" says nothing about the class in
         // hand. Calling it anyway ran Ovl::__get with a Plain2 `$this` and read
         // that object's slot 0 as an array. Always dispatch on class_id.
-        // Dispatch on class_id: each holder reads (and boxes) its OWN slot.
-        $out .= $this->emitLoadClassId($objPtr);
-        $cid = $this->classIdReg;
-        $res = $this->ssa->allocReg();
-        $out .= '  ' . $res . " = alloca i64\n";
-        $end = $this->ssa->allocLabel('rp.end');
-        $def = $this->ssa->allocLabel('rp.default');
-        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
-        $bodies = '';
-        /** @var array<string, string> {@see canonArm} */
-        $armSeen = [];
-        foreach ($hooks as $hc => $hsym) {
-            unset($magic[$hc]);
-            $lbl = $this->ssa->allocLabel('rp.hook');
-            $switch .= '    i64 ' . (string)$this->classes[$hc]->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n" . $this->emitHookGetCell($objPtr, $hsym);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $end . "\n";
-        }
-        foreach ($fixed as $cd) {
-            $lbl = $this->ssa->allocLabel('rp.case');
-            $arm = $this->emitFixedPropLoad($objPtr, $cd, $prop);
-            $fv = $this->lastValue;
-            if ($fresh) { $arm .= $this->rcRetainReg($fv, 'cell'); }
-            $arm .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
-            $arm .= '  br label %' . $end . "\n";
-            $key = $this->canonArm($arm);
-            if (isset($armSeen[$key])) {
-                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
-                continue;
-            }
-            $armSeen[$key] = $lbl;
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n" . $arm;
-        }
-        foreach ($magic as $cname => $declCls) {
-            $lbl = $this->ssa->allocLabel('rp.magic');
-            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitMagicGetCell($declCls, $objPtr, $prop);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $end . "\n";
-        }
-        $switch .= "  ]\n";
-        $out .= $switch . $bodies;
-        $out .= $def . ":\n";
-        $out .= $this->emitBagReadByName($prop, $objPtr);
-        $fv = $this->lastValue;
-        if ($fresh) { $out .= $this->rcRetainReg($fv, 'cell'); }
-        $out .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
-        $out .= '  br label %' . $end . "\n";
-        $out .= $end . ":\n";
+        // Dispatch on class_id: each holder reads (and boxes) its OWN slot. The switch is
+        // the shared per-name reader, not a copy per site: one symfony-demo closure read
+        // ~40 erased properties and spliced 25 MB of `__get` arms.
+        $sym = $this->cellPropReadHelperFor($prop, $fresh);
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $objPtr . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
@@ -4527,7 +4479,7 @@ trait EmitLlvmObjects
     /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
      *  path this asks for one even when a single class declares the name: the
      *  point is that the SITE stays a call, whatever the arm count. */
-    private function cellPropReadHelperFor(string $prop): string
+    private function cellPropReadHelperFor(string $prop, bool $fresh = false): string
     {
         $enumArms = [];
         if ($prop === 'name' || $prop === 'value') {
@@ -4542,6 +4494,7 @@ trait EmitLlvmObjects
             $enumArms,
             $this->magicPropHolders($prop, '__get'),
             $this->bagClassNames() !== [],
+            $fresh,
         );
     }
 
@@ -5251,12 +5204,12 @@ trait EmitLlvmObjects
     }
 
     /** @return Node[] the arm's arguments, read out of the packed `__mc_dyn_args` local */
-    private function dynSpreadArmArgs(int $fixedN): array
+    private function dynSpreadArmArgs(int $fixedN, ?Type $packT = null): array
     {
         $vecT = Type::vec(Type::cell());
         $armArgs = [];
         if ($fixedN < 0) {
-            $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT), Type::cell());
+            $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $packT ?? $vecT), Type::cell());
         } else {
             for ($i = 0; $i < $fixedN; $i++) {
                 $armArgs[] = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT),
@@ -5280,13 +5233,14 @@ trait EmitLlvmObjects
      * splicing a copy (~210 IR lines per arm, 1 850 arms per shape, 39 shapes).
      * '' when the body is not closed; the caller then inlines the arm.
      */
-    private function dynamicMethodSpreadArmHelper(Type $rt, int $fixedN, string $m, Type $retT, int $srcArgc = -1): string
+    private function dynamicMethodSpreadArmHelper(Type $rt, int $fixedN, string $m, Type $retT, int $srcArgc = -1, ?Type $packT = null): string
     {
         $recvKey = $rt->class ?? '';
         if ($rt->kind === Type::KIND_UNION) {
             foreach ($rt->atoms as $at) { $recvKey .= ($at->class ?? '') . '|'; }
         }
-        $key = 'inlarm|' . $rt->kind . ':' . $recvKey . '|' . (string)$fixedN . '|' . $retT->kind . ':' . ($retT->class ?? '') . '|' . $m . '|' . (string)$srcArgc;
+        $key = 'inlarm|' . $rt->kind . ':' . $recvKey . '|' . (string)$fixedN . '|' . $retT->kind . ':' . ($retT->class ?? '') . '|' . $m . '|' . (string)$srcArgc
+            . ($packT === null ? '' : '|' . $packT->exactString());
         if (isset($this->dynArmSyms[$key])) { return $this->dynArmSyms[$key]; }
         $sym = '@' . $this->mirHelperSym('__mir_dynarm_' . (string)\count($this->dynArmSyms));
         $this->dynArmSyms[$key] = $sym;
@@ -5336,7 +5290,7 @@ trait EmitLlvmObjects
         $body .= '  ' . $argsSlot . " = alloca i64\n";
         $body .= "  %argsI = ptrtoint ptr %args to i64\n  store i64 %argsI, ptr " . $argsSlot . "\n";
         $recv = new \Compile\Mir\LoadLocal('__mc_dyn_obj', $rt);
-        $call = new \Compile\Mir\MethodCall_($recv, $m, $this->packDynVariadicArgs($recv, $m, $this->dynSpreadArmArgs($fixedN)), $retT);
+        $call = new \Compile\Mir\MethodCall_($recv, $m, $this->packDynVariadicArgs($recv, $m, $this->dynSpreadArmArgs($fixedN, $packT)), $retT);
         $call->srcArgc = $srcArgc;
         $body .= $this->emitMethodCall($call);
         $body .= $this->boxToCell($retT);
@@ -9553,16 +9507,18 @@ trait EmitLlvmObjects
         $op = $this->asSpreadNode($n->args[0])->operand;
         $pt = $op->type;
         $erasedPack = $pt->kind === Type::KIND_UNKNOWN;
-        if (!$erasedPack) {
-            $el = $pt->element;
-            if (!$pt->isVec() || ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN)) { return null; }
-        }
+        // A typed pack keys its own helper and is unpacked there as its type says:
+        // Monomorphize clones a forwarding method per pack shape (`assoc[string, cell]`,
+        // `vec[int]`), and each clone inlined one arm per class declaring the method
+        // (ContainerBuilder::createService's `$proxy->__construct(...$arguments)`: 14 MB).
+        if (!$erasedPack && !$pt->isArray()) { return null; }
         if ($op->kind !== Node::KIND_LOAD_LOCAL && $op->kind !== Node::KIND_STORE_LOCAL) { return null; }
         // No by-ref veto: the site's only argument is the spread, and a pack element reaches a
         // parameter by VALUE on the inline path as well ({@see emitSpreadFill}), so a by-ref
         // parameter on some class changes nothing the helper could carry differently.
         if (\count($this->methodHolders($n->method)) < 8) { return null; }
-        $sym = $this->dynamicMethodSpreadArmHelper($n->object->type, -1, $n->method, Type::cell(), $n->srcArgc);
+        $sym = $this->dynamicMethodSpreadArmHelper($n->object->type, -1, $n->method, Type::cell(), $n->srcArgc,
+            $erasedPack ? null : $pt);
         if ($sym === '') { return null; }
         $out = $this->emitNode($n->object);
         $out .= $this->coerceToI64();
