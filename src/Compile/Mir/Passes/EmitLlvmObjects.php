@@ -158,11 +158,12 @@ trait EmitLlvmObjects
                       . $obj . ', i64 ' . (string)$cd->bagOffset() . "\n";
                 $out .= '  store i64 0, ptr ' . $bGep . "\n";
             }
+            $seed = $this->initMapSeed($cd);
             for ($w = 0; $w < $cd->initMapWords; $w = $w + 1) {
                 $mGep = $this->ssa->allocReg();
                 $out .= '  ' . $mGep . ' = getelementptr inbounds i8, ptr '
                       . $obj . ', i64 ' . (string)($cd->initMapOffset + 8 * $w) . "\n";
-                $out .= '  store i64 0, ptr ' . $mGep . "\n";
+                $out .= '  store i64 ' . (string)($seed[$w] ?? 0) . ', ptr ' . $mGep . "\n";
             }
         }
         if (!$isStruct) { $out .= '  call void @__mir_obj_handle_alloc(ptr ' . $obj . ")\n"; }
@@ -178,6 +179,30 @@ trait EmitLlvmObjects
      * One `private` global per class, named by the class so the part a split
      * puts it in stays byte-stable across unrelated edits.
      */
+    /**
+     * The init-map words a fresh instance starts with: an UNTYPED property is
+     * initialized from birth (php's implicit null), so its bit is set. A lazy
+     * ghost's maker clears the map and ORs this image back once its initializer
+     * ran ({@see __mc_lazy_make}). Starting it clear made every untyped read the
+     * "must not be accessed before initialization" Error once a program made
+     * ghosts — Laravel's `$this->appPath ?: …` at boot.
+     * @return array<int, int> word index => bits
+     */
+    private function initMapSeed(\Compile\Mir\ClassDef $cd): array
+    {
+        $seed = [];
+        $wb = \Compile\MemoryAbi::INIT_MAP_WORD_BITS;
+        foreach ($cd->initMapProps as $pn => $_) {
+            $pm = $cd->propertyMeta[$pn] ?? null;
+            if ($pm === null || $pm->typeHint !== '') { continue; }
+            $bit = $cd->initMapBit((string)$pn);
+            if ($bit < 0) { continue; }
+            $wi = \intdiv($bit, $wb);
+            $seed[$wi] = ($seed[$wi] ?? 0) | (1 << ($bit % $wb));
+        }
+        return $seed;
+    }
+
     private function objInitTemplate(?\Compile\Mir\ClassDef $cd): string
     {
         if ($cd === null || $cd->isStruct || \count($cd->propertyNames) < 2) { return ''; }
@@ -199,6 +224,10 @@ trait EmitLlvmObjects
             if ($this->cellPropBoxed($ptype, $cd->name, $pname)) {
                 $words[\intdiv($cd->propertyOffset($pname), 8)] = '-3659174697238528';
             }
+        }
+        foreach ($this->initMapSeed($cd) as $wi => $bits) {
+            $at = \intdiv($cd->initMapOffset, 8) + $wi;
+            if ($at < \count($words)) { $words[$at] = (string)$bits; }
         }
         $sym = '@.otmpl.' . $this->mangle($cd->name);
         $parts = [];
