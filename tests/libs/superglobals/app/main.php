@@ -42,7 +42,15 @@ if ($g >= 1024 * 1024 && is_readable('/proc/self/maps')) {
             echo 'map ', $p[0], ' ', round($sz / 1048576, 1), "MB\n";
         }
     }
-    foreach (explode("\n", (string)@file_get_contents('/proc/self/smaps_rollup')) as $l) {
-        if (str_starts_with($l, 'Rss:') || str_starts_with($l, 'AnonHugePages:')) { echo $l, "\n"; }
+    // Resident size per mapping, the big ones and the sum of the small anonymous ones.
+    $hdr = '';
+    $small = 0;
+    foreach (explode("\n", (string)@file_get_contents('/proc/self/smaps')) as $l) {
+        if (preg_match('/^[0-9a-f]+-[0-9a-f]+ /', $l)) { $hdr = $l; continue; }
+        if (!str_starts_with($l, 'Rss:')) { continue; }
+        $kb = (int)trim(substr($l, 4));
+        if ($kb >= 512) { echo 'rss ', $kb, 'kB ', preg_replace('/\s+/', ' ', $hdr), "\n"; }
+        elseif (str_ends_with(rtrim($hdr), '0') || str_contains($hdr, '[heap]')) { $small += $kb; }
     }
+    echo 'rss small-anon ', $small, "kB\n";
 }
