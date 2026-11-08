@@ -412,14 +412,14 @@ trait EmitLlvmModule
             $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_line = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_depth = linkonce_odr global i64 0\n";
-            // The caller's `@.btl.` record per frame ({ base line, file }): the frame's file. 0 = no record.
-            $out .= "@__mir_bt_base = linkonce_odr global [4096 x i64] zeroinitializer\n";
+            // The file of each frame's call site (a string literal; 0 = none recorded).
+            $out .= "@__mir_bt_file = linkonce_odr global [4096 x i64] zeroinitializer\n";
             if (\Compile\Debug::$btObjects) {
                 // A frame's `$this`, valid while the name it was stamped beside is still the frame's name.
                 $out .= "@__mir_bt_obj = linkonce_odr global [4096 x i64] zeroinitializer\n";
                 $out .= "@__mir_bt_objn = linkonce_odr global [4096 x i64] zeroinitializer\n";
             }
-            $out .= "define void @__mir_bt_push(ptr %name, i64 %line) alwaysinline {\n";
+            $out .= "define void @__mir_bt_push(ptr %name, i64 %line, ptr %file) alwaysinline {\n";
             $out .= "entry:\n";
             $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
             $out .= "  %ok = icmp slt i64 %d, 4096\n";
@@ -430,8 +430,9 @@ trait EmitLlvmModule
             $out .= "  store i64 %ni, ptr %np\n";
             $out .= "  %lp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_line, i64 0, i64 %d\n";
             $out .= "  store i64 %line, ptr %lp\n";
-            $out .= "  %bp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_base, i64 0, i64 %d\n";
-            $out .= "  store i64 0, ptr %bp\n";
+            $out .= "  %fi = ptrtoint ptr %file to i64\n";
+            $out .= "  %fp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_file, i64 0, i64 %d\n";
+            $out .= "  store i64 %fi, ptr %fp\n";
             $out .= "  br label %inc\n";
             $out .= "inc:\n";
             $out .= "  %d1 = add i64 %d, 1\n";
@@ -439,21 +440,11 @@ trait EmitLlvmModule
             $out .= "  ret void\n}\n";
             // The call site's line as an offset from its function's base line,
             // which lives in `@.btl.<fn>` ({@see EmitLlvm::btPush}).
-            $out .= "define void @__mir_bt_push_rel(ptr %name, ptr %base, i64 %delta) alwaysinline {\n";
+            $out .= "define void @__mir_bt_push_rel(ptr %name, ptr %base, i64 %delta, ptr %file) alwaysinline {\n";
             $out .= "entry:\n";
             $out .= "  %b = load i64, ptr %base\n";
             $out .= "  %line = add i64 %b, %delta\n";
-            $out .= "  call void @__mir_bt_push(ptr %name, i64 %line)\n";
-            $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
-            $out .= "  %top = sub i64 %d, 1\n";
-            $out .= "  %in = icmp slt i64 %top, 4096\n";
-            $out .= "  br i1 %in, label %st, label %out\n";
-            $out .= "st:\n";
-            $out .= "  %bi = ptrtoint ptr %base to i64\n";
-            $out .= "  %bp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_base, i64 0, i64 %top\n";
-            $out .= "  store i64 %bi, ptr %bp\n";
-            $out .= "  br label %out\n";
-            $out .= "out:\n";
+            $out .= "  call void @__mir_bt_push(ptr %name, i64 %line, ptr %file)\n";
             $out .= "  ret void\n}\n";
             // The name of the frame on TOP of that stack, as a `%s` operand.
             //

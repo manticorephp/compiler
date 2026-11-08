@@ -2014,7 +2014,7 @@ trait EmitLlvmBuiltins
         $names = $this->lastValue;
         $out .= $this->emitBtVec('@__mir_bt_line');
         $lines = $this->lastValue;
-        $out .= $this->emitBtVec('@__mir_bt_base', true);
+        $out .= $this->emitBtVec('@__mir_bt_file', true);
         $files = $this->lastValue;
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = ptrtoint ptr '

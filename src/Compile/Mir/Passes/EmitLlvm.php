@@ -2667,7 +2667,7 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /** Whether a slot read through `$h` can meet a lazy ghost. */
-    private function lazyHolder(?ClassDef $h): bool
+    private function lazyHolder(?\Compile\Mir\ClassDef $h): bool
     {
         return $h !== null && isset($this->lazyHolders[$h->name]);
     }
@@ -4505,7 +4505,8 @@ final class EmitLlvm implements EmitVisitor
         if (!$this->rt->needsBacktrace) { return ''; }
         $fn = $this->frame->name;
         if ($fn === '') {
-            return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '');
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '',
+                $this->strLitId($this->pool->intern($this->frameFile())));
         }
         // Relative to the function's first traced line, which lives in ONE
         // global per function: a line inserted above a function moves that
@@ -4514,29 +4515,29 @@ final class EmitLlvm implements EmitVisitor
         // split part, so the object cache never hit.
         if (!isset($this->btBaseLine[$fn])) {
             $this->btBaseLine[$fn] = $line;
-            // { base line, file }: a frame's file is the file of the function that made its call.
-            $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant { i64, i64 } { i64 '
-                . (string)$line . ', i64 ptrtoint (ptr ' . $this->strLitId($this->pool->intern($this->frameFile())) . " to i64) }\n";
+            $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 '
+                . (string)$line . "\n";
         }
         return $this->btPushInline(
             $this->strLitId($this->pool->intern($display)),
             (string)($line - $this->btBaseLine[$fn]),
             '@.btl.' . $this->mangle($fn),
+            $this->strLitId($this->pool->intern($this->frameFile())),
         );
     }
 
     /** The ring push inlined: store name+line at [depth] only while depth < 4096
      *  (frames past the ring are counted, never stored), then bump depth. With
      *  `$base`, the line is that global plus `$line` (a delta). */
-    private function btPushInline(string $nameLit, string $line, string $base): string
+    private function btPushInline(string $nameLit, string $line, string $base, string $fileLit = 'null'): string
     {
         // One call, not ~20 lines of two blocks per call site: the helpers are `alwaysinline`
         // (EmitLlvmModule), so the machine code is the same push, but the IR that every later
         // phase writes, splits and parses is a sixth the size.
         if ($base !== '') {
-            return '  call void @__mir_bt_push_rel(ptr ' . $nameLit . ', ptr ' . $base . ', i64 ' . $line . ")\n";
+            return '  call void @__mir_bt_push_rel(ptr ' . $nameLit . ', ptr ' . $base . ', i64 ' . $line . ', ptr ' . $fileLit . ")\n";
         }
-        return '  call void @__mir_bt_push(ptr ' . $nameLit . ', i64 ' . $line . ")\n";
+        return '  call void @__mir_bt_push(ptr ' . $nameLit . ', i64 ' . $line . ', ptr ' . $fileLit . ")\n";
     }
 
     /** The file of the function being emitted, else the module's. */
@@ -4892,7 +4893,7 @@ final class EmitLlvm implements EmitVisitor
         return '  ' . $r . ' = call i64 ' . $sym . "()\n";
     }
 
-    /** With `$files` the ring is `@__mir_bt_base` and each element is its record's file, '' for none. */
+    /** With `$files` the ring is `@__mir_bt_file`: each element its string, '' where none was recorded. */
     private function btVecLoopIr(string $global, bool $files = false): string
     {
         $dep = $this->ssa->allocReg();
@@ -4925,19 +4926,11 @@ final class EmitLlvm implements EmitVisitor
         $out .= '  ' . $ev . ' = load i64, ptr ' . $ep . "\n";
         if ($files) {
             $none = $this->ssa->allocReg();
-            $safe = $this->ssa->allocReg();
-            $rp = $this->ssa->allocReg();
-            $fpp = $this->ssa->allocReg();
-            $fv = $this->ssa->allocReg();
             $emp = $this->ssa->allocReg();
             $sel = $this->ssa->allocReg();
             $out .= '  ' . $none . ' = icmp eq i64 ' . $ev . ", 0\n";
             $out .= '  ' . $emp . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern('')) . " to i64\n";
-            $out .= '  ' . $safe . ' = select i1 ' . $none . ', i64 ' . $emp . ', i64 ' . $ev . "\n";
-            $out .= '  ' . $rp . ' = inttoptr i64 ' . $safe . " to ptr\n";
-            $out .= '  ' . $fpp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 8\n";
-            $out .= '  ' . $fv . ' = load i64, ptr ' . $fpp . "\n";
-            $out .= '  ' . $sel . ' = select i1 ' . $none . ', i64 ' . $emp . ', i64 ' . $fv . "\n";
+            $out .= '  ' . $sel . ' = select i1 ' . $none . ', i64 ' . $emp . ', i64 ' . $ev . "\n";
             $ev = $sel;
         }
         $cur = $this->ssa->allocReg();

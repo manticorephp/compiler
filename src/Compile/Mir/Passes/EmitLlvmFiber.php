@@ -776,7 +776,7 @@ trait EmitLlvmFiber
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
         // Every per-frame ring travels with the fiber: a frame's object left behind
         // would be another fiber's (and maybe freed) `$this`.
-        $rings = ['@__mir_bt_name', '@__mir_bt_line', '@__mir_bt_base'];
+        $rings = ['@__mir_bt_name', '@__mir_bt_line', '@__mir_bt_file'];
         if (\Compile\Debug::$btObjects) { $rings[] = '@__mir_bt_obj'; $rings[] = '@__mir_bt_objn'; }
         $park = '';
         $unpark = '';

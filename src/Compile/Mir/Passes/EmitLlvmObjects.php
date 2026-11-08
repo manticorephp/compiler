@@ -1023,7 +1023,7 @@ trait EmitLlvmObjects
         $out .= '  store i64 ' . $linesVec . ', ptr ' . $lnp . "\n";
         $fOff = $cd->propertyOffset('traceFiles');
         if ($fOff >= 0) {
-            $out .= $this->emitBtVec('@__mir_bt_base', true);
+            $out .= $this->emitBtVec('@__mir_bt_file', true);
             $fv = $this->lastValue;
             $fpp = $this->ssa->allocReg();
             $out .= '  ' . $fpp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fOff . "\n";
