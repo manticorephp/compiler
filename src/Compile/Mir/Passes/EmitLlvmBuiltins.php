@@ -2014,14 +2014,16 @@ trait EmitLlvmBuiltins
         $names = $this->lastValue;
         $out .= $this->emitBtVec('@__mir_bt_line');
         $lines = $this->lastValue;
+        $out .= $this->emitBtVec('@__mir_bt_base', true);
+        $files = $this->lastValue;
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = ptrtoint ptr '
               . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @manticore___mir_bt_frames(i64 '
-              . $names . ', i64 ' . $lines . ', i64 ' . $fp . ', i64 ' . $limit . ")\n";
+              . $names . ', i64 ' . $lines . ', i64 ' . $fp . ', i64 ' . $files . ', i64 ' . $limit . ")\n";
         // DEBUG_BACKTRACE_PROVIDE_OBJECT (php's default): each method frame's `$this`.
-        $vecs = [$names, $lines];
+        $vecs = [$names, $lines, $files];
         if (\Compile\Debug::$btObjects) {
             $out .= $this->emitBtVec('@__mir_bt_obj');
             $ow = $this->lastValue;
@@ -9861,7 +9863,7 @@ trait EmitLlvmBuiltins
      *  php's property set: no object view shows it. */
     private function isThrowableTraceSlot(\Compile\Mir\ClassDef $cd, string $pn): bool
     {
-        if ($pn !== 'traceNames' && $pn !== 'traceLines') { return false; }
+        if ($pn !== 'traceNames' && $pn !== 'traceLines' && $pn !== 'traceFiles') { return false; }
         $pm = $cd->propertyMeta[$pn] ?? null;
         $decl = $pm !== null && $pm->declaringClass !== '' ? $pm->declaringClass : $cd->name;
         return $decl === 'Exception' || $decl === 'Error';

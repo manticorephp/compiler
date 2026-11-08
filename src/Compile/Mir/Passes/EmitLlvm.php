@@ -4514,8 +4514,9 @@ final class EmitLlvm implements EmitVisitor
         // split part, so the object cache never hit.
         if (!isset($this->btBaseLine[$fn])) {
             $this->btBaseLine[$fn] = $line;
-            $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 '
-                . (string)$line . "\n";
+            // { base line, file }: a frame's file is the file of the function that made its call.
+            $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant { i64, i64 } { i64 '
+                . (string)$line . ', i64 ptrtoint (ptr ' . $this->strLitId($this->pool->intern($this->frameFile())) . " to i64) }\n";
         }
         return $this->btPushInline(
             $this->strLitId($this->pool->intern($display)),
@@ -4536,6 +4537,14 @@ final class EmitLlvm implements EmitVisitor
             return '  call void @__mir_bt_push_rel(ptr ' . $nameLit . ', ptr ' . $base . ', i64 ' . $line . ")\n";
         }
         return '  call void @__mir_bt_push(ptr ' . $nameLit . ', i64 ' . $line . ")\n";
+    }
+
+    /** The file of the function being emitted, else the module's. */
+    private function frameFile(): string
+    {
+        // Built-in code has no file: php leaves file/line out of a frame called from it.
+        if ($this->frame->isPrelude) { return "\0"; }
+        return $this->frame->file !== '' ? $this->frame->file : $this->sourceFile;
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */
@@ -4860,9 +4869,9 @@ final class EmitLlvm implements EmitVisitor
      * fresh packed vec, innermost first — ONE body per global, called: the copy
      * loop used to be inlined twice at every Throwable construction.
      */
-    private function emitBtVec(string $global): string
+    private function emitBtVec(string $global, bool $files = false): string
     {
-        $key = '__mc_btvec_' . \ltrim($global, '@');
+        $key = '__mc_btvec_' . \ltrim($global, '@') . ($files ? '_files' : '');
         $sym = '@manticore_' . $key;
         if (!isset($this->propertyReadHelpers[$key])) {
             $oldSsa = $this->ssa;
@@ -4870,7 +4879,7 @@ final class EmitLlvm implements EmitVisitor
             $oldLastType = $this->lastValueType;
             $this->ssa = new \Compile\Mir\SsaBuilder();
             $this->ssa->reset();
-            $body = $this->btVecLoopIr($global);
+            $body = $this->btVecLoopIr($global, $files);
             $this->propertyReadHelpers[$key] = 'define linkonce_odr i64 ' . $sym . "() {\nentry:\n"
                 . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
             $this->ssa = $oldSsa;
@@ -4883,7 +4892,8 @@ final class EmitLlvm implements EmitVisitor
         return '  ' . $r . ' = call i64 ' . $sym . "()\n";
     }
 
-    private function btVecLoopIr(string $global): string
+    /** With `$files` the ring is `@__mir_bt_base` and each element is its record's file, '' for none. */
+    private function btVecLoopIr(string $global, bool $files = false): string
     {
         $dep = $this->ssa->allocReg();
         $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";
@@ -4913,6 +4923,23 @@ final class EmitLlvm implements EmitVisitor
         $out .= '  ' . $ep . ' = getelementptr inbounds [4096 x i64], ptr ' . $global . ', i64 0, i64 ' . $i . "\n";
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = load i64, ptr ' . $ep . "\n";
+        if ($files) {
+            $none = $this->ssa->allocReg();
+            $safe = $this->ssa->allocReg();
+            $rp = $this->ssa->allocReg();
+            $fpp = $this->ssa->allocReg();
+            $fv = $this->ssa->allocReg();
+            $emp = $this->ssa->allocReg();
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $none . ' = icmp eq i64 ' . $ev . ", 0\n";
+            $out .= '  ' . $emp . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern('')) . " to i64\n";
+            $out .= '  ' . $safe . ' = select i1 ' . $none . ', i64 ' . $emp . ', i64 ' . $ev . "\n";
+            $out .= '  ' . $rp . ' = inttoptr i64 ' . $safe . " to ptr\n";
+            $out .= '  ' . $fpp . ' = getelementptr inbounds i8, ptr ' . $rp . ", i64 8\n";
+            $out .= '  ' . $fv . ' = load i64, ptr ' . $fpp . "\n";
+            $out .= '  ' . $sel . ' = select i1 ' . $none . ', i64 ' . $emp . ', i64 ' . $fv . "\n";
+            $ev = $sel;
+        }
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->ssa->allocReg();

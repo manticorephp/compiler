@@ -380,8 +380,13 @@ final class Module
     /** @var array<string, true> Names of passes that have run. */
     public array $passesApplied = [];
 
+    /** The file whose declaration is being lowered: a function added meanwhile was written there.
+     *  ponytail: top-level code from several files is one `__main`, which takes the last one's (the entry). */
+    public string $loweringFile = '';
+
     public function addFunction(FunctionDef $fn): void
     {
+        if ($fn->file === '') { $fn->file = $this->loweringFile; }
         $this->functions[] = $fn;
     }
 

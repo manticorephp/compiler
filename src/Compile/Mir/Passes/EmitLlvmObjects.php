@@ -1007,7 +1007,7 @@ trait EmitLlvmObjects
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fileOff . "\n";
         $fstr = $this->ssa->allocReg();
-        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
+        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->frameFile())) . " to i64\n";
         $out .= '  store i64 ' . $fstr . ', ptr ' . $fp . "\n";
         if (!$withTrace) { return $out; }
         // Two packed vecs of the active frames, innermost first.
@@ -1021,6 +1021,14 @@ trait EmitLlvmObjects
         $lnp = $this->ssa->allocReg();
         $out .= '  ' . $lnp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$lnOff . "\n";
         $out .= '  store i64 ' . $linesVec . ', ptr ' . $lnp . "\n";
+        $fOff = $cd->propertyOffset('traceFiles');
+        if ($fOff >= 0) {
+            $out .= $this->emitBtVec('@__mir_bt_base', true);
+            $fv = $this->lastValue;
+            $fpp = $this->ssa->allocReg();
+            $out .= '  ' . $fpp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fOff . "\n";
+            $out .= '  store i64 ' . $fv . ', ptr ' . $fpp . "\n";
+        }
         return $out;
     }
 

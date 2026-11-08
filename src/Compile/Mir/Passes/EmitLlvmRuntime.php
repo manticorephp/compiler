@@ -2211,7 +2211,7 @@ trait EmitLlvmRuntime
             // An ancestor's redeclared private: php does not list it on this class.
             if ($pn !== $pm->name) { continue; }
             // The throwables' stack storage is ours, not php's property set.
-            if (($pn === 'traceNames' || $pn === 'traceLines')
+            if (($pn === 'traceNames' || $pn === 'traceLines' || $pn === 'traceFiles')
                 && \in_array($pm->declaringClass !== '' ? $pm->declaringClass : $cls->name, ['Exception', 'Error'], true)) {
                 continue;
             }

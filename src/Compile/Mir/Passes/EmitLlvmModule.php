@@ -412,6 +412,8 @@ trait EmitLlvmModule
             $out .= "@__mir_bt_name = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_line = linkonce_odr global [4096 x i64] zeroinitializer\n";
             $out .= "@__mir_bt_depth = linkonce_odr global i64 0\n";
+            // The caller's `@.btl.` record per frame ({ base line, file }): the frame's file. 0 = no record.
+            $out .= "@__mir_bt_base = linkonce_odr global [4096 x i64] zeroinitializer\n";
             if (\Compile\Debug::$btObjects) {
                 // A frame's `$this`, valid while the name it was stamped beside is still the frame's name.
                 $out .= "@__mir_bt_obj = linkonce_odr global [4096 x i64] zeroinitializer\n";
@@ -428,6 +430,8 @@ trait EmitLlvmModule
             $out .= "  store i64 %ni, ptr %np\n";
             $out .= "  %lp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_line, i64 0, i64 %d\n";
             $out .= "  store i64 %line, ptr %lp\n";
+            $out .= "  %bp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_base, i64 0, i64 %d\n";
+            $out .= "  store i64 0, ptr %bp\n";
             $out .= "  br label %inc\n";
             $out .= "inc:\n";
             $out .= "  %d1 = add i64 %d, 1\n";
@@ -440,6 +444,16 @@ trait EmitLlvmModule
             $out .= "  %b = load i64, ptr %base\n";
             $out .= "  %line = add i64 %b, %delta\n";
             $out .= "  call void @__mir_bt_push(ptr %name, i64 %line)\n";
+            $out .= "  %d = load i64, ptr @__mir_bt_depth\n";
+            $out .= "  %top = sub i64 %d, 1\n";
+            $out .= "  %in = icmp slt i64 %top, 4096\n";
+            $out .= "  br i1 %in, label %st, label %out\n";
+            $out .= "st:\n";
+            $out .= "  %bi = ptrtoint ptr %base to i64\n";
+            $out .= "  %bp = getelementptr inbounds [4096 x i64], ptr @__mir_bt_base, i64 0, i64 %top\n";
+            $out .= "  store i64 %bi, ptr %bp\n";
+            $out .= "  br label %out\n";
+            $out .= "out:\n";
             $out .= "  ret void\n}\n";
             // The name of the frame on TOP of that stack, as a `%s` operand.
             //
@@ -1033,6 +1047,7 @@ trait EmitLlvmModule
         $this->clearPtrArgCells();
         $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
+        $this->frame->file = $fn->file;
         $this->own->fnName = $fn->name;
         $this->frame->isPrelude = $fn->isPrelude;
         $this->frame->body = $fn->body;

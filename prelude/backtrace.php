@@ -20,17 +20,21 @@
 /**
  * @param string[] $names
  * @param int[] $lines
+ * @param string[] $files the file of each frame's call site, '' where unrecorded
  * @return array<int,array<string,mixed>>
  */
-function __mir_bt_frames(array $names, array $lines, string $file, int $limit = 0): array
+function __mir_bt_frames(array $names, array $lines, string $file, array $files = [], int $limit = 0): array
 {
     $out = [];
     $n = \count($names);
     if ($limit > 0 && $n > $limit) { $n = $limit; }
     $i = 0;
+    $top = $file;
     while ($i < $n) {
         $name = $names[$i];
         $ln = $lines[$i];
+        $file = ($files[$i] ?? '') !== '' ? (string)$files[$i] : $top;
+        $internal = $file === "\0";
         $type = "";
         $p = \strpos($name, "::");
         if ($p === false) {
@@ -39,13 +43,15 @@ function __mir_bt_frames(array $names, array $lines, string $file, int $limit = 
         } else {
             $type = "::";
         }
+        $fr = $internal ? [] : ["file" => $file, "line" => $ln];
         if ($type !== "") {
-            $cls = \substr($name, 0, $p);
-            $fn = \substr($name, $p + 2);
-            $out[] = ["file" => $file, "line" => $ln, "function" => $fn, "class" => $cls, "type" => $type];
+            $fr["function"] = \substr($name, $p + 2);
+            $fr["class"] = \substr($name, 0, $p);
+            $fr["type"] = $type;
         } else {
-            $out[] = ["file" => $file, "line" => $ln, "function" => $name];
+            $fr["function"] = $name;
         }
+        $out[] = $fr;
         $i = $i + 1;
     }
     return $out;

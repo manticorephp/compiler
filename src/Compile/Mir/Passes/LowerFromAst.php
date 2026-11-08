@@ -1429,6 +1429,7 @@ final class LowerFromAst implements Pass
         $this->pendingSynthFns = [];
 
         $mainStmts = [];
+        $mainFile = '';
         $stmtIdx = 0;
         $measureLower = \Compile\Stats::$on;
         $lowerFnNs = 0;
@@ -1512,6 +1513,7 @@ final class LowerFromAst implements Pass
             $this->currentRefParamNames = [];
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
             $this->lowerInMain = true;
+            if ($stmt->span->file !== '') { $module->loweringFile = $stmt->span->file; $mainFile = $stmt->span->file; }
             $mainStmts[] = $this->lowerStmt($stmt);
             $this->lowerInMain = false;
             if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
@@ -1559,6 +1561,7 @@ final class LowerFromAst implements Pass
         $mainStmts = $this->injectGlobalDecls($mainStmts);
         $mainStmts = $this->injectShutdownDrain($mainStmts);
         $mainBody = new Block($mainStmts, Type::void());
+        $module->loweringFile = $mainFile;
         $module->addFunction(new FunctionDef(
             name: '__main',
             params: [],

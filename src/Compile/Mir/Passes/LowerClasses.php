@@ -1281,6 +1281,7 @@ trait LowerClasses
      */
     private function lowerClassMethods(\Parser\Ast\ClassDecl $decl, Module $module): void
     {
+        if ($decl->span->file !== '') { $module->loweringFile = $decl->span->file; }
         // A plain CLASS with no ClassDef must stop HERE, with its name. Read
         // blind, the null went on to a ClassDef-typed parameter — a TypeError
         // under Zend but a SIGSEGV once self-built, several frames from the

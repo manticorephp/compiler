@@ -774,6 +774,23 @@ trait EmitLlvmFiber
     {
         $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
+        // Every per-frame ring travels with the fiber: a frame's object left behind
+        // would be another fiber's (and maybe freed) `$this`.
+        $rings = ['@__mir_bt_name', '@__mir_bt_line', '@__mir_bt_base'];
+        if (\Compile\Debug::$btObjects) { $rings[] = '@__mir_bt_obj'; $rings[] = '@__mir_bt_objn'; }
+        $park = '';
+        $unpark = '';
+        foreach ($rings as $k => $g) {
+            $ks = (string)$k;
+            $park .= "  %po" . $ks . " = mul i64 %bytes, " . $ks . "\n"
+                . "  %pd" . $ks . " = getelementptr i8, ptr %cbuf, i64 %po" . $ks . "\n"
+                . "  %ps" . $ks . " = getelementptr [4096 x i64], ptr " . $g . ", i64 0, i64 %base\n"
+                . "  %pm" . $ks . " = call ptr @memcpy(ptr %pd" . $ks . ", ptr %ps" . $ks . ", i64 %bytes)\n";
+            $unpark .= "  %uo" . $ks . " = mul i64 %ysb, " . $ks . "\n"
+                . "  %us" . $ks . " = getelementptr i8, ptr %ybuf, i64 %uo" . $ks . "\n"
+                . "  %ud" . $ks . " = getelementptr [4096 x i64], ptr " . $g . ", i64 0, i64 %d\n"
+                . "  %um" . $ks . " = call ptr @memcpy(ptr %ud" . $ks . ", ptr %us" . $ks . ", i64 %tb)\n";
+        }
         return "@__mir_bt_fctx = linkonce_odr global ptr null\n"
             . "define void @__mir_fiber_bt_switch(ptr %y) {\n"
             . "entry:\n"
@@ -806,16 +823,12 @@ trait EmitLlvmFiber
             . "  br i1 %spos, label %park, label %done\n"
             . "park:\n"
             . "  %bytes = mul i64 %s, 8\n"
-            . "  %bytes2 = mul i64 %s, 16\n"
+            . "  %bytes2 = mul i64 %s, " . (string)(8 * \count($rings)) . "\n"
             . "  %cbufp = getelementptr i8, ptr %c, i64 80\n"
             . "  %cbuf0 = load ptr, ptr %cbufp\n"
             . "  %cbuf = call ptr @realloc(ptr %cbuf0, i64 %bytes2)\n"
             . "  store ptr %cbuf, ptr %cbufp\n"
-            . "  %nsrc = getelementptr [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %base\n"
-            . "  %lsrc = getelementptr [4096 x i64], ptr @__mir_bt_line, i64 0, i64 %base\n"
-            . "  %ldst = getelementptr i8, ptr %cbuf, i64 %bytes\n"
-            . "  %m1 = call ptr @memcpy(ptr %cbuf, ptr %nsrc, i64 %bytes)\n"
-            . "  %m2 = call ptr @memcpy(ptr %ldst, ptr %lsrc, i64 %bytes)\n"
+            . $park
             . "  br label %done\n"
             . "push:\n"
             . "  %ypp = getelementptr i8, ptr %y, i64 48\n"
@@ -839,11 +852,7 @@ trait EmitLlvmFiber
             . "  %ysb = mul i64 %ys, 8\n"
             . "  %ybufp = getelementptr i8, ptr %y, i64 80\n"
             . "  %ybuf = load ptr, ptr %ybufp\n"
-            . "  %ylsrc = getelementptr i8, ptr %ybuf, i64 %ysb\n"
-            . "  %ndst = getelementptr [4096 x i64], ptr @__mir_bt_name, i64 0, i64 %d\n"
-            . "  %ldst2 = getelementptr [4096 x i64], ptr @__mir_bt_line, i64 0, i64 %d\n"
-            . "  %m3 = call ptr @memcpy(ptr %ndst, ptr %ybuf, i64 %tb)\n"
-            . "  %m4 = call ptr @memcpy(ptr %ldst2, ptr %ylsrc, i64 %tb)\n"
+            . $unpark
             . "  br label %done\n"
             . "done:\n"
             . "  ret void\n"

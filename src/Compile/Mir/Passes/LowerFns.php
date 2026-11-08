@@ -140,6 +140,7 @@ trait LowerFns
         $this->currentLowerClass = $this->synthFnScope[$decl->name] ?? '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // FFI: `#[Symbol('cSym')]` makes this a thin extern forward — the
         // body (a stock-PHP fallback like `$GLOBALS['argc']`) is never
         // lowered; EmitLlvm emits a wrapper that calls the C symbol.
@@ -254,6 +255,7 @@ trait LowerFns
         $this->currentLowerClass = '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // `#[RefOut('a', 'b')]` on the function names its pure-output by-ref
         // params (survives the .sig + self-host parse; a param-position marker
         // does not). `@param-out T $x` is the PHPStan-compatible equivalent.
