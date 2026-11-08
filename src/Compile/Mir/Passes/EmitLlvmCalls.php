@@ -1960,14 +1960,257 @@ trait EmitLlvmCalls
 
     private function emitErasedInvoke(Invoke_ $n): string
     {
+        $shared = $this->erasedInvokeShareable($n);
         $out = $this->emitNode($n->callee);
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         /** @var array<string, string> $owned */
         $owned = [];
         $n = $this->hoistFreshInvokeArgs($n, $out, $owned);
-        $out .= $this->emitErasedInvokeArms($n, $raw);
+        if ($shared) {
+            $out .= $this->emitErasedInvokeShared($n, $raw);
+        } else {
+            $out .= $this->emitErasedInvokeArms($n, $raw);
+        }
         return $out . $this->releaseHoistedArgs($owned);
+    }
+
+    /**
+     * Can this erased invoke run through {@see erasedInvokeHelper}? Every argument
+     * must be a value no by-reference parameter could bind to (a constant, a cast,
+     * a call result: nothing the caller would see written back) of a type whose box
+     * takes no reference, and there is no spread.
+     */
+    private function erasedInvokeShareable(Invoke_ $n): bool
+    {
+        $why = $this->erasedInvokeInlineReason($n);
+        if ($why !== '' && \getenv('MANTICORE_ERINV_TRACE') === '1') {
+            \fwrite(\STDERR, 'erinv inline: ' . $why . ' @ ' . $this->frame->name . "\n");
+        }
+        return $why === '';
+    }
+
+    /** Why `$n` keeps the inline dispatch, '' when the shared helper can serve it. */
+    private function erasedInvokeInlineReason(Invoke_ $n): string
+    {
+        // `$r = &$f()` binds the address the arms hand back undereferenced.
+        if (\getenv('MANTICORE_ERINV_SHARED') === '0') { return 'off'; }
+        if ($n->srcArgc === -2) { return 'srcArgc-2'; }
+        if ($this->rawRefCall) { return 'ref-bind'; }
+        foreach ($n->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return 'spread'; }
+            if ($this->erinvSlotArg($a)) { continue; }
+            $k = $a->type->kind;
+            // `$this` cannot be reassigned, so no by-reference parameter can write it back.
+            $isThis = $a->kind === Node::KIND_LOAD_LOCAL && $a->name === 'this' && $k === Type::KIND_OBJ;
+            if (!$isThis && $this->isByRefAddressable($a)) { return 'lvalue ' . $a->kind . ':' . $k; }
+            // An object box takes no reference ({@see boxToCell}); an array box does.
+            if ($k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN && $k !== Type::KIND_INT && $k !== Type::KIND_BOOL
+                && $k !== Type::KIND_FLOAT && $k !== Type::KIND_NULL && $k !== Type::KIND_STRING
+                && $k !== Type::KIND_OBJ) { return 'type ' . $k; }
+        }
+        return '';
+    }
+
+    /**
+     * A plain CELL local of this frame: the helper takes its slot itself, so an arm
+     * binding it by reference writes the caller's variable, as the inline arm does
+     * ({@see emitDynByRefArg} hands a cell lvalue's own slot over). A local with
+     * reference, alias, capture or global bookkeeping stays with the inline path.
+     */
+    private function erinvSlotArg(Node $a): bool
+    {
+        if ($a->kind !== Node::KIND_LOAD_LOCAL || $a->type->kind !== Type::KIND_CELL) { return false; }
+        $nm = $a->name;
+        $l = $this->locals;
+        return isset($l->slots[$nm]) && !isset($l->refLocals[$nm]) && !isset($l->refParamTypes[$nm])
+            && !isset($l->captureRefs[$nm]) && !isset($l->globalBacked[$nm]) && !isset($l->byRefCaptured[$nm])
+            && !isset($l->unsetNames[$nm]) && !isset($l->aliasLocals[$nm]) && !isset($l->refCellTargets[$nm])
+            && !isset($l->ownedBoxes[$nm]) && !isset($l->byRefParamWb[$nm]) && !isset($l->elemRefTargets[$nm])
+            && !isset($l->elemRefBoxes[$nm]) && !isset($l->aliasBoxNames[$nm]);
+    }
+
+    /** The call of the shared helper for `$n`; lastValue as {@see emitErasedInvokeArms} leaves it. */
+    private function emitErasedInvokeShared(Invoke_ $n, string $raw): string
+    {
+        $out = '';
+        /** @var string[] $argRegs */
+        $argRegs = [];
+        $modes = '';
+        foreach ($n->args as $a) {
+            if ($this->erinvSlotArg($a)) {
+                $argRegs[] = 'ptr ' . $this->locals->slots[$a->name];
+                $modes .= 's';
+                continue;
+            }
+            $out .= $this->emitNode($a);
+            $out .= $this->boxToCell($a->type);
+            $argRegs[] = 'i64 ' . $this->lastValue;
+            $modes .= 'v';
+        }
+        $line = 'i64 0';
+        if ($this->rt->needsBacktrace) {
+            $fn = $this->frame->name;
+            if ($fn === '') {
+                $line = 'i64 ' . (string)$n->line;
+            } else {
+                if (!isset($this->btBaseLine[$fn])) {
+                    $this->btBaseLine[$fn] = $n->line;
+                    $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 ' . (string)$n->line . "\n";
+                }
+                $b = $this->ssa->allocReg();
+                $out .= '  ' . $b . ' = load i64, ptr @.btl.' . $this->mangle($fn) . "\n";
+                $abs = $this->ssa->allocReg();
+                $out .= '  ' . $abs . ' = add i64 ' . $b . ', ' . (string)($n->line - $this->btBaseLine[$fn]) . "\n";
+                $line = 'i64 ' . $abs;
+            }
+        }
+        $sym = $this->erasedInvokeHelper($modes, $n->srcArgc);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $raw . ', ' . $line
+            . ($argRegs === [] ? '' : ', ' . \implode(', ', $argRegs)) . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        if ($this->isCellScalarParam($n->type)) {
+            $out .= $this->unboxCellToType($n->type);
+        }
+        if ($n->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
+        return $out;
+    }
+
+    /**
+     * Does the dispatch depend on the calling scope? Only through a compile-time
+     * visibility check: callable-array names run without the method table, or an
+     * `__invoke` that is not public.
+     */
+    private function erinvScopeMatters(): bool
+    {
+        if ($this->erinvScopeMemo !== null) { return $this->erinvScopeMemo; }
+        $matters = $this->callableArrayMethods !== [] && !$this->dynamicMethodMeta;
+        if (!$matters) {
+            foreach ($this->classes as $cd) {
+                $mm = $cd->methodMeta['__invoke'] ?? null;
+                if ($mm !== null && $mm->visibility !== 'public') { $matters = true; break; }
+            }
+        }
+        $this->erinvScopeMemo = $matters;
+        return $matters;
+    }
+
+    private ?bool $erinvScopeMemo = null;
+
+    /** Call-site line for {@see btPush} inside {@see erasedInvokeHelper}: a register, '' elsewhere.
+     *  Only for that helper's own body, not for a helper built while it emits. */
+    private string $btLineOverride = '';
+    private ?SsaBuilder $btLineOverrideSsa = null;
+
+    /** @var array<string, string> argc|srcArgc|scope|trace => helper symbol */
+    private array $erinvSyms = [];
+
+    /**
+     * `i64 (i64 callee, i64 line, i64 arg...)`: the whole erased-invoke dispatch
+     * (function names, callable arrays, `__invoke`, closures) for `$argc` cell
+     * arguments, once per module instead of once per site: on symfony-demo 945 sites
+     * carried 388 MB of it, about 15% of the module.
+     */
+    private function erasedInvokeHelper(string $modes, int $srcArgc): string
+    {
+        $argc = \strlen($modes);
+        $scope = $this->erinvScopeMatters() ? ($this->accessScope() ?? '?') : '';
+        $key = $modes . '|' . (string)$srcArgc . '|' . $scope . '|' . ($this->rt->needsBacktrace ? 't' : '');
+        if (isset($this->erinvSyms[$key])) { return $this->erinvSyms[$key]; }
+        $sym = '@' . $this->mirHelperSym('__mir_erinv_' . (string)\count($this->erinvSyms));
+        $this->erinvSyms[$key] = $sym;
+
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $oldRawRef = $this->rawRefCall;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldCellProv = $this->cellProv;
+        $oldBtLine = $this->btLineOverride;
+        $oldBtSsa = $this->btLineOverrideSsa;
+
+        $this->ssa = new SsaBuilder();
+        $this->btLineOverrideSsa = $this->ssa;
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        $this->locals = new LocalSlots();
+        $this->cf = new ControlFlow();
+        $this->arena = new ArenaContext();
+        $this->rawRefCall = false;
+        $this->spreadTail = null;
+        $this->lastPadArgs = '';
+        $this->vdResult = '';
+        $this->vdArmList = '';
+        $this->vdSiteArgc = 0;
+        $this->btLineOverride = '%line';
+
+        $params = 'i64 %callee, i64 %line';
+        $body = '';
+        /** @var Node[] $args */
+        $args = [];
+        for ($i = 0; $i < $argc; $i = $i + 1) {
+            $name = '__mc_erinv_a' . (string)$i;
+            if ($modes[$i] === 's') {
+                // The caller's own slot: a by-reference arm binds the caller's variable.
+                $params .= ', ptr %a' . (string)$i;
+                $this->locals->slots[$name] = '%a' . (string)$i;
+                $args[] = new \Compile\Mir\LoadLocal($name, Type::cell());
+                continue;
+            }
+            $params .= ', i64 %a' . (string)$i;
+            $slot = $this->ssa->allocReg();
+            $body .= '  ' . $slot . " = alloca i64\n  store i64 %a" . (string)$i . ', ptr ' . $slot . "\n";
+            $this->locals->slots[$name] = $slot;
+            $args[] = new \Compile\Mir\LoadLocal($name, Type::cell());
+        }
+        $cslot = $this->ssa->allocReg();
+        $body .= '  ' . $cslot . " = alloca i64\n  store i64 %callee, ptr " . $cslot . "\n";
+        $this->locals->slots['__mc_erinv_callee'] = $cslot;
+        $inv = new Invoke_(new \Compile\Mir\LoadLocal('__mc_erinv_callee', Type::cell()), $args, Type::cell());
+        $inv->srcArgc = $srcArgc;
+        $body .= $this->emitErasedInvokeArms($inv, '%callee');
+        $text = 'define hidden i64 ' . $sym . '(' . $params . ") {\nentry:\n" . $body
+            . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        if ($this->irIsClosed($text)) {
+            $this->dynamicMethodHelpers['erinv|' . $key] = $text;
+        } else {
+            throw new \RuntimeException('EmitLlvm: erased-invoke helper ' . $sym . ' does not close');
+        }
+
+        $this->btLineOverride = $oldBtLine;
+        $this->btLineOverrideSsa = $oldBtSsa;
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        $this->rawRefCall = $oldRawRef;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        return $sym;
     }
 
     /**

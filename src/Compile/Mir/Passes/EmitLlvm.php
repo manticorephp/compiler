@@ -4495,6 +4495,10 @@ final class EmitLlvm implements EmitVisitor
     private function btPush(string $display, int $line): string
     {
         if (!$this->rt->needsBacktrace) { return ''; }
+        if ($this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa) {
+            // Inside a shared helper: the call site's absolute line is its argument.
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), $this->btLineOverride, '');
+        }
         $fn = $this->frame->name;
         if ($fn === '') {
             return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '');
