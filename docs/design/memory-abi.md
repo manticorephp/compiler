@@ -462,8 +462,10 @@ Invariants worth stating out loud:
 * **Linux: the region is `madvise(MADV_NOHUGEPAGE)`.** Under THP `enabled=always`
   the first touch of a span otherwise faulted a 2 MiB page, so RSS (and a forked
   worker's copy-on-write) grew in 2 MiB steps: 16 of 22 MB RSS of a small
-  program was huge pages, and the libsuperglobal smoke read +4 MB of peak on
-  CI runners.
+  program was huge pages. (The +4..5 MB of peak the leak tests then still read
+  on CI runners was file pages — RssFile grew, RssAnon stayed flat — which is
+  why `memory_get_usage` / `memory_get_peak_usage` on Linux report anonymous
+  memory only, see `src/Runtime/Stdlib/VarExtra.php`.)
 * The pool is **not thread-safe** (plain loads/stores on the class heads) — fine
   for the single-threaded fiber runtime (the blocking-I/O offload threads call
   libc `malloc`/`free` on their own buffers only); a fork-per-worker model COW-duplicates
