@@ -1,0 +1,19 @@
+# Only the files that adapt symfony/demo to Manticore live in this repository;
+# setup.sh fetches the rest of the application from upstream.
+/*
+!/.gitignore
+!/README.md
+!/setup.sh
+!/manticore.json
+!/.env
+!/bin/
+/bin/*
+!/bin/warm-twig.php
+!/bin/warm-assets.php
+!/compat/
+!/public/
+/public/*
+!/public/index.php
+!/src/
+/src/*
+!/src/Kernel.php

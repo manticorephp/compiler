@@ -48,7 +48,7 @@ Third-party code is the quality bar. Each target has a runnable exit criterion.
 | Symfony framework app (`examples/symfony-app`) | [x] builds and serves | routes answer 200/404 like php; cold `var/` first request included |
 | Laravel app (`examples/laravel-app`) | [x] builds and serves | web and JSON routes, Eloquent/SQLite CRUD, sessions and precompiled Blade views are served; stable over repeated request rounds; output not yet diffed against php |
 | php-cs-fixer (`@PSR12`, `@Symfony`) | [~] runs natively with a parallel worker pool; `@Symfony` output matches php | whole rule corpus matches php; speed competitive with native fixers |
-| symfony-demo (full framework, ~79k functions) | [~] builds and runs to completion | no missing-function traps; pages answer like php |
+| symfony-demo (full framework, ~79k functions) | [x] every page byte-identical to php (search: no php reference) | `examples/symfony-demo`; lazy entities, Twig, UX components; macOS arm64 checked, Linux not yet |
 | HTTP server benchmark workload | [~] 64k req/s on one process, 124k on eight workers | competitive with established PHP servers |
 | A Laravel-class application | [ ] | needs MySQL/PostgreSQL drivers, `openssl`, XML (see §2) |
 | Composer | [ ] | `composer install` on a real project |
