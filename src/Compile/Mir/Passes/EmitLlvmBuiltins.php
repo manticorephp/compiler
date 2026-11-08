@@ -2032,6 +2032,8 @@ trait EmitLlvmBuiltins
             $r2 = $this->ssa->allocReg();
             $out .= '  ' . $r2 . ' = call i64 @manticore___mir_bt_with_objects(i64 ' . $r . ', i64 ' . $names
                   . ', i64 ' . $ow . ', i64 ' . $onw . ', i64 ' . $flags . ")\n";
+            // The callee borrowed the frames and returned its own (counted) array.
+            $out .= $this->rcReleaseReg($r, $this->own->releaseFlavor(Type::vec(Type::assoc(Type::string_(), Type::cell()))));
             $r = $r2;
             $vecs[] = $ow;
             $vecs[] = $onw;
