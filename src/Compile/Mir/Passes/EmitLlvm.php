@@ -1303,23 +1303,31 @@ final class EmitLlvm implements EmitVisitor
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         if ($this->needsBoxUnknownFn) { $extraBodies .= $this->emitBoxUnknownFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
-        $extraBodies .= $this->vdExtraBodies;
-        $extraBodies .= $this->dynmExtraBodies;
-        $extraBodies .= $this->scmpExtraBodies;
-        $extraBodies .= $this->dynfExtraBodies;
-        $extraBodies .= $this->litTableBodies;
+        // The big tables stay separate pieces, in this order, each released once
+        // written: joining them held every one of them twice (185 MB on Laravel).
+        /** @var string[] $extraParts */
+        $extraParts = [$extraBodies, $this->vdExtraBodies, $this->dynmExtraBodies, $this->scmpExtraBodies,
+            $this->dynfExtraBodies, $this->litTableBodies];
+        $extraBodies = '';
         $this->litTablesFlushed = true;
-        if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
+        if ($this->needsInclResolveFn) { $extraParts[] = $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
         // loop; callers then contain only a small call instead of a repeated
         // class-id switch. The preamble is emitted afterwards, so any runtime
         // demand raised by the helper is still visible to emitPreamble().
         $this->rootSnapshot('post-lazy-helper-build', $module, true, $bodyBytes);
-        \Compile\Stats::line('IR: extra bodies joined ' . (string)\strlen($extraBodies) . ' bytes'
+        $extraBytes = 0;
+        foreach ($extraParts as $piece) { $extraBytes += \strlen($piece); }
+        \Compile\Stats::line('IR: extra bodies joined ' . (string)$extraBytes . ' bytes'
             . ' (vd ' . (string)\strlen($this->vdExtraBodies) . ', dynm ' . (string)\strlen($this->dynmExtraBodies)
             . ', dynf ' . (string)\strlen($this->dynfExtraBodies) . ', lit ' . (string)\strlen($this->litTableBodies)
             . ', helpers ' . (string)\count($this->dynamicMethodHelpers) . ')');
+        $this->vdExtraBodies = '';
+        $this->dynmExtraBodies = '';
+        $this->scmpExtraBodies = '';
+        $this->dynfExtraBodies = '';
+        $this->litTableBodies = '';
         if ($streaming) {
             // Helper bodies are compiler-owned text and can be numerous on Doctrine.
             // Do not join all of them into one temporary PHP string: stage, hoist,
@@ -1362,12 +1370,18 @@ final class EmitLlvm implements EmitVisitor
                 $bodyBytes += $nBody;
             };
             $h = new \Compile\Mir\HoistAllocas();
-            $extraBodies = $h->runFast($extraBodies);
-            \Compile\Stats::line('IR: extra bodies hoisted');
-            $hoistedAllocas += $h->moved;
-            $this->bodyAppend($bodyPath, $extraBodies);
-            $bodyBytes += \strlen($extraBodies);
-            unset($extraBodies);
+            $nParts = \count($extraParts);
+            for ($i = 0; $i < $nParts; $i = $i + 1) {
+                $piece = $extraParts[$i];
+                $extraParts[$i] = '';
+                if ($piece === '') { continue; }
+                $piece = $h->runFast($piece);
+                $hoistedAllocas += $h->moved;
+                $this->bodyAppend($bodyPath, $piece);
+                $bodyBytes += \strlen($piece);
+                $piece = '';
+            }
+            unset($extraParts);
             \Compile\Stats::line('IR: extra bodies appended');
             $this->drainLazyHelpers($appendStreamedBody);
             \Compile\Stats::line('IR: lazy helpers drained');
@@ -1379,6 +1393,8 @@ final class EmitLlvm implements EmitVisitor
                 . (string)$fileHoistThreshold . ')');
             $this->rootSnapshot('post-extra-body-merge', $module, true, $bodyBytes);
         } else {
+            $extraBodies = \implode('', $extraParts);
+            unset($extraParts);
             $functionBodyChunks[] = $extraBodies;
             $bodyBytes += \strlen($extraBodies);
             // The buffered path needs the same drain. Streaming grew one and the
