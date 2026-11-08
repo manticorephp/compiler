@@ -1505,7 +1505,12 @@ trait EmitLlvmCalls
     private function dynfCachedRow(string $keyP, string $tsym, int $count, ?string &$rowReg): string
     {
         $this->dynfExtraBodies .= $this->dynfBsearchFn() . $this->dynfIcmpFn();
-        $cg = '@.dynf.rc.' . $this->mirHelperSym((string)$this->dynfCacheSeq);
+        // Named by the function holding the site and the site's ordinal in it: a
+        // module-wide sequence renamed every later cache whenever one site was added.
+        $owner = $this->cellSinkFnOverride ?? $this->frame->name;
+        $nth = $this->dynfCacheSeqByFn[$owner] ?? 0;
+        $this->dynfCacheSeqByFn[$owner] = $nth + 1;
+        $cg = '@.dynf.rc.' . $this->mirHelperSym($this->keyedHelperName('', $owner . '#' . (string)$nth));
         $this->dynfCacheSeq = $this->dynfCacheSeq + 1;
         $this->dynfExtraBodies .= $cg . " = internal global ptr null\n\n";
         $crow = $this->ssa->allocReg();
@@ -1733,7 +1738,7 @@ trait EmitLlvmCalls
             $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($this->dynfPublicName($fname)) . ', ptr ' . $fp . ' }';
         }
         $n = \count($rows);
-        $tsym = '@.dynf.rows.' . $this->mirHelperSym((string)\count($this->dynfTables));
+        $tsym = '@.dynf.rows.' . $this->mirHelperSym($this->keyedHelperName('', $key));
         $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)$n
             . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n\n";
         $this->dynfTables[$key] = [$tsym, $n];
@@ -2091,28 +2096,10 @@ trait EmitLlvmCalls
             $argRegs[] = 'i64 ' . $this->lastValue;
             $modes .= 'v';
         }
-        $line = 'i64 0';
-        $file = 'ptr null';
-        if ($this->rt->needsBacktrace) {
-            $fn = $this->frame->name;
-            if ($fn === '') {
-                $line = 'i64 ' . (string)$n->line;
-            } else {
-                if (!isset($this->btBaseLine[$fn])) {
-                    $this->btBaseLine[$fn] = $n->line;
-                    $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 ' . (string)$n->line . "\n";
-                }
-                $b = $this->ssa->allocReg();
-                $out .= '  ' . $b . ' = load i64, ptr @.btl.' . $this->mangle($fn) . "\n";
-                $abs = $this->ssa->allocReg();
-                $out .= '  ' . $abs . ' = add i64 ' . $b . ', ' . (string)($n->line - $this->btBaseLine[$fn]) . "\n";
-                $line = 'i64 ' . $abs;
-            }
-        }
-        if ($this->rt->needsBacktrace) { $file = 'ptr ' . $this->strLitId($this->pool->intern($this->frameFile())); }
+        $site = $this->siteTraceArgs($n->line, $out);
         $sym = $this->erasedInvokeHelper($modes, $n->srcArgc);
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $raw . ', ' . $line . ', ' . $file
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $raw . ', ' . $site
             . ($argRegs === [] ? '' : ', ' . \implode(', ', $argRegs)) . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
@@ -2145,6 +2132,45 @@ trait EmitLlvmCalls
     }
 
     private ?bool $erinvScopeMemo = null;
+
+    /**
+     * `i64 line, ptr file` of this call site, for a shared helper that pushes the
+     * trace frames of the calls it makes: the frame's line and file, the site the
+     * enclosing helper was handed, or none inside a helper that has no site.
+     */
+    private function siteTraceArgs(int $line, string &$out): string
+    {
+        // The file always goes over: a Throwable built in the helper stores it.
+        if ($this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa) {
+            return 'i64 ' . $this->btLineOverride . ', ptr ' . $this->btFileOverride;
+        }
+        if ($this->cellSinkFnOverride !== null) {
+            return 'i64 0, ptr ' . $this->strLitId($this->pool->intern("\0"));
+        }
+        $file = 'ptr ' . $this->strLitId($this->pool->intern($this->frameFile()));
+        if (!$this->rt->needsBacktrace) { return 'i64 ' . (string)$line . ', ' . $file; }
+        $fn = $this->frame->name;
+        if ($fn === '') { return 'i64 ' . (string)$line . ', ' . $file; }
+        if (!isset($this->btBaseLine[$fn])) {
+            $this->btBaseLine[$fn] = $line;
+            $this->litTableBodies .= '@.btl.' . $this->mangle($fn) . ' = linkonce_odr constant i64 ' . (string)$line . "\n";
+        }
+        $b = $this->ssa->allocReg();
+        $out .= '  ' . $b . ' = load i64, ptr @.btl.' . $this->mangle($fn) . "\n";
+        $abs = $this->ssa->allocReg();
+        $out .= '  ' . $abs . ' = add i64 ' . $b . ', ' . (string)($line - $this->btBaseLine[$fn]) . "\n";
+        return 'i64 ' . $abs . ', ' . $file;
+    }
+
+    /** Make the body being built take its call site as `%btline` / `%btfile` ({@see siteTraceArgs}). */
+    private function useSiteTraceParams(): void
+    {
+        $this->btLineOverride = '%btline';
+        $this->btFileOverride = '%btfile';
+        $this->btLineOverrideSsa = $this->ssa;
+    }
+
+    private string $btFileOverride = '';
 
     /** Call-site line for {@see btPush} inside {@see erasedInvokeHelper}: a register, '' elsewhere.
      *  Only for that helper's own body, not for a helper built while it emits. */
@@ -2186,6 +2212,7 @@ trait EmitLlvmCalls
         $oldCellSinkFn = $this->cellSinkFnOverride;
         $oldCellProv = $this->cellProv;
         $oldBtLine = $this->btLineOverride;
+        $oldBtFile = $this->btFileOverride;
         $oldBtSsa = $this->btLineOverrideSsa;
 
         $this->ssa = new SsaBuilder();
@@ -2202,9 +2229,9 @@ trait EmitLlvmCalls
         $this->vdResult = '';
         $this->vdArmList = '';
         $this->vdSiteArgc = 0;
-        $this->btLineOverride = '%line';
+        $this->useSiteTraceParams();
 
-        $params = 'i64 %callee, i64 %line, ptr %file';
+        $params = 'i64 %callee, i64 %btline, ptr %btfile';
         $body = '';
         /** @var Node[] $args */
         $args = [];
@@ -2243,6 +2270,7 @@ trait EmitLlvmCalls
         }
 
         $this->btLineOverride = $oldBtLine;
+        $this->btFileOverride = $oldBtFile;
         $this->btLineOverrideSsa = $oldBtSsa;
         $this->ssa = $oldSsa;
         $this->locals = $oldLocals;

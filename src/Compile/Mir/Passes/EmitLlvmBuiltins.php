@@ -8613,6 +8613,9 @@ trait EmitLlvmBuiltins
             $oldCellProv = $this->cellProv;
             $oldCellSinkOrd = $this->cellSinkOrd;
             $oldCellSinkFn = $this->cellSinkFnOverride;
+            $oldBtLine = $this->btLineOverride;
+            $oldBtFile = $this->btFileOverride;
+            $oldBtSsa = $this->btLineOverrideSsa;
             $this->ssa = new \Compile\Mir\SsaBuilder();
             $this->ssa->reset();
             $this->resetCellGuardFrame();
@@ -8622,9 +8625,11 @@ trait EmitLlvmBuiltins
             $this->arena = new \Compile\Mir\ArenaContext();
             $this->spreadTail = null;
             $this->lastPadArgs = '';
+            // The Error is the call site's, not that of the first frame asking for this helper.
+            $this->useSiteTraceParams();
             $slot = $this->ssa->allocReg();
             $this->locals->slots['__mc_mce'] = $slot;
-            $body = 'define hidden i64 ' . $sym . "(i64 %v) noinline cold {\nentry:\n";
+            $body = 'define hidden i64 ' . $sym . "(i64 %v, i64 %btline, ptr %btfile) noinline cold {\nentry:\n";
             $body .= '  ' . $slot . " = alloca i64\n  store i64 %v, ptr " . $slot . "\n";
             $cell = Type::cell();
             $str = fn (string $x): Node => new \Compile\Mir\StringConst($x, Type::string_());
@@ -8655,9 +8660,13 @@ trait EmitLlvmBuiltins
             $this->cellProv = $oldCellProv;
             $this->cellSinkOrd = $oldCellSinkOrd;
             $this->cellSinkFnOverride = $oldCellSinkFn;
+            $this->btLineOverride = $oldBtLine;
+            $this->btFileOverride = $oldBtFile;
+            $this->btLineOverrideSsa = $oldBtSsa;
         }
+        $site = $this->siteTraceArgs(0, $out);
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $v . ")\n";
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $v . ', ' . $site . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         return $out;

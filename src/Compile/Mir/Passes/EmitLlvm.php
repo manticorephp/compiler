@@ -973,6 +973,7 @@ final class EmitLlvm implements EmitVisitor
         $this->litTableSyms = [];
         $this->litTableTaken = [];
         $this->keyedHelperTaken = [];
+        $this->keyedHelperNames = [];
         $this->objTemplates = [];
         $this->litTablesFlushed = false;
         $this->btBaseLine = [];
@@ -984,6 +985,7 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfIcmpEmitted = false;
         $this->dynfZeroEmitted = false;
         $this->dynfCacheSeq = 0;
+        $this->dynfCacheSeqByFn = [];
         $this->dynfIdTab = null;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
@@ -2476,6 +2478,10 @@ final class EmitLlvm implements EmitVisitor
      */
     private function keyedHelperName(string $prefix, string $key): string
     {
+        // The same key always gets the same name: a shape whose body did not close is
+        // asked for again later, and a fresh suffix then depended on emission order.
+        $full = $prefix . '|' . $key;
+        if (isset($this->keyedHelperNames[$full])) { return $this->keyedHelperNames[$full]; }
         $base = $prefix . \str_replace('-', 'n', (string)$this->fnvHash64($key));
         $name = $base;
         $n = 0;
@@ -2484,8 +2490,12 @@ final class EmitLlvm implements EmitVisitor
             $name = $base . '_' . (string)$n;
         }
         $this->keyedHelperTaken[$name] = true;
+        $this->keyedHelperNames[$full] = $name;
         return $name;
     }
+
+    /** @var array<string, string> prefix|key => the name {@see keyedHelperName} gave it */
+    private array $keyedHelperNames = [];
 
     private string $vdExtraBodies = '';
 
@@ -2557,6 +2567,8 @@ final class EmitLlvm implements EmitVisitor
     private bool $dynfIcmpEmitted = false;
     private bool $dynfZeroEmitted = false;
     private int $dynfCacheSeq = 0;
+    /** @var array<string, int> function => resolve-cache sites emitted in it so far */
+    private array $dynfCacheSeqByFn = [];
     /** @var array{0:string,1:int,2:array<string,int>}|null */
     private ?array $dynfIdTab = null;
     /** Signature-only imports (their bodies live in another object).
@@ -4625,14 +4637,13 @@ final class EmitLlvm implements EmitVisitor
         if (!$this->rt->needsBacktrace) { return ''; }
         if ($this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa) {
             // Inside a shared helper: the call site's absolute line and file are its arguments.
-            return $this->btPushInline($this->strLitId($this->pool->intern($display)), $this->btLineOverride, '', '%file');
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), $this->btLineOverride, '', $this->btFileOverride);
         }
         if ($this->cellSinkFnOverride !== null) {
             // Any other shared helper has no call site of its own (its nodes carry
             // line 0); relative to the frame that first asked for it, the push named
             // that frame's base line and changed with whoever asked first.
-            return $this->btPushInline($this->strLitId($this->pool->intern($display)), '0', '',
-                $this->strLitId($this->pool->intern($this->frameFile())));
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), '0', '', 'null');
         }
         $fn = $this->frame->name;
         if ($fn === '') {

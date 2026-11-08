@@ -1001,13 +1001,19 @@ trait EmitLlvmObjects
         $lnOff = $cd->propertyOffset('traceLines');
         $out = '';
         // line = the `new` site line; file = the source path.
+        // Inside a shared helper handed its call site, the site is where it was thrown.
+        $site = $this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa;
         $lp = $this->ssa->allocReg();
         $out .= '  ' . $lp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$lineOff . "\n";
-        $out .= '  store i64 ' . (string)$no->line . ', ptr ' . $lp . "\n";
+        $out .= '  store i64 ' . ($site && $no->line === 0 ? $this->btLineOverride : (string)$no->line) . ', ptr ' . $lp . "\n";
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fileOff . "\n";
         $fstr = $this->ssa->allocReg();
-        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->frameFile())) . " to i64\n";
+        // A shared helper with no site has no file either (built-in code, as php shows it):
+        // the file of whichever frame asked for it first named the wrong file elsewhere.
+        $fileLit = $site ? $this->btFileOverride
+            : $this->strLitId($this->pool->intern($this->cellSinkFnOverride !== null ? "\0" : $this->frameFile()));
+        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $fileLit . " to i64\n";
         $out .= '  store i64 ' . $fstr . ', ptr ' . $fp . "\n";
         if (!$withTrace) { return $out; }
         // Two packed vecs of the active frames, innermost first.
@@ -5599,6 +5605,9 @@ trait EmitLlvmObjects
         $oldCellSinkOrd = $this->cellSinkOrd;
         $oldCellSinkFn = $this->cellSinkFnOverride;
         $oldCellProv = $this->cellProv;
+        $oldBtLine = $this->btLineOverride;
+        $oldBtFile = $this->btFileOverride;
+        $oldBtSsa = $this->btLineOverrideSsa;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
@@ -5620,7 +5629,9 @@ trait EmitLlvmObjects
         $argsSlot = $this->ssa->allocReg();
         $this->locals->slots['__mc_dyn_obj'] = $objSlot;
         $this->locals->slots['__mc_dyn_args'] = $argsSlot;
-        $body = 'define hidden i64 ' . $sym . "(i64 %obj, ptr %args) {\nentry:\n";
+        // The call site comes in, so a shared arm pushes the frame of whoever called it.
+        $this->useSiteTraceParams();
+        $body = 'define hidden i64 ' . $sym . "(i64 %obj, ptr %args, i64 %btline, ptr %btfile) {\nentry:\n";
         $body .= '  ' . $objSlot . " = alloca i64\n  store i64 %obj, ptr " . $objSlot . "\n";
         $body .= '  ' . $argsSlot . " = alloca i64\n";
         $body .= "  %argsI = ptrtoint ptr %args to i64\n  store i64 %argsI, ptr " . $argsSlot . "\n";
@@ -5637,6 +5648,9 @@ trait EmitLlvmObjects
         }
 
         $this->noSpreadRoute = $oldNoSpreadRoute;
+        $this->btLineOverride = $oldBtLine;
+        $this->btFileOverride = $oldBtFile;
+        $this->btLineOverrideSsa = $oldBtSsa;
         $this->ssa = $oldSsa;
         $this->locals = $oldLocals;
         $this->cf = $oldCf;
@@ -6580,7 +6594,7 @@ trait EmitLlvmObjects
             $this->dynScopeRelTables[$scope] = ['null', 0];
             return ['null', 0];
         }
-        $sym = '@.dynd.rel.' . (string)\count($this->dynScopeRelTables);
+        $sym = '@.dynd.rel.' . $this->keyedHelperName('', 'rel|' . $scope);
         $this->dynfExtraBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($names)
             . ' x ptr] [' . \implode(', ', $names) . "]\n";
         $this->dynScopeRelTables[$scope] = [$sym, \count($names)];
@@ -6656,7 +6670,8 @@ trait EmitLlvmObjects
                 $rp = $this->ssa->allocReg();
                 $out .= '  ' . $rp . ' = inttoptr i64 ' . $ra . " to ptr\n";
                 $rv = $this->ssa->allocReg();
-                $out .= '  ' . $rv . ' = call i64 ' . $armSym . '(i64 ' . $ro . ', ptr ' . $rp . ")\n";
+                $site = $this->siteTraceArgs(0, $out);
+                $out .= '  ' . $rv . ' = call i64 ' . $armSym . '(i64 ' . $ro . ', ptr ' . $rp . ', ' . $site . ")\n";
                 $out .= '  store i64 ' . $rv . ', ptr ' . $res . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $nextL . ":\n";
@@ -9223,11 +9238,11 @@ trait EmitLlvmObjects
         $k .= '@';
         for ($i = 0; $i < $argc; $i++) {
             $t = $argOutTypes[$i] ?? null;
-            $k .= ($t === null ? '-' : (string)$t->id) . ',';
+            $k .= ($t === null ? '-' : $t->exactString()) . ',';
         }
         // The arms read an address differently from a value: two sites apart on it share no body.
-        foreach ($this->vdWiden as $wi => $wt) { $k .= 'w' . (string)$wi . ':' . (string)$wt->id . ','; }
-        foreach ($this->vdAddrLoad as $li => $lt) { $k .= 'l' . (string)$li . ':' . (string)$lt->id . ','; }
+        foreach ($this->vdWiden as $wi => $wt) { $k .= 'w' . (string)$wi . ':' . $wt->exactString() . ','; }
+        foreach ($this->vdAddrLoad as $li => $lt) { $k .= 'l' . (string)$li . ':' . $lt->exactString() . ','; }
         return $k;
     }
     /** A dispatch arm's result in a cell-typed call: an enum body returns its ordinal, and a cell holds the case singleton. */
@@ -10087,7 +10102,8 @@ trait EmitLlvmObjects
         }
         $argsP = $this->lastValue;
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $recv . ', ptr ' . $argsP . ")\n";
+        $site = $this->siteTraceArgs($n->line, $out);
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $recv . ', ptr ' . $argsP . ', ' . $site . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
@@ -10104,7 +10120,9 @@ trait EmitLlvmObjects
      * the receiver is spilled once and the arm is picked at run time instead
      * of dispatching blindly into an unrelated class's `__call`.
      */
-    /** @var array<int, bool> MethodCall_ nodes already wrapped by {@see emitMixedMagicCall} */
+    /** @var array<int, Node> MethodCall_ nodes already wrapped by {@see emitMixedMagicCall}, kept
+     *  alive so their id names no later node: a freed node's id is handed out again, and the
+     *  next call reusing it skipped its own magic check, depending on emission order. */
     private array $mixedMagicDone = [];
 
     /** @var array<string, bool> */
@@ -10181,7 +10199,7 @@ trait EmitLlvmObjects
         $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
         $plain = new \Compile\Mir\MethodCall_($t(), $mc->method, $mc->args, $mc->type);
         $plain->srcArgc = $mc->srcArgc;
-        $this->mixedMagicDone[\spl_object_id($plain)] = true;
+        $this->mixedMagicDone[\spl_object_id($plain)] = $plain;
         $out .= $this->emitNode(new \Compile\Mir\Ternary($magicOnly, $viaMagic, $plain, $cell));
         // Both arms read the receiver through a local, a borrow: the fresh temp is this site's to give back.
         // `collect($x)->map(…)` takes this path wherever some class has `__call` and no `map`.
@@ -10499,13 +10517,13 @@ trait EmitLlvmObjects
         // cannot share one switch, and the arg emission below is already built
         // against the resolved callee's signature. Recorded in docs/ROADMAP.md.
         if ($mcStatic !== '' && isset($this->classes[$mcStatic]) && $mc->object->type->kind === Type::KIND_OBJ
-            && !isset($this->mixedMagicDone[\spl_object_id($mc)])
+            && ($this->mixedMagicDone[\spl_object_id($mc)] ?? null) !== $mc
             && $this->resolveMethodClass($mcStatic, $mc->method) === ''
             && $this->resolveMethodClass($mcStatic, '__call') === ''
             && $this->descendantAnswers($mcStatic, $mc->method)) {
             return $this->emitMixedMagicCall($mc, true);
         }
-        if (!isset($this->classes[$mcStatic]) && !isset($this->mixedMagicDone[\spl_object_id($mc)])
+        if (!isset($this->classes[$mcStatic]) && ($this->mixedMagicDone[\spl_object_id($mc)] ?? null) !== $mc
             && ($mc->object->type->kind === Type::KIND_CELL || $mc->object->type->kind === Type::KIND_UNKNOWN)
             && $this->anyClassDeclares($mc->method) && $this->magicOnlyClassExists($mc->method)) {
             return $this->emitMixedMagicCall($mc);
