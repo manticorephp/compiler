@@ -4907,6 +4907,24 @@ trait EmitLlvmObjects
         $out .= '  ' . $res . " = alloca i64\n";
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $endL = $this->ssa->allocLabel('dynp.end');
+        // Inlining the full read path per name made a site cost names × class
+        // switch: Carbon::roundUnit reached 348K lines of IR. Past a few names,
+        // probe the table of shared per-name readers instead, as the erased path does.
+        $tabled = \count($propTypes) >= self::DYNF_TABLE_MIN;
+        if ($tabled) {
+            $out .= $this->emitObjPtrOf($n->object);
+            $objPtr = $this->lastValue;
+            $rows = [];
+            foreach ($propTypes as $p => $pt) { $rows[(string)$p] = $this->cellPropReadHelperFor((string)$p); }
+            $out .= $this->dynPropTableProbe($keyP, $rows, 'dynp');
+            $fp = $this->lastValue;
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = call i64 ' . $fp . '(ptr ' . $objPtr . ")\n";
+            $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+            $out .= '  br label %' . $endL . "\n";
+            $out .= $this->dynPropMissLabel . ":\n";
+            $propTypes = [];
+        }
         foreach ($propTypes as $p => $pt) {
             $hitL = $this->ssa->allocLabel('dynp.hit');
             $nextL = $this->ssa->allocLabel('dynp.next');
@@ -4956,6 +4974,7 @@ trait EmitLlvmObjects
         $out .= '  ' . $loaded . ' = load i64, ptr ' . $res . "\n";
         $this->lastValue = $loaded;
         $this->lastValueType = 'i64';
+        if ($tabled) { $this->markCellOpaque($loaded); }
         return $out;
     }
 

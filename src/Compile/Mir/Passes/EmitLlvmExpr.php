@@ -822,9 +822,14 @@ trait EmitLlvmExpr
     private function cellIntBadRuntime(): string
     {
         $m = (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK;
+        // Inline only the untagged / int test; the string scan is out of line
+        // (inlined whole it was ~450K lines of the Laravel IR).
         $o  = "\ndefine i32 @__manticore_cell_int_bad(i64 %v) alwaysinline {\n";
-        $o .= "entry:\n  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  br i1 %isint, label %ok, label %slow\n";
-        $o .= "slow:\n  %istag = icmp ugt i64 %v, -4503599627370496\n  br i1 %istag, label %tagged, label %ok\n";
+        $o .= "entry:\n  %hi = lshr i64 %v, 48\n  %isint = icmp eq i64 %hi, 65521\n  %istag = icmp ugt i64 %v, -4503599627370496\n";
+        $o .= "  %nt = xor i1 %istag, true\n  %fast = or i1 %isint, %nt\n  br i1 %fast, label %ok, label %slow\n";
+        $o .= "ok:\n  ret i32 0\nslow:\n  %r = call i32 @__manticore_cell_int_bad_slow(i64 %v)\n  ret i32 %r\n}\n";
+        $o .= "\ndefine i32 @__manticore_cell_int_bad_slow(i64 %v) noinline {\n";
+        $o .= "entry:\n  %hi = lshr i64 %v, 48\n  br label %tagged\n";
         $o .= "tagged:\n  %nib = and i64 %hi, 15\n  switch i64 %nib, label %ok [\n    i64 3, label %null\n    i64 7, label %arr\n    i64 4, label %str\n  ]\n";
         $o .= "ok:\n  ret i32 0\nnull:\n  ret i32 1\narr:\n  ret i32 2\n";
         $o .= "str:\n  %sp = and i64 %v, " . $m . "\n  %sptr = inttoptr i64 %sp to ptr\n  br label %ws\n";
@@ -6835,10 +6840,11 @@ trait EmitLlvmExpr
         $vt = $this->lastValueType;
         $out = $this->cellTagIr($v);
         $tag = $this->cellTagReg;
+        $arms = [];
         foreach ([[1, 'int'], [4, 'string']] as $tn) {
             $c = $this->ssa->allocReg();
             $out .= '  ' . $c . ' = icmp eq i64 ' . $tag . ', ' . (string)$tn[0] . "\n";
-            $out .= $this->emitThrowIf($c, $cls, $head . $tn[1] . $given);
+            $arms[] = [$c, $head . $tn[1] . $given];
         }
         $isB = $this->ssa->allocReg();
         $bit = $this->ssa->allocReg();
@@ -6852,10 +6858,57 @@ trait EmitLlvmExpr
         $out .= '  ' . $t . ' = icmp eq i64 ' . $bit . ", 1\n";
         $out .= '  ' . $isF . ' = and i1 ' . $isB . ', ' . $f . "\n";
         $out .= '  ' . $isT . ' = and i1 ' . $isB . ', ' . $t . "\n";
-        $out .= $this->emitThrowIf($isF, $cls, $head . 'false' . $given);
-        $out .= $this->emitThrowIf($isT, $cls, $head . 'true' . $given);
+        $arms[] = [$isF, $head . 'false' . $given];
+        $arms[] = [$isT, $head . 'true' . $given];
+        $out .= $this->emitColdRaise($arms, $cls);
         $this->lastValue = $v;
         $this->lastValueType = $vt;
+        return $out;
+    }
+
+    /**
+     * Throw `$cls` with the message of the first arm whose i1 holds, as ONE cold
+     * block per site: the message is a `select` over the arms' literals and the
+     * raise is a single call. One {@see emitThrowIf} per arm was a branch, a raise
+     * and a dead block each — the per-kind guards were ~5% of the Laravel IR.
+     * Falls back to per-arm throws when `$cls` has no raise helper.
+     * @param list<array{0: string, 1: string}> $arms [i1 register, message]
+     */
+    private function emitColdRaise(array $arms, string $cls): string
+    {
+        $raise = $this->raiseHelper($cls);
+        if ($raise === '' || \count($arms) < 2) {
+            $out = '';
+            foreach ($arms as $a) { $out .= $this->emitThrowIf($a[0], $cls, $a[1]); }
+            return $out;
+        }
+        $saved = $this->lastValue;
+        $savedT = $this->lastValueType;
+        $any = $arms[0][0];
+        $out = '';
+        for ($i = 1; $i < \count($arms); $i++) {
+            $o = $this->ssa->allocReg();
+            $out .= '  ' . $o . ' = or i1 ' . $any . ', ' . $arms[$i][0] . "\n";
+            $any = $o;
+        }
+        $thr = $this->ssa->allocLabel('arith.throw');
+        $ok = $this->ssa->allocLabel('arith.ok');
+        $out .= '  br i1 ' . $any . ', label %' . $thr . ', label %' . $ok . "\n" . $thr . ":\n";
+        $msgs = [];
+        foreach ($arms as $a) {
+            $out .= $this->emitNode(new \Compile\Mir\StringConst($a[1], Type::string_()));
+            $out .= $this->coerceToI64();
+            $msgs[] = $this->lastValue;
+        }
+        $msg = $msgs[\count($msgs) - 1];
+        for ($i = \count($arms) - 2; $i >= 0; $i--) {
+            $s = $this->ssa->allocReg();
+            $out .= '  ' . $s . ' = select i1 ' . $arms[$i][0] . ', i64 ' . $msgs[$i] . ', i64 ' . $msg . "\n";
+            $msg = $s;
+        }
+        $out .= '  call void ' . $raise . '(i64 ' . $msg . ", i64 0)\n  unreachable\n" . $ok . ":\n";
+        $this->lastValue = $saved;
+        $this->lastValueType = $savedT;
         return $out;
     }
 
@@ -7030,17 +7083,18 @@ trait EmitLlvmExpr
             $keep = $this->lastValue;
             $out = '';
             // A by-ref scratch holds a callee's OUTPUT: a null there is no argument.
-            foreach ($this->intGuardOff ? [] : [[1, 'null'], [2, 'array'], [3, 'string']] as $bw) {
-                if ($out === '') {
-                    $bad = $this->ssa->allocReg();
-                    $out = '  ' . $bad . ' = call i32 @__manticore_cell_int_bad(i64 ' . $keep . ")\n";
+            if (!$this->intGuardOff) {
+                $bad = $this->ssa->allocReg();
+                $out = '  ' . $bad . ' = call i32 @__manticore_cell_int_bad(i64 ' . $keep . ")\n";
+                $arms = [];
+                foreach ([[1, 'null'], [2, 'array'], [3, 'string']] as $bw) {
+                    $cnd = $this->ssa->allocReg();
+                    $out .= '  ' . $cnd . ' = icmp eq i32 ' . $bad . ', ' . (string)$bw[0] . "\n";
+                    $arms[] = [$cnd, $this->unboxPropCtx !== ''
+                        ? 'Cannot assign ' . $bw[1] . ' to property ' . $this->unboxPropCtx . ' of type int'
+                        : 'Argument must be of type int, ' . $bw[1] . ' given'];
                 }
-                $cnd = $this->ssa->allocReg();
-                $out .= '  ' . $cnd . ' = icmp eq i32 ' . $bad . ', ' . (string)$bw[0] . "\n";
-                $msg = $this->unboxPropCtx !== ''
-                    ? 'Cannot assign ' . $bw[1] . ' to property ' . $this->unboxPropCtx . ' of type int'
-                    : 'Argument must be of type int, ' . $bw[1] . ' given';
-                $out .= $this->emitThrowIf($cnd, 'TypeError', $msg);
+                $out .= $this->emitColdRaise($arms, 'TypeError');
             }
             $this->lastValue = $keep;
             $r = $this->ssa->allocReg();

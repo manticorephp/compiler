@@ -777,8 +777,18 @@ trait EmitLlvmExceptions
     /** Runtime helpers that never run user code and never throw. */
     private function ehNounwind(string $callee): bool
     {
+        // Each invoke costs a block and an unwind edge per call site: in the
+        // Laravel build the backtrace ring alone was 648K of them.
         return $callee === '@__mc_eh_catch'
             || $callee === '@__mir_elem_untag'
+            || $callee === '@__mir_bt_push'
+            || $callee === '@__mir_bt_push_rel'
+            || $callee === '@__mir_bt_pop'
+            || $callee === '@__manticore_deref'
+            || $callee === '@__manticore_tag'
+            || $callee === '@__manticore_cell_int_bad'
+            || $callee === '@__mir_obj_handle_alloc'
+            || \str_starts_with($callee, '@__mc_dynf_')
             || \str_starts_with($callee, '@__mir_arena_')
             || \str_starts_with($callee, '@__mir_rc_retain')
             || \str_starts_with($callee, '@__manticore_box_');
