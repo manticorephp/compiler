@@ -621,7 +621,11 @@ final class TypeCheck
             $at = $n->array->type;
             $k = self::constKey($n->index);
             if ($k !== null && !$n->probe && $at->isShape() && $at->declared && $at->shapeField($k) === null) {
-                $this->errors[] = $this->at($n) . $inFn . '(): key ' . (string)$k . ' is not in ' . $at->shapeString();
+                if ($this->demoteArgMismatch) {
+                    $this->warnings[] = ($n->line > 0 ? 'line ' . (string)$n->line . ': warning: ' : 'warning: ') . $inFn . '(): key ' . (string)$k . ' is not in ' . $at->shapeString();
+                } else {
+                    $this->errors[] = $this->at($n) . $inFn . '(): key ' . (string)$k . ' is not in ' . $at->shapeString();
+                }
             }
         } elseif ($n->kind === Node::KIND_STORE_LOCAL && $n->declaredType !== null
             && $n->declaredType->hasShape()) {
@@ -691,6 +695,16 @@ final class TypeCheck
                     $gt = $given->shapeFieldAt($ek);
                     if ($gt === null) {
                         if (isset($want->nullableFields[$ek])) { continue; }
+                        // A docblock is advisory in php: in a user program a key-set
+                        // disagreement (laravel/guzzle/carbon declare shapes their own
+                        // code contradicts) is a warning; the shaped read is tag-checked
+                        // at run time.
+                        if ($this->demoteArgMismatch) {
+                            if ($this->shapeWarn === '') {
+                                $this->shapeWarn = 'key ' . Type::shapeKeyLabel($ek) . ' of ' . $want->shapeString() . ' is missing from ' . $given->shapeString();
+                            }
+                            continue;
+                        }
                         $why = 'key ' . Type::shapeKeyLabel($ek) . ' is missing';
                         break;
                     }
@@ -733,6 +747,8 @@ final class TypeCheck
                 }
             } elseif ($given->element !== null && $this->concrete($given->element)) {
                 foreach ($want->fields as $ek => $ft) {
+                    // An optional key may simply be absent from the map.
+                    if (isset($want->nullableFields[$ek])) { continue; }
                     if ($this->fieldIncompatible($given->element, $ft)) {
                         $why = 'key ' . Type::shapeKeyLabel($ek) . ' is ' . $given->element->toString() . ', ' . $ft->toString() . ' expected';
                         break;

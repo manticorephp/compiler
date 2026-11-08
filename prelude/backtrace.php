@@ -22,10 +22,11 @@
  * @param int[] $lines
  * @return array<int,array<string,mixed>>
  */
-function __mir_bt_frames(array $names, array $lines, string $file): array
+function __mir_bt_frames(array $names, array $lines, string $file, int $limit = 0): array
 {
     $out = [];
     $n = \count($names);
+    if ($limit > 0 && $n > $limit) { $n = $limit; }
     $i = 0;
     while ($i < $n) {
         $name = $names[$i];

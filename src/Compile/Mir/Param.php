@@ -93,4 +93,9 @@ final class Param
     /** The call-site refinement above was withdrawn; never made again (the
      *  same monotone rule as {@see $elemGuessWithdrawn}). */
     public bool $siteRefineWithdrawn = false;
+
+    /** The array type of this param comes from a DOCBLOCK alone (no native type). php does not enforce
+     *  a docblock, so a body that casts the param with `(array)` is expecting a non-array (an object row
+     *  handed to `newFromBuilder($attributes)`); {@see Passes\InferTypes::withdrawDocArrayClaims}. */
+    public bool $docOnly = false;
 }

@@ -1,0 +1,8 @@
+string(9) "Emergency"
+bool(true)
+bool(true)
+bool(true)
+enum(Mon\Level::Emergency)
+bool(false)
+bool(true)
+Undefined constant Mon\Level::Nope

@@ -892,12 +892,13 @@ trait EmitLlvmControl
      */
     private function armIsFresh(Node $arm, string $flavor): bool
     {
+        $arm = \Compile\Mir\Ownership::promotedInvoke($arm);
         if ($arm->type->kind === Type::KIND_NULL) { return true; }
         $k = $arm->kind;
         if ($k === Node::KIND_THROW) { return true; }
         if ($k === Node::KIND_STRING_CONST || $k === Node::KIND_CONCAT
             || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
-            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ || $k === Node::KIND_CLONE
             || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
             || $k === Node::KIND_INVOKE || \Compile\Mir\BitOp::mintsFresh($arm)) {
             return true;
@@ -2561,7 +2562,12 @@ trait EmitLlvmControl
                             $out .= '  ' . $sp . ' = inttoptr i64 ' . $subj . " to ptr\n";
                             $cp = $this->ssa->allocReg();
                             $out .= '  ' . $cp . ' = inttoptr i64 ' . $cv . " to ptr\n";
-                            $out .= '  ' . $eq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+                            $seq = $this->ssa->allocReg();
+                            $out .= '  ' . $seq . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
+                            // null === null: two absent strings are the same word, which str_eq does not accept.
+                            $same = $this->ssa->allocReg();
+                            $out .= '  ' . $same . ' = icmp eq i64 ' . $subj . ', ' . $cv . "\n";
+                            $out .= '  ' . $eq . ' = or i1 ' . $seq . ', ' . $same . "\n";
                         } elseif ($vk === Type::KIND_CELL && $this->isObjishType($m->subject->type)) {
                             // An object subject against a cell cond: identity by payload.
                             $out .= $this->objCellSameIr($subj, $cv);

@@ -3216,7 +3216,8 @@ trait EmitLlvmExpr
             $lpa = $nc->left;
             if ($lpa->object->kind === Node::KIND_PROPERTY_ACCESS
                 && $lpa->object->type->kind === Type::KIND_OBJ) {
-                return $this->emitCoalesceChain($nc, $n->type);
+                $chained = $this->emitCoalesceChain($nc, $n->type);
+                if ($chained !== null) { return $chained; }
             }
         }
         // An array/assoc access can be ABSENT (PHP: missing key/index →
@@ -3422,7 +3423,8 @@ trait EmitLlvmExpr
         return $out . $this->coalesceFloatResult($n, $wantCell);
     }
 
-    private function emitCoalesceChain(NullCoalesce_ $nc, Type $resultType): string
+    /** The fused property-chain `??`, or null when the leaf property is not a declared slot (an interface-typed receiver). */
+    private function emitCoalesceChain(NullCoalesce_ $nc, Type $resultType): ?string
     {
         $chain = [];
         $node = $nc->left;
@@ -3441,6 +3443,7 @@ trait EmitLlvmExpr
             }
         }
         $hops = \count($chain);
+        if ($hops === 0) { return null; }
         $leafPa = $chain[0];
         if ($leafPa->kind !== Node::KIND_PROPERTY_ACCESS) {
             throw new \RuntimeException('emitCoalesceChain: non-property leaf');
@@ -3918,7 +3921,7 @@ trait EmitLlvmExpr
     private function emitBagOfFn(): string
     {
         $body = $this->emitBagOfUnknownClassInline('%bagf.obj');
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_bag_of') . "(ptr %bagf.obj) noinline optnone {\nentry:\n"
+        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_bag_of') . "(ptr %bagf.obj) noinline {\nentry:\n"
             . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
     }
 
@@ -4005,6 +4008,23 @@ trait EmitLlvmExpr
         $c = $n;
         $ok = $c->operand->type->kind;
         $out = $c->target === 'float' ? $this->emitNodeFloatSink($c->operand) : $this->emitNode($c->operand);
+        // `(array) new Bag()` / `(array) make()`: the object is a temp with no
+        // other owner; the array result co-owns everything it copied out.
+        $castObjFlavor = $c->target === 'array' && $ok === Type::KIND_OBJ
+            ? $this->freshRcArgFlavor($c->operand) : '';
+        if ($castObjFlavor !== '') {
+            $out .= $this->coerceToPtr();
+            $objp = $this->lastValue;
+            $out .= $this->emitCastObjToArray($c);
+            $res = $this->lastValue;
+            $resTy = $this->lastValueType;
+            $oi = $this->ssa->allocReg();
+            $out .= '  ' . $oi . ' = ptrtoint ptr ' . $objp . " to i64\n";
+            $out .= $this->rcReleaseReg($oi, $castObjFlavor);
+            $this->lastValue = $res;
+            $this->lastValueType = $resTy;
+            return $out;
+        }
         if ($c->target === 'string') {
             if ($ok === Type::KIND_STRING) { $out .= $this->coerceToPtr(); return $out; }
             if ($ok === Type::KIND_CELL) {
@@ -4357,64 +4377,7 @@ trait EmitLlvmExpr
             // The printers want the bag ALONE (they print the declared slots
             // themselves) and call {@see EmitLlvmBuiltins::biObjBag} for it.
             if ($ok === Type::KIND_OBJ) {
-                $out .= $this->coerceToPtr();
-                $objp = $this->lastValue;
-                $cls = $c->operand->type->class ?? '';
-                $cd = $cls !== '' ? ($this->classes[$cls] ?? null) : null;
-                // An interface (no ClassDef), an abstract class or a class with
-                // subclasses names no layout: the runtime class decides, as for
-                // an erased receiver.
-                if ($cd === null || $cd->isAbstract || (!$cd->isFinal && $this->classHasSubclass($cls))) {
-                    $out .= $this->emitObjectVarsOfPtr($objp, true);
-                    return $out;
-                }
-                $declared = $cd->propertyNames !== [];
-                $decl = '';
-                if ($declared) {
-                    $out .= $this->emitDeclaredPropsArray($objp, $cls, false, false, true);
-                    $decl = $this->lastValue;
-                    if (!$cd->usesBag()) {
-                        $this->lastValue = $decl; $this->lastValueType = 'ptr';
-                        return $out;
-                    }
-                } elseif ($cd !== null && !$cd->usesBag()) {
-                    // Neither declared slots nor a bag: the object ends at its
-                    // header, so the bag word below would be read past the end.
-                    $e0 = $this->ssa->allocReg();
-                    $out .= '  ' . $e0 . " = call ptr @__mir_array_alloc(i64 0)\n";
-                    $out .= '  store i64 0, ptr ' . $e0 . "\n";
-                    $this->lastValue = $e0; $this->lastValueType = 'ptr';
-                    return $out;
-                }
-                $bagOff = $this->bagOffsetOf($c->operand);
-                $bg = $this->ssa->allocReg();
-                $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . (string)$bagOff . "\n";
-                $bagI = $this->ssa->allocReg();
-                $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-                $bagP = $this->ssa->allocReg();
-                $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
-                if (!$declared) {
-                    // CO-OWNED, like every other arm of the cast: the result is
-                    // owned by whoever consumes it ({@see Ownership::castArrayMints}),
-                    // and a borrowed bag would be freed out from under the object.
-                    $this->rt->needsRc = true;
-                    $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
-                    $this->lastValue = $bagP; $this->lastValueType = 'ptr';
-                    return $out;
-                }
-                // Declared first, bag second — php's order, and `+` keeps the
-                // left side on a (impossible here) collision. Both halves are
-                // cell-repr, so the union's single repr stamp is exact.
-                $un = $this->ssa->allocReg();
-                $out .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $decl
-                      . ', ptr ' . $bagP . ")\n";
-                // `+` COPIES its left side, co-owning its REPR_CELL elements: the
-                // declared map is dead now.
-                $this->rt->needsRc = true;
-                $this->rt->needsStrRc = true;
-                $out .= '  call void @__mir_array_release(ptr ' . $decl . ")\n";
-                $this->lastValue = $un; $this->lastValueType = 'ptr';
-                return $out;
+                return $out . $this->emitCastObjToArray($c);
             }
             $out .= $this->coerceToPtr();
             return $out;
@@ -4440,6 +4403,69 @@ trait EmitLlvmExpr
         $reg = $this->ssa->allocReg();
         $out .= '  ' . $reg . ' = zext i1 ' . $bit . " to i64\n";
         $this->lastValue = $reg; $this->lastValueType = 'i64';
+        return $out;
+    }
+
+    /** `(array)$obj` of an object-typed operand already emitted into lastValue. */
+    private function emitCastObjToArray(Cast $c): string
+    {
+        $out = $this->coerceToPtr();
+        $objp = $this->lastValue;
+        $cls = $c->operand->type->class ?? '';
+        $cd = $cls !== '' ? ($this->classes[$cls] ?? null) : null;
+        // An interface (no ClassDef), an abstract class or a class with
+        // subclasses names no layout: the runtime class decides, as for
+        // an erased receiver.
+        if ($cd === null || $cd->isAbstract || (!$cd->isFinal && $this->classHasSubclass($cls))) {
+            $out .= $this->emitObjectVarsOfPtr($objp, true);
+            return $out;
+        }
+        $declared = $cd->propertyNames !== [];
+        $decl = '';
+        if ($declared) {
+            $out .= $this->emitDeclaredPropsArray($objp, $cls, false, false, true);
+            $decl = $this->lastValue;
+            if (!$cd->usesBag()) {
+                $this->lastValue = $decl; $this->lastValueType = 'ptr';
+                return $out;
+            }
+        } elseif ($cd !== null && !$cd->usesBag()) {
+            // Neither declared slots nor a bag: the object ends at its
+            // header, so the bag word below would be read past the end.
+            $e0 = $this->ssa->allocReg();
+            $out .= '  ' . $e0 . " = call ptr @__mir_array_alloc(i64 0)\n";
+            $out .= '  store i64 0, ptr ' . $e0 . "\n";
+            $this->lastValue = $e0; $this->lastValueType = 'ptr';
+            return $out;
+        }
+        $bagOff = $this->bagOffsetOf($c->operand);
+        $bg = $this->ssa->allocReg();
+        $out .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objp . ', i64 ' . (string)$bagOff . "\n";
+        $bagI = $this->ssa->allocReg();
+        $out .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+        $bagP = $this->ssa->allocReg();
+        $out .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+        if (!$declared) {
+            // CO-OWNED, like every other arm of the cast: the result is
+            // owned by whoever consumes it ({@see Ownership::castArrayMints}),
+            // and a borrowed bag would be freed out from under the object.
+            $this->rt->needsRc = true;
+            $out .= '  call void @__mir_array_retain(ptr ' . $bagP . ")\n";
+            $this->lastValue = $bagP; $this->lastValueType = 'ptr';
+            return $out;
+        }
+        // Declared first, bag second — php's order, and `+` keeps the
+        // left side on a (impossible here) collision. Both halves are
+        // cell-repr, so the union's single repr stamp is exact.
+        $un = $this->ssa->allocReg();
+        $out .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $decl
+              . ', ptr ' . $bagP . ")\n";
+        // `+` COPIES its left side, co-owning its REPR_CELL elements: the
+        // declared map is dead now.
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_array_release(ptr ' . $decl . ")\n";
+        $this->lastValue = $un; $this->lastValueType = 'ptr';
         return $out;
     }
 

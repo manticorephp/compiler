@@ -335,18 +335,19 @@ trait InferCalls
             || $n === '__mc_refl_consts_fn' || $n === '__mc_refl_ifaces_fn' || $n === '__mc_refl_file_fn' || $n === '__mc_refl_doc_fn'
             || $n === '__mc_refl_fn_find' || $n === '__mc_refl_clo_find' || $n === '__mc_refl_row_tramp'
             || $n === '__mc_refl_param_flags'
+            || $n === '__mc_refl_row_caps' || $n === '__mc_refl_caps_count' || $n === '__mc_refl_caps_kind'
             || $n === '__mc_refl_param_nattrs' || $n === '__mc_refl_param_attrs'
             || $n === '__mc_refl_param_deffn') { return Type::int_(); }
         if ($n === '__mc_refl_name'
             || $n === '__mc_refl_param_name' || $n === '__mc_refl_param_type'
-            || $n === '__mc_refl_row_name' || $n === '__mc_refl_attr_name'
+            || $n === '__mc_refl_row_name' || $n === '__mc_refl_attr_name' || $n === '__mc_refl_caps_name'
             || $n === '__mc_refl_attr_err'
             || $n === '__mc_refl_row_rettype' || $n === '__mc_refl_row_declclass'
             || $n === '__mc_refl_prow_type') { return Type::string_(); }
         // The boxed result of an indirect trampoline call — a mixed cell the
         // prelude's ReflectionMethod::invoke / newInstance hand back to the user.
         if ($n === '__mc_refl_invoke' || $n === '__mc_refl_call1'
-            || $n === '__mc_refl_call0' || $n === '__mc_refl_clo_this') { return Type::cell(); }
+            || $n === '__mc_refl_call0' || $n === '__mc_refl_clo_this' || $n === '__mc_refl_clo_cap') { return Type::cell(); }
         if ($n === '__mc_refl_prop_set') { return Type::void(); }
         // ptr_to_int: a Ptr's raw address (the mirror of int_to_ptr above).
         if ($n === 'ptr_to_int') { return Type::int_(); }
@@ -357,7 +358,7 @@ trait InferCalls
         if ($n === 'str_bytes' || $n === 'manticore_raw_str_bytes') { return Type::int_(); }
 
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
-            || $n === 'ord' || $n === 'intval' || $n === 'intdiv'
+            || $n === 'ord' || $n === '__mc_str_cmp_bytes' || $n === '__mc_mb_ascii_run' || $n === 'intval' || $n === 'intdiv'
             || $n === 'printf' || $n === 'spl_object_id' || $n === '__mc_obj_addr' || $n === 'gc_collect_cycles'
             || $n === 'strcspn' || $n === '__mc_crc32b'
             || $n === '__mc_b64_ok' || $n === '__mc_hex_ok'
@@ -675,7 +676,9 @@ trait InferCalls
         // and method access work — the cell path masks the low 48 bits, which is
         // identity for a real heap pointer. Boxing objects at the closure return
         // would have to be matched by an unmask in every typed callee path.
-        if ($ct->kind === Type::KIND_CELL || $ct->kind === Type::KIND_UNKNOWN) {
+        // `$c::$m()` and `[$c, $m]()`: an array callable takes the same erased invoke, and left
+        // `unknown` its +1 had no owner: every Carbon::now() through DateFactory::__call stayed alive.
+        if ($ct->kind === Type::KIND_CELL || $ct->kind === Type::KIND_UNKNOWN || $ct->isArray()) {
             $node->type = Type::cell();
             return $node->type;
         }
@@ -940,6 +943,15 @@ trait InferCalls
                 return $node->type;
             }
             $cls = $this->resolveMethodClass($objType->class, $node->method);
+            // The static class has no such method but a subclass answers it through
+            // `__call` (`Carbon::setTimestamp()` is typed `DateTime`, and
+            // `->setMicroseconds()` is Carbon's magic): the emitter dispatches on
+            // the runtime class and the answer is a boxed cell, not whatever word
+            // `unknown` would read.
+            if ($cls === '' && $this->subclassAnswersByMagicCall($objType->class, $node->method)) {
+                $node->type = Type::cell();
+                return $node->type;
+            }
             // Interface-typed receiver (e.g. `\Throwable $e`): the interface has
             // no ClassDef, so borrow a return signature from an IMPLEMENTING
             // class. Matching on the method NAME alone picks whichever unrelated
@@ -954,6 +966,18 @@ trait InferCalls
                 }
                 foreach ($this->declarersOf($node->method) as $cn) {
                     if ($this->classImplementsT($cn, $recvIface)) { $cls = $cn; break; }
+                }
+            }
+            // The declarer scan above only sees classes that DECLARE the method. An
+            // implementer that INHERITS it (`App extends Container implements
+            // Application`) is invisible to it, and the name-only fallback below
+            // then adopted an unrelated `Signals::instance(): Signals` as the
+            // result type of `$app->instance(...)`. Resolve through the subtypes.
+            if ($cls === '') {
+                if (!$this->subtypeIndexBuilt) { $this->buildSubtypeIndex(); }
+                foreach ($this->subtypesOf[$objType->class] ?? [] as $sub) {
+                    $b = $this->resolveMethodClass($sub, $node->method);
+                    if ($b !== '') { $cls = $b; break; }
                 }
             }
             // No implementing class in this module (a cross-module interface, or
@@ -1039,6 +1063,18 @@ trait InferCalls
         return $node->type;
     }
 
+    /** Does a class below `$class` answer `$method` ONLY through `__call` (the class itself neither declares nor inherits it)? */
+    private function subclassAnswersByMagicCall(string $class, string $method): bool
+    {
+        if (!isset($this->classes[$class])) { return false; }
+        if (!$this->subtypeIndexBuilt) { $this->buildSubtypeIndex(); }
+        foreach ($this->subtypesOf[$class] ?? [] as $sub) {
+            if ($sub === $class) { continue; }
+            if ($this->resolveMethodClass($sub, $method) === '' && $this->classDefinesMagic($sub, '__call')) { return true; }
+        }
+        return false;
+    }
+
     /**
      * The return type of an erased-receiver call that NO class declares but some
      * class answers through __call — the shape EmitLlvm rewrites the call into.
@@ -1095,9 +1131,14 @@ trait InferCalls
         $shapeDiffers = false;
         $numeric = true;
         $differ = false;
+        /** @var array<string, bool> $objClasses */
+        $objClasses = [];
+        $allObj = true;
         foreach ($bodies as $b) {
             $t = $this->sigs[$b . '__' . $method] ?? null;
             if ($t === null) { continue; }
+            if ($t->kind === Type::KIND_OBJ && $t->class !== null && $t->class !== '') { $objClasses[$t->class] = true; }
+            else { $allObj = false; }
             if ($t->kind !== Type::KIND_INT && $t->kind !== Type::KIND_FLOAT) { $numeric = false; }
             if ($first === null) { $first = $t; $acc = $t; continue; }
             if ($t->kind === Type::KIND_ARRAY && $acc !== null && $acc->kind === Type::KIND_ARRAY) {
@@ -1111,6 +1152,17 @@ trait InferCalls
             if ($t->kind !== $first->kind) { $differ = true; }
         }
         if (!$differ) {
+            // Objects of different CLASSES share the representation but not the
+            // class: adopting the first body's `obj<S>` told every consumer the
+            // result IS an `S` — `get_class()` folded to it and a method call on
+            // the result bound to `S`'s body (phpoption's `Result::map` answered
+            // a `Success` for an `Error`). The call's type is the nearest common
+            // ancestor of what the bodies return.
+            if ($allObj && \count($objClasses) > 1) {
+                $anc = $this->commonAncestorClass(\array_keys($objClasses));
+                if ($anc !== '') { return Type::obj($anc); }
+                return Type::cell();
+            }
             // Arrays of different ELEMENT shapes share a representation but not a
             // view: the call must read the join, not whichever body came first.
             // The join's element is ERASED: unionWith takes an unrefined element
@@ -1119,6 +1171,29 @@ trait InferCalls
             return $shapeDiffers && $acc !== null ? $acc->withElement(Type::unknown()) : null;
         }
         return $numeric ? Type::numericCell() : Type::cell();
+    }
+
+    /** The nearest class every one of `$classes` descends from (itself included), '' when they share none. @param string[] $classes */
+    private function commonAncestorClass(array $classes): string
+    {
+        $first = $classes[0];
+        for ($c = $first, $d = 0; $c !== '' && $d < 64; $d = $d + 1) {
+            $all = true;
+            foreach ($classes as $k) {
+                $x = $k;
+                $hit = false;
+                for ($e = 0; $x !== '' && $e < 64; $e = $e + 1) {
+                    if ($x === $c) { $hit = true; break; }
+                    $cd = $this->classes[$x] ?? null;
+                    $x = $cd === null ? '' : $cd->parent;
+                }
+                if (!$hit) { $all = false; break; }
+            }
+            if ($all) { return $c; }
+            $cd0 = $this->classes[$c] ?? null;
+            $c = $cd0 === null ? '' : $cd0->parent;
+        }
+        return '';
     }
 
     /** How an array's elements are laid out, ignoring which class an object is: two arrays that differ here are read differently. */

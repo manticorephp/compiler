@@ -598,7 +598,13 @@ trait LowerClasses
             // uses, and that one round-trips through every path. Statics are left
             // alone deliberately: they are external-linkage globals here, so their
             // repr is a linking contract and not this pass's to change.
-            if ($veff === null || $veff === '') { $pt = Type::cell(); }
+            if ($veff === null || $veff === '') {
+                // …but a REDECLARATION shares the parent's slot, and the parent's methods
+                // read it in the parent's representation: a `@var array` parent slot is
+                // a raw array, so a subclass's bare `protected $casts = [..]` boxing it
+                // handed Eloquent's `array_merge($this->casts, …)` a tagged word.
+                $pt = isset($types[$prop->name]) ? $types[$prop->name] : Type::cell();
+            }
             $types[$prop->name] = $pt;
             $arrHinted[$prop->name] = $this->isBareArrayHint($veff) || $pt->isArray();
             $neverObj[$prop->name] = $this->hintNeverObject($veff);
@@ -1299,6 +1305,19 @@ trait LowerClasses
                 if ($pprop->default === null) { continue; }
                 $pptype = $cd->propertyTypes[$pprop->name] ?? Type::unknown();
                 $defaultStores[] = $this->inheritedPropDefaultStore($pprop, $decl->name, $pptype);
+            }
+            // …and the defaults the PARENT mixed in from its traits: they live in no ClassDecl
+            // property list, so a subclass of a trait-using class left them uninitialised.
+            foreach ($this->usedTraitsFlat($pdecl) as $ptraitName) {
+                $ptd = $this->traitTable[\ltrim($ptraitName, '\\')] ?? null;
+                if ($ptd === null) { continue; }
+                foreach ($ptd->properties as $ptprop) {
+                    if (isset($seen[$ptprop->name])) { continue; }
+                    $seen[$ptprop->name] = true;
+                    if ($ptprop->isStatic || !$this->traitPropHasDefault($ptprop)) { continue; }
+                    $ptptype = $cd->propertyTypes[$ptprop->name] ?? Type::unknown();
+                    $defaultStores[] = $this->traitPropDefaultStore($ptprop, $decl->name, $ptptype);
+                }
             }
             $pname = $pdecl->extends !== [] ? \ltrim($pdecl->extends[0], '\\') : '';
             $guard = $guard + 1;

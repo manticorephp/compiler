@@ -852,6 +852,10 @@ final class LowerFromAst implements Pass
             }
         }
         $stmts = $this->dropShadowedBuiltinTypes($stmts, $preludeCount, $userStart);
+        // A class's static property default is lowered while its ClassDef is built, long before the
+        // define pre-pass below: without the unconditional constants known by then, `static $a = [X]`
+        // lowered `X` to the undefined-constant throw. The later pass skips what is registered.
+        $this->registerUnconditionalDefines($stmts);
         // The flattened local list is now the lowering owner; release the
         // merged Program statement-array before class bodies are lowered.
         $this->program = new Program([], "", [], $this->program->docComments);
@@ -1034,33 +1038,7 @@ final class LowerFromAst implements Pass
                 $decl = $stmt->decl;
                 $dkind = $decl->kind ?? 'class';
                 if ($dkind === 'enum') {
-                    $ed = $this->buildEnumDef($decl);
-                    $this->enumTable[$ed->name] = $ed;
-                    $module->addEnum($ed);
-                    // Register a minimal ClassDef so enum instance methods lower
-                    // and emit (a case is an ordinal; the method takes $this =
-                    // ordinal, and `->name`/`->value` resolve via the enum
-                    // globals). NOT added to module->classes: enum cases are
-                    // value ordinals, not heap objects — the call site dispatches
-                    // directly to `Enum__method`.
-                    $mnames = [];
-                    foreach ($decl->methods as $m) { $mnames[$m->name] = true; }
-                    if ($mnames !== []) {
-                        $ecd = new ClassDef(
-                            name: $ed->name,
-                            classId: $this->stableClassId(\ltrim($ed->name, '\\')),
-                            propertyNames: [],
-                            propertyTypes: [],
-                            methodNames: $mnames,
-                            interfaces: $decl->implements,
-                        );
-                        $this->classTable[$ed->name] = $ecd;
-                        // Registered so InferTypes resolves `$case->method()`
-                        // return types + dispatch. Enum cases stay ordinals — the
-                        // isEnumClass() guards keep rc/new/property on the enum
-                        // path; only method signatures are consulted here.
-                        $module->addClass($ecd);
-                    }
+                    $this->buildEnumInto($decl, $module);
                     continue;
                 }
                 if ($dkind === 'trait') {
@@ -1073,6 +1051,7 @@ final class LowerFromAst implements Pass
                     continue;
                 }
                 if ($dkind !== 'class') { continue; }
+                $this->buildHoistedAncestors($decl, $module);
                 $cd = $this->buildClassDef($decl, $this->stableClassId(\ltrim($this->declName($decl), '\\')));
                 $cd->isPreludeClass = $this->inPreludeClass;
                 $cd->isInternal = $this->inPreludeClass || $this->exportRuntimeTypes
@@ -1675,7 +1654,8 @@ final class LowerFromAst implements Pass
                 $module->addFunction($this->lowerFunction($cfs->decl));
             }
         }
-        $hasDynamicMethodInvoke = $this->moduleHasDynamicMethodInvoke($module);
+        $hasDynamicMethodInvoke = $this->runtimeNamedCallable || $this->moduleHasDynamicMethodInvoke($module);
+        $module->callableArrayAnyName = $this->runtimeNamedCallable;
         $module->needsDynamicMethodMeta = $hasDynamicMethodInvoke;
         if ($hasDynamicMethodInvoke) {
             // Keep the complete slow spread dispatcher in one compiler-owned
@@ -1871,8 +1851,57 @@ final class LowerFromAst implements Pass
                 }
             }
         }
+        $this->noteRuntimeNamedCallable($node);
         foreach (Walk::children($node) as $child) { $this->collectCallableArrayMethods($child, $module); }
     }
+
+    /** Some `[$x, $name]` is called: an object in it reaches any method through the method tables. */
+    private bool $runtimeNamedCallable = false;
+    /** Locals assigned a `[$x, $name]` literal, and locals invoked: their overlap is a callable. @var array<string, bool> */
+    private array $runtimeCallableLocals = [];
+    /** @var array<string, bool> */
+    private array $invokedLocals = [];
+
+    /** `[$x, $name]`: a two-element list whose method name only exists at run time. */
+    private function isRuntimeNamedPair(Node $n): bool
+    {
+        if (!($n instanceof \Compile\Mir\ArrayLit) || \count($n->elements) !== 2) { return false; }
+        $e0 = $n->elements[0];
+        $e1 = $n->elements[1];
+        return $e0->key === null && $e1->key === null && !($e1->value instanceof \Compile\Mir\StringConst);
+    }
+
+    /**
+     * A callable whose method name is a runtime string can reach ANY static method, so it needs the
+     * arm for every one, as `$c::$m()` does ({@see synthStaticCallable}). Without the dispatcher the
+     * erased invoke took the array for a closure and jumped to its length word. Only where the pair
+     * is visibly CALLED: every `[$a, $b]` tuple in a program must not cost it a dispatcher.
+     */
+    private function noteRuntimeNamedCallable(Node $n): void
+    {
+        if ($n instanceof \Compile\Mir\Invoke_) {
+            if ($this->isRuntimeNamedPair($n->callee)) { $this->dynStaticAnyMethod = true; $this->runtimeNamedCallable = true; }
+            if ($n->callee->kind === Node::KIND_LOAD_LOCAL) {
+                $name = $n->callee->name;
+                $this->invokedLocals[$name] = true;
+                if (isset($this->runtimeCallableLocals[$name])) { $this->dynStaticAnyMethod = true; $this->runtimeNamedCallable = true; }
+            }
+        } elseif ($n->kind === Node::KIND_STORE_LOCAL && $this->isRuntimeNamedPair($n->value)) {
+            $name = $n->name;
+            $this->runtimeCallableLocals[$name] = true;
+            if (isset($this->invokedLocals[$name])) { $this->dynStaticAnyMethod = true; $this->runtimeNamedCallable = true; }
+        } elseif ($n instanceof \Compile\Mir\Call && isset(self::CALLBACK_TAKING[\strtolower($n->function)])) {
+            foreach ($n->args as $a) {
+                if ($this->isRuntimeNamedPair($a)) { $this->dynStaticAnyMethod = true; $this->runtimeNamedCallable = true; }
+            }
+        }
+    }
+
+    private const CALLBACK_TAKING = [
+        'array_map' => true, 'array_filter' => true, 'array_walk' => true, 'array_reduce' => true,
+        'usort' => true, 'uasort' => true, 'uksort' => true, 'iterator_apply' => true,
+        'preg_replace_callback' => true, 'register_shutdown_function' => true,
+    ];
 
     /**
      * `__mc_static_callable` ({@see TrampolineSynth::staticCallableSource}): one arm
@@ -1896,15 +1925,41 @@ final class LowerFromAst implements Pass
                 $arms[] =[$cd->name, (string)$mn, \strtolower($mm->returnType) === 'void'];
             }
         }
+        // A late-static method inherited by a subclass runs with `static` = THAT class
+        // (`Child::instance()` → `new Child`), so the subclass needs an arm of its
+        // own; an arm on the declaring class would build the parent. Methods that
+        // do not look at `static` fall back to the parent's arm at run time.
+        /** @var array<string, bool> $lsbKeys */
+        $lsbKeys = [];
+        foreach ($this->lsbPending as $lp) {
+            $lsbKeys[\strtolower($lp->lexicalClass !== '' ? $lp->lexicalClass : $lp->decl->name) . '::' . \strtolower($lp->method->name)] = true;
+        }
+        $extra = [];
+        foreach ($arms as $arm) {
+            if (!isset($lsbKeys[\strtolower($arm[0]) . '::' . \strtolower($arm[1])])) { continue; }
+            foreach ($this->descendantsOf($arm[0]) as $sub) {
+                $scd = $module->classes[$sub] ?? null;
+                if ($scd === null || isset($scd->methodMeta[$arm[1]])) { continue; }
+                $extra[] = [$sub, $arm[1], $arm[2]];
+            }
+        }
+        foreach ($extra as $e) { $arms[] = $e; }
         if (isset($this->callableNamesAnyRecv['fromcallable'])) { $arms[] = ['Closure', 'fromCallable', false]; }
         if ($arms === []) { return; }
         $prog = \Parser\Parser::parseSource("<?php\n" . TrampolineSynth::staticCallableSource($arms));
         foreach ($prog->statements as $s) {
             if ($s->kind !== 'Function') { continue; }
             $this->declareFn($s->decl->name, $s->decl);
+            // Every arm names a method `methodMeta` already proved to exist; the
+            // declarations' `uses` are released by now, so the usual "is it declared
+            // anywhere" walk would call a trait-provided one undefined.
+            $this->synthTrustsStaticCalls = true;
             $module->addFunction($this->lowerFunction($s->decl));
+            $this->synthTrustsStaticCalls = false;
         }
     }
+
+    private bool $synthTrustsStaticCalls = false;
 
     /**
      * `'Class::method'` string literals into {@see Module::$callableStaticStrings}:
@@ -2208,6 +2263,20 @@ final class LowerFromAst implements Pass
                 if ($cc->visibility === 'public' || $cc->visibility === '') { $names[\ltrim($cd->name, '\\') . '::' . $cc->name] = true; }
             }
         }
+        // An enum CASE is a class constant to `constant()` / `defined()`
+        // (Monolog's `\defined(Level::class . '::' . $upper)`), though the
+        // declaration keeps it apart from `consts`.
+        /** @var array<string, bool> $caseNames */
+        $caseNames = [];
+        // (Read from the lowered enum table: the declaration's `cases` are
+        // released as soon as the class is lowered.)
+        foreach ($module->enums as $ed) {
+            foreach ($ed->caseNames as $cn0) {
+                $ck = \ltrim($ed->name, '\\') . '::' . $cn0;
+                $names[$ck] = true;
+                $caseNames[$ck] = true;
+            }
+        }
         $arms = '';
         $defs = '';
         foreach ($names as $n => $_) {
@@ -2217,7 +2286,7 @@ final class LowerFromAst implements Pass
                 // collectConstLits admitted only `Name::CONST` / `Name` shapes.
                 $cls = \substr($n, 0, $dc);
                 $cn = \substr($n, $dc + 2);
-                if ($this->findClassConst($cls, $cn) !== null) { $expr = '\\' . $cls . '::' . $cn; }
+                if ($this->findClassConst($cls, $cn) !== null || isset($caseNames[$n])) { $expr = '\\' . $cls . '::' . $cn; }
             } else {
                 if ($this->predefinedConstant($n) !== null || isset($this->userConstants[$n])) { $expr = '\\' . $n; }
             }
@@ -2227,7 +2296,7 @@ final class LowerFromAst implements Pass
             $defs .= "  if (\$n === \"" . $q . "\") { return true; }\n";
         }
         return "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $arms
-            . "  throw new \\Error('Undefined constant \"' . \$n . '\"');\n}\n"
+            . "  throw new \\Error('Undefined constant ' . (\\strpos(\$n, '::') === false ? '\"' . \$n . '\"' : \$n));\n}\n"
             . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $defs
             . "  return false;\n}\n";
     }
@@ -3069,7 +3138,8 @@ final class LowerFromAst implements Pass
                 variadic: $isVar,
                 default: $p->default !== null ? $this->lowerExpr($p->default) : null,
             );
-            $mp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $pt->isArray();
+            $mp->arrayHinted = $this->isBareArrayHint($p->typeHint) || $this->isBareArrayHint($effHint) || $pt->isArray();
+            $mp->docOnly = ($p->typeHint === null || $p->typeHint === '') && !$isVar && $pt->isArray();
             $mp->refPack = $this->paramIsRefPack($p);
             // Variadic excluded for the same reason as the free-function path:
             // the pack's keys are the compiler's own 0..n.
@@ -3119,7 +3189,7 @@ final class LowerFromAst implements Pass
         $usesFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = $savedSawFuncArgs;
         $mretDoc = $this->docTagType($m->docComment, '@return', '');
-        $mret = $this->lowerTypeHint($this->effectiveHint($m->returnType, $mretDoc));
+        $mret = $this->lowerTypeHint($this->effectiveReturnHint($m->returnType, $mretDoc));
         // `@return T` on a generic class: the shared body must see the ERASED
         // type (exactly what it saw before generics), so keep the un-erased form
         // aside for call sites to substitute against their receiver's binding.
@@ -3182,6 +3252,17 @@ final class LowerFromAst implements Pass
                 // copy of Process's `new static([], …)` against PhpProcess's
                 // constructor was a type error in code that cannot run.
                 if ($this->overriddenBelow($owner, $sub, $p->method->name)) { continue; }
+                // The copy is lowered long after its class: restore the type context the original
+                // saw, or a `@return TCollection` the original resolved lowers to `cell` here and the
+                // two disagree on the return ABI (the dispatcher reads the original's).
+                $this->currentTypeParams = [];
+                $this->currentTypeBounds = [];
+                $this->currentTypeSubst = $this->memberTypeSubst($p->decl);
+                if (isset($this->classTable[$owner])) {
+                    $this->currentTypeParams = $this->classTable[$owner]->typeParams;
+                    $this->currentTypeBounds = $this->classTable[$owner]->typeParamBounds;
+                }
+                $this->currentDeclNamespace = $this->nsOf($owner);
                 $spec = $this->lowerMethodFn(
                     $p->decl, $p->method, $p->cd, $p->defaultStores,
                     $sub, $owner . '__' . $p->method->name . '__lsb' . $sub, $p->lexicalClass,
@@ -4720,8 +4801,22 @@ final class LowerFromAst implements Pass
         /** @var \Parser\Ast\PropertyAccess $e */
         return $e;
     }
+
+    private function asVarVar(\Parser\Ast\Expr $e): \Parser\Ast\VarVar
+    {
+        /** @var \Parser\Ast\VarVar $e */
+        return $e;
+    }
+
     private function lowerAssign(\Parser\Ast\Assign $expr): Node
     {
+        if ($expr->target->kind === 'VarVar') {
+            $this->sawExtract = true;
+            return new Block([new Call(ExtractScope::VV_WRITE, [
+                $this->lowerExpr($this->asVarVar($expr->target)->nameExpr),
+                $this->lowerExpr($expr->value),
+            ], Type::unknown())], Type::unknown());
+        }
         if ($expr->target->kind === 'Variable') {
             $this->trackCallableAssign($this->varName($expr->target), $expr->value);
         }
@@ -5586,7 +5681,8 @@ final class LowerFromAst implements Pass
         }
         // Only a plain class gets a ClassDef; an interface has none by design
         // and an enum builds its own table entry from its cases.
-        if ($dkind === 'class') { $this->hoistedClassDecls[] = $cdecl; }
+        if ($dkind === 'enum') { $this->enumNames[\ltrim($cname, '\\')] = true; }
+        if ($dkind === 'class' || $dkind === 'enum') { $this->hoistedClassDecls[] = $cdecl; }
     }
 
     /**
@@ -5595,17 +5691,84 @@ final class LowerFromAst implements Pass
      * identically to the top-level pass, so a hoisted class is a first-class
      * one from here on.
      */
+    /** Build an enum's table entry (and the minimal ClassDef its methods lower against) into `$module`. */
+    private function buildEnumInto(\Parser\Ast\ClassDecl $decl, Module $module): void
+    {
+        $ed = $this->buildEnumDef($decl);
+        $this->enumTable[$ed->name] = $ed;
+        $module->addEnum($ed);
+        // Register a minimal ClassDef so enum instance methods lower
+        // and emit (a case is an ordinal; the method takes $this =
+        // ordinal, and `->name`/`->value` resolve via the enum
+        // globals). NOT added to module->classes: enum cases are
+        // value ordinals, not heap objects — the call site dispatches
+        // directly to `Enum__method`.
+        $mnames = [];
+        foreach ($decl->methods as $m) { $mnames[$m->name] = true; }
+        if ($mnames !== []) {
+            $ecd = new ClassDef(
+                name: $ed->name,
+                classId: $this->stableClassId(\ltrim($ed->name, '\\')),
+                propertyNames: [],
+                propertyTypes: [],
+                methodNames: $mnames,
+                interfaces: $decl->implements,
+            );
+            $this->classTable[$ed->name] = $ecd;
+            // Registered so InferTypes resolves `$case->method()`
+            // return types + dispatch. Enum cases stay ordinals — the
+            // isEnumClass() guards keep rc/new/property on the enum
+            // path; only method signatures are consulted here.
+            $module->addClass($ecd);
+        }
+    }
+
     private function buildHoistedClassDefs(Module $module): void
     {
         foreach ($this->hoistedClassDecls as $cdecl) {
             $name = $this->declName($cdecl);
+            if (($cdecl->kind ?? 'class') === 'enum') {
+                if (!isset($this->enumTable[$name])) { $this->buildEnumInto($cdecl, $module); }
+                continue;
+            }
             if ($name === '' || isset($this->classTable[$name])) { continue; }
-            $cd = $this->buildClassDef($cdecl, $this->stableClassId(\ltrim($name, '\\')));
-            $cd->isPreludeClass = false;
-            $this->classTable[$cd->name] = $cd;
-            $module->addClass($cd);
+            $this->buildHoistedAncestors($cdecl, $module);
+            $this->buildHoistedClassDef($cdecl, $module);
         }
         $this->hoistedClassDecls = [];
+    }
+
+    private function buildHoistedClassDef(\Parser\Ast\ClassDecl $cdecl, Module $module): void
+    {
+        $name = $this->declName($cdecl);
+        if ($name === '' || isset($this->classTable[$name])) { return; }
+        $wasPrelude = $this->inPreludeClass;
+        $this->inPreludeClass = false;
+        $cd = $this->buildClassDef($cdecl, $this->stableClassId(\ltrim($name, '\\')));
+        $this->inPreludeClass = $wasPrelude;
+        $cd->isPreludeClass = false;
+        $this->classTable[$cd->name] = $cd;
+        $module->addClass($cd);
+    }
+
+    /**
+     * A class hoisted out of a folded `if` is built after the main class-table pass, but a
+     * top-level class may extend it: built first, the child would copy NO inherited slots and
+     * allocate fewer bytes than its inherited methods write. Build the hoisted ancestors of
+     * `$decl` first.
+     */
+    private function buildHoistedAncestors(\Parser\Ast\ClassDecl $decl, Module $module): void
+    {
+        foreach ($this->classDeclExtends($decl) as $parentName) {
+            $pn = \ltrim($parentName, '\\');
+            if (isset($this->classTable[$pn])) { continue; }
+            foreach ($this->hoistedClassDecls as $h) {
+                if (($h->kind ?? 'class') !== 'class' || \ltrim($this->declName($h), '\\') !== $pn) { continue; }
+                $this->buildHoistedAncestors($h, $module);
+                $this->buildHoistedClassDef($h, $module);
+                break;
+            }
+        }
     }
 
     /** foldGuard: not statically foldable — the guard stays for runtime. */
@@ -6899,6 +7062,27 @@ final class LowerFromAst implements Pass
         // as a null-safe chain works for user code but REGRESSED the self-host
         // (the compiler's own `??` chains over erased types crash Stage-2 emit),
         // so it stays a bare read for now — use `$a->b?->c ?? $d` explicitly.
+        // A property read off a CALL result (`f()->p ?? $d`) answers the default when the
+        // call returns null; plain-variable receivers keep the bare read (see the note above).
+        $left = $e->left;
+        if ($left instanceof \Parser\Ast\PropertyAccess && !$left->nullsafe
+            && ($left->object instanceof \Parser\Ast\CallExpr || $left->object instanceof \Parser\Ast\MethodCallExpr
+                || $left->object instanceof \Parser\Ast\StaticCall)) {
+            return new NullCoalesce_($this->lowerNullsafeProp($left), $this->lowerExpr($e->right), Type::unknown());
+        }
+        // A plain local that is null: the default, without touching the probe path of the read
+        // (an uninitialized typed property still answers the default through it).
+        if ($left instanceof \Parser\Ast\PropertyAccess && !$left->nullsafe
+            && $left->object instanceof \Parser\Ast\Variable && $left->object->name !== 'this') {
+            $recv = $this->lowerExpr($left->object);
+            return new Ternary(
+                new Cmp($recv, new NullConst(Type::null_()), '==='),
+                $this->lowerExpr($e->right),
+                new NullCoalesce_($this->markProbe($this->lowerExpr($left)), $this->lowerExpr($e->right), Type::unknown()),
+                Type::unknown(),
+                true,
+            );
+        }
         return new NullCoalesce_(
             $this->markProbe($this->lowerExpr($e->left)),
             $this->lowerExpr($e->right),
@@ -7552,6 +7736,20 @@ final class LowerFromAst implements Pass
             $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
         } else {
             $args = [];
+            // A receiver whose class is only known after inference (`?C`, an untyped value): its
+            // parameter NAMES are not known here either, so the named arguments ride one string-keyed
+            // spread and each candidate binds them to its own parameters at emit
+            // ({@see EmitLlvmCalls::emitSpreadFill}). Lowered by value they bound by position.
+            $named = false;
+            foreach ($expr->args as $a) { if ($a->kind === 'NamedArg') { $named = true; } }
+            if ($named && $magicHint === '') {
+                foreach ($this->foldSpreadNamed($expr->args, $expr->span, true) as $a) {
+                    $args[] = $this->lowerExpr($a);
+                }
+                $mcn = new MethodCall_($obj, $expr->method, $args, Type::unknown());
+                $mcn->srcArgc = \count($args);
+                return $mcn;
+            }
             foreach ($expr->args as $a) {
                 $args[] = $this->lowerExpr($a);
             }
@@ -7701,9 +7899,10 @@ final class LowerFromAst implements Pass
         } elseif ($low === 'parent') {
             $cd = $this->classTable[$this->currentLowerClass] ?? null;
             $class = $cd !== null ? $cd->parent : $this->currentLowerClass;
-            if (\strtolower($expr->method) === \strtolower($this->currentLowerFn)) {
-                $this->forwardsToParent[$this->currentLowerClass . '::' . \strtolower($expr->method)] = true;
-            }
+            // From ANY method of the class, not only the override itself: Carbon's `instance()` calls
+            // `parent::createFromFormat()` while its own `createFromFormat` is a different body, and
+            // the parent body still runs with `static` bound to the subclass.
+            $this->forwardsToParent[$this->currentLowerClass . '::' . \strtolower($expr->method)] = true;
         } else {
             $scope = \ltrim($class, '\\');
         }
@@ -7924,7 +8123,7 @@ final class LowerFromAst implements Pass
 
     private function staticCallUnresolvable(string $class, string $method): bool
     {
-        if ($class === '' || $method === '') { return false; }
+        if ($class === '' || $method === '' || $this->synthTrustsStaticCalls) { return false; }
         $c = $class;
         $guard = 0;
         while ($c !== '' && $guard < 64) {
@@ -7936,17 +8135,28 @@ final class LowerFromAst implements Pass
                 if ($m->name === $method || $m->name === '__callStatic') { return false; }
             }
             foreach ($decl->uses as $traitName) {
-                $t = $this->classDecls[$traitName] ?? null;
-                if ($t === null) { return false; }
-                foreach ($t->methods as $tm) {
-                    if ($tm->name === $method || $tm->name === '__callStatic') { return false; }
-                }
+                // A trait may itself use traits (Carbon's `Date` uses `Creator`).
+                if (!$this->traitProvablyLacks(\ltrim($traitName, '\\'), $method, 0)) { return false; }
             }
             $cd = $this->classTable[$c] ?? null;
             $c = $cd !== null ? $cd->parent : '';
             $guard = $guard + 1;
         }
         return $guard < 64;
+    }
+
+    /** True only when `$trait` and every trait it uses provably declare neither `$method` nor `__callStatic`. */
+    private function traitProvablyLacks(string $trait, string $method, int $depth): bool
+    {
+        $t = $this->classDecls[$trait] ?? ($this->traitTable[$trait] ?? null);
+        if ($t === null || $depth > 16) { return false; }
+        foreach ($t->methods as $tm) {
+            if ($tm->name === $method || $tm->name === '__callStatic') { return false; }
+        }
+        foreach ($t->uses as $inner) {
+            if (!$this->traitProvablyLacks(\ltrim($inner, '\\'), $method, $depth + 1)) { return false; }
+        }
+        return true;
     }
 
     /** Whether `$method` resolved from `$class` (walking ancestors) is a
@@ -7969,16 +8179,31 @@ final class LowerFromAst implements Pass
             // argument shifted one place — silently: the first parameter read
             // the object pointer, the last read whatever followed the frame.
             foreach ($decl->uses as $traitName) {
-                $td = $this->traitTable[\ltrim($traitName, '\\')] ?? null;
-                if ($td === null) { continue; }
-                foreach ($td->methods as $m) {
-                    if ($m->name === $method) { return $m->isStatic; }
-                }
+                $ts = $this->traitMethodIsStatic(\ltrim($traitName, '\\'), $method, 0);
+                if ($ts !== null) { return $ts; }
             }
             $cd = $this->classTable[$c] ?? null;
             $c = $cd !== null ? $cd->parent : '';
         }
         return false;
+    }
+
+    /**
+     * Whether trait `$trait` (or a trait IT uses — Carbon's `Date` uses `Mixin`)
+     * declares `$method` static; null when no such method is found.
+     */
+    private function traitMethodIsStatic(string $trait, string $method, int $depth): ?bool
+    {
+        $td = $this->traitTable[$trait] ?? null;
+        if ($td === null || $depth > 16) { return null; }
+        foreach ($td->methods as $m) {
+            if ($m->name === $method) { return $m->isStatic; }
+        }
+        foreach ($td->uses as $inner) {
+            $r = $this->traitMethodIsStatic(\ltrim($inner, '\\'), $method, $depth + 1);
+            if ($r !== null) { return $r; }
+        }
+        return null;
     }
 
     private function lowerBinary(\Parser\Ast\BinaryOp $e): Node

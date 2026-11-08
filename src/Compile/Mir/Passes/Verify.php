@@ -55,6 +55,13 @@ final class Verify implements Pass
         // silent choice of one release over the other ({@see OwnershipFlow}).
         $errs = $module->ownFlowErrors;
         if (\count($errs) > 0) {
+            // The MIR a flow error is about, before it is thrown away: `MANTICORE_DUMP_FN=<substr>`.
+            $want = \getenv('MANTICORE_DUMP_FN');
+            if (\is_string($want) && $want !== '') {
+                foreach ($module->functions as $fn) {
+                    if (\str_contains($fn->name, $want)) { \error_log(\Compile\Mir\Dump::fn($fn)); }
+                }
+            }
             $shown = \array_slice($errs, 0, 20);
             throw new \RuntimeException('MIR.verify: ' . \implode("\n  ", $shown)
                 . (\count($errs) > 20 ? "\n  … " . (string)(\count($errs) - 20) . ' more' : ''));

@@ -304,6 +304,8 @@ final class InferTypes implements Pass
      * @var array<string, bool>
      */
     private array $rescanTouched = [];
+    /** @var array<string, bool> properties the last scan retyped — their readers re-infer with the touched functions */
+    private array $rescanProps = [];
     /** @var array<string, bool> properties {@see setPropType} retyped since the last {@see inferAfterPropScan} */
     private array $retypedProps = [];
     /** @var array<string, string[]> "fn#idx" → caller candidate params its erased sites forward */
@@ -978,6 +980,34 @@ final class InferTypes implements Pass
      *  @var array<string, \Compile\Mir\ClassDef> */
     private array $typeDefs = [];
 
+    /**
+     * A param typed `array` by its docblock ALONE and cast `(array)` in the body is not an array: the
+     * cast is the author converting whatever arrives (Eloquent's `newFromBuilder($attributes)` is handed
+     * the object rows PDO fetched). Trusting the claim made the cast a no-op over an object.
+     */
+    private function withdrawDocArrayClaims(FunctionDef $fn): void
+    {
+        foreach ($fn->params as $p) {
+            if (!$p->docOnly || $fn->body === null) { continue; }
+            if ($this->castsParamToArray($fn->body, $p->name)) {
+                $p->type = Type::cell();
+                $p->arrayHinted = false;
+                $p->docList = false;
+                $p->docOnly = false;
+            }
+        }
+    }
+
+    private function castsParamToArray(Node $n, string $name): bool
+    {
+        if ($n->kind === Node::KIND_CAST && $n->target === 'array'
+            && $n->operand->kind === Node::KIND_LOAD_LOCAL && $n->operand->name === $name) { return true; }
+        foreach (Walk::children($n) as $ch) {
+            if ($this->castsParamToArray($ch, $name)) { return true; }
+        }
+        return false;
+    }
+
     public function run(Module $module): Module
     {
         $tRun = \Compile\Stats::now();
@@ -996,6 +1026,7 @@ final class InferTypes implements Pass
         $this->closureNodeByName = [];
         $this->sawClosures = false;
         $this->undeclaredReturnFns = [];
+        foreach ($module->functions as $dfn) { $this->withdrawDocArrayClaims($dfn); }
         // The signature tables cover EVERY function, scoped run or not: a call
         // from inside the scope to a function outside it still has to see that
         // function's return, and a dispatch unions the returns of every class.
@@ -1419,6 +1450,8 @@ final class InferTypes implements Pass
             \Compile\Stats::bump('infer.t.walk_ms', \intdiv($tPost - $tWalk, 1000000));
             \Compile\Stats::bump('infer.t.post_ms', \intdiv(\Compile\Stats::now() - $tPost, 1000000));
             \Compile\Stats::bump('infer.t.runs', 1);
+            \Compile\Stats::line('  infer run: pre-scans=' . (string)\intdiv($tWalk - $tRun, 1000000) . 'ms walk='
+                . (string)\intdiv($tPost - $tWalk, 1000000) . 'ms post=' . (string)\intdiv(\Compile\Stats::now() - $tPost, 1000000) . 'ms');
         }
         return $module;
     }
@@ -1700,6 +1733,16 @@ final class InferTypes implements Pass
                     && !$this->sameElemShape($observed[$key], $vt)) {
                     $observed[$key] = Type::cell();
                 }
+            } elseif ($se->array->kind === Node::KIND_ARRAY_ACCESS) {
+                // A NESTED write `static::$cache[$k][$j] = v` proves the static's
+                // element is itself an array — a cell, as for an instance
+                // property ({@see collectPropElemStores}). Unseen, another
+                // write typed the element `string` and the nested read-back
+                // (`isset($cache[$k][$j])`) indexed a string
+                // (Illuminate\Support\Str::$snakeCache).
+                $root = $se->array;
+                while ($root->kind === Node::KIND_ARRAY_ACCESS) { $root = $root->array; }
+                if ($root->kind === Node::KIND_STATIC_PROP) { $observed[$root->global] = Type::cell(); }
             }
         }
         foreach (Walk::children($n) as $c) { $this->collectStaticPropElemStores($c, $observed, $unusable); }
@@ -3942,7 +3985,27 @@ final class InferTypes implements Pass
                 $found = $found->unionWith($sig);
             }
         }
+        // A class that only answers the name through `__call` (a tap proxy) can
+        // be the receiver too, and what it returns is its own: the declarers'
+        // type would be a false claim about that answer.
+        if ($found !== null && $this->magicOnlyClassExists($method)) { return Type::cell(); }
         return $shapeDiffers ? $found->withElement(Type::unknown()) : $found;
+    }
+
+    /** @var array<string, bool> */
+    private array $magicOnlyCache = [];
+
+    /** Does some class answer `$method` ONLY through `__call` (neither declares nor inherits it)? */
+    private function magicOnlyClassExists(string $method): bool
+    {
+        if (isset($this->magicOnlyCache[$method])) { return $this->magicOnlyCache[$method]; }
+        $found = false;
+        foreach ($this->classes as $cd) {
+            if ($this->resolveMethodClass($cd->name, $method) === ''
+                && $this->classDefinesMagic($cd->name, '__call')) { $found = true; break; }
+        }
+        $this->magicOnlyCache[$method] = $found;
+        return $found;
     }
 
     /**

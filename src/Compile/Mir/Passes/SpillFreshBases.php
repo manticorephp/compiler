@@ -790,7 +790,10 @@ final class SpillFreshBases
             if ($t === Type::KIND_ARRAY && ($a->type->element === null || $a->type->element->kind === Type::KIND_ARRAY)) { continue; }
             $ak = $a->kind;
             if ($ak !== Node::KIND_ARRAY_LIT && $ak !== Node::KIND_CONCAT && $ak !== Node::KIND_CLOSURE && $ak !== Node::KIND_NEW_OBJ
-                && !$this->isFreshValue($a)) { continue; }
+                && !$this->isFreshValue($a)
+                // A string conditional is +1 from every arm; a builtin that only reads its argument gives
+                // nothing back: `sprintf('%s', $c ? $c . '@' : '')` stranded it.
+                && !($t === Type::KIND_STRING && \Compile\Mir\CondOwn::isConditional($a))) { continue; }
             $this->setOperand($n, $i + $shift, $this->spill($a));
         }
     }
@@ -1378,6 +1381,7 @@ final class SpillFreshBases
             $aa = $this->asArrayAccess($b);
             return !$aa->probe && \Compile\Mir\Ownership::userOffsetGetBase($aa->array->type, $this->classDefs);
         }
+        if ($k === Node::KIND_NEW_DYN_OBJ) { return true; }
         if ($t->kind !== Type::KIND_OBJ) { return false; }
         return $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
     }

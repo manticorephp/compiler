@@ -1,0 +1,24 @@
+Zebra => Zebra::run v / Zebra::run d
+zebra => Zebra::run v / Zebra::run d
+apple => apple::run v / apple::run d
+APPLE => apple::run v / apple::run d
+Foo_Bar => Foo_Bar::run v / Foo_Bar::run d
+foo_bar => Foo_Bar::run v / Foo_Bar::run d
+FooBar => FooBar::run v / FooBar::run d
+FOOBAR => FooBar::run v / FooBar::run d
+FOOBAZ => FooBar::run v / FooBar::run d
+foobaz => FooBar::run v / FooBar::run d
+Mid => Mid::run v / Mid::run d
+App\Zeta\Leaf => Leaf::run v / Leaf::run d
+app\zeta\LEAF => Leaf::run v / Leaf::run d
+Alpha => Zebra::Alpha
+alpha => Zebra::Alpha
+beta_x => Zebra::beta_x
+BETA_X => Zebra::beta_x
+BetaX => Zebra::BetaX
+betax => Zebra::BetaX
+zed => Zebra::zed
+ZED => Zebra::zed
+nope => Error: Call to undefined method Zebra::nope()
+FOOBAZ::own FOOBAZ::own
+Error: Call to undefined method Mid::own()

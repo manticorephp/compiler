@@ -615,6 +615,18 @@ trait LowerStmts
 
     private function lowerForeach(\Parser\Ast\ForeachStmt $stmt): Node
     {
+        // `foreach ($$name as &$x)`: iterate a copy and write it back, as the name is a runtime value.
+        if ($stmt->valueByRef && $stmt->expr->kind === 'VarVar') {
+            $tmp = '__vvfe' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            $tv = \Parser\Ast\Expr::variable($tmp, $stmt->span);
+            $inner = new \Parser\Ast\ForeachStmt($tv, $stmt->key, $stmt->value, true, $stmt->body, $stmt->span);
+            return new Block([
+                $this->lowerExpr(\Parser\Ast\Expr::assign($tv, $stmt->expr, $stmt->span)),
+                $this->lowerForeach($inner),
+                $this->lowerExpr(\Parser\Ast\Expr::assign($stmt->expr, $tv, $stmt->span)),
+            ], Type::void());
+        }
         $array = $this->lowerExpr($stmt->expr);
         // php lets a foreach bind into ANY assignable target, not just a
         // variable: `foreach ($item as $stub->class => $stub->position)` is

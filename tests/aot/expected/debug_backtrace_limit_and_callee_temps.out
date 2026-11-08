@@ -1,0 +1,36 @@
+string(2) "t2"
+drop t2
+== t2
+string(2) "t3"
+drop t3
+== t3
+string(2) "t4"
+drop t4
+== t4
+string(2) "t7"
+drop t7
+== t7
+string(2) "t8"
+drop t8
+== t8
+array(1) {
+  [0]=>
+  string(2) "t9"
+}
+drop t9
+== t9
+string(3) "t10"
+drop t10
+== t10
+t6 set
+t6 body
+R drop
+drop t6
+t6 unset
+== t6
+dynm
+m2
+int(1)
+string(11) "2:lim3:lim4"
+string(5) "1,2,2"
+flat

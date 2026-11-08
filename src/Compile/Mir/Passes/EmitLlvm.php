@@ -348,6 +348,7 @@ final class EmitLlvm implements EmitVisitor
 
     /** @var array<string, bool> {@see Module::$callableArrayMethods} */
     private array $callableArrayMethods = [];
+    private bool $callableArrayAnyName = false;
 
     /** @var array<string, bool> {@see Module::$callableStaticStrings} */
     private array $callableStaticStrings = [];
@@ -394,6 +395,9 @@ final class EmitLlvm implements EmitVisitor
     /** True while the erased-callee object arm emits its `__invoke` call: that call must reach dispatch, not the closure rewrite. */
     private bool $inErasedInvokeArm = false;
 
+    /** `MANTICORE_DUMP_MIR=<substr>`: print the MIR of every emitted function whose name contains it (null = not read yet). */
+    private ?string $dumpMirOnly = null;
+
     // ── generator state (set while emitting a `$resume` function) ──
     /** Per-function generator emit state (fresh each {@see emit}). */
     private ?GeneratorContext $gen = null;
@@ -426,6 +430,8 @@ final class EmitLlvm implements EmitVisitor
      *  `return` value ({@see Module::$includeSlots}). Read by the
      *  `require`/`include` builtin. @var array<string, string> */
     private array $includeSlots = [];
+    /** @var array<string, string> */
+    private array $includeUnits = [];
     /**
      * String literals of `$n` that name a builtin twin.
      * @param array<string, int> $twins
@@ -691,6 +697,12 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, \Compile\Mir\MethodMeta> */
     private array $reflClosureMeta = [];
 
+    /** @var array<string, string[]> */
+    private array $closureCapNames = [];
+
+    /** @var array<string, array<int, int>> closure fn → capture index → {@see \Compile\MemoryAbi::RMETA_CAP_UNSUPPORTED} … code, as the creation site stored it */
+    private array $closureCapKinds = [];
+
     /** `#[\Deprecated]` / `#[\NoDiscard]` diagnostic bodies, from the module.
      *  Keyed by function name / "DeclaringClass::method".
      *  @var array<string, string> */
@@ -759,6 +771,7 @@ final class EmitLlvm implements EmitVisitor
         $this->hasClassAlias = $module->hasClassAlias;
         $this->dynamicMethodMeta = $module->needsDynamicMethodMeta;
         $this->callableArrayMethods = $module->callableArrayMethods;
+        $this->callableArrayAnyName = $module->callableArrayAnyName;
         $this->callableStaticStrings = $module->callableStaticStrings;
         $this->enums = $module->enums;
         $this->own = new \Compile\Mir\Ownership(\Compile\Mir\OwnershipContext::fromModule($module));
@@ -773,6 +786,7 @@ final class EmitLlvm implements EmitVisitor
         $this->traitNames = $module->traitNames;
         $this->reflFnMeta = $module->reflFnMeta;
         $this->reflClosureMeta = $module->reflClosureMeta;
+        $this->closureCapNames = $module->closureCapNames;
         $this->deprecatedFns = $module->deprecatedFns;
         $this->deprecatedMethods = $module->deprecatedMethods;
         $this->noDiscardFns = $module->noDiscardFns;
@@ -789,6 +803,7 @@ final class EmitLlvm implements EmitVisitor
         $this->globalVarNames = $module->globalVarNames;
         $this->globalsViewNames = $module->globalsViewNames;
         $this->includeSlots = $module->includeSlots;
+        $this->includeUnits = $module->includeUnits;
         $this->builtinTwinReq = $module->builtinTwinReq;
         $this->builtinTwinRet = $module->builtinTwinRet;
         $this->builtinTwinParams = $module->builtinTwinParams;
@@ -1452,20 +1467,30 @@ final class EmitLlvm implements EmitVisitor
             if ($spooled) {
                 try {
                     $preambleBytes = $this->writeSpooledPreamble($preamble, $this->streamIrPath);
-                    if ($preambleBytes < 0 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
+                    if ($preambleBytes < 0) {
                         throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
                     }
                 } catch (\Throwable $e) {
                     $this->dropPreambleSpools();
                     throw $e;
                 }
-            } elseif (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))
+            } elseif (!\Manticore\write_file($this->streamIrPath, $this->framePointerChunk($preamble))) {
+                throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
+            }
+            // The runtime helpers need the hoist the bodies got: an alloca written after a
+            // call falls out of the entry block when that call is inlined and the block
+            // splits. LLVM then lowers it as a dynamic alloca, and under "probe-stack" (which
+            // inlining a probed callee hands to the caller) sp moves by the bare 8 bytes: the
+            // next sp-relative access is an alignment fault on arm64 darwin.
+            $hoistedPreamble = $this->streamIrPath . '.hoisted';
+            $h = new \Compile\Mir\HoistAllocas();
+            if (!$h->runFile($this->streamIrPath, $hoistedPreamble)
+                || \Manticore\sys_rename($hoistedPreamble, $this->streamIrPath) !== 0
                 || !\Manticore\append_file_path($bodyPath, $this->streamIrPath)) {
                 throw new \RuntimeException('EmitLlvm: cannot finalize staged IR ' . $this->streamIrPath);
             }
-            if (\Compile\Debug::$framePointers
-                && !\Manticore\append_file_bytes($this->streamIrPath,
-                    "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n")) {
+            $hoistedAllocas += $h->moved;
+            if (!\Manticore\append_file_bytes($this->streamIrPath, "\n" . \Compile\Debug::bodyAttrGroup() . "\n")) {
                 throw new \RuntimeException('EmitLlvm: cannot append staged IR attributes');
             }
             \Manticore\sys_unlink($bodyPath);
@@ -2448,6 +2473,9 @@ final class EmitLlvm implements EmitVisitor
 
     /** Thunk bodies + row globals for the table path, flushed with the others. */
     private string $dynfExtraBodies = '';
+
+    /** The module's preamble already carries `__mir_name_icmp`. */
+    private bool $nameIcmpEmitted = false;
 
     /** {@see EmitLlvmArrays::litConstTable} globals, flushed with the helper bodies. */
     private string $litTableBodies = '';
@@ -3572,9 +3600,17 @@ final class EmitLlvm implements EmitVisitor
         $eqc = $this->ssa->allocReg();
         $out .= '  ' . $eqc . ' = call i1 @__mir_str_eq(ptr ' . $sp . ', ptr ' . $cp . ")\n";
         $out .= '  br label %' . $jnL . "\n";
-        $out .= $nsL . ":\n  br label %" . $jnL . "\n";
+        // A null cell against an absent (null) string cond is the one non-string cell that is ===.
+        $out .= $nsL . ":\n";
+        $isNull = $this->ssa->allocReg();
+        $out .= '  ' . $isNull . ' = icmp eq i64 ' . $subj . ', ' . (string)\Compile\MemoryAbi::CELL_NULL . "\n";
+        $condNull = $this->ssa->allocReg();
+        $out .= '  ' . $condNull . ' = icmp eq ptr ' . $cp . ", null\n";
+        $nullEq = $this->ssa->allocReg();
+        $out .= '  ' . $nullEq . ' = and i1 ' . $isNull . ', ' . $condNull . "\n";
+        $out .= '  br label %' . $jnL . "\n";
         $out .= $jnL . ":\n";
-        $out .= '  ' . $eq . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ false, %' . $nsL . " ]\n";
+        $out .= '  ' . $eq . ' = phi i1 [ ' . $eqc . ', %' . $cmpL . ' ], [ ' . $nullEq . ', %' . $nsL . " ]\n";
         return $out;
     }
 
@@ -4213,7 +4249,7 @@ final class EmitLlvm implements EmitVisitor
             if ($this->condOwnsResult($src)) { return ''; }
             if ($vk === Node::KIND_CALL || $vk === Node::KIND_METHOD_CALL
                 || $vk === Node::KIND_STATIC_CALL || $vk === Node::KIND_INVOKE
-                || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ
+                || $vk === Node::KIND_ARRAY_LIT || $vk === Node::KIND_NEW_OBJ || $vk === Node::KIND_NEW_DYN_OBJ
                 || $vk === Node::KIND_CLONE || $vk === Node::KIND_CONCAT
                 || \Compile\Mir\BitOp::mintsFresh($src)) {
                 return '';
@@ -4257,6 +4293,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function cellBoxSource(Node $value): Node
     {
+        $value = \Compile\Mir\Ownership::promotedInvoke($value);
         if ($value->kind !== Node::KIND_CALL) { return $value; }
         if (\ltrim($value->function, '\\') !== '__mir_to_cell') { return $value; }
         $args = $value->args;

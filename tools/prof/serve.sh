@@ -44,7 +44,7 @@ cleanup() { pkill -f "^./bin/app.prof" 2>/dev/null || true; [[ "${KEEP:-0}" == 1
 trap cleanup EXIT
 
 PORT=$PORT WORKERS=1 ./bin/app.prof >/dev/null 2>&1 &
-sleep 6
+for _ in $(seq 1 240); do curl -s -m 1 -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 0.5; done
 SUP="$(pgrep -f '^./bin/app.prof' | head -1)"
 WORKER="$(pgrep -P "$SUP" | head -1)"
 [[ -n "$WORKER" ]] || { echo "serve.sh: no worker process under $SUP" >&2; exit 1; }

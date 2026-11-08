@@ -32,7 +32,7 @@ final class DumpLlvmMirCommand extends Command
         if ($ir === null) {
             return 65;
         }
-        \Manticore\puts($ir);
+        \Manticore\puts(\Manticore\with_frame_pointers($ir));
         return 0;
     }
 }

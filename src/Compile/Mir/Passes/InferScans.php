@@ -673,7 +673,8 @@ trait InferScans
         $observed = [];   // global cell symbol → element Type (cell when mixed)
         $unusable = [];   // global cell symbol → true
         foreach ($module->functions as $fn) {
-            if (!$this->bodyHas($fn, 'se:' . Node::KIND_STATIC_PROP)) { continue; }
+            if (!$this->bodyHas($fn, 'se:' . Node::KIND_STATIC_PROP)
+                && !$this->bodyHas($fn, 'se:' . Node::KIND_ARRAY_ACCESS)) { continue; }
             $this->collectStaticPropElemStores($fn->body, $observed, $unusable);
         }
         /** @var array<string, Type> $targets */
@@ -717,6 +718,17 @@ trait InferScans
             $cur = $n->type;
             if ($this->isErasedArrayType($cur)) {
                 $keyT = $cur->isArray() ? $cur->key : null;
+                $n->type = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
+                $changed = true;
+            }
+            // A docblock that lies: Laravel's `@var array<string, string> $snakeCache`
+            // is written `$snakeCache[$k][$j] = v` — what the program STORES says
+            // the element is an array, and a scalar element type would index a
+            // string. Writes that prove a cell element win over a scalar claim.
+            elseif ($elem->kind === Type::KIND_CELL && $cur->isArray() && $cur->element !== null
+                && ($cur->element->kind === Type::KIND_STRING || $cur->element->kind === Type::KIND_INT
+                    || $cur->element->kind === Type::KIND_FLOAT || $cur->element->kind === Type::KIND_BOOL)) {
+                $keyT = $cur->key;
                 $n->type = $keyT !== null ? Type::assoc($keyT, $elem) : Type::vec($elem);
                 $changed = true;
             }
@@ -988,6 +1000,29 @@ trait InferScans
                         break;
                     }
                 }
+            }
+        }
+        // An LSB copy (`Owner__m__lsbScope`) is reached through the same dispatcher as its
+        // original, never by name, so no call site ever observes it. It must still end up
+        // speaking the original's parameter ABI: the dispatcher hands every arm the one argument
+        // list, and a copy left at its declared `vec[obj]` read the original's `vec[cell]` as raw
+        // object pointers.
+        foreach ($module->functions as $cfn) {
+            $lp = \strpos($cfn->name, '__lsb');
+            if ($lp === false || $lp === 0) { continue; }
+            $baseName = \substr($cfn->name, 0, $lp);
+            $ci = 0;
+            foreach ($cfn->params as $cp) {
+                $bk = $baseName . '#' . (string)$ci;
+                $ck = $cfn->name . '#' . (string)$ci;
+                $ci = $ci + 1;
+                if (!isset($cand[$bk]) || !isset($cand[$ck])) { continue; }
+                if (isset($observed[$bk])) { $observed[$ck] = $observed[$bk]; }
+                if (isset($conflict[$bk])) { $conflict[$ck] = true; }
+                if (isset($assocKey[$bk])) { $assocKey[$ck] = $assocKey[$bk]; }
+                if (isset($shape[$bk])) { $shape[$ck] = $shape[$bk]; }
+                if (isset($sawCell[$bk])) { $sawCell[$ck] = true; }
+                if (isset($erasedArg[$bk])) { $erasedArg[$ck] = true; }
             }
         }
         $changed = false;

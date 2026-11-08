@@ -72,6 +72,8 @@ final class Module
      *  php's `int(1)`.
      *  @var array<string, string> */
     public array $includeSlots = [];
+    /** @var array<string, string> resolved path → function running that file on its first `require` */
+    public array $includeUnits = [];
 
     /** Every function name `function_exists()` should answer true for, for a
      *  program that asks with a NON-literal argument. Filtered through the same
@@ -236,6 +238,9 @@ final class Module
 
     /** @var array<string, bool> method names `[$obj, 'name']` literals spell */
     public array $callableArrayMethods = [];
+
+    /** Some `[$x, $name]` with a runtime name is called: an erased invoke of an array needs its instance arm whatever the literals spell. */
+    public bool $callableArrayAnyName = false;
 
     /** @var array<string, bool> `'Class::method'` string literals the module spells */
     public array $callableStaticStrings = [];
@@ -484,6 +489,9 @@ final class Module
      *  shape, for `new ReflectionFunction($closure)`. Kept only when the program
      *  reflects a computed name (the closure may be what it names). Declared LAST. */
     public array $reflClosureMeta = [];
+
+    /** @var array<string, string[]> closure fn name → captured variable names, in env order (`this` included) */
+    public array $closureCapNames = [];
 
     /** Whether the program reflects a computed name, so a closure built after lowering
      *  ({@see Passes\ResolveMethodFcc}) must record its shape too. Declared LAST. */

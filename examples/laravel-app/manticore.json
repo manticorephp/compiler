@@ -1,0 +1,11 @@
+{
+    "applications": [
+        {
+            "name": "laravel-app",
+            "src": ["app", "bootstrap", "routes", "config", "vendor/laravel/framework/config", "vendor/nesbot/carbon/lazy"],
+            "entry": "public/index.php",
+            "output": "bin/app",
+            "composer": true
+        }
+    ]
+}

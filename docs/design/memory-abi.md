@@ -424,7 +424,7 @@ global roots. Both are open work — see `docs/ROADMAP.md`.
 
 ## 7a. Small-object pool
 
-Objects, unified-array buffers and hash bucket side-arrays are served by a
+Objects, unified-array buffers, hash bucket side-arrays and reference boxes are served by a
 size-classed pool in front of `malloc`, emitted by
 `EmitLlvmRuntime::poolRuntime()` and gated on `Compile\Debug::$pool`
 (`MANTICORE_POOL=0` disables). Strings keep their own older two-class free list;
@@ -459,8 +459,16 @@ Invariants worth stating out loud:
   peaks on one class and then shifts to another holds both peaks resident. This
   is the reason `bench/run.sh`'s `LEAK=1` mode confirms a suspected leak with a
   third measurement: a high-water grows once and plateaus, a leak keeps paying.
+* **Linux: the region is `madvise(MADV_NOHUGEPAGE)`.** Under THP `enabled=always`
+  the first touch of a span otherwise faulted a 2 MiB page, so RSS (and a forked
+  worker's copy-on-write) grew in 2 MiB steps: 16 of 22 MB RSS of a small
+  program was huge pages. (The +4..5 MB of peak the leak tests then still read
+  on CI runners was file pages — RssFile grew, RssAnon stayed flat — which is
+  why `memory_get_usage` / `memory_get_peak_usage` on Linux report anonymous
+  memory only, see `src/Runtime/Stdlib/VarExtra.php`.)
 * The pool is **not thread-safe** (plain loads/stores on the class heads) — fine
-  for the single-threaded fiber runtime; a fork-per-worker model COW-duplicates
+  for the single-threaded fiber runtime (the blocking-I/O offload threads call
+  libc `malloc`/`free` on their own buffers only); a fork-per-worker model COW-duplicates
   touched pool pages per child.
 * `MANTICORE_DEBUG_VERIFY=1` poisons word +8 of a freed block (cleared on alloc)
   and aborts by name on a double free — libc used to catch those for us, and a

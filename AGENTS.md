@@ -100,6 +100,7 @@ Rules of evidence:
 - The `dump-*` commands do not link the stdlib, so a stdlib/FFI callee resolves as
   `unknown` and a bug in that path vanishes from the dump. Read the final binary.
 - A test that passes without the fix is not a test.
+- A crash inside libmalloc (`mfm_alloc`, "memory corruption of free block") is a write past or after a block, far from its cause. Find it with `MANTICORE_ASAN=1` (stdlib `--libs-only` AND app; 0xbe fill names an uninitialized read) before anything else; `MANTICORE_REF_QUARANTINE=1` (freed arrays / ref boxes poisoned, never reused; adds `-no_compact_unwind`, so exception paths crash) and `MANTICORE_POOL_POISON=1` (pool blocks 0xDE) are measurement builds, `bin/build` restores the normal libraries.
 - Cap every log you write (`| tail`, `head -c`). A runaway trace log has filled
   the disk more than once. Delete probe binaries and `.ll` files as soon as they
   are read.

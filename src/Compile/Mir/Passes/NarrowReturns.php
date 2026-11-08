@@ -135,6 +135,11 @@ final class NarrowReturns implements Pass
             \Compile\Stats::step('  narrow round ' . (string)$iters
                 . ' (narrowed ' . (string)$narrowed . ')', $roundT, -1, -1);
             \Compile\Stats::bump('narrow.rounds', 1);
+            if (\Compile\Stats::$on && $narrowed > 0 && $iters > 1 && !$lastLight) {
+                // The round after a FULL inference narrowed something the light rounds never reached.
+                \Compile\Stats::line('  narrow: after a full inference ' . (string)$narrowed . ' more: '
+                    . \implode(' ', \array_slice(\array_keys($narrowedNames), 0, 12)));
+            }
             if (!$changed) {
                 // Converged — but if every inference since the last full one was
                 // scoped, that convergence is only as good as the scope. Run one

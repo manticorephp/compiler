@@ -305,7 +305,7 @@ jobs:
           pdo=false
           mysqli=false
           if [ "${{ github.event_name }}" = pull_request ]; then
-            files="$(gh pr diff "${{ github.event.pull_request.number }}" --repo "$GITHUB_REPOSITORY" --name-only)"
+            files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/${{ github.event.pull_request.number }}/files?per_page=100" --jq '.[].filename')"
             if echo "$files" | grep -qE '^(prelude/pdo|tests/pdo_net/|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then pdo=true; fi
             if echo "$files" | grep -qE '^(prelude/(mysqli|pdo_mysql|pdo\.php|pdo_sql\.php)|src/|tests/mysqli_net/|tests/pdo_net/up\.sh|tools/mysqli_surface_audit\.php|tools/docker/gate\.sh|\.github/workflows/ci\.yml)'; then mysqli=true; fi
           fi

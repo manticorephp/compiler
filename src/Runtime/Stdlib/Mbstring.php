@@ -63,6 +63,18 @@ function __mc_mb_enc(?string $encoding, string $fn, int $arg): string
 }
 
 /**
+ * First offset of `[$from, $to)` holding a byte >= 0x80, `$to` when there is none. Text is nearly
+ * always ASCII, so the UTF-8 walks skip it here instead of a call per byte. The codegen builtin of
+ * this name reads a word at a time; this body is the bootstrap's.
+ */
+function __mc_mb_ascii_run(string $s, int $from, int $to): int
+{
+    $i = $from;
+    while ($i < $to && \ord($s[$i]) < 0x80) { $i = $i + 1; }
+    return $i;
+}
+
+/**
  * One decoder step from byte `$i` (< `$n`): the offset past a well-formed
  * character, or the NEGATED offset past an ill-formed prefix (always > `$i`, so
  * the sign is free). Maximal subpart: a lead byte followed by a byte outside its
@@ -143,7 +155,9 @@ function __mc_mb_scrub_range(int $kind, string $s, int $from, int $to, ?string $
     $run = $from;
     $i = $from;
     $haveSub = $sub !== null;
-    while ($i < $to) {
+    while (true) {
+        $i = \__mc_mb_ascii_run($s, $i, $to);
+        if ($i >= $to) { break; }
         $next = \__mc_mb_u8_step($s, $i, $to);
         if ($next > 0) { $i = $next; continue; }
         if (!$haveSub) { $sub = \__mc_mb_bad_bytes("UTF-8"); $haveSub = true; }
@@ -240,13 +254,12 @@ function __mc_mb_u8_len(string $s): int
     $n = \strlen($s);
     $i = 0;
     $c = 0;
-    while ($i < $n) {
+    while (true) {
+        $r = \__mc_mb_ascii_run($s, $i, $n);
+        $c = $c + ($r - $i);
+        $i = $r;
+        if ($i >= $n) { break; }
         $b = \ord($s[$i]);
-        if ($b < 0x80) {
-            $i = $i + 1;
-            $c = $c + 1;
-            continue;
-        }
         if ($b >= 0xC2 && $b < 0xE0 && $i + 1 < $n && (\ord($s[$i + 1]) & 0xC0) === 0x80) {
             $i = $i + 2;
             $c = $c + 1;
@@ -288,11 +301,11 @@ function __mc_mb_seek(int $w, string $s, int $from, int $chars): int
     }
     $i = $from;
     while ($chars > 0 && $i < $n) {
-        if (\ord($s[$i]) < 0x80) {
-            $i = $i + 1;
-            $chars = $chars - 1;
-            continue;
-        }
+        $lim = $chars < $n - $i ? $i + $chars : $n;
+        $r = \__mc_mb_ascii_run($s, $i, $lim);
+        $chars = $chars - ($r - $i);
+        $i = $r;
+        if ($chars <= 0 || $i >= $n) { break; }
         $next = \__mc_mb_u8_step($s, $i, $n);
         $i = $next < 0 ? -$next : $next;
         $chars = $chars - 1;

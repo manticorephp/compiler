@@ -1100,6 +1100,11 @@ final class UnifiedArrayRuntime
     private function emitIndexFind(): void
     {
         $fn = $this->module->func('__mir_array_index_find', Type::i64());
+        // Every caller passes wantKind as a constant: inlined, the other key
+        // kind's arm folds away and the probe loop runs in the caller's frame
+        // instead of behind a call that saved twelve registers for the str_eq
+        // path an int probe never takes.
+        $fn->attrs = 'alwaysinline';
         $arr = $fn->param(Type::ptr(), 'arr');
         $wantKind = $fn->param(Type::i64(), 'wantKind');
         $keyptr = $fn->param(Type::ptr(), 'keyptr');
@@ -1528,6 +1533,10 @@ final class UnifiedArrayRuntime
         $rfp = $this->hdr($adopt, $res0, MemoryAbi::ARRAY_FLAGS_OFFSET);
         $rfl = $adopt->load(Type::i64(), $rfp);
         $adopt->store($adopt->or_($adopt->and_($rfl, Value::int(Type::i64(), ~(MemoryAbi::ARRAY_ELEM_HINT_MASK | MemoryAbi::ARRAY_REPR_MASK))), $adopt->and_($bflags, $adm)), $rfp);
+        // The result now describes `$b`'s words as they are: the "two different
+        // hints" box flag computed above (an empty `$a` can carry a stale hint)
+        // must not box them under a raw hint.
+        $adopt->store($zero, $boxSlot);
         $adopt->br($head);
         $prep = $afterAdopt;
         $prep->brIf($prep->and_($mixed, $prep->icmp('ne', $ha, $cell)), $cellify, $head);
@@ -1947,7 +1956,7 @@ final class UnifiedArrayRuntime
 
         $rcAddr = $bump->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::ARRAY_RC_OFFSET)]);
         $cur = $bump->load(Type::i64(), $rcAddr);
-        if (Debug::$verify) {
+        if (Debug::$verify || Debug::$refQuarantine) {
             $ok = $fn->block('rc_ok');
             $bad = $fn->block('rc_bad');
             $bump->brIf($bump->icmp('sle', $cur, Value::int(Type::i64(), 0)), $bad, $ok);
@@ -2735,7 +2744,7 @@ final class UnifiedArrayRuntime
 
         $rcAddr = $dec->gep(Type::i8(), $arr, [Value::int(Type::i64(), MemoryAbi::ARRAY_RC_OFFSET)]);
         $cur = $dec->load(Type::i64(), $rcAddr);
-        if (Debug::$verify) {
+        if (Debug::$verify || Debug::$refQuarantine) {
             $ok = $fn->block('rc_ok');
             $bad = $fn->block('rc_bad');
             $dec->brIf($dec->icmp('sle', $cur, Value::int(Type::i64(), 0)), $bad, $ok);
@@ -2904,7 +2913,15 @@ final class UnifiedArrayRuntime
             $doFree->call('dprintf', Type::i32(),
                 [Value::int(Type::i32(), 2), $ff, $arr, $fc], null, '(i32, ptr, ...)');
         }
-        $this->poolFree($doFree, $base);
+        if (Debug::$refQuarantine) {
+            $doFree->call('__mir_arrq_check', Type::void(), []);
+            $poison = Value::int(Type::i64(), -2401053088876216593);
+            $doFree->store($poison, $arr);
+            $doFree->store($poison, $this->hdr($doFree, $arr, MemoryAbi::ARRAY_RC_OFFSET));
+            $doFree->call('__mir_arrq_push', Type::void(), [$arr]);
+        } else {
+            $this->poolFree($doFree, $base);
+        }
         $doFree->retVoid();
     }
 
@@ -3215,7 +3232,15 @@ final class UnifiedArrayRuntime
             $done->call('dprintf', Type::i32(),
                 [Value::int(Type::i32(), 2), $ff, $arr, $fc], null, '(i32, ptr, ...)');
         }
-        $this->poolFree($done, $base);
+        if (Debug::$refQuarantine) {
+            $done->call('__mir_arrq_check', Type::void(), []);
+            $poison = Value::int(Type::i64(), -2401053088876216593);
+            $done->store($poison, $arr);
+            $done->store($poison, $this->hdr($done, $arr, MemoryAbi::ARRAY_RC_OFFSET));
+            $done->call('__mir_arrq_push', Type::void(), [$arr]);
+        } else {
+            $this->poolFree($done, $base);
+        }
         $done->ret($nu);
     }
 
@@ -4035,6 +4060,7 @@ final class UnifiedArrayRuntime
         $fn = $this->module->func('__mir_ref_new', Type::ptr());
         $v = $fn->param($i64, 'v');
         $e = $fn->block('entry');
+        if (Debug::$refQuarantine) { $e->call('__mir_refq_check', Type::void(), []); }
         $base = $this->poolAlloc($e, Value::int($i64, MemoryAbi::REF_BOX_BYTES));
         $e->store($magic, $base);
         $data = $e->gep(Type::i8(), $base, [Value::int($i64, 8)]);
@@ -4104,8 +4130,17 @@ final class UnifiedArrayRuntime
         // after its reuse must not read it as a live box.
         $b = $e->gep(Type::i8(), $p, [$hdrOff]);
         $e->store(Value::int($i64, 0), $b);
-        $this->poolFree($e, $b);
-        $e->retVoid();
+        if (Debug::$refQuarantine) {
+            $e->call('__mir_refq_check', Type::void(), []);
+            $poison = Value::int($i64, -2401053088876216593);
+            $e->store($poison, $p);
+            $e->store($poison, $e->gep(Type::i8(), $p, [$rcOff]));
+            $e->call('__mir_refq_push', Type::void(), [$p]);
+            $e->retVoid();
+        } else {
+            $this->poolFree($e, $b);
+            $e->retVoid();
+        }
 
         $fn = $this->module->func('__mir_ref_release', Type::void());
         $p = $fn->param(Type::ptr(), 'p');
@@ -4118,7 +4153,93 @@ final class UnifiedArrayRuntime
         $last->br($done);
         $done->retVoid();
 
+        if (Debug::$refQuarantine) { $this->emitRefQuarantine(); }
         $this->emitRefSlotHelpers();
+    }
+
+    /**
+     * `MANTICORE_REF_QUARANTINE=1` bookkeeping: a ring of the last REFQ_SLOTS freed boxes. `__mir_refq_push(data)`
+     * records one; `__mir_refq_check()` aborts, naming the box, when a recorded box no longer holds what
+     * `__mir_ref_free` left (magic 0, value and rc poison) — a stale holder wrote into freed memory. Run at every
+     * box alloc and free, so the abort lands within a few operations of the stray write.
+     */
+        private function emitRefQuarantine(): void
+    {
+        $poison = Value::int(Type::i64(), -2401053088876216593);
+        // box: the magic word before the data is 0, the value and rc words are poison
+        $this->emitQuarantineRing('__mir_refq', 'ref box', [[MemoryAbi::REF_MAGIC_OFFSET, Value::int(Type::i64(), 0)], [0, $poison], [MemoryAbi::REF_RC_OFFSET, $poison]]);
+        // array: the len and rc words are poison; the tag stays, so a stale retain/release still runs and trips the check
+        $this->emitQuarantineRing('__mir_arrq', 'array', [[0, $poison], [MemoryAbi::ARRAY_RC_OFFSET, $poison]]);
+    }
+
+    /**
+     * One quarantine ring: `<p>_push(data)` records a freed block, `<p>_check()` aborts, naming it, when a
+     * recorded block no longer holds the `[offset => expected word]` pairs `$words` that the free left.
+     *
+     * @param list<array{int, Value}> $words
+     */
+    private function emitQuarantineRing(string $p, string $what, array $words): void
+    {
+        $i64 = Type::i64();
+        $slots = 256;
+        $ringG = $this->module->globalInt($p . '_ring', $i64, 0, 'linkonce_odr');
+        $cntG = $this->module->globalInt($p . '_n', $i64, 0, 'linkonce_odr');
+
+        $fn = $this->module->func($p . '_push', Type::void());
+        $ptr = $fn->param(Type::ptr(), 'p');
+        $e = $fn->block('entry');
+        $mk = $fn->block('mk');
+        $put = $fn->block('put');
+        $ring0 = $e->load($i64, $ringG);
+        $e->brIf($e->icmp('eq', $ring0, Value::int($i64, 0)), $mk, $put);
+        $mem = $mk->call('malloc', Type::ptr(), [Value::int($i64, $slots * 8)]);
+        $mk->call('memset', Type::ptr(), [$mem, Value::int(Type::i32(), 0), Value::int($i64, $slots * 8)]);
+        $mk->store($mk->ptrtoint($mem, $i64), $ringG);
+        $mk->br($put);
+        $ring = $put->inttoptr($put->load($i64, $ringG), Type::ptr());
+        $n = $put->load($i64, $cntG);
+        $slot = $put->gep($i64, $ring, [$put->and_($n, Value::int($i64, $slots - 1))]);
+        $put->store($put->ptrtoint($ptr, $i64), $slot);
+        $put->store($put->add($n, Value::int($i64, 1)), $cntG);
+        $put->retVoid();
+
+        $fn = $this->module->func($p . '_check', Type::void());
+        $e = $fn->block('entry');
+        $go = $fn->block('go');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $chk = $fn->block('chk');
+        $bad = $fn->block('bad');
+        $next = $fn->block('next');
+        $done = $fn->block('done');
+        $ring0 = $e->load($i64, $ringG);
+        $e->brIf($e->icmp('eq', $ring0, Value::int($i64, 0)), $done, $go);
+        $ring = $go->inttoptr($go->load($i64, $ringG), Type::ptr());
+        $iSlot = $go->alloca($i64, 'qi');
+        $go->store(Value::int($i64, 0), $iSlot);
+        $go->br($head);
+        $i = $head->load($i64, $iSlot);
+        $head->brIf($head->icmp('sge', $i, Value::int($i64, $slots)), $done, $body);
+        $pw = $body->load($i64, $body->gep($i64, $ring, [$i]));
+        $body->brIf($body->icmp('eq', $pw, Value::int($i64, 0)), $next, $chk);
+        $dp = $chk->inttoptr($pw, Type::ptr());
+        $got = [];
+        $ok = null;
+        foreach ($words as [$off, $want]) {
+            $w = $chk->load($i64, $chk->gep(Type::i8(), $dp, [Value::int($i64, $off)]));
+            $got[] = $w;
+            $c = $chk->icmp('eq', $w, $want);
+            $ok = $ok === null ? $c : $chk->and_($ok, $c);
+        }
+        $chk->brIf($ok, $next, $bad);
+        $fmt = $this->module->anonString("[" . \strtoupper(\substr($p, 6, 4)) . "] freed " . $what . " %p modified after free: words=%llx %llx %llx\n");
+        $got[] = $got[0];
+        $bad->call('dprintf', Type::i32(), [Value::int(Type::i32(), 2), $fmt, $dp, $got[0], $got[1], $got[2] ?? $got[0]], null, '(i32, ptr, ...)');
+        $bad->call('abort', Type::void(), []);
+        $bad->unreachable();
+        $next->store($next->add($i, Value::int($i64, 1)), $iSlot);
+        $next->br($head);
+        $done->retVoid();
     }
 
     /** i1: `$w` is a REF cell (tagged, nibble {@see MemoryAbi::CELL_TAG_REF}). */
@@ -7064,8 +7185,20 @@ final class UnifiedArrayRuntime
         $h0->brIf($isClo, $h0clo, $h0plain);
         $h0clo->call('__mir_array_cellify_inplace', Type::void(), [$arr, Value::int(Type::i64(), 0)]);
         $h0clo->ret($cell);
-        $h0plain->store($h0plain->or_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $fp);
-        $h0plain->ret($cell);
+        // The shared immortal empty array (and any immortal literal) is never
+        // written: stamping CELL on the singleton made every later `[]` that was
+        // cow-copied from it inherit a CELL hint, so an `int[]` built from `[]`
+        // stored tagged words a raw reader then misread (`$w < 0` marker in
+        // mb_ucfirst, a double free of the boxed word). The private copy the
+        // writer is about to make gets its own stamp.
+        $h0stamp = $fn->block('h0stamp');
+        $h0plain->brIf(
+            $h0plain->icmp('sgt', $h0plain->load(Type::i64(), $this->hdr($h0plain, $arr, MemoryAbi::ARRAY_RC_OFFSET)), Value::int(Type::i64(), 1 << 61)),
+            $asis,
+            $h0stamp,
+        );
+        $h0stamp->store($h0stamp->or_($flags, Value::int(Type::i64(), MemoryAbi::ARRAY_ELEM_HINT_CELL)), $fp);
+        $h0stamp->ret($cell);
         $mism->call('__mir_array_cellify_inplace', Type::void(), [$arr, $hint]);
         $mism->ret($cell);
     }
