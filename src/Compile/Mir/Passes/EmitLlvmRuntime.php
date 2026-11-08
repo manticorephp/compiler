@@ -1960,8 +1960,7 @@ trait EmitLlvmRuntime
         $i = 0;
         foreach ($cls->methodMeta as $mn => $mm) {
             if ($mn === '__construct' || $mn === '__call') { continue; }
-            $nameSym = '@.dynm.name.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($nameSym, $mn);
+            $nameRef = $this->metaStrRef((string)$mn);
             $trampFld = 'null';
             if (\Compile\Mir\Passes\TrampolineSynth::invokable($mm)) {
                 $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
@@ -1975,15 +1974,13 @@ trait EmitLlvmRuntime
             // name and route the call to the old semantic fallback before trying
             // the class's __call handler.
             $declName = \ltrim($mm->declaringClass !== '' ? $mm->declaringClass : $cls->name, '\\');
-            $declSym = '@.dynm.decl.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($declSym, $declName);
             $vis = match ($mm->visibility) {
                 'private' => \Compile\MemoryAbi::DYN_METHOD_VIS_PRIVATE,
                 'protected' => \Compile\MemoryAbi::DYN_METHOD_VIS_PROTECTED,
                 default => \Compile\MemoryAbi::DYN_METHOD_VIS_PUBLIC,
             };
             $rows[] = \Compile\Mir\RuntimeLibrary::dynamicMethodRow(
-                $this->strSymBytes($nameSym), $trampFld, $this->strSymBytes($declSym), $vis);
+                $nameRef, $trampFld, $this->metaStrRef($declName), $vis);
             $i = $i + 1;
         }
         // A class may have no ordinary fixed-shape methods but still need a
@@ -2045,8 +2042,6 @@ trait EmitLlvmRuntime
         $defs = '';
         $i = 0;
         foreach ($methodMeta as $mn => $mm) {
-            $sym = '@.rmeta.m.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($sym, $mn);
             $pp = $this->rmetaParamTable($mm, $id, $i, $clsName);
             $defs .= $pp[0];
             $mdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $clsName;
@@ -2055,20 +2050,16 @@ trait EmitLlvmRuntime
             // Always a real string (empty when untyped), never a null pointer:
             // hasReturnType()/getReturnType() compare it to "" BY VALUE, and a
             // null pointer read back is 0, which is `!== ""` — a false positive.
-            $rsym = '@.rmeta.mret.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($rsym, $mm->returnType);
-            $retFld = $this->strSymBytes($rsym);
-            $dsym = '@.rmeta.mdecl.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($dsym, $mdecl);
+            $retFld = $this->metaStrRef($mm->returnType);
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
-                $this->strSymBytes($sym),
+                $this->metaStrRef((string)$mn),
                 $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false)
                     | $this->metaIsDeprecated($mm),
                 $cls === null ? 'null' : $this->methodTrampField($cls, $mm, $mn),
                 $this->methodArity($mm),
                 \count($mm->params),
                 $pp[1],
-                $ap[1], $ap[2], $retFld, $this->strSymBytes($dsym));
+                $ap[1], $ap[2], $retFld, $this->metaStrRef($mdecl));
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows);
@@ -2099,9 +2090,7 @@ trait EmitLlvmRuntime
         $defs = '';
         $pi = 0;
         foreach ($mm->params as $pm) {
-            $nsym = '@.rmeta.pmn.' . $id . '.' . (string)$mi . '.' . (string)$pi;
-            $defs .= $this->strGlobalDef($nsym, $pm->name);
-            $names[] = $this->strSymBytes($nsym);
+            $names[] = $this->metaStrRef($pm->name);
             $hint = $pm->typeHint;
             if ($hint !== '' && $hint[0] === '?') { $hint = \substr($hint, 1); }
             $f = 0;
@@ -2112,9 +2101,7 @@ trait EmitLlvmRuntime
             if ($pm->byRef)             { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_BYREF; }
             if ($pm->typeHint !== '') {
                 $f = $f | \Compile\MemoryAbi::RMETA_PARAM_HAS_TYPE;
-                $tsym = '@.rmeta.pmt.' . $id . '.' . (string)$mi . '.' . (string)$pi;
-                $defs .= $this->strGlobalDef($tsym, $hint);
-                $types[] = $this->strSymBytes($tsym);
+                $types[] = $this->metaStrRef($hint);
             } else {
                 $types[] = 'null';
             }

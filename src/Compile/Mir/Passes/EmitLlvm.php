@@ -204,6 +204,11 @@ final class EmitLlvm implements EmitVisitor
     /** Sequence for private per-function raw text sink files. */
     private int $functionTextCounter = 0;
     private string $bodyPend = '';
+    /** @var array<string, string> metadata string => its shared global, {@see EmitLlvmBuiltins::metaStrRef} */
+    private array $metaStrSyms = [];
+    /** @var array<string, bool> */
+    private array $metaStrTaken = [];
+    private string $metaStrDefs = '';
 
     private function bodyAppend(string $path, string $s): void
     {
@@ -939,6 +944,9 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
+        $this->metaStrSyms = [];
+        $this->metaStrTaken = [];
+        $this->metaStrDefs = '';
         $this->litTableCount = 0;
         $this->objTemplates = [];
         $this->litTablesFlushed = false;
@@ -1432,6 +1440,9 @@ final class EmitLlvm implements EmitVisitor
         $this->drainLazyHelpers(function (string $body, string $label) use (&$late): void { $late .= $body; });
         $preamble .= $late;
         unset($late);
+        // Last: every table that names a shared metadata string is out by now.
+        $preamble .= $this->metaStrDefs;
+        $this->metaStrDefs = '';
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {

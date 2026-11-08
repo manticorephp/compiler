@@ -4848,6 +4848,31 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * The string bytes of one immortal global per distinct `$value`, named by its
+     * content so linkonce tables naming it stay identical across modules; defined
+     * once at the end of the preamble. Reflection and dynamic-method tables
+     * repeat the same names (a declaring class, a type, a parameter): on
+     * symfony-demo 360k strings had 37k distinct values, 64 MB against 6.
+     */
+    private function metaStrRef(string $value): string
+    {
+        $sym = $this->metaStrSyms[$value] ?? '';
+        if ($sym === '') {
+            $base = '@.mstr.' . (string)$this->fnvHash64($value);
+            $sym = $base;
+            $k = 0;
+            while (isset($this->metaStrTaken[$sym])) {
+                $k = $k + 1;
+                $sym = $base . '.' . (string)$k;
+            }
+            $this->metaStrTaken[$sym] = true;
+            $this->metaStrSyms[$value] = $sym;
+            $this->metaStrDefs .= $this->strGlobalDef($sym, $value);
+        }
+        return $this->strSymBytes($sym);
+    }
+
+    /**
      * is_int / is_string / … — runtime tag compare on a tagged cell
      * arg, else a compile-time constant from the static type.
      * @param Node[] $args
