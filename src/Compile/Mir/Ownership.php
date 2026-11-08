@@ -203,6 +203,15 @@ final class Ownership
         return $t->kind === Type::KIND_UNION ? self::OBJ : self::VEC;
     }
 
+    /** `+ - *` over cells run {@see Passes\EmitLlvmExpr::emitTaggedArith}, which mints a
+     *  fresh value on every path: a numeric cell for all three, a union array for `+`. */
+    public static function cellArithMints(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_ADD) { return $n->type->kind === Type::KIND_CELL; }
+        return ($k === Node::KIND_SUB || $k === Node::KIND_MUL) && $n->type->isNumericCell();
+    }
+
     public static function isClosureClass(string $cls): bool
     {
         return $cls === 'Closure' || \str_starts_with($cls, '__closure_');
@@ -349,6 +358,8 @@ final class Ownership
         // A string / cell bitwise op mints its result like a concat, on the
         // heap whatever the allocKind says ({@see BitOp::mintsFresh}).
         if (BitOp::mintsFresh($value)) { return true; }
+        // …and so does a cell `+ - *` ({@see cellArithMints}, the temp half's twin).
+        if (self::cellArithMints($value)) { return true; }
         // `(string)$int` / `(string)$float` ALLOCATE — __mir_int_to_str and
         // __mir_float_to_str hand back a fresh rc=1 buffer exactly as a string
         // builtin does. This was the one producer nobody owned: the local took
@@ -884,8 +895,10 @@ final class Ownership
         // `+ - *` over a numeric cell run {@see Passes\EmitLlvmExpr::emitTaggedArith}:
         // the helper boxes a NEW cell on every path, a counted heap box past the
         // inline int form.
-        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
-            && $n->type->isNumericCell()) { return true; }
+        // A cell `+` of two arrays is the union (`__manticore_tagged_add` boxes a
+        // fresh `__mir_array_union`), so any cell-typed `+` mints too; read as a
+        // borrow, `$x = ($a[$k] ?? []) + ($b[$k] ?? []); return $x;` leaked the union.
+        if (self::cellArithMints($n)) { return true; }
         if (BitOp::mintsFresh($n)) { return true; }
         if ($k !== Node::KIND_CALL) { return false; }
         $fn = $n->function;
@@ -1458,8 +1471,7 @@ final class Ownership
         if ($this->returnCondNormalized($v, $erasedArray)) { return false; }
         if ($this->isUserOffsetGetRead($v)) { return false; }
         // A numeric op's cell is minted by its helper ({@see tempCellOwned}).
-        if (($k === Node::KIND_ADD || $k === Node::KIND_SUB || $k === Node::KIND_MUL)
-            && $v->type->isNumericCell()) { return false; }
+        if (self::cellArithMints($v)) { return false; }
         return true;
     }
 

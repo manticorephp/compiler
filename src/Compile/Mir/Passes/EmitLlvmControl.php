@@ -903,6 +903,14 @@ trait EmitLlvmControl
             || $k === Node::KIND_INVOKE || \Compile\Mir\BitOp::mintsFresh($arm)) {
             return true;
         }
+        // An array `+` is `__mir_array_union`'s fresh +1 buffer ({@see
+        // \Compile\Mir\Ownership} owns it like a literal); retained again, Laravel's
+        // `RouteCollection::get` leaked the union on every request.
+        if ($k === Node::KIND_ADD && $arm->type->kind === Type::KIND_ARRAY
+            && $arm->allocKind === \Compile\Mir\AllocationKind::RC_HEAP) {
+            return true;
+        }
+        if (\Compile\Mir\Ownership::cellArithMints($arm)) { return true; }
         if ($k === Node::KIND_CALL) {
             $fn = $arm->function;
             if ($this->sigs->returnsByRef[$fn] ?? false) { return false; }

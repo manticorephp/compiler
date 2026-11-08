@@ -5041,7 +5041,16 @@ trait EmitLlvmCalls
                 $out = $this->coerceToI64();
                 return $out . $this->rcReleaseReg($this->lastValue, $pf);
             }
-            if ($this->lastCallWasBuiltin) { return ''; }
+            // A MINTING builtin (`json_decode('[]');`, `str_repeat(…);`) hands its
+            // result at +1 like a body does; nothing binds it, so drop it here —
+            // Laravel's JsonResponse::setData leaked one array per request. A
+            // borrowing builtin classifies Borrow and is left alone.
+            if ($this->lastCallWasBuiltin) {
+                if ($this->own->classifyTemp($s, true) <= 0) { return ''; }
+                $bf = $this->isClosureValueType($s->type) ? 'closure' : $this->discardReleaseFlavor($s->type);
+                if ($bf === '') { return ''; }
+                return $this->coerceToI64() . $this->rcReleaseReg($this->lastValue, $bf);
+            }
             if (!isset($this->sigs->paramTypes[$fname])) { return ''; }
             // Value context derefs the address and takes a +1 copy
             // ({@see byRefValueCopyRetainIr}). Only an array copy is counted; a raw
