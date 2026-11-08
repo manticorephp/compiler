@@ -1019,6 +1019,42 @@ final class LowerFromAst implements Pass
         // a broken binding there should fail at once rather than only when some
         // user program happens to pull that prelude tier in.
         $this->checkFfiAttrs($stmts);
+        // Constants first: a class's static-property default (`static $c = [FOO]`) is lowered
+        // inside buildClassDef and must already see every `define()` / `const`.
+        // Pre-pass: register every top-level `define("NAME", <const-expr>)` so a
+        // later bareword reference / `constant()` / `defined()` resolves at
+        // compile time, regardless of source order. Non-literal-name defines are
+        // not registered (no runtime registry).
+        $this->registerUnconditionalDefines($stmts);
+        // the guarded form `if (!defined('N')) { define('N', <const-expr>); }`.
+        // This is THE polyfill idiom — every one of the 45 guarded defines across
+        // the tier-1 packages has exactly this shape, with no version conditional
+        // among them — and without it the whole polyfill layer is unreachable
+        // (`unknown constant IDNA_DEFAULT`, reached through a DEFAULT PARAMETER
+        // VALUE, which must be a compile-time constant).
+        //
+        // Only this shape is admitted, and only for the SAME name the guard
+        // tests. That is what makes it sound without evaluating anything: the
+        // constant world is closed at compile time, so "nobody else defined N"
+        // is decidable, and the guard says the author's intent is exactly
+        // "define it if nobody did". A define under any OTHER condition stays
+        // unregistered — registering one from a branch that would not run is
+        // the shape of bug this compiler has paid for before.
+        foreach ($stmts as $stmt) {
+            $this->registerGuardedDefines($stmt);
+        }
+        // Every other `define("N", v)` with a literal name (in a branch, used as an
+        // expression, or inside a function / method body) gets a run-time cell:
+        // the call stores into it and later bare / constant() / defined() reads see it.
+        $this->registerRuntimeDefines($stmts);
+        // Constants a dependency exports. AFTER the local scan and guarded, so a
+        // program that defines the name itself keeps its own value — the same
+        // precedence the imported-FUNCTION path uses, and the one that lets a
+        // program shadow a library's default without renaming it.
+        foreach ($this->externConstants as $xn => $xv) {
+            if (isset($this->userConstants[$xn])) { continue; }
+            $this->userConstants[$xn] = $xv;
+        }
         // Same [0, $preludeCount) window the method loop below uses for
         // FunctionDef::$isPrelude — here it decides the LINKAGE of a class's
         // static-prop cells, which are registered inside buildClassDef.
@@ -1107,6 +1143,85 @@ final class LowerFromAst implements Pass
             $this->classTable['stdClass'] = $std;
             $this->knownClassNames['stdClass'] = true;
             $module->addClass($std);
+        }
+
+        // Declarations first, then the class table's hoisted classes: every walker synthesized below (var_dump, print_r,
+        // serialize, reflection, ...) is written from the class table, so a class hoisted out of a guarded `if` must be in it.
+        // Pre-pass: capture every function's params so call sites can
+        // fill defaults + reorder named args regardless of source order.
+        foreach ($stmts as $stmt) {
+            if ($stmt->kind === 'Function') {
+                $fqn = $stmt->decl->name;
+                $this->declareFn($fqn, $stmt->decl);
+                $this->noteSourceFnAlias($fqn);
+            }
+        }
+
+        // Inject bundled-stdlib signatures as declare-only externs. Skipped
+        // when the program defines the name itself (the compiler's own source
+        // ships the stdlib) or a codegen builtin handles it inline — in both
+        // cases the user object is self-contained and stdlib.o is not linked.
+        foreach ($this->externDecls as $extDecl) {
+            $name = $extDecl->name;
+            // A method of an imported class: the class import already declares
+            // it, with the implicit `$this` in slot 0 that a plain function
+            // signature has no way to reconstruct.
+            if (isset($this->externMethodSyms[$name])) { continue; }
+            if (isset($this->fnDecls[$name])) { continue; }
+            // A codegen builtin's stdlib twin is still DECLARED — not
+            // registered for direct calls (those stay inline, emitBuiltin is
+            // asked first), but present so a call by RUNTIME NAME finds a
+            // symbol: `self::VALIDATION_FUNCTIONS[$type]($value)` reached no
+            // `is_string` and symfony OptionsResolver rejected every option.
+            if ($this->isCodegenBuiltin($name)) {
+                $req = 0;
+                foreach ($extDecl->params as $bp) {
+                    if (!($bp->default instanceof \Parser\Ast\Expr) && !$bp->variadic) { $req = $req + 1; }
+                }
+                $module->builtinTwinReq[$name] = $req;
+                $module->builtinTwinTot[$name] = \count($extDecl->params);
+                // The HINT, not a lowered Type: lowering a type hint registers
+                // what it names, and this runs for every builtin twin in the
+                // stdlib whether or not the program ever calls one by name.
+                $module->builtinTwinRet[$name] = $extDecl->returnType ?? '';
+                $hints = [];
+                foreach ($extDecl->params as $bp) { $hints[] = \strtolower($bp->typeHint ?? ''); }
+                $module->builtinTwinParams[$name] = $hints;
+                foreach ($extDecl->params as $bp) {
+                    if ($bp->byRef) { $module->builtinTwinRef[$name] = true; }
+                }
+                continue;
+            }
+            $this->declareFn($name, $extDecl);
+            // Register the bare-name alias for a namespaced import, exactly as
+            // the in-source pre-pass does, so an unqualified `strncmp()` in the
+            // consumer resolves to the imported `Runtime\Libc\strncmp` instead
+            // of mis-mangling to an undefined global `@manticore_strncmp`.
+            $pos = \strrpos($name, '\\');
+            if ($pos !== false && $pos >= 0) {
+                $bare = \substr($name, $pos + 1);
+                $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare])
+                    ? '' : $name;
+            }
+            $fn = $this->lowerFunctionSignature($extDecl);
+            $fn->isExtern = true;
+            $module->addFunction($fn);
+            $this->externInjected = true;
+        }
+
+        // Fold polyfill-style declaration guards: expand a top-level `if
+        // (compile-time predicate) { … }` into its live branch, so a declaration
+        // it guards — `if (!function_exists('X')) { function X() {…} }` — hoists to
+        // the top level when live, or is dropped when X already exists. Runs after
+        // the stdlib externs are in `$fnDecls` (so function_exists sees native
+        // functions) and only over the user portion (the prelude window stays put).
+        if ($preludeCount < \count($stmts)) {
+            $head = \array_slice($stmts, 0, $preludeCount);
+            $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
+            $stmts = \array_merge($head, $tail);
+            // Every hoisted class's DECL is registered by now; give them their
+            // ClassDefs before anything lowers a method body against one.
+            $this->buildHoistedClassDefs($module);
         }
 
         // Synthesize `__mir_dump_object` from the now-complete class table: a
@@ -1306,50 +1421,6 @@ final class LowerFromAst implements Pass
             }
         }
 
-        // Pre-pass: capture every function's params so call sites can
-        // fill defaults + reorder named args regardless of source order.
-        foreach ($stmts as $stmt) {
-            if ($stmt->kind === 'Function') {
-                $fqn = $stmt->decl->name;
-                $this->declareFn($fqn, $stmt->decl);
-                $this->noteSourceFnAlias($fqn);
-            }
-        }
-
-        // Pre-pass: register every top-level `define("NAME", <const-expr>)` so a
-        // later bareword reference / `constant()` / `defined()` resolves at
-        // compile time, regardless of source order. Non-literal-name defines are
-        // not registered (no runtime registry).
-        $this->registerUnconditionalDefines($stmts);
-        // the guarded form `if (!defined('N')) { define('N', <const-expr>); }`.
-        // This is THE polyfill idiom — every one of the 45 guarded defines across
-        // the tier-1 packages has exactly this shape, with no version conditional
-        // among them — and without it the whole polyfill layer is unreachable
-        // (`unknown constant IDNA_DEFAULT`, reached through a DEFAULT PARAMETER
-        // VALUE, which must be a compile-time constant).
-        //
-        // Only this shape is admitted, and only for the SAME name the guard
-        // tests. That is what makes it sound without evaluating anything: the
-        // constant world is closed at compile time, so "nobody else defined N"
-        // is decidable, and the guard says the author's intent is exactly
-        // "define it if nobody did". A define under any OTHER condition stays
-        // unregistered — registering one from a branch that would not run is
-        // the shape of bug this compiler has paid for before.
-        foreach ($stmts as $stmt) {
-            $this->registerGuardedDefines($stmt);
-        }
-        // Every other `define("N", v)` with a literal name (in a branch, used as an
-        // expression, or inside a function / method body) gets a run-time cell:
-        // the call stores into it and later bare / constant() / defined() reads see it.
-        $this->registerRuntimeDefines($stmts);
-        // Constants a dependency exports. AFTER the local scan and guarded, so a
-        // program that defines the name itself keeps its own value — the same
-        // precedence the imported-FUNCTION path uses, and the one that lets a
-        // program shadow a library's default without renaming it.
-        foreach ($this->externConstants as $xn => $xv) {
-            if (isset($this->userConstants[$xn])) { continue; }
-            $this->userConstants[$xn] = $xv;
-        }
         // The synthesized reflection factories, lowered now that every constant
         // a body of theirs might name is known — see the registration above.
         foreach ($this->pendingSynthFns as $decl) {
@@ -1357,74 +1428,8 @@ final class LowerFromAst implements Pass
         }
         $this->pendingSynthFns = [];
 
-        // Inject bundled-stdlib signatures as declare-only externs. Skipped
-        // when the program defines the name itself (the compiler's own source
-        // ships the stdlib) or a codegen builtin handles it inline — in both
-        // cases the user object is self-contained and stdlib.o is not linked.
-        foreach ($this->externDecls as $extDecl) {
-            $name = $extDecl->name;
-            // A method of an imported class: the class import already declares
-            // it, with the implicit `$this` in slot 0 that a plain function
-            // signature has no way to reconstruct.
-            if (isset($this->externMethodSyms[$name])) { continue; }
-            if (isset($this->fnDecls[$name])) { continue; }
-            // A codegen builtin's stdlib twin is still DECLARED — not
-            // registered for direct calls (those stay inline, emitBuiltin is
-            // asked first), but present so a call by RUNTIME NAME finds a
-            // symbol: `self::VALIDATION_FUNCTIONS[$type]($value)` reached no
-            // `is_string` and symfony OptionsResolver rejected every option.
-            if ($this->isCodegenBuiltin($name)) {
-                $req = 0;
-                foreach ($extDecl->params as $bp) {
-                    if (!($bp->default instanceof \Parser\Ast\Expr) && !$bp->variadic) { $req = $req + 1; }
-                }
-                $module->builtinTwinReq[$name] = $req;
-                $module->builtinTwinTot[$name] = \count($extDecl->params);
-                // The HINT, not a lowered Type: lowering a type hint registers
-                // what it names, and this runs for every builtin twin in the
-                // stdlib whether or not the program ever calls one by name.
-                $module->builtinTwinRet[$name] = $extDecl->returnType ?? '';
-                $hints = [];
-                foreach ($extDecl->params as $bp) { $hints[] = \strtolower($bp->typeHint ?? ''); }
-                $module->builtinTwinParams[$name] = $hints;
-                foreach ($extDecl->params as $bp) {
-                    if ($bp->byRef) { $module->builtinTwinRef[$name] = true; }
-                }
-                continue;
-            }
-            $this->declareFn($name, $extDecl);
-            // Register the bare-name alias for a namespaced import, exactly as
-            // the in-source pre-pass does, so an unqualified `strncmp()` in the
-            // consumer resolves to the imported `Runtime\Libc\strncmp` instead
-            // of mis-mangling to an undefined global `@manticore_strncmp`.
-            $pos = \strrpos($name, '\\');
-            if ($pos !== false && $pos >= 0) {
-                $bare = \substr($name, $pos + 1);
-                $this->fnAliasByBare[$bare] = isset($this->fnAliasByBare[$bare])
-                    ? '' : $name;
-            }
-            $fn = $this->lowerFunctionSignature($extDecl);
-            $fn->isExtern = true;
-            $module->addFunction($fn);
-            $this->externInjected = true;
-        }
-
-        // Fold polyfill-style declaration guards: expand a top-level `if
-        // (compile-time predicate) { … }` into its live branch, so a declaration
-        // it guards — `if (!function_exists('X')) { function X() {…} }` — hoists to
-        // the top level when live, or is dropped when X already exists. Runs after
-        // the stdlib externs are in `$fnDecls` (so function_exists sees native
-        // functions) and only over the user portion (the prelude window stays put).
-        if ($preludeCount < \count($stmts)) {
-            $head = \array_slice($stmts, 0, $preludeCount);
-            $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
-            $stmts = \array_merge($head, $tail);
-            // Every hoisted class's DECL is registered by now; give them their
-            // ClassDefs before anything lowers a method body against one.
-            $this->buildHoistedClassDefs($module);
-        }
-
         $mainStmts = [];
+        $mainFile = '';
         $stmtIdx = 0;
         $measureLower = \Compile\Stats::$on;
         $lowerFnNs = 0;
@@ -1508,6 +1513,7 @@ final class LowerFromAst implements Pass
             $this->currentRefParamNames = [];
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
             $this->lowerInMain = true;
+            if ($stmt->span->file !== '') { $module->loweringFile = $stmt->span->file; $mainFile = $stmt->span->file; }
             $mainStmts[] = $this->lowerStmt($stmt);
             $this->lowerInMain = false;
             if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
@@ -1555,6 +1561,7 @@ final class LowerFromAst implements Pass
         $mainStmts = $this->injectGlobalDecls($mainStmts);
         $mainStmts = $this->injectShutdownDrain($mainStmts);
         $mainBody = new Block($mainStmts, Type::void());
+        $module->loweringFile = $mainFile;
         $module->addFunction(new FunctionDef(
             name: '__main',
             params: [],
@@ -2566,6 +2573,8 @@ final class LowerFromAst implements Pass
                         [\Parser\Ast\Expr::arrayLit($elems, $span)], $span),
                     $span),
             ]);
+            // Lowered in the declaring class's scope: an argument may name `self::HELP`.
+            $this->synthFnScope[\Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false)] = $class;
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, false),
                 [], 'mixed', $argsBody, $span);
@@ -2579,6 +2588,7 @@ final class LowerFromAst implements Pass
             $newBody = new \Parser\Ast\Block([
                 \Parser\Ast\Stmt::return_(\Parser\Ast\Expr::new_($attr->name, $attr->args, $span), $span),
             ]);
+            $this->synthFnScope[\Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true)] = $class;
             $out[] = new \Parser\Ast\FunctionDecl(
                 \Compile\Mir\Passes\ReflectSynth::attrFn($class, $kind, $member, $k, true),
                 [], 'mixed', $newBody, $span);
@@ -2604,7 +2614,7 @@ final class LowerFromAst implements Pass
             foreach ($decl->methods as $md) {
                 $methods[] = new \Parser\Ast\ArrayElement(
                     \Parser\Ast\Expr::string(\strtolower($md->name), $sp),
-                    $this->docEntry($md->docComment, $md->span->line, $sp));
+                    $this->docEntry($md->docComment, $md->span->line, $sp, $md->endLine));
             }
             $props = [];
             foreach ($decl->properties as $pd) {
@@ -2641,13 +2651,14 @@ final class LowerFromAst implements Pass
         return $out;
     }
 
-    /** `[doc-or-false, line]` as an array literal. */
-    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp): \Parser\Ast\Expr
+    /** `[doc-or-false, line, end-line]` as an array literal (end 0 = the start). */
+    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp, int $end = 0): \Parser\Ast\Expr
     {
         $docExpr = $doc === null ? \Parser\Ast\Expr::bool(false, $sp) : \Parser\Ast\Expr::string($doc, $sp);
         return \Parser\Ast\Expr::arrayLit([
             new \Parser\Ast\ArrayElement(null, $docExpr),
             new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($line, $sp)),
+            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($end > 0 ? $end : $line, $sp)),
         ], $sp);
     }
 
@@ -3808,6 +3819,15 @@ final class LowerFromAst implements Pass
     }
 
     /** @param \Parser\Ast\Expr[] $args */
+    private function hasNamedArg(array $args): bool
+    {
+        foreach ($args as $a) {
+            if ($a->kind === 'NamedArg') { return true; }
+        }
+        return false;
+    }
+
+    /** @param \Parser\Ast\Expr[] $args */
     private function spreadVariableArg(array $args): bool
     {
         foreach ($args as $a) {
@@ -4768,8 +4788,7 @@ final class LowerFromAst implements Pass
         // binding rather than writing through whatever reference it held —
         // which is the whole point of that line.
         if (($expr->target->kind === 'ArrayAccess' || $expr->target->kind === 'DynProp'
-                || ($expr->target->kind === 'PropertyAccess'
-                    && $this->propSlotMayHoldRef($this->asPropertyAccessAst($expr->target))))
+                || $expr->target->kind === 'PropertyAccess')
             && \Compile\Debug::$refCells
             && ($expr->source->kind === 'Variable'
                 || $expr->source->kind === 'PropertyAccess'
@@ -4779,27 +4798,6 @@ final class LowerFromAst implements Pass
             return $this->storeToTarget($expr->target, new \Compile\Mir\RefCell_($lv, Type::cell()));
         }
         return $this->storeToTarget($expr->target, $this->lowerExpr($expr->source));
-    }
-
-    /**
-     * Can `$o->p = &$v` bind? Only a slot of the boxed-cell channel (untyped /
-     * `mixed`) can hold a reference. A property NAME some class declares with a
-     * concrete type keeps the value copy: the receiver's class is not known here
-     * and a reference-cell slot is read by name. Open: typed-property reference repr.
-     */
-    private function propSlotMayHoldRef(\Parser\Ast\PropertyAccess $target): bool
-    {
-        foreach ($this->classTable as $cd) {
-            $t = $cd->propertyTypes[$target->property] ?? null;
-            if ($t !== null && $t->kind !== Type::KIND_CELL) { return false; }
-        }
-        return true;
-    }
-
-    private function asPropertyAccessAst(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess
-    {
-        /** @var \Parser\Ast\PropertyAccess $e */
-        return $e;
     }
 
     private function asVarVar(\Parser\Ast\Expr $e): \Parser\Ast\VarVar
@@ -4853,7 +4851,51 @@ final class LowerFromAst implements Pass
                 new LoadLocal($vtmp, $value->type),
             ], $value->type);
         }
-        return $this->storeToTarget($expr->target, $this->lowerExpr($expr->value));
+        $value = $this->lowerExpr($expr->value);
+        // `$a[$k] = $a`: php takes the value first, so the store separates the array from it.
+        // The element store runs its copy-on-write BEFORE it evaluates the value: rc 1, no
+        // copy, and the array held itself (Twig's `$context['_parent'] = $context`).
+        if ($expr->target->kind === 'ArrayAccess' && $this->valueHoldsStoreRoot($value, $expr->target)) {
+            $vtmp = '__av_' . (string)$this->destrCounter;
+            $this->destrCounter = $this->destrCounter + 1;
+            return new Block([
+                new StoreLocal($vtmp, $value, $value->type),
+                $this->storeToTarget($expr->target, new LoadLocal($vtmp, $value->type)),
+                new LoadLocal($vtmp, $value->type),
+            ], $value->type);
+        }
+        return $this->storeToTarget($expr->target, $value);
+    }
+
+    /** Can `$value` carry the whole array `$target` writes into? A read of one of its elements cannot. */
+    private function valueHoldsStoreRoot(Node $value, \Parser\Ast\Expr $target): bool
+    {
+        $cur = $target;
+        while ($cur->kind === 'ArrayAccess') { $cur = $this->arrayAccessBase($this->asArrayAccess($cur)); }
+        if ($cur->kind === 'Variable') { return $this->nodeReadsWhole($value, 'l', $this->varName($this->asVariable($cur))); }
+        if ($cur->kind === 'PropertyAccess') { return $this->nodeReadsWhole($value, 'p', $this->asPropAst($cur)->property); }
+        if ($cur->kind === 'StaticAccess') { return $this->nodeReadsWhole($value, 's', ''); }
+        return false;
+    }
+
+    private function asPropAst(\Parser\Ast\Expr $e): \Parser\Ast\PropertyAccess
+    {
+        /** @var \Parser\Ast\PropertyAccess $e */
+        return $e;
+    }
+
+    private function nodeReadsWhole(Node $n, string $rootKind, string $name): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CLOSURE) { return false; }
+        if ($k === Node::KIND_LOAD_LOCAL) { return $rootKind === 'l' && $n->name === $name; }
+        if ($k === Node::KIND_PROPERTY_ACCESS) { return $rootKind === 'p' && $n->property === $name; }
+        if ($k === Node::KIND_STATIC_PROP) { return $rootKind === 's'; }
+        if ($k === Node::KIND_ARRAY_ACCESS) { return $this->nodeReadsWhole($n->index, $rootKind, $name); }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->nodeReadsWhole($c, $rootKind, $name)) { return true; }
+        }
+        return false;
     }
 
     /**
@@ -5660,6 +5702,8 @@ final class LowerFromAst implements Pass
         $dkind = $cdecl->kind ?? 'class';
         if ($dkind === 'trait') {
             $this->traitTable[$this->declName($cdecl)] = $cdecl;
+            // Reflection and trait_exists() know a trait by this table; a hoisted one was missing from it.
+            $this->module->traitNames[\ltrim($this->declName($cdecl), '\\')] = true;
             return;
         }
         $cname = $this->classDeclName($cdecl);
@@ -6704,6 +6748,14 @@ final class LowerFromAst implements Pass
             if ($this->isTypeDef($cname)) { continue; }
             if ($this->resolveMethodParams($cname, $method) !== null) { $names[] = $cname; }
         }
+        // `$enumClass::cases()` / `::from()` / `::tryFrom()` are built in, so no method table names them.
+        $lm = \strtolower($method);
+        if ($lm === 'cases' || $lm === 'from' || $lm === 'tryfrom') {
+            foreach ($this->enumTable as $en => $ed) {
+                if ($lm !== 'cases' && $ed->backing === '') { continue; }
+                if (!\in_array($en, $names, true)) { $names[] = $en; }
+            }
+        }
         $tmp = '__dynrc' . (string)$this->destrCounter;
         $this->destrCounter = $this->destrCounter + 1;
         $chain = \Parser\Ast\Expr::null($span);
@@ -7083,11 +7135,22 @@ final class LowerFromAst implements Pass
                 true,
             );
         }
+        $elemProp = $e->left->kind === 'PropertyAccess' ? $this->coalesceElementProp($e->left) : null;
         return new NullCoalesce_(
-            $this->markProbe($this->lowerExpr($e->left)),
+            $elemProp ?? $this->markProbe($this->lowerExpr($e->left)),
             $this->lowerExpr($e->right),
             Type::unknown(),
         );
+    }
+
+    /** `$map[$k]->p ?? $d`: a missing element is null, and `??` of anything behind a null is the default. */
+    private function coalesceElementProp(\Parser\Ast\PropertyAccess $pa): ?Node
+    {
+        if ($pa->object->kind !== 'ArrayAccess') { return null; }
+        // The inner `??` is the presence test: a missing key's probe word is not a null value.
+        $elem = new NullCoalesce_(
+            $this->markProbe($this->lowerExpr($pa->object)), new NullConst(Type::null_()), Type::unknown());
+        return $this->nullsafeRead($elem, $pa->property);
     }
 
     /**
@@ -7531,6 +7594,20 @@ final class LowerFromAst implements Pass
                     return $params;
                 }
             }
+            // A method the class mixes in from a trait (doctrine's `JoinColumn` takes its promoted
+            // constructor from `JoinColumnProperties`): without its signature a named argument is
+            // lowered blind and its NAME is lost.
+            foreach ($this->usedTraitsFlat($cd) as $tname) {
+                $td = $this->traitTable[\ltrim($tname, '\\')] ?? null;
+                if ($td === null) { continue; }
+                foreach ($this->classDeclMethods($td) as $tm) {
+                    if ($this->methodDeclName($tm) === $method) {
+                        $tparams = $this->methodDeclParams($tm);
+                        $this->methodParamsCache[$key] = $tparams;
+                        return $tparams;
+                    }
+                }
+            }
             $ext = $this->classDeclExtends($cd);
             $c = ($ext !== []) ? $ext[0] : '';
         }
@@ -7597,12 +7674,16 @@ final class LowerFromAst implements Pass
      */
     private function lowerNullsafeProp(\Parser\Ast\PropertyAccess $expr): Node
     {
-        $obj = $this->lowerExpr($expr->object);
+        return $this->nullsafeRead($this->lowerExpr($expr->object), $expr->property);
+    }
+
+    private function nullsafeRead(Node $obj, string $property): Node
+    {
         $tmp = '__ns_' . (string)$this->destrCounter;
         $this->destrCounter = $this->destrCounter + 1;
         $store = new StoreLocal($tmp, $obj, $obj->type);
         $cond = new Cmp($store, new NullConst(Type::null_()), '===');
-        $prop = new PropertyAccess_(new LoadLocal($tmp, $obj->type), $expr->property, Type::unknown());
+        $prop = new PropertyAccess_(new LoadLocal($tmp, $obj->type), $property, Type::unknown());
         return new Ternary($cond, new NullConst(Type::null_()), $prop, Type::unknown(), true);
     }
 
@@ -7649,8 +7730,72 @@ final class LowerFromAst implements Pass
         return $this->fnCanon[\strtolower($name)] ?? $name;
     }
 
+    private function mcNullsafe(\Parser\Ast\MethodCallExpr $m): bool { return $m->nullsafe; }
+    private function mcObject(\Parser\Ast\MethodCallExpr $m): \Parser\Ast\Expr { return $m->object; }
+    private function paNullsafe(\Parser\Ast\PropertyAccess $p): bool { return $p->nullsafe; }
+    private function paObject(\Parser\Ast\PropertyAccess $p): \Parser\Ast\Expr { return $p->object; }
+
+    /** The same call/access with another receiver (and `nullsafe` off when asked). */
+    private function withReceiver(\Parser\Ast\Expr $node, \Parser\Ast\Expr $recv, bool $nullsafe): \Parser\Ast\Expr
+    {
+        if ($node->kind === 'MethodCall') {
+            $m = $node;
+            return new \Parser\Ast\MethodCallExpr($recv, $this->mcMethod($m), $this->mcArgs($m), $nullsafe, $this->mcSpan($m));
+        }
+        $p = $node;
+        return new \Parser\Ast\PropertyAccess($recv, $this->paProp($p), $nullsafe, $this->paSpan($p));
+    }
+    private function mcMethod(\Parser\Ast\MethodCallExpr $m): string { return $m->method; }
+    /** @return \Parser\Ast\Expr[] */
+    private function mcArgs(\Parser\Ast\MethodCallExpr $m): array { return $m->args; }
+    private function mcSpan(\Parser\Ast\MethodCallExpr $m): \Parser\Ast\Span { return $m->span; }
+    private function paProp(\Parser\Ast\PropertyAccess $p): string { return $p->property; }
+    private function paSpan(\Parser\Ast\PropertyAccess $p): \Parser\Ast\Span { return $p->span; }
+
+    /**
+     * `$a?->b()->c()`: when `$a` is null php skips the WHOLE rest of the chain. The `?->` desugar
+     * covers only its own call, so the outer `->c()` ran on null. For a call/access that is NOT
+     * itself nullsafe but sits on a chain holding one, evaluate the deepest nullsafe receiver once
+     * and run the chain on it: `($t = $a) === null ? null : $t->b()->c()`. Null = no nullsafe link.
+     */
+    private function nullsafeChainTail(\Parser\Ast\Expr $expr): ?Node
+    {
+        /** @var \Parser\Ast\Expr[] $chain */
+        $chain = [];
+        $cur = $expr;
+        while ($cur->kind === 'MethodCall' || $cur->kind === 'PropertyAccess') {
+            $chain[] = $cur;
+            $cur = $cur->kind === 'MethodCall' ? $this->mcObject($cur) : $this->paObject($cur);
+        }
+        $k = -1;
+        for ($i = 1; $i < \count($chain); $i = $i + 1) {
+            $c = $chain[$i];
+            $ns = $c->kind === 'MethodCall' ? $this->mcNullsafe($c) : $this->paNullsafe($c);
+            if ($ns) { $k = $i; }
+        }
+        if ($k < 0) { return null; }
+        $n = $chain[$k];
+        $baseObj = $n->kind === 'MethodCall' ? $this->mcObject($n) : $this->paObject($n);
+        $tmp = '__nsc_' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $rebuilt = $this->withReceiver($n, \Parser\Ast\Expr::variable($tmp, $n->span), false);
+        for ($i = $k - 1; $i >= 0; $i = $i - 1) {
+            $c = $chain[$i];
+            $cns = $c->kind === 'MethodCall' ? $this->mcNullsafe($c) : $this->paNullsafe($c);
+            $rebuilt = $this->withReceiver($c, $rebuilt, $cns);
+        }
+        $obj = $this->lowerExpr($baseObj);
+        $store = new StoreLocal($tmp, $obj, $obj->type);
+        $cond = new Cmp($store, new NullConst(Type::null_()), '===');
+        return new Ternary($cond, new NullConst(Type::null_()), $this->lowerExpr($rebuilt), Type::unknown());
+    }
+
     private function lowerMethodCall(\Parser\Ast\MethodCallExpr $expr): Node
     {
+        if (!$this->mcNullsafe($expr)) {
+            $chainTail = $this->nullsafeChainTail($expr);
+            if ($chainTail !== null) { return $chainTail; }
+        }
         $canon = $this->canonMethodName($expr->method);
         if ($canon !== $expr->method) {
             return $this->lowerMethodCall(new \Parser\Ast\MethodCallExpr($expr->object, $canon, $expr->args, $expr->nullsafe, $expr->span));
@@ -7707,9 +7852,11 @@ final class LowerFromAst implements Pass
         }
         // `$o->m(...$args)` on a receiver typed by its own parameter: the method's by-ref
         // parameters decide how the spread unpacks ({@see lowerRefSpread}).
+        // A named argument needs the signature just as much: lowered blind, its NAME is lost
+        // (`$record->with(message: …)` on a variadic reached the callee as a positional string).
         if ($params === null && $expr->object->kind === 'Variable') {
             $pc = $this->paramClassHint($this->varName($expr->object));
-            if ($pc !== '' && $this->spreadVariableArg($expr->args)) {
+            if ($pc !== '' && ($this->spreadVariableArg($expr->args) || $this->hasNamedArg($expr->args))) {
                 $params = $this->resolveMethodParams($pc, $expr->method);
                 if ($params !== null) { $mcClass = $pc; }
             }
@@ -7731,10 +7878,12 @@ final class LowerFromAst implements Pass
         if ($params === null && $magicHint === '') {
             $params = $this->variadicMethodParams($expr->method);
         }
+        $argsUnbound = false;
         if ($params !== null) {
             $selfCls = $mcClass !== '' ? $this->resolveMethodDeclClass($mcClass, $expr->method) : '';
             $args = $this->defaultFillArgs($params, $expr->args, $selfCls);
         } else {
+            $argsUnbound = $magicHint === '';
             $args = [];
             // A receiver whose class is only known after inference (`?C`, an untyped value): its
             // parameter NAMES are not known here either, so the named arguments ride one string-keyed
@@ -7787,6 +7936,7 @@ final class LowerFromAst implements Pass
         }
         if (\strtolower($expr->method) === 'bindto' || \strtolower($expr->method) === 'call') { $this->module->closureRebinds = true; }
         $mc = new MethodCall_($obj, $expr->method, $args, Type::unknown());
+        $mc->argsUnbound = $argsUnbound;
         $mc->srcArgc = \count($expr->args);
         return $mc;
     }

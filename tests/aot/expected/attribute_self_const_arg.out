@@ -1,0 +1,3 @@
+app:add|adds a thing
+{"name":"app:add","help":"adds a thing"}
+m|adds a thing!

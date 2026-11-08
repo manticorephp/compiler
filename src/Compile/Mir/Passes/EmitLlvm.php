@@ -260,6 +260,12 @@ final class EmitLlvm implements EmitVisitor
     private array $hookPropertyHoldersCache = [];
     /** @var array<string, string> helper symbol → emitted LLVM body */
     private array $propertyReadHelpers = [];
+    /** @var array<string, string> scope|magic => deny-helper symbol, '' when nothing is denied */
+    private array $propDenyHelpers = [];
+    /** @var array<string, bool> classes a lazy ghost's slots are read through */
+    private array $lazyHolders = [];
+    /** The `$o->$name` an isset / `??` is testing: inaccessible reads as unset there, not an Error. */
+    private ?Node $dynQuietRead = null;
     /** @var array<string, string> erased dynamic-method helper bodies */
     private array $dynamicMethodHelpers = [];
     /** Prevent recursive uniform-ABI selection while emitting an extracted fallback. */
@@ -763,6 +769,7 @@ final class EmitLlvm implements EmitVisitor
         $this->magicPropertyHoldersCache = [];
         $this->hookPropertyHoldersCache = [];
         $this->propertyReadHelpers = [];
+        $this->propDenyHelpers = [];
         $this->dynamicMethodHelpers = [];
         $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;
@@ -2253,7 +2260,7 @@ final class EmitLlvm implements EmitVisitor
     /** Overwrite the top backtrace frame's name (index depth-1) with `$disp`,
      *  guarded on 0<depth<=4096 (a frame past the ring was never stored). Emitted at a method's entry so the frame carries
      *  the exact "Class->method" / "Class::method" the callee knows. */
-    private function btNameFix(string $disp): string
+    private function btNameFix(string $disp, string $thisWord = ''): string
     {
         $d = $this->ssa->allocReg();
         $out = '  ' . $d . " = load i64, ptr @__mir_bt_depth\n";
@@ -2274,6 +2281,16 @@ final class EmitLlvm implements EmitVisitor
         $sv = $this->ssa->allocReg();
         $out .= '  ' . $sv . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($disp)) . " to i64\n";
         $out .= '  store i64 ' . $sv . ', ptr ' . $ep . "\n";
+        if ($thisWord !== '') {
+            $ow = $this->ssa->allocReg();
+            $op = $this->ssa->allocReg();
+            $np = $this->ssa->allocReg();
+            $out .= '  ' . $ow . ' = and i64 ' . $thisWord . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $out .= '  ' . $op . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_obj, i64 0, i64 ' . $i . "\n";
+            $out .= '  store i64 ' . $ow . ', ptr ' . $op . "\n";
+            $out .= '  ' . $np . ' = getelementptr inbounds [4096 x i64], ptr @__mir_bt_objn, i64 0, i64 ' . $i . "\n";
+            $out .= '  store i64 ' . $sv . ', ptr ' . $np . "\n";
+        }
         $out .= '  br label %' . $end . "\n" . $end . ":\n";
         return $out;
     }
@@ -2674,6 +2691,21 @@ final class EmitLlvm implements EmitVisitor
                 }
             }
         }
+        // A lazy ghost starts with every property unset, and the read of an unset one
+        // is what starts its initializer ({@see EmitLlvmObjects::emitInitReadCheck}).
+        if (\Compile\Debug::$lazyObjects) {
+            foreach ($this->classes as $name => $cd) {
+                if ($cd->isPreludeClass || !$this->lazyCandidateName((string)$name)) { continue; }
+                foreach ($cd->propertyMeta as $pn => $pm) {
+                    if (!$pm->isStatic) { $cd->propertyMaybeUninit[$pn] = true; }
+                }
+                // A method of an ancestor reads a ghost's slots through the ancestor's type.
+                for ($h = (string)$name, $g = 0; $h !== '' && isset($this->classes[$h]) && $g < 256; $g = $g + 1) {
+                    $this->lazyHolders[$h] = true;
+                    $h = $this->classes[$h]->parent;
+                }
+            }
+        }
         // A read through a base type sees every subclass's instances: a property
         // a subclass's own constructor may leave unwritten is checked on the
         // ancestors that declare it too.
@@ -2748,6 +2780,21 @@ final class EmitLlvm implements EmitVisitor
                 $cd->initMapProps = $set;
             }
         }
+    }
+
+    /** Whether a slot read through `$h` can meet a lazy ghost. */
+    private function lazyHolder(?\Compile\Mir\ClassDef $h): bool
+    {
+        return $h !== null && isset($this->lazyHolders[$h->name]);
+    }
+
+    private function lazyCandidateName(string $name): bool
+    {
+        if (\Compile\Debug::$lazyPrefixes === []) { return true; }
+        foreach (\Compile\Debug::$lazyPrefixes as $p) {
+            if (\str_starts_with($name, (string)$p)) { return true; }
+        }
+        return false;
     }
 
     /** Names of the properties some `unset($x->p)` in `$n` targets.
@@ -3555,6 +3602,13 @@ final class EmitLlvm implements EmitVisitor
         // singletons all carry the enum's own class_id (see biEnumName), which is
         // exactly the id to accept here.
         if (isset($this->enums[$target])) { $ids[] = $this->enums[$target]->classId; }
+        // Every enum is a UnitEnum; a backed one is also a BackedEnum.
+        $lt = \strtolower(\ltrim($target, '\\'));
+        if ($lt === 'unitenum' || $lt === 'backedenum') {
+            foreach ($this->enums as $ed) {
+                if ($lt === 'unitenum' || $ed->backing !== '') { $ids[] = $ed->classId; }
+            }
+        }
         return $ids;
     }
 
@@ -4455,7 +4509,12 @@ final class EmitLlvm implements EmitVisitor
             $cls = $at->kind === Type::KIND_OBJ ? ($at->class ?? '') : '';
             if ($cls === '') { return ''; }
             $ts = $this->resolveMethodClass($cls, '__toString');
-            if ($ts === '') { return ''; }
+            // An atom naming no body (an interface a guard narrowed to): the runtime class answers.
+            if ($ts === '') {
+                $this->rt->needsTagged = true;
+                $out = $this->boxToCell($t);
+                return $out . $this->coerceCellToStr($this->lastValue);
+            }
             if ($first === '') { $first = $ts; }
             foreach ($this->toStringCandidates($cls, $ts) as $c) {
                 if (!\in_array($c, $cands, true)) { $cands[] = $c; }
@@ -4566,7 +4625,8 @@ final class EmitLlvm implements EmitVisitor
         }
         $fn = $this->frame->name;
         if ($fn === '') {
-            return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '');
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '',
+                $this->strLitId($this->pool->intern($this->frameFile())));
         }
         // Relative to the function's first traced line, which lives in ONE
         // global per function: a line inserted above a function moves that
@@ -4582,21 +4642,30 @@ final class EmitLlvm implements EmitVisitor
             $this->strLitId($this->pool->intern($display)),
             (string)($line - $this->btBaseLine[$fn]),
             '@.btl.' . $this->mangle($fn),
+            $this->strLitId($this->pool->intern($this->frameFile())),
         );
     }
 
     /** The ring push inlined: store name+line at [depth] only while depth < 4096
      *  (frames past the ring are counted, never stored), then bump depth. With
      *  `$base`, the line is that global plus `$line` (a delta). */
-    private function btPushInline(string $nameLit, string $line, string $base): string
+    private function btPushInline(string $nameLit, string $line, string $base, string $fileLit = 'null'): string
     {
         // One call, not ~20 lines of two blocks per call site: the helpers are `alwaysinline`
         // (EmitLlvmModule), so the machine code is the same push, but the IR that every later
         // phase writes, splits and parses is a sixth the size.
         if ($base !== '') {
-            return '  call void @__mir_bt_push_rel(ptr ' . $nameLit . ', ptr ' . $base . ', i64 ' . $line . ")\n";
+            return '  call void @__mir_bt_push_rel(ptr ' . $nameLit . ', ptr ' . $base . ', i64 ' . $line . ', ptr ' . $fileLit . ")\n";
         }
-        return '  call void @__mir_bt_push(ptr ' . $nameLit . ', i64 ' . $line . ")\n";
+        return '  call void @__mir_bt_push(ptr ' . $nameLit . ', i64 ' . $line . ', ptr ' . $fileLit . ")\n";
+    }
+
+    /** The file of the function being emitted, else the module's. */
+    private function frameFile(): string
+    {
+        // Built-in code has no file: php leaves file/line out of a frame called from it.
+        if ($this->frame->isPrelude) { return "\0"; }
+        return $this->frame->file !== '' ? $this->frame->file : $this->sourceFile;
     }
 
     /** Pop the frame pushed by {@see btPush} after the call returns. */
@@ -4921,9 +4990,9 @@ final class EmitLlvm implements EmitVisitor
      * fresh packed vec, innermost first — ONE body per global, called: the copy
      * loop used to be inlined twice at every Throwable construction.
      */
-    private function emitBtVec(string $global): string
+    private function emitBtVec(string $global, bool $files = false): string
     {
-        $key = '__mc_btvec_' . \ltrim($global, '@');
+        $key = '__mc_btvec_' . \ltrim($global, '@') . ($files ? '_files' : '');
         $sym = '@manticore_' . $key;
         if (!isset($this->propertyReadHelpers[$key])) {
             $oldSsa = $this->ssa;
@@ -4931,7 +5000,7 @@ final class EmitLlvm implements EmitVisitor
             $oldLastType = $this->lastValueType;
             $this->ssa = new \Compile\Mir\SsaBuilder();
             $this->ssa->reset();
-            $body = $this->btVecLoopIr($global);
+            $body = $this->btVecLoopIr($global, $files);
             $this->propertyReadHelpers[$key] = 'define linkonce_odr i64 ' . $sym . "() {\nentry:\n"
                 . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
             $this->ssa = $oldSsa;
@@ -4944,7 +5013,8 @@ final class EmitLlvm implements EmitVisitor
         return '  ' . $r . ' = call i64 ' . $sym . "()\n";
     }
 
-    private function btVecLoopIr(string $global): string
+    /** With `$files` the ring is `@__mir_bt_file`: each element its string, '' where none was recorded. */
+    private function btVecLoopIr(string $global, bool $files = false): string
     {
         $dep = $this->ssa->allocReg();
         $out = '  ' . $dep . " = load i64, ptr @__mir_bt_depth\n";
@@ -4974,6 +5044,15 @@ final class EmitLlvm implements EmitVisitor
         $out .= '  ' . $ep . ' = getelementptr inbounds [4096 x i64], ptr ' . $global . ', i64 0, i64 ' . $i . "\n";
         $ev = $this->ssa->allocReg();
         $out .= '  ' . $ev . ' = load i64, ptr ' . $ep . "\n";
+        if ($files) {
+            $none = $this->ssa->allocReg();
+            $emp = $this->ssa->allocReg();
+            $sel = $this->ssa->allocReg();
+            $out .= '  ' . $none . ' = icmp eq i64 ' . $ev . ", 0\n";
+            $out .= '  ' . $emp . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern('')) . " to i64\n";
+            $out .= '  ' . $sel . ' = select i1 ' . $none . ', i64 ' . $emp . ', i64 ' . $ev . "\n";
+            $ev = $sel;
+        }
         $cur = $this->ssa->allocReg();
         $out .= '  ' . $cur . ' = load ptr, ptr ' . $slot . "\n";
         $nx = $this->ssa->allocReg();
@@ -5016,7 +5095,9 @@ final class EmitLlvm implements EmitVisitor
             return $cls !== '' && isset($this->classes[$cls]);
         }
         if ($a->kind === Node::KIND_ARRAY_ACCESS) {
-            return $this->arrayElemAddressable($a);
+            if ($this->arrayElemAddressable($a)) { return true; }
+            // An element a callee keeps a reference to is handed over as its box, whatever the base's static type.
+            return $a->refStored && $this->elemRefBoxable($a);
         }
         // A static property is an external-linkage global, and
         // {@see EmitLlvmLocals::byRefAddrOf} hands its address over. Not listed
@@ -5026,6 +5107,20 @@ final class EmitLlvm implements EmitVisitor
             return true;
         }
         return false;
+    }
+
+    /** Will {@see EmitLlvmObjects::elemRefBoxAddr} answer a box for this element? Its refusals, in its order. */
+    private function elemRefBoxable(Node $a): bool
+    {
+        $sek = $a->array->type->element->kind ?? Type::KIND_UNKNOWN;
+        if ($sek !== Type::KIND_CELL && $sek !== Type::KIND_UNKNOWN) { return false; }
+        if ($a->index->kind !== Node::KIND_NULL_CONST && $this->arrayElemKeyKind($a->index) === null
+            && !$this->keyRidesCellChannel($a->index)) { return false; }
+        if (!$this->containerAddressable($a->array)) { return false; }
+        $bk = $a->array->type->kind;
+        if (!$a->array->type->isArray() && $bk !== Type::KIND_CELL && $bk !== Type::KIND_UNKNOWN) { return false; }
+        // A nested container is opened through its own address.
+        return $a->array->kind !== Node::KIND_ARRAY_ACCESS || $this->isByRefAddressable($a->array);
     }
 
     /** Pure predicate: `$base` has a stable i64 cell holding its array pointer
@@ -5344,7 +5439,9 @@ final class EmitLlvm implements EmitVisitor
         $cellified = $cellVals && $opT->isArray() && $opElem !== null
             && $opElem->kind !== Type::KIND_CELL && $opElem->kind !== Type::KIND_UNKNOWN;
         $iterSym = $this->mangle('__mc_spread_to_array');
-        if ($opT->kind === Type::KIND_OBJ && isset($this->definedFns[$iterSym])) {
+        // A CELL or a union may hold one too, which only the run time can tell.
+        if (($opT->kind === Type::KIND_OBJ || $opT->kind === Type::KIND_CELL || $opT->kind === Type::KIND_UNION)
+            && isset($this->definedFns[$iterSym])) {
             // A TRAVERSABLE operand (a generator, an Iterator, an aggregate) is
             // drained by the prelude into a cell-valued array with php's spread
             // key rules; the merge then takes that array. Handed to the merge
@@ -5352,7 +5449,7 @@ final class EmitLlvm implements EmitVisitor
             // — a generator's elements vanished and an ArrayIterator looped.
             $out .= $this->coerceToI64();
             $word = $this->lastValue;
-            $out .= $this->boxToCell($opT, $sp->operand);
+            if ($opT->kind !== Type::KIND_CELL) { $out .= $this->boxToCell($opT, $sp->operand); }
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call i64 @manticore_' . $iterSym . '(i64 ' . $this->lastValue . ")\n";
             $pr = $this->ssa->allocReg();

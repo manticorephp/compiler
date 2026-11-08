@@ -1991,6 +1991,9 @@ final class StoreProperty extends Node
 
 final class MethodCall_ extends Node
 {
+    /** Lowered without knowing the method's signature: a variadic still has to be packed once inference knows it. */
+    public bool $argsUnbound = false;
+
     /** @param Node[] $args */
     public function __construct(
         public Node $object,

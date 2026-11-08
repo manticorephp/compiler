@@ -808,34 +808,34 @@ function preg_replace__str(string $pattern, string $replacement, string $subject
  * php's `preg_replace_callback`: a pattern list applies in order, an array
  * subject maps key by key. The typed forms are overloads.
  */
-function preg_replace_callback(array|string $pattern, callable $callback, array|string $subject, int $limit = -1, #[RefOut] int &$count = 0): array|string|null
+function preg_replace_callback(array|string $pattern, callable $callback, array|string $subject, int $limit = -1, #[RefOut] int &$count = 0, int $flags = 0): array|string|null
 {
     $count = 0;
     if (\is_array($subject)) {
         $out = [];
         foreach ($subject as $k => $one) {
             $c = 0;
-            $r = \__preg_replace_callback_list($pattern, $callback, (string)$one, $limit, $c);
+            $r = \__preg_replace_callback_list($pattern, $callback, (string)$one, $limit, $c, $flags);
             if ($r !== null) { $out[$k] = $r; }
             $count = $count + $c;
         }
         return $out;
     }
-    return \__preg_replace_callback_list($pattern, $callback, $subject, $limit, $count);
+    return \__preg_replace_callback_list($pattern, $callback, $subject, $limit, $count, $flags);
 }
 
 /** A pattern list over one string subject. */
 #[\Manticore\Attr\Overload('preg_replace_callback')]
-function __preg_replace_callback_list(array|string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): ?string
+function __preg_replace_callback_list(array|string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0, int $flags = 0): ?string
 {
     $count = 0;
     if (!\is_array($pattern)) {
-        return \preg_replace_callback__str($pattern, $callback, $subject, $limit, $count);
+        return \preg_replace_callback__str($pattern, $callback, $subject, $limit, $count, $flags);
     }
     $out = $subject;
     foreach ($pattern as $p) {
         $c = 0;
-        $next = \preg_replace_callback__str((string)$p, $callback, $out, $limit, $c);
+        $next = \preg_replace_callback__str((string)$p, $callback, $out, $limit, $c, $flags);
         if ($next === null) { return null; }
         $out = $next;
         $count = $count + $c;
@@ -844,11 +844,14 @@ function __preg_replace_callback_list(array|string $pattern, callable $callback,
 }
 
 #[\Manticore\Attr\Overload('preg_replace_callback')]
-function preg_replace_callback__str(string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0): ?string
+function preg_replace_callback__str(string $pattern, callable $callback, string $subject, int $limit = -1, #[RefOut] int &$count = 0, int $flags = 0): ?string
 {
     $count = 0;
     $code = \__preg_compile($pattern);
     if ($code === 0) { return null; }
+    $offsetCapture = ($flags & 256) !== 0;        // PREG_OFFSET_CAPTURE
+    $asNull = ($flags & 512) !== 0;               // PREG_UNMATCHED_AS_NULL
+    $declared = $asNull ? \__preg_capture_count($code) + 1 : 0;
     $len = \strlen($subject);
     $md = \__preg_md($code, 0);
     // A named group reaches the callback under its name too, as in preg_match.
@@ -868,11 +871,19 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
         $me = \peek_i64($ov, 8);
         /** @var mixed[] $arg */
         $arg = [];
-        for ($i = 0; $i < $rc; $i = $i + 1) {
-            $s = \peek_i64($ov, $i * 16);
-            $g = $s < 0 ? "" : \substr($subject, $s, \peek_i64($ov, $i * 16 + 8) - $s);
-            if ($hasNames && isset($names[$i])) { $arg[$names[$i]] = $g; }
-            $arg[$i] = $g;
+        $total = $rc > $declared ? $rc : $declared;
+        for ($i = 0; $i < $total; $i = $i + 1) {
+            $s = $i < $rc ? \peek_i64($ov, $i * 16) : -1;
+            $e = $i < $rc ? \peek_i64($ov, $i * 16 + 8) : -1;
+            if ($offsetCapture) {
+                // A fresh pair per key, as in preg_match.
+                if ($hasNames && isset($names[$i])) { $arg[$names[$i]] = \__mir_to_cell(\__preg_group_pair($subject, $s, $e, $asNull)); }
+                $arg[$i] = \__mir_to_cell(\__preg_group_pair($subject, $s, $e, $asNull));
+                continue;
+            }
+            $g = $s < 0 ? ($asNull ? null : "") : \substr($subject, $s, $e - $s);
+            if ($hasNames && isset($names[$i])) { $arg[$names[$i]] = \__mir_to_cell($g); }
+            $arg[$i] = \__mir_to_cell($g);
         }
         $out .= \substr($subject, $pos, $ms - $pos);
         $out .= $callback($arg);
@@ -889,12 +900,12 @@ function preg_replace_callback__str(string $pattern, callable $callback, string 
 /**
  * @param array<string, callable> $patterns
  */
-function preg_replace_callback_array(array $patterns, string $subject, int $limit = -1, #[RefOut] int &$count = 0): ?string
+function preg_replace_callback_array(array $patterns, string $subject, int $limit = -1, #[RefOut] int &$count = 0, int $flags = 0): ?string
 {
     $count = 0;
     foreach ($patterns as $pattern => $callback) {
         $c = 0;
-        $next = \preg_replace_callback__str($pattern, $callback, $subject, $limit, $c);
+        $next = \preg_replace_callback__str($pattern, $callback, $subject, $limit, $c, $flags);
         if ($next === null) { return null; }
         $subject = $next;
         $count = $count + $c;

@@ -148,7 +148,7 @@ weakening a member's visibility. Method-signature compatibility (LSP) is not che
 | Feature | Behaviour |
 |---|---|
 | `require` / `include` of a file that is not in the build and is not a pure-data `return` file (including code written at run time) | there is no interpreter, so it cannot run. `require` / `require_once` throw `Error: Failed opening required '<path>'`, as php 8.5 does for a missing file. `include` / `include_once` evaluate to `false` and do not throw (`@include` and `include ... or` idioms keep working; there is no warning channel). `compile` and `analyze` warn (`include.unresolved`) when the path is a constant outside the compile set |
-| `eval()` | not supported. The build prints `undefined-function traps (1): eval`; at run time `Call to undefined function eval()` |
+| `eval()` | not run: there is no interpreter, so the call answers `null` and declares nothing. Code that needs what the evaluated string defines must have it in the build |
 | variable variables (`$$n = 5`, `${'n'}`) | parse error |
 | `get_defined_vars()` | not defined (trap at run time) |
 | `goto` into a loop body | unsupported (forward/backward `goto` works) |

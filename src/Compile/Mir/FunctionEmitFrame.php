@@ -12,6 +12,8 @@ final class FunctionEmitFrame
 {
     /** Name of the function being emitted (property-hook self-ref guard). */
     public string $name = '';
+    /** The file the function was written in ('' = the module's). */
+    public string $file = '';
     /** Body of the function being emitted — the loop arena-reset liveness
      *  check needs it to see uses OUTSIDE the loop. */
     public ?Node $body = null;

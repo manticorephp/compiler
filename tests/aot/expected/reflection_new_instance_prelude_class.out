@@ -1,0 +1,8 @@
+ArrayObject ok ArrayObject
+ArrayIterator ok ArrayIterator
+SplObjectStorage ok SplObjectStorage
+stdClass ok stdClass
+SplStack ok SplStack
+DateTimeImmutable ok DateTimeImmutable
+3
+0

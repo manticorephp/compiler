@@ -1092,6 +1092,7 @@ final class InferTypes implements Pass
         // matter what one getter's return type says, and the getter scan only
         // fires on a still-unknown/bare property, so running this first is what
         // keeps it off. symfony's TableCell has both.
+        $this->hasRefStoredElems = $module->hasRefStoredElems;
         $this->scanCellElemProps($module);
         $this->scanPropElementReturns($module);
         // BEFORE the first inference walk: a property a `&` points at from a
@@ -1437,6 +1438,12 @@ final class InferTypes implements Pass
             $this->rescanPropagating($module, 'byref_capture_post');
             $guard = $guard + 1;
         }
+        // A static slot's default never belongs to a function: `self::D + [...]` would stay an int `+`.
+        foreach ($module->globalDefaults as $gd) {
+            if ($gd->kind !== Node::KIND_ADD) { continue; }
+            $this->inferFunction(new \Compile\Mir\FunctionDef('__global_default', [], Type::unknown(),
+                new Block([new Return_($gd, Type::void())], Type::void())));
+        }
         if ($this->ctx !== null && $this->scopeNames === null) { $this->ctx->seeded = true; }
         $module->inferByRefCellElemLocals = $this->byRefCellElemLocals;
         $module->inferByRefElemRetyped = $this->byRefElemRetyped;
@@ -1644,6 +1651,9 @@ final class InferTypes implements Pass
      * @param array<string, Type> $observed
      * @param array<string, bool> $unusable
      */
+    /** @var array<string, bool> `Class::prop` stored through a key not provably an int */
+    private array $propElemDynKey = [];
+
     private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$unusable): void
     {
         // A WHOLE-property store of an array is evidence about the elements
@@ -1676,6 +1686,10 @@ final class InferTypes implements Pass
                 if ($owner !== '') {
                     $key = $owner . '::' . $se->array->property;
                     $vt = $se->value->type;
+                    // A key that is not provably an int: the slot is no list, whatever its values say.
+                    if ($se->index->kind !== Node::KIND_NULL_CONST && $se->index->type->kind !== Type::KIND_INT) {
+                        $this->propElemDynKey[$key] = true;
+                    }
                     if (!$this->isBoxablePropElem($vt)) {
                         $unusable[$key] = true;
                     } elseif (!isset($observed[$key])) {
@@ -3510,6 +3524,11 @@ final class InferTypes implements Pass
             return $a->class !== null && $b->class !== null && $a->class !== $b->class
                 && $this->unionTypes($a, $b)->kind === Type::KIND_CELL;
         }
+        // An all-object union is a raw object word too: beside another object it joins as
+        // two objects do, beside anything else it boxes.
+        $ao = $a->kind === Type::KIND_OBJ || $this->isObjectUnion($a);
+        $bo = $b->kind === Type::KIND_OBJ || $this->isObjectUnion($b);
+        if ($ao && $bo) { return $this->unionTypes($a, $b)->kind === Type::KIND_CELL; }
         if ($a->kind === $b->kind) { return false; }
         // A closure value and a closure literal's `obj<__closure_N>` handle are
         // one env pointer.
@@ -3628,7 +3647,16 @@ final class InferTypes implements Pass
     private function cellCarries(Type $t): bool
     {
         return $this->isScalarOrCell($t) || $t->isArray() || $t->kind === Type::KIND_OBJ
-            || $t->kind === Type::KIND_CLOSURE;
+            || $t->kind === Type::KIND_CLOSURE || $this->isObjectUnion($t);
+    }
+
+    private function isObjectUnion(Type $t): bool
+    {
+        if ($t->kind !== Type::KIND_UNION) { return false; }
+        foreach ($t->atoms as $at) {
+            if ($at->kind !== Type::KIND_OBJ) { return false; }
+        }
+        return true;
     }
 
     /** @param Node[] $stmts  Ends in return/throw: never reaches the join after it. */

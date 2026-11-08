@@ -1553,19 +1553,71 @@ function fopen(string $filename, string $mode)
     if ($scheme !== 'file') {
         return false;   // no wrapper for it (yet) — php: "Unable to find the wrapper"
     }
-    if (\__mc_offload_active()) {
-        \__mc_offload_cancel_point();
-        $fpAddr = \__mc_offload_path2(__MC_OFF_FOPEN, \__mc_file_path($filename), $mode);
-        if ($fpAddr === 0) {
-            return false;
-        }
-        return \__mc_pooled_res(\Resource::KIND_FILE, $fpAddr);
+    $path = \__mc_file_path($filename);
+    $kind = $mode === '' ? '' : $mode[0];
+    $plus = \strpos($mode, '+') !== false;
+    if ($kind === 'x') {
+        // C11's exclusive mode: fails when the file exists, as php's x does.
+        $fpAddr = \__mc_fopen_raw($path, $plus ? 'w+x' : 'wx');
+    } elseif ($kind === 'c') {
+        // ponytail: `c` also opens readable (r+), a write-only descriptor needs open(2) + fdopen.
+        $fpAddr = \__mc_fopen_raw($path, 'r+');
+        if ($fpAddr === 0) { $fpAddr = \__mc_fopen_raw($path, 'w+x'); }
+        // Lost the race to another creator: it exists now.
+        if ($fpAddr === 0) { $fpAddr = \__mc_fopen_raw($path, 'r+'); }
+    } else {
+        $fpAddr = \__mc_fopen_raw($path, $mode);
     }
-    $fp = \Runtime\Libc\fopen(\__mc_file_path($filename), $mode);
-    if ($fp === null) {
+    if ($fpAddr === 0) {
+        \__mc_warn('fopen(' . $filename . '): Failed to open stream: ' . \__mc_fopen_reason($path, $kind));
         return false;
     }
-    return \__mc_pooled_res(\Resource::KIND_FILE, \ptr_to_int($fp));
+    return \__mc_pooled_res(\Resource::KIND_FILE, $fpAddr);
+}
+
+/**
+ * Why a local fopen failed, in strerror's words.
+ * ponytail: read off the file system, not errno (no errno binding works on both libcs and
+ * across the offload thread); a race or EACCES on an existing file reads as "Permission denied".
+ */
+function __mc_fopen_reason(string $path, string $kind): string
+{
+    if (\file_exists($path)) { return $kind === 'x' ? 'File exists' : 'Permission denied'; }
+    return \is_dir(\dirname($path)) && $kind !== 'r' ? 'Permission denied' : 'No such file or directory';
+}
+
+/**
+ * The installed error handler, set by set_error_handler (prelude/errors.php): the stdlib cannot
+ * see the prelude's handler stack, so the prelude hands it a callback.
+ */
+function __mc_warning_hook(mixed $callback = null, int $op = 0): mixed
+{
+    static $hook = null;
+    if ($op === 1) { $hook = $callback; }
+    return $hook;
+}
+
+/**
+ * Report an E_WARNING the way php's internal functions do: to the installed error handler, which
+ * may throw it (Symfony's cache retries a temp name on fopen's "File exists" so). With no handler
+ * it stays silent, as before.
+ * ponytail: only fopen reports so far; other functions still fail without a word.
+ */
+function __mc_warn(string $message): void
+{
+    $hook = \__mc_warning_hook();
+    if ($hook !== null) { $hook(2, $message); }
+}
+
+/** libc fopen, off the fiber's thread when offload is on; 0 on failure. */
+function __mc_fopen_raw(string $path, string $mode): int
+{
+    if (\__mc_offload_active()) {
+        \__mc_offload_cancel_point();
+        return \__mc_offload_path2(__MC_OFF_FOPEN, $path, $mode);
+    }
+    $fp = \Runtime\Libc\fopen($path, $mode);
+    return $fp === null ? 0 : \ptr_to_int($fp);
 }
 
 /**

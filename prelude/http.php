@@ -5494,6 +5494,11 @@ final class Server
         $out = [];
         $out['REQUEST_METHOD'] = $req->method;
         $out['REQUEST_URI'] = $req->target;
+        // A front controller, as php-fpm presents one: frameworks derive their base URL from these,
+        // and the CLI's own argv[0] (`./bin/app`) cut `/assets/s` off every path containing "app".
+        $out['SCRIPT_NAME'] = '/index.php';
+        $out['PHP_SELF'] = '/index.php';
+        $out['SCRIPT_FILENAME'] = (\getcwd() ?: '') . '/index.php';
         $out['SERVER_PROTOCOL'] = 'HTTP/' . $req->version;
         $out['QUERY_STRING'] = $req->queryString;
         // The socket case: `remoteAddr` IS the peer string, `ip:port` with no

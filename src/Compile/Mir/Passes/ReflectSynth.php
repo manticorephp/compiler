@@ -143,10 +143,19 @@ final class ReflectSynth
             $read = '$t->' . $pm->name;
             $recv = $fqn . ' $t';
         }
-        $out = 'function ' . $get . '(' . $recv . "): mixed {\n  return " . $read . ";\n}\n";
-        // A readonly slot rejects a write from outside its declaring scope — and
-        // this accessor is a free function, not the class. Emit no setter;
-        // setValue() then throws, matching php's own readonly refusal.
+        // An instance a readonly slot was never written on reads as uninitialized: its one
+        // write is recorded in the init map, whatever the constructor would have done.
+        $guarded = $pm->isReadonly && !$pm->isStatic;
+        $uninit = $guarded
+            ? "  if (!\\__mir_prop_inited(\$t, '" . $pm->name . "')) { throw new \\Error('Typed property " . \addslashes(\ltrim($class, '\\')) . '::$' . $pm->name . " must not be accessed before initialization'); }\n"
+            : '';
+        $out = 'function ' . $get . '(' . $recv . "): mixed {\n" . $uninit . '  return ' . $read . ";\n}\n";
+        // Reflection writes a readonly slot from the declaring scope: once, as php does.
+        if ($guarded) {
+            $out .= 'function ' . $set . '(' . $recv . ", mixed \$v): void {\n"
+                . "  if (\\__mir_prop_inited(\$t, '" . $pm->name . "')) { throw new \\Error('Cannot modify readonly property " . \addslashes(\ltrim($class, '\\')) . '::$' . $pm->name . "'); }\n"
+                . "  \\__mc_raw_prop_store(\$t, '" . $pm->name . "', \$v);\n}\n";
+        }
         if (!$pm->isReadonly) {
             $out .= 'function ' . $set . '(' . $recv . ", mixed \$v): void {\n  " . $read . " = \$v;\n}\n";
             if ($setHooked && !$pm->isStatic) {

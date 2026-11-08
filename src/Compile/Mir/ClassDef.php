@@ -315,6 +315,29 @@ final class ClassDef
         return $this->propertyWidths[$prop] ?? 8;
     }
 
+    /**
+     * Slot name of `$decl`'s private `$prop` in a subclass that declares the same
+     * name: php's `\0Decl\0prop`. Everything is keyed by property name, so the two
+     * properties need two names. Spelled as an identifier because generated dump
+     * and serialize code reads a slot as `$v->slot`; no leading `__`, which the init
+     * map reserves for compiler slots.
+     */
+    public static function shadowSlot(string $decl, string $prop): string
+    {
+        return '_shadow__' . \str_replace('\\', '__', \ltrim($decl, '\\')) . '__' . $prop;
+    }
+
+    /** The name php shows for a slot. */
+    public function propDisplayName(string $slot): string
+    {
+        return isset($this->propertyMeta[$slot]) ? $this->propertyMeta[$slot]->name : $slot;
+    }
+
+    public function isShadowSlot(string $slot): bool
+    {
+        return $this->propDisplayName($slot) !== $slot;
+    }
+
     /** Byte offset of `$prop` within an instance, or -1 if unknown. */
     public function propertyOffset(string $prop): int
     {

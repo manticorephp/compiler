@@ -1047,7 +1047,9 @@ trait EmitLlvmControl
         $thenArm = $t->then;
         if ($thenArm === null) { $thenArm = $t->cond; }
         if ($t->then !== null) {
+            $litMark = \count($this->litElemDropRegs);
             $out .= $this->emitNode($t->then);
+            $this->dropArmLitElems($litMark);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $thenArm);
                 $out .= $this->boxToCell($t->then->type, $t->then);
@@ -1068,7 +1070,9 @@ trait EmitLlvmControl
         $out .= '  store i64 ' . $thenVal . ', ptr ' . $res . "\n";
         $out .= '  br label %' . $endLabel . "\n";
         $out .= $elseLabel . ":\n";
+        $litMark = \count($this->litElemDropRegs);
         $out .= $this->emitNode($t->else_);
+        $this->dropArmLitElems($litMark);
         if ($wantCell) {
             $out .= $this->armRetainPreBox($n, $t->else_);
             $out .= $this->boxToCell($t->else_->type, $t->else_);

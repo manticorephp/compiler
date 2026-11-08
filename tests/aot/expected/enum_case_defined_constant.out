@@ -1,0 +1,6 @@
+string(5) "Debug"
+bool(true)
+bool(true)
+bool(true)
+enum(M\Level::Debug)
+enum(M\Level::Info)

@@ -945,8 +945,9 @@ trait EmitLlvmExceptions
         $body .= '  ' . $fs . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->sourceFile)) . " to i64\n";
         $body .= '  store i64 ' . $fs . ', ptr ' . $fp . "\n";
         if ($this->rt->needsBacktrace) {
-            foreach (['traceNames' => '@__mir_bt_name', 'traceLines' => '@__mir_bt_line'] as $prop => $g) {
-                $body .= $this->emitBtVec($g);
+            foreach (['traceNames' => '@__mir_bt_name', 'traceLines' => '@__mir_bt_line', 'traceFiles' => '@__mir_bt_file'] as $prop => $g) {
+                if ($cd->propertyOffset($prop) < 0) { continue; }
+                $body .= $this->emitBtVec($g, $prop === 'traceFiles');
                 $vec = $this->lastValue;
                 $pp = $this->ssa->allocReg();
                 $body .= '  ' . $pp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$cd->propertyOffset($prop) . "\n";

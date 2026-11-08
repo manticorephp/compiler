@@ -1,0 +1,28 @@
+{
+    "applications": [
+        {
+            "name": "symfony-demo",
+            "src": [
+                "src",
+                "vendor/doctrine/doctrine-bundle/config",
+                "vendor/symfony/monolog-bundle/config",
+                "vendor/symfony/ux-icons/config",
+                "vendor/symfony/ux-twig-component/config",
+                "vendor/symfony/ux-live-component/config",
+                "vendor/symfonycasts/sass-bundle/config",
+                "vendor/symfony/stimulus-bundle/config",
+                "vendor/twig/extra-bundle/Resources/config",
+                "vendor/symfony/security-bundle/Resources/config",
+                "vendor/symfony/twig-bundle/Resources/config",
+                "var/cache/prod/twig",
+                "var/cache/prod/translations"
+            ],
+            "entry": "public/index.php",
+            "output": "bin/app",
+            "composer": true,
+            "lazy": ["App\\Entity\\"],
+            "extensions": ["compat"]
+        }
+    ],
+    "extensions": { "compat": { "src": "compat" } }
+}

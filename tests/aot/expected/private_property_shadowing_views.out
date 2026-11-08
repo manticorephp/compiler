@@ -1,0 +1,109 @@
+g p1670 c0507 7
+G! p3670 c1507
+object(N\C)#1 (11) {
+  ["s":"N\G":private]=>
+  string(2) "G!"
+  ["pub"]=>
+  int(1)
+  ["r":"N\P":private]=>
+  array(3) {
+    [0]=>
+    string(1) "p"
+    [1]=>
+    float(1.5)
+    [2]=>
+    string(1) "x"
+  }
+  ["s":"N\P":private]=>
+  string(1) "p"
+  ["prot":protected]=>
+  int(2)
+  ["t":"N\P":private]=>
+  int(70)
+  ["promo":"N\P":private]=>
+  int(6)
+  ["r":"N\C":private]=>
+  array(1) {
+    [0]=>
+    int(9)
+  }
+  ["s":"N\C":private]=>
+  string(1) "c"
+  ["promo":"N\C":private]=>
+  int(50)
+  ["t":"N\C":private]=>
+  int(7)
+}
+N\C Object
+(
+    [s:N\G:private] => G!
+    [pub] => 1
+    [r:N\P:private] => Array
+        (
+            [0] => p
+            [1] => 1.5
+            [2] => x
+        )
+
+    [s:N\P:private] => p
+    [prot:protected] => 2
+    [t:N\P:private] => 70
+    [promo:N\P:private] => 6
+    [r:N\C:private] => Array
+        (
+            [0] => 9
+        )
+
+    [s:N\C:private] => c
+    [promo:N\C:private] => 50
+    [t:N\C:private] => 7
+)
+\N\C::__set_state(array(
+   's' => 'G!',
+   'pub' => 1,
+   'r' => 
+  array (
+    0 => 'p',
+    1 => 1.5,
+    2 => 'x',
+  ),
+   's' => 'p',
+   'prot' => 2,
+   't' => 70,
+   'promo' => 6,
+   'r' => 
+  array (
+    0 => 9,
+  ),
+   's' => 'c',
+   'promo' => 50,
+   't' => 7,
+))
+~N\G~s pub ~N\P~r ~N\P~s ~*~prot ~N\P~t ~N\P~promo ~N\C~r ~N\C~s ~N\C~promo ~N\C~t 
+Array
+(
+    [pub] => 1
+    [prot] => 2
+    [r] => Array
+        (
+            [0] => 9
+        )
+
+    [s] => c
+    [promo] => 50
+    [t] => 7
+)
+{"pub":1}
+O:3:"N\C":11:{s:6:"~N\G~s";s:2:"G!";s:3:"pub";i:1;s:6:"~N\P~r";a:3:{i:0;s:1:"p";i:1;d:1.5;i:2;s:1:"x";}s:6:"~N\P~s";s:1:"p";s:7:"~*~prot";i:2;s:6:"~N\P~t";i:70;s:10:"~N\P~promo";i:6;s:6:"~N\C~r";a:1:{i:0;i:9;}s:6:"~N\C~s";s:1:"c";s:10:"~N\C~promo";i:50;s:6:"~N\C~t";i:7;}
+G! p3670 c1507
+p3670 c1507 p4670 c2507
+bool(true)
+bool(false)
+c0507 p2670
+N\C::promo N\C::r N\C::s N\C::t N\G::pub N\P::prot
+N\RB N\RB N\RA N\P
+bool(true)
+bool(true)
+3
+1
+mine inner

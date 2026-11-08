@@ -177,7 +177,7 @@ trait EmitLlvmGenerator
                 $paramSig .= 'i64 %arg.' . $p->name;
             }
         }
-        $defLinkage = $isClosure ? 'internal ' : '';
+        $defLinkage = $isClosure ? 'internal ' : ($fn->isPrelude ? 'linkonce_odr ' : '');
         $out = 'define ' . $defLinkage . 'i64 ' . $mangled . '(' . $paramSig . ')'
             . ($isClosure ? $this->closureMetaPrefix($fn->name, $capCnt) : '') . " {\nentry:\n";
         // The frame carries the string-style rc header `[cap@-24, len@-16,

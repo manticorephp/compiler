@@ -149,7 +149,13 @@ final class TrampolineSynth
      */
     public static function sourceFor(ClassDef $cls): string
     {
-        if ($cls->isStruct || $cls->isPreludeClass) { return ''; }
+        if ($cls->isStruct) { return ''; }
+        // A prelude class (ArrayObject, DateTime, SplStack…) is built by name through
+        // ReflectionClass::newInstance*, so it gets its constructor trampoline; its
+        // methods stay un-reflected.
+        if ($cls->isPreludeClass) {
+            return $cls->isAbstract ? '' : self::ctorTramp($cls->name, $cls->methodMeta['__construct'] ?? null);
+        }
         $out = '';
         if (!$cls->isAbstract) {
             $ctor = $cls->methodMeta['__construct'] ?? null;

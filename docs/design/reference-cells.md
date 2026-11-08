@@ -3,7 +3,7 @@
 Status: **implemented (as of 2026-09-14).** `[&$a]`, `[&$this->p]`,
 `[&$a[$k]]`, `[$v, &$v]`, `$a[$k] = &$v`, cell-alias ownership, `unset` breaking the
 binding and a mutated `mixed` by-ref param all match php; the deepclone witness is
-byte-identical. Still open: a `PropertyAccess` as the TARGET of `=&` (a copy), the
+byte-identical. Still open: the
 static-property source, `R:` in `serialize` and the var_dump `&` marker. `$a = &$b` on two locals
 binds through a shared box (`LocalSlots::aliasBoxNames`), and `...$xs` into a by-ref
 parameter passes references (`LowerFns::lowerRefSpread`) since 2026-10-25.
@@ -290,3 +290,7 @@ Still open as well: #353's dynamic property name through a first-class
 callable (`$f($o->$n)`) — no static name to promote; it needs a name-dispatched
 `byRefAddrOf` for `DynProp_` plus promoting every declared property of the
 receiver class, a cost to measure before paying it.
+
+## `$o->p = &$v` on a typed property
+
+A slot bound by `=&` is a cell whatever its declared type (`InferScans::findRefBoundProps` → `scanRefCellProps`), so an `array` or `?int` property holds `cell(REF, box)` like an untyped one. A by-ref array param the body keeps a reference to rides a cell too, and so does an array property handed to one; a capture does not, it binds an address already. A buffer an element write reallocates goes back through the box (`vecWriteBack`): the binding stays, and the count moved with the buffer, so nothing is dropped. An element argument marked `ArrayAccess_::$refStored` makes its base a cell channel, the same promotion `[&$a[$k]]` makes.

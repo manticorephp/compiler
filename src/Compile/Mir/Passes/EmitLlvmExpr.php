@@ -3211,7 +3211,25 @@ trait EmitLlvmExpr
     }
     private function emitNullCoalesce(NullCoalesce_ $n): string
     {
+        // `$ghost->p ?? d` answers for the initialized object.
+        $l = $n->left;
+        if ($this->lazyHolders !== [] && $l->kind === Node::KIND_PROPERTY_ACCESS
+            && $l->object->kind === Node::KIND_LOAD_LOCAL && $l->object->type->kind === Type::KIND_OBJ) {
+            $h = $this->slotHolder($l->object, $l->property);
+            if ($h !== null && $h->initChecked($l->property)) {
+                $pre = $this->emitNode($l->object) . $this->coerceToPtr();
+                $pre .= $this->emitLazyStoreGate($this->lastValue, $h, $l->property,
+                    $this->propertyOffsetOrNull($l->object, $l->property) ?? -1, '');
+                return $pre . $this->emitNullCoalesceBody($n);
+            }
+        }
+        return $this->emitNullCoalesceBody($n);
+    }
+
+    private function emitNullCoalesceBody(NullCoalesce_ $n): string
+    {
         $nc = $n;
+        if ($nc->left->kind === Node::KIND_DYN_PROP) { $this->dynQuietRead = $nc->left; }
         if ($nc->left->kind === Node::KIND_PROPERTY_ACCESS) {
             $lpa = $nc->left;
             if ($lpa->object->kind === Node::KIND_PROPERTY_ACCESS
@@ -3295,7 +3313,9 @@ trait EmitLlvmExpr
             $out .= $useR . ":\n";
             if ($pre !== null) { $out .= $this->coalesceMissRelease($nc->left, $pre); }
             if (!$fused) { $out .= $peRelKey . $this->peBaseRelease($peBase, false); }
+            $litMark = \count($this->litElemDropRegs);
             $out .= $this->emitNode($nc->right);
+            $this->dropArmLitElems($litMark);
             if ($wantCell) {
                 $out .= $this->armRetainPreBox($n, $nc->right);
                 $out .= $this->boxToCell($nc->right->type, $nc->right);
@@ -3403,7 +3423,9 @@ trait EmitLlvmExpr
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
+        $litMark = \count($this->litElemDropRegs);
         $out .= $this->emitNode($nc->right);
+        $this->dropArmLitElems($litMark);
         if ($wantCell) {
             $out .= $this->armRetainPreBox($n, $nc->right);
             $out .= $this->boxToCell($nc->right->type, $nc->right);
@@ -3522,7 +3544,9 @@ trait EmitLlvmExpr
         }
         $out .= '  br label %' . $end . "\n";
         $out .= $useR . ":\n";
+        $litMark = \count($this->litElemDropRegs);
         $out .= $this->emitNode($nc->right);
+        $this->dropArmLitElems($litMark);
         if ($wantCell) {
             $out .= $this->armRetainPreBox($nc, $nc->right);
             $out .= $this->boxToCell($nc->right->type);
@@ -3564,6 +3588,18 @@ trait EmitLlvmExpr
                 return $out;
             }
             return $this->emitClassIdTest($n->operand, [], true);
+        }
+        // A statically typed enum value is a bare ordinal, with no object to read a class id from.
+        $ot = $n->operand->type;
+        if ($this->isEnumType($ot)) {
+            $ed = $this->enums[$ot->class];
+            $want = \strtolower(\ltrim($n->class, '\\'));
+            $yes = \strtolower($ed->name) === $want || $want === 'unitenum'
+                || ($want === 'backedenum' && $ed->backing !== '');
+            $out = $this->emitNode($n->operand);
+            $this->lastValue = $yes ? '1' : '0';
+            $this->lastValueType = 'i64';
+            return $out;
         }
         $genToo = $low === 'iterator' || $low === 'traversable';
         return $this->emitClassIdTest($n->operand, $this->instanceofMatchIds($n->class), $genToo);
@@ -5900,6 +5936,17 @@ trait EmitLlvmExpr
         // at RUNTIME instead, so neither shape is guessed at.
         $lCellish = $lk === Type::KIND_CELL || $lk === Type::KIND_UNKNOWN;
         $rCellish = $rk === Type::KIND_CELL || $rk === Type::KIND_UNKNOWN;
+        // A `callable` against a cell: the callable's word may be raw, the cell's
+        // never is, so the same array compared unequal to itself.
+        if ($strictEq && $lk === Type::KIND_CLOSURE && $rCellish) {
+            $this->lastValue = $l; $this->lastValueType = $lt;
+            $chunks[] = $this->boxToCell($c->left->type);
+            $l = $this->lastValue; $lt = $this->lastValueType; $lk = Type::KIND_CELL; $lCellish = true;
+        } elseif ($strictEq && $rk === Type::KIND_CLOSURE && $lCellish) {
+            $this->lastValue = $r; $this->lastValueType = $rt;
+            $chunks[] = $this->boxToCell($c->right->type);
+            $r = $this->lastValue; $rt = $this->lastValueType; $rk = Type::KIND_CELL; $rCellish = true;
+        }
         if ($strictEq
             && (($lk === Type::KIND_STRING && $rCellish)
                 || ($lCellish && $rk === Type::KIND_STRING))) {
@@ -6658,7 +6705,11 @@ trait EmitLlvmExpr
         $kind = $e->type->kind;
         // Stringable object → __toString, then print as a string.
         $ts = $this->toStringClassOf($e);
-        if ($ts !== '') {
+        $us = $ts === '' && $kind === Type::KIND_UNION ? $this->emitUnionToString($e->type) : '';
+        if ($us !== '') {
+            $out .= $us;
+            $kind = Type::KIND_STRING;
+        } elseif ($ts !== '') {
             $out .= $this->emitToStringCall($ts, $this->staticClassOf($e));
             $kind = Type::KIND_STRING;
         } else {

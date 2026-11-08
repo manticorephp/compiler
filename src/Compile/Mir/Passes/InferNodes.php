@@ -492,7 +492,7 @@ trait InferNodes
         // stores say. Typed from the appends alone, `$c[0]` read the REF cell as
         // a raw string pointer.
         $this->refElemBases = [];
-        if ($this->bodyHas($fn, Node::KIND_REF_ADDR) || $this->bodyHas($fn, Node::KIND_REF_CELL)) {
+        if ($this->hasRefStoredElems || $this->bodyHas($fn, Node::KIND_REF_ADDR) || $this->bodyHas($fn, Node::KIND_REF_CELL)) {
             $this->collectRefElemBases($fn->body);
         }
         foreach ($this->refElemBases as $name => $unused) {
@@ -3019,6 +3019,8 @@ trait InferNodes
     }
     /** @var array<string, bool> {@see collectRefElemBases} */
     private array $refElemBases = [];
+    /** {@see \Compile\Mir\Module::$hasRefStoredElems} */
+    private bool $hasRefStoredElems = false;
 
     /**
      * A by-value array PARAM whose element channel this frame made a cell (a
@@ -3074,6 +3076,8 @@ trait InferNodes
         $src = null;
         if ($n instanceof \Compile\Mir\RefAddr_) { $src = $n->lvalue; }
         elseif ($n instanceof \Compile\Mir\RefCell_) { $src = $n->refSource; }
+        // An element handed to a param that keeps the reference is promoted the same way.
+        elseif ($n instanceof \Compile\Mir\ArrayAccess_ && $n->refStored) { $src = $n; }
         if ($src !== null && $src->kind === Node::KIND_ARRAY_ACCESS) {
             $b = $src;
             $guard = 0;

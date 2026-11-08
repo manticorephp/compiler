@@ -113,6 +113,7 @@ foreach ([8191, 8192, 8193] as $n) {
 }
 
 // A zlib header asking for a preset dictionary (FDICT).
+// No read= here: zlib 1.3.2 counts the FDICT header in total_in at Z_NEED_DICT, 1.2.x does not.
 $z = hex2bin('78bb1a0b045dcb403015c06c003b200691'); // 'hello world hello' over dictionary 'hello world'
 show('fdict none', inflate_init(ZLIB_ENCODING_DEFLATE), $z, ZLIB_SYNC_FLUSH, false);
 $i = inflate_init(ZLIB_ENCODING_DEFLATE, ['dictionary' => 'hello worle']);

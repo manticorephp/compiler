@@ -189,7 +189,9 @@ trait InferCalls
             $node->type = $bt;
             return $node->type;
         }
-        if (isset($this->sigs[$callee])) {
+        // A `mixed` stdlib twin says nothing about what the builtin emits: `array_first($cases)`
+        // answers the enum ORDINAL its builtin types, not a cell.
+        if (isset($this->sigs[$callee]) && !($bt !== null && $this->sigs[$callee]->kind === Type::KIND_CELL)) {
             $node->type = $this->sigs[$callee];
             return $node->type;
         }
@@ -312,6 +314,7 @@ trait InferCalls
             || $n === '__mir_fiber_guard_install') { return Type::void(); }
         if ($n === '__mir_object_class_id') { return Type::int_(); }
         if ($n === '__mir_prop_inited') { return Type::bool_(); }
+        if ($n === '__mir_init_map_ptr' || $n === '__mir_init_map_words') { return Type::int_(); }
         if ($n === '__mir_enum_name') { return Type::string_(); }
         // Reflection Tier-2: an rmeta HANDLE is a raw address carried as an int
         // (the Ffi\Ptr::$address idiom), never an obj — nothing may retain,
@@ -848,6 +851,38 @@ trait InferCalls
         return $out;
     }
 
+    /**
+     * Lowering packs a variadic only when it can name the method: by the receiver's class, or
+     * by a name every declaration agrees on. Past that the receiver's class is known here, and
+     * the arguments still have to become the one vec the callee reads:
+     * `$em->createQueryBuilder()->select($alias)` handed ORM's `select(mixed ...)` a bare string.
+     */
+    private function packLateVariadic(MethodCall_ $node, string $fn): void
+    {
+        if (!$node->argsUnbound) { return; }
+        $target = $this->fnByName[$fn] ?? null;
+        if ($target === null) { return; }
+        $node->argsUnbound = false;
+        $ps = $target->params;
+        $np = \count($ps);
+        if ($np < 2 || $ps[0]->name !== 'this' || !$ps[$np - 1]->variadic || $ps[$np - 1]->byRef) { return; }
+        $k = $np - 2;
+        $argc = \count($node->args);
+        if ($argc < $k) { return; }
+        foreach ($node->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return; }
+        }
+        $els = [];
+        $args = [];
+        foreach ($node->args as $i => $a) {
+            if ($i < $k) { $args[] = $a; } else { $els[] = new \Compile\Mir\ArrayElement_(null, $a); }
+        }
+        $pack = new ArrayLit($els, Type::unknown());
+        $this->inferNode($pack);
+        $args[] = $pack;
+        $node->args = $args;
+    }
+
     private function inferMethodCall(MethodCall_ $node): Type
     {
         $objType = $this->inferNode($node->object);
@@ -987,6 +1022,7 @@ trait InferCalls
             }
             if ($cls !== '') {
                 $mangled = $cls . '__' . $node->method;
+                $this->packLateVariadic($node, $mangled);
                 $joined = $this->virtualReturnJoin($objType->class, $node->method);
                 if ($joined !== null) {
                     $node->type = $joined;

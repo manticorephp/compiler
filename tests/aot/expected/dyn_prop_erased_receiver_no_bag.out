@@ -1,0 +1,8 @@
+Pg.pub=set,ak,int Pg.nope=no,na Pg.getN=no,na Pg.a=no,na Pg.zz=no,na Pg.0=no,na 
+Ent.pub=no,na Ent.nope=no,na Ent.getN=no,na Ent.a=no,na Ent.zz=no,na Ent.0=no,na 
+stdClass.pub=no,na stdClass.nope=no,na stdClass.getN=no,na stdClass.a=no,na stdClass.zz=no,na stdClass.0=no,na 
+Dy.pub=no,na Dy.nope=no,na Dy.getN=no,na Dy.a=set,ak,int Dy.zz=no,na Dy.0=no,na 
+DateTime.pub=no,na DateTime.nope=no,na DateTime.getN=no,na DateTime.a=no,na DateTime.zz=no,na DateTime.0=no,na 
+Exception.pub=no,na Exception.nope=no,na Exception.getN=no,na Exception.a=no,na Exception.zz=no,na Exception.0=no,na 
+set,ak,intset,ak,int
+set,ak,array

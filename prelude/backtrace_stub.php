@@ -13,7 +13,7 @@
  * @param int[] $lines
  * @return string[]
  */
-function __mir_bt_frames(array $names, array $lines, string $file, int $limit = 0): array
+function __mir_bt_frames(array $names, array $lines, string $file, array $files = [], int $limit = 0): array
 {
     return $names;
 }

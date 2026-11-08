@@ -528,9 +528,10 @@ function __mc_nested_assign(array &$node, array $segs, int $idx, string $val): v
  *
  * @param array<mixed,mixed> $data
  */
-function http_build_query(#[\Manticore\Attr\CellArg] array $data, string $numeric_prefix = '', ?string $arg_separator = null, int $encoding_type = 1): string
+function http_build_query(#[\Manticore\Attr\CellArg] array|object $data, string $numeric_prefix = '', ?string $arg_separator = null, int $encoding_type = 1): string
 {
     $out = '';
+    if (\is_object($data)) { $data = \__mc_public_object_vars($data); }
     \__mc_build_query($data, '', $numeric_prefix, $out, $arg_separator ?? '&', $encoding_type === 2);
     return $out;
 }
@@ -549,6 +550,8 @@ function __mc_build_query(#[\Manticore\Attr\CellArg] array $data, string $prefix
         }
         $ek = $raw ? \rawurlencode($key) : \urlencode($key);
         $name = $prefix === '' ? $ek : $prefix . '%5B' . $ek . '%5D';
+        // An object contributes its public properties, nested like an array (php's own walk).
+        if (\is_object($v)) { $v = \__mc_public_object_vars($v); }
         if (\is_array($v)) {
             \__mc_build_query($v, $name, '', $out, $sep, $raw);
         } else {

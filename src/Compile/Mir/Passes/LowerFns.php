@@ -140,6 +140,7 @@ trait LowerFns
         $this->currentLowerClass = $this->synthFnScope[$decl->name] ?? '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // FFI: `#[Symbol('cSym')]` makes this a thin extern forward — the
         // body (a stock-PHP fallback like `$GLOBALS['argc']`) is never
         // lowered; EmitLlvm emits a wrapper that calls the C symbol.
@@ -254,6 +255,7 @@ trait LowerFns
         $this->currentLowerClass = '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // `#[RefOut('a', 'b')]` on the function names its pure-output by-ref
         // params (survives the .sig + self-host parse; a param-position marker
         // does not). `@param-out T $x` is the PHPStan-compatible equivalent.
@@ -1359,12 +1361,44 @@ trait LowerFns
             $out = [];
             $packed = [];
             $i = 0;
-            foreach ($astArgs as $a) {
-                if ($i < $vidx) { $out[] = $this->lowerArgForParam($params[$i] ?? null, $a); }
-                elseif ($refPack) { $packed[] = new ArrayElement_(null, $this->lowerRefPackElem($a)); }
-                else { $packed[] = new ArrayElement_(null, $this->lowerExpr($a)); }
-                $i = $i + 1;
+            // A NAMED argument binds the fixed parameter of that name; one that matches none is
+            // collected by the variadic UNDER ITS NAME (`g(b: 1)` packs ['b' => 1], not [1]).
+            // Dense parallel slots: a sparse int-key isset is unreliable in self-host.
+            $fixedNode = [];
+            $fixedSet = [];
+            for ($j = 0; $j < $vidx; $j = $j + 1) {
+                $fixedNode[] = new NullConst(Type::null_());
+                $fixedSet[] = false;
             }
+            foreach ($astArgs as $a) {
+                if ($a->kind === 'NamedArg') {
+                    $an = $this->namedArgName($a);
+                    $av = $this->namedArgValue($a);
+                    $hit = -1;
+                    for ($j = 0; $j < $vidx; $j = $j + 1) {
+                        if ($this->paramName($params[$j]) === $an) { $hit = $j; break; }
+                    }
+                    if ($hit >= 0) {
+                        $fixedNode[$hit] = $this->lowerArgForParam($params[$hit], $av);
+                        $fixedSet[$hit] = true;
+                    } elseif ($refPack) {
+                        $packed[] = new ArrayElement_(new StringConst($an, Type::string_()), $this->lowerRefPackElem($av));
+                    } else {
+                        $packed[] = new ArrayElement_(new StringConst($an, Type::string_()), $this->lowerExpr($av));
+                    }
+                    continue;
+                }
+                if ($i < $vidx) {
+                    $fixedNode[$i] = $this->lowerArgForParam($params[$i] ?? null, $a);
+                    $fixedSet[$i] = true;
+                    $i = $i + 1;
+                } elseif ($refPack) { $packed[] = new ArrayElement_(null, $this->lowerRefPackElem($a)); }
+                else { $packed[] = new ArrayElement_(null, $this->lowerExpr($a)); }
+            }
+            for ($j = 0; $j < $vidx; $j = $j + 1) {
+                $out[] = $fixedSet[$j] ? $fixedNode[$j] : $this->lowerOmittedParam($params[$j], $selfClass, $params, $astArgs);
+            }
+            $i = $vidx;
             // A FIXED param the call omitted still owns its slot. Without this
             // the pack landed in the FIRST omitted one instead of the variadic's:
             // `PDO::query($sql)` — `?int $fetchMode = null` ahead of

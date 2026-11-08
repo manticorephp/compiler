@@ -4292,6 +4292,15 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                     break;
                 }
             }
+            // A declaring statement that also holds a `return` (php-parser's `if (PHP_VERSION_ID >= 80000) { class T {} return; }`)
+            // would go into `__main` whole, and its `return` would end the PROGRAM. Such a file takes the eager path below,
+            // where each return becomes a jump past the file.
+            foreach ($topStmts as $s) {
+                if (__mc_stmt_declares($s) && __mc_file_return_kind([$s]) > 0) {
+                    $effects = false;
+                    break;
+                }
+            }
             if ($effects) {
                 $unitName = '__mc_unit_' . (string)$i;
                 $includeSlots[$incAbs] = $incSlot;
@@ -4948,6 +4957,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     // because the DOM class tree is the larger half and most SimpleXML programs
     // never touch it.
     $useXmlDom = $demand->mentionsAny([
+            'HTMLDocument',
+            'Dom\\HTMLDocument',
             'DOMDocument',
             'DOMNode',
             'DOMElement',
@@ -5147,7 +5158,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
 
         || $demand->mentionsAny(['Normalizer', 'IntlException', 'IntlIterator']);
     // WeakMap / WeakReference: two global class names php owns outright.
-    $useWeak = $demand->mentionsAny(['WeakMap', 'WeakReference']);
+    \Compile\Debug::$lazyObjects = $demand->mentionsAny(['newLazyGhost']);
+    \Compile\Debug::$btObjects = $demand->calls('debug_backtrace');
+    $useWeak = \Compile\Debug::$lazyObjects || $demand->mentionsAny(['WeakMap', 'WeakReference']);
     $useVarDump = $demand->calls('var_dump');
     $useVarExport = $demand->calls('var_export');
     $usePrintR = $demand->calls('print_r');
