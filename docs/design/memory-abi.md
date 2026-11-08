@@ -424,7 +424,7 @@ global roots. Both are open work — see `docs/ROADMAP.md`.
 
 ## 7a. Small-object pool
 
-Objects, unified-array buffers and hash bucket side-arrays are served by a
+Objects, unified-array buffers, hash bucket side-arrays and reference boxes are served by a
 size-classed pool in front of `malloc`, emitted by
 `EmitLlvmRuntime::poolRuntime()` and gated on `Compile\Debug::$pool`
 (`MANTICORE_POOL=0` disables). Strings keep their own older two-class free list;
@@ -460,7 +460,8 @@ Invariants worth stating out loud:
   is the reason `bench/run.sh`'s `LEAK=1` mode confirms a suspected leak with a
   third measurement: a high-water grows once and plateaus, a leak keeps paying.
 * The pool is **not thread-safe** (plain loads/stores on the class heads) — fine
-  for the single-threaded fiber runtime; a fork-per-worker model COW-duplicates
+  for the single-threaded fiber runtime (the blocking-I/O offload threads call
+  libc `malloc`/`free` on their own buffers only); a fork-per-worker model COW-duplicates
   touched pool pages per child.
 * `MANTICORE_DEBUG_VERIFY=1` poisons word +8 of a freed block (cleared on alloc)
   and aborts by name on a double free — libc used to catch those for us, and a
