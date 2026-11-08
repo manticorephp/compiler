@@ -1188,7 +1188,7 @@ trait EmitLlvmCalls
         }
         $exported = $this->dynfExporting($fname, $bit);
         $sym = $exported ? $this->dynfExportSym($fname, $bit)
-            : $this->mirHelperSym('__mir_dynfs_' . (string)\count($this->dynfThunks));
+            : $this->mirHelperSym($this->keyedHelperName('__mir_dynfs_', $key));
         $this->dynfThunks[$key] = $sym;
 
         $oldSsa = $this->ssa;
@@ -1629,7 +1629,7 @@ trait EmitLlvmCalls
         }
         $exported = $this->dynfExporting($fname, $bit);
         $sym = $exported ? $this->dynfExportSym($fname, $bit)
-            : $this->mirHelperSym('__mir_dynft_' . (string)\count($this->dynfThunks));
+            : $this->mirHelperSym($this->keyedHelperName('__mir_dynft_', $key));
         // Registered BEFORE the body is built, for the reason dynmChainFn gives:
         // a half-built registry is the one state that emits two bodies for one
         // symbol. Removed again below if the body turns out not to be closed.
@@ -2164,7 +2164,7 @@ trait EmitLlvmCalls
         $scope = $this->erinvScopeMatters() ? ($this->accessScope() ?? '?') : '';
         $key = $modes . '|' . (string)$srcArgc . '|' . $scope . '|' . ($this->rt->needsBacktrace ? 't' : '');
         if (isset($this->erinvSyms[$key])) { return $this->erinvSyms[$key]; }
-        $sym = '@' . $this->mirHelperSym('__mir_erinv_' . (string)\count($this->erinvSyms));
+        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_erinv_', $key));
         $this->erinvSyms[$key] = $sym;
 
         $oldSsa = $this->ssa;

@@ -1795,11 +1795,36 @@ trait EmitLlvmArrays
     {
         $words = $this->litConstWords($al, $shape);
         if ($words === null) { return ''; }
-        $sym = '@.lit.' . (string)$this->litTableCount;
+        $init = '[' . (string)\count($words) . ' x i64] [' . \implode(', ', $words) . ']';
+        $sym = $this->litTableSym('@.lit.', $init);
+        if ($sym[1]) {
+            $this->litTableBodies .= $sym[0] . ' = private unnamed_addr constant ' . $init . ", align 8\n";
+        }
+        return $sym[0];
+    }
+
+    /**
+     * The symbol of a literal table, named by its content and shared by every
+     * literal with the same one; [symbol, true when it has to be defined now].
+     * A running number renamed every later table when one literal was added, and
+     * each split part naming one of them missed the object cache.
+     * @return array{0: string, 1: bool}
+     */
+    private function litTableSym(string $prefix, string $init): array
+    {
+        $k = $prefix . $init;
+        if (isset($this->litTableSyms[$k])) { return [$this->litTableSyms[$k], false]; }
+        $base = $prefix . (string)$this->fnvHash64($init);
+        $sym = $base;
+        $n = 0;
+        while (isset($this->litTableTaken[$sym])) {
+            $n = $n + 1;
+            $sym = $base . '.' . (string)$n;
+        }
+        $this->litTableTaken[$sym] = true;
+        $this->litTableSyms[$k] = $sym;
         $this->litTableCount = $this->litTableCount + 1;
-        $this->litTableBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($words)
-            . ' x i64] [' . \implode(', ', $words) . "], align 8\n";
-        return $sym;
+        return [$sym, true];
     }
 
     /**
@@ -1873,11 +1898,14 @@ trait EmitLlvmArrays
         $all = [];
         foreach ($hdr as $h) { $all[] = 'i64 ' . $h; }
         foreach ($words as $w) { $all[] = $w; }
-        $sym = '@.ilit.' . (string)$this->litTableCount;
-        $this->litTableCount = $this->litTableCount + 1;
-        $this->litTableBodies .= $sym . ' = internal global [' . (string)\count($all)
-            . ' x i64] [' . \implode(', ', $all) . "], align 8\n";
-        return 'getelementptr inbounds (i8, ptr ' . $sym . ', i64 8)';
+        // Shared by content: the rc never reaches 1, so a writer copies first, and the hash
+        // index a lookup builds lazily is the same for the same entries.
+        $init = '[' . (string)\count($all) . ' x i64] [' . \implode(', ', $all) . ']';
+        $sym = $this->litTableSym('@.ilit.', $init);
+        if ($sym[1]) {
+            $this->litTableBodies .= $sym[0] . ' = internal global ' . $init . ", align 8\n";
+        }
+        return 'getelementptr inbounds (i8, ptr ' . $sym[0] . ', i64 8)';
     }
 
     /**

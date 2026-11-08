@@ -5271,7 +5271,7 @@ trait EmitLlvmObjects
         $key = 'inl|' . $rk . ':' . $recvKey . '|' . (string)$fixedN . '|' . $resT->kind;
         foreach ($methods as $m => $mt) { $key .= '|' . (string)$m . ':' . $mt->kind . ':' . ($mt->class ?? ''); }
         if (isset($this->dynInlSyms[$key])) { return $this->dynInlSyms[$key]; }
-        $sym = '@' . $this->mirHelperSym('__mir_dyninl_' . (string)\count($this->dynInlSyms));
+        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_dyninl_', $key));
         $this->dynInlSyms[$key] = $sym;
 
         $oldSsa = $this->ssa;
@@ -5401,7 +5401,7 @@ trait EmitLlvmObjects
         $key = 'inlarm|' . $rt->kind . ':' . $recvKey . '|' . (string)$fixedN . '|' . $retT->kind . ':' . ($retT->class ?? '') . '|' . $m . '|' . (string)$srcArgc
             . ($packT === null ? '' : '|' . $packT->exactString());
         if (isset($this->dynArmSyms[$key])) { return $this->dynArmSyms[$key]; }
-        $sym = '@' . $this->mirHelperSym('__mir_dynarm_' . (string)\count($this->dynArmSyms));
+        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_dynarm_', $key));
         $this->dynArmSyms[$key] = $sym;
 
         $oldSsa = $this->ssa;
@@ -6016,7 +6016,7 @@ trait EmitLlvmObjects
             $key .= '|a' . (string)$at->kind . ':' . ($at->class ?? '');
         }
         if (isset($this->dynmSyms[$key])) { return $this->dynmSyms[$key]; }
-        $sym = $this->mirHelperSym('__mir_dynm_' . (string)\count($this->dynmSyms));
+        $sym = $this->mirHelperSym($this->keyedHelperName('__mir_dynm_', $key));
         // Registered BEFORE the body is built, for the reason
         // {@see emitVirtualDispatch} gives: a half-built registry is the one
         // state that would emit two bodies for one symbol.
@@ -8805,7 +8805,7 @@ trait EmitLlvmObjects
             $boxCell, $erasedSyms, $argOutTypes);
         $sym = $this->vdSyms[$key] ?? '';
         if ($sym === '') {
-            $sym = $this->mirHelperSym('__mir_vdisp_' . (string)\count($this->vdSyms));
+            $sym = $this->mirHelperSym($this->keyedHelperName('__mir_vdisp_', $key));
             // Registered BEFORE the body is built: the body cannot reach this
             // shape again (it dispatches, it does not re-dispatch), but a
             // half-built registry is the one state that would emit two bodies
@@ -8818,8 +8818,18 @@ trait EmitLlvmObjects
                 $params .= 'i64 %a' . (string)$i;
                 $thunkArgs .= 'i64 %a' . (string)$i;
             }
+            // Its own counters, not the requesting frame's: built on those, the body
+            // took that frame's numbering and the frame lost registers only when it
+            // happened to ask first, so an edit anywhere renumbered later functions.
+            $oldSsa = $this->ssa;
+            $oldCid = $this->classIdReg;
+            $this->ssa = new SsaBuilder();
+            $this->ssa->reset();
+            $this->ssa->startAt(1000000000);
             $body = $this->emitVirtualDispatchInline('%a0', $thunkArgs, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
+            $this->ssa = $oldSsa;
+            $this->classIdReg = $oldCid;
             // ⚠ A body is only a function if it is CLOSED. Some arms reach
             // helpers that hand back a register the SITE created — a spread pack
             // is one — and moving that block into a thunk leaves the reference

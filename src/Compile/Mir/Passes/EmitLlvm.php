@@ -963,6 +963,9 @@ final class EmitLlvm implements EmitVisitor
         $this->metaStrTaken = [];
         $this->metaStrDefs = '';
         $this->litTableCount = 0;
+        $this->litTableSyms = [];
+        $this->litTableTaken = [];
+        $this->keyedHelperTaken = [];
         $this->objTemplates = [];
         $this->litTablesFlushed = false;
         $this->btBaseLine = [];
@@ -2442,6 +2445,27 @@ final class EmitLlvm implements EmitVisitor
         return $base . '_m' . $this->modToken;
     }
 
+    /** @var array<string, bool> helper names {@see keyedHelperName} handed out in this module */
+    private array $keyedHelperTaken = [];
+
+    /**
+     * A shared helper's name from its cache key. A running number renamed every
+     * later helper whenever one was added, so a one-function edit changed every
+     * caller of those helpers and most split parts missed the object cache.
+     */
+    private function keyedHelperName(string $prefix, string $key): string
+    {
+        $base = $prefix . \str_replace('-', 'n', (string)$this->fnvHash64($key));
+        $name = $base;
+        $n = 0;
+        while (isset($this->keyedHelperTaken[$name])) {
+            $n = $n + 1;
+            $name = $base . '_' . (string)$n;
+        }
+        $this->keyedHelperTaken[$name] = true;
+        return $name;
+    }
+
     private string $vdExtraBodies = '';
 
     /** The module's shared erased-receiver clone ({@see EmitLlvmObjects::emitCloneErased}), once emitted. */
@@ -2497,6 +2521,10 @@ final class EmitLlvm implements EmitVisitor
     private array $classlessCandidatesMemo = [];
 
     private int $litTableCount = 0;
+    /** @var array<string, string> prefix + initializer => its literal table symbol */
+    private array $litTableSyms = [];
+    /** @var array<string, bool> */
+    private array $litTableTaken = [];
     /** @var array<string, string> class name => its instance template symbol, '' = none ({@see EmitLlvmObjects::objInitTemplate}) */
     private array $objTemplates = [];
     /** `litTableBodies` is already in the output: a template minted now would never be defined. */

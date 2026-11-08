@@ -24,6 +24,16 @@ final class SsaBuilder
         $this->userLabels = [];
     }
 
+    /**
+     * Number this body's registers from `$id`: a helper body built while a frame
+     * emits takes a range that frame never reaches, so a register the frame
+     * created and the body still names cannot pass for one the body defines.
+     */
+    public function startAt(int $id): void
+    {
+        $this->nextId = $id;
+    }
+
     /** Fresh SSA register (`%rN`). */
     public function allocReg(): string
     {
