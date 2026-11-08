@@ -157,8 +157,23 @@ function __mc_rss_bytes(): int
     return \__mc_host_is_darwin() ? $maxrss : $maxrss * 1024;
 }
 
+/**
+ * Linux: the CURRENT anonymous resident size (RssAnon), which is what php's
+ * memory_get_usage() measures — live heap, not a peak, and not the pages of
+ * the binary and its libraries. VmHWM counted those: on a CI kernel the code
+ * pages of a 5 MB binary and libcrypto kept faulting in over a hot loop, and a
+ * flat program read +4.5 MB per 50k iterations with RssAnon still at +0.1 MB.
+ * Elsewhere, and when the line is missing, the peak as before.
+ */
 function memory_get_usage(bool $real_usage = false): int
 {
+    if (!\__mc_host_is_darwin()) {
+        $s = \is_readable('/proc/self/status') ? \file_get_contents('/proc/self/status') : false;
+        $p = \is_string($s) ? \strpos($s, "\nRssAnon:") : false;
+        if ($p !== false) {
+            return (int)\trim(\substr($s, $p + 9, \strpos($s, 'kB', $p) - $p - 9)) * 1024;
+        }
+    }
     return \__mc_rss_bytes();
 }
 
