@@ -2092,6 +2092,7 @@ trait EmitLlvmCalls
             $modes .= 'v';
         }
         $line = 'i64 0';
+        $file = 'ptr null';
         if ($this->rt->needsBacktrace) {
             $fn = $this->frame->name;
             if ($fn === '') {
@@ -2108,9 +2109,10 @@ trait EmitLlvmCalls
                 $line = 'i64 ' . $abs;
             }
         }
+        if ($this->rt->needsBacktrace) { $file = 'ptr ' . $this->strLitId($this->pool->intern($this->frameFile())); }
         $sym = $this->erasedInvokeHelper($modes, $n->srcArgc);
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $raw . ', ' . $line
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $raw . ', ' . $line . ', ' . $file
             . ($argRegs === [] ? '' : ', ' . \implode(', ', $argRegs)) . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
@@ -2202,7 +2204,7 @@ trait EmitLlvmCalls
         $this->vdSiteArgc = 0;
         $this->btLineOverride = '%line';
 
-        $params = 'i64 %callee, i64 %line';
+        $params = 'i64 %callee, i64 %line, ptr %file';
         $body = '';
         /** @var Node[] $args */
         $args = [];

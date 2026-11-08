@@ -1059,6 +1059,10 @@ final class EmitLlvm implements EmitVisitor
         // already copied the signature facts into $this->sigs, and no code below
         // this loop reads $module->functions again.
         $functionKeys = \array_keys($module->functions);
+        // MANTICORE_EMIT_REVERSE=1: emit in reverse. A body that comes out different
+        // depends on what was emitted before it, which is what makes one edit change
+        // functions far from it and miss the object cache; diff the two staged modules.
+        if (\getenv('MANTICORE_EMIT_REVERSE') === '1') { $functionKeys = \array_reverse($functionKeys); }
         $functionTotal = \count($functionKeys);
         foreach ($functionKeys as $functionKey) {
             $fn = $module->functions[$functionKey];
@@ -4620,8 +4624,15 @@ final class EmitLlvm implements EmitVisitor
     {
         if (!$this->rt->needsBacktrace) { return ''; }
         if ($this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa) {
-            // Inside a shared helper: the call site's absolute line is its argument.
-            return $this->btPushInline($this->strLitId($this->pool->intern($display)), $this->btLineOverride, '');
+            // Inside a shared helper: the call site's absolute line and file are its arguments.
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), $this->btLineOverride, '', '%file');
+        }
+        if ($this->cellSinkFnOverride !== null) {
+            // Any other shared helper has no call site of its own (its nodes carry
+            // line 0); relative to the frame that first asked for it, the push named
+            // that frame's base line and changed with whoever asked first.
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), '0', '',
+                $this->strLitId($this->pool->intern($this->frameFile())));
         }
         $fn = $this->frame->name;
         if ($fn === '') {

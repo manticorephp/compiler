@@ -2702,7 +2702,13 @@ trait EmitLlvmRuntime
             foreach ($cls->propertyNames as $pn) {
                 if (($cls->propertyTypes[$pn] ?? null) !== null) { $hasProps = true; break; }
             }
+            // The props, visit and compare views are functions of their own: each numbers
+            // its registers afresh, or every one took the counters the module's last
+            // function left behind, and one edit anywhere rewrote all of them.
+            $viewSsa = $this->ssa;
             if (($hasProps || $cls->usesBag()) && !$cls->isStruct) {
+                $this->ssa = new \Compile\Mir\SsaBuilder();
+                $this->ssa->reset();
                 $pIr = $this->emitDeclaredPropsArray('%o', $cls->name, true);
                 $pRes = $this->lastValue;
                 // …then the DYNAMIC bag, in php's order: declared first, then
@@ -2735,9 +2741,12 @@ trait EmitLlvmRuntime
                 // DESCRIPTOR_VISIT_FN_OFFSET}): what the json encoder reads, so
                 // an object costs no map.
                 $vsym = \Compile\Mir\RuntimeLibrary::visitFnSymbol((int)$id);
+                $this->ssa = new \Compile\Mir\SsaBuilder();
+                $this->ssa->reset();
                 $defs .= 'define void ' . $vsym . "(ptr %o, ptr %ctx, ptr %cb) {\nentry:\n"
                     . $this->emitDeclaredPropsVisit($cls->name) . "  ret void\n}\n";
                 $visitFld = 'ptr ' . $vsym;
+                $this->ssa = $viewSsa;
             }
             // The COMPARE view and group ({@see \Compile\MemoryAbi::
             // DESCRIPTOR_CMP_VIEW_FN_OFFSET}). Same derivation rule as the props
@@ -2756,6 +2765,8 @@ trait EmitLlvmRuntime
             } elseif (($hasProps || $cls->usesBag()) && !$cls->isStruct) {
                 $keyed = $this->cmpKeyProps($cls);
                 if ($keyed !== []) { $cmpGroup = \Compile\MemoryAbi::CMP_GROUP_KEYED; }
+                $this->ssa = new \Compile\Mir\SsaBuilder();
+                $this->ssa->reset();
                 $cIr = $this->emitDeclaredPropsArray('%o', $cls->name, false, true);
                 $cRes = $this->lastValue;
                 if ($keyed === [] && $cls->usesBag()) {
@@ -2775,6 +2786,7 @@ trait EmitLlvmRuntime
                     . '  %cvi = ptrtoint ptr ' . $cRes . " to i64\n"
                     . "  ret i64 %cvi\n}\n";
                 $cmpViewFld = 'ptr ' . $csym;
+                $this->ssa = $viewSsa;
             }
             // Reflection metadata — only for classes reflection can actually
             // reach ({@see ReflectAnalysis}). A class outside the set keeps
