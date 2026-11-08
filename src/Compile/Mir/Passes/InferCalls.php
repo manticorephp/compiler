@@ -189,7 +189,9 @@ trait InferCalls
             $node->type = $bt;
             return $node->type;
         }
-        if (isset($this->sigs[$callee])) {
+        // A `mixed` stdlib twin says nothing about what the builtin emits: `array_first($cases)`
+        // answers the enum ORDINAL its builtin types, not a cell.
+        if (isset($this->sigs[$callee]) && !($bt !== null && $this->sigs[$callee]->kind === Type::KIND_CELL)) {
             $node->type = $this->sigs[$callee];
             return $node->type;
         }
