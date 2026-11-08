@@ -3432,6 +3432,13 @@ end:
         // object has an allocator magic at -8 and nothing owned below it, so -32
         // is read only when -8 carries none (#413: an object first in its malloc
         // region put -32 on an unmapped page).
+        // A cell slot is an ordinary edge too: an OBJECT in it (allocator magic at
+        // -8) is the holder's child exactly as an obj-typed slot's is. Walking only
+        // a closure there left every cycle through an untyped property
+        // (`$route->req = $req; $req->route = $route`) uncollected — all of
+        // Laravel's per-request object graph. The release half drops what is
+        // neither an object (the walk accounted for it) nor a closure: a string or
+        // array a collected node held.
         $cellEnv = "  %tg = icmp ugt i64 %v, " . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n"
             . '  %sh = lshr i64 %v, ' . (string)\Compile\MemoryAbi::CELL_TAG_SHIFT . "\n"
             . '  %nib = and i64 %sh, ' . (string)\Compile\MemoryAbi::CELL_TAG_MASK . "\n"
@@ -3440,14 +3447,14 @@ end:
             . '  %pl = and i64 %v, ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n"
             . '  %big = icmp ugt i64 %pl, ' . (string)\Compile\MemoryAbi::CELL_OBJ_MIN_PAYLOAD . "\n"
             . "  %okp = and i1 %okt, %big\n"
-            . "  br i1 %okp, label %hdr, label %done\n"
+            . "  br i1 %okp, label %hdr, label %other\n"
             . "hdr:\n"
             . "  %p = inttoptr i64 %pl to ptr\n"
             . "  %t8p = getelementptr inbounds i8, ptr %p, i64 -8\n"
             . "  %t8 = load i64, ptr %t8p\n"
             . "  %t8h = lshr i64 %t8, 48\n"
             . '  %t8m = icmp eq i64 %t8h, ' . (string)(\Compile\MemoryAbi::CLOSURE_TAG_MAGIC >> 48) . "\n"
-            . "  br i1 %t8m, label %done, label %env\n"
+            . "  br i1 %t8m, label %objc, label %env\n"
             . "env:\n"
             . '  %mp = getelementptr inbounds i8, ptr %p, i64 ' . $mOff . "\n"
             . "  %m = load i64, ptr %mp\n"
@@ -3455,11 +3462,20 @@ end:
             . '  %ism = icmp eq i64 %mm, ' . $magic . "\n"
             . "  br i1 %ism, label %clo, label %done\n"
             . "clo:\n";
+        $rcMagic = (string)\Compile\MemoryAbi::RC_TAG_MAGIC;
         $out .= "define void @__cc_cellclo_walk(i64 %v, i64 %a) {\nentry:\n" . $cellEnv
             . "  call void @__cc_closure_walk(i64 %pl, i64 %a)\n  br label %done\n"
+            . "objc:\n"
+            . '  %isrc = icmp eq i64 %t8, ' . $rcMagic . "\n"
+            . "  br i1 %isrc, label %child, label %done\n"
+            . "child:\n"
+            . "  call void @__manticore_cc_child_apply(ptr %p, i64 %a)\n  br label %done\n"
+            . "other:\n  br label %done\n"
             . "done:\n  ret void\n}\n";
         $out .= "define void @__cc_cellclo_free(i64 %v) {\nentry:\n" . $cellEnv
             . "  call void @__cc_closure_free(i64 %pl)\n  br label %done\n"
+            . "objc:\n  br label %done\n"
+            . "other:\n  call void @__mir_cell_drop(i64 %v)\n  br label %done\n"
             . "done:\n  ret void\n}\n";
         return $out;
     }
