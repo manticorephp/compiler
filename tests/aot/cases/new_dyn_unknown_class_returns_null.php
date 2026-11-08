@@ -1,6 +1,5 @@
 <?php
 // `new $class` with the name of a class that does not exist returns null instead of throwing Error
-// issue: #565
 function make(string $class) { return new $class(1); }
 class Known { public function __construct(public int $a) {} }
 echo make('Known')->a, "\n";
