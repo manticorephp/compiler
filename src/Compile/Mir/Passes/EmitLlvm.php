@@ -262,6 +262,8 @@ final class EmitLlvm implements EmitVisitor
     private array $propertyReadHelpers = [];
     /** @var array<string, string> scope|magic => deny-helper symbol, '' when nothing is denied */
     private array $propDenyHelpers = [];
+    /** @var array<string, array<int, array<string, string[]>>> magic => class id => name => [message, visibility, declaring class] */
+    private array $propDenyRows = [];
     /** @var array<string, bool> classes a lazy ghost's slots are read through */
     private array $lazyHolders = [];
     /** The `$o->$name` an isset / `??` is testing: inaccessible reads as unset there, not an Error. */
@@ -770,6 +772,7 @@ final class EmitLlvm implements EmitVisitor
         $this->hookPropertyHoldersCache = [];
         $this->propertyReadHelpers = [];
         $this->propDenyHelpers = [];
+        $this->propDenyRows = [];
         $this->dynamicMethodHelpers = [];
         $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;

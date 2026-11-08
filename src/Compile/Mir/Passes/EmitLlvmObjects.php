@@ -4316,24 +4316,69 @@ trait EmitLlvmObjects
      * ponytail: php calls the magic for an inaccessible name; here the slot is still
      * read directly, as before this check. Route denied names to the magic when a
      * program depends on it.
+     *
+     * The message does not depend on the scope, only whether it applies does, and a
+     * scope reaches few of the module's non-public properties. So one shared helper
+     * per magic answers every candidate, and a scope that may reach some of them gets
+     * a small wrapper answering 0 for those first: a copy of the whole table per
+     * scope was 4.5 MB of IR each on symfony-demo, 300 MB in all.
      */
     private function propDenyHelper(string $scope, string $magic): string
     {
         $key = '__mc_prop_deny_' . $this->mangle($scope) . $magic;
         if (isset($this->propDenyHelpers[$key])) { return $this->propDenyHelpers[$key]; }
-        $holders = $this->methodHolders($magic);
-        $rows = [];
-        foreach ($this->classes as $cn => $cd) {
-            if (isset($holders[$cn])) { continue; }
-            foreach ($cd->propertyMeta as $p => $_pm) {
-                $msg = $cd->isShadowSlot((string)$p) ? '' : $this->propAccessError((string)$cn, (string)$p);
-                if ($msg !== '') { $rows[$cd->classId][(string)$p] = $msg; }
+        $shared = $this->propDenySharedHelper($magic);
+        if ($shared === '') { return $this->propDenyHelpers[$key] = ''; }
+        /** @var array<int, array<string, string>> $allowed */
+        $allowed = [];
+        foreach ($this->propDenyRows[$magic] as $cid => $props) {
+            foreach ($props as $p => $row) {
+                if (!$this->accessDenied($row[1], $row[2])) { $allowed[$cid][(string)$p] = '0'; }
             }
         }
-        if ($rows === []) { return $this->propDenyHelpers[$key] = ''; }
-
-        $this->rt->needsStrcmp = true;
+        if ($allowed === []) { return $this->propDenyHelpers[$key] = $shared; }
         $sym = '@manticore_' . $key;
+        $this->emitPropDenyFn($key, $sym, $allowed, '  %r = tail call i64 ' . $shared . "(ptr %obj, ptr %key)\n  ret i64 %r\n");
+        return $this->propDenyHelpers[$key] = $sym;
+    }
+
+    /** Every non-public property any scope may be denied, with php's message; '' when there is none. */
+    private function propDenySharedHelper(string $magic): string
+    {
+        $key = '__mc_prop_deny' . $magic;
+        if (isset($this->propDenyHelpers[$key])) { return $this->propDenyHelpers[$key]; }
+        $holders = $this->methodHolders($magic);
+        /** @var array<int, array<string, string[]>> $rows class id => name => [message, visibility, declaring class] */
+        $rows = [];
+        /** @var array<int, array<string, string>> $answers */
+        $answers = [];
+        foreach ($this->classes as $cn => $cd) {
+            if (isset($holders[$cn])) { continue; }
+            foreach ($cd->propertyMeta as $p => $pm) {
+                $p = (string)$p;
+                if ($cd->isShadowSlot($p) || $pm->isStatic || $pm->visibility === 'public' || $pm->visibility === ''
+                    || $pm->declaringClass === '') { continue; }
+                // An ancestor's private property is invisible to the subclass, not forbidden.
+                if ($pm->visibility === 'private' && $this->accessCanon($pm->declaringClass) !== $this->accessCanon((string)$cn)) { continue; }
+                $msg = 'Cannot access ' . $pm->visibility . ' property ' . (string)$cn . '::$' . $p;
+                $rows[$cd->classId][$p] = [$msg, $pm->visibility, $pm->declaringClass];
+                $answers[$cd->classId][$p] = 'ptrtoint (ptr ' . $this->litStr($msg) . ' to i64)';
+            }
+        }
+        $this->propDenyRows[$magic] = $rows;
+        if ($rows === []) { return $this->propDenyHelpers[$key] = ''; }
+        $sym = '@manticore_' . $key;
+        $this->emitPropDenyFn($key, $sym, $answers, "  ret i64 0\n");
+        return $this->propDenyHelpers[$key] = $sym;
+    }
+
+    /**
+     * `(ptr obj, ptr name) -> i64` answering `$rows[class id][name]`, else running `$miss`.
+     * @param array<int, array<string, string>> $rows
+     */
+    private function emitPropDenyFn(string $key, string $sym, array $rows, string $miss): void
+    {
+        $this->rt->needsStrcmp = true;
         $oldSsa = $this->ssa;
         $oldClassId = $this->classIdReg;
         $this->ssa = new SsaBuilder();
@@ -4348,7 +4393,7 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('deny.class');
             $switch .= '    i64 ' . (string)$cid . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
-            foreach ($props as $p => $msg) {
+            foreach ($props as $p => $answer) {
                 $c = $this->ssa->allocReg();
                 $e = $this->ssa->allocReg();
                 $hit = $this->ssa->allocLabel('deny.hit');
@@ -4356,16 +4401,15 @@ trait EmitLlvmObjects
                 $bodies .= '  ' . $c . ' = call i32 @strcmp(ptr %key, ptr ' . $this->litStr((string)$p) . ")\n";
                 $bodies .= '  ' . $e . ' = icmp eq i32 ' . $c . ", 0\n";
                 $bodies .= '  br i1 ' . $e . ', label %' . $hit . ', label %' . $next . "\n";
-                $bodies .= $hit . ":\n  ret i64 ptrtoint (ptr " . $this->litStr($msg) . " to i64)\n";
+                $bodies .= $hit . ":\n  ret i64 " . $answer . "\n";
                 $bodies .= $next . ":\n";
             }
             $bodies .= "  br label %none\n";
         }
-        $out .= $switch . "  ]\n" . $bodies . "none:\n  ret i64 0\n}\n\n";
+        $out .= $switch . "  ]\n" . $bodies . "none:\n" . $miss . "}\n\n";
         $this->ssa = $oldSsa;
         $this->classIdReg = $oldClassId;
         $this->propertyReadHelpers[$key] = $out;
-        return $this->propDenyHelpers[$key] = $sym;
     }
 
     /**
