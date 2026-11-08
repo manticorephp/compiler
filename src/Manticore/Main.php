@@ -951,11 +951,23 @@ function clang_id(): string
 
 function obj_cache_key(string $llPath, string $flags): string
 {
-    $h = \sha1_file($llPath);
-    if ($h === false) {
+    // A digest of 8 MB chunk digests: sha1_file() reads the whole part into one
+    // string, 65 parts of up to 170 MB that the compiler then holds while clang runs.
+    $f = \fopen($llPath, 'rb');
+    if ($f === false) {
         return '';
     }
-    return \sha1($flags . '|' . clang_id() . '|' . $h);
+    $h = '';
+    while (!\feof($f)) {
+        $chunk = \fread($f, 8388608);
+        if ($chunk === false) {
+            \fclose($f);
+            return '';
+        }
+        $h .= \sha1($chunk, true);
+    }
+    \fclose($f);
+    return \sha1($flags . '|' . clang_id() . '|' . \sha1($h));
 }
 
 /** True when the cached object was placed at `$dest`. */
@@ -1384,6 +1396,8 @@ function assemble_ir_file_split(
         $splitter->sharedDefs,
         $splitter->internalDefs
     );
+    // Its module index would otherwise stay resident beside every clang.
+    unset($splitter);
     $lto = thinlto_flags();
     $objs = [];
     /** @var string[] */

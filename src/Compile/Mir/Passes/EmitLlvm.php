@@ -207,6 +207,14 @@ final class EmitLlvm implements EmitVisitor
 
     private function bodyAppend(string $path, string $s): void
     {
+        if (\strlen($s) >= 1048576) {
+            // A big body goes straight to the file: buffering it copies it once more.
+            $this->bodyFlush($path);
+            if (!\Manticore\append_file_bytes($path, $s)) {
+                throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $path);
+            }
+            return;
+        }
         $this->bodyPend .= $s;
         if (\strlen($this->bodyPend) >= 1048576) { $this->bodyFlush($path); }
     }
