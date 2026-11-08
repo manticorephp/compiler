@@ -33,28 +33,28 @@ finish: 'onetwothree' status=1 read=25
 fill 8191: 8191 status=0
 fill 8192: 8192 status=-5
 fill 8193: 8193 status=0
-fdict none: false status=2 read=0
-fdict wrong: false status=2 read=0
-fdict wrong again: false status=2 read=0
-fdict ok: 'hello world hello' status=1 read=11
-fdict second stream: false status=2 read=0
-fdict byte 0: '' status=0 read=1
-fdict byte 1: '' status=0 read=2
-fdict byte 2: '' status=0 read=3
-fdict byte 3: '' status=0 read=4
-fdict byte 4: '' status=0 read=5
-fdict byte 5: '' status=-5 read=5
-fdict byte 6: '' status=0 read=6
-fdict byte 7: 'h' status=0 read=7
-fdict byte 8: '' status=0 read=8
-fdict byte 9: 'ello world' status=0 read=9
-fdict byte 10: ' ' status=0 read=10
-fdict byte 11: 'hello' status=0 read=11
-fdict byte 12: '' status=0 read=12
-fdict byte 13: '' status=0 read=13
-fdict byte 14: '' status=0 read=14
-fdict byte 15: '' status=0 read=15
-fdict byte 16: '' status=1 read=16
+fdict none: false status=2
+fdict wrong: false status=2
+fdict wrong again: false status=2
+fdict ok: 'hello world hello' status=1
+fdict second stream: false status=2
+fdict byte 0: '' status=0
+fdict byte 1: '' status=0
+fdict byte 2: '' status=0
+fdict byte 3: '' status=0
+fdict byte 4: '' status=0
+fdict byte 5: '' status=-5
+fdict byte 6: '' status=0
+fdict byte 7: 'h' status=0
+fdict byte 8: '' status=0
+fdict byte 9: 'ello world' status=0
+fdict byte 10: ' ' status=0
+fdict byte 11: 'hello' status=0
+fdict byte 12: '' status=0
+fdict byte 13: '' status=0
+fdict byte 14: '' status=0
+fdict byte 15: '' status=0
+fdict byte 16: '' status=1
 dictionary unused: 'abc' status=1 read=11
 zlib window9 into 8: false status=-3 read=2
 zlib window9 into 9: 'hello' status=1 read=13
