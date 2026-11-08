@@ -18,9 +18,8 @@ namespace Compile;
  *                                         non-escaping arrays. ON by default.
  *   MANTICORE_EMPTY_SINGLETON=0         — opt OUT of the shared immortal empty
  *                                         `[]` buffer. ON by default.
- *   MANTICORE_POOL=1                    — opt IN to the small-object pool
- *                                         allocator. OFF by default after the
- *                                         arm64 reserved-address crash; must be
+ *   MANTICORE_POOL=0                    — opt OUT of the small-object pool
+ *                                         allocator. ON by default; must be
  *                                         the same for the whole build (see $pool).
  *   MANTICORE_REF_CELLS=0               — opt OUT of reference cells. ON by
  *                                         default; must be the same for the
@@ -567,9 +566,8 @@ final class Debug
      * Size-classed small-object pool in front of libc for objects, unified
      * array buffers and hash bucket side-arrays (strings already had their own
      * two-class free list). See {@see \Compile\MemoryAbi::POOL_GRAIN} for the
-     * shape. DEFAULT OFF: the mmap-backed arm64 pool hit a reserved-address
-     * SIGBUS during the large Doctrine self-host target. Enable explicitly with
-     * `MANTICORE_POOL=1` only for a controlled pool experiment.
+     * shape. DEFAULT ON (Laravel: −9..−14% instructions per request; the
+     * compiler self-builds with it). Disable with `MANTICORE_POOL=0`.
      *
      * ⚠ The flag must hold for the WHOLE build. `__mir_pool_alloc` / `_free`
      * and the allocators calling them are `linkonce_odr`: link a stdlib `.o`
@@ -579,7 +577,7 @@ final class Debug
      * environment to both halves, so exporting the variable for the build is
      * enough — flipping it for a single file is not.
      */
-    public static bool $pool = false;
+    public static bool $pool = true;
 
     /**
      * Reference cells — a `&` whose result is a storable VALUE rather than an
