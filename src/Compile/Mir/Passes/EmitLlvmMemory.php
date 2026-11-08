@@ -1009,6 +1009,7 @@ trait EmitLlvmMemory
 
     private function rcRetainByType(Node $valueNode, string $i64reg, ?Type $fallback = null, int $cat = 6): string
     {
+        $valueNode = \Compile\Mir\Ownership::promotedInvoke($valueNode);
         // By-handle rc for obj / vec / string / assoc (buffer rc).
         $tk = $valueNode->type->kind;
         $cls = $valueNode->type->class ?? '';
@@ -1023,7 +1024,7 @@ trait EmitLlvmMemory
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
             $fk = $fallback->kind;
             if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY
-                || $fk === Type::KIND_STRING) {
+                || $fk === Type::KIND_STRING || $fk === Type::KIND_CLOSURE) {
                 $tk = $fk;
                 $cls = $fallback->class ?? '';
             }
@@ -1073,7 +1074,7 @@ trait EmitLlvmMemory
         // would over-count. Only borrowed values (alias / property / array
         // read) and owned locals need a retain to add a co-owner.
         $k = $valueNode->kind;
-        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_NEW_DYN_OBJ
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE
             || \Compile\Mir\BitOp::mintsFresh($valueNode)) {
             return '';
@@ -1083,7 +1084,7 @@ trait EmitLlvmMemory
         // — that double retain is what made the half-fixed string ternary leak
         // into every property / array-element / cell store.
         if ($this->condOwnsResult($valueNode)) { return ''; }
-        if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return ''; }
+        if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ || $k === Node::KIND_CLONE)) { return ''; }
         // `(object)$v` is owned on every path: a fresh stdClass, or the object
         // itself retained by the cast ({@see EmitLlvmExpr::emitCast}).
         if (($tk === Type::KIND_OBJ || $tk === Type::KIND_CELL) && $valueNode instanceof \Compile\Mir\Cast && $valueNode->target === 'object') { return ''; }

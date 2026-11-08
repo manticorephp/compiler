@@ -68,8 +68,22 @@ final class EscapeSummaries
     private array $byMethodMemo = [];
     /** @var array<string, string[]> class / interface → every class that is-a it */
     private array $isAMemo = [];
+    /** @var array<string, array<string, bool>> class → every class / interface it is-a */
+    private array $ancestorsMemo = [];
     /** @var array<string, bool> */
     private array $pureNames = [];
+    /** @var array<string, array<string, bool>> slot sets by content: most functions write the same few */
+    private array $poolSets = [];
+    /** @var array<int, int[]> set hash → ids of the pooled sets with it (0 is reserved for 'no set') */
+    private array $setBuckets = [];
+    private int $poolSeq = 0;
+    private int $lastPoolId = 0;
+    /** @var array<string, int> function → id of its pooled write set */
+    private array $writesId = [];
+    /** @var array<int, bool> callee write-set ids already queued by this walk */
+    private array $ewSeenIds = [];
+    /** @var array<int, array<string, bool>> callee write sets met outside recording, tested without being merged */
+    private array $ewCalleeSets = [];
 
     public static function fromModule(Module $module): self
     {
@@ -166,7 +180,11 @@ final class EscapeSummaries
         foreach ($window as $w) { $this->walk($w); }
         if ($consumer !== null) { $this->noteConsumer($consumer); }
         if (!$this->ewPark || $this->ewAny) { return true; }
-        return $this->keysMeet($held, $this->ewWrites);
+        if ($this->keysMeet($held, $this->ewWrites)) { return true; }
+        foreach ($this->ewCalleeSets as $set) {
+            if ($this->keysMeet($held, $set)) { return true; }
+        }
+        return false;
     }
 
     /**
@@ -190,8 +208,12 @@ final class EscapeSummaries
         $k = $n->kind;
         if ($k === Node::KIND_STORE_PROPERTY) {
             $saved = $this->ewWrites;
+            $savedSets = $this->ewCalleeSets;
+            $savedIds = $this->ewSeenIds;
             $this->noteStoreProperty(self::asStoreProperty($n));
             $this->ewWrites = $saved;
+            $this->ewCalleeSets = $savedSets;
+            $this->ewSeenIds = $savedIds;
             return;
         }
         if ($k === Node::KIND_STORE_ELEMENT || $k === Node::KIND_ARRAY_ACCESS) {
@@ -207,12 +229,49 @@ final class EscapeSummaries
         $this->noteCall($n);
     }
 
+    /**
+     * One shared copy per distinct set of slots: a module of 130k functions otherwise holds
+     * 130k private copies of the same few sets.
+     *
+     * @param array<string, bool> $set
+     * @return array<string, bool>
+     */
+    private function pooled(array $set): array
+    {
+        // Bucketed by an order-free hash and confirmed key by key: no canonical order, so no sort.
+        $n = \count($set);
+        $h = $n * 1000003;
+        foreach ($set as $k => $unused) {
+            $ks = (string)$k;
+            $len = \strlen($ks);
+            $h = $h + $len * 7919 + \ord($ks) * 131 + \ord(\substr($ks, $len >> 1, 1));
+        }
+        $bucket = $this->setBuckets[$h] ?? [];
+        foreach ($bucket as $id) {
+            $cand = $this->poolSets[$id];
+            if (\count($cand) !== $n) { continue; }
+            $same = true;
+            foreach ($set as $k => $unused) {
+                if (!isset($cand[$k])) { $same = false; break; }
+            }
+            if ($same) { $this->lastPoolId = $id; return $cand; }
+        }
+        $this->poolSeq = $this->poolSeq + 1;
+        $this->poolSets[$this->poolSeq] = $set;
+        $bucket[] = $this->poolSeq;
+        $this->setBuckets[$h] = $bucket;
+        $this->lastPoolId = $this->poolSeq;
+        return $set;
+    }
+
     private function resetScratch(): void
     {
         $this->ewWrites = [];
         $this->ewAny = false;
         $this->ewPark = true;
         $this->ewWhy = '';
+        $this->ewSeenIds = [];
+        $this->ewCalleeSets = [];
     }
 
     private function compute(Module $module): void
@@ -257,7 +316,7 @@ final class EscapeSummaries
             $callees[$name] = \array_keys($this->ewReads);
             $localPark[$name] = $this->ewPark;
             $localAny[$name] = $this->ewAny;
-            $localWrites[$name] = $this->ewWrites;
+            $localWrites[$name] = $this->pooled($this->ewWrites);
             $localWhy[$name] = $this->ewWhy;
         }
         // 2. Strongly connected components, callees first. Every member of a
@@ -283,16 +342,33 @@ final class EscapeSummaries
                     if ((!$this->parkFree[$c] || $this->writesAny[$c]) && $why === '') { $why = 'via ' . $c; }
                     if (!$this->parkFree[$c]) { $park = false; }
                     if ($this->writesAny[$c]) { $any = true; }
-                    foreach ($this->writes[$c] as $wk => $unused) { $writes[$wk] = true; }
+                    // First set adopted whole (shared, not copied); later ones add only what is missing.
+                    if ($writes === []) { $writes = $this->writes[$c]; continue; }
+                    foreach ($this->writes[$c] as $wk => $unused) { if (!isset($writes[$wk])) { $writes[$wk] = true; } }
                 }
             }
+            // The union only grows from its parts: a callee set of the same size IS the union.
+            $pooledWrites = null;
+            $pooledId = 0;
+            $total = \count($writes);
+            foreach ($scc as $m) {
+                foreach ($callees[$m] as $c) {
+                    if (!isset($inScc[$c]) && \count($this->writes[$c]) === $total) { $pooledWrites = $this->writes[$c]; $pooledId = $this->writesId[$c] ?? 0; break 2; }
+                }
+            }
+            if ($pooledWrites === null) { $pooledWrites = $this->pooled($writes); $pooledId = $this->lastPoolId; }
             foreach ($scc as $m) {
                 $this->parkFree[$m] = $park;
                 $this->writesAny[$m] = $any;
-                $this->writes[$m] = $writes;
+                $this->writes[$m] = $pooledWrites;
+                $this->writesId[$m] = $pooledId;
                 if (!$park || $any) { $this->why[$m] = $why; }
+                // Consumed: a component's members are never read again.
+                unset($callees[$m], $localWrites[$m], $localWhy[$m]);
             }
         }
+        $this->poolSets = [];
+        $this->setBuckets = [];
         \Compile\Stats::line('escape: fns=' . (string)\count($names) . ' sccs=' . (string)\count($sccs));
         $this->ewReads = [];
         $this->ewWrites = [];
@@ -533,7 +609,19 @@ final class EscapeSummaries
             if ((!$this->parkFree[$t] || $this->writesAny[$t]) && $this->ewWhy === '') { $this->ewWhy = 'via ' . $t; }
             if (!$this->parkFree[$t]) { $this->ewPark = false; }
             if ($this->writesAny[$t]) { $this->ewAny = true; }
-            foreach ($this->writes[$t] as $prop => $unused) { $this->ewWrites[$prop] = true; }
+            if ($this->ewRecording) {
+                foreach ($this->writes[$t] as $prop => $unused) { $this->ewWrites[$prop] = true; }
+            } else {
+                // A finished summary: test it as it is, once per distinct pooled set, instead of
+                // copying every slot into this walk's set.
+                $wid = $this->writesId[$t] ?? 0;
+                if ($wid === 0) {
+                    foreach ($this->writes[$t] as $prop => $unused) { $this->ewWrites[$prop] = true; }
+                } elseif (!isset($this->ewSeenIds[$wid])) {
+                    $this->ewSeenIds[$wid] = true;
+                    $this->ewCalleeSets[] = $this->writes[$t];
+                }
+            }
             $off = isset($this->thisFirst[$t]) ? 1 : 0;
             $refs = $this->refParams[$t] ?? [];
             $i = 0;
@@ -691,6 +779,16 @@ final class EscapeSummaries
 
     private function isA(string $name, string $target): bool
     {
+        if (!isset($this->ancestorsMemo[$name])) { $this->ancestorsMemo[$name] = $this->ancestorsOf($name); }
+        return isset($this->ancestorsMemo[$name][$target]);
+    }
+
+    /**
+     * Everything `$name` is-a, itself included: one walk per class instead of one per pair asked.
+     * @return array<string, bool>
+     */
+    private function ancestorsOf(string $name): array
+    {
         /** @var array<string, bool> $seen */
         $seen = [];
         /** @var string[] $stack */
@@ -699,7 +797,6 @@ final class EscapeSummaries
             $c = \array_pop($stack);
             if ($c === '' || isset($seen[$c])) { continue; }
             $seen[$c] = true;
-            if ($c === $target) { return true; }
             if (!isset($this->classes[$c])) {
                 foreach ($this->interfaceAncestors[$c] ?? [] as $ia) { $stack[] = $ia; }
                 continue;
@@ -710,8 +807,9 @@ final class EscapeSummaries
             // `ClassDef::$interfaces` is a bare `array`: its elements arrive erased.
             foreach ($cd->interfaces as $i) { $stack[] = (string)$i; }
         }
-        return false;
+        return $seen;
     }
+
 
     /**
      * Every concrete class a method NAME can dispatch to, or [] when that is

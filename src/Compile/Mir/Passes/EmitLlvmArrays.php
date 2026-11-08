@@ -236,11 +236,18 @@ trait EmitLlvmArrays
     private function keyAsWritten(Node $base, Node $idx): Node
     {
         if ($base->type->kind !== Type::KIND_OBJ
-            || !$this->classImplements($base->type->class ?? '', 'ArrayAccess')) { return $idx; }
+            || !$this->isArrayAccessClass($base->type->class ?? '')) { return $idx; }
         return \Compile\Mir\IntConst::asWritten($idx);
     }
 
     /** Whether `$cls` or any class below it implements ArrayAccess; an unknown class is assumed to (true). */
+    /** Whether an object typed `$cls` is read through `offsetGet`: it implements ArrayAccess, or an interface /
+     *  base class does not declare it but a class below it does (`$this->app['x']` over a contract). */
+    private function isArrayAccessClass(string $cls): bool
+    {
+        return $cls !== '' && ($this->classImplements($cls, 'ArrayAccess') || $this->mayBeArrayAccess($cls));
+    }
+
     private function mayBeArrayAccess(string $cls): bool
     {
         if ($cls === '' || !isset($this->classes[$cls])) { return true; }
@@ -282,7 +289,7 @@ trait EmitLlvmArrays
         }
         // `$obj[$k]` on an ArrayAccess object → `$obj->offsetGet($k)`.
         if ($aa->array->type->kind === Type::KIND_OBJ
-            && $this->classImplements($aa->array->type->class ?? '', 'ArrayAccess')) {
+            && $this->isArrayAccessClass($aa->array->type->class ?? '')) {
             // A bound SplFixedArray<Class> read is typed the class
             // ({@see InferNodes::inferArrayAccess}); the call and the inline
             // load both answer the CELL word, which is unboxed to the pointer.
@@ -1148,11 +1155,14 @@ trait EmitLlvmArrays
             $this->lastValueType = 'i64';
             return $out;
         }
+        if ($se->array->kind === Node::KIND_ARRAY_ACCESS && $this->isIndirectModifiable($se->array)) {
+            return $this->emitIndirectElementStore($se);
+        }
         // `$obj[$k] = $v` / `$obj[] = $v` on an ArrayAccess object →
         // `$obj->offsetSet($k, $v)`. The append form `$obj[]=` already lowered
         // its index to a NullConst, so `$se->index` is the right key as-is.
         if ($se->array->type->kind === Type::KIND_OBJ
-            && $this->classImplements($se->array->type->class ?? '', 'ArrayAccess')) {
+            && $this->isArrayAccessClass($se->array->type->class ?? '')) {
             $mc = new \Compile\Mir\MethodCall_($se->array, 'offsetSet', [$this->keyAsWritten($se->array, $se->index), $se->value], Type::void());
             // A value the binding's claim does not provably hold goes through the
             // erased thunk (a check), not the inline store.
@@ -1186,6 +1196,69 @@ trait EmitLlvmArrays
             return $this->emitMethodCall($mc) . $this->offsetSetResult($se);
         }
         return $this->emitStoreElementErased($se);
+    }
+
+    /**
+     * `$map[$k][$j] = $v` where `$map` is a WeakMap / ArrayObject: php lets the
+     * write reach INTO the element (`offsetGet` hands out the stored array by
+     * reference). The ordinary store wrote through the cell `offsetGet`
+     * answered — a copy at best, and a corrupt array at worst. True only for a
+     * side-effect-free object and key, since both are evaluated twice.
+     */
+    private function isIndirectModifiable(Node $access): bool
+    {
+        $base = $access->array;
+        if ($base->type->kind !== Type::KIND_OBJ) { return false; }
+        $cls = \ltrim($base->type->class ?? '', '\\');
+        if ($cls !== 'WeakMap' && $cls !== 'ArrayObject' && $cls !== 'ArrayIterator') { return false; }
+        return $this->indirectOperandIsPure($base) && $this->indirectOperandIsPure($access->index);
+    }
+
+    private function indirectOperandIsPure(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL || $k === Node::KIND_STRING_CONST || $k === Node::KIND_INT_CONST
+            || $k === Node::KIND_STATIC_PROP) { return true; }
+        if ($k === Node::KIND_PROPERTY_ACCESS) { return $this->indirectOperandIsPure($n->object); }
+        return false;
+    }
+
+    private function emitIndirectElementStore(\Compile\Mir\StoreElement $se): string
+    {
+        $access = $se->array;
+        $tag = \substr($this->ssa->allocReg(), 2);
+        $tmp = '__nwm' . $tag;
+        // The value is the expression's result and may call: evaluate it once, up front.
+        $mark = \count($this->preEvalNodes);
+        $out = $this->emitNode($se->value);
+        $this->preEvalNodes[] = $se->value;
+        $this->preEvalRegs[] = $this->lastValue;
+        $this->preEvalTypes[] = $this->lastValueType;
+        $vReg = $this->lastValue;
+        $vType = $this->lastValueType;
+        $slot = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n";
+        $this->locals->slots[$tmp] = $slot;
+        $cell = Type::cell();
+        // tmp = $map[$k]  (offsetGet, a counted cell)
+        $out .= $this->emitNode($access);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $slot . "\n";
+        // tmp[$j] = $v  — copy-on-write against the map's own reference
+        $inner = new \Compile\Mir\StoreElement(new \Compile\Mir\LoadLocal($tmp, $cell), $se->index, $se->value, $se->type);
+        $out .= $this->emitNode($inner);
+        // $map[$k] = tmp  (offsetSet), then give tmp's own count back
+        $set = new \Compile\Mir\StoreElement($access->array, $access->index, new \Compile\Mir\LoadLocal($tmp, $cell), $cell);
+        $out .= $this->emitNode($set);
+        $cv = $this->ssa->allocReg();
+        $out .= '  ' . $cv . ' = load i64, ptr ' . $slot . "\n";
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out .= '  call void @__mir_cell_drop(i64 ' . $cv . ")\n";
+        $this->popPreEval($mark);
+        $this->lastValue = $vReg;
+        $this->lastValueType = $vType;
+        return $out;
     }
 
     /** A value `offsetSet` may be followed by a second read of: a local, a constant, pure arithmetic over them. */
@@ -2564,6 +2637,10 @@ trait EmitLlvmArrays
             $kind = \Compile\MemoryAbi::ARRAY_ELEM_HINT_STR;
         }
         $enc = $this->ssa->allocReg();
+        // The store as an EXPRESSION is the raw operand: the encoded word is boxed or raw by
+        // the buffer's runtime hint, and a consumer reads the value in the node's static type.
+        $this->elemRawReg = $this->elemValReg;
+        $this->elemRawType = 'i64';
         $out = '  ' . $enc . ' = call i64 @__mir_elem_encode_raw(ptr ' . $arrPtr . ', i64 '
              . $this->elemValReg . ', i64 ' . (string)$kind . ', i64 '
              . ($se->array->type->element === null || $se->array->type->element->kind === Type::KIND_UNKNOWN ? '1' : '0') . ")\n";
@@ -3262,7 +3339,7 @@ trait EmitLlvmArrays
         // The store as an EXPRESSION is the value in the node's own static
         // type, not the word the slot took: a boxing store yields the raw
         // operand, or a chained `$a[$k] = $b[$k] = v` reads a cell as a value.
-        if ($boxVal && $this->elemRawReg !== '') {
+        if ($this->elemRawReg !== '') {
             $this->lastValue = $this->elemRawReg;
             $this->lastValueType = $this->elemRawType;
         } else {

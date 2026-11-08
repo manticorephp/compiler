@@ -311,10 +311,19 @@ final class InferAllocKind implements Pass
             $this->traverse($n->value, true, $collecting);
             return;
         }
+        // `static $t = [..]` parks its initialiser in a module global that
+        // outlives the frame: an arena-eligible literal there was reclaimed at
+        // the first arena_leave and its bytes handed to the next string concat.
+        if ($k === Node::KIND_STATIC_LOCAL_DECL) {
+            if ($n->init !== null) { $this->traverse($n->init, true, $collecting); }
+            return;
+        }
         if ($k === Node::KIND_STORE_DYN_PROP) {
             $sd = $n;
             $this->traverse($sd->object, false, $collecting);
-            $this->traverse($sd->name, false, $collecting);
+            // The bag keeps the name by pointer. On the arena, `$k = "key$j"` in a loop reused one buffer,
+            // so every iteration wrote the same key, and a returned object read a freed one.
+            $this->traverse($sd->name, true, $collecting);
             $this->traverse($sd->value, true, $collecting);
             return;
         }

@@ -1,0 +1,23 @@
+drop receiver
+bool(true)
+1
+drop closure
+bool(false)
+2
+drop arg
+bool(false)
+3
+bool(false)
+flat
+int(3)
+drop lit0
+drop lit1
+bool(false)
+4
+drop cell
+bool(false)
+5
+still kept
+6
+drop kept
+7

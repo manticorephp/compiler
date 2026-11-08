@@ -221,7 +221,15 @@ trait LowerExprs
                     }
                     $ts[] = $this->markProbe($this->lowerExpr($a));
                 }
-                return new Isset_($ts, Type::bool_());
+                // php stops at the first unset operand: `isset($a[0], $a[0]->m())` never calls m()
+                // on the missing element, so chain the operands instead of testing all of them.
+                $chain = new Isset_([$ts[\count($ts) - 1]], Type::bool_());
+                $ti = \count($ts) - 2;
+                while ($ti >= 0) {
+                    $chain = new Ternary(new Isset_([$ts[$ti]], Type::bool_()), $chain, new BoolConst(false, Type::bool_()), Type::bool_());
+                    $ti = $ti - 1;
+                }
+                return $chain;
             }
             if ($fn === 'unset') {
                 // `unset($GLOBALS['x'])` nulls the module cell — Unset_ itself has
@@ -815,6 +823,11 @@ trait LowerExprs
             return $this->lowerDynStaticPropRead($this->asDynStaticProp($expr));
         }
         if ($expr->kind === 'DynamicStaticAccess') { return $this->lowerDynamicStaticAccessExpr($expr); }
+        if ($expr->kind === 'VarVar') {
+            // `$$n` READ: a marker, expanded to a chain over the function's locals ({@see ExtractScope}).
+            $this->sawExtract = true;
+            return new Block([new Call(ExtractScope::VV_READ, [$this->lowerExpr($this->asVarVar($expr)->nameExpr)], Type::unknown())], Type::unknown());
+        }
         if ($expr->kind === 'DynamicStaticCall') {
             return $this->lowerDynStaticCall($expr);
         }

@@ -61,6 +61,12 @@ final class Dump implements EmitVisitor
         return $out;
     }
 
+    /** One function's MIR — what a failing verify prints for `MANTICORE_DUMP_FN`. */
+    public static function fn(FunctionDef $fn): string
+    {
+        return self::function_($fn, false);
+    }
+
     private static function function_(FunctionDef $fn, bool $showEffects): string
     {
         $paramStr = '';

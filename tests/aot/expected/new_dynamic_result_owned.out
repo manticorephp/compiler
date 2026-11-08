@@ -1,0 +1,84 @@
+mw-drop mw
+t1
+== t1
+t2
+mw-drop mw
+== t2
+t3
+mw-drop mw
+== t3
+mw-drop t4
+t4 reassigned
+== t4
+t7 closure param
+mw-drop t7
+t7 end
+== t7
+t8 capture retyped
+mw-drop t8
+t8 end
+== t8
+t9 call
+mw-drop t9
+t9 end
+== t9
+t10 body
+mw-drop t10
+res-drop t10
+== t10
+t11 body
+mw-drop t11
+res-drop t11
+== t11
+t12 body
+res-drop t12
+== t12
+t5 param retyped
+mw-drop t5
+== t5
+t6 param retyped dyn
+mw-drop mw
+== t6
+t13 local
+mw-drop t13
+t13 cleared
+== t13
+mw-drop t14
+t14 receiver
+== t14
+t16 stored
+mw-drop t16
+== t16
+t17 appended
+mw-drop t17
+== t17
+t18 literal
+mw-drop t18
+== t18
+t19 arrow
+mw-drop t19
+== t19
+t21 ternary
+mw-drop t21
+== t21
+t22 arg
+mw-drop t22
+== t22
+t24 t24
+mw-drop t24
+== t24
+t25 Mw
+mw-drop t25
+t25 Res
+res-drop t25
+== t25
+2
+== t26
+t27 static
+mw-drop t27
+t27 cleared
+== t27
+t20 spread
+got
+mw-drop t20
+== t20

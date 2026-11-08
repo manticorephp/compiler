@@ -72,8 +72,24 @@ final class Ownership
 
     /** Does a local that STORES `$v` own it (and so release it at scope exit /
      *  before an overwrite)? */
+    /**
+     * `$o->$m(...$xs)` is a VALUE block: the by-ref promotion of `$xs`, then the
+     * invoke ({@see Passes\LowerFns::lowerRefSpread}). Its value IS the invoke's
+     * +1, and a predicate reading the block's kind took it for a borrow: the store
+     * owned nothing, the return retained it, a ternary arm retained it again.
+     * Laravel's Pipeline::carry() stranded the Response at one count per middleware.
+     */
+    public static function promotedInvoke(Node $v): Node
+    {
+        if (!($v instanceof Block)) { return $v; }
+        $n = \count($v->stmts);
+        if ($n === 0 || $v->stmts[$n - 1]->kind !== Node::KIND_INVOKE) { return $v; }
+        return $v->stmts[$n - 1];
+    }
+
     public function classifyStored(Node $v): int
     {
+        $v = self::promotedInvoke($v);
         if ($this->storedOwned($v)) { return $this->ownCode($v->type); }
         return $this->flavorOf($v->type) > 0 ? self::BORROW : self::NONE;
     }
@@ -121,6 +137,7 @@ final class Ownership
      */
     public function classifyTemp(Node $v, bool $lastCallWasBuiltin = false): int
     {
+        $v = self::promotedInvoke($v);
         $k = $v->type->kind;
         if ($k === Type::KIND_STRING) {
             return $this->tempStrOwned($v) ? self::STR : self::BORROW;
@@ -370,7 +387,7 @@ final class Ownership
             if (\in_array(\ltrim($value->function, '\\'), $this->ctx->borrowingBuiltins, true)) { return false; }
             return !isset($this->ctx->externFns[$value->function]);
         }
-        if ($k === Node::KIND_METHOD_CALL
+        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_NEW_DYN_OBJ
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             return true;
         }
@@ -446,7 +463,7 @@ final class Ownership
         // scope; rc-releasing them would be wrong (their header is -1 so
         // release no-ops, but don't track them as owned regardless).
         if ($value->allocKind !== AllocationKind::RC_HEAP) { return false; }
-        if ($tk === Type::KIND_OBJ) { return $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE; }
+        if ($tk === Type::KIND_OBJ) { return $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ || $k === Node::KIND_CLONE; }
         if ($tk === Type::KIND_STRING) { return $k === Node::KIND_CONCAT; }
         // An array-typed `+` is the union operator — __mir_array_union returns a
         // FRESH +1 array, so it is owned exactly like a literal.
@@ -843,6 +860,7 @@ final class Ownership
      */
     public function tempCellOwned(Node $n, bool $lastCallWasBuiltin): bool
     {
+        $n = self::promotedInvoke($n);
         if ($n->type->kind !== Type::KIND_CELL) { return false; }
         // A normalized conditional hands out +1 from every arm ({@see
         // Passes\EmitLlvmControl::armRetainPreBox} retains the borrowed one), so a
@@ -862,7 +880,7 @@ final class Ownership
         // `clone` of an erased value boxes a fresh copy — +1 on every arm of
         // the runtime-class dispatch ({@see Passes\EmitLlvmObjects::
         // emitCloneDispatch} retains on its pass-through arm for this reason).
-        if ($k === Node::KIND_CLONE) { return true; }
+        if ($k === Node::KIND_CLONE || $k === Node::KIND_NEW_DYN_OBJ) { return true; }
         // `+ - *` over a numeric cell run {@see Passes\EmitLlvmExpr::emitTaggedArith}:
         // the helper boxes a NEW cell on every path, a counted heap box past the
         // inline int form.
@@ -942,6 +960,7 @@ final class Ownership
      */
     public function tempArgFlavor(Node $a, bool $lastCallWasBuiltin): string
     {
+        $a = self::promotedInvoke($a);
         // A normalized conditional is +1 from every arm, so a borrowed-arg temp
         // must be released after the call like any other fresh producer. Tested
         // first: its result type may be a UNION (which the obj/array gate below
@@ -1018,7 +1037,7 @@ final class Ownership
         // A `clone` mints a fresh +1 exactly as `new` does: left out, a clone
         // passed as an argument (`f(clone $t)`, `$fixed[$i] = clone $v`) was
         // owned by nobody and lived until shutdown.
-        $owned = $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+        $owned = $k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ || $k === Node::KIND_CLONE
               || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
               || ($k === Node::KIND_ADD && $tk === Type::KIND_ARRAY)
               || ($a instanceof Cast && self::castArrayMints($a));
@@ -1348,6 +1367,7 @@ final class Ownership
      */
     public function returnBorrowsObj(Node $v, ?Type $retType, bool $moved, bool $erasedArray): bool
     {
+        $v = self::promotedInvoke($v);
         $t = $this->returnOwnershipType($v, $retType);
         $tk = $t->kind;
         $isArr = $t->isVec() || $t->isAssoc();
@@ -1364,7 +1384,7 @@ final class Ownership
         }
         if ($this->returnCondNormalized($v, $erasedArray)) { return false; }
         if ($this->isUserOffsetGetRead($v)) { return false; }
-        if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE)) { return false; }
+        if ($tk === Type::KIND_OBJ && ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ || $k === Node::KIND_CLONE)) { return false; }
         if ($tk === Type::KIND_OBJ && $v instanceof Cast && $v->target === 'object') { return false; }
         if ($isArr && $v instanceof Cast && self::castArrayMints($v)) { return false; }
         if ($isArr && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD)) { return false; }
@@ -1387,13 +1407,14 @@ final class Ownership
      */
     public function returnBorrowsCell(Node $v, bool $moved, bool $erasedArray): bool
     {
+        $v = self::promotedInvoke($v);
         $k = $v->kind;
         if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL
             || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) {
             if ($erasedArray && $v->type->kind === Type::KIND_UNKNOWN) { return !$this->erasedArrayCall($v); }
             return false;
         }
-        if ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE
+        if ($k === Node::KIND_NEW_OBJ || $k === Node::KIND_NEW_DYN_OBJ || $k === Node::KIND_CLONE
             || $k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD
             || $k === Node::KIND_CONCAT || $k === Node::KIND_STRING_CONST
             || BitOp::mintsFresh($v)) {
@@ -1693,6 +1714,8 @@ final class Ownership
         if ($tk === Type::KIND_CLOSURE || ($tk === Type::KIND_OBJ && self::isClosureClass($cls))) { return true; }
         if (($tk === Type::KIND_UNKNOWN || $tk === Type::KIND_CELL) && $fallback !== null) {
             $fk = $fallback->kind;
+            // An erased value stored into a closure-typed slot co-owns the env, as a closure does.
+            if ($fk === Type::KIND_CLOSURE) { return true; }
             if ($fk === Type::KIND_OBJ || $fk === Type::KIND_ARRAY || $fk === Type::KIND_STRING) {
                 $tk = $fk;
                 $cls = $fallback->class ?? '';

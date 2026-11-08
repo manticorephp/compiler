@@ -1241,9 +1241,9 @@ trait LowerPrelude
      * leaf `return`s); no match falls out of the tree to what follows it.
      *
      * @param string[] $names
-     * @param string   $leaf  statement(s) for a match; `%s` is the quoted class name
+     * @param string|callable $leaf  statement(s) for a match; `%s` is the quoted class name, or a callable taking the (unquoted) name
      */
-    private function nameTreeSrc(string $var, array $names, string $leaf, string $pad): string
+    private function nameTreeSrc(string $var, array $names, $leaf, string $pad): string
     {
         /** @var array<int, string[]> $groups crc32 => the names with it */
         $groups = [];
@@ -1263,7 +1263,7 @@ trait LowerPrelude
      * @param int[]                $keys   the crc32 values, ascending
      * @param array<int, string[]> $groups
      */
-    private function nameTreeRange(string $var, array $keys, array $groups, int $lo, int $hi, string $leaf, string $pad): string
+    private function nameTreeRange(string $var, array $keys, array $groups, int $lo, int $hi, $leaf, string $pad): string
     {
         if ($hi <= $lo) { return ''; }
         if ($hi - $lo <= 2) {
@@ -1284,12 +1284,13 @@ trait LowerPrelude
     }
 
     /** @param string[] $names the names sharing one crc32 */
-    private function nameGroupSrc(string $var, array $names, string $leaf, string $pad): string
+    private function nameGroupSrc(string $var, array $names, $leaf, string $pad): string
     {
         $o = '';
         foreach ($names as $n) {
             $q = $this->dqBody($n);
-            $o .= $pad . 'if (' . $var . ' === "' . $q . '") { ' . \str_replace('%s', $q, $leaf) . " }\n";
+            $stmt = \is_string($leaf) ? \str_replace('%s', $q, $leaf) : $leaf($n);
+            $o .= $pad . 'if (' . $var . ' === "' . $q . '") { ' . $stmt . " }\n";
         }
         return $o;
     }
@@ -1649,6 +1650,7 @@ trait LowerPrelude
             // round modes
             'PHP_ROUND_HALF_UP' => 1, 'PHP_ROUND_HALF_DOWN' => 2,
             'PHP_ROUND_HALF_EVEN' => 3, 'PHP_ROUND_HALF_ODD' => 4,
+            'DEBUG_BACKTRACE_PROVIDE_OBJECT' => 1, 'DEBUG_BACKTRACE_IGNORE_ARGS' => 2,
             // error reporting levels
             'E_ERROR' => 1, 'E_WARNING' => 2, 'E_PARSE' => 4, 'E_NOTICE' => 8,
             'E_CORE_ERROR' => 16, 'E_CORE_WARNING' => 32, 'E_COMPILE_ERROR' => 64,
@@ -1699,6 +1701,17 @@ trait LowerPrelude
             'LOCK_SH' => 1, 'LOCK_EX' => 2, 'LOCK_UN' => 3, 'LOCK_NB' => 4,
             'SCANDIR_SORT_ASCENDING' => 0, 'SCANDIR_SORT_DESCENDING' => 1,
             'SCANDIR_SORT_NONE' => 2,
+            // syslog(): priorities, facilities and openlog() options — the same
+            // numbers on Linux and Darwin, passed straight to libc.
+            'LOG_EMERG' => 0, 'LOG_ALERT' => 1, 'LOG_CRIT' => 2, 'LOG_ERR' => 3,
+            'LOG_WARNING' => 4, 'LOG_NOTICE' => 5, 'LOG_INFO' => 6, 'LOG_DEBUG' => 7,
+            'LOG_KERN' => 0, 'LOG_USER' => 8, 'LOG_MAIL' => 16, 'LOG_DAEMON' => 24,
+            'LOG_AUTH' => 32, 'LOG_SYSLOG' => 40, 'LOG_LPR' => 48, 'LOG_NEWS' => 56,
+            'LOG_UUCP' => 64, 'LOG_CRON' => 72, 'LOG_AUTHPRIV' => 80,
+            'LOG_LOCAL0' => 128, 'LOG_LOCAL1' => 136, 'LOG_LOCAL2' => 144, 'LOG_LOCAL3' => 152,
+            'LOG_LOCAL4' => 160, 'LOG_LOCAL5' => 168, 'LOG_LOCAL6' => 176, 'LOG_LOCAL7' => 184,
+            'LOG_PID' => 1, 'LOG_CONS' => 2, 'LOG_ODELAY' => 4, 'LOG_NDELAY' => 8,
+            'LOG_NOWAIT' => 16, 'LOG_PERROR' => 32,
             // ob_start() handler phases + flags. START is set on the FIRST
             // handler call for a buffer, so a first ob_end_flush() sees 9 and a
             // flush after one already happened sees 8 — {@see prelude/ob.php}.

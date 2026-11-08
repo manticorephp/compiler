@@ -268,6 +268,15 @@ final class Variable extends Expr
     }
 }
 
+/** `$$name` / `${expr}` — a local named by a runtime value. */
+final class VarVar extends Expr
+{
+    public function __construct(public readonly Expr $nameExpr, Span $span)
+    {
+        parent::__construct('VarVar', $span);
+    }
+}
+
 final class Identifier extends Expr
 {
     public function __construct(public readonly string $name, Span $span)

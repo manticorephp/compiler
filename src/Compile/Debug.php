@@ -18,9 +18,8 @@ namespace Compile;
  *                                         non-escaping arrays. ON by default.
  *   MANTICORE_EMPTY_SINGLETON=0         — opt OUT of the shared immortal empty
  *                                         `[]` buffer. ON by default.
- *   MANTICORE_POOL=1                    — opt IN to the small-object pool
- *                                         allocator. OFF by default after the
- *                                         arm64 reserved-address crash; must be
+ *   MANTICORE_POOL=0                    — opt OUT of the small-object pool
+ *                                         allocator. ON by default; must be
  *                                         the same for the whole build (see $pool).
  *   MANTICORE_REF_CELLS=0               — opt OUT of reference cells. ON by
  *                                         default; must be the same for the
@@ -567,9 +566,8 @@ final class Debug
      * Size-classed small-object pool in front of libc for objects, unified
      * array buffers and hash bucket side-arrays (strings already had their own
      * two-class free list). See {@see \Compile\MemoryAbi::POOL_GRAIN} for the
-     * shape. DEFAULT OFF: the mmap-backed arm64 pool hit a reserved-address
-     * SIGBUS during the large Doctrine self-host target. Enable explicitly with
-     * `MANTICORE_POOL=1` only for a controlled pool experiment.
+     * shape. DEFAULT ON (Laravel: −9..−14% instructions per request; the
+     * compiler self-builds with it). Disable with `MANTICORE_POOL=0`.
      *
      * ⚠ The flag must hold for the WHOLE build. `__mir_pool_alloc` / `_free`
      * and the allocators calling them are `linkonce_odr`: link a stdlib `.o`
@@ -579,7 +577,7 @@ final class Debug
      * environment to both halves, so exporting the variable for the build is
      * enough — flipping it for a single file is not.
      */
-    public static bool $pool = false;
+    public static bool $pool = true;
 
     /**
      * Reference cells — a `&` whose result is a storable VALUE rather than an
@@ -614,6 +612,43 @@ final class Debug
      * attribute has to be spliced into the IR text.
      */
     public static bool $framePointers = false;
+
+    /**
+     * `MANTICORE_ASAN=1` — a HEAP AddressSanitizer build: every function gets the `sanitize_address`
+     * attribute (spliced into the IR text like the frame-pointer one, because `-fsanitize=address`
+     * instruments nothing for `-x ir` input), and clang/the link get `-fsanitize=address`. Stack
+     * instrumentation is off (`-asan-stack=0`): fibers switch stacks and exceptions unwind with
+     * setjmp, which ASan's stack poisoning reports as false positives. A MEASUREMENT build only —
+     * use with `-O 0`.
+     */
+    public static bool $asan = false;
+
+    /**
+     * `MANTICORE_REF_QUARANTINE=1` — `__mir_ref_free` poisons a reference box's value word and never
+     * returns it to the allocator, so a stale holder that still touches it reads poison instead of
+     * corrupting whatever reused the block. A MEASUREMENT build only.
+     */
+    public static bool $refQuarantine = false;
+
+    /**
+     * `MANTICORE_POOL_POISON=1` — a freed small-object pool block is filled with 0xDE and never reused,
+     * so a use after free reads poison. Unlike the quarantine it adds no linker flag: exceptions keep
+     * unwinding. A MEASUREMENT build only.
+     */
+    public static bool $poolPoison = false;
+
+    /**
+     * The `#0` (and, for the ASan build's 870k-line dispatchers, `#1`) attribute group every emitted function body carries. `probe-stack` makes a frame
+     * larger than a page touch each page on the way down, so a fiber stack that overflows hits its
+     * PROT_NONE guard (named by the SIGSEGV handler) instead of jumping over it into whatever is
+     * mapped below — a heap, a library — and writing there. The frame-pointer half is the profiler's.
+     */
+    public static function bodyAttrGroup(): string
+    {
+        $fp = self::$framePointers ? ' "frame-pointer"="all"' : '';
+        return 'attributes #0 = { "probe-stack"="inline-asm"' . $fp . (self::$asan ? ' sanitize_address' : '') . " }\n"
+            . 'attributes #1 = { "probe-stack"="inline-asm"' . $fp . ' }';
+    }
 
     public static function applyMemoryMode(string $mode): bool
     {
@@ -712,6 +747,19 @@ final class Debug
         $env = \getenv('MANTICORE_REFLECT_REPORT');
         if ($env !== false && $env !== '0' && $env !== '') {
             self::$reflectReport = true;
+        }
+        $env = \getenv('MANTICORE_REF_QUARANTINE');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$refQuarantine = true;
+        }
+        $env = \getenv('MANTICORE_POOL_POISON');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$poolPoison = true;
+        }
+        $env = \getenv('MANTICORE_ASAN');
+        if ($env !== false && $env !== '0' && $env !== '') {
+            self::$asan = true;
+            self::$framePointers = true;
         }
         $env = \getenv('MANTICORE_FRAME_POINTERS');
         if ($env !== false && $env !== '0' && $env !== '') {

@@ -850,6 +850,10 @@ final class Monomorphize implements Pass
     private function isCandidate(FunctionDef $fn): bool
     {
         if ($fn->name === '__main') { return false; }
+        // A same-named codegen builtin shadows this body at every direct call; a `$mono$` clone
+        // renames the call, so the emitter never asks the builtin and the slow body runs.
+        if ($fn->name === 'array_key_exists' || $fn->name === 'in_array' || $fn->name === 'array_keys'
+            || $fn->name === 'array_values' || $fn->name === 'array_is_list') { return false; }
         if ($fn->isExtern || $fn->isGenerator) { return false; }
         if ($fn->ffiSymbol !== null) { return false; }
         // Already a specialization (`f$mono$…`) — its params are concrete, so

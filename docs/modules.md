@@ -50,7 +50,7 @@ executable that imports its dependencies' `.sig` and links their `.o`).
 | Field | Meaning |
 |-------|---------|
 | `name` | label, shown in build output |
-| `src` | directory scanned recursively for `*.php` |
+| `src` | directory scanned recursively for `*.php`; or a list of directories (the first names the target) when the code sits in several roots |
 | `output` | path of the linked executable |
 | `entry` | *optional* — the file whose **top-level code** becomes `main()`. Every other file contributes only its declarations. Omit it and files load in `find … | sort` order (a `zzz_*` driver sorts last by convention). |
 | `exclude` | *optional* — path prefixes to skip in the `src` scan (e.g. a subtree compiled separately as a library) |

@@ -24,8 +24,9 @@
  * is a COMPILE-time flag baked into the emitted IR, Debug.php:223). Without it
  * the program runs and prints its guard value, and you get RSS only.
  *
- * ⚠ MANTICORE_POOL is opt-in and must stay OFF: the small-object pool carves
- * objects out of one mmap, so a leaked object never shows as a live malloc.
+ * ⚠ Build with MANTICORE_POOL=0 (the pool is on by default): the small-object
+ * pool carves objects out of one mmap, so a leaked object never shows as a
+ * live malloc.
  *
  * WHAT EACH VARIANT DISCRIMINATES
  *

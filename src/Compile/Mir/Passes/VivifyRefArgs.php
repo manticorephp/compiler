@@ -309,6 +309,12 @@ final class VivifyRefArgs implements Pass
      *
      * @param Node[] $args
      */
+    /*
+     * `$this` is never a reference target: php hands it to a by-ref parameter as a temporary, so a callee
+     * that keeps the reference keeps it to that temporary. Holding it made `$this` a ref-cell local (a cell)
+     * for the whole frame, the receiver of every `$this->m(...)` lost its class, and each argument of those
+     * calls was then treated as by-ref (OwnershipFlow) — the pack of Model::__call was released twice.
+     */
     private function holdAnyStoring(array $args): void
     {
         if ($this->storingAny === []) { return; }
@@ -326,7 +332,7 @@ final class VivifyRefArgs implements Pass
                 $this->storeProp($this->asPropAccess($a));
                 continue;
             }
-            if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
+            if ($a->kind !== Node::KIND_LOAD_LOCAL || $this->asLoadLocal($a)->name === 'this') { continue; }
             $this->holds[$this->asLoadLocal($a)->name] = true;
         }
     }
@@ -364,6 +370,7 @@ final class VivifyRefArgs implements Pass
             }
             if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
             $name = $this->asLoadLocal($a)->name;
+            if ($name === 'this') { continue; }
             $this->holds[$name] = true;
             if (!isset($this->candidates[$name])) { $this->candidates[$name] = Type::cell(); }
         }
@@ -667,7 +674,7 @@ final class VivifyRefArgs implements Pass
             }
             if ($a->kind !== Node::KIND_LOAD_LOCAL) { continue; }
             $ll = $this->asLoadLocal($a);
-            if ($this->storesAt($fnName, $pi, $method)) { $this->holds[$ll->name] = true; }
+            if ($ll->name !== 'this' && $this->storesAt($fnName, $pi, $method)) { $this->holds[$ll->name] = true; }
             if (isset($this->candidates[$ll->name])) { continue; }
             $this->candidates[$ll->name] = $ptypes[$pi] ?? Type::unknown();
         }

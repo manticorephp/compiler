@@ -839,18 +839,22 @@ function host_jobs(): int
  * also covers {@see \Compile\Mir\RuntimeLibrary}'s hand-written bodies, unlike a
  * change at the dozens of `"\ndefine …"` emission sites.
  *
- * Off by default, and the transform is skipped entirely when off, so the emitted
- * IR is byte-identical unless the variable is set. Every `define` this compiler
+ * With the flag off only the attribute group is appended (probe-stack, see
+ * {@see \Compile\Debug::bodyAttrGroup}); the per-line tagging below runs only when
+ * it is on. Every `define` this compiler
  * emits is one line ending in `") {"` (4 107 checked across 40 programs) and no
  * module carries an attribute group of its own, so `#0` is free; a define that
  * ever stops matching is simply left alone rather than mangled.
  */
 function with_frame_pointers(string $ir): string
 {
-    if (!\Compile\Debug::$framePointers) {
-        return $ir;
+    if (!\Compile\Debug::$framePointers && !\Compile\Debug::$asan) {
+        // The bodies already carry `#0` ({@see \Compile\Mir\HoistAllocas::withFrameRecord});
+        // only the group is missing.
+        return $ir . "\n" . \Compile\Debug::bodyAttrGroup() . "\n";
     }
     $lines = \explode("\n", $ir);
+    $total = \count($lines);
     $n = 0;
     foreach ($lines as $i => $l) {
         if (\substr($l, 0, 7) !== "define ") {
@@ -859,13 +863,18 @@ function with_frame_pointers(string $ir): string
         if (\substr($l, -3) !== ") {") {
             continue;
         }
-        $lines[$i] = \substr($l, 0, -2) . "#0 {";
+        // ASan: the 870k-line dispatchers (`__mir_dyninl_*`, `__mc_static_callable`) overflow clang's
+        // own stack in the instrumentation pass; they get the frame pointer only (`#1`).
+        $group = '#0';
+        if (\Compile\Debug::$asan) {
+            $j = $i + 1;
+            while ($j < $total && $j - $i <= 30000 && $lines[$j] !== '}') { $j++; }
+            if ($j - $i > 30000) { $group = '#1'; }
+        }
+        $lines[$i] = \substr($l, 0, -2) . $group . " {";
         $n++;
     }
-    if ($n === 0) {
-        return $ir;
-    }
-    return \implode("\n", $lines) . "\nattributes #0 = { \"frame-pointer\"=\"all\" }\n";
+    return \implode("\n", $lines) . "\n" . \Compile\Debug::bodyAttrGroup() . "\n";
 }
 
 /**
@@ -1006,6 +1015,9 @@ function clang_opt_level(): string
 
 function clang_tuning_flags(): string
 {
+    if (\Compile\Debug::$asan) {
+        return ' -fsanitize=address -mllvm -asan-stack=0 -mllvm -asan-globals=0';
+    }
     $e = \getenv("MANTICORE_FAT_FUNCTION_SPLIT");
     if ($e !== false && $e !== "" && $e !== "0" && $e !== "off") {
         return " -mllvm -enable-split-machine-functions";
@@ -2326,6 +2338,16 @@ final class CompileArgs
     /** A `composer: true` build: `vendor/autoload.php` and composer's generated files are built in ({@see \Parser\IncludePath::isComposerGenerated}). */
     public static bool $composerBuild = false;
 
+    /**
+     * Files of an entry-mode application's own `src` roots. Their top-level
+     * side effects run when the program `require`s them, not at startup:
+     * a Laravel `routes/web.php` calls `Route::get()` on a facade nothing has
+     * set yet when the eager model runs it ahead of the entry.
+     *
+     * @var array<string,bool>
+     */
+    public static array $lazyUnitPaths = [];
+
     /** @var array<string, \Parser\Ast\Expr> */
     public static array $externConstants = [];
 
@@ -2605,7 +2627,8 @@ function target_os_family(): string
  */
 function unwind_link_flags(): string
 {
-    return is_darwin() ? "" : " -static-libgcc";
+    // Both link sites append this, so the ASan runtime (MANTICORE_ASAN=1) rides along here.
+    return (is_darwin() ? "" : " -static-libgcc") . (\Compile\Debug::$asan ? " -fsanitize=address" : "") . ((\Compile\Debug::$asan || \Compile\Debug::$refQuarantine) && is_darwin() ? " -Wl,-no_compact_unwind" : "");
 }
 
 /** True when the compile target is Darwin/macOS. */
@@ -4082,6 +4105,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $lastIdx = \count($sources) - 1;
     /** @var array<string, string> resolved path → value-slot global name */
     $includeSlots = [];
+    /** @var array<string, string> resolved path → function that runs the file on its first `require` */
+    $includeUnits = [];
     // Compute all source-wide lexical metadata before releasing raw source
     // strings during the parse loop. lower_module receives a copy-on-write
     // source array, so clearing an element releases its bytes here without
@@ -4245,6 +4270,72 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // require …`. Nested in an `if`, those used to silently kill the whole
         // program — a composer application compiled and then did nothing.
         $retKind = $isEntry ? 0 : __mc_file_return_kind($topStmts);
+        if (!$isEntry && $incSlot !== '' && $srcPath !== '' && isset(CompileArgs::$lazyUnitPaths[$srcPath])) {
+            $effects = false;
+            foreach ($topStmts as $s) {
+                if (!__mc_stmt_declares($s) && !__mc_stmt_is_pure_return($s)) {
+                    $effects = true;
+                    break;
+                }
+            }
+            if ($effects) {
+                $unitName = '__mc_unit_' . (string)$i;
+                $includeSlots[$incAbs] = $incSlot;
+                $includeUnits[$incAbs] = $unitName;
+                $span0 = $topStmts[0]->span;
+                $doneKey = $incSlot . '_d';
+                $slotRef = function (string $key) use ($span0): \Parser\Ast\Expr {
+                    return \Parser\Ast\Expr::arrayAccess(
+                        \Parser\Ast\Expr::variable('GLOBALS', $span0),
+                        \Parser\Ast\Expr::string($key, $span0),
+                        $span0,
+                    );
+                };
+                /** @var \Parser\Ast\Stmt[] $body */
+                $body = [];
+                $body[] = \Parser\Ast\Stmt::if_(
+                    $slotRef($doneKey),
+                    new \Parser\Ast\Block([\Parser\Ast\Stmt::return_($slotRef($incSlot), $span0)]),
+                    [],
+                    null,
+                    $span0,
+                );
+                $body[] = \Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign($slotRef($doneKey), \Parser\Ast\Expr::call('__mir_to_cell', [\Parser\Ast\Expr::int(1, $span0)], $span0), $span0),
+                    $span0,
+                );
+                $body[] = \Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign($slotRef($incSlot), \Parser\Ast\Expr::call('__mir_to_cell', [\Parser\Ast\Expr::int(1, $span0)], $span0), $span0),
+                    $span0,
+                );
+                $eofLabel = '__mc_eof_' . (string)$i;
+                /** @var \Parser\Ast\Stmt[] $effectStmts */
+                $effectStmts = [];
+                foreach ($topStmts as $s) {
+                    if (__mc_stmt_declares($s)) {
+                        $stmts[] = $s;
+                    } else {
+                        $effectStmts[] = $s;
+                    }
+                }
+                foreach (__mc_rewrite_file_returns($effectStmts, $incSlot, $eofLabel) as $s) {
+                    $body[] = $s;
+                }
+                $body[] = new \Parser\Ast\LabelStmt($eofLabel, $span0);
+                $body[] = \Parser\Ast\Stmt::return_($slotRef($incSlot), $span0);
+                $stmts[] = \Parser\Ast\Stmt::function_(
+                    new \Parser\Ast\FunctionDecl($unitName, [], null, new \Parser\Ast\Block($body), $span0),
+                    $span0,
+                );
+                foreach ($program->useAliases as $short => $fqn) {
+                    $aliases[$short] = $fqn;
+                }
+                foreach ($program->docComments as $d) {
+                    $docs[] = $d;
+                }
+                continue;
+            }
+        }
         if ($retKind > 0) {
             // Any return claims the slot, valued or not — a bare `return`
             // stores NULL, which is what php's `require` of it evaluates to.
@@ -4876,27 +4967,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $curlFns[] = $fn;
         }
     }
-    $useCurl = $demand->callsAny($curlFns)
-        || $demand->mentionsAny([
-            'CurlHandle',
-            'CURLOPT_URL',
-            'CURLOPT_RETURNTRANSFER',
-            'CURLOPT_POST',
-            'CURLOPT_POSTFIELDS',
-            'CURLOPT_HTTPHEADER',
-            'CURLOPT_HEADER',
-            'CURLOPT_NOBODY',
-            'CURLOPT_FOLLOWLOCATION',
-            'CURLOPT_TIMEOUT',
-            'CURLOPT_CUSTOMREQUEST',
-            'CURLOPT_USERAGENT',
-            'CURLOPT_WRITEFUNCTION',
-            'CURLOPT_HEADERFUNCTION',
-            'CURLOPT_SSL_VERIFYPEER',
-            'CURLINFO_HTTP_CODE',
-            'CURLINFO_RESPONSE_CODE',
-            'CURLE_OK',
-        ]);
+    // Every `CURL*` constant the file defines is a mention too: a class constant
+    // list such as monolog's `[CURLE_COULDNT_RESOLVE_HOST, …]` calls nothing.
+    $curlNames = ['CurlHandle'];
+    if (\preg_match_all('/^const (CURL\w+)\s*=/m', $curlSrc, $curlConsts) > 0) {
+        foreach ($curlConsts[1] as $cc) { $curlNames[] = $cc; }
+    }
+    $useCurl = $demand->callsAny($curlFns) || $demand->mentionsAny($curlNames);
     // curl_multi_* / curl_share_* — same prefixed family, own gate, and it
     // forces curl.php on because it names __McCurl and CurlHandle.
     $curlMultiFns = [];
@@ -5329,6 +5406,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // parse-merge time, the only point that still knows which file each
         // top-level statement came from.
         $module->includeSlots = $includeSlots;
+        $module->includeUnits = $includeUnits;
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         // `if (is_int($x))` reads an unboxed copy of a cell $x ({@see NarrowScalarGuards}).
         $module = (new \Compile\Mir\Passes\NarrowScalarGuards())->run($module);

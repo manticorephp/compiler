@@ -8,8 +8,12 @@ use Compile\Mir\ArrayLit;
 use Compile\Mir\Block;
 use Compile\Mir\BoolConst;
 use Compile\Mir\Call;
+use Compile\Mir\Cmp;
+use Compile\Mir\NullConst;
+use Compile\Mir\Ternary;
 use Compile\Mir\Foreach_;
 use Compile\Mir\If_;
+use Compile\Mir\IntConst;
 use Compile\Mir\Isset_;
 use Compile\Mir\LoadLocal;
 use Compile\Mir\Module;
@@ -42,6 +46,9 @@ final class ExtractScope
     public const SITE = '__mc_extract_site';
     /** `get_defined_vars()` marker: a zero-arg Call, expanded to the locals that hold a value. */
     public const GDV_SITE = '__mc_gdv_site';
+    /** `$$n` read / write markers: a chain over the same local set. */
+    public const VV_READ = '__mc_varvar_read';
+    public const VV_WRITE = '__mc_varvar_write';
 
     private const NOT_LOCALS = [
         'this' => true, 'GLOBALS' => true, '_SERVER' => true, '_GET' => true, '_POST' => true,
@@ -63,7 +70,8 @@ final class ExtractScope
                 $names[$p->name] = true;
                 $params[$p->name] = true;
             }
-            self::scan($fn->body, $sites, $names);
+            $lits = [];
+            self::scan($fn->body, $sites, $names, $lits);
             if ($sites === []) { continue; }
             $locals = [];
             foreach ($names as $n => $_b) {
@@ -80,7 +88,7 @@ final class ExtractScope
                     self::fillDefinedVars($site, $ordered, $params);
                     continue;
                 }
-                self::fill($site, $locals, $params, $fn->name === '__main');
+                self::fill($site, $locals, $params, $fn->name === '__main', $lits);
             }
         }
     }
@@ -88,12 +96,14 @@ final class ExtractScope
     /**
      * @param Block[] $sites
      * @param array<string, bool> $names
+     * @param array<string, bool> $lits
      */
-    private static function scan(Node $n, array &$sites, array &$names): void
+    private static function scan(Node $n, array &$sites, array &$names, array &$lits): void
     {
+        if ($n instanceof StringConst && $n->value !== '') { $lits[(string)$n->value] = true; }
         if ($n instanceof Block && \count($n->stmts) === 1) {
             $c = $n->stmts[0];
-            if ($c instanceof Call && ($c->function === self::SITE || $c->function === self::GDV_SITE)) { $sites[] = $n; }
+            if ($c instanceof Call && ($c->function === self::SITE || $c->function === self::GDV_SITE || $c->function === self::VV_READ || $c->function === self::VV_WRITE)) { $sites[] = $n; }
         }
         if ($n instanceof LoadLocal) { $names[$n->name] = true; }
         elseif ($n instanceof StoreLocal) { $names[$n->name] = true; }
@@ -109,18 +119,23 @@ final class ExtractScope
         elseif ($n instanceof RefBind_) { $names[$n->target] = true; }
         elseif ($n instanceof RefAddr_) { $names[$n->target] = true; }
         foreach ($n->children() as $ch) {
-            self::scan($ch, $sites, $names);
+            self::scan($ch, $sites, $names, $lits);
         }
     }
 
     /**
      * @param string[] $locals
      * @param array<string, bool> $params
+     * @param array<string, bool> $lits
      */
-    private static function fill(Block $site, array $locals, array $params, bool $inMain): void
+    private static function fill(Block $site, array $locals, array $params, bool $inMain, array $lits): void
     {
         $call = $site->stmts[0];
         if (!($call instanceof Call)) { return; }
+        if ($call->function === self::VV_READ || $call->function === self::VV_WRITE) {
+            self::fillVarVar($site, $call, self::varVarCandidates($locals, $lits));
+            return;
+        }
         $plan = '__mc_extract' . (string)self::$seq;
         self::$seq = self::$seq + 1;
         $exists = [];
@@ -177,6 +192,64 @@ final class ExtractScope
             new ArrayLit($vals, Type::unknown()),
             new ArrayLit($defs, Type::unknown()),
         ], Type::unknown())];
+    }
+
+    /**
+     * The locals a `$$n` can name: those some string literal of the function spells
+     * outright, begins or ends (`'from' . 'Translations'` builds `fromTranslations`).
+     * A name that comes wholly from outside matches none, and then every local stays a
+     * candidate. ponytail: a name built from outside data AND beside unrelated
+     * literals is missed; the cost of more candidates is an ownership join per local.
+     *
+     * @param string[] $locals
+     * @param array<string, bool> $lits
+     * @return string[]
+     */
+    private static function varVarCandidates(array $locals, array $lits): array
+    {
+        $out = [];
+        foreach ($locals as $n) {
+            foreach ($lits as $l => $_b) {
+                $l = (string)$l;
+                if ($l === $n || \str_starts_with($n, $l) || \str_ends_with($n, $l)) { $out[] = $n; break; }
+            }
+        }
+        return $out === [] ? $locals : $out;
+    }
+
+    /**
+     * `$$n` read → `n === 'a' ? $a : (n === 'b' ? $b : null)`; write → the same
+     * guards around a store. A name matching no local of the function is dropped:
+     * no code of the function can read it.
+     *
+     * @param string[] $locals
+     */
+    private static function fillVarVar(Block $site, Call $call, array $locals): void
+    {
+        $id = (string)self::$seq;
+        self::$seq = self::$seq + 1;
+        $nm = '__mc_vvn' . $id;
+        $vl = '__mc_vvv' . $id;
+        $is = static fn(string $n): Cmp => new Cmp(new LoadLocal($nm, Type::string_()), new StringConst($n, Type::string_()), '===');
+        $stmts = [new StoreLocal($nm, new Call('strval', [$call->args[0]], Type::string_()), Type::string_())];
+        if ($call->function === self::VV_READ) {
+            $chain = new NullConst(Type::null_());
+            for ($i = \count($locals) - 1; $i >= 0; $i = $i - 1) {
+                $chain = new Ternary($is($locals[$i]), new LoadLocal($locals[$i], Type::unknown()), $chain, Type::unknown());
+            }
+            $stmts[] = $chain;
+        } else {
+            // Boxed in a one-element array, like extract's plan values: inference types a
+            // plain temp by its value, and a typed value stored into every candidate slot
+            // would join arr / obj / str classes the ownership flow cannot reconcile.
+            $stmts[] = new StoreLocal($vl, new ArrayLit([new ArrayElement_(null, $call->args[1])], Type::unknown()), Type::unknown());
+            $boxed = static fn(): ArrayAccess_ => new ArrayAccess_(new LoadLocal($vl, Type::unknown()), new IntConst(0, Type::int_()), Type::cell());
+            foreach ($locals as $n) {
+                $stmts[] = new If_($is($n), new Block([new StoreLocal($n, $boxed(), Type::cell())], Type::void()), null);
+            }
+            $stmts[] = $boxed();
+        }
+        $site->stmts = $stmts;
     }
 
     private static function validName(string $n): bool

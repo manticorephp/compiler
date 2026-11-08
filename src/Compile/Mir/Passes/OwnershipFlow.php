@@ -107,6 +107,10 @@ final class OwnershipFlow implements Pass
     private bool $trace = false;
     /** @var array<string, bool> */
     private array $excluded = [];
+    /** @var array<string, bool> names this function's flow could not settle: left unowned, a leak and never a free */
+    private array $leaked = [];
+    /** The function was lowered again with {@see $leaked} excluded. */
+    private bool $retry = false;
     /** @var array<string, Type> */
     private array $mixedHere = [];
     /** @var array<string, bool> */
@@ -205,7 +209,13 @@ final class OwnershipFlow implements Pass
         $want = \getenv('MANTICORE_OWN_TRACE');
         $this->traceWant = $want === false ? '' : $want;
         foreach ($module->functions as $fn) {
+            $this->leaked = [];
+            $this->retry = false;
             $this->lowerFunction($fn);
+            if ($this->retry) {
+                $this->retry = false;
+                $this->lowerFunction($fn);
+            }
         }
         foreach ($this->errors as $e) { $module->ownFlowErrors[] = $e; }
         $module->markPassApplied(self::NAME);
@@ -233,7 +243,7 @@ final class OwnershipFlow implements Pass
         $this->fnBody = $fn->body;
         $this->releases = self::bisectAdmits($fn->name);
         $this->trace = $this->traceWant !== '' && \str_contains($fn->name, $this->traceWant);
-        $this->excluded = [];
+        $this->excluded = $this->leaked;
         $this->mixedHere = $this->mixedSlots->verdict($fn);
         $this->shared = [];
         $this->mutatedVecs = VecCopyOnAssign::mutatedLocals($fn->body);
@@ -481,6 +491,19 @@ final class OwnershipFlow implements Pass
         }
         if ($final === null) {
             $this->errors[] = 'ownflow: ' . $fn->name . ': compensation did not converge';
+            return;
+        }
+        // A join of an owned array with a word of unknown ownership (an untyped
+        // callee's result) has no drop that is right on both edges. Leave the name
+        // unowned: the value leaks, nothing is ever freed twice.
+        if ((\count($stuck) > 0 || \count($deadRead) > 0) && \count($this->leaked) === 0) {
+            foreach ($stuck as $name => $unused) { $this->leaked[$name] = true; }
+            foreach ($deadRead as $name => $unused) { $this->leaked[$name] = true; }
+            if ($this->trace) { \error_log('OWNFLOW ' . $fn->name . ': LEAK ' . \implode(',', \array_keys($this->leaked))); }
+            if (\Compile\Stats::$on) { \Compile\Stats::bump('own.flow.leaked', \count($this->leaked)); }
+            $this->removeInserted($body);
+            $this->inserted = [];
+            $this->retry = true;
             return;
         }
         foreach ($stuck as $name => $kind) {

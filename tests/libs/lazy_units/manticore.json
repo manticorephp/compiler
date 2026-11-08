@@ -1,0 +1,1 @@
+{"applications":[{"name":"lazyunits","src":["tests/libs/lazy_units/routes"],"entry":"tests/libs/lazy_units/public/index.php","output":"tests/libs/lazy_units/.work/lazyunits"}]}

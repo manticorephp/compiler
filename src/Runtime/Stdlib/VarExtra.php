@@ -137,14 +137,24 @@ function extension_loaded(string $extension): bool
  * `ru_maxrss` ACROSS execve, so it starts at the peak of whatever process exec'd
  * this one (a 20 MB test runner, a shell) and a program's own growth stays
  * invisible until it passes that number. VmHWM is this address space's own peak.
+ *
+ * VmHWM also counts file pages (the binary, libc, libcrypto), which a CI kernel
+ * kept mapping in over a hot loop that allocates nothing: RssFile 3.7 → 12.9 MB
+ * with RssAnon flat. php's peak is heap, so the file share is taken off: the
+ * file pages mapped at the peak are at most those mapped now, which makes
+ * VmHWM − RssFile − RssShmem a floor of the anonymous peak, raised to the
+ * current RssAnon.
  */
 function __mc_rss_bytes(): int
 {
     if (!\__mc_host_is_darwin()) {
         $s = \is_readable('/proc/self/status') ? \file_get_contents('/proc/self/status') : false;
-        $p = \is_string($s) ? \strpos($s, "\nVmHWM:") : false;
-        if ($p !== false) {
-            return (int)\trim(\substr($s, $p + 7, \strpos($s, 'kB', $p) - $p - 7)) * 1024;
+        $hwm = \is_string($s) ? \__mc_status_kb($s, 'VmHWM') : -1;
+        if ($hwm >= 0) {
+            $anon = \__mc_status_kb($s, 'RssAnon');
+            $file = \__mc_status_kb($s, 'RssFile');
+            if ($anon < 0 || $file < 0) { return $hwm * 1024; }
+            return \max($anon, $hwm - $file - \max(0, \__mc_status_kb($s, 'RssShmem'))) * 1024;
         }
     }
     $buf = \Runtime\Libc\calloc(1, 256);
@@ -157,9 +167,32 @@ function __mc_rss_bytes(): int
     return \__mc_host_is_darwin() ? $maxrss : $maxrss * 1024;
 }
 
+/**
+ * Linux: the CURRENT anonymous resident size (RssAnon), which is what php's
+ * memory_get_usage() measures — live heap, not a peak, and not the pages of
+ * the binary and its libraries. VmHWM counted those: on a CI kernel the code
+ * pages of a 5 MB binary and libcrypto kept faulting in over a hot loop, and a
+ * flat program read +4.5 MB per 50k iterations with RssAnon still at +0.1 MB.
+ * Elsewhere, and when the line is missing, the peak as before.
+ */
 function memory_get_usage(bool $real_usage = false): int
 {
+    if (!\__mc_host_is_darwin()) {
+        $s = \is_readable('/proc/self/status') ? \file_get_contents('/proc/self/status') : false;
+        $kb = \is_string($s) ? \__mc_status_kb($s, 'RssAnon') : -1;
+        if ($kb >= 0) { return $kb * 1024; }
+    }
     return \__mc_rss_bytes();
+}
+
+/** The kB value of one `/proc/self/status` field, -1 when it is absent. */
+function __mc_status_kb(string $s, string $field): int
+{
+    $p = \strpos($s, "\n" . $field . ':');
+    if ($p === false) { return -1; }
+    $p += \strlen($field) + 2;
+    $e = \strpos($s, 'kB', $p);
+    return $e === false ? -1 : (int)\trim(\substr($s, $p, $e - $p));
 }
 
 function memory_get_peak_usage(bool $real_usage = false): int

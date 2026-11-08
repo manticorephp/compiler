@@ -77,6 +77,15 @@ trait EmitLlvmRuntime
         $out .= "  %nope = or i1 %bad, %bad0\n";
         $out .= "  br i1 %nope, label %ret, label %ok\n";
         $out .= "ok:\n";
+        if (!\Manticore\is_darwin()) {
+            // MADV_NOHUGEPAGE (15). Under THP `enabled=always` the first touch of
+            // a span faulted a whole 2 MiB page: every new span cost 2 MiB of
+            // RSS (and of copy-on-write in a forked worker) where malloc's heap
+            // grows by 4 KiB pages. A failure only leaves the default policy.
+            // Declared by RuntimeFeatures beside mmap.
+            $out .= "  %nohp = call i32 @madvise(ptr %m, i64 " . (string)(\Compile\MemoryAbi::POOL_REGION_BYTES
+                  + \Compile\MemoryAbi::POOL_SPAN_SIZE) . ", i32 15)\n";
+        }
         $out .= "  %up = add i64 %mi, " . (string)(\Compile\MemoryAbi::POOL_SPAN_SIZE - 1) . "\n";
         $out .= "  %al = and i64 %up, " . $mask . "\n";
         $out .= "  store i64 %al, ptr @__mir_pool_base\n";
@@ -213,6 +222,14 @@ trait EmitLlvmRuntime
         $out .= "  %sp = inttoptr i64 %sb to ptr\n";
         $out .= "  %idx = load i64, ptr %sp\n";
         $out .= "  %lp = getelementptr inbounds [" . $nCls . " x ptr], ptr @__mir_pool_list, i64 0, i64 %idx\n";
+        if (\Compile\Debug::$refQuarantine || \Compile\Debug::$poolPoison) {
+            // Measurement build: a freed pooled block is poisoned and never handed out again,
+            // so a use after free reads 0xDEDE… instead of a live neighbour's bytes.
+            $out .= "  %qsz = shl i64 %idx, " . (string)$shift . "\n";
+            $out .= "  call ptr @memset(ptr %p, i32 222, i64 %qsz)\n";
+            $out .= "  ret void\n";
+            $out .= "qdead:\n";
+        }
         if (\Compile\Debug::$verify) {
             // libc used to catch a double free for us and abort with a name.
             // A pooled block would instead be pushed onto its class list twice,
@@ -1958,7 +1975,18 @@ trait EmitLlvmRuntime
         $rows = [];
         $defs = '';
         $i = 0;
-        foreach ($cls->methodMeta as $mn => $mm) {
+        // Sorted by lower-cased name for {@see RuntimeLibrary::dynamicMethodRuntime}'s binary search.
+        // php's method names are case-insensitive: an override spelled differently from its parent's
+        // is one method, and the class's own row comes first in methodMeta.
+        /** @var array<string, string> $byLower */
+        $byLower = [];
+        foreach ($cls->methodMeta as $mn => $unused) {
+            $lower = \strtolower((string)$mn);
+            if (!isset($byLower[$lower])) { $byLower[$lower] = (string)$mn; }
+        }
+        \ksort($byLower, SORT_STRING);
+        foreach ($byLower as $mn) {
+            $mm = $cls->methodMeta[$mn];
             if ($mn === '__construct' || $mn === '__call') { continue; }
             $nameSym = '@.dynm.name.' . $id . '.' . (string)$i;
             $defs .= $this->strGlobalDef($nameSym, $mn);
@@ -2445,10 +2473,29 @@ trait EmitLlvmRuntime
             $out .= $pp[0];
             $rsym = '@.fnmeta.ret.' . $id;
             $out .= $this->strGlobalDef($rsym, $mm->returnType);
+            $caps = 'null';
+            $capNames = $this->closureCapNames[$fn] ?? [];
+            if ($capNames !== []) {
+                // The captured names, with how to read each env slot back as a cell
+                // (ReflectionFunctionAbstract::getClosureUsedVariables).
+                $ents = [];
+                $ci = 0;
+                foreach ($capNames as $cn) {
+                    $csym = '@.fnmeta.cap.' . $id . '.' . (string)$ci;
+                    $out .= $this->strGlobalDef($csym, $cn);
+                    $kind = $this->closureCapKinds[$fn][$ci] ?? \Compile\MemoryAbi::RMETA_CAP_UNSUPPORTED;
+                    $ents[] = '{ ptr, i64 } { ptr ' . $this->strSymBytes($csym) . ', i64 ' . (string)$kind . ' }';
+                    $ci = $ci + 1;
+                }
+                $cn2 = (string)\count($ents);
+                $caps = '@__mc_fncaps_' . $id;
+                $out .= $caps . ' = linkonce_odr constant { i64, [' . $cn2 . ' x { ptr, i64 }] } { i64 ' . $cn2
+                      . ', [' . $cn2 . ' x { ptr, i64 }] [' . \implode(', ', $ents) . "] }\n";
+            }
             $row = \Compile\Mir\RuntimeLibrary::rmetaRow(
                 $this->strSymBytes($nameSym), 0, 'null',
                 $this->methodArity($mm), \count($mm->params), $pp[1],
-                0, 'null', $this->strSymBytes($rsym));
+                0, 'null', $this->strSymBytes($rsym), 'null', $caps);
             $out .= '@__mc_fnmeta_' . $id . ' = linkonce_odr constant ' . $row . "\n";
         }
         $out .= "define i64 @__mc_refl_clo_find(i64 %fp) {\nentry:\n";
@@ -2855,7 +2902,7 @@ trait EmitLlvmRuntime
         $dynRuntime = '';
         if ($this->dynamicMethodMeta) {
             $this->rt->needsStrcmp = true;
-            $dynRuntime = \Compile\Mir\RuntimeLibrary::dynamicMethodRuntime();
+            $dynRuntime = $this->nameIcmpFn() . \Compile\Mir\RuntimeLibrary::dynamicMethodRuntime();
         }
         // The weak-reference death hook (prelude/weak.php): null until a
         // WeakMap / WeakReference first enrolls an object, then the prelude's

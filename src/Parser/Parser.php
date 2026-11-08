@@ -143,11 +143,10 @@ final class Parser
     /**
      * Anonymous-class declarations (`new class { … }`) parsed inline, hoisted
      * to the program's top-level statement list so they register + lower like
-     * any class. `$anonClassCounter` makes each synthetic name unique.
+     * any class. Each synthetic name is unique per file and position.
      * @var ClassDecl[]
      */
     private array $hoistedClasses = [];
-    private int $anonClassCounter = 0;
 
     /**
      * Convenience entry point. Lexes the source and parses it in one call.
@@ -395,7 +394,7 @@ final class Parser
             }
             if ($kw === 'interface') return $this->parseClass($attrs, $stmtDoc, $firstTok);
             if ($kw === 'trait')     return $this->parseClass($attrs, $stmtDoc, $firstTok);
-            if ($kw === 'enum')      return $this->parseClass($attrs, $stmtDoc, $firstTok);
+            if ($kw === 'enum' && $this->tokens[$this->pos + 1]->kind === TokenKind::Identifier) return $this->parseClass($attrs, $stmtDoc, $firstTok);
             if ($kw === 'function')  return $this->parseFunctionDecl($attrs, $firstTok);
             if ($kw === 'return')    return $this->parseReturn();
             if ($kw === 'echo')      return $this->parseEcho();
@@ -729,7 +728,12 @@ final class Parser
             throw $this->error('expected class / interface / trait / enum');
         }
 
-        $nameTok = $this->expect(TokenKind::Identifier, 'expected ' . $kindKw . ' name');
+        // `enum` is contextual: `class Enum` (laravel/framework Validation\Rules\Enum) is a valid name.
+        if ($this->check(TokenKind::Keyword) && strtolower($this->peek()->lexeme) === 'enum') {
+            $nameTok = $this->advance();
+        } else {
+            $nameTok = $this->expect(TokenKind::Identifier, 'expected ' . $kindKw . ' name');
+        }
         $name = $nameTok->lexeme;
         // Qualify with the active namespace so the class table key
         // matches what references — through `use` / namespace prefix —
@@ -2079,7 +2083,12 @@ final class Parser
             && \strtolower($this->peek()->lexeme) === 'yield') {
             return $this->parseYield();
         }
-        $left = $this->parseTernary();
+        return $this->parseAssignTail($this->parseTernary());
+    }
+
+    /** The `= …` / `op= …` that may follow an already-parsed assignment target. */
+    private function parseAssignTail(Expr $left): Expr
+    {
         $tok = $this->peek();
         if ($tok->kind === TokenKind::Equals) {
             $span = $this->span();
@@ -2316,7 +2325,24 @@ final class Parser
             //
             // parseAssign, not parseExpression: `and` / `or` / `xor` bind looser
             // than this, so `$a ?? $b and $c` must stay `($a ?? $b) and $c`.
-            $right = $this->parseAssign();
+            //
+            // But NOT the ternary: `??` binds tighter than `?:`, so
+            // `$a ?? false ? [1] : []` is `($a ?? false) ? [1] : []`. The operand
+            // is a coalesce-level expression that may itself be assigned to
+            // (`$x ?? $y = 1`), which is the only way an `=` follows it.
+            if ($this->peek()->kind === TokenKind::Keyword
+                && \strtolower($this->peek()->lexeme) === 'yield') {
+                $right = $this->parseYield();
+            } else {
+                // The recursion carries the same depth guard parseAssign has: a
+                // long `a ?? a ?? …` chain is right-nested.
+                if ($this->tolerant === 1) {
+                    if ($this->depth > self::MAX_DEPTH) { throw $this->error('nesting too deep'); }
+                    $this->depth = $this->depth + 1;
+                }
+                $right = $this->parseAssignTail($this->parseNullCoalesce());
+                if ($this->tolerant === 1) { $this->depth = $this->depth - 1; }
+            }
             return Expr::nullCoalesce($left, $right, $this->end($span, $left));
         }
         return $left;
@@ -2708,6 +2734,15 @@ final class Parser
                 $this->advance();
                 $memberTok = $this->advance();
                 $memberName = $memberTok->lexeme;
+                // `$v::{$m}(...)` is `$v::$m(...)` when the braces wrap a plain variable (laravel HigherOrderCollectionProxy).
+                if ($memberTok->kind === TokenKind::OpenBrace) {
+                    $nameExpr = $this->parseExpression();
+                    $this->expect(TokenKind::CloseBrace, "expected '}' after a dynamic static method name");
+                    if (!($nameExpr instanceof \Parser\Ast\Variable) || !$this->check(TokenKind::OpenParen)) {
+                        throw $this->error("unsupported '::{expr}' on an expression receiver: only '::{\$var}(...)'");
+                    }
+                    $memberName = '$' . $nameExpr->name;
+                }
                 if ($this->check(TokenKind::OpenParen)) {
                     $args = $this->parseArgList();
                     $left = new \Parser\Ast\DynamicStaticCall($left, $memberName, $args, $this->end($span, $left));
@@ -2999,6 +3034,16 @@ final class Parser
         }
         if ($tok->kind === TokenKind::Variable) {
             $this->advance();
+            if ($tok->lexeme === '$') {
+                // `$$name`, `$$$name`, `${expr}`: the lexer scans a bare `$` on its own.
+                if ($this->match(TokenKind::OpenBrace)) {
+                    $nameExpr = $this->parseExpression();
+                    $this->expect(TokenKind::CloseBrace, "expected '}' after a variable-variable name");
+                    return new \Parser\Ast\VarVar($nameExpr, $this->end($span));
+                }
+                $inner = $this->parsePrimary();
+                return new \Parser\Ast\VarVar($inner, $this->end($span));
+            }
             return Expr::variable(substr($tok->lexeme, 1), $this->end($span));
         }
         if ($tok->kind === TokenKind::MagicConstant) {
@@ -3022,6 +3067,7 @@ final class Parser
             if ($lower === 'false') { $this->advance(); return Expr::bool(false, $this->end($span)); }
             if ($lower === 'null')  { $this->advance(); return Expr::null($this->end($span)); }
             if ($lower === 'new')   { return $this->parseNew($span); }
+            if ($lower === 'enum')  { return $this->parseNameOrCall($span); }
             if ($lower === 'clone') {
                 $this->advance();
                 // PHP 8.5 clone-with: `clone($obj, ['p' => v])` — call shape.
@@ -3351,6 +3397,14 @@ final class Parser
             $this->advance();
             $this->advance();
             $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
+            // `new static::$map[$k](args)`: subscripts still name the class; only `(` starts the arguments.
+            while ($this->check(TokenKind::OpenBracket)) {
+                $bspan = $this->span();
+                $this->advance();
+                $bindex = $this->parseExpression();
+                $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
+                $classExpr = Expr::arrayAccess($classExpr, $bindex, $this->end($bspan, $classExpr));
+            }
             $dargs = [];
             if ($this->check(TokenKind::OpenParen)) {
                 $dargs = $this->parseArgList();
@@ -3381,9 +3435,10 @@ final class Parser
         }
         // A valid identifier (LLVM symbol-safe) — PHP's `class@anonymous` form
         // carries an `@` that the mangler can't emit.
-        // The counter is per file: a file hash keeps the symbol unique across files.
-        $name = '__anon_class_' . ($this->sourceFile === '' ? '' : \dechex(\crc32($this->sourceFile)) . '_') . (string)$this->anonClassCounter;
-        $this->anonClassCounter = $this->anonClassCounter + 1;
+        // File + position, not a per-parse counter: two files of one namespace (or a
+        // lazily materialized body, parsed by a fresh Parser) would both start at 0.
+        $name = '__anon_class_' . \dechex(\crc32($span->file !== '' ? $span->file : $this->sourceFile))
+            . '_' . (string)$span->line . '_' . (string)$span->column;
         if ($this->currentNamespace !== '') {
             $name = $this->currentNamespace . '\\' . $name;
         }
