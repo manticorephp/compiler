@@ -421,12 +421,7 @@ final class SplitModule
         $this->internalComponents($defOrder, $defSize, $defRefs, $internal, $compOf, $compSize);
 
         if ($this->stable) {
-            /** @var array<string, int> */
-            $assign = [];
-            foreach ($shared as $s) {
-                $assign[$s] = (int)(\crc32($s) % $parts);
-            }
-            return $assign;
+            return $this->assignStable($shared, $defSize, $defRefs, $compOf, $compSize, $parts);
         }
         $bySize = [];
         foreach ($shared as $s) { $bySize[$s] = $defSize[$s] ?? 0; }
@@ -463,6 +458,73 @@ final class SplitModule
             $bit = 1 << $best;
             foreach ($comps as $c => $_) { $have[$c] = ($have[$c] ?? 0) | $bit; }
         }
+        return $assign;
+    }
+
+    /** Hash buckets the stable placement packs into parts. */
+    private const STABLE_BUCKETS = 4096;
+
+    /**
+     * Placement that an edit barely moves, for the object cache, and that still
+     * balances: a symbol's bucket is its name's hash, and the buckets, in index
+     * order, are cut into runs of about equal weight. A body that grows shifts
+     * the cuts by its growth, so only a bucket at a cut can change parts.
+     *
+     * Hashing straight to a part (`crc32 % parts`) ignored sizes and the internal
+     * bodies a definition drags along: on symfony-demo two of 65 parts came out
+     * at 99 and 127 MB against 34 on average, and clang's peak follows them.
+     *
+     * A bucket weighs its definitions plus each internal component they name,
+     * once per bucket: the component is copied into every part that names it.
+     *
+     * @param string[]                            $shared
+     * @param array<string, int>                  $defSize
+     * @param array<string, array<string, bool>>  $defRefs
+     * @param array<string, string>               $compOf
+     * @param array<string, int>                  $compSize
+     * @return array<string, int> symbol => part index
+     */
+    private function assignStable(array $shared, array $defSize, array $defRefs, array $compOf,
+                                  array $compSize, int $parts): array
+    {
+        $nb = self::STABLE_BUCKETS;
+        /** @var int[] $weight */
+        $weight = [];
+        for ($b = 0; $b < $nb; $b = $b + 1) { $weight[] = 0; }
+        /** @var array<string, int> $bucketOf */
+        $bucketOf = [];
+        /** @var array<string, bool> $seen bucket|component already weighed */
+        $seen = [];
+        foreach ($shared as $s) {
+            $b = (int)(\crc32($s) % $nb);
+            $bucketOf[$s] = $b;
+            $w = $defSize[$s] ?? 0;
+            foreach ($defRefs[$s] ?? [] as $r => $_) {
+                $c = $compOf[$r] ?? null;
+                if ($c === null) { continue; }
+                $k = (string)$b . '|' . $c;
+                if (isset($seen[$k])) { continue; }
+                $seen[$k] = true;
+                $w = $w + ($compSize[$c] ?? 0);
+            }
+            $weight[$b] = $weight[$b] + $w;
+        }
+        $total = 0;
+        foreach ($weight as $w) { $total = $total + $w; }
+        /** @var int[] $partOf */
+        $partOf = [];
+        $p = 0;
+        $cum = 0;
+        for ($b = 0; $b < $nb; $b = $b + 1) {
+            // Cut where the run passes its share; the bucket's midpoint decides which side it lands on.
+            // At most one cut per bucket, so a heavy bucket leaves no part empty.
+            if ($p < $parts - 1 && 2 * $cum + $weight[$b] > 2 * \intdiv($total * ($p + 1), $parts)) { $p = $p + 1; }
+            $partOf[] = $p;
+            $cum = $cum + $weight[$b];
+        }
+        /** @var array<string, int> */
+        $assign = [];
+        foreach ($shared as $s) { $assign[$s] = $partOf[$bucketOf[$s]]; }
         return $assign;
     }
 
