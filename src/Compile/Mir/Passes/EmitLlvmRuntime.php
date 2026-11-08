@@ -771,7 +771,8 @@ trait EmitLlvmRuntime
         // re-entered at `-2 - state`, where the resume function carries the exit
         // of a generator abandoned there ({@see EmitLlvmGenerator}) — the
         // `finally` blocks around the yield and the drops of its owned locals.
-        // Then the header's own cells go: current@16, key@24, sent@40, retval@48.
+        // Then the header's own cells go: current@16, key@24, sent@40, retval@48,
+        // and a closure generator's env@56 (0 for a named one: a no-op drop).
         $this->rt->needsTagged = true;
         $out .= "define void @__mir_gen_destroy(ptr %g) {\n";
         $out .= "entry:\n";
@@ -787,7 +788,7 @@ trait EmitLlvmRuntime
         $out .= "  call i64 %fn(ptr %g)\n";
         $out .= "  br label %drop\n";
         $out .= "drop:\n";
-        foreach ([16, 24, 40, 48] as $goff) {
+        foreach ([16, 24, 40, 48, 56] as $goff) {
             $gs = (string)$goff;
             $out .= "  %hp" . $gs . " = getelementptr inbounds i8, ptr %g, i64 " . $gs . "\n";
             $out .= "  %hv" . $gs . " = load i64, ptr %hp" . $gs . "\n";

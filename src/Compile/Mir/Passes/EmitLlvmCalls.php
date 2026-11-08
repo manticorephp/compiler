@@ -1869,9 +1869,10 @@ trait EmitLlvmCalls
         // gives the count back. Hold one for the call, as php does.
         if (!$this->invokePinsCallee($iv, $iv->callee)) {
             // A closure LITERAL callee (`(function () use ($x) {…})()`) is a fresh +1
-            // nobody else binds: give it back once the call returns.
-            // A generator closure is the exception: the Generator keeps borrowing the env.
-            if ($iv->callee->kind === Node::KIND_CLOSURE && !$n->type->isGenerator()) {
+            // nobody else binds, and so is a conditional's (`($cb ?? $default)()` retains
+            // the arm it picked): give it back once the call returns. A generator closure
+            // holds its own env in the frame ({@see EmitLlvmGenerator}), so it is no exception.
+            if ($iv->callee->kind === Node::KIND_CLOSURE || $this->condOwnsResult($iv->callee)) {
                 $this->rt->needsClosureRc = true;
                 $env = $this->lastValue;
                 $out .= $this->emitClosureStructInvoke($n, $env);
@@ -1970,9 +1971,13 @@ trait EmitLlvmCalls
     {
         $shared = $this->erasedInvokeShareable($n);
         $out = $this->emitNode($n->callee);
-        // The `[$c, $m]` of `$c::$m()` has no other owner. Only an array: a generator keeps borrowing
-        // the closure that made it, and an erased result does not say whether it is one.
-        $calleeFlavor = $n->callee->type->isArray() ? $this->freshRcArgFlavor($n->callee) : '';
+        // The `[$c, $m]` of `$c::$m()` has no other owner, nor has a conditional's pick
+        // (`call_user_func($this->cb ?? $default, …)` retained `$default` and leaked it
+        // with everything it captured, per Laravel request). A generator closure holds
+        // its own env ({@see EmitLlvmGenerator}), so releasing after the call is safe.
+        $calleeFlavor = $n->callee->type->isArray() ? $this->freshRcArgFlavor($n->callee)
+            : ($this->condOwnsResult($n->callee) ? $this->condFlavor($n->callee->type)
+            : ($n->callee->kind === Node::KIND_CLOSURE ? 'closure' : ''));
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         /** @var array<string, string> $owned */

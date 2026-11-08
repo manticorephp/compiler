@@ -219,6 +219,21 @@ trait EmitLlvmGenerator
         $out .= '  ' . $bn . " = call i64 @__manticore_box_null()\n";
         $out .= $this->genStoreAt($fr, 40, $bn);                      // sent@40 = null cell
         $out .= $this->genStoreAt($fr, 48, $bn);                     // retval@48 = null cell
+        // env@56: a closure generator holds its own closure for as long as the frame
+        // lives — the captures the frame reads are the env's. Borrowed, it had to be
+        // kept alive by whoever called it, so no call site could release a closure it
+        // owned (`(fn () => yield 1)()`, `($cb ?? $default)()` leaked every env).
+        if ($isClosure) {
+            $this->rt->needsClosureRc = true;
+            $ew = $this->ssa->allocReg();
+            $ec = $this->ssa->allocReg();
+            $out .= '  ' . $ew . " = ptrtoint ptr %env to i64\n";
+            $out .= '  ' . $ec . ' = or i64 ' . $ew . ', ' . (string)\Compile\MemoryAbi::CELL_OBJ . "\n";
+            $out .= '  call void @__mir_cell_retain(i64 ' . $ec . ")\n";
+            $out .= $this->genStoreAt($fr, 56, $ec);
+        } else {
+            $out .= $this->genStoreAt($fr, 56, '0');
+        }
         $paramNames = [];
         $paramTypeByName = [];
         $paramByRef = [];
