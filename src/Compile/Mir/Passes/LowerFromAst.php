@@ -2611,7 +2611,7 @@ final class LowerFromAst implements Pass
             foreach ($decl->methods as $md) {
                 $methods[] = new \Parser\Ast\ArrayElement(
                     \Parser\Ast\Expr::string(\strtolower($md->name), $sp),
-                    $this->docEntry($md->docComment, $md->span->line, $sp));
+                    $this->docEntry($md->docComment, $md->span->line, $sp, $md->endLine));
             }
             $props = [];
             foreach ($decl->properties as $pd) {
@@ -2648,13 +2648,14 @@ final class LowerFromAst implements Pass
         return $out;
     }
 
-    /** `[doc-or-false, line]` as an array literal. */
-    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp): \Parser\Ast\Expr
+    /** `[doc-or-false, line, end-line]` as an array literal (end 0 = the start). */
+    private function docEntry(?string $doc, int $line, \Parser\Ast\Span $sp, int $end = 0): \Parser\Ast\Expr
     {
         $docExpr = $doc === null ? \Parser\Ast\Expr::bool(false, $sp) : \Parser\Ast\Expr::string($doc, $sp);
         return \Parser\Ast\Expr::arrayLit([
             new \Parser\Ast\ArrayElement(null, $docExpr),
             new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($line, $sp)),
+            new \Parser\Ast\ArrayElement(null, \Parser\Ast\Expr::int($end > 0 ? $end : $line, $sp)),
         ], $sp);
     }
 

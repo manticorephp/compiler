@@ -1204,6 +1204,7 @@ final class Parser
             $returnsByRef,
             $docComment,
             $lazyBody,
+            $this->pos > 0 ? $this->tokens[$this->pos - 1]->line : 0,
         );
     }
 

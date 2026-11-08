@@ -29,5 +29,7 @@ final class MethodDecl
         public readonly bool $returnsByRef = false,
         public readonly ?string $docComment = null,
         public ?LazyBody $lazyBody = null,
+        /** The line of the closing `}` (or `;`); 0 when unknown. */
+        public readonly int $endLine = 0,
     ) {}
 }

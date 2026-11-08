@@ -1323,10 +1323,11 @@ class ReflectionMethod extends ReflectionFunctionAbstract
         return $e[1] ?? false;
     }
 
-    /** ponytail: declarations carry no end position, so the end reads as the start; record the span's end when a caller needs the extent. */
+    /** The line of the method's closing `}` (`;` for an abstract one). */
     public function getEndLine(): int|false
     {
-        return $this->getStartLine();
+        $e = $this->docEntry();
+        return $e[2] ?? ($e[1] ?? false);
     }
 
     public function isConstructor(): bool
