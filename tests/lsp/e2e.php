@@ -62,7 +62,7 @@ function check(string $name, bool $ok, string $extra = ''): void
     ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
     ['jsonrpc' => '2.0', 'method' => 'exit'],
 ], 2);
-check('initialize framed', ($got[0]['id'] ?? null) === 1 && ($got[0]['result']['capabilities']['textDocumentSync']['change'] ?? null) === 1, json_encode($got[0]) . $err);
+check('initialize framed', ($got[0]['id'] ?? null) === 1 && ($got[0]['result']['capabilities']['textDocumentSync']['change'] ?? null) === 2, json_encode($got[0]) . $err);
 check('shutdown framed', ($got[1]['id'] ?? null) === 2 && array_key_exists('result', $got[1] ?? []), json_encode($got[1]));
 check('stdout clean after replies', $rest === '', $rest);
 check('exit code 0', $code === 0, "code=$code $err");
