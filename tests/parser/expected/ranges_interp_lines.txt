@@ -140,59 +140,46 @@ end"
                 value: "}"
     docComment: null
     attributes: [0]
-  Stmt:Expression @7:1-7:14
+  Stmt:Expression @7:1-7:18
     expr:
-      Expr:Assign @7:1-7:13
+      Expr:Assign @7:1-7:17
         target:
           Expr:Variable @7:1-7:3
+            name: "e"
+        value:
+          Expr:Cast @7:6-7:17
+            cast: "string"
+            operand:
+              Expr:ArrayAccess @7:8-7:15
+                array:
+                  Expr:Variable @7:8-7:10
+                    name: "a"
+                index:
+                  Expr:StringLiteral @7:11-7:14
+                    value: "b"
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @8:1-9:1
+    expr:
+      Expr:Assign @8:1-9:1
+        target:
+          Expr:Variable @8:1-8:3
             name: "d"
         value:
-          Expr:BinaryOp @7:6-7:13
+          Expr:BinaryOp @8:6-9:1
             op: "."
             left:
-              Expr:StringLiteral @7:7-7:9
+              Expr:StringLiteral @8:7-8:9
                 value: "a "
             right:
-              Expr:Cast @7:10-7:12
+              Expr:Cast @8:10-8:12
                 cast: "string"
                 operand:
-                  Expr:Variable @7:10-7:12
+                  Expr:Variable @8:10-8:12
                     name: "x"
     docComment: null
     attributes: [0]
-  Stmt:Expression @8:1-8:12
-    expr:
-      Expr:Assign @8:1-8:12
-        target:
-          Expr:Variable @8:1-8:3
-            name: "e"
-        value:
-          Expr:Cast @8:6-8:12
-            cast: "string"
-            operand:
-              Expr:ArrayAccess @8:8-8:11
-                array:
-                  Expr:Variable @8:8-8:10
-                    name: "a"
-                index:
-                  Expr:Error @8:11-8:11
-    docComment: null
-    attributes: [0]
-  Stmt:Expression @8:12-8:13
-    expr:
-      Expr:Identifier @8:12-8:13
-        name: "b"
-    docComment: null
-    attributes: [0]
-  Stmt:Expression @8:13-8:18
-    expr:
-      Expr:StringLiteral @8:13-8:17
-        value: "]}"
-    docComment: null
-    attributes: [0]
-error 7:9-7:12 Unterminated "{$" interpolation
-error 8:7-8:11 Unterminated "{$" interpolation
-error 8:11-8:11 unexpected token in expression: Eof
-error 8:12-8:13 expected ';' after expression
-error 8:13-8:17 expected ';' after expression
+error 8:6-9:1 unterminated string
+error 8:9-9:1 Unterminated "{$" interpolation
+error 9:1-9:1 expected ';' after expression
 

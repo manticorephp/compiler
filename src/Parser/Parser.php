@@ -3950,14 +3950,17 @@ final class Parser
                 $k = 0;
                 $il = \strlen($inner);
                 while ($k < $il && $this->isIdentChar(\substr($inner, $k, 1))) { $k = $k + 1; }
-                if ($k > 0 && $this->isIdentStart(\substr($inner, 0, 1)) && ($k === $il || \substr($inner, $k, 1) === '[')) {
-                    $part = $this->parseSubExpr('$' . $inner, $span);
+                $plain = $k > 0 && $this->isIdentStart(\substr($inner, 0, 1)) && ($k === $il || \substr($inner, $k, 1) === '[');
+                $src = $plain ? '$' . $inner : '${' . $inner . '}';
+                if ($exact) {
+                    // `${name…}` reparses as `$name…` laid over `{name…`, so every byte after the sigil keeps its column.
+                    $this->interpAt($lex, $plain ? $i + 2 : $i + 1);
+                    $part = $this->parseSubExpr($src, $span, $this->ipLine, $this->ipCol);
+                    $this->interpAt($lex, \min($j + 2, $n + 1));
                 } else {
-                    $part = $this->parseSubExpr('${' . $inner . '}', $span);
+                    $part = $this->parseSubExpr($src, $span);
                 }
-                // Rewritten source: the part keeps the string's span; only the cursor moves past `}`.
-                if ($exact) { $this->interpAt($lex, \min($j + 2, $n + 1)); }
-                $parts[] = Expr::cast('string', $part, $span);
+                $parts[] = Expr::cast('string', $part, $exact ? $part->span : $span);
                 $inners[] = $part;
                 $litVals[] = '';
                 $endLines[] = $this->ipLine;
