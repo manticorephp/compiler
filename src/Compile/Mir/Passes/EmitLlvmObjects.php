@@ -10230,6 +10230,12 @@ trait EmitLlvmObjects
         $oldCellSinkOrd = $this->cellSinkOrd;
         $oldCellSinkFn = $this->cellSinkFnOverride;
         $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $oldClassId = $this->classIdReg;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
@@ -10271,6 +10277,12 @@ trait EmitLlvmObjects
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
         $this->rt->needsBacktrace = $oldNeedsBacktrace;
+        $this->classIdReg = $oldClassId;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
         return $sym;
     }
 
@@ -10311,6 +10323,16 @@ trait EmitLlvmObjects
         $oldBtLine = $this->btLineOverride;
         $oldBtFile = $this->btFileOverride;
         $oldBtSsa = $this->btLineOverrideSsa;
+        // Everything a method call leaves behind for its own site, as dynamicMethodSpreadArmHelper
+        // keeps it: the dispatch below would otherwise hand its argc, pads and result to the next
+        // site of the frame that asked for this helper.
+        $oldClassId = $this->classIdReg;
+        $oldRawRef = $this->rawRefCall;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
         $this->resetCellGuardFrame();
@@ -10318,6 +10340,12 @@ trait EmitLlvmObjects
         $this->locals = new \Compile\Mir\LocalSlots();
         $this->cf = new \Compile\Mir\ControlFlow();
         $this->arena = new \Compile\Mir\ArenaContext();
+        $this->rawRefCall = false;
+        $this->spreadTail = null;
+        $this->lastPadArgs = '';
+        $this->vdResult = '';
+        $this->vdArmList = '';
+        $this->vdSiteArgc = 0;
         $this->useSiteTraceParams();
         $cell = Type::cell();
         $params = 'i64 %o, i64 %n';
@@ -10355,6 +10383,13 @@ trait EmitLlvmObjects
         $this->btLineOverride = $oldBtLine;
         $this->btFileOverride = $oldBtFile;
         $this->btLineOverrideSsa = $oldBtSsa;
+        $this->classIdReg = $oldClassId;
+        $this->rawRefCall = $oldRawRef;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
         return $sym;
     }
 
