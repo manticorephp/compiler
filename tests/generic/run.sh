@@ -50,9 +50,15 @@ done
 
 report="$(php tools/generic_identity.php --diffs "$DIFFS" "${lls[@]}")"
 echo "$report"
-pct="$(echo "$report" | head -1 | sed -E 's/^generic-identical: ([0-9.]+)%.*/\1/')"
+pct="$(echo "$report" | sed -nE 's/^generic-identical: ([0-9.]+)%.*/\1/p')"
+hits="$(echo "$report" | sed -nE 's/^variant-hits: ([0-9.]+)%.*/\1/p')"
+HIT_THRESHOLD="$(cat tests/generic/hit_threshold)"
+rc=0
 if ! php -r "exit((float)'$pct' >= (float)'$THRESHOLD' ? 0 : 1);"; then
-    echo "FAIL generic-identical $pct% < threshold $THRESHOLD%"
-    exit 1
+    echo "FAIL generic-identical $pct% < threshold $THRESHOLD%"; rc=1
 fi
-echo "ok: generic-identical $pct% >= $THRESHOLD%"
+if ! php -r "exit((float)'$hits' >= (float)'$HIT_THRESHOLD' ? 0 : 1);"; then
+    echo "FAIL variant-hits $hits% < threshold $HIT_THRESHOLD%"; rc=1
+fi
+[[ $rc -eq 0 ]] && echo "ok: generic-identical $pct% >= $THRESHOLD%, variant-hits $hits% >= $HIT_THRESHOLD%"
+exit $rc

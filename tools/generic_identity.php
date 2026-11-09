@@ -6,10 +6,14 @@
 //
 //   php tools/generic_identity.php [--diffs N] a.ll b.ll ...
 //
-// Prints `generic-identical: <pct>% of <bytes> bytes (<n> functions, <d> differ)`
-// and, for up to N differing functions (default 40), the first differing line pair.
+// Prints `generic-identical: <pct>% of <bytes> bytes (<n> functions, <d> differ)`,
+// `variant-hits: <pct>% of <bytes> bytes` (content-addressed reuse of bodies
+// >= SHARE_MIN_BYTES across the inputs in a fixed shuffled order) and, for up to
+// N differing functions (default 40), the first differing line pair.
 
 declare(strict_types=1);
+
+const SHARE_MIN_BYTES = 4096;
 
 $maxDiffs = 40;
 $files = [];
@@ -40,7 +44,7 @@ function shareable_defs(string $path): array
     foreach ($m as $def) {
         $name = trim($def[1], '"');
         if (str_contains($name, '$mono$') || preg_match('/(^|_)__closure_/', $name) === 1
-            || preg_match('/_m[0-9a-f]{16}$/', $name) === 1) {
+            || preg_match('/_m[0-9a-f]{12,16}$/', $name) === 1) {
             continue;
         }
         $out[$name] = $def[0];
@@ -96,9 +100,34 @@ foreach ($byName as $name => $copies) {
     $diffs[$name] = [$bytes, $la, $lb, (string)count(array_unique($copies))];
 }
 
+// Variant hits: what a content-addressed object cache would reuse. Programs in a
+// fixed pseudo-random order; a large body counts as a hit when its exact text was
+// already seen in an earlier program.
+$order = $files;
+mt_srand(1);
+shuffle($order);
+$seen = [];
+$hitBytes = 0;
+$bigBytes = 0;
+foreach ($order as $f) {
+    foreach ($byName as $copies) {
+        $t = $copies[$f] ?? null;
+        if ($t === null || strlen($t) < SHARE_MIN_BYTES) {
+            continue;
+        }
+        $bigBytes += strlen($t);
+        $h = sha1($t);
+        if (isset($seen[$h])) {
+            $hitBytes += strlen($t);
+        }
+        $seen[$h] = true;
+    }
+}
+
 uasort($diffs, fn(array $x, array $y): int => $y[0] <=> $x[0]);
 $pct = $total === 0 ? 100.0 : 100.0 * $same / $total;
 printf("generic-identical: %.1f%% of %d bytes (%d functions, %d differ)\n", $pct, $total, $n, count($diffs));
+printf("variant-hits: %.1f%% of %d bytes (bodies >= %d B)\n", $bigBytes === 0 ? 0.0 : 100.0 * $hitBytes / $bigBytes, $bigBytes, SHARE_MIN_BYTES);
 $shown = 0;
 foreach ($diffs as $name => [$bytes, $la, $lb, $variants]) {
     if ($shown++ >= $maxDiffs) {
