@@ -1400,6 +1400,8 @@ final class SpillFreshBases
             return !$aa->probe && \Compile\Mir\Ownership::userOffsetGetBase($aa->array->type, $this->classDefs);
         }
         if ($k === Node::KIND_NEW_DYN_OBJ) { return true; }
+        // `[new A, new B][$i]`: the literal is as fresh as a call's array, and nothing else owns it (#591).
+        if ($k === Node::KIND_ARRAY_LIT && $want === 1 && $t->kind === Type::KIND_ARRAY) { return true; }
         if ($t->kind !== Type::KIND_OBJ) { return false; }
         return $k === Node::KIND_NEW_OBJ || $k === Node::KIND_CLONE;
     }

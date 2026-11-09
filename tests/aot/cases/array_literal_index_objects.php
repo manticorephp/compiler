@@ -1,6 +1,5 @@
 <?php
 // Indexing a temporary array literal of new objects never releases the objects.
-// issue: #591
 class A { public string $p = 'x'; }
 class B { public string $p = 'y'; }
 function pick(int $i): object { return [new A, new B][$i]; }
