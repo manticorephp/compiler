@@ -2027,7 +2027,19 @@ function unlink(string $path): bool
 /**
  * Current working directory, or false on failure.
  */
+/**
+ * The working directory, from the cache {@see __mc_cwd} keeps: only chdir() moves it,
+ * and it resets the cache. libc's getcwd(3) opens directories on macOS — the HTTP
+ * server asked it once per request for SCRIPT_FILENAME, 7% of a Laravel `/api/ping`.
+ */
 function getcwd(): string|false
+{
+    $c = \__mc_cwd();
+    return $c === '' ? \__mc_getcwd_raw() : $c;
+}
+
+/** libc getcwd(3), uncached. */
+function __mc_getcwd_raw(): string|false
 {
     $buf = \Runtime\Libc\calloc(4097, 1);
     if ($buf === null) {

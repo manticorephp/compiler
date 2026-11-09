@@ -216,7 +216,7 @@ function __mc_cwd(bool $reset = false): string
     static $cwd = '';
     if ($reset) { $cwd = ''; return ''; }
     if ($cwd === '') {
-        $c = \getcwd();
+        $c = \__mc_getcwd_raw();
         $cwd = $c === false ? '' : $c;
     }
     return $cwd;
