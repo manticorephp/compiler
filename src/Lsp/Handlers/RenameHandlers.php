@@ -322,7 +322,7 @@ final class RenameHandlers
     {
         $slice = $this->slice($l, $map);
         if ($slice === null || $slice === '') { return null; }
-        $off = $slice[0] === '$' ? 1 : 0;
+        $off = $slice[0] === '$' || $slice[0] === '{' ? 1 : 0; // `{x` = the `${x}` interpolation form
         $bs = \strrpos($slice, '\\');
         if ($bs !== false) { $off = \max($off, $bs + 1); }
         if ($off >= \strlen($slice)) { return null; }

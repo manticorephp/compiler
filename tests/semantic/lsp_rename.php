@@ -169,6 +169,15 @@ function applyEdits(string $text, mixed $r, string $uri): string
     return implode("\n", $lines);
 }
 
+check('rename variable inside "${x}" and "${x[0]}" keeps the braces', function (): bool|string {
+    [$d] = rigWs(new Sink());
+    $src = "<?php\n\$abc = [1];\necho \"a\${abc}b \${abc[0]} \$abc\";\n";
+    open($d, 'file:///t/a.php', $src);
+    $out = applyEdits($src, rn($d, 'file:///t/a.php', 1, 2, 'xyz'), 'file:///t/a.php');
+    $want = "<?php\n\$xyz = [1];\necho \"a\${xyz}b \${xyz[0]} \$xyz\";\n";
+    return $out === $want ?: $out;
+});
+
 check('rename instance property keeps $ on the declaration, plain on uses', function (): bool|string {
     [$d] = rigWs(new Sink());
     $src = "<?php\nclass A {\n    public \$sp = 1;\n    function m() { return \$this->sp; }\n}\n\$o = new A();\necho \$o->sp;\n";
