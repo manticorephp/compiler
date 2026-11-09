@@ -98,6 +98,18 @@ trait EmitLlvmBuiltins
         $this->btCallLine = $c->line;
         $mark = \count($this->arrArgTempRegs);
         $ir = $this->emitBuiltinDispatch($c);
+        // A builtin shadows its same-named PHP body (the bootstrap twin) at every direct call, and so
+        // at a call Monomorphize repointed to a `$mono$` clone of that body: `__mc_sort_native` →
+        // `__mc_sort_native$mono$p0_vec_str` ran the twin (always false) and sent sort() down its
+        // fallback path. Ask the dispatch under the base name; the args are the same.
+        $mono = \strpos($c->function, '$mono$');
+        if ($ir === null && $mono !== false) {
+            $this->dropArrArgTempsFrom($mark);
+            $full = $c->function;
+            $c->function = \substr($full, 0, $mono);
+            $ir = $this->emitBuiltinDispatch($c);
+            $c->function = $full;
+        }
         if ($ir === null) { $this->dropArrArgTempsFrom($mark); return null; }
         return $ir . $this->freeArrArgTempsFrom($mark);
     }
@@ -3408,6 +3420,9 @@ trait EmitLlvmBuiltins
     {
         $this->lastValue = '0';
         $this->lastValueType = 'i64';
+        // The stdlib twin compiled into the program still gets a name trampoline, which reaches here
+        // without prelude/weak.php: a no-op then, like the twin.
+        if (!isset($this->definedFns[$this->mangle('__mc_weak_forget')])) { return ''; }
         return '  store ptr @manticore_' . $this->mangle('__mc_weak_forget') . ", ptr @__mc_weak_hook\n";
     }
 
