@@ -79,7 +79,8 @@ final class Monomorphize implements Pass
     /** @var string[] index-parallel to {@see $pendingRepointCalls}. */
     private array $pendingRepointNames = [];
 
-    public function __construct(private ?\Compile\Mir\AnalysisContext $ctx = null) {}
+    /** @param InferTypes|null $infer the full inference the pipeline just ran, whose tables the rounds reuse */
+    public function __construct(private ?\Compile\Mir\AnalysisContext $ctx = null, private ?InferTypes $infer = null) {}
 
     public function name(): string { return self::NAME; }
 
@@ -123,6 +124,10 @@ final class Monomorphize implements Pass
         return $module;
     }
 
+
+    /** Some round re-typed only its clones and their callers. */
+    public bool $lightRoundRan = false;
+
     /** One specialization round. Returns true if anything was specialized
      *  (and the module re-typed), false at the fixpoint. */
     private function runOnce(Module $module): bool
@@ -139,7 +144,7 @@ final class Monomorphize implements Pass
             $this->collectCalls($fn->body);
         }
 
-        // originalName → [ specializedFunctionDef, ... ]
+        /** @var array<string, FunctionDef[]> $clonesByOrig originalName → its specializations */
         $clonesByOrig = [];
         $changed = false;
 
@@ -181,8 +186,23 @@ final class Monomorphize implements Pass
         // With the analysis context, so what a round moves — the clones, the
         // repointed callers — is in the change set the next scoped pass reads.
         if ($this->ctx !== null) { $this->ctx->refresh($module); }
-        $infer = new InferTypes(null, $this->ctx);
-        $infer->run($module);
+        // Re-infer the clones and what calls them, on the tables of the inference
+        // the pipeline ran just before this pass. The module scans have not seen
+        // those bodies until the next full inference: {@see $lightRoundRan} makes
+        // NarrowReturns run one, and it closes on a fixpoint.
+        if ($this->infer === null || $this->ctx !== null) {
+            $this->infer = new InferTypes(null, $this->ctx);
+            $this->infer->run($module);
+            return true;
+        }
+        /** @var array<string, bool> $seed */
+        $seed = [];
+        foreach ($clonesByOrig as $clones) {
+            foreach ($clones as $clone) { $seed[$clone->name] = true; }
+        }
+        foreach ($this->newClosureFns as $clFn) { $seed[$clFn->name] = true; }
+        $this->infer->reinferAfterSplice($module, $seed);
+        $this->lightRoundRan = true;
         return true;
     }
 

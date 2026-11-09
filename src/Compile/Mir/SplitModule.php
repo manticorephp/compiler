@@ -73,9 +73,26 @@ final class SplitModule
      */
     public bool $stable = false;
 
+    /** Size from which a file-local global gets one definition per module. */
+    private const SHARED_LOCAL_BYTES = 4096;
+
+    private const OPTNONE_DEFAULT_KB = 1024;
+
     /** Cached symbol references for definitions reused by several parts. */
     /** @var array<string, array<string, bool>> */
     private array $refsCache = [];
+
+    /** @var array<string, string> global name => globalClass(), computed once */
+    private array $gcls = [];
+
+    /** @var array<string, int> definition symbol => index in defOrder */
+    private array $defPos = [];
+
+    /** @var array<string, int> global name => index in globalOrder */
+    private array $gpos = [];
+
+    /** @var array<int, string[]> part => its own non-internal definitions in defOrder order */
+    private array $partMine = [];
 
     /**
      * @return string[] one complete module text per part
@@ -165,6 +182,7 @@ final class SplitModule
         $this->sharedDefs = \count($shared);
         $this->internalDefs = \count($internal);
 
+        $this->indexModule($defOrder, $globalOrder, $globals);
         $assign = $this->assignParts($shared, $defOrder, $defSize, $defRefs, $internal, $parts);
         // Threaded through the part loop: the first part that reaches a
         // coalesced global defines it, every later part declares it.
@@ -200,6 +218,42 @@ final class SplitModule
             $out[] = $this->lineTablePart($headerText, $lineTable, $globals);
         }
         return $out;
+    }
+
+    /**
+     * Insert $v into the sorted tail of $a starting at $from.
+     *
+     * @param int[] $a
+     */
+    private function sortedInsert(array &$a, int $from, int $v): void
+    {
+        $lo = $from;
+        $hi = \count($a);
+        while ($lo < $hi) {
+            $mid = ($lo + $hi) >> 1;
+            if ($a[$mid] < $v) { $lo = $mid + 1; } else { $hi = $mid; }
+        }
+        \array_splice($a, $lo, 0, [$v]);
+    }
+
+    /**
+     * @param string[]              $defOrder
+     * @param string[]              $globalOrder
+     * @param array<string, string> $globals
+     */
+    private function indexModule(array $defOrder, array $globalOrder, array $globals): void
+    {
+        $this->gcls = [];
+        $this->gpos = [];
+        $k = 0;
+        foreach ($globalOrder as $g) {
+            $this->gcls[$g] = $this->globalClass($globals[$g]);
+            $this->gpos[$g] = $k;
+            $k = $k + 1;
+        }
+        $this->defPos = [];
+        $i = 0;
+        foreach ($defOrder as $s) { $this->defPos[$s] = $i; $i = $i + 1; }
     }
 
     /**
@@ -275,7 +329,44 @@ final class SplitModule
             $promoted[$s] = \strlen($h);
             $defHead[$s] = \substr($h, 0, $at) . ' hidden ' . \substr($h, $at + 10);
         }
+        $this->markOversized($defOrder, $defSize, $defHead, $promoted);
         return $promoted;
+    }
+
+    /**
+     * Leave a definition of at least {@see OPTNONE_DEFAULT_KB} KB unoptimized:
+     * clang's cost grows faster than a function's size, so a few giants dominate
+     * (78 definitions were 30% of clang's CPU on a Symfony app, and they are mostly
+     * generated dispatch). `MANTICORE_OPTNONE_KB=<n>` moves the bar, 0 turns it off,
+     * and `-O3` asks for everything to be optimized.
+     *
+     * @param string[]              $defOrder
+     * @param array<string, int>    $defSize
+     * @param array<string, string> $defHead
+     * @param array<string, int>    $promoted symbol => length of its head in the file
+     */
+    private function markOversized(array $defOrder, array $defSize, array &$defHead, array &$promoted): void
+    {
+        $env = \getenv('MANTICORE_OPTNONE_KB');
+        $kb = $env === false ? self::OPTNONE_DEFAULT_KB : (int)$env;
+        if ($kb <= 0 || ($env === false && \Manticore\clang_opt_level() === '3')) { return; }
+        foreach ($defOrder as $s) {
+            if (($defSize[$s] ?? 0) < $kb * 1024) { continue; }
+            $h = $defHead[$s];
+            if (\str_contains($h, 'alwaysinline')) { continue; }
+            $open = \strpos($h, '(', (int)\strpos($h, '@'));
+            if ($open === false) { continue; }
+            $depth = 0;
+            $n = \strlen($h);
+            for ($i = $open; $i < $n; $i = $i + 1) {
+                if ($h[$i] === '(') { $depth = $depth + 1; }
+                if ($h[$i] === ')') { $depth = $depth - 1; }
+                if ($depth === 0) { break; }
+            }
+            if ($i >= $n) { continue; }
+            if (!isset($promoted[$s])) { $promoted[$s] = \strlen($h); }
+            $defHead[$s] = \substr($h, 0, $i + 1) . ' noinline optnone' . \substr($h, $i + 1);
+        }
     }
 
 
@@ -330,12 +421,7 @@ final class SplitModule
         $this->internalComponents($defOrder, $defSize, $defRefs, $internal, $compOf, $compSize);
 
         if ($this->stable) {
-            /** @var array<string, int> */
-            $assign = [];
-            foreach ($shared as $s) {
-                $assign[$s] = (int)(\crc32($s) % $parts);
-            }
-            return $assign;
+            return $this->assignStable($shared, $defSize, $defRefs, $compOf, $compSize, $parts);
         }
         $bySize = [];
         foreach ($shared as $s) { $bySize[$s] = $defSize[$s] ?? 0; }
@@ -372,6 +458,73 @@ final class SplitModule
             $bit = 1 << $best;
             foreach ($comps as $c => $_) { $have[$c] = ($have[$c] ?? 0) | $bit; }
         }
+        return $assign;
+    }
+
+    /** Hash buckets the stable placement packs into parts. */
+    private const STABLE_BUCKETS = 4096;
+
+    /**
+     * Placement that an edit barely moves, for the object cache, and that still
+     * balances: a symbol's bucket is its name's hash, and the buckets, in index
+     * order, are cut into runs of about equal weight. A body that grows shifts
+     * the cuts by its growth, so only a bucket at a cut can change parts.
+     *
+     * Hashing straight to a part (`crc32 % parts`) ignored sizes and the internal
+     * bodies a definition drags along: on symfony-demo two of 65 parts came out
+     * at 99 and 127 MB against 34 on average, and clang's peak follows them.
+     *
+     * A bucket weighs its definitions plus each internal component they name,
+     * once per bucket: the component is copied into every part that names it.
+     *
+     * @param string[]                            $shared
+     * @param array<string, int>                  $defSize
+     * @param array<string, array<string, bool>>  $defRefs
+     * @param array<string, string>               $compOf
+     * @param array<string, int>                  $compSize
+     * @return array<string, int> symbol => part index
+     */
+    private function assignStable(array $shared, array $defSize, array $defRefs, array $compOf,
+                                  array $compSize, int $parts): array
+    {
+        $nb = self::STABLE_BUCKETS;
+        /** @var int[] $weight */
+        $weight = [];
+        for ($b = 0; $b < $nb; $b = $b + 1) { $weight[] = 0; }
+        /** @var array<string, int> $bucketOf */
+        $bucketOf = [];
+        /** @var array<string, bool> $seen bucket|component already weighed */
+        $seen = [];
+        foreach ($shared as $s) {
+            $b = (int)(\crc32($s) % $nb);
+            $bucketOf[$s] = $b;
+            $w = $defSize[$s] ?? 0;
+            foreach ($defRefs[$s] ?? [] as $r => $_) {
+                $c = $compOf[$r] ?? null;
+                if ($c === null) { continue; }
+                $k = (string)$b . '|' . $c;
+                if (isset($seen[$k])) { continue; }
+                $seen[$k] = true;
+                $w = $w + ($compSize[$c] ?? 0);
+            }
+            $weight[$b] = $weight[$b] + $w;
+        }
+        $total = 0;
+        foreach ($weight as $w) { $total = $total + $w; }
+        /** @var int[] $partOf */
+        $partOf = [];
+        $p = 0;
+        $cum = 0;
+        for ($b = 0; $b < $nb; $b = $b + 1) {
+            // Cut where the run passes its share; the bucket's midpoint decides which side it lands on.
+            // At most one cut per bucket, so a heavy bucket leaves no part empty.
+            if ($p < $parts - 1 && 2 * $cum + $weight[$b] > 2 * \intdiv($total * ($p + 1), $parts)) { $p = $p + 1; }
+            $partOf[] = $p;
+            $cum = $cum + $weight[$b];
+        }
+        /** @var array<string, int> */
+        $assign = [];
+        foreach ($shared as $s) { $assign[$s] = $partOf[$bucketOf[$s]]; }
         return $assign;
     }
 
@@ -480,12 +633,16 @@ final class SplitModule
                                array $assign, array $internal, array $globalOrder,
                                array $globals, array &$owned): PartPlan
     {
-        /** @var string[] */
-        $mine = [];
-        foreach ($defOrder as $s) {
-            if (isset($internal[$s])) { continue; }
-            if (($assign[$s] ?? -1) === $p) { $mine[] = $s; }
+        if ($p === 0) {
+            $this->partMine = [];
+            foreach ($defOrder as $s) {
+                if (isset($internal[$s])) { continue; }
+                $a = $assign[$s] ?? -1;
+                if ($a >= 0) { $this->partMine[$a][] = $s; }
+            }
         }
+        /** @var string[] */
+        $mine = $this->partMine[$p] ?? [];
         /** @var array<string, bool> */
         $refs = [];
         foreach ($mine as $s) {
@@ -524,8 +681,12 @@ final class SplitModule
         }
         /** @var string[] */
         $avail = [];
-        foreach ($defOrder as $s) {
-            if (!isset($availSet[$s])) { continue; }
+        /** @var int[] */
+        $availPos = [];
+        foreach ($availSet as $s => $_) { $availPos[] = $this->defPos[$s]; }
+        \sort($availPos);
+        foreach ($availPos as $i) {
+            $s = $defOrder[$i];
             $avail[] = $s;
             foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
         }
@@ -546,7 +707,7 @@ final class SplitModule
         // (`@E__fqns` -> `@E__fqn_0`) and would otherwise be emitted without it.
         if ($p === 0) {
             foreach ($globalOrder as $g) {
-                if ($this->globalClass($globals[$g]) === 'strong') { $refs[$g] = true; }
+                if ($this->gcls[$g] === 'strong') { $refs[$g] = true; }
             }
         }
         // ⚠ The closure follows a global's INITIALIZER only where this part
@@ -560,45 +721,84 @@ final class SplitModule
         $needG = [];
         /** @var array<string, bool> */
         $ownG = [];
-        $progress = true;
-        while ($progress) {
-        $progress = false;
-        $changed = true;
-        while ($changed) {
-            $changed = false;
-            foreach ($defOrder as $s) {
-                if (!isset($internal[$s]) || isset($haveInternal[$s]) || !isset($refs[$s])) { continue; }
-                $haveInternal[$s] = true;
-                foreach ($defRefs[$s] as $r => $_) { $refs[$r] = true; }
-                $changed = true;
-                $progress = true;
-            }
+        // Worklist form of the joint fixpoint. It visits names in exactly the
+        // order the old defOrder/globalOrder sweeps did (a name reached ahead of
+        // the sweep cursor is taken in the same sweep, one behind it in the next),
+        // because `$refs` insertion order decides the order of the `declare`s.
+        /** @var int[] */
+        $pendI = [];
+        /** @var int[] */
+        $pendG = [];
+        foreach ($refs as $r => $_) {
+            $r = (string)$r;
+            if (isset($internal[$r])) { $pendI[] = $this->defPos[$r]; $haveInternal[$r] = false; }
+            elseif (isset($this->gcls[$r])) { $pendG[] = $this->gpos[$r]; $needG[$r] = false; }
         }
-        $changed = true;
-        while ($changed) {
-            $changed = false;
-            foreach ($globalOrder as $g) {
-                if (!isset($refs[$g]) || isset($needG[$g])) { continue; }
-                $needG[$g] = true;
-                $cls = $this->globalClass($globals[$g]);
-                if ($cls === 'coalesced') {
-                    if (isset($owned[$g])) { continue; }
-                    $owned[$g] = true;
-                    $ownG[$g] = true;
-                } elseif ($cls === 'strong' && $p !== 0) {
-                    // Part 0 defines every strong global; here it is a bare
-                    // `external` with no initializer to follow.
-                    continue;
+        while ($pendI !== [] || $pendG !== []) {
+            while ($pendI !== []) {
+                $cur = $pendI;
+                $pendI = [];
+                \sort($cur);
+                $idx = 0;
+                while ($idx < \count($cur)) {
+                    $i = $cur[$idx];
+                    $idx = $idx + 1;
+                    $sym = $defOrder[$i];
+                    $haveInternal[$sym] = true;
+                    foreach ($defRefs[$sym] as $r => $_) {
+                        if (isset($refs[$r])) { continue; }
+                        $refs[$r] = true;
+                        $r = (string)$r;
+                        if (isset($internal[$r])) {
+                            $haveInternal[$r] = false;
+                            $j = $this->defPos[$r];
+                            if ($j > $i) { $this->sortedInsert($cur, $idx, $j); } else { $pendI[] = $j; }
+                        } elseif (isset($this->gcls[$r])) {
+                            $needG[$r] = false;
+                            $pendG[] = $this->gpos[$r];
+                        }
+                    }
                 }
-                foreach ($this->refsOf('global:' . $g, $globals[$g]) as $r => $_) { $refs[$r] = true; }
-                $changed = true;
-                $progress = true;
+            }
+            while ($pendG !== []) {
+                $cur = $pendG;
+                $pendG = [];
+                \sort($cur);
+                $idx = 0;
+                while ($idx < \count($cur)) {
+                    $i = $cur[$idx];
+                    $idx = $idx + 1;
+                    $g = $globalOrder[$i];
+                    $needG[$g] = true;
+                    $cls = $this->gcls[$g];
+                    if ($cls === 'coalesced') {
+                        if (isset($owned[$g])) { continue; }
+                        $owned[$g] = true;
+                        $ownG[$g] = true;
+                    } elseif ($cls === 'strong' && $p !== 0) {
+                        continue;
+                    }
+                    foreach ($this->refsOf('global:' . $g, $globals[$g]) as $r => $_) {
+                        if (isset($refs[$r])) { continue; }
+                        $refs[$r] = true;
+                        $r = (string)$r;
+                        if (isset($internal[$r])) {
+                            $haveInternal[$r] = false;
+                            $pendI[] = $this->defPos[$r];
+                        } elseif (isset($this->gcls[$r])) {
+                            $needG[$r] = false;
+                            $j = $this->gpos[$r];
+                            if ($j > $i) { $this->sortedInsert($cur, $idx, $j); } else { $pendG[] = $j; }
+                        }
+                    }
+                }
             }
         }
-        }
-        foreach ($defOrder as $s) {
-            if (isset($haveInternal[$s])) { $mine[] = $s; }
-        }
+        /** @var int[] */
+        $hp = [];
+        foreach ($haveInternal as $s => $_) { $hp[] = $this->defPos[$s]; }
+        \sort($hp);
+        foreach ($hp as $i) { $mine[] = $defOrder[$i]; }
         $plan = new PartPlan();
         $plan->mine = $mine;
         $plan->avail = $avail;
@@ -625,7 +825,7 @@ final class SplitModule
         $gtext = '';
         foreach ($globalOrder as $g) {
             $gl = $globals[$g];
-            $cls = $this->globalClass($gl);
+            $cls = $this->gcls[$g];
             if ($cls === 'local') {
                 if (!isset($needG[$g])) { continue; }
                 $gtext = $gtext . $this->promoteGlobal($gl) . "\n";
@@ -639,7 +839,7 @@ final class SplitModule
                 // — every other part would then hold an unresolved external.
                 // weak_odr is the same coalescing with no discard.
                 if (isset($plan->ownG[$g])) {
-                    $gtext = $gtext . $this->pinGlobal($gl) . "\n";
+                    $gtext = $gtext . $this->pinGlobal($this->promoteGlobal($gl)) . "\n";
                     continue;
                 }
                 $gtext = $gtext . $this->externGlobal($gl) . "\n";
@@ -816,6 +1016,7 @@ final class SplitModule
         }
         $this->sharedDefs = \count($shared);
         $this->internalDefs = \count($internal);
+        $this->indexModule($defOrder, $globalOrder, $globals);
         $assign = $this->assignParts($shared, $defOrder, $defSize, $defRefs, $internal, $parts);
         // Threaded through the part loop: the first part that reaches a
         // coalesced global defines it, every later part declares it.
@@ -939,13 +1140,21 @@ final class SplitModule
         return $this->readSymbol($line, 1);
     }
 
-    /** 'local' (file-local), 'coalesced' (discardable if unused) or 'strong'. */
+    /**
+     * 'local' (file-local), 'coalesced' (discardable if unused) or 'strong'.
+     *
+     * A big file-local table is coalesced too. Copied into every part that names it,
+     * three dispatch tables alone cost 3.2 MB per part. A small one stays local: the
+     * optimizer reads a short string's bytes, which a declaration would hide from it.
+     */
     private function globalClass(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return 'strong'; }
         $rest = \substr($line, $eq + 3);
-        if (\str_starts_with($rest, 'internal ') || \str_starts_with($rest, 'private ')) { return 'local'; }
+        if (\str_starts_with($rest, 'internal ') || \str_starts_with($rest, 'private ')) {
+            return \strlen($line) >= self::SHARED_LOCAL_BYTES ? 'coalesced' : 'local';
+        }
         if (\str_starts_with($rest, 'linkonce_odr ') || \str_starts_with($rest, 'weak_odr ')
             || \str_starts_with($rest, 'linkonce ') || \str_starts_with($rest, 'weak ')) { return 'coalesced'; }
         return 'strong';

@@ -73,6 +73,8 @@ foreach ([fn() => inflate_init(3), fn() => inflate_init(ZLIB_ENCODING_RAW, ['win
 $phpGzip = hex2bin('1f8b08000000000000134b4c4a0600c241243503000000');
 $phpZlib = hex2bin('789c4b4c4a0600024d0127');
 
+// `read` is left out once a preset dictionary is involved: zlib 1.4 fixed total_in
+// after Z_NEED_DICT, so the count depends on the libz underneath.
 function show(string $label, InflateContext $ctx, string $data, int $flush, bool $read = true): void
 {
     $r = @inflate_add($ctx, $data, $flush);

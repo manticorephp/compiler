@@ -1,0 +1,12 @@
+M1 read='M1:x'
+M1 after='M1:x' log=["M1 x=42"]
+M2 read='M2:x'
+M2 after='M2:x' log=["M2 x=42"]
+M3 read='M3:x'
+M3 after='M3:x' log=["M2 x=42"]
+Fixed read='fixed'
+Fixed after=42
+stdClass read='bag'
+stdClass after=42
+Plain read='unset'
+Plain after=42

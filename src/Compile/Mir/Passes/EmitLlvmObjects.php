@@ -1001,13 +1001,19 @@ trait EmitLlvmObjects
         $lnOff = $cd->propertyOffset('traceLines');
         $out = '';
         // line = the `new` site line; file = the source path.
+        // Inside a shared helper handed its call site, the site is where it was thrown.
+        $site = $this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa;
         $lp = $this->ssa->allocReg();
         $out .= '  ' . $lp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$lineOff . "\n";
-        $out .= '  store i64 ' . (string)$no->line . ', ptr ' . $lp . "\n";
+        $out .= '  store i64 ' . ($site && $no->line === 0 ? $this->btLineOverride : (string)$no->line) . ', ptr ' . $lp . "\n";
         $fp = $this->ssa->allocReg();
         $out .= '  ' . $fp . ' = getelementptr inbounds i8, ptr ' . $obj . ', i64 ' . (string)$fileOff . "\n";
         $fstr = $this->ssa->allocReg();
-        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $this->strLitId($this->pool->intern($this->frameFile())) . " to i64\n";
+        // A shared helper with no site has no file either (built-in code, as php shows it):
+        // the file of whichever frame asked for it first named the wrong file elsewhere.
+        $fileLit = $site ? $this->btFileOverride
+            : $this->strLitId($this->pool->intern($this->cellSinkFnOverride !== null ? "\0" : $this->frameFile()));
+        $out .= '  ' . $fstr . ' = ptrtoint ptr ' . $fileLit . " to i64\n";
         $out .= '  store i64 ' . $fstr . ', ptr ' . $fp . "\n";
         if (!$withTrace) { return $out; }
         // Two packed vecs of the active frames, innermost first.
@@ -1667,7 +1673,10 @@ trait EmitLlvmObjects
     private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag, bool $fresh = false): string
     {
         $key = '__mc_prop_read_' . $this->mangle($prop) . ($fresh ? '__fresh' : '');
-        $sym = '@manticore_' . $key;
+        // linkonce_odr under the module token, not internal: the module's property tables name
+        // every reader, and a split part copies an internal body with each body naming it, so
+        // the part holding the tables took all of them (51 MB on symfony-demo).
+        $sym = '@' . $this->mirHelperSym('manticore_' . $key);
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
         $oldSsa = $this->ssa;
@@ -1683,7 +1692,7 @@ trait EmitLlvmObjects
         $this->cellSinkFnOverride = \ltrim($sym, '@');
         $obj = '%obj';
         $res = $this->ssa->allocReg();
-        $out = 'define internal i64 ' . $sym . "(ptr %obj) {\nentry:\n";
+        $out = 'define linkonce_odr i64 ' . $sym . "(ptr %obj) {\nentry:\n";
         $out .= $this->emitLoadClassId($obj);
         $cid = $this->classIdReg;
         $out .= '  ' . $res . " = alloca i64\n";
@@ -1736,12 +1745,12 @@ trait EmitLlvmObjects
             $bodies .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
+        $magicLbl = '';
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {
-            $lbl = $this->ssa->allocLabel('pr.magic');
-            foreach ($magic as $cname => $_decl) {
-                $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
-            }
-            $bodies .= $lbl . ":\n" . $this->magicDispatchCall('__get', $obj, $prop, '0');
+            // Not one case per overloading class (~250 on symfony-demo, in each of
+            // ~4 400 readers): the default arm asks the module's one predicate.
+            $magicLbl = $this->ssa->allocLabel('pr.magic');
+            $bodies .= $magicLbl . ":\n" . $this->magicDispatchCall('__get', $obj, $prop, '0');
             $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
             $magic = [];
@@ -1756,6 +1765,7 @@ trait EmitLlvmObjects
         }
         $switch .= "  ]\n";
         $out .= $switch . $bodies . $def . ":\n";
+        if ($magicLbl !== '') { $out .= $this->magicHolderBranch('__get', $cid, $magicLbl); }
         if ($hasBag) {
             $out .= $this->emitBagReadByName($prop, $obj);
             $fv = $this->lastValue;
@@ -2199,60 +2209,12 @@ trait EmitLlvmObjects
         // ERASED, so "one class declares __get" says nothing about the class in
         // hand. Calling it anyway ran Ovl::__get with a Plain2 `$this` and read
         // that object's slot 0 as an array. Always dispatch on class_id.
-        // Dispatch on class_id: each holder reads (and boxes) its OWN slot.
-        $out .= $this->emitLoadClassId($objPtr);
-        $cid = $this->classIdReg;
-        $res = $this->ssa->allocReg();
-        $out .= '  ' . $res . " = alloca i64\n";
-        $end = $this->ssa->allocLabel('rp.end');
-        $def = $this->ssa->allocLabel('rp.default');
-        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
-        $bodies = '';
-        /** @var array<string, string> {@see canonArm} */
-        $armSeen = [];
-        foreach ($hooks as $hc => $hsym) {
-            unset($magic[$hc]);
-            $lbl = $this->ssa->allocLabel('rp.hook');
-            $switch .= '    i64 ' . (string)$this->classes[$hc]->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n" . $this->emitHookGetCell($objPtr, $hsym);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $end . "\n";
-        }
-        foreach ($fixed as $cd) {
-            $lbl = $this->ssa->allocLabel('rp.case');
-            $arm = $this->emitFixedPropLoad($objPtr, $cd, $prop);
-            $fv = $this->lastValue;
-            if ($fresh) { $arm .= $this->rcRetainReg($fv, 'cell'); }
-            $arm .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
-            $arm .= '  br label %' . $end . "\n";
-            $key = $this->canonArm($arm);
-            if (isset($armSeen[$key])) {
-                $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $armSeen[$key] . "\n";
-                continue;
-            }
-            $armSeen[$key] = $lbl;
-            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n" . $arm;
-        }
-        foreach ($magic as $cname => $declCls) {
-            $lbl = $this->ssa->allocLabel('rp.magic');
-            $switch .= '    i64 ' . (string)$this->classes[$cname]->classId . ', label %' . $lbl . "\n";
-            $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitMagicGetCell($declCls, $objPtr, $prop);
-            $bodies .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $end . "\n";
-        }
-        $switch .= "  ]\n";
-        $out .= $switch . $bodies;
-        $out .= $def . ":\n";
-        $out .= $this->emitBagReadByName($prop, $objPtr);
-        $fv = $this->lastValue;
-        if ($fresh) { $out .= $this->rcRetainReg($fv, 'cell'); }
-        $out .= '  store i64 ' . $fv . ', ptr ' . $res . "\n";
-        $out .= '  br label %' . $end . "\n";
-        $out .= $end . ":\n";
+        // Dispatch on class_id: each holder reads (and boxes) its OWN slot. The switch is
+        // the shared per-name reader, not a copy per site: one symfony-demo closure read
+        // ~40 erased properties and spliced 25 MB of `__get` arms.
+        $sym = $this->cellPropReadHelperFor($prop, $fresh);
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $objPtr . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
@@ -2940,6 +2902,32 @@ trait EmitLlvmObjects
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
+    }
+
+    /**
+     * In a helper's default arm: branch to `$magicLbl` when the class `$cid` is one
+     * {@see magicDispatchFn} answers for, else fall through to what follows.
+     */
+    private function magicHolderBranch(string $method, string $cid, string $magicLbl): string
+    {
+        $key = '__mc_magic_has_' . $method;
+        $sym = '@' . $this->mirHelperSym($key);
+        if (!isset($this->propertyReadHelpers[$key])) {
+            // linkonce_odr for the reason magicDispatchFn gives.
+            $out = 'define linkonce_odr i1 ' . $sym . "(i64 %cid) {\nentry:\n  switch i64 %cid, label %no [\n";
+            foreach ($this->methodHolders($method) as $cn => $_decl) {
+                $cd = $this->classes[$cn];
+                if ($cd->isStruct || $cd->usesBag()) { continue; }
+                if ($this->isClosureClass($cn) || $this->isEnumClass($cn)) { continue; }
+                $out .= '    i64 ' . (string)$cd->classId . ", label %yes\n";
+            }
+            $out .= "  ]\nyes:\n  ret i1 true\nno:\n  ret i1 false\n}\n\n";
+            $this->propertyReadHelpers[$key] = $out;
+        }
+        $h = $this->ssa->allocReg();
+        $cont = $this->ssa->allocLabel('magic.no');
+        return '  ' . $h . ' = call i1 ' . $sym . '(i64 ' . $cid . ")\n"
+            . '  br i1 ' . $h . ', label %' . $magicLbl . ', label %' . $cont . "\n" . $cont . ":\n";
     }
 
     private function hasEmittedFunction(string $name): bool
@@ -4328,24 +4316,69 @@ trait EmitLlvmObjects
      * ponytail: php calls the magic for an inaccessible name; here the slot is still
      * read directly, as before this check. Route denied names to the magic when a
      * program depends on it.
+     *
+     * The message does not depend on the scope, only whether it applies does, and a
+     * scope reaches few of the module's non-public properties. So one shared helper
+     * per magic answers every candidate, and a scope that may reach some of them gets
+     * a small wrapper answering 0 for those first: a copy of the whole table per
+     * scope was 4.5 MB of IR each on symfony-demo, 300 MB in all.
      */
     private function propDenyHelper(string $scope, string $magic): string
     {
         $key = '__mc_prop_deny_' . $this->mangle($scope) . $magic;
         if (isset($this->propDenyHelpers[$key])) { return $this->propDenyHelpers[$key]; }
-        $holders = $this->methodHolders($magic);
-        $rows = [];
-        foreach ($this->classes as $cn => $cd) {
-            if (isset($holders[$cn])) { continue; }
-            foreach ($cd->propertyMeta as $p => $_pm) {
-                $msg = $cd->isShadowSlot((string)$p) ? '' : $this->propAccessError((string)$cn, (string)$p);
-                if ($msg !== '') { $rows[$cd->classId][(string)$p] = $msg; }
+        $shared = $this->propDenySharedHelper($magic);
+        if ($shared === '') { return $this->propDenyHelpers[$key] = ''; }
+        /** @var array<int, array<string, string>> $allowed */
+        $allowed = [];
+        foreach ($this->propDenyRows[$magic] as $cid => $props) {
+            foreach ($props as $p => $row) {
+                if (!$this->accessDenied($row[1], $row[2])) { $allowed[$cid][(string)$p] = '0'; }
             }
         }
-        if ($rows === []) { return $this->propDenyHelpers[$key] = ''; }
-
-        $this->rt->needsStrcmp = true;
+        if ($allowed === []) { return $this->propDenyHelpers[$key] = $shared; }
         $sym = '@manticore_' . $key;
+        $this->emitPropDenyFn($key, $sym, $allowed, '  %r = tail call i64 ' . $shared . "(ptr %obj, ptr %key)\n  ret i64 %r\n");
+        return $this->propDenyHelpers[$key] = $sym;
+    }
+
+    /** Every non-public property any scope may be denied, with php's message; '' when there is none. */
+    private function propDenySharedHelper(string $magic): string
+    {
+        $key = '__mc_prop_deny' . $magic;
+        if (isset($this->propDenyHelpers[$key])) { return $this->propDenyHelpers[$key]; }
+        $holders = $this->methodHolders($magic);
+        /** @var array<int, array<string, string[]>> $rows class id => name => [message, visibility, declaring class] */
+        $rows = [];
+        /** @var array<int, array<string, string>> $answers */
+        $answers = [];
+        foreach ($this->classes as $cn => $cd) {
+            if (isset($holders[$cn])) { continue; }
+            foreach ($cd->propertyMeta as $p => $pm) {
+                $p = (string)$p;
+                if ($cd->isShadowSlot($p) || $pm->isStatic || $pm->visibility === 'public' || $pm->visibility === ''
+                    || $pm->declaringClass === '') { continue; }
+                // An ancestor's private property is invisible to the subclass, not forbidden.
+                if ($pm->visibility === 'private' && $this->accessCanon($pm->declaringClass) !== $this->accessCanon((string)$cn)) { continue; }
+                $msg = 'Cannot access ' . $pm->visibility . ' property ' . (string)$cn . '::$' . $p;
+                $rows[$cd->classId][$p] = [$msg, $pm->visibility, $pm->declaringClass];
+                $answers[$cd->classId][$p] = 'ptrtoint (ptr ' . $this->litStr($msg) . ' to i64)';
+            }
+        }
+        $this->propDenyRows[$magic] = $rows;
+        if ($rows === []) { return $this->propDenyHelpers[$key] = ''; }
+        $sym = '@manticore_' . $key;
+        $this->emitPropDenyFn($key, $sym, $answers, "  ret i64 0\n");
+        return $this->propDenyHelpers[$key] = $sym;
+    }
+
+    /**
+     * `(ptr obj, ptr name) -> i64` answering `$rows[class id][name]`, else running `$miss`.
+     * @param array<int, array<string, string>> $rows
+     */
+    private function emitPropDenyFn(string $key, string $sym, array $rows, string $miss): void
+    {
+        $this->rt->needsStrcmp = true;
         $oldSsa = $this->ssa;
         $oldClassId = $this->classIdReg;
         $this->ssa = new SsaBuilder();
@@ -4360,7 +4393,7 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('deny.class');
             $switch .= '    i64 ' . (string)$cid . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
-            foreach ($props as $p => $msg) {
+            foreach ($props as $p => $answer) {
                 $c = $this->ssa->allocReg();
                 $e = $this->ssa->allocReg();
                 $hit = $this->ssa->allocLabel('deny.hit');
@@ -4368,16 +4401,15 @@ trait EmitLlvmObjects
                 $bodies .= '  ' . $c . ' = call i32 @strcmp(ptr %key, ptr ' . $this->litStr((string)$p) . ")\n";
                 $bodies .= '  ' . $e . ' = icmp eq i32 ' . $c . ", 0\n";
                 $bodies .= '  br i1 ' . $e . ', label %' . $hit . ', label %' . $next . "\n";
-                $bodies .= $hit . ":\n  ret i64 ptrtoint (ptr " . $this->litStr($msg) . " to i64)\n";
+                $bodies .= $hit . ":\n  ret i64 " . $answer . "\n";
                 $bodies .= $next . ":\n";
             }
             $bodies .= "  br label %none\n";
         }
-        $out .= $switch . "  ]\n" . $bodies . "none:\n  ret i64 0\n}\n\n";
+        $out .= $switch . "  ]\n" . $bodies . "none:\n" . $miss . "}\n\n";
         $this->ssa = $oldSsa;
         $this->classIdReg = $oldClassId;
         $this->propertyReadHelpers[$key] = $out;
-        return $this->propDenyHelpers[$key] = $sym;
     }
 
     /**
@@ -4666,7 +4698,7 @@ trait EmitLlvmObjects
         $key = '__mc_prop_write_' . $this->mangle($prop) . ($roGuard ? '__ro' : '')
              . ($within === '' ? '' : '__in_' . $this->mangle($within))
              . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '') . ($hooks ? 'h' : '');
-        $sym = '@manticore_' . $key;
+        $sym = '@' . $this->mirHelperSym('manticore_' . $key);
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
         $fixed = $this->fixedPropertyHolders($prop);
@@ -4687,7 +4719,7 @@ trait EmitLlvmObjects
         $this->cellSinkFnOverride = \ltrim($sym, '@');
         $obj = '%obj';
         $cellVal = '%val';
-        $out = 'define internal void ' . $sym . "(ptr %obj, i64 %val) {\nentry:\n";
+        $out = 'define linkonce_odr void ' . $sym . "(ptr %obj, i64 %val) {\nentry:\n";
         $out .= $this->emitLoadClassId($obj);
         $cid = $this->classIdReg;
         $end = $this->ssa->allocLabel('pw.end');
@@ -4722,6 +4754,16 @@ trait EmitLlvmObjects
             $bodies .= $this->emitCellSlotStoreDropping($obj, $cd, $prop, $cellVal, $dropOld, $dropBoxed);
             $bodies .= '  br label %' . $end . "\n";
         }
+        $magicLbl = '';
+        if (\count($magic) >= self::MAGIC_SHARED_MIN && $within === '') {
+            // Every holder of `$prop` is a case above, so a class reaching the
+            // default arm overloads `__set` exactly when it is one of `$magic`:
+            // the module's one predicate stands in for a case per class.
+            $magicLbl = $this->ssa->allocLabel('pw.magic');
+            $bodies .= $magicLbl . ":\n" . $this->magicDispatchCall('__set', $obj, $prop, $cellVal);
+            $bodies .= '  br label %' . $end . "\n";
+            $magic = [];
+        }
         if (\count($magic) >= self::MAGIC_SHARED_MIN) {
             $lbl = $this->ssa->allocLabel('pw.magic');
             $any = false;
@@ -4748,6 +4790,7 @@ trait EmitLlvmObjects
         }
         $switch .= "  ]\n";
         $out .= $switch . $bodies . $def . ":\n";
+        if ($magicLbl !== '') { $out .= $this->magicHolderBranch('__set', $cid, $magicLbl); }
         if ($hasBag) { $out .= $this->emitCellBagStoreByName($prop, $obj, $cellVal); }
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n  ret void\n}\n\n";
@@ -4800,7 +4843,7 @@ trait EmitLlvmObjects
     /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
      *  path this asks for one even when a single class declares the name: the
      *  point is that the SITE stays a call, whatever the arm count. */
-    private function cellPropReadHelperFor(string $prop): string
+    private function cellPropReadHelperFor(string $prop, bool $fresh = false): string
     {
         $enumArms = [];
         if ($prop === 'name' || $prop === 'value') {
@@ -4815,6 +4858,7 @@ trait EmitLlvmObjects
             $enumArms,
             $this->magicPropHolders($prop, '__get'),
             $this->bagClassNames() !== [],
+            $fresh,
         );
     }
 
@@ -5332,6 +5376,8 @@ trait EmitLlvmObjects
         $targets = [];
         $erasedSyms = [];
         $distinct = [];
+        /** @var array<string, bool> $seenTargets */
+        $seenTargets = [];
         $fallback = '';
         foreach ($this->methodHolders($method) as $cn => $decl) {
             $cd = $this->classes[$cn];
@@ -5343,7 +5389,7 @@ trait EmitLlvmObjects
             if (!$this->hasEmittedFunction($full)) { continue; }
             $cands[] = $cd->name;
             $targets[$cd->name] = $full;
-            if (!\in_array($full, $distinct, true)) { $distinct[] = $full; }
+            if (!isset($seenTargets[$full])) { $seenTargets[$full] = true; $distinct[] = $full; }
         }
         if ($fallback === '' || $distinct === []) {
             $body .= "  ret i64 0\n}\n\n";
@@ -5451,7 +5497,7 @@ trait EmitLlvmObjects
         $key = 'inl|' . $rk . ':' . $recvKey . '|' . (string)$fixedN . '|' . $resT->kind;
         foreach ($methods as $m => $mt) { $key .= '|' . (string)$m . ':' . $mt->kind . ':' . ($mt->class ?? ''); }
         if (isset($this->dynInlSyms[$key])) { return $this->dynInlSyms[$key]; }
-        $sym = '@' . $this->mirHelperSym('__mir_dyninl_' . (string)\count($this->dynInlSyms));
+        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_dyninl_', $key));
         $this->dynInlSyms[$key] = $sym;
 
         $oldSsa = $this->ssa;
@@ -5543,12 +5589,12 @@ trait EmitLlvmObjects
     }
 
     /** @return Node[] the arm's arguments, read out of the packed `__mc_dyn_args` local */
-    private function dynSpreadArmArgs(int $fixedN): array
+    private function dynSpreadArmArgs(int $fixedN, ?Type $packT = null): array
     {
         $vecT = Type::vec(Type::cell());
         $armArgs = [];
         if ($fixedN < 0) {
-            $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT), Type::cell());
+            $armArgs[] = new \Compile\Mir\Spread_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $packT ?? $vecT), Type::cell());
         } else {
             for ($i = 0; $i < $fixedN; $i++) {
                 $armArgs[] = new \Compile\Mir\ArrayAccess_(new \Compile\Mir\LoadLocal('__mc_dyn_args', $vecT),
@@ -5572,15 +5618,16 @@ trait EmitLlvmObjects
      * splicing a copy (~210 IR lines per arm, 1 850 arms per shape, 39 shapes).
      * '' when the body is not closed; the caller then inlines the arm.
      */
-    private function dynamicMethodSpreadArmHelper(Type $rt, int $fixedN, string $m, Type $retT, int $srcArgc = -1): string
+    private function dynamicMethodSpreadArmHelper(Type $rt, int $fixedN, string $m, Type $retT, int $srcArgc = -1, ?Type $packT = null): string
     {
         $recvKey = $rt->class ?? '';
         if ($rt->kind === Type::KIND_UNION) {
             foreach ($rt->atoms as $at) { $recvKey .= ($at->class ?? '') . '|'; }
         }
-        $key = 'inlarm|' . $rt->kind . ':' . $recvKey . '|' . (string)$fixedN . '|' . $retT->kind . ':' . ($retT->class ?? '') . '|' . $m . '|' . (string)$srcArgc;
+        $key = 'inlarm|' . $rt->kind . ':' . $recvKey . '|' . (string)$fixedN . '|' . $retT->kind . ':' . ($retT->class ?? '') . '|' . $m . '|' . (string)$srcArgc
+            . ($packT === null ? '' : '|' . $packT->exactString());
         if (isset($this->dynArmSyms[$key])) { return $this->dynArmSyms[$key]; }
-        $sym = '@' . $this->mirHelperSym('__mir_dynarm_' . (string)\count($this->dynArmSyms));
+        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_dynarm_', $key));
         $this->dynArmSyms[$key] = $sym;
 
         $oldSsa = $this->ssa;
@@ -5602,6 +5649,9 @@ trait EmitLlvmObjects
         $oldCellSinkOrd = $this->cellSinkOrd;
         $oldCellSinkFn = $this->cellSinkFnOverride;
         $oldCellProv = $this->cellProv;
+        $oldBtLine = $this->btLineOverride;
+        $oldBtFile = $this->btFileOverride;
+        $oldBtSsa = $this->btLineOverrideSsa;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
@@ -5623,12 +5673,14 @@ trait EmitLlvmObjects
         $argsSlot = $this->ssa->allocReg();
         $this->locals->slots['__mc_dyn_obj'] = $objSlot;
         $this->locals->slots['__mc_dyn_args'] = $argsSlot;
-        $body = 'define hidden i64 ' . $sym . "(i64 %obj, ptr %args) {\nentry:\n";
+        // The call site comes in, so a shared arm pushes the frame of whoever called it.
+        $this->useSiteTraceParams();
+        $body = 'define hidden i64 ' . $sym . "(i64 %obj, ptr %args, i64 %btline, ptr %btfile) {\nentry:\n";
         $body .= '  ' . $objSlot . " = alloca i64\n  store i64 %obj, ptr " . $objSlot . "\n";
         $body .= '  ' . $argsSlot . " = alloca i64\n";
         $body .= "  %argsI = ptrtoint ptr %args to i64\n  store i64 %argsI, ptr " . $argsSlot . "\n";
         $recv = new \Compile\Mir\LoadLocal('__mc_dyn_obj', $rt);
-        $call = new \Compile\Mir\MethodCall_($recv, $m, $this->packDynVariadicArgs($recv, $m, $this->dynSpreadArmArgs($fixedN)), $retT);
+        $call = new \Compile\Mir\MethodCall_($recv, $m, $this->packDynVariadicArgs($recv, $m, $this->dynSpreadArmArgs($fixedN, $packT)), $retT);
         $call->srcArgc = $srcArgc;
         $body .= $this->emitMethodCall($call);
         $body .= $this->boxToCell($retT);
@@ -5640,6 +5692,9 @@ trait EmitLlvmObjects
         }
 
         $this->noSpreadRoute = $oldNoSpreadRoute;
+        $this->btLineOverride = $oldBtLine;
+        $this->btFileOverride = $oldBtFile;
+        $this->btLineOverrideSsa = $oldBtSsa;
         $this->ssa = $oldSsa;
         $this->locals = $oldLocals;
         $this->cf = $oldCf;
@@ -6195,7 +6250,7 @@ trait EmitLlvmObjects
             $key .= '|a' . (string)$at->kind . ':' . ($at->class ?? '');
         }
         if (isset($this->dynmSyms[$key])) { return $this->dynmSyms[$key]; }
-        $sym = $this->mirHelperSym('__mir_dynm_' . (string)\count($this->dynmSyms));
+        $sym = $this->mirHelperSym($this->keyedHelperName('__mir_dynm_', $key));
         // Registered BEFORE the body is built, for the reason
         // {@see emitVirtualDispatch} gives: a half-built registry is the one
         // state that would emit two bodies for one symbol.
@@ -6583,7 +6638,7 @@ trait EmitLlvmObjects
             $this->dynScopeRelTables[$scope] = ['null', 0];
             return ['null', 0];
         }
-        $sym = '@.dynd.rel.' . (string)\count($this->dynScopeRelTables);
+        $sym = '@.dynd.rel.' . $this->keyedHelperName('', 'rel|' . $scope);
         $this->dynfExtraBodies .= $sym . ' = private unnamed_addr constant [' . (string)\count($names)
             . ' x ptr] [' . \implode(', ', $names) . "]\n";
         $this->dynScopeRelTables[$scope] = [$sym, \count($names)];
@@ -6659,7 +6714,8 @@ trait EmitLlvmObjects
                 $rp = $this->ssa->allocReg();
                 $out .= '  ' . $rp . ' = inttoptr i64 ' . $ra . " to ptr\n";
                 $rv = $this->ssa->allocReg();
-                $out .= '  ' . $rv . ' = call i64 ' . $armSym . '(i64 ' . $ro . ', ptr ' . $rp . ")\n";
+                $site = $this->siteTraceArgs(0, $out);
+                $out .= '  ' . $rv . ' = call i64 ' . $armSym . '(i64 ' . $ro . ', ptr ' . $rp . ', ' . $site . ")\n";
                 $out .= '  store i64 ' . $rv . ', ptr ' . $res . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $nextL . ":\n";
@@ -9130,7 +9186,7 @@ trait EmitLlvmObjects
             $boxCell, $erasedSyms, $argOutTypes);
         $sym = $this->vdSyms[$key] ?? '';
         if ($sym === '') {
-            $sym = $this->mirHelperSym('__mir_vdisp_' . (string)\count($this->vdSyms));
+            $sym = $this->mirHelperSym($this->keyedHelperName('__mir_vdisp_', $key));
             // Registered BEFORE the body is built: the body cannot reach this
             // shape again (it dispatches, it does not re-dispatch), but a
             // half-built registry is the one state that would emit two bodies
@@ -9143,8 +9199,18 @@ trait EmitLlvmObjects
                 $params .= 'i64 %a' . (string)$i;
                 $thunkArgs .= 'i64 %a' . (string)$i;
             }
+            // Its own counters, not the requesting frame's: built on those, the body
+            // took that frame's numbering and the frame lost registers only when it
+            // happened to ask first, so an edit anywhere renumbered later functions.
+            $oldSsa = $this->ssa;
+            $oldCid = $this->classIdReg;
+            $this->ssa = new SsaBuilder();
+            $this->ssa->reset();
+            $this->ssa->startAt(1000000000);
             $body = $this->emitVirtualDispatchInline('%a0', $thunkArgs, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
+            $this->ssa = $oldSsa;
+            $this->classIdReg = $oldCid;
             // ⚠ A body is only a function if it is CLOSED. Some arms reach
             // helpers that hand back a register the SITE created — a spread pack
             // is one — and moving that block into a thunk leaves the reference
@@ -9216,11 +9282,11 @@ trait EmitLlvmObjects
         $k .= '@';
         for ($i = 0; $i < $argc; $i++) {
             $t = $argOutTypes[$i] ?? null;
-            $k .= ($t === null ? '-' : (string)$t->id) . ',';
+            $k .= ($t === null ? '-' : $t->exactString()) . ',';
         }
         // The arms read an address differently from a value: two sites apart on it share no body.
-        foreach ($this->vdWiden as $wi => $wt) { $k .= 'w' . (string)$wi . ':' . (string)$wt->id . ','; }
-        foreach ($this->vdAddrLoad as $li => $lt) { $k .= 'l' . (string)$li . ':' . (string)$lt->id . ','; }
+        foreach ($this->vdWiden as $wi => $wt) { $k .= 'w' . (string)$wi . ':' . $wt->exactString() . ','; }
+        foreach ($this->vdAddrLoad as $li => $lt) { $k .= 'l' . (string)$li . ':' . $lt->exactString() . ','; }
         return $k;
     }
     /** A dispatch arm's result in a cell-typed call: an enum body returns its ordinal, and a cell holds the case singleton. */
@@ -10054,10 +10120,11 @@ trait EmitLlvmObjects
         $op = $this->asSpreadNode($n->args[0])->operand;
         $pt = $op->type;
         $erasedPack = $pt->kind === Type::KIND_UNKNOWN;
-        if (!$erasedPack) {
-            $el = $pt->element;
-            if (!$pt->isVec() || ($el !== null && $el->kind !== Type::KIND_CELL && $el->kind !== Type::KIND_UNKNOWN)) { return null; }
-        }
+        // A typed pack keys its own helper and is unpacked there as its type says:
+        // Monomorphize clones a forwarding method per pack shape (`assoc[string, cell]`,
+        // `vec[int]`), and each clone inlined one arm per class declaring the method
+        // (ContainerBuilder::createService's `$proxy->__construct(...$arguments)`: 14 MB).
+        if (!$erasedPack && !$pt->isArray()) { return null; }
         if ($op->kind !== Node::KIND_LOAD_LOCAL && $op->kind !== Node::KIND_STORE_LOCAL) { return null; }
         // No by-ref veto: the site's only argument is the spread, and a pack element reaches a
         // parameter by VALUE on the inline path as well ({@see emitSpreadFill}), so a by-ref
@@ -10065,7 +10132,8 @@ trait EmitLlvmObjects
         // NAME let one by-ref constructor anywhere in the program keep every `->__construct(...$a)`
         // inline: PDOStatement::makeObject spliced ~5 000 arms and a 419 KiB -O0 frame.
         if (\count($this->methodHolders($n->method)) < 8) { return null; }
-        $sym = $this->dynamicMethodSpreadArmHelper($n->object->type, -1, $n->method, Type::cell(), $n->srcArgc);
+        $sym = $this->dynamicMethodSpreadArmHelper($n->object->type, -1, $n->method, Type::cell(), $n->srcArgc,
+            $erasedPack ? null : $pt);
         if ($sym === '') { return null; }
         $out = $this->emitNode($n->object);
         $out .= $this->coerceToI64();
@@ -10078,7 +10146,8 @@ trait EmitLlvmObjects
         }
         $argsP = $this->lastValue;
         $r = $this->ssa->allocReg();
-        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $recv . ', ptr ' . $argsP . ")\n";
+        $site = $this->siteTraceArgs($n->line, $out);
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(i64 ' . $recv . ', ptr ' . $argsP . ', ' . $site . ")\n";
         $this->lastValue = $r;
         $this->lastValueType = 'i64';
         $this->markCellOpaque($r);
@@ -10095,7 +10164,9 @@ trait EmitLlvmObjects
      * the receiver is spilled once and the arm is picked at run time instead
      * of dispatching blindly into an unrelated class's `__call`.
      */
-    /** @var array<int, bool> MethodCall_ nodes already wrapped by {@see emitMixedMagicCall} */
+    /** @var array<int, Node> MethodCall_ nodes already wrapped by {@see emitMixedMagicCall}, kept
+     *  alive so their id names no later node: a freed node's id is handed out again, and the
+     *  next call reusing it skipped its own magic check, depending on emission order. */
     private array $mixedMagicDone = [];
 
     /** @var array<string, bool> */
@@ -10139,6 +10210,189 @@ trait EmitLlvmObjects
      * has `__call` goes through `__call` (as the all-magic reroute does); every
      * other receiver takes the ordinary dispatch.
      */
+    /**
+     * `i64 (i64 cell)`: 1 when the value is an object whose class has `__call` and lacks
+     * `$method`, else 0 — {@see emitMixedMagicCall}'s run-time choice, one body per name.
+     */
+    private function magicOnlyPredicate(string $method): string
+    {
+        $key = '__mir_magiconly|' . \strtolower($method);
+        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_magiconly_', \strtolower($method)));
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $this->dynamicMethodHelpers[$key] = '';
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $oldClassId = $this->classIdReg;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        $this->locals = new \Compile\Mir\LocalSlots();
+        $this->cf = new \Compile\Mir\ControlFlow();
+        $this->arena = new \Compile\Mir\ArenaContext();
+        $slot = $this->ssa->allocReg();
+        $this->locals->slots['__mc_mo'] = $slot;
+        $body = 'define hidden i64 ' . $sym . "(i64 %v) {\nentry:\n";
+        $body .= '  ' . $slot . " = alloca i64\n  store i64 %v, ptr " . $slot . "\n";
+        $cell = Type::cell();
+        $bool = Type::bool_();
+        $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
+        $t = fn (): Node => new \Compile\Mir\LoadLocal('__mc_mo', $cell);
+        $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
+        $false = fn (): Node => new \Compile\Mir\BoolConst(false, $bool);
+        $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
+        $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
+            new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
+                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str($method)]), $false(), $true(), $bool),
+                $false(), $bool),
+            $false(), $bool);
+        $body .= $this->emitNode($magicOnly);
+        $body .= $this->coerceToI64();
+        $nz = $this->ssa->allocReg();
+        $body .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+        $w = $this->ssa->allocReg();
+        $body .= '  ' . $w . ' = zext i1 ' . $nz . " to i64\n";
+        $body .= '  ret i64 ' . $w . "\n}\n\n";
+        $this->dynamicMethodHelpers[$key] = $body;
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        $this->rt->needsBacktrace = $oldNeedsBacktrace;
+        $this->classIdReg = $oldClassId;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
+        return $sym;
+    }
+
+    /** Can {@see magicCallHelper} take this call's arguments: no spread, and each a value whose box takes no reference. */
+    private function magicCallShareable(\Compile\Mir\MethodCall_ $mc): bool
+    {
+        foreach ($mc->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return false; }
+            $k = $a->type->kind;
+            if ($k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN && $k !== Type::KIND_INT && $k !== Type::KIND_BOOL
+                && $k !== Type::KIND_FLOAT && $k !== Type::KIND_NULL && $k !== Type::KIND_STRING
+                && $k !== Type::KIND_OBJ) { return false; }
+        }
+        return true;
+    }
+
+    /**
+     * `i64 (i64 recv, i64 name, i64 a0..a(n-1), i64 btline, ptr btfile)`: `$recv->__call($name, [$a0, …])`
+     * for {@see emitMixedMagicCall}, one body per arity. Spliced into each site, the erased `__call`
+     * dispatch and its argument checks were ~60 IR lines a call.
+     */
+    private function magicCallHelper(int $argc): string
+    {
+        $key = '__mir_callmagic|' . (string)$argc;
+        $sym = '@' . $this->mirHelperSym('__mir_callmagic_' . (string)$argc);
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $this->dynamicMethodHelpers[$key] = '';
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $oldBtLine = $this->btLineOverride;
+        $oldBtFile = $this->btFileOverride;
+        $oldBtSsa = $this->btLineOverrideSsa;
+        // Everything a method call leaves behind for its own site, as dynamicMethodSpreadArmHelper
+        // keeps it: the dispatch below would otherwise hand its argc, pads and result to the next
+        // site of the frame that asked for this helper.
+        $oldClassId = $this->classIdReg;
+        $oldRawRef = $this->rawRefCall;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        $this->locals = new \Compile\Mir\LocalSlots();
+        $this->cf = new \Compile\Mir\ControlFlow();
+        $this->arena = new \Compile\Mir\ArenaContext();
+        $this->rawRefCall = false;
+        $this->spreadTail = null;
+        $this->lastPadArgs = '';
+        $this->vdResult = '';
+        $this->vdArmList = '';
+        $this->vdSiteArgc = 0;
+        $this->useSiteTraceParams();
+        $cell = Type::cell();
+        $params = 'i64 %o, i64 %n';
+        $body = '';
+        foreach (['o' => '%o', 'n' => '%n'] as $nm => $p) {
+            $s = $this->ssa->allocReg();
+            $body .= '  ' . $s . " = alloca i64\n  store i64 " . $p . ', ptr ' . $s . "\n";
+            $this->locals->slots['__mc_cm_' . $nm] = $s;
+        }
+        $elems = [];
+        for ($i = 0; $i < $argc; $i = $i + 1) {
+            $params .= ', i64 %a' . (string)$i;
+            $s = $this->ssa->allocReg();
+            $body .= '  ' . $s . " = alloca i64\n  store i64 %a" . (string)$i . ', ptr ' . $s . "\n";
+            $this->locals->slots['__mc_cm_a' . (string)$i] = $s;
+            $elems[] = new \Compile\Mir\ArrayElement_(null, new \Compile\Mir\LoadLocal('__mc_cm_a' . (string)$i, $cell));
+        }
+        $call = new \Compile\Mir\MethodCall_(new \Compile\Mir\LoadLocal('__mc_cm_o', $cell), '__call',
+            [new \Compile\Mir\LoadLocal('__mc_cm_n', $cell), new \Compile\Mir\ArrayLit($elems, Type::vec($cell))], $cell);
+        $body .= $this->emitNode($call);
+        $body .= $this->coerceToI64();
+        $text = 'define hidden i64 ' . $sym . '(' . $params . ", i64 %btline, ptr %btfile) {\nentry:\n" . $body
+            . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        $this->dynamicMethodHelpers[$key] = $text;
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        $this->rt->needsBacktrace = $oldNeedsBacktrace;
+        $this->btLineOverride = $oldBtLine;
+        $this->btFileOverride = $oldBtFile;
+        $this->btLineOverrideSsa = $oldBtSsa;
+        $this->classIdReg = $oldClassId;
+        $this->rawRefCall = $oldRawRef;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
+        return $sym;
+    }
+
     private function emitMixedMagicCall(\Compile\Mir\MethodCall_ $mc, bool $boxObject = false): string
     {
         $out = $this->emitNode($mc->object);
@@ -10160,20 +10414,71 @@ trait EmitLlvmObjects
         $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
         $false = fn (): Node => new \Compile\Mir\BoolConst(false, $bool);
         $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
-        // is_object && method_exists(__call) && !method_exists(method)
-        $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
-            new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
-                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str($mc->method)]), $false(), $true(), $bool),
-                $false(), $bool),
-            $false(), $bool);
-        $elems = [];
-        foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
-        $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
-        $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
-        $plain = new \Compile\Mir\MethodCall_($t(), $mc->method, $mc->args, $mc->type);
-        $plain->srcArgc = $mc->srcArgc;
-        $this->mixedMagicDone[\spl_object_id($plain)] = true;
-        $out .= $this->emitNode(new \Compile\Mir\Ternary($magicOnly, $viaMagic, $plain, $cell));
+        // is_object && method_exists(__call) && !method_exists(method), once per method name: spliced into
+        // every site it was ~140 IR lines (a get_class chain per method_exists), 3 MB in one Symfony
+        // Configuration builder whose fluent calls all ride an erased receiver.
+        $pred = $this->magicOnlyPredicate($mc->method);
+        $pr = $this->ssa->allocReg();
+        $out .= '  ' . $pr . ' = call i64 ' . $pred . '(i64 ' . $cellV . ")\n";
+        $predName = '__emxp' . $tag;
+        $predSlot = $this->ssa->allocReg();
+        $out .= '  ' . $predSlot . " = alloca i64\n  store i64 " . $pr . ', ptr ' . $predSlot . "\n";
+        $this->locals->slots[$predName] = $predSlot;
+        $magicOnly = new \Compile\Mir\LoadLocal($predName, Type::int_());
+        if (!$this->magicCallShareable($mc)) {
+            $elems = [];
+            foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
+            $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
+            $plain = new \Compile\Mir\MethodCall_($t(), $mc->method, $mc->args, $mc->type);
+            $plain->srcArgc = $mc->srcArgc;
+            $this->mixedMagicDone[\spl_object_id($plain)] = $plain;
+            $out .= $this->emitNode(new \Compile\Mir\Ternary($magicOnly, $viaMagic, $plain, $cell));
+        } else {
+            // The `__call` arm is one shared helper per arity ({@see magicCallHelper}); an argument
+            // that runs code is evaluated once, before the choice, as only one arm runs anyway.
+            /** @var array<string, string> $owned */
+            $owned = [];
+            $args = [];
+            foreach ($mc->args as $a) {
+                $args[] = $this->invokeArgRunsCode($a) ? $this->dynHoistOperand($a, $out, $owned, true) : $a;
+            }
+            $plain = new \Compile\Mir\MethodCall_($t(), $mc->method, $args, $mc->type);
+            $plain->srcArgc = $mc->srcArgc;
+            $plain->line = $mc->line;
+            $this->mixedMagicDone[\spl_object_id($plain)] = $plain;
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . " = alloca i64\n";
+            $isM = $this->ssa->allocReg();
+            $out .= '  ' . $isM . ' = icmp ne i64 ' . $pr . ", 0\n";
+            $magL = $this->ssa->allocLabel('mmc.magic');
+            $plainL = $this->ssa->allocLabel('mmc.plain');
+            $endL = $this->ssa->allocLabel('mmc.end');
+            $out .= '  br i1 ' . $isM . ', label %' . $magL . ', label %' . $plainL . "\n" . $magL . ":\n";
+            $regs = '';
+            foreach ($args as $a) {
+                $out .= $this->emitNode($a);
+                $out .= $this->boxToCell($a->type);
+                $regs .= ', i64 ' . $this->lastValue;
+            }
+            $nameCell = $this->ssa->allocReg();
+            $out .= '  ' . $nameCell . ' = call i64 @__manticore_box_ptr(ptr '
+                . $this->strLitId($this->pool->intern($mc->method)) . ")\n";
+            $site = $this->siteTraceArgs($mc->line, $out);
+            $mr = $this->ssa->allocReg();
+            $out .= '  ' . $mr . ' = call i64 ' . $this->magicCallHelper(\count($args)) . '(i64 ' . $cellV
+                . ', i64 ' . $nameCell . $regs . ', ' . $site . ")\n";
+            $out .= '  store i64 ' . $mr . ', ptr ' . $res . "\n  br label %" . $endL . "\n" . $plainL . ":\n";
+            $out .= $this->emitNode($plain);
+            $out .= $this->boxToCell($plain->type);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n  br label %" . $endL . "\n" . $endL . ":\n";
+            $lr = $this->ssa->allocReg();
+            $out .= '  ' . $lr . ' = load i64, ptr ' . $res . "\n";
+            $this->lastValue = $lr;
+            $this->lastValueType = 'i64';
+            $this->markCellOpaque($lr);
+            $out .= $this->releaseHoistedArgs($owned);
+        }
         // Both arms read the receiver through a local, a borrow: the fresh temp is this site's to give back.
         // `collect($x)->map(…)` takes this path wherever some class has `__call` and no `map`.
         if ($recvOwned) { $out .= $this->rcReleaseReg($cellV, 'cell'); }
@@ -10490,13 +10795,13 @@ trait EmitLlvmObjects
         // cannot share one switch, and the arg emission below is already built
         // against the resolved callee's signature. Recorded in docs/ROADMAP.md.
         if ($mcStatic !== '' && isset($this->classes[$mcStatic]) && $mc->object->type->kind === Type::KIND_OBJ
-            && !isset($this->mixedMagicDone[\spl_object_id($mc)])
+            && ($this->mixedMagicDone[\spl_object_id($mc)] ?? null) !== $mc
             && $this->resolveMethodClass($mcStatic, $mc->method) === ''
             && $this->resolveMethodClass($mcStatic, '__call') === ''
             && $this->descendantAnswers($mcStatic, $mc->method)) {
             return $this->emitMixedMagicCall($mc, true);
         }
-        if (!isset($this->classes[$mcStatic]) && !isset($this->mixedMagicDone[\spl_object_id($mc)])
+        if (!isset($this->classes[$mcStatic]) && ($this->mixedMagicDone[\spl_object_id($mc)] ?? null) !== $mc
             && ($mc->object->type->kind === Type::KIND_CELL || $mc->object->type->kind === Type::KIND_UNKNOWN)
             && $this->anyClassDeclares($mc->method) && $this->magicOnlyClassExists($mc->method)) {
             return $this->emitMixedMagicCall($mc);
@@ -10943,6 +11248,8 @@ trait EmitLlvmObjects
         // override (so `static::` binds to the real object's class).
         $targets = [];
         $distinct = [];
+        /** @var array<string, bool> $seenTargets */
+        $seenTargets = [];
         $liveCands = [];
         // Symbols that are ERASED THUNKS (erasedEntry rewrote them): a thunk
         // already boxes its result to a cell, so the per-arm cell-boxing below
@@ -10975,8 +11282,7 @@ trait EmitLlvmObjects
             if (!$this->hasEmittedFunction($full)) { continue; }
             $liveCands[] = $c;
             $targets[$c] = $full;
-            if (\Compile\Stats::$on) { \Compile\Stats::bump('dispatch.in_array_probes', \count($distinct)); }
-            if (!\in_array($full, $distinct, true)) { $distinct[] = $full; }
+            if (!isset($seenTargets[$full])) { $seenTargets[$full] = true; $distinct[] = $full; }
         }
         \Compile\Stats::bump('dispatch.arms_emitted', \count($distinct));
         $fallbackFull = $this->lsbTarget($fallback, $mc->method, $static);

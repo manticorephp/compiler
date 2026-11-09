@@ -960,11 +960,23 @@ function clang_id(): string
 
 function obj_cache_key(string $llPath, string $flags): string
 {
-    $h = \sha1_file($llPath);
-    if ($h === false) {
+    // A digest of 8 MB chunk digests: sha1_file() reads the whole part into one
+    // string, 65 parts of up to 170 MB that the compiler then holds while clang runs.
+    $f = \fopen($llPath, 'rb');
+    if ($f === false) {
         return '';
     }
-    return \sha1($flags . '|' . clang_id() . '|' . $h);
+    $h = '';
+    while (!\feof($f)) {
+        $chunk = \fread($f, 8388608);
+        if ($chunk === false) {
+            \fclose($f);
+            return '';
+        }
+        $h .= \sha1($chunk, true);
+    }
+    \fclose($f);
+    return \sha1($flags . '|' . clang_id() . '|' . \sha1($h));
 }
 
 /** True when the cached object was placed at `$dest`. */
@@ -1396,6 +1408,8 @@ function assemble_ir_file_split(
         $splitter->sharedDefs,
         $splitter->internalDefs
     );
+    // Its module index would otherwise stay resident beside every clang.
+    unset($splitter);
     $lto = thinlto_flags();
     $objs = [];
     /** @var string[] */
@@ -5491,9 +5505,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $narrowConcrete = new \Compile\Mir\Passes\NarrowReturns(true, $analysisContext, $worklistMode === 'on');
         $module = $narrowConcrete->run($module);
         \Compile\Stats::step('NarrowReturns (concreteOnly)', $statT, \count($module->functions), -1);
-        // A narrowing pass that closed on a full inference leaves nothing for a
-        // second one to move: the module is the one that run just typed.
-        if (!$narrowConcrete->endedOnFullInfer) {
+        // A narrowing pass that ran a full inference leaves nothing for a second
+        // one to type: InferTypes #3 re-infers after InlineClosures anyway.
+        if (!$narrowConcrete->moduleTyped) {
             $statT = \Compile\Stats::begin('InferTypes #2');
             $infer2 = new \Compile\Mir\Passes\InferTypes(
                 ($analysisContext !== null && $worklistMode === 'on')
@@ -5521,15 +5535,18 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         // below re-derives each retargeted call's type from its overload.
         $module = (new \Compile\Mir\Passes\ResolveOverloads())->run($module);
         $statT = \Compile\Stats::begin('InferTypes #3');
-        $module = (new \Compile\Mir\Passes\InferTypes(null, $analysisContext))->run($module);
+        $infer3 = new \Compile\Mir\Passes\InferTypes(null, $analysisContext);
+        $module = $infer3->run($module);
         \Compile\Stats::step('InferTypes #3', $statT, \count($module->functions), -1);
         // Specialize erased-array / polymorphic functions per call-site
         // argument shape (runs after InferTypes so call-arg types are known;
         // re-runs InferTypes internally when it specializes anything).
         $statT = \Compile\Stats::begin('Monomorphize');
-        $mono = new \Compile\Mir\Passes\Monomorphize($analysisContext);
+        $mono = new \Compile\Mir\Passes\Monomorphize($analysisContext, $infer3);
+        $infer3 = null;
         $module = $mono->run($module);
         \Compile\Stats::step('Monomorphize', $statT, \count($module->functions), -1);
+        $monoLight = $mono->lightRoundRan;
         $mono = null;
         \Manticore\Allocator::release('after-monomorphize');
         // Fuse implode(explode()) split-join round-trips into one native
@@ -5602,8 +5619,12 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         \Manticore\Allocator::release('after-typecheck');
         $statT = \Compile\Stats::begin('NarrowReturns (full)');
         $narrow = new \Compile\Mir\Passes\NarrowReturns(false, $analysisContext, $worklistMode === 'on');
+        $narrow->needsFullInfer = $monoLight;
         $module = $narrow->run($module);
         \Compile\Stats::step('NarrowReturns (full)', $statT, \count($module->functions), -1);
+        // The report's last `deps run` line must move nothing: the pass above has to
+        // leave a true fixpoint, or a property stays narrower than what is stored in it.
+        if (\Compile\Mir\ShadowDeps::enabled()) { $module = (new \Compile\Mir\Passes\InferTypes(null, $analysisContext))->run($module); }
         $narrow = null;
         // NarrowReturns sharpened erased call results to objects: a string param they
         // reach needs its `__toString` cast, which the first check could not see.
@@ -5705,6 +5726,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $module = $verify->run($module);
         \Compile\Stats::step('Verify', $statT, \count($module->functions), \count($module->classes));
         $verify = null;
+        if (\Compile\Stats::reporting()) { \Compile\Stats::line(\Compile\Mir\PrecisionCensus::line($module)); }
         \Manticore\Allocator::release('before-emit');
         if ($analysisContext !== null) {
             $finalScope = $analysisContext->scope();

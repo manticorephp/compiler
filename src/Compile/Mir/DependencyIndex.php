@@ -187,6 +187,21 @@ final class DependencyIndex
     }
 
     /**
+     * The functions `$name` calls, directly or through a dispatch on a bare name.
+     * @return array<string, bool>
+     */
+    public function calleesOfFn(string $name): array
+    {
+        $out = [];
+        foreach (($this->callees[$name] ?? []) as $n => $_) { $out[$n] = true; }
+        foreach (($this->methodCallsOf[$name] ?? []) as $m => $_) {
+            foreach (($this->methodSyms[$m] ?? []) as $sym => $__) { $out[$sym] = true; }
+        }
+        unset($out[$name]);
+        return $out;
+    }
+
+    /**
      * The first wave of a scoped pass: what moved, what can see it directly, and
      * whoever names a retyped property. The rest is propagated by the pass itself.
      * @return array<string, bool>|null  null when only a full pass is sound

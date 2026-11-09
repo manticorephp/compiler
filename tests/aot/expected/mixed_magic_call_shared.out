@@ -1,0 +1,8 @@
+Real: 'hi w0 hi w0 ' | 'hi x0 '
+Proxy: 'greet(w1,2)' | 'greet(x1)'
+Other: 2 | 1
+Real: 'hi w3 hi w3 ' | 'hi x3 '
+Proxy: 'greet(w4,2)' | 'greet(x4)'
+Other: 2 | 1
+greet(aaa) ["greet"]
+flat

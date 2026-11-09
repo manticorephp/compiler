@@ -203,6 +203,35 @@ final class EmitLlvm implements EmitVisitor
     private int $switchCounter = 0;
     /** Sequence for private per-function raw text sink files. */
     private int $functionTextCounter = 0;
+    private string $bodyPend = '';
+    /** @var array<string, string> metadata string => its shared global, {@see EmitLlvmBuiltins::metaStrRef} */
+    private array $metaStrSyms = [];
+    /** @var array<string, bool> */
+    private array $metaStrTaken = [];
+    private string $metaStrDefs = '';
+
+    private function bodyAppend(string $path, string $s): void
+    {
+        if (\strlen($s) >= 1048576) {
+            // A big body goes straight to the file: buffering it copies it once more.
+            $this->bodyFlush($path);
+            if (!\Manticore\append_file_bytes($path, $s)) {
+                throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $path);
+            }
+            return;
+        }
+        $this->bodyPend .= $s;
+        if (\strlen($this->bodyPend) >= 1048576) { $this->bodyFlush($path); }
+    }
+
+    private function bodyFlush(string $path): void
+    {
+        if ($this->bodyPend === '') { return; }
+        if (!\Manticore\append_file_bytes($path, $this->bodyPend)) {
+            throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $path);
+        }
+        $this->bodyPend = '';
+    }
 
     /** {@see EmitLlvmObjects::methodHolders}: method => [class => resolved holder].
      *  @var array<string, array<string, string>> */
@@ -233,6 +262,8 @@ final class EmitLlvm implements EmitVisitor
     private array $propertyReadHelpers = [];
     /** @var array<string, string> scope|magic => deny-helper symbol, '' when nothing is denied */
     private array $propDenyHelpers = [];
+    /** @var array<string, array<int, array<string, string[]>>> magic => class id => name => [message, visibility, declaring class] */
+    private array $propDenyRows = [];
     /** @var array<string, bool> classes a lazy ghost's slots are read through */
     private array $lazyHolders = [];
     /** The `$o->$name` an isset / `??` is testing: inaccessible reads as unset there, not an Error. */
@@ -741,6 +772,7 @@ final class EmitLlvm implements EmitVisitor
         $this->hookPropertyHoldersCache = [];
         $this->propertyReadHelpers = [];
         $this->propDenyHelpers = [];
+        $this->propDenyRows = [];
         $this->dynamicMethodHelpers = [];
         $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;
@@ -937,7 +969,14 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
+        $this->metaStrSyms = [];
+        $this->metaStrTaken = [];
+        $this->metaStrDefs = '';
         $this->litTableCount = 0;
+        $this->litTableSyms = [];
+        $this->litTableTaken = [];
+        $this->keyedHelperTaken = [];
+        $this->keyedHelperNames = [];
         $this->objTemplates = [];
         $this->litTablesFlushed = false;
         $this->btBaseLine = [];
@@ -949,6 +988,7 @@ final class EmitLlvm implements EmitVisitor
         $this->dynfIcmpEmitted = false;
         $this->dynfZeroEmitted = false;
         $this->dynfCacheSeq = 0;
+        $this->dynfCacheSeqByFn = [];
         $this->dynfIdTab = null;
         $this->needsInclResolveFn = false;
         $this->propOwnElem = [];
@@ -982,6 +1022,7 @@ final class EmitLlvm implements EmitVisitor
         $fileHoistThreshold = 262144;
         $fileHoistedBodies = 0;
         $fileHoistedBytes = 0;
+        $this->bodyPend = '';
         if ($streaming && !\Manticore\write_file($bodyPath, '')) {
             throw new \RuntimeException('EmitLlvm: cannot create staged body file ' . $bodyPath);
         }
@@ -1023,6 +1064,10 @@ final class EmitLlvm implements EmitVisitor
         // already copied the signature facts into $this->sigs, and no code below
         // this loop reads $module->functions again.
         $functionKeys = \array_keys($module->functions);
+        // MANTICORE_EMIT_REVERSE=1: emit in reverse. A body that comes out different
+        // depends on what was emitted before it, which is what makes one edit change
+        // functions far from it and miss the object cache; diff the two staged modules.
+        if (\getenv('MANTICORE_EMIT_REVERSE') === '1') { $functionKeys = \array_reverse($functionKeys); }
         $functionTotal = \count($functionKeys);
         foreach ($functionKeys as $functionKey) {
             $fn = $module->functions[$functionKey];
@@ -1084,6 +1129,20 @@ final class EmitLlvm implements EmitVisitor
                     // both temporary paths immediately.
                     $hoistedPath = $rawBodyPath . '.hoisted';
                     $h = new \Compile\Mir\HoistAllocas();
+                    $rawSz = \filesize($rawBodyPath);
+                    $rawTxt = ($rawSz !== false && $rawSz <= 67108864) ? \file_get_contents($rawBodyPath) : false;
+                    if ($rawTxt !== false) {
+                        $hoistedTxt = $h->runFast($rawTxt);
+                        unset($rawTxt);
+                        $hoistedAllocas += $h->moved;
+                        $fileHoistedBodies += 1;
+                        $fileHoistedBytes += $rawBodyBytes;
+                        $this->bodyAppend($bodyPath, $hoistedTxt . "\n\n");
+                        unset($hoistedTxt);
+                        \Manticore\sys_unlink($rawBodyPath);
+                        $bodyBytes += $rawBodyBytes;
+                    } else {
+                    $this->bodyFlush($bodyPath);
                     if (!$h->runFile($rawBodyPath, $hoistedPath)) {
                         throw new \RuntimeException('EmitLlvm: cannot hoist sink file ' . $rawBodyPath);
                     }
@@ -1107,6 +1166,7 @@ final class EmitLlvm implements EmitVisitor
                     \Manticore\sys_unlink($rawBodyPath);
                     \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $rawBodyBytes;
+                    }
                 } elseif ($rawBodyBytes < $fileHoistThreshold) {
                     // Small functions do not justify a filesystem round-trip. Keep
                 // their bounded in-memory rewrite; only fat bodies use the file
@@ -1115,9 +1175,7 @@ final class EmitLlvm implements EmitVisitor
                 $h = new \Compile\Mir\HoistAllocas();
                 $body = $h->runFast($body);
                 $hoistedAllocas += $h->moved;
-                if (!\Manticore\append_file_bytes($bodyPath, $body)) {
-                    throw new \RuntimeException('EmitLlvm: cannot append in-memory body');
-                }
+                $this->bodyAppend($bodyPath, $body);
                 unset($body);
                 $bodyBytes += $rawBodyBytes;
                 } else {
@@ -1127,6 +1185,17 @@ final class EmitLlvm implements EmitVisitor
                     // copy. The old path materialized `$body`, then `run()` exploded
                     // it into lines and joined a second full string. For a large
                     // Doctrine function that creates a needless two-body peak.
+                    if ($rawBodyBytes <= 67108864) {
+                        $h = new \Compile\Mir\HoistAllocas();
+                        $body = $h->runFast($body);
+                        $hoistedAllocas += $h->moved;
+                        $fileHoistedBodies += 1;
+                        $fileHoistedBytes += $rawBodyBytes;
+                        $this->bodyAppend($bodyPath, $body);
+                        unset($body);
+                        $bodyBytes += $rawBodyBytes;
+                    } else {
+                    $this->bodyFlush($bodyPath);
                     $fnPath = $bodyPath . '.fn.' . (string)$emitIndex;
                     $hoistedPath = $fnPath . '.hoisted';
                     if (!\Manticore\write_file($fnPath, $body)) {
@@ -1152,6 +1221,7 @@ final class EmitLlvm implements EmitVisitor
                     \Manticore\sys_unlink($fnPath);
                     \Manticore\sys_unlink($hoistedPath);
                     $bodyBytes += $nBody;
+                    }
                 }
             } else {
                 $functionBodyChunks[] = $body;
@@ -1275,23 +1345,31 @@ final class EmitLlvm implements EmitVisitor
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         if ($this->needsBoxUnknownFn) { $extraBodies .= $this->emitBoxUnknownFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
-        $extraBodies .= $this->vdExtraBodies;
-        $extraBodies .= $this->dynmExtraBodies;
-        $extraBodies .= $this->scmpExtraBodies;
-        $extraBodies .= $this->dynfExtraBodies;
-        $extraBodies .= $this->litTableBodies;
+        // The big tables stay separate pieces, in this order, each released once
+        // written: joining them held every one of them twice (185 MB on Laravel).
+        /** @var string[] $extraParts */
+        $extraParts = [$extraBodies, $this->vdExtraBodies, $this->dynmExtraBodies, $this->scmpExtraBodies,
+            $this->dynfExtraBodies, $this->litTableBodies];
+        $extraBodies = '';
         $this->litTablesFlushed = true;
-        if ($this->needsInclResolveFn) { $extraBodies .= $this->emitInclResolveFn(); }
+        if ($this->needsInclResolveFn) { $extraParts[] = $this->emitInclResolveFn(); }
         // Erased fixed-property readers are generated lazily while ordinary
         // functions emit. Append each helper exactly once after the function
         // loop; callers then contain only a small call instead of a repeated
         // class-id switch. The preamble is emitted afterwards, so any runtime
         // demand raised by the helper is still visible to emitPreamble().
         $this->rootSnapshot('post-lazy-helper-build', $module, true, $bodyBytes);
-        \Compile\Stats::line('IR: extra bodies joined ' . (string)\strlen($extraBodies) . ' bytes'
+        $extraBytes = 0;
+        foreach ($extraParts as $piece) { $extraBytes += \strlen($piece); }
+        \Compile\Stats::line('IR: extra bodies joined ' . (string)$extraBytes . ' bytes'
             . ' (vd ' . (string)\strlen($this->vdExtraBodies) . ', dynm ' . (string)\strlen($this->dynmExtraBodies)
             . ', dynf ' . (string)\strlen($this->dynfExtraBodies) . ', lit ' . (string)\strlen($this->litTableBodies)
             . ', helpers ' . (string)\count($this->dynamicMethodHelpers) . ')');
+        $this->vdExtraBodies = '';
+        $this->dynmExtraBodies = '';
+        $this->scmpExtraBodies = '';
+        $this->dynfExtraBodies = '';
+        $this->litTableBodies = '';
         if ($streaming) {
             // Helper bodies are compiler-owned text and can be numerous on Doctrine.
             // Do not join all of them into one temporary PHP string: stage, hoist,
@@ -1299,6 +1377,18 @@ final class EmitLlvm implements EmitVisitor
             // compiler lifetime; the emitted LLVM order and target ABI are stable.
             $appendStreamedBody = function (string $rawBody, string $label) use (&$bodyBytes, &$hoistedAllocas, &$fileHoistedBodies, &$fileHoistedBytes, $bodyPath): void {
                 if ($rawBody === '') { return; }
+                if (\strlen($rawBody) <= 67108864) {
+                    $h = new \Compile\Mir\HoistAllocas();
+                    $nBody = \strlen($rawBody);
+                    $rawBody = $h->runFast($rawBody);
+                    $hoistedAllocas += $h->moved;
+                    $fileHoistedBodies += 1;
+                    $fileHoistedBytes += $nBody;
+                    $this->bodyAppend($bodyPath, $rawBody);
+                    $bodyBytes += $nBody;
+                    return;
+                }
+                $this->bodyFlush($bodyPath);
                 $id = (string)(++$this->functionTextCounter);
                 $rawPath = $bodyPath . '.helper.' . $id;
                 $hoistedPath = $rawPath . '.hoisted';
@@ -1322,14 +1412,18 @@ final class EmitLlvm implements EmitVisitor
                 $bodyBytes += $nBody;
             };
             $h = new \Compile\Mir\HoistAllocas();
-            $extraBodies = $h->runFast($extraBodies);
-            \Compile\Stats::line('IR: extra bodies hoisted');
-            $hoistedAllocas += $h->moved;
-            if (!\Manticore\append_file_bytes($bodyPath, $extraBodies)) {
-                throw new \RuntimeException('EmitLlvm: cannot append staged body file ' . $bodyPath);
+            $nParts = \count($extraParts);
+            for ($i = 0; $i < $nParts; $i = $i + 1) {
+                $piece = $extraParts[$i];
+                $extraParts[$i] = '';
+                if ($piece === '') { continue; }
+                $piece = $h->runFast($piece);
+                $hoistedAllocas += $h->moved;
+                $this->bodyAppend($bodyPath, $piece);
+                $bodyBytes += \strlen($piece);
+                $piece = '';
             }
-            $bodyBytes += \strlen($extraBodies);
-            unset($extraBodies);
+            unset($extraParts);
             \Compile\Stats::line('IR: extra bodies appended');
             $this->drainLazyHelpers($appendStreamedBody);
             \Compile\Stats::line('IR: lazy helpers drained');
@@ -1341,6 +1435,8 @@ final class EmitLlvm implements EmitVisitor
                 . (string)$fileHoistThreshold . ')');
             $this->rootSnapshot('post-extra-body-merge', $module, true, $bodyBytes);
         } else {
+            $extraBodies = \implode('', $extraParts);
+            unset($extraParts);
             $functionBodyChunks[] = $extraBodies;
             $bodyBytes += \strlen($extraBodies);
             // The buffered path needs the same drain. Streaming grew one and the
@@ -1378,9 +1474,13 @@ final class EmitLlvm implements EmitVisitor
         $this->drainLazyHelpers(function (string $body, string $label) use (&$late): void { $late .= $body; });
         $preamble .= $late;
         unset($late);
+        // Last: every table that names a shared metadata string is out by now.
+        $preamble .= $this->metaStrDefs;
+        $this->metaStrDefs = '';
         \Compile\Stats::step('  emit preamble', $statT, -1, -1);
         \Compile\Stats::line('IR: preamble ' . (string)\strlen($preamble) . ' bytes');
         if ($streaming) {
+            $this->bodyFlush($bodyPath);
             $statT = \Compile\Stats::begin('  hoist allocas (streamed)');
             $preambleBytes = \strlen($preamble);
             if ($spooled) {
@@ -2371,6 +2471,35 @@ final class EmitLlvm implements EmitVisitor
         return $base . '_m' . $this->modToken;
     }
 
+    /** @var array<string, bool> helper names {@see keyedHelperName} handed out in this module */
+    private array $keyedHelperTaken = [];
+
+    /**
+     * A shared helper's name from its cache key. A running number renamed every
+     * later helper whenever one was added, so a one-function edit changed every
+     * caller of those helpers and most split parts missed the object cache.
+     */
+    private function keyedHelperName(string $prefix, string $key): string
+    {
+        // The same key always gets the same name: a shape whose body did not close is
+        // asked for again later, and a fresh suffix then depended on emission order.
+        $full = $prefix . '|' . $key;
+        if (isset($this->keyedHelperNames[$full])) { return $this->keyedHelperNames[$full]; }
+        $base = $prefix . \str_replace('-', 'n', (string)$this->fnvHash64($key));
+        $name = $base;
+        $n = 0;
+        while (isset($this->keyedHelperTaken[$name])) {
+            $n = $n + 1;
+            $name = $base . '_' . (string)$n;
+        }
+        $this->keyedHelperTaken[$name] = true;
+        $this->keyedHelperNames[$full] = $name;
+        return $name;
+    }
+
+    /** @var array<string, string> prefix|key => the name {@see keyedHelperName} gave it */
+    private array $keyedHelperNames = [];
+
     private string $vdExtraBodies = '';
 
     /** The module's shared erased-receiver clone ({@see EmitLlvmObjects::emitCloneErased}), once emitted. */
@@ -2426,6 +2555,10 @@ final class EmitLlvm implements EmitVisitor
     private array $classlessCandidatesMemo = [];
 
     private int $litTableCount = 0;
+    /** @var array<string, string> prefix + initializer => its literal table symbol */
+    private array $litTableSyms = [];
+    /** @var array<string, bool> */
+    private array $litTableTaken = [];
     /** @var array<string, string> class name => its instance template symbol, '' = none ({@see EmitLlvmObjects::objInitTemplate}) */
     private array $objTemplates = [];
     /** `litTableBodies` is already in the output: a template minted now would never be defined. */
@@ -2437,6 +2570,8 @@ final class EmitLlvm implements EmitVisitor
     private bool $dynfIcmpEmitted = false;
     private bool $dynfZeroEmitted = false;
     private int $dynfCacheSeq = 0;
+    /** @var array<string, int> function => resolve-cache sites emitted in it so far */
+    private array $dynfCacheSeqByFn = [];
     /** @var array{0:string,1:int,2:array<string,int>}|null */
     private ?array $dynfIdTab = null;
     /** Signature-only imports (their bodies live in another object).
@@ -4503,6 +4638,16 @@ final class EmitLlvm implements EmitVisitor
     private function btPush(string $display, int $line): string
     {
         if (!$this->rt->needsBacktrace) { return ''; }
+        if ($this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa) {
+            // Inside a shared helper: the call site's absolute line and file are its arguments.
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), $this->btLineOverride, '', $this->btFileOverride);
+        }
+        if ($this->cellSinkFnOverride !== null) {
+            // Any other shared helper has no call site of its own (its nodes carry
+            // line 0); relative to the frame that first asked for it, the push named
+            // that frame's base line and changed with whoever asked first.
+            return $this->btPushInline($this->strLitId($this->pool->intern($display)), '0', '', 'null');
+        }
         $fn = $this->frame->name;
         if ($fn === '') {
             return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '',

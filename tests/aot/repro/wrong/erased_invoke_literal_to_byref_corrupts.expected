@@ -1,0 +1,2 @@
+ret 'closure'
+Error: {closure}(): Argument #1 ($x) could not be passed by reference

@@ -184,6 +184,13 @@ final class InferTypes implements Pass
         return $acc;
     }
 
+    private function signatureFingerprint(FunctionDef $fn): int
+    {
+        $acc = $this->typeCode($fn->returnType);
+        foreach ($fn->params as $p) { $acc = $this->fpMix($acc, $this->typeCode($p->type)); }
+        return $acc;
+    }
+
     private function fpMix(int $acc, int $v): int
     {
         return (($acc * 131) + $v) & 4503599627370495;
@@ -436,15 +443,23 @@ final class InferTypes implements Pass
         }
         /** @var array<string, int> $visits */
         $visits = [];
+        $startNs = \Compile\Stats::now();
+        $moved = 0;
         for ($i = 0; $i < \count($queue); $i = $i + 1) {
             $fn = $queue[$i];
             unset($pending[$fn->name]);
             $visits[$fn->name] = ($visits[$fn->name] ?? 0) + 1;
             $before = $this->typeFingerprint($fn);
+            $sigBefore = $this->signatureFingerprint($fn);
             $this->inferFunction($fn);
             $this->noteTypeChange($fn);
             if ($this->typeFingerprint($fn) === $before) { continue; }
-            foreach ($graph->neighbors($fn->name) as $nb => $unused) {
+            $moved = $moved + 1;
+            // A signature that held still is invisible to callers: only the types
+            // this body passes down moved, and those reach its callees alone.
+            $next = $this->signatureFingerprint($fn) === $sigBefore
+                ? $graph->calleesOfFn($fn->name) : $graph->neighbors($fn->name);
+            foreach ($next as $nb => $unused) {
                 if (isset($pending[$nb]) || ($visits[$nb] ?? 0) >= 4) { continue; }
                 $nfn = $this->fnByName[$nb] ?? null;
                 if ($nfn === null) { continue; }
@@ -454,6 +469,7 @@ final class InferTypes implements Pass
             }
         }
         if (\Compile\Stats::$on) {
+            \Compile\Stats::line('    propagate ' . $reason . ' seed=' . (string)\count($seed) . ' visits=' . (string)\count($queue) . ' moved=' . (string)$moved . ' ms=' . (string)\intdiv(\Compile\Stats::now() - $startNs, 1000000));
             \Compile\Stats::bump('infer.rescan.' . $reason . '.calls', 1);
             \Compile\Stats::bump('infer.rescan.' . $reason . '.functions', \count($queue));
             \Compile\Stats::line('    propagate ' . $reason . ' seed=' . (string)\count($seed) . ' visited=' . (string)\count($queue));
@@ -479,6 +495,36 @@ final class InferTypes implements Pass
     }
 
     /**
+     * A LIGHT round after {@see Monomorphize} spliced new functions `$seed` into
+     * the module: register them, then re-infer them and everything that calls
+     * them, with the tables of this instance's last {@see run}. No module scan
+     * runs; the next full inference covers these bodies.
+     * @param array<string, bool> $seed
+     */
+    public function reinferAfterSplice(Module $module, array $seed): void
+    {
+        foreach ($module->functions as $fn) {
+            if (!isset($seed[$fn->name])) { continue; }
+            if (!isset($module->declaredReturnTypes[$fn->name])) {
+                $module->declaredReturnTypes[$fn->name] = $fn->returnType;
+            }
+            $this->sigs[$fn->name] = $fn->returnType;
+            $this->fnByName[$fn->name] = $fn;
+            if ($fn->returnType->kind === Type::KIND_UNKNOWN && !$fn->isExtern) {
+                $this->undeclaredReturnFns[$fn->name] = true;
+            }
+        }
+        $this->declaredReturns = $module->declaredReturnTypes;
+        $this->callGraph = null;
+        $this->bodyKinds = [];
+        $all = $seed;
+        foreach ($seed as $name => $unused) {
+            foreach ($this->depGraph($module)->neighbors($name) as $nb => $alsoUnused) { $all[$nb] = true; }
+        }
+        $this->inferPropagating($module, 'mono_light', $all);
+    }
+
+    /**
      * Every node type of every function in `$names`, as one string: equal
      * digests mean a re-inference moved nothing there. By Type INSTANCE: one id
      * is one type, and two equal types that are separate objects only cost
@@ -495,6 +541,24 @@ final class InferTypes implements Pass
             $acc .= $fn->name . '=' . \implode(',', $this->digestIds) . ';';
         }
         return $acc;
+    }
+
+    /**
+     * A hash of every node's exact type in one function, for a table that
+     * outlives the run. By content, not instance as {@see bodyTypeDigest} is: an
+     * inference rebuilds its shapes, so their ids move while the types do not.
+     */
+    private function bodyDigest(FunctionDef $fn): int
+    {
+        $acc = 0;
+        $this->exactDigestNode($fn->body, $acc);
+        return $acc;
+    }
+
+    private function exactDigestNode(Node $n, int &$acc): void
+    {
+        $acc = $this->fpMix($acc, \crc32($n->type->exactString()));
+        foreach (Walk::children($n) as $c) { $this->exactDigestNode($c, $acc); }
     }
 
     /** @var int[] */
@@ -542,10 +606,9 @@ final class InferTypes implements Pass
         }
         foreach ($functions as $fn) { $this->inferFunction($fn); $this->noteTypeChange($fn); }
         if (\Compile\Stats::$on) {
-            \Compile\Stats::bump('infer.rescan.' . $reason . '.ms',
-                \intdiv(\Compile\Stats::now() - $startNs, 1000000));
-            \Compile\Stats::line('    rescan ' . $reason . ' fns=' . (string)\count($functions) . ' '
-                . (string)\intdiv(\Compile\Stats::now() - $startNs, 1000000) . 'ms');
+            $ms = \intdiv(\Compile\Stats::now() - $startNs, 1000000);
+            \Compile\Stats::bump('infer.rescan.' . $reason . '.ms', $ms);
+            \Compile\Stats::line('    rescan ' . $reason . ' fns=' . (string)\count($functions) . ' ms=' . (string)$ms);
         }
     }
 
@@ -772,6 +835,9 @@ final class InferTypes implements Pass
 
     /** @var array<string, string[]> `Recv::method` → the classes whose body a virtual call can reach */
     private array $virtualBodies = [];
+
+    /** @var array<string, bool> method name → is it answered by `__call` alone ({@see erasedMagicCallReturn}) */
+    private array $erasedMagicAnswers = [];
 
     /** @var array<string, string[]> class/interface name → every class under it, itself included */
     private array $subtypesOf = [];
@@ -1165,11 +1231,34 @@ final class InferTypes implements Pass
         $guard = 0;
         while ($guard < 4) {
             $targets = $this->untypedAssocKeyStoreFunctions($module);
+            // A body re-inference left unmoved earlier, and that still has those
+            // types, would only stay put again. These matches are mostly genuine
+            // vecs, so across runs nearly all of the work was this.
+            /** @var array<string, int> $before */
+            $before = [];
+            foreach ($module->functions as $fn) {
+                if (!isset($targets[$fn->name])) { continue; }
+                $d = $this->bodyDigest($fn);
+                if (($module->inferAssocKeySettled[$fn->name] ?? -1) === $d) {
+                    unset($targets[$fn->name]);
+                } else {
+                    $before[$fn->name] = $d;
+                }
+            }
             if (\count($targets) === 0) { break; }
-            $before = $this->bodyTypeDigest($module, $targets);
             $this->inferFunctionsForScope($module, 'assoc_key', $targets);
             $guard = $guard + 1;
-            if ($this->bodyTypeDigest($module, $targets) === $before) { break; }
+            $moved = false;
+            foreach ($module->functions as $fn) {
+                if (!isset($targets[$fn->name])) { continue; }
+                $d = $this->bodyDigest($fn);
+                if ($d === $before[$fn->name]) {
+                    $module->inferAssocKeySettled[$fn->name] = $d;
+                } else {
+                    $moved = true;
+                }
+            }
+            if (!$moved) { break; }
         }
         // Element erasure on a LOCAL: `$out = []` whose only clue is a store of an
         // already-CELL value (`$out[$k] = $v`). The pre-inference scan can't type a
@@ -1361,6 +1450,7 @@ final class InferTypes implements Pass
         $module->inferByRefCaptureCellLocals = $this->byRefCaptureCellLocals;
         $module->inferGlobalVarTypes = $this->globalVarTypes;
         $module->inferByRefCaptureElemLocals = $this->byRefCaptureElemLocals;
+        if ($this->scopeNames === null && \Compile\Mir\ShadowDeps::enabled()) { \Compile\Mir\ShadowDeps::observe($module); }
         $module->markPassApplied(self::NAME);
         if (\Compile\Stats::$on) {
             \Compile\Stats::bump('infer.t.pre_scans_ms', \intdiv($tWalk - $tRun, 1000000));

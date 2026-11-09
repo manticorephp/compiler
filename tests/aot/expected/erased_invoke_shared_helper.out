@@ -1,0 +1,21 @@
+array (
+  0 => NULL,
+) array (
+  0 => true,
+) array (
+  0 => 3,
+)
+'inv:NULL' 'inv:true' 'inv:3'
+'m:NULL' 'm:true' 'm:3'
+'s:NULL' 's:true' 's:3'
+8 42
+boom 'a' at 26
+boom 'b' at 26
+'set'
+2
+array (
+  0 => 0,
+  1 => 'pushed',
+)
+new
+kept

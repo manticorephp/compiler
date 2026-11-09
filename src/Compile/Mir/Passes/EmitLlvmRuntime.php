@@ -1998,8 +1998,7 @@ trait EmitLlvmRuntime
         foreach ($byLower as $mn) {
             $mm = $cls->methodMeta[$mn];
             if ($mn === '__construct' || $mn === '__call') { continue; }
-            $nameSym = '@.dynm.name.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($nameSym, $mn);
+            $nameRef = $this->metaStrRef((string)$mn);
             $trampFld = 'null';
             if (\Compile\Mir\Passes\TrampolineSynth::invokable($mm)) {
                 $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
@@ -2013,15 +2012,13 @@ trait EmitLlvmRuntime
             // name and route the call to the old semantic fallback before trying
             // the class's __call handler.
             $declName = \ltrim($mm->declaringClass !== '' ? $mm->declaringClass : $cls->name, '\\');
-            $declSym = '@.dynm.decl.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($declSym, $declName);
             $vis = match ($mm->visibility) {
                 'private' => \Compile\MemoryAbi::DYN_METHOD_VIS_PRIVATE,
                 'protected' => \Compile\MemoryAbi::DYN_METHOD_VIS_PROTECTED,
                 default => \Compile\MemoryAbi::DYN_METHOD_VIS_PUBLIC,
             };
             $rows[] = \Compile\Mir\RuntimeLibrary::dynamicMethodRow(
-                $this->strSymBytes($nameSym), $trampFld, $this->strSymBytes($declSym), $vis);
+                $nameRef, $trampFld, $this->metaStrRef($declName), $vis);
             $i = $i + 1;
         }
         // A class may have no ordinary fixed-shape methods but still need a
@@ -2083,8 +2080,6 @@ trait EmitLlvmRuntime
         $defs = '';
         $i = 0;
         foreach ($methodMeta as $mn => $mm) {
-            $sym = '@.rmeta.m.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($sym, $mn);
             $pp = $this->rmetaParamTable($mm, $id, $i, $clsName);
             $defs .= $pp[0];
             $mdecl = $mm->declaringClass !== '' ? $mm->declaringClass : $clsName;
@@ -2093,20 +2088,16 @@ trait EmitLlvmRuntime
             // Always a real string (empty when untyped), never a null pointer:
             // hasReturnType()/getReturnType() compare it to "" BY VALUE, and a
             // null pointer read back is 0, which is `!== ""` — a false positive.
-            $rsym = '@.rmeta.mret.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($rsym, $mm->returnType);
-            $retFld = $this->strSymBytes($rsym);
-            $dsym = '@.rmeta.mdecl.' . $id . '.' . (string)$i;
-            $defs .= $this->strGlobalDef($dsym, $mdecl);
+            $retFld = $this->metaStrRef($mm->returnType);
             $rows[] = \Compile\Mir\RuntimeLibrary::rmetaRow(
-                $this->strSymBytes($sym),
+                $this->metaStrRef((string)$mn),
                 $this->memberFlags($mm->visibility, $mm->isStatic, $mm->isAbstract, $mm->isFinal, false)
                     | $this->metaIsDeprecated($mm),
                 $cls === null ? 'null' : $this->methodTrampField($cls, $mm, $mn),
                 $this->methodArity($mm),
                 \count($mm->params),
                 $pp[1],
-                $ap[1], $ap[2], $retFld, $this->strSymBytes($dsym));
+                $ap[1], $ap[2], $retFld, $this->metaStrRef($mdecl));
             $i = $i + 1;
         }
         $pair = \Compile\Mir\RuntimeLibrary::rmetaTable('@.rmeta.mt.' . $id, $rows);
@@ -2137,9 +2128,7 @@ trait EmitLlvmRuntime
         $defs = '';
         $pi = 0;
         foreach ($mm->params as $pm) {
-            $nsym = '@.rmeta.pmn.' . $id . '.' . (string)$mi . '.' . (string)$pi;
-            $defs .= $this->strGlobalDef($nsym, $pm->name);
-            $names[] = $this->strSymBytes($nsym);
+            $names[] = $this->metaStrRef($pm->name);
             $hint = $pm->typeHint;
             if ($hint !== '' && $hint[0] === '?') { $hint = \substr($hint, 1); }
             $f = 0;
@@ -2150,9 +2139,7 @@ trait EmitLlvmRuntime
             if ($pm->byRef)             { $f = $f | \Compile\MemoryAbi::RMETA_PARAM_BYREF; }
             if ($pm->typeHint !== '') {
                 $f = $f | \Compile\MemoryAbi::RMETA_PARAM_HAS_TYPE;
-                $tsym = '@.rmeta.pmt.' . $id . '.' . (string)$mi . '.' . (string)$pi;
-                $defs .= $this->strGlobalDef($tsym, $hint);
-                $types[] = $this->strSymBytes($tsym);
+                $types[] = $this->metaStrRef($hint);
             } else {
                 $types[] = 'null';
             }
@@ -2715,7 +2702,13 @@ trait EmitLlvmRuntime
             foreach ($cls->propertyNames as $pn) {
                 if (($cls->propertyTypes[$pn] ?? null) !== null) { $hasProps = true; break; }
             }
+            // The props, visit and compare views are functions of their own: each numbers
+            // its registers afresh, or every one took the counters the module's last
+            // function left behind, and one edit anywhere rewrote all of them.
+            $viewSsa = $this->ssa;
             if (($hasProps || $cls->usesBag()) && !$cls->isStruct) {
+                $this->ssa = new \Compile\Mir\SsaBuilder();
+                $this->ssa->reset();
                 $pIr = $this->emitDeclaredPropsArray('%o', $cls->name, true);
                 $pRes = $this->lastValue;
                 // …then the DYNAMIC bag, in php's order: declared first, then
@@ -2748,9 +2741,12 @@ trait EmitLlvmRuntime
                 // DESCRIPTOR_VISIT_FN_OFFSET}): what the json encoder reads, so
                 // an object costs no map.
                 $vsym = \Compile\Mir\RuntimeLibrary::visitFnSymbol((int)$id);
+                $this->ssa = new \Compile\Mir\SsaBuilder();
+                $this->ssa->reset();
                 $defs .= 'define void ' . $vsym . "(ptr %o, ptr %ctx, ptr %cb) {\nentry:\n"
                     . $this->emitDeclaredPropsVisit($cls->name) . "  ret void\n}\n";
                 $visitFld = 'ptr ' . $vsym;
+                $this->ssa = $viewSsa;
             }
             // The COMPARE view and group ({@see \Compile\MemoryAbi::
             // DESCRIPTOR_CMP_VIEW_FN_OFFSET}). Same derivation rule as the props
@@ -2769,6 +2765,8 @@ trait EmitLlvmRuntime
             } elseif (($hasProps || $cls->usesBag()) && !$cls->isStruct) {
                 $keyed = $this->cmpKeyProps($cls);
                 if ($keyed !== []) { $cmpGroup = \Compile\MemoryAbi::CMP_GROUP_KEYED; }
+                $this->ssa = new \Compile\Mir\SsaBuilder();
+                $this->ssa->reset();
                 $cIr = $this->emitDeclaredPropsArray('%o', $cls->name, false, true);
                 $cRes = $this->lastValue;
                 if ($keyed === [] && $cls->usesBag()) {
@@ -2788,6 +2786,7 @@ trait EmitLlvmRuntime
                     . '  %cvi = ptrtoint ptr ' . $cRes . " to i64\n"
                     . "  ret i64 %cvi\n}\n";
                 $cmpViewFld = 'ptr ' . $csym;
+                $this->ssa = $viewSsa;
             }
             // Reflection metadata — only for classes reflection can actually
             // reach ({@see ReflectAnalysis}). A class outside the set keeps

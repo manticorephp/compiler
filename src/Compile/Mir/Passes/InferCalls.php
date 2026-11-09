@@ -1119,15 +1119,19 @@ trait InferCalls
      */
     private function erasedMagicCallReturn(string $method): ?Type
     {
-        $magic = null;
+        $known = $this->erasedMagicAnswers[$method] ?? null;
+        if ($known !== null) { return $known ? Type::cell() : null; }
+        $magic = false;
         foreach ($this->classes as $cd) {
-            if ($this->resolveMethodClass($cd->name, $method) !== '') { return null; }
-            if ($magic === null && $this->classDefinesMagic($cd->name, '__call')) {
-                // Any value may sit behind an erased receiver (a closure, null): __call answers only some.
-                $magic = Type::cell();
+            if ($this->resolveMethodClass($cd->name, $method) !== '') {
+                $this->erasedMagicAnswers[$method] = false;
+                return null;
             }
+            $magic = $magic || $this->classDefinesMagic($cd->name, '__call');
         }
-        return $magic;
+        $this->erasedMagicAnswers[$method] = $magic;
+        // Any value may sit behind an erased receiver (a closure, null): __call answers only some.
+        return $magic ? Type::cell() : null;
     }
 
     /** Whether `$class` (or an ancestor) implements `$iface`, transitively
