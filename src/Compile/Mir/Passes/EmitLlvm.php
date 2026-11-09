@@ -3032,12 +3032,13 @@ final class EmitLlvm implements EmitVisitor
 
     // Generator frame layout:
     //   resume_fn@0, state@8, current@16, key@24, nextkey@32,
-    //   sent@40, retval@48, locals@56+
+    //   sent@40, retval@48, env@56, locals@64+
     // state: 0 = not started, k = suspended at yield k, -1 = finished (or
     // running: the resume entry stores it, a yield overwrites it);
     // -2 - s = being destroyed from state s (`__mir_gen_destroy`).
-    // The frame owns current / key / sent / retval, each a tagged cell.
-    private const GEN_HEADER = 56;
+    // The frame owns current / key / sent / retval / env, each a tagged cell;
+    // env is a closure generator's own closure (its captures are read from it).
+    private const GEN_HEADER = 64;
 
     /** Count `yield` nodes in a generator body (state-machine arity). */
     private function countYields(Node $n): int
@@ -4376,6 +4377,11 @@ final class EmitLlvm implements EmitVisitor
         // while the array still held it.
         if ($k !== Type::KIND_STRING && $k !== Type::KIND_OBJ && $k !== Type::KIND_UNION
             && $k !== Type::KIND_CLOSURE && !$borrowedCellArray) {
+            return '';
+        }
+        // `(array)` over a minting operand ({@see \Compile\Mir\Ownership::castArrayMints})
+        // hands its +1 on: retained again, `$out[$k] = (array) resolve($n)` leaked it.
+        if ($value instanceof \Compile\Mir\Cast && \Compile\Mir\Ownership::castArrayMints($value)) {
             return '';
         }
         $saveV = $this->lastValue;

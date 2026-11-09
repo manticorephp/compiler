@@ -517,7 +517,14 @@ trait EmitLlvmLocals
             $out = '  ' . $addr . ' = load i64, ptr ' . $this->locals->slots[$ll->name] . "\n";
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $addr . " to ptr\n";
-            $out .= '  ' . $reg . ' = load i64, ptr ' . $p . "\n";
+            if (isset($this->locals->refCellTargets[$ll->name]) && $this->isClosureValueType($ll->type)) {
+                // The box holds the env as an object cell (see the store): the closure ABI wants it raw.
+                $cw = $this->ssa->allocReg();
+                $out .= '  ' . $cw . ' = load i64, ptr ' . $p . "\n";
+                $out .= '  ' . $reg . ' = and i64 ' . $cw . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            } else {
+                $out .= '  ' . $reg . ' = load i64, ptr ' . $p . "\n";
+            }
         } else {
             $out = '  ' . $reg . ' = load i64, ptr ' . $this->locals->slots[$ll->name] . "\n";
         }
@@ -1333,7 +1340,20 @@ trait EmitLlvmLocals
             $sv = $sl->value;
             $out .= $this->refParamOverwriteIr($sl->name, $p, $val,
                 $sv instanceof \Compile\Mir\LoadLocal && $sv->name === $sl->name, $sl->type);
-            $out .= '  store i64 ' . $val . ', ptr ' . $p . "\n";
+            // A reference box holds a CELL ({@see EmitLlvmModule::ownedBoxFlavor}), and a
+            // closure env rides raw: stored untagged, the box's cell drop and every cell
+            // retain read it as a number and skipped it, so the closure — and all it
+            // captured — leaked (Laravel's `$default` in Router::substituteImplicitBindings,
+            // a by-ref-able local). Tag it as the object cell it is; a read unboxes it.
+            $boxed = $val;
+            if (isset($this->locals->refCellTargets[$sl->name])
+                && ($this->isClosureValueType($sl->type) || $this->isClosureValueType($sv->type))) {
+                $pl = $this->ssa->allocReg();
+                $boxed = $this->ssa->allocReg();
+                $out .= '  ' . $pl . ' = and i64 ' . $val . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+                $out .= '  ' . $boxed . ' = or i64 ' . $pl . ', ' . (string)\Compile\MemoryAbi::CELL_OBJ . "\n";
+            }
+            $out .= '  store i64 ' . $boxed . ', ptr ' . $p . "\n";
         } else {
             // Release-before-overwrite, where OwnershipFlow owns the old value.
             $out .= $this->ownOldIr($sl);

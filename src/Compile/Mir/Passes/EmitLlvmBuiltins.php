@@ -9552,6 +9552,10 @@ trait EmitLlvmBuiltins
         $this->rt->needsStrcmp = true;
         $out = $this->emitNode($args[0]);
         $out .= $this->coerceToI64();
+        // A minted subject (`strval($x)` — what an erased subject is unboxed by,
+        // {@see biIsA} — or `strtolower(...)`) is consumed by the compares and
+        // dropped here: Laravel's Container::build leaked one class name per make().
+        $fresh = $this->isFreshStringTemp($args[0]) ? $this->lastValue : '';
         $strP = $this->ssa->allocReg();
         $out .= '  ' . $strP . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
         $out .= $this->emitNode($args[1]);
@@ -9569,6 +9573,7 @@ trait EmitLlvmBuiltins
             $out .= '  ' . $or . ' = or i1 ' . $acc . ', ' . $eq . "\n";
             $acc = $or;
         }
+        if ($fresh !== '') { $out .= $this->rcReleaseReg($fresh, 'str'); }
         if ($acc === '') { return $this->biConstBool($out, false); }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = zext i1 ' . $acc . " to i64\n";

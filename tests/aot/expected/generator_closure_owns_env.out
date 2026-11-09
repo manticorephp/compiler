@@ -1,0 +1,7 @@
+lit1
+lit2
+drop lit
+condA
+condB
+drop cond
+end

@@ -1027,14 +1027,19 @@ function clang_opt_level(): string
 
 function clang_tuning_flags(): string
 {
+    // The MachineOutliner is a MODULE pass at the end of codegen, so every
+    // MachineFunction of the module stays alive until it runs: one Laravel part
+    // (193 MB bitcode) peaked at 13.7 GB RSS with it, 4.65 GB without, for a
+    // 1.5% bigger object. arm64 schedules it by default.
+    $f = ' -mllvm -enable-machine-outliner=never';
     if (\Compile\Debug::$asan) {
-        return ' -fsanitize=address -mllvm -asan-stack=0 -mllvm -asan-globals=0';
+        return $f . ' -fsanitize=address -mllvm -asan-stack=0 -mllvm -asan-globals=0';
     }
     $e = \getenv("MANTICORE_FAT_FUNCTION_SPLIT");
     if ($e !== false && $e !== "" && $e !== "0" && $e !== "off") {
-        return " -mllvm -enable-split-machine-functions";
+        return $f . " -mllvm -enable-split-machine-functions";
     }
-    return "";
+    return $f;
 }
 
 /**

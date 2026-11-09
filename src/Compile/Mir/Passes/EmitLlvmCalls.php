@@ -1867,11 +1867,13 @@ trait EmitLlvmCalls
         // `($this->hooks[$k])()` calls an env the ELEMENT owns, and the body
         // may take it off its slot (a hook that unregisters itself), which now
         // gives the count back. Hold one for the call, as php does.
+        $calleeCallOwned = $this->calleeIsOwnedCall($iv->callee);
         if (!$this->invokePinsCallee($iv, $iv->callee)) {
             // A closure LITERAL callee (`(function () use ($x) {…})()`) is a fresh +1
-            // nobody else binds: give it back once the call returns.
-            // A generator closure is the exception: the Generator keeps borrowing the env.
-            if ($iv->callee->kind === Node::KIND_CLOSURE && !$n->type->isGenerator()) {
+            // nobody else binds, and so is a conditional's (`($cb ?? $default)()` retains
+            // the arm it picked): give it back once the call returns. A generator closure
+            // holds its own env in the frame ({@see EmitLlvmGenerator}), so it is no exception.
+            if ($iv->callee->kind === Node::KIND_CLOSURE || $this->condOwnsResult($iv->callee) || $calleeCallOwned) {
                 $this->rt->needsClosureRc = true;
                 $env = $this->lastValue;
                 $out .= $this->emitClosureStructInvoke($n, $env);
@@ -1966,13 +1968,36 @@ trait EmitLlvmCalls
     }
 
 
+    /**
+     * A callee that is a call's result is +1 under the return convention — a method, a
+     * static method, an invoke, or a body this module defines (not a builtin, not by
+     * reference) — and nothing else binds it: `call_user_func($this->getRouteResolver())`
+     * leaked Laravel's route resolver closure, with the Route it captured, per request.
+     * Read right after the callee was emitted ({@see $lastCallWasBuiltin}).
+     */
+    private function calleeIsOwnedCall(Node $c): bool
+    {
+        $k = $c->kind;
+        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) { return true; }
+        if ($k !== Node::KIND_CALL || $this->lastCallWasBuiltin) { return false; }
+        $fn = $c->function;
+        return isset($this->sigs->paramTypes[$fn]) && !($this->sigs->returnsByRef[$fn] ?? false);
+    }
+
     private function emitErasedInvoke(Invoke_ $n): string
     {
         $shared = $this->erasedInvokeShareable($n);
         $out = $this->emitNode($n->callee);
-        // The `[$c, $m]` of `$c::$m()` has no other owner. Only an array: a generator keeps borrowing
-        // the closure that made it, and an erased result does not say whether it is one.
-        $calleeFlavor = $n->callee->type->isArray() ? $this->freshRcArgFlavor($n->callee) : '';
+        // The `[$c, $m]` of `$c::$m()` has no other owner, nor has a conditional's pick
+        // (`call_user_func($this->cb ?? $default, …)` retained `$default` and leaked it
+        // with everything it captured, per Laravel request). A generator closure holds
+        // its own env ({@see EmitLlvmGenerator}), so releasing after the call is safe.
+        $calleeFlavor = $n->callee->type->isArray() ? $this->freshRcArgFlavor($n->callee)
+            : ($this->condOwnsResult($n->callee) ? $this->condFlavor($n->callee->type)
+            : ($n->callee->kind === Node::KIND_CLOSURE ? 'closure'
+            : ($n->callee->type->kind === Type::KIND_CELL && $this->calleeIsOwnedCall($n->callee) ? 'cell'
+            : (($n->callee->type->kind === Type::KIND_CLOSURE || $n->callee->type->kind === Type::KIND_UNKNOWN)
+                && $this->calleeIsOwnedCall($n->callee) ? 'callable' : ''))));
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         /** @var array<string, string> $owned */
@@ -1987,7 +2012,7 @@ trait EmitLlvmCalls
         if ($calleeFlavor !== '' && \str_starts_with($raw, '%')) {
             $resReg = $this->lastValue;
             $resTy = $this->lastValueType;
-            $out .= $this->rcReleaseReg($raw, $calleeFlavor);
+            $out .= $calleeFlavor === 'callable' ? $this->callableWordDropIr($raw) : $this->rcReleaseReg($raw, $calleeFlavor);
             $this->lastValue = $resReg;
             $this->lastValueType = $resTy;
         }
@@ -2289,6 +2314,48 @@ trait EmitLlvmCalls
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
+    }
+
+    /**
+     * Drop a `callable` word whose representation is only known at run time: a
+     * tagged cell, a raw closure env, a raw callable array or a raw object. A raw
+     * pointer is tagged by its allocator header (array magic at -8 → array cell,
+     * anything else → object cell, whose drop tells an object from a closure env)
+     * and dropped as that cell. `call_user_func($this->getRouteResolver())` with
+     * `@return \Closure` leaked Laravel's route resolver and its Route per request.
+     */
+    private function callableWordDropIr(string $w): string
+    {
+        $this->rt->needsTagged = true;
+        $tagL = $this->ssa->allocLabel('cwd.tag');
+        $rawL = $this->ssa->allocLabel('cwd.raw');
+        $ptrL = $this->ssa->allocLabel('cwd.ptr');
+        $endL = $this->ssa->allocLabel('cwd.end');
+        $istag = $this->ssa->allocReg();
+        $out = '  ' . $istag . ' = icmp ugt i64 ' . $w . ', ' . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
+        $out .= '  br i1 ' . $istag . ', label %' . $tagL . ', label %' . $rawL . "\n";
+        $out .= $tagL . ":\n  call void @__mir_cell_drop(i64 " . $w . ")\n  br label %" . $endL . "\n";
+        $big = $this->ssa->allocReg();
+        $out .= $rawL . ":\n  " . $big . ' = icmp ugt i64 ' . $w . ', ' . (string)\Compile\MemoryAbi::CELL_OBJ_MIN_PAYLOAD . "\n";
+        $out .= '  br i1 ' . $big . ', label %' . $ptrL . ', label %' . $endL . "\n";
+        $p = $this->ssa->allocReg();
+        $hp = $this->ssa->allocReg();
+        $h = $this->ssa->allocReg();
+        $hm = $this->ssa->allocReg();
+        $isArr = $this->ssa->allocReg();
+        $tag = $this->ssa->allocReg();
+        $cell = $this->ssa->allocReg();
+        $out .= $ptrL . ":\n  " . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $out .= '  ' . $hp . ' = getelementptr inbounds i8, ptr ' . $p . ", i64 -8\n";
+        $out .= '  ' . $h . ' = load i64, ptr ' . $hp . "\n";
+        // Array buffers carry RC_TAG_MAGIC + 1..3 at -8 (vec / hashed / arena), an object + 0.
+        $out .= '  ' . $hm . ' = sub i64 ' . $h . ', ' . (string)(\Compile\MemoryAbi::RC_TAG_MAGIC + 1) . "\n";
+        $out .= '  ' . $isArr . ' = icmp ult i64 ' . $hm . ", 3\n";
+        $out .= '  ' . $tag . ' = select i1 ' . $isArr . ', i64 ' . (string)\Compile\MemoryAbi::CELL_ARRAY_TAG_BITS
+              . ', i64 ' . (string)\Compile\MemoryAbi::CELL_OBJ . "\n";
+        $out .= '  ' . $cell . ' = or i64 ' . $w . ', ' . $tag . "\n";
+        $out .= '  call void @__mir_cell_drop(i64 ' . $cell . ")\n  br label %" . $endL . "\n";
+        return $out . $endL . ":\n";
     }
 
     /**
@@ -5041,7 +5108,16 @@ trait EmitLlvmCalls
                 $out = $this->coerceToI64();
                 return $out . $this->rcReleaseReg($this->lastValue, $pf);
             }
-            if ($this->lastCallWasBuiltin) { return ''; }
+            // A MINTING builtin (`json_decode('[]');`, `str_repeat(…);`) hands its
+            // result at +1 like a body does; nothing binds it, so drop it here —
+            // Laravel's JsonResponse::setData leaked one array per request. A
+            // borrowing builtin classifies Borrow and is left alone.
+            if ($this->lastCallWasBuiltin) {
+                if ($this->own->classifyTemp($s, true) <= 0) { return ''; }
+                $bf = $this->isClosureValueType($s->type) ? 'closure' : $this->discardReleaseFlavor($s->type);
+                if ($bf === '') { return ''; }
+                return $this->coerceToI64() . $this->rcReleaseReg($this->lastValue, $bf);
+            }
             if (!isset($this->sigs->paramTypes[$fname])) { return ''; }
             // Value context derefs the address and takes a +1 copy
             // ({@see byRefValueCopyRetainIr}). Only an array copy is counted; a raw
