@@ -4049,6 +4049,11 @@ trait EmitLlvmExpr
         $c = $n;
         $ok = $c->operand->type->kind;
         $out = $c->target === 'float' ? $this->emitNodeFloatSink($c->operand) : $this->emitNode($c->operand);
+        // Every arm of a runtime-dispatched `(array)` takes its own count (the array arm
+        // retains, `[$v]` co-owns $v), so an OWNED temp operand is dead after it:
+        // `(array) Resolver::resolve($name)` leaked the resolved array per Laravel request.
+        $castOperandOwned = $c->target === 'array'
+            && $this->own->classifyTemp($c->operand, $this->lastCallWasBuiltin) > 0;
         // `(array) new Bag()` / `(array) make()`: the object is a temp with no
         // other owner; the array result co-owns everything it copied out.
         $castObjFlavor = $c->target === 'array' && $ok === Type::KIND_OBJ
@@ -4401,6 +4406,7 @@ trait EmitLlvmExpr
                 $out .= '  store ptr ' . $one . ', ptr ' . $slot . "\n";
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $endL . ":\n";
+                if ($castOperandOwned) { $out .= '  call void @__mir_cell_drop(i64 ' . $v . ")\n"; }
                 $res = $this->ssa->allocReg();
                 $out .= '  ' . $res . ' = load ptr, ptr ' . $slot . "\n";
                 $this->lastValue = $res;

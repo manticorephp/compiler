@@ -1933,6 +1933,15 @@ final class Ownership
     {
         if ($c->target !== 'array') { return false; }
         $ok = $c->operand->type->kind;
+        // An ARRAY operand passes through, and with it its count: a fresh +1 producer's
+        // result stays owned. Read as a borrow, `fn ($n) => (array) R::resolve($n)` was
+        // retained again on return and the resolved array leaked (Laravel's
+        // Router::resolveMiddleware, once per request).
+        if ($ok === Type::KIND_ARRAY) {
+            $k = $c->operand->kind;
+            return $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+                || $k === Node::KIND_INVOKE || $k === Node::KIND_ARRAY_LIT;
+        }
         // An OBJECT mints too: its declared slots are built into a fresh assoc
         // (and a bag-only class's bag is retained). Read as a borrow, the
         // result was retained again on return and never released in a local —

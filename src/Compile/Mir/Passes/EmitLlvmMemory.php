@@ -1092,6 +1092,10 @@ trait EmitLlvmMemory
         // borrowed arrays (alias / read) need a co-owner retain.
         // An array `+` is `__mir_array_union`'s fresh +1, a literal's twin.
         if ($tk === Type::KIND_ARRAY && ($k === Node::KIND_ARRAY_LIT || $k === Node::KIND_SPREAD || $k === Node::KIND_ADD)) { return ''; }
+        // `(array)` over a minting operand hands its +1 on ({@see \Compile\Mir\Ownership::castArrayMints}):
+        // `$out[$k] = (array) resolve($n)` retained it again and leaked the array.
+        if ($tk === Type::KIND_ARRAY && $valueNode instanceof \Compile\Mir\Cast
+            && \Compile\Mir\Ownership::castArrayMints($valueNode)) { return ''; }
         // String owned producer: a concat is a fresh +1; a literal is
         // immortal (retain is a sentinel no-op — skip it).
         if ($tk === Type::KIND_STRING

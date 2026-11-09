@@ -4379,6 +4379,11 @@ final class EmitLlvm implements EmitVisitor
             && $k !== Type::KIND_CLOSURE && !$borrowedCellArray) {
             return '';
         }
+        // `(array)` over a minting operand ({@see \Compile\Mir\Ownership::castArrayMints})
+        // hands its +1 on: retained again, `$out[$k] = (array) resolve($n)` leaked it.
+        if ($value instanceof \Compile\Mir\Cast && \Compile\Mir\Ownership::castArrayMints($value)) {
+            return '';
+        }
         $saveV = $this->lastValue;
         $saveT = $this->lastValueType;
         $out = $this->coerceToI64();

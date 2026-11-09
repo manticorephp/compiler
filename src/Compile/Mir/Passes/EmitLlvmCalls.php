@@ -1867,12 +1867,13 @@ trait EmitLlvmCalls
         // `($this->hooks[$k])()` calls an env the ELEMENT owns, and the body
         // may take it off its slot (a hook that unregisters itself), which now
         // gives the count back. Hold one for the call, as php does.
+        $calleeCallOwned = $this->calleeIsOwnedCall($iv->callee);
         if (!$this->invokePinsCallee($iv, $iv->callee)) {
             // A closure LITERAL callee (`(function () use ($x) {…})()`) is a fresh +1
             // nobody else binds, and so is a conditional's (`($cb ?? $default)()` retains
             // the arm it picked): give it back once the call returns. A generator closure
             // holds its own env in the frame ({@see EmitLlvmGenerator}), so it is no exception.
-            if ($iv->callee->kind === Node::KIND_CLOSURE || $this->condOwnsResult($iv->callee)) {
+            if ($iv->callee->kind === Node::KIND_CLOSURE || $this->condOwnsResult($iv->callee) || $calleeCallOwned) {
                 $this->rt->needsClosureRc = true;
                 $env = $this->lastValue;
                 $out .= $this->emitClosureStructInvoke($n, $env);
@@ -1967,6 +1968,22 @@ trait EmitLlvmCalls
     }
 
 
+    /**
+     * A callee that is a call's result is +1 under the return convention — a method, a
+     * static method, an invoke, or a body this module defines (not a builtin, not by
+     * reference) — and nothing else binds it: `call_user_func($this->getRouteResolver())`
+     * leaked Laravel's route resolver closure, with the Route it captured, per request.
+     * Read right after the callee was emitted ({@see $lastCallWasBuiltin}).
+     */
+    private function calleeIsOwnedCall(Node $c): bool
+    {
+        $k = $c->kind;
+        if ($k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL || $k === Node::KIND_INVOKE) { return true; }
+        if ($k !== Node::KIND_CALL || $this->lastCallWasBuiltin) { return false; }
+        $fn = $c->function;
+        return isset($this->sigs->paramTypes[$fn]) && !($this->sigs->returnsByRef[$fn] ?? false);
+    }
+
     private function emitErasedInvoke(Invoke_ $n): string
     {
         $shared = $this->erasedInvokeShareable($n);
@@ -1977,7 +1994,8 @@ trait EmitLlvmCalls
         // its own env ({@see EmitLlvmGenerator}), so releasing after the call is safe.
         $calleeFlavor = $n->callee->type->isArray() ? $this->freshRcArgFlavor($n->callee)
             : ($this->condOwnsResult($n->callee) ? $this->condFlavor($n->callee->type)
-            : ($n->callee->kind === Node::KIND_CLOSURE ? 'closure' : ''));
+            : ($n->callee->kind === Node::KIND_CLOSURE ? 'closure'
+            : ($n->callee->type->kind === Type::KIND_CELL && $this->calleeIsOwnedCall($n->callee) ? 'cell' : '')));
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         /** @var array<string, string> $owned */
