@@ -4654,6 +4654,12 @@ final class EmitLlvm implements EmitVisitor
             // that frame's base line and changed with whoever asked first.
             return $this->btPushInline($this->strLitId($this->pool->intern($display)), '0', '', 'null');
         }
+        if ($this->frame->isTrampoline) {
+            // A synthesized trampoline has no source line of its own (its nodes carry the
+            // synthetic source's, its file whichever was being lowered when it was made):
+            // the frame it pushes is located at its caller's site.
+            return '  call void @__mir_bt_push_site(ptr ' . $this->strLitId($this->pool->intern($display)) . ")\n";
+        }
         $fn = $this->frame->name;
         if ($fn === '') {
             return $this->btPushInline($this->strLitId($this->pool->intern($display)), (string)$line, '',
@@ -4675,6 +4681,22 @@ final class EmitLlvm implements EmitVisitor
             '@.btl.' . $this->mangle($fn),
             $this->strLitId($this->pool->intern($this->frameFile())),
         );
+    }
+
+    /**
+     * Leave this call site's line and file for the trampoline the next call enters
+     * ({@see btPush}): a dynamic dispatch reaches the method through one, and php
+     * places that frame at the site.
+     */
+    private function btSiteStore(int $line): string
+    {
+        if (!$this->rt->needsBacktrace) { return ''; }
+        $pre = '';
+        $args = $this->siteTraceArgs($line, $pre);
+        $cut = \strpos($args, ', ptr ');
+        if ($cut === false) { return ''; }
+        return $pre . '  store ' . \substr($args, 0, $cut) . ", ptr @__mir_bt_site_line\n"
+            . '  store ptr ' . \substr($args, $cut + 6) . ", ptr @__mir_bt_site_file\n";
     }
 
     /** The ring push inlined: store name+line at [depth] only while depth < 4096

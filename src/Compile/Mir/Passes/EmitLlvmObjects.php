@@ -6607,9 +6607,14 @@ trait EmitLlvmObjects
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $this->rt->needsStrcmp = true;
         $hit = $this->ssa->allocReg();
+        $out .= $this->btSiteStore($iv->line);
         $out .= '  ' . $hit . ' = call i1 @__mc_dyn_method_dispatch(i64 ' . $recvArg . ', ptr ' . $keyP
               . ', ptr ' . $argsP . ', ptr ' . $scopeArg . ', ptr ' . $relSym
               . ', i64 ' . (string)$relN . ', ptr ' . $res . ")\n";
+        if ($this->rt->needsBacktrace) {
+            // A miss ran no trampoline: the slots must not locate a later, unrelated one.
+            $out .= "  store i64 0, ptr @__mir_bt_site_line\n  store ptr null, ptr @__mir_bt_site_file\n";
+        }
         $endL = $this->ssa->allocLabel('dynd.end');
         $inlL = $this->ssa->allocLabel('dynd.inline');
         $out .= '  br i1 ' . $hit . ', label %' . $endL . ', label %' . $inlL . "\n";
@@ -10279,7 +10284,28 @@ trait EmitLlvmObjects
         return $out . $this->emitThrowIf($z, 'Error', 'Call to a member function ' . $n->method . '() on null');
     }
 
+    /** Line of the method call being emitted, for the calls it is rewritten into. */
+    private int $methodSiteLine = 0;
+
+    /**
+     * A method call is often emitted as other method calls built on the spot (the
+     * `__call` / plain split, a dynamic arm, an ArrayAccess desugar) that carry no
+     * line: the frame they push stood at line 0 — Twig's `->render()` through a
+     * receiver some class answers by `__call`, and ux-live-component could not find
+     * its template line (symfony-demo `/blog/search`, a 500). They take the line of
+     * the call they stand for.
+     */
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
+    {
+        if ($n->line === 0) { $n->line = $this->methodSiteLine; }
+        $prev = $this->methodSiteLine;
+        $this->methodSiteLine = $n->line;
+        $out = $this->emitMethodCallAt($n);
+        $this->methodSiteLine = $prev;
+        return $out;
+    }
+
+    private function emitMethodCallAt(\Compile\Mir\MethodCall_ $n): string
     {
         if ($this->isPtrReceiver($n->object)) {
             $pm = $this->emitPtrMember($n);
