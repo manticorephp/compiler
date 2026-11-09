@@ -10274,6 +10274,90 @@ trait EmitLlvmObjects
         return $sym;
     }
 
+    /** Can {@see magicCallHelper} take this call's arguments: no spread, and each a value whose box takes no reference. */
+    private function magicCallShareable(\Compile\Mir\MethodCall_ $mc): bool
+    {
+        foreach ($mc->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return false; }
+            $k = $a->type->kind;
+            if ($k !== Type::KIND_CELL && $k !== Type::KIND_UNKNOWN && $k !== Type::KIND_INT && $k !== Type::KIND_BOOL
+                && $k !== Type::KIND_FLOAT && $k !== Type::KIND_NULL && $k !== Type::KIND_STRING
+                && $k !== Type::KIND_OBJ) { return false; }
+        }
+        return true;
+    }
+
+    /**
+     * `i64 (i64 recv, i64 name, i64 a0..a(n-1), i64 btline, ptr btfile)`: `$recv->__call($name, [$a0, …])`
+     * for {@see emitMixedMagicCall}, one body per arity. Spliced into each site, the erased `__call`
+     * dispatch and its argument checks were ~60 IR lines a call.
+     */
+    private function magicCallHelper(int $argc): string
+    {
+        $key = '__mir_callmagic|' . (string)$argc;
+        $sym = '@' . $this->mirHelperSym('__mir_callmagic_' . (string)$argc);
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $this->dynamicMethodHelpers[$key] = '';
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $oldBtLine = $this->btLineOverride;
+        $oldBtFile = $this->btFileOverride;
+        $oldBtSsa = $this->btLineOverrideSsa;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        $this->locals = new \Compile\Mir\LocalSlots();
+        $this->cf = new \Compile\Mir\ControlFlow();
+        $this->arena = new \Compile\Mir\ArenaContext();
+        $this->useSiteTraceParams();
+        $cell = Type::cell();
+        $params = 'i64 %o, i64 %n';
+        $body = '';
+        foreach (['o' => '%o', 'n' => '%n'] as $nm => $p) {
+            $s = $this->ssa->allocReg();
+            $body .= '  ' . $s . " = alloca i64\n  store i64 " . $p . ', ptr ' . $s . "\n";
+            $this->locals->slots['__mc_cm_' . $nm] = $s;
+        }
+        $elems = [];
+        for ($i = 0; $i < $argc; $i = $i + 1) {
+            $params .= ', i64 %a' . (string)$i;
+            $s = $this->ssa->allocReg();
+            $body .= '  ' . $s . " = alloca i64\n  store i64 %a" . (string)$i . ', ptr ' . $s . "\n";
+            $this->locals->slots['__mc_cm_a' . (string)$i] = $s;
+            $elems[] = new \Compile\Mir\ArrayElement_(null, new \Compile\Mir\LoadLocal('__mc_cm_a' . (string)$i, $cell));
+        }
+        $call = new \Compile\Mir\MethodCall_(new \Compile\Mir\LoadLocal('__mc_cm_o', $cell), '__call',
+            [new \Compile\Mir\LoadLocal('__mc_cm_n', $cell), new \Compile\Mir\ArrayLit($elems, Type::vec($cell))], $cell);
+        $body .= $this->emitNode($call);
+        $body .= $this->coerceToI64();
+        $text = 'define hidden i64 ' . $sym . '(' . $params . ", i64 %btline, ptr %btfile) {\nentry:\n" . $body
+            . '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        $this->dynamicMethodHelpers[$key] = $text;
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        $this->rt->needsBacktrace = $oldNeedsBacktrace;
+        $this->btLineOverride = $oldBtLine;
+        $this->btFileOverride = $oldBtFile;
+        $this->btLineOverrideSsa = $oldBtSsa;
+        return $sym;
+    }
+
     private function emitMixedMagicCall(\Compile\Mir\MethodCall_ $mc, bool $boxObject = false): string
     {
         $out = $this->emitNode($mc->object);
@@ -10306,14 +10390,60 @@ trait EmitLlvmObjects
         $out .= '  ' . $predSlot . " = alloca i64\n  store i64 " . $pr . ', ptr ' . $predSlot . "\n";
         $this->locals->slots[$predName] = $predSlot;
         $magicOnly = new \Compile\Mir\LoadLocal($predName, Type::int_());
-        $elems = [];
-        foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
-        $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
-        $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
-        $plain = new \Compile\Mir\MethodCall_($t(), $mc->method, $mc->args, $mc->type);
-        $plain->srcArgc = $mc->srcArgc;
-        $this->mixedMagicDone[\spl_object_id($plain)] = $plain;
-        $out .= $this->emitNode(new \Compile\Mir\Ternary($magicOnly, $viaMagic, $plain, $cell));
+        if (!$this->magicCallShareable($mc)) {
+            $elems = [];
+            foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
+            $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
+            $viaMagic = new \Compile\Mir\MethodCall_($t(), '__call', [$str($mc->method), $argsArr], $cell);
+            $plain = new \Compile\Mir\MethodCall_($t(), $mc->method, $mc->args, $mc->type);
+            $plain->srcArgc = $mc->srcArgc;
+            $this->mixedMagicDone[\spl_object_id($plain)] = $plain;
+            $out .= $this->emitNode(new \Compile\Mir\Ternary($magicOnly, $viaMagic, $plain, $cell));
+        } else {
+            // The `__call` arm is one shared helper per arity ({@see magicCallHelper}); an argument
+            // that runs code is evaluated once, before the choice, as only one arm runs anyway.
+            /** @var array<string, string> $owned */
+            $owned = [];
+            $args = [];
+            foreach ($mc->args as $a) {
+                $args[] = $this->invokeArgRunsCode($a) ? $this->dynHoistOperand($a, $out, $owned, true) : $a;
+            }
+            $plain = new \Compile\Mir\MethodCall_($t(), $mc->method, $args, $mc->type);
+            $plain->srcArgc = $mc->srcArgc;
+            $plain->line = $mc->line;
+            $this->mixedMagicDone[\spl_object_id($plain)] = $plain;
+            $res = $this->ssa->allocReg();
+            $out .= '  ' . $res . " = alloca i64\n";
+            $isM = $this->ssa->allocReg();
+            $out .= '  ' . $isM . ' = icmp ne i64 ' . $pr . ", 0\n";
+            $magL = $this->ssa->allocLabel('mmc.magic');
+            $plainL = $this->ssa->allocLabel('mmc.plain');
+            $endL = $this->ssa->allocLabel('mmc.end');
+            $out .= '  br i1 ' . $isM . ', label %' . $magL . ', label %' . $plainL . "\n" . $magL . ":\n";
+            $regs = '';
+            foreach ($args as $a) {
+                $out .= $this->emitNode($a);
+                $out .= $this->boxToCell($a->type);
+                $regs .= ', i64 ' . $this->lastValue;
+            }
+            $nameCell = $this->ssa->allocReg();
+            $out .= '  ' . $nameCell . ' = call i64 @__manticore_box_ptr(ptr '
+                . $this->strLitId($this->pool->intern($mc->method)) . ")\n";
+            $site = $this->siteTraceArgs($mc->line, $out);
+            $mr = $this->ssa->allocReg();
+            $out .= '  ' . $mr . ' = call i64 ' . $this->magicCallHelper(\count($args)) . '(i64 ' . $cellV
+                . ', i64 ' . $nameCell . $regs . ', ' . $site . ")\n";
+            $out .= '  store i64 ' . $mr . ', ptr ' . $res . "\n  br label %" . $endL . "\n" . $plainL . ":\n";
+            $out .= $this->emitNode($plain);
+            $out .= $this->boxToCell($plain->type);
+            $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n  br label %" . $endL . "\n" . $endL . ":\n";
+            $lr = $this->ssa->allocReg();
+            $out .= '  ' . $lr . ' = load i64, ptr ' . $res . "\n";
+            $this->lastValue = $lr;
+            $this->lastValueType = 'i64';
+            $this->markCellOpaque($lr);
+            $out .= $this->releaseHoistedArgs($owned);
+        }
         // Both arms read the receiver through a local, a borrow: the fresh temp is this site's to give back.
         // `collect($x)->map(…)` takes this path wherever some class has `__call` and no `map`.
         if ($recvOwned) { $out .= $this->rcReleaseReg($cellV, 'cell'); }
