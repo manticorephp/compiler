@@ -1995,7 +1995,9 @@ trait EmitLlvmCalls
         $calleeFlavor = $n->callee->type->isArray() ? $this->freshRcArgFlavor($n->callee)
             : ($this->condOwnsResult($n->callee) ? $this->condFlavor($n->callee->type)
             : ($n->callee->kind === Node::KIND_CLOSURE ? 'closure'
-            : ($n->callee->type->kind === Type::KIND_CELL && $this->calleeIsOwnedCall($n->callee) ? 'cell' : '')));
+            : ($n->callee->type->kind === Type::KIND_CELL && $this->calleeIsOwnedCall($n->callee) ? 'cell'
+            : (($n->callee->type->kind === Type::KIND_CLOSURE || $n->callee->type->kind === Type::KIND_UNKNOWN)
+                && $this->calleeIsOwnedCall($n->callee) ? 'callable' : ''))));
         $out .= $this->coerceToI64();
         $raw = $this->lastValue;
         /** @var array<string, string> $owned */
@@ -2010,7 +2012,7 @@ trait EmitLlvmCalls
         if ($calleeFlavor !== '' && \str_starts_with($raw, '%')) {
             $resReg = $this->lastValue;
             $resTy = $this->lastValueType;
-            $out .= $this->rcReleaseReg($raw, $calleeFlavor);
+            $out .= $calleeFlavor === 'callable' ? $this->callableWordDropIr($raw) : $this->rcReleaseReg($raw, $calleeFlavor);
             $this->lastValue = $resReg;
             $this->lastValueType = $resTy;
         }
@@ -2312,6 +2314,48 @@ trait EmitLlvmCalls
         $this->cellSinkOrd = $oldCellSinkOrd;
         $this->cellSinkFnOverride = $oldCellSinkFn;
         return $sym;
+    }
+
+    /**
+     * Drop a `callable` word whose representation is only known at run time: a
+     * tagged cell, a raw closure env, a raw callable array or a raw object. A raw
+     * pointer is tagged by its allocator header (array magic at -8 → array cell,
+     * anything else → object cell, whose drop tells an object from a closure env)
+     * and dropped as that cell. `call_user_func($this->getRouteResolver())` with
+     * `@return \Closure` leaked Laravel's route resolver and its Route per request.
+     */
+    private function callableWordDropIr(string $w): string
+    {
+        $this->rt->needsTagged = true;
+        $tagL = $this->ssa->allocLabel('cwd.tag');
+        $rawL = $this->ssa->allocLabel('cwd.raw');
+        $ptrL = $this->ssa->allocLabel('cwd.ptr');
+        $endL = $this->ssa->allocLabel('cwd.end');
+        $istag = $this->ssa->allocReg();
+        $out = '  ' . $istag . ' = icmp ugt i64 ' . $w . ', ' . (string)\Compile\MemoryAbi::CELL_TAGGED_MIN . "\n";
+        $out .= '  br i1 ' . $istag . ', label %' . $tagL . ', label %' . $rawL . "\n";
+        $out .= $tagL . ":\n  call void @__mir_cell_drop(i64 " . $w . ")\n  br label %" . $endL . "\n";
+        $big = $this->ssa->allocReg();
+        $out .= $rawL . ":\n  " . $big . ' = icmp ugt i64 ' . $w . ', ' . (string)\Compile\MemoryAbi::CELL_OBJ_MIN_PAYLOAD . "\n";
+        $out .= '  br i1 ' . $big . ', label %' . $ptrL . ', label %' . $endL . "\n";
+        $p = $this->ssa->allocReg();
+        $hp = $this->ssa->allocReg();
+        $h = $this->ssa->allocReg();
+        $hm = $this->ssa->allocReg();
+        $isArr = $this->ssa->allocReg();
+        $tag = $this->ssa->allocReg();
+        $cell = $this->ssa->allocReg();
+        $out .= $ptrL . ":\n  " . $p . ' = inttoptr i64 ' . $w . " to ptr\n";
+        $out .= '  ' . $hp . ' = getelementptr inbounds i8, ptr ' . $p . ", i64 -8\n";
+        $out .= '  ' . $h . ' = load i64, ptr ' . $hp . "\n";
+        // Array buffers carry RC_TAG_MAGIC + 1..3 at -8 (vec / hashed / arena), an object + 0.
+        $out .= '  ' . $hm . ' = sub i64 ' . $h . ', ' . (string)(\Compile\MemoryAbi::RC_TAG_MAGIC + 1) . "\n";
+        $out .= '  ' . $isArr . ' = icmp ult i64 ' . $hm . ", 3\n";
+        $out .= '  ' . $tag . ' = select i1 ' . $isArr . ', i64 ' . (string)\Compile\MemoryAbi::CELL_ARRAY_TAG_BITS
+              . ', i64 ' . (string)\Compile\MemoryAbi::CELL_OBJ . "\n";
+        $out .= '  ' . $cell . ' = or i64 ' . $w . ', ' . $tag . "\n";
+        $out .= '  call void @__mir_cell_drop(i64 ' . $cell . ")\n  br label %" . $endL . "\n";
+        return $out . $endL . ":\n";
     }
 
     /**
