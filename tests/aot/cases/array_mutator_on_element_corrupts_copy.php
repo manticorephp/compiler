@@ -1,6 +1,5 @@
 <?php
 // array_shift / array_pop on an element ($a['q']) mutate the inner array in place, so a copy of the outer array and a reused literal change too
-// issue: #601
 function mk(int $n): array { return ['q' => range(1, $n)]; }
 $a = mk(3);
 $b = $a;

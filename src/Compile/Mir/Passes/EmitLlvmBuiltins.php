@@ -8195,6 +8195,26 @@ trait EmitLlvmBuiltins
     private function mutArrayCow(Node $arrNode, string $arr, bool $writeBack = true): string
     {
         $k = $arrNode->kind;
+        if ($k === Node::KIND_ARRAY_ACCESS && $this->elemMutAddressable($arrNode)) {
+            // An element (`array_shift($a['q'])`): the inner array is a value of the outer one,
+            // shared with a copy of it or with a literal. Take the element's slot the way a `&`
+            // binding does (that separates the outer array), copy the inner one if it is shared,
+            // and put the result back in the slot. Mutating the element in place changed every
+            // other holder of it (#601).
+            $out = (string)$this->byRefAddrOf($arrNode);
+            $slot = $this->ssa->allocReg();
+            $out .= '  ' . $slot . ' = inttoptr i64 ' . $this->lastValue . " to ptr\n";
+            $p = $this->ssa->allocReg();
+            $out .= '  ' . $p . ' = load ptr, ptr ' . $slot . "\n";
+            $cow = $this->ssa->allocReg();
+            $out .= '  ' . $cow . ' = call ptr ' . $this->cowSymbolFor($arrNode->type, $arrNode) . '(ptr ' . $p . ")\n";
+            $out .= '  store ptr ' . $cow . ', ptr ' . $slot . "\n";
+            $this->elemMutNode = $arrNode;
+            $this->elemMutSlot = $slot;
+            $this->lastValue = $cow;
+            $this->lastValueType = 'ptr';
+            return $out;
+        }
         if ($k !== Node::KIND_LOAD_LOCAL && $k !== Node::KIND_PROPERTY_ACCESS
             && $k !== Node::KIND_STATIC_PROP) {
             $this->lastValue = $arr;
@@ -8251,9 +8271,46 @@ trait EmitLlvmBuiltins
     }
 
     /** Whether {@see vecWriteBack} stores into a slot for this base, rather than dropping the buffer. */
+    /** The element slot {@see mutArrayCow} separated, for the {@see vecWriteBack} that follows it. */
+    private ?Node $elemMutNode = null;
+    private string $elemMutSlot = '';
+
+    /**
+     * Can an in-place array builtin work through this element's slot? The chain is
+     * evaluated again to find the slot, so it must have no effect: locals, properties
+     * and static properties indexed by locals or constants. Only an outer array whose
+     * elements are statically arrays: its slot holds the inner array raw and never a
+     * reference box, so the slot word IS the buffer.
+     */
+    private function elemMutAddressable(Node $n): bool
+    {
+        if ($n->kind !== Node::KIND_ARRAY_ACCESS) { return false; }
+        $aa = $n;
+        if ($aa->refStored) { return false; }
+        $ot = $aa->array->type;
+        if ($ot->kind !== Type::KIND_ARRAY || $ot->element === null || $ot->element->kind !== Type::KIND_ARRAY) { return false; }
+        $ik = $aa->index->kind;
+        if ($ik !== Node::KIND_LOAD_LOCAL && $ik !== Node::KIND_INT_CONST && $ik !== Node::KIND_STRING_CONST) { return false; }
+        if (!$this->arrayElemAddressable($aa, false)) { return false; }
+        $b = $aa->array;
+        while (true) {
+            $bk = $b->kind;
+            if ($bk === Node::KIND_LOAD_LOCAL || $bk === Node::KIND_STATIC_PROP) { return true; }
+            if ($bk === Node::KIND_PROPERTY_ACCESS) { $b = $b->object; continue; }
+            if ($bk === Node::KIND_ARRAY_ACCESS) {
+                $bik = $b->index->kind;
+                if ($bik !== Node::KIND_LOAD_LOCAL && $bik !== Node::KIND_INT_CONST && $bik !== Node::KIND_STRING_CONST) { return false; }
+                $b = $b->array;
+                continue;
+            }
+            return false;
+        }
+    }
+
     private function canVecWriteBack(Node $arrNode): bool
     {
         $k = $arrNode->kind;
+        if ($k === Node::KIND_ARRAY_ACCESS) { return $this->elemMutAddressable($arrNode); }
         if ($k === Node::KIND_LOAD_LOCAL) {
             return isset($this->locals->globalBacked[$arrNode->name])
                 || isset($this->locals->slots[$arrNode->name]);
@@ -11345,6 +11402,11 @@ trait EmitLlvmBuiltins
      * property storage (shared by array_unshift / future realloc ops). */
     private function vecWriteBack(Node $arrNode, string $arr2, bool $asCell = false): string
     {
+        if ($arrNode->kind === Node::KIND_ARRAY_ACCESS && $this->elemMutNode === $arrNode) {
+            // Into the element slot mutArrayCow separated, in the outer array's repr; any other
+            // element base is a nested store, re-stored into its parent below.
+            return '  store ptr ' . $arr2 . ', ptr ' . $this->elemMutSlot . "\n";
+        }
         if ($arrNode->kind === Node::KIND_LOAD_LOCAL) {
             $name = $arrNode->name;
             // Global-backed (`global $arr`): the (possibly realloced) buffer must
