@@ -1,6 +1,5 @@
 <?php
 // A variadic closure forwarding to $this->{$m}(...$args), installed as the exception handler, crashes (SIGBUS) when an exception is uncaught.
-// issue: #575
 class H
 {
     public function handle(Throwable $e): void { echo "handled: ", $e->getMessage(), "\n"; }
