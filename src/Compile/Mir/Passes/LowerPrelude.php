@@ -1239,27 +1239,49 @@ trait LowerPrelude
         if ($this->uninitArmsEmitted) { return ''; }
         $this->uninitArmsEmitted = true;
         $src = '';
+        $rows = [];
+        /** @var array<int, string> $leaves index => its call */
+        $leaves = [];
         foreach ($this->walkableClassesDerivedFirst() as $cname) {
-            $src .= 'function __mc_uninit_' . (string)$this->classTable[$cname]->classId
-                . '(): mixed { return __mc_new_uninit("' . $this->dqBody($cname) . "\"); }\n";
+            $id = (string)$this->classTable[$cname]->classId;
+            $src .= 'function __mc_uninit_' . $id . '(): mixed { return __mc_new_uninit("' . $this->dqBody($cname) . "\"); }\n";
+            $rows[] = "'" . \addcslashes($cname, "'\\") . "' => " . (string)\count($leaves);
+            $leaves[] = 'return __mc_uninit_' . $id . '();';
         }
-        return $src;
+        // The name is looked up in a static map (data), then a balanced tree of integer
+        // compares picks the arm: the crc32 tree with a string compare per leaf, once in
+        // each of the two callers, was 2 x 112K IR lines in a Laravel build.
+        return $src . "function __mc_uninit_by_name(string \$cls): mixed {\n"
+            . '  static $__ix = [' . \implode(', ', $rows) . "];\n"
+            . "  \$__i = \$__ix[\$cls] ?? -1;\n"
+            . self::intTreeSrc('$__i', $leaves, 0, \count($leaves))
+            . "  return null;\n}\n";
     }
 
-    /** @param string[] $names */
-    private function uninitTreeSrc(array $names): string
+    /**
+     * A balanced tree of `<` compares over `$var` in [lo, hi), each leaf running `$leaves[i]`.
+     *
+     * @param array<int, string> $leaves
+     */
+    private static function intTreeSrc(string $var, array $leaves, int $lo, int $hi): string
     {
-        return $this->nameTreeSrc('$cls', $names, function (string $n): string {
-            return 'return __mc_uninit_' . (string)$this->classTable[$n]->classId . '();';
-        }, '  ');
+        if ($hi - $lo <= 2) {
+            $o = '';
+            for ($i = $lo; $i < $hi; $i = $i + 1) {
+                $o .= 'if (' . $var . ' === ' . (string)$i . ') { ' . $leaves[$i] . " }\n";
+            }
+            return $o;
+        }
+        $mid = \intdiv($lo + $hi, 2);
+        return 'if (' . $var . ' < ' . (string)$mid . ") {\n" . self::intTreeSrc($var, $leaves, $lo, $mid)
+            . "} else {\n" . self::intTreeSrc($var, $leaves, $mid, $hi) . "}\n";
     }
 
     private function reflAllocSrc(): string
     {
         $src = "function __mc_refl_alloc(string \$cls): mixed {\n"
              . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
-        $src .= $this->uninitTreeSrc($this->walkableClassesDerivedFirst());
-        return $this->uninitArmsSrc() . $src . "  return null;\n}\n";
+        return $this->uninitArmsSrc() . $src . "  return __mc_uninit_by_name(\$cls);\n}\n";
     }
 
     /**
@@ -1334,7 +1356,7 @@ trait LowerPrelude
             // chain onto the same __PHP_Incomplete_Class.
             . "  if (!\$st->allowAll && !isset(\$st->allowed[\$cls])) { return __mc_incomplete(\$cls); }\n"
             . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
-        $alloc = $this->uninitArmsSrc() . $alloc . $this->uninitTreeSrc($names);
+        $alloc = $this->uninitArmsSrc() . $alloc . "  \$o = __mc_uninit_by_name(\$cls);\n  if (\$o !== null) { return \$o; }\n";
         $alloc .= "  return __mc_unser_unknown(\$cls, \$st);\n}\n";
 
         // ONE KEY AT A TIME, with the value as a `mixed` PARAMETER — not a
