@@ -4401,6 +4401,23 @@ trait EmitLlvmObjects
         return $this->propDenyHelpers[$key] = $sym;
     }
 
+    /** `__mc_pdeny_find(key, rows, n) -> i64`: the answer of `key` in a strcmp-sorted `{ name, answer }` table, -1 when absent. */
+    private static function propDenyFindIr(): string
+    {
+        return "define linkonce_odr i64 @__mc_pdeny_find(ptr %key, ptr %rows, i64 %n) {\nentry:\n  br label %loop\n"
+            . "loop:\n  %lo = phi i64 [ 0, %entry ], [ %lo1, %right ], [ %lo, %left ]\n"
+            . "  %hi = phi i64 [ %n, %entry ], [ %hi, %right ], [ %mid, %left ]\n"
+            . "  %more = icmp slt i64 %lo, %hi\n  br i1 %more, label %probe, label %absent\n"
+            . "probe:\n  %sum = add i64 %lo, %hi\n  %mid = lshr i64 %sum, 1\n"
+            . "  %np = getelementptr inbounds { ptr, i64 }, ptr %rows, i64 %mid, i32 0\n  %name = load ptr, ptr %np\n"
+            . "  %c = call i32 @strcmp(ptr %key, ptr %name)\n  %eq = icmp eq i32 %c, 0\n  br i1 %eq, label %found, label %side\n"
+            . "side:\n  %lt = icmp slt i32 %c, 0\n  br i1 %lt, label %left, label %right\n"
+            . "left:\n  br label %loop\n"
+            . "right:\n  %lo1 = add i64 %mid, 1\n  br label %loop\n"
+            . "found:\n  %ap = getelementptr inbounds { ptr, i64 }, ptr %rows, i64 %mid, i32 1\n  %a = load i64, ptr %ap\n  ret i64 %a\n"
+            . "absent:\n  ret i64 -1\n}\n\n";
+    }
+
     /**
      * `(ptr obj, ptr name) -> i64` answering `$rows[class id][name]`, else running `$miss`.
      * @param array<int, array<string, string>> $rows
@@ -4418,24 +4435,35 @@ trait EmitLlvmObjects
         $out .= $this->emitLoadClassId('%obj');
         $switch = '  switch i64 ' . $this->classIdReg . ", label %none [\n";
         $bodies = '';
+        // Each class answers through ONE binary search over its names, sorted the way
+        // `strcmp` orders them (a property name is case-sensitive, unlike the function
+        // tables). The strcmp chain it replaces ran on every `$o->$name`: a quarter of
+        // a Laravel `/api/notes` request went through Carbon's protected names.
+        $tables = '';
         foreach ($rows as $cid => $props) {
+            $names = \array_map('strval', \array_keys($props));
+            \usort($names, static fn(string $a, string $b): int => \strcmp($a, $b));
+            $tbl = '@.pdeny.' . $this->mangle($key) . '.' . (string)$cid;
+            $cells = [];
+            foreach ($names as $p) { $cells[] = '{ ptr, i64 } { ptr ' . $this->litStr($p) . ', i64 ' . $props[$p] . ' }'; }
+            $tables .= $tbl . ' = private unnamed_addr constant [' . (string)\count($cells) . ' x { ptr, i64 }] ['
+                . \implode(', ', $cells) . "], align 8\n";
             $lbl = $this->ssa->allocLabel('deny.class');
+            $hit = $this->ssa->allocLabel('deny.hit');
             $switch .= '    i64 ' . (string)$cid . ', label %' . $lbl . "\n";
+            $fr = $this->ssa->allocReg();
+            $absent = $this->ssa->allocReg();
             $bodies .= $lbl . ":\n";
-            foreach ($props as $p => $answer) {
-                $c = $this->ssa->allocReg();
-                $e = $this->ssa->allocReg();
-                $hit = $this->ssa->allocLabel('deny.hit');
-                $next = $this->ssa->allocLabel('deny.next');
-                $bodies .= '  ' . $c . ' = call i32 @strcmp(ptr %key, ptr ' . $this->litStr((string)$p) . ")\n";
-                $bodies .= '  ' . $e . ' = icmp eq i32 ' . $c . ", 0\n";
-                $bodies .= '  br i1 ' . $e . ', label %' . $hit . ', label %' . $next . "\n";
-                $bodies .= $hit . ":\n  ret i64 " . $answer . "\n";
-                $bodies .= $next . ":\n";
-            }
-            $bodies .= "  br label %none\n";
+            $bodies .= '  ' . $fr . ' = call i64 @__mc_pdeny_find(ptr %key, ptr ' . $tbl . ', i64 ' . (string)\count($cells) . ")\n";
+            $bodies .= '  ' . $absent . ' = icmp eq i64 ' . $fr . ", -1\n";
+            $bodies .= '  br i1 ' . $absent . ', label %none, label %' . $hit . "\n";
+            $bodies .= $hit . ":\n  ret i64 " . $fr . "\n";
         }
-        $out .= $switch . "  ]\n" . $bodies . "none:\n" . $miss . "}\n\n";
+        if (!isset($this->propDenyHelpers['@find'])) {
+            $this->propDenyHelpers['@find'] = 'emitted';
+            $tables .= self::propDenyFindIr();
+        }
+        $out = $tables . $out . $switch . "  ]\n" . $bodies . "none:\n" . $miss . "}\n\n";
         $this->ssa = $oldSsa;
         $this->classIdReg = $oldClassId;
         $this->propertyReadHelpers[$key] = $out;
