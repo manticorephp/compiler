@@ -93,7 +93,7 @@ function ownersOf(string $src): string
     $ni = new \Semantic\NameIndex();
     $ni->replaceFile('o.php', \Parser\Parser::parseTolerant($src, 'o.php', true, true, 2)->program, $src);
     $owners = [];
-    foreach ($ni->allOccurrences() as $o) { if ($o->isDecl && $o->kind === 'member') { $owners[] = $o->resolved . '@' . preg_replace('/^(\\\\?)__anon_class_\d+_\d+_\d+$/', 'ANON', $o->owner); } }
+    foreach ($ni->allOccurrences() as $o) { if ($o->isDecl && $o->kind === 'member') { $owners[] = $o->resolved . '@' . preg_replace('/^(\\\\?)__anon_class_[0-9a-f]+_\d+_\d+$/', 'ANON', $o->owner); } }
     return implode(',', $owners);
 }
 check('owner: anon class inside method', fn() => ownersOf("<?php\nclass A { function m() { return new class { function run() {} }; } function run() {} }\n") === 'm@A,run@ANON,run@A' ? true : ownersOf("<?php\nclass A { function m() { return new class { function run() {} }; } function run() {} }\n"));
