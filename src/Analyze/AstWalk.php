@@ -182,6 +182,7 @@ final class AstWalk
         if ($e instanceof Ternary) { $this->expr($e->condition); $this->expr($e->then); $this->expr($e->else); return; }
         if ($e instanceof NullCoalesce) { $this->expr($e->left); $this->expr($e->right); return; }
         if ($e instanceof Cast) { $this->expr($e->operand); return; }
+        if ($e instanceof \Parser\Ast\VarVar) { $this->expr($e->nameExpr); return; }
         if ($e instanceof InstanceofExpr) { $this->expr($e->operand); return; }
         if ($e instanceof Assign) { $this->expr($e->target); $this->expr($e->value); return; }
         if ($e instanceof CompoundAssign) { $this->expr($e->target); $this->expr($e->value); return; }

@@ -139,7 +139,7 @@ imply an empty uncertain list; a P3 rename that finds any blocker must refuse or
 | Blocker | Meaning |
 |---|---|
 | `unresolved-member` | the cursor use site, or (with `:file:line:col`) any same-name use site anywhere in the workspace whose receiver type is unknown, closed files included |
-| `string-class-name`, `callable-string`, `dynamic-member`, `legacy-interpolation` | uncertain sites carried over as blockers: a string equal to the name, `'A::run'`, a dynamic access (`->$n`, `A::$$n`), a `"${n}"` literal (the lexer reads it as a plain string) |
+| `string-class-name`, `callable-string`, `dynamic-member` | uncertain sites carried over as blockers: a string equal to the name, `'A::run'`, a dynamic access (`->$n`, `A::$$n`) |
 | `owner-unknown` | declaring class nested in a closure / loop / switch (no owner) |
 | `implicit-member` | member the source never declares (synthesized by the Index, e.g. from `__toString`) |
 | `library-declaration` | declared in the prelude / stdlib |

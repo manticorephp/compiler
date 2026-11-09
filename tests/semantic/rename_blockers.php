@@ -99,7 +99,7 @@ check('callable string A::run is an uncertain site and a blocker', function () {
     return $un === $want ? (contract($w, 'a.php', $p) ?? true) : json_encode($un);
 });
 
-check('A::$$n and "${n}" are not missed', function () {
+check('A::$$n and "${n}" are not missed: ${n} is a plain reference', function () {
     $a = "<?php\nclass A { public static \$sp = 1; }\n\$n = 'sp';\necho A::\$\$n;\n\$s = \"\${n}\";\n";
     $w = ws(['a.php' => $a]);
     $p = where($a, '$n', 1);
@@ -109,7 +109,7 @@ check('A::$$n and "${n}" are not missed', function () {
     $re = reasons($w, 'a.php', $p);
     $sp = where($a, '$sp', 1);
     $reSp = reasons($w, 'a.php', $sp);
-    return $lines === [3, 4] && in_array('legacy-interpolation', $re, true) && in_array('dynamic-member', $reSp, true)
+    return $lines === [3, 4, 5] && in_array('dynamic-member', $reSp, true)
         && contract($w, 'a.php', $p) === null && contract($w, 'a.php', $sp) === null ? true : json_encode([$lines, $re, $reSp]);
 });
 
