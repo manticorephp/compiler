@@ -1090,7 +1090,9 @@ trait LowerPrelude
             . "    if (array_key_exists('value', \$d)) { \$head = \$head . (is_int(\$d['value']) ? ':int' : ':string'); }\n"
             . "    return __mir_print_r_obj_map(\$head, \$d, \$indent, \$pad);\n"
             . "  }\n"
-            . "  switch (__mir_object_class_id(\$v)) {\n";
+            ;
+        /** @var array<int, string> $cases class id => its arm call */
+        $cases = [];
         $arm = 0;
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
@@ -1129,10 +1131,15 @@ trait LowerPrelude
                 $body .= "    return \$out . \$pad . \")\\n\";\n";
             }
             $body .= "  }\n  return '';\n}\n";
-            $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$indent, \$pad);\n";
+            $cases[$cd->classId] = 'return ' . $helper . '($v, $indent, $pad);';
             $arm = $arm + 1;
         }
-        $dispatch .= "  }\n";
+        if ($cases !== []) {
+            [$bfns, $pick] = self::bucketTreeSrc('__mir_print_r_object', 'mixed $v, int $cid, int $indent, string $pad',
+                '$v, $cid, $indent, $pad', '?string', '$cid', $cases, true);
+            $body .= $bfns;
+            $dispatch .= "  \$cid = __mir_object_class_id(\$v);\n" . $pick;
+        }
         // A closure carries no property table; everything else left is a
         // dynamic (stdClass / bag) object.
         $dispatch .= "  if (\$v instanceof \\Closure) { return \"Closure Object\\n\" . \$pad . \"(\\n\" . \$pad . \")\\n\"; }\n"
@@ -1166,8 +1173,9 @@ trait LowerPrelude
             . "  \$ipad = \$pad . '   ';\n"
             . "  \$lead = \$indent > 0 ? (\"\\n\" . \$pad) : '';\n"
             . "  \$en = __mir_enum_name(\$v);\n"
-            . "  if (\$en !== '') { return \$lead . '\\\\' . \$en; }\n"
-            . "  switch (__mir_object_class_id(\$v)) {\n";
+            . "  if (\$en !== '') { return \$lead . '\\\\' . \$en; }\n";
+        /** @var array<int, string> $cases class id => its arm call */
+        $cases = [];
         $arm = 0;
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
@@ -1190,11 +1198,16 @@ trait LowerPrelude
                     . "  }\n";
             }
             $body .= "  return \$out . \$pad . '))';\n  }\n}\n";
-            $dispatch .= "    case " . (string)$cd->classId . ": return " . $helper . "(\$v, \$indent, \$pad, \$ipad, \$lead);\n";
+            $cases[$cd->classId] = 'return ' . $helper . '($v, $indent, $pad, $ipad, $lead);';
             $arm = $arm + 1;
         }
+        if ($cases !== []) {
+            [$bfns, $pick] = self::bucketTreeSrc('__mir_export_object', 'mixed $v, int $cid, int $indent, string $pad, string $ipad, string $lead',
+                '$v, $cid, $indent, $pad, $ipad, $lead', '?string', '$cid', $cases, true);
+            $body .= $bfns;
+            $dispatch .= "  \$cid = __mir_object_class_id(\$v);\n" . $pick;
+        }
         $dispatch = $dispatch
-            . "  }\n"
             . "  \$out = \$lead . \"(object) array(\\n\";\n"
             . "  foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
             . "    \$ks = is_int(\$k) ? (string)\$k : (\"'\" . __mc_var_export_qstr((string)\$k) . \"'\");\n"
@@ -1275,6 +1288,77 @@ trait LowerPrelude
         $mid = \intdiv($lo + $hi, 2);
         return 'if (' . $var . ' < ' . (string)$mid . ") {\n" . self::intTreeSrc($var, $leaves, $lo, $mid)
             . "} else {\n" . self::intTreeSrc($var, $leaves, $mid, $hi) . "}\n";
+    }
+
+    /**
+     * Dispatch over sorted integer keys split into functions of at most 64 leaves:
+     * an outer tree of `<` compares picks the bucket by key range, the bucket's own
+     * tree picks the leaf. No generated function grows with the class count — one
+     * `switch` over every class was 107K (var_export) and 76K (print_r) IR lines in
+     * a Laravel build, the giants clang holds whole.
+     *
+     * With `$fallThrough` a bucket answers null for a key it does not hold and the
+     * dispatch continues past the tree; without it the bucket's answer is returned.
+     *
+     * @param array<int, string> $leaves key => statement(s), each returning
+     * @return array{0: string, 1: string} the bucket functions, the dispatch code
+     */
+    private static function bucketTreeSrc(string $prefix, string $params, string $args, string $ret,
+                                          string $keyVar, array $leaves, bool $fallThrough): array
+    {
+        \ksort($leaves);
+        /** @var int[] $keys */
+        $keys = \array_keys($leaves);
+        /** @var array<int, int[]> $buckets */
+        $buckets = \array_chunk($keys, 64);
+        $fns = '';
+        /** @var string[] $calls */
+        $calls = [];
+        foreach ($buckets as $b => $bk) {
+            $name = $prefix . '_b' . (string)$b;
+            $stmts = [];
+            foreach ($bk as $k) { $stmts[] = $leaves[$k]; }
+            $fns .= 'function ' . $name . '(' . $params . '): ' . $ret . " {\n"
+                . self::keyTreeSrc($keyVar, $bk, $stmts, 0, \count($bk))
+                . ($fallThrough ? "  return null;\n" : '') . "}\n";
+            $calls[] = $fallThrough
+                ? '$__bt = ' . $name . '(' . $args . '); if ($__bt !== null) { return $__bt; }'
+                : 'return ' . $name . '(' . $args . ');';
+        }
+        /** @var int[] $firsts */
+        $firsts = [];
+        foreach ($buckets as $bk) { $firsts[] = $bk[0]; }
+        return [$fns, self::bucketPickSrc($keyVar, $firsts, $calls, 0, \count($calls))];
+    }
+
+    /**
+     * @param int[]    $keys  sorted
+     * @param string[] $stmts parallel to `$keys`
+     */
+    private static function keyTreeSrc(string $var, array $keys, array $stmts, int $lo, int $hi): string
+    {
+        if ($hi - $lo <= 2) {
+            $o = '';
+            for ($i = $lo; $i < $hi; $i = $i + 1) {
+                $o .= 'if (' . $var . ' === ' . (string)$keys[$i] . ') { ' . $stmts[$i] . " }\n";
+            }
+            return $o;
+        }
+        $mid = \intdiv($lo + $hi, 2);
+        return 'if (' . $var . ' < ' . (string)$keys[$mid] . ") {\n" . self::keyTreeSrc($var, $keys, $stmts, $lo, $mid)
+            . "} else {\n" . self::keyTreeSrc($var, $keys, $stmts, $mid, $hi) . "}\n";
+    }
+
+    /**
+     * @param int[]    $firsts each bucket's smallest key, ascending
+     * @param string[] $calls  parallel to `$firsts`
+     */
+    private static function bucketPickSrc(string $var, array $firsts, array $calls, int $lo, int $hi): string
+    {
+        if ($hi - $lo === 1) { return $calls[$lo] . "\n"; }
+        $mid = \intdiv($lo + $hi, 2);
+        return 'if (' . $var . ' < ' . (string)$firsts[$mid] . ") {\n" . self::bucketPickSrc($var, $firsts, $calls, $lo, $mid)
+            . "} else {\n" . self::bucketPickSrc($var, $firsts, $calls, $mid, $hi) . "}\n";
     }
 
     private function reflAllocSrc(): string

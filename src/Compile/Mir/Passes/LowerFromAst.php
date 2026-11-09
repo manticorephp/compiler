@@ -2284,8 +2284,10 @@ final class LowerFromAst implements Pass
                 $caseNames[$ck] = true;
             }
         }
-        $arms = '';
-        $defs = '';
+        /** @var string[] $rows name literal => its index */
+        $rows = [];
+        /** @var array<int, string> $leaves index => the fetch */
+        $leaves = [];
         foreach ($names as $n => $_) {
             $expr = '';
             $dc = \strpos($n, '::');
@@ -2298,14 +2300,19 @@ final class LowerFromAst implements Pass
                 if ($this->predefinedConstant($n) !== null || isset($this->userConstants[$n])) { $expr = '\\' . $n; }
             }
             if ($expr === '') { continue; }
-            $q = $this->dqBody($n);
-            $arms .= "  if (\$n === \"" . $q . "\") { return " . $expr . "; }\n";
-            $defs .= "  if (\$n === \"" . $q . "\") { return true; }\n";
+            $rows[] = "'" . \addcslashes((string)$n, "'\\") . "' => " . (string)\count($leaves);
+            $leaves[] = 'return ' . $expr . ';';
         }
-        return "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $arms
-            . "  throw new \\Error('Undefined constant ' . (\\strpos(\$n, '::') === false ? '\"' . \$n . '\"' : \$n));\n}\n"
-            . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $defs
-            . "  return false;\n}\n";
+        // A static name map (data) and a bucketed integer tree, not a chain of string
+        // compares: O(log n) per lookup, and no function of 66K IR lines.
+        $map = '  static $__ix = [' . \implode(', ', $rows) . "];\n";
+        [$bfns, $pick] = $leaves === [] ? ['', ''] : self::bucketTreeSrc('__mc_constant', 'int $__i', '$__i', 'mixed', '$__i', $leaves, false);
+        return $bfns . "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $map
+            . "  \$__i = \$__ix[\$n] ?? -1;\n"
+            . "  if (\$__i < 0) { throw new \\Error('Undefined constant ' . (\\strpos(\$n, '::') === false ? '\"' . \$n . '\"' : \$n)); }\n"
+            . $pick . "  return null;\n}\n"
+            . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $map
+            . "  return isset(\$__ix[\$n]);\n}\n";
     }
 
     /** @param array<string, bool> $out */
