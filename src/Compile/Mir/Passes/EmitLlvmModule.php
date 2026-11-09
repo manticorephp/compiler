@@ -446,6 +446,19 @@ trait EmitLlvmModule
             $out .= "  %line = add i64 %b, %delta\n";
             $out .= "  call void @__mir_bt_push(ptr %name, i64 %line, ptr %file)\n";
             $out .= "  ret void\n}\n";
+            // A trampoline's frame: the line and file its caller left in the site slots
+            // ({@see EmitLlvm::btSiteStore}), taken once — a trampoline reached from no
+            // site (reflection, a callable string) is built-in code, with neither.
+            $out .= "@__mir_bt_site_line = linkonce_odr global i64 0\n";
+            $out .= "@__mir_bt_site_file = linkonce_odr global ptr null\n";
+            $out .= "define void @__mir_bt_push_site(ptr %name) alwaysinline {\n";
+            $out .= "entry:\n";
+            $out .= "  %line = load i64, ptr @__mir_bt_site_line\n";
+            $out .= "  %file = load ptr, ptr @__mir_bt_site_file\n";
+            $out .= "  store i64 0, ptr @__mir_bt_site_line\n";
+            $out .= "  store ptr null, ptr @__mir_bt_site_file\n";
+            $out .= "  call void @__mir_bt_push(ptr %name, i64 %line, ptr %file)\n";
+            $out .= "  ret void\n}\n";
             // The name of the frame on TOP of that stack, as a `%s` operand.
             //
             // `llvm.returnaddress` alone cannot name a caller here — the binary

@@ -2239,9 +2239,15 @@ trait EmitLlvmCalls
         $oldBtLine = $this->btLineOverride;
         $oldBtFile = $this->btFileOverride;
         $oldBtSsa = $this->btLineOverrideSsa;
+        $oldPrelude = $this->frame->isPrelude;
 
         $this->ssa = new SsaBuilder();
         $this->btLineOverrideSsa = $this->ssa;
+        // A `hidden` module helper, not the linkonce_odr prelude body of the site that
+        // happened to ask first: a prelude frame kept the variadic pack and default pad
+        // arms out of EVERY site's copy, and symfony's listener closure (`...$args`)
+        // took the event object as its pack.
+        $this->frame->isPrelude = false;
         $this->ssa->reset();
         $this->resetCellGuardFrame();
         $this->cellSinkFnOverride = \ltrim($sym, '@');
@@ -2294,6 +2300,7 @@ trait EmitLlvmCalls
             throw new \RuntimeException('EmitLlvm: erased-invoke helper ' . $sym . ' does not close');
         }
 
+        $this->frame->isPrelude = $oldPrelude;
         $this->btLineOverride = $oldBtLine;
         $this->btFileOverride = $oldBtFile;
         $this->btLineOverrideSsa = $oldBtSsa;

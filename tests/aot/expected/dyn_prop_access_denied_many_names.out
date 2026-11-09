@@ -1,0 +1,21 @@
+Cannot access private property Many::$juliet
+juliet inside 10
+Cannot access protected property Many::$alpha
+alpha inside 1
+Cannot access protected property Many::$hotel
+hotel inside 8
+Cannot access protected property Many::$charlie
+charlie inside 3
+Cannot access private property Many::$india
+india inside 9
+Cannot access protected property Many::$echo
+echo inside 5
+Cannot access protected property Many::$bravo
+bravo inside 2
+Cannot access protected property Many::$golf
+golf inside 7
+Cannot access protected property Many::$delta
+delta inside 4
+Cannot access protected property Many::$foxtrot
+foxtrot inside 6
+kilo outside 11

@@ -1238,11 +1238,12 @@ trait EmitLlvmObjects
             // of it at each site multiplied the module by the class count.
             if ($this->cloneErasedSym === '') {
                 $sym = $this->mirHelperSym('__mir_clone_erased');
-                $body = $this->emitCloneDispatch($n, '%a0', $impls);
+                $helpers = '';
+                $body = $this->emitCloneSwitch($n, '%a0', $impls, $helpers);
                 $ret = $this->lastValue;
-                if ($this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
+                if ($body !== '' && $this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
                     $this->cloneErasedSym = $sym;
-                    $this->vdExtraBodies .= 'define linkonce_odr ptr @' . $sym
+                    $this->vdExtraBodies .= $helpers . 'define linkonce_odr ptr @' . $sym
                         . "(ptr %a0) noinline {\nentry:\n" . $body . '  ret ptr ' . $ret . "\n}\n\n";
                 }
             }
@@ -1268,6 +1269,66 @@ trait EmitLlvmObjects
         $ret = $this->finishI64($out, $r);
         $this->markCellBoxed($this->lastValue);
         return $ret;
+    }
+
+    /**
+     * The shared erased-`clone` body: a `switch` on the class id calling one small
+     * function per class. The chain of {@see emitCloneDispatch} compared the
+     * descriptor against every class in turn and carried each class's slot copy
+     * inline — 178K IR lines of one function in a Laravel build.
+     *
+     * @param string[] $impls
+     */
+    private function emitCloneSwitch(\Compile\Mir\Clone_ $n, string $src, array $impls, string &$helpers): string
+    {
+        $out = $this->emitLoadClassId($src);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('clonesw.end');
+        $def = $this->ssa->allocLabel('clonesw.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $arms = '';
+        $phi = [];
+        foreach ($impls as $name) {
+            $cd = $this->classes[$name];
+            $lbl = $this->ssa->allocLabel('clonesw.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $sym = '@' . $this->mirHelperSym('__mir_clone_c' . (string)$cd->classId);
+            $fn = $this->emitCloneClassFn($n, $sym, $cd, $name);
+            if ($fn === '') { return ''; }
+            $helpers .= $fn;
+            $r = $this->ssa->allocReg();
+            $arms .= $lbl . ":\n  " . $r . ' = call ptr ' . $sym . '(ptr ' . $src . ")\n  br label %" . $end . "\n";
+            $phi[] = '[ ' . $r . ', %' . $lbl . ' ]';
+        }
+        // The pass-through arm hands the SOURCE back with its own +1 ({@see emitCloneDispatch}).
+        $this->rt->needsRc = true;
+        $arms .= $def . ":\n  call void @__mir_rc_retain(ptr " . $src . ")\n  br label %" . $end . "\n";
+        $phi[] = '[ ' . $src . ', %' . $def . ' ]';
+        $res = $this->ssa->allocReg();
+        $out .= $switch . "  ]\n" . $arms . $end . ":\n  " . $res . ' = phi ptr ' . \implode(', ', $phi) . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** `(ptr src) -> ptr`: the clone of one known class, its own function. */
+    private function emitCloneClassFn(\Compile\Mir\Clone_ $n, string $sym, $cd, string $name): string
+    {
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $body = $this->emitCloneOfClass($n, $cd, $name, '%src');
+        $body .= $this->coerceToPtr();
+        $body .= '  ret ptr ' . $this->lastValue . "\n";
+        $out = $this->irIsClosed($body) ? 'define internal ptr ' . $sym . "(ptr %src) {\nentry:\n" . $body . "}\n\n" : '';
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        return $out;
     }
 
     /**
@@ -4401,6 +4462,23 @@ trait EmitLlvmObjects
         return $this->propDenyHelpers[$key] = $sym;
     }
 
+    /** `__mc_pdeny_find(key, rows, n) -> i64`: the answer of `key` in a strcmp-sorted `{ name, answer }` table, -1 when absent. */
+    private static function propDenyFindIr(): string
+    {
+        return "define linkonce_odr i64 @__mc_pdeny_find(ptr %key, ptr %rows, i64 %n) {\nentry:\n  br label %loop\n"
+            . "loop:\n  %lo = phi i64 [ 0, %entry ], [ %lo1, %right ], [ %lo, %left ]\n"
+            . "  %hi = phi i64 [ %n, %entry ], [ %hi, %right ], [ %mid, %left ]\n"
+            . "  %more = icmp slt i64 %lo, %hi\n  br i1 %more, label %probe, label %absent\n"
+            . "probe:\n  %sum = add i64 %lo, %hi\n  %mid = lshr i64 %sum, 1\n"
+            . "  %np = getelementptr inbounds { ptr, i64 }, ptr %rows, i64 %mid, i32 0\n  %name = load ptr, ptr %np\n"
+            . "  %c = call i32 @strcmp(ptr %key, ptr %name)\n  %eq = icmp eq i32 %c, 0\n  br i1 %eq, label %found, label %side\n"
+            . "side:\n  %lt = icmp slt i32 %c, 0\n  br i1 %lt, label %left, label %right\n"
+            . "left:\n  br label %loop\n"
+            . "right:\n  %lo1 = add i64 %mid, 1\n  br label %loop\n"
+            . "found:\n  %ap = getelementptr inbounds { ptr, i64 }, ptr %rows, i64 %mid, i32 1\n  %a = load i64, ptr %ap\n  ret i64 %a\n"
+            . "absent:\n  ret i64 -1\n}\n\n";
+    }
+
     /**
      * `(ptr obj, ptr name) -> i64` answering `$rows[class id][name]`, else running `$miss`.
      * @param array<int, array<string, string>> $rows
@@ -4418,24 +4496,35 @@ trait EmitLlvmObjects
         $out .= $this->emitLoadClassId('%obj');
         $switch = '  switch i64 ' . $this->classIdReg . ", label %none [\n";
         $bodies = '';
+        // Each class answers through ONE binary search over its names, sorted the way
+        // `strcmp` orders them (a property name is case-sensitive, unlike the function
+        // tables). The strcmp chain it replaces ran on every `$o->$name`: a quarter of
+        // a Laravel `/api/notes` request went through Carbon's protected names.
+        $tables = '';
         foreach ($rows as $cid => $props) {
+            $names = \array_map('strval', \array_keys($props));
+            \usort($names, static fn(string $a, string $b): int => \strcmp($a, $b));
+            $tbl = '@.pdeny.' . $this->mangle($key) . '.' . (string)$cid;
+            $cells = [];
+            foreach ($names as $p) { $cells[] = '{ ptr, i64 } { ptr ' . $this->litStr($p) . ', i64 ' . $props[$p] . ' }'; }
+            $tables .= $tbl . ' = private unnamed_addr constant [' . (string)\count($cells) . ' x { ptr, i64 }] ['
+                . \implode(', ', $cells) . "], align 8\n";
             $lbl = $this->ssa->allocLabel('deny.class');
+            $hit = $this->ssa->allocLabel('deny.hit');
             $switch .= '    i64 ' . (string)$cid . ', label %' . $lbl . "\n";
+            $fr = $this->ssa->allocReg();
+            $absent = $this->ssa->allocReg();
             $bodies .= $lbl . ":\n";
-            foreach ($props as $p => $answer) {
-                $c = $this->ssa->allocReg();
-                $e = $this->ssa->allocReg();
-                $hit = $this->ssa->allocLabel('deny.hit');
-                $next = $this->ssa->allocLabel('deny.next');
-                $bodies .= '  ' . $c . ' = call i32 @strcmp(ptr %key, ptr ' . $this->litStr((string)$p) . ")\n";
-                $bodies .= '  ' . $e . ' = icmp eq i32 ' . $c . ", 0\n";
-                $bodies .= '  br i1 ' . $e . ', label %' . $hit . ', label %' . $next . "\n";
-                $bodies .= $hit . ":\n  ret i64 " . $answer . "\n";
-                $bodies .= $next . ":\n";
-            }
-            $bodies .= "  br label %none\n";
+            $bodies .= '  ' . $fr . ' = call i64 @__mc_pdeny_find(ptr %key, ptr ' . $tbl . ', i64 ' . (string)\count($cells) . ")\n";
+            $bodies .= '  ' . $absent . ' = icmp eq i64 ' . $fr . ", -1\n";
+            $bodies .= '  br i1 ' . $absent . ', label %none, label %' . $hit . "\n";
+            $bodies .= $hit . ":\n  ret i64 " . $fr . "\n";
         }
-        $out .= $switch . "  ]\n" . $bodies . "none:\n" . $miss . "}\n\n";
+        if (!isset($this->propDenyHelpers['@find'])) {
+            $this->propDenyHelpers['@find'] = 'emitted';
+            $tables .= self::propDenyFindIr();
+        }
+        $out = $tables . $out . $switch . "  ]\n" . $bodies . "none:\n" . $miss . "}\n\n";
         $this->ssa = $oldSsa;
         $this->classIdReg = $oldClassId;
         $this->propertyReadHelpers[$key] = $out;
@@ -6518,9 +6607,14 @@ trait EmitLlvmObjects
         $out .= '  store i64 0, ptr ' . $res . "\n";
         $this->rt->needsStrcmp = true;
         $hit = $this->ssa->allocReg();
+        $out .= $this->btSiteStore($iv->line);
         $out .= '  ' . $hit . ' = call i1 @__mc_dyn_method_dispatch(i64 ' . $recvArg . ', ptr ' . $keyP
               . ', ptr ' . $argsP . ', ptr ' . $scopeArg . ', ptr ' . $relSym
               . ', i64 ' . (string)$relN . ', ptr ' . $res . ")\n";
+        if ($this->rt->needsBacktrace) {
+            // A miss ran no trampoline: the slots must not locate a later, unrelated one.
+            $out .= "  store i64 0, ptr @__mir_bt_site_line\n  store ptr null, ptr @__mir_bt_site_file\n";
+        }
         $endL = $this->ssa->allocLabel('dynd.end');
         $inlL = $this->ssa->allocLabel('dynd.inline');
         $out .= '  br i1 ' . $hit . ', label %' . $endL . ', label %' . $inlL . "\n";
@@ -9183,10 +9277,97 @@ trait EmitLlvmObjects
         // Cleared across the fill: a default expression is lowered here too, and
         // a nested call must not inherit this site's pending tail.
         $this->spreadTail = null;
+        $fill = $this->spreadFillHelper($sym, $tail[1], $ptypes, $tmask, $tail[2]);
+        if ($fill !== null) {
+            // Out of line, one body per callee: inline, every arm of an erased
+            // `new $c(...$args)` carried its constructor's whole unpack — 165K IR
+            // lines of one function over Laravel's 2 104 constructors.
+            [$fsym, $cnt] = $fill;
+            $buf = $this->ssa->allocReg();
+            $out = '  ' . $buf . ' = alloca [' . (string)\max(1, $cnt) . " x i64]\n";
+            $out .= '  call void ' . $fsym . '(ptr ' . $tail[0] . ', ptr ' . $buf . ")\n";
+            for ($i = 0; $i < $cnt; $i = $i + 1) {
+                $gp = $this->ssa->allocReg();
+                $rg = $this->ssa->allocReg();
+                $out .= '  ' . $gp . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)$i . "\n";
+                $out .= '  ' . $rg . ' = load i64, ptr ' . $gp . "\n";
+                $this->vdArmList .= ', i64 ' . $rg;
+            }
+            $this->spreadTail = $tail;
+            return $out;
+        }
         [$out, $regs] = $this->emitSpreadFill($tail[0], $tail[1], $ptypes, $tmask, $tail[2], $sym);
         $this->spreadTail = $tail;
         foreach ($regs as $rg) { $this->vdArmList .= ', i64 ' . $rg; }
         return $out;
+    }
+
+    /** @var array<string, array{0: string, 1: int}|null> spread-fill shape => [symbol, register count], null when it does not close */
+    private array $spreadFillSyms = [];
+
+    /**
+     * `void (ptr arr, ptr out)`: {@see emitSpreadFill} for one callee as its own
+     * function, the produced argument words stored to `out[0..n)`. Null when the
+     * fill does not close over its own registers; the arm then fills inline.
+     *
+     * @param array<int, Type> $ptypes
+     * @param array<int, bool> $tmask
+     * @return array{0: string, 1: int}|null
+     */
+    private function spreadFillHelper(string $sym, int $first, array $ptypes, array $tmask, ?Type $elemType): ?array
+    {
+        $key = $sym . '|' . (string)$first . '|' . ($elemType === null ? '' : $elemType->exactString());
+        foreach ($ptypes as $i => $pt) { $key .= '|' . (string)$i . ':' . $pt->exactString() . (($tmask[$i] ?? false) ? 't' : ''); }
+        if (\array_key_exists($key, $this->spreadFillSyms)) { return $this->spreadFillSyms[$key]; }
+        $fsym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_spfill_', $key));
+
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $oldPad = $this->lastPadArgs;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldCellProv = $this->cellProv;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($fsym, '@');
+        $this->locals = new LocalSlots();
+        $this->cf = new ControlFlow();
+        $this->arena = new ArenaContext();
+
+        [$body, $regs] = $this->emitSpreadFill('%arr', $first, $ptypes, $tmask, $elemType, $sym);
+        foreach ($regs as $i => $rg) {
+            $gp = $this->ssa->allocReg();
+            $body .= '  ' . $gp . ' = getelementptr inbounds i64, ptr %out, i64 ' . (string)$i . "\n";
+            $body .= '  store i64 ' . $rg . ', ptr ' . $gp . "\n";
+        }
+        $body .= "  ret void\n";
+        $result = null;
+        // A by-reference parameter is filled with the address of a slot of this frame,
+        // which would not outlive the helper.
+        if ($this->irIsClosed($body) && !\str_contains($body, ' = alloca ')) {
+            $this->dynamicMethodHelpers['spfill|' . $key] = 'define internal void ' . $fsym . "(ptr %arr, ptr %out) {\nentry:\n" . $body . "}\n\n";
+            $result = [$fsym, \count($regs)];
+        }
+
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        $this->lastPadArgs = $oldPad;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        $this->spreadFillSyms[$key] = $result;
+        return $result;
     }
 
     /**
@@ -10103,7 +10284,28 @@ trait EmitLlvmObjects
         return $out . $this->emitThrowIf($z, 'Error', 'Call to a member function ' . $n->method . '() on null');
     }
 
+    /** Line of the method call being emitted, for the calls it is rewritten into. */
+    private int $methodSiteLine = 0;
+
+    /**
+     * A method call is often emitted as other method calls built on the spot (the
+     * `__call` / plain split, a dynamic arm, an ArrayAccess desugar) that carry no
+     * line: the frame they push stood at line 0 — Twig's `->render()` through a
+     * receiver some class answers by `__call`, and ux-live-component could not find
+     * its template line (symfony-demo `/blog/search`, a 500). They take the line of
+     * the call they stand for.
+     */
     private function emitMethodCall(\Compile\Mir\MethodCall_ $n): string
+    {
+        if ($n->line === 0) { $n->line = $this->methodSiteLine; }
+        $prev = $this->methodSiteLine;
+        $this->methodSiteLine = $n->line;
+        $out = $this->emitMethodCallAt($n);
+        $this->methodSiteLine = $prev;
+        return $out;
+    }
+
+    private function emitMethodCallAt(\Compile\Mir\MethodCall_ $n): string
     {
         if ($this->isPtrReceiver($n->object)) {
             $pm = $this->emitPtrMember($n);

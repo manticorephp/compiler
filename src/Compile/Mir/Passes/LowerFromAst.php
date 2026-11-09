@@ -2284,8 +2284,10 @@ final class LowerFromAst implements Pass
                 $caseNames[$ck] = true;
             }
         }
-        $arms = '';
-        $defs = '';
+        /** @var string[] $rows name literal => its index */
+        $rows = [];
+        /** @var array<int, string> $leaves index => the fetch */
+        $leaves = [];
         foreach ($names as $n => $_) {
             $expr = '';
             $dc = \strpos($n, '::');
@@ -2298,14 +2300,19 @@ final class LowerFromAst implements Pass
                 if ($this->predefinedConstant($n) !== null || isset($this->userConstants[$n])) { $expr = '\\' . $n; }
             }
             if ($expr === '') { continue; }
-            $q = $this->dqBody($n);
-            $arms .= "  if (\$n === \"" . $q . "\") { return " . $expr . "; }\n";
-            $defs .= "  if (\$n === \"" . $q . "\") { return true; }\n";
+            $rows[] = "'" . \addcslashes((string)$n, "'\\") . "' => " . (string)\count($leaves);
+            $leaves[] = 'return ' . $expr . ';';
         }
-        return "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $arms
-            . "  throw new \\Error('Undefined constant ' . (\\strpos(\$n, '::') === false ? '\"' . \$n . '\"' : \$n));\n}\n"
-            . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $defs
-            . "  return false;\n}\n";
+        // A static name map (data) and a bucketed integer tree, not a chain of string
+        // compares: O(log n) per lookup, and no function of 66K IR lines.
+        $map = '  static $__ix = [' . \implode(', ', $rows) . "];\n";
+        [$bfns, $pick] = $leaves === [] ? ['', ''] : self::bucketTreeSrc('__mc_constant', 'int $__i', '$__i', 'mixed', '$__i', $leaves, false);
+        return $bfns . "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $map
+            . "  \$__i = \$__ix[\$n] ?? -1;\n"
+            . "  if (\$__i < 0) { throw new \\Error('Undefined constant ' . (\\strpos(\$n, '::') === false ? '\"' . \$n . '\"' : \$n)); }\n"
+            . $pick . "  return null;\n}\n"
+            . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $map
+            . "  return isset(\$__ix[\$n]);\n}\n";
     }
 
     /** @param array<string, bool> $out */
@@ -6632,28 +6639,34 @@ final class LowerFromAst implements Pass
      */
     private function classUsesSrc(): string
     {
-        /** @var array<string, string> $bodies lowercased name => the statement that answers it */
-        $bodies = [];
-        $names = [];
+        // DATA, not code: only the declarations that use a trait get an entry (a few
+        // hundred in Laravel), every other declared name answers `[]`. A tree with a
+        // literal per declaration was 155K IR lines of one function, and a model calls
+        // this several times per attribute — a hash lookup is also the faster answer.
+        /** @var array<string, string> $rows lowercased name => its array literal */
+        $rows = [];
+        /** @var string[] $plain lowercased names of declarations that use no trait */
+        $plain = [];
         $decls = [];
         foreach ($this->classDecls as $d) { $decls[$d->name] = $d; }
         foreach ($this->traitTable as $d) { $decls[$d->name] = $d; }
         foreach ($decls as $name => $d) {
+            if ($d->uses === []) { $plain[] = \strtolower(\ltrim($name, '\\')); continue; }
             $lit = [];
             foreach ($d->uses as $t) {
                 $tn = \ltrim($t, '\\');
                 $lit[] = "'" . \addcslashes($tn, "'\\") . "' => '" . \addcslashes($tn, "'\\") . "'";
             }
             $key = \strtolower(\ltrim($name, '\\'));
-            if (!isset($bodies[$key])) { $names[] = $key; }
-            $bodies[$key] = 'return [' . \implode(', ', $lit) . '];';
+            $rows[$key] = "'" . \addcslashes($key, "'\\") . "' => [" . \implode(', ', $lit) . ']';
         }
-        // O(log N) crc32 tree, not a switch: a model calls this several times per attribute.
-        $tree = $this->nameTreeSrc('$__k', $names, function (string $n) use ($bodies): string { return $bodies[$n]; }, '  ');
         return "function class_uses(object|string \$object_or_class, bool \$autoload = true): array|false {\n"
+            . "  static \$__uses = [" . \implode(', ', $rows) . "];\n"
             . "  \$n = \\is_object(\$object_or_class) ? \\get_class(\$object_or_class) : \$object_or_class;\n"
-            . "  \$__k = \\strtolower(\\ltrim(\$n, '\\\\'));\n" . $tree
-            . "  return false;\n}\n";
+            . "  \$__k = \\strtolower(\\ltrim(\$n, '\\\\'));\n"
+            . "  if (isset(\$__uses[\$__k])) { return \$__uses[\$__k]; }\n"
+            . "  static \$__plain = [" . \implode(', ', \array_map(fn (string $p): string => "'" . \addcslashes($p, "'\\") . "' => true", $plain)) . "];\n"
+            . "  return isset(\$__plain[\$__k]) ? [] : false;\n}\n";
     }
 
     /**

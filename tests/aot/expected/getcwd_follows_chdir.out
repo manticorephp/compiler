@@ -1,0 +1,8 @@
+same
+bool(true)
+in tmp
+realpath ok
+bool(false)
+still in tmp
+bool(true)
+back

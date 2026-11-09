@@ -321,12 +321,14 @@ trait EmitLlvmGenerator
         $this->ehBegin($fn, true);
         $out .= 'define ' . $defLinkage . 'i64 ' . $resume . '(ptr %frame)' . $this->personalityClause() . " {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
+        $this->gen->frameSlots = [];
         foreach ($locals as $name => $idx) {
             $off = self::GEN_HEADER + 8 * $idx;
             $slot = $this->ssa->allocReg();
             $out .= '  ' . $slot . ' = getelementptr inbounds i8, ptr %frame, i64 '
                   . (string)$off . "\n";
             $this->locals->slots[$name] = $slot;
+            $this->gen->frameSlots[$slot] = true;
         }
         $this->gen->statePtr = $this->ssa->allocReg();
         $out .= '  ' . $this->gen->statePtr . " = getelementptr inbounds i8, ptr %frame, i64 8\n";
@@ -565,6 +567,10 @@ trait EmitLlvmGenerator
                 $locals["@fe.0." . (string)$n->genSlotBase] = \count($locals);
                 if (!$this->isGeneratorType($n->array->type)) {
                     $locals["@fe.1." . (string)$n->genSlotBase] = \count($locals);
+                    // The owners of the walk's snapshot copy and of a fresh iterable: an
+                    // alloca would be dead by the resume, and the loop end released its garbage.
+                    $locals["@fe.2." . (string)$n->genSlotBase] = \count($locals);
+                    $locals["@fe.3." . (string)$n->genSlotBase] = \count($locals);
                 }
             }
             // The OBJECT path's synthetic iterator local is created at EMIT
@@ -694,6 +700,7 @@ trait EmitLlvmGenerator
         $nFin = $this->cf->finallyCount();
         $out .= $this->emitPendingDiscard() . $this->emitFinallysLeaving($nFin);
         $out .= $this->genOwnDropsIr($nFin > 0 ? $this->cf->finallyOwn(0) : $y->ownLive);
+        $out .= $this->releaseFramedAggIters();
         $out .= "  ret i64 0\n";
         $out .= 'gen.resume.' . (string)$k . ":\n";
         // `$gen->throw($e)` injection: on resume, a pending exception makes the

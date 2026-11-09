@@ -1,0 +1,70 @@
+D0 Object
+(
+    [v] => 0
+    [p:protected] => p0
+)
+\D0::__set_state(array(
+   'v' => 0,
+   'p' => 'p0',
+))
+0 true
+D63 Object
+(
+    [v] => 63
+    [p:protected] => p63
+)
+\D63::__set_state(array(
+   'v' => 63,
+   'p' => 'p63',
+))
+63 true
+D64 Object
+(
+    [v] => 64
+    [p:protected] => p64
+)
+\D64::__set_state(array(
+   'v' => 64,
+   'p' => 'p64',
+))
+64 true
+D65 Object
+(
+    [v] => 65
+    [p:protected] => p65
+)
+\D65::__set_state(array(
+   'v' => 65,
+   'p' => 'p65',
+))
+65 true
+D100 Object
+(
+    [v] => 100
+    [p:protected] => p100
+)
+\D100::__set_state(array(
+   'v' => 100,
+   'p' => 'p100',
+))
+100 true
+D139 Object
+(
+    [v] => 139
+    [p:protected] => p139
+)
+\D139::__set_state(array(
+   'v' => 139,
+   'p' => 'p139',
+))
+139 true
+stdClass Object
+(
+    [x] => 1
+)
+(object) array(
+   'x' => 1,
+)
+bool(false)
+bool(true)
+int(8)

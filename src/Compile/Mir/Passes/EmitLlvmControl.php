@@ -777,6 +777,24 @@ trait EmitLlvmControl
         return $out;
     }
 
+    /**
+     * A generator destroyed while suspended in a loop: release the open aggregate
+     * iterators and loop-owned arrays that live in its frame, as a `return` would.
+     * A slot outside the frame is a dead alloca on that path and is left alone.
+     */
+    private function releaseFramedAggIters(): string
+    {
+        $out = '';
+        foreach ($this->cf->aggItersLeftBy(0) as $i) {
+            if (!isset($this->gen->frameSlots[$this->cf->aggIterSlot($i)])) { continue; }
+            $fl = $this->cf->aggIterFlag($i);
+            if ($fl !== '' && !isset($this->gen->frameSlots[$fl])) { continue; }
+            $out .= $this->releaseAggIterSlot($this->cf->aggIterSlot($i), $this->cf->aggIterDyn($i),
+                $this->cf->aggIterFlag($i), $this->cf->aggIterFlavor($i));
+        }
+        return $out;
+    }
+
     /** Release the open aggregate iterators a jump to loop `$level` leaves (0: a return). */
     private function releaseAggItersLeftBy(int $level): string
     {
@@ -1680,9 +1698,14 @@ trait EmitLlvmControl
         // given back at the end and on every jump out of the body.
         $iterFlavor = $this->ownedIterableFlavor($fe);
         $iterSlot = '';
+        $ownFramed = $fe->genSlotBase >= 0 && isset($this->locals->slots['@fe.2.' . (string)$fe->genSlotBase]);
         if ($iterFlavor !== '') {
-            $iterSlot = $this->ssa->allocReg();
-            $out .= '  ' . $iterSlot . " = alloca i64\n";
+            if ($ownFramed) {
+                $iterSlot = $this->locals->slots['@fe.3.' . (string)$fe->genSlotBase];
+            } else {
+                $iterSlot = $this->ssa->allocReg();
+                $out .= '  ' . $iterSlot . " = alloca i64\n";
+            }
             $iw = $this->ssa->allocReg();
             $out .= '  ' . $iw . ' = ptrtoint ptr ' . $arr . " to i64\n";
             $out .= '  store i64 ' . $iw . ', ptr ' . $iterSlot . "\n";
@@ -1705,8 +1728,12 @@ trait EmitLlvmControl
             // element of an unstamped buffer the copy had adopted none of:
             // `foreach ((array) $obj …)` with a write freed the object's arrays.
             $snapFlavor = 'vec';
-            $snapSlot = $this->ssa->allocReg();
-            $out .= '  ' . $snapSlot . " = alloca i64\n";
+            if ($ownFramed) {
+                $snapSlot = $this->locals->slots['@fe.2.' . (string)$fe->genSlotBase];
+            } else {
+                $snapSlot = $this->ssa->allocReg();
+                $out .= '  ' . $snapSlot . " = alloca i64\n";
+            }
             $sw = $this->ssa->allocReg();
             $out .= '  ' . $sw . ' = ptrtoint ptr ' . $snap . " to i64\n";
             $out .= '  store i64 ' . $sw . ', ptr ' . $snapSlot . "\n";

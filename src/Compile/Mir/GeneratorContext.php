@@ -14,6 +14,8 @@ final class GeneratorContext
 {
     /** True while emitting a generator resume body. */
     public bool $inGenerator = false;
+    /** @var array<string, bool> the resume body's frame-slot registers (entry GEPs) */
+    public array $frameSlots = [];
     /** Running yield index (1..N) — each yield's suspend/resume state number. */
     public int $yieldCounter = 0;
     /** SSA ptr to the frame's `state` word (entry GEP, dominates all). */
