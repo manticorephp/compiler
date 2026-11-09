@@ -145,6 +145,10 @@ trait InferScans
             if ($p === null || $p->propDisplayName($p->propertyNames[$idx] ?? '') !== $bare) { break; }
             $root = $p;
         }
+        /** @var list<array{0: \Compile\Mir\ClassDef, 1: string}> $sharing */
+        $sharing = [];
+        // Some class of the slot already holds a BARE cell — a tagged word, not a buffer pointer.
+        $bareCell = $t->kind === Type::KIND_CELL;
         foreach ($this->classes as $other) {
             if ($other === $cd) { continue; }
             // A subclass that redeclared the private calls this slot by another name.
@@ -160,9 +164,24 @@ trait InferScans
                 $c = $up;
             }
             if (!$shares) { continue; }
+            $sharing[] = [$other, $slot];
+            $oc = $other->propertyTypes[$slot] ?? null;
+            if ($oc !== null && $oc->kind === Type::KIND_CELL) { $bareCell = true; }
+        }
+        // One slot, ONE representation. A bare cell (a tagged word) does not agree
+        // with a cell-element ARRAY (a raw buffer pointer): Model::$attributes celled
+        // through the parent's `setRawAttributes(array $attributes)` while Note kept
+        // `vec[cell]`, so Note's class drop released the tagged word as a buffer —
+        // every Laravel `/api/notes` request crashed. Once any class of the slot is a
+        // bare cell, every class of it is.
+        if ($bareCell) {
+            $cd->propertyTypes[$prop] = Type::cell();
+            foreach ($sharing as [$other, $slot]) { $other->propertyTypes[$slot] = Type::cell(); }
+            return;
+        }
+        foreach ($sharing as [$other, $slot]) {
             $cur = $other->propertyTypes[$slot] ?? null;
-            if ($cur !== null && ($cur->kind === Type::KIND_CELL
-                || ($cur->isArray() && ($cur->element->kind ?? '') === Type::KIND_CELL))) { continue; }
+            if ($cur !== null && $cur->isArray() && ($cur->element->kind ?? '') === Type::KIND_CELL) { continue; }
             // Keep the sibling's own key shape; only its element joins to cell.
             $other->propertyTypes[$slot] = ($t->isArray() && $cur !== null && $cur->isArray() && $cur->key !== null)
                 ? Type::assoc($cur->key, Type::cell())
