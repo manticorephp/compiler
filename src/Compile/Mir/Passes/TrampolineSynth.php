@@ -199,15 +199,25 @@ final class TrampolineSynth
      */
     public static function spreadFallbackSource(array $methods, array $tableless = []): string
     {
-        $out = self::ARGS_HINT . "function __mc_dyn_spread_fallback(object \$o, string \$name, array \$a): mixed {\n";
+        // A tree over the names, and each (class, method) call its own function: a chain
+        // with every spread call inline was 104K IR lines of one function in Laravel.
+        $fns = '';
+        /** @var array<string, string> $byName method => its instanceof chain */
+        $byName = [];
+        $n = 0;
         foreach ($tableless as $class => $names) {
             foreach ($names as $method) {
                 if (!isset($methods[$method]) || $method === '' || $method === '__construct' || $method === '__call') { continue; }
-                $out .= '  if ($name === ' . \var_export($method, true) . ' && $o instanceof \\' . \ltrim($class, '\\')
-                      . ') { return $o->' . $method . "(...\$a); }\n";
+                $cls = '\\' . \ltrim($class, '\\');
+                $arm = '__mc_dsf_arm_' . (string)$n;
+                $n = $n + 1;
+                $fns .= self::ARGS_HINT . 'function ' . $arm . '(' . $cls . ' $o, array $a): mixed { return $o->' . $method . "(...\$a); }\n";
+                if (!isset($byName[$method])) { $byName[$method] = ''; }
+                $byName[$method] .= 'if ($o instanceof ' . $cls . ') { return ' . $arm . '($o, $a); } ';
             }
         }
-        return $out . "  return null;\n}\n";
+        $out = $fns . self::ARGS_HINT . "function __mc_dyn_spread_fallback(object \$o, string \$name, array \$a): mixed {\n";
+        return $out . self::nameTree('$name', $byName) . "  return null;\n}\n";
     }
 
     /**
@@ -248,15 +258,23 @@ final class TrampolineSynth
         }
         $out = $fns . self::ARGS_HINT . "function __mc_static_callable(string \$c, string \$m, array \$a): mixed {\n"
              . "  \$lc = \\strtolower(\\ltrim(\$c, '\\\\'));\n  \$lm = \\strtolower(\$m);\n";
+        // A subclass the program names but no arm covers runs its parent's method.
+        $miss = "  \$p = \\get_parent_class(\$c);\n  if (\$p !== false) { return __mc_static_callable(\$p, \$m, \$a); }\n"
+              . "  throw new \\Error('Call to undefined method ' . \\ltrim(\$c, '\\\\') . '::' . \$m . '()');\n}\n";
+        // Each class's method tree is its own function: one tree over all ~9 000 arms was
+        // 308K IR lines of one function in a Laravel build.
         /** @var array<string, string> $classBodies */
         $classBodies = [];
+        $k = 0;
         foreach ($byClass as $lc => $methods) {
-            $classBodies[(string)$lc] = self::nameTree('$lm', $methods);
+            $cf = '__mc_static_callable_cls_' . (string)$k;
+            $k = $k + 1;
+            $out = self::ARGS_HINT . 'function ' . $cf . "(string \$c, string \$m, string \$lm, array \$a): mixed {\n"
+                 . self::nameTree('$lm', $methods) . $miss . $out;
+            $classBodies[(string)$lc] = 'return ' . $cf . '($c, $m, $lm, $a);';
         }
         $out .= self::nameTree('$lc', $classBodies);
-        // A subclass the program names but no arm covers runs its parent's method.
-        $out .= "  \$p = \\get_parent_class(\$c);\n  if (\$p !== false) { return __mc_static_callable(\$p, \$m, \$a); }\n";
-        return $out . "  throw new \\Error('Call to undefined method ' . \\ltrim(\$c, '\\\\') . '::' . \$m . '()');\n}\n";
+        return $out . $miss;
     }
 
     /**

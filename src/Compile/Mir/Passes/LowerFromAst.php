@@ -6632,28 +6632,34 @@ final class LowerFromAst implements Pass
      */
     private function classUsesSrc(): string
     {
-        /** @var array<string, string> $bodies lowercased name => the statement that answers it */
-        $bodies = [];
-        $names = [];
+        // DATA, not code: only the declarations that use a trait get an entry (a few
+        // hundred in Laravel), every other declared name answers `[]`. A tree with a
+        // literal per declaration was 155K IR lines of one function, and a model calls
+        // this several times per attribute — a hash lookup is also the faster answer.
+        /** @var array<string, string> $rows lowercased name => its array literal */
+        $rows = [];
+        /** @var string[] $plain lowercased names of declarations that use no trait */
+        $plain = [];
         $decls = [];
         foreach ($this->classDecls as $d) { $decls[$d->name] = $d; }
         foreach ($this->traitTable as $d) { $decls[$d->name] = $d; }
         foreach ($decls as $name => $d) {
+            if ($d->uses === []) { $plain[] = \strtolower(\ltrim($name, '\\')); continue; }
             $lit = [];
             foreach ($d->uses as $t) {
                 $tn = \ltrim($t, '\\');
                 $lit[] = "'" . \addcslashes($tn, "'\\") . "' => '" . \addcslashes($tn, "'\\") . "'";
             }
             $key = \strtolower(\ltrim($name, '\\'));
-            if (!isset($bodies[$key])) { $names[] = $key; }
-            $bodies[$key] = 'return [' . \implode(', ', $lit) . '];';
+            $rows[$key] = "'" . \addcslashes($key, "'\\") . "' => [" . \implode(', ', $lit) . ']';
         }
-        // O(log N) crc32 tree, not a switch: a model calls this several times per attribute.
-        $tree = $this->nameTreeSrc('$__k', $names, function (string $n) use ($bodies): string { return $bodies[$n]; }, '  ');
         return "function class_uses(object|string \$object_or_class, bool \$autoload = true): array|false {\n"
+            . "  static \$__uses = [" . \implode(', ', $rows) . "];\n"
             . "  \$n = \\is_object(\$object_or_class) ? \\get_class(\$object_or_class) : \$object_or_class;\n"
-            . "  \$__k = \\strtolower(\\ltrim(\$n, '\\\\'));\n" . $tree
-            . "  return false;\n}\n";
+            . "  \$__k = \\strtolower(\\ltrim(\$n, '\\\\'));\n"
+            . "  if (isset(\$__uses[\$__k])) { return \$__uses[\$__k]; }\n"
+            . "  static \$__plain = [" . \implode(', ', \array_map(fn (string $p): string => "'" . \addcslashes($p, "'\\") . "' => true", $plain)) . "];\n"
+            . "  return isset(\$__plain[\$__k]) ? [] : false;\n}\n";
     }
 
     /**

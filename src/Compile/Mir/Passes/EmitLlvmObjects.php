@@ -1238,11 +1238,12 @@ trait EmitLlvmObjects
             // of it at each site multiplied the module by the class count.
             if ($this->cloneErasedSym === '') {
                 $sym = $this->mirHelperSym('__mir_clone_erased');
-                $body = $this->emitCloneDispatch($n, '%a0', $impls);
+                $helpers = '';
+                $body = $this->emitCloneSwitch($n, '%a0', $impls, $helpers);
                 $ret = $this->lastValue;
-                if ($this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
+                if ($body !== '' && $this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
                     $this->cloneErasedSym = $sym;
-                    $this->vdExtraBodies .= 'define linkonce_odr ptr @' . $sym
+                    $this->vdExtraBodies .= $helpers . 'define linkonce_odr ptr @' . $sym
                         . "(ptr %a0) noinline {\nentry:\n" . $body . '  ret ptr ' . $ret . "\n}\n\n";
                 }
             }
@@ -1268,6 +1269,66 @@ trait EmitLlvmObjects
         $ret = $this->finishI64($out, $r);
         $this->markCellBoxed($this->lastValue);
         return $ret;
+    }
+
+    /**
+     * The shared erased-`clone` body: a `switch` on the class id calling one small
+     * function per class. The chain of {@see emitCloneDispatch} compared the
+     * descriptor against every class in turn and carried each class's slot copy
+     * inline — 178K IR lines of one function in a Laravel build.
+     *
+     * @param string[] $impls
+     */
+    private function emitCloneSwitch(\Compile\Mir\Clone_ $n, string $src, array $impls, string &$helpers): string
+    {
+        $out = $this->emitLoadClassId($src);
+        $cid = $this->classIdReg;
+        $end = $this->ssa->allocLabel('clonesw.end');
+        $def = $this->ssa->allocLabel('clonesw.default');
+        $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
+        $arms = '';
+        $phi = [];
+        foreach ($impls as $name) {
+            $cd = $this->classes[$name];
+            $lbl = $this->ssa->allocLabel('clonesw.case');
+            $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $sym = '@' . $this->mirHelperSym('__mir_clone_c' . (string)$cd->classId);
+            $fn = $this->emitCloneClassFn($n, $sym, $cd, $name);
+            if ($fn === '') { return ''; }
+            $helpers .= $fn;
+            $r = $this->ssa->allocReg();
+            $arms .= $lbl . ":\n  " . $r . ' = call ptr ' . $sym . '(ptr ' . $src . ")\n  br label %" . $end . "\n";
+            $phi[] = '[ ' . $r . ', %' . $lbl . ' ]';
+        }
+        // The pass-through arm hands the SOURCE back with its own +1 ({@see emitCloneDispatch}).
+        $this->rt->needsRc = true;
+        $arms .= $def . ":\n  call void @__mir_rc_retain(ptr " . $src . ")\n  br label %" . $end . "\n";
+        $phi[] = '[ ' . $src . ', %' . $def . ' ]';
+        $res = $this->ssa->allocReg();
+        $out .= $switch . "  ]\n" . $arms . $end . ":\n  " . $res . ' = phi ptr ' . \implode(', ', $phi) . "\n";
+        $this->lastValue = $res;
+        $this->lastValueType = 'ptr';
+        return $out;
+    }
+
+    /** `(ptr src) -> ptr`: the clone of one known class, its own function. */
+    private function emitCloneClassFn(\Compile\Mir\Clone_ $n, string $sym, $cd, string $name): string
+    {
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $body = $this->emitCloneOfClass($n, $cd, $name, '%src');
+        $body .= $this->coerceToPtr();
+        $body .= '  ret ptr ' . $this->lastValue . "\n";
+        $out = $this->irIsClosed($body) ? 'define internal ptr ' . $sym . "(ptr %src) {\nentry:\n" . $body . "}\n\n" : '';
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        return $out;
     }
 
     /**
@@ -9211,10 +9272,97 @@ trait EmitLlvmObjects
         // Cleared across the fill: a default expression is lowered here too, and
         // a nested call must not inherit this site's pending tail.
         $this->spreadTail = null;
+        $fill = $this->spreadFillHelper($sym, $tail[1], $ptypes, $tmask, $tail[2]);
+        if ($fill !== null) {
+            // Out of line, one body per callee: inline, every arm of an erased
+            // `new $c(...$args)` carried its constructor's whole unpack — 165K IR
+            // lines of one function over Laravel's 2 104 constructors.
+            [$fsym, $cnt] = $fill;
+            $buf = $this->ssa->allocReg();
+            $out = '  ' . $buf . ' = alloca [' . (string)\max(1, $cnt) . " x i64]\n";
+            $out .= '  call void ' . $fsym . '(ptr ' . $tail[0] . ', ptr ' . $buf . ")\n";
+            for ($i = 0; $i < $cnt; $i = $i + 1) {
+                $gp = $this->ssa->allocReg();
+                $rg = $this->ssa->allocReg();
+                $out .= '  ' . $gp . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)$i . "\n";
+                $out .= '  ' . $rg . ' = load i64, ptr ' . $gp . "\n";
+                $this->vdArmList .= ', i64 ' . $rg;
+            }
+            $this->spreadTail = $tail;
+            return $out;
+        }
         [$out, $regs] = $this->emitSpreadFill($tail[0], $tail[1], $ptypes, $tmask, $tail[2], $sym);
         $this->spreadTail = $tail;
         foreach ($regs as $rg) { $this->vdArmList .= ', i64 ' . $rg; }
         return $out;
+    }
+
+    /** @var array<string, array{0: string, 1: int}|null> spread-fill shape => [symbol, register count], null when it does not close */
+    private array $spreadFillSyms = [];
+
+    /**
+     * `void (ptr arr, ptr out)`: {@see emitSpreadFill} for one callee as its own
+     * function, the produced argument words stored to `out[0..n)`. Null when the
+     * fill does not close over its own registers; the arm then fills inline.
+     *
+     * @param array<int, Type> $ptypes
+     * @param array<int, bool> $tmask
+     * @return array{0: string, 1: int}|null
+     */
+    private function spreadFillHelper(string $sym, int $first, array $ptypes, array $tmask, ?Type $elemType): ?array
+    {
+        $key = $sym . '|' . (string)$first . '|' . ($elemType === null ? '' : $elemType->exactString());
+        foreach ($ptypes as $i => $pt) { $key .= '|' . (string)$i . ':' . $pt->exactString() . (($tmask[$i] ?? false) ? 't' : ''); }
+        if (\array_key_exists($key, $this->spreadFillSyms)) { return $this->spreadFillSyms[$key]; }
+        $fsym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_spfill_', $key));
+
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $oldPad = $this->lastPadArgs;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldCellProv = $this->cellProv;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($fsym, '@');
+        $this->locals = new LocalSlots();
+        $this->cf = new ControlFlow();
+        $this->arena = new ArenaContext();
+
+        [$body, $regs] = $this->emitSpreadFill('%arr', $first, $ptypes, $tmask, $elemType, $sym);
+        foreach ($regs as $i => $rg) {
+            $gp = $this->ssa->allocReg();
+            $body .= '  ' . $gp . ' = getelementptr inbounds i64, ptr %out, i64 ' . (string)$i . "\n";
+            $body .= '  store i64 ' . $rg . ', ptr ' . $gp . "\n";
+        }
+        $body .= "  ret void\n";
+        $result = null;
+        // A by-reference parameter is filled with the address of a slot of this frame,
+        // which would not outlive the helper.
+        if ($this->irIsClosed($body) && !\str_contains($body, ' = alloca ')) {
+            $this->dynamicMethodHelpers['spfill|' . $key] = 'define internal void ' . $fsym . "(ptr %arr, ptr %out) {\nentry:\n" . $body . "}\n\n";
+            $result = [$fsym, \count($regs)];
+        }
+
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        $this->lastPadArgs = $oldPad;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        $this->spreadFillSyms[$key] = $result;
+        return $result;
     }
 
     /**

@@ -1226,12 +1226,40 @@ trait LowerPrelude
         return $d->enumBackingType === null ? '' : $d->enumBackingType;
     }
 
+    private bool $uninitArmsEmitted = false;
+
+    /**
+     * `__mc_uninit_<classId>()`: one constructor-less allocation per class, shared
+     * by `__mc_refl_alloc` and `__mc_unser_alloc` and emitted with whichever comes
+     * first. Inlined into the name tree, every class's whole slot initialisation
+     * made each of the two one function of 128K IR lines in a Laravel build.
+     */
+    private function uninitArmsSrc(): string
+    {
+        if ($this->uninitArmsEmitted) { return ''; }
+        $this->uninitArmsEmitted = true;
+        $src = '';
+        foreach ($this->walkableClassesDerivedFirst() as $cname) {
+            $src .= 'function __mc_uninit_' . (string)$this->classTable[$cname]->classId
+                . '(): mixed { return __mc_new_uninit("' . $this->dqBody($cname) . "\"); }\n";
+        }
+        return $src;
+    }
+
+    /** @param string[] $names */
+    private function uninitTreeSrc(array $names): string
+    {
+        return $this->nameTreeSrc('$cls', $names, function (string $n): string {
+            return 'return __mc_uninit_' . (string)$this->classTable[$n]->classId . '();';
+        }, '  ');
+    }
+
     private function reflAllocSrc(): string
     {
         $src = "function __mc_refl_alloc(string \$cls): mixed {\n"
              . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
-        $src .= $this->nameTreeSrc('$cls', $this->walkableClassesDerivedFirst(), 'return __mc_new_uninit("%s");', '  ');
-        return $src . "  return null;\n}\n";
+        $src .= $this->uninitTreeSrc($this->walkableClassesDerivedFirst());
+        return $this->uninitArmsSrc() . $src . "  return null;\n}\n";
     }
 
     /**
@@ -1306,7 +1334,7 @@ trait LowerPrelude
             // chain onto the same __PHP_Incomplete_Class.
             . "  if (!\$st->allowAll && !isset(\$st->allowed[\$cls])) { return __mc_incomplete(\$cls); }\n"
             . "  if (\$cls === 'stdClass') { return new \\stdClass(); }\n";
-        $alloc .= $this->nameTreeSrc('$cls', $names, 'return __mc_new_uninit("%s");', '  ');
+        $alloc = $this->uninitArmsSrc() . $alloc . $this->uninitTreeSrc($names);
         $alloc .= "  return __mc_unser_unknown(\$cls, \$st);\n}\n";
 
         // ONE KEY AT A TIME, with the value as a `mixed` PARAMETER — not a
