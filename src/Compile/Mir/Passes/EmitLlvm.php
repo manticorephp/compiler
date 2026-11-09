@@ -954,8 +954,14 @@ final class EmitLlvm implements EmitVisitor
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
-        $this->modToken = \dechex($this->fnvHash64($module->sourceFile
-            . '|' . ($this->emitLibrary ? 'lib' : 'app')));
+        // Only a library can share an executable with another module, so only a
+        // library needs a name of its own. The executable's module takes a fixed
+        // token: identical prelude code then emits identical text in every
+        // program (shared object reuse), and `app` is not hex, so it can never
+        // equal a library's token.
+        $this->modToken = $this->emitLibrary
+            ? \dechex($this->fnvHash64($module->sourceFile . '|lib'))
+            : 'app';
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
         $this->cloneErasedSym = '';

@@ -45,6 +45,14 @@ for src in tests/generic/cases/*.php; do
         echo "FAIL $name: output differs from php"; diff "tests/generic/cases/$name.out" "$dir/out" | head -6; fail=1
     fi
     lls+=("$dir/bin.dbg.ll")
+    # The executable's own module needs no per-program module token (it takes
+    # the fixed `app`): only libraries can collide with it, and they keep theirs.
+    tok="$(grep -cE '@[A-Za-z_.$0-9]+_m[0-9a-f]{12,16}\b' "$dir/bin.dbg.ll" || true)"
+    if [[ "$tok" != "0" ]]; then
+        echo "FAIL $name: $tok lines name module-tokened helpers in an app module"
+        grep -oE '@[A-Za-z_.$0-9]+_m[0-9a-f]{12,16}\b' "$dir/bin.dbg.ll" | sort -u | head -3
+        fail=1
+    fi
 done
 [[ $fail -eq 0 ]] || exit 1
 
