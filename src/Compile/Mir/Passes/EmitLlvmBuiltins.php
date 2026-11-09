@@ -10054,8 +10054,47 @@ trait EmitLlvmBuiltins
         // Not `optnone`, for all it costs clang: unoptimized, the switch below is a chain of
         // compares over every class, and Eloquent's `(array) $row` on a stdClass per fetched
         // row walked all of it (5% of a request).
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . "(ptr %gov.obj) noinline {\n"
+        $helpers = $this->ovarsHelperBodies;
+        $this->ovarsHelperBodies = '';
+        return $helpers . 'define linkonce_odr ptr @' . $this->mirHelperSym($mangle ? '__mir_object_vars_mg' : '__mir_object_vars') . "(ptr %gov.obj) noinline {\n"
             . "entry:\n" . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
+    }
+
+    /** Bodies of the per-class `get_object_vars` helpers, emitted beside the dispatcher. */
+    private string $ovarsHelperBodies = '';
+
+    /** `(ptr obj) -> ptr`: the declared properties of one class (and its dynamic bag) as an array. */
+    private function emitObjectVarsClassFn(string $sym, string $cname, \Compile\Mir\ClassDef $cd, bool $mangle): string
+    {
+        $oldSsa = $this->ssa;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldClassId = $this->classIdReg;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $body = $this->emitDeclaredPropsArray('%o', $cname, false, false, $mangle);
+        $props = $this->lastValue;
+        // A class can have BOTH — `#[AllowDynamicProperties] class Q { public int $a; }`
+        // with `$q->extra = 9`. Declared first, bag second, php's order.
+        if ($cd->usesBag()) {
+            $bg = $this->ssa->allocReg();
+            $body .= '  ' . $bg . ' = getelementptr inbounds i8, ptr %o, i64 ' . (string)$cd->bagOffset() . "\n";
+            $bagI = $this->ssa->allocReg();
+            $body .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
+            $bagP = $this->ssa->allocReg();
+            $body .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
+            $un = $this->ssa->allocReg();
+            $body .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props . ', ptr ' . $bagP . ")\n";
+            $this->rt->needsRc = true;
+            $body .= '  call void @__mir_array_release(ptr ' . $props . ")\n";
+            $props = $un;
+        }
+        $out = 'define internal ptr ' . $sym . "(ptr %o) {\nentry:\n" . $body . '  ret ptr ' . $props . "\n}\n\n";
+        $this->ssa = $oldSsa;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->classIdReg = $oldClassId;
+        return $out;
     }
 
     private function emitObjectVarsInline(string $objPtr, bool $mangle = false): string
@@ -10081,35 +10120,20 @@ trait EmitLlvmBuiltins
         $def = $this->ssa->allocLabel('gov.default');
         $switch = '  switch i64 ' . $cid . ', label %' . $def . " [\n";
         $bodies = '';
+        // One small function per class, the switch only calls it: inline, every class's
+        // property walk sat in ONE function — 360K lines of IR in a Laravel build, the
+        // largest single function clang had to hold.
         foreach ($holders as $cname => $cd) {
             $lbl = $this->ssa->allocLabel('gov.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
+            $hsym = '@' . $this->mirHelperSym('__mir_ovars_' . (string)$cd->classId . ($mangle ? '_mg' : ''));
+            $this->ovarsHelperBodies .= $this->emitObjectVarsClassFn($hsym, (string)$cname, $cd, $mangle);
+            $hr = $this->ssa->allocReg();
+            $hi = $this->ssa->allocReg();
             $bodies .= $lbl . ":\n";
-            $bodies .= $this->emitDeclaredPropsArray($objPtr, $cname, false, false, $mangle);
-            $props = $this->lastValue;
-            // A class can have BOTH — `#[AllowDynamicProperties] class Q { public
-            // int $a; }` with `$q->extra = 9`. Declared first, bag second, php's
-            // order; the same union the statically-typed arm of the cast does.
-            // Without it this arm answered the declared half alone and silently
-            // dropped every dynamic property off an erased receiver.
-            if ($cd->usesBag()) {
-                $bg = $this->ssa->allocReg();
-                $bodies .= '  ' . $bg . ' = getelementptr inbounds i8, ptr ' . $objPtr
-                         . ', i64 ' . (string)$cd->bagOffset() . "\n";
-                $bagI = $this->ssa->allocReg();
-                $bodies .= '  ' . $bagI . ' = load i64, ptr ' . $bg . "\n";
-                $bagP = $this->ssa->allocReg();
-                $bodies .= '  ' . $bagP . ' = inttoptr i64 ' . $bagI . " to ptr\n";
-                $un = $this->ssa->allocReg();
-                $bodies .= '  ' . $un . ' = call ptr @__mir_array_union(ptr ' . $props
-                         . ', ptr ' . $bagP . ")\n";
-                $this->rt->needsRc = true;
-                $bodies .= '  call void @__mir_array_release(ptr ' . $props . ")\n";
-                $props = $un;
-            }
-            $pi = $this->ssa->allocReg();
-            $bodies .= '  ' . $pi . ' = ptrtoint ptr ' . $props . " to i64\n";
-            $bodies .= '  store i64 ' . $pi . ', ptr ' . $res . "\n";
+            $bodies .= '  ' . $hr . ' = call ptr ' . $hsym . '(ptr ' . $objPtr . ")\n";
+            $bodies .= '  ' . $hi . ' = ptrtoint ptr ' . $hr . " to i64\n";
+            $bodies .= '  store i64 ' . $hi . ', ptr ' . $res . "\n";
             $bodies .= '  br label %' . $end . "\n";
         }
         // ⚠ An ENUM CASE is an object to every erased consumer, and it is NOT
