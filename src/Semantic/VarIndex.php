@@ -42,7 +42,7 @@ use Parser\Ast\WhileStmt;
  * - `$this` and the superglobals are special: never renameable. `$this` of a closure follows its parent
  *   (a `static` closure opens its own); a superglobal is one binding for the whole file;
  * - a scope holding `compact` / `extract` / `get_defined_vars` / `func_get_args` / `eval` / a variable-variable
- *   (the parser keeps it as a nameless Variable) lists the call as an uncertain site (`dynamic-variable`) of
+ *   (`VarVar`) lists the call as an uncertain site (`dynamic-variable`) of
  *   every binding visible in it, and `include` / `require` as `include-scope`; `compact('a')` with literal
  *   names lists that literal for `a` alone;
  * - a variable inside heredoc text has no name-precise span: it is listed as an uncertain site
@@ -266,6 +266,8 @@ final class VarIndex
                 foreach ($sub->exprs as $x) { $list[] = $x; }
             } elseif ($e instanceof Variable) {
                 $this->scVars[$sid][] = $e;
+            } elseif ($e instanceof \Parser\Ast\VarVar) {
+                $this->scDyn[$sid][] = new UncertainSite($this->file, $e->span->startLine(), $e->span->startColumn(), "dynamic-variable");
             } elseif ($e instanceof Closure) {
                 $this->scanParams($e->params);
                 $this->process($this->newScope('closure', $e->span, $e->body->statements, null, $e, $sid, $e->isStatic));
