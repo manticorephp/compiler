@@ -772,6 +772,10 @@ final class LowerFromAst implements Pass
 
     private ?Module $module = null;
     private int $closureCounter = 0;
+    /** @var array<string, int> next closure ordinal per prelude `Class::function` scope */
+    private array $preludeClosureOrd = [];
+    /** @var array<int, bool> prelude closure ids handed out */
+    private array $preludeClosureIds = [];
     private int $destrCounter = 0;
 
     /** Names a `static` / `global` statement bound to a module cell, per function (an over-approximation across closures).
