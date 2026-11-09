@@ -10,7 +10,7 @@ Program
             name: "a"
         value:
           Expr:New @3:6-3:35
-            class: "N\\__anon_class_4108050209_3_10"
+            class: "N\\__anon_class_0_3_6"
             args: [0]
     docComment: null
     attributes: [0]
@@ -22,18 +22,18 @@ Program
             name: "b"
         value:
           Expr:New @4:6-4:31
-            class: "N\\__anon_class_4108050209_4_10"
+            class: "N\\__anon_class_0_4_6"
             args: [1]
               Expr:IntLiteral @4:16-4:17
                 value: 1
     docComment: null
     attributes: [0]
   Stmt:Class @3:6-3:35
-    decl: class N\__anon_class_4108050209_3_10
+    decl: class N\__anon_class_0_3_6
       Method m [public] -> (none) @3:18-3:33
         params: 0
         body: Block @3:31-3:33
   Stmt:Class @4:6-4:31
-    decl: class N\__anon_class_4108050209_4_10
+    decl: class N\__anon_class_0_4_6
       extends: N\P
 

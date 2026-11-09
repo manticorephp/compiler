@@ -90,8 +90,11 @@ Program
           Expr:Variable @6:1-6:3
             name: "e"
         value:
-          Expr:StringLiteral @6:6-6:12
-            value: "${x}"
+          Expr:Cast @6:6-6:12
+            cast: "string"
+            operand:
+              Expr:Variable @6:8-6:10
+                name: "x"
     docComment: null
     attributes: [0]
   Stmt:Expression @7:1-7:18
