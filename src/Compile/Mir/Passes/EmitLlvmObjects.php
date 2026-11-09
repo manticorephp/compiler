@@ -10210,6 +10210,70 @@ trait EmitLlvmObjects
      * has `__call` goes through `__call` (as the all-magic reroute does); every
      * other receiver takes the ordinary dispatch.
      */
+    /**
+     * `i64 (i64 cell)`: 1 when the value is an object whose class has `__call` and lacks
+     * `$method`, else 0 — {@see emitMixedMagicCall}'s run-time choice, one body per name.
+     */
+    private function magicOnlyPredicate(string $method): string
+    {
+        $key = '__mir_magiconly|' . \strtolower($method);
+        $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_magiconly_', \strtolower($method)));
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $this->dynamicMethodHelpers[$key] = '';
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldNeedsBacktrace = $this->rt->needsBacktrace;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        $this->locals = new \Compile\Mir\LocalSlots();
+        $this->cf = new \Compile\Mir\ControlFlow();
+        $this->arena = new \Compile\Mir\ArenaContext();
+        $slot = $this->ssa->allocReg();
+        $this->locals->slots['__mc_mo'] = $slot;
+        $body = 'define hidden i64 ' . $sym . "(i64 %v) {\nentry:\n";
+        $body .= '  ' . $slot . " = alloca i64\n  store i64 %v, ptr " . $slot . "\n";
+        $cell = Type::cell();
+        $bool = Type::bool_();
+        $str = fn (string $s): Node => new \Compile\Mir\StringConst($s, Type::string_());
+        $t = fn (): Node => new \Compile\Mir\LoadLocal('__mc_mo', $cell);
+        $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
+        $false = fn (): Node => new \Compile\Mir\BoolConst(false, $bool);
+        $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
+        $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
+            new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
+                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str($method)]), $false(), $true(), $bool),
+                $false(), $bool),
+            $false(), $bool);
+        $body .= $this->emitNode($magicOnly);
+        $body .= $this->coerceToI64();
+        $nz = $this->ssa->allocReg();
+        $body .= '  ' . $nz . ' = icmp ne i64 ' . $this->lastValue . ", 0\n";
+        $w = $this->ssa->allocReg();
+        $body .= '  ' . $w . ' = zext i1 ' . $nz . " to i64\n";
+        $body .= '  ret i64 ' . $w . "\n}\n\n";
+        $this->dynamicMethodHelpers[$key] = $body;
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        $this->rt->needsBacktrace = $oldNeedsBacktrace;
+        return $sym;
+    }
+
     private function emitMixedMagicCall(\Compile\Mir\MethodCall_ $mc, bool $boxObject = false): string
     {
         $out = $this->emitNode($mc->object);
@@ -10231,12 +10295,17 @@ trait EmitLlvmObjects
         $call = fn (string $f, array $args): Node => new \Compile\Mir\Call($f, $args, $bool);
         $false = fn (): Node => new \Compile\Mir\BoolConst(false, $bool);
         $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
-        // is_object && method_exists(__call) && !method_exists(method)
-        $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
-            new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
-                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str($mc->method)]), $false(), $true(), $bool),
-                $false(), $bool),
-            $false(), $bool);
+        // is_object && method_exists(__call) && !method_exists(method), once per method name: spliced into
+        // every site it was ~140 IR lines (a get_class chain per method_exists), 3 MB in one Symfony
+        // Configuration builder whose fluent calls all ride an erased receiver.
+        $pred = $this->magicOnlyPredicate($mc->method);
+        $pr = $this->ssa->allocReg();
+        $out .= '  ' . $pr . ' = call i64 ' . $pred . '(i64 ' . $cellV . ")\n";
+        $predName = '__emxp' . $tag;
+        $predSlot = $this->ssa->allocReg();
+        $out .= '  ' . $predSlot . " = alloca i64\n  store i64 " . $pr . ', ptr ' . $predSlot . "\n";
+        $this->locals->slots[$predName] = $predSlot;
+        $magicOnly = new \Compile\Mir\LoadLocal($predName, Type::int_());
         $elems = [];
         foreach ($mc->args as $a) { $elems[] = new \Compile\Mir\ArrayElement_(null, $a); }
         $argsArr = new \Compile\Mir\ArrayLit($elems, Type::vec($cell));
