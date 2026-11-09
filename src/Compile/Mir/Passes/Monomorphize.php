@@ -879,6 +879,10 @@ final class Monomorphize implements Pass
         // Already a specialization (`f$mono$…`) — its params are concrete, so
         // it is never a candidate; this also keeps the worklist terminating.
         if (\str_contains($fn->name, '$mono$')) { return false; }
+        // A synthesized dispatcher already takes every caller's shape (its params are
+        // the trampoline ABI), and a clone copies all of it: `__mc_static_callable`'s
+        // `$mono$p2_vec_cell` was another 308K IR lines in a Laravel build.
+        if (TrampolineSynth::isSynthReturn($fn->name) || $fn->name === '__mc_dyn_spread_fallback') { return false; }
         // A leading `this` param marks a lowered method — skip (free functions
         // only; object layout / dispatch is out of scope).
         if (\count($fn->params) > 0 && $fn->params[0]->name === 'this') { return false; }
