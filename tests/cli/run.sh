@@ -121,6 +121,7 @@ PHP
     diag "check_ref_after_class"    "$MC" compile --check "$HERE/check/ref_after_class_lowered.php" -o "$WORK/rc"
     diag "check_class_alias_literal" "$MC" compile --check "$HERE/check/class_alias_literal.php" -o "$WORK/ca"
     diag "check_unresolved_fns"     "$MC" compile --check "$HERE/check/unresolved_fns.php" -o "$WORK/uf"
+    diag "check_unresolved_hints"   "$MC" compile --check "$HERE/check/unresolved_hints.php" -o "$WORK/uh"
     printf '== builtin names in sync\n'; bash "$ROOT/tools/check_builtin_names.sh"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus

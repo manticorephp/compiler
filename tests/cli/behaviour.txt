@@ -95,6 +95,17 @@ rc=0
 unresolved_fns.php:10: warning[undefined.function]: function apcu_fetch() is not declared (2 uses)
 unresolved_fns.php:12: warning[undefined.function]: function no_such_fn() is not declared
 front end: 0 error(s), 2 warning(s)
+== check_unresolved_hints
+rc=0
+unresolved_hints.php:10: warning[undefined.class]: class App\Missing\K is not declared
+unresolved_hints.php:6: warning[undefined.class]: class App\Missing\H is not declared
+unresolved_hints.php:6: warning[undefined.class]: class App\Missing\R is not declared
+unresolved_hints.php:6: warning[undefined.class]: class App\Missing\U is not declared
+unresolved_hints.php:8: warning[undefined.class]: class App\Missing\P is not declared
+unresolved_hints.php:9: warning[undefined.class]: class App\Missing\Base is not declared
+unresolved_hints.php:9: warning[undefined.class]: class App\Missing\I is not declared
+unresolved_hints.php:9: warning[undefined.class]: class App\Missing\T is not declared
+front end: 0 error(s), 8 warning(s)
 == builtin names in sync
 ok
 == compile bad --progress

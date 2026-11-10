@@ -1055,6 +1055,7 @@ final class LowerFromAst implements Pass
         // the call stores into it and later bare / constant() / defined() reads see it.
         $this->registerRuntimeDefines($stmts);
         $this->registerClassAliases($stmts);
+        $this->checkDeclTypeNames($stmts, $preludeCount);
         // Constants a dependency exports. AFTER the local scan and guarded, so a
         // program that defines the name itself keeps its own value — the same
         // precedence the imported-FUNCTION path uses, and the one that lets a
@@ -4457,8 +4458,10 @@ final class LowerFromAst implements Pass
     /**
      * Class names the compiler owns without a PHP declaration: `Closure` (emitter statics, EmitLlvmObjects /
      * staticClassAbsent), `Generator` (emitter-built, EmitLlvmBuiltins class_exists), `Ffi\Ptr` (ptrIntrinsicClass).
+     * `UnitEnum` / `BackedEnum` (every enum implements them in EmitLlvm; no PHP declaration).
      */
-    private const COMPILER_CLASSES = ['closure' => true, 'generator' => true, 'ffi\\ptr' => true];
+    private const COMPILER_CLASSES = ['closure' => true, 'generator' => true, 'ffi\\ptr' => true,
+        'unitenum' => true, 'backedenum' => true];
 
     /** @var array<string, bool> lowercase names of every table classIsDeclared reads, plus literal class_alias targets */
     private array $declaredLower = [];
@@ -4557,6 +4560,52 @@ final class LowerFromAst implements Pass
     private function noteClassRef(string $cls, ?\Parser\Ast\Span $span): void
     {
         if ($cls !== '' && !$this->classIsDeclared($cls)) { $this->noteUndefined('undefined.class', $cls, $span); }
+    }
+
+    /** @var array<string, bool> hint words that name no class */
+    private const NON_CLASS_HINTS = ['self' => true, 'static' => true, 'parent' => true, 'int' => true, 'float' => true,
+        'string' => true, 'bool' => true, 'array' => true, 'iterable' => true, 'callable' => true, 'object' => true,
+        'mixed' => true, 'void' => true, 'never' => true, 'null' => true, 'false' => true, 'true' => true];
+
+    /** `undefined.class` for every class name a user declaration's signature, property types and class hierarchy spell. */
+    private function checkDeclTypeNames(array $stmts, int $preludeCount): void
+    {
+        if ($this->diags === null) { return; }
+        $this->lowerInPrelude = false;
+        foreach ($stmts as $i => $stmt) {
+            if ($i >= $preludeCount) { $this->checkDeclTypeNamesIn($stmt); }
+        }
+    }
+
+    private function checkDeclTypeNamesIn(\Parser\Ast\Stmt $stmt): void
+    {
+        if ($stmt->kind === 'Namespace' && $stmt->body !== null) {
+            foreach ($stmt->body->statements as $s) { $this->checkDeclTypeNamesIn($s); }
+        } elseif ($stmt->kind === 'Function') {
+            $d = $stmt->decl;
+            $this->noteHintNames($d->returnType, $d->span);
+            foreach ($d->params as $p) { $this->noteHintNames($p->typeHint, $p->span); }
+        } elseif ($stmt->kind === 'Class') {
+            $d = $stmt->decl;
+            foreach ([$d->extends, $d->implements, $d->uses] as $names) {
+                foreach ($names as $n) { $this->noteClassRef(\ltrim($n, '\\'), $d->span); }
+            }
+            foreach ($d->properties as $p) { $this->noteHintNames($p->typeHint, $p->span); }
+            foreach ($d->methods as $m) {
+                $this->noteHintNames($m->returnType, $m->span);
+                foreach ($m->params as $p) { $this->noteHintNames($p->typeHint, $p->span); }
+            }
+        }
+    }
+
+    private function noteHintNames(?string $hint, \Parser\Ast\Span $span): void
+    {
+        if ($hint === null || $hint === '') { return; }
+        foreach (\preg_split('/[|&()?\s]+/', $hint, -1, \PREG_SPLIT_NO_EMPTY) as $w) {
+            $n = \ltrim($w, '\\');
+            if (isset(self::NON_CLASS_HINTS[\strtolower($n)]) || \preg_match('/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff\\\\]*$/', $n) !== 1) { continue; }
+            if ($this->resolveClassHint($n) === '') { $this->noteClassRef($n, $span); }
+        }
     }
 
     /**
