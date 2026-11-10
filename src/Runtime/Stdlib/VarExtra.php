@@ -130,6 +130,8 @@ function extension_loaded(string $extension): bool
         || $e === 'openssl' || $e === 'core' || $e === 'standard'
         || $e === 'tokenizer' || $e === 'mbstring' || $e === 'intl'
         || $e === 'session' || $e === 'mysqli'
+        || $e === 'hash' || $e === 'date' || $e === 'spl' || $e === 'filter' || $e === 'iconv' || $e === 'random' || $e === 'reflection'
+        || $e === 'sockets' || $e === 'curl' || $e === 'simplexml' || $e === 'libxml' || $e === 'zlib' || $e === 'pdo'
         || $e === 'bcmath';
 }
 

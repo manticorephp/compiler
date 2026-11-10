@@ -6353,6 +6353,8 @@ final class LowerFromAst implements Pass
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
             || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl'
             || $ext === 'session' || $ext === 'mysqli'
+            || $ext === 'hash' || $ext === 'date' || $ext === 'spl' || $ext === 'filter' || $ext === 'iconv' || $ext === 'random' || $ext === 'reflection'
+            || $ext === 'sockets' || $ext === 'curl' || $ext === 'simplexml' || $ext === 'libxml' || $ext === 'zlib' || $ext === 'pdo'
             || $ext === 'bcmath';
     }
 
