@@ -41,7 +41,9 @@ Three facts drive the plan:
 
 ## Epics, in order of payoff per effort
 
-### E1 — Shared generics (in progress, branch `shared-generics`)
+### E1 — Shared generics (implemented on branch `shared-generics`; `docs/design/shared-generics.md`)
+Result on the 138-case sample: empty cache wall 89 % / CPU 105 %, warm CPU 43 %,
+runtime geomean 1.000. Remaining: release seed, libraries and large apps.
 Large prelude bodies compiled once per variant, reused from the object cache.
 Spec/plan: `docs/superpowers/specs|plans/2026-11-09-shared-generics*`.
 Done: mechanical roots — identity 46.5 → 59.8 %, variant hits 17.5 → 67.3 %
