@@ -5855,8 +5855,15 @@ final class LowerFromAst implements Pass
         $guarded = [];
         $n0 = \count($stmts);
         for ($i = $userStart; $i < $n0; $i = $i + 1) {
-            $g = $this->existsGuardedReturn($stmts[$i]);
-            if ($g !== '') { $guarded[$stmts[$i]->span->file . "\0" . $g] = true; }
+            $gs = $stmts[$i];
+            // A lazy include unit (Main.php `__mc_unit_N`) keeps the file's guard
+            // in its body while the declaration it guards sits at the top level.
+            $cands = ($gs->kind === 'Function' && \str_starts_with($this->fnStmtName($gs), '__mc_unit_'))
+                ? $this->fnStmtBody($gs) : [$gs];
+            foreach ($cands as $c) {
+                $g = $this->existsGuardedReturn($c);
+                if ($g !== '') { $guarded[$c->span->file . "\0" . $g] = true; }
+            }
         }
         if ($this->demandLoadedFiles === [] && $guarded === []) { return $stmts; }
         /** @var array<string, bool> $builtin */
