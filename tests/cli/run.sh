@@ -99,6 +99,8 @@ PHP
     run "dump-ast bogus flag"      "$MC" dump-ast --bogus "f.php"
     run "dump-ast missing file"    "$MC" dump-ast "nope.php"
     run "dump-ast with compile-only flag" "$MC" dump-ast --analyze "f.php"
+    run "dump-mir rejects --check"  "$MC" dump-mir --check "f.php"
+    run "analyze rejects --check"   "$MC" analyze --check "f.php"
     run "compile bad -O"           "$MC" compile "f.php" -o "x" -O9
     run "compile bad --memory"     "$MC" compile "f.php" -o "x" --memory bogus
     run "compile bad --strict"     "$MC" compile "f.php" -o "x" --strict=bogus

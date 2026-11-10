@@ -39,6 +39,7 @@ final class BuildCommand extends Command
             new Option('libs-only', \Cli\ArgParse::FLAG, 'Build library targets and stop (cold seed)'),
             new Option('apps-only', \Cli\ArgParse::FLAG, 'Build application targets only'),
             new Option('no-analyze', \Cli\ArgParse::FLAG, 'Accepted for compile parity; build does not run the analyzer'),
+            new Option('check', \Cli\ArgParse::FLAG, 'Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen'),
         ], ProgressOptions::all());
     }
 

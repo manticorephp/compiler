@@ -36,11 +36,11 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
-  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
   --analyze                Run the analyzer (default)
   --no-analyze             Skip the analyzer
+  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --analyze-strict         Fail with rc 65 on analyzer errors
   --progress <mode>        Progress output: auto|live|plain|json|off (default auto)
   --quiet                  Silence progress and timings (diagnostics stay)
@@ -62,12 +62,12 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
-  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
   --libs-only              Build library targets and stop (cold seed)
   --apps-only              Build application targets only
   --no-analyze             Accepted for compile parity; build does not run the analyzer
+  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --progress <mode>        Progress output: auto|live|plain|json|off (default auto)
   --quiet                  Silence progress and timings (diagnostics stay)
   --timings                Print a per-stage time table at the end
@@ -88,7 +88,6 @@ Options:
   --runtime                   With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps     Do not refuse a library that contains undefined-function traps
   --keep-ir                   Keep the intermediate .ll files
-  --check                     Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --strict <list>             Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                      Parallel clang jobs; 0 = one per core
   --deep                      Also run the compiler's MIR type passes (heavier)
@@ -112,7 +111,6 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
-  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
 == help dump-ast
@@ -131,7 +129,6 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
-  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
   --tolerant               Recover from syntax errors; print the tree and every error
@@ -155,7 +152,6 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
-  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
 == help dump-llvm-mir
@@ -174,7 +170,6 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
-  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
 == help dump-sig
@@ -193,7 +188,6 @@ Options:
   --runtime                With --emit-library: this library is the bundled stdlib
   --allow-undefined-traps  Do not refuse a library that contains undefined-function traps
   --keep-ir                Keep the intermediate .ll files
-  --check                  Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen
   --strict <list>          Comma-separated strict checks: shapes (closed array shapes), analyze
   -j <n>                   Parallel clang jobs; 0 = one per core
 == help split-ir

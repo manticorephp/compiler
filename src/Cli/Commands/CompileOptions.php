@@ -22,7 +22,6 @@ final class CompileOptions
             new Option('runtime', ArgParse::FLAG, 'With --emit-library: this library is the bundled stdlib'),
             new Option('allow-undefined-traps', ArgParse::FLAG, 'Do not refuse a library that contains undefined-function traps'),
             new Option('keep-ir', ArgParse::FLAG, 'Keep the intermediate .ll files'),
-            new Option('check', ArgParse::FLAG, 'Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen'),
             new Option('strict', ArgParse::VALUE, 'Comma-separated strict checks: shapes (closed array shapes), analyze', 'list'),
             new Option('j', ArgParse::VALUE, 'Parallel clang jobs; 0 = one per core', 'n'),
         ];

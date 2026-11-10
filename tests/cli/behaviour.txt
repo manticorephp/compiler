@@ -22,6 +22,10 @@ rc=64
 rc=66
 == dump-ast with compile-only flag
 rc=64
+== dump-mir rejects --check
+rc=64
+== analyze rejects --check
+rc=64
 == compile bad -O
 rc=64
 == compile bad --memory

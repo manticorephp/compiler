@@ -27,6 +27,7 @@ final class CompileCommand extends Command
         return \array_merge(CompileOptions::shared(), [
             new Option('analyze', \Cli\ArgParse::FLAG, 'Run the analyzer (default)'),
             new Option('no-analyze', \Cli\ArgParse::FLAG, 'Skip the analyzer'),
+            new Option('check', \Cli\ArgParse::FLAG, 'Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen'),
             new Option('analyze-strict', \Cli\ArgParse::FLAG, 'Fail with rc 65 on analyzer errors'),
         ], ProgressOptions::all());
     }
