@@ -80,6 +80,8 @@ empties it (only the cache's own `<sha1>.o` files). The budget applies to the sh
 
 ## Not yet
 
-- Libraries and the staged/auto-split path of large apps keep their existing
-  assembly.
+- Libraries keep one unit; a staged module above `MANTICORE_SHARE_MAX_MB` (512)
+  keeps the file-based split (a streaming ShareSplit is the follow-up).
+- Manifest builds (staged) share up to that size; the program part keeps its
+  hash-stable split (symfony-console: cold 35 s, warm 14 s, off 29 s).
 - A seed of common variants shipped with a release (first-ever compiles).
