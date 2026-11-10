@@ -97,7 +97,7 @@ brew install manticorephp/tap/manticore
 
 The formula installs the published macOS build and its libraries (`openssl@4`, `pcre2`,
 `icu4c`, `pkgconf`); clang, `cc`, zlib, iconv, libcurl, libsqlite3 and libxml2 come from
-macOS. The release workflow points the formula at each new tag. Upgrade with
+macOS. A scheduled workflow in the tap points the formula at the latest release. Upgrade with
 `brew upgrade manticore`; `manticore upgrade` refuses a Homebrew install. It does not
 touch an `install.sh` install under `~/.manticore`; with both present, the one earlier in
 `PATH` wins, and `brew info manticore` warns about it.
