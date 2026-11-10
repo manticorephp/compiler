@@ -377,6 +377,13 @@ bash tools/librefpack_smoke.sh > "$MC_LOGDIR/librefpack.log" 2>&1
 refpack_rc=$?
 tail -5 "$MC_LOGDIR/librefpack.log"
 
+# An entry app's own src files run at their require (lazy units), in the global scope.
+echo
+echo "=== tools/liblazyunits_smoke.sh (lazy compile units vs php) ==="
+bash tools/liblazyunits_smoke.sh > "$MC_LOGDIR/liblazyunits.log" 2>&1
+lazy_rc=$?
+tail -5 "$MC_LOGDIR/liblazyunits.log"
+
 # The CLI surface (wiring, options, exit codes, help, progress formats). Its
 # golden holds no codegen-dependent value, so it only goes red on a CLI change.
 echo
@@ -394,7 +401,7 @@ tail -5 "$MC_LOGDIR/parser.log"
 
 else
     echo "=== smokes skipped (MC_SMOKES=0) — the build job ran them ==="
-    install_rc=0; lib_rc=0; refpack_rc=0; cli_rc=0; parser_rc=0
+    install_rc=0; lib_rc=0; refpack_rc=0; lazy_rc=0; cli_rc=0; parser_rc=0
 fi
 echo
 suite_rc=0
@@ -461,8 +468,8 @@ fi
 
 if [ "$MC_DIFFTEST" != "1" ] && [ "$MC_FIXPOINT" != "1" ]; then
     echo
-    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc cli=$cli_rc parser=$parser_rc known-bugs=[$XFAIL_LABEL] ==="
-    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$parser_rc" = "0" ] && [ "$xfail_rc" = "0" ] || exit 1
+    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc liblazyunits=$lazy_rc cli=$cli_rc parser=$parser_rc known-bugs=[$XFAIL_LABEL] ==="
+    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$lazy_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$parser_rc" = "0" ] && [ "$xfail_rc" = "0" ] || exit 1
     exit 0
 fi
 
@@ -487,6 +494,6 @@ if [ "$MC_FIXPOINT" = "1" ]; then
 fi
 
 echo
-echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc cli=$cli_rc parser=$parser_rc difftest=$diff_rc fixpoint=$fix_rc known-bugs=[$XFAIL_LABEL] ==="
-[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$parser_rc" = "0" ] && [ "$xfail_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
+echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc liblazyunits=$lazy_rc cli=$cli_rc parser=$parser_rc difftest=$diff_rc fixpoint=$fix_rc known-bugs=[$XFAIL_LABEL] ==="
+[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$lazy_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$parser_rc" = "0" ] && [ "$xfail_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
 exit 0
