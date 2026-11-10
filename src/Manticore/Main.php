@@ -621,7 +621,88 @@ function icu_link_flags(string $name): string
  *
  * @param string[] $libs
  */
+/**
+ * Linker flags for `$libs`, served from an on-disk cache of earlier probes.
+ *
+ * The probes (`pkg-config`, `pcre2-config`, Homebrew lookups) cost ~50 ms of
+ * shell processes per compile and answer the same thing until the host changes.
+ * The key covers what decides the answer (compiler binary, OS, PATH,
+ * PKG_CONFIG_PATH, the library list); a host change it does not cover shows up
+ * as a failed link, after which the caller forgets the entry, probes again and
+ * links once more ({@see link_flags_forget}).
+ *
+ * @param string[] $libs
+ */
 function ffi_link_flags(array $libs, string $already = ""): string
+{
+    CompileArgs::$linkFlagsCachePath = '';
+    $path = link_flags_cache_path($libs, $already);
+    if ($path !== '') {
+        try {
+            if (\file_exists($path)) {
+                $c = read_file($path);
+                if ($c !== null) {
+                    CompileArgs::$linkFlagsCachePath = $path;
+                    return $c;
+                }
+            }
+        } catch (\Throwable $e) {
+            // a miss
+        }
+    }
+    $out = ffi_link_flags_probe($libs, $already);
+    if ($path !== '') {
+        try {
+            $dir = \dirname($path);
+            if (!\is_dir($dir)) {
+                \mkdir($dir, 0777, true);
+            }
+            $tmp = $path . '.tmp' . (string)getpid();
+            if (\file_put_contents($tmp, $out) === \strlen($out)) {
+                \rename($tmp, $path);
+            }
+        } catch (\Throwable $e) {
+            // not cached; the next compile probes again
+        }
+    }
+    return $out;
+}
+
+/** @param string[] $libs */
+function link_flags_cache_path(array $libs, string $already): string
+{
+    $exe = self_exe_id();
+    if ($exe === '') {
+        return '';
+    }
+    $pathEnv = \getenv('PATH');
+    $pkgEnv = \getenv('PKG_CONFIG_PATH');
+    $key = \sha1($exe . "\0" . host_os() . "\0" . ($pathEnv === false ? '' : $pathEnv) . "\0"
+        . ($pkgEnv === false ? '' : $pkgEnv) . "\0" . \implode(',', $libs) . "\0" . $already);
+    return \dirname(obj_cache_dir()) . '/link/' . $key . '.txt';
+}
+
+/**
+ * Drop the cached flags the last {@see ffi_link_flags} served. True when there
+ * was one: the caller then probes again and retries its link once.
+ */
+function link_flags_forget(): bool
+{
+    $p = CompileArgs::$linkFlagsCachePath;
+    if ($p === '') {
+        return false;
+    }
+    CompileArgs::$linkFlagsCachePath = '';
+    try {
+        \unlink($p);
+    } catch (\Throwable $e) {
+        // gone already
+    }
+    return true;
+}
+
+/** @param string[] $libs */
+function ffi_link_flags_probe(array $libs, string $already = ""): string
 {
     $seen = [];
     foreach (\explode(" ", $already) as $tok) {
@@ -2482,6 +2563,8 @@ final class CompileArgs
      * link). With `--runtime` it is the bundled stdlib itself.
      */
     public static bool $emitLibrary = false;
+    /** The cache file the last ffi_link_flags() answer came from ('' = probed). */
+    public static string $linkFlagsCachePath = '';
     /** `clang --version`, asked once ({@see clang_id}). */
     public static string $clangId = '';
 
@@ -3803,15 +3886,15 @@ function build_compile_module(
             $weak[] = $w;
         }
     }
-    $libFlags = ffi_link_flags($libs, $linkFlags);
-    if ($libFlags !== "") {
-        $linkExtra = $linkExtra . $libFlags;
-    }
+    // The library flags sit between $preLib and $tail, so a link that fails on
+    // cached flags can be retried with fresh ones ({@see link_flags_forget}).
+    $preLib = $linkExtra;
+    $tail = '';
     // Darwin's weak-undefined allowance, derived exactly as in CompileCommand.
     // This path carried NO -U flags at all before, which is a divergence that
     // only stayed invisible because link_stubs.sh defines what ld would reject.
     if (is_darwin()) {
-        $linkExtra = $linkExtra . weak_undef_flags($weak) . darwin_export_flags();
+        $tail = $tail . weak_undef_flags($weak) . darwin_export_flags();
     }
     // Drop what nothing reaches, as CompileCommand does. A split module pins its
     // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
@@ -3819,20 +3902,22 @@ function build_compile_module(
     // built in 8 parts came out 20.5 MB against 14.3 MB for one unit.
     // -lm as cmd_compile does: libm is separate on glibc/musl, and a manifest application that calls
     // floor/fmod/pow/... (Symfony's) fails to link without it. Darwin folds libm into libSystem.
-    $linkExtra = $linkExtra . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections -lm");
+    $tail = $tail . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections -lm");
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
-    $linkExtra = $linkExtra . thinlto_link_flags() . unwind_link_flags();
+    $tail = $tail . thinlto_link_flags() . unwind_link_flags();
+    $linkExtra = $preLib . ffi_link_flags($libs, $linkFlags) . $tail;
     // Link via the stub-generating tail: the bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
     $stubs = find_link_stubs_script();
     $statT = \Compile\Stats::begin('link');
-    if ($stubs !== "") {
-        $rc2 = system("bash " . $stubs . " " . $output . " " . $objList . $linkExtra);
-    } else {
-        $rc2 = system("cc " . $objList . $linkExtra . " -o " . $output);
+    $rc2 = build_link($stubs, $output, $objList, $linkExtra);
+    // Cached library flags may predate a change on the host: probe again, once.
+    if ($rc2 !== 0 && link_flags_forget()) {
+        $linkExtra = $preLib . ffi_link_flags($libs, $linkFlags) . $tail;
+        $rc2 = build_link($stubs, $output, $objList, $linkExtra);
     }
     \Compile\Stats::step('link', $statT, -1, -1);
     \Compile\Stats::dumpCounters();
@@ -3844,6 +3929,14 @@ function build_compile_module(
         system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll " . $base . ".s*.ll");
     }
     return 0;
+}
+
+function build_link(string $stubs, string $output, string $objList, string $linkExtra): int
+{
+    if ($stubs !== "") {
+        return system("bash " . $stubs . " " . $output . " " . $objList . $linkExtra);
+    }
+    return system("cc " . $objList . $linkExtra . " -o " . $output);
 }
 
 /**
@@ -4852,6 +4945,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $intlSrc = prelude_src_or_empty("intl.php");
     $weakSrc = prelude_src_or_empty("weak.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
+    $demandT = \Compile\Stats::begin('prelude demand');
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -5700,6 +5794,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if ($collect !== null) {
             $lower->attrCollectMode = true;
         }
+        \Compile\Stats::step('prelude demand', $demandT, -1, -1);
         $statT = \Compile\Stats::begin('LowerFromAst');
         $module = $lower->run($module);
         // Path → value-slot map for `require`/`include`. Set after lowering

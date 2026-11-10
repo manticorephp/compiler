@@ -49,9 +49,9 @@ rc=0 fail=0 warn=3
 == doctor: full toolchain
 rc=0 fail=0 warn=1
 == cache show
-<dir>: 2 objects, 1 analyzer indexes, 7 B
+<dir>: 2 objects, 1 indexes, 7 B
 == cache clear
-cleared 2 objects, 1 analyzer indexes (7 B) from <dir>
+cleared 2 objects, 1 indexes (7 B) from <dir>
 left: ./notes.txt ./user.o analyze: 0
 == cache unknown action
 rc=64

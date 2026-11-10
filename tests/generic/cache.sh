@@ -84,5 +84,15 @@ else
     echo "FAIL build: build or output"; tail -5 "$WORK/build1.trace"; fail=1
 fi
 
+# Cached link flags that no longer link (a host change the key does not see):
+# the compile forgets them, probes again and links.
+linkdir="$(dirname "$MANTICORE_OBJ_CACHE_DIR")/link"
+if ls "$linkdir"/*.txt >/dev/null 2>&1; then
+    for lf in "$linkdir"/*.txt; do printf ' -lmanticore_no_such_library' > "$lf"; done
+    compile arrays_sort relink && expect "stale cached link flags: probed again and linked" '! grep -q manticore_no_such_library "$linkdir"/*.txt'
+else
+    echo "FAIL link flags were not cached"; fail=1
+fi
+
 [[ $fail -eq 0 ]] && echo "ok: shared generics cache"
 exit $fail

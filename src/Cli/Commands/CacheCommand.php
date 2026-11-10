@@ -11,7 +11,7 @@ use Cli\ParsedArgs;
  *
  * Only the cache's own files are touched (`<sha1>.o` and their in-flight
  * `.tmp` copies, at the top and in `prog/`, and the analyzer's `<sha1>.json`
- * prelude indexes beside it): `MANTICORE_OBJ_CACHE_DIR` may point
+ * prelude indexes and cached link flags beside it): `MANTICORE_OBJ_CACHE_DIR` may point
  * anywhere, and clearing must never reach a file the cache did not write.
  */
 final class CacheCommand extends Command
@@ -40,10 +40,11 @@ final class CacheCommand extends Command
             [$dir, '/^[0-9a-f]{40}\.o(\.tmp[0-9_]*)?$/'],
             [$dir . '/prog', '/^[0-9a-f]{40}\.o(\.tmp[0-9_]*)?$/'],
             [\dirname($dir) . '/analyze', '/^[0-9a-f]{40}\.json(\.tmp[0-9_]*)?$/'],
+            [\dirname($dir) . '/link', '/^[0-9a-f]{40}\.txt(\.tmp[0-9_]*)?$/'],
         ];
         foreach ($sets as $k => $set) {
             foreach ($this->cacheFiles($set[0], $set[1]) as $f) {
-                if ($k === 2) { $indexes++; } else { $files++; }
+                if ($k >= 2) { $indexes++; } else { $files++; }
                 $sz = \filesize($f);
                 $bytes += $sz === false ? 0 : $sz;
                 if ($action === 'clear') {
@@ -51,7 +52,7 @@ final class CacheCommand extends Command
                 }
             }
         }
-        $what = (string)$files . ' objects, ' . (string)$indexes . ' analyzer indexes';
+        $what = (string)$files . ' objects, ' . (string)$indexes . ' indexes';
         $size = $this->human($bytes);
         if ($action === 'clear') {
             \Manticore\puts('cleared ' . $what . ' (' . $size . ') from ' . $dir);

@@ -187,6 +187,7 @@ final class CompileCommand extends Command
         if ($keep) {
             \Manticore\dprint("compile: kept IR " . $base . ".*.ll");
         }
+        $flagsT = \Compile\Stats::begin('link flags');
         $objList = \implode(" ", $objs);
         // Link the prebuilt stdlib.o only when the program imported a bundled
         // stdlib function (str_starts_with / ctype_* / file_*). A self-contained
@@ -232,6 +233,7 @@ final class CompileCommand extends Command
                 $weak[] = $w;
             }
         }
+        $preLib = $linkExtra;
         $libFlags = \Manticore\ffi_link_flags($libs);
         if ($libFlags !== "") {
             $linkExtra .= $libFlags;
@@ -271,8 +273,14 @@ final class CompileCommand extends Command
             : " -Wl,--gc-sections -lm";
         $gc = $gc . \Manticore\unwind_link_flags();
         $asNeeded = \Manticore\is_darwin() ? "" : " -Wl,--as-needed";
+        \Compile\Stats::step('link flags', $flagsT, -1, -1);
         $linkT = \Compile\Stats::begin('link');
         $rc2 = \Manticore\system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
+        // Cached library flags may predate a change on the host: probe again, once.
+        if ($rc2 !== 0 && \Manticore\link_flags_forget()) {
+            $linkExtra = $preLib . \Manticore\ffi_link_flags($libs);
+            $rc2 = \Manticore\system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
+        }
         \Compile\Stats::step('link', $linkT, -1, -1);
         if ($rc2 !== 0) {
             \Manticore\dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objList);
