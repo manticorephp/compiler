@@ -45,6 +45,11 @@ final class Reachability
     /** @var array<string, bool> classes `new`ed themselves (their late-static copies are noted once) */
     private array $leafDone = [];
 
+    /** @var array<string, FunctionDef> */
+    private array $fnDefs = [];
+    /** @var array<string, LocalValueSets> per function, built on the first dynamic target met in it */
+    private array $localSets = [];
+
     /** @var array<string, bool> */
     private array $fnNames = [];
     /** @var array<string, string> lowercase function name => its symbol */
@@ -160,6 +165,7 @@ final class Reachability
         /** @var array<string, FunctionDef> $fns */
         $fns = [];
         foreach ($m->functions as $fn) { $fns[$fn->name] = $fn; }
+        $r->fnDefs = $fns;
         $r->drain($fns);
         $r->staticParent = $r->parent;
         $r->staticInstantiated = $r->instantiated;
@@ -493,6 +499,62 @@ final class Reachability
         if ($cc !== false && $cc > 0) { $this->staticCall(\substr($s, 0, $cc), \substr($s, $cc + 2), $from); }
     }
 
+    /** The strings `$e` can hold, from the locals of function `$from`; null = unknown. @return array<string, bool>|null */
+    private function valueSetOf(Node $e, string $from): ?array
+    {
+        $k = $e->kind;
+        if ($k !== Node::KIND_LOAD_LOCAL && $k !== Node::KIND_TERNARY && $k !== Node::KIND_MATCH && $k !== Node::KIND_CONCAT) { return null; }
+        if (!isset($this->localSets[$from])) {
+            if (!isset($this->fnDefs[$from])) { return null; }
+            $this->localSets[$from] = LocalValueSets::of($this->fnDefs[$from], $this->fnDefs);
+        }
+        return $this->localSets[$from]->valueSet($e);
+    }
+
+    /** Lowercase names of the user classes `$e` can name; null unless every string is a known class. @return string[]|null */
+    private function classTargets(Node $e, string $from): ?array
+    {
+        $set = $this->valueSetOf($e, $from);
+        if ($set === null) { return null; }
+        $out = [];
+        foreach ($set as $s => $_) {
+            $lc = \strtolower(\ltrim((string)$s, '\\'));
+            if (!isset($this->classLc[$lc])) { return null; }
+            $out[] = $lc;
+        }
+        return $out;
+    }
+
+    /** Method names `$e` can hold; null unless every string is an identifier. @return string[]|null */
+    private function nameTargets(Node $e, string $from): ?array
+    {
+        $set = $this->valueSetOf($e, $from);
+        if ($set === null) { return null; }
+        $out = [];
+        foreach ($set as $s => $_) {
+            if (!$this->isIdent((string)$s)) { return null; }
+            $out[] = (string)$s;
+        }
+        return $out;
+    }
+
+    /** Function names / `'C::m'` strings `$e` can hold; null unless every one resolves to a module function or a known class. @return string[]|null */
+    private function callableTargets(Node $e, string $from): ?array
+    {
+        $set = $this->valueSetOf($e, $from);
+        if ($set === null) { return null; }
+        $out = [];
+        foreach ($set as $s => $_) {
+            $str = (string)$s;
+            if (isset($this->fnLc[\strtolower(\ltrim($str, '\\'))])) { $out[] = $str; continue; }
+            $cc = \strpos($str, '::');
+            if ($cc === false || $cc === 0 || !isset($this->classLc[\strtolower(\ltrim(\substr($str, 0, $cc), '\\'))])
+                || !$this->isIdent(\substr($str, $cc + 2))) { return null; }
+            $out[] = $str;
+        }
+        return $out;
+    }
+
     private function isIdent(string $s): bool
     {
         if ($s === '') { return false; }
@@ -510,6 +572,8 @@ final class Reachability
     private function asString(Node $n): StringConst { return $n; }
     private function asArrayLit(Node $n): ArrayLit { return $n; }
     private function asInvoke(Node $n): Invoke_ { return $n; }
+    private function asNewDyn(Node $n): NewDynObj { return $n; }
+    private function asDynProp(Node $n): DynProp_ { return $n; }
 
     private function walk(Node $root, string $from): void
     {
@@ -532,7 +596,9 @@ final class Reachability
             } elseif ($k === Node::KIND_NEW_OBJ) {
                 $this->instantiate(\strtolower(\ltrim($this->asNewObj($n)->class, '\\')), $from);
             } elseif ($k === Node::KIND_NEW_DYN_OBJ) {
-                $this->newDynamic($from);
+                $cls = $this->classTargets($this->asNewDyn($n)->classExpr, $from);
+                if ($cls === null) { $this->newDynamic($from); }
+                else { foreach ($cls as $lc) { $this->instantiate($lc, $from); } }
             } elseif ($k === Node::KIND_METHOD_CALL) {
                 $this->demand($this->asMethodCall($n)->method, $from);
             } elseif ($k === Node::KIND_STATIC_CALL) {
@@ -549,14 +615,33 @@ final class Reachability
                 // instance method of a live object or any static method of any class.
                 $callee = $this->asInvoke($n)->callee;
                 $ck = $callee->kind;
-                if ($ck === Node::KIND_DYN_PROP) { $this->reachAllMethods($from); }
-                elseif ($ck === Node::KIND_ARRAY_LIT) {
+                // A name or class that is a local holding only literals ({@see LocalValueSets}) is a static edge to those.
+                if ($ck === Node::KIND_DYN_PROP) {
+                    $names = $this->nameTargets($this->asDynProp($callee)->name, $from);
+                    if ($names === null) { $this->reachAllMethods($from); }
+                    else { foreach ($names as $nm) { $this->demand($nm, $from); } }
+                } elseif ($ck === Node::KIND_ARRAY_LIT) {
                     $el = $this->asArrayLit($callee)->elements;
                     if (\count($el) !== 2 || $el[1]->value->kind !== Node::KIND_STRING_CONST) {
-                        $this->reachAllMethods($from);
-                        $this->reachAllStatic($from);
+                        $names = \count($el) === 2 && $el[0]->key === null && $el[1]->key === null
+                            ? $this->nameTargets($el[1]->value, $from) : null;
+                        if ($names === null) {
+                            $this->reachAllMethods($from);
+                            $this->reachAllStatic($from);
+                        } else {
+                            $cls = $this->classTargets($el[0]->value, $from);
+                            foreach ($names as $nm) {
+                                $this->demand($nm, $from);
+                                if ($cls === null) { $this->demandEverywhere($nm, $from); }
+                                else { foreach ($cls as $lc) { $this->staticCall($lc, $nm, $from); } }
+                            }
+                        }
                     }
-                } elseif ($ck !== Node::KIND_CLOSURE && $ck !== Node::KIND_STRING_CONST) { $this->reachNameableFns($from); }
+                } elseif ($ck !== Node::KIND_CLOSURE && $ck !== Node::KIND_STRING_CONST) {
+                    $fnsNamed = $this->callableTargets($callee, $from);
+                    if ($fnsNamed === null) { $this->reachNameableFns($from); }
+                    else { foreach ($fnsNamed as $s) { $this->stringLiteral($s, $from); } }
+                }
             } elseif ($k === Node::KIND_ARRAY_LIT) {
                 // `[$obj, 'm']` / `['C', 'm']`: a callable array demands its method name.
                 $el = $this->asArrayLit($n)->elements;
@@ -569,7 +654,9 @@ final class Reachability
                             $this->staticCall($this->asString($el[0]->value)->value, $mn, $from);
                         } else {
                             // The receiver may be a runtime CLASS name: a static `m` of any class.
-                            $this->demandEverywhere($mn, $from);
+                            $cls = $this->classTargets($el[0]->value, $from);
+                            if ($cls === null) { $this->demandEverywhere($mn, $from); }
+                            else { foreach ($cls as $lc) { $this->staticCall($lc, $mn, $from); } }
                         }
                     }
                 }

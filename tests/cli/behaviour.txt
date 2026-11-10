@@ -223,6 +223,67 @@ site: undefined.class|missinga line=2 fn=@class:Unused reach=0 maybe=0
 site: undefined.class|missingb line=3 fn=@class:UsedI reach=1 maybe=1
 site: undefined.class|missingc line=4 fn=@class:Base reach=1 maybe=1
 front end: 0 error(s), 3 warning(s)
+== reach_literal_class
+rc=0
+class: A
+class: B
+reach: __main
+reach: A____construct
+reach: B____construct
+reach: pick
+== reach_param_class
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach: viaParam
+reach?: A____construct
+reach?: B____construct
+== reach_literal_fn
+rc=0
+reach: __main
+reach: fa
+reach: fb
+reach: run
+== reach_byref_fn
+rc=0
+reach: __closure_0
+reach: __main
+reach: byRef
+reach: fa
+reach?: unrelated
+== reach_byref_arg_class
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach: make
+reach: swap
+reach?: A____construct
+reach?: B____construct
+== reach_literal_method
+rc=0
+class: X
+class?: stdClass
+reach: __main
+reach: viaClassAndName
+reach: viaConcat
+reach: viaLocal
+reach: X__a
+reach: X__b
+reach: X__sa
+reach?: X__c
+reach?: X__sc
+== reach_param_method
+rc=0
+class: X
+class?: stdClass
+reach: __main
+reach: viaParam
+reach?: X__a
+reach?: X__b
 == builtin names in sync
 ok
 == compile bad --progress
