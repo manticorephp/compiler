@@ -263,6 +263,23 @@ reach: make
 reach: swap
 reach?: A____construct
 reach?: B____construct
+== reach_include_class
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach?: A____construct
+reach?: B____construct
+== reach_include_in_fn
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach: make
+reach?: A____construct
+reach?: B____construct
 == reach_literal_method
 rc=0
 class: X

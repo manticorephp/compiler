@@ -47,6 +47,7 @@ final class Reachability
 
     /** @var array<string, FunctionDef> */
     private array $fnDefs = [];
+    private bool $hasUnits = false;
     /** @var array<string, LocalValueSets> per function, built on the first dynamic target met in it */
     private array $localSets = [];
 
@@ -116,6 +117,7 @@ final class Reachability
             $r->fnNames[$fn->name] = true;
             $r->fnLc[\strtolower($fn->name)] = $fn->name;
             if ($fn->isPrelude || $fn->isExtern) { $r->hiddenFns[$fn->name] = true; }
+            if (\str_starts_with($fn->name, '__mc_unit_')) { $r->hasUnits = true; }
         }
         foreach ($m->classes as $cd) {
             $lc = \strtolower(\ltrim($cd->name, '\\'));
@@ -506,7 +508,7 @@ final class Reachability
         if ($k !== Node::KIND_LOAD_LOCAL && $k !== Node::KIND_TERNARY && $k !== Node::KIND_MATCH && $k !== Node::KIND_CONCAT) { return null; }
         if (!isset($this->localSets[$from])) {
             if (!isset($this->fnDefs[$from])) { return null; }
-            $this->localSets[$from] = LocalValueSets::of($this->fnDefs[$from], $this->fnDefs);
+            $this->localSets[$from] = LocalValueSets::of($this->fnDefs[$from], $this->fnDefs, $this->hasUnits);
         }
         return $this->localSets[$from]->valueSet($e);
     }

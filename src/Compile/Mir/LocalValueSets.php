@@ -51,9 +51,11 @@ final class LocalValueSets
     private function asMatchArm(MatchArm_ $a): MatchArm_ { return $a; }
 
     /** @param array<string, FunctionDef> $fns every module function by symbol (by-ref parameters of a callee) */
-    public static function of(FunctionDef $fd, array $fns): self
+    public static function of(FunctionDef $fd, array $fns, bool $hasUnits): self
     {
         $s = new self();
+        // An include unit shares the top-level scope with `__main` and with other units: any of their locals may be rewritten.
+        if ($hasUnits && ($fd->name === '__main' || \str_starts_with($fd->name, '__mc_unit_'))) { $s->all = true; }
         foreach ($fd->params as $p) { $s->taint[$p->name] = true; }
         $s->scan($fd->body, $fns);
         return $s;
@@ -165,6 +167,8 @@ final class LocalValueSets
             if ($k === Node::KIND_STORE_LOCAL) {
                 $s = $this->asStore($n);
                 $this->stores[$s->name][] = $s->value;
+                // An include / require inside this body binds this function's locals to the included file.
+                if (\str_starts_with($s->name, '__mc_inc_')) { $this->all = true; }
             } elseif ($k === Node::KIND_REF_ALIAS) {
                 $a = $this->asRefAlias($n);
                 $this->taint[$a->target] = true;
@@ -200,7 +204,7 @@ final class LocalValueSets
             } elseif ($k === Node::KIND_CALL) {
                 $c = $this->asCall($n);
                 $fn = $c->function;
-                if ($fn === 'extract' || $fn === 'get_defined_vars' || \str_starts_with($fn, '__mc_extract')) { $this->all = true; }
+                if (\str_starts_with($fn, '__mc_require') || \str_starts_with($fn, '__mc_include') || $fn === 'extract' || $fn === 'get_defined_vars' || \str_starts_with($fn, '__mc_extract')) { $this->all = true; }
                 $def = $fns[$fn] ?? null;
                 if ($def === null) {
                     $this->taintBareArgs($c->args);
