@@ -1001,6 +1001,7 @@ final class Parser
                 }
                 continue;
             }
+            if ($kw === 'var')      { $this->advance(); continue; }
             if ($kw === 'static')   { $static   = true; $this->advance(); continue; }
             if ($kw === 'final')    { $final    = true; $this->advance(); continue; }
             if ($kw === 'abstract') { $abstract = true; $this->advance(); continue; }
@@ -1941,10 +1942,15 @@ final class Parser
         $this->expect(TokenKind::OpenParen, "expected '(' after switch");
         $expr = $this->parseExpression();
         $this->expect(TokenKind::CloseParen, "expected ')' after switch expression");
-        $this->expect(TokenKind::OpenBrace, "expected '{' in switch body");
+        $alt = $this->match(TokenKind::Colon);
+        if (!$alt) { $this->expect(TokenKind::OpenBrace, "expected '{' in switch body"); }
         $cases = [];
-        while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
+        while (!$this->switchBodyEnds($alt) && !$this->isAtEnd()) {
             $value = null;
+            if ($this->check(TokenKind::InlineHtml) && \trim($this->peek()->lexeme) === '') {
+                $this->advance();
+                continue;
+            }
             if ($this->checkKeyword('case')) {
                 $this->advance();
                 $value = $this->parseExpression();
@@ -1961,7 +1967,7 @@ final class Parser
             $this->expect(TokenKind::Colon, "expected ':' after case label");
             $body = [];
             while (
-                !$this->check(TokenKind::CloseBrace)
+                !$this->switchBodyEnds($alt)
                 && !$this->checkKeyword('case')
                 && !$this->checkKeyword('default')
                 && !$this->isAtEnd()
@@ -1971,8 +1977,17 @@ final class Parser
             }
             $cases[] = new SwitchArm($value, $body);
         }
-        $this->expect(TokenKind::CloseBrace, "expected '}' to close switch");
+        if ($alt) {
+            $this->endAltBody('endswitch');
+        } else {
+            $this->expect(TokenKind::CloseBrace, "expected '}' to close switch");
+        }
         return Stmt::switch_($expr, $cases, $this->end($span));
+    }
+
+    private function switchBodyEnds(bool $alt): bool
+    {
+        return $alt ? $this->checkKeyword('endswitch') : $this->check(TokenKind::CloseBrace);
     }
 
     // ── Expressions (Pratt) ──────────────────────────────────────────────────
