@@ -679,6 +679,7 @@ trait LowerExprs
                 }
             }
             $call = new Call($callee, $args, Type::unknown());
+            $this->noteUserCall($callee, $expr->span);
             // Before defaultFillArgs padded it — the callee's func_num_args()
             // needs what the SOURCE wrote, and this is the last point that
             // knows it. The overflow is read here and nowhere later: the next

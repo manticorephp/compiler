@@ -2963,7 +2963,7 @@ function __mc_library_source_may_declare(string $src): bool
             }
         }
         return false;
-    } catch (Throwable $e) {
+    } catch (\Throwable $e) {
         return true;
     }
 }
@@ -3870,7 +3870,7 @@ function __mc_source_is_data_file(string $src): bool
     }
     try {
         $program = \Parser\Parser::parseSource($src);
-    } catch (Throwable $e) {
+    } catch (\Throwable $e) {
         return false;
     }
     $ret = null;
@@ -5458,6 +5458,15 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         $lower->diags = $diag;
         $statT = \Compile\Stats::begin('LowerFromAst');
         $module = $lower->run($module);
+        if ($collect === null) {
+            /** @var string[] $extNames */
+            $extNames = [];
+            foreach (CompileArgs::$externDecls as $extDecl) { $extNames[] = \strtolower($extDecl->name); }
+            /** @var array<string, bool> $userAbs */
+            $userAbs = [];
+            foreach ($paths as $up) { $userAbs[__mc_abs_source_path((string)$up)] = true; }
+            \Compile\Mir\UndefinedFunctionScan::run($module, $diag, $extNames, $userAbs, $lower->userCallNames, $lower->userCallFiles, $lower->userCallLines);
+        }
         if ($collect !== null) {
             foreach ($diag->items as $it) {
                 if ($it->severity === 'error') {

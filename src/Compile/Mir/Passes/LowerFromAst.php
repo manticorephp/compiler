@@ -4525,6 +4525,22 @@ final class LowerFromAst implements Pass
         }
     }
 
+    /** @var string[] callee of each user-written direct call not yet in fnDecls (checked after lowering by UndefinedFunctionScan) */
+    public array $userCallNames = [];
+    /** @var string[] */
+    public array $userCallFiles = [];
+    /** @var int[] */
+    public array $userCallLines = [];
+
+    private function noteUserCall(string $callee, ?\Parser\Ast\Span $span): void
+    {
+        if ($this->diags === null || $this->lowerInPrelude || $span === null || $span->file === '' || isset($this->fnDecls[$callee])) { return; }
+        if (\strncmp($this->currentLowerFn, '__mir_', 6) === 0 || \strncmp($this->currentLowerFn, '__mc_', 5) === 0) { return; }
+        $this->userCallNames[] = $callee;
+        $this->userCallFiles[] = $span->file;
+        $this->userCallLines[] = $span->line;
+    }
+
     /** Record a reference to an undeclared class/constant as a grouped front-end warning; user code only. */
     private function noteUndefined(string $code, string $name, ?\Parser\Ast\Span $span): void
     {

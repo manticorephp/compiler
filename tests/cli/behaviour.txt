@@ -90,6 +90,13 @@ rc=0
 rc=0
 == check_class_alias_literal
 rc=0
+== check_unresolved_fns
+rc=0
+unresolved_fns.php:10: warning[undefined.function]: function apcu_fetch() is not declared (2 uses)
+unresolved_fns.php:12: warning[undefined.function]: function no_such_fn() is not declared
+front end: 0 error(s), 2 warning(s)
+== builtin names in sync
+ok
 == compile bad --progress
 rc=64
 == compile bad --color

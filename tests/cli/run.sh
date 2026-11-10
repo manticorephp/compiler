@@ -120,6 +120,8 @@ PHP
     diag "check_guarded_decls"      "$MC" compile --check "$HERE/check/guarded_decls.php" -o "$WORK/gd"
     diag "check_ref_after_class"    "$MC" compile --check "$HERE/check/ref_after_class_lowered.php" -o "$WORK/rc"
     diag "check_class_alias_literal" "$MC" compile --check "$HERE/check/class_alias_literal.php" -o "$WORK/ca"
+    diag "check_unresolved_fns"     "$MC" compile --check "$HERE/check/unresolved_fns.php" -o "$WORK/uf"
+    printf '== builtin names in sync\n'; bash "$ROOT/tools/check_builtin_names.sh"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir
