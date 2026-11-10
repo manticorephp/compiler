@@ -2244,7 +2244,9 @@ final class EmitLlvm implements EmitVisitor
         $n = \strlen($name);
         for ($i = 0; $i < $n; $i = $i + 1) {
             $c = \substr($name, $i, 1);
-            if ($c === '\\') { $parts[] = '_'; continue; }
+            // `.` — never a byte of a php name — keeps `A\B_C` and `A_B\C` apart
+            // (sodium_compat ships both spellings of one class); `_` merged them.
+            if ($c === '\\') { $parts[] = '.'; continue; }
             // php identifiers admit every byte >= 0x80, so a class can be named
             // in UTF-8 — symfony/cache declares `class \\xa9`. An LLVM identifier
             // cannot carry those bytes raw, so they are hex-escaped into a
