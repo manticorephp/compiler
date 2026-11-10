@@ -35,6 +35,8 @@ expect() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi; }
 
 compile arrays_sort cold && read -r h n <<< "$(hits cold)" \
     && expect "cold cache: $n parts, $h hits" '[[ ${n:-0} -ge 2 && ${h:-1} -eq 0 ]]'
+expect "program part kept apart in prog/, bodies at the top" \
+    '[[ $(ls "$MANTICORE_OBJ_CACHE_DIR"/prog/*.o 2>/dev/null | wc -l) -eq 1 && $(ls "$MANTICORE_OBJ_CACHE_DIR"/*.o 2>/dev/null | wc -l) -ge 1 ]]'
 compile arrays_sort warm && read -r h n <<< "$(hits warm)" \
     && expect "same program again: $h/$n parts from the cache" '[[ ${n:-0} -ge 2 && ${h:-0} -eq ${n:-1} ]]'
 compile closures other && read -r h n <<< "$(hits other)" \

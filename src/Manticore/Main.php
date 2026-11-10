@@ -930,10 +930,17 @@ function obj_cache_prune(): void
         $mb = 1;
     }
     $cap = $mb * 1048576;
-    system(
-        'cd ' . $dir . ' && ls -lt | awk -v cap=' . (string)$cap
-        . " 'NR>1 && \$9 ~ /\\.o\$/ { s += \$5; if (s > cap) print \$9 }' | xargs rm -f"
-    );
+    // The program parts live in `prog/` ({@see assemble_shared}) and age on
+    // their own budget, so the shared bodies are never pushed out by them.
+    foreach ([$dir, $dir . '/prog'] as $d) {
+        if (!\is_dir($d)) {
+            continue;
+        }
+        system(
+            'cd ' . $d . ' && ls -lt | awk -v cap=' . (string)$cap
+            . " 'NR>1 && \$9 ~ /\\.o\$/ { s += \$5; if (s > cap) print \$9 }' | xargs rm -f"
+        );
+    }
 }
 
 function obj_cache_dir(): string
@@ -1002,11 +1009,12 @@ function obj_cache_put(string $key, string $src): void
     if ($key === '' || !\file_exists($src)) {
         return;
     }
-    $dir = obj_cache_dir();
+    $final = obj_cache_dir() . '/' . $key . '.o';
+    // A key may name a subdirectory (`prog/<sha>`, {@see assemble_shared}).
+    $dir = \dirname($final);
     if (!\is_dir($dir)) {
         system('mkdir -p ' . $dir);
     }
-    $final = $dir . '/' . $key . '.o';
     if (\file_exists($final)) {
         return;
     }
@@ -1412,7 +1420,10 @@ function assemble_shared(string $ir, string $base, string $cflags): array
         '-O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags,
         '.s',
         false,
-        true
+        true,
+        // The program part is this program alone; it is kept apart so a cache
+        // shipped between machines (CI) can carry only the shared bodies.
+        'prog/'
     );
     if ($objs === []) {
         dprint('assemble: shared split failed; compiling the module as one unit');
@@ -1509,7 +1520,7 @@ function assemble_ir_file_split(
  * @param string[] $parts the part `.ll` files
  * @return string[] the objects in part order, or [] when any part failed
  */
-function compile_parts_cached(array $parts, string $base, string $flags, string $tag, bool $lto, bool $group = false): array
+function compile_parts_cached(array $parts, string $base, string $flags, string $tag, bool $lto, bool $group = false, string $firstKeyPrefix = ''): array
 {
     $objs = [];
     /** @var string[] */
@@ -1523,7 +1534,7 @@ function compile_parts_cached(array $parts, string $base, string $flags, string 
         if (obj_cache_enabled(true)) {
             $k = obj_cache_key($partPath, $flags);
             if ($k !== '') {
-                $putKeys[$i] = $k;
+                $putKeys[$i] = ($i === 0 ? $firstKeyPrefix : '') . $k;
             }
         }
         $cmds[$i] = 'clang ' . $flags . ' -c -x ir ' . $partPath . ' -o ' . $pobj
