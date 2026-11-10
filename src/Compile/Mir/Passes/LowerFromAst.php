@@ -1613,6 +1613,18 @@ final class LowerFromAst implements Pass
             if (!\str_starts_with($ufn->name, '__mc_unit_')) { continue; }
             $ufn->body = new Block($this->injectGlobalDecls($ufn->body->stmts), $ufn->body->type);
         }
+        // A `foreach` whose loop variable is a global writes it through the
+        // module cell ({@see rebindGlobalForeachVars}).
+        /** @var array<string, bool> $mainGlobals */
+        $mainGlobals = [];
+        foreach ($module->globalVarNames as $gname) { $mainGlobals[$gname] = true; }
+        foreach ($module->functions as $gfn) {
+            /** @var array<string, bool> $fnGlobals */
+            $fnGlobals = \str_starts_with($gfn->name, '__mc_unit_') ? $mainGlobals : [];
+            $this->collectGlobalDeclNames($gfn->body, $fnGlobals);
+            if ($fnGlobals !== []) { $this->rebindGlobalForeachVars($gfn->body, $fnGlobals); }
+        }
+        foreach ($mainStmts as $ms) { $this->rebindGlobalForeachVars($ms, $mainGlobals); }
         $mainStmts = $this->injectShutdownDrain($mainStmts);
         $mainBody = new Block($mainStmts, Type::void());
         $module->loweringFile = $mainFile;
@@ -4048,6 +4060,54 @@ final class LowerFromAst implements Pass
         if ($pre === []) { return $mainStmts; }
         foreach ($mainStmts as $s) { $pre[] = $s; }
         return $pre;
+    }
+
+    /** @param array<string, bool> $out names bound to a module cell by `global $x` / `static $x` */
+    private function collectGlobalDeclNames(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) { $out[$this->asStaticDecl($n)->name] = true; }
+        foreach (Walk::children($n) as $c) { $this->collectGlobalDeclNames($c, $out); }
+    }
+
+    private function asStaticDecl(StaticLocalDecl_ $n): StaticLocalDecl_ { return $n; }
+
+    /**
+     * A loop variable that is a global (`foreach ($a as $action)` at a file's top
+     * level, where `$action` is also some function's `global $action`) has no
+     * stack slot: the module cell is its storage. The loop binds a fresh local
+     * and the body opens by assigning it, which every store path already writes
+     * through the cell — left alone, the loop filled an alloca and every read of
+     * the name answered the cell's NULL (WordPress default-filters.php hooked
+     * its counters on hook "").
+     *
+     * @param array<string, bool> $globals
+     */
+    private function rebindGlobalForeachVars(Node $n, array $globals): void
+    {
+        if ($n->kind === Node::KIND_FOREACH) {
+            $fe = self::asForeachNode($n);
+            if (!$fe->byRef) {
+                $pre = [];
+                if (isset($globals[$fe->valueVar])) {
+                    $tmp = '__fev' . (string)$this->destrCounter;
+                    $this->destrCounter = $this->destrCounter + 1;
+                    $pre[] = new StoreLocal($fe->valueVar, new LoadLocal($tmp, Type::unknown()), Type::unknown());
+                    $fe->valueVar = $tmp;
+                }
+                $kv = $fe->keyVar;
+                if ($kv !== null && isset($globals[$kv])) {
+                    $tmp = '__fek' . (string)$this->destrCounter;
+                    $this->destrCounter = $this->destrCounter + 1;
+                    $pre[] = new StoreLocal($kv, new LoadLocal($tmp, Type::unknown()), Type::unknown());
+                    $fe->keyVar = $tmp;
+                }
+                if ($pre !== []) {
+                    foreach ($fe->body->stmts as $bs) { $pre[] = $bs; }
+                    $fe->body->stmts = $pre;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->rebindGlobalForeachVars($c, $globals); }
     }
 
     /** Whether the node tree reads the named local (LoadLocal). */
