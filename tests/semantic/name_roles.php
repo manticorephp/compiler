@@ -96,10 +96,10 @@ check('anon_classes_do_not_shadow_across_files', function () {
     return $ms === ['ma', 'mb'] ?: json_encode($anon);
 });
 
-check('strict_parse_keeps_legacy_anon_name', function () {
+check('strict_parse_names_anon_class_by_file_and_position', function () {
     $p = Parser::parseSource('<?php $o = new class {};', 'a.php');
-    if (str_contains(\Parser\Dump::program($p, false), '__anon_class_0')) { return true; }
-    return 'no __anon_class_0';
+    $want = '__anon_class_' . dechex(crc32('a.php')) . '_1_12';
+    return str_contains(\Parser\Dump::program($p, false), $want) ?: "no $want";
 });
 
 exit($fail);
