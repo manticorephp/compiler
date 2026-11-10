@@ -17,8 +17,10 @@ namespace Compile\Mir;
  *
  *  - only the declarations the body names, sorted;
  *  - a shared global as `external`, a file-local `unnamed_addr` constant as a
- *    copy (its address means nothing), any other file-local global or function
- *    PROMOTED to `linkonce_odr` in the program part and named `external` here;
+ *    copy (its address means nothing), a file-local function or other constant
+ *    PROMOTED to `linkonce_odr` in the program part and named `external` here.
+ *    File-local MUTABLE state is never promoted (it would cost the program
+ *    part its register-held cursors): a body that names it is not cut;
  *  - `available_externally` copies of small callees, so the body still inlines
  *    what it inlined in one module — never a whole-program helper (`_mapp`), a
  *    `$mono$` clone or a closure, whose text is the program's own;
@@ -36,7 +38,10 @@ final class ShareSplit
     public const SHARE_MIN_BYTES = 8192;
 
     /** IR bytes up to which a callee is copied `available_externally`. */
-    private const AVAIL_MAX_BYTES = 512;
+    private const AVAIL_MAX_BYTES = 2048;
+
+    /** The same bound for a callee that is not a runtime helper (prelude PHP). */
+    private const AVAIL_PRELUDE_BYTES = 512;
 
     /** Transitive depth of the copies. */
     private const AVAIL_MAX_DEPTH = 2;
@@ -46,6 +51,9 @@ final class ShareSplit
 
     /** {@see AVAIL_MAX_BYTES} unless tuned. */
     public int $availMaxBytes = self::AVAIL_MAX_BYTES;
+
+    /** {@see AVAIL_MAX_DEPTH} unless tuned. */
+    public int $availDepth = self::AVAIL_MAX_DEPTH;
 
     /** Bodies cut out by the last {@see run}. */
     public int $bodies = 0;
@@ -126,11 +134,21 @@ final class ShareSplit
             if (\str_contains($h, ' internal ') || \str_contains($h, ' private ')) { $localFn[$s] = true; }
         }
 
+        // File-local MUTABLE state is never promoted: while a global is
+        // `internal` and its address stays in, LLVM knows no unknown call writes
+        // it and keeps it in registers. Promoting the arena/pool cursors cost the
+        // string and JSON benches 6–19 %. A body that names such state stays in
+        // the program part, and a callee that does is declared, never copied.
+        /** @var array<string, bool> */
+        $mutLocal = [];
+        foreach ($globals as $g => $l) {
+            if ($this->fileLocal($l) && !\str_contains($l, ' constant ')) { $mutLocal[$g] = true; }
+        }
         /** @var array<string, bool> */
         $cut = [];
         foreach ($defOrder as $s) {
             if (\strlen($defs[$s]) >= $this->minBytes && \str_starts_with($head[$s], 'define linkonce_odr ')
-                && !\str_ends_with($s, '_mapp')) {
+                && !\str_ends_with($s, '_mapp') && !$this->namesAny($refs[$s], $mutLocal)) {
                 $cut[$s] = true;
             }
         }
@@ -145,7 +163,7 @@ final class ShareSplit
         foreach ($defOrder as $s) {
             if (!isset($cut[$s])) { continue; }
             $parts[$s] = $this->bodyPart($s, $sm, $header, $globals, $defs, $head, $refs, $declares,
-                                         $localFn, $cut, $promote, $pin);
+                                         $localFn, $mutLocal, $cut, $promote, $pin);
         }
         $this->bodies = \count($parts);
 
@@ -193,12 +211,13 @@ final class ShareSplit
      * @param array<string, array<string, bool>> $refs
      * @param array<string, string> $declares
      * @param array<string, bool> $localFn
+     * @param array<string, bool> $mutLocal
      * @param array<string, bool> $cut
      * @param array<string, bool> $promote
      * @param array<string, bool> $pin
      */
     private function bodyPart(string $s, SplitModule $sm, array $header, array $globals, array $defs,
-                              array $head, array $refs, array $declares, array $localFn, array $cut,
+                              array $head, array $refs, array $declares, array $localFn, array $mutLocal, array $cut,
                               array &$promote, array &$pin): string
     {
         /** @var array<string, string> sorted later: symbol => line */
@@ -221,9 +240,9 @@ final class ShareSplit
             $seen[$r] = true;
             if (isset($defs[$r])) {
                 $pin[$r] = true;
-                if (!isset($cut[$r]) && !isset($localFn[$r]) && $depth < self::AVAIL_MAX_DEPTH
-                    && \strlen($defs[$r]) <= $this->availMaxBytes && $this->stableName($r)
-                    && !\str_contains($head[$r], ' prefix ')) {
+                if (!isset($cut[$r]) && !isset($localFn[$r]) && $depth < $this->availDepth
+                    && \strlen($defs[$r]) <= ($this->runtimeHelper($r) ? $this->availMaxBytes : self::AVAIL_PRELUDE_BYTES) && $this->stableName($r)
+                    && !\str_contains($head[$r], ' prefix ') && !$this->namesAny($refs[$r], $mutLocal)) {
                     $avail[$r] = $sm->availHead($head[$r]) . \substr($defs[$r], \strlen($head[$r]));
                     foreach ($refs[$r] as $rr => $_) { $work[] = [$rr, $depth + 1]; }
                     continue;
@@ -261,6 +280,29 @@ final class ShareSplit
         foreach ($avail as $b) { $t[] = $b; }
         $t[] = $defs[$s];
         return \implode("\n", $t) . "\n";
+    }
+
+    /**
+     * @param array<string, bool> $refs
+     * @param array<string, bool> $set
+     */
+    private function namesAny(array $refs, array $set): bool
+    {
+        foreach ($refs as $r => $_) {
+            if (isset($set[$r])) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * A compiler-emitted runtime helper (refcounts, strings, array slots): the
+     * small callees a body must still inline to run as fast as in one module.
+     * Prelude PHP functions inline far less often and cost every part a copy.
+     */
+    private function runtimeHelper(string $sym): bool
+    {
+        return \str_starts_with($sym, '__mir_') || \str_starts_with($sym, '__mc_')
+            || \str_starts_with($sym, '__manticore_');
     }
 
     /** Whether a callee's text can be the same in every program (see the class doc). */

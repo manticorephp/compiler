@@ -38,7 +38,9 @@ for src in tests/generic/cases/*.php; do
     name="$(basename "$src" .php)"
     dir="$WORK/$name"
     mkdir -p "$dir"
-    if ! (cd "$dir" && "$ROOT/$MANT" compile -O2 --keep-ir "$ROOT/$src" -o bin > compile.log 2>&1); then
+    # The whole emitted module, not its shared parts: this gate measures what the
+    # emitter writes ({@see tests/generic/cache.sh} covers the parts).
+    if ! (cd "$dir" && MANTICORE_SHARED_GENERICS=0 "$ROOT/$MANT" compile -O2 --keep-ir "$ROOT/$src" -o bin > compile.log 2>&1); then
         echo "FAIL $name: compile"; tail -5 "$dir/compile.log"; fail=1; continue
     fi
     if ! "$dir/bin" > "$dir/out" 2>&1 || ! cmp -s "$dir/out" "tests/generic/cases/$name.out"; then

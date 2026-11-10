@@ -1379,6 +1379,13 @@ function assemble_shared(string $ir, string $base, string $cflags): array
 {
     $statT = \Compile\Stats::begin('  shared split');
     $splitter = new \Compile\Mir\ShareSplit();
+    // Tuning knobs for measurement; the defaults are the measured choice.
+    $em = \getenv('MANTICORE_SHARE_MIN');
+    if ($em !== false && $em !== '') { $splitter->minBytes = (int)$em; }
+    $ea = \getenv('MANTICORE_SHARE_AVAIL');
+    if ($ea !== false && $ea !== '') { $splitter->availMaxBytes = (int)$ea; }
+    $ed = \getenv('MANTICORE_SHARE_DEPTH');
+    if ($ed !== false && $ed !== '') { $splitter->availDepth = (int)$ed; }
     $texts = $splitter->run($ir);
     $bodies = $splitter->bodies;
     unset($splitter);
