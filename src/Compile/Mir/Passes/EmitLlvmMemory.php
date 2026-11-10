@@ -445,7 +445,9 @@ trait EmitLlvmMemory
             $deeper = $el->element;
             if ($deeper !== null && $deeper->kind === Type::KIND_ARRAY) {
                 $sub = $this->nestedArrFlavor($deeper, '');
-                if ($sub !== 'arr') { return $prefix . 'arr' . $sub; }
+                // Bounded HERE, not by the comment: a fourth level asked for a
+                // helper nobody emits (`__mir_array_release_ownel_arrarrarrarrstr`).
+                if ($sub !== 'arr' && \substr_count('arr' . $sub, 'arr') <= 3) { return $prefix . 'arr' . $sub; }
             }
         }
         return $prefix . 'arr';
