@@ -5,6 +5,7 @@
 // does pass a reference) keep working.
 function cmpRef(int &$a, int &$b): int { return $a <=> $b; }
 function cmpVal(int $a, int $b): int { return $b <=> $a; }
+function cmpOptRef(int $a, int $b, mixed &$unused = null): int { return $a <=> $b; }
 function addOne(int &$v, int $k, mixed $extra): void { $v += 1; }
 
 $a = [3, 1, 2];
@@ -12,6 +13,7 @@ $a = [3, 1, 2];
 $ref = $argc > 9 ? '' : 'cmpRef';
 $val = $argc > 9 ? '' : 'cmpVal';
 $add = $argc > 9 ? '' : 'addOne';
+$opt = $argc > 9 ? '' : 'cmpOptRef';
 try {
     usort($a, $ref);
     echo "sorted\n";
@@ -24,6 +26,8 @@ try {
 } catch (Error $e) {
     echo get_class($e), ': ', $e->getMessage(), "\n";
 }
+usort($a, $opt);
+echo implode(',', $a), "\n";
 usort($a, $val);
 echo implode(',', $a), "\n";
 array_walk($a, $add);

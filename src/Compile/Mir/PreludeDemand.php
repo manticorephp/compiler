@@ -279,6 +279,7 @@ final class PreludeDemand
                 $txt = \implode("\n", $out);
                 $tmp = $path . '.tmp' . (string)\Manticore\getpid();
                 if (\file_put_contents($tmp, $txt) === \strlen($txt)) { \rename($tmp, $path); }
+                \Manticore\side_cache_prune($dir);
             } catch (\Throwable $e) {
                 // not cached
             }

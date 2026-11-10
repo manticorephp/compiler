@@ -33,10 +33,19 @@ compile() {
 hits() { sed -nE 's/.*obj cache: ([0-9]+)\/([0-9]+) parts hit.*/\1 \2/p' "$WORK/$1.trace" | tail -1; }
 expect() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; fail=1; fi; }
 
+# Side-cache entries nobody has written for two weeks (an older compiler's keys)
+# are pruned when a new entry is stored.
+side="$(dirname "$MANTICORE_OBJ_CACHE_DIR")"
+for sd in analyze link demand; do
+    mkdir -p "$side/$sd"; old="$side/$sd/$(printf 'a%.0s' $(seq 40))"
+    if [[ $sd == analyze ]]; then old="$old.json"; else old="$old.txt"; fi
+    printf x > "$old"; touch -t 202001010000 "$old"
+done
 compile arrays_sort cold && read -r h n <<< "$(hits cold)" \
     && expect "cold cache: $n parts, $h hits" '[[ ${n:-0} -ge 2 && ${h:-1} -eq 0 ]]'
 expect "program part kept apart in prog/, bodies at the top" \
     '[[ $(ls "$MANTICORE_OBJ_CACHE_DIR"/prog/*.o 2>/dev/null | wc -l) -eq 1 && $(ls "$MANTICORE_OBJ_CACHE_DIR"/*.o 2>/dev/null | wc -l) -ge 1 ]]'
+expect "stale side-cache entries pruned" '[[ -z "$(ls "$side"/*/aaaaaaaaaa* 2>/dev/null)" ]]'
 compile arrays_sort warm && read -r h n <<< "$(hits warm)" \
     && expect "same program again: $h/$n parts from the cache" '[[ ${n:-0} -ge 2 && ${h:-0} -eq ${n:-1} ]]'
 compile closures other && read -r h n <<< "$(hits other)" \
@@ -77,7 +86,9 @@ build_app() {
     (cd "$app" && MANTICORE_PHASE_TRACE=1 "$MANT" build > "$WORK/$1.trace" 2>&1) \
         && "$app/bin/a" > "$WORK/$1.out" 2>&1 && cmp -s "$WORK/$1.out" tests/generic/cases/arrays_sort.out
 }
+nlink=$(ls "$side/link" 2>/dev/null | wc -l)
 if build_app build1 && build_app build2; then
+    expect "build probes link flags instead of caching them" '[[ $(ls "$side/link" 2>/dev/null | wc -l) -eq $nlink ]]'
     read -r h n <<< "$(hits build2)"
     expect "build: second build serves $h/$n parts from the cache" '[[ ${n:-0} -ge 2 && ${h:-0} -eq ${n:-1} ]]'
 else

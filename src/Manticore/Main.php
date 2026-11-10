@@ -661,6 +661,7 @@ function ffi_link_flags(array $libs, string $already = ""): string
             if (\file_put_contents($tmp, $out) === \strlen($out)) {
                 \rename($tmp, $path);
             }
+            side_cache_prune($dir);
         } catch (\Throwable $e) {
             // not cached; the next compile probes again
         }
@@ -1021,6 +1022,37 @@ function obj_cache_prune(): void
             'cd ' . $d . ' && ls -lt | awk -v cap=' . (string)$cap
             . " 'NR>1 && \$9 ~ /\\.o\$/ { s += \$5; if (s > cap) print \$9 }' | xargs rm -f"
         );
+    }
+}
+
+/**
+ * Drop entries of a side cache (analyzer index, link flags, prelude gates)
+ * that nothing has written for two weeks. Their keys carry the compiler's
+ * identity, so every rebuild leaves the previous set unread for good; a live
+ * entry that ages out is simply recomputed once. Runs when a new entry is
+ * stored, at most once per directory per process; any error is ignored.
+ */
+function side_cache_prune(string $dir): void
+{
+    static $done = [];
+    if (isset($done[$dir])) {
+        return;
+    }
+    $done[$dir] = true;
+    try {
+        $cut = \time() - 14 * 86400;
+        foreach (\scandir($dir) ?: [] as $e) {
+            $e = (string)$e;
+            if (\preg_match('/^[0-9a-f]{40}\.(json|txt)(\.tmp[0-9_]*)?$/', $e) !== 1) {
+                continue;
+            }
+            $m = \filemtime($dir . '/' . $e);
+            if ($m !== false && $m < $cut) {
+                \unlink($dir . '/' . $e);
+            }
+        }
+    } catch (\Throwable $e) {
+        // best effort
     }
 }
 
@@ -3891,8 +3923,6 @@ function build_compile_module(
             $weak[] = $w;
         }
     }
-    // The library flags sit between $preLib and $tail, so a link that fails on
-    // cached flags can be retried with fresh ones ({@see link_flags_forget}).
     $preLib = $linkExtra;
     $tail = '';
     // Darwin's weak-undefined allowance, derived exactly as in CompileCommand.
@@ -3912,18 +3942,15 @@ function build_compile_module(
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
     $tail = $tail . thinlto_link_flags() . unwind_link_flags();
-    $linkExtra = $preLib . ffi_link_flags($libs, $linkFlags) . $tail;
+    // Probed, not cached: a failed link here is usually the program's own
+    // (an undefined symbol), and a retry would rerun the whole ThinLTO link.
+    $linkExtra = $preLib . ffi_link_flags_probe($libs, $linkFlags) . $tail;
     // Link via the stub-generating tail: the bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
     $stubs = find_link_stubs_script();
     $statT = \Compile\Stats::begin('link');
     $rc2 = build_link($stubs, $output, $objList, $linkExtra);
-    // Cached library flags may predate a change on the host: probe again, once.
-    if ($rc2 !== 0 && link_flags_forget()) {
-        $linkExtra = $preLib . ffi_link_flags($libs, $linkFlags) . $tail;
-        $rc2 = build_link($stubs, $output, $objList, $linkExtra);
-    }
     \Compile\Stats::step('link', $statT, -1, -1);
     \Compile\Stats::dumpCounters();
     if ($rc2 !== 0) {

@@ -977,10 +977,10 @@ trait EmitLlvmCalls
             $out .= '  ' . $eq . ' = icmp eq i64 ' . $nameId . ', ' . (string)$idMap[\strtolower($this->dynfPublicName($fname))] . "\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
-            if (!$hasSpread && $this->dynByValue && $this->anyRefParam($fname)) {
+            if (!$hasSpread && $this->dynByValue && $this->firstRefParamBelow($fname, $argc) >= 0) {
                 // An internal function hands its callback values; php warns that a
                 // by-reference parameter got one, and a warning here is a throw.
-                $out .= $this->emitDynRefByValueError($fname);
+                $out .= $this->emitDynRefByValueError($fname, $this->firstRefParamBelow($fname, $argc));
                 $out .= '  br label %' . $endL . "\n";
                 $out .= $nextL . ":\n";
                 continue;
@@ -1419,7 +1419,7 @@ trait EmitLlvmCalls
         if (!isset($this->dyncallSyms[$key])) {
             $this->dyncallSyms[$key] = $this->emitDynCallDispatcher($iv, $key, $byValue);
         }
-        $args = 'ptr ' . $keyP;
+        $args = 'ptr ' . $keyP . ', ' . $this->siteTraceArgs($iv->line, $out);
         foreach ($slots as $sl) { $args .= ', ' . $sl; }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 @' . $this->dyncallSyms[$key] . '(' . $args . ")\n";
@@ -1431,13 +1431,18 @@ trait EmitLlvmCalls
         return $out;
     }
 
-    /** `Error: f(): Argument #N ($p) must be passed by reference, value given` for $fname's first by-ref param. */
-    private function emitDynRefByValueError(string $fname): string
+    /** The first by-reference parameter of $fname among its first $argc, or -1: php only complains about one it passes. */
+    private function firstRefParamBelow(string $fname, int $argc): int
     {
-        $idx = 0;
         foreach ($this->sigs->refParams[$fname] ?? [] as $i => $r) {
-            if ($r) { $idx = (int)$i; break; }
+            if ($r && (int)$i < $argc) { return (int)$i; }
         }
+        return -1;
+    }
+
+    /** `Error: f(): Argument #N ($p) must be passed by reference, value given` for $fname's parameter $idx. */
+    private function emitDynRefByValueError(string $fname, int $idx): string
+    {
         $pname = (string)($this->sigs->paramNames[$fname][$idx] ?? '');
         $msg = $this->dynfPublicName($fname) . '(): Argument #' . (string)($idx + 1) . ' ($' . $pname
             . ') must be passed by reference, value given';
@@ -1475,7 +1480,9 @@ trait EmitLlvmCalls
         $L = $this->locals;
         return isset($L->slots[$name]) && !isset($L->refLocals[$name]) && !isset($L->captureRefs[$name])
             && !isset($L->globalBacked[$name]) && !isset($L->byRefCaptured[$name]) && !isset($L->unsetNames[$name])
-            && !isset($L->aliasLocals[$name]) && !isset($L->refCellTargets[$name]) && !isset($L->ownedBoxes[$name]);
+            && !isset($L->aliasLocals[$name]) && !isset($L->refCellTargets[$name]) && !isset($L->ownedBoxes[$name])
+            && !isset($L->byRefParamWb[$name]) && !isset($L->elemRefTargets[$name]) && !isset($L->elemRefBoxes[$name])
+            && !isset($L->aliasBoxNames[$name]);
     }
 
     /**
@@ -1493,6 +1500,17 @@ trait EmitLlvmCalls
         $oldCellProv = $this->cellProv;
         $oldCellSinkOrd = $this->cellSinkOrd;
         $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldRawRef = $this->rawRefCall;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
+        $oldBtLine = $this->btLineOverride;
+        $oldBtFile = $this->btFileOverride;
+        $oldBtSsa = $this->btLineOverrideSsa;
 
         $this->ssa = new SsaBuilder();
         $this->ssa->reset();
@@ -1501,11 +1519,18 @@ trait EmitLlvmCalls
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
+        $this->rawRefCall = false;
+        $this->spreadTail = null;
+        $this->lastPadArgs = '';
+        $this->vdResult = '';
+        $this->vdArmList = '';
+        $this->vdSiteArgc = 0;
+        $this->useSiteTraceParams();
         $this->dyncallDepth = $this->dyncallDepth + 1;
         $oldByValue = $this->dynByValue;
         $this->dynByValue = $byValue;
 
-        $params = 'ptr %dc.name';
+        $params = 'ptr %dc.name, i64 %btline, ptr %btfile';
         $nameSlot = $this->ssa->allocReg();
         $nameWord = $this->ssa->allocReg();
         $body = '  ' . $nameSlot . " = alloca i64\n"
@@ -1533,6 +1558,17 @@ trait EmitLlvmCalls
 
         $this->dyncallDepth = $this->dyncallDepth - 1;
         $this->dynByValue = $oldByValue;
+        $this->btLineOverride = $oldBtLine;
+        $this->btFileOverride = $oldBtFile;
+        $this->btLineOverrideSsa = $oldBtSsa;
+        $this->rawRefCall = $oldRawRef;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
         $this->ssa = $oldSsa;
         $this->locals = $oldLocals;
         $this->cf = $oldCf;

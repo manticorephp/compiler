@@ -1,4 +1,5 @@
 Error: cmpRef(): Argument #1 ($a) must be passed by reference, value given
 Error: cmpRef(): Argument #1 ($a) must be passed by reference, value given
+1,2,3
 3,2,1
 4,3,2

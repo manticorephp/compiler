@@ -76,6 +76,7 @@ final class PreludeIndex
             }
             $tmp = $p . '.tmp' . (string)\Manticore\getpid() . '_' . \str_replace('.', '', (string)\microtime(true));
             if (\file_put_contents($tmp, $txt) === \strlen($txt) && \rename($tmp, $p)) {
+                \Manticore\side_cache_prune($dir);
                 return;
             }
         } catch (\Throwable $e) {
