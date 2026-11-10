@@ -18,6 +18,12 @@ try {
 } catch (Error $e) {
     echo get_class($e), ': ', $e->getMessage(), "\n";
 }
+try {
+    uasort($a, $ref);
+    echo "sorted\n";
+} catch (Error $e) {
+    echo get_class($e), ': ', $e->getMessage(), "\n";
+}
 usort($a, $val);
 echo implode(',', $a), "\n";
 array_walk($a, $add);

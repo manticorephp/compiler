@@ -1402,7 +1402,7 @@ trait EmitLlvmCalls
         // Only a prelude body may take the by-value form: it stands for an
         // internal function, and php calls an internal function's callback
         // with values (`usort`'s comparator gets copies, never the elements).
-        if ($byValue && ($this->frame === null || !$this->frame->isPrelude)) { return ''; }
+        if ($byValue && !$this->frameIsPreludeCode()) { return ''; }
         $key = ($byValue ? 'v' : 'r') . (string)\count($iv->args);
         $out = '';
         foreach ($iv->args as $a) {
@@ -1449,6 +1449,22 @@ trait EmitLlvmCalls
             ], Type::obj('Error')),
             Type::void(),
         ));
+    }
+
+    /**
+     * The function being emitted is prelude code: a prelude function, or a
+     * closure written inside one — those take ids from 2^53 up
+     * ({@see \Compile\Mir\Passes\LowerFns::allocClosureId}). Kept apart from
+     * `isPrelude`, which a closure does not carry and which also decides its
+     * scope, its frame's file and parameter inference.
+     */
+    private function frameIsPreludeCode(): bool
+    {
+        if ($this->frame === null) { return false; }
+        if ($this->frame->isPrelude) { return true; }
+        if (!$this->frame->isClosure || !\str_starts_with($this->frame->name, '__closure_')) { return false; }
+        $id = \substr($this->frame->name, \strlen('__closure_'));
+        return \ctype_digit($id) && (\strlen($id) > 16 || (int)$id >= 9007199254740992);
     }
 
     /** A local whose slot a by-reference callee may be handed as is. */
