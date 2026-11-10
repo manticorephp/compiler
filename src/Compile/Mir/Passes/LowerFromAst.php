@@ -5842,12 +5842,23 @@ final class LowerFromAst implements Pass
      * Compiled anyway, it redefined the prelude's constructor and clang refused
      * the module.
      *
+     * Any file does the same when it leaves before the declaration once the type
+     * exists — sodium_compat's `if (class_exists('SplFixedArray')) { return; }`
+     * ahead of its own SplFixedArray.
+     *
      * @param \Parser\Ast\Stmt[] $stmts
      * @return \Parser\Ast\Stmt[]
      */
     private function dropShadowedBuiltinTypes(array $stmts, int $preludeCount, int $userStart): array
     {
-        if ($this->demandLoadedFiles === []) { return $stmts; }
+        /** @var array<string, bool> $guarded file . "\0" . lowercased type name */
+        $guarded = [];
+        $n0 = \count($stmts);
+        for ($i = $userStart; $i < $n0; $i = $i + 1) {
+            $g = $this->existsGuardedReturn($stmts[$i]);
+            if ($g !== '') { $guarded[$stmts[$i]->span->file . "\0" . $g] = true; }
+        }
+        if ($this->demandLoadedFiles === [] && $guarded === []) { return $stmts; }
         /** @var array<string, bool> $builtin */
         $builtin = [];
         for ($i = 0; $i < $preludeCount; $i = $i + 1) {
@@ -5860,14 +5871,45 @@ final class LowerFromAst implements Pass
         $n = \count($stmts);
         for ($i = 0; $i < $n; $i = $i + 1) {
             $s = $stmts[$i];
-            if ($i >= $userStart && $s->kind === 'Class' && isset($this->demandLoadedFiles[$s->span->file])) {
+            if ($i >= $userStart && $s->kind === 'Class') {
                 $udecl = $s->decl;
-                if (isset($builtin[\strtolower(\ltrim($this->classDeclName($udecl), '\\'))])) { continue; }
+                $uname = \strtolower(\ltrim($this->classDeclName($udecl), '\\'));
+                if (isset($builtin[$uname])
+                    && (isset($this->demandLoadedFiles[$s->span->file]) || isset($guarded[$s->span->file . "\0" . $uname]))) {
+                    continue;
+                }
             }
             $out[] = $s;
         }
         return $out;
     }
+
+    /**
+     * The lowercased type name of a file-level `if (class_exists('X')) { return; }`
+     * (or `interface_exists` / `trait_exists` / `enum_exists`), '' for any other
+     * statement. The `return` may already be the jump past the file it is
+     * rewritten to.
+     */
+    private function existsGuardedReturn(\Parser\Ast\Stmt $s): string
+    {
+        if ($s->kind !== 'If') { return ''; }
+        $if = $this->asIfStmt($s);
+        if ($if->elseifs !== [] || $if->else !== null) { return ''; }
+        $body = $if->then->statements;
+        $nb = \count($body);
+        if ($nb === 0) { return ''; }
+        $last = $body[$nb - 1]->kind;
+        if ($last !== 'Return' && $last !== 'Goto') { return ''; }
+        $c = $if->condition;
+        if ($c->kind !== 'Call') { return ''; }
+        $call = $this->asCallExpr($c);
+        $fn = \strtolower($this->bareName(\ltrim($call->function, '\\')));
+        if ($fn !== 'class_exists' && $fn !== 'interface_exists' && $fn !== 'trait_exists' && $fn !== 'enum_exists') { return ''; }
+        if (\count($call->args) < 1 || $call->args[0]->kind !== 'StringLiteral') { return ''; }
+        return \strtolower(\ltrim($this->stringLitValue($call->args[0]), '\\'));
+    }
+
+    private function asCallExpr(\Parser\Ast\CallExpr $e): \Parser\Ast\CallExpr { return $e; }
 
     /**
      * Register a declaration hoisted out of a folded `if`, so later code
