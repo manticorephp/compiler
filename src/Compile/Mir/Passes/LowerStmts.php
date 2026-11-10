@@ -96,7 +96,7 @@ trait LowerStmts
         $catches = [];
         foreach ($stmt->catches as $c) {
             $types = [];
-            foreach ($c->types as $t) { $types[] = \ltrim($t, '\\'); $this->noteClassRef(\ltrim($t, '\\'), $stmt->span); }
+            foreach ($c->types as $t) { $types[] = \ltrim($t, '\\'); $this->noteClassRef(\ltrim($t, '\\'), $stmt->span, 'soft'); }
             // The arm takes the thrown object's +1 out of `@__mir_thrown`
             // first: into its variable, or discarded (released) without one.
             $caught = new CaughtValue_($types, Type::obj(\count($types) > 0 ? $types[0] : 'Throwable'));
@@ -116,6 +116,7 @@ trait LowerStmts
     {
         $stmts = [];
         $dead = false;
+        $pushed = 0;
         foreach ($block->statements as $stmt) {
             // A LABEL re-enters the flow: `goto` may jump straight to it, so the
             // statements it heads are live no matter what precedes them (the
@@ -133,8 +134,20 @@ trait LowerStmts
             // lowering it avoids a spurious "unknown constant" on a branch that
             // can never run.
             if ($this->nodeAlwaysTerminates($lowered)) { $dead = true; }
+            // `if (!class_exists('X')) { return; }` guards everything after it in this block.
+            if ($stmt->kind === 'If') {
+                $eg = $this->earlyExitGuard($stmt);
+                if ($eg !== '') { $this->guardStack[] = $eg; $pushed = $pushed + 1; }
+            }
         }
+        for ($pi = 0; $pi < $pushed; $pi = $pi + 1) { \array_pop($this->guardStack); }
         return new Block($stmts, Type::void());
+    }
+
+    private function earlyExitGuard(\Parser\Ast\IfStmt $s): string
+    {
+        $l = $this->guardLabel($s->condition);
+        return ($l !== '' && $this->blockEndsInJump($s->then)) ? $l : '';
     }
 
     /** Whether a lowered statement unconditionally leaves the block — a
@@ -516,10 +529,13 @@ trait LowerStmts
         // unresolvable symbols — an undefined constant like SIGINT behind
         // `defined('SIGINT')` — never reach codegen. Same fold flattenConstantIfs
         // applies at top level, extended here to nested (method-body) `if`s.
+        $gl = $this->ifGuardLabel($stmt);
         $live = $this->constIfBranch($stmt);
         if ($live !== null) {
             $stmts = [];
+            if ($gl !== '') { $this->guardStack[] = $gl; }
             foreach ($live as $s) { $stmts[] = $this->lowerStmt($s); }
+            if ($gl !== '') { \array_pop($this->guardStack); }
             return new Block($stmts, Type::void());
         }
         // Not every arm folds — but the ones that fold FALSE are still dead, and
@@ -543,7 +559,7 @@ trait LowerStmts
             $armConds[] = $pair->condition;
             $armBodies[] = $pair->body;
         }
-        $else_ = $stmt->else === null ? null : $this->lowerBlockNode($stmt->else);
+        $else_ = $stmt->else === null ? null : $this->lowerBlockGuarded($stmt->else, $gl);
         $n = \count($armConds);
         if ($n === 0) {
             // Every arm is statically dead — only the `else` can run.
@@ -552,14 +568,14 @@ trait LowerStmts
         for ($i = $n - 1; $i >= 1; $i = $i - 1) {
             $nested = new If_(
                 $this->lowerExpr($armConds[$i]),
-                $this->lowerBlockNode($armBodies[$i]),
+                $this->lowerBlockGuarded($armBodies[$i], $gl),
                 $else_,
             );
             $else_ = new Block([$nested], Type::void());
         }
         return new If_(
             $this->lowerExpr($armConds[0]),
-            $this->lowerBlockNode($armBodies[0]),
+            $this->lowerBlockGuarded($armBodies[0], $gl),
             $else_,
         );
     }

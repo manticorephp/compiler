@@ -120,6 +120,10 @@ rc=0
 rc=0
 missing_package/src/main.php:4: warning[undefined.class]: class Symfony\Component\String\UnicodeString is not declared
 front end: 0 error(s), 1 warning(s)
+== check_unit_top_level
+rc=0
+unit_top_level/src/u.php:3: warning[undefined.class]: class Missing\U is not declared
+front end: 0 error(s), 1 warning(s)
 == builtin names in sync
 ok
 == compile bad --progress

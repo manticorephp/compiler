@@ -315,8 +315,10 @@ final class UndefinedFunctionScan
      * @param string[] $names callee as lowered
      * @param string[] $files
      * @param int[] $lines
+     * @param string[] $fns enclosing MIR function of each call
+     * @param string[] $guards guard label of each call
      */
-    public static function run(Module $m, \Compile\Diagnostics $d, array $externFns, array $userFiles, array $names, array $files, array $lines): void
+    public static function run(Module $m, \Compile\Diagnostics $d, array $externFns, array $userFiles, array $names, array $files, array $lines, array $fns, array $guards): void
     {
         $defined = [];
         foreach ($m->functions as $fn) {
@@ -334,7 +336,8 @@ final class UndefinedFunctionScan
             $name = \ltrim($names[$i], '\\');
             $lc = \strtolower($name);
             if (isset($defined[$lc]) || \strncmp($lc, '__mir_', 6) === 0 || \strncmp($lc, '__mc_', 5) === 0) { continue; }
-            $d->addUse('warning', 'undefined.function', $name, 'function ' . $name . '() is not declared', $files[$i], $lines[$i]);
+            $d->addUse('warning', 'undefined.function', $name, 'function ' . $name . '() is not declared', $files[$i], $lines[$i],
+                $d->resolveFn($fns[$i]), 'hard', $guards[$i]);
         }
     }
 }

@@ -140,6 +140,7 @@ trait LowerFns
         $this->currentLowerClass = $this->synthFnScope[$decl->name] ?? '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        $this->currentFnSym = $decl->name;
         if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // FFI: `#[Symbol('cSym')]` makes this a thin extern forward — the
         // body (a stock-PHP fallback like `$GLOBALS['argc']`) is never
@@ -255,6 +256,7 @@ trait LowerFns
         $this->currentLowerClass = '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        $this->currentFnSym = $decl->name;
         if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // `#[RefOut('a', 'b')]` on the function names its pure-output by-ref
         // params (survives the .sig + self-host parse; a param-position marker
@@ -519,6 +521,8 @@ trait LowerFns
         $id = $this->closureCounter;
         $this->closureCounter = $this->closureCounter + 1;
         $fnName = '__closure_' . (string)$id;
+        if ($this->lastClosureFrame !== '' && $this->diags !== null) { $this->diags->fnAlias[$this->lastClosureFrame] = $fnName; }
+        $this->lastClosureFrame = '';
         $params = [];
         // A by-value capture the body writes THROUGH (append, element store,
         // array_pop($x), …) arrives borrowed: the environment keeps its own
@@ -697,6 +701,8 @@ trait LowerFns
         $id = $this->closureCounter;
         $this->closureCounter = $id + 1;
         $fnName = '__closure_' . (string)$id;
+        if ($this->lastClosureFrame !== '' && $this->diags !== null) { $this->diags->fnAlias[$this->lastClosureFrame] = $fnName; }
+        $this->lastClosureFrame = '';
         $params = [];
         $i = 0;
         foreach ($capNames as $cn) {

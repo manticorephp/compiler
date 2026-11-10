@@ -1227,6 +1227,7 @@ trait LowerClasses
             if (!isset($meta->symbolIsStatic[$m->name])) { continue; }
             $fnName = $decl->name . '__' . $m->name;
             $this->currentLowerFn = $m->name;
+            $this->currentFnSym = $fnName;
             $params = [];
             if (!$m->isStatic) {
                 $params[] = new Param(

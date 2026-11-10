@@ -5465,8 +5465,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             /** @var array<string, bool> $userAbs */
             $userAbs = [];
             foreach ($paths as $up) { $userAbs[__mc_abs_source_path((string)$up)] = true; }
-            \Compile\Mir\UndefinedFunctionScan::run($module, $diag, $extNames, $userAbs, $lower->userCallNames, $lower->userCallFiles, $lower->userCallLines);
+            \Compile\Mir\UndefinedFunctionScan::run($module, $diag, $extNames, $userAbs, $lower->userCallNames, $lower->userCallFiles, $lower->userCallLines, $lower->userCallFns, $lower->userCallGuards);
         }
+        $diag->resolveSiteFns();
         if ($collect !== null) {
             foreach ($diag->items as $it) {
                 if ($it->severity === 'error') {

@@ -126,6 +126,7 @@ PHP
     diag "check_uses_distinct_default" "$MC" compile --check "$HERE/check/uses_distinct_default.php" -o "$WORK/ud"
     diag "check_numeric_class"      "$MC" compile --check "$HERE/check/numeric_class.php" -o "$WORK/nc"
     diag "check_missing_package"    sh -c "cd \"$HERE/check/missing_package\" && \"$MC\" build --check"
+    diag "check_unit_top_level"     sh -c "cd \"$HERE/check/unit_top_level\" && \"$MC\" build --check"
     printf '== builtin names in sync\n'; bash "$ROOT/tools/check_builtin_names.sh"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus

@@ -1526,6 +1526,8 @@ final class LowerFromAst implements Pass
             // instead of a late-bound placeholder).
             $this->currentLowerClass = '';
             $this->currentLowerFn = '';
+            $this->currentFnSym = '';
+            $this->guardStack = [];
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
             // …nor parameters: a preceding function's by-ref names would
@@ -3124,6 +3126,7 @@ final class LowerFromAst implements Pass
         $this->currentLowerClass = $lexicalClass !== '' ? $lexicalClass : $decl->name;
         $this->currentStaticClass = $staticClass;
         $this->currentLowerFn = $m->name;
+        $this->currentFnSym = $fnName;
         // Which class a lowered method body belongs to. `$this` is untyped until
         // InferTypes runs, so a pass that needs to attribute a `$this->p = …`
         // store while still lowering (LowerReify) asks HERE instead of guessing
@@ -3830,7 +3833,9 @@ final class LowerFromAst implements Pass
         $savedClosureMagic = $this->closureMagic;
         $this->closureMagic = $this->closureMagicName($expr->span);
         $this->lowerClosureDepth = $this->lowerClosureDepth + 1;
+        $this->enterClosureFrame();
         $body = $this->lowerBlockNode($expr->body);
+        $this->leaveClosureFrame();
         $this->lowerClosureDepth = $this->lowerClosureDepth - 1;
         $this->closureMagic = $savedClosureMagic;
         $this->currentLowerFnHasThis = $savedHasThis;
@@ -3916,7 +3921,9 @@ final class LowerFromAst implements Pass
         $savedClosureMagic = $this->closureMagic;
         $this->closureMagic = $this->closureMagicName($expr->span);
         $this->lowerClosureDepth = $this->lowerClosureDepth + 1;
+        $this->enterClosureFrame();
         $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
+        $this->leaveClosureFrame();
         $this->lowerClosureDepth = $this->lowerClosureDepth - 1;
         $this->closureMagic = $savedClosureMagic;
         $this->currentLowerFnHasThis = $savedHasThis;
@@ -4534,32 +4541,179 @@ final class LowerFromAst implements Pass
     public array $userCallFiles = [];
     /** @var int[] */
     public array $userCallLines = [];
+    /** @var string[] enclosing MIR function of each recorded call (closures: a placeholder until `Diagnostics::resolveFn`) */
+    public array $userCallFns = [];
+    /** @var string[] guard label of each recorded call ('' = unguarded) */
+    public array $userCallGuards = [];
+
+    /** The MIR function name the code being lowered ends up in (`FunctionDef::$name`). */
+    private string $currentFnSym = '';
+    /** @var string[] placeholders of the closure bodies being lowered, innermost last */
+    private array $closureFrames = [];
+    private int $closureFrameSeq = 0;
+    /** Placeholder of the closure whose body just finished lowering; `finishClosure` binds it to the real name. */
+    private string $lastClosureFrame = '';
+    /** @var string[] guard labels live at the code being lowered (innermost last) */
+    private array $guardStack = [];
+    /** Set while declaration signatures / hierarchies are checked: those sites belong to no function. */
+    private bool $inDeclCheck = false;
+
+    private const GUARD_FNS = ['class_exists' => true, 'interface_exists' => true, 'trait_exists' => true,
+        'enum_exists' => true, 'function_exists' => true, 'method_exists' => true, 'is_callable' => true,
+        'extension_loaded' => true, 'defined' => true];
+
+    private function currentFnSymbol(): string
+    {
+        if ($this->inDeclCheck) { return ''; }
+        $n = \count($this->closureFrames);
+        if ($n > 0) { return $this->closureFrames[$n - 1]; }
+        return $this->currentFnSym === '' ? '__main' : $this->currentFnSym;
+    }
+
+    private function currentGuard(): string
+    {
+        $n = \count($this->guardStack);
+        return ($n === 0 || $this->inDeclCheck) ? '' : $this->guardStack[$n - 1];
+    }
+
+    /** Lower a closure body, recording the placeholder its sites carry until the real `__closure_N` is known. */
+    private function enterClosureFrame(): void
+    {
+        $this->closureFrameSeq = $this->closureFrameSeq + 1;
+        $this->closureFrames[] = '@closure' . (string)$this->closureFrameSeq;
+    }
+
+    private function leaveClosureFrame(): void
+    {
+        $this->lastClosureFrame = (string)\array_pop($this->closureFrames);
+    }
+
+    /** Label (`class_exists('X')` / `function_exists(...)`) of the first existence-check call inside a condition; '' if none. */
+    private function guardLabel(\Parser\Ast\Expr $e): string
+    {
+        $k = $e->kind;
+        if ($k === 'Call') { return $this->guardLabelCall($e); }
+        if ($k === 'UnaryOp') { return $this->guardLabelUnary($e); }
+        if ($k === 'BinaryOp') { return $this->guardLabelBinary($e); }
+        return '';
+    }
+
+    private function guardLabelUnary(\Parser\Ast\UnaryOp $e): string
+    {
+        return $e->op === '!' ? $this->guardLabel($e->operand) : '';
+    }
+
+    private function guardLabelBinary(\Parser\Ast\BinaryOp $e): string
+    {
+        $l = $this->guardLabel($e->left);
+        return $l !== '' ? $l : $this->guardLabel($e->right);
+    }
+
+    private function guardLabelCall(\Parser\Ast\CallExpr $e): string
+    {
+        $fn = \strtolower($this->bareName(\ltrim($e->function, '\\')));
+        if (!isset(self::GUARD_FNS[$fn])) { return ''; }
+        $arg = '...';
+        if (\count($e->args) > 0 && $e->args[0]->kind === 'StringLiteral') {
+            $arg = "'" . $this->stringLitValue($e->args[0]) . "'";
+        }
+        return $fn . '(' . $arg . ')';
+    }
+
+    /** First guard label across an `if` chain's conditions. */
+    private function ifGuardLabel(\Parser\Ast\IfStmt $s): string
+    {
+        $l = $this->guardLabel($s->condition);
+        if ($l !== '') { return $l; }
+        foreach ($s->elseifs as $pair) {
+            $l = $this->guardLabel($pair->condition);
+            if ($l !== '') { return $l; }
+        }
+        return '';
+    }
+
+    /** Whether a statement list ends in a `return` / `throw` / `exit` / `continue` / `break`. */
+    private function blockEndsInJump(\Parser\Ast\Block $b): bool
+    {
+        $n = \count($b->statements);
+        if ($n === 0) { return false; }
+        $k = $b->statements[$n - 1]->kind;
+        if ($k === 'Return' || $k === 'Throw' || $k === 'Break' || $k === 'Continue') { return true; }
+        return $k === 'Expression' && $this->stmtIsExit($b->statements[$n - 1]);
+    }
+
+    private function stmtIsExit(\Parser\Ast\ExpressionStmt $s): bool
+    {
+        $k = $s->expr->kind;
+        if ($k === 'Identifier') { return $this->identIsExit($s->expr); }
+        return $k === 'Call' && $this->callIsExit($s->expr);
+    }
+
+    private function identIsExit(\Parser\Ast\Identifier $i): bool
+    {
+        $f = \strtolower($i->name);
+        return $f === 'exit' || $f === 'die';
+    }
+
+    private function callIsExit(\Parser\Ast\CallExpr $c): bool
+    {
+        $f = \strtolower(\ltrim($c->function, '\\'));
+        return $f === 'exit' || $f === 'die';
+    }
+
+    private function lowerBlockGuarded(\Parser\Ast\Block $b, string $label): Block
+    {
+        if ($label === '') { return $this->lowerBlockNode($b); }
+        $this->guardStack[] = $label;
+        $r = $this->lowerBlockNode($b);
+        \array_pop($this->guardStack);
+        return $r;
+    }
+
+    private function lowerExprGuarded(\Parser\Ast\Expr $e, string $label): Node
+    {
+        if ($label === '') { return $this->lowerExpr($e); }
+        $this->guardStack[] = $label;
+        $r = $this->lowerExpr($e);
+        \array_pop($this->guardStack);
+        return $r;
+    }
+
+    private function skipsSiteNotes(): bool
+    {
+        $f = $this->currentLowerFn;
+        if (\strncmp($f, '__mir_', 6) === 0) { return true; }
+        return \strncmp($f, '__mc_', 5) === 0 && \strncmp($f, '__mc_unit_', 10) !== 0;
+    }
 
     private function noteUserCall(string $callee, ?\Parser\Ast\Span $span): void
     {
         if ($this->diags === null || $this->lowerInPrelude || $span === null || $span->file === '' || isset($this->fnDecls[$callee])) { return; }
-        if (\strncmp($this->currentLowerFn, '__mir_', 6) === 0 || \strncmp($this->currentLowerFn, '__mc_', 5) === 0) { return; }
+        if ($this->skipsSiteNotes()) { return; }
         $this->userCallNames[] = $callee;
         $this->userCallFiles[] = $span->file;
         $this->userCallLines[] = $span->line;
+        $this->userCallFns[] = $this->currentFnSymbol();
+        $this->userCallGuards[] = $this->currentGuard();
     }
 
     /** Record a reference to an undeclared class/constant as a grouped front-end warning; user code only. */
-    private function noteUndefined(string $code, string $name, ?\Parser\Ast\Span $span): void
+    private function noteUndefined(string $code, string $name, ?\Parser\Ast\Span $span, string $kind = 'hard'): void
     {
         if ($this->diags === null || $this->lowerInPrelude) { return; }
-        if (\strncmp($this->currentLowerFn, '__mir_', 6) === 0 || \strncmp($this->currentLowerFn, '__mc_', 5) === 0) { return; }
+        if ($this->skipsSiteNotes()) { return; }
         $file = $span === null ? '' : $span->file;
         if ($file === '') { $file = $this->lowerSourceFile; }
         $n = \ltrim($name, '\\');
         $what = $code === 'undefined.constant' ? 'constant ' . $n : ($code === 'undefined.function' ? 'function ' . $n . '()' : 'class ' . $n);
-        $this->diags->addUse('warning', $code, $n, $what . ' is not declared', $file, $span === null ? 0 : $span->line);
+        $this->diags->addUse('warning', $code, $n, $what . ' is not declared', $file, $span === null ? 0 : $span->line,
+            $this->currentFnSymbol(), $kind, $this->currentGuard());
     }
 
     /** `new X` / `catch (X)` / `instanceof X` naming a class nothing declares. */
-    private function noteClassRef(string $cls, ?\Parser\Ast\Span $span): void
+    private function noteClassRef(string $cls, ?\Parser\Ast\Span $span, string $kind = 'hard'): void
     {
-        if ($cls !== '' && !$this->classIsDeclared($cls)) { $this->noteUndefined('undefined.class', $cls, $span); }
+        if ($cls !== '' && !$this->classIsDeclared($cls)) { $this->noteUndefined('undefined.class', $cls, $span, $kind); }
     }
 
     /** @var array<string, bool> hint words that name no class */
@@ -4572,9 +4726,11 @@ final class LowerFromAst implements Pass
     {
         if ($this->diags === null) { return; }
         $this->lowerInPrelude = false;
+        $this->inDeclCheck = true;
         foreach ($stmts as $i => $stmt) {
             if ($i >= $userStart) { $this->checkDeclTypeNamesIn($stmt); }
         }
+        $this->inDeclCheck = false;
     }
 
     private function checkDeclTypeNamesIn(\Parser\Ast\Stmt $stmt): void
@@ -4604,7 +4760,7 @@ final class LowerFromAst implements Pass
         foreach (\preg_split('/[|&()?\s]+/', $hint, -1, \PREG_SPLIT_NO_EMPTY) as $w) {
             $n = \ltrim($w, '\\');
             if (isset(self::NON_CLASS_HINTS[\strtolower($n)]) || \preg_match('/^[A-Za-z_\x80-\xff][A-Za-z0-9_\x80-\xff\\\\]*$/', $n) !== 1) { continue; }
-            if ($this->resolveClassHint($n) === '') { $this->noteClassRef($n, $span); }
+            if ($this->resolveClassHint($n) === '') { $this->noteClassRef($n, $span, 'soft'); }
         }
     }
 
@@ -4647,6 +4803,10 @@ final class LowerFromAst implements Pass
         }
         $this->currentLowerClass = '';
         $this->currentLowerFn = '';
+        $this->currentFnSym = '';
+        $this->guardStack = [];
+        $this->closureFrames = [];
+        $this->inDeclCheck = false;
         $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
         $this->currentTypeBounds = [];
@@ -7370,14 +7530,14 @@ final class LowerFromAst implements Pass
         // ? sapi_windows_cp_get() : 0;` otherwise emitted a call to a function
         // that exists on no unix target. Same purity argument as lowerBinary.
         $cf = $this->foldGuard($expr->condition);
-        if ($cf === self::GUARD_TRUE && $expr->then !== null) { return $this->lowerExpr($expr->then); }
+        if ($cf === self::GUARD_TRUE && $expr->then !== null) { return $this->lowerExprGuarded($expr->then, $this->guardLabel($expr->condition)); }
         if ($cf === self::GUARD_FALSE) { return $this->lowerExpr($expr->else); }
         $cond = $this->lowerExpr($expr->condition);
         $else = $this->lowerExpr($expr->else);
         $type = $cond->type;
         $then = null;
         if ($expr->then !== null) {
-            $then = $this->lowerExpr($expr->then);
+            $then = $this->lowerExprGuarded($expr->then, $this->guardLabel($expr->condition));
             $type = $then->type;
         }
         return new Ternary($cond, $then, $else, $type);
@@ -7469,7 +7629,7 @@ final class LowerFromAst implements Pass
         $cls = ($low === 'self' || $low === 'static' || $low === 'parent')
             ? $this->resolveStaticClass($e->class)
             : \ltrim($e->class, '\\');
-        $this->noteClassRef($cls, $e->span);
+        $this->noteClassRef($cls, $e->span, 'soft');
         return new Instanceof_($this->lowerExpr($e->operand), $cls);
     }
 
@@ -8668,7 +8828,7 @@ final class LowerFromAst implements Pass
             $left = $lf === self::GUARD_UNKNOWN
                 ? $this->lowerExpr($e->left) : new BoolConst($lf === self::GUARD_TRUE, Type::bool_());
             $right = $rf === self::GUARD_UNKNOWN
-                ? $this->truthy($this->lowerExpr($e->right))
+                ? $this->truthy($this->lowerExprGuarded($e->right, $this->guardLabel($e->left)))
                 : new BoolConst($rf === self::GUARD_TRUE, Type::bool_());
             return new Ternary($left, $right, new BoolConst(false, Type::bool_()), Type::bool_());
             // Both arms bool so the Ternary stays bool through InferTypes
