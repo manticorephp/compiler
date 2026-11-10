@@ -276,22 +276,27 @@ trait LowerSuperglobals
     {
         $arms = '';
         foreach ($module->globalVarNames as $name) {
-            if (\preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $name) !== 1 || $name === 'GLOBALS') { continue; }
-            $q = "'" . $name . "'";
-            $arms .= "        case " . $q . ":\n"
-                . "            if (\$op === 0) { return \$GLOBALS[" . $q . "] ?? null; }\n"
-                . "            if (\$op === 1) { \$GLOBALS[" . $q . "] = \$v; return null; }\n"
-                . "            if (\$op === 2) { return isset(\$GLOBALS[" . $q . "]); }\n"
-                . "            unset(\$GLOBALS[" . $q . "]);\n"
+            if (\preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $name) !== 1 || $name === 'GLOBALS' || \str_starts_with($name, '__mc_')) { continue; }
+            // `global $x`, not `$GLOBALS['x']`: a name reached through the
+            // `$GLOBALS` view keeps a boxed slot that cannot be passed by
+            // reference, and this table names every global of the program.
+            // Unsetting writes NULL — `unset()` of a `global` binding would
+            // only drop the local alias.
+            $arms .= "        case '" . $name . "':\n"
+                . "            global \$" . $name . ";\n"
+                . "            if (\$__mc_op === 0) { return \$" . $name . " ?? null; }\n"
+                . "            if (\$__mc_op === 1) { \$" . $name . " = \$__mc_v; return null; }\n"
+                . "            if (\$__mc_op === 2) { return isset(\$" . $name . "); }\n"
+                . "            \$" . $name . " = null;\n"
                 . "            return null;\n";
         }
-        return "function __mc_globals(int \$op, string \$n, mixed \$v = null): mixed\n{\n"
-            . "    static \$dyn = [];\n"
-            . ($arms === '' ? '' : "    switch (\$n) {\n" . $arms . "    }\n")
-            . "    if (\$op === 0) { return \$dyn[\$n] ?? null; }\n"
-            . "    if (\$op === 1) { \$dyn[\$n] = \$v; return null; }\n"
-            . "    if (\$op === 2) { return isset(\$dyn[\$n]); }\n"
-            . "    unset(\$dyn[\$n]);\n"
+        return "function __mc_globals(int \$__mc_op, string \$__mc_n, mixed \$__mc_v = null): mixed\n{\n"
+            . "    static \$__mc_dyn = [];\n"
+            . ($arms === '' ? '' : "    switch (\$__mc_n) {\n" . $arms . "    }\n")
+            . "    if (\$__mc_op === 0) { return \$__mc_dyn[\$__mc_n] ?? null; }\n"
+            . "    if (\$__mc_op === 1) { \$__mc_dyn[\$__mc_n] = \$__mc_v; return null; }\n"
+            . "    if (\$__mc_op === 2) { return isset(\$__mc_dyn[\$__mc_n]); }\n"
+            . "    unset(\$__mc_dyn[\$__mc_n]);\n"
             . "    return null;\n}\n";
     }
 
