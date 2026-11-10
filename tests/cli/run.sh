@@ -106,6 +106,7 @@ PHP
     run "compile bad --strict"     "$MC" compile "f.php" -o "x" --strict=bogus
     diag "check_parse_two_files"    sh -c "cd \"$HERE/check/parse2\" && \"$MC\" build --check"
     diag "check_unsupported_three_files" sh -c "cd \"$HERE/check/unsupported3\" && \"$MC\" build --check"
+    printf "== analyze_decl_and_type_both\n"; "$MC" analyze --deep --json "$HERE/check/analyze_decl_and_type.php" 2>"$WORK/e" | grep -o "repr.type\|arg.type" | sort; [ -s "$WORK/e" ] && echo "BAD: stderr"
     diag "check_clean"              "$MC" compile --check "$HERE/check/clean.php" -o "$WORK/clean"
     [ -e "$WORK/clean" ] && echo "BAD: --check wrote output"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus

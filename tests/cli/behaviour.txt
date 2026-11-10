@@ -43,6 +43,9 @@ unsupported3/a.php:4: error[lower.unsupported]: unsupported: foreach cannot bind
 unsupported3/b.php:2: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
 unsupported3/c.php:3: error[lower.unsupported]: unsupported: an array literal can bind a VARIABLE, a PROPERTY or an ELEMENT by reference (`[&$a, &$this->p, &$a[$k], …]`), and nothing else yet. This element would receive a copy, not an alias, so every write through it would be lost.
 front end: 3 error(s), 0 warning(s)
+== analyze_decl_and_type_both
+arg.type
+repr.type
 == check_clean
 rc=0
 == compile bad --progress

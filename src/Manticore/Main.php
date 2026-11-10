@@ -5461,12 +5461,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 }
             }
         }
-        if ($diag->hasErrors()) {
-            dprint($diag->render());
-            return null;
-        }
-        if (\count($diag->items) > 0) {
-            dprint($diag->render());
+        if ($collect === null) {
+            if ($diag->hasErrors()) {
+                dprint($diag->render());
+                return null;
+            }
+            if (\count($diag->items) > 0) {
+                dprint($diag->render());
+            }
         }
         if (CompileArgs::$checkOnly) {
             return $module;
