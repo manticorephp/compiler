@@ -31,8 +31,10 @@ use Compile\Mir\Type;
  * `$x`, in any scope. With a literal key that is precisely the cell `@g_x` —
  * a {@see StaticProp_} read / {@see StoreStaticProp_} write, no local binding
  * needed. Registering the name as a global var also re-routes `__main`'s own
- * `$x` to the same cell. A non-literal key would need a runtime name→cell table
- * (every top-level var pinned to a cell forever); it is a hard error instead.
+ * `$x` to the same cell. A non-literal key (`$GLOBALS[$name] = $v`) goes through
+ * `__mc_globals`, generated once lowering is done ({@see dynGlobalsSrc}): a
+ * switch over every name that IS a global cell, and a table of its own for a
+ * name the program never spells.
  */
 trait LowerSuperglobals
 {
@@ -138,12 +140,10 @@ trait LowerSuperglobals
         if ($base->kind !== 'Variable') { return null; }
         if ($this->varName($base) !== 'GLOBALS') { return null; }
         $idx = $expr->index;
-        if ($idx === null || $idx->kind !== 'StringLiteral') {
-            throw new \RuntimeException(
-                'MIR.lower: $GLOBALS needs a literal string key '
-                . '(a dynamic one would need a runtime name table)'
-            );
+        if ($idx === null) {
+            throw new \RuntimeException('MIR.lower: $GLOBALS[] needs a key');
         }
+        if ($idx->kind !== 'StringLiteral') { return null; }
         $name = $this->strLitValue($idx);
         $cell = '@g_' . $name;
         $this->module->addGlobalCell($cell, new IntConst(0, Type::int_()));
@@ -159,6 +159,8 @@ trait LowerSuperglobals
     /** `$GLOBALS['x']` as an rvalue, or null if `$expr` is not one. */
     private function lowerGlobalsRead(\Parser\Ast\ArrayAccess $expr): ?Node
     {
+        $dyn = $this->dynGlobalsKey($expr);
+        if ($dyn !== null) { return $this->dynGlobalsCall(0, $dyn, null); }
         $cell = $this->globalsCell($expr);
         if ($cell === null) { return null; }
         return new StaticProp_($cell, Type::cell());
@@ -167,6 +169,13 @@ trait LowerSuperglobals
     /** `$GLOBALS['x'] = v`, or null if `$target` is not one. */
     private function storeToGlobals(\Parser\Ast\ArrayAccess $target, Node $value): ?Node
     {
+        $dyn = $this->dynGlobalsKey($target);
+        if ($dyn !== null) { return $this->dynGlobalsCall(1, $dyn, $value); }
+        $base = $target->array;
+        if ($base->kind === 'ArrayAccess' && $this->dynGlobalsKey($base) !== null) {
+            throw new \RuntimeException('MIR.lower: writing into an element of $GLOBALS[$name] with a computed name is unsupported; '
+                . 'read it, change the copy and store it back with $GLOBALS[$name] = $value');
+        }
         $cell = $this->globalsCell($target);
         if ($cell === null) { return null; }
         // DECLARED cell, because the READ side is: `lowerGlobalsRead` hands back
@@ -229,8 +238,66 @@ trait LowerSuperglobals
      */
     private function unsetGlobalsCell(\Parser\Ast\ArrayAccess $target): Node
     {
+        $dyn = $this->dynGlobalsKey($target);
+        if ($dyn !== null) { return $this->dynGlobalsCall(3, $dyn, null); }
         $cell = $this->globalsCell($target);
         return new StoreStaticProp_($cell, new NullConst(Type::null_()), Type::null_());
+    }
+
+    /** The computed key of a `$GLOBALS[$expr]` access, or null for any other access. */
+    private function dynGlobalsKey(\Parser\Ast\ArrayAccess $expr): ?\Parser\Ast\Expr
+    {
+        if (!$this->isGlobalsVar($expr->array)) { return null; }
+        $idx = $expr->index;
+        if ($idx === null || $idx->kind === 'StringLiteral') { return null; }
+        return $idx;
+    }
+
+    /** `__mc_globals(op, (string) key, value)` — op 0 read, 1 write, 2 isset, 3 unset. */
+    private function dynGlobalsCall(int $op, \Parser\Ast\Expr $key, ?Node $value): Node
+    {
+        $this->sawDynGlobals = true;
+        $k = $this->lowerExpr(\Parser\Ast\Expr::call('strval', [$key], $key->span));
+        $args = [new IntConst($op, Type::int_()), $k];
+        if ($value !== null) { $args[] = $value; }
+        return new Call('__mc_globals', $args, $op === 2 ? Type::bool_() : Type::cell());
+    }
+
+    /**
+     * The by-name table behind {@see dynGlobalsCall}: one arm per name that is a
+     * global cell, so a computed name and a spelled one reach the same storage,
+     * and a static table for a name nothing spells.
+     *
+     * ponytail: a top-level variable no scope declares `global` and no
+     * `$GLOBALS['x']` spells stays a `__main` local, invisible to a computed name.
+     * Pin every top-level variable to a cell if a program needs that.
+     */
+    private function dynGlobalsSrc(Module $module): string
+    {
+        $arms = '';
+        foreach ($module->globalVarNames as $name) {
+            if (\preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $name) !== 1 || $name === 'GLOBALS' || \str_starts_with($name, '__mc_')) { continue; }
+            // `global $x`, not `$GLOBALS['x']`: a name reached through the
+            // `$GLOBALS` view keeps a boxed slot that cannot be passed by
+            // reference, and this table names every global of the program.
+            // Unsetting writes NULL — `unset()` of a `global` binding would
+            // only drop the local alias.
+            $arms .= "        case '" . $name . "':\n"
+                . "            global \$" . $name . ";\n"
+                . "            if (\$__mc_op === 0) { return \$" . $name . " ?? null; }\n"
+                . "            if (\$__mc_op === 1) { \$" . $name . " = \$__mc_v; return null; }\n"
+                . "            if (\$__mc_op === 2) { return isset(\$" . $name . "); }\n"
+                . "            \$" . $name . " = null;\n"
+                . "            return null;\n";
+        }
+        return "function __mc_globals(int \$__mc_op, string \$__mc_n, mixed \$__mc_v = null): mixed\n{\n"
+            . "    static \$__mc_dyn = [];\n"
+            . ($arms === '' ? '' : "    switch (\$__mc_n) {\n" . $arms . "    }\n")
+            . "    if (\$__mc_op === 0) { return \$__mc_dyn[\$__mc_n] ?? null; }\n"
+            . "    if (\$__mc_op === 1) { \$__mc_dyn[\$__mc_n] = \$__mc_v; return null; }\n"
+            . "    if (\$__mc_op === 2) { return isset(\$__mc_dyn[\$__mc_n]); }\n"
+            . "    unset(\$__mc_dyn[\$__mc_n]);\n"
+            . "    return null;\n}\n";
     }
 
     /** The indexed expression of an ArrayAccess, read through a TYPE-PINNED param. */

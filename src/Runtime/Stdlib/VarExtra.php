@@ -23,6 +23,29 @@ function __mc_public_object_vars(object $o): array
     return $out;
 }
 
+/**
+ * `compact()` with a name that is not a literal: LowerExprs passes the calling
+ * scope's `get_defined_vars()` and the call's arguments as one list. A name may
+ * be an array of names, nested. A name the scope does not define is skipped.
+ *
+ * @param array<string, mixed> $vars
+ * @param array<int, mixed> $names
+ * @return array<string, mixed>
+ */
+function __mc_compact(array $vars, array $names): array
+{
+    $out = [];
+    foreach ($names as $n) {
+        if (\is_array($n)) {
+            foreach (__mc_compact($vars, $n) as $k => $v) { $out[$k] = $v; }
+            continue;
+        }
+        $key = (string)$n;
+        if (\array_key_exists($key, $vars)) { $out[$key] = $vars[$key]; }
+    }
+    return $out;
+}
+
 /** `(bool)` of any value (PHP `boolval`). */
 function boolval(mixed $value): bool
 {
@@ -107,6 +130,8 @@ function extension_loaded(string $extension): bool
         || $e === 'openssl' || $e === 'core' || $e === 'standard'
         || $e === 'tokenizer' || $e === 'mbstring' || $e === 'intl'
         || $e === 'session' || $e === 'mysqli'
+        || $e === 'hash' || $e === 'date' || $e === 'spl' || $e === 'filter' || $e === 'iconv' || $e === 'random' || $e === 'reflection'
+        || $e === 'sockets' || $e === 'curl' || $e === 'simplexml' || $e === 'libxml' || $e === 'zlib' || $e === 'pdo'
         || $e === 'bcmath';
 }
 

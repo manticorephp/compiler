@@ -1,0 +1,8 @@
+hook user_register
+hook deleted_user
+k0=deleted_user
+a:1 b:2 
+b=2
+in x
+in y
+b=y

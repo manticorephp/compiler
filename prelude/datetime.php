@@ -100,6 +100,21 @@ class DateMalformedPeriodStringException extends DateException {}
  */
 class DateTimeZone
 {
+    public const AFRICA = 1;
+    public const AMERICA = 2;
+    public const ANTARCTICA = 4;
+    public const ARCTIC = 8;
+    public const ASIA = 16;
+    public const ATLANTIC = 32;
+    public const AUSTRALIA = 64;
+    public const EUROPE = 128;
+    public const INDIAN = 256;
+    public const PACIFIC = 512;
+    public const UTC = 1024;
+    public const ALL = 2047;
+    public const ALL_WITH_BC = 4095;
+    public const PER_COUNTRY = 4096;
+
     private string $tzname = '';
     private int $tztype = 3;
     private int $tzoffset = 0;
@@ -1055,6 +1070,11 @@ function date_create_immutable(string $datetime = 'now', ?DateTimeZone $timezone
 function date_create_from_format(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTime|false
 {
     return DateTime::createFromFormat($format, $datetime, $timezone);
+}
+
+function date_create_immutable_from_format(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTimeImmutable|false
+{
+    return DateTimeImmutable::createFromFormat($format, $datetime, $timezone);
 }
 
 function date_format(DateTimeInterface $object, string $format): string

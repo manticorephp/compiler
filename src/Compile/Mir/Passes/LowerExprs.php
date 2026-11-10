@@ -383,6 +383,14 @@ trait LowerExprs
                     }
                     return new ArrayLit($elems, Type::unknown());
                 }
+                // A name held in a variable (`compact($pieces)`): pick from the
+                // scope's own symbol table.
+                $cnames = [];
+                foreach ($expr->args as $a) { $cnames[] = new \Parser\Ast\ArrayElement(null, $a); }
+                return $this->lowerExpr(\Parser\Ast\Expr::call('__mc_compact', [
+                    \Parser\Ast\Expr::call('get_defined_vars', [], $expr->span),
+                    \Parser\Ast\Expr::arrayLit($cnames, $expr->span),
+                ], $expr->span));
             }
             // `get_class_vars($c)` / `get_object_vars($o)` answer by the CALLING scope's
             // visibility. The scope is known here and nowhere later, so pass it on (`''` =
@@ -612,6 +620,15 @@ trait LowerExprs
             if ($fnBare === 'function_exists' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 if ($a0->kind === 'StringLiteral') {
+                    // Declared in a file that has not run yet: answer at run time.
+                    $doneKey = $this->lazyFnDoneKey($this->stringLitValue($a0));
+                    if ($doneKey !== '') {
+                        return $this->lowerExpr(\Parser\Ast\Expr::call('isset', [\Parser\Ast\Expr::arrayAccess(
+                            \Parser\Ast\Expr::variable('GLOBALS', $a0->span),
+                            \Parser\Ast\Expr::string($doneKey, $a0->span),
+                            $a0->span,
+                        )], $a0->span));
+                    }
                     return new IntConst(
                         $this->functionIsKnown($this->stringLitValue($a0)) ? 1 : 0,
                         Type::bool_());
@@ -1210,13 +1227,16 @@ trait LowerExprs
         if ($target->kind === 'ArrayLit') {
             return $this->lowerDestructure($target, $value);
         }
+        if ($target->kind === 'DynamicStaticAccess') {
+            return $this->storeDynStaticProp($target, $value);
+        }
         // Name the FILE, not just the line. A whole-program build merges
         // thousands of files into one module, so "at line 25" sent three
         // separate searches to the wrong file before this was added — the
         // parse error has always named its file and this had no reason not to.
         throw new \RuntimeException(
             'MIR.lower: unsupported assign target kind ' . $target->kind
-            . ' at ' . ($this->lowerSourceFile !== '' ? $this->lowerSourceFile : '<source>')
+            . ' at ' . ($this->lowerSourceFile !== '' ? $this->lowerSourceFile : ($target->span->file !== '' ? $target->span->file : '<source>'))
             . ':' . (string)$target->span->line
         );
     }

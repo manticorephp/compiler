@@ -2967,6 +2967,29 @@ function __mc_library_source_may_declare(string $src): bool
 }
 
 /**
+ * {@see __mc_stmt_declares} without `define()`: what a LAZY include unit hoists
+ * to the top level. A class or function is declared for the whole program, but
+ * a `define()` runs when its file does — hoisted, WordPress's xmlrpc.php
+ * `define('XMLRPC_REQUEST', true)` ran in every request of a binary that never
+ * includes it, and `wp_die()` answered in XML.
+ */
+function __mc_stmt_declares_code(\Parser\Ast\Stmt $s): bool
+{
+    $k = $s->kind;
+    if ($k === 'Class' || $k === 'Function' || $k === 'UseDecl'
+        || $k === 'Namespace' || $k === 'StaticLocal' || $k === 'Label') {
+        return true;
+    }
+    if ($k === 'Expression') { return false; }
+    foreach (__mc_stmt_children($s) as $c) {
+        if (__mc_stmt_declares_code($c)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
  * Does this top-level statement DECLARE something, at any depth?
  *
  * The keep/drop test for a demand-loaded file ({@see CompileArgs::$demandLoadedPaths}).
@@ -4126,6 +4149,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $lastIdx = \count($sources) - 1;
     /** @var array<string, string> resolved path → value-slot global name */
     $includeSlots = [];
+    /** @var array<string, string> $lazyUnitDone */
+    $lazyUnitDone = [];
     /** @var array<string, string> resolved path → function that runs the file on its first `require` */
     $includeUnits = [];
     // Compute all source-wide lexical metadata before releasing raw source
@@ -4294,7 +4319,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if (!$isEntry && $incSlot !== '' && $srcPath !== '' && isset(CompileArgs::$lazyUnitPaths[$srcPath])) {
             $effects = false;
             foreach ($topStmts as $s) {
-                if (!__mc_stmt_declares($s) && !__mc_stmt_is_pure_return($s)) {
+                if (!__mc_stmt_declares_code($s) && !__mc_stmt_is_pure_return($s)) {
+                    $effects = true;
+                    break;
+                }
+                // A file of function declarations alone still gets a unit: its
+                // done flag is what function_exists() asks before the file runs
+                // ({@see \Compile\Mir\Passes\LowerFromAst::lazyFnDoneKey}).
+                if ($s->kind === 'Function') {
                     $effects = true;
                     break;
                 }
@@ -4303,7 +4335,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             // would go into `__main` whole, and its `return` would end the PROGRAM. Such a file takes the eager path below,
             // where each return becomes a jump past the file.
             foreach ($topStmts as $s) {
-                if (__mc_stmt_declares($s) && __mc_file_return_kind([$s]) > 0) {
+                if (__mc_stmt_declares_code($s) && __mc_file_return_kind([$s]) > 0) {
                     $effects = false;
                     break;
                 }
@@ -4312,6 +4344,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 $unitName = '__mc_unit_' . (string)$i;
                 $includeSlots[$incAbs] = $incSlot;
                 $includeUnits[$incAbs] = $unitName;
+                $lazyUnitDone[$incAbs] = $incSlot . '_d';
+                $lazyUnitDone[$srcPath] = $incSlot . '_d';
                 $span0 = $topStmts[0]->span;
                 $doneKey = $incSlot . '_d';
                 $slotRef = function (string $key) use ($span0): \Parser\Ast\Expr {
@@ -4342,7 +4376,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 /** @var \Parser\Ast\Stmt[] $effectStmts */
                 $effectStmts = [];
                 foreach ($topStmts as $s) {
-                    if (__mc_stmt_declares($s)) {
+                    if (__mc_stmt_declares_code($s)) {
                         $stmts[] = $s;
                     } else {
                         $effectStmts[] = $s;
@@ -5428,6 +5462,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $unitAbs[$entryAbs] = true;
         }
         $lower->compileUnitFiles = $unitAbs;
+        $lower->lazyUnitDone = $lazyUnitDone;
         // Reserved-attribute errors (#[Override] with no parent, a bad target, a
         // repeat) abort the build by default; analysis collects them instead.
         if ($collect !== null) {

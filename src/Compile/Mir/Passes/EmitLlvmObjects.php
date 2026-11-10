@@ -3088,7 +3088,7 @@ trait EmitLlvmObjects
     /** The out-of-line symbol for one erased-interface dispatcher. */
     private function erasedIfaceSym(string $iface, string $method, int $argc): string
     {
-        $i = \str_replace('\\', '_', \ltrim($iface, '\\'));
+        $i = \Compile\SymbolName::ident($iface);
         return $this->mirHelperSym('__mir_eicall_' . $i . '__' . $method . '_' . (string)$argc);
     }
 
@@ -4159,11 +4159,25 @@ trait EmitLlvmObjects
             // A PROPERTY source answers its promoted BOX here, not its slot
             // ({@see EmitLlvmLocals::byRefAddrOf}).
             $addrIr = $this->byRefAddrOf($src);
+            // A `$GLOBALS`-viewed global (`$GLOBALS['bar'] = …; f([&$bar])`): its
+            // module cell holds the value BOXED, which is what a REF cell's
+            // readers expect of its target. byRefAddrOf refuses it only for a raw
+            // by-ref parameter, which would write an untagged word there.
+            if ($addrIr === null && $src instanceof \Compile\Mir\LoadLocal && $this->isGlobalsViewName($src->name)) {
+                $gcell = $this->locals->globalBacked[$src->name] ?? '';
+                if ($gcell !== '') {
+                    $ga = $this->ssa->allocReg();
+                    $addrIr = '  ' . $ga . ' = ptrtoint ptr ' . $gcell . " to i64\n";
+                    $this->lastValue = $ga;
+                    $this->lastValueType = 'i64';
+                }
+            }
         }
         if ($addrIr === null) {
             throw new \RuntimeException(
-                'unsupported: cannot take a storable reference to this expression '
-                . '— it has no address, so the reference would be a copy and every '
+                'unsupported: cannot take a storable reference to this expression ('
+                . ($src instanceof \Compile\Mir\LoadLocal ? '$' . $src->name : $src->kind)
+                . ') — it has no address, so the reference would be a copy and every '
                 . 'write through it would be lost'
             );
         }
@@ -9710,7 +9724,7 @@ trait EmitLlvmObjects
         // module. Its linked method is still a valid implementation; the
         // emitter must not replace the call with an undefined-method trap.
         $fqn = \ltrim($class, '\\') . '__' . $method;
-        $wire = \str_replace('\\', '_', \ltrim($class, '\\')) . '__' . $method;
+        $wire = \Compile\SymbolName::mangle(\ltrim($class, '\\')) . '__' . $method;
         if (isset($this->sigs->paramTypes[$fqn]) || isset($this->sigs->paramTypes[$wire])) {
             return false;
         }
