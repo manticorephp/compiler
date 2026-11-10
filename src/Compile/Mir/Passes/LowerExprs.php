@@ -620,6 +620,15 @@ trait LowerExprs
             if ($fnBare === 'function_exists' && \count($expr->args) === 1) {
                 $a0 = $expr->args[0];
                 if ($a0->kind === 'StringLiteral') {
+                    // Declared in a file that has not run yet: answer at run time.
+                    $doneKey = $this->lazyFnDoneKey($this->stringLitValue($a0));
+                    if ($doneKey !== '') {
+                        return $this->lowerExpr(\Parser\Ast\Expr::call('isset', [\Parser\Ast\Expr::arrayAccess(
+                            \Parser\Ast\Expr::variable('GLOBALS', $a0->span),
+                            \Parser\Ast\Expr::string($doneKey, $a0->span),
+                            $a0->span,
+                        )], $a0->span));
+                    }
                     return new IntConst(
                         $this->functionIsKnown($this->stringLitValue($a0)) ? 1 : 0,
                         Type::bool_());

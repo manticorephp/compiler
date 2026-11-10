@@ -640,6 +640,37 @@ final class LowerFromAst implements Pass
      *  inlined at the site, in the includer's scope ({@see lowerScopedInclude}). */
     public array $compileUnitFiles = [];
 
+    /** @var array<string, string> a LAZY include unit's file (as parsed, and its
+     *  real path) → the `$GLOBALS` key its body sets once it has run. Set by the
+     *  driver; {@see lazyFnDoneKey}. */
+    public array $lazyUnitDone = [];
+
+    /** The top-level declaration guards are being folded (polyfill idiom): a
+     *  function_exists() there is a compile-time question. */
+    private bool $foldingTopDecls = false;
+
+    /**
+     * The `$GLOBALS` key that says whether the file declaring user function
+     * `$name` has been included yet, '' when the function exists from the start.
+     * php declares a file's functions when the file runs: WordPress asks
+     * `function_exists('language_attributes')` to learn how far it has loaded.
+     */
+    private function lazyFnDoneKey(string $name): string
+    {
+        if ($this->lazyUnitDone === []) { return ''; }
+        $decl = $this->fnDecls[\ltrim($name, '\\')] ?? null;
+        if ($decl === null) {
+            $canon = $this->fnCanon[\strtolower(\ltrim($name, '\\'))] ?? '';
+            $decl = $canon === '' ? null : ($this->fnDecls[$canon] ?? null);
+        }
+        if ($decl === null) { return ''; }
+        $file = $decl->span->file;
+        if ($file === '') { return ''; }
+        if (isset($this->lazyUnitDone[$file])) { return $this->lazyUnitDone[$file]; }
+        $real = \realpath($file);
+        return \is_string($real) ? ($this->lazyUnitDone[$real] ?? '') : '';
+    }
+
     /** @var array<string, \Parser\Ast\Stmt[]> parsed inlinable include targets
      *  by absolute path; an uninlinable one maps to an empty list. */
     private array $scopedIncludeAst = [];
@@ -1000,7 +1031,9 @@ final class LowerFromAst implements Pass
         // Registration only — the statement list is still rewritten later by
         // the real flatten. A guard that needs `fnDecls` (not populated yet)
         // folds to UNKNOWN here, is not remembered, and is decided there.
+        $this->foldingTopDecls = true;
         $this->preregisterFoldableDecls(\array_slice($stmts, $preludeCount));
+        $this->foldingTopDecls = false;
         // `#[TypeDef]` classes, BEFORE any ClassDef is built: a class registered
         // earlier may already name one in a property or parameter hint, and
         // `lowerTypeHint` must resolve it to the carrier scalar from the first use.
@@ -1217,7 +1250,9 @@ final class LowerFromAst implements Pass
         // functions) and only over the user portion (the prelude window stays put).
         if ($preludeCount < \count($stmts)) {
             $head = \array_slice($stmts, 0, $preludeCount);
+            $this->foldingTopDecls = true;
             $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
+            $this->foldingTopDecls = false;
             $tail = \array_merge($tail, $this->hoistNestedDecls($tail));
             $stmts = \array_merge($head, $tail);
             // Every hoisted class's DECL is registered by now; give them their
@@ -6261,6 +6296,7 @@ final class LowerFromAst implements Pass
                 // the fully-qualified function name. guardClassArgName handles both.
                 $cn = $this->guardClassArgName($a0);
                 if ($cn === null) { return self::GUARD_UNKNOWN; }
+                if (!$this->foldingTopDecls && $this->lazyFnDoneKey($cn) !== '') { return self::GUARD_UNKNOWN; }
                 return $this->guardOf($this->functionIsKnown($cn));
             }
             // `defined('NAME')` — whole-program AOT knows every constant, so an

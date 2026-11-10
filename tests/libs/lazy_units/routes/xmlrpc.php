@@ -3,3 +3,4 @@
 define("LAZY_XMLRPC_REQUEST", true);
 if (!defined("LAZY_OTHER")) { define("LAZY_OTHER", 1); }
 echo "routes/xmlrpc.php ran\n";
+function lazy_xmlrpc_server(): string { return "x"; }

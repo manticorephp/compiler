@@ -4149,6 +4149,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $lastIdx = \count($sources) - 1;
     /** @var array<string, string> resolved path → value-slot global name */
     $includeSlots = [];
+    /** @var array<string, string> $lazyUnitDone */
+    $lazyUnitDone = [];
     /** @var array<string, string> resolved path → function that runs the file on its first `require` */
     $includeUnits = [];
     // Compute all source-wide lexical metadata before releasing raw source
@@ -4335,6 +4337,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 $unitName = '__mc_unit_' . (string)$i;
                 $includeSlots[$incAbs] = $incSlot;
                 $includeUnits[$incAbs] = $unitName;
+                $lazyUnitDone[$incAbs] = $incSlot . '_d';
+                $lazyUnitDone[$srcPath] = $incSlot . '_d';
                 $span0 = $topStmts[0]->span;
                 $doneKey = $incSlot . '_d';
                 $slotRef = function (string $key) use ($span0): \Parser\Ast\Expr {
@@ -5451,6 +5455,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $unitAbs[$entryAbs] = true;
         }
         $lower->compileUnitFiles = $unitAbs;
+        $lower->lazyUnitDone = $lazyUnitDone;
         // Reserved-attribute errors (#[Override] with no parent, a bad target, a
         // repeat) abort the build by default; analysis collects them instead.
         if ($collect !== null) {
