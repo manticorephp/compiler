@@ -1458,7 +1458,13 @@ final class LowerFromAst implements Pass
             // discriminates as 'Class').
             if ($stmt->kind === 'Function') {
                 $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
-                $fn = $this->lowerFunction($stmt->decl);
+                try {
+                    $fn = $this->lowerFunction($stmt->decl);
+                } catch (\Throwable $e) {
+                    if ($this->diags === null) { throw $e; }
+                    $this->recoverLowering($e, 'function ' . $stmt->decl->name, $stmt->decl->span);
+                    continue;
+                }
                 if ($measureLower) { $lowerFnNs += \Compile\Stats::now() - $lowerStart; }
                 $lowerFnCount = $lowerFnCount + 1;
                 if ($isPrelude) { $fn->isPrelude = true; }
@@ -1485,7 +1491,12 @@ final class LowerFromAst implements Pass
                 if ($dk === 'class' || $dk === 'enum') {
                     $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
                     $before = \count($module->functions);
-                    $this->lowerClassMethods($stmt->decl, $module);
+                    try {
+                        $this->lowerClassMethods($stmt->decl, $module);
+                    } catch (\Throwable $e) {
+                        if ($this->diags === null) { throw $e; }
+                        $this->recoverLowering($e, 'class ' . $stmt->decl->name, $stmt->decl->span);
+                    }
                     if ($measureLower) { $lowerClassNs += \Compile\Stats::now() - $lowerStart; }
                     $lowerClassCount = $lowerClassCount + 1;
                     $this->releaseLoweredMethodBodies($stmt->decl);
@@ -1521,7 +1532,13 @@ final class LowerFromAst implements Pass
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
             $this->lowerInMain = true;
             if ($stmt->span->file !== '') { $module->loweringFile = $stmt->span->file; $mainFile = $stmt->span->file; }
-            $mainStmts[] = $this->lowerStmt($stmt);
+            try {
+                $mainStmts[] = $this->lowerStmt($stmt);
+            } catch (\Throwable $e) {
+                if ($this->diags === null) { throw $e; }
+                $this->recoverLowering($e, 'statement', $stmt->span);
+                continue;
+            }
             $this->lowerInMain = false;
             if ($measureLower) { $lowerMainNs += \Compile\Stats::now() - $lowerStart; }
             $lowerMainCount = $lowerMainCount + 1;
@@ -4449,6 +4466,64 @@ final class LowerFromAst implements Pass
         if ($file === '') { $file = $this->lowerSourceFile; }
         $this->diags->add('error', $code, $msg, $file, $span === null ? 0 : $span->line);
         return $this->throwErrorExpr($msg);
+    }
+
+    /**
+     * Close a recovery boundary after `$e` escaped lowering one function, method
+     * or top-level statement: record it and put every piece of per-function state
+     * back to its top-level value, so the NEXT unit lowers on a clean slate.
+     * Lowering sets this state and restores it without a `finally`, so an
+     * exception leaves it wherever the throw happened.
+     */
+    private function recoverLowering(\Throwable $e, string $what, \Parser\Ast\Span $span): void
+    {
+        $pe = $e instanceof \Parser\ParseError ? $e : $e->getPrevious();
+        if ($pe instanceof \Parser\ParseError) {
+            $this->diags->add('error', 'parse.error', $pe->reason, $span->file, $pe->errLine, $pe->column);
+        } else {
+            $this->diags->add('error', 'lower.internal', $what . ': ' . $e->getMessage(), $span->file, $span->line);
+        }
+        $this->currentLowerClass = '';
+        $this->currentLowerFn = '';
+        $this->currentLowerFnHasThis = false;
+        $this->currentTypeParams = [];
+        $this->currentTypeBounds = [];
+        $this->currentTypeSubst = [];
+        $this->currentStaticClass = '';
+        $this->currentTypeDefClass = '';
+        $this->currentRefParamNames = [];
+        $this->currentLowerParams = [];
+        $this->currentLowerParamHints = [];
+        $this->currentArrayCaps = [];
+        $this->constCallables = [];
+        $this->localNewClasses = [];
+        $this->lowerInMain = false;
+        $this->bindLateThis = false;
+        $this->lowerClosureDepth = 0;
+        $this->closureMagic = '';
+        $this->silenceDepth = 0;
+        $this->sawYield = false;
+        $this->sawFuncArgs = false;
+        $this->sawStaticUse = false;
+        $this->lvHoist = [];
+        $this->lvTemps = [];
+        $this->valueTemps = [];
+        $this->stmtAssign = null;
+        $this->pendingCallInits = [];
+        $this->pendingCallPost = [];
+        $this->scopedIncludeStack = [];
+        $this->declTableBusy = [];
+    }
+
+    /** The class-level scope `lowerClassMethods` establishes, re-entered after a failed method. */
+    private function restoreClassScope(\Parser\Ast\ClassDecl $decl): void
+    {
+        if (isset($this->classTable[$decl->name])) {
+            $this->currentTypeParams = $this->classTable[$decl->name]->typeParams;
+            $this->currentTypeBounds = $this->classTable[$decl->name]->typeParamBounds;
+        }
+        $this->currentTypeSubst = $this->memberTypeSubst($decl);
+        $this->currentDeclNamespace = $this->nsOf($decl->name);
     }
 
     private function throwErrorExpr(string $message): Node

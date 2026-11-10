@@ -109,6 +109,11 @@ PHP
     printf "== analyze_decl_and_type_both\n"; "$MC" analyze --deep --json "$HERE/check/analyze_decl_and_type.php" 2>"$WORK/e" | grep -o "repr.type\|arg.type" | sort; [ -s "$WORK/e" ] && echo "BAD: stderr"
     diag "check_clean"              "$MC" compile --check "$HERE/check/clean.php" -o "$WORK/clean"
     [ -e "$WORK/clean" ] && echo "BAD: --check wrote output"
+    diag "check_two_bad_fns_then_good" "$MC" compile --check "$HERE/check/two_bad_then_good.php" -o "$WORK/tb"
+    diag "build_two_bad_fns_then_good" "$MC" compile "$HERE/check/two_bad_then_good.php" -o "$WORK/tb"
+    [ -e "$WORK/tb" ] && echo "BAD: wrote a binary"
+    diag "check_parse_in_body"      "$MC" compile --check "$HERE/check/parse_in_body.php" -o "$WORK/pb"
+    diag "check_dedup"              "$MC" compile --check "$HERE/check/dedup.php" -o "$WORK/dd"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir

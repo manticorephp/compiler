@@ -48,6 +48,30 @@ arg.type
 repr.type
 == check_clean
 rc=0
+== check_two_bad_fns_then_good
+rc=65
+two_bad_then_good.php:2: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
+two_bad_then_good.php:3: error[lower.unsupported]: unsupported: foreach cannot bind BY REFERENCE into anything but a variable — the alias would reach a temporary, not the target.
+front end: 2 error(s), 0 warning(s)
+== build_two_bad_fns_then_good
+rc=65
+compile: front-end (parse/typeck/IR) returned null (rc=65)
+two_bad_then_good.php:2: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
+two_bad_then_good.php:3: error[lower.unsupported]: unsupported: foreach cannot bind BY REFERENCE into anything but a variable — the alias would reach a temporary, not the target.
+front end: 2 error(s), 0 warning(s)
+== check_parse_in_body
+rc=65
+
+
+
+Found 1 error(s), 0 warning(s).
+parse_in_body.php:5: error[parse.error]: unexpected token in expression: Semicolon
+parse_in_body.php:5:14: error: unexpected token in expression: Semicolon
+front end: 1 error(s), 0 warning(s)
+== check_dedup
+rc=65
+dedup.php:5: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
+front end: 1 error(s), 0 warning(s)
 == compile bad --progress
 rc=64
 == compile bad --color
