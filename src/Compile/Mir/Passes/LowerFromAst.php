@@ -6924,6 +6924,40 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * `$cls::$sp = v` / `$obj::$sp = v` — the write side of {@see lowerDynStaticAccess}:
+     * the value goes to a temp first (php evaluates it before resolving the class),
+     * then a chain over every class declaring `$sp` stores it into the matching one.
+     */
+    private function storeDynStaticProp(\Parser\Ast\DynamicStaticAccess $e, Node $value): Node
+    {
+        $recv = $e->receiver;
+        $nm = $e->name;
+        $span = $e->span;
+        $names = [];
+        foreach ($this->classTable as $cname => $cd) {
+            if ($this->staticPropRef($cname, $nm) !== null) { $names[] = $cname; }
+        }
+        $val = '__dynsv' . (string)$this->destrCounter;
+        $tmp = '__dynrc' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $nameExpr = \Parser\Ast\Expr::ternary(
+            \Parser\Ast\Expr::call('is_object', [$recv], $span),
+            \Parser\Ast\Expr::call('get_class', [$recv], $span),
+            $recv,
+            $span,
+        );
+        $v = \Parser\Ast\Expr::variable($val, $span);
+        $chain = \Parser\Ast\Expr::null($span);
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $cname = $names[$i];
+            $cond = \Parser\Ast\Expr::binary('===', $this->dynArmName($nameExpr, $tmp, $i, $span), new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $then = \Parser\Ast\Expr::assign(\Parser\Ast\Expr::staticAccess($cname, $nm, $span), $v, $span);
+            $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
+        }
+        return new Block([new StoreLocal($val, $value, $value->type), $this->lowerExpr($chain)], $value->type);
+    }
+
+    /**
      * The class-name operand of arm `$i` of a `$cls::member` chain: the first
      * arm evaluates `$nameExpr` into the hidden local `$tmp`, every other arm
      * reads it. Re-lowering the expression per arm gave each of the N arms its
