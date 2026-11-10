@@ -169,7 +169,7 @@ jobs:
       # cache miss starts from the pinned release (BOOTSTRAP_VERSION).
       - name: Toolchain
         run: |
-          brew install php pcre2 openssl@3 sqlite icu4c
+          brew install php pcre2 openssl@4 sqlite icu4c
           php -v
           clang --version | head -1
 
@@ -237,7 +237,7 @@ jobs:
       # cache miss starts from the pinned release (BOOTSTRAP_VERSION).
       - name: Toolchain
         run: |
-          brew install php pcre2 openssl@3 sqlite icu4c
+          brew install php pcre2 openssl@4 sqlite icu4c
           php -v
           clang --version | head -1
 

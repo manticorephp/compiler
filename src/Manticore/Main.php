@@ -475,7 +475,7 @@ function pcre2_link_flags(): string
 
 /**
  * Linker flags for the host OpenSSL (libssl + libcrypto), via `pkg-config`
- * so the -L path is right on any host (Homebrew keeps openssl@3 off the default
+ * so the -L path is right on any host (Homebrew keeps openssl off the default
  * search path). Falls back to bare `-lssl -lcrypto`. Used by the TLS transport
  * under `https://`; dead-strip drops it for a program that never opens a TLS
  * stream, exactly as pcre2 is dropped when regex is unused.
@@ -491,9 +491,11 @@ function openssl_link_flags(): string
             return $t;
         }
     }
-    $home = homebrew_opt_lib('openssl@3');
-    if ($home !== '' && \is_file($home . '/libssl.dylib') && \is_file($home . '/libcrypto.dylib')) {
-        return '-L' . $home . ' -lssl -lcrypto';
+    foreach (['openssl@4', 'openssl@3'] as $formula) {
+        $home = homebrew_opt_lib($formula);
+        if ($home !== '' && \is_file($home . '/libssl.dylib') && \is_file($home . '/libcrypto.dylib')) {
+            return '-L' . $home . ' -lssl -lcrypto';
+        }
     }
     return '-lssl -lcrypto';
 }
@@ -605,7 +607,7 @@ function icu_link_flags(string $name): string
  * Resolve a set of `#[Ffi\Library]` names to `cc` link tokens.
  *
  * The two probes above stay the RESOLVERS — they exist because Homebrew keeps
- * openssl@3 and pcre2 off the default search path, so a bare `-lssl` would not
+ * openssl and pcre2 off the default search path, so a bare `-lssl` would not
  * link here. What changes is who asks: the flags used to be appended
  * unconditionally from a "did we link stdlib.o" branch, which made
  * `#[Ffi\Library]` decorative. Now the bindings that name a library are what
