@@ -122,6 +122,9 @@ final class CompileCommand extends Command
         // compiler on some stdlib+user combinations (the "stdlib as guest"
         // hazard). The chosen design is a prebuilt stdlib.o linked at the cc step
         // (see discover_stdlib_files / the link tail) — built once, in isolation.
+        if (\Manticore\CompileArgs::$checkOnly) {
+            return \Manticore\lower_module($sources, null, $paths) === null ? 65 : 0;
+        }
         $ir = \Manticore\compile_with_backend($sources, $paths);
         if ($ir === null) {
             \Manticore\dprint("compile: front-end (parse/typeck/IR) returned null (rc=65)");

@@ -2158,6 +2158,9 @@ final class CompileArgs
     /** `--strict=shapes`: a declared array shape is closed (extra key = error). */
     public static bool $strictShapes = false;
 
+    /** `--check`: stop after the front end, report every error, write nothing. */
+    public static bool $checkOnly = false;
+
     /** `--strict=analyze` (alias `--analyze-strict`): analyzer errors fail the compile. */
     public static bool $strictAnalyze = false;
 
@@ -2436,6 +2439,7 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool
     if ($p->flag("runtime")) { CompileArgs::$runtimeLibrary = true; CompileArgs::$exportTypes = false; }
     if ($p->flag("allow-undefined-traps")) { CompileArgs::$allowUndefinedTraps = true; }
     if ($p->flag("keep-ir")) { CompileArgs::$keepIr = true; }
+    if ($p->flag("check")) { CompileArgs::$checkOnly = true; }
     $jobs = $p->value("j", "");
     if ($jobs !== "") {
         $jn = (int)$jobs;
@@ -3342,6 +3346,9 @@ function build_compile_module(
         dprint("build: front-end returned null for " . $output);
         return 65;
     }
+    if (CompileArgs::$checkOnly) {
+        return 0;
+    }
     /** @var string[] $undefTraps */
     $undefTraps = [];
     try {
@@ -4094,6 +4101,7 @@ function __mc_rewrite_stmt_returns(\Parser\Ast\Stmt $s, string $slot, string $la
 function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module
 {
     $stmts = [];
+    $diag = new \Compile\Diagnostics();
     $aliases = [];
     $docs = [];
     $statT = \Compile\Stats::now();
@@ -4150,9 +4158,20 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 true,
             );
         } catch (\Throwable $e) {
-            $where = isset($paths[$i]) ? $paths[$i] : "<source>";
-            dprint($where . ": parse failed: " . $e->getMessage());
-            return null;
+            $where = __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : '');
+            if ($where === '') {
+                $where = "<source>";
+            }
+            $tol = Parser::parseTolerant($source, $where, false, false);
+            foreach ($tol->errors as $pe) {
+                $diag->add('error', 'parse.error', $pe->reason !== '' ? $pe->reason : $pe->getMessage(), $where, $pe->errLine, $pe->column);
+            }
+            if (\count($tol->errors) === 0) {
+                $pl = $e instanceof \Parser\ParseError ? $e->errLine : 0;
+                $pc = $e instanceof \Parser\ParseError ? $e->column : 0;
+                $diag->add('error', 'parse.error', $e instanceof \Parser\ParseError && $e->reason !== '' ? $e->reason : $e->getMessage(), $where, $pl, $pc);
+            }
+            continue;
         }
         foreach (\Compile\Mir\PreludeDemand::definedFunctions($source) as $fn) {
             $ownFns[$fn] = true;
@@ -4452,6 +4471,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
     }
     \Compile\Stats::step('parse', $statT, \count($stmts), -1);
+    if ($diag->hasErrors()) {
+        dprint($diag->render());
+        return null;
+    }
 
     // The on-disk prelude sources. Reading them goes through the libc fopen
     // binding (a throwing stub under the Zend cold-seed), so guard: an
@@ -5433,6 +5456,16 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
         $statT = \Compile\Stats::begin('LowerFromAst');
         $module = $lower->run($module);
+        if ($diag->hasErrors()) {
+            dprint($diag->render());
+            return null;
+        }
+        if (\count($diag->items) > 0) {
+            dprint($diag->render());
+        }
+        if (CompileArgs::$checkOnly) {
+            return $module;
+        }
         // Path → value-slot map for `require`/`include`. Set after lowering
         // because that is when the Module exists; the map itself was built at
         // parse-merge time, the only point that still knows which file each
@@ -5749,6 +5782,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if ($collect !== null) {
             $collect->lines[] = $e->getMessage();
             return null;
+        }
+        if (\count($diag->items) > 0) {
+            dprint($diag->render());
         }
         dprint("compile failed: " . $e->getMessage());
         return null;

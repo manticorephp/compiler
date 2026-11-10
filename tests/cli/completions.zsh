@@ -40,6 +40,7 @@ _manticore() {
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '--analyze[Run the analyzer (default)]' \
@@ -64,6 +65,7 @@ _manticore() {
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '--libs-only[Build library targets and stop (cold seed)]' \
@@ -88,6 +90,7 @@ _manticore() {
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '*:file:_files'
@@ -105,6 +108,7 @@ _manticore() {
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '--tolerant[Recover from syntax errors; print the tree and every error]' \
@@ -127,6 +131,7 @@ _manticore() {
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '--deep[Also run the compiler'\''s MIR type passes (heavier)]' \
@@ -149,6 +154,7 @@ _manticore() {
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '*:file:_files'
@@ -166,6 +172,7 @@ _manticore() {
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '*:file:_files'
@@ -188,6 +195,7 @@ _manticore() {
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
         '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
         '--keep-ir[Keep the intermediate .ll files]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '*:file:_files'

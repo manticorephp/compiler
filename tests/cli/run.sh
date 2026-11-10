@@ -35,6 +35,13 @@ shape() { # label, first-line prefix, fixed-string markers, then the command: rc
     if [ -z "$bad" ]; then echo "ok rc=0 first='$first' markers='$markers'"; else echo "BAD:$bad"; fi
 }
 
+diag() { # label, then the command: rc + stderr (paths stripped), sorted, summary line last
+    local label="$1" rc; shift
+    "$@" >/dev/null 2>"$WORK/e"; rc=$?
+    printf '== %s\nrc=%s\n' "$label" "$rc"
+    sed -e "s|$WORK/||g" -e "s|$HERE/check/||g" "$WORK/e" | grep -v -e '^front end:' -e '^build:' | sort
+    grep '^front end:' "$WORK/e"
+}
 doctor_case() { # label; PATH for the compiler is only $WORK/shim
     local label="$1" out rc
     out="$(PATH="$WORK/shim" "$MC" doctor --offline --no-smoke 2>&1)"; rc=$?
@@ -95,6 +102,9 @@ PHP
     run "compile bad -O"           "$MC" compile "f.php" -o "x" -O9
     run "compile bad --memory"     "$MC" compile "f.php" -o "x" --memory bogus
     run "compile bad --strict"     "$MC" compile "f.php" -o "x" --strict=bogus
+    diag "check_parse_two_files"    sh -c "cd \"$HERE/check/parse2\" && \"$MC\" build --check"
+    diag "check_clean"              "$MC" compile --check "$HERE/check/clean.php" -o "$WORK/clean"
+    [ -e "$WORK/clean" ] && echo "BAD: --check wrote output"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir

@@ -74,6 +74,7 @@ final class BuildCommand extends Command
         }
         \Manticore\CompileArgs::$allowUndefinedTraps = $args->flag("allow-undefined-traps");
         \Manticore\CompileArgs::$keepIr = $args->flag("keep-ir");
+        \Manticore\CompileArgs::$checkOnly = $args->flag("check");
         $src = \Manticore\read_file($manifestPath);
         if ($src === null) {
             \Manticore\dprint("build: cannot read manifest: " . $manifestPath);
@@ -399,7 +400,7 @@ final class BuildCommand extends Command
             \Manticore\CompileArgs::$externClassDecls = $externClassDecls;
             \Manticore\CompileArgs::$externClassMeta = $externClassMeta;
             \Manticore\CompileArgs::$externConstants = $externConstants;
-            if (\Manticore\build_cache_hit($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib)) {
+            if (!\Manticore\CompileArgs::$checkOnly && \Manticore\build_cache_hit($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib)) {
                 \Manticore\dprint("build: cache hit application " . $name);
                 $rc = 0;
             } else {
@@ -407,7 +408,7 @@ final class BuildCommand extends Command
                 // retain the cache identity before that intentional mutation.
                 $cacheKey = \Manticore\build_cache_key($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib);
                 $rc = \Manticore\build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
-                if ($rc === 0) {
+                if ($rc === 0 && !\Manticore\CompileArgs::$checkOnly) {
                     \Manticore\build_cache_store($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $cacheKey);
                 }
             }
@@ -516,7 +517,7 @@ final class BuildCommand extends Command
             // Every library but the stdlib itself declares the stdlib's functions
             // ({@see build_compile_module}).
             $libStdlib = \Manticore\CompileArgs::$exportTypes;
-            if (\Manticore\build_cache_hit($sources, $paths, $output, true, [], "", $libStdlib)) {
+            if (!\Manticore\CompileArgs::$checkOnly && \Manticore\build_cache_hit($sources, $paths, $output, true, [], "", $libStdlib)) {
                 \Manticore\dprint("build: cache hit library " . $name);
                 $rc = 0;
             } else {
@@ -524,7 +525,7 @@ final class BuildCommand extends Command
                 // contents through its reference parameter.
                 $cacheKey = \Manticore\build_cache_key($sources, $paths, $output, true, [], "", $libStdlib);
                 $rc = \Manticore\build_compile_module($sources, $output, true, [], "", $libStdlib, $paths);
-                if ($rc === 0) { \Manticore\build_cache_store($sources, $paths, $output, true, [], "", $libStdlib, $cacheKey); }
+                if ($rc === 0 && !\Manticore\CompileArgs::$checkOnly) { \Manticore\build_cache_store($sources, $paths, $output, true, [], "", $libStdlib, $cacheKey); }
             }
             \Manticore\CompileArgs::$exportTypes = true;
             if ($rc !== 0) {
