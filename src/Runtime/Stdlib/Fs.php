@@ -109,7 +109,11 @@ function copy(string $from, string $to): bool
     }
     \Runtime\Libc\free($buf);
     \Runtime\Libc\fclose($in);
-    \Runtime\Libc\fclose($out);
+    // The last buffered bytes are written by fclose: a full disk fails HERE, and
+    // a copy that reports success over a short file is worse than a failed one.
+    if (\Runtime\Libc\fclose($out) !== 0) {
+        $ok = false;
+    }
     return $ok;
 }
 
