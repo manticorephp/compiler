@@ -80,12 +80,15 @@ unresolved_classes/main.php:4: warning[undefined.class]: class Missing\C is not 
 unresolved_classes/main.php:5: warning[undefined.class]: class Missing\D is not declared
 unresolved_classes/main.php:6: warning[undefined.class]: class Missing\E is not declared
 unresolved_classes/main.php:8: warning[undefined.constant]: constant NO_SUCH_CONST is not declared
-front end: 0 error(s), 6 warning(s)
+unresolved_classes/main.php:9: warning[undefined.class]: class Missing\S is not declared
+front end: 0 error(s), 7 warning(s)
 == check_known_builtin_classes
 rc=0
 == check_guarded_decls
 rc=0
 == check_ref_after_class
+rc=0
+== check_class_alias_literal
 rc=0
 == compile bad --progress
 rc=64

@@ -1054,6 +1054,7 @@ final class LowerFromAst implements Pass
         // expression, or inside a function / method body) gets a run-time cell:
         // the call stores into it and later bare / constant() / defined() reads see it.
         $this->registerRuntimeDefines($stmts);
+        $this->registerClassAliases($stmts);
         // Constants a dependency exports. AFTER the local scan and guarded, so a
         // program that defines the name itself keeps its own value — the same
         // precedence the imported-FUNCTION path uses, and the one that lets a
@@ -4459,7 +4460,13 @@ final class LowerFromAst implements Pass
      */
     private const COMPILER_CLASSES = ['closure' => true, 'generator' => true, 'ffi\\ptr' => true];
 
-    /** Whether the class table, a declared trait/enum/interface, an extern signature or a compiler-owned name knows `$fqn`. */
+    /** @var array<string, bool> lowercase names of every table classIsDeclared reads, plus literal class_alias targets */
+    private array $declaredLower = [];
+    private int $declaredLowerSig = -1;
+    /** @var array<string, bool> lowercase literal `class_alias(_, 'Alias')` targets */
+    private array $classAliasNames = [];
+
+    /** Whether the class table, a declared trait/enum/interface, an extern signature, a literal class alias or a compiler-owned name knows `$fqn`. */
     private function classIsDeclared(string $fqn): bool
     {
         $c = \ltrim($fqn, '\\');
@@ -4467,14 +4474,55 @@ final class LowerFromAst implements Pass
             || isset($this->traitTable[$c]) || isset($this->classDecls[$c])
             || isset($this->externClassMeta[$c])) { return true; }
         $low = \strtolower($c);
-        if (isset(self::COMPILER_CLASSES[$low])) { return true; }
-        foreach ([$this->knownClassNames, $this->classTable, $this->enumTable, $this->traitTable,
-                  $this->classDecls, $this->externClassMeta] as $tbl) {
-            foreach ($tbl as $n => $_) {
-                if (\strtolower((string)$n) === $low) { return true; }
+        if (isset(self::COMPILER_CLASSES[$low]) || isset($this->classAliasNames[$low])) { return true; }
+        $sig = \count($this->knownClassNames) + \count($this->classTable) + \count($this->enumTable)
+            + \count($this->traitTable) + \count($this->classDecls) + \count($this->externClassMeta);
+        if ($sig !== $this->declaredLowerSig) {
+            $this->declaredLowerSig = $sig;
+            $this->declaredLower = [];
+            foreach ([$this->knownClassNames, $this->classTable, $this->enumTable, $this->traitTable,
+                      $this->classDecls, $this->externClassMeta] as $tbl) {
+                foreach ($tbl as $n => $_) { $this->declaredLower[\strtolower((string)$n)] = true; }
             }
         }
-        return false;
+        return isset($this->declaredLower[$low]);
+    }
+
+    /** Collect `class_alias('Orig', 'Alias')` literal targets; function/method bodies are still lazy, so scanned as text. */
+    private function registerClassAliases(array $stmts): void
+    {
+        $w = new \Analyze\AstWalk(false);
+        $w->stmts($stmts);
+        foreach ($w->exprs as $e) {
+            if ($e->kind !== 'Call' || \count($e->args) < 2 || $e->args[1]->kind !== 'StringLiteral') { continue; }
+            if (\strtolower($this->constBareName($e->function)) !== 'class_alias') { continue; }
+            $this->classAliasNames[\strtolower(\ltrim($this->stringLitValue($e->args[1]), '\\'))] = true;
+        }
+        $this->scanLazyAliases($stmts);
+    }
+
+    private function scanLazyAliases(array $stmts): void
+    {
+        foreach ($stmts as $stmt) {
+            $lbs = [];
+            if ($stmt->kind === 'Namespace' && $stmt->body !== null) {
+                $this->scanLazyAliases($stmt->body->statements);
+            } elseif ($stmt->kind === 'Function') {
+                $lbs[] = $stmt->decl->lazyBody;
+            } elseif ($stmt->kind === 'Class') {
+                foreach ($stmt->decl->methods as $m) { $lbs[] = $m->lazyBody; }
+            }
+            foreach ($lbs as $lb) {
+                if ($lb === null || $lb->source === '') { continue; }
+                $slice = \substr($lb->source, $lb->start, $lb->end - $lb->start);
+                if (\strpos($slice, 'class_alias') === false) { continue; }
+                if (\preg_match_all('/\bclass_alias\s*\([^,]*,\s*(?:\'([^\']+)\'|"([^"]+)")\s*[,)]/', $slice, $mm, \PREG_SET_ORDER) === false) { continue; }
+                foreach ($mm as $m) {
+                    $n = $m[1] !== '' ? $m[1] : ($m[2] ?? '');
+                    if ($n !== '') { $this->classAliasNames[\strtolower(\ltrim(\str_replace('\\\\', '\\', $n), '\\'))] = true; }
+                }
+            }
+        }
     }
 
     /** Record a reference to an undeclared class/constant as a grouped front-end warning; user code only. */

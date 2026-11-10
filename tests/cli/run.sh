@@ -119,6 +119,7 @@ PHP
     diag "check_known_builtin_classes" "$MC" compile --check "$HERE/check/known_builtin_classes.php" -o "$WORK/kb"
     diag "check_guarded_decls"      "$MC" compile --check "$HERE/check/guarded_decls.php" -o "$WORK/gd"
     diag "check_ref_after_class"    "$MC" compile --check "$HERE/check/ref_after_class_lowered.php" -o "$WORK/rc"
+    diag "check_class_alias_literal" "$MC" compile --check "$HERE/check/class_alias_literal.php" -o "$WORK/ca"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir

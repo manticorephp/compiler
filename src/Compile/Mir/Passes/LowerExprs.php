@@ -1206,6 +1206,7 @@ trait LowerExprs
                 if ($den !== '') { return $this->throwErrorExpr($den); }
                 return new StoreStaticProp_($ref->global, $value, $value->type, $ref->type);
             }
+            $this->noteClassRef($this->resolveStaticClass($this->staticAccessClass($target)), $target->span);
         }
         if ($target->kind === 'ArrayLit') {
             return $this->lowerDestructure($target, $value);
