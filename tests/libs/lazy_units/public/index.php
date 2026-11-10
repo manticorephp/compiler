@@ -8,3 +8,4 @@ require __DIR__ . '/../routes/guarded.php';
 echo "after guarded ", get_class(new Lazy\TokenPolyfill(1, "x")), "\n";
 require __DIR__ . '/../routes/vars.php';
 echo "vars ", lazy_cfg_path(), " ", lazy_count(), " ", $count, "\n";
+echo "xmlrpc ", var_export(defined("LAZY_XMLRPC_REQUEST"), true), " ", var_export(defined("LAZY_OTHER"), true), "\n";
