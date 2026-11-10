@@ -1,7 +1,12 @@
 <?php
-// A builtin's same-named PHP body compiled into the program (the stdlib bootstrap twin, as in the compiler's own build) is shadowed even at a call Monomorphize repointed to a $mono$ clone.
+// The stdlib's bootstrap twins compiled into the program (stdlib: false, as in the compiler's own build).
+// A builtin shadows its same-named PHP body even at a call Monomorphize repointed to a $mono$ clone,
+// and through the body's by-name trampoline.
+
 /** @param mixed[] $a */
 function __mc_sort_native(array &$a): bool { return false; }
+
+function __mc_weak_arm(): void {}
 
 /**
  * @param array<string, array<string, bool>> $deps
@@ -26,3 +31,6 @@ function reach(array $deps, string $root): array
 $a = reach(['i' => ['zeta' => true, 'alpha' => true], 'zeta' => ['mid' => true]], 'i');
 sort($a);
 echo implode(',', $a), "\n";
+$f = '__mc_weak_arm';
+$f();
+echo "trampoline ok\n";
