@@ -37,7 +37,7 @@ shape() { # label, first-line prefix, fixed-string markers, then the command: rc
 
 diag() { # label, then the command: rc + stderr (paths stripped), sorted, summary line last
     local label="$1" rc; shift
-    "$@" >/dev/null 2>"$WORK/e"; rc=$?
+    env -u CI "$@" >/dev/null 2>"$WORK/e"; rc=$?   # CI=1 turns progress on; goldens hold diagnostics only
     printf '== %s\nrc=%s\n' "$label" "$rc"
     sed -e "s|$WORK/||g" -e "s|$HERE/check/||g" "$WORK/e" | grep -v -e '^front end:' -e '^build:' | sort
     grep '^front end:' "$WORK/e"
