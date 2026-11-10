@@ -957,7 +957,7 @@ trait EmitLlvmCalls
             // gives a static lower bound on the callee arity.
             if ($hasSpread) {
                 if ($tot < $numFixed) { continue; }
-            } elseif ($argc < $req || $argc > $tot) {
+            } elseif ($argc < $req || ($argc > $tot && !isset($this->userFnNames[$fname]))) {
                 continue;
             }
             // Arity alone is not enough to make a candidate emittable. A FLOAT is
@@ -4516,7 +4516,7 @@ trait EmitLlvmCalls
         $vars = $this->sigs->variadicParams[$fname] ?? [];
         // A trailing variadic over a cell pack takes any surplus and may be empty: the thunk packs it.
         $tailVar = $this->cellPackVariadic($fname);
-        if ($argc > $tot && !$tailVar) { return false; }
+        if ($argc > $tot && !$tailVar && !isset($this->userFnNames[$fname])) { return false; }
         for ($pi = $argc; $pi < $tot; $pi = $pi + 1) {
             if (($pdefs[$pi] ?? null) === null && !($vars[$pi] ?? false)) { return false; }
         }

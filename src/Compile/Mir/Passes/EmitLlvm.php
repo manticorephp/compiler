@@ -542,6 +542,9 @@ final class EmitLlvm implements EmitVisitor
     private array $rtExterns = [];
     /** @var array<string, bool> mangled module-fn name → defined (for extern detection) */
     private array $definedFns = [];
+    /** @var array<string, true> functions the program itself declares (not stdlib, not prelude):
+     *  php drops surplus arguments to these, where an internal function throws */
+    private array $userFnNames = [];
     /** @var array<string, \Compile\Mir\FunctionDef> reified spec method name → its def, each with claimed params ({@see ResolveOverloads::claimRoute}) */
     private array $claimedFns = [];
     /** @var array<string, bool> FFI bindings (`#[Ffi\Symbol]`): a pointer arrives as an int */
@@ -859,11 +862,15 @@ final class EmitLlvm implements EmitVisitor
         $this->sigs->closureRefUnion = FunctionSignatures::closureRefUnion(
             $module->functions, $module->closureCaptures);
         $this->externFnNames = [];
+        $this->userFnNames = [];
         $this->dynfExportFns = [];
         $this->dynfExports = [];
         $this->sigs->namedSpread = $module->namedSpread;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
+            if (!$fn->isExtern && !$fn->isPrelude) {
+                $this->userFnNames[$fn->name] = true;
+            }
             if ($fn->isExtern) {
                 $this->externFnNames[$fn->name] = true;
             } elseif ($this->exportDynf && !$fn->isPrelude && $this->dynfNameable($fn->name)) {
