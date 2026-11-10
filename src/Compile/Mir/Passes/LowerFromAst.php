@@ -6194,6 +6194,13 @@ final class LowerFromAst implements Pass
         // concrete parameter type.
         $k = $e->kind;
         if ($k === 'BoolLiteral') { return $this->boolLitValue($e) ? self::GUARD_TRUE : self::GUARD_FALSE; }
+        // `\false` / `\TRUE` parse as a name, not a literal; they are the same constants.
+        if ($k === 'Identifier') {
+            $lit = \strtolower(\ltrim($this->identifierName($e), '\\'));
+            if ($lit === 'true') { return self::GUARD_TRUE; }
+            if ($lit === 'false' || $lit === 'null') { return self::GUARD_FALSE; }
+            return self::GUARD_UNKNOWN;
+        }
         if ($k === 'UnaryOp')     { return $this->foldGuardUnary($e); }
         if ($k === 'BinaryOp')    { return $this->foldGuardBinary($e); }
         if ($k === 'Call')        { return $this->foldGuardCall($e); }
@@ -6466,6 +6473,9 @@ final class LowerFromAst implements Pass
         if ($k === 'BoolLiteral')   { return 'b:' . ($this->boolLitValue($e) ? '1' : '0'); }
         if ($k === 'NullLiteral')   { return 'n:'; }
         if ($k === 'Identifier') {
+            $lit = \strtolower(\ltrim($this->identifierName($e), '\\'));
+            if ($lit === 'true' || $lit === 'false') { return 'b:' . ($lit === 'true' ? '1' : '0'); }
+            if ($lit === 'null') { return 'n:'; }
             $nm = $this->constBareName($this->identifierName($e));
             if (isset($this->userConstants[$nm])) {
                 return $this->constScalarKey($this->userConstants[$nm], $depth + 1);
