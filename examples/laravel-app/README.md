@@ -6,7 +6,7 @@ The binary needs neither PHP nor Composer nor `vendor/` at run time; it reads `.
 `config/` and `storage/` from the project directory it was built in, so run it from there.
 
 ```bash
-composer install
+composer install --no-dev             # dev packages are not compiled in; their providers must not be discovered
 cp .env.example .env
 php artisan key:generate            # APP_KEY
 touch database/database.sqlite

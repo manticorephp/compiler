@@ -9,6 +9,7 @@ $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
 $blade = app('blade.compiler');
 $files = app('files');
 $outDir = $root . '/app/AotViews';
+is_dir($outDir) || mkdir($outDir, 0777, true);
 foreach (glob($outDir . '/*.php') as $old) { unlink($old); }
 
 // every view the app can reach: its own, plus the framework / package ones registered in the finder
