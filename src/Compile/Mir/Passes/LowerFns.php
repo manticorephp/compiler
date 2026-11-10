@@ -100,6 +100,9 @@ trait LowerFns
         $this->constCallables = [];
         $this->setCurrentLowerParams($decl->params);
         $this->scanStableCallables($decl->body->statements);
+        $prevGuardLocals = $this->guardLocals;
+        $this->noteGuardHelper('f:' . $decl->name, $this->bareName($decl->name), $decl->body);
+        $this->guardLocals = $this->computeGuardLocals($decl->params, $decl->body);
         // `#[RefOut('a', 'b')]` names the pure-output by-ref params (portable
         // across .sig + self-host parse); `@param-out T $x` is the PHPStan-side
         // equivalent.
@@ -204,6 +207,7 @@ trait LowerFns
             $decl->body = null;
 
             $this->currentFnSym = $prevFnSym;
+            $this->guardLocals = $prevGuardLocals;
             return $fn;
         }
         $savedSawYield = $this->sawYield;
@@ -245,6 +249,7 @@ trait LowerFns
         $decl->body = null;
 
         $this->currentFnSym = $prevFnSym;
+        $this->guardLocals = $prevGuardLocals;
         return $fn;
     }
 

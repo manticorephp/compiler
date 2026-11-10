@@ -1528,6 +1528,7 @@ final class LowerFromAst implements Pass
             $this->currentLowerFn = '';
             $this->currentFnSym = '';
             $this->guardStack = [];
+            $this->guardLocals = [];
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
             // …nor parameters: a preceding function's by-ref names would
@@ -3138,6 +3139,9 @@ final class LowerFromAst implements Pass
         $this->constCallables = [];
         $this->setCurrentLowerParams($m->params);
         $this->scanStableCallables($m->body->statements);
+        $prevGuardLocals = $this->guardLocals;
+        $this->noteGuardHelper('m:' . \strtolower(\ltrim($decl->name, '\\')) . '::' . \strtolower($m->name), $m->name, $m->body);
+        $this->guardLocals = $this->computeGuardLocals($m->params, $m->body);
         $this->localNewClasses = [];
         // Inside a `#[TypeDef]` body `$this` IS the carrier: there is no object to
         // point at. `__invoke` — the normaliser — takes no `$this` at all: it is a
@@ -3226,18 +3230,22 @@ final class LowerFromAst implements Pass
         $this->sawFuncArgs = false;
         $this->sawStaticUse = false;
         $deadTail = false;
+        $guardsPushed = 0;
         foreach ($m->body->statements as $bodyStmt) {
             // A label heads live code even after a terminator — `goto` reaches it.
             if ($deadTail && $bodyStmt->kind !== 'Label') { continue; }
             $deadTail = false;
+            $eg = $bodyStmt->kind === 'If' ? $this->earlyExitGuard($bodyStmt) : '';
             $lowered = $this->lowerStmt($bodyStmt);
             $stmts[] = $lowered;
+            if ($eg !== '') { $this->guardStack[] = $eg; $guardsPushed = $guardsPushed + 1; }
             // Same dead-code cut as lowerBlockNode: skip after an unconditional
             // terminator so trailing code behind a folded static guard (a
             // `if (!function_exists('pcntl_signal')) return;` reducing to a bare
             // return, then `[\SIGINT, …]`) is never lowered.
             if ($this->nodeAlwaysTerminates($lowered)) { $deadTail = true; }
         }
+        for ($gp = 0; $gp < $guardsPushed; $gp = $gp + 1) { \array_pop($this->guardStack); }
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
         $usesFuncArgs = $this->sawFuncArgs;
@@ -3286,6 +3294,7 @@ final class LowerFromAst implements Pass
         $mfn->usesFuncArgs = $usesFuncArgs;
         $mfn->returnArrayHinted = $this->isBareArrayReturnHint($m->returnType);
         $this->currentFnSym = $prevFnSym;
+        $this->guardLocals = $prevGuardLocals;
         return $mfn;
     }
 
@@ -4558,6 +4567,17 @@ final class LowerFromAst implements Pass
     private string $lastClosureFrame = '';
     /** @var string[] guard labels live at the code being lowered (innermost last) */
     private array $guardStack = [];
+    /** @var array<string, string> clean locals of the body being lowered => label of the guard they hold */
+    private array $guardLocals = [];
+    /** @var array<string, string>[] */
+    private array $guardLocalsStack = [];
+    private int $guardHelperDepth = 0;
+    /** @var array<string, string> helper key => `name() → inner guard`; '' = not a guard helper */
+    private array $guardHelperMemo = [];
+    /** @var array<string, bool> */
+    private array $glBad = [];
+    /** @var array<string, string> */
+    private array $glLabel = [];
     /** Set while declaration signatures / hierarchies are checked: those sites belong to {@see $declSym}. */
     private bool $inDeclCheck = false;
     /** The function a checked signature belongs to, or `@class:<FQN>` for a hierarchy / property type. */
@@ -4593,11 +4613,15 @@ final class LowerFromAst implements Pass
     {
         $this->closureFrameSeq = $this->closureFrameSeq + 1;
         $this->closureFrames[] = '@closure' . (string)$this->closureFrameSeq;
+        $this->guardLocalsStack[] = $this->guardLocals;
+        $this->guardLocals = [];
     }
 
     private function leaveClosureFrame(): void
     {
         $this->lastClosureFrame = (string)\array_pop($this->closureFrames);
+        $this->guardLocals = $this->guardLocalsStack[\count($this->guardLocalsStack) - 1];
+        \array_pop($this->guardLocalsStack);
     }
 
     /** Label (`class_exists('X')` / `function_exists(...)`) of the first existence-check call inside a condition; '' if none. */
@@ -4608,6 +4632,9 @@ final class LowerFromAst implements Pass
         if ($k === 'UnaryOp') { return $this->guardLabelUnary($e); }
         if ($k === 'BinaryOp') { return $this->guardLabelBinary($e); }
         if ($k === 'Assign') { return $this->guardLabelAssign($e); }
+        if ($k === 'Variable') { return $this->guardLabelVar($e); }
+        if ($k === 'StaticCall') { return $this->guardLabelStatic($e); }
+        if ($k === 'MethodCall') { return $this->guardLabelMethod($e); }
         return '';
     }
 
@@ -4631,13 +4658,193 @@ final class LowerFromAst implements Pass
     private function guardLabelCall(\Parser\Ast\CallExpr $e): string
     {
         $fn = \strtolower($this->bareName(\ltrim($e->function, '\\')));
-        if (!isset(self::GUARD_FNS[$fn])) { return ''; }
+        if (!isset(self::GUARD_FNS[$fn])) { return $this->guardLabelHelperFn($e); }
         $arg = '...';
         if (\count($e->args) > 0 && $e->args[0]->kind === 'StringLiteral') {
             $arg = "'" . $this->stringLitValue($e->args[0]) . "'";
         }
         return $fn . '(' . $arg . ')';
     }
+
+    /** A local every write to which is a guard value (see {@see computeGuardLocals}). */
+    private function guardLabelVar(\Parser\Ast\Variable $e): string
+    {
+        return $this->guardHelperDepth > 0 ? '' : ($this->guardLocals[$e->name] ?? '');
+    }
+
+    /** `self::f()` / `static::f()` / `parent::f()` naming a guard helper. */
+    private function guardLabelStatic(\Parser\Ast\StaticCall $e): string
+    {
+        $low = \strtolower($e->class);
+        if ($low !== 'self' && $low !== 'static' && $low !== 'parent') { return ''; }
+        $cls = \ltrim($this->currentLowerClass, '\\');
+        if ($low === 'parent') {
+            $d = $this->classDecls[$cls] ?? null;
+            if ($d === null || \count($d->extends) === 0) { return ''; }
+            $cls = \ltrim($d->extends[0], '\\');
+        }
+        return $this->guardLabelMethodIn($cls, $e->method);
+    }
+
+    /** `$this->f()` naming a guard helper. */
+    private function guardLabelMethod(\Parser\Ast\MethodCallExpr $e): string
+    {
+        if ($e->object->kind !== 'Variable' || $this->varName($e->object) !== 'this') { return ''; }
+        return $this->guardLabelMethodIn(\ltrim($this->currentLowerClass, '\\'), $e->method);
+    }
+
+    private function guardLabelMethodIn(string $cls, string $method): string
+    {
+        if ($this->guardHelperDepth > 0) { return ''; }
+        $lm = \strtolower($method);
+        for ($i = 0; $i < 8 && $cls !== ''; $i = $i + 1) {
+            $key = 'm:' . \strtolower($cls) . '::' . $lm;
+            if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemo[$key]; }
+            $d = $this->classDecls[$cls] ?? null;
+            if ($d === null) { return ''; }
+            foreach ($d->methods as $m) {
+                if (\strtolower($m->name) !== $lm) { continue; }
+                try { $this->materializeMethodBody($m); } catch (\Throwable $t) { return ''; }
+                return $this->noteGuardHelper($key, $m->name, $m->body);
+            }
+            $cls = \count($d->extends) > 0 ? \ltrim($d->extends[0], '\\') : '';
+        }
+        return '';
+    }
+
+    /** A call to a free function whose body is a single guard `return`. */
+    private function guardLabelHelperFn(\Parser\Ast\CallExpr $e): string
+    {
+        if ($this->guardHelperDepth > 0) { return ''; }
+        $sym = $this->resolveCallName(\ltrim($e->function, '\\'), $e->qualified);
+        $key = 'f:' . $sym;
+        if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemo[$key]; }
+        $d = $this->fnDecls[$sym] ?? null;
+        if ($d === null) { return ''; }
+        if ($d->body === null && $d->lazyBody !== null) {
+            try { $d->body = \Parser\Parser::materializeLazyBody($d->lazyBody); $d->lazyBody = null; } catch (\Throwable $t) { return ''; }
+        }
+        return $this->noteGuardHelper($key, $this->bareName($sym), $d->body);
+    }
+
+    /**
+     * Memoise whether a body is exactly `return <guard expr>;` (one level: a helper calling a helper is no guard).
+     * Called at lowering time too, because a lowered function releases its body.
+     */
+    private function noteGuardHelper(string $key, string $name, ?\Parser\Ast\Block $body): string
+    {
+        if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemo[$key]; }
+        $r = '';
+        if ($body !== null && \count($body->statements) === 1 && $body->statements[0]->kind === 'Return') {
+            $v = $this->returnStmtValue($body->statements[0]);
+            if ($v !== null) {
+                $this->guardHelperDepth = $this->guardHelperDepth + 1;
+                $inner = $this->guardLabel($v);
+                $this->guardHelperDepth = $this->guardHelperDepth - 1;
+                if ($inner !== '') { $r = $name . '() → ' . $inner; }
+            }
+        }
+        $this->guardHelperMemo[$key] = $r;
+        return $r;
+    }
+
+    private function returnStmtValue(\Parser\Ast\ReturnStmt $s): ?\Parser\Ast\Expr
+    {
+        return $s->value;
+    }
+
+    /**
+     * Locals of a body that provably hold only guard values: every write is `$v = <guard expr>`, and nothing
+     * can write them behind the scan (parameter, `global` / `static`, `foreach` / `catch` target, reference,
+     * by-ref capture, `++` / compound assign, element store, destructuring, a call argument that may be
+     * by-reference, `extract` / `$$`). Flow-insensitive; any doubt taints.
+     *
+     * @param \Parser\Ast\Param[] $params
+     * @return array<string, string> name => guard label
+     */
+    private function computeGuardLocals(array $params, \Parser\Ast\Block $body): array
+    {
+        $this->guardLocals = [];
+        $w = new \Analyze\AstWalk(true);
+        $w->stmts($body->statements);
+        $this->glBad = $w->boundNames;
+        $this->glLabel = [];
+        foreach ($params as $p) { $this->glBad[$p->name] = true; }
+        foreach ($w->foreachTargets as $t) { $this->glTaintVars($t); }
+        foreach ($w->exprs as $e) {
+            if ($e->kind === 'VarVar') { return []; }
+            if (!$this->glScanExpr($e)) { return []; }
+        }
+        $out = [];
+        foreach ($this->glLabel as $n => $l) {
+            if (!isset($this->glBad[$n])) { $out[$n] = $l; }
+        }
+        return $out;
+    }
+
+    /** False when the body can write any local (`extract` and friends). */
+    private function glScanExpr(\Parser\Ast\Expr $e): bool
+    {
+        if ($e instanceof \Parser\Ast\Assign) {
+            if ($e->target instanceof \Parser\Ast\Variable) {
+                $l = $this->guardLabel($e->value);
+                $n = $e->target->name;
+                if ($l === '') { $this->glBad[$n] = true; } elseif (!isset($this->glLabel[$n])) { $this->glLabel[$n] = $l; }
+            } else {
+                $this->glTaintVars($e->target);
+            }
+        } elseif ($e instanceof \Parser\Ast\CompoundAssign) {
+            $this->glTaintVars($e->target);
+        } elseif ($e instanceof \Parser\Ast\IncDec) {
+            $this->glTaintVars($e->operand);
+        } elseif ($e instanceof \Parser\Ast\RefAssign) {
+            $this->glTaintVars($e->target);
+            $this->glTaintVars($e->source);
+        } elseif ($e instanceof \Parser\Ast\ArrayLit) {
+            foreach ($e->elements as $el) { if ($el->byRef) { $this->glTaintVars($el->value); } }
+        } elseif ($e instanceof \Parser\Ast\Closure) {
+            foreach ($e->uses as $u) { if ($u->byRef) { $this->glBad[$u->name] = true; } }
+        } elseif ($e instanceof \Parser\Ast\CallExpr) {
+            $f = \strtolower($this->bareName(\ltrim($e->function, '\\')));
+            if ($f === 'extract' || $f === 'compact' || $f === 'get_defined_vars' || $f === 'parse_str' || $f === 'eval'
+                || \str_starts_with($f, 'include') || \str_starts_with($f, 'require')) { return false; }
+            $this->glTaintArgs($e->args);
+        } elseif ($e instanceof \Parser\Ast\MethodCallExpr) {
+            $this->glTaintArgs($e->args);
+        } elseif ($e instanceof \Parser\Ast\StaticCall) {
+            $this->glTaintArgs($e->args);
+        } elseif ($e instanceof \Parser\Ast\NewExpr) {
+            $this->glTaintArgs($e->args);
+        } elseif ($e instanceof \Parser\Ast\NewDynExpr) {
+            $this->glTaintArgs($e->args);
+        } elseif ($e instanceof \Parser\Ast\Invoke) {
+            $this->glTaintArgs($e->args);
+        } elseif ($e instanceof \Parser\Ast\DynamicStaticCall) {
+            $this->glTaintArgs($e->args);
+        } elseif ($e instanceof \Parser\Ast\DynamicStaticMethodCall) {
+            $this->glTaintArgs($e->args);
+        }
+        return true;
+    }
+
+    /** @param \Parser\Ast\Expr[] $args */
+    private function glTaintArgs(array $args): void
+    {
+        foreach ($args as $a) { $this->glTaintVars($a); }
+    }
+
+    /** Taint every variable an expression names as a (possible) write target or by-ref argument. */
+    private function glTaintVars(\Parser\Ast\Expr $e): void
+    {
+        if ($e instanceof \Parser\Ast\Variable) { $this->glBad[$e->name] = true; return; }
+        if ($e instanceof \Parser\Ast\NamedArg) { $this->glTaintVars($e->value); return; }
+        if ($e instanceof \Parser\Ast\Spread) { $this->glTaintVars($e->value); return; }
+        if ($e instanceof \Parser\Ast\ArrayAccess) { $this->glTaintVars($e->array); return; }
+        if ($e instanceof \Parser\Ast\ArrayLit) {
+            foreach ($e->elements as $el) { $this->glTaintVars($el->value); }
+        }
+    }
+
 
     /** First guard label across an `if` chain's conditions. */
     private function ifGuardLabel(\Parser\Ast\IfStmt $s): string
@@ -4837,6 +5044,8 @@ final class LowerFromAst implements Pass
         $this->currentLowerFn = '';
         $this->currentFnSym = '';
         $this->guardStack = [];
+        $this->guardLocals = [];
+        $this->guardLocalsStack = [];
         $this->closureFrames = [];
         $this->inDeclCheck = false;
         $this->currentLowerFnHasThis = false;

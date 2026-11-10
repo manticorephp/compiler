@@ -122,9 +122,10 @@ trait LowerStmts
         $out = [];
         $pushed = 0;
         foreach ($list as $stmt) {
+            // Resolved before lowering: lowering the condition may lower a helper and move the class scope.
+            $eg = $stmt->kind === 'If' ? $this->earlyExitGuard($stmt) : '';
             $out[] = $this->lowerStmt($stmt);
             if ($stmt->kind === 'If') {
-                $eg = $this->earlyExitGuard($stmt);
                 if ($eg !== '') { $this->guardStack[] = $eg; $pushed = $pushed + 1; }
             }
         }
@@ -144,6 +145,7 @@ trait LowerStmts
             // Skipping a label emitted a `br` to a block that was never defined.
             if ($dead && $stmt->kind !== 'Label') { continue; }
             $dead = false;
+            $eg = $stmt->kind === 'If' ? $this->earlyExitGuard($stmt) : '';
             $lowered = $this->lowerStmt($stmt);
             $stmts[] = $lowered;
             // Drop statements after an UNCONDITIONAL terminator (php treats
@@ -156,7 +158,6 @@ trait LowerStmts
             if ($this->nodeAlwaysTerminates($lowered)) { $dead = true; }
             // `if (!class_exists('X')) { return; }` guards everything after it in this block.
             if ($stmt->kind === 'If') {
-                $eg = $this->earlyExitGuard($stmt);
                 if ($eg !== '') { $this->guardStack[] = $eg; $pushed = $pushed + 1; }
             }
         }

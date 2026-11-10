@@ -184,6 +184,21 @@ rc=0
 tier/switch_guard.php:12: warning[undefined.function]: function missing_fetch() is not declared (guarded by function_exists('missing_fetch'))
 tier/switch_guard.php:8: warning[undefined.class]: class Missing\DsnParser is not declared (guarded by class_exists(...))
 front end: 0 error(s), 2 warning(s)
+== tier_guard_helpers
+rc=65
+tier/guard_helpers.php:11: warning[undefined.function]: function apcu_second() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
+tier/guard_helpers.php:14: warning[undefined.class]: class Missing\ViaThis is not declared (guarded by supportsX() → class_exists('Missing\Probe'))
+tier/guard_helpers.php:17: warning[undefined.function]: function missing_via_fn() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:20: warning[undefined.class]: class Missing\M is not declared (guarded by class_exists(...))
+tier/guard_helpers.php:22: warning[undefined.function]: function missing_both() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:24: error[undefined.function]: function missing_two() is not declared (reachable: notHelper <- __main)
+tier/guard_helpers.php:25: error[undefined.function]: function missing_nested() is not declared (reachable: notNested <- __main)
+tier/guard_helpers.php:29: error[undefined.class]: class Missing\Tainted is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:32: error[undefined.class]: class Missing\Incr is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:35: error[undefined.class]: class Missing\Loop is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:36: error[undefined.class]: class Missing\Param is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:9: warning[undefined.function]: function apcu_fetch_m() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
+front end: 6 error(s), 6 warning(s)
 == tier_static_hierarchy
 rc=0
 front end: 1 unreachable undeclared name(s) hidden (--all to list)
