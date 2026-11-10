@@ -15,6 +15,7 @@ _manticore() {
     'version:Print compiler version'
     'upgrade:Update the installed compiler to the latest release (--check only reports)'
     'doctor:Check that this compiler and its toolchain work; exit 1 on a failure'
+    'cache:Show the compiled-object cache, or clear it'
     'completions:Print a shell completion script (bash, zsh or fish)'
     'help:Show this help text'
   )
@@ -210,6 +211,11 @@ _manticore() {
         '--help[Show this help text]' \
         '--offline[Skip the update check]' \
         '--no-smoke[Skip compiling and running a hello-world]' \
+        '*:file:_files'
+      ;;
+    cache)
+      _arguments \
+        '--help[Show this help text]' \
         '*:file:_files'
       ;;
     completions)

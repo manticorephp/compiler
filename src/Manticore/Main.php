@@ -6323,6 +6323,7 @@ function main_driver(): int
     $cli->add(new \Cli\Commands\VersionCommand());
     $cli->add(new \Cli\Commands\UpgradeCommand());
     $cli->add(new \Cli\Commands\DoctorCommand());
+    $cli->add(new \Cli\Commands\CacheCommand());
     $cli->add(new \Cli\Commands\CompletionsCommand($cli));
     return $cli->run(collect_argv());
 }

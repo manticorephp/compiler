@@ -74,7 +74,8 @@ artifact decided `htmlspecialchars` otherwise), median of 11: geomean 1.000;
 
 `MANTICORE_SHARE_MIN`, `MANTICORE_SHARE_AVAIL`, `MANTICORE_SHARE_DEPTH`,
 `MANTICORE_SHARED_GENERICS=0`; the cache itself: `MANTICORE_OBJ_CACHE_DIR`,
-`MANTICORE_OBJ_CACHE_MAX_MB`.
+`MANTICORE_OBJ_CACHE_MAX_MB`. `manticore cache` shows where it is and how big; `manticore cache clear`
+empties it (only the cache's own `<sha1>.o` files).
 
 ## Not yet
 
