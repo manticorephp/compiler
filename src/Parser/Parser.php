@@ -1183,7 +1183,7 @@ final class Parser
         $body = null;
         $lazyBody = null;
         if ($this->check(TokenKind::OpenBrace)) {
-            if ($this->lazyBodies && !$this->upcomingBlockHasAnonymousClass()) {
+            if ($this->lazyBodies && !$this->upcomingBlockNeedsEagerParse()) {
                 $lazyBody = $this->skipLazyBody();
             } else {
                 $body = $this->parseBlock();
@@ -1244,7 +1244,7 @@ final class Parser
 
         $body = null;
         $lazyBody = null;
-        if ($this->lazyBodies && !$this->upcomingBlockHasAnonymousClass()) {
+        if ($this->lazyBodies && !$this->upcomingBlockNeedsEagerParse()) {
             $lazyBody = $this->skipLazyBody();
         } else {
             $body = $this->parseBlock();
@@ -1427,15 +1427,26 @@ final class Parser
         throw $this->error('expected type name');
     }
 
-    private function upcomingBlockHasAnonymousClass(): bool
+    /**
+     * A body that must be parsed now rather than kept lazy: one holding an
+     * anonymous class, or a NAMED function / class / interface / trait
+     * declaration — lowering hoists those to the top level, so it has to see
+     * them before any body is lowered.
+     */
+    private function upcomingBlockNeedsEagerParse(): bool
     {
         $depth = 0;
-        $previousWasNew = false;
+        $prev = '';
         $n = count($this->tokens);
         for ($i = $this->pos; $i < $n; $i = $i + 1) {
             $tok = $this->tokens[$i];
-            if ($previousWasNew && strtolower($tok->lexeme) === 'class') {
-                return true;
+            $lex = strtolower($tok->lexeme);
+            if ($lex === 'class' && $prev === 'new') { return true; }
+            if ($depth > 0 && $tok->kind === TokenKind::Keyword && $prev !== '::' && $prev !== '->' && $prev !== '?->'
+                && ($lex === 'function' || $lex === 'class' || $lex === 'interface' || $lex === 'trait')) {
+                $j = $i + 1;
+                if ($j < $n && $this->tokens[$j]->lexeme === '&') { $j = $j + 1; }
+                if ($j < $n && $this->tokens[$j]->kind === TokenKind::Identifier) { return true; }
             }
             if ($tok->kind === TokenKind::OpenBrace) {
                 $depth = $depth + 1;
@@ -1443,7 +1454,7 @@ final class Parser
                 $depth = $depth - 1;
                 if ($depth === 0) { return false; }
             }
-            $previousWasNew = strtolower($tok->lexeme) === 'new';
+            $prev = $lex;
         }
         return false;
     }

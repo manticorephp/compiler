@@ -1218,6 +1218,7 @@ final class LowerFromAst implements Pass
         if ($preludeCount < \count($stmts)) {
             $head = \array_slice($stmts, 0, $preludeCount);
             $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
+            $tail = \array_merge($tail, $this->hoistNestedDecls($tail));
             $stmts = \array_merge($head, $tail);
             // Every hoisted class's DECL is registered by now; give them their
             // ClassDefs before anything lowers a method body against one.
@@ -1549,6 +1550,18 @@ final class LowerFromAst implements Pass
         if ($this->sawDynConstant) {
             $dcProg = \Parser\Parser::parseSource("<?php\n" . $this->dynConstantSrc($module, $mainStmts));
             foreach ($dcProg->statements as $dstmt) {
+                if ($dstmt->kind !== 'Function') { continue; }
+                $this->declareFn($dstmt->decl->name, $dstmt->decl);
+                $dfn = $this->lowerFunction($dstmt->decl);
+                $dfn->isPrelude = true;
+                $module->addFunction($dfn);
+            }
+        }
+        // `$GLOBALS[$name]` with a computed name: the by-name table over every
+        // global cell. Before injectGlobalDecls, which binds those cells.
+        if ($this->sawDynGlobals) {
+            $dgProg = \Parser\Parser::parseSource("<?php\n" . $this->dynGlobalsSrc($module));
+            foreach ($dgProg->statements as $dstmt) {
                 if ($dstmt->kind !== 'Function') { continue; }
                 $this->declareFn($dstmt->decl->name, $dstmt->decl);
                 $dfn = $this->lowerFunction($dstmt->decl);
@@ -2252,6 +2265,8 @@ final class LowerFromAst implements Pass
      */
     /** A `constant()` / `defined()` call whose name is not a literal was lowered. */
     public bool $sawDynConstant = false;
+    /** A `$GLOBALS[$name]` with a computed name was lowered: generate `__mc_globals`. */
+    public bool $sawDynGlobals = false;
 
     /**
      * `__mc_constant(string): mixed` and `__mc_defined(string): bool` over every
@@ -5563,6 +5578,183 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * Hoist every function / class declaration that is not a top-level statement —
+     * one under a runtime `if` (`if (!is_multisite()) { function f() {} }`), or one
+     * inside a function body (WordPress `export_wp()` declares its `wxr_*` helpers)
+     * — to the top level. php declares it when control reaches it; a compiled
+     * program declares it up front, so `function_exists()` may answer true before
+     * the branch runs. Only a name declared exactly once can be hoisted: two
+     * declarations of one name behind a guard that does not fold have no single
+     * answer at compile time.
+     *
+     * The statement stays where it was and lowers to nothing
+     * ({@see isHoistedNestedDecl}).
+     *
+     * @param \Parser\Ast\Stmt[] $top
+     * @return \Parser\Ast\Stmt[] the hoisted declarations, already registered
+     */
+    private function hoistNestedDecls(array $top): array
+    {
+        /** @var \Parser\Ast\Stmt[] $found */
+        $found = [];
+        foreach ($top as $s) {
+            if ($s->kind === 'Function') {
+                $this->collectNestedDecls($this->fnStmtBody($s), $found);
+                continue;
+            }
+            if ($s->kind === 'Class') {
+                foreach ($this->classStmtMethodBodies($s) as $mb) { $this->collectNestedDecls($mb, $found); }
+                continue;
+            }
+            $this->collectNestedDecls([$s], $found);
+        }
+        if ($found === []) { return []; }
+        /** @var array<string, \Parser\Ast\Stmt> $seen */
+        $seen = [];
+        foreach ($found as $d) {
+            $key = $this->nestedDeclKey($d);
+            if ($key === '') { continue; }
+            $taken = isset($seen[$key]);
+            if (!$taken && $d->kind === 'Function') {
+                $taken = isset($this->fnCanon[\strtolower(\substr($key, 2))]);
+            } elseif (!$taken) {
+                $taken = isset($this->classDecls[\substr($key, 2)]) || isset($this->traitTable[\substr($key, 2)]);
+            }
+            if ($taken) {
+                throw new \RuntimeException('Cannot compile the conditional declaration of '
+                    . \substr($key, 2) . ' in ' . $d->span->file . ' on line ' . (string)$d->span->line
+                    . ': it is declared more than once and the guard choosing between them is not known at compile time');
+            }
+            $seen[$key] = $d;
+        }
+        $out = [];
+        foreach ($seen as $d) {
+            $this->registerHoistedDecl($d);
+            $this->hoistedNestedDecls[$this->nestedDeclKey($d)] = $d;
+            $out[] = $d;
+        }
+        return $out;
+    }
+
+    /** @var array<string, \Parser\Ast\Stmt> */
+    private array $hoistedNestedDecls = [];
+
+    private function isHoistedNestedDecl(\Parser\Ast\Stmt $s): bool
+    {
+        $key = $this->nestedDeclKey($s);
+        return $key !== '' && isset($this->hoistedNestedDecls[$key]) && $this->hoistedNestedDecls[$key] === $s;
+    }
+
+    private function nestedDeclKey(\Parser\Ast\Stmt $s): string
+    {
+        if ($s->kind === 'Function') { return 'f:' . \strtolower(\ltrim($this->fnStmtName($s), '\\')); }
+        if ($s->kind !== 'Class') { return ''; }
+        $cdecl = $this->classStmtDecl($s);
+        $name = ($cdecl->kind ?? 'class') === 'trait' ? $this->declName($cdecl) : $this->classDeclName($cdecl);
+        return $name === '' ? '' : 'c:' . $name;
+    }
+
+    /**
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @param \Parser\Ast\Stmt[] $found
+     */
+    private function collectNestedDecls(array $stmts, array &$found): void
+    {
+        foreach ($stmts as $s) {
+            $k = $s->kind;
+            if ($k === 'Function') {
+                $found[] = $s;
+                $this->collectNestedDecls($this->fnStmtBody($s), $found);
+            } elseif ($k === 'Class') {
+                $found[] = $s;
+                foreach ($this->classStmtMethodBodies($s) as $mb) { $this->collectNestedDecls($mb, $found); }
+            } elseif ($k === 'If') {
+                $live = $this->constIfBranch($this->asIfStmt($s));
+                if ($live !== null) {
+                    $this->collectNestedDecls($live, $found);
+                } else {
+                    foreach ($this->ifStmtBlocks($s) as $b) { $this->collectNestedDecls($b, $found); }
+                }
+            } else {
+                foreach ($this->stmtChildBlocks($s) as $b) { $this->collectNestedDecls($b, $found); }
+            }
+        }
+    }
+
+    private function asIfStmt(\Parser\Ast\IfStmt $s): \Parser\Ast\IfStmt { return $s; }
+    private function fnStmtName(\Parser\Ast\FunctionStmt $s): string { return $s->decl->name; }
+    private function classStmtDecl(\Parser\Ast\ClassStmt $s): \Parser\Ast\ClassDecl { return $s->decl; }
+
+    /** @return \Parser\Ast\Stmt[] */
+    private function fnStmtBody(\Parser\Ast\FunctionStmt $s): array
+    {
+        $b = $s->decl->body;
+        return $b === null ? [] : $b->statements;
+    }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function classStmtMethodBodies(\Parser\Ast\ClassStmt $s): array
+    {
+        $out = [];
+        foreach ($s->decl->methods as $m) {
+            $mb = $m->body;
+            if ($mb !== null) { $out[] = $mb->statements; }
+        }
+        return $out;
+    }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function ifStmtBlocks(\Parser\Ast\IfStmt $s): array
+    {
+        $out = [$s->then->statements];
+        foreach ($s->elseifs as $arm) { $out[] = $arm->body->statements; }
+        if ($s->else !== null) { $out[] = $s->else->statements; }
+        return $out;
+    }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function stmtChildBlocks(\Parser\Ast\Stmt $s): array
+    {
+        $k = $s->kind;
+        if ($k === 'While')   { return [$this->whileBody($s)]; }
+        if ($k === 'DoWhile') { return [$this->doWhileBody($s)]; }
+        if ($k === 'For')     { return [$this->forBody($s)]; }
+        if ($k === 'Foreach') { return [$this->foreachBody($s)]; }
+        if ($k === 'Switch')  { return $this->switchBodies($s); }
+        if ($k === 'TryCatch') { return $this->tryBodies($s); }
+        if ($k === 'Namespace') { return [$this->namespaceBody($s)]; }
+        return [];
+    }
+
+    /** @return \Parser\Ast\Stmt[] */
+    private function whileBody(\Parser\Ast\WhileStmt $s): array { return $s->body->statements; }
+    /** @return \Parser\Ast\Stmt[] */
+    private function doWhileBody(\Parser\Ast\DoWhileStmt $s): array { return $s->body->statements; }
+    /** @return \Parser\Ast\Stmt[] */
+    private function forBody(\Parser\Ast\ForStmt $s): array { return $s->body->statements; }
+    /** @return \Parser\Ast\Stmt[] */
+    private function foreachBody(\Parser\Ast\ForeachStmt $s): array { return $s->body->statements; }
+    /** @return \Parser\Ast\Stmt[] */
+    private function namespaceBody(\Parser\Ast\NamespaceStmt $s): array { return $s->body === null ? [] : $s->body->statements; }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function switchBodies(\Parser\Ast\SwitchStmt $s): array
+    {
+        $out = [];
+        foreach ($s->cases as $arm) { $out[] = $arm->body; }
+        return $out;
+    }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function tryBodies(\Parser\Ast\TryCatchStmt $s): array
+    {
+        $out = [$s->try->statements];
+        foreach ($s->catches as $c) { $out[] = $c->body->statements; }
+        if ($s->finally !== null) { $out[] = $s->finally->statements; }
+        return $out;
+    }
+
+    /**
      * The live branch's statements of a compile-time `if`, or null when the guard
      * (or a preceding elseif guard) is not statically foldable.
      *
@@ -5967,6 +6159,21 @@ final class LowerFromAst implements Pass
                 $lower = $op === '<' || $op === 'lt' || $op === '<=' || $op === 'le'
                     || $op === '!=' || $op === 'ne' || $op === '<>';
                 return $this->guardOf($lower);
+            }
+            // `version_compare(PHP_VERSION, '8.1.6', '>=')` — both versions are
+            // compile-time strings (the target's PHP_VERSION is fixed), so the
+            // answer is too. WordPress picks its UTF-8 functions by it.
+            $va = $this->constScalarKey($e->args[0]);
+            $vb = $this->constScalarKey($e->args[1]);
+            if (\strtolower($vfn) === 'version_compare'
+                && $va !== null && $vb !== null
+                && \strncmp($va, 's:', 2) === 0 && \strncmp($vb, 's:', 2) === 0
+                && $e->args[2]->kind === 'StringLiteral') {
+                $vop = \strtolower($this->stringLitValue($e->args[2]));
+                $known = ['<', 'lt', '<=', 'le', '>', 'gt', '>=', 'ge', '==', 'eq', '!=', '<>', 'ne'];
+                if (\in_array($vop, $known, true)) {
+                    return $this->guardOf(\version_compare(\substr($va, 2), \substr($vb, 2), $vop) === true);
+                }
             }
         }
         $guardQual = \ltrim($e->function, '\\');
