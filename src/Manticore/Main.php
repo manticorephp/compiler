@@ -5484,7 +5484,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                     foreach ($sites as $site) {
                         $sfn = (string)$site['fn'];
                         $rd .= 'site: ' . (string)$sk . ' line=' . (string)$site['line'] . ' fn=' . $sfn
-                            . ' reach=' . ($reach->reaches($sfn) ? '1' : '0') . "\n";
+                            . ' reach=' . ($reach->reaches($sfn) ? '1' : '0') . ' maybe=' . ($reach->maybeReaches($sfn) ? '1' : '0') . "\n";
                     }
                 }
                 dprint(\rtrim($rd, "\n"));

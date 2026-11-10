@@ -4,24 +4,46 @@ namespace Compile\Mir;
 /**
  * Which functions the program can run, by rapid type analysis over the lowered MIR.
  *
- * Roots are `__main`, every lazy include unit (`__mc_unit_*`) and the global
- * initialisers ({@see Module::$globalDefaults}). From a reached body: a direct
- * call reaches its callee, a closure literal its body, a string literal naming a
- * function that function (string callables); `new C` instantiates C and its
- * ancestors, and a method call demands its NAME — every instantiated class's
+ * Roots are `__main`, every `__mc_*` / `__mir_*` body lowering synthesized (include
+ * units, attribute factories, reflection trampolines: the emitter calls them) and
+ * the global initialisers ({@see Module::$globalDefaults}). From a reached body: a
+ * direct call reaches its callee, a closure literal its body, a string literal
+ * naming a function that function (string callables); `new C` instantiates C and
+ * its ancestors, and a method call demands its NAME — every instantiated class's
  * method of that name is reached, now or when a later `new` instantiates one.
- * A `new $cls`, a call by a runtime method name or a callable array with a
- * runtime name makes the analysis assume the worst for that axis.
  *
- * It is an OVER-approximation: a function reported unreachable is one no path
- * from a root can call; anything it cannot see through counts as reached.
+ * Two levels: {@see reaches} follows those explicit edges only; {@see maybeReaches}
+ * also assumes a call by a runtime function name, a `new $cls`, a call by a runtime
+ * method name or a runtime class + method reach everything they could.
  * Prelude bodies are walked when reached (they call back into user code) but
  * are never roots and never reported.
  */
 final class Reachability
 {
-    /** A reached body contains `new $cls`: every class counts as instantiated. */
+    /** A reached body contains `new $cls` (information only: it widens the DYNAMIC level, never the static one). */
     public bool $dynamicNew = false;
+
+    /**
+     * Two levels. STATIC: reached from a root through explicit edges only. DYNAMIC: additionally reached
+     * once the widenings a reached body asks for fire (runtime function name, `new $x`, `$o->$m()`,
+     * runtime class + method). While the static level is computed a widening is only recorded in
+     * {@see $pending}; then the snapshot is taken and the widenings run.
+     */
+    private bool $widen = false;
+    /** @var array<string, bool> widenings asked for before {@see $widen}: fns | methods | static | new */
+    private array $pending = [];
+    private int $qi = 0;
+    /** @var array<string, string> the static level of {@see $parent} */
+    private array $staticParent = [];
+    /** @var array<string, bool> */
+    private array $staticInstantiated = [];
+    /** @var array<string, bool> */
+    private array $staticStaticCalled = [];
+    /** @var array<string, bool>|null */
+    private ?array $maybeUsedClasses = null;
+    private bool $newDone = false;
+    /** @var array<string, bool> classes `new`ed themselves (their late-static copies are noted once) */
+    private array $leafDone = [];
 
     /** @var array<string, bool> */
     private array $fnNames = [];
@@ -50,6 +72,10 @@ final class Reachability
     private array $demandedAll = [];
     /** Every method of every instantiated class is reached (a call by a runtime method name). */
     private bool $allMethods = false;
+    /** A reached call by a runtime function name: every nameable function is reached. */
+    private bool $nameableFns = false;
+    /** Every static method of every class is reached (a runtime class + method name). */
+    private bool $allStatic = false;
     /** @var array<string, bool> lowercase classes named by a reached static call */
     private array $staticCalled = [];
     /** @var array<string, string[]> method symbol => its late-static-binding copies for instantiated subclasses */
@@ -106,7 +132,9 @@ final class Reachability
         foreach ($m->interfaceAncestors as $in => $list) { $r->ifaceAncestors[\strtolower(\ltrim($in, '\\'))] = $list; }
         foreach ($m->traitNames as $tn => $_) { $r->traitLc[\strtolower(\ltrim($tn, '\\'))] = true; }
 
-        if ($m->callableArrayAnyName) { $r->allMethods = true; }
+        /** @var string[] $dynRoots */
+        $dynRoots = [];
+        if ($m->callableArrayAnyName) { $r->reachAllMethods(''); $r->reachAllStatic(''); }
         // An enum case is a constant, never a `new`: count every user enum with methods as instantiated.
         foreach ($m->enums as $en => $_) {
             $lc = \strtolower(\ltrim($en, '\\'));
@@ -114,7 +142,16 @@ final class Reachability
         }
         foreach ($m->functions as $fn) {
             if ($fn->isPrelude) { continue; }
-            if ($fn->name === '__main' || \str_starts_with($fn->name, '__mc_unit_')) { $r->enqueue($fn->name, ''); }
+            // `__mc_*` / `__mir_*` bodies synthesized by lowering are called by the emitter, not by a MIR call.
+            // Include units and the reflection tables (attribute factories, parameter defaults, constant
+            // tables, property getters / setters) are static roots; the dispatchers that exist for dynamic
+            // calls (static-callable arms, function / reflection trampolines, …) root the dynamic level only.
+            $n = $fn->name;
+            if (self::isStaticRoot($n)) {
+                $r->enqueue($n, '');
+            } elseif (\str_starts_with($n, '__mc_') || \str_starts_with($n, '__mir_')) {
+                $dynRoots[] = $n;
+            }
         }
         foreach ($m->globalDefaults as $i => $g) {
             if ($m->globalIsPrelude[$i] ?? false) { continue; }
@@ -123,20 +160,46 @@ final class Reachability
         /** @var array<string, FunctionDef> $fns */
         $fns = [];
         foreach ($m->functions as $fn) { $fns[$fn->name] = $fn; }
-        for ($i = 0; $i < \count($r->queue); $i = $i + 1) {
-            $sym = $r->queue[$i];
-            foreach (($r->lsbOf[$sym] ?? []) as $copy) { $r->enqueue($copy, $sym); }
-            $fd = $fns[$sym] ?? null;
-            if ($fd === null) { continue; }
-            $r->walk($fd->body, $sym);
-        }
+        $r->drain($fns);
+        $r->staticParent = $r->parent;
+        $r->staticInstantiated = $r->instantiated;
+        $r->staticStaticCalled = $r->staticCalled;
+        $r->widen = true;
+        foreach ($dynRoots as $dr) { $r->enqueue($dr, ''); }
+        if (isset($r->pending['fns'])) { $r->reachNameableFns(''); }
+        if (isset($r->pending['methods'])) { $r->reachAllMethods(''); }
+        if (isset($r->pending['static'])) { $r->reachAllStatic(''); }
+        if (isset($r->pending['new'])) { $r->newDynamic(''); }
+        $r->drain($fns);
+        $r->usedClasses = null;
         return $r;
     }
 
-    /** Can `$fnSymbol` run? `@class:<FQN>` asks {@see classUsed}; a name that is no module function counts as reached. */
+    /** @param array<string, FunctionDef> $fns */
+    private function drain(array $fns): void
+    {
+        while ($this->qi < \count($this->queue)) {
+            $sym = $this->queue[$this->qi];
+            $this->qi = $this->qi + 1;
+            foreach (($this->lsbOf[$sym] ?? []) as $copy) { $this->enqueue($copy, $sym); }
+            $fd = $fns[$sym] ?? null;
+            if ($fd === null) { continue; }
+            $this->walk($fd->body, $sym);
+        }
+    }
+
+    /** Does an explicit call path from a root reach `$fnSymbol`? `@class:<FQN>` asks {@see classUsed}; a name that is no module function counts as reached. */
     public function reaches(string $fnSymbol): bool
     {
         if (\str_starts_with($fnSymbol, '@class:')) { return $this->classUsed(\substr($fnSymbol, 7)); }
+        if (!isset($this->fnNames[$fnSymbol])) { return true; }
+        return isset($this->staticParent[$fnSymbol]);
+    }
+
+    /** Can `$fnSymbol` run once dynamic calls are assumed to reach whatever they could? */
+    public function maybeReaches(string $fnSymbol): bool
+    {
+        if (\str_starts_with($fnSymbol, '@class:')) { return $this->classMaybeUsed(\substr($fnSymbol, 7)); }
         if (!isset($this->fnNames[$fnSymbol])) { return true; }
         return isset($this->parent[$fnSymbol]);
     }
@@ -149,9 +212,9 @@ final class Reachability
     {
         $out = [];
         $cur = $fnSymbol;
-        while (\count($out) < $max && isset($this->parent[$cur])) {
+        while (\count($out) < $max && isset($this->staticParent[$cur])) {
             $out[] = $cur;
-            $cur = $this->parent[$cur];
+            $cur = $this->staticParent[$cur];
             if ($cur === '') { break; }
         }
         return $out;
@@ -165,10 +228,19 @@ final class Reachability
     public function classUsed(string $fqn): bool
     {
         $lc = \strtolower(\ltrim($fqn, '\\'));
+        if (!isset($this->classLc[$lc]) && !isset($this->ifaceLc[$lc])) { return true; }
+        if ($this->usedClasses === null) { $this->usedClasses = $this->computeUsedClasses(false); }
+        return isset($this->usedClasses[$lc]);
+    }
+
+    /** {@see classUsed} at the dynamic level: a `new $x` anywhere reached makes every class maybe-used. */
+    public function classMaybeUsed(string $fqn): bool
+    {
+        $lc = \strtolower(\ltrim($fqn, '\\'));
         if ($this->dynamicNew) { return true; }
         if (!isset($this->classLc[$lc]) && !isset($this->ifaceLc[$lc])) { return true; }
-        if ($this->usedClasses === null) { $this->usedClasses = $this->computeUsedClasses(); }
-        return isset($this->usedClasses[$lc]);
+        if ($this->maybeUsedClasses === null) { $this->maybeUsedClasses = $this->computeUsedClasses(true); }
+        return isset($this->maybeUsedClasses[$lc]);
     }
 
     /** `reach:` lines for every reached user function, then `class:` lines for every used user class. */
@@ -176,12 +248,16 @@ final class Reachability
     {
         $fns = [];
         foreach ($this->parent as $sym => $_) {
-            if (!isset($this->hiddenFns[$sym])) { $fns[] = 'reach: ' . $sym; }
+            if (isset($this->hiddenFns[$sym])) { continue; }
+            if ($this->isSynthesized($sym)) { continue; }
+            $fns[] = (isset($this->staticParent[$sym]) ? 'reach: ' : 'reach?: ') . $sym;
         }
         \sort($fns);
         $cls = [];
         foreach ($this->classLc as $lc => $cd) {
-            if (!$cd->isPreludeClass && !$cd->isExternClass && $this->classUsed($lc)) { $cls[] = 'class: ' . \ltrim($cd->name, '\\'); }
+            if ($cd->isPreludeClass || $cd->isExternClass) { continue; }
+            if ($this->classUsed($lc)) { $cls[] = 'class: ' . \ltrim($cd->name, '\\'); }
+            elseif ($this->classMaybeUsed($lc)) { $cls[] = 'class?: ' . \ltrim($cd->name, '\\'); }
         }
         \sort($cls);
         $out = '';
@@ -191,11 +267,11 @@ final class Reachability
     }
 
     /** @return array<string, bool> */
-    private function computeUsedClasses(): array
+    private function computeUsedClasses(bool $maybe): array
     {
         $used = [];
-        foreach ($this->instantiated as $lc => $_) { $used[$lc] = true; }
-        foreach ($this->staticCalled as $lc => $_) { $used[$lc] = true; }
+        foreach (($maybe ? $this->instantiated : $this->staticInstantiated) as $lc => $_) { $used[$lc] = true; }
+        foreach (($maybe ? $this->staticCalled : $this->staticStaticCalled) as $lc => $_) { $used[$lc] = true; }
         // A reference recorded inside another class's class-level code counts once THAT class is used.
         $changed = true;
         while ($changed) {
@@ -206,7 +282,7 @@ final class Reachability
                 foreach ($fns as $fn => $_) {
                     $hit = \str_starts_with($fn, '@class:')
                         ? $this->refClassUsed(\strtolower(\ltrim(\substr($fn, 7), '\\')), $used)
-                        : $this->reaches($fn);
+                        : ($maybe ? $this->maybeReaches($fn) : $this->reaches($fn));
                     if ($hit) { $used[$lc] = true; $changed = true; break; }
                 }
             }
@@ -258,6 +334,8 @@ final class Reachability
     /** Mark `$lc` and its ancestors instantiated; reach every method of theirs the runtime or a demanded name can call. */
     private function instantiate(string $lc, string $from): void
     {
+        if (isset($this->leafDone[$lc])) { return; }
+        $this->leafDone[$lc] = true;
         $leaf = $lc;
         $cur = $lc;
         while ($cur !== '' && isset($this->classLc[$cur])) {
@@ -285,6 +363,7 @@ final class Reachability
         foreach ($this->methodsOf[$anc] as $lm => $sym) {
             $copy = $ancName . '__' . $this->methodSpelling[$anc][$lm] . '__lsb' . $leafName;
             if (!isset($this->fnNames[$copy])) { continue; }
+            if ($this->classLc[$anc]->isPreludeClass) { $this->hiddenFns[$copy] = true; }
             $this->lsbOf[$sym][] = $copy;
             if (isset($this->parent[$sym])) { $this->enqueue($copy, $sym); }
         }
@@ -310,6 +389,7 @@ final class Reachability
 
     private function reachAllMethods(string $from): void
     {
+        if (!$this->widen) { $this->pending['methods'] = true; return; }
         if ($this->allMethods) { return; }
         $this->allMethods = true;
         foreach ($this->instantiated as $lc => $_) {
@@ -317,10 +397,56 @@ final class Reachability
         }
     }
 
+    /** A `__mc_*` / `__mir_*` body that exists for dynamic calls, not a reflection table or an include unit. */
+    private function isDynamicHelper(string $n): bool
+    {
+        if (!\str_starts_with($n, '__mc_') && !\str_starts_with($n, '__mir_')) { return false; }
+        return !self::isStaticRoot($n);
+    }
+
+    /** Runtime machinery lowering synthesized: never reported (an include unit is user code). */
+    private function isSynthesized(string $n): bool
+    {
+        return (\str_starts_with($n, '__mc_') && !\str_starts_with($n, '__mc_unit_')) || \str_starts_with($n, '__mir_');
+    }
+
+    private static function isStaticRoot(string $n): bool
+    {
+        return $n === '__main' || \str_starts_with($n, '__mc_unit_') || \str_starts_with($n, '__mc_attr_')
+            || \str_starts_with($n, '__mc_pdef_') || \str_starts_with($n, '__mc_consts_')
+            || \str_starts_with($n, '__mc_pget_') || \str_starts_with($n, '__mc_pset_');
+    }
+
+    private function reachAllStatic(string $from): void
+    {
+        if (!$this->widen) { $this->pending['static'] = true; return; }
+        if ($this->allStatic) { return; }
+        $this->allStatic = true;
+        foreach ($this->classLc as $lc => $cd) {
+            foreach ($cd->methodMeta as $mn => $mm) {
+                if (!$mm->isStatic) { continue; }
+                $sym = $this->methodsOf[$lc][\strtolower((string)$mn)] ?? '';
+                if ($sym !== '') { $this->enqueue($sym, $from); }
+            }
+        }
+    }
+
+    private function reachNameableFns(string $from): void
+    {
+        if (!$this->widen) { $this->pending['fns'] = true; return; }
+        if ($this->nameableFns) { return; }
+        $this->nameableFns = true;
+        foreach ($this->fnNames as $sym => $_) {
+            if (\strpos($sym, '__') === false && !\str_contains($sym, '$mono$')) { $this->enqueue($sym, $from); }
+        }
+    }
+
     private function newDynamic(string $from): void
     {
-        if ($this->dynamicNew) { return; }
         $this->dynamicNew = true;
+        if (!$this->widen) { $this->pending['new'] = true; return; }
+        if ($this->newDone) { return; }
+        $this->newDone = true;
         foreach ($this->classLc as $lc => $cd) {
             if (!$cd->isPreludeClass) { $this->instantiate($lc, $from); }
         }
@@ -343,8 +469,9 @@ final class Reachability
                 $sym = $this->methodsOf[$cur][$lm];
                 $this->enqueue($sym, $from);
                 if ($cur !== $lc) {
-                    $this->enqueue($this->classLc[$cur]->name . '__' . $this->methodSpelling[$cur][$lm]
-                        . '__lsb' . $this->classLc[$lc]->name, $from);
+                    $copy = $this->classLc[$cur]->name . '__' . $this->methodSpelling[$cur][$lm] . '__lsb' . $this->classLc[$lc]->name;
+                    if ($this->classLc[$cur]->isPreludeClass) { $this->hiddenFns[$copy] = true; }
+                    $this->enqueue($copy, $from);
                 }
                 return;
             }
@@ -393,12 +520,15 @@ final class Reachability
             $k = $n->kind;
             if ($k === Node::KIND_CALL) {
                 $f = $this->asCall($n)->function;
-                if (isset($this->fnNames[$f])) { $this->enqueue($f, $from); }
-                else { $this->enqueue($this->fnLc[\strtolower($f)] ?? '', $from); }
+                if (!isset($this->fnNames[$f])) { $f = $this->fnLc[\strtolower($f)] ?? ''; }
+                // A synthesized dispatcher (`__mc_uninit_by_name`, …) is a dynamic edge: the dynamic roots reach it.
+                if ($this->widen || !$this->isDynamicHelper($f)) { $this->enqueue($f, $from); }
             } elseif ($k === Node::KIND_STRING_CONST) {
                 $this->stringLiteral($this->asString($n)->value, $from);
             } elseif ($k === Node::KIND_CLOSURE) {
-                $this->enqueue('__closure_' . (string)$this->asClosure($n)->id, $from);
+                $cl = '__closure_' . (string)$this->asClosure($n)->id;
+                if (isset($this->hiddenFns[$from]) || $this->isSynthesized($from)) { $this->hiddenFns[$cl] = true; }
+                $this->enqueue($cl, $from);
             } elseif ($k === Node::KIND_NEW_OBJ) {
                 $this->instantiate(\strtolower(\ltrim($this->asNewObj($n)->class, '\\')), $from);
             } elseif ($k === Node::KIND_NEW_DYN_OBJ) {
@@ -413,7 +543,20 @@ final class Reachability
                 }
             } elseif ($k === Node::KIND_INVOKE) {
                 // `$o->$name()` lowers to an invoke of a dynamic property read: any method may run.
-                if ($this->asInvoke($n)->callee->kind === Node::KIND_DYN_PROP) { $this->reachAllMethods($from); }
+                // Any other non-closure callee may be a runtime function NAME: the emitter dispatches it to every
+                // function whose symbol has no `__` ({@see EmitLlvmCalls::dynfNameable}).
+                // A callable array with a runtime method name (`$c::$m()`, `[$x, $name]`) may name any
+                // instance method of a live object or any static method of any class.
+                $callee = $this->asInvoke($n)->callee;
+                $ck = $callee->kind;
+                if ($ck === Node::KIND_DYN_PROP) { $this->reachAllMethods($from); }
+                elseif ($ck === Node::KIND_ARRAY_LIT) {
+                    $el = $this->asArrayLit($callee)->elements;
+                    if (\count($el) !== 2 || $el[1]->value->kind !== Node::KIND_STRING_CONST) {
+                        $this->reachAllMethods($from);
+                        $this->reachAllStatic($from);
+                    }
+                } elseif ($ck !== Node::KIND_CLOSURE && $ck !== Node::KIND_STRING_CONST) { $this->reachNameableFns($from); }
             } elseif ($k === Node::KIND_ARRAY_LIT) {
                 // `[$obj, 'm']` / `['C', 'm']`: a callable array demands its method name.
                 $el = $this->asArrayLit($n)->elements;
@@ -424,6 +567,9 @@ final class Reachability
                         $this->demand($mn, $from);
                         if ($el[0]->value->kind === Node::KIND_STRING_CONST) {
                             $this->staticCall($this->asString($el[0]->value)->value, $mn, $from);
+                        } else {
+                            // The receiver may be a runtime CLASS name: a static `m` of any class.
+                            $this->demandEverywhere($mn, $from);
                         }
                     }
                 }

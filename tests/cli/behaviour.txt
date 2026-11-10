@@ -150,6 +150,7 @@ reach: M__offsetUnset
 == reach_callables
 rc=0
 class: C
+class?: stdClass
 reach: __closure_10
 reach: __closure_7
 reach: __closure_9
@@ -160,15 +161,17 @@ reach: C__sortIt
 reach: f
 reach: g
 reach: makesClosure
+reach?: __closure_8
+reach?: neverCalled
 == reach_dynamic_new
 rc=0
-class: stdClass
-class: X
-class: Y
-class: Z
+class?: stdClass
+class?: X
+class?: Y
+class?: Z
 reach: __main
-reach: X____construct
-reach: Y____construct
+reach?: X____construct
+reach?: Y____construct
 == reach_class_level
 rc=0
 class: Holder
@@ -180,9 +183,45 @@ reach: Used__m
 reach/class_level.php:2: warning[undefined.constant]: constant UNDEF_USED is not declared
 reach/class_level.php:3: warning[undefined.class]: class MissingHint is not declared
 reach/class_level.php:3: warning[undefined.constant]: constant UNDEF_DEAD is not declared
-site: undefined.class|missinghint line=3 fn=@class:Dead reach=0
-site: undefined.constant|undef_dead line=3 fn=@class:Dead reach=0
-site: undefined.constant|undef_used line=2 fn=@class:Used reach=1
+site: undefined.class|missinghint line=3 fn=@class:Dead reach=0 maybe=0
+site: undefined.constant|undef_dead line=3 fn=@class:Dead reach=0 maybe=0
+site: undefined.constant|undef_used line=2 fn=@class:Used reach=1 maybe=1
+front end: 0 error(s), 3 warning(s)
+== reach_dyn_fn_name
+rc=0
+reach: __main
+reach: direct
+reach?: target
+== reach_dyn_static
+rc=0
+class: Plain
+class?: S
+class?: stdClass
+reach: __main
+reach: Plain__p
+reach?: S__inst
+reach?: S__s
+== reach_attr_reflect
+rc=0
+class: Tag
+class?: stdClass
+class?: T
+class?: Unrelated
+reach: __main
+reach: Tag____construct
+reach?: Unrelated____construct
+== reach_unused_interface
+rc=0
+class: Base
+class: Impl
+reach: __main
+reach: Impl__g
+reach/unused_interface.php:2: warning[undefined.class]: class MissingA is not declared
+reach/unused_interface.php:3: warning[undefined.class]: class MissingB is not declared
+reach/unused_interface.php:4: warning[undefined.class]: class MissingC is not declared
+site: undefined.class|missinga line=2 fn=@class:Unused reach=0 maybe=0
+site: undefined.class|missingb line=3 fn=@class:UsedI reach=1 maybe=1
+site: undefined.class|missingc line=4 fn=@class:Base reach=1 maybe=1
 front end: 0 error(s), 3 warning(s)
 == builtin names in sync
 ok

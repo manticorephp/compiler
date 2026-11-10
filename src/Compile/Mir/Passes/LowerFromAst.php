@@ -4766,7 +4766,8 @@ final class LowerFromAst implements Pass
             }
             foreach ($d->properties as $p) { $this->noteHintNames($p->typeHint, $p->span); }
             foreach ($d->methods as $m) {
-                $this->declSym = $d->name . '__' . $m->name;
+                // A bodiless (abstract / interface) method has no function: its hints belong to the class.
+                $this->declSym = ($m->body === null && $m->lazyBody === null) ? '@class:' . \ltrim($d->name, '\\') : $d->name . '__' . $m->name;
                 $this->noteHintNames($m->returnType, $m->span);
                 foreach ($m->params as $p) { $this->noteHintNames($p->typeHint, $p->span); }
             }
