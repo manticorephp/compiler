@@ -975,6 +975,7 @@ final class EmitLlvm implements EmitVisitor
         $this->scmpSyms = [];
         $this->scmpExtraBodies = '';
         $this->dynfThunks = [];
+        $this->dyncallSyms = [];
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';

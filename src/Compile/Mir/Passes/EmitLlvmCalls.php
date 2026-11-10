@@ -779,6 +779,10 @@ trait EmitLlvmCalls
                 return $out . $this->releaseHoistedArgs($owned);
             }
         }
+        $outlined = $this->emitDynCallOutlined($iv, $keyP);
+        if ($outlined !== '') {
+            return $out . $outlined;
+        }
         $argc = \count($iv->args);
         // A `...$arr` spread makes the runtime arg count unknown. HOIST the
         // fixed-prefix arg values and the spread array pointer ONCE, before the
@@ -973,6 +977,14 @@ trait EmitLlvmCalls
             $out .= '  ' . $eq . ' = icmp eq i64 ' . $nameId . ', ' . (string)$idMap[\strtolower($this->dynfPublicName($fname))] . "\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
+            if (!$hasSpread && $this->dynByValue && $this->anyRefParam($fname)) {
+                // An internal function hands its callback values; php warns that a
+                // by-reference parameter got one, and a warning here is a throw.
+                $out .= $this->emitDynRefByValueError($fname);
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+                continue;
+            }
             if ($hasSpread && $this->anyRefParam($fname)) {
                 // This arm's callee takes a parameter by reference, and a spread
                 // supplies it from array ELEMENTS — there is no caller variable
@@ -1356,6 +1368,167 @@ trait EmitLlvmCalls
             }
             if ($mask !== 0) { $this->dynfExports[$fname] = $mask; }
         }
+    }
+
+    /** @var array<string, string> dispatcher key => symbol ({@see emitDynCallOutlined}) */
+    private array $dyncallSyms = [];
+    private int $dyncallDepth = 0;
+    /** Emitting a by-value dispatcher: a by-reference callee is refused ({@see emitDynCallDispatcher}). */
+    private bool $dynByValue = false;
+
+    /**
+     * A by-name call whose every argument is a plain local, as one call to a
+     * dispatcher shared by every site of the same argument types.
+     *
+     * The inline dispatch is the whole program's: an arm for each by-reference
+     * callee (sort, preg_match, …) and the name table. Spliced into each site it
+     * cost ~40 arms per site, and it made a prelude body that calls a callback
+     * (usort, array_map) the program's own text, so the shared-generics cache
+     * never saw the same body twice. The dispatcher takes the name and the
+     * address of each argument's slot: a by-reference callee binds the caller's
+     * variable exactly as the inline arm did. Sites with any other argument (an
+     * element or property that may be a by-reference target, a spread, a
+     * reference-backed local) keep the inline dispatch. Answers '' then.
+     */
+    private function emitDynCallOutlined(Invoke_ $iv, string $keyP): string
+    {
+        if ($this->dyncallDepth > 0 || $iv->args === []) { return ''; }
+        $slots = [];
+        $byValue = false;
+        foreach ($iv->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return ''; }
+            if (!$this->dynPlainLocalArg($a)) { $byValue = true; }
+        }
+        // Only a prelude body may take the by-value form: it stands for an
+        // internal function, and php calls an internal function's callback
+        // with values (`usort`'s comparator gets copies, never the elements).
+        if ($byValue && ($this->frame === null || !$this->frame->isPrelude)) { return ''; }
+        $key = ($byValue ? 'v' : 'r') . (string)\count($iv->args);
+        $out = '';
+        foreach ($iv->args as $a) {
+            $key .= '|' . $a->type->exactString();
+            if ($byValue) {
+                $out .= $this->emitNode($a);
+                $out .= $this->coerceToI64();
+                $slots[] = 'i64 ' . $this->lastValue;
+            } else {
+                $slots[] = 'ptr ' . $this->locals->slots[$this->asLoadLocalNode($a)->name];
+            }
+        }
+        $key .= '|' . $iv->type->exactString();
+        if (!isset($this->dyncallSyms[$key])) {
+            $this->dyncallSyms[$key] = $this->emitDynCallDispatcher($iv, $key, $byValue);
+        }
+        $args = 'ptr ' . $keyP;
+        foreach ($slots as $sl) { $args .= ', ' . $sl; }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @' . $this->dyncallSyms[$key] . '(' . $args . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        if ($iv->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
+        return $out;
+    }
+
+    /** `Error: f(): Argument #N ($p) must be passed by reference, value given` for $fname's first by-ref param. */
+    private function emitDynRefByValueError(string $fname): string
+    {
+        $idx = 0;
+        foreach ($this->sigs->refParams[$fname] ?? [] as $i => $r) {
+            if ($r) { $idx = (int)$i; break; }
+        }
+        $pname = (string)($this->sigs->paramNames[$fname][$idx] ?? '');
+        $msg = $this->dynfPublicName($fname) . '(): Argument #' . (string)($idx + 1) . ' ($' . $pname
+            . ') must be passed by reference, value given';
+        return $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                new \Compile\Mir\StringConst($msg, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        ));
+    }
+
+    /** A local whose slot a by-reference callee may be handed as is. */
+    private function dynPlainLocalArg(Node $a): bool
+    {
+        if ($a->kind !== Node::KIND_LOAD_LOCAL) { return false; }
+        $name = $this->asLoadLocalNode($a)->name;
+        $L = $this->locals;
+        return isset($L->slots[$name]) && !isset($L->refLocals[$name]) && !isset($L->captureRefs[$name])
+            && !isset($L->globalBacked[$name]) && !isset($L->byRefCaptured[$name]) && !isset($L->unsetNames[$name])
+            && !isset($L->aliasLocals[$name]) && !isset($L->refCellTargets[$name]) && !isset($L->ownedBoxes[$name]);
+    }
+
+    /**
+     * The body behind {@see emitDynCallOutlined}: the inline dispatch over its
+     * own locals — the caller's slots, or (`$byValue`) copies of the values.
+     */
+    private function emitDynCallDispatcher(Invoke_ $iv, string $key, bool $byValue): string
+    {
+        $sym = $this->mirHelperSym($this->keyedHelperName('__mir_dyncall_', $key));
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = $sym;
+        $this->locals = new LocalSlots();
+        $this->cf = new ControlFlow();
+        $this->arena = new ArenaContext();
+        $this->dyncallDepth = $this->dyncallDepth + 1;
+        $oldByValue = $this->dynByValue;
+        $this->dynByValue = $byValue;
+
+        $params = 'ptr %dc.name';
+        $nameSlot = $this->ssa->allocReg();
+        $nameWord = $this->ssa->allocReg();
+        $body = '  ' . $nameSlot . " = alloca i64\n"
+            . '  ' . $nameWord . " = ptrtoint ptr %dc.name to i64\n"
+            . '  store i64 ' . $nameWord . ', ptr ' . $nameSlot . "\n";
+        $this->locals->slots['__mc_dc_name'] = $nameSlot;
+        $args = [];
+        foreach ($iv->args as $i => $a) {
+            $ln = '__mc_dc_a' . (string)$i;
+            if ($byValue) {
+                $params .= ', i64 %dc.a' . (string)$i;
+                $sl = $this->ssa->allocReg();
+                $body .= '  ' . $sl . " = alloca i64\n  store i64 %dc.a" . (string)$i . ', ptr ' . $sl . "\n";
+                $this->locals->slots[$ln] = $sl;
+            } else {
+                $params .= ', ptr %dc.a' . (string)$i;
+                $this->locals->slots[$ln] = '%dc.a' . (string)$i;
+            }
+            $args[] = new LoadLocal($ln, $a->type);
+        }
+        $inner = new Invoke_(new LoadLocal('__mc_dc_name', Type::string_()), $args, $iv->type);
+        $inner->line = $iv->line;
+        $body .= $this->emitDynFnCall($inner, '%dc.name');
+        $ret = $this->lastValue;
+
+        $this->dyncallDepth = $this->dyncallDepth - 1;
+        $this->dynByValue = $oldByValue;
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+
+        $this->dynfExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
+            . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
+        return $sym;
     }
 
     /**

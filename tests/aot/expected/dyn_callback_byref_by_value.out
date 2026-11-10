@@ -1,0 +1,3 @@
+Error: cmpRef(): Argument #1 ($a) must be passed by reference, value given
+3,2,1
+4,3,2
