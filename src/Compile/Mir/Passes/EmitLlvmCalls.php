@@ -915,7 +915,11 @@ trait EmitLlvmCalls
         $out .= '  ' . $keyP . ' = select i1 ' . $isBs0 . ', ptr ' . $tail0 . ', ptr ' . $keyRaw . "\n";
         $idTab = $this->dynfIdTable();
         $idMap = $idTab[2];
-        $out .= $this->dynfCachedRow($keyP, $idTab[0], $idTab[1], $rowReg);
+        // The row count is READ, not inlined: it is a property of the whole
+        // program, and the caller may be a prelude body that every program shares.
+        $idCnt = $this->ssa->allocReg();
+        $out .= '  ' . $idCnt . ' = load i64, ptr ' . $idTab[0] . ".n\n";
+        $out .= $this->dynfCachedRow($keyP, $idTab[0], $idCnt, $rowReg);
         $idp = $this->ssa->allocReg();
         $nameId = $this->ssa->allocReg();
         $hasRow = $this->ssa->allocReg();
@@ -1403,7 +1407,7 @@ trait EmitLlvmCalls
             $out .= $this->boxToCell($a->type, $a);
             $argRegs[] = $this->lastValue;
         }
-        $out .= $this->dynfCachedRow($keyP, $pair[0], $pair[1], $trow);
+        $out .= $this->dynfCachedRow($keyP, $pair[0], (string)$pair[1], $trow);
         $hit = $this->ssa->allocReg();
         $out .= '  ' . $hit . ' = icmp ne ptr ' . $trow . ", null\n";
         $callL = $this->ssa->allocLabel('dynf.tab');
@@ -1460,7 +1464,15 @@ trait EmitLlvmCalls
         return $out;
     }
 
-    /** Name table over every nameable function and builtin twin: [rows symbol, count, lowercase name => id]. Ids are 1-based sorted positions. */
+    /**
+     * Name table over every nameable function and builtin twin: [rows symbol,
+     * count, lowercase name => id]; `<rows symbol>.n` holds the count.
+     *
+     * An id is a hash of the NAME, never a position: a position shifts with every
+     * function the program adds, and the ids are inlined into the arms of every
+     * by-name call — prelude bodies included, which must read the same in every
+     * program. Never 0 (the miss row answers 0); a collision re-salts.
+     */
     private function dynfIdTable(): array
     {
         if ($this->dynfIdTab !== null) { return $this->dynfIdTab; }
@@ -1472,15 +1484,23 @@ trait EmitLlvmCalls
         \ksort($names, SORT_STRING);
         $this->dynfExtraBodies .= $this->dynfBsearchFn();
         $ids = [];
+        /** @var array<int, bool> */
+        $taken = [];
         $rows = [];
-        $i = 0;
         foreach ($names as $lc => $pub) {
-            $i = $i + 1;
-            $ids[$lc] = $i;
-            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($pub) . ', ptr inttoptr (i64 ' . (string)$i . ' to ptr) }';
+            $salt = '';
+            $id = $this->fnvHash64($lc) & 0x7FFFFFFFFFFFFFFF;
+            while ($id === 0 || isset($taken[$id])) {
+                $salt = $salt . '#';
+                $id = $this->fnvHash64($lc . $salt) & 0x7FFFFFFFFFFFFFFF;
+            }
+            $taken[$id] = true;
+            $ids[$lc] = $id;
+            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($pub) . ', ptr inttoptr (i64 ' . (string)$id . ' to ptr) }';
         }
         $tsym = '@.dynf.ids.' . $this->mirHelperSym('0');
-        $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)\count($rows) . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n\n";
+        $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)\count($rows) . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n";
+        $this->dynfExtraBodies .= $tsym . '.n = linkonce_odr constant i64 ' . (string)\count($rows) . "\n\n";
         $this->dynfIdTab = [$tsym, \count($rows), $ids];
         return $this->dynfIdTab;
     }
@@ -1502,7 +1522,7 @@ trait EmitLlvmCalls
      * $rowReg to the row pointer, null on a miss (misses are not cached).
      * The cache global is `internal`: never shared across call sites or modules.
      */
-    private function dynfCachedRow(string $keyP, string $tsym, int $count, ?string &$rowReg): string
+    private function dynfCachedRow(string $keyP, string $tsym, string $count, ?string &$rowReg): string
     {
         $this->dynfExtraBodies .= $this->dynfBsearchFn() . $this->dynfIcmpFn();
         // Named by the function holding the site and the site's ordinal in it: a
@@ -1533,7 +1553,7 @@ trait EmitLlvmCalls
         $out .= '  br i1 ' . $ceq . ', label %' . $joinL . ', label %' . $slowL . "\n";
         $out .= $slowL . ":\n";
         $srow = $this->ssa->allocReg();
-        $out .= '  ' . $srow . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP . ', ptr ' . $tsym . ', i64 ' . (string)$count . ")\n";
+        $out .= '  ' . $srow . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP . ', ptr ' . $tsym . ', i64 ' . $count . ")\n";
         $out .= '  store ptr ' . $srow . ', ptr ' . $cg . "\n";
         $out .= '  br label %' . $joinL . "\n" . $joinL . ":\n";
         $rowReg = $this->ssa->allocReg();
