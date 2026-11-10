@@ -710,6 +710,7 @@ trait LowerExprs
             // const lookup below. Resolve `self`/`static`/`parent` first so a
             // `self::Case` inside an enum method finds its own case table.
             $ecls = \ltrim($this->resolveStaticClass($saClass), '\\');
+            $this->noteStaticClassRef($ecls);
             if (isset($this->enumTable[$ecls])) {
                 $ord = $this->enumTable[$ecls]->ordinalOf($saName);
                 if ($ord >= 0) {

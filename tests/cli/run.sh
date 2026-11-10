@@ -127,6 +127,9 @@ PHP
     diag "check_numeric_class"      "$MC" compile --check "$HERE/check/numeric_class.php" -o "$WORK/nc"
     diag "check_missing_package"    sh -c "cd \"$HERE/check/missing_package\" && \"$MC\" build --check"
     diag "check_unit_top_level"     sh -c "cd \"$HERE/check/unit_top_level\" && \"$MC\" build --check"
+    for r in basic interface_dispatch magic_and_interfaces callables dynamic_new class_level; do
+        diag "reach_$r" env MANTICORE_REACH_DUMP=1 "$MC" compile --check "$HERE/check/reach/$r.php" -o "$WORK/rh"
+    done
     printf '== builtin names in sync\n'; bash "$ROOT/tools/check_builtin_names.sh"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus

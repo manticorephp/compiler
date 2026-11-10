@@ -3126,6 +3126,7 @@ final class LowerFromAst implements Pass
         $this->currentLowerClass = $lexicalClass !== '' ? $lexicalClass : $decl->name;
         $this->currentStaticClass = $staticClass;
         $this->currentLowerFn = $m->name;
+        $prevFnSym = $this->currentFnSym;
         $this->currentFnSym = $fnName;
         // Which class a lowered method body belongs to. `$this` is untyped until
         // InferTypes runs, so a pass that needs to attribute a `$this->p = …`
@@ -3284,6 +3285,7 @@ final class LowerFromAst implements Pass
         $mfn->isGenerator = $isGen;
         $mfn->usesFuncArgs = $usesFuncArgs;
         $mfn->returnArrayHinted = $this->isBareArrayReturnHint($m->returnType);
+        $this->currentFnSym = $prevFnSym;
         return $mfn;
     }
 
@@ -4555,8 +4557,12 @@ final class LowerFromAst implements Pass
     private string $lastClosureFrame = '';
     /** @var string[] guard labels live at the code being lowered (innermost last) */
     private array $guardStack = [];
-    /** Set while declaration signatures / hierarchies are checked: those sites belong to no function. */
+    /** Set while declaration signatures / hierarchies are checked: those sites belong to {@see $declSym}. */
     private bool $inDeclCheck = false;
+    /** The function a checked signature belongs to, or `@class:<FQN>` for a hierarchy / property type. */
+    private string $declSym = '';
+    /** @var array<string, array<string, bool>> lowercase class => the functions reading its constants / static properties (`@class:<FQN>` from class-level code) */
+    public array $staticClassRefs = [];
 
     private const GUARD_FNS = ['class_exists' => true, 'interface_exists' => true, 'trait_exists' => true,
         'enum_exists' => true, 'function_exists' => true, 'method_exists' => true, 'is_callable' => true,
@@ -4564,10 +4570,12 @@ final class LowerFromAst implements Pass
 
     private function currentFnSymbol(): string
     {
-        if ($this->inDeclCheck) { return ''; }
+        if ($this->inDeclCheck) { return $this->declSym; }
         $n = \count($this->closureFrames);
         if ($n > 0) { return $this->closureFrames[$n - 1]; }
-        return $this->currentFnSym === '' ? '__main' : $this->currentFnSym;
+        if ($this->currentFnSym !== '') { return $this->currentFnSym; }
+        // Outside any body but inside a class: a default, constant, case or attribute argument.
+        return $this->currentLowerClass !== '' ? '@class:' . \ltrim($this->currentLowerClass, '\\') : '__main';
     }
 
     private function currentGuard(): string
@@ -4681,7 +4689,8 @@ final class LowerFromAst implements Pass
 
     private function skipsSiteNotes(): bool
     {
-        $f = $this->currentLowerFn;
+        // Only a BODY belongs to runtime plumbing; class-level code keeps whatever fn lowered last.
+        $f = $this->currentFnSym !== '' ? $this->currentLowerFn : '';
         if (\strncmp($f, '__mir_', 6) === 0) { return true; }
         return \strncmp($f, '__mc_', 5) === 0 && \strncmp($f, '__mc_unit_', 10) !== 0;
     }
@@ -4708,6 +4717,13 @@ final class LowerFromAst implements Pass
         $what = $code === 'undefined.constant' ? 'constant ' . $n : ($code === 'undefined.function' ? 'function ' . $n . '()' : 'class ' . $n);
         $this->diags->addUse('warning', $code, $n, $what . ' is not declared', $file, $span === null ? 0 : $span->line,
             $this->currentFnSymbol(), $kind, $this->currentGuard());
+    }
+
+    /** `C::K` / `C::$p` / `E::Case`: lowering inlines them, so reachability learns of the class here. */
+    private function noteStaticClassRef(string $cls): void
+    {
+        if ($this->diags === null || $this->lowerInPrelude || $cls === '') { return; }
+        $this->staticClassRefs[\strtolower(\ltrim($cls, '\\'))][$this->currentFnSymbol()] = true;
     }
 
     /** `new X` / `catch (X)` / `instanceof X` naming a class nothing declares. */
@@ -4739,15 +4755,18 @@ final class LowerFromAst implements Pass
             foreach ($stmt->body->statements as $s) { $this->checkDeclTypeNamesIn($s); }
         } elseif ($stmt->kind === 'Function') {
             $d = $stmt->decl;
+            $this->declSym = $d->name;
             $this->noteHintNames($d->returnType, $d->span);
             foreach ($d->params as $p) { $this->noteHintNames($p->typeHint, $p->span); }
         } elseif ($stmt->kind === 'Class') {
             $d = $stmt->decl;
+            $this->declSym = '@class:' . \ltrim($d->name, '\\');
             foreach ([$d->extends, $d->implements, $d->uses] as $names) {
                 foreach ($names as $n) { $this->noteClassRef(\ltrim($n, '\\'), $d->span); }
             }
             foreach ($d->properties as $p) { $this->noteHintNames($p->typeHint, $p->span); }
             foreach ($d->methods as $m) {
+                $this->declSym = $d->name . '__' . $m->name;
                 $this->noteHintNames($m->returnType, $m->span);
                 foreach ($m->params as $p) { $this->noteHintNames($p->typeHint, $p->span); }
             }
@@ -5033,6 +5052,7 @@ final class LowerFromAst implements Pass
     private function staticPropRef(string $rawClass, string $rawName): ?StaticProp_
     {
         $cls = $this->resolveStaticClass($rawClass);
+        $this->noteStaticClassRef($cls);
         $pn = $rawName;
         if (\strlen($pn) > 0 && $pn[0] === '$') { $pn = \substr($pn, 1); }
         $dc = $this->staticPropDeclClass($cls, $pn);

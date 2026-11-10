@@ -124,6 +124,66 @@ front end: 0 error(s), 1 warning(s)
 rc=0
 unit_top_level/src/u.php:3: warning[undefined.class]: class Missing\U is not declared
 front end: 0 error(s), 1 warning(s)
+== reach_basic
+rc=0
+reach: __main
+reach: a
+reach: b
+== reach_interface_dispatch
+rc=0
+class: A
+reach: __main
+reach: A__find
+reach: look
+== reach_magic_and_interfaces
+rc=0
+class: M
+reach: __main
+reach: M____construct
+reach: M____toString
+reach: M__getIterator
+reach: M__jsonSerialize
+reach: M__offsetExists
+reach: M__offsetGet
+reach: M__offsetSet
+reach: M__offsetUnset
+== reach_callables
+rc=0
+class: C
+reach: __closure_10
+reach: __closure_7
+reach: __closure_9
+reach: __main
+reach: C__cmp
+reach: C__s
+reach: C__sortIt
+reach: f
+reach: g
+reach: makesClosure
+== reach_dynamic_new
+rc=0
+class: stdClass
+class: X
+class: Y
+class: Z
+reach: __main
+reach: X____construct
+reach: Y____construct
+== reach_class_level
+rc=0
+class: Holder
+class: Konst
+class: Used
+reach: __main
+reach: Holder__v
+reach: Used__m
+reach/class_level.php:2: warning[undefined.constant]: constant UNDEF_USED is not declared
+reach/class_level.php:3: warning[undefined.class]: class MissingHint is not declared
+reach/class_level.php:3: warning[undefined.constant]: constant UNDEF_DEAD is not declared
+site: undefined.class|missinghint line=3 fn=@class:Dead reach=0
+site: undefined.constant|undef_dead line=3 fn=@class:Dead reach=0
+site: undefined.constant|undef_used line=2 fn=@class:Used reach=1
+front end: 0 error(s), 3 warning(s)
 == builtin names in sync
 ok
 == compile bad --progress

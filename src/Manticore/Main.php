@@ -5468,6 +5468,28 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             \Compile\Mir\UndefinedFunctionScan::run($module, $diag, $extNames, $userAbs, $lower->userCallNames, $lower->userCallFiles, $lower->userCallLines, $lower->userCallFns, $lower->userCallGuards);
         }
         $diag->resolveSiteFns();
+        $reach = null;
+        if ($collect === null) {
+            /** @var array<string, array<string, bool>> $classRefs */
+            $classRefs = [];
+            foreach ($lower->staticClassRefs as $rc => $rfns) {
+                foreach ($rfns as $rfn => $_r) { $classRefs[(string)$rc][$diag->resolveFn((string)$rfn)] = true; }
+            }
+            $reachT = \Compile\Stats::begin('Reachability');
+            $reach = \Compile\Mir\Reachability::compute($module, $classRefs);
+            \Compile\Stats::step('Reachability', $reachT, \count($module->functions), \count($module->classes));
+            if (\getenv('MANTICORE_REACH_DUMP') === '1') {
+                $rd = $reach->dump();
+                foreach ($diag->useSites as $sk => $sites) {
+                    foreach ($sites as $site) {
+                        $sfn = (string)$site['fn'];
+                        $rd .= 'site: ' . (string)$sk . ' line=' . (string)$site['line'] . ' fn=' . $sfn
+                            . ' reach=' . ($reach->reaches($sfn) ? '1' : '0') . "\n";
+                    }
+                }
+                dprint(\rtrim($rd, "\n"));
+            }
+        }
         if ($collect !== null) {
             foreach ($diag->items as $it) {
                 if ($it->severity === 'error') {

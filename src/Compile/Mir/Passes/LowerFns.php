@@ -140,6 +140,7 @@ trait LowerFns
         $this->currentLowerClass = $this->synthFnScope[$decl->name] ?? '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        $prevFnSym = $this->currentFnSym;
         $this->currentFnSym = $decl->name;
         if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // FFI: `#[Symbol('cSym')]` makes this a thin extern forward — the
@@ -200,6 +201,7 @@ trait LowerFns
             // free-function files do not remain rooted through fnDecls.
             $decl->body = null;
 
+            $this->currentFnSym = $prevFnSym;
             return $fn;
         }
         $savedSawYield = $this->sawYield;
@@ -240,6 +242,7 @@ trait LowerFns
         // argument filling; the lowered body itself is no longer needed.
         $decl->body = null;
 
+        $this->currentFnSym = $prevFnSym;
         return $fn;
     }
 
@@ -256,6 +259,7 @@ trait LowerFns
         $this->currentLowerClass = '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        $prevFnSym = $this->currentFnSym;
         $this->currentFnSym = $decl->name;
         if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // `#[RefOut('a', 'b')]` on the function names its pure-output by-ref
@@ -310,6 +314,7 @@ trait LowerFns
             returnsByRef: (bool)($decl->returnsByRef ?? false),
         );
         $ext->returnArrayHinted = $this->isBareArrayReturnHint($decl->returnType);
+        $this->currentFnSym = $prevFnSym;
         return $ext;
     }
 

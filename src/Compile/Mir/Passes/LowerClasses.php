@@ -1272,6 +1272,7 @@ trait LowerClasses
             $module->methodDisplay[$fnName] = $decl->name . $sep . $m->name;
         }
         $this->currentLowerClass = '';
+        $this->currentFnSym = '';
     }
 
     /**
