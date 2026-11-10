@@ -383,6 +383,14 @@ trait LowerExprs
                     }
                     return new ArrayLit($elems, Type::unknown());
                 }
+                // A name held in a variable (`compact($pieces)`): pick from the
+                // scope's own symbol table.
+                $cnames = [];
+                foreach ($expr->args as $a) { $cnames[] = new \Parser\Ast\ArrayElement(null, $a); }
+                return $this->lowerExpr(\Parser\Ast\Expr::call('__mc_compact', [
+                    \Parser\Ast\Expr::call('get_defined_vars', [], $expr->span),
+                    \Parser\Ast\Expr::arrayLit($cnames, $expr->span),
+                ], $expr->span));
             }
             // `get_class_vars($c)` / `get_object_vars($o)` answer by the CALLING scope's
             // visibility. The scope is known here and nowhere later, so pass it on (`''` =
