@@ -1,0 +1,7 @@
+before require
+routes/web.php ran
+after require {"r":1}
+routes/plain.php ran
+int(1)
+after guarded Lazy\TokenPolyfill
+vars /srv 3 3

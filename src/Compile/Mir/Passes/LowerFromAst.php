@@ -1559,6 +1559,12 @@ final class LowerFromAst implements Pass
         $this->releaseAllClassMetadata();
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
         $mainStmts = $this->injectGlobalDecls($mainStmts);
+        // A lazy include unit (Main.php `__mc_unit_N`) is a file's top level run at its
+        // `require`: its variables live in the global scope, like `__main`'s.
+        foreach ($module->functions as $ufn) {
+            if (!\str_starts_with($ufn->name, '__mc_unit_')) { continue; }
+            $ufn->body = new Block($this->injectGlobalDecls($ufn->body->stmts), $ufn->body->type);
+        }
         $mainStmts = $this->injectShutdownDrain($mainStmts);
         $mainBody = new Block($mainStmts, Type::void());
         $module->loweringFile = $mainFile;
