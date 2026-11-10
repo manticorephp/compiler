@@ -883,7 +883,7 @@ trait LowerExprs
         // Unwrap positionally for now — full reordering against the
         // callee's params on those paths is a TODO.
         if ($expr->kind === 'NamedArg')       { return $this->lowerExpr($this->namedArgValue($expr)); }
-        if ($expr->kind === 'Identifier')     { return $this->lowerIdentifier($expr->name, $expr->span->line); }
+        if ($expr->kind === 'Identifier')     { return $this->lowerIdentifier($expr->name, $expr->span->line, $expr->span); }
         if ($expr->kind === 'Yield') {
             // Read subclass fields through a YieldExpr-typed param (the kind
             // check above proves the shape) — a base-`Expr` read picks the
@@ -949,6 +949,7 @@ trait LowerExprs
                 || isset($this->enumTable[$saCls])
                 || isset($this->classDecls[$saCls]);
             if ($saName !== '' && \strtolower($saName) !== 'class') {
+                if (!$classKnown) { $this->noteClassRef($saCls, $expr->span); }
                 return $this->throwErrorExpr($classKnown
                     ? 'Undefined constant ' . $saCls . '::' . $saName
                     : 'Class "' . $saCls . '" not found');

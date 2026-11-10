@@ -4395,7 +4395,7 @@ final class LowerFromAst implements Pass
      * predefined constants the compiler source uses; `true`/`false`/
      * `null` too (the parser sometimes hands them through as identifiers).
      */
-    private function lowerIdentifier(string $rawName, int $line = 0): Node
+    private function lowerIdentifier(string $rawName, int $line = 0, ?\Parser\Ast\Span $span = null): Node
     {
         // An unqualified constant resolves in the current namespace
         // first, then the global one — so `Compile\PHP_INT_MAX` is really
@@ -4429,6 +4429,7 @@ final class LowerFromAst implements Pass
         // `undefined.constant` closed-world over the whole source set, which is
         // where a typo should be caught — at build time, by the thing whose job
         // that is, rather than by the code generator refusing to emit.
+        $this->noteUndefined('undefined.constant', $rawName, $span ?? new \Parser\Ast\Span($line, 0, $this->lowerSourceFile));
         return $this->throwErrorExpr(
             'Undefined constant "' . \ltrim($rawName, '\\') . '"');
     }
@@ -4450,6 +4451,48 @@ final class LowerFromAst implements Pass
     {
         $f = $s->file === '' ? '<generated>' : $s->file;
         return $f . ':' . (string)$s->line . ':' . (string)$s->column;
+    }
+
+    /**
+     * Class names the compiler owns without a PHP declaration: `Closure` (emitter statics, EmitLlvmObjects /
+     * staticClassAbsent), `Generator` (emitter-built, EmitLlvmBuiltins class_exists), `Ffi\Ptr` (ptrIntrinsicClass).
+     */
+    private const COMPILER_CLASSES = ['closure' => true, 'generator' => true, 'ffi\\ptr' => true];
+
+    /** Whether the class table, a declared trait/enum/interface, an extern signature or a compiler-owned name knows `$fqn`. */
+    private function classIsDeclared(string $fqn): bool
+    {
+        $c = \ltrim($fqn, '\\');
+        if (isset($this->knownClassNames[$c]) || isset($this->classTable[$c]) || isset($this->enumTable[$c])
+            || isset($this->traitTable[$c]) || isset($this->classDecls[$c])
+            || isset($this->externClassMeta[$c])) { return true; }
+        $low = \strtolower($c);
+        if (isset(self::COMPILER_CLASSES[$low])) { return true; }
+        foreach ([$this->knownClassNames, $this->classTable, $this->enumTable, $this->traitTable,
+                  $this->classDecls, $this->externClassMeta] as $tbl) {
+            foreach ($tbl as $n => $_) {
+                if (\strtolower((string)$n) === $low) { return true; }
+            }
+        }
+        return false;
+    }
+
+    /** Record a reference to an undeclared class/constant as a grouped front-end warning; user code only. */
+    private function noteUndefined(string $code, string $name, ?\Parser\Ast\Span $span): void
+    {
+        if ($this->diags === null || $this->lowerInPrelude) { return; }
+        if (\strncmp($this->currentLowerFn, '__mir_', 6) === 0 || \strncmp($this->currentLowerFn, '__mc_', 5) === 0) { return; }
+        $file = $span === null ? '' : $span->file;
+        if ($file === '') { $file = $this->lowerSourceFile; }
+        $n = \ltrim($name, '\\');
+        $what = $code === 'undefined.constant' ? 'constant ' . $n : ($code === 'undefined.function' ? 'function ' . $n . '()' : 'class ' . $n);
+        $this->diags->addUse('warning', $code, $n, $what . ' is not declared', $file, $span === null ? 0 : $span->line);
+    }
+
+    /** `new X` / `catch (X)` / `instanceof X` naming a class nothing declares. */
+    private function noteClassRef(string $cls, ?\Parser\Ast\Span $span): void
+    {
+        if ($cls !== '' && !$this->classIsDeclared($cls)) { $this->noteUndefined('undefined.class', $cls, $span); }
     }
 
     /**
@@ -7313,6 +7356,7 @@ final class LowerFromAst implements Pass
         $cls = ($low === 'self' || $low === 'static' || $low === 'parent')
             ? $this->resolveStaticClass($e->class)
             : \ltrim($e->class, '\\');
+        $this->noteClassRef($cls, $e->span);
         return new Instanceof_($this->lowerExpr($e->operand), $cls);
     }
 
@@ -7496,6 +7540,7 @@ final class LowerFromAst implements Pass
     {
         // `new self` / `new static` / `new parent` → concrete class.
         $cls = $this->resolveStaticClass($expr->class);
+        $this->noteClassRef($cls, $expr->span);
         $den = $this->newAccessError($cls);
         if ($den !== '') { return $this->throwErrorExpr($den); }
         // A Ptr is its address at run time ({@see ptrIntrinsicClass}): `new Ptr($a)` IS int_to_ptr($a).
@@ -8227,6 +8272,7 @@ final class LowerFromAst implements Pass
         // and clang refused the whole build — strictly stricter than php, which
         // runs the file happily and only raises if the branch is REACHED.
         if ($this->staticClassAbsent($class, $expr->method)) {
+            $this->noteUndefined('undefined.class', $class, $expr->span);
             return $this->throwErrorExpr('Class "' . $class . '" not found');
         }
         if ($this->staticCallUnresolvable($class, $expr->method)) {

@@ -20,6 +20,26 @@ final class Diagnostics
         $this->items[] = new Diagnostic($file, $line, $col, $severity, $code, $message);
     }
 
+    /** @var array<string,int> */
+    private array $useIdx = [];
+    /** @var array<int,int> */
+    private array $useCount = [];
+
+    /** One diagnostic per (code, name): the first site is kept, later uses only count. */
+    public function addUse(string $severity, string $code, string $name, string $message, string $file, int $line): void
+    {
+        $k = $code . '|' . \strtolower($name);
+        if (isset($this->useIdx[$k])) {
+            $i = $this->useIdx[$k];
+            $this->useCount[$i] = $this->useCount[$i] + 1;
+            return;
+        }
+        $n = \count($this->items);
+        $this->useIdx[$k] = $n;
+        $this->useCount[$n] = 1;
+        $this->items[] = new Diagnostic($file, $line, 0, $severity, $code, $message);
+    }
+
     public function hasErrors(): bool
     {
         foreach ($this->items as $d) {
@@ -50,7 +70,9 @@ final class Diagnostics
         $out = '';
         foreach ($keyed as $k) {
             $d = $this->items[(int)\substr($k, \strrpos($k, '|') + 1)];
-            $out .= $d->file . ':' . (string)$d->line . ': ' . $d->severity . '[' . $d->code . ']: ' . $d->message . "\n";
+            $uses = $this->useCount[(int)\substr($k, \strrpos($k, '|') + 1)] ?? 1;
+            $out .= $d->file . ':' . (string)$d->line . ': ' . $d->severity . '[' . $d->code . ']: ' . $d->message
+                . ($uses > 1 ? ' (' . (string)$uses . ' uses)' : '') . "\n";
         }
         return $out . 'front end: ' . (string)$errors . ' error(s), ' . (string)$warnings . ' warning(s)';
     }

@@ -96,7 +96,7 @@ trait LowerStmts
         $catches = [];
         foreach ($stmt->catches as $c) {
             $types = [];
-            foreach ($c->types as $t) { $types[] = \ltrim($t, '\\'); }
+            foreach ($c->types as $t) { $types[] = \ltrim($t, '\\'); $this->noteClassRef(\ltrim($t, '\\'), $stmt->span); }
             // The arm takes the thrown object's +1 out of `@__mir_thrown`
             // first: into its variable, or discarded (released) without one.
             $caught = new CaughtValue_($types, Type::obj(\count($types) > 0 ? $types[0] : 'Throwable'));

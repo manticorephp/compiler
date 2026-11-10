@@ -115,6 +115,10 @@ PHP
     diag "check_parse_in_body"      "$MC" compile --check "$HERE/check/parse_in_body.php" -o "$WORK/pb"
     diag "check_parse_two_in_body"  "$MC" compile --check "$HERE/check/parse_two_in_body.php" -o "$WORK/p2"
     diag "check_dedup"              "$MC" compile --check "$HERE/check/dedup.php" -o "$WORK/dd"
+    diag "check_unresolved_classes" sh -c "cd \"$HERE/check/unresolved_classes\" && \"$MC\" build --check"
+    diag "check_known_builtin_classes" "$MC" compile --check "$HERE/check/known_builtin_classes.php" -o "$WORK/kb"
+    diag "check_guarded_decls"      "$MC" compile --check "$HERE/check/guarded_decls.php" -o "$WORK/gd"
+    diag "check_ref_after_class"    "$MC" compile --check "$HERE/check/ref_after_class_lowered.php" -o "$WORK/rc"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir
