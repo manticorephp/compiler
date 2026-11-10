@@ -1206,6 +1206,12 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
     if ($largeModule && $forcedJobs >= 2) {
         \Compile\Stats::line('  assembly: forced split jobs=' . (string)$jobs);
     }
+    if ($jobs < 2 && shared_generics_enabled()) {
+        $objs = assemble_shared($ir, $base, $cflags);
+        if ($objs !== []) {
+            return $objs;
+        }
+    }
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
         if (!write_file($llPath, with_frame_pointers($ir))) {
@@ -1346,6 +1352,67 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
     return $objs;
 }
 
+/**
+ * Shared generics: each large prelude/runtime body is compiled once per VARIANT
+ * and reused from the object cache by every program that emits the same text
+ * ({@see \Compile\Mir\ShareSplit}). Default on for an executable's module;
+ * `MANTICORE_SHARED_GENERICS=0` compiles the whole module as one unit (A/B
+ * measurement). A library shares its link with the app, so it stays one unit.
+ */
+function shared_generics_enabled(): bool
+{
+    if (CompileArgs::$emitLibrary) {
+        return false;
+    }
+    $e = \getenv('MANTICORE_SHARED_GENERICS');
+    return $e === false || $e === '' || ($e !== '0' && $e !== 'off');
+}
+
+/**
+ * The executable's module as a program part plus one part per large shareable
+ * body, every part through the object cache.
+ *
+ * @return string[] the objects, or [] when the module has nothing to share or
+ *                  a part failed (the caller then compiles the whole module)
+ */
+function assemble_shared(string $ir, string $base, string $cflags): array
+{
+    $statT = \Compile\Stats::begin('  shared split');
+    $splitter = new \Compile\Mir\ShareSplit();
+    $texts = $splitter->run($ir);
+    $bodies = $splitter->bodies;
+    unset($splitter);
+    if (\count($texts) < 2) {
+        return [];
+    }
+    /** @var string[] */
+    $paths = [];
+    foreach ($texts as $i => $t) {
+        $p = $base . '.s' . (string)$i . '.ll';
+        // Per part, as for any split: the attribute group must sit in the file
+        // that names `#0`.
+        if (!write_file($p, with_frame_pointers($t))) {
+            dprint('assemble: cannot write ' . $p);
+            return [];
+        }
+        $paths[] = $p;
+    }
+    unset($texts);
+    \Compile\Stats::step('  shared split (' . (string)$bodies . ' bodies)', $statT, -1, -1);
+    $objs = compile_parts_cached(
+        $paths,
+        $base,
+        '-O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags,
+        '.s',
+        false,
+        true
+    );
+    if ($objs === []) {
+        dprint('assemble: shared split failed; compiling the module as one unit');
+    }
+    return $objs;
+}
+
 /** Assemble already-staged large IR without reading it back into PHP. */
 function assemble_ir_file(
     string $llPath,
@@ -1418,6 +1485,25 @@ function assemble_ir_file_split(
     // Its module index would otherwise stay resident beside every clang.
     unset($splitter);
     $lto = thinlto_flags();
+    return compile_parts_cached(
+        $parts,
+        $base,
+        '-O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags,
+        '.p',
+        $lto !== ''
+    );
+}
+
+/**
+ * Compile part files to `<base><tag><i>.o` through the object cache: hits are
+ * copied, misses run in batches of what the machine can take ({@see host_jobs},
+ * `MANTICORE_SPLIT_BATCH`), and a miss that built is stored for the next build.
+ *
+ * @param string[] $parts the part `.ll` files
+ * @return string[] the objects in part order, or [] when any part failed
+ */
+function compile_parts_cached(array $parts, string $base, string $flags, string $tag, bool $lto, bool $group = false): array
+{
     $objs = [];
     /** @var string[] */
     $cmds = [];
@@ -1425,9 +1511,8 @@ function assemble_ir_file_split(
     $putKeys = [];
     $hits = 0;
     foreach ($parts as $i => $partPath) {
-        $pobj = $base . '.p' . (string)$i . '.o';
+        $pobj = $base . $tag . (string)$i . '.o';
         $objs[] = $pobj;
-        $flags = '-O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags;
         if (obj_cache_enabled(true)) {
             $k = obj_cache_key($partPath, $flags);
             if ($k !== '') {
@@ -1454,9 +1539,11 @@ function assemble_ir_file_split(
     if (obj_cache_enabled(true)) {
         \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
     }
+    /** @var int[] */
+    $missIdx = \array_keys($cmds);
     $cmds = \array_values($cmds);
     $stage = '  clang -O' . clang_opt_level() . ' -c x' . (string)\count($cmds)
-        . ($lto === '' ? '' : ' (thinlto)');
+        . ($lto ? ' (thinlto)' : '');
     $statT = \Compile\Stats::begin($stage);
     // ⚠ PARTS and CONCURRENCY are two different numbers, and conflating them is
     // what makes a big module unbuildable. clang's peak is roughly proportional
@@ -1496,13 +1583,39 @@ function assemble_ir_file_split(
             $batch = $b;
         }
     }
+    if ($group && \count($missIdx) > $batch) {
+        // ONE clang per group of misses, the groups side by side. Starting clang
+        // costs ~40 ms before it reads a byte, which is most of what a small part
+        // costs; one driver over many inputs pays it once (24 body parts: 1048 ms
+        // as 24 runs, 516 ms as one). clang names each object after its input,
+        // so from the parts' own directory `<base>.s<i>.ll` lands on `<base>.s<i>.o`.
+        $dir = \dirname($base);
+        /** @var array<int, string> */
+        $groups = [];
+        // Part 0 is the largest by far (the program part); it runs alone.
+        $j = 0;
+        foreach ($missIdx as $pi) {
+            if ($pi === 0 && $batch >= 2) {
+                $groups[0] = ' ' . \basename($parts[0]);
+                continue;
+            }
+            $g = $batch >= 2 && isset($groups[0]) && $groups[0] === ' ' . \basename($parts[0])
+                ? 1 + $j % ($batch - 1) : $j % $batch;
+            $groups[$g] = ($groups[$g] ?? '') . ' ' . \basename($parts[$pi]);
+            $j = $j + 1;
+        }
+        $cmds = [];
+        foreach ($groups as $files) {
+            $cmds[] = 'cd ' . $dir . ' && clang ' . $flags . ' -c -x ir' . $files . ' -Wno-override-module';
+        }
+    }
     // `wait` must be INSIDE the subshell: the background jobs are ITS children.
     $i = 0;
     $n = \count($cmds);
     if (\Compile\Progress::active() && $n === 0) {
         \Compile\Progress::counter('clang', $hits, \count($objs));
     }
-    if (\Compile\Progress::active() && $n > 0) {
+    if (\Compile\Progress::active() && $n > 0 && $n === \count($missIdx)) {
         // Progress-aware twin of the loop below: same batches, same commands,
         // but the parent polls the finished parts instead of blocking.
         /** @var string[] */
@@ -1557,8 +1670,8 @@ function assemble_ir_file_split(
     foreach ($objs as $i => $o) {
         if (!\file_exists($o)) {
             dprint(
-                'assemble: staged part ' . (string)$i . ' failed to build; IR at '
-                . $base . '.p' . (string)$i . '.ll'
+                'assemble: part ' . (string)$i . ' failed to build; IR at '
+                . $parts[$i]
             );
             return [];
         }
@@ -3474,7 +3587,7 @@ function build_compile_module(
         }
         if (!$keep) {
             system(
-                "rm -f " . $llPath . " " . $base . ".p*.ll "
+                "rm -f " . $llPath . " " . $base . ".p*.ll " . $base . ".s*.ll " . $base . ".s*.o "
                 . $base . ".p*.o " . $base . ".o"
             );
         }
@@ -3609,7 +3722,7 @@ function build_compile_module(
         return 76;
     }
     if (!$keep) {
-        system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll");
+        system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll " . $base . ".s*.ll");
     }
     return 0;
 }

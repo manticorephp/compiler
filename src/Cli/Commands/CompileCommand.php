@@ -281,7 +281,7 @@ final class CompileCommand extends Command
         // Linked: the staged IR and objects have no further use. Kept under
         // --keep-ir, which is the escape hatch for reading what was emitted.
         if (!$keep) {
-            \Manticore\system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll");
+            \Manticore\system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll " . $base . ".s*.ll");
         }
         return 0;
     }

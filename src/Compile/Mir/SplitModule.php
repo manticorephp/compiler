@@ -1106,7 +1106,7 @@ final class SplitModule
         return true;
     }
 
-    private function head(string $def): string
+    public function head(string $def): string
     {
         $nl = \strpos($def, "\n");
         return $nl === false ? $def : \substr($def, 0, $nl);
@@ -1126,14 +1126,14 @@ final class SplitModule
         return '@' . $sym;
     }
 
-    private function defineSymbol(string $line): string
+    public function defineSymbol(string $line): string
     {
         $at = \strpos($line, '@');
         if ($at === false) { return ''; }
         return $this->readSymbol($line, $at + 1);
     }
 
-    private function globalName(string $line): string
+    public function globalName(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return ''; }
@@ -1160,7 +1160,7 @@ final class SplitModule
         return 'strong';
     }
 
-    private function promoteGlobal(string $line): string
+    public function promoteGlobal(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return $line; }
@@ -1176,7 +1176,7 @@ final class SplitModule
     }
 
     /** The `external` form of a global definition — same name and type, no initializer. */
-    private function externGlobal(string $line): string
+    public function externGlobal(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return $line; }
@@ -1244,7 +1244,7 @@ final class SplitModule
     }
 
     /** A definition header relinked `available_externally` — same signature and attributes. */
-    private function availHead(string $headLine): string
+    public function availHead(string $headLine): string
     {
         $rest = \substr($headLine, 7);
         $keys = ['linkonce_odr ', 'weak_odr ', 'external ', 'dso_local ', 'weak ', 'linkonce '];
@@ -1262,7 +1262,7 @@ final class SplitModule
     }
 
     /** A `declare` taken from the definition's own header — never invented. */
-    private function declareFromDefine(string $def): string
+    public function declareFromDefine(string $def): string
     {
         $headLine = $this->head($def);
         $paren = \strpos($headLine, '(');
@@ -1319,7 +1319,7 @@ final class SplitModule
      *
      * @param array<string, bool> $into
      */
-    private function collectRefsBulk(string $text, array &$into): void
+    public function collectRefsBulk(string $text, array &$into): void
     {
         if (\strpos($text, '@') === false) { return; }
         \preg_match_all('/@("[^"\n]*"|[A-Za-z0-9_.$\\\\-]+)/', $text, $m);
