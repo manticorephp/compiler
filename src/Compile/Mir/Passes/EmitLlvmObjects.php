@@ -1673,7 +1673,7 @@ trait EmitLlvmObjects
         // A slot a `&` promoted holds `cell(REF, box)`; the property IS the
         // referenced value, as an element holding one is ({@see
         // EmitLlvmArrays}'s element read, the same deref).
-        if ($n->type->kind === Type::KIND_CELL && isset($this->refCellPropNames[$pa->property])) {
+        if ($n->type->kind === Type::KIND_CELL && $this->propMayHoldRef($pa->object, null, $pa->property)) {
             $this->rt->needsTagged = true;
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
@@ -2566,7 +2566,7 @@ trait EmitLlvmObjects
         $spt = $cd->propertyTypes[$prop] ?? null;
         if ($spt !== null && $cd->propertyWidth($prop) === 8) {
             if ($this->cellPropBoxed($spt, $cd->name, $prop)) {
-                if ($dropBoxed && !isset($this->refCellPropNames[$prop])) { $oldFlavor = 'cell'; }
+                if ($dropBoxed && !$this->propMayHoldRef(null, $cd, $prop)) { $oldFlavor = 'cell'; }
             } elseif ($dropRaw && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))) {
                 $oldFlavor = $this->discardReleaseFlavor($spt);
             }
@@ -3690,7 +3690,7 @@ trait EmitLlvmObjects
         // `cell(REF, box)`: the store goes THROUGH to the box, which takes the
         // count the value already carries.
         $thruDone = '';
-        if (isset($this->refCellPropNames[$n->property]) && $propType !== null
+        if ($this->propMayHoldRef($n->object, null, $n->property) && $propType !== null
             && $propType->kind === Type::KIND_CELL) {
             $wt = $this->ssa->allocReg();
             $out .= '  ' . $wt . ' = call i1 @__mir_ref_slot_store(ptr ' . $gep . ', i64 ' . $val . ")\n";

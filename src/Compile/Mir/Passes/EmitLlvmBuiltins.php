@@ -11497,7 +11497,7 @@ trait EmitLlvmBuiltins
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
             // A slot a `&` bound holds `cell(REF, box)`: the buffer is the box's, and the
             // binding stays. The count moved with the buffer, so nothing is dropped here.
-            if ($asCell && isset($this->refCellPropNames[$arrNode->property])) {
+            if ($asCell && $this->propMayHoldRef($arrNode->object, null, $arrNode->property)) {
                 $w = $this->ssa->allocReg();
                 $hi = $this->ssa->allocReg();
                 $isCell = $this->ssa->allocReg();

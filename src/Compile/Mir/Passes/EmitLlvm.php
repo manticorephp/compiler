@@ -943,6 +943,9 @@ final class EmitLlvm implements EmitVisitor
         // property's REPR is its declaration's, {@see cellPropBoxed}).
         $this->cellPropArrayBase = [];
         $this->refCellPropNames = [];
+        $this->refCellPropShared = [];
+        $this->refCellPropPrivate = [];
+        $this->refCellPropPrivNames = [];
         $this->needsObjectVarsFn = false;
         $this->needsObjectVarsMgFn = false;
         $this->needsGetClassFn = false;
@@ -2323,30 +2326,90 @@ final class EmitLlvm implements EmitVisitor
      * (`[&$o->p]`). Such a slot is promoted in place on the first `&`
      * ({@see EmitLlvmObjects::emitRefCell}): it holds `cell(REF, box)` from
      * then on, so a store of that name tests the slot's tag and writes through
-     * the box, and the class drop gives the slot's count on the box back. By
-     * NAME, not by class: the object may be typed as a parent or a child of the
-     * class the `&` named, and the runtime tag is the real answer anyway.
+     * the box, and the class drop gives the slot's count on the box back.
      *
-     * @var array<string, bool>
+     * Keyed by SLOT OWNER where the receiver's class says who owns the slot
+     * ({@see refSlotOwner}): a SHARED (public/protected) slot by name across
+     * every class — the object may be typed as a parent or a child of the class
+     * the `&` named — and a PRIVATE slot by its declaring class. A `&` whose
+     * receiver class is unknown, or a slot the class does not declare, stays by
+     * NAME and governs every slot of that name. Without the private split, a `&`
+     * to any `$__s` made every read of a prelude class's private `$__s` deref,
+     * so the same prelude body compiled differently from program to program.
+     *
+     * @var array<string, bool> names a `&` reached through an unknown receiver
      */
     private array $refCellPropNames = [];
+    /** @var array<string, bool> names of SHARED slots a `&` reached */
+    private array $refCellPropShared = [];
+    /** @var array<string, bool> `Owner::slot` of PRIVATE slots a `&` reached */
+    private array $refCellPropPrivate = [];
+    /** @var array<string, bool> names of the {@see $refCellPropPrivate} slots */
+    private array $refCellPropPrivNames = [];
 
-    /** Fill {@see $refCellPropNames} from one function body. */
+    /** Fill the `&`-reached slot sets from one function body. */
     private function collectRefCellPropNames(Node $n): void
     {
         if ($n->kind === Node::KIND_REF_CELL) {
             $kids = \Compile\Mir\Walk::children($n);
             if ($kids[0]->kind === Node::KIND_PROPERTY_ACCESS) {
-                $this->refCellPropNames[$this->asPropAccess($kids[0])->property] = true;
+                $pa = $this->asPropAccess($kids[0]);
+                $this->noteRefSlot($pa->object, $pa->property);
             }
             return;
         }
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
             $sp = \Compile\Mir\Walk::children($n);
             $last = $sp[\count($sp) - 1];
-            if ($last->kind === Node::KIND_REF_CELL) { $this->refCellPropNames[$this->asStoreProp($n)->property] = true; }
+            if ($last->kind === Node::KIND_REF_CELL) {
+                $st = $this->asStoreProp($n);
+                $this->noteRefSlot($st->object, $st->property);
+            }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectRefCellPropNames($c); }
+    }
+
+    /**
+     * Who owns `$prop` on a receiver: '' when unknown (no class, or a slot the
+     * class does not declare), '*' for a shared (non-private) slot, else the
+     * class that declared the private slot. `$cd` when the caller already has
+     * the receiver's class, else read from `$recv`'s type.
+     */
+    private function refSlotOwner(?Node $recv, ?\Compile\Mir\ClassDef $cd, string $prop): string
+    {
+        if ($cd === null && $recv !== null && $recv->type->kind === Type::KIND_OBJ && $recv->type->class !== null) {
+            $cd = $this->classes[\ltrim($recv->type->class, '\\')] ?? null;
+        }
+        if ($cd === null) { return ''; }
+        $pm = $cd->propertyMeta[$prop] ?? null;
+        if ($pm === null) { return ''; }
+        if ($pm->visibility !== 'private') { return '*'; }
+        return $pm->declaringClass !== '' ? \ltrim($pm->declaringClass, '\\') : $cd->name;
+    }
+
+    private function noteRefSlot(Node $recv, string $prop): void
+    {
+        $owner = $this->refSlotOwner($recv, null, $prop);
+        if ($owner === '') {
+            $this->refCellPropNames[$prop] = true;
+        } elseif ($owner === '*') {
+            $this->refCellPropShared[$prop] = true;
+        } else {
+            $this->refCellPropPrivate[$owner . '::' . $prop] = true;
+            $this->refCellPropPrivNames[$prop] = true;
+        }
+    }
+
+    /** May the slot `$recv->$prop` hold a `&`-promoted REF cell? See {@see $refCellPropNames}. */
+    private function propMayHoldRef(?Node $recv, ?\Compile\Mir\ClassDef $cd, string $prop): bool
+    {
+        if (isset($this->refCellPropNames[$prop])) { return true; }
+        $owner = $this->refSlotOwner($recv, $cd, $prop);
+        if ($owner === '') {
+            return isset($this->refCellPropShared[$prop]) || isset($this->refCellPropPrivNames[$prop]);
+        }
+        if ($owner === '*') { return isset($this->refCellPropShared[$prop]); }
+        return isset($this->refCellPropPrivate[$owner . '::' . $prop]);
     }
 
     private function asStoreProp(Node $n): \Compile\Mir\StoreProperty { return $n; }

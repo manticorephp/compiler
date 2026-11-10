@@ -44,7 +44,7 @@ function shareable_defs(string $path): array
     foreach ($m as $def) {
         $name = trim($def[1], '"');
         if (str_contains($name, '$mono$') || preg_match('/(^|_)__closure_/', $name) === 1
-            || preg_match('/_m[0-9a-f]{12,16}$/', $name) === 1) {
+            || preg_match('/_m(app|[0-9a-f]{12,16})$/', $name) === 1) {
             continue;
         }
         $out[$name] = $def[0];
