@@ -1,0 +1,33 @@
+-- ArrayObject
+bool(true)
+ksort: a=IMG10 b=img12 c=img1 d=img2
+ksort SORT_STRING: a=IMG10 b=img12 c=img1 d=img2
+bool(true)
+asort: a=IMG10 c=img1 b=img12 d=img2
+asort case-insensitive: c=img1 a=IMG10 b=img12 d=img2
+bool(true)
+uasort: c=img1 d=img2 a=IMG10 b=img12
+bool(true)
+uksort: d=img2 c=img1 b=img12 a=IMG10
+bool(true)
+natsort: a=IMG10 c=img1 d=img2 b=img12
+bool(true)
+natcasesort: c=img1 d=img2 a=IMG10 b=img12
+-- ArrayIterator
+bool(true)
+ksort: a=IMG10 b=img12 c=img1 d=img2
+ksort SORT_STRING: a=IMG10 b=img12 c=img1 d=img2
+bool(true)
+asort: a=IMG10 c=img1 b=img12 d=img2
+asort case-insensitive: c=img1 a=IMG10 b=img12 d=img2
+bool(true)
+uasort: c=img1 d=img2 a=IMG10 b=img12
+bool(true)
+uksort: d=img2 c=img1 b=img12 a=IMG10
+bool(true)
+natsort: a=IMG10 c=img1 d=img2 b=img12
+bool(true)
+natcasesort: c=img1 d=img2 a=IMG10 b=img12
+-- iterator over a sorted ArrayObject
+live iterator: 1=a 2=b 3=c
+iterator asort writes through: 1=a 2=b 3=c
