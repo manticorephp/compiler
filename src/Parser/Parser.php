@@ -2923,7 +2923,7 @@ final class Parser
             || $low === 'float' || $low === 'double' || $low === 'string' || $low === 'array'
             || $low === 'mixed' || $low === 'void' || $low === 'null' || $low === 'callable'
             || $low === 'iterable' || $low === 'object' || $low === 'never' || $low === 'false'
-            || $low === 'true' || $low === 'numeric'
+            || $low === 'true'
         ) {
             return;
         }
@@ -3006,7 +3006,6 @@ final class Parser
             || $low === 'mixed' || $low === 'void' || $low === 'null'
             || $low === 'callable' || $low === 'iterable' || $low === 'object'
             || $low === 'never' || $low === 'false' || $low === 'true'
-            || $low === 'numeric'
         ) {
             return $literal;
         }

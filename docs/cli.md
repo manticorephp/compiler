@@ -99,6 +99,23 @@ any error means exit `65`. Codes:
 | `typedef.error` | invalid type definition |
 | `lower.internal` | internal lowering failure, recorded at a function / method / top-level boundary |
 
+Three more codes are **warnings** (they never change the exit code; `--check` still exits `0`). They
+flag a name in the program's own sources (app and vendor) that no compiled source, prelude, stdlib
+`.sig` extern or compiler builtin declares, so the first run of that code path would throw at run time:
+
+| Code | Meaning |
+|---|---|
+| `undefined.class` | class / interface / trait / enum used in `new`, static access, `instanceof`, `catch`, a type hint, `extends`, `implements` or `use` and never declared (a missing package, or an extension class) |
+| `undefined.function` | direct call of a function that is not declared, not a stdlib / FFI function and not a builtin |
+| `undefined.constant` | bare constant that is not declared |
+
+Warnings are grouped: one line per (code, name), at the first site, with ` (N uses)` when the name is
+used more than once. A name declared only conditionally behind a guard that is false in this build
+(for example `fake()` behind `class_exists(Faker\Factory::class)`) is reported as undeclared.
+These stay warnings until reachability analysis lands: a vendor package carries many references
+to optional dependencies that no program path reaches, so promoting them to errors today would reject
+working builds.
+
 `--check` (on `compile` and `build`) stops after these checks, before `InferTypes`: exit `0` and no output
 file when clean, `65` with the diagnostics otherwise. In `analyze --deep` the same errors feed the
 analyzer and lowering continues.

@@ -106,6 +106,12 @@ unresolved_hints.php:9: warning[undefined.class]: class App\Missing\Base is not 
 unresolved_hints.php:9: warning[undefined.class]: class App\Missing\I is not declared
 unresolved_hints.php:9: warning[undefined.class]: class App\Missing\T is not declared
 front end: 0 error(s), 8 warning(s)
+== check_numeric_class
+rc=0
+== check_missing_package
+rc=0
+missing_package/src/main.php:4: warning[undefined.class]: class Symfony\Component\String\UnicodeString is not declared
+front end: 0 error(s), 1 warning(s)
 == builtin names in sync
 ok
 == compile bad --progress
