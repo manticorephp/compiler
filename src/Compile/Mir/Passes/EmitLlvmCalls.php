@@ -1235,26 +1235,37 @@ trait EmitLlvmCalls
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
 
+        // The pack goes on as a spread of an ordinary call, so the callee's own
+        // spread lowering binds it: a short pack takes the defaults, a variadic
+        // tail collects the rest and string keys bind by name — reading element k
+        // into parameter numFixed+k handed a variadic a scalar and a default 0.
         $body = '';
         $callArgs = [];
         $cellT = Type::cell();
-        for ($i = 0; $i < $tot; $i = $i + 1) {
+        for ($i = 0; $i < $numFixed; $i = $i + 1) {
             $lname = '__mc_dynfs_a' . (string)$i;
             $slot = $this->ssa->allocReg();
             $body .= '  ' . $slot . " = alloca i64\n";
-            if ($i < $numFixed) {
-                $body .= '  store i64 %ft.a' . (string)$i . ', ptr ' . $slot . "\n";
-                $callArgs[] = new LoadLocal($lname, $cellT);
-            } else {
-                $ev = $this->ssa->allocReg();
-                $body .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr %ft.sp, i64 '
-                       . (string)($i - $numFixed) . ")\n";
-                $body .= '  store i64 ' . $ev . ', ptr ' . $slot . "\n";
-                $callArgs[] = new LoadLocal($lname, $spreadElem);
-            }
+            $body .= '  store i64 %ft.a' . (string)$i . ', ptr ' . $slot . "\n";
+            $callArgs[] = new LoadLocal($lname, $cellT);
             $this->locals->slots[$lname] = $slot;
         }
-        $body .= $this->emitNode(new Call($fname, $callArgs, $rt));
+        $packT = Type::vec($spreadElem);
+        $packSlot = $this->ssa->allocReg();
+        $packWord = $this->ssa->allocReg();
+        $body .= '  ' . $packSlot . " = alloca i64\n"
+            . '  ' . $packWord . " = ptrtoint ptr %ft.sp to i64\n"
+            . '  store i64 ' . $packWord . ', ptr ' . $packSlot . "\n";
+        $this->locals->slots['__mc_dynfs_pack'] = $packSlot;
+        $callArgs[] = new \Compile\Mir\Spread_(new LoadLocal('__mc_dynfs_pack', $packT), Type::cell());
+        // A codegen builtin indexes its arguments positionally and has no spread
+        // lowering; its same-named PHP body (the bootstrap rule guarantees one)
+        // does, so this call goes to the body.
+        $call = new Call($fname, $callArgs, $rt);
+        $oldDeclined = $this->builtinDeclined;
+        $this->builtinDeclined = $call;
+        $body .= $this->emitNode($call);
+        $this->builtinDeclined = $oldDeclined;
         $body .= $this->boxToCell($rt);
         $ret = $this->lastValue;
         $closed = $this->irIsClosed($body . '  ret i64 ' . $ret . "\n");
@@ -1369,6 +1380,9 @@ trait EmitLlvmCalls
             if ($mask !== 0) { $this->dynfExports[$fname] = $mask; }
         }
     }
+
+    /** The one call {@see emitBuiltin} must leave to the function body ({@see dynfSpreadThunk}). */
+    private ?Call $builtinDeclined = null;
 
     /** @var array<string, string> dispatcher key => symbol ({@see emitDynCallOutlined}) */
     private array $dyncallSyms = [];

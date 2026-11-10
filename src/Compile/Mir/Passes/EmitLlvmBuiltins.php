@@ -95,6 +95,7 @@ trait EmitLlvmBuiltins
 
     private function emitBuiltin(Call $c): ?string
     {
+        if ($c === $this->builtinDeclined) { return null; }
         $this->btCallLine = $c->line;
         $mark = \count($this->arrArgTempRegs);
         $ir = $this->emitBuiltinDispatch($c);
