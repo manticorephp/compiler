@@ -2105,16 +2105,21 @@ function self_dir_resolve(): string
  */
 function self_exe_id(): string
 {
+    static $id = null;
+    if ($id !== null) {
+        return $id;
+    }
+    $id = '';
     $exe = self_exe_resolve();
     if ($exe === '') {
-        return '';
+        return $id;
     }
     $size = \filesize($exe);
     $mtime = \filemtime($exe);
-    if ($size === false || $mtime === false) {
-        return '';
+    if ($size !== false && $mtime !== false) {
+        $id = (string)$size . ':' . (string)$mtime;
     }
-    return (string)$size . ':' . (string)$mtime;
+    return $id;
 }
 
 /**

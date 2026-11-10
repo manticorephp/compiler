@@ -94,5 +94,18 @@ else
     echo "FAIL link flags were not cached"; fail=1
 fi
 
+# The prelude gates (which file defines what) are cached by file content: a
+# prelude edited in place gates on its new functions.
+demanddir="$(dirname "$MANTICORE_OBJ_CACHE_DIR")/demand"
+expect "prelude gate answers cached" 'ls "$demanddir"/*.txt >/dev/null 2>&1'
+cp -R prelude "$WORK/prelude"
+printf '\nfunction mc_gate_probe(): string { return "probe"; }\n' >> "$WORK/prelude/array_fns_ext.php"
+printf '<?php\necho mc_gate_probe(), "\\n";\n' > "$WORK/probe.php"
+if MANTICORE_PRELUDE="$WORK/prelude" "$MANT" compile "$WORK/probe.php" -o "$WORK/probe" > "$WORK/probe.trace" 2>&1; then
+    expect "edited prelude gates on its new function" '[[ "$("$WORK/probe")" == probe ]]'
+else
+    echo "FAIL edited prelude: compile"; tail -3 "$WORK/probe.trace"; fail=1
+fi
+
 [[ $fail -eq 0 ]] && echo "ok: shared generics cache"
 exit $fail

@@ -41,6 +41,7 @@ final class CacheCommand extends Command
             [$dir . '/prog', '/^[0-9a-f]{40}\.o(\.tmp[0-9_]*)?$/'],
             [\dirname($dir) . '/analyze', '/^[0-9a-f]{40}\.json(\.tmp[0-9_]*)?$/'],
             [\dirname($dir) . '/link', '/^[0-9a-f]{40}\.txt(\.tmp[0-9_]*)?$/'],
+            [\dirname($dir) . '/demand', '/^[0-9a-f]{40}\.txt(\.tmp[0-9_]*)?$/'],
         ];
         foreach ($sets as $k => $set) {
             foreach ($this->cacheFiles($set[0], $set[1]) as $f) {
