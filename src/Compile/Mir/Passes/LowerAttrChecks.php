@@ -62,10 +62,6 @@ trait LowerAttrChecks
 
     // ── reserved-attribute checks ────────────────────────────────────────────
 
-    /** Collected `line N: error: …` diagnostics when {@see $attrCollectMode}. */
-    public array $attrErrors = [];
-    /** Analyze mode: collect instead of aborting the build. */
-    public bool $attrCollectMode = false;
 
     /**
      * Validate every reserved-attribute USE in the user program. Runs right
@@ -751,11 +747,7 @@ trait LowerAttrChecks
      */
     private function attrFail(string $msg, \Parser\Ast\Span $span): void
     {
-        if ($this->attrCollectMode) {
-            $this->attrErrors[] = 'line ' . (string)$span->line . ': error: ' . $msg;
-            return;
-        }
-        throw new \RuntimeException($msg . ' at line ' . (string)$span->line);
+        $this->lowerFail('attr.error', $msg, $span, $msg . ' at line ' . (string)$span->line);
     }
 
     // ── typed field reads (T5: a base-typed read resolves by OFFSET) ─────────

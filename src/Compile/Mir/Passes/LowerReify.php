@@ -863,12 +863,11 @@ trait LowerReify
         if ($cd === null) { return; }
         $pt = $cd->propertyTypes[$prop] ?? null;
         if ($pt === null || !$this->specChangesProp($cls, $prop, $pt)) { return; }
-        throw new \RuntimeException(
+        $this->lowerFail('lower.unsupported',
             'generic property `' . $cls . '::$' . $prop . '` read through the erased `'
             . $cls . '` while `' . $cls . '` is also used with a binding; the '
             . 'representation of that slot depends on the binding. Annotate the '
-            . 'receiver with one (e.g. `' . $cls . '<T>`).'
-        );
+            . 'receiver with one (e.g. `' . $cls . '<T>`).', null);
     }
 
     /** Whether any specialization of `$cls` was built. */

@@ -364,14 +364,16 @@ trait LowerTypeDefs
         if ($el->hasTypeVar()) { return; }
         $want = \Compile\Mir\NbufInline::elementOf($kind);
         if ($want === '') {
-            throw new \RuntimeException(\ltrim($cls, '\\') . ' takes no element type');
+            $this->lowerFail('typedef.error', \ltrim($cls, '\\') . ' takes no element type', null);
+            return;
         }
         $carrier = $el->kind === Type::KIND_INT ? 'int' : ($el->kind === Type::KIND_FLOAT ? 'float' : '');
         $td = $el->typeDefClass();
         if ($td === null) {
             if ($carrier !== '' && ($carrier === 'float') === ($want[0] === 'f')) { return; }
-            throw new \RuntimeException(\ltrim($cls, '\\') . '<…>: the element must be '
-                . ($want[0] === 'f' ? 'float' : 'int') . ' or a #[TypeDef] over it');
+            $this->lowerFail('typedef.error', \ltrim($cls, '\\') . '<…>: the element must be '
+                . ($want[0] === 'f' ? 'float' : 'int') . ' or a #[TypeDef] over it', null);
+            return;
         }
         $repr = $this->typeDefReprs[$td] ?? '';
         if ($carrier !== '' && \Compile\Mir\NbufInline::holds($kind, $repr, $carrier)) { return; }
@@ -473,6 +475,6 @@ trait LowerTypeDefs
 
     private function typeDefError(string $cls, string $why): void
     {
-        throw new \RuntimeException('#[TypeDef] ' . $cls . ': ' . $why);
+        $this->lowerFail('typedef.error', '#[TypeDef] ' . $cls . ': ' . $why, null);
     }
 }

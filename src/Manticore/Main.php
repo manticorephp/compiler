@@ -5449,13 +5449,18 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $unitAbs[$entryAbs] = true;
         }
         $lower->compileUnitFiles = $unitAbs;
-        // Reserved-attribute errors (#[Override] with no parent, a bad target, a
-        // repeat) abort the build by default; analysis collects them instead.
-        if ($collect !== null) {
-            $lower->attrCollectMode = true;
-        }
+        // User-facing lowering errors are recorded (and lowering carries on); the
+        // gate after run() reports them all.
+        $lower->diags = $diag;
         $statT = \Compile\Stats::begin('LowerFromAst');
         $module = $lower->run($module);
+        if ($collect !== null) {
+            foreach ($diag->items as $it) {
+                if ($it->severity === 'error') {
+                    $collect->lines[] = 'line ' . (string)$it->line . ': error: ' . $it->message;
+                }
+            }
+        }
         if ($diag->hasErrors()) {
             dprint($diag->render());
             return null;
@@ -5475,11 +5480,6 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         // `if (is_int($x))` reads an unboxed copy of a cell $x ({@see NarrowScalarGuards}).
         $module = (new \Compile\Mir\Passes\NarrowScalarGuards())->run($module);
-        if ($collect !== null) {
-            foreach ($lower->attrErrors as $ae) {
-                $collect->lines[] = $ae;
-            }
-        }
         CompileArgs::$linkStdlib = $lower->externInjected;
         $analysisContext = null;
         $worklistMode = \getenv('MANTICORE_WORKLIST');

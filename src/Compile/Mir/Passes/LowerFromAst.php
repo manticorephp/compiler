@@ -450,6 +450,8 @@ final class LowerFromAst implements Pass
     private int $silenceDepth = 0;
     /** The file name a diagnostic names, for the `trigger_error` rewrite. */
     private string $lowerSourceFile = '';
+    /** Front-end diagnostics sink: set, a user-facing lowering error is recorded and lowering goes on; null, it throws. */
+    public ?\Compile\Diagnostics $diags = null;
     /** Async\ (scheduler / tasks / channels) — DEMAND-GATED. Braced-namespace
      *  tree like io_poll.php; implies fiberSrc + ioPollSrc. */
     public string $asyncSrc = '';
@@ -883,7 +885,12 @@ final class LowerFromAst implements Pass
                 // layout. That is a wrong-layout free, not a wrong answer.
                 if ($sIdx >= $userStart
                         && isset($this->externClassNames[$this->classDeclName($cdecl)])) {
-                    throw new \RuntimeException(
+                    $this->lowerFail('decl.error',
+                        $this->classDeclName($cdecl)
+                        . ' is declared here and also exported by a linked library'
+                        . "\n  a program cannot redefine a class its libraries export —"
+                        . ' rename one, or drop the library from `libraries` in the manifest.',
+                        $cdecl->span,
                         'manticore: ' . $this->classDeclName($cdecl)
                         . ' is declared here and also exported by a linked library'
                         . "\n  a program cannot redefine a class its libraries export —"
@@ -3757,7 +3764,8 @@ final class LowerFromAst implements Pass
         if ($op === 'print') {
             return new Call('print', [$operand], Type::int_());
         }
-        throw new \RuntimeException('MIR.lower: unsupported unary op ' . $op);
+        return $this->lowerFail('lower.unsupported', 'unsupported unary op ' . $op, $e->span,
+            'MIR.lower: unsupported unary op ' . $op);
     }
 
     private function lowerDoWhile(\Parser\Ast\DoWhileStmt $stmt): DoWhile_
@@ -4425,6 +4433,22 @@ final class LowerFromAst implements Pass
     {
         $f = $s->file === '' ? '<generated>' : $s->file;
         return $f . ':' . (string)$s->line . ':' . (string)$s->column;
+    }
+
+    /**
+     * A user-facing lowering error. With a sink the error is recorded and the
+     * placeholder expression returned so lowering carries on and collects the
+     * rest; without one it throws `$throwMsg` (default: `$msg`) as before.
+     */
+    private function lowerFail(string $code, string $msg, ?\Parser\Ast\Span $span, string $throwMsg = ''): Node
+    {
+        if ($this->diags === null) {
+            throw new \RuntimeException($throwMsg === '' ? $msg : $throwMsg);
+        }
+        $file = $span === null ? '' : $span->file;
+        if ($file === '') { $file = $this->lowerSourceFile; }
+        $this->diags->add('error', $code, $msg, $file, $span === null ? 0 : $span->line);
+        return $this->throwErrorExpr($msg);
     }
 
     private function throwErrorExpr(string $message): Node
@@ -6593,10 +6617,10 @@ final class LowerFromAst implements Pass
         if (!$this->isCodegenBuiltin($fnName)) { return; }
         $bare = $this->constBareName(\strtolower($fnName));
         if ($bare === 'sprintf' || $bare === 'printf' || $bare === 'array_unshift' || $bare === 'min' || $bare === 'max') { return; }
-        throw new \RuntimeException(
-            'argument unpacking into ' . $bare . '() is not supported: it is a '
-            . 'codegen builtin with no signature to expand the pack against '
-            . '(line ' . (string)$spread->span->line . ')');
+        $m = 'argument unpacking into ' . $bare . '() is not supported: it is a '
+            . 'codegen builtin with no signature to expand the pack against';
+        $this->lowerFail('lower.unsupported', $m, $spread->span,
+            $m . ' (line ' . (string)$spread->span->line . ')');
     }
 
     private function paramTypeHint(\Parser\Ast\Param $p): ?string { return $p->typeHint; }
@@ -7055,7 +7079,7 @@ final class LowerFromAst implements Pass
     {
         // `$GLOBALS += […]` is a WRITE of the whole array (a php 8.1 fatal), so
         // say so — lowering the target as a read below would blame the read.
-        if ($this->isGlobalsVar($expr->target)) { $this->rejectGlobalsWrite(); }
+        if ($this->isGlobalsVar($expr->target)) { $this->rejectGlobalsWrite($expr->target->span); }
         $h = $this->hoistLvalueExpr($expr);
         if ($h !== null) { return $h; }
         $read = $this->lowerExpr($expr->target);
@@ -7269,13 +7293,13 @@ final class LowerFromAst implements Pass
                 $ok = \Compile\Debug::$refCells
                     && ($sk === 'Variable' || $sk === 'PropertyAccess' || $sk === 'ArrayAccess');
                 if (!$ok) {
-                    throw new \RuntimeException(
-                        'unsupported: an array literal can bind a VARIABLE, a PROPERTY or an '
+                    $m = 'unsupported: an array literal can bind a VARIABLE, a PROPERTY or an '
                         . 'ELEMENT by reference (`[&$a, &$this->p, &$a[$k], …]`), and nothing else yet. This '
                         . 'element would receive a copy, not an alias, so every write '
-                        . 'through it would be lost.'
-                        . ' at ' . $this->spanWhere($expr->span)
-                    );
+                        . 'through it would be lost.';
+                    $elems[] = new ArrayElement_(null,
+                        $this->lowerFail('lower.unsupported', $m, $expr->span, $m . ' at ' . $this->spanWhere($expr->span)));
+                    continue;
                 }
                 $lv = $this->lowerExpr($src);
                 $this->module->hasRefCells = true;

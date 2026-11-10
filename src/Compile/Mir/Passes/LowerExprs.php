@@ -792,7 +792,7 @@ trait LowerExprs
             // A BARE `$GLOBALS` — every legal use ($GLOBALS['x']) is intercepted
             // at the ArrayAccess above it, so reaching here means the whole array
             // was read (foreach/count) or handed to a by-ref parameter.
-            if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead(); }
+            if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead($expr->span); }
             if ($expr->name === 'this' && $this->currentLowerClass !== '' && !$this->currentLowerFnHasThis) {
                 return $this->throwErrorExpr('Using $this when not in object context');
             }
@@ -957,10 +957,9 @@ trait LowerExprs
         $extra = '';
         if ($expr->kind === 'StaticAccess') { $extra = ' (' . $this->staticAccessClass($expr) . '::' . $this->staticAccessName($expr) . ')'; }
         if ($expr->kind === 'Identifier') { $extra = ' (' . ($expr->name ?? '?') . ')'; }
-        throw new \RuntimeException(
+        return $this->lowerFail('lower.unsupported', 'unsupported expression kind ' . $expr->kind . $extra, $expr->span,
             'MIR.lower: unsupported expression kind ' . $expr->kind . $extra
-            . ' at line ' . (string)$expr->span->line
-        );
+            . ' at line ' . (string)$expr->span->line);
     }
 
     /**
@@ -1161,7 +1160,7 @@ trait LowerExprs
             // `$GLOBALS = […]` / `$GLOBALS += […]` — a php 8.1 fatal, and silently
             // accepting it wrote a bogus local named GLOBALS while the real globals
             // sat untouched. {@see rejectGlobalsWrite}
-            if ($this->isGlobalsVar($target)) { $this->rejectGlobalsWrite(); }
+            if ($this->isGlobalsVar($target)) { $this->rejectGlobalsWrite($target->span); }
             return new StoreLocal($target->name, $value, $value->type);
         }
         if ($target->kind === 'ArrayAccess') {
@@ -1214,11 +1213,10 @@ trait LowerExprs
         // thousands of files into one module, so "at line 25" sent three
         // separate searches to the wrong file before this was added — the
         // parse error has always named its file and this had no reason not to.
-        throw new \RuntimeException(
+        return $this->lowerFail('lower.unsupported', 'unsupported assign target kind ' . $target->kind, $target->span,
             'MIR.lower: unsupported assign target kind ' . $target->kind
             . ' at ' . ($this->lowerSourceFile !== '' ? $this->lowerSourceFile : '<source>')
-            . ':' . (string)$target->span->line
-        );
+            . ':' . (string)$target->span->line);
     }
 
     /** The dim chain bottoms out in a plain local: no call can reach its buffer. */
@@ -1275,9 +1273,8 @@ trait LowerExprs
         if ($op === '&')  { return new BitOp('and', $left, $right, Type::int_()); }
         if ($op === '|')  { return new BitOp('or',  $left, $right, Type::int_()); }
         if ($op === '^')  { return new BitOp('xor', $left, $right, Type::int_()); }
-        throw new \RuntimeException(
-            'MIR.lower: unsupported binary op ' . $op
-        );
+        return $this->lowerFail('lower.unsupported', 'unsupported binary op ' . $op, null,
+            'MIR.lower: unsupported binary op ' . $op);
     }
 
     /** A variable / literal / property / element read chain: re-evaluating it has no effect. */

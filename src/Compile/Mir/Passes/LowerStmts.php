@@ -499,10 +499,9 @@ trait LowerStmts
         if ($stmt->kind === 'Global') { return $this->lowerGlobal($stmt); }
         if ($stmt->kind === 'Throw') { return new Throw_($this->lowerExpr($stmt->expr), Type::void()); }
         if ($stmt->kind === 'TryCatch') { return $this->lowerTryCatch($stmt); }
-        throw new \RuntimeException(
+        return $this->lowerFail('lower.unsupported', 'unsupported statement kind ' . $stmt->kind, $stmt->span,
             'MIR.lower: unsupported statement kind ' . $stmt->kind
-            . ' at line ' . (string)$stmt->span->line
-        );
+            . ' at line ' . (string)$stmt->span->line);
     }
 
     /**
@@ -659,10 +658,9 @@ trait LowerStmts
         // synthetic local, not the target, so writes through it would be lost —
         // refuse it rather than compile something silently wrong.
         if ($stmt->valueByRef && $stmt->value->kind !== 'Variable') {
-            throw new \RuntimeException(
+            return $this->lowerFail('lower.unsupported',
                 'unsupported: foreach cannot bind BY REFERENCE into anything but a '
-                . 'variable — the alias would reach a temporary, not the target.'
-            );
+                . 'variable — the alias would reach a temporary, not the target.', $stmt->span);
         }
         // List-destructuring value pattern — `foreach ($x as [$a, $b])` /
         // `foreach ($x as ['k' => $v])`: the value binding can't name the

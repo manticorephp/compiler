@@ -366,11 +366,8 @@ trait LowerClassDeclChecks
 
     private function declFail(string $msg, \Parser\Ast\Span $span): void
     {
-        if ($this->attrCollectMode) {
-            $this->attrErrors[] = 'line ' . (string)$span->line . ': error: ' . $msg;
-            return;
-        }
         $file = $span->file;
-        throw new \RuntimeException($msg . ($file === '' ? '' : ' in ' . $file) . ' on line ' . (string)$span->line);
+        $this->lowerFail('decl.error', $msg, $span,
+            $msg . ($file === '' ? '' : ' in ' . $file) . ' on line ' . (string)$span->line);
     }
 }

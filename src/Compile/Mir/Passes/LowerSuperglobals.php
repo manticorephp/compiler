@@ -139,10 +139,11 @@ trait LowerSuperglobals
         if ($this->varName($base) !== 'GLOBALS') { return null; }
         $idx = $expr->index;
         if ($idx === null || $idx->kind !== 'StringLiteral') {
-            throw new \RuntimeException(
+            $this->lowerFail('lower.unsupported',
+                '$GLOBALS needs a literal string key (a dynamic one would need a runtime name table)', $expr->span,
                 'MIR.lower: $GLOBALS needs a literal string key '
-                . '(a dynamic one would need a runtime name table)'
-            );
+                . '(a dynamic one would need a runtime name table)');
+            return 'GLOBALS';
         }
         $name = $this->strLitValue($idx);
         $cell = '@g_' . $name;
@@ -190,12 +191,12 @@ trait LowerSuperglobals
      * COMPILE-TIME fatal. Reject it with php's own wording — silently accepting
      * it wrote a bogus local named GLOBALS and left the real globals untouched.
      */
-    private function rejectGlobalsWrite(): void
+    private function rejectGlobalsWrite(\Parser\Ast\Span $span): void
     {
-        throw new \RuntimeException(
+        $this->lowerFail('lower.unsupported',
+            '$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax', $span,
             'MIR.lower: $GLOBALS can only be modified using the '
-            . '$GLOBALS[$name] = $value syntax'
-        );
+            . '$GLOBALS[$name] = $value syntax');
     }
 
     /**
@@ -205,12 +206,12 @@ trait LowerSuperglobals
      * table this design deliberately does not carry. An honest error beats a
      * silently empty array.
      */
-    private function rejectGlobalsRead(): void
+    private function rejectGlobalsRead(\Parser\Ast\Span $span): void
     {
-        throw new \RuntimeException(
+        $this->lowerFail('lower.unsupported',
+            '$GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS[\'name\']', $span,
             'MIR.lower: $GLOBALS as a whole array is unsupported '
-            . '(it would need a runtime name table); use $GLOBALS[\'name\']'
-        );
+            . '(it would need a runtime name table); use $GLOBALS[\'name\']');
     }
 
     /** Is `$expr` a `$GLOBALS[…]` access? */
