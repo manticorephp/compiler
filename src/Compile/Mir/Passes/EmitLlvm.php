@@ -1457,6 +1457,7 @@ final class EmitLlvm implements EmitVisitor
                 $bodyBytes += \strlen($body);
             });
             \Compile\Stats::line('IR: bodies ' . (string)$bodyBytes . ' bytes');
+            $this->reportIrCensus($bodyBytes);
         }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`

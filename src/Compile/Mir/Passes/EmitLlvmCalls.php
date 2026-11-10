@@ -821,6 +821,7 @@ trait EmitLlvmCalls
         // evaluates them itself, and the table path below is reached only when
         // none did.
         $dynfSyms = [];
+        $packCells = false;
         // The candidate set depends on the argument count alone, so every site of that arity shares it.
         $memoHit = !$hasSpread && isset($this->dynfSymsMemo[$argc]);
         if ($memoHit) {
@@ -874,6 +875,14 @@ trait EmitLlvmCalls
                 $spNode = $this->asSpreadNode($iv->args[$spreadIdx]);
                 $spElem = $spNode->operand->type->element;
                 $spreadElem = $spElem === null ? Type::unknown() : $spElem;
+                // A TYPED pack (int[], string[], P[]) is handed to the table as a
+                // cellified copy, so it shares the cell thunks — the stdlib's
+                // exports, one module set for the rest — instead of building a
+                // thunk per nameable function for each element type it meets.
+                if ($spreadElem->kind !== Type::KIND_UNKNOWN && $spreadElem->kind !== Type::KIND_CELL) {
+                    $spreadElem = Type::cell();
+                    $packCells = true;
+                }
                 foreach ($clean as $cname => $crt) {
                     $tsym = $this->dynfSpreadThunk($cname, $numFixed, $spreadElem, $crt);
                     if ($tsym !== '') { $dynfSyms[$cname] = $tsym; }
@@ -885,7 +894,7 @@ trait EmitLlvmCalls
             $twElem = null;
             if ($hasSpread) {
                 $twSp = $this->asSpreadNode($iv->args[$spreadIdx])->operand->type->element;
-                $twElem = $twSp === null ? Type::unknown() : $twSp;
+                $twElem = $packCells ? Type::cell() : ($twSp === null ? Type::unknown() : $twSp);
             }
             foreach ($this->allTwinTot as $bname => $btot) {
                 $bname = (string)$bname;
@@ -1114,7 +1123,7 @@ trait EmitLlvmCalls
         $missL = $dynfSyms !== [] ? $this->ssa->allocLabel('dynf.miss') : '';
         if ($dynfSyms !== []) {
             $out .= $hasSpread
-                ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr, $missL)
+                ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr, $missL, $packCells ? $this->asSpreadNode($iv->args[$spreadIdx])->operand->type : null)
                 : $this->emitDynfTablePath($iv, $keyP, $res, $endL, $dynfSyms, $missL);
             $out .= '  br label %' . $endL . "\n";
             $out .= $missL . ":\n";
@@ -1357,12 +1366,13 @@ trait EmitLlvmCalls
      * @param string[]              $fixedRegs hoisted fixed-prefix values
      * @param array<string, string> $syms      candidate name => thunk symbol
      */
-    private function emitDynfSpreadTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, array $fixedRegs, string $spreadArr, string $missL): string
+    private function emitDynfSpreadTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, array $fixedRegs, string $spreadArr, string $missL, ?Type $cellifyPack = null): string
     {
         $this->dynfExtraBodies .= $this->dynfLookupFn();
         $pair = $this->dynfTable($syms);
         $out = '';
         $argList = 'ptr ' . $spreadArr;
+        $cells = '';
         foreach ($fixedRegs as $i => $r) {
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
@@ -1377,9 +1387,21 @@ trait EmitLlvmCalls
         $callL = $this->ssa->allocLabel('dynf.stab');
         $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $missL . "\n";
         $out .= $callL . ":\n";
+        if ($cellifyPack !== null) {
+            // The thunks read CELL elements; this pack stores raw ones. The copy
+            // is the call's own and is released once the callee returns.
+            $cells = $this->ssa->allocReg();
+            $out .= '  ' . $cells . ' = call ptr @__mir_array_cellified_copy(ptr ' . $spreadArr . ")\n";
+            $argList = 'ptr ' . $cells . \substr($argList, \strlen('ptr ' . $spreadArr));
+        }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 ' . $fn . '(' . $argList . ")\n";
         $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
+        if ($cellifyPack !== null) {
+            $ci = $this->ssa->allocReg();
+            $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cells . " to i64\n";
+            $out .= $this->rcReleaseReg($ci, $cellifyPack->isAssoc() ? 'assoccell' : 'veccell');
+        }
         return $out;
     }
 
