@@ -106,6 +106,14 @@ unresolved_hints.php:9: warning[undefined.class]: class App\Missing\Base is not 
 unresolved_hints.php:9: warning[undefined.class]: class App\Missing\I is not declared
 unresolved_hints.php:9: warning[undefined.class]: class App\Missing\T is not declared
 front end: 0 error(s), 8 warning(s)
+== check_uses_distinct_trait
+rc=0
+uses_distinct_trait.php:2: warning[undefined.class]: class Missing\InTrait is not declared
+front end: 0 error(s), 1 warning(s)
+== check_uses_distinct_default
+rc=0
+uses_distinct_default.php:2: warning[undefined.constant]: constant NO_SUCH_CONST is not declared
+front end: 0 error(s), 1 warning(s)
 == check_numeric_class
 rc=0
 == check_missing_package

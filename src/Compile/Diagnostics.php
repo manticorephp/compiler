@@ -25,18 +25,26 @@ final class Diagnostics
     /** @var array<int,int> */
     private array $useCount = [];
 
-    /** One diagnostic per (code, name): the first site is kept, later uses only count. */
+    /** @var array<string,bool> */
+    private array $useSites = [];
+
+    /** One diagnostic per (code, name): the first site is kept, later DISTINCT (file, line) sites only count. */
     public function addUse(string $severity, string $code, string $name, string $message, string $file, int $line): void
     {
         $k = $code . '|' . \strtolower($name);
         if (isset($this->useIdx[$k])) {
             $i = $this->useIdx[$k];
-            $this->useCount[$i] = $this->useCount[$i] + 1;
+            $sk = $k . '|' . $file . ':' . (string)$line;
+            if (!isset($this->useSites[$sk])) {
+                $this->useSites[$sk] = true;
+                $this->useCount[$i] = $this->useCount[$i] + 1;
+            }
             return;
         }
         $n = \count($this->items);
         $this->useIdx[$k] = $n;
         $this->useCount[$n] = 1;
+        $this->useSites[$k . '|' . $file . ':' . (string)$line] = true;
         $this->items[] = new Diagnostic($file, $line, 0, $severity, $code, $message);
     }
 

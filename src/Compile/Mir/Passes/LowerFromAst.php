@@ -1055,7 +1055,7 @@ final class LowerFromAst implements Pass
         // the call stores into it and later bare / constant() / defined() reads see it.
         $this->registerRuntimeDefines($stmts);
         $this->registerClassAliases($stmts);
-        $this->checkDeclTypeNames($stmts, $preludeCount);
+        $this->checkDeclTypeNames($stmts, $userStart);
         // Constants a dependency exports. AFTER the local scan and guarded, so a
         // program that defines the name itself keeps its own value — the same
         // precedence the imported-FUNCTION path uses, and the one that lets a
@@ -4568,12 +4568,12 @@ final class LowerFromAst implements Pass
         'mixed' => true, 'void' => true, 'never' => true, 'null' => true, 'false' => true, 'true' => true];
 
     /** `undefined.class` for every class name a user declaration's signature, property types and class hierarchy spell. */
-    private function checkDeclTypeNames(array $stmts, int $preludeCount): void
+    private function checkDeclTypeNames(array $stmts, int $userStart): void
     {
         if ($this->diags === null) { return; }
         $this->lowerInPrelude = false;
         foreach ($stmts as $i => $stmt) {
-            if ($i >= $preludeCount) { $this->checkDeclTypeNamesIn($stmt); }
+            if ($i >= $userStart) { $this->checkDeclTypeNamesIn($stmt); }
         }
     }
 

@@ -122,6 +122,8 @@ PHP
     diag "check_class_alias_literal" "$MC" compile --check "$HERE/check/class_alias_literal.php" -o "$WORK/ca"
     diag "check_unresolved_fns"     "$MC" compile --check "$HERE/check/unresolved_fns.php" -o "$WORK/uf"
     diag "check_unresolved_hints"   "$MC" compile --check "$HERE/check/unresolved_hints.php" -o "$WORK/uh"
+    diag "check_uses_distinct_trait"   "$MC" compile --check "$HERE/check/uses_distinct_trait.php" -o "$WORK/ut"
+    diag "check_uses_distinct_default" "$MC" compile --check "$HERE/check/uses_distinct_default.php" -o "$WORK/ud"
     diag "check_numeric_class"      "$MC" compile --check "$HERE/check/numeric_class.php" -o "$WORK/nc"
     diag "check_missing_package"    sh -c "cd \"$HERE/check/missing_package\" && \"$MC\" build --check"
     printf '== builtin names in sync\n'; bash "$ROOT/tools/check_builtin_names.sh"

@@ -101,7 +101,9 @@ any error means exit `65`. Codes:
 
 Three more codes are **warnings** (they never change the exit code; `--check` still exits `0`). They
 flag a name in the program's own sources (app and vendor) that no compiled source, prelude, stdlib
-`.sig` extern or compiler builtin declares, so the first run of that code path would throw at run time:
+`.sig` extern or compiler builtin declares. Executing a `new`, static access, function call or constant
+read of such a name throws at run time; `instanceof`, `catch` and type hints never throw for a missing
+class, so the warning there only flags a likely missing dependency:
 
 | Code | Meaning |
 |---|---|
