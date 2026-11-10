@@ -65,6 +65,7 @@ manticore compile [options] <files…|manifest.json> -o <out>
 | `--quiet` | | Silence progress and timings (diagnostics stay) |
 | `--timings` | | Print a per-stage time table at the end |
 | `--color` | `<when>` | Colour: `auto`\|`always`\|`never` (default `auto`) |
+| `--check` | | Run the front end only (parse, lowering, declaration, attribute and typedef checks), stop before type inference; exit `0` with no output file when clean |
 
 Exit codes:
 
@@ -72,7 +73,7 @@ Exit codes:
 |---|---|
 | `0` | binary written |
 | `64` | usage error: unknown flag, missing value, bad `--progress` / `--color` value |
-| `65` | front end failed (parse / type check / empty IR), or `--analyze-strict` found errors |
+| `65` | front end failed (every parse / lowering / declaration / attribute / typedef error is reported, then exit), type check or empty IR failed, or `--analyze-strict` found errors |
 | `66` | no input read: source missing or the source list is empty |
 | `73` | `--emit-library`: cannot write the `.ll` file |
 | `75` | `clang` failed (object, or library with `--emit-library`) |
@@ -82,6 +83,25 @@ Exit codes:
 manticore compile hello.php -o hello && ./hello
 manticore compile src/ -o app -O2 -j 0
 ```
+
+### Front-end diagnostics and `--check`
+
+The front end collects every error instead of stopping at the first. Each prints as
+`<file>:<line>: <severity>[<code>]: <message>`, followed by `front end: N error(s), M warning(s)`;
+any error means exit `65`. Codes:
+
+| Code | Meaning |
+|---|---|
+| `parse.error` | syntax error (the file is skipped, the rest still lowers) |
+| `lower.unsupported` | construct the compiler does not support |
+| `decl.error` | invalid class / function / constant declaration |
+| `attr.error` | invalid attribute |
+| `typedef.error` | invalid type definition |
+| `lower.internal` | internal lowering failure, recorded at a function / method / top-level boundary |
+
+`--check` (on `compile` and `build`) stops after these checks, before `InferTypes`: exit `0` and no output
+file when clean, `65` with the diagnostics otherwise. In `analyze --deep` the same errors feed the
+analyzer and lowering continues.
 
 ## build
 
