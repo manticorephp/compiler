@@ -2161,6 +2161,9 @@ final class CompileArgs
     /** `--check`: stop after the front end, report every error, write nothing. */
     public static bool $checkOnly = false;
 
+    /** `--all`: list undeclared names no reachable code uses (notes) too. */
+    public static bool $showAllDiagnostics = false;
+
     /** `--strict=analyze` (alias `--analyze-strict`): analyzer errors fail the compile. */
     public static bool $strictAnalyze = false;
 
@@ -2440,6 +2443,7 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool
     if ($p->flag("allow-undefined-traps")) { CompileArgs::$allowUndefinedTraps = true; }
     if ($p->flag("keep-ir")) { CompileArgs::$keepIr = true; }
     if ($p->flag("check")) { CompileArgs::$checkOnly = true; }
+    if ($p->flag("all")) { CompileArgs::$showAllDiagnostics = true; }
     $jobs = $p->value("j", "");
     if ($jobs !== "") {
         $jn = (int)$jobs;
@@ -5489,6 +5493,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 }
                 dprint(\rtrim($rd, "\n"));
             }
+            $diag->applyReachability($reach, CompileArgs::$allowUndefinedTraps, $lower->sawDynConstant);
         }
         if ($collect !== null) {
             foreach ($diag->items as $it) {
@@ -5499,11 +5504,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
         if ($collect === null) {
             if ($diag->hasErrors()) {
-                dprint($diag->render());
+                dprint($diag->render(CompileArgs::$showAllDiagnostics));
                 return null;
             }
             if (\count($diag->items) > 0) {
-                dprint($diag->render());
+                dprint($diag->render(CompileArgs::$showAllDiagnostics));
             }
         }
         if (CompileArgs::$checkOnly) {

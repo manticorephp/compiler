@@ -73,15 +73,15 @@ rc=65
 dedup.php:5: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
 front end: 1 error(s), 0 warning(s)
 == check_unresolved_classes
-rc=0
-unresolved_classes/main.php:2: warning[undefined.class]: class Missing\A is not declared (2 uses)
-unresolved_classes/main.php:3: warning[undefined.class]: class Missing\B is not declared
-unresolved_classes/main.php:4: warning[undefined.class]: class Missing\C is not declared
-unresolved_classes/main.php:5: warning[undefined.class]: class Missing\D is not declared
+rc=65
+unresolved_classes/main.php:2: error[undefined.class]: class Missing\A is not declared (reachable: __main) (2 uses)
+unresolved_classes/main.php:3: error[undefined.class]: class Missing\B is not declared (reachable: __main)
+unresolved_classes/main.php:4: error[undefined.class]: class Missing\C is not declared (reachable: __main)
 unresolved_classes/main.php:6: warning[undefined.class]: class Missing\E is not declared
-unresolved_classes/main.php:8: warning[undefined.constant]: constant NO_SUCH_CONST is not declared
-unresolved_classes/main.php:9: warning[undefined.class]: class Missing\S is not declared
-front end: 0 error(s), 7 warning(s)
+unresolved_classes/main.php:8: error[undefined.constant]: constant NO_SUCH_CONST is not declared (reachable: __main)
+unresolved_classes/main.php:9: error[undefined.class]: class Missing\S is not declared (reachable: __main)
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 5 error(s), 1 warning(s)
 == check_known_builtin_classes
 rc=0
 == check_guarded_decls
@@ -91,39 +91,93 @@ rc=0
 == check_class_alias_literal
 rc=0
 == check_unresolved_fns
-rc=0
-unresolved_fns.php:10: warning[undefined.function]: function apcu_fetch() is not declared (2 uses)
-unresolved_fns.php:12: warning[undefined.function]: function no_such_fn() is not declared
-front end: 0 error(s), 2 warning(s)
+rc=65
+unresolved_fns.php:10: error[undefined.function]: function apcu_fetch() is not declared (reachable: __main) (2 uses)
+unresolved_fns.php:12: error[undefined.function]: function no_such_fn() is not declared (reachable: __main)
+front end: 2 error(s), 0 warning(s)
 == check_unresolved_hints
 rc=0
-unresolved_hints.php:10: warning[undefined.class]: class App\Missing\K is not declared
-unresolved_hints.php:6: warning[undefined.class]: class App\Missing\H is not declared
-unresolved_hints.php:6: warning[undefined.class]: class App\Missing\R is not declared
-unresolved_hints.php:6: warning[undefined.class]: class App\Missing\U is not declared
-unresolved_hints.php:8: warning[undefined.class]: class App\Missing\P is not declared
-unresolved_hints.php:9: warning[undefined.class]: class App\Missing\Base is not declared
-unresolved_hints.php:9: warning[undefined.class]: class App\Missing\I is not declared
-unresolved_hints.php:9: warning[undefined.class]: class App\Missing\T is not declared
-front end: 0 error(s), 8 warning(s)
+front end: 8 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
 == check_uses_distinct_trait
 rc=0
-uses_distinct_trait.php:2: warning[undefined.class]: class Missing\InTrait is not declared
-front end: 0 error(s), 1 warning(s)
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
 == check_uses_distinct_default
-rc=0
-uses_distinct_default.php:2: warning[undefined.constant]: constant NO_SUCH_CONST is not declared
-front end: 0 error(s), 1 warning(s)
+rc=65
+uses_distinct_default.php:2: error[undefined.constant]: constant NO_SUCH_CONST is not declared (reachable: f <- __main)
+front end: 1 error(s), 0 warning(s)
 == check_numeric_class
 rc=0
 == check_missing_package
-rc=0
-missing_package/src/main.php:4: warning[undefined.class]: class Symfony\Component\String\UnicodeString is not declared
-front end: 0 error(s), 1 warning(s)
+rc=65
+missing_package/src/main.php:4: error[undefined.class]: class Symfony\Component\String\UnicodeString is not declared (reachable: __main)
+front end: 1 error(s), 0 warning(s)
 == check_unit_top_level
+rc=65
+unit_top_level/src/u.php:3: error[undefined.class]: class Missing\U is not declared (reachable: __mc_unit_0)
+front end: 1 error(s), 0 warning(s)
+== tier_reachable_new
+rc=65
+tier/reachable_new.php:2: error[undefined.class]: class Missing\A is not declared (reachable: __main)
+front end: 1 error(s), 0 warning(s)
+== tier_dead_fn
 rc=0
-unit_top_level/src/u.php:3: warning[undefined.class]: class Missing\U is not declared
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_guards
+rc=0
+tier/guards.php:11: warning[undefined.function]: function missing_mg() is not declared (guarded by function_exists(...))
+tier/guards.php:14: warning[undefined.class]: class Missing\D is not declared (guarded by class_exists(...))
+tier/guards.php:4: warning[undefined.class]: class Missing\C is not declared (guarded by class_exists(...))
+tier/guards.php:8: warning[undefined.function]: function missing_mf() is not declared (guarded by function_exists(...))
+front end: 0 error(s), 4 warning(s)
+== tier_soft
+rc=0
+tier/soft.php:2: warning[undefined.class]: class Missing\G is not declared
+tier/soft.php:4: warning[undefined.class]: class Missing\E is not declared
+tier/soft.php:5: warning[undefined.class]: class Missing\F is not declared
+front end: 0 error(s), 3 warning(s)
+== tier_method_never
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_method_called
+rc=65
+tier/method_called.php:2: error[undefined.function]: function missing_fn() is not declared (reachable: K__run <- __main)
+front end: 1 error(s), 0 warning(s)
+== tier_default_param
+rc=65
+tier/default_param.php:2: error[undefined.constant]: constant NO_CONST is not declared (reachable: d <- __main)
+front end: 1 error(s), 0 warning(s)
+== tier_default_param_unused
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_dyn_define
+rc=0
+tier/dyn_define.php:4: warning[undefined.constant]: constant SOME_CONST is not declared
 front end: 0 error(s), 1 warning(s)
+== tier_fold_define
+rc=0
+== tier_cascade
+rc=65
+tier/cascade.php:3: error[lower.unsupported]: unsupported statement kind Function
+tier/cascade.php:4: warning[undefined.function]: function inner_missing() is not declared
+front end: 1 error(s), 1 warning(s)
+== tier_reachable_new_allow_traps
+rc=0
+tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared
+front end: 0 error(s), 1 warning(s)
+== tier_dead_fn_all
+rc=0
+tier/dead_fn.php:2: note[undefined.class]: class Missing\B is not declared
+front end: 0 error(s), 0 warning(s)
+== tier_build_error_no_output
+rc=65
+compile: front-end (parse/typeck/IR) returned null (rc=65)
+tier/reachable_new.php:2: error[undefined.class]: class Missing\A is not declared (reachable: __main)
+front end: 1 error(s), 0 warning(s)
 == reach_basic
 rc=0
 reach: __main
@@ -173,20 +227,19 @@ reach: __main
 reach?: X____construct
 reach?: Y____construct
 == reach_class_level
-rc=0
+rc=65
 class: Holder
 class: Konst
 class: Used
 reach: __main
 reach: Holder__v
 reach: Used__m
-reach/class_level.php:2: warning[undefined.constant]: constant UNDEF_USED is not declared
-reach/class_level.php:3: warning[undefined.class]: class MissingHint is not declared
-reach/class_level.php:3: warning[undefined.constant]: constant UNDEF_DEAD is not declared
+reach/class_level.php:2: error[undefined.constant]: constant UNDEF_USED is not declared
 site: undefined.class|missinghint line=3 fn=@class:Dead reach=0 maybe=0
 site: undefined.constant|undef_dead line=3 fn=@class:Dead reach=0 maybe=0
 site: undefined.constant|undef_used line=2 fn=@class:Used reach=1 maybe=1
-front end: 0 error(s), 3 warning(s)
+front end: 2 unreachable undeclared name(s) hidden (--all to list)
+front end: 1 error(s), 0 warning(s)
 == reach_dyn_fn_name
 rc=0
 reach: __main
@@ -216,13 +269,13 @@ class: Base
 class: Impl
 reach: __main
 reach: Impl__g
-reach/unused_interface.php:2: warning[undefined.class]: class MissingA is not declared
 reach/unused_interface.php:3: warning[undefined.class]: class MissingB is not declared
 reach/unused_interface.php:4: warning[undefined.class]: class MissingC is not declared
 site: undefined.class|missinga line=2 fn=@class:Unused reach=0 maybe=0
 site: undefined.class|missingb line=3 fn=@class:UsedI reach=1 maybe=1
 site: undefined.class|missingc line=4 fn=@class:Base reach=1 maybe=1
-front end: 0 error(s), 3 warning(s)
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 2 warning(s)
 == reach_literal_class
 rc=0
 class: A

@@ -475,8 +475,10 @@ trait LowerExprs
             // itself is a no-op yielding true (define's bool return).
             if ($fnBare === 'define') {
                 $d0 = $expr->args[0] ?? null;
-                if ($d0 !== null && $d0->kind === 'StringLiteral' && \count($expr->args) >= 2) {
-                    $dn = $this->constBareName($this->stringLitValue($d0));
+                $d0Name = $d0 !== null ? $this->foldDefineName($d0) : '';
+                if ($d0 !== null && $d0Name === '') { $this->sawDynConstant = true; }
+                if ($d0Name !== '' && \count($expr->args) >= 2) {
+                    $dn = $this->constBareName($d0Name);
                     if (isset($this->runtimeConstants[$dn])) {
                         $dv = $this->lowerExpr($expr->args[1]);
                         $cell = $this->runtimeConstants[$dn];

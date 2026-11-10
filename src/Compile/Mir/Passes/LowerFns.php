@@ -105,6 +105,10 @@ trait LowerFns
         // equivalent.
         $refOutNames = $this->refOutParamNames($decl->attributes);
         $cellArgNames = $this->cellArgParamNames($decl->attributes);
+        // Parameter defaults lower under the function itself: their undeclared names run only when it does.
+        $prevFnSym = $this->currentFnSym;
+        $this->currentFnSym = $decl->name;
+        $this->currentLowerFn = $decl->name;
         $params = [];
         foreach ($decl->params as $p) {
             $isVariadic = (bool)($p->variadic ?? false);
@@ -140,8 +144,6 @@ trait LowerFns
         $this->currentLowerClass = $this->synthFnScope[$decl->name] ?? '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
-        $prevFnSym = $this->currentFnSym;
-        $this->currentFnSym = $decl->name;
         if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // FFI: `#[Symbol('cSym')]` makes this a thin extern forward — the
         // body (a stock-PHP fallback like `$GLOBALS['argc']`) is never

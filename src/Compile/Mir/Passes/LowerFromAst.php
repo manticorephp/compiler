@@ -4468,9 +4468,10 @@ final class LowerFromAst implements Pass
      * Class names the compiler owns without a PHP declaration: `Closure` (emitter statics, EmitLlvmObjects /
      * staticClassAbsent), `Generator` (emitter-built, EmitLlvmBuiltins class_exists), `Ffi\Ptr` (ptrIntrinsicClass).
      * `UnitEnum` / `BackedEnum` (every enum implements them in EmitLlvm; no PHP declaration).
+     * `Composer\Autoload\ClassLoader` (the autoloader the compiler replaces; its references are dropped).
      */
     private const COMPILER_CLASSES = ['closure' => true, 'generator' => true, 'ffi\\ptr' => true,
-        'unitenum' => true, 'backedenum' => true];
+        'unitenum' => true, 'backedenum' => true, 'composer\\autoload\\classloader' => true];
 
     /** @var array<string, bool> lowercase names of every table classIsDeclared reads, plus literal class_alias targets */
     private array $declaredLower = [];
@@ -4879,6 +4880,27 @@ final class LowerFromAst implements Pass
         );
     }
 
+    /**
+     * The literal name a `define()` first argument spells: a string literal (`__NAMESPACE__` is one by parse
+     * time), a `.` concatenation of foldable parts, or a constant already known as a string. '' when it
+     * is only known at run time.
+     */
+    private function foldDefineName(\Parser\Ast\Expr $e): string
+    {
+        if ($e->kind === 'StringLiteral') { return $this->stringLitValue($e); }
+        if ($e->kind === 'BinaryOp' && $this->binaryOp($e) === '.') {
+            $l = $this->foldDefineName($this->binaryLeft($e));
+            if ($l === '') { return ''; }
+            $r = $this->foldDefineName($this->binaryRight($e));
+            return $r === '' ? '' : $l . $r;
+        }
+        if ($e->kind === 'Identifier') {
+            $u = $this->userConstants[$this->constBareName($this->identifierName($e))] ?? null;
+            if ($u !== null && $u->kind === 'StringLiteral') { return $this->stringLitValue($u); }
+        }
+        return '';
+    }
+
     /** The trailing segment of a possibly-namespaced constant — or call — name. */
     private function registerUnconditionalDefines(array $stmts): void {
         foreach ($stmts as $stmt) {
@@ -4891,8 +4913,10 @@ final class LowerFromAst implements Pass
             if ($de->kind !== 'Call') { continue; }
             if (\strtolower($this->constBareName($de->function)) !== 'define') { continue; }
             $dargs = $de->args;
-            if (\count($dargs) < 2 || $dargs[0]->kind !== 'StringLiteral') { continue; }
-            $this->registerDefinedConstant($this->constBareName($this->stringLitValue($dargs[0])), $dargs[1]);
+            if (\count($dargs) < 2) { continue; }
+            $dname = $this->foldDefineName($dargs[0]);
+            if ($dname === '') { continue; }
+            $this->registerDefinedConstant($this->constBareName($dname), $dargs[1]);
         }
     }
 
@@ -4909,9 +4933,11 @@ final class LowerFromAst implements Pass
         $w = new \Analyze\AstWalk(false);
         $w->stmts($stmts);
         foreach ($w->exprs as $e) {
-            if ($e->kind !== 'Call' || \count($e->args) < 2 || $e->args[0]->kind !== 'StringLiteral') { continue; }
+            if ($e->kind !== 'Call' || \count($e->args) < 2) { continue; }
             if (\strtolower($this->constBareName($e->function)) !== 'define') { continue; }
-            $names[$this->constBareName($this->stringLitValue($e->args[0]))] = true;
+            $dname = $this->foldDefineName($e->args[0]);
+            if ($dname === '') { continue; }
+            $names[$this->constBareName($dname)] = true;
         }
         $names = $names + $this->collectLazyDefineNames($stmts);
         foreach ($names as $n => $_) {

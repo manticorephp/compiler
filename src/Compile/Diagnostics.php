@@ -81,6 +81,46 @@ final class Diagnostics
         $this->items[] = new Diagnostic($file, $line, 0, $severity, $code, $message);
     }
 
+    /**
+     * Rank every undefined.* group by reachability. A group is an ERROR when some HARD, unguarded site is
+     * reached statically (unless traps are allowed, a dynamic constant table exists, or an unrelated error
+     * already cascades); a WARNING when some site may run (dynamically reached, soft or guarded); else a NOTE.
+     */
+    public function applyReachability(\Compile\Mir\Reachability $r, bool $allowTraps, bool $dynConstants): void
+    {
+        $cascade = false;
+        foreach ($this->items as $d) {
+            if ($d->severity === Diagnostic::SEV_ERROR && !\str_starts_with($d->code, 'undefined.')) { $cascade = true; }
+        }
+        foreach ($this->useSites as $k => $sites) {
+            $idx = $this->useIdx[$k] ?? -1;
+            if ($idx < 0 || !\str_starts_with($this->items[$idx]->code, 'undefined.')) { continue; }
+            $d = $this->items[$idx];
+            $canError = !$allowTraps && !$cascade && !($d->code === 'undefined.constant' && $dynConstants);
+            $hard = null;
+            $maybe = null;
+            foreach ($sites as $s) {
+                $fn = (string)$s['fn'];
+                if ($canError && $hard === null && $s['kind'] === 'hard' && $s['guard'] === '' && $r->reaches($fn)) { $hard = $s; }
+                if ($maybe === null && $r->maybeReaches($fn)) { $maybe = $s; }
+            }
+            if ($hard !== null) {
+                $d->severity = Diagnostic::SEV_ERROR;
+                $d->file = (string)$hard['file'];
+                $d->line = (int)$hard['line'];
+                $chain = $r->chain((string)$hard['fn'], 4);
+                if (\count($chain) > 0) { $d->message .= ' (reachable: ' . \implode(' <- ', $chain) . ')'; }
+            } elseif ($maybe !== null) {
+                $d->severity = Diagnostic::SEV_WARNING;
+                $d->file = (string)$maybe['file'];
+                $d->line = (int)$maybe['line'];
+                if ($maybe['guard'] !== '') { $d->message .= ' (guarded by ' . (string)$maybe['guard'] . ')'; }
+            } else {
+                $d->severity = 'note';
+            }
+        }
+    }
+
     public function hasErrors(): bool
     {
         foreach ($this->items as $d) {
@@ -91,7 +131,7 @@ final class Diagnostics
         return false;
     }
 
-    public function render(): string
+    public function render(bool $showNotes = false): string
     {
         if (\count($this->items) === 0) {
             return '';
@@ -99,7 +139,13 @@ final class Diagnostics
         $keyed = [];
         $errors = 0;
         $warnings = 0;
+        $hidden = 0;
         foreach ($this->items as $i => $d) {
+            if ($d->severity === 'note') {
+                if (!$showNotes) { $hidden = $hidden + 1; continue; }
+                $keyed[] = \sprintf('%s|%09d|%09d', $d->file, $d->line, $i);
+                continue;
+            }
             $keyed[] = \sprintf('%s|%09d|%09d', $d->file, $d->line, $i);
             if ($d->severity === Diagnostic::SEV_ERROR) {
                 $errors = $errors + 1;
@@ -114,6 +160,9 @@ final class Diagnostics
             $uses = $this->useCount[(int)\substr($k, \strrpos($k, '|') + 1)] ?? 1;
             $out .= $d->file . ':' . (string)$d->line . ': ' . $d->severity . '[' . $d->code . ']: ' . $d->message
                 . ($uses > 1 ? ' (' . (string)$uses . ' uses)' : '') . "\n";
+        }
+        if ($hidden > 0) {
+            $out .= 'front end: ' . (string)$hidden . ' unreachable undeclared name(s) hidden (--all to list)' . "\n";
         }
         return $out . 'front end: ' . (string)$errors . ' error(s), ' . (string)$warnings . ' warning(s)';
     }
