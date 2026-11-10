@@ -3088,7 +3088,7 @@ trait EmitLlvmObjects
     /** The out-of-line symbol for one erased-interface dispatcher. */
     private function erasedIfaceSym(string $iface, string $method, int $argc): string
     {
-        $i = \str_replace('\\', '_', \ltrim($iface, '\\'));
+        $i = \Compile\SymbolName::ident($iface);
         return $this->mirHelperSym('__mir_eicall_' . $i . '__' . $method . '_' . (string)$argc);
     }
 
@@ -9724,7 +9724,7 @@ trait EmitLlvmObjects
         // module. Its linked method is still a valid implementation; the
         // emitter must not replace the call with an undefined-method trap.
         $fqn = \ltrim($class, '\\') . '__' . $method;
-        $wire = \str_replace('\\', '_', \ltrim($class, '\\')) . '__' . $method;
+        $wire = \Compile\SymbolName::mangle(\ltrim($class, '\\')) . '__' . $method;
         if (isset($this->sigs->paramTypes[$fqn]) || isset($this->sigs->paramTypes[$wire])) {
             return false;
         }

@@ -1306,16 +1306,10 @@ final class Sig
         return false;
     }
 
-    /** Mangle a PHP name to its LLVM symbol fragment (`\` → `_`). */
+    /** A PHP name's LLVM symbol fragment — the one the emitter spells. */
     private static function mangle(string $name): string
     {
-        $out = '';
-        $n = \strlen($name);
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $c = \substr($name, $i, 1);
-            $out = $out . ($c === '\\' ? '_' : $c);
-        }
-        return $out;
+        return \Compile\SymbolName::mangle($name);
     }
 
     /** Minimal JSON string literal: quote + escape the bytes that need it. */

@@ -2236,26 +2236,7 @@ final class EmitLlvm implements EmitVisitor
     private function mangle(string $name): string
     {
         if (isset($this->mangleCache[$name])) { return $this->mangleCache[$name]; }
-        // Keep fragments in an array: `.=` per byte has quadratic copy cost when
-        // a generated symbol is long, and mangle is called from nearly every
-        // emitter site. The resulting spelling is byte-for-byte unchanged.
-        /** @var string[] $parts */
-        $parts = [];
-        $n = \strlen($name);
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $c = \substr($name, $i, 1);
-            // `.` — never a byte of a php name — keeps `A\B_C` and `A_B\C` apart
-            // (sodium_compat ships both spellings of one class); `_` merged them.
-            if ($c === '\\') { $parts[] = '.'; continue; }
-            // php identifiers admit every byte >= 0x80, so a class can be named
-            // in UTF-8 — symfony/cache declares `class \\xa9`. An LLVM identifier
-            // cannot carry those bytes raw, so they are hex-escaped into a
-            // still-unique ASCII name. `$u` keeps the escape from colliding with
-            // an ordinary `_XX` in a source name.
-            $b = \ord($c);
-            $parts[] = $b >= 0x80 ? '_u' . \strtoupper(\dechex($b)) : $c;
-        }
-        $out = \implode('', $parts);
+        $out = \Compile\SymbolName::mangle($name);
         $this->mangleCache[$name] = $out;
         return $out;
     }

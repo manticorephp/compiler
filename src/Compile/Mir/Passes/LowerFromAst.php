@@ -8526,7 +8526,7 @@ final class LowerFromAst implements Pass
         // calls retain the PHP FQN. Treat either spelling as an exported
         // method; otherwise internal Runtime classes such as AsyncHook are
         // falsely diagnosed as absent although stdlib.o defines them.
-        $wireSym = \str_replace('\\', '_', $c) . '__' . $method;
+        $wireSym = \Compile\SymbolName::mangle($c) . '__' . $method;
         if (isset($this->externMethodSyms[$wireSym])) { return false; }
         return true;
     }
