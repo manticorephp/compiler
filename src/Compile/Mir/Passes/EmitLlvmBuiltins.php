@@ -93,9 +93,25 @@ trait EmitLlvmBuiltins
     /** Line of the builtin call being emitted: the line its trace frame reports. */
     private int $btCallLine = 0;
 
+    /**
+     * A spread into a builtin that has a same-named PHP body: the builtin emitters
+     * index their arguments positionally and cannot read a pack, the body binds it
+     * like any call (defaults, variadics, names). Lowering already expands the
+     * fixed-arity ones ({@see \Compile\Mir\Passes\LowerFromAst::expandBuiltinSpread}).
+     */
+    private function spreadIntoBodiedBuiltin(Call $c): bool
+    {
+        $name = $c->function;
+        if (!isset($this->allTwinTot[$name]) && !isset($this->sigs->paramTypes[$name])) { return false; }
+        foreach ($c->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return true; }
+        }
+        return false;
+    }
+
     private function emitBuiltin(Call $c): ?string
     {
-        if ($c === $this->builtinDeclined) { return null; }
+        if ($c === $this->builtinDeclined || $this->spreadIntoBodiedBuiltin($c)) { return null; }
         $this->btCallLine = $c->line;
         $mark = \count($this->arrArgTempRegs);
         $ir = $this->emitBuiltinDispatch($c);
