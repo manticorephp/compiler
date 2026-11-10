@@ -15,3 +15,7 @@ function lazy_probe(): string {
 echo "before late ", lazy_probe(), "\n";
 require __DIR__ . '/../routes/late.php';
 echo "after late ", lazy_probe(), " ", lazy_late_helper(), "\n";
+function lazy_probe2(): string { return function_exists('lazy_decl_only') ? 'y' : 'n'; }
+echo "before decl_only ", lazy_probe2(), "\n";
+require_once __DIR__ . '/../routes/decl_only.php';
+echo "after decl_only ", lazy_probe2(), " ", lazy_decl_only(), "\n";

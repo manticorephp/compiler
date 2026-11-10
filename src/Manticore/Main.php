@@ -4323,6 +4323,13 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                     $effects = true;
                     break;
                 }
+                // A file of function declarations alone still gets a unit: its
+                // done flag is what function_exists() asks before the file runs
+                // ({@see \Compile\Mir\Passes\LowerFromAst::lazyFnDoneKey}).
+                if ($s->kind === 'Function') {
+                    $effects = true;
+                    break;
+                }
             }
             // A declaring statement that also holds a `return` (php-parser's `if (PHP_VERSION_ID >= 80000) { class T {} return; }`)
             // would go into `__main` whole, and its `return` would end the PROGRAM. Such a file takes the eager path below,
