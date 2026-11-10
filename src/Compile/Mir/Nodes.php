@@ -2065,6 +2065,9 @@ final class StaticCall_ extends Node
     /** See {@see Call::$srcArgc}. Declared LAST. */
     public int $srcArgc = -1;
 
+    /** One arm of the per-class expansion of `$cls::m()` (a RUNTIME class): reachability counts it at the dynamic level only. Declared LAST. */
+    public bool $dynArm = false;
+
     /** Set by {@see Passes\OwnershipFlow}: the locals Own just before the call
      *  runs (its operands evaluated), name → its `drop` op — what an unwind
      *  through this call must drop ({@see NothrowSummary::callMayThrow}).

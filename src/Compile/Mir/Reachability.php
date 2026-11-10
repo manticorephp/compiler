@@ -95,6 +95,10 @@ final class Reachability
 
     /** @var array<string, array<string, bool>> lowercase class => functions statically referencing it (`C::K`, `C::$p`) */
     private array $classRefs = [];
+    /** @var array<string, array<string, bool>> like {@see $classRefs}, from a `$cls::K` with a runtime class: counted at the dynamic level only */
+    private array $dynClassRefs = [];
+    /** @var array<int, array{string, string, string}> runtime-class `$cls::m()` arms met at the static level: replayed once the dynamic level starts */
+    private array $deferredArms = [];
     /** @var array<string, bool>|null lowercase class / interface names in use, null until first asked */
     private ?array $usedClasses = null;
     /** @var array<string, string[]> interface => every interface it extends */
@@ -116,11 +120,13 @@ final class Reachability
     /**
      * @param array<string, array<string, bool>> $staticClassRefs lowercase class => fns reading its constants /
      *   static properties (recorded by lowering, since a constant is inlined and leaves no trace in MIR)
+     * @param array<string, array<string, bool>> $dynClassRefs the same for a `$cls::K` whose class is a runtime value
      */
-    public static function compute(Module $m, array $staticClassRefs = []): self
+    public static function compute(Module $m, array $staticClassRefs = [], array $dynClassRefs = []): self
     {
         $r = new self();
         $r->classRefs = $staticClassRefs;
+        $r->dynClassRefs = $dynClassRefs;
         foreach ($m->functions as $fn) {
             $r->fnNames[$fn->name] = true;
             $r->fnLc[\strtolower($fn->name)] = $fn->name;
@@ -183,6 +189,7 @@ final class Reachability
         $r->staticInstantiated = $r->instantiated;
         $r->staticStaticCalled = $r->staticCalled;
         $r->widen = true;
+        foreach ($r->deferredArms as $arm) { $r->staticCall($arm[0], $arm[1], $arm[2]); }
         foreach ($dynRoots as $dr) { $r->enqueue($dr, ''); }
         if (isset($r->pending['fns'])) { $r->reachNameableFns(''); }
         if (isset($r->pending['methods'])) { $r->reachAllMethods(''); }
@@ -293,11 +300,17 @@ final class Reachability
         foreach (($maybe ? $this->instantiated : $this->staticInstantiated) as $lc => $_) { $used[$lc] = true; }
         foreach (($maybe ? $this->staticCalled : $this->staticStaticCalled) as $lc => $_) { $used[$lc] = true; }
         // A reference recorded inside another class's class-level code counts once THAT class is used.
+        $refs = $this->classRefs;
+        if ($maybe) {
+            foreach ($this->dynClassRefs as $lc => $fns) {
+                foreach ($fns as $fn => $_) { $refs[$lc][$fn] = true; }
+            }
+        }
         $changed = true;
         while ($changed) {
             $changed = false;
             $used = $this->closeOverAncestors($used);
-            foreach ($this->classRefs as $lc => $fns) {
+            foreach ($refs as $lc => $fns) {
                 if (isset($used[$lc])) { continue; }
                 foreach ($fns as $fn => $_) {
                     $owner = $maybe ? '' : $this->factoryOwner($fn);
@@ -667,6 +680,8 @@ final class Reachability
             if ($k === Node::KIND_CALL) {
                 $f = $this->asCall($n)->function;
                 if (!isset($this->fnNames[$f])) { $f = $this->fnLc[\strtolower($f)] ?? ''; }
+                // An object born without `new`: its class is a runtime value (`unserialize`, a reflection factory).
+                if ($f === 'unserialize' || $f === '__mc_refl_alloc' || $f === '__mc_refl_ctor') { $this->newDynamic($from); }
                 // A synthesized dispatcher (`__mc_uninit_by_name`, …) is a dynamic edge: the dynamic roots reach it.
                 if ($this->widen || !$this->isDynamicHelper($f)) { $this->enqueue($f, $from); }
             } elseif ($k === Node::KIND_STRING_CONST) {
@@ -676,7 +691,17 @@ final class Reachability
                 if (isset($this->hiddenFns[$from]) || $this->isSynthesized($from)) { $this->hiddenFns[$cl] = true; }
                 $this->enqueue($cl, $from);
             } elseif ($k === Node::KIND_NEW_OBJ) {
-                $this->instantiate(\strtolower(\ltrim($this->asNewObj($n)->class, '\\')), $from);
+                $no = $this->asNewObj($n);
+                $this->instantiate(\strtolower(\ltrim($no->class, '\\')), $from);
+                // `new ReflectionClass(A::class)`: its factories can build exactly A.
+                if (\strtolower(\ltrim($no->class, '\\')) === 'reflectionclass' && \count($no->args) > 0) {
+                    $rc = $no->args[0];
+                    $lcs = $rc->kind === Node::KIND_STRING_CONST
+                        ? [\strtolower(\ltrim($this->asString($rc)->value, '\\'))] : $this->classTargets($rc, $from);
+                    if ($lcs !== null) {
+                        foreach ($lcs as $lc) { if (isset($this->classLc[$lc])) { $this->instantiate($lc, $from); } }
+                    }
+                }
             } elseif ($k === Node::KIND_NEW_DYN_OBJ) {
                 $cls = $this->classTargets($this->asNewDyn($n)->classExpr, $from);
                 if ($cls === null) { $this->newDynamic($from); }
@@ -685,6 +710,13 @@ final class Reachability
                 $this->demand($this->asMethodCall($n)->method, $from);
             } elseif ($k === Node::KIND_STATIC_CALL) {
                 $sc = $this->asStaticCall($n);
+                if ($sc->dynArm) {
+                    // One arm of `$cls::m()` over a runtime class: a static call only at the dynamic level.
+                    if ($this->widen) { $this->staticCall($sc->class, $sc->method, $from); }
+                    else { $this->deferredArms[] = [$sc->class, $sc->method, $from]; }
+                    foreach (Walk::children($n) as $c) { $stack[] = $c; }
+                    continue;
+                }
                 $this->staticCall($sc->class, $sc->method, $from);
                 if ($sc->staticClass !== '' && \strtolower($sc->staticClass) !== \strtolower($sc->class)) {
                     $this->staticCall($sc->staticClass, $sc->method, $from);

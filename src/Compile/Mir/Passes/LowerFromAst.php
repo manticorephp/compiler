@@ -4564,6 +4564,9 @@ final class LowerFromAst implements Pass
     private string $declSym = '';
     /** @var array<string, array<string, bool>> lowercase class => the functions reading its constants / static properties (`@class:<FQN>` from class-level code) */
     public array $staticClassRefs = [];
+    /** @var array<string, array<string, bool>> like {@see $staticClassRefs}, from the arms of a `$cls::K` with a runtime class: dynamic level only */
+    public array $dynClassRefs = [];
+    private int $dynRefDepth = 0;
 
     private const GUARD_FNS = ['class_exists' => true, 'interface_exists' => true, 'trait_exists' => true,
         'enum_exists' => true, 'function_exists' => true, 'method_exists' => true, 'is_callable' => true,
@@ -4731,6 +4734,7 @@ final class LowerFromAst implements Pass
     private function noteStaticClassRef(string $cls): void
     {
         if ($this->diags === null || $this->lowerInPrelude || $cls === '') { return; }
+        if ($this->dynRefDepth > 0) { $this->dynClassRefs[\strtolower(\ltrim($cls, '\\'))][$this->currentFnSymbol()] = true; return; }
         $this->staticClassRefs[\strtolower(\ltrim($cls, '\\'))][$this->currentFnSymbol()] = true;
     }
 
@@ -7191,7 +7195,10 @@ final class LowerFromAst implements Pass
             $then = \Parser\Ast\Expr::staticAccess($cname, $nm, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
-        return $this->lowerExpr($chain);
+        $this->dynRefDepth = $this->dynRefDepth + 1;
+        $lowered = $this->lowerExpr($chain);
+        $this->dynRefDepth = $this->dynRefDepth - 1;
+        return $lowered;
     }
 
     /**
@@ -7262,8 +7269,29 @@ final class LowerFromAst implements Pass
             $then = \Parser\Ast\Expr::staticCall($cname, $method, $args, $span);
             $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
         }
-        return $this->lowerExpr($chain);
+        $lowered = $this->lowerExpr($chain);
+        $armClasses = [];
+        foreach ($names as $cname) { $armClasses[\strtolower(\ltrim($cname, '\\'))] = true; }
+        $this->markDynArms($lowered, $armClasses, \strtolower($method));
+        return $lowered;
     }
+
+    /** Flag the per-class arms (`StaticCall_` of a class in `$classes`, method `$lm`) of a lowered `$cls::m()` chain; an arm's arguments are not entered. @param array<string, bool> $classes */
+    private function markDynArms(Node $root, array $classes, string $lm): void
+    {
+        /** @var Node[] $stack */
+        $stack = [$root];
+        while (\count($stack) > 0) {
+            $n = \array_pop($stack);
+            if ($n->kind === Node::KIND_STATIC_CALL) {
+                $sc = $this->asStaticCallNode($n);
+                if (isset($classes[\strtolower(\ltrim($sc->class, '\\'))]) && \strtolower($sc->method) === $lm) { $sc->dynArm = true; continue; }
+            }
+            foreach (Walk::children($n) as $c) { $stack[] = $c; }
+        }
+    }
+
+    private function asStaticCallNode(Node $n): StaticCall_ { return $n; }
 
     /**
      * `__mc_closure_from($c)`: `$c` itself when it is a Closure, else a Closure

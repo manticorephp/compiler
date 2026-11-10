@@ -5480,7 +5480,12 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 foreach ($rfns as $rfn => $_r) { $classRefs[(string)$rc][$diag->resolveFn((string)$rfn)] = true; }
             }
             $reachT = \Compile\Stats::begin('Reachability');
-            $reach = \Compile\Mir\Reachability::compute($module, $classRefs);
+            /** @var array<string, array<string, bool>> $dynRefs */
+            $dynRefs = [];
+            foreach ($lower->dynClassRefs as $rc => $rfns) {
+                foreach ($rfns as $rfn => $_r) { $dynRefs[(string)$rc][$diag->resolveFn((string)$rfn)] = true; }
+            }
+            $reach = \Compile\Mir\Reachability::compute($module, $classRefs, $dynRefs);
             \Compile\Stats::step('Reachability', $reachT, \count($module->functions), \count($module->classes));
             if (\getenv('MANTICORE_REACH_DUMP') === '1') {
                 $rd = $reach->dump();

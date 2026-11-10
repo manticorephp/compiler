@@ -188,6 +188,14 @@ front end: 0 error(s), 2 warning(s)
 rc=0
 front end: 1 unreachable undeclared name(s) hidden (--all to list)
 front end: 0 error(s), 0 warning(s)
+== tier_dyn_static_missing
+rc=0
+tier/dyn_static_missing.php:2: warning[undefined.function]: function missing_fn() is not declared
+front end: 0 error(s), 1 warning(s)
+== tier_unserialize_missing
+rc=0
+tier/unserialize_missing.php:2: warning[undefined.function]: function missing_fn() is not declared
+front end: 0 error(s), 1 warning(s)
 == tier_reachable_new_allow_traps
 rc=0
 tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared
@@ -279,9 +287,9 @@ reach?: S__inst
 reach?: S__s
 == reach_attr_reflect
 rc=0
+class: T
 class: Tag
 class?: stdClass
-class?: T
 class?: Unrelated
 reach: __main
 reach: Tag____construct
@@ -377,6 +385,43 @@ reach: __main
 reach: viaParam
 reach?: X__a
 reach?: X__b
+== reach_dyn_static_call
+rc=0
+class?: P
+class?: Q
+reach: __main
+reach: pick
+reach?: P__make
+reach?: Q__make
+== reach_unserialize_new
+rc=0
+class?: Other
+class?: stdClass
+class?: Svc
+reach: __main
+reach?: Svc__run
+== reach_reflection_literal
+rc=0
+class: A
+class?: B
+class?: stdClass
+reach: __main
+reach: A____construct
+reach?: B____construct
+== reach_reflection_runtime
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach?: A____construct
+reach?: B____construct
+== reach_dyn_static_const
+rc=0
+class?: K1
+class?: K2
+reach: __main
+reach: get
 == builtin names in sync
 ok
 == compile bad --progress
