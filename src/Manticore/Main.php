@@ -1977,7 +1977,8 @@ function self_dir(): string
     return CompileArgs::$selfDirCache;
 }
 
-function self_dir_resolve(): string
+/** The running compiler's own path (symlinks resolved), or ''. */
+function self_exe_resolve(): string
 {
     // GUARDED: the libc `argv` binding and `cstr_to_str` are throwing stubs
     // under the Zend cold-seed, where the env overrides are the resolution path.
@@ -2001,7 +2002,12 @@ function self_dir_resolve(): string
     } elseif ($self !== "") {
         $self = path_lookup($self);
     }
+    return $self;
+}
 
+function self_dir_resolve(): string
+{
+    $self = self_exe_resolve();
     if ($self === "") {
         return "";
     }
@@ -2010,6 +2016,24 @@ function self_dir_resolve(): string
         return "";
     }
     return \substr($self, 0, $slashAt);
+}
+
+/**
+ * Which compiler binary is running, as `size:mtime` of its file: a rebuilt
+ * compiler is a different one even at the same version. '' when unknown.
+ */
+function self_exe_id(): string
+{
+    $exe = self_exe_resolve();
+    if ($exe === '') {
+        return '';
+    }
+    $size = \filesize($exe);
+    $mtime = \filemtime($exe);
+    if ($size === false || $mtime === false) {
+        return '';
+    }
+    return (string)$size . ':' . (string)$mtime;
 }
 
 /**
@@ -6096,9 +6120,9 @@ function compile_via_mir(array $sources, array $paths = []): ?string
  * the compiler resolves the prelude (`prelude_src_or_empty`). Best-effort: a
  * missing / unparseable prelude file is skipped, not fatal.
  *
- * @return \Analyze\ParsedFile[]
+ * @return array<string, string> prelude file name => contents
  */
-function analyze_prelude_files(): array
+function analyze_prelude_sources(): array
 {
     // The prelude file set (stable). Class-defining files matter most for the
     // undefined-class rule; loading all also seeds prelude functions.
@@ -6189,18 +6213,33 @@ function analyze_prelude_files(): array
         "mysqli.php",
         "mysqli_fn.php",
     ];
-    /** @var \Analyze\ParsedFile[] $out */
+    /** @var array<string, string> $out */
     $out = [];
     foreach ($names as $name) {
         $src = prelude_src_or_empty($name);
-        if ($src === "") {
-            continue;
+        if ($src !== "") {
+            $out[$name] = $src;
         }
+    }
+    return $out;
+}
+
+/**
+ * The prelude files of {@see analyze_prelude_sources}, parsed.
+ *
+ * @param array<string, string> $sources file name => contents
+ * @return \Analyze\ParsedFile[]
+ */
+function analyze_prelude_files(array $sources): array
+{
+    /** @var \Analyze\ParsedFile[] $out */
+    $out = [];
+    foreach ($sources as $name => $src) {
         // `prelude_src_or_empty` strips the opening `<?php` (it is built to append
         // after a prelude header); re-add it so this parses as a standalone file.
         try {
             $program = \Parser\Parser::parseSource("<?php\n" . $src);
-            $out[] = new \Analyze\ParsedFile("prelude/" . $name, $program);
+            $out[] = new \Analyze\ParsedFile("prelude/" . (string)$name, $program);
         } catch (\Throwable $e) {
             // A prelude file that does not parse standalone is simply skipped.
         }
@@ -6359,12 +6398,28 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array
     }
 
     /** @var \Analyze\ParsedFile[] $libFiles prelude — known symbols, never reported */
-    $libFiles = analyze_prelude_files();
+    // The prelude's symbol table, cached between compiles: parsing every prelude
+    // file to rebuild it was most of the analyzer's cost ({@see \Analyze\PreludeIndex}).
+    $statT = \Compile\Stats::begin('analyze: prelude');
+    $preludeSrc = analyze_prelude_sources();
+    $piKey = \Analyze\PreludeIndex::key($preludeSrc, self_exe_id());
+    $libIndex = \Analyze\PreludeIndex::load($piKey);
+    if ($libIndex !== null) {
+        \Compile\Stats::line('analyze: prelude index (cached)');
+    } else {
+        $libIndex = \Analyze\Index::build(analyze_prelude_files($preludeSrc));
+        \Analyze\PreludeIndex::store($piKey, $libIndex);
+        \Compile\Stats::line('analyze: prelude files (parsed)');
+    }
+    \Compile\Stats::step('analyze: prelude', $statT, \count($libIndex->functions), -1);
+    unset($preludeSrc);
     $stdlibFns = $checkUndefined ? analyze_stdlib_fn_names() : [];
+    $statT = \Compile\Stats::begin('analyze: rules');
     $analyzer = new \Analyze\Analyzer();
-    foreach ($analyzer->run($parsed, $libFiles, $checkUndefined, $stdlibFns) as $d) {
+    foreach ($analyzer->run($parsed, [], $checkUndefined, $stdlibFns, $libIndex) as $d) {
         $diags[] = $d;
     }
+    \Compile\Stats::step('analyze: rules', $statT, \count($parsed), -1);
 
     // Deep pass: drive the compiler's OWN MIR type checks (no duplicated logic).
     if ($deep) {

@@ -27,7 +27,7 @@
 #   2. SYNC    The analyzer's two hand-written universes must still cover what
 #              the compiler actually implements:
 #                - Analyze\Builtins::functionSet ⊇ emitBuiltin dispatch names
-#                - analyze_prelude_files()       == prelude/*.php
+#                - analyze_prelude_sources()     == prelude/*.php
 #              Both are runtime hardcodes on purpose (globbing a directory and
 #              regexing a source file from inside the compiled binary would add
 #              a bootstrap dependency that the cold seed cannot satisfy), so the
@@ -126,7 +126,7 @@ if ($userVisible) {
 
 $listed = [];
 $main = (string)file_get_contents("$root/src/Manticore/Main.php");
-$s = strpos($main, "function analyze_prelude_files");
+$s = strpos($main, "function analyze_prelude_sources");
 $e = strpos($main, "return \$out;", $s);
 preg_match_all("/.([a-z_0-9]+\.php)./", substr($main, $s, $e - $s), $pm);
 foreach ($pm[1] as $n) { $listed[$n] = true; }
@@ -135,11 +135,11 @@ foreach (glob("$root/prelude/*.php") as $p) { $onDisk[basename($p)] = true; }
 $absent = array_values(array_diff(array_keys($onDisk), array_keys($listed)));
 if ($absent) {
     $fail = 1;
-    echo "FAIL analyze_prelude_files() omits ", count($absent), " prelude file(s):\n";
+    echo "FAIL analyze_prelude_sources() omits ", count($absent), " prelude file(s):\n";
     echo "     ", implode(", ", $absent), "\n";
     echo "     Every function they declare reads as undefined.\n";
 } else {
-    echo "ok   analyze_prelude_files() lists all ", count($onDisk), " prelude files\n";
+    echo "ok   analyze_prelude_sources() lists all ", count($onDisk), " prelude files\n";
 }
 exit($fail);
 '

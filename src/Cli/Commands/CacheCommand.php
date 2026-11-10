@@ -10,7 +10,8 @@ use Cli\ParsedArgs;
  * `manticore cache clear` — empty it.
  *
  * Only the cache's own files are touched (`<sha1>.o` and their in-flight
- * `.tmp` copies, at the top and in `prog/`): `MANTICORE_OBJ_CACHE_DIR` may point
+ * `.tmp` copies, at the top and in `prog/`, and the analyzer's `<sha1>.json`
+ * prelude indexes beside it): `MANTICORE_OBJ_CACHE_DIR` may point
  * anywhere, and clearing must never reach a file the cache did not write.
  */
 final class CacheCommand extends Command
@@ -31,9 +32,18 @@ final class CacheCommand extends Command
         $dir = \Manticore\obj_cache_dir();
         $files = 0;
         $bytes = 0;
-        foreach ([$dir, $dir . '/prog'] as $d) {
-            foreach ($this->cacheFiles($d) as $f) {
-                $files++;
+        $indexes = 0;
+        // Objects at the top and in prog/; the analyzer's prelude indexes beside
+        // the object directory ({@see \Analyze\PreludeIndex::path}).
+        /** @var array<int, string[]> */
+        $sets = [
+            [$dir, '/^[0-9a-f]{40}\.o(\.tmp[0-9_]*)?$/'],
+            [$dir . '/prog', '/^[0-9a-f]{40}\.o(\.tmp[0-9_]*)?$/'],
+            [\dirname($dir) . '/analyze', '/^[0-9a-f]{40}\.json(\.tmp[0-9_]*)?$/'],
+        ];
+        foreach ($sets as $k => $set) {
+            foreach ($this->cacheFiles($set[0], $set[1]) as $f) {
+                if ($k === 2) { $indexes++; } else { $files++; }
                 $sz = \filesize($f);
                 $bytes += $sz === false ? 0 : $sz;
                 if ($action === 'clear') {
@@ -41,17 +51,18 @@ final class CacheCommand extends Command
                 }
             }
         }
+        $what = (string)$files . ' objects, ' . (string)$indexes . ' analyzer indexes';
         $size = $this->human($bytes);
         if ($action === 'clear') {
-            \Manticore\puts('cleared ' . (string)$files . ' objects (' . $size . ') from ' . $dir);
+            \Manticore\puts('cleared ' . $what . ' (' . $size . ') from ' . $dir);
             return 0;
         }
-        \Manticore\puts($dir . ': ' . (string)$files . ' objects, ' . $size);
+        \Manticore\puts($dir . ': ' . $what . ', ' . $size);
         return 0;
     }
 
     /** @return string[] */
-    private function cacheFiles(string $dir): array
+    private function cacheFiles(string $dir, string $pattern): array
     {
         if (!\is_dir($dir)) {
             return [];
@@ -62,7 +73,7 @@ final class CacheCommand extends Command
         }
         $out = [];
         foreach ($ents as $e) {
-            if (\preg_match('/^[0-9a-f]{40}\.o(\.tmp[0-9]*)?$/', (string)$e) === 1) {
+            if (\preg_match($pattern, (string)$e) === 1) {
                 $out[] = $dir . '/' . (string)$e;
             }
         }

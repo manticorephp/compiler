@@ -43,6 +43,17 @@ final class Index
     }
 
     /** @param ParsedFile[] $files */
+    /**
+     * Add a library index after this one's own declarations: a name both declare
+     * resolves to the library's, as when {@see build} indexed user files first and
+     * the prelude after them.
+     */
+    public function merge(Index $lib): void
+    {
+        foreach ($lib->functions as $k => $f) { $this->functions[$k] = $f; }
+        foreach ($lib->classes as $k => $c) { $this->classes[$k] = $c; }
+    }
+
     public static function build(array $files): Index
     {
         $idx = new Index();
