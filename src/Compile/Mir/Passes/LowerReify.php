@@ -867,7 +867,7 @@ trait LowerReify
             'generic property `' . $cls . '::$' . $prop . '` read through the erased `'
             . $cls . '` while `' . $cls . '` is also used with a binding; the '
             . 'representation of that slot depends on the binding. Annotate the '
-            . 'receiver with one (e.g. `' . $cls . '<T>`).', null);
+            . 'receiver with one (e.g. `' . $cls . '<T>`).', $this->declSpanFor($cls));
     }
 
     /** Whether any specialization of `$cls` was built. */

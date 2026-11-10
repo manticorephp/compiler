@@ -741,9 +741,8 @@ trait LowerAttrChecks
     }
 
     /**
-     * Report one attribute error. Analyze mode collects it in the
-     * `line N: error: …` shape the driver already parses back into a
-     * diagnostic; a normal build throws, and Main's catch prints it.
+     * Report one attribute error: recorded in the front-end diagnostics when a
+     * sink is set (the build), else thrown as `$msg at line N`.
      */
     private function attrFail(string $msg, \Parser\Ast\Span $span): void
     {

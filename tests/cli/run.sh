@@ -113,6 +113,7 @@ PHP
     diag "build_two_bad_fns_then_good" "$MC" compile "$HERE/check/two_bad_then_good.php" -o "$WORK/tb"
     [ -e "$WORK/tb" ] && echo "BAD: wrote a binary"
     diag "check_parse_in_body"      "$MC" compile --check "$HERE/check/parse_in_body.php" -o "$WORK/pb"
+    diag "check_parse_two_in_body"  "$MC" compile --check "$HERE/check/parse_two_in_body.php" -o "$WORK/p2"
     diag "check_dedup"              "$MC" compile --check "$HERE/check/dedup.php" -o "$WORK/dd"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus

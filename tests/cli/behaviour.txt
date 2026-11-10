@@ -61,13 +61,13 @@ two_bad_then_good.php:3: error[lower.unsupported]: unsupported: foreach cannot b
 front end: 2 error(s), 0 warning(s)
 == check_parse_in_body
 rc=65
-
-
-
-Found 1 error(s), 0 warning(s).
 parse_in_body.php:5: error[parse.error]: unexpected token in expression: Semicolon
-parse_in_body.php:5:14: error: unexpected token in expression: Semicolon
 front end: 1 error(s), 0 warning(s)
+== check_parse_two_in_body
+rc=65
+parse_two_in_body.php:5: error[parse.error]: unexpected token in expression: Semicolon
+parse_two_in_body.php:6: error[parse.error]: unexpected token in expression: Semicolon
+front end: 2 error(s), 0 warning(s)
 == check_dedup
 rc=65
 dedup.php:5: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']

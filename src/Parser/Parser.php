@@ -220,6 +220,9 @@ final class Parser
         return new ParseResult($program, $errors);
     }
 
+    /** @var ParseError[] every error of the lazy body whose materialization last failed (tolerant re-parse). */
+    public static array $lazyBodyErrors = [];
+
     /** Materialize one deferred function/method body and release its source copy. */
     public static function materializeLazyBody(LazyBody $lazy): Block
     {
@@ -241,6 +244,11 @@ final class Parser
             }
             throw new \RuntimeException('manticore: failed to materialize lazy body');
         } catch (\Throwable $e) {
+            self::$lazyBodyErrors = [];
+            try {
+                self::$lazyBodyErrors = self::parseTolerant($wrapped, $lazy->file, false, false)->errors;
+            } catch (\Throwable $te) {
+            }
             $preview = substr(str_replace(["\n", "\r"], ' ', $raw), 0, 120);
             throw new \RuntimeException('lazy body ' . $lazy->file . ':' . (string)$lazy->line
                 . ' [' . $preview . ']: ' . $e->getMessage(), 0, $e);

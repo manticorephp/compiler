@@ -50,7 +50,7 @@ final class CompileCommand extends Command
             \Manticore\dprint("compile: failed to parse args (rc=64)");
             return 64;
         }
-        $analyze = !$args->flag("no-analyze");
+        $analyze = !$args->flag("no-analyze") && !\Manticore\CompileArgs::$checkOnly;
         $strict = \Manticore\CompileArgs::$strictAnalyze;
         $output = \Manticore\CompileArgs::$output;
 

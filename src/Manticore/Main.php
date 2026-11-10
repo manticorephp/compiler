@@ -4162,11 +4162,15 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             if ($where === '') {
                 $where = "<source>";
             }
-            $tol = Parser::parseTolerant($source, $where, false, false);
-            foreach ($tol->errors as $pe) {
+            $tolErrors = [];
+            try {
+                $tolErrors = Parser::parseTolerant($source, $where, false, false)->errors;
+            } catch (\Throwable $te) {
+            }
+            foreach ($tolErrors as $pe) {
                 $diag->add('error', 'parse.error', $pe->reason !== '' ? $pe->reason : $pe->getMessage(), $where, $pe->errLine, $pe->column);
             }
-            if (\count($tol->errors) === 0) {
+            if (\count($tolErrors) === 0) {
                 $pl = $e instanceof \Parser\ParseError ? $e->errLine : 0;
                 $pc = $e instanceof \Parser\ParseError ? $e->column : 0;
                 $diag->add('error', 'parse.error', $e instanceof \Parser\ParseError && $e->reason !== '' ? $e->reason : $e->getMessage(), $where, $pl, $pc);

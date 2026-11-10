@@ -4478,7 +4478,13 @@ final class LowerFromAst implements Pass
     private function recoverLowering(\Throwable $e, string $what, \Parser\Ast\Span $span): void
     {
         $pe = $e instanceof \Parser\ParseError ? $e : $e->getPrevious();
-        if ($pe instanceof \Parser\ParseError) {
+        $lazyErrs = \Parser\Parser::$lazyBodyErrors;
+        \Parser\Parser::$lazyBodyErrors = [];
+        if (\count($lazyErrs) > 0 && $pe instanceof \Parser\ParseError && !($e instanceof \Parser\ParseError)) {
+            foreach ($lazyErrs as $le) {
+                $this->diags->add('error', 'parse.error', $le->reason, $span->file, $le->errLine, $le->column);
+            }
+        } elseif ($pe instanceof \Parser\ParseError) {
             $this->diags->add('error', 'parse.error', $pe->reason, $span->file, $pe->errLine, $pe->column);
         } else {
             $this->diags->add('error', 'lower.internal', $what . ': ' . $e->getMessage(), $span->file, $span->line);
@@ -4524,6 +4530,8 @@ final class LowerFromAst implements Pass
         }
         $this->currentTypeSubst = $this->memberTypeSubst($decl);
         $this->currentDeclNamespace = $this->nsOf($decl->name);
+        $this->currentLowerClass = $decl->name;
+        $this->currentStaticClass = $decl->name;
     }
 
     private function throwErrorExpr(string $message): Node
