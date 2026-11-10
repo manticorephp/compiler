@@ -46,7 +46,7 @@ fixpoint; Alpine has its own image tag (`:alpine`) and `linux-musl` tarballs. Se
 
 ```bash
 # macOS
-brew install php pcre2 openssl@3 pkg-config
+brew install php pcre2 openssl@4 pkg-config
 
 # Debian / Ubuntu — plus clang from your distro or apt.llvm.org, and PHP 8.5 from sury.org
 sudo apt-get install -y build-essential pkg-config libpcre2-dev libssl-dev
@@ -76,6 +76,10 @@ download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC` (buil
 local checkout instead of cloning). Building from source is the same self-hosting
 loop it always was: an existing `manticore` rebuilds the new version *with itself*,
 and a first build starts from the pinned bootstrap release (`BOOTSTRAP_VERSION`) — no php.
+
+On macOS (arm64) Homebrew works too: `brew install manticorephp/tap/manticore`. Upgrade
+it with `brew upgrade`, not `manticore upgrade`, and keep only one of the two installs
+on PATH.
 
 In a container, with the toolchain already in it:
 

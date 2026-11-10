@@ -80,7 +80,7 @@ fi
 # Demand-driven, exactly like the driver's `#[Ffi\Library]` handling: the
 # undefined names decide which library to add. The resolvers mirror
 # {@see \Manticore\pcre2_link_flags}, {@see \Manticore\openssl_link_flags} and
-# {@see \Manticore\iconv_link_flags} — Homebrew keeps pcre2 and openssl@3 off
+# {@see \Manticore\iconv_link_flags} — Homebrew keeps pcre2 and openssl off
 # the default search path, and glibc implements iconv inside libc.
 _pcre2_flags() {
     local f
@@ -98,7 +98,7 @@ _openssl_flags() {
     f="$(pkg-config --libs openssl 2>/dev/null)"
     if [[ -n "$f" ]]; then printf '%s' "$f"; return; fi
     local d
-    for d in /opt/homebrew/opt/openssl@3/lib /usr/local/opt/openssl@3/lib; do
+    for d in /opt/homebrew/opt/openssl@{4,3}/lib /usr/local/opt/openssl@{4,3}/lib; do
         if [[ -f "$d/libssl.dylib" && -f "$d/libcrypto.dylib" ]]; then
             printf -- '-L%s -lssl -lcrypto' "$d"; return
         fi
