@@ -1198,6 +1198,7 @@ final class LowerFromAst implements Pass
         // when the program defines the name itself (the compiler's own source
         // ships the stdlib) or a codegen builtin handles it inline — in both
         // cases the user object is self-contained and stdlib.o is not linked.
+        foreach ($this->emitterInlineNames() as $inl) { $module->countReadInlineNames[$inl] = true; }
         foreach ($this->externDecls as $extDecl) {
             $name = $extDecl->name;
             // A method of an imported class: the class import already declares
@@ -6815,7 +6816,12 @@ final class LowerFromAst implements Pass
         foreach ($astArgs as $a) { if ($a->kind === 'NamedArg') { $hasNamed = true; break; } }
         $np = \count($params);
         $variadic = $np > 0 && $this->paramVariadic($params[$np - 1]);
-        if (!$hasNamed && !$variadic && \count($astArgs) >= $np) {
+        // A name the emitter answers inline reads its arguments by COUNT
+        // (`array_keys($a)` lists, `array_keys($a, $v)` searches), so an omitted
+        // parameter must stay omitted: filled with its default it reads as passed.
+        // This is the compiler's own build, where the stdlib bodies are declared.
+        $inline = $this->isCodegenBuiltin($fnName) || $this->isEmitterInlineName(\strtolower($bare));
+        if (!$hasNamed && !$variadic && (\count($astArgs) >= $np || $inline)) {
             $out = [];
             $i = 0;
             foreach ($astArgs as $a) {

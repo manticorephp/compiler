@@ -545,6 +545,8 @@ final class EmitLlvm implements EmitVisitor
     /** @var array<string, true> functions the program itself declares (not stdlib, not prelude):
      *  php drops surplus arguments to these, where an internal function throws */
     private array $userFnNames = [];
+    /** @var array<string, bool> {@see \Compile\Mir\Module::$countReadInlineNames} */
+    private array $countReadInlineNames = [];
     /** @var array<string, \Compile\Mir\FunctionDef> reified spec method name → its def, each with claimed params ({@see ResolveOverloads::claimRoute}) */
     private array $claimedFns = [];
     /** @var array<string, bool> FFI bindings (`#[Ffi\Symbol]`): a pointer arrives as an int */
@@ -821,6 +823,7 @@ final class EmitLlvm implements EmitVisitor
         $this->builtinTwinRet = $module->builtinTwinRet;
         $this->builtinTwinParams = $module->builtinTwinParams;
         $this->builtinTwinRef = $module->builtinTwinRef;
+        $this->countReadInlineNames = $module->countReadInlineNames;
         // Only a twin the program NAMES in a string literal can be the target of
         // a call by name. Arming every one at every dynamic site inlined builtins
         // the program never uses — `gc_collect_cycles` pulled the cycle

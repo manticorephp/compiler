@@ -545,7 +545,7 @@ function __mc_dirent_name_off(): int
  * Open a directory handle, or false on failure.
  * @return \Resource|false
  */
-function opendir(string $directory)
+function opendir(string $directory, mixed $context = null)
 {
     if (\__mc_offload_active()) {
         \__mc_offload_cancel_point();
@@ -647,7 +647,7 @@ function __mc_strcmp_bytes(string $a, string $b): int
  * _NONE (2).
  * @return string[]|false
  */
-function scandir(string $directory, int $sorting_order = 0): array|false
+function scandir(string $directory, int $sorting_order = 0, mixed $context = null): array|false
 {
     if (\__mc_offload_active()) {
         \__mc_offload_cancel_point();

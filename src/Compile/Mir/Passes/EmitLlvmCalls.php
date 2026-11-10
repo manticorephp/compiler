@@ -6231,6 +6231,10 @@ trait EmitLlvmCalls
     private function emitCall(Call $n): string
     {
         $c = $n;
+        $surplus = $this->internalSurplusArgs($n);
+        if ($surplus !== '') {
+            return $surplus . $this->emitCallUnguarded($n);
+        }
         if (\str_starts_with($c->function, '__mc_fuse_ds') && \count($c->args) > 0
             && $c->args[0]->kind === Node::KIND_LOAD_LOCAL && $c->args[0]->type->kind === Type::KIND_OBJ) {
             // A fused Ds callback method (`$m->reduce(fn …)`) stands in for a method call on its receiver.
@@ -6242,6 +6246,51 @@ trait EmitLlvmCalls
                 . $this->emitCallUnguarded($n);
         }
         return $this->emitCallUnguarded($n);
+    }
+
+    /**
+     * An internal function called with more arguments than it declares: php
+     * throws ArgumentCountError, a user function just drops the surplus. Only
+     * php-visible global names (no `__` helper prefix, no namespace) without a
+     * variadic. The arguments still run first, as php evaluates them before
+     * the count check; the call after the throw is never reached. Relies on the
+     * stdlib and prelude declaring every parameter php does.
+     */
+    private function internalSurplusArgs(Call $c): string
+    {
+        $name = $c->function;
+        if ($c === $this->builtinDeclined || isset($this->userFnNames[$name]) || isset($this->countReadInlineNames[\strtolower($name)])
+            || \str_starts_with($name, '__') || \str_contains($name, '\\')) { return ''; }
+        foreach ($c->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return ''; }
+        }
+        $argc = \count($c->args);
+        if (isset($this->sigs->paramTypes[$name])) {
+            $tot = \count($this->sigs->paramTypes[$name]);
+            if ($argc <= $tot || \in_array(true, $this->sigs->variadicParams[$name] ?? [], true)) { return ''; }
+            $req = 0;
+            foreach ($this->sigs->paramDefaults[$name] ?? [] as $d) {
+                if ($d === null) { $req = $req + 1; }
+            }
+        } elseif (isset($this->allTwinTot[$name])) {
+            $tot = $this->allTwinTot[$name];
+            if ($argc <= $tot) { return ''; }
+            $req = $this->builtinTwinReq[$name] ?? $tot;
+        } else {
+            return '';
+        }
+        $msg = $this->dynfPublicName($name) . '() expects ' . ($req === $tot ? 'exactly' : 'at most') . ' '
+            . (string)$tot . ($tot === 1 ? ' argument, ' : ' arguments, ') . (string)$argc . ' given';
+        if (\getenv('MANTICORE_SURPLUS_TRACE') !== false) {
+            \Manticore\dprint('surplus: ' . ($this->frame !== null ? $this->frame->name : '?') . ': ' . $msg);
+        }
+        $out = '';
+        foreach ($c->args as $a) {
+            if ($this->invokeArgRunsCode($a)) { $out .= $this->emitNode($a); }
+        }
+        return $out . $this->emitNode(new Call('__mir_throw_argcount_error', [
+            new \Compile\Mir\StringConst($msg, Type::string_()),
+        ], Type::cell()));
     }
 
     private function emitCallUnguarded(Call $n): string

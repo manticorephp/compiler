@@ -517,7 +517,7 @@ function strchr(string $haystack, string $needle, bool $before_needle = false): 
  * `$needle` is searched for (`strrchr('a/b#c', '#/')` is `'#c'`), and an EMPTY
  * needle returns false rather than the whole string — the opposite of `strstr`.
  */
-function strrchr(string $haystack, string $needle): string|false
+function strrchr(string $haystack, string $needle, bool $before_needle = false): string|false
 {
     if (\strlen($needle) === 0) {
         return false;
@@ -526,7 +526,7 @@ function strrchr(string $haystack, string $needle): string|false
     if ($pos === false) {
         return false;
     }
-    return \substr($haystack, $pos);
+    return $before_needle ? \substr($haystack, 0, $pos) : \substr($haystack, $pos);
 }
 
 /** Reverse a string byte-wise (1:1 with PHP `strrev`). */
@@ -644,8 +644,10 @@ function nl2br(string $s, bool $is_xhtml = true): string
  *  characters, optionally containing `'` and `-` (PHP's default locale set).
  *  format 0 → the count; 1 → a list of the words; 2 → words keyed by their
  *  starting offset. */
-function str_word_count(string $s, int $format = 0): int|array
+function str_word_count(string $string, int $format = 0, ?string $characters = null): int|array
 {
+    $s = $string;
+    $extra = $characters ?? '';
     $n = \strlen($s);
     /** @var string[] $words */
     $words = [];
@@ -657,7 +659,8 @@ function str_word_count(string $s, int $format = 0): int|array
     for ($i = 0; $i < $n; $i = $i + 1) {
         $c = \ord($s[$i]);
         $l = $c | 32;
-        $isAlpha = $l >= 97 && $l <= 122;
+        // A byte of $characters counts as a letter.
+        $isAlpha = ($l >= 97 && $l <= 122) || ($extra !== '' && \strpos($extra, $s[$i]) !== false);
         $isInner = $isAlpha || $c === 39 || $c === 45;
         // A run STARTS on an alphabetic char; `'`/`-` only continue an open run.
         if ($isAlpha && !$inWord) { $st = $i; $inWord = true; }

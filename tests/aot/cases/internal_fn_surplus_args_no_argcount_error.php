@@ -1,6 +1,5 @@
 <?php
 // An internal function called with more arguments than it accepts returns normally instead of throwing ArgumentCountError.
-// issue: #643
 try {
     var_dump(strlen("a", "b"));
 } catch (ArgumentCountError $e) {
