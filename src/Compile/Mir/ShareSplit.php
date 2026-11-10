@@ -66,7 +66,6 @@ final class ShareSplit
     {
         $this->bodies = 0;
         $sm = new SplitModule();
-        $lines = \explode("\n", $ir);
         /** @var string[] */
         $header = [];
         /** @var array<string, string> */
@@ -77,25 +76,31 @@ final class ShareSplit
         $defOrder = [];
         /** @var array<string, string> */
         $declares = [];
-        $cur = '';
-        $buf = '';
-        foreach ($lines as $l) {
-            if ($cur !== '') {
-                $buf = $buf . "\n" . $l;
-                if (\rtrim($l) === '}') {
-                    $defs[$cur] = $buf;
-                    $defOrder[] = $cur;
-                    $cur = '';
-                }
-                continue;
-            }
+        // One pass over the module by offsets: a definition is ONE substr from
+        // its `define` line to its closing `}` line. Joining a body line by line
+        // is quadratic in the body, and the compiler's own dispatchers run to
+        // hundreds of thousands of lines (36 s on its module).
+        $len = \strlen($ir);
+        $pos = 0;
+        while ($pos < $len) {
+            $nl = \strpos($ir, "\n", $pos);
+            $end = $nl === false ? $len : $nl;
+            $l = \substr($ir, $pos, $end - $pos);
+            $next = $end + 1;
             if (\str_starts_with($l, 'define ')) {
                 $sym = $sm->defineSymbol($l);
                 if ($sym === '') { return [$ir]; }
-                $cur = $sym;
-                $buf = $l;
+                $close = \strpos($ir, "\n}\n", $pos);
+                if ($close === false) {
+                    $close = \strpos($ir, "\n}", $pos);
+                    if ($close === false) { return [$ir]; }
+                }
+                $defs[$sym] = \substr($ir, $pos, $close + 2 - $pos);
+                $defOrder[] = $sym;
+                $pos = $close + 3;
                 continue;
             }
+            $pos = $next;
             if ($l !== '' && $l[0] === '@') {
                 $g = $sm->globalName($l);
                 if ($g === '') { return [$ir]; }
@@ -162,10 +167,16 @@ final class ShareSplit
         $parts = [];
         foreach ($defOrder as $s) {
             if (!isset($cut[$s])) { continue; }
-            $parts[$s] = $this->bodyPart($s, $sm, $header, $globals, $defs, $head, $refs, $declares,
-                                         $localFn, $mutLocal, $cut, $promote, $pin);
+            $text = $this->bodyPart($s, $sm, $header, $globals, $defs, $head, $refs, $declares,
+                                    $localFn, $mutLocal, $cut, $promote, $pin);
+            if ($text === '') {
+                unset($cut[$s]);
+                continue;
+            }
+            $parts[$s] = $text;
         }
         $this->bodies = \count($parts);
+        if ($parts === []) { return [$ir]; }
 
         $prog = [];
         foreach ($header as $l) { $prog[] = $l; }
@@ -215,6 +226,7 @@ final class ShareSplit
      * @param array<string, bool> $cut
      * @param array<string, bool> $promote
      * @param array<string, bool> $pin
+     * @return string the part's text, or '' when the body must stay in the program part
      */
     private function bodyPart(string $s, SplitModule $sm, array $header, array $globals, array $defs,
                               array $head, array $refs, array $declares, array $localFn, array $mutLocal, array $cut,
@@ -264,7 +276,12 @@ final class ShareSplit
                     foreach ($gr as $rr => $_) { $work[] = [$rr, $depth]; }
                     continue;
                 }
-                if ($this->fileLocal($line)) { $promote[$r] = true; }
+                if ($this->fileLocal($line)) {
+                    // Reached through a copied callee or a constant: still state
+                    // the program part keeps in registers, so the body stays whole.
+                    if (isset($mutLocal[$r])) { return ''; }
+                    $promote[$r] = true;
+                }
                 $pin[$r] = true;
                 $glob[$r] = $sm->externGlobal($line);
             }

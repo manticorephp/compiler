@@ -48,6 +48,19 @@ compile string_callable par2 & p2=$!
 wait $p1; r1=$?; wait $p2; r2=$?
 expect "two compiles racing on one cache" '[[ $r1 -eq 0 && $r2 -eq 0 ]]'
 
+# The same program twice at once on an empty cache: both writers put the SAME
+# keys at the same moment; neither may leave a torn object for the other.
+for round in 1 2 3; do
+    rm -rf "$MANTICORE_OBJ_CACHE_DIR"
+    compile arrays_sort same1 & q1=$!
+    compile arrays_sort same2 & q2=$!
+    wait $q1; s1=$?; wait $q2; s2=$?
+    compile arrays_sort same3 && read -r h n <<< "$(hits same3)"
+    expect "round $round: one key, two writers, then $h/$n hits" '[[ $s1 -eq 0 && $s2 -eq 0 && ${h:-0} -eq ${n:-1} ]]'
+    [[ -z "$(ls "$MANTICORE_OBJ_CACHE_DIR"/*.tmp* "$MANTICORE_OBJ_CACHE_DIR"/prog/*.tmp* 2>/dev/null)" ]] \
+        || { echo "FAIL round $round: temp files left in the cache"; fail=1; }
+done
+
 chmod -R a-w "$MANTICORE_OBJ_CACHE_DIR"
 compile exceptions ro && expect "read-only cache still builds" 'true'
 chmod -R u+w "$MANTICORE_OBJ_CACHE_DIR"
@@ -55,6 +68,21 @@ chmod -R u+w "$MANTICORE_OBJ_CACHE_DIR"
 compile reflection off MANTICORE_SHARED_GENERICS=0 \
     && expect "MANTICORE_SHARED_GENERICS=0 compiles one unit" '! grep -q "shared split" "$WORK/off.trace"'
 compile arrayobject_refname split MANTICORE_SPLIT_JOBS=4 && expect "MANTICORE_SPLIT_JOBS=4" 'true'
+
+# `build` stages its module; the shared parts apply there too.
+app="$WORK/app"; mkdir -p "$app/src"
+cp tests/generic/cases/arrays_sort.php "$app/src/main.php"
+printf '{"applications":[{"name":"a","src":"src","entry":"src/main.php","output":"bin/a"}]}\n' > "$app/manticore.json"
+build_app() {
+    (cd "$app" && MANTICORE_PHASE_TRACE=1 "$MANT" build > "$WORK/$1.trace" 2>&1) \
+        && "$app/bin/a" > "$WORK/$1.out" 2>&1 && cmp -s "$WORK/$1.out" tests/generic/cases/arrays_sort.out
+}
+if build_app build1 && build_app build2; then
+    read -r h n <<< "$(hits build2)"
+    expect "build: second build serves $h/$n parts from the cache" '[[ ${n:-0} -ge 2 && ${h:-0} -eq ${n:-1} ]]'
+else
+    echo "FAIL build: build or output"; tail -5 "$WORK/build1.trace"; fail=1
+fi
 
 [[ $fail -eq 0 ]] && echo "ok: shared generics cache"
 exit $fail

@@ -960,11 +960,14 @@ function obj_cache_dir(): string
 /** The toolchain's identity. A different clang is a different object. */
 function clang_id(): string
 {
-    $v = \shell_exec('clang --version 2>/dev/null | head -1');
-    if ($v === null || $v === false) {
-        return 'clang?';
+    // Asked once per process: every part's cache key needs it, and a fork per
+    // part sat on the compile path, hits included.
+    if (CompileArgs::$clangId !== '') {
+        return CompileArgs::$clangId;
     }
-    return \trim((string)$v);
+    $v = \shell_exec('clang --version 2>/dev/null | head -1');
+    CompileArgs::$clangId = ($v === null || $v === false) ? 'clang?' : \trim((string)$v);
+    return CompileArgs::$clangId;
 }
 
 function obj_cache_key(string $llPath, string $flags): string
@@ -1018,9 +1021,15 @@ function obj_cache_put(string $key, string $src): void
     if (\file_exists($final)) {
         return;
     }
-    $tmp = $final . '.tmp' . \str_replace('.', '', (string)\microtime(true));
-    if (\copy($src, $tmp)) {
-        if (!\rename($tmp, $final)) {
+    // Unique per writer: with the cache shared across programs, parallel builds
+    // put the SAME key at the same moment, and two writers on one temp name
+    // would truncate each other's object. A short copy (a full disk) is never
+    // renamed into place, where every later program would link it.
+    $tmp = $final . '.tmp' . (string)getpid() . '_' . \str_replace('.', '', (string)\microtime(true))
+        . '_' . (string)\mt_rand();
+    $size = \filesize($src);
+    if ($size === false || !\copy($src, $tmp) || \filesize($tmp) !== $size || !\rename($tmp, $final)) {
+        if (\file_exists($tmp)) {
             \unlink($tmp);
         }
     }
@@ -1191,8 +1200,21 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
                 );
             }
         }
+        $stagedPath = \substr($payload, 0, $cut);
+        // Every `build` stages, small apps included: shared generics apply here
+        // too, the program part keeping the split decided above.
+        if (shared_generics_enabled() && $stagedBytes <= share_staged_max_bytes()) {
+            $whole = read_file($stagedPath);
+            if ($whole !== null) {
+                $objs = assemble_shared($whole, $base, $cflags, true, $stagedJobs);
+                unset($whole);
+                if ($objs !== []) {
+                    return $objs;
+                }
+            }
+        }
         return assemble_ir_file(
-            \substr($payload, 0, $cut),
+            $stagedPath,
             $base,
             $cflags,
             $stagedBytes,
@@ -1377,13 +1399,30 @@ function shared_generics_enabled(): bool
 }
 
 /**
+ * Largest staged module (MB) that {@see assemble_shared} reads into memory
+ * (`MANTICORE_SHARE_MAX_MB`, default 512); a larger one keeps the file-based
+ * split. The split holds ~3x the module while it runs.
+ */
+function share_staged_max_bytes(): int
+{
+    $e = \getenv('MANTICORE_SHARE_MAX_MB');
+    $mb = ($e === false || $e === '') ? 512 : (int)$e;
+    return $mb * 1048576;
+}
+
+/**
  * The executable's module as a program part plus one part per large shareable
  * body, every part through the object cache.
  *
+ * `$staged`: the IR came from a staged file, which already carries its attribute
+ * group (in-memory IR gets it per part). `$progParts` >= 2: the program part is
+ * itself big enough to split and goes through the hash-stable split of
+ * {@see assemble_ir_file_split}, its parts cached like any other.
+ *
  * @return string[] the objects, or [] when the module has nothing to share or
- *                  a part failed (the caller then compiles the whole module)
+ *                  a part failed (the caller then assembles the module as before)
  */
-function assemble_shared(string $ir, string $base, string $cflags): array
+function assemble_shared(string $ir, string $base, string $cflags, bool $staged = false, int $progParts = 1): array
 {
     $statT = \Compile\Stats::begin('  shared split');
     $splitter = new \Compile\Mir\ShareSplit();
@@ -1400,13 +1439,28 @@ function assemble_shared(string $ir, string $base, string $cflags): array
     if (\count($texts) < 2) {
         return [];
     }
+    $flags = '-O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags;
     /** @var string[] */
     $paths = [];
+    $progPath = '';
+    $progBytes = 0;
     foreach ($texts as $i => $t) {
-        $p = $base . '.s' . (string)$i . '.ll';
         // Per part, as for any split: the attribute group must sit in the file
-        // that names `#0`.
-        if (!write_file($p, with_frame_pointers($t))) {
+        // that names `#0`. A staged module already carries it.
+        $text = $staged ? $t : with_frame_pointers($t);
+        if ($i === 0 && $progParts >= 2) {
+            $progPath = $base . '.prog.ll';
+            $progBytes = \strlen($text);
+            if (!write_file($progPath, $text)) {
+                dprint('assemble: cannot write ' . $progPath);
+                return [];
+            }
+            continue;
+        }
+        // Numbered by POSITION in $paths: compile_parts_cached names part n's
+        // object `<base>.s<n>.o`, and a grouped clang names it after its input.
+        $p = $base . '.s' . (string)\count($paths) . '.ll';
+        if (!write_file($p, $text)) {
             dprint('assemble: cannot write ' . $p);
             return [];
         }
@@ -1414,21 +1468,42 @@ function assemble_shared(string $ir, string $base, string $cflags): array
     }
     unset($texts);
     \Compile\Stats::step('  shared split (' . (string)$bodies . ' bodies)', $statT, -1, -1);
-    $objs = compile_parts_cached(
+    /** @var string[] */
+    $objs = [];
+    if ($progPath !== '') {
+        $objs = assemble_ir_file_split($progPath, $base . '.prog', $cflags, $progBytes, $progParts);
+        if ($objs === []) {
+            dprint('assemble: shared split: the program part failed; assembling the module as before');
+            shared_drop_objects($base);
+            return [];
+        }
+    }
+    $bodyObjs = compile_parts_cached(
         $paths,
         $base,
-        '-O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags,
+        $flags,
         '.s',
         false,
         true,
         // The program part is this program alone; it is kept apart so a cache
         // shipped between machines (CI) can carry only the shared bodies.
-        'prog/'
+        $progPath === '' ? 'prog/' : ''
     );
-    if ($objs === []) {
-        dprint('assemble: shared split failed; compiling the module as one unit');
+    if ($bodyObjs === []) {
+        dprint('assemble: shared split failed; assembling the module as before');
+        shared_drop_objects($base);
+        return [];
+    }
+    foreach ($bodyObjs as $o) {
+        $objs[] = $o;
     }
     return $objs;
+}
+
+/** The part objects a failed shared assembly built: the fallback links none of them. */
+function shared_drop_objects(string $base): void
+{
+    system('rm -f ' . $base . '.s*.o ' . $base . '.prog.p*.o');
 }
 
 /** Assemble already-staged large IR without reading it back into PHP. */
@@ -2383,6 +2458,8 @@ final class CompileArgs
      * link). With `--runtime` it is the bundled stdlib itself.
      */
     public static bool $emitLibrary = false;
+    /** `clang --version`, asked once ({@see clang_id}). */
+    public static string $clangId = '';
 
     /**
      * `--allow-undefined-traps` — permit a LIBRARY target to ship calls the
