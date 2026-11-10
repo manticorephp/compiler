@@ -91,8 +91,7 @@ trait LowerStmts
 {
     private function lowerTryCatch(\Parser\Ast\TryCatchStmt $stmt): Node
     {
-        $tryBody = [];
-        foreach ($stmt->try->statements as $s) { $tryBody[] = $this->lowerStmt($s); }
+        $tryBody = $this->lowerStmtList($stmt->try->statements);
         $catches = [];
         foreach ($stmt->catches as $c) {
             $types = [];
@@ -101,15 +100,36 @@ trait LowerStmts
             // first: into its variable, or discarded (released) without one.
             $caught = new CaughtValue_($types, Type::obj(\count($types) > 0 ? $types[0] : 'Throwable'));
             $body = [$c->name === null ? $caught : new StoreLocal($c->name, $caught, $caught->type)];
-            foreach ($c->body->statements as $s) { $body[] = $this->lowerStmt($s); }
+            foreach ($this->lowerStmtList($c->body->statements) as $s) { $body[] = $s; }
             $catches[] = new MirCatch($types, $c->name, $body);
         }
         $finallyBody = [];
         $hasFinally = $stmt->finally !== null;
         if ($hasFinally) {
-            foreach ($stmt->finally->statements as $s) { $finallyBody[] = $this->lowerStmt($s); }
+            $finallyBody = $this->lowerStmtList($stmt->finally->statements);
         }
         return new TryCatch_($tryBody, $catches, $finallyBody, $hasFinally, Type::void());
+    }
+
+    /**
+     * A statement list that is not a Block (switch arm, try / catch / finally body): each statement
+     * lowered as is, and `if (!class_exists('X')) { throw …; }` guards the rest of the list.
+     * @param \Parser\Ast\Stmt[] $list
+     * @return Node[]
+     */
+    private function lowerStmtList(array $list): array
+    {
+        $out = [];
+        $pushed = 0;
+        foreach ($list as $stmt) {
+            $out[] = $this->lowerStmt($stmt);
+            if ($stmt->kind === 'If') {
+                $eg = $this->earlyExitGuard($stmt);
+                if ($eg !== '') { $this->guardStack[] = $eg; $pushed = $pushed + 1; }
+            }
+        }
+        for ($pi = 0; $pi < $pushed; $pi = $pi + 1) { \array_pop($this->guardStack); }
+        return $out;
     }
 
     private function lowerBlockNode(\Parser\Ast\Block $block): Block
@@ -844,8 +864,7 @@ trait LowerStmts
         foreach ($stmt->cases as $arm) {
             $val = null;
             if ($arm->value !== null) { $val = $this->lowerExpr($arm->value); }
-            $body = [];
-            foreach ($arm->body as $s) { $body[] = $this->lowerStmt($s); }
+            $body = $this->lowerStmtList($arm->body);
             $arms[] = new SwitchArm_($val, $body);
         }
         return new Switch_($subject, $arms);

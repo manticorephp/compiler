@@ -76,6 +76,12 @@ final class Reachability
     private array $demanded = [];
     /** @var array<string, bool> method names demanded on EVERY class (unresolved `static::m()`) */
     private array $demandedAll = [];
+    /** @var array<string, bool> method names whose STATIC bodies are demanded on every class ({@see demandStatic}) */
+    private array $demandedStatic = [];
+    /** @var array<string, bool> `lowercase class|method` pairs demanded across that class's hierarchy */
+    private array $demandedIn = [];
+    /** @var array<string, string> method symbol => lowercase class declaring it */
+    private array $classOfFn = [];
     /** Every method of every instantiated class is reached (a call by a runtime method name). */
     private bool $allMethods = false;
     /** A reached call by a runtime function name: every nameable function is reached. */
@@ -97,6 +103,8 @@ final class Reachability
     private array $ifaceLc = [];
     /** @var array<string, bool> lowercase trait names */
     private array $traitLc = [];
+    /** @var array<string, string> class name as reflection factories mangle it => lowercase class */
+    private array $classByMangled = [];
 
     /** Methods the runtime calls without a call site naming them, beyond every `__*` magic method. */
     private const IMPLICIT = ['current' => true, 'key' => true, 'next' => true, 'rewind' => true, 'valid' => true,
@@ -122,6 +130,7 @@ final class Reachability
         foreach ($m->classes as $cd) {
             $lc = \strtolower(\ltrim($cd->name, '\\'));
             $r->classLc[$lc] = $cd;
+            $r->classByMangled[\str_replace('\\', '_', \ltrim($cd->name, '\\'))] = $lc;
             $own = [];
             $spell = [];
             foreach ($cd->methodNames as $mn => $_) {
@@ -131,6 +140,7 @@ final class Reachability
                 $own[$lm] = $sym;
                 $spell[$lm] = $mn;
                 $r->declaringClasses[$lm][$lc] = true;
+                $r->classOfFn[$sym] = $lc;
             }
             $r->methodsOf[$lc] = $own;
             $r->methodSpelling[$lc] = $spell;
@@ -201,6 +211,8 @@ final class Reachability
     {
         if (\str_starts_with($fnSymbol, '@class:')) { return $this->classUsed(\substr($fnSymbol, 7)); }
         if (!isset($this->fnNames[$fnSymbol])) { return true; }
+        $owner = $this->factoryOwner($fnSymbol);
+        if ($owner !== '') { return $this->classUsed($owner); }
         return isset($this->staticParent[$fnSymbol]);
     }
 
@@ -288,9 +300,11 @@ final class Reachability
             foreach ($this->classRefs as $lc => $fns) {
                 if (isset($used[$lc])) { continue; }
                 foreach ($fns as $fn => $_) {
+                    $owner = $maybe ? '' : $this->factoryOwner($fn);
                     $hit = \str_starts_with($fn, '@class:')
                         ? $this->refClassUsed(\strtolower(\ltrim(\substr($fn, 7), '\\')), $used)
-                        : ($maybe ? $this->maybeReaches($fn) : $this->reaches($fn));
+                        : ($owner !== '' ? $this->refClassUsed($owner, $used)
+                            : ($maybe ? $this->maybeReaches($fn) : $this->reaches($fn)));
                     if ($hit) { $used[$lc] = true; $changed = true; break; }
                 }
             }
@@ -395,6 +409,46 @@ final class Reachability
         foreach (($this->declaringClasses[$lm] ?? []) as $lc => $_) { $this->enqueue($this->methodsOf[$lc][$lm], $from); }
     }
 
+    /**
+     * A callable array whose receiver may be a runtime CLASS name: any class's STATIC `m`. An instance `m`
+     * runs only on a live object (or forwarded `$this`, an instance of a subclass), which {@see demand} covers.
+     */
+    private function demandStatic(string $method, string $from): void
+    {
+        $lm = \strtolower($method);
+        if (isset($this->demandedStatic[$lm]) || isset($this->demandedAll[$lm])) { return; }
+        $this->demandedStatic[$lm] = true;
+        foreach (($this->declaringClasses[$lm] ?? []) as $lc => $_) {
+            $mm = $this->classLc[$lc]->methodMeta[$this->methodSpelling[$lc][$lm]] ?? null;
+            if ($mm === null || $mm->isStatic) { $this->enqueue($this->methodsOf[$lc][$lm], $from); }
+        }
+    }
+
+    /** `m` of every class that is `$lc`, an ancestor of it or a descendant of it. */
+    private function demandInHierarchy(string $lc, string $method, string $from): void
+    {
+        $lm = \strtolower($method);
+        $key = $lc . '|' . $lm;
+        if (isset($this->demandedAll[$lm]) || isset($this->demandedIn[$key])) { return; }
+        $this->demandedIn[$key] = true;
+        foreach (($this->declaringClasses[$lm] ?? []) as $c => $_) {
+            if ($this->isAncestorOf((string)$c, $lc) || $this->isAncestorOf($lc, (string)$c)) {
+                $this->enqueue($this->methodsOf[$c][$lm], $from);
+            }
+        }
+    }
+
+    /** Is `$anc` the class `$lc` or one of its parents? */
+    private function isAncestorOf(string $anc, string $lc): bool
+    {
+        $cur = $lc;
+        while ($cur !== '' && isset($this->classLc[$cur])) {
+            if ($cur === $anc) { return true; }
+            $cur = \strtolower(\ltrim($this->classLc[$cur]->parent, '\\'));
+        }
+        return false;
+    }
+
     private function reachAllMethods(string $from): void
     {
         if (!$this->widen) { $this->pending['methods'] = true; return; }
@@ -423,6 +477,28 @@ final class Reachability
         return $n === '__main' || \str_starts_with($n, '__mc_unit_') || \str_starts_with($n, '__mc_attr_')
             || \str_starts_with($n, '__mc_pdef_') || \str_starts_with($n, '__mc_consts_')
             || \str_starts_with($n, '__mc_pget_') || \str_starts_with($n, '__mc_pset_');
+    }
+
+    /**
+     * The lowercase class a per-class reflection factory belongs to (`__mc_consts_<C>`, `__mc_pdef_<C>__…`,
+     * `__mc_attr_{args,new}_<C>__…`, `__mc_p{get,set}_<C>__…`), '' for any other symbol. Such a body runs only
+     * once its class is in use (named in code, or reflected on by a runtime name — the dynamic level).
+     */
+    private function factoryOwner(string $fn): string
+    {
+        if (!\str_starts_with($fn, '__mc_')) { return ''; }
+        if (\str_starts_with($fn, '__mc_consts_')) { return $this->classByMangled[\substr($fn, 12)] ?? ''; }
+        $rest = '';
+        foreach (['__mc_pdef_', '__mc_attr_args_', '__mc_attr_new_', '__mc_pget_', '__mc_pset_'] as $p) {
+            if (\str_starts_with($fn, $p)) { $rest = \substr($fn, \strlen($p)); break; }
+        }
+        $at = \strpos($rest, '__');
+        while ($at !== false) {
+            $lc = $this->classByMangled[\substr($rest, 0, $at)] ?? '';
+            if ($lc !== '') { return $lc; }
+            $at = \strpos($rest, '__', $at + 1);
+        }
+        return '';
     }
 
     private function reachAllStatic(string $from): void
@@ -465,7 +541,11 @@ final class Reachability
     {
         $lc = \strtolower(\ltrim($class, '\\'));
         if ($lc === 'self' || $lc === 'static' || $lc === 'parent' || $lc === '') {
-            $this->demandEverywhere($method, $from);
+            // Called from a method: `static::m()` resolves in a subclass of that method's class, `self::` /
+            // `parent::` in the class or an ancestor. From a closure or a function, any class may answer.
+            $own = $lc === '' ? '' : ($this->classOfFn[$from] ?? '');
+            if ($own === '') { $this->demandEverywhere($method, $from); }
+            else { $this->demandInHierarchy($own, $method, $from); }
             return;
         }
         if (!isset($this->classLc[$lc])) { return; }
@@ -485,8 +565,8 @@ final class Reachability
             }
             $cur = \strtolower(\ltrim($this->classLc[$cur]->parent, '\\'));
         }
-        // No body found up the chain (`__callStatic`, an abstract or interface method): any class may answer.
-        $this->demandEverywhere($method, $from);
+        // No body found up the chain (`__callStatic`, an abstract method reached through a subclass).
+        $this->demandInHierarchy($lc, $method, $from);
     }
 
     /** A string literal: a function name (string callable) or `'C::m'`. */
@@ -634,7 +714,7 @@ final class Reachability
                             $cls = $this->classTargets($el[0]->value, $from);
                             foreach ($names as $nm) {
                                 $this->demand($nm, $from);
-                                if ($cls === null) { $this->demandEverywhere($nm, $from); }
+                                if ($cls === null) { $this->demandStatic($nm, $from); }
                                 else { foreach ($cls as $lc) { $this->staticCall($lc, $nm, $from); } }
                             }
                         }
@@ -657,7 +737,7 @@ final class Reachability
                         } else {
                             // The receiver may be a runtime CLASS name: a static `m` of any class.
                             $cls = $this->classTargets($el[0]->value, $from);
-                            if ($cls === null) { $this->demandEverywhere($mn, $from); }
+                            if ($cls === null) { $this->demandStatic($mn, $from); }
                             else { foreach ($cls as $lc) { $this->staticCall($lc, $mn, $from); } }
                         }
                     }

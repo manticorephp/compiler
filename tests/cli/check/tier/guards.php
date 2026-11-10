@@ -17,4 +17,8 @@ function g5() {
     if (class_exists('Missing\Folded')) { new Missing\Folded(); }
     if (function_exists('missing_folded')) { missing_folded(); }
 }
-g1(['cls' => 'x']); g2('a'); g3('b'); g4('c'); g5();
+function g6(string $c) {
+    if ($ok = class_exists($c)) { new Missing\G6(); }
+    return $ok;
+}
+g1(['cls' => 'x']); g2('a'); g3('b'); g4('c'); g5(); g6('d');

@@ -4604,7 +4604,14 @@ final class LowerFromAst implements Pass
         if ($k === 'Call') { return $this->guardLabelCall($e); }
         if ($k === 'UnaryOp') { return $this->guardLabelUnary($e); }
         if ($k === 'BinaryOp') { return $this->guardLabelBinary($e); }
+        if ($k === 'Assign') { return $this->guardLabelAssign($e); }
         return '';
+    }
+
+    /** `if ($ok = class_exists(X::class))` */
+    private function guardLabelAssign(\Parser\Ast\Assign $e): string
+    {
+        return $this->guardLabel($e->value);
     }
 
     private function guardLabelUnary(\Parser\Ast\UnaryOp $e): string
@@ -7163,7 +7170,8 @@ final class LowerFromAst implements Pass
         $span = $e->span;
         $names = [];
         foreach ($this->classTable as $cname => $cd) {
-            if ($this->staticPropRef($cname, $nm) !== null
+            // Probe without staticPropRef: it records a reachability reference to the class it is asked about.
+            if ($this->staticPropDeclClass(\ltrim($cname, '\\'), \str_starts_with($nm, '$') ? \substr($nm, 1) : $nm) !== ''
                 || $this->findClassConst($this->resolveStaticClass($cname), $nm) !== null) {
                 $names[] = $cname;
             }

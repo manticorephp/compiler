@@ -129,9 +129,10 @@ front end: 0 error(s), 0 warning(s)
 rc=0
 tier/guards.php:11: warning[undefined.function]: function missing_mg() is not declared (guarded by function_exists(...))
 tier/guards.php:14: warning[undefined.class]: class Missing\D is not declared (guarded by class_exists(...))
+tier/guards.php:21: warning[undefined.class]: class Missing\G6 is not declared (guarded by class_exists(...))
 tier/guards.php:4: warning[undefined.class]: class Missing\C is not declared (guarded by class_exists(...))
 tier/guards.php:8: warning[undefined.function]: function missing_mf() is not declared (guarded by function_exists(...))
-front end: 0 error(s), 4 warning(s)
+front end: 0 error(s), 5 warning(s)
 == tier_soft
 rc=0
 tier/soft.php:2: warning[undefined.class]: class Missing\G is not declared
@@ -165,6 +166,28 @@ rc=65
 tier/cascade.php:3: error[lower.unsupported]: unsupported statement kind Function
 tier/cascade.php:4: warning[undefined.function]: function inner_missing() is not declared
 front end: 1 error(s), 1 warning(s)
+== tier_class_consts_unused
+rc=65
+tier/class_consts_unused.php:2: warning[undefined.class]: class Missing\AbstractLogger is not declared
+tier/class_consts_unused.php:7: error[undefined.class]: class Missing\Event is not declared
+front end: 1 error(s), 1 warning(s)
+== tier_dyn_const_probe
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_callable_array_instance
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_switch_guard
+rc=0
+tier/switch_guard.php:12: warning[undefined.function]: function missing_fetch() is not declared (guarded by function_exists('missing_fetch'))
+tier/switch_guard.php:8: warning[undefined.class]: class Missing\DsnParser is not declared (guarded by class_exists(...))
+front end: 0 error(s), 2 warning(s)
+== tier_static_hierarchy
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
 == tier_reachable_new_allow_traps
 rc=0
 tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared
