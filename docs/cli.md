@@ -54,7 +54,7 @@ manticore compile [options] <files…|manifest.json> -o <out>
 | `--effects` | | `dump-mir`: show inferred effects |
 | `--emit-library` | | Emit a library object instead of an executable |
 | `--runtime` | | With `--emit-library`: this library is the bundled stdlib |
-| `--allow-undefined-traps` | | Do not refuse a library that contains undefined-function traps |
+| `--allow-undefined-traps` | | Do not refuse a library that contains undefined-function traps; a reachable undeclared name is a warning, not an error |
 | `--keep-ir` | | Keep the intermediate `.ll` files |
 | `--strict` | `<list>` | Comma-separated strict checks: `shapes` (a PHPDoc `array{…}` shape is closed: an extra key is an error instead of a warning), `analyze` (= `--analyze-strict`) |
 | `-j` | `<n>` | Parallel clang jobs; `0` = one per core |
@@ -66,6 +66,7 @@ manticore compile [options] <files…|manifest.json> -o <out>
 | `--timings` | | Print a per-stage time table at the end |
 | `--color` | `<when>` | Colour: `auto`\|`always`\|`never` (default `auto`) |
 | `--check` | | Run the front end only (parse, lowering, declaration, attribute and typedef checks), stop before type inference; exit `0` with no output file when clean |
+| `--all` | | List unreachable undeclared names too (hidden notes, see below) |
 
 Exit codes:
 
@@ -99,11 +100,8 @@ any error means exit `65`. Codes:
 | `typedef.error` | invalid type definition |
 | `lower.internal` | internal lowering failure, recorded at a function / method / top-level boundary |
 
-Three more codes are **warnings** (they never change the exit code; `--check` still exits `0`). They
-flag a name in the program's own sources (app and vendor) that no compiled source, prelude, stdlib
-`.sig` extern or compiler builtin declares. Executing a `new`, static access, function call or constant
-read of such a name throws at run time; `instanceof`, `catch` and type hints never throw for a missing
-class, so the warning there only flags a likely missing dependency:
+Three more codes flag a name in the program's own sources (app and vendor) that no compiled source,
+prelude, stdlib `.sig` extern or compiler builtin declares:
 
 | Code | Meaning |
 |---|---|
@@ -111,12 +109,37 @@ class, so the warning there only flags a likely missing dependency:
 | `undefined.function` | direct call of a function that is not declared, not a stdlib / FFI function and not a builtin |
 | `undefined.constant` | bare constant that is not declared |
 
-Warnings are grouped: one line per (code, name), at the first site, with ` (N uses)` when the name is
-used more than once. A name declared only conditionally behind a guard that is false in this build
+They are grouped: one line per (code, name), at the most severe site, with ` (N uses)` when the name
+is used more than once. A name declared only conditionally behind a guard that is false in this build
 (for example `fake()` behind `class_exists(Faker\Factory::class)`) is reported as undeclared.
-These stay warnings until reachability analysis lands: a vendor package carries many references
-to optional dependencies that no program path reaches, so promoting them to errors today would reject
-working builds.
+
+Their severity comes from **reachability**: which functions the program can run, computed from the
+roots (`__main`, include units, the reflection tables of a class in use, global initialisers) over the
+lowered program. It has two levels. *Statically reached* follows explicit edges only: named calls,
+`new C`, `C::m()`, `$o->m()` over the classes the program instantiates, closure literals, callable
+literals (`'f'`, `'C::m'`, `[C::class, 'm']`, `[$o, 'm']`) and dynamic targets whose value is a set of
+literals. *Maybe reached* also assumes that a call by a runtime name (`$f()`, `call_user_func($name)`),
+`new $class`, `$o->$method()` or `[$class, $method]` reaches everything it could. A class's own code
+(`extends`, `implements`, `use`, constants, property defaults) counts once the class is instantiated,
+statically referenced or an ancestor of such a class.
+
+| Site | Tier | Effect |
+|---|---|---|
+| statically reached, *hard* use (`new`, static access, call, constant read, `extends` / `implements` / `use`), not guarded | **error** | exit `65`; the message ends with ` (reachable: f <- g <- root)`, the call path that reaches it |
+| maybe reached, a *soft* use (type hint, `instanceof`, `catch`: these never throw for a missing class), or guarded | warning | exit code unchanged |
+| not reached at either level | note | hidden; the summary line counts them, `--all` lists them |
+
+A site is *guarded* when it sits inside the branch of an `if`, `?:`, `&&` / `||` operand, or after an
+early exit (`if (!class_exists(X::class)) { throw …; }` in the same statement list, switch arm or
+`try` body), whose condition calls `class_exists`, `interface_exists`, `trait_exists`, `enum_exists`,
+`function_exists`, `method_exists`, `is_callable`, `extension_loaded` or `defined`. A guard inside a
+helper method (`if (!self::isSupported())`) is not followed.
+
+An undeclared name never escalates to an error with `--allow-undefined-traps` (the binary is built and
+the use throws `Error` at run time if it executes), when the front end already reported another error
+(a parse or lowering error can hide the declaration), or, for `undefined.constant`, when the program
+defines a constant under a runtime name (`define($name, …)`). `MANTICORE_REACH_DUMP=1` prints the
+reached functions (`reach:` static, `reach?:` maybe) and used classes (`class:` / `class?:`).
 
 `--check` (on `compile` and `build`) stops after these checks, before `InferTypes`: exit `0` and no output
 file when clean, `65` with the diagnostics otherwise. In `analyze --deep` the same errors feed the

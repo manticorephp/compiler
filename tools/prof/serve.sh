@@ -33,7 +33,9 @@ cd "$APP"
 if [[ $BUILD -eq 1 || ! -x bin/app.prof ]]; then
     # A scratch manifest: the same one with another output, so bin/app stays the shipping binary.
     sed 's#"bin/app"#"bin/app.prof"#' manticore.json > manticore.probe-prof.json
-    MANTICORE_FRAME_POINTERS=1 "$ROOT/bin/manticore" build --quiet manticore.probe-prof.json >/dev/null
+    # --allow-undefined-traps: examples/symfony-app reaches names from packages it does not install (APCu /
+    # Memcached / Couchbase / Redis cache adapters, ExpressionLanguage, Serializer, request_parse_body, VarDumper casters).
+    MANTICORE_FRAME_POINTERS=1 "$ROOT/bin/manticore" build --quiet --allow-undefined-traps manticore.probe-prof.json >/dev/null
     rm -f manticore.probe-prof.json
 fi
 
