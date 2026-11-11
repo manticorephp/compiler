@@ -203,8 +203,12 @@ tier/guard_helpers.php:48: warning[undefined.function]: function pol_rest_guarde
 tier/guard_helpers.php:52: warning[undefined.function]: function pol_rest_cmp() is not declared (guarded by on() → function_exists('pol_probe'))
 tier/guard_helpers.php:57: error[undefined.function]: function pol_fn_unguarded() is not declared (reachable: polPositive <- __main)
 tier/guard_helpers.php:61: warning[undefined.function]: function pol_fn_guarded() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:66: error[undefined.function]: function pol_or_operand() is not declared (reachable: polOrOperand <- __main)
+tier/guard_helpers.php:70: error[undefined.function]: function pol_double_not() is not declared (reachable: polDoubleNot <- __main)
+tier/guard_helpers.php:74: error[undefined.function]: function pol_not_false() is not declared (reachable: polNotFalse <- __main)
+tier/guard_helpers.php:78: warning[undefined.function]: function pol_and_operand() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
 tier/guard_helpers.php:9: warning[undefined.function]: function apcu_fetch_m() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
-front end: 8 error(s), 10 warning(s)
+front end: 11 error(s), 11 warning(s)
 == tier_static_hierarchy
 rc=0
 front end: 1 unreachable undeclared name(s) hidden (--all to list)

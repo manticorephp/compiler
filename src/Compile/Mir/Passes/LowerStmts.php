@@ -165,6 +165,25 @@ trait LowerStmts
         return new Block($stmts, Type::void());
     }
 
+    /** A guard call, a guard-valued local or an assignment of one: no `!` / `||` / comparison on the way, which would flip the polarity. */
+    private function plainGuardLabel(\Parser\Ast\Expr $e): string
+    {
+        if ($e instanceof \Parser\Ast\Assign) { return $this->plainGuardLabel($e->value); }
+        $k = $e->kind;
+        if ($k === 'Call' || $k === 'StaticCall' || $k === 'MethodCall' || $k === 'Variable') { return $this->guardLabel($e); }
+        return '';
+    }
+
+    /** Operand of `!`: a plain guard, or `a && b` with a plain guard among the conjuncts (it exits unless both hold). */
+    private function plainOrAndGuardLabel(\Parser\Ast\Expr $e): string
+    {
+        if ($e instanceof \Parser\Ast\BinaryOp && $e->op === '&&') {
+            $l = $this->plainOrAndGuardLabel($e->left);
+            return $l !== '' ? $l : $this->plainOrAndGuardLabel($e->right);
+        }
+        return $this->plainGuardLabel($e);
+    }
+
     private function earlyExitGuard(\Parser\Ast\IfStmt $s): string
     {
         $l = $this->negatedGuardLabel($s->condition);
@@ -177,15 +196,15 @@ trait LowerStmts
      */
     private function negatedGuardLabel(\Parser\Ast\Expr $e): string
     {
-        if ($e instanceof \Parser\Ast\UnaryOp) { return $e->op === '!' ? $this->guardLabel($e->operand) : ''; }
+        if ($e instanceof \Parser\Ast\UnaryOp) { return $e->op === '!' ? $this->plainOrAndGuardLabel($e->operand) : ''; }
         if (!($e instanceof \Parser\Ast\BinaryOp)) { return ''; }
         if ($e->op === '||') {
             $l = $this->negatedGuardLabel($e->left);
             return $l !== '' ? $l : $this->negatedGuardLabel($e->right);
         }
         if ($e->op !== '===' && $e->op !== '==') { return ''; }
-        if ($e->right instanceof \Parser\Ast\BoolLiteral && !$e->right->value) { return $this->guardLabel($e->left); }
-        if ($e->left instanceof \Parser\Ast\BoolLiteral && !$e->left->value) { return $this->guardLabel($e->right); }
+        if ($e->right instanceof \Parser\Ast\BoolLiteral && !$e->right->value) { return $this->plainGuardLabel($e->left); }
+        if ($e->left instanceof \Parser\Ast\BoolLiteral && !$e->left->value) { return $this->plainGuardLabel($e->right); }
         return '';
     }
 

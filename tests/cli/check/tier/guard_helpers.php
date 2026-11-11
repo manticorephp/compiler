@@ -61,3 +61,20 @@ function polNegated() {
     return pol_fn_guarded();
 }
 $pl = new Polarity(); $pl->positive(); $pl->negated(); $pl->falseCmp(); polPositive(); polNegated();
+function polOrOperand(string $c, bool $x) {
+    if (!(has_apcu() || $x)) { return 1; }
+    return pol_or_operand();
+}
+function polDoubleNot() {
+    if (!!has_apcu()) { return 1; }
+    return pol_double_not();
+}
+function polNotFalse() {
+    if (!(has_apcu() === false)) { return 1; }
+    return pol_not_false();
+}
+function polAndOperand(bool $x) {
+    if (!(has_apcu() && $x)) { return 1; }
+    return pol_and_operand();
+}
+polOrOperand('a', true); polDoubleNot(); polNotFalse(); polAndOperand(true);
