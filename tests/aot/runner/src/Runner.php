@@ -69,6 +69,14 @@ final class Runner
         return $rc === 0;
     }
 
+    /** `@allow-undefined-traps` compiles with `--allow-undefined-traps` (run.sh's rule). */
+    private function allowsUndefinedTraps(string $src): bool
+    {
+        $rc = 1;
+        system('grep -rqs @allow-undefined-traps ' . escapeshellarg($src), $rc);
+        return $rc === 0;
+    }
+
     public function execute(): int
     {
         $args = $this->parseArguments();
@@ -442,9 +450,10 @@ final class Runner
         // 1. Compile test case
         $compileLog = $workDir . '/' . $safeName . '_' . $uniqueSuffix . '.compile.log';
         $compileCmd = $this->limited($this->compileTimeout, sprintf(
-            '%s%s compile -O%s %s -o %s',
+            '%s%s compile%s -O%s %s -o %s',
             $this->isSplit($srcPath) ? 'env MANTICORE_SPLIT_JOBS=4 ' : '',
             escapeshellarg($compiler),
+            $this->allowsUndefinedTraps($srcPath) ? ' --allow-undefined-traps' : '',
             escapeshellarg($opt),
             escapeshellarg($srcPath),
             escapeshellarg($tmpBinary)

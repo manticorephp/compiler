@@ -338,17 +338,32 @@ final class ClassDef
         return $this->propDisplayName($slot) !== $slot;
     }
 
+    /** @var array<string, int> */
+    private array $offsetMap = [];
+    private int $offsetMapNames = -1;
+    private int $offsetMapWidths = -1;
+
     /** Byte offset of `$prop` within an instance, or -1 if unknown. */
     public function propertyOffset(string $prop): int
     {
-        $off = $this->headerSize();
-        foreach ($this->propertyNames as $name) {
-            $w = $this->propertyWidth($name);
-            $off = $this->alignUp($off, $w);
-            if ($name === $prop) { return $off; }
-            $off = $off + $w;
+        // Memoized per layout; a different property/width count (lowering and sig
+        // import still fill them) drops it.
+        $nn = \count($this->propertyNames);
+        $nw = \count($this->propertyWidths);
+        if ($nn !== $this->offsetMapNames || $nw !== $this->offsetMapWidths) {
+            $map = [];
+            $off = $this->headerSize();
+            foreach ($this->propertyNames as $name) {
+                $w = $this->propertyWidth($name);
+                $off = $this->alignUp($off, $w);
+                if (!isset($map[$name])) { $map[$name] = $off; }
+                $off = $off + $w;
+            }
+            $this->offsetMap = $map;
+            $this->offsetMapNames = $nn;
+            $this->offsetMapWidths = $nw;
         }
-        return -1;
+        return $this->offsetMap[$prop] ?? -1;
     }
 
     /** Instance size in bytes: header + every property's slot + the bag slot

@@ -483,8 +483,10 @@ trait LowerExprs
             // itself is a no-op yielding true (define's bool return).
             if ($fnBare === 'define') {
                 $d0 = $expr->args[0] ?? null;
-                if ($d0 !== null && $d0->kind === 'StringLiteral' && \count($expr->args) >= 2) {
-                    $dn = $this->constBareName($this->stringLitValue($d0));
+                $d0Name = $d0 !== null ? $this->foldDefineName($d0) : '';
+                if ($d0 !== null && $d0Name === '') { $this->sawDynConstant = true; }
+                if ($d0Name !== '' && \count($expr->args) >= 2) {
+                    $dn = $this->constBareName($d0Name);
                     if (isset($this->runtimeConstants[$dn])) {
                         $dv = $this->lowerExpr($expr->args[1]);
                         $cell = $this->runtimeConstants[$dn];
@@ -696,6 +698,7 @@ trait LowerExprs
                 }
             }
             $call = new Call($callee, $args, Type::unknown());
+            $this->noteUserCall($callee, $expr->span);
             // Before defaultFillArgs padded it — the callee's func_num_args()
             // needs what the SOURCE wrote, and this is the last point that
             // knows it. The overflow is read here and nowhere later: the next
@@ -726,6 +729,7 @@ trait LowerExprs
             // const lookup below. Resolve `self`/`static`/`parent` first so a
             // `self::Case` inside an enum method finds its own case table.
             $ecls = \ltrim($this->resolveStaticClass($saClass), '\\');
+            $this->noteStaticClassRef($ecls);
             if (isset($this->enumTable[$ecls])) {
                 $ord = $this->enumTable[$ecls]->ordinalOf($saName);
                 if ($ord >= 0) {
@@ -809,7 +813,7 @@ trait LowerExprs
             // A BARE `$GLOBALS` — every legal use ($GLOBALS['x']) is intercepted
             // at the ArrayAccess above it, so reaching here means the whole array
             // was read (foreach/count) or handed to a by-ref parameter.
-            if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead(); }
+            if ($this->isGlobalsVar($expr)) { $this->rejectGlobalsRead($expr->span); }
             if ($expr->name === 'this' && $this->currentLowerClass !== '' && !$this->currentLowerFnHasThis) {
                 return $this->throwErrorExpr('Using $this when not in object context');
             }
@@ -900,7 +904,9 @@ trait LowerExprs
         // Unwrap positionally for now — full reordering against the
         // callee's params on those paths is a TODO.
         if ($expr->kind === 'NamedArg')       { return $this->lowerExpr($this->namedArgValue($expr)); }
-        if ($expr->kind === 'Identifier')     { return $this->lowerIdentifier($expr->name, $expr->span->line); }
+        // A bare `exit;` / `die;` (no parentheses) is the exit construct, not a constant.
+        if ($expr->kind === 'Identifier' && $this->identIsExit($expr)) { return $this->lowerCallExpr(new \Parser\Ast\CallExpr(\strtolower($this->constBareName($expr->name)), [], $expr->span)); }
+        if ($expr->kind === 'Identifier')     { return $this->lowerIdentifier($expr->name, $expr->span->line, $expr->span, $expr->qualified); }
         if ($expr->kind === 'Yield') {
             // Read subclass fields through a YieldExpr-typed param (the kind
             // check above proves the shape) — a base-`Expr` read picks the
@@ -966,6 +972,7 @@ trait LowerExprs
                 || isset($this->enumTable[$saCls])
                 || isset($this->classDecls[$saCls]);
             if ($saName !== '' && \strtolower($saName) !== 'class') {
+                if (!$classKnown) { $this->noteClassRef($saCls, $expr->span); }
                 return $this->throwErrorExpr($classKnown
                     ? 'Undefined constant ' . $saCls . '::' . $saName
                     : 'Class "' . $saCls . '" not found');
@@ -974,10 +981,9 @@ trait LowerExprs
         $extra = '';
         if ($expr->kind === 'StaticAccess') { $extra = ' (' . $this->staticAccessClass($expr) . '::' . $this->staticAccessName($expr) . ')'; }
         if ($expr->kind === 'Identifier') { $extra = ' (' . ($expr->name ?? '?') . ')'; }
-        throw new \RuntimeException(
+        return $this->lowerFail('lower.unsupported', 'unsupported expression kind ' . $expr->kind . $extra, $expr->span,
             'MIR.lower: unsupported expression kind ' . $expr->kind . $extra
-            . ' at line ' . (string)$expr->span->line
-        );
+            . ' at line ' . (string)$expr->span->line);
     }
 
     /**
@@ -1178,7 +1184,7 @@ trait LowerExprs
             // `$GLOBALS = […]` / `$GLOBALS += […]` — a php 8.1 fatal, and silently
             // accepting it wrote a bogus local named GLOBALS while the real globals
             // sat untouched. {@see rejectGlobalsWrite}
-            if ($this->isGlobalsVar($target)) { $this->rejectGlobalsWrite(); }
+            if ($this->isGlobalsVar($target)) { $this->rejectGlobalsWrite($target->span); }
             return new StoreLocal($target->name, $value, $value->type);
         }
         if ($target->kind === 'ArrayAccess') {
@@ -1223,6 +1229,7 @@ trait LowerExprs
                 if ($den !== '') { return $this->throwErrorExpr($den); }
                 return new StoreStaticProp_($ref->global, $value, $value->type, $ref->type);
             }
+            $this->noteClassRef($this->resolveStaticClass($this->staticAccessClass($target)), $target->span);
         }
         if ($target->kind === 'ArrayLit') {
             return $this->lowerDestructure($target, $value);
@@ -1234,11 +1241,10 @@ trait LowerExprs
         // thousands of files into one module, so "at line 25" sent three
         // separate searches to the wrong file before this was added — the
         // parse error has always named its file and this had no reason not to.
-        throw new \RuntimeException(
+        return $this->lowerFail('lower.unsupported', 'unsupported assign target kind ' . $target->kind, $target->span,
             'MIR.lower: unsupported assign target kind ' . $target->kind
             . ' at ' . ($this->lowerSourceFile !== '' ? $this->lowerSourceFile : ($target->span->file !== '' ? $target->span->file : '<source>'))
-            . ':' . (string)$target->span->line
-        );
+            . ':' . (string)$target->span->line);
     }
 
     /** The dim chain bottoms out in a plain local: no call can reach its buffer. */
@@ -1295,9 +1301,8 @@ trait LowerExprs
         if ($op === '&')  { return new BitOp('and', $left, $right, Type::int_()); }
         if ($op === '|')  { return new BitOp('or',  $left, $right, Type::int_()); }
         if ($op === '^')  { return new BitOp('xor', $left, $right, Type::int_()); }
-        throw new \RuntimeException(
-            'MIR.lower: unsupported binary op ' . $op
-        );
+        return $this->lowerFail('lower.unsupported', 'unsupported binary op ' . $op, null,
+            'MIR.lower: unsupported binary op ' . $op);
     }
 
     /** A variable / literal / property / element read chain: re-evaluating it has no effect. */

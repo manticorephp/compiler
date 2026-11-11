@@ -28,6 +28,8 @@ final class RuntimeFeatures
     public bool $needsRc = false;
     /** `gc_collect_cycles()` is used — gates the Bacon-Rajan cycle collector. */
     public bool $needsCc = false;
+    /** `gc_disable()` / `gc_enable()` / `gc_enabled()` is used — gates the auto-collection flag cell. */
+    public bool $needsGcFlag = false;
     /** Any string is rc retained/released (sentinel-guarded str rc helpers). */
     public bool $needsStrRc = false;
 

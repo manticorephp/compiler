@@ -110,6 +110,9 @@ Rules of evidence:
 Create `tests/aot/cases/<name>.php` + `tests/aot/expected/<name>.out`. No manifest.
 The expected output should be what `php` prints (`php -d xdebug.mode=off` — xdebug
 poisons the oracle). Run it with `bash tests/aot/run.sh -k <name>`.
+A case that tests the runtime `Error` of an undeclared class, function or constant on a reachable
+site (which the build otherwise refuses) carries a `// @allow-undefined-traps` comment; both runners
+then compile it with `--allow-undefined-traps`.
 
 ### Reporting a bug you are not fixing now
 

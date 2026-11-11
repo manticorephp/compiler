@@ -68,30 +68,28 @@ trait LowerSuperglobals
         // every function read an uninitialised `int`. symfony's ArgvInput reads
         // `$_SERVER['argv']` and no console entry point mentions it, so argv was
         // empty and every command fell through to the application default.
+        $want = [];
+        foreach ($names as $sg) { $want[$sg] = true; }
         $demanded = [];
-        foreach ($module->functions as $fn) {
-            foreach ($names as $sg) {
-                if ($this->nodeReadsLocal($fn->body, $sg)
-                    || $this->nodeWritesLocal($fn->body, $sg)
-                    || $this->nodeAliasesLocal($fn->body, $sg)) {
-                    $demanded[$sg] = true;
-                }
-            }
+        /** @var array<int, array<string, bool>> $touchedBy */
+        $touchedBy = [];
+        foreach ($module->functions as $i => $fn) {
+            $t = [];
+            $this->collectTouchedLocals($fn->body, $want, true, $t);
+            if ($t === []) { continue; }
+            $touchedBy[$i] = $t;
+            foreach ($t as $sg => $_) { $demanded[$sg] = true; }
         }
         if ($demanded === []) { return; }
-        foreach ($module->functions as $fn) {
+        foreach ($module->functions as $i => $fn) {
             $isMain = $fn->name === '__main';
+            $t = $touchedBy[$i] ?? [];
             $used = [];
             foreach ($names as $sg) {
                 if (!isset($demanded[$sg])) { continue; }
                 // __main binds every DEMANDED name so it can seed it; every
                 // other scope binds only what it actually touches.
-                if ($isMain
-                    || $this->nodeReadsLocal($fn->body, $sg)
-                    || $this->nodeWritesLocal($fn->body, $sg)
-                    || $this->nodeAliasesLocal($fn->body, $sg)) {
-                    $used[] = $sg;
-                }
+                if ($isMain || isset($t[$sg])) { $used[] = $sg; }
             }
             if ($used === []) { continue; }
             $pre = [];
@@ -141,7 +139,9 @@ trait LowerSuperglobals
         if ($this->varName($base) !== 'GLOBALS') { return null; }
         $idx = $expr->index;
         if ($idx === null) {
-            throw new \RuntimeException('MIR.lower: $GLOBALS[] needs a key');
+            $this->lowerFail('lower.unsupported', '$GLOBALS[] needs a key', $expr->span,
+                'MIR.lower: $GLOBALS[] needs a key');
+            return 'GLOBALS';
         }
         if ($idx->kind !== 'StringLiteral') { return null; }
         $name = $this->strLitValue($idx);
@@ -199,12 +199,12 @@ trait LowerSuperglobals
      * COMPILE-TIME fatal. Reject it with php's own wording — silently accepting
      * it wrote a bogus local named GLOBALS and left the real globals untouched.
      */
-    private function rejectGlobalsWrite(): void
+    private function rejectGlobalsWrite(\Parser\Ast\Span $span): void
     {
-        throw new \RuntimeException(
+        $this->lowerFail('lower.unsupported',
+            '$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax', $span,
             'MIR.lower: $GLOBALS can only be modified using the '
-            . '$GLOBALS[$name] = $value syntax'
-        );
+            . '$GLOBALS[$name] = $value syntax');
     }
 
     /**
@@ -214,12 +214,12 @@ trait LowerSuperglobals
      * table this design deliberately does not carry. An honest error beats a
      * silently empty array.
      */
-    private function rejectGlobalsRead(): void
+    private function rejectGlobalsRead(\Parser\Ast\Span $span): void
     {
-        throw new \RuntimeException(
+        $this->lowerFail('lower.unsupported',
+            '$GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS[\'name\']', $span,
             'MIR.lower: $GLOBALS as a whole array is unsupported '
-            . '(it would need a runtime name table); use $GLOBALS[\'name\']'
-        );
+            . '(it would need a runtime name table); use $GLOBALS[\'name\']');
     }
 
     /** Is `$expr` a `$GLOBALS[…]` access? */

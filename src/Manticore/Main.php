@@ -2508,6 +2508,12 @@ final class CompileArgs
     /** `--strict=shapes`: a declared array shape is closed (extra key = error). */
     public static bool $strictShapes = false;
 
+    /** `--check`: stop after the front end, report every error, write nothing. */
+    public static bool $checkOnly = false;
+
+    /** `--all`: list undeclared names no reachable code uses (notes) too. */
+    public static bool $showAllDiagnostics = false;
+
     /** `--strict=analyze` (alias `--analyze-strict`): analyzer errors fail the compile. */
     public static bool $strictAnalyze = false;
 
@@ -2721,6 +2727,14 @@ final class CompileArgs
      */
     public static array $lazyUnitPaths = [];
 
+    /**
+     * Manifest `allowUndefined`: glob patterns (`*`, case-insensitive) of undefined.* names that never
+     * escalate past a warning. Set per application by `build`.
+     *
+     * @var string[]
+     */
+    public static array $allowUndefined = [];
+
     /** @var array<string, \Parser\Ast\Expr> */
     public static array $externConstants = [];
 
@@ -2790,6 +2804,8 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool
     if ($p->flag("runtime")) { CompileArgs::$runtimeLibrary = true; CompileArgs::$exportTypes = false; }
     if ($p->flag("allow-undefined-traps")) { CompileArgs::$allowUndefinedTraps = true; }
     if ($p->flag("keep-ir")) { CompileArgs::$keepIr = true; }
+    if ($p->flag("check")) { CompileArgs::$checkOnly = true; }
+    if ($p->flag("all")) { CompileArgs::$showAllDiagnostics = true; }
     $jobs = $p->value("j", "");
     if ($jobs !== "") {
         $jn = (int)$jobs;
@@ -3313,7 +3329,7 @@ function __mc_library_source_may_declare(string $src): bool
             }
         }
         return false;
-    } catch (Throwable $e) {
+    } catch (\Throwable $e) {
         return true;
     }
 }
@@ -3718,6 +3734,9 @@ function build_compile_module(
     if ($module === null) {
         dprint("build: front-end returned null for " . $output);
         return 65;
+    }
+    if (CompileArgs::$checkOnly) {
+        return 0;
     }
     /** @var string[] $undefTraps */
     $undefTraps = [];
@@ -4245,7 +4264,7 @@ function __mc_source_is_data_file(string $src): bool
     }
     try {
         $program = \Parser\Parser::parseSource($src);
-    } catch (Throwable $e) {
+    } catch (\Throwable $e) {
         return false;
     }
     $ret = null;
@@ -4476,6 +4495,7 @@ function __mc_rewrite_stmt_returns(\Parser\Ast\Stmt $s, string $slot, string $la
 function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module
 {
     $stmts = [];
+    $diag = new \Compile\Diagnostics();
     $aliases = [];
     $docs = [];
     $statT = \Compile\Stats::now();
@@ -4534,9 +4554,24 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 true,
             );
         } catch (\Throwable $e) {
-            $where = isset($paths[$i]) ? $paths[$i] : "<source>";
-            dprint($where . ": parse failed: " . $e->getMessage());
-            return null;
+            $where = __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : '');
+            if ($where === '') {
+                $where = "<source>";
+            }
+            $tolErrors = [];
+            try {
+                $tolErrors = Parser::parseTolerant($source, $where, false, false)->errors;
+            } catch (\Throwable $te) {
+            }
+            foreach ($tolErrors as $pe) {
+                $diag->add('error', 'parse.error', $pe->reason !== '' ? $pe->reason : $pe->getMessage(), $where, $pe->errLine, $pe->column);
+            }
+            if (\count($tolErrors) === 0) {
+                $pl = $e instanceof \Parser\ParseError ? $e->errLine : 0;
+                $pc = $e instanceof \Parser\ParseError ? $e->column : 0;
+                $diag->add('error', 'parse.error', $e instanceof \Parser\ParseError && $e->reason !== '' ? $e->reason : $e->getMessage(), $where, $pl, $pc);
+            }
+            continue;
         }
         foreach (\Compile\Mir\PreludeDemand::definedFunctions($source) as $fn) {
             $ownFns[$fn] = true;
@@ -4845,6 +4880,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
     }
     \Compile\Stats::step('parse', $statT, \count($stmts), -1);
+    if ($diag->hasErrors()) {
+        dprint($diag->render());
+        return null;
+    }
 
     // The on-disk prelude sources. Reading them goes through the libc fopen
     // binding (a throwing stub under the Zend cold-seed), so guard: an
@@ -5821,14 +5860,72 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
         $lower->compileUnitFiles = $unitAbs;
         $lower->lazyUnitDone = $lazyUnitDone;
-        // Reserved-attribute errors (#[Override] with no parent, a bad target, a
-        // repeat) abort the build by default; analysis collects them instead.
-        if ($collect !== null) {
-            $lower->attrCollectMode = true;
-        }
+        // User-facing lowering errors are recorded (and lowering carries on); the
+        // gate after run() reports them all.
+        $lower->diags = $diag;
         \Compile\Stats::step('prelude demand', $demandT, -1, -1);
         $statT = \Compile\Stats::begin('LowerFromAst');
         $module = $lower->run($module);
+        if ($collect === null) {
+            /** @var string[] $extNames */
+            $extNames = [];
+            foreach (CompileArgs::$externDecls as $extDecl) { $extNames[] = \strtolower($extDecl->name); }
+            /** @var array<string, bool> $userAbs */
+            $userAbs = [];
+            foreach ($paths as $up) { $userAbs[__mc_abs_source_path((string)$up)] = true; }
+            \Compile\Mir\UndefinedFunctionScan::run($module, $diag, $extNames, $userAbs, $lower->userCallNames, $lower->userCallFiles, $lower->userCallLines, $lower->userCallFns, $lower->userCallGuards);
+        }
+        $diag->resolveSiteFns();
+        $reach = null;
+        if ($collect === null) {
+            /** @var array<string, array<string, bool>> $classRefs */
+            $classRefs = [];
+            foreach ($lower->staticClassRefs as $rc => $rfns) {
+                foreach ($rfns as $rfn => $_r) { $classRefs[(string)$rc][$diag->resolveFn((string)$rfn)] = true; }
+            }
+            $reachT = \Compile\Stats::begin('Reachability');
+            /** @var array<string, array<string, bool>> $dynRefs */
+            $dynRefs = [];
+            foreach ($lower->dynClassRefs as $rc => $rfns) {
+                foreach ($rfns as $rfn => $_r) { $dynRefs[(string)$rc][$diag->resolveFn((string)$rfn)] = true; }
+            }
+            $reach = \Compile\Mir\Reachability::compute($module, $classRefs, $dynRefs, CompileArgs::$emitLibrary);
+            \Compile\Stats::step('Reachability', $reachT, \count($module->functions), \count($module->classes));
+            $reachDump = (string)\getenv('MANTICORE_REACH_DUMP');
+            if ($reachDump === '1' || $reachDump === '2') {
+                $rd = $reach->dump($reachDump === '2');
+                foreach ($diag->useSites as $sk => $sites) {
+                    foreach ($sites as $site) {
+                        foreach ($site['fns'] as $sfnv) {
+                            $sfn = (string)$sfnv;
+                            $rd .= 'site: ' . (string)$sk . ' line=' . (string)$site['line'] . ' fn=' . $sfn
+                                . ' reach=' . ($reach->reaches($sfn) ? '1' : '0') . ' maybe=' . ($reach->maybeReaches($sfn) ? '1' : '0') . "\n";
+                        }
+                    }
+                }
+                dprint(\rtrim($rd, "\n"));
+            }
+            $diag->applyReachability($reach, CompileArgs::$allowUndefinedTraps, $lower->sawDynConstant, CompileArgs::$allowUndefined);
+        }
+        if ($collect !== null) {
+            foreach ($diag->items as $it) {
+                if ($it->severity === 'error') {
+                    $collect->lines[] = 'line ' . (string)$it->line . ': error: ' . $it->message;
+                }
+            }
+        }
+        if ($collect === null) {
+            if ($diag->hasErrors()) {
+                dprint($diag->render(CompileArgs::$showAllDiagnostics));
+                return null;
+            }
+            if (\count($diag->items) > 0) {
+                dprint($diag->render(CompileArgs::$showAllDiagnostics));
+            }
+        }
+        if (CompileArgs::$checkOnly) {
+            return $module;
+        }
         // Path → value-slot map for `require`/`include`. Set after lowering
         // because that is when the Module exists; the map itself was built at
         // parse-merge time, the only point that still knows which file each
@@ -5838,11 +5935,6 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         // `if (is_int($x))` reads an unboxed copy of a cell $x ({@see NarrowScalarGuards}).
         $module = (new \Compile\Mir\Passes\NarrowScalarGuards())->run($module);
-        if ($collect !== null) {
-            foreach ($lower->attrErrors as $ae) {
-                $collect->lines[] = $ae;
-            }
-        }
         CompileArgs::$linkStdlib = $lower->externInjected;
         $analysisContext = null;
         $worklistMode = \getenv('MANTICORE_WORKLIST');
@@ -6145,6 +6237,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if ($collect !== null) {
             $collect->lines[] = $e->getMessage();
             return null;
+        }
+        if (\count($diag->items) > 0) {
+            dprint($diag->render());
         }
         dprint("compile failed: " . $e->getMessage());
         return null;

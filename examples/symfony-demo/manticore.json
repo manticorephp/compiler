@@ -20,6 +20,7 @@
             "entry": "public/index.php",
             "output": "bin/app",
             "composer": true,
+            "allowUndefined": ["apcu_*","Memcached","RedisCluster","Relay\\*","Symfony\\Component\\Serializer\\*","Amp\\*","Revolt\\*","awaitFirst","PHPStan\\PhpDocParser\\*"],
             "lazy": ["App\\Entity\\"],
             "extensions": ["compat"]
         }

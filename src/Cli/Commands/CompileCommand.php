@@ -27,6 +27,8 @@ final class CompileCommand extends Command
         return \array_merge(CompileOptions::shared(), [
             new Option('analyze', \Cli\ArgParse::FLAG, 'Run the analyzer (default)'),
             new Option('no-analyze', \Cli\ArgParse::FLAG, 'Skip the analyzer'),
+            new Option('check', \Cli\ArgParse::FLAG, 'Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen'),
+            new Option('all', \Cli\ArgParse::FLAG, 'List unreachable undeclared names too'),
             new Option('analyze-strict', \Cli\ArgParse::FLAG, 'Fail with rc 65 on analyzer errors'),
         ], ProgressOptions::all());
     }
@@ -49,7 +51,7 @@ final class CompileCommand extends Command
             \Manticore\dprint("compile: failed to parse args (rc=64)");
             return 64;
         }
-        $analyze = !$args->flag("no-analyze");
+        $analyze = !$args->flag("no-analyze") && !\Manticore\CompileArgs::$checkOnly;
         $strict = \Manticore\CompileArgs::$strictAnalyze;
         $output = \Manticore\CompileArgs::$output;
 
@@ -122,6 +124,9 @@ final class CompileCommand extends Command
         // compiler on some stdlib+user combinations (the "stdlib as guest"
         // hazard). The chosen design is a prebuilt stdlib.o linked at the cc step
         // (see discover_stdlib_files / the link tail) — built once, in isolation.
+        if (\Manticore\CompileArgs::$checkOnly) {
+            return \Manticore\lower_module($sources, null, $paths) === null ? 65 : 0;
+        }
         $ir = \Manticore\compile_with_backend($sources, $paths);
         if ($ir === null) {
             \Manticore\dprint("compile: front-end (parse/typeck/IR) returned null (rc=65)");

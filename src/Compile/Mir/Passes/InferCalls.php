@@ -564,7 +564,7 @@ trait InferCalls
         if ($n === 'putenv') {
             return Type::bool_();
         }
-        if ($n === '__mir_fn_exists') {
+        if ($n === '__mir_fn_exists' || $n === 'gc_enabled') {
             return Type::bool_();
         }
         // `require`/`include` evaluates to whatever the target file returned —

@@ -220,6 +220,9 @@ final class Parser
         return new ParseResult($program, $errors);
     }
 
+    /** @var ParseError[] every error of the lazy body whose materialization last failed (tolerant re-parse). */
+    public static array $lazyBodyErrors = [];
+
     /** Materialize one deferred function/method body and release its source copy. */
     public static function materializeLazyBody(LazyBody $lazy): Block
     {
@@ -241,6 +244,11 @@ final class Parser
             }
             throw new \RuntimeException('manticore: failed to materialize lazy body');
         } catch (\Throwable $e) {
+            self::$lazyBodyErrors = [];
+            try {
+                self::$lazyBodyErrors = self::parseTolerant($wrapped, $lazy->file, false, false)->errors;
+            } catch (\Throwable $te) {
+            }
             $preview = substr(str_replace(["\n", "\r"], ' ', $raw), 0, 120);
             throw new \RuntimeException('lazy body ' . $lazy->file . ':' . (string)$lazy->line
                 . ' [' . $preview . ']: ' . $e->getMessage(), 0, $e);
@@ -2941,7 +2949,7 @@ final class Parser
             || $low === 'float' || $low === 'double' || $low === 'string' || $low === 'array'
             || $low === 'mixed' || $low === 'void' || $low === 'null' || $low === 'callable'
             || $low === 'iterable' || $low === 'object' || $low === 'never' || $low === 'false'
-            || $low === 'true' || $low === 'numeric'
+            || $low === 'true'
         ) {
             return;
         }
@@ -3024,7 +3032,6 @@ final class Parser
             || $low === 'mixed' || $low === 'void' || $low === 'null'
             || $low === 'callable' || $low === 'iterable' || $low === 'object'
             || $low === 'never' || $low === 'false' || $low === 'true'
-            || $low === 'numeric'
         ) {
             return $literal;
         }
@@ -3630,7 +3637,7 @@ final class Parser
             return Expr::call($name, $args, $this->end($span), $qualified);
         }
 
-        return Expr::identifier($name, $this->end($span));
+        return Expr::identifier($name, $this->end($span), \str_contains($literal, '\\') || isset($this->useConstAliases[$literal]));
     }
 
     private function parseIntLiteral(string $lex): int

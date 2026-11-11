@@ -100,11 +100,18 @@ trait LowerFns
         $this->constCallables = [];
         $this->setCurrentLowerParams($decl->params);
         $this->scanStableCallables($decl->body->statements);
+        $prevGuardLocals = $this->guardLocals;
+        $this->noteGuardHelper('f:' . $decl->name, $this->bareName($decl->name), $decl->body);
+        $this->guardLocals = $this->computeGuardLocals($decl->params, $decl->body);
         // `#[RefOut('a', 'b')]` names the pure-output by-ref params (portable
         // across .sig + self-host parse); `@param-out T $x` is the PHPStan-side
         // equivalent.
         $refOutNames = $this->refOutParamNames($decl->attributes);
         $cellArgNames = $this->cellArgParamNames($decl->attributes);
+        // Parameter defaults lower under the function itself: their undeclared names run only when it does.
+        $prevFnSym = $this->currentFnSym;
+        $this->currentFnSym = $decl->name;
+        $this->currentLowerFn = $decl->name;
         $params = [];
         foreach ($decl->params as $p) {
             $isVariadic = (bool)($p->variadic ?? false);
@@ -199,6 +206,8 @@ trait LowerFns
             // free-function files do not remain rooted through fnDecls.
             $decl->body = null;
 
+            $this->currentFnSym = $prevFnSym;
+            $this->guardLocals = $prevGuardLocals;
             return $fn;
         }
         $savedSawYield = $this->sawYield;
@@ -239,6 +248,8 @@ trait LowerFns
         // argument filling; the lowered body itself is no longer needed.
         $decl->body = null;
 
+        $this->currentFnSym = $prevFnSym;
+        $this->guardLocals = $prevGuardLocals;
         return $fn;
     }
 
@@ -255,6 +266,8 @@ trait LowerFns
         $this->currentLowerClass = '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        $prevFnSym = $this->currentFnSym;
+        $this->currentFnSym = $decl->name;
         if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // `#[RefOut('a', 'b')]` on the function names its pure-output by-ref
         // params (survives the .sig + self-host parse; a param-position marker
@@ -308,6 +321,7 @@ trait LowerFns
             returnsByRef: (bool)($decl->returnsByRef ?? false),
         );
         $ext->returnArrayHinted = $this->isBareArrayReturnHint($decl->returnType);
+        $this->currentFnSym = $prevFnSym;
         return $ext;
     }
 
@@ -456,7 +470,7 @@ trait LowerFns
             || $n === 'implode' || $n === 'join'
             || $n === 'sprintf' || $n === 'printf'
             || $n === 'exit' || $n === 'die' || $n === 'error_log'
-            || $n === 'gc_collect_cycles' || $n === 'spl_object_id' || $n === '__mc_obj_addr'
+            || $n === 'gc_collect_cycles' || $n === 'gc_disable' || $n === 'gc_enable' || $n === 'gc_enabled' || $n === 'spl_object_id' || $n === '__mc_obj_addr'
             || $n === 'get_class' || $n === 'array_pop' || $n === 'array_shift'
             || $n === 'array_unshift' || $n === 'addslashes' || $n === 'getenv'
             || $n === 'putenv' || $n === '__mir_fn_exists'
@@ -518,6 +532,8 @@ trait LowerFns
         }
         $id = $this->allocClosureId();
         $fnName = '__closure_' . (string)$id;
+        if ($this->lastClosureFrame !== '' && $this->diags !== null) { $this->diags->fnAlias[$this->lastClosureFrame] = $fnName; }
+        $this->lastClosureFrame = '';
         $params = [];
         // A by-value capture the body writes THROUGH (append, element store,
         // array_pop($x), …) arrives borrowed: the environment keeps its own
@@ -719,6 +735,8 @@ trait LowerFns
     {
         $id = $this->allocClosureId();
         $fnName = '__closure_' . (string)$id;
+        if ($this->lastClosureFrame !== '' && $this->diags !== null) { $this->diags->fnAlias[$this->lastClosureFrame] = $fnName; }
+        $this->lastClosureFrame = '';
         $params = [];
         $i = 0;
         foreach ($capNames as $cn) {

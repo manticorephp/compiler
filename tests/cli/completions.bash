@@ -21,7 +21,7 @@ _manticore() {
                 --memory|--backend|-O|--strict|-j|--progress|--color) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j --analyze --no-analyze --analyze-strict --progress --quiet --timings --color" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j --analyze --no-analyze --check --all --analyze-strict --progress --quiet --timings --color" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi
@@ -32,7 +32,7 @@ _manticore() {
                 --memory|--backend|-O|--strict|-j|--progress|--color) return 0 ;;
             esac
             if [[ "$cur" == -* ]]; then
-                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j --libs-only --apps-only --no-analyze --progress --quiet --timings --color" -- "$cur"))
+                COMPREPLY=($(compgen -W "--help -o --memory --backend -O --prelude --effects --emit-library --runtime --allow-undefined-traps --keep-ir --strict -j --libs-only --apps-only --no-analyze --check --all --progress --quiet --timings --color" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi

@@ -177,18 +177,30 @@ echo '<?php echo "hi\n";' | manticore compile -o /tmp/hi && /tmp/hi
 # a project — a cargo-style manifest, see docs/modules.md
 manticore build                    # reads ./manticore.json
 manticore build --libs-only        # library targets only
+manticore build --check            # front end only: every error and unresolved name in one pass
+manticore compile app.php --check  # the same for one file; no binary is written
 
 # a Composer project: "composer": true in the manifest compiles the project's
 # autoload dirs AND every package in composer.lock — vendor/ is source, not an
 # autoload map evaluated at runtime.
 ```
 
+`--check` parses and lowers the whole manifest, vendor included, and skips inference and
+codegen (about 30 s for Laravel). It reports every front-end error in one run (`parse.error`,
+`lower.unsupported`, `decl.error`, …) as `<file>:<line>: <severity>[<code>]: <message>` and exits
+`65` on errors; a normal build prints the same list and writes no binary. A class, function or
+constant that nothing declares is an **error** when a statically reachable, unguarded path from the
+entry needs it (`new`, `X::m()`, a call, `extends`), and a warning when it is guarded
+(`class_exists`, `function_exists`, …), dynamic or only type-hinted. A PHP function Manticore does
+not implement is an `unsupported.builtin` warning. Details, tiers and `allowUndefined`:
+[`docs/cli.md`](docs/cli.md#front-end-diagnostics-and---check).
+
 Everything else is inspection — every stage of the pipeline is dumpable:
 
 | Command | Purpose |
 |---|---|
-| `compile <file> -o <out>` | PHP source → native binary (file arg or stdin) |
-| `build [manticore.json]` | build all manifest targets (libraries + applications) |
+| `compile <file> -o <out>` | PHP source → native binary (file arg or stdin); `--check` stops after the front end |
+| `build [manticore.json]` | build all manifest targets (libraries + applications); `--check` stops after the front end |
 | `analyze <file>` | the static checks a compiler can make and an interpreter never gets to |
 | `dump-ast` / `dump-mir` / `dump-llvm-mir` | parse / typed MIR / LLVM IR |
 | `dump-llvm` | LLVM IR from stdin |
