@@ -959,8 +959,8 @@ trait EmitLlvmRuntime
                 // rc actually does. Same flag — the two halves are one story.
                 $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.orc.rel, ptr %p, i64 %rc1)\n";
             }
-            $out .= "  %rcsh = shl i64 %rc1, 8\n";
-            $out .= "  %rcsig = ashr i64 %rcsh, 8\n";
+            $out .= "  %rcsh = shl i64 %rc1, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+            $out .= "  %rcsig = ashr i64 %rcsh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
             $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
             $out .= "  br i1 %zero, label %free, label %keep\n";
             $out .= "keep:\n";
@@ -974,21 +974,20 @@ trait EmitLlvmRuntime
             $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
             $out .= "  br label %done\n";
             $out .= "free:\n";
-            // A *buffered* object is NOT freed here even at rc<=0 — the
-            // collector owns it, else its candidate list dangles. The mask is
-            // zero in a program that never buffers, so this is a no-op there.
+            // A *buffered* object leaves the root buffer first ({@see ccUnrootIr}),
+            // else the candidate list dangles; the collector keeps it only during
+            // a collection. The bit is never set in a program that never buffers.
             $out .= "  %bufb = and i64 %rc1, " . (string)\Compile\MemoryAbi::BUFFERED_MASK . "\n";
             $out .= "  %isbuf = icmp ne i64 %bufb, 0\n";
             $out .= "  br i1 %isbuf, label %blocked, label %dofree\n";
             $out .= "blocked:\n";
             $out .= $this->ccTrace('blocked', 'ptr %p');
-            // DEAD NOW, not at the next collection ({@see ccDropDeadIr}) — through
-            // the weak hook for the same linkonce_odr reason as the root push.
-            $out .= "  %ccdd = icmp ne ptr @__manticore_cc_drop_dead, null\n";
+            // Through the weak hook for the same linkonce_odr reason as the root push.
+            $out .= "  %ccdd = icmp ne ptr @__manticore_cc_unroot, null\n";
             $out .= "  br i1 %ccdd, label %bdrop, label %done\n";
             $out .= "bdrop:\n";
-            $out .= "  call void @__manticore_cc_drop_dead(ptr %p)\n";
-            $out .= "  br label %done\n";
+            $out .= "  %unrooted = call i1 @__manticore_cc_unroot(ptr %p)\n";
+            $out .= "  br i1 %unrooted, label %dofree, label %done\n";
             $out .= "dofree:\n";
             if ($this->rt->needsCc) { $out .= $this->ccTrace('rcfree', 'ptr %p'); }
             $out .= $this->profBump(25);
@@ -998,8 +997,8 @@ trait EmitLlvmRuntime
             // A destructor that resurrected the object left rc > 0: it lives on.
             $out .= "  %rwp2 = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %rw2 = load i64, ptr %rwp2\n";
-            $out .= "  %rsh2 = shl i64 %rw2, 8\n";
-            $out .= "  %rsg2 = ashr i64 %rsh2, 8\n";
+            $out .= "  %rsh2 = shl i64 %rw2, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+            $out .= "  %rsg2 = ashr i64 %rsh2, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
             $out .= "  %alive2 = icmp sgt i64 %rsg2, 0\n";
             $out .= "  br i1 %alive2, label %done, label %reallyfree\n";
             $out .= "reallyfree:\n";
@@ -2601,8 +2600,8 @@ trait EmitLlvmRuntime
                 $body .= '  %dr = call i64 @manticore_' . $this->mangle($dtorCls)
                        . '____destruct(i64 %oi)' . "\n";
                 $body .= "  %dw1 = load i64, ptr %dwp\n";
-                $body .= "  %dsh = shl i64 %dw1, 8\n";
-                $body .= "  %drc = ashr i64 %dsh, 8\n";
+                $body .= "  %dsh = shl i64 %dw1, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+                $body .= "  %drc = ashr i64 %dsh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
                 $body .= "  %drc1 = sub i64 %drc, 1\n";
                 $body .= "  %dfl1 = and i64 %dw1, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
                 $body .= "  %drcm = and i64 %drc1, " . $rcMask . "\n";
@@ -3121,10 +3120,10 @@ trait EmitLlvmRuntime
         if ($this->rt->needsCc || $this->ccHooksDeclared) { return ''; }
         $this->ccHooksDeclared = true;
         $this->weakSyms['__manticore_cc_add_root'] = true;
-        $this->weakSyms['__manticore_cc_drop_dead'] = true;
+        $this->weakSyms['__manticore_cc_unroot'] = true;
         $this->weakSyms['__manticore_cc_autogc'] = true;
         return "declare extern_weak void @__manticore_cc_add_root(ptr)\n"
-            . "declare extern_weak void @__manticore_cc_drop_dead(ptr)\n"
+            . "declare extern_weak i1 @__manticore_cc_unroot(ptr)\n"
             . "declare extern_weak void @__manticore_cc_autogc()\n";
     }
 
@@ -3132,32 +3131,62 @@ trait EmitLlvmRuntime
     private bool $ccHooksDeclared = false;
 
     /**
-     * A buffered object whose count reached zero outside a collection: DEAD NOW,
-     * not at the next collection. It used to wait, with everything it held, until
-     * the root buffer hit its threshold — and every such wait made the collector
-     * walk it. Drop it as php does (destructor, children) and keep only the SHELL
-     * for the buffer's sake ({@see MemoryAbi::COLOR_DEAD}). During a collection
-     * the collector still decides (its CollectRoots arm).
+     * A buffered object whose count reached zero outside a collection leaves the
+     * root buffer NOW: its slot ({@see MemoryAbi::CC_SLOT_MASK}) names its entry,
+     * the last entry moves into it, and the answer 1 tells `__mir_rc_release` to
+     * free the object like an unbuffered one. The buffer then holds only live
+     * candidates. It used to keep a dropped SHELL there until the next collection,
+     * which grew the heap with automatic collection off and made every
+     * collection walk the corpses.
+     *
+     * Answer 0 = the collector keeps it: during a collection (its CollectRoots arm
+     * decides), or a slot past the field's range, where the object is dropped as
+     * php does and only its shell waits ({@see MemoryAbi::COLOR_DEAD}).
      */
-    private function ccDropDeadIr(): string
+    private function ccUnrootIr(): string
     {
         $DEAD = (string)\Compile\MemoryAbi::COLOR_DEAD;
-        $out = "define void @__manticore_cc_drop_dead(ptr %p) {\n";
+        $out = "define i1 @__manticore_cc_unroot(ptr %p) {\n";
         $out .= "entry:\n";
         $out .= "  %bact = load i64, ptr @__manticore_cc_active\n";
         $out .= "  %bbusy = icmp ne i64 %bact, 0\n";
-        $out .= "  br i1 %bbusy, label %done, label %bchk\n";
+        $out .= "  br i1 %bbusy, label %keep, label %bchk\n";
         $out .= "bchk:\n";
         $out .= "  %bcol = call i64 @__cc_color(ptr %p)\n";
         $out .= "  %bdead = icmp eq i64 %bcol, " . $DEAD . "\n";
-        $out .= "  br i1 %bdead, label %done, label %bdrop\n";
-        $out .= "bdrop:\n";
+        $out .= "  br i1 %bdead, label %keep, label %slot\n";
+        $out .= "slot:\n";
+        $out .= "  %wp = getelementptr i8, ptr %p, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %ws = lshr i64 %w, " . (string)\Compile\MemoryAbi::CC_SLOT_SHIFT . "\n";
+        $out .= "  %i = and i64 %ws, " . (string)\Compile\MemoryAbi::CC_SLOT_NONE . "\n";
+        $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
+        $out .= "  %inr = icmp ult i64 %i, %cnt\n";
+        $out .= "  br i1 %inr, label %chk, label %shell\n";
+        $out .= "chk:\n";
+        $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= "  %sp = getelementptr ptr, ptr %buf, i64 %i\n";
+        $out .= "  %sv = load ptr, ptr %sp\n";
+        $out .= "  %mine = icmp eq ptr %sv, %p\n";
+        $out .= "  br i1 %mine, label %swap, label %shell\n";
+        $out .= "swap:\n";
+        $out .= "  %last = sub i64 %cnt, 1\n";
+        $out .= "  %lp = getelementptr ptr, ptr %buf, i64 %last\n";
+        $out .= "  %lv = load ptr, ptr %lp\n";
+        $out .= "  store ptr %lv, ptr %sp\n";
+        $out .= "  call void @__cc_setslot(ptr %lv, i64 %i)\n";
+        $out .= "  store i64 %last, ptr @__manticore_cc_count\n";
+        $out .= "  call void @__cc_setbuffered(ptr %p, i64 0)\n";
+        // BLACK, not purple: a destructor that resurrects it must be able to buffer it again.
+        $out .= "  call void @__cc_setcolor(ptr %p, i64 " . (string)\Compile\MemoryAbi::COLOR_BLACK . ")\n";
+        $out .= "  ret i1 1\n";
+        $out .= "shell:\n";
         $out .= "  call void @__cc_setcolor(ptr %p, i64 " . $DEAD . ")\n";
         $out .= $this->profBump(25);
         $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
-        $out .= "  br label %done\n";
-        $out .= "done:\n";
-        $out .= "  ret void\n}\n";
+        $out .= "  br label %keep\n";
+        $out .= "keep:\n";
+        $out .= "  ret i1 0\n}\n";
         return $out;
     }
 
@@ -3747,7 +3776,7 @@ end:
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
         $this->libcExtra['free'] = 'declare void @free(ptr)';
 
-        $out .= $this->ccDropDeadIr();
+        $out .= $this->ccUnrootIr();
         $out .= $this->ccAutoGcIr();
         $out .= $this->ccCensusIr();
 
@@ -3784,21 +3813,32 @@ end:
         $out .= "define i64 @__cc_rcval(ptr %s) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
         $out .= "  %w = load i64, ptr %wp\n";
-        $out .= "  %sh = shl i64 %w, 8\n";
-        $out .= "  %r = ashr i64 %sh, 8\n";
+        $out .= "  %sh = shl i64 %w, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+        $out .= "  %r = ashr i64 %sh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
         $out .= "  ret i64 %r\n}\n";
-        // add %d to signed rc, preserving color/buffered
+        // add %d to signed rc, preserving every bit outside the rc field
+        // (color, dtor-called, root slot, buffered)
         $out .= "define void @__cc_rcadd(ptr %s, i64 %d) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
         $out .= "  %w = load i64, ptr %wp\n";
-        $out .= "  %hi = and i64 %w, " . $colorMask . "\n";
-        $out .= "  %hib = and i64 %w, " . $bufMask . "\n";
-        $out .= "  %hiboth = or i64 %hi, %hib\n";
-        $out .= "  %sh = shl i64 %w, 8\n";
-        $out .= "  %rc = ashr i64 %sh, 8\n";
+        $out .= "  %hiboth = and i64 %w, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
+        $out .= "  %sh = shl i64 %w, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+        $out .= "  %rc = ashr i64 %sh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
         $out .= "  %rc2 = add i64 %rc, %d\n";
         $out .= "  %lo = and i64 %rc2, " . $rcMask . "\n";
         $out .= "  %nw = or i64 %hiboth, %lo\n";
+        $out .= "  store i64 %nw, ptr %wp\n";
+        $out .= "  ret void\n}\n";
+        // record the root-buffer slot (clamped to CC_SLOT_NONE past the field)
+        $none = (string)\Compile\MemoryAbi::CC_SLOT_NONE;
+        $out .= "define void @__cc_setslot(ptr %s, i64 %i) {\n";
+        $out .= "  %big = icmp ugt i64 %i, " . $none . "\n";
+        $out .= "  %v = select i1 %big, i64 " . $none . ", i64 %i\n";
+        $out .= "  %vs = shl i64 %v, " . (string)\Compile\MemoryAbi::CC_SLOT_SHIFT . "\n";
+        $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %clr = and i64 %w, " . (string)~\Compile\MemoryAbi::CC_SLOT_MASK . "\n";
+        $out .= "  %nw = or i64 %clr, %vs\n";
         $out .= "  store i64 %nw, ptr %wp\n";
         $out .= "  ret void\n}\n";
 
@@ -3872,6 +3912,7 @@ end:
         $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
         $out .= "  %slot = getelementptr ptr, ptr %buf, i64 %cnt\n";
         $out .= "  store ptr %s, ptr %slot\n";
+        $out .= "  call void @__cc_setslot(ptr %s, i64 %cnt)\n";
         $out .= "  %cnt1 = add i64 %cnt, 1\n";
         $out .= "  store i64 %cnt1, ptr @__manticore_cc_count\n";
         $out .= $this->ccTrace('push', 'ptr %s, i64 %cnt1, ptr %buf');

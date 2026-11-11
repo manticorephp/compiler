@@ -117,15 +117,21 @@ One i64 at offset 8:
 | Bits | Width | Purpose |
 |---|---|---|
 | 63 | 1 | `buffered` — member of the cc candidate list (`BUFFERED_MASK`) |
-| 62..56 | 7 | `color` — 0 BLACK, 1 PURPLE, 2 GRAY, 3 WHITE (`COLOR_MASK`, `COLOR_SHIFT = 56`) |
-| 55..0 | 56 | `rc` — signed; trial deletion drives it negative (`RC_MASK`) |
+| 62 | 1 | `__destruct` already ran (`DTOR_CALLED_MASK`) |
+| 61..56 | 6 | `color` — 0 BLACK, 1 PURPLE, 2 GRAY, 3 WHITE, 4 DEAD (`COLOR_MASK`, `COLOR_SHIFT = 56`) |
+| 55..32 | 24 | root-buffer slot while buffered (`CC_SLOT_MASK`, `CC_SLOT_SHIFT = 32`; `CC_SLOT_NONE` = past the field) |
+| 31..0 | 32 | `rc` — signed; trial deletion drives it negative (`RC_MASK`) |
 
-Read by masking and sign-extending from bit 55; compare with **signed** predicates:
+The slot makes leaving the root buffer O(1): a buffered object whose rc reaches 0
+outside a collection is swap-removed (`__manticore_cc_unroot`: the last entry moves
+into its slot) and freed at once. Only an object pushed past slot `CC_SLOT_NONE`
+still dies the old way — dropped, its DEAD shell left for the next collection.
+
+Read by sign-extending from bit 31 (`RC_SIGN_SHIFT`); compare with **signed** predicates:
 
 ```llvm
-%rc_only = and i64 %word, 0x00FFFFFFFFFFFFFF
-%shl8    = shl i64 %rc_only, 8
-%rc_s    = ashr i64 %shl8, 8
+%shl  = shl i64 %word, 32
+%rc_s = ashr i64 %shl, 32
 ```
 
 Write only the rc field — colour and buffered are mutated by their own helpers:
@@ -134,7 +140,7 @@ Write only the rc field — colour and buffered are mutated by their own helpers
 new_word = (word & ~RC_MASK) | ((rc + delta) & RC_MASK)
 ```
 
-A plain `add %word, 1` is **forbidden**: the carry overflows into the colour field. It used
+A plain `add %word, 1` is **forbidden** where rc may be negative: the carry overflows into the slot field. It used
 to look like it worked because the corruption landed in bytes nobody read.
 
 ### 3.2 `#[Struct]` opt-out

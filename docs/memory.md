@@ -86,6 +86,9 @@ linked in only by a program that references `gc_collect_cycles()` (zero overhead
 otherwise, and cycles then leak). Once linked it also runs **automatically** at
 allocations when the root buffer reaches an adaptive threshold, as php's
 `gc_adjust_threshold` does; call it explicitly at a natural boundary to reclaim sooner.
+A root candidate whose count reaches zero leaves the buffer in O(1) and is freed at
+once, so the buffer holds only live candidates and `gc_disable()` does not grow the heap
+with dead objects.
 
 ---
 

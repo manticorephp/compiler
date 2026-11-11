@@ -1069,11 +1069,25 @@ final class MemoryAbi
     // ─── rc_word packing (object header offset 8) ─────────────────
 
     /**
-     * Low 56 bits hold the signed rc value. Trial-deletion (the
+     * Low 32 bits hold the signed rc value. Trial-deletion (the
      * Bacon-Rajan cycle collector) can drive it negative; reads
-     * sign-extend from bit 55.
+     * sign-extend from bit 31 (`shl RC_SIGN_SHIFT` + `ashr RC_SIGN_SHIFT`).
      */
-    public const RC_MASK = 0x00FFFFFFFFFFFFFF;
+    public const RC_MASK = 0x00000000FFFFFFFF;
+
+    /** Shift pair that sign-extends the rc field out of the whole word. */
+    public const RC_SIGN_SHIFT = 32;
+
+    /**
+     * Bits 32-55: the object's slot in the cycle collector's root buffer while
+     * it is buffered, so a buffered object that dies is swap-removed in O(1)
+     * and freed at once instead of staying behind as a dead shell.
+     * {@see CC_SLOT_NONE} marks a slot past the field's range (the object then
+     * dies the old way, {@see COLOR_DEAD}). Meaningless while not buffered.
+     */
+    public const CC_SLOT_SHIFT = 32;
+    public const CC_SLOT_MASK = 0x00FFFFFF00000000;
+    public const CC_SLOT_NONE = 0xFFFFFF;
 
     /** Bits 56-61 hold the color (Bacon-Rajan uses 0..3). */
     public const COLOR_MASK = 0x3F00000000000000;
@@ -1104,9 +1118,10 @@ final class MemoryAbi
     public const COLOR_GRAY = 2;
     public const COLOR_WHITE = 3;
 
-    /** A buffered root whose count reached zero outside a collection: already
-     *  DROPPED (destructor run, children released) the moment it died, as php
-     *  frees it; only its SHELL waits in the root buffer for the collector. */
+    /** A buffered root whose count reached zero outside a collection while its
+     *  slot was {@see CC_SLOT_NONE}: already DROPPED (destructor run, children
+     *  released) the moment it died, as php frees it; only its SHELL waits in
+     *  the root buffer for the collector. */
     public const COLOR_DEAD = 4;
 
     // ─── Blocking-offload job record ──────────────────────────────
