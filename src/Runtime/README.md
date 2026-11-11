@@ -107,7 +107,9 @@ lives in the global namespace so an unqualified user call
 - `gc_collect_cycles` is shadowed by a compiler builtin (the AOT path
   emits `@__manticore_cc_collect_cycles`, the real Bacon-Rajan
   collector); the PHP body here is the interpreter/fallback stub.
-  `gc_enable`/`gc_disable`/`gc_mem_caches` are no-ops in AOT mode.
+  `gc_enable`/`gc_disable`/`gc_enabled` are builtins too: they flip the flag that
+  gates AUTOMATIC collection (explicit `gc_collect_cycles()` still runs).
+  `gc_mem_caches` is a no-op in AOT mode.
 - Calls into `Runtime\Libc\*` from the global-namespace files use
   fully-qualified names because `use function` isn't aliased into a
   per-file table yet.

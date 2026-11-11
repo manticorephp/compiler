@@ -425,6 +425,9 @@ trait EmitLlvmBuiltins
         if ($name === 'exit' || $name === 'die')      { return $this->biExit($args); }
         if ($name === 'error_log')                    { return $this->biErrorLog($args); }
         if ($name === 'gc_collect_cycles')            { return $this->biGcCollect(); }
+        if ($name === 'gc_disable')                   { return $this->biGcSwitch(1); }
+        if ($name === 'gc_enable')                    { return $this->biGcSwitch(0); }
+        if ($name === 'gc_enabled')                   { return $this->biGcEnabled(); }
         if ($name === 'spl_object_id')                { return $this->biSplObjectId($args); }
         if ($name === '__mc_obj_addr')               { return $this->biObjAddr($args); }
         // Reflection Tier-2 metadata reads. Internal (`__mc_` prefix) — the
@@ -7026,6 +7029,28 @@ trait EmitLlvmBuiltins
         $this->rt->needsRc = true;
         $reg = $this->ssa->allocReg();
         $out = '  ' . $reg . " = call i64 @__manticore_cc_collect_cycles()\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `gc_disable()` / `gc_enable()` → flip the flag that gates AUTOMATIC collection. */
+    private function biGcSwitch(int $off): string
+    {
+        $this->rt->needsGcFlag = true;
+        $this->rt->needsRc = true;
+        $this->lastValue = '0';
+        $this->lastValueType = 'i64';
+        return '  store i64 ' . (string)$off . ", ptr @__manticore_cc_gcoff\n";
+    }
+
+    /** `gc_enabled()` → whether automatic collection is on. */
+    private function biGcEnabled(): string
+    {
+        $this->rt->needsGcFlag = true;
+        $this->rt->needsRc = true;
+        $off = $this->ssa->allocReg();
+        $reg = $this->ssa->allocReg();
+        $out = '  ' . $off . " = load i64, ptr @__manticore_cc_gcoff\n";
+        $out .= '  ' . $reg . ' = xor i64 ' . $off . ", 1\n";
         return $this->finishI64($out, $reg);
     }
 

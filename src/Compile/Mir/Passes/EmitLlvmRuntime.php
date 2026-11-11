@@ -1026,6 +1026,7 @@ trait EmitLlvmRuntime
             $out .= "}\n";
             $out .= $this->dropRuntime();
             if ($this->rt->needsCc) { $out .= $this->ccRuntime(); }
+            elseif ($this->rt->needsGcFlag) { $out .= "@__manticore_cc_gcoff = linkonce_odr global i64 0\n"; }
         }
         // Unconditional: `__mir_cell_retain` / `__mir_cell_drop` reach a
         // closure env boxed as an object, and they are emitted in every module.
@@ -3159,7 +3160,9 @@ trait EmitLlvmRuntime
         $out = "define void @__manticore_cc_autogc() {\n";
         $out .= "entry:\n";
         $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
-        $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
+        $out .= "  %gcoff = load i64, ptr @__manticore_cc_gcoff\n";
+        $out .= "  %gcact2 = or i64 %gcact, %gcoff\n";
+        $out .= "  %gcbusy = icmp ne i64 %gcact2, 0\n";
         $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
         $out .= "gccheck:\n";
         $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
@@ -3499,6 +3502,9 @@ end:
         $out .= "@__manticore_cc_count = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_cap   = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_active = linkonce_odr global i64 0\n";
+        // `gc_disable()`: 1 skips AUTOMATIC collection only; roots are still buffered
+        // and an explicit `gc_collect_cycles()` still runs, as in Zend.
+        $out .= "@__manticore_cc_gcoff = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_freed = linkonce_odr global i64 0\n";
         // The auto-collection threshold, ADAPTIVE as php's: a run that frees
         // almost nothing raises it, a productive one lowers it back.

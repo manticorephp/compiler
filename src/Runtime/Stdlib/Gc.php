@@ -7,10 +7,11 @@
  * `docs/design/memory-abi.md` §7). Collection is manual-trigger only
  * and does not scan static/global roots — `docs/ROADMAP.md`.
  *
- * Every function here except `gc_collect_cycles` is a genuine no-op in
- * AOT mode — there is no runtime-tunable collector to toggle. The
- * presence of these symbols keeps user PHP that calls them
- * compiling.
+ * `gc_enable` / `gc_disable` / `gc_enabled` and `gc_collect_cycles` are codegen
+ * builtins ({@see EmitLlvmBuiltins}); the bodies here are the fallback stubs a
+ * compiler without the builtin links. As in Zend, `gc_disable()` stops only the
+ * AUTOMATIC (threshold-triggered) collection — roots are still buffered and an
+ * explicit `gc_collect_cycles()` still collects.
  */
 
 function gc_enabled(): bool
