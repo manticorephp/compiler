@@ -232,19 +232,49 @@ final class SplitModule
     }
 
     /**
-     * Insert $v into the sorted tail of $a starting at $from.
+     * Push $v onto the binary min-heap $h.
      *
-     * @param int[] $a
+     * The closure's worklist was a sorted array grown by `array_splice`, one O(n)
+     * rebuild per insertion: 81 s of a 97 s Laravel split. A heap pops in the same
+     * ascending order, so the visit order (and with it every part's text) is unchanged.
+     *
+     * @param int[] $h
      */
-    private function sortedInsert(array &$a, int $from, int $v): void
+    private function heapPush(array &$h, int $v): void
     {
-        $lo = $from;
-        $hi = \count($a);
-        while ($lo < $hi) {
-            $mid = ($lo + $hi) >> 1;
-            if ($a[$mid] < $v) { $lo = $mid + 1; } else { $hi = $mid; }
+        $i = \count($h);
+        $h[] = $v;
+        while ($i > 0) {
+            $up = ($i - 1) >> 1;
+            if ($h[$up] <= $v) { break; }
+            $h[$i] = $h[$up];
+            $i = $up;
         }
-        \array_splice($a, $lo, 0, [$v]);
+        $h[$i] = $v;
+    }
+
+    /**
+     * Pop the smallest value of the non-empty min-heap $h.
+     *
+     * @param int[] $h
+     */
+    private function heapPop(array &$h): int
+    {
+        $top = $h[0];
+        $last = (int)\array_pop($h);
+        $n = \count($h);
+        if ($n === 0) { return $top; }
+        $i = 0;
+        while (true) {
+            $c = 2 * $i + 1;
+            if ($c >= $n) { break; }
+            if ($c + 1 < $n && $h[$c + 1] < $h[$c]) { $c = $c + 1; }
+            if ($h[$c] >= $last) { break; }
+            $h[$i] = $h[$c];
+            $i = $c;
+        }
+        $h[$i] = $last;
+        return $top;
     }
 
     /**
@@ -748,13 +778,12 @@ final class SplitModule
         }
         while ($pendI !== [] || $pendG !== []) {
             while ($pendI !== []) {
+                // A sorted array is already a valid min-heap.
                 $cur = $pendI;
                 $pendI = [];
                 \sort($cur);
-                $idx = 0;
-                while ($idx < \count($cur)) {
-                    $i = $cur[$idx];
-                    $idx = $idx + 1;
+                while ($cur !== []) {
+                    $i = $this->heapPop($cur);
                     $sym = $defOrder[$i];
                     $haveInternal[$sym] = true;
                     foreach ($defRefs[$sym] as $r => $_) {
@@ -764,7 +793,7 @@ final class SplitModule
                         if (isset($internal[$r])) {
                             $haveInternal[$r] = false;
                             $j = $this->defPos[$r];
-                            if ($j > $i) { $this->sortedInsert($cur, $idx, $j); } else { $pendI[] = $j; }
+                            if ($j > $i) { $this->heapPush($cur, $j); } else { $pendI[] = $j; }
                         } elseif (isset($this->gcls[$r])) {
                             $needG[$r] = false;
                             $pendG[] = $this->gpos[$r];
@@ -776,10 +805,8 @@ final class SplitModule
                 $cur = $pendG;
                 $pendG = [];
                 \sort($cur);
-                $idx = 0;
-                while ($idx < \count($cur)) {
-                    $i = $cur[$idx];
-                    $idx = $idx + 1;
+                while ($cur !== []) {
+                    $i = $this->heapPop($cur);
                     $g = $globalOrder[$i];
                     $needG[$g] = true;
                     $cls = $this->gcls[$g];
@@ -800,7 +827,7 @@ final class SplitModule
                         } elseif (isset($this->gcls[$r])) {
                             $needG[$r] = false;
                             $j = $this->gpos[$r];
-                            if ($j > $i) { $this->sortedInsert($cur, $idx, $j); } else { $pendG[] = $j; }
+                            if ($j > $i) { $this->heapPush($cur, $j); } else { $pendG[] = $j; }
                         }
                     }
                 }
@@ -835,12 +862,24 @@ final class SplitModule
         $needG = $plan->needG;
         $refs = $plan->refs;
         $gtext = '';
-        foreach ($globalOrder as $g) {
+        // Part 0 defines every strong global; any other part emits only what it
+        // names. Walking all globals per part was parts x globals map probes
+        // (65 x 588k on Laravel) — visit the named ones, in module order.
+        $order = $globalOrder;
+        if ($p !== 0) {
+            /** @var int[] */
+            $gp = [];
+            foreach ($needG as $g => $_) { $gp[] = $this->gpos[(string)$g]; }
+            \sort($gp);
+            $order = [];
+            foreach ($gp as $i) { $order[] = $globalOrder[$i]; }
+        }
+        foreach ($order as $g) {
             $gl = $globals[$g];
             $cls = $this->gcls[$g];
             if ($cls === 'local') {
                 if (!isset($needG[$g])) { continue; }
-                $gtext = $gtext . $this->promoteGlobal($gl) . "\n";
+                $gtext .= $this->promoteGlobal($gl) . "\n";
                 continue;
             }
             if ($cls === 'coalesced') {
@@ -851,18 +890,18 @@ final class SplitModule
                 // — every other part would then hold an unresolved external.
                 // weak_odr is the same coalescing with no discard.
                 if (isset($plan->ownG[$g])) {
-                    $gtext = $gtext . $this->pinGlobal($this->promoteGlobal($gl)) . "\n";
+                    $gtext .= $this->pinGlobal($this->promoteGlobal($gl)) . "\n";
                     continue;
                 }
-                $gtext = $gtext . $this->externGlobal($gl) . "\n";
+                $gtext .= $this->externGlobal($gl) . "\n";
                 continue;
             }
             if ($p === 0) {
-                $gtext = $gtext . (isset($this->inputPins[$g]) ? $this->pinGlobal($gl) : $gl) . "\n";
+                $gtext .= (isset($this->inputPins[$g]) ? $this->pinGlobal($gl) : $gl) . "\n";
                 continue;
             }
             if (!isset($needG[$g])) { continue; }
-            $gtext = $gtext . $this->externGlobal($gl) . "\n";
+            $gtext .= $this->externGlobal($gl) . "\n";
         }
         // Declares for what this part calls but another part defines.
         /** @var array<string, bool> */
@@ -873,7 +912,7 @@ final class SplitModule
             if (!isset($defHead[$r]) || isset($internal[$r]) || isset($availSet[$r])) { continue; }
             if (($assign[$r] ?? -1) === $p) { continue; }
             $d = $this->declareFromDefine($defHead[$r]);
-            if ($d !== '') { $dtext = $dtext . $d . "\n"; }
+            if ($d !== '') { $dtext .= $d . "\n"; }
         }
         /** @var string[] */
         $keep = [];
@@ -934,6 +973,7 @@ final class SplitModule
     public function runFile(string $llPath, int $parts, string $outBase): array
     {
         if ($parts < 2) { return []; }
+        $tStart = \Compile\Stats::now();
         $this->refsCache = [];
         $this->inputPins = [];
         $in = \Manticore\fopen($llPath, 'rb');
@@ -1029,6 +1069,7 @@ final class SplitModule
         // A stable split is a function of the module's CONTENT, not of the order it was
         // written in: parallel emission writes the same definitions in another order, and
         // an object cache keyed by part text should not care either.
+        $tParse = \Compile\Stats::now();
         if ($this->stable) {
             \sort($defOrder, SORT_STRING);
             \sort($globalOrder, SORT_STRING);
@@ -1055,6 +1096,8 @@ final class SplitModule
         /** @var array<string, bool> */
         $owned = [];
         $lineTable = $this->lineTableGlobals($globalOrder, $owned);
+        $tAssign = \Compile\Stats::now();
+        $tPlan = 0;
 
         $headerText = \implode("\n", $header);
         $declText = \implode("\n", $declares);
@@ -1065,8 +1108,10 @@ final class SplitModule
             if ($p !== 0) {
                 $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
             }
+            $t1 = \Compile\Stats::now();
             $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $defSize, $assign,
                                     $internal, $globalOrder, $globals, $owned);
+            $tPlan += \Compile\Stats::now() - $t1;
             $path = $outBase . '.p' . (string)$p . '.ll';
             if (!\Manticore\write_file($path,
                     $partHeader . "\n" . $declText . "\n" . $plan->gtext . $plan->dtext . $plan->usedText)) {
@@ -1118,6 +1163,9 @@ final class SplitModule
             }
             $out[] = $path;
         }
+        \Compile\Stats::line('  split: parse ' . (string)\intdiv($tParse - $tStart, 1000000) . 'ms, assign '
+            . (string)\intdiv($tAssign - $tParse, 1000000) . 'ms, plan ' . (string)\intdiv($tPlan, 1000000)
+            . 'ms, write ' . (string)\intdiv(\Compile\Stats::now() - $tAssign - $tPlan, 1000000) . 'ms');
         \Manticore\free($buf);
         \Manticore\fclose($in);
         return $out;
