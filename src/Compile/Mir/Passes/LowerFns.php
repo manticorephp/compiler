@@ -530,8 +530,7 @@ trait LowerFns
             foreach ($capNames as $cn) { $prepended[] = $cn; }
             $capNames = $prepended;
         }
-        $id = $this->closureCounter;
-        $this->closureCounter = $this->closureCounter + 1;
+        $id = $this->allocClosureId();
         $fnName = '__closure_' . (string)$id;
         if ($this->lastClosureFrame !== '' && $this->diags !== null) { $this->diags->fnAlias[$this->lastClosureFrame] = $fnName; }
         $this->lastClosureFrame = '';
@@ -699,6 +698,30 @@ trait LowerFns
     }
 
     /**
+     * The id behind `__closure_<id>`. A user closure takes the next counter
+     * value. A prelude closure's id is derived from where it is written
+     * (enclosing class, function, ordinal) and lives above 2^53, far past any
+     * counter: the counter runs through the prelude first, so a counter id
+     * would shift with the set of injected prelude files and the same prelude
+     * body would name a different closure in every program.
+     */
+    private function allocClosureId(): int
+    {
+        if (!$this->lowerInPrelude) {
+            $id = $this->closureCounter;
+            $this->closureCounter = $id + 1;
+            return $id;
+        }
+        $scope = $this->currentLowerClass . '::' . $this->currentLowerFn;
+        $ord = $this->preludeClosureOrd[$scope] ?? 0;
+        $this->preludeClosureOrd[$scope] = $ord + 1;
+        $id = 9007199254740992 + (int)\hexdec(\substr(\sha1($scope . '#' . (string)$ord), 0, 13));
+        while (isset($this->preludeClosureIds[$id])) { $id = $id + 1; }
+        $this->preludeClosureIds[$id] = true;
+        return $id;
+    }
+
+    /**
      * Assemble a closure value: leading capture params (`$capNames`, bound to
      * `$capVals`) followed by the call params, with body `return <callNode>`.
      * Used by the method/static/builtin first-class-callable lowering.
@@ -710,8 +733,7 @@ trait LowerFns
      */
     private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret, bool $forwardsErasedArray = false, ?array $metaParams = null): Node
     {
-        $id = $this->closureCounter;
-        $this->closureCounter = $id + 1;
+        $id = $this->allocClosureId();
         $fnName = '__closure_' . (string)$id;
         if ($this->lastClosureFrame !== '' && $this->diags !== null) { $this->diags->fnAlias[$this->lastClosureFrame] = $fnName; }
         $this->lastClosureFrame = '';

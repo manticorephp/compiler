@@ -101,6 +101,9 @@ Reference point: compiling symfony-demo (79k functions, 1.1 GB of LLVM IR) takes
 - [x] Dynamic-name calls dispatch through a table instead of a comparison chain
       (−12 % IR, −31 % build time)
 - [x] Content-addressed object cache for split builds
+- [x] Shared generics: large prelude bodies compiled once per variant and reused across
+      programs (`docs/design/shared-generics.md`); warm-cache compile CPU −57 % on the AOT
+      sample, runtime unchanged. Plan for the rest: `docs/design/compile-speed-roadmap.md`
 - [~] Emit less IR — `clang -O2` is about two thirds of build time; helpers instead of inlined
       loops is the proven lever
 - [ ] Cut front-end re-inference (~29 s on the compiler itself)

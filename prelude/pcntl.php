@@ -219,8 +219,10 @@ namespace {
      * Wait for a child. Returns the pid reaped, 0 when WNOHANG found none, or -1.
      * @param int $status raw wait status; read it with the pcntl_w* helpers
      */
-    function pcntl_waitpid(int $process_id, #[RefOut] int &$status, int $flags = 0): int
+    function pcntl_waitpid(int $process_id, #[RefOut] int &$status, int $flags = 0, #[RefOut] array &$resource_usage = []): int
     {
+        // No getrusage(2) per child here: php fills it, this leaves it empty.
+        $resource_usage = [];
         $st = 0;
         $r = \__mc_proc_waitpid($process_id, $flags, $st);
         $status = $st;

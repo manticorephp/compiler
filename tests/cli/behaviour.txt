@@ -570,6 +570,13 @@ rc=1 fail=1 warn=3
 rc=0 fail=0 warn=3
 == doctor: full toolchain
 rc=0 fail=0 warn=1
+== cache show
+<dir>: 2 objects, 1 indexes, 7 B
+== cache clear
+cleared 2 objects, 1 indexes (7 B) from <dir>
+left: ./notes.txt ./user.o analyze: 0
+== cache unknown action
+rc=64
 == completions no shell
 rc=64
 == completions unknown shell

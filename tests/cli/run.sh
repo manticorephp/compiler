@@ -156,6 +156,18 @@ PHP
     shim clang14 cc; doctor_case "doctor: old clang"
     shim clang17 cc; doctor_case "doctor: no pcre2/pkg-config"
     shim clang17 cc pcre2-config pkg-config; doctor_case "doctor: full toolchain"
+    # `cache` reports and `cache clear` empties the object cache — only the cache's own
+    # `<sha1>.o` files (top and prog/); anything else in the directory stays.
+    cdir="$WORK/objcache"; mkdir -p "$cdir/prog"
+    printf 'xx' > "$cdir/$(printf 'a%.0s' $(seq 40)).o"; printf 'yyy' > "$cdir/prog/$(printf 'b%.0s' $(seq 40)).o"
+    printf 'keep' > "$cdir/notes.txt"; printf 'keep' > "$cdir/user.o"
+    mkdir -p "$WORK/analyze"; printf '{}' > "$WORK/analyze/$(printf 'c%.0s' $(seq 40)).json"
+    printf '== cache show\n'
+    MANTICORE_OBJ_CACHE_DIR="$cdir" "$MC" cache 2>&1 | sed "s|$cdir|<dir>|"
+    printf '== cache clear\n'
+    MANTICORE_OBJ_CACHE_DIR="$cdir" "$MC" cache clear 2>&1 | sed "s|$cdir|<dir>|"
+    echo "left: $(cd "$cdir" && find . -type f | sort | paste -sd' ' -) analyze: $(ls "$WORK/analyze" | wc -l | tr -d ' ')"
+    run "cache unknown action"      "$MC" cache wipe
     run "completions no shell"      "$MC" completions
     run "completions unknown shell" "$MC" completions tcsh
     run "unknown command"          "$MC" frobnicate

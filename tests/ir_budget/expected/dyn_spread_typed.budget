@@ -1,0 +1,3 @@
+# ceiling for tests/aot/cases/dyn_spread_typed_pack.php — regenerate with tests/ir_budget/run.sh --bless
+max_bytes=3291174
+max_defs=709

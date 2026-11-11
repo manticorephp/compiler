@@ -91,6 +91,15 @@ final class SplitModule
     /** @var array<string, int> global name => index in globalOrder */
     private array $gpos = [];
 
+    /**
+     * Symbols the INPUT module pins with its own `@llvm.compiler.used` (a shared-
+     * generics program part pins what its body parts name). The array itself is
+     * dropped — each part writes one — and a pinned global is defined, non-
+     * discardable, in part 0.
+     * @var array<string, bool>
+     */
+    private array $inputPins = [];
+
     /** @var array<int, string[]> part => its own non-internal definitions in defOrder order */
     private array $partMine = [];
 
@@ -101,6 +110,7 @@ final class SplitModule
     {
         if ($parts < 2) { return [$ir]; }
         $this->refsCache = [];
+        $this->inputPins = [];
         $lines = \explode("\n", $ir);
         $n = \count($lines);
 
@@ -140,6 +150,7 @@ final class SplitModule
             if ($l !== '' && $l[0] === '@') {
                 $sym = $this->globalName($l);
                 if ($sym === '') { $header[] = $l; continue; }
+                if ($sym === 'llvm.compiler.used') { $this->notePins($l); continue; }
                 $globals[$sym] = $l;
                 $globalOrder[] = $sym;
                 continue;
@@ -247,7 +258,8 @@ final class SplitModule
         $this->gpos = [];
         $k = 0;
         foreach ($globalOrder as $g) {
-            $this->gcls[$g] = $this->globalClass($globals[$g]);
+            // A pinned global is defined once, in part 0, whatever its linkage.
+            $this->gcls[$g] = isset($this->inputPins[$g]) ? 'strong' : $this->globalClass($globals[$g]);
             $this->gpos[$g] = $k;
             $k = $k + 1;
         }
@@ -845,7 +857,10 @@ final class SplitModule
                 $gtext = $gtext . $this->externGlobal($gl) . "\n";
                 continue;
             }
-            if ($p === 0) { $gtext = $gtext . $gl . "\n"; continue; }
+            if ($p === 0) {
+                $gtext = $gtext . (isset($this->inputPins[$g]) ? $this->pinGlobal($gl) : $gl) . "\n";
+                continue;
+            }
             if (!isset($needG[$g])) { continue; }
             $gtext = $gtext . $this->externGlobal($gl) . "\n";
         }
@@ -878,6 +893,13 @@ final class SplitModule
     }
 
     /** A coalesced global's definition, made non-discardable for its owning part. */
+    private function notePins(string $line): void
+    {
+        if (\preg_match_all('/ptr @("[^"]+"|[A-Za-z0-9_.$\\\\-]+)/', $line, $m) > 0) {
+            foreach ($m[1] as $raw) { $this->inputPins[\trim((string)$raw, '"')] = true; }
+        }
+    }
+
     private function pinGlobal(string $line): string
     {
         $eq = \strpos($line, ' = ');
@@ -913,6 +935,7 @@ final class SplitModule
     {
         if ($parts < 2) { return []; }
         $this->refsCache = [];
+        $this->inputPins = [];
         $in = \Manticore\fopen($llPath, 'rb');
         $cap = 1048576;
         $buf = \Manticore\malloc($cap);
@@ -994,6 +1017,7 @@ final class SplitModule
             if ($bare !== '' && $bare[0] === '@') {
                 $sym = $this->globalName($bare);
                 if ($sym === '') { $header[] = $bare; continue; }
+                if ($sym === 'llvm.compiler.used') { $this->notePins($bare); continue; }
                 $globals[$sym] = $bare;
                 $globalOrder[] = $sym;
                 continue;
@@ -1106,7 +1130,7 @@ final class SplitModule
         return true;
     }
 
-    private function head(string $def): string
+    public function head(string $def): string
     {
         $nl = \strpos($def, "\n");
         return $nl === false ? $def : \substr($def, 0, $nl);
@@ -1126,14 +1150,14 @@ final class SplitModule
         return '@' . $sym;
     }
 
-    private function defineSymbol(string $line): string
+    public function defineSymbol(string $line): string
     {
         $at = \strpos($line, '@');
         if ($at === false) { return ''; }
         return $this->readSymbol($line, $at + 1);
     }
 
-    private function globalName(string $line): string
+    public function globalName(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return ''; }
@@ -1160,7 +1184,7 @@ final class SplitModule
         return 'strong';
     }
 
-    private function promoteGlobal(string $line): string
+    public function promoteGlobal(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return $line; }
@@ -1176,7 +1200,7 @@ final class SplitModule
     }
 
     /** The `external` form of a global definition — same name and type, no initializer. */
-    private function externGlobal(string $line): string
+    public function externGlobal(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return $line; }
@@ -1244,7 +1268,7 @@ final class SplitModule
     }
 
     /** A definition header relinked `available_externally` — same signature and attributes. */
-    private function availHead(string $headLine): string
+    public function availHead(string $headLine): string
     {
         $rest = \substr($headLine, 7);
         $keys = ['linkonce_odr ', 'weak_odr ', 'external ', 'dso_local ', 'weak ', 'linkonce '];
@@ -1262,7 +1286,7 @@ final class SplitModule
     }
 
     /** A `declare` taken from the definition's own header — never invented. */
-    private function declareFromDefine(string $def): string
+    public function declareFromDefine(string $def): string
     {
         $headLine = $this->head($def);
         $paren = \strpos($headLine, '(');
@@ -1319,7 +1343,7 @@ final class SplitModule
      *
      * @param array<string, bool> $into
      */
-    private function collectRefsBulk(string $text, array &$into): void
+    public function collectRefsBulk(string $text, array &$into): void
     {
         if (\strpos($text, '@') === false) { return; }
         \preg_match_all('/@("[^"\n]*"|[A-Za-z0-9_.$\\\\-]+)/', $text, $m);
