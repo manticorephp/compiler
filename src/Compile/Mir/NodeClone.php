@@ -194,7 +194,7 @@ final class NodeClone
         }
         if ($k === Node::KIND_STORE_DYN_PROP) { $x = self::asStoreDynProp($n); return new StoreDynProp_(self::node($x->object), self::node($x->name), self::node($x->value), $n->type); }
         if ($k === Node::KIND_METHOD_CALL) { $x = self::asMethodCall($n); $c = new MethodCall_(self::node($x->object), $x->method, self::nodes($x->args), $n->type); $c->direct = $x->direct; return $c; }
-        if ($k === Node::KIND_STATIC_CALL) { $x = self::asStaticCall($n); $c = new StaticCall_($x->class, $x->method, self::nodes($x->args), $n->type, $x->staticClass); $c->dynArm = $x->dynArm; return $c; }
+        if ($k === Node::KIND_STATIC_CALL) { $x = self::asStaticCall($n); $c = new StaticCall_($x->class, $x->method, self::nodes($x->args), $n->type, $x->staticClass); $c->dynArm = $x->dynArm; $c->lateStatic = $x->lateStatic; return $c; }
         if ($k === Node::KIND_CLONE) {
             $x = self::asClone($n);
             $wp = [];

@@ -287,6 +287,11 @@ tier/toplevel_return_guard.php:4: warning[undefined.class]: class Missing\Q is n
 front end: 0 error(s), 1 warning(s)
 == tier_toplevel_exit_guard
 rc=0
+== tier_static_lsb_base
+rc=65
+tier/static_lsb_base.php:4: warning[undefined.function]: function missing_base_hook() is not declared
+tier/static_lsb_base.php:7: error[undefined.function]: function missing_leaf_hook() is not declared (reachable: Leaf6__hook <- Base5__mk <- __main)
+front end: 1 error(s), 1 warning(s)
 == tier_reachable_new_allow_traps
 rc=0
 tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared

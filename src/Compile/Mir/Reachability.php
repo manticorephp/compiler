@@ -80,6 +80,12 @@ final class Reachability
     private array $demandedStatic = [];
     /** @var array<string, bool> `lowercase class|method` pairs demanded across that class's hierarchy */
     private array $demandedIn = [];
+    /** @var array<string, array<string, string>> lowercase class => lowercase method => from: `static::m()` met in a method of that class */
+    private array $lsbDemand = [];
+    /** @var array<int, array{string, string, string}> `static::m()` calls met at the static level: their dynamic half replayed later */
+    private array $deferredLsb = [];
+    /** @var array<string, string[]> lowercase class => its direct subclasses */
+    private array $childrenOf = [];
     /** @var array<string, string> method symbol => lowercase class declaring it */
     private array $classOfFn = [];
     /** Every method of every instantiated class is reached (a call by a runtime method name). */
@@ -152,6 +158,7 @@ final class Reachability
                 $r->classOfFn[$sym] = $lc;
             }
             $r->methodsOf[$lc] = $own;
+            if ($cd->parent !== '') { $r->childrenOf[\strtolower(\ltrim($cd->parent, '\\'))][] = $lc; }
             $r->methodSpelling[$lc] = $spell;
         }
         foreach ($m->interfaceNames as $in => $_) { $r->ifaceLc[\strtolower(\ltrim($in, '\\'))] = true; }
@@ -202,6 +209,7 @@ final class Reachability
         $r->staticStaticCalled = $r->staticCalled;
         $r->widen = true;
         foreach ($r->deferredArms as $arm) { $r->staticCall($arm[0], $arm[1], $arm[2]); }
+        foreach ($r->deferredLsb as $dl) { $r->lateStaticCall($dl[0], $dl[1], $dl[2]); }
         foreach ($r->deferredStrings as $ds) { $r->stringLiteral($ds[0], $ds[1]); }
         foreach ($dynRoots as $dr) { $r->enqueue($dr, ''); }
         if (isset($r->pending['fns'])) { $r->reachNameableFns(''); }
@@ -384,6 +392,7 @@ final class Reachability
     {
         if (isset($this->leafDone[$lc])) { return; }
         $this->leafDone[$lc] = true;
+        $this->noteStaticClass($lc);
         $leaf = $lc;
         $cur = $lc;
         while ($cur !== '' && isset($this->classLc[$cur])) {
@@ -461,6 +470,53 @@ final class Reachability
             if ($this->isAncestorOf((string)$c, $lc) || $this->isAncestorOf($lc, (string)$c)) {
                 $this->enqueue($this->methodsOf[$c][$lm], $from);
             }
+        }
+    }
+
+    /**
+     * `static::m()` lexically in class `$own` (a generic body, not a late-static copy): statically, `m` as resolved
+     * from each class the call can be bound to (`new`ed, or named by a static call); any `m` of the hierarchy only
+     * at the dynamic level.
+     */
+    private function lateStaticCall(string $own, string $method, string $from): void
+    {
+        $this->demandLateStatic($own, $method, $from);
+        if ($this->widen) { $this->demandInHierarchy($own, $method, $from); }
+        else { $this->deferredLsb[] = [$own, $method, $from]; }
+    }
+
+    /** `static::m()` in a method of `$own`: `m` as resolved from every bindable class that is `$own` or a descendant, now or later. */
+    private function demandLateStatic(string $own, string $method, string $from): void
+    {
+        $lm = \strtolower($method);
+        if (isset($this->lsbDemand[$own][$lm])) { return; }
+        $this->lsbDemand[$own][$lm] = $from;
+        /** @var string[] $todo */
+        $todo = [$own];
+        while (\count($todo) > 0) {
+            $c = (string)\array_pop($todo);
+            if (isset($this->leafDone[$c]) || isset($this->staticCalled[$c])) { $this->resolveLateStatic($c, $lm, $from); }
+            foreach (($this->childrenOf[$c] ?? []) as $sub) { $todo[] = $sub; }
+        }
+    }
+
+    /** `$lc` became a class a late static call can be bound to: answer the `static::m()` demands of its ancestors. */
+    private function noteStaticClass(string $lc): void
+    {
+        $cur = $lc;
+        while ($cur !== '' && isset($this->classLc[$cur])) {
+            foreach (($this->lsbDemand[$cur] ?? []) as $lm => $from) { $this->resolveLateStatic($lc, (string)$lm, $from); }
+            $cur = \strtolower(\ltrim($this->classLc[$cur]->parent, '\\'));
+        }
+    }
+
+    /** The nearest body of `$lm` up from `$lc`. */
+    private function resolveLateStatic(string $lc, string $lm, string $from): void
+    {
+        $cur = $lc;
+        while ($cur !== '' && isset($this->classLc[$cur])) {
+            if (isset($this->methodsOf[$cur][$lm])) { $this->enqueue($this->methodsOf[$cur][$lm], $from); return; }
+            $cur = \strtolower(\ltrim($this->classLc[$cur]->parent, '\\'));
         }
     }
 
@@ -575,7 +631,7 @@ final class Reachability
             return;
         }
         if (!isset($this->classLc[$lc])) { return; }
-        if (!isset($this->staticCalled[$lc])) { $this->staticCalled[$lc] = true; $this->usedClasses = null; }
+        if (!isset($this->staticCalled[$lc])) { $this->staticCalled[$lc] = true; $this->usedClasses = null; $this->noteStaticClass($lc); }
         $lm = \strtolower($method);
         $cur = $lc;
         while ($cur !== '' && isset($this->classLc[$cur])) {
@@ -782,8 +838,9 @@ final class Reachability
                     foreach (Walk::children($n) as $c) { $stack[] = $c; }
                     continue;
                 }
-                $this->staticCall($sc->class, $sc->method, $from);
                 $scl = \strtolower(\ltrim($sc->class, '\\'));
+                if ($sc->lateStatic && isset($this->classLc[$scl])) { $this->lateStaticCall($scl, $sc->method, $from); }
+                else { $this->staticCall($sc->class, $sc->method, $from); }
                 $this->callableArgs($sc->args, $scl === 'closure' && \strtolower($sc->method) === 'fromcallable' ? [0] : [],
                     $this->fnDefs[$this->methodsOf[$scl][\strtolower($sc->method)] ?? ''] ?? null, $from);
                 if ($sc->staticClass !== '' && \strtolower($sc->staticClass) !== \strtolower($sc->class)) {

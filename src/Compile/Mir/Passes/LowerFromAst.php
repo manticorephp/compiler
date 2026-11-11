@@ -8993,6 +8993,7 @@ final class LowerFromAst implements Pass
         }
         $sc = new StaticCall_($class, $expr->method, $args, Type::unknown(), $scope);
         $sc->srcArgc = \count($expr->args);
+        $sc->lateStatic = $low === 'static' && ($this->currentStaticClass === '' || $this->currentStaticClass === $this->currentLowerClass);
         return $sc;
     }
 
