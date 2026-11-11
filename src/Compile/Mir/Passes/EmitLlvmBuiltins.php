@@ -879,6 +879,7 @@ trait EmitLlvmBuiltins
     /** The one shared body {@see boxUnknownShallowIr} calls. */
     private function emitBoxUnknownFn(): string
     {
+        $this->ssa->reset();
         $body = $this->boxUnknownShallowInlineIr('%bxf.v');
         return 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_box_unknown')
             . "(i64 %bxf.v) noinline {\nentry:\n" . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
@@ -10052,6 +10053,7 @@ trait EmitLlvmBuiltins
      */
     private function emitGetClassFn(): string
     {
+        $this->ssa->reset();
         $res = $this->ssa->allocReg();
         $out = '  ' . $res . " = alloca ptr\n";
         $endL = $this->ssa->allocLabel('gcf.end');
@@ -10092,6 +10094,7 @@ trait EmitLlvmBuiltins
      *  function bodies (not the preamble) when a site asked for it. */
     private function emitObjectVarsFn(bool $mangle = false): string
     {
+        $this->ssa->reset();
         $body = $this->emitObjectVarsInline('%gov.obj', $mangle);
         // Not `optnone`, for all it costs clang: unoptimized, the switch below is a chain of
         // compares over every class, and Eloquent's `(array) $row` on a stdClass per fetched

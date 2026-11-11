@@ -1080,6 +1080,9 @@ trait EmitLlvmModule
         $this->locals->hasTry = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
+        // Call-site scratch read into the virtual-dispatch KEY: left over from the
+        // previous body, it made this body depend on what was emitted before it.
+        $this->vdSiteArgc = 0;
         $this->arrayHintedRefParams = [];
         foreach ($fn->params as $ahp) {
             if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }

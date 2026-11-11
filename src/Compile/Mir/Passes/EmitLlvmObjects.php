@@ -389,6 +389,7 @@ trait EmitLlvmObjects
     {
         $out = '';
         foreach ($this->newDynNeeded as $sym => $shape) {
+            $this->ssa->reset();
             $params = 'ptr %ndy.n';
             $body = '';
             $regs = [];
@@ -418,6 +419,7 @@ trait EmitLlvmObjects
                   . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
         }
         foreach ($this->newDynRestNeeded as $sym => [$srcArgc, $boxResult]) {
+            $this->ssa->reset();
             $this->rt->needsStrcmp = true;
             $body = $this->newDynChainIr('%ndy.n', [], [], [], $srcArgc, $boxResult,
                 '%ndy.s', Type::cell(), $this->newDynTable()[2]);
@@ -1244,8 +1246,16 @@ trait EmitLlvmObjects
             if ($this->cloneErasedSym === '') {
                 $sym = $this->mirHelperSym('__mir_clone_erased');
                 $helpers = '';
+                // Its own counters: numbered from the first requester's frame, the bytes
+                // depended on which function asked first.
+                $oldSsa = $this->ssa;
+                $oldCid = $this->classIdReg;
+                $this->ssa = new SsaBuilder();
+                $this->ssa->reset();
                 $body = $this->emitCloneSwitch($n, '%a0', $impls, $helpers);
                 $ret = $this->lastValue;
+                $this->ssa = $oldSsa;
+                $this->classIdReg = $oldCid;
                 if ($body !== '' && $this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
                     $this->cloneErasedSym = $sym;
                     $this->vdExtraBodies .= $helpers . 'define linkonce_odr ptr @' . $sym
@@ -3112,6 +3122,7 @@ trait EmitLlvmObjects
     {
         $out = '';
         foreach ($this->erasedIfaceIface as $key => $iface) {
+            $this->ssa->reset();
             $method = $this->erasedIfaceMethod[$key] ?? '';
             $argc = $this->erasedIfaceArgc[$key] ?? 0;
             if ($method === '') { continue; }
@@ -9432,7 +9443,10 @@ trait EmitLlvmObjects
         foreach ($parts as $p) {
             if (!\str_starts_with($p, 'i64 ')) { $plain = false; break; }
         }
-        if (!$plain || $n < 1 || \count($cands) < 2) {
+        // A pending spread is SITE state the key does not carry: built under it the
+        // body is not closed and stays inline, and a thunk another site registered
+        // first would drop the spread. Whichever came first decided — order-dependent.
+        if (!$plain || $n < 1 || \count($cands) < 2 || $this->spreadTail !== null) {
             return $this->emitVirtualDispatchInline($thisArg, $argList, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
         }
@@ -10531,7 +10545,9 @@ trait EmitLlvmObjects
         $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
         $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
             new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
-                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str($method)]), $false(), $true(), $bool),
+                // The body is shared by every spelling of the name (keyed lowercase): bake the lowercase
+                // one, or the first requester's spelling would decide the bytes. method_exists ignores case.
+                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str(\strtolower($method))]), $false(), $true(), $bool),
                 $false(), $bool),
             $false(), $bool);
         $body .= $this->emitNode($magicOnly);
