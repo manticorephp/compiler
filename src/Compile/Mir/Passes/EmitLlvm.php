@@ -147,6 +147,8 @@ final class EmitLlvm implements EmitVisitor
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
         $this->classIsACache = [];
+        $this->ancestorSets = [];
+        $this->instanceofIdsCache = [];
         $this->selfDescendantsCache = [];
         $this->fixedPropertyHoldersCache = [];
         $this->bagClassNamesCache = [];
@@ -248,6 +250,10 @@ final class EmitLlvm implements EmitVisitor
     private array $classImplementsIfaceCache = [];
     /** @var array<string, bool> */
     private array $classIsACache = [];
+    /** @var array<string, array<string, bool>> class → self + parents + interfaces + origin closure, exactly what classIsA walks (class table is frozen during emit) */
+    private array $ancestorSets = [];
+    /** @var array<string, int[]> */
+    private array $instanceofIdsCache = [];
     /** @var array<string, string[]> */
     private array $selfDescendantsCache = [];
     /** @var array<string, ClassDef[]> */
@@ -770,6 +776,8 @@ final class EmitLlvm implements EmitVisitor
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
         $this->classIsACache = [];
+        $this->ancestorSets = [];
+        $this->instanceofIdsCache = [];
         $this->selfDescendantsCache = [];
         $this->fixedPropertyHoldersCache = [];
         $this->bagClassNamesCache = [];
@@ -3676,6 +3684,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function instanceofMatchIds(string $target): array
     {
+        if (isset($this->instanceofIdsCache[$target])) { return $this->instanceofIdsCache[$target]; }
         $ids = [];
         foreach ($this->classes as $name => $cd) {
             if ($this->classIsA($name, $target)) { $ids[] = $cd->classId; }
@@ -3693,6 +3702,7 @@ final class EmitLlvm implements EmitVisitor
                 if ($lt === 'unitenum' || $ed->backing !== '') { $ids[] = $ed->classId; }
             }
         }
+        $this->instanceofIdsCache[$target] = $ids;
         return $ids;
     }
 
@@ -3712,30 +3722,37 @@ final class EmitLlvm implements EmitVisitor
                 || $this->classImplements($name, 'IteratorAggregate')
                 || $this->classImplements($name, 'Traversable');
         }
+        $set = $this->ancestorSetOf($name);
+        return isset($set[$target]);
+    }
+
+    /**
+     * Every name `classIsA` accepts for `$name`: each class on the parent chain
+     * (up to the first one missing from the table), their interfaces, and the
+     * same closure of each ORIGIN class (see LowerReify).
+     *
+     * @return array<string, bool>
+     */
+    private function ancestorSetOf(string $name): array
+    {
+        if (isset($this->ancestorSets[$name])) { return $this->ancestorSets[$name]; }
+        $set = [];
         $c = $name;
         while ($c !== '') {
             // `isset`, NOT `$cd = … ?? null` + `$cd === null`: a `ClassDef|null`
             // local types as NON-null, so the native self-build leaves the slot
-            // un-zeroed and the null test reads garbage — then `->interfaces`
-            // walks it. Latent for as long as the stale slot happened to hold
-            // something benign; adding an unrelated stdlib file shifted the
-            // layout and it SIGSEGV'd on `$x instanceof $cls` over an interface.
-            if (!isset($this->classes[$c])) { return false; }
+            // un-zeroed and the null test reads garbage.
+            if (!isset($this->classes[$c])) { break; }
             $cd = $this->classes[$c];
-            if ($c === $target) { return true; }
-            if (\in_array($target, $cd->interfaces, true)) { return true; }
-            // A REIFIED specialization is-a its ORIGIN, and everything the origin
-            // is: `Box$of$float` answers `instanceof Box`, and `Bag$of$float` —
-            // whose PARENT is the specialized `Base$of$float`, so the plain chain
-            // never reaches `Bag` — answers `instanceof Bag` and `instanceof Base`.
-            // The origin edge is what carries PHP's identity across the layout
-            // split (see LowerReify).
-            if ($cd->originClass !== '' && $this->classIsA($cd->originClass, $target)) {
-                return true;
+            $set[$c] = true;
+            foreach ($cd->interfaces as $i) { $set[$i] = true; }
+            if ($cd->originClass !== '') {
+                $set += $this->ancestorSetOf($cd->originClass);
             }
             $c = $cd->parent;
         }
-        return false;
+        $this->ancestorSets[$name] = $set;
+        return $set;
     }
 
     /**
