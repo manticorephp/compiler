@@ -182,8 +182,8 @@ front end: 0 error(s), 1 warning(s)
 rc=0
 == tier_cascade
 rc=65
-tier/cascade.php:3: error[lower.unsupported]: unsupported statement kind Function
-tier/cascade.php:4: warning[undefined.function]: function inner_missing() is not declared
+tier/cascade.php:4: error[lower.unsupported]: unsupported: foreach cannot bind BY REFERENCE into anything but a variable — the alias would reach a temporary, not the target.
+tier/cascade.php:5: warning[undefined.function]: function inner_missing() is not declared
 front end: 1 error(s), 1 warning(s)
 == tier_class_consts_unused
 rc=65

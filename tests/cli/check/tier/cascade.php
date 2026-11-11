@@ -1,6 +1,7 @@
 <?php
 function outer() {
-    function inner() {}
+    $o = new \stdClass();
+    foreach ([1] as &$o->p) {}
     inner_missing();
 }
 outer();
