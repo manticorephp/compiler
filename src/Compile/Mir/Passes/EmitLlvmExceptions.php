@@ -58,6 +58,8 @@ trait EmitLlvmExceptions
 
     /** Marking is on for the function being emitted. */
     private bool $ehOn = false;
+    /** Names the payload register of each Darwin pad resume ({@see ehResume}). */
+    private int $ehResumeN = 0;
     /** The function's define carries a personality for its cleanup pads. */
     private bool $ehPersonality = false;
     /** The SSA the function body is emitted in; an outlined helper's nodes are not marked. */
@@ -148,6 +150,19 @@ trait EmitLlvmExceptions
         // Declared once, at the end of the function ({@see ehEnd}): a pad body may never be emitted.
         $this->ehTmpDeclared = true;
         return '';
+    }
+
+    /**
+     * The end of a cleanup pad. Darwin continues the unwind through the runtime's
+     * own phase 2 (UnwindRuntime::darwinFastUnwindIr): the system `_Unwind_Resume`
+     * starts from a shared-cache frame dyld resolves by a linear scan (#648).
+     */
+    private function ehResume(string $lp): string
+    {
+        if (!\Manticore\is_darwin()) { return '  resume { ptr, i32 } ' . $lp . "\n"; }
+        $this->ehResumeN = $this->ehResumeN + 1;
+        $x = '%mc.rx' . (string)$this->ehResumeN;
+        return '  ' . $x . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n  call void @__mc_resume(ptr " . $x . ")\n  unreachable\n";
     }
 
     /** What a landing pad of this frame runs first: release whatever call temps are still listed. */
@@ -335,7 +350,7 @@ trait EmitLlvmExceptions
         $this->ehPadLabels[$pad] = $lbl;
         $lp = $this->ssa->allocReg();
         $this->ehPadBodies[$pad] = $this->ehWithBoxReleases($lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n"
-            . $this->ehTmpDrainIr() . '  resume { ptr, i32 } ' . $lp . "\n");
+            . $this->ehTmpDrainIr() . $this->ehResume($lp));
         return $pad;
     }
 
@@ -646,7 +661,7 @@ trait EmitLlvmExceptions
             $body .= \str_starts_with($fl, 'mix') ? $this->ownDropIr($slot, $op)
                 : '  call void ' . $this->ehDropHelper($fl) . '(ptr ' . $slot . ")\n";
         }
-        $body .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $body .= $this->ehResume($lp);
         $this->ehPadBodies[$pad] = $this->ehWithBoxReleases($body);
         return $pad;
     }
@@ -725,7 +740,7 @@ trait EmitLlvmExceptions
         $out .= '  br i1 ' . $ours . ', label %' . $drops . ', label %' . $plain . "\n";
         $out .= $plain . ":\n";
         for ($i = 0; $i < $n; $i = $i + 1) { $out .= $this->ownDropIr($slots[$i], $ops[$i]); }
-        $out .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $out .= $this->ehResume($lp);
         /** @var string[] catch while the original is in flight, per drop */
         $inFlight = [];
         /** @var string[] object mode: continue at drop j (j = n: raise) */
@@ -739,7 +754,7 @@ trait EmitLlvmExceptions
         for ($j = 0; $j <= $n; $j = $j + 1) { $next[] = $this->ssa->allocLabel('ehlp.next'); }
         $out .= $drops . ":\n  " . $cur . " = alloca ptr\n";
         for ($i = 0; $i < $n; $i = $i + 1) { $out .= $this->ehDropInvoke($slots[$i], $ops[$i], $inFlight[$i]); }
-        $out .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $out .= $this->ehResume($lp);
         $pay = (string)\Compile\MemoryAbi::EXC_PAYLOAD_OFFSET;
         for ($i = 0; $i < $n; $i = $i + 1) {
             $out .= $this->ehPad($inFlight[$i]);
@@ -804,7 +819,7 @@ trait EmitLlvmExceptions
         for ($i = 0; $i < $n; $i = $i + 1) {
             $out .= '  call void ' . $this->ehDropHelper($this->rcReleaseFlavor($ops[$i])) . '(ptr ' . $slots[$i] . ")\n";
         }
-        $out .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $out .= $this->ehResume($lp);
         $out .= $drops . ":\n  " . $cur . " = alloca ptr\n";
         $out .= '  store ptr null, ptr ' . $cur . "\n";
         for ($i = 0; $i < $n; $i = $i + 1) {
@@ -816,7 +831,7 @@ trait EmitLlvmExceptions
         $out .= '  ' . $last . ' = load ptr, ptr ' . $cur . "\n";
         $out .= '  ' . $none . ' = icmp eq ptr ' . $last . ", null\n";
         $out .= '  br i1 ' . $none . ', label %' . $resumeL . ', label %' . $raiseL . "\n";
-        $out .= $resumeL . ":\n  resume { ptr, i32 } " . $lp . "\n";
+        $out .= $resumeL . ":\n" . $this->ehResume($lp);
         $out .= $raiseL . ":\n";
         $out .= $this->emitRethrowAt($last);
         return $out;
