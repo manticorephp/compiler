@@ -117,6 +117,21 @@ front end: 1 error(s), 0 warning(s)
 rc=65
 unit_top_level/src/u.php:3: error[undefined.class]: class Missing\U is not declared (reachable: __mc_unit_0)
 front end: 1 error(s), 0 warning(s)
+== check_allow_undefined_exact
+rc=65
+allow_undefined/src/main.php:2: warning[undefined.class]: class Missing\Alpha is not declared
+allow_undefined/src/main.php:3: error[undefined.class]: class Other\Beta is not declared (reachable: __main)
+front end: 1 error(s), 1 warning(s)
+== check_allow_undefined_wild
+rc=65
+allow_undefined/src/main.php:2: warning[undefined.class]: class Missing\Alpha is not declared
+allow_undefined/src/main.php:3: error[undefined.class]: class Other\Beta is not declared (reachable: __main)
+front end: 1 error(s), 1 warning(s)
+== check_allow_undefined_both
+rc=0
+allow_undefined/src/main.php:2: warning[undefined.class]: class Missing\Alpha is not declared
+allow_undefined/src/main.php:3: warning[undefined.class]: class Other\Beta is not declared
+front end: 0 error(s), 2 warning(s)
 == tier_reachable_new
 rc=65
 tier/reachable_new.php:2: error[undefined.class]: class Missing\A is not declared (reachable: __main)

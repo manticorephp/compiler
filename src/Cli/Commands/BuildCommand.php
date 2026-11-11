@@ -116,6 +116,12 @@ final class BuildCommand extends Command
             }
             $srcDir = $srcDirs[0];
             $output = (string)$app["output"];
+            \Manticore\CompileArgs::$allowUndefined = [];
+            if (isset($app["allowUndefined"])) {
+                foreach ((array)$app["allowUndefined"] as $ap) {
+                    \Manticore\CompileArgs::$allowUndefined[] = (string)$ap;
+                }
+            }
             /** @var string[] $excludes */
             $excludes = [];
             foreach ($app["exclude"] as $e) {
@@ -431,6 +437,7 @@ final class BuildCommand extends Command
             if ($appsOnly) {
                 break;
             }
+            \Manticore\CompileArgs::$allowUndefined = [];
             $name = (string)$lib["name"];
             $srcDir = (string)$lib["src"];
             $output = (string)$lib["output"];

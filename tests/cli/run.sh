@@ -127,6 +127,9 @@ PHP
     diag "check_numeric_class"      "$MC" compile --check "$HERE/check/numeric_class.php" -o "$WORK/nc"
     diag "check_missing_package"    sh -c "cd \"$HERE/check/missing_package\" && \"$MC\" build --check"
     diag "check_unit_top_level"     sh -c "cd \"$HERE/check/unit_top_level\" && \"$MC\" build --check"
+    for m in exact wild both; do
+        diag "check_allow_undefined_$m" sh -c "cd \"$HERE/check/allow_undefined\" && \"$MC\" build --check $m.json"
+    done
     for t in reachable_new dead_fn guards soft method_never method_called default_param default_param_unused dyn_define fold_define cascade class_consts_unused dyn_const_probe callable_array_instance switch_guard guard_helpers static_hierarchy dyn_static_missing unserialize_missing unsupported_builtin unsupported_mixed unsupported_ns_const unsupported_ns_const_fq unsupported_ns_fn; do
         diag "tier_$t" "$MC" compile --check "$HERE/check/tier/$t.php" -o "$WORK/tr"
     done

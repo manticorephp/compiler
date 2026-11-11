@@ -88,9 +88,12 @@ final class Diagnostics
     /**
      * Rank every undefined.* group by reachability. A group is an ERROR when some HARD, unguarded site is
      * reached statically (unless traps are allowed, a dynamic constant table exists, or an unrelated error
-     * already cascades); a WARNING when some site may run (dynamically reached, soft or guarded); else a NOTE.
+     * already cascades, or the name matches an `allow` glob); a WARNING when some site may run (dynamically
+     * reached, soft or guarded); else a NOTE.
+     *
+     * @param string[] $allow
      */
-    public function applyReachability(\Compile\Mir\Reachability $r, bool $allowTraps, bool $dynConstants): void
+    public function applyReachability(\Compile\Mir\Reachability $r, bool $allowTraps, bool $dynConstants, array $allow = []): void
     {
         $cascade = false;
         foreach ($this->items as $d) {
@@ -105,7 +108,12 @@ final class Diagnostics
                 $d->code = 'unsupported.builtin';
                 $d->message = $unsupported . ' is part of PHP but not implemented by Manticore';
             }
-            $canError = $unsupported === '' && !$allowTraps && !$cascade && !($d->code === 'undefined.constant' && $dynConstants);
+            $allowed = false;
+            $nm = \substr((string)$k, \strpos((string)$k, '|') + 1);
+            foreach ($allow as $pat) {
+                if (\preg_match('/^' . \str_replace('\\*', '.*', \preg_quote(\ltrim($pat, '\\'), '/')) . '$/i', \ltrim($nm, '\\')) === 1) { $allowed = true; }
+            }
+            $canError = $unsupported === '' && !$allowed && !$allowTraps && !$cascade && !($d->code === 'undefined.constant' && $dynConstants);
             $hard = null;
             $maybe = null;
             foreach ($sites as $s) {

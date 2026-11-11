@@ -2373,6 +2373,14 @@ final class CompileArgs
      */
     public static array $lazyUnitPaths = [];
 
+    /**
+     * Manifest `allowUndefined`: glob patterns (`*`, case-insensitive) of undefined.* names that never
+     * escalate past a warning. Set per application by `build`.
+     *
+     * @var string[]
+     */
+    public static array $allowUndefined = [];
+
     /** @var array<string, \Parser\Ast\Expr> */
     public static array $externConstants = [];
 
@@ -5498,7 +5506,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 }
                 dprint(\rtrim($rd, "\n"));
             }
-            $diag->applyReachability($reach, CompileArgs::$allowUndefinedTraps, $lower->sawDynConstant);
+            $diag->applyReachability($reach, CompileArgs::$allowUndefinedTraps, $lower->sawDynConstant, CompileArgs::$allowUndefined);
         }
         if ($collect !== null) {
             foreach ($diag->items as $it) {

@@ -100,7 +100,7 @@ any error means exit `65`. Codes:
 | `typedef.error` | invalid type definition |
 | `lower.internal` | internal lowering failure, recorded at a function / method / top-level boundary |
 
-Three more codes flag a name in the program's own sources (app and vendor) that no compiled source,
+Four more codes flag a name in the program's own sources (app and vendor) that no compiled source,
 prelude, stdlib `.sig` extern or compiler builtin declares:
 
 | Code | Meaning |
@@ -108,6 +108,7 @@ prelude, stdlib `.sig` extern or compiler builtin declares:
 | `undefined.class` | class / interface / trait / enum used in `new`, static access, `instanceof`, `catch`, a type hint, `extends`, `implements` or `use` and never declared (a missing package, or an extension class) |
 | `undefined.function` | direct call of a function that is not declared, not a stdlib / FFI function and not a builtin |
 | `undefined.constant` | bare constant that is not declared |
+| `unsupported.builtin` | the name is not declared, but PHP itself defines it (`request_parse_body`, `finfo_open`, `GMP_ROUND_ZERO`, …): a gap in Manticore, not a missing package. Always a **warning**, never an error, reachable or not; the message reads `function f is part of PHP but not implemented by Manticore`. The binary builds and the use throws `Error` if it runs |
 
 They are grouped: one line per (code, name), at the most severe site, with ` (N uses)` when the name
 is used more than once. A name declared only conditionally behind a guard that is false in this build
@@ -132,14 +133,36 @@ statically referenced or an ancestor of such a class.
 A site is *guarded* when it sits inside the branch of an `if`, `?:`, `&&` / `||` operand, or after an
 early exit (`if (!class_exists(X::class)) { throw …; }` in the same statement list, switch arm or
 `try` body), whose condition calls `class_exists`, `interface_exists`, `trait_exists`, `enum_exists`,
-`function_exists`, `method_exists`, `is_callable`, `extension_loaded` or `defined`. A guard inside a
-helper method (`if (!self::isSupported())`) is not followed.
+`function_exists`, `method_exists`, `is_callable`, `extension_loaded` or `defined`. A guard is also followed through
+a helper: a function or method whose body is a single `return <guard expression>;` (`self::isSupported()`,
+`$this->supports()`, `has_apcu()`), including a `&&` of guards, and a local assigned from a guard
+and not reassigned (`$ok = class_exists($c); if ($ok) { … }`). A helper that does more than return
+the guard, or one that calls another helper, is not followed.
 
-An undeclared name never escalates to an error with `--allow-undefined-traps` (the binary is built and
+An undeclared name never escalates to an error when it matches a manifest
+[`allowUndefined`](#allowundefined) pattern, with `--allow-undefined-traps` (the binary is built and
 the use throws `Error` at run time if it executes), when the front end already reported another error
 (a parse or lowering error can hide the declaration), or, for `undefined.constant`, when the program
 defines a constant under a runtime name (`define($name, …)`). `MANTICORE_REACH_DUMP=1` prints the
 reached functions (`reach:` static, `reach?:` maybe) and used classes (`class:` / `class?:`).
+
+### allowUndefined
+
+A reachable use of a missing optional package is a true error: the path throws if it runs. When the
+application accepts that (the feature is never used, or the extension is absent on purpose), list the
+names in the per-application `allowUndefined` field of `manticore.json`:
+
+```json
+{"applications": [{"name": "app", "src": "src", "output": "bin/app",
+  "allowUndefined": ["apcu_*", "Memcached", "Symfony\\Component\\Serializer\\*"]}]}
+```
+
+Each entry is a glob matched against the whole finding name, case-insensitively: `*` matches any run
+of characters, everything else is literal; namespaces use `\` (written `\\` in JSON). A matching
+`undefined.*` finding is capped at a warning; names that do not match keep their tier, so a new
+missing dependency still fails the build. Keep patterns narrow: an exact name or one package
+namespace. The list applies to that application only. The examples use it for the optional
+packages and extensions they do not install.
 
 `--check` (on `compile` and `build`) stops after these checks, before `InferTypes`: exit `0` and no output
 file when clean, `65` with the diagnostics otherwise. In `analyze --deep` the same errors feed the
