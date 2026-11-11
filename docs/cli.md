@@ -54,7 +54,7 @@ manticore compile [options] <files…|manifest.json> -o <out>
 | `--effects` | | `dump-mir`: show inferred effects |
 | `--emit-library` | | Emit a library object instead of an executable |
 | `--runtime` | | With `--emit-library`: this library is the bundled stdlib |
-| `--allow-undefined-traps` | | Do not refuse a library that contains undefined-function traps; a reachable undeclared name is a warning, not an error |
+| `--allow-undefined-traps` | | Cap reachable undeclared classes, functions and constants at a warning (the binary is built, a use throws `Error` if it runs); also allow undefined-function traps in a library |
 | `--keep-ir` | | Keep the intermediate `.ll` files |
 | `--strict` | `<list>` | Comma-separated strict checks: `shapes` (a PHPDoc `array{…}` shape is closed: an extra key is an error instead of a warning), `analyze` (= `--analyze-strict`) |
 | `-j` | `<n>` | Parallel clang jobs; `0` = one per core |
@@ -108,7 +108,7 @@ prelude, stdlib `.sig` extern or compiler builtin declares:
 | `undefined.class` | class / interface / trait / enum used in `new`, static access, `instanceof`, `catch`, a type hint, `extends`, `implements` or `use` and never declared (a missing package, or an extension class) |
 | `undefined.function` | direct call of a function that is not declared, not a stdlib / FFI function and not a builtin |
 | `undefined.constant` | bare constant that is not declared |
-| `unsupported.builtin` | the name is not declared, but PHP itself defines it (`request_parse_body`, `finfo_open`, `GMP_ROUND_ZERO`, …): a gap in Manticore, not a missing package. Always a **warning**, never an error, reachable or not; the message reads `function f is part of PHP but not implemented by Manticore`. The binary builds and the use throws `Error` if it runs |
+| `unsupported.builtin` | the name is not declared, but PHP itself defines it (`request_parse_body`, `finfo_open`, `GMP_ROUND_ZERO`, …): a gap in Manticore, not a missing package. Never an error: a **warning** when the site may run, a hidden note when it is unreachable (`--all` lists it); the message reads `function f is part of PHP but not implemented by Manticore`. The binary builds and the use throws `Error` if it runs |
 
 They are grouped: one line per (code, name), at the most severe site, with ` (N uses)` when the name
 is used more than once. A name declared only conditionally behind a guard that is false in this build
@@ -116,13 +116,21 @@ is used more than once. A name declared only conditionally behind a guard that i
 
 Their severity comes from **reachability**: which functions the program can run, computed from the
 roots (`__main`, include units, the reflection tables of a class in use, global initialisers) over the
-lowered program. It has two levels. *Statically reached* follows explicit edges only: named calls,
-`new C`, `C::m()`, `$o->m()` over the classes the program instantiates, closure literals, callable
-literals (`'f'`, `'C::m'`, `[C::class, 'm']`, `[$o, 'm']`) and dynamic targets whose value is a set of
-literals. *Maybe reached* also assumes that a call by a runtime name (`$f()`, `call_user_func($name)`),
-`new $class`, `$o->$method()` or `[$class, $method]` reaches everything it could. A class's own code
-(`extends`, `implements`, `use`, constants, property defaults) counts once the class is instantiated,
-statically referenced or an ancestor of such a class.
+lowered program. For a library target (`--emit-library`, a manifest library, the stdlib) every
+function, class and method it exports is a root too. It has two levels. *Statically reached* follows
+explicit edges only: named calls, `new C`, `C::m()`, `$o->m()` over the classes the program
+instantiates, closure literals (a closure's body counts as reached whether or not it is called),
+callable arrays (`[C::class, 'm']`, `[$o, 'm']`), a string naming a function (`'f'`, `'C::m'`) in a
+callable position (called as `'f'()`, passed to a builtin that calls it back such as `array_map`,
+`usort`, `call_user_func` or `register_shutdown_function`, or to a `callable` / `Closure` parameter),
+and dynamic targets whose value is a set of literals. `static::m()` in a method of `C` reaches `m` as
+resolved from each subclass of `C` (or `C` itself) that is instantiated or named by a static call.
+*Maybe reached* also assumes that a call by a runtime name (`$f()`, `call_user_func($name)`),
+`new $class`, `$o->$method()` or `[$class, $method]` reaches everything it could, that a string
+naming a function anywhere else may be called, and that `static::m()` may bind to any class of the
+hierarchy. A class's own code (`extends`, `implements`, `use`, constants, property defaults) counts once
+the class is instantiated, statically referenced or an ancestor of such a class. A trait method is
+compiled once per using class; a site in it is reached when any of the copies is.
 
 | Site | Tier | Effect |
 |---|---|---|
@@ -131,8 +139,8 @@ statically referenced or an ancestor of such a class.
 | not reached at either level | note | hidden; the summary line counts them, `--all` lists them |
 
 A site is *guarded* when it sits inside the branch of an `if`, `?:`, `&&` / `||` operand, or after an
-early exit (`if (!class_exists(X::class)) { throw …; }` in the same statement list, switch arm or
-`try` body), whose condition calls `class_exists`, `interface_exists`, `trait_exists`, `enum_exists`,
+early exit (`if (!class_exists(X::class)) { throw …; }` in the same statement list, switch arm,
+`try` body, or at the top level of the main script or of an included file, to its end), whose condition calls `class_exists`, `interface_exists`, `trait_exists`, `enum_exists`,
 `function_exists`, `method_exists`, `is_callable`, `extension_loaded` or `defined`. A guard is also followed through
 a helper: a function or method whose body is a single `return <guard expression>;` (`self::isSupported()`,
 `$this->supports()`, `has_apcu()`), including a `&&` of guards, and a local assigned from a guard
