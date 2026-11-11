@@ -235,7 +235,9 @@ final class SplitModule
      * Push $v onto the binary min-heap $h.
      *
      * The closure's worklist was a sorted array grown by `array_splice`, one O(n)
-     * rebuild per insertion: 81 s of a 97 s Laravel split. A heap pops in the same
+     * rebuild per insertion: 81 s of a 97 s Laravel split. In write order a body's
+     * callees mostly come BEFORE it (deferred, a cheap append); in the stable split's
+     * name order half of them come after it and were spliced. A heap pops in the same
      * ascending order, so the visit order (and with it every part's text) is unchanged.
      *
      * @param int[] $h
