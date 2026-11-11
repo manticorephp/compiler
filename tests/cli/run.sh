@@ -136,6 +136,7 @@ PHP
     done
     diag "tier_reachable_new_allow_traps" "$MC" compile --check --allow-undefined-traps "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"
     diag "tier_dead_fn_all"  "$MC" compile --check --all "$HERE/check/tier/dead_fn.php" -o "$WORK/tr"
+    diag "tier_library"      "$MC" compile --check --emit-library "$HERE/check/tier/library.php" -o "$WORK/tr.o"
     diag "tier_unsupported_dead_all" "$MC" compile --check --all "$HERE/check/tier/unsupported_dead.php" -o "$WORK/tr"
     diag "tier_build_error_no_output" "$MC" compile "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"
     [ -e "$WORK/tr" ] && echo "BAD: wrote a binary"

@@ -123,8 +123,9 @@ final class Reachability
      * @param array<string, array<string, bool>> $staticClassRefs lowercase class => fns reading its constants /
      *   static properties (recorded by lowering, since a constant is inlined and leaves no trace in MIR)
      * @param array<string, array<string, bool>> $dynClassRefs the same for a `$cls::K` whose class is a runtime value
+     * @param bool $library a library target: every exported function, class and method is a static root
      */
-    public static function compute(Module $m, array $staticClassRefs = [], array $dynClassRefs = []): self
+    public static function compute(Module $m, array $staticClassRefs = [], array $dynClassRefs = [], bool $library = false): self
     {
         $r = new self();
         $r->classRefs = $staticClassRefs;
@@ -165,8 +166,17 @@ final class Reachability
             $lc = \strtolower(\ltrim($en, '\\'));
             if (isset($r->classLc[$lc]) && !$r->classLc[$lc]->isPreludeClass) { $r->instantiate($lc, ''); }
         }
+        if ($library) {
+            foreach ($r->classLc as $lc => $cd) {
+                if (!$cd->isPreludeClass && !$cd->isExternClass) { $r->instantiate($lc, ''); }
+            }
+        }
         foreach ($m->functions as $fn) {
             if ($fn->isPrelude) { continue; }
+            if ($library && !$fn->isExtern && !\str_starts_with($fn->name, '__mc_') && !\str_starts_with($fn->name, '__mir_')) {
+                $r->enqueue($fn->name, '');
+                continue;
+            }
             // `__mc_*` / `__mir_*` bodies synthesized by lowering are called by the emitter, not by a MIR call.
             // Include units and the reflection tables (attribute factories, parameter defaults, constant
             // tables, property getters / setters) are static roots; the dispatchers that exist for dynamic

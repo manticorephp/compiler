@@ -295,6 +295,11 @@ front end: 0 error(s), 1 warning(s)
 rc=0
 tier/dead_fn.php:2: note[undefined.class]: class Missing\B is not declared
 front end: 0 error(s), 0 warning(s)
+== tier_library
+rc=65
+tier/library.php:2: error[undefined.class]: class MissingLibClass is not declared (reachable: libf)
+tier/library.php:3: error[undefined.constant]: constant MISSING_LIB_CONST is not declared (reachable: LibK__k)
+front end: 2 error(s), 0 warning(s)
 == tier_unsupported_dead_all
 rc=0
 tier/unsupported_dead.php:2: note[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
