@@ -35,6 +35,9 @@ final class Diagnostics
      */
     public array $useSites = [];
 
+    /** @var array<string,string> group key => the name to look up in PHP's own set (`addUse`'s $phpName) */
+    private array $phpName = [];
+
     /** @var array<string,string> placeholder fn symbol of a closure still being lowered => its final `__closure_N` */
     public array $fnAlias = [];
 
@@ -55,7 +58,7 @@ final class Diagnostics
 
     /** One diagnostic per (code, name): the first site is kept, later DISTINCT (file, line) sites only count. */
     public function addUse(string $severity, string $code, string $name, string $message, string $file, int $line,
-                           string $fn = '', string $kind = 'hard', string $guard = ''): void
+                           string $fn = '', string $kind = 'hard', string $guard = '', string $phpName = ''): void
     {
         $k = $code . '|' . \strtolower($name);
         $sk = $k . '|' . $file . ':' . (string)$line;
@@ -74,6 +77,7 @@ final class Diagnostics
             return;
         }
         $n = \count($this->items);
+        if ($phpName !== '') { $this->phpName[$k] = $phpName; }
         $this->useIdx[$k] = $n;
         $this->useCount[$n] = 1;
         $this->siteIdx[$sk] = 0;
@@ -96,7 +100,7 @@ final class Diagnostics
             $idx = $this->useIdx[$k] ?? -1;
             if ($idx < 0 || !\str_starts_with($this->items[$idx]->code, 'undefined.')) { continue; }
             $d = $this->items[$idx];
-            $unsupported = self::unsupportedName($d);
+            $unsupported = self::unsupportedName($d, $this->phpName[$k] ?? '');
             if ($unsupported !== '') {
                 $d->code = 'unsupported.builtin';
                 $d->message = $unsupported . ' is part of PHP but not implemented by Manticore';
@@ -127,13 +131,11 @@ final class Diagnostics
     }
 
     /** `<kind> <name>` of an undefined.* finding naming something PHP itself defines, else ''. */
-    private static function unsupportedName(\Analyze\Diagnostic $d): string
+    private static function unsupportedName(\Analyze\Diagnostic $d, string $name): string
     {
         $kind = $d->code === 'undefined.function' ? 'function' : ($d->code === 'undefined.class' ? 'class' : ($d->code === 'undefined.constant' ? 'constant' : ''));
         if ($kind === '') { return ''; }
-        $name = \substr($d->message, \strlen($kind) + 1);
-        $name = \substr($name, 0, \strpos($name, ' is not declared'));
-        if ($kind === 'function') { $name = \substr($name, 0, -2); }
+        if ($name === '') { return ''; }
         return \Compile\PhpInternalNames::has($kind, $name) ? $kind . ' ' . $name : '';
     }
 

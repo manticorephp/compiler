@@ -235,6 +235,20 @@ rc=65
 tier/unsupported_mixed.php:2: warning[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
 tier/unsupported_mixed.php:3: error[undefined.function]: function my_missing_fn() is not declared (reachable: g <- __main)
 front end: 1 error(s), 1 warning(s)
+== tier_unsupported_ns_const
+rc=0
+tier/unsupported_ns_const.php:3: warning[unsupported.builtin]: constant GMP_ROUND_ZERO is part of PHP but not implemented by Manticore
+front end: 0 error(s), 1 warning(s)
+== tier_unsupported_ns_const_fq
+rc=65
+tier/unsupported_ns_const_fq.php:3: error[undefined.constant]: constant App\GMP_ROUND_ZERO is not declared (reachable: __main)
+front end: 1 error(s), 0 warning(s)
+== tier_unsupported_ns_fn
+rc=65
+tier/unsupported_ns_fn.php:3: warning[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
+tier/unsupported_ns_fn.php:4: error[undefined.function]: function strlen2() is not declared (reachable: __main)
+tier/unsupported_ns_fn.php:5: error[undefined.class]: class App\ReflectionGenerator is not declared (reachable: __main) (2 uses)
+front end: 2 error(s), 1 warning(s)
 == tier_reachable_new_allow_traps
 rc=0
 tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared

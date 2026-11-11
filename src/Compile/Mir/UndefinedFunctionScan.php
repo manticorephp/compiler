@@ -337,7 +337,7 @@ final class UndefinedFunctionScan
             $lc = \strtolower($name);
             if (isset($defined[$lc]) || \strncmp($lc, '__mir_', 6) === 0 || \strncmp($lc, '__mc_', 5) === 0) { continue; }
             $d->addUse('warning', 'undefined.function', $name, 'function ' . $name . '() is not declared', $files[$i], $lines[$i],
-                $d->resolveFn($fns[$i]), 'hard', $guards[$i]);
+                $d->resolveFn($fns[$i]), 'hard', $guards[$i], $name);
         }
     }
 }

@@ -3611,7 +3611,7 @@ final class Parser
             return Expr::call($name, $args, $this->end($span), $qualified);
         }
 
-        return Expr::identifier($name, $this->end($span));
+        return Expr::identifier($name, $this->end($span), \str_contains($literal, '\\') || isset($this->useConstAliases[$literal]));
     }
 
     private function parseIntLiteral(string $lex): int

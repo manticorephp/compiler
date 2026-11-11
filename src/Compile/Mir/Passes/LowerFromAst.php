@@ -4415,7 +4415,7 @@ final class LowerFromAst implements Pass
      * predefined constants the compiler source uses; `true`/`false`/
      * `null` too (the parser sometimes hands them through as identifiers).
      */
-    private function lowerIdentifier(string $rawName, int $line = 0, ?\Parser\Ast\Span $span = null): Node
+    private function lowerIdentifier(string $rawName, int $line = 0, ?\Parser\Ast\Span $span = null, bool $qualified = false): Node
     {
         // An unqualified constant resolves in the current namespace
         // first, then the global one — so `Compile\PHP_INT_MAX` is really
@@ -4449,7 +4449,7 @@ final class LowerFromAst implements Pass
         // `undefined.constant` closed-world over the whole source set, which is
         // where a typo should be caught — at build time, by the thing whose job
         // that is, rather than by the code generator refusing to emit.
-        $this->noteUndefined('undefined.constant', $rawName, $span ?? new \Parser\Ast\Span($line, 0, $this->lowerSourceFile));
+        $this->noteUndefined('undefined.constant', $rawName, $span ?? new \Parser\Ast\Span($line, 0, $this->lowerSourceFile), 'hard', $qualified ? '' : $name);
         return $this->throwErrorExpr(
             'Undefined constant "' . \ltrim($rawName, '\\') . '"');
     }
@@ -4949,7 +4949,8 @@ final class LowerFromAst implements Pass
     }
 
     /** Record a reference to an undeclared class/constant as a grouped front-end warning; user code only. */
-    private function noteUndefined(string $code, string $name, ?\Parser\Ast\Span $span, string $kind = 'hard'): void
+    /** $globalName: the global name php falls back to (unqualified constant in a namespace), else ''. */
+    private function noteUndefined(string $code, string $name, ?\Parser\Ast\Span $span, string $kind = 'hard', string $globalName = ''): void
     {
         if ($this->diags === null || $this->lowerInPrelude) { return; }
         if ($this->skipsSiteNotes()) { return; }
@@ -4958,7 +4959,7 @@ final class LowerFromAst implements Pass
         $n = \ltrim($name, '\\');
         $what = $code === 'undefined.constant' ? 'constant ' . $n : ($code === 'undefined.function' ? 'function ' . $n . '()' : 'class ' . $n);
         $this->diags->addUse('warning', $code, $n, $what . ' is not declared', $file, $span === null ? 0 : $span->line,
-            $this->currentFnSymbol(), $kind, $this->currentGuard());
+            $this->currentFnSymbol(), $kind, $this->currentGuard(), $globalName !== '' ? $globalName : $n);
     }
 
     /** `C::K` / `C::$p` / `E::Case`: lowering inlines them, so reachability learns of the class here. */
