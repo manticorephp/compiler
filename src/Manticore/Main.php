@@ -5532,8 +5532,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             }
             $reach = \Compile\Mir\Reachability::compute($module, $classRefs, $dynRefs, CompileArgs::$emitLibrary);
             \Compile\Stats::step('Reachability', $reachT, \count($module->functions), \count($module->classes));
-            if (\getenv('MANTICORE_REACH_DUMP') === '1') {
-                $rd = $reach->dump();
+            $reachDump = (string)\getenv('MANTICORE_REACH_DUMP');
+            if ($reachDump === '1' || $reachDump === '2') {
+                $rd = $reach->dump($reachDump === '2');
                 foreach ($diag->useSites as $sk => $sites) {
                     foreach ($sites as $site) {
                         foreach ($site['fns'] as $sfnv) {

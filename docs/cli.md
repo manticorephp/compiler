@@ -152,7 +152,8 @@ An undeclared name never escalates to an error when it matches a manifest
 the use throws `Error` at run time if it executes), when the front end already reported another error
 (a parse or lowering error can hide the declaration), or, for `undefined.constant`, when the program
 defines a constant under a runtime name (`define($name, …)`). `MANTICORE_REACH_DUMP=1` prints the
-reached functions (`reach:` static, `reach?:` maybe) and used classes (`class:` / `class?:`).
+reached functions (`reach:` static, `reach?:` maybe) and used classes (`class:` / `class?:`); `=2` also names
+the first edge that makes each `class:` statically used (`<- new C in f`, `<- ref in f`, `<- static call m in f`).
 
 ### allowUndefined
 

@@ -539,6 +539,15 @@ class?: K1
 class?: K2
 reach: __main
 reach: get
+== reach_class_consts_ns
+rc=0
+class: App\Log\Live_Box
+class?: App\Log\Dead_Logger
+class?: stdClass
+reach: __main
+reach/class_consts_ns.php:5: warning[undefined.class]: class Missing\AbstractLogger is not declared
+site: undefined.class|missing\abstractlogger line=5 fn=@class:App\Log\Dead_Logger reach=0 maybe=1
+front end: 0 error(s), 1 warning(s)
 == builtin names in sync
 ok
 == compile bad --progress

@@ -142,7 +142,7 @@ PHP
     diag "tier_method_default_all" "$MC" compile --check --all "$HERE/check/tier/method_default.php" -o "$WORK/tr"
     diag "tier_build_error_no_output" "$MC" compile "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"
     [ -e "$WORK/tr" ] && echo "BAD: wrote a binary"
-    for r in basic interface_dispatch magic_and_interfaces callables dynamic_new class_level dyn_fn_name dyn_static attr_reflect unused_interface literal_class param_class literal_fn byref_fn byref_arg_class include_class include_in_fn literal_method param_method dyn_static_call unserialize_new reflection_literal reflection_runtime dyn_static_const; do
+    for r in basic interface_dispatch magic_and_interfaces callables dynamic_new class_level dyn_fn_name dyn_static attr_reflect unused_interface literal_class param_class literal_fn byref_fn byref_arg_class include_class include_in_fn literal_method param_method dyn_static_call unserialize_new reflection_literal reflection_runtime dyn_static_const class_consts_ns; do
         diag "reach_$r" env MANTICORE_REACH_DUMP=1 "$MC" compile --check "$HERE/check/reach/$r.php" -o "$WORK/rh"
     done
     printf '== builtin names in sync\n'; bash "$ROOT/tools/check_builtin_names.sh"

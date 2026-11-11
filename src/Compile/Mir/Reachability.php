@@ -107,6 +107,8 @@ final class Reachability
     private array $deferredArms = [];
     /** @var array<int, array{string, string}> string literals met at the static level outside a callable position: replayed at the dynamic level */
     private array $deferredStrings = [];
+    /** @var array<string, string> lowercase class => why it is statically used (first edge), for MANTICORE_REACH_DUMP=2 */
+    private array $why = [];
     /** @var array<string, bool>|null lowercase class / interface names in use, null until first asked */
     private ?array $usedClasses = null;
     /** @var array<string, string[]> interface => every interface it extends */
@@ -115,7 +117,7 @@ final class Reachability
     private array $ifaceLc = [];
     /** @var array<string, bool> lowercase trait names */
     private array $traitLc = [];
-    /** @var array<string, string> class name as reflection factories mangle it => lowercase class */
+    /** @var array<string, string> class name as reflection factories mangle it ({@see \Compile\SymbolName::ident}) => lowercase class */
     private array $classByMangled = [];
 
     /** Methods the runtime calls without a call site naming them, beyond every `__*` magic method. */
@@ -145,7 +147,7 @@ final class Reachability
         foreach ($m->classes as $cd) {
             $lc = \strtolower(\ltrim($cd->name, '\\'));
             $r->classLc[$lc] = $cd;
-            $r->classByMangled[\str_replace('\\', '_', \ltrim($cd->name, '\\'))] = $lc;
+            $r->classByMangled[\Compile\SymbolName::ident($cd->name)] = $lc;
             $own = [];
             $spell = [];
             foreach ($cd->methodNames as $mn => $_) {
@@ -292,7 +294,7 @@ final class Reachability
     }
 
     /** `reach:` lines for every reached user function, then `class:` lines for every used user class. */
-    public function dump(): string
+    public function dump(bool $why = false): string
     {
         $fns = [];
         foreach ($this->parent as $sym => $_) {
@@ -304,7 +306,7 @@ final class Reachability
         $cls = [];
         foreach ($this->classLc as $lc => $cd) {
             if ($cd->isPreludeClass || $cd->isExternClass) { continue; }
-            if ($this->classUsed($lc)) { $cls[] = 'class: ' . \ltrim($cd->name, '\\'); }
+            if ($this->classUsed($lc)) { $cls[] = 'class: ' . \ltrim($cd->name, '\\') . ($why ? '  <- ' . ($this->why[$lc] ?? 'ancestor of a used class') : ''); }
             elseif ($this->classMaybeUsed($lc)) { $cls[] = 'class?: ' . \ltrim($cd->name, '\\'); }
         }
         \sort($cls);
@@ -339,7 +341,10 @@ final class Reachability
                         ? $this->refClassUsed(\strtolower(\ltrim(\substr($fn, 7), '\\')), $used)
                         : ($owner !== '' ? $this->refClassUsed($owner, $used)
                             : ($maybe ? $this->maybeReaches($fn) : $this->reaches($fn)));
-                    if ($hit) { $used[$lc] = true; $changed = true; break; }
+                    if ($hit) {
+                        if (!$maybe && !isset($this->why[$lc])) { $this->why[$lc] = 'ref in ' . $fn; }
+                        $used[$lc] = true; $changed = true; break;
+                    }
                 }
             }
         }
@@ -400,6 +405,7 @@ final class Reachability
             if ($cur !== $leaf) { $this->noteLsbCopies($cur, $leaf, $from); }
             if (!isset($this->instantiated[$cur])) {
                 $this->instantiated[$cur] = true;
+                if (!$this->widen && !isset($this->why[$cur])) { $this->why[$cur] = 'new ' . $leaf . ' in ' . ($from === '' ? '<root>' : $from); }
                 $this->usedClasses = null;
                 foreach ($this->methodsOf[$cur] as $lm => $sym) {
                     if ($this->allMethods || \str_starts_with($lm, '__') || isset(self::IMPLICIT[$lm])
@@ -574,13 +580,9 @@ final class Reachability
         foreach (['__mc_pdef_', '__mc_attr_args_', '__mc_attr_new_', '__mc_pget_', '__mc_pset_'] as $p) {
             if (\str_starts_with($fn, $p)) { $rest = \substr($fn, \strlen($p)); break; }
         }
+        // The class fragment never contains `__`: the first one ends it.
         $at = \strpos($rest, '__');
-        while ($at !== false) {
-            $lc = $this->classByMangled[\substr($rest, 0, $at)] ?? '';
-            if ($lc !== '') { return $lc; }
-            $at = \strpos($rest, '__', $at + 1);
-        }
-        return '';
+        return $at === false ? '' : ($this->classByMangled[\substr($rest, 0, $at)] ?? '');
     }
 
     private function reachAllStatic(string $from): void
@@ -631,6 +633,7 @@ final class Reachability
             return;
         }
         if (!isset($this->classLc[$lc])) { return; }
+        if (!$this->widen && !isset($this->why[$lc])) { $this->why[$lc] = 'static call ' . $method . ' in ' . ($from === '' ? '<root>' : $from); }
         if (!isset($this->staticCalled[$lc])) { $this->staticCalled[$lc] = true; $this->usedClasses = null; $this->noteStaticClass($lc); }
         $lm = \strtolower($method);
         $cur = $lc;
