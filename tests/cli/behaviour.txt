@@ -14,6 +14,8 @@ ok rc=0 first='; ModuleID' markers='source_filename define probe-stack'
 ok
 == this is no ref cell
 ok
+== string literal names order independent
+ok
 == analyze json
 ok rc=0 first='[' markers=']'
 == dump-ast bogus flag
