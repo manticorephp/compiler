@@ -977,7 +977,7 @@ final class SplitModule
         $this->refsCache = [];
         $this->inputPins = [];
         $in = \Manticore\fopen($llPath, 'rb');
-        $cap = 1048576;
+        $cap = 4194304;
         $buf = \Manticore\malloc($cap);
 
         /** @var string[] */
@@ -999,61 +999,72 @@ final class SplitModule
         /** @var array<string, int> */
         $defSize = [];
 
+        // The file is read in blocks, never line by line: a body's end is ONE
+        // strpos for its closing `}` line, so only module-level lines (globals,
+        // declares, headers) are cut out one at a time. fgets per line plus a
+        // string per line was most of the parse on Laravel's 48M-line module.
+        //
+        // ⚠ A module-level line can run to megabytes (a per-enum case table, a
+        // class descriptor array): the window grows until the newline arrives.
+        $data = '';
+        $dp = 0;
+        // File offset of $data[$dp].
         $pos = 0;
-        $cur = '';
-        $start = 0;
-        /** @var array<string, bool> */
-        $refs = [];
-        // The body of the define being read, scanned for `@symbol` once at its closing brace.
-        $body = '';
+        $eof = false;
         while (true) {
-            // fgets stops at the BUFFER as readily as at the newline, and this
-            // module has global initialisers whose single line runs to megabytes
-            // (a per-enum case table, a class descriptor array). Treating each
-            // chunk as a line put the tail of one on a line of its own, where it
-            // parses as nothing: `p0.ll:4:1: error: expected top-level entity`,
-            // and the whole split fell back to the serial path that cannot
-            // compile the module at all. Read until the newline actually arrives.
-            $line = '';
-            while (true) {
-                $p = \Manticore\fgets($buf, $cap, $in);
-                if ($p === 0) { break; }
-                $chunk = \cstr_to_str($p);
-                $line .= $chunk;
-                if (\substr($chunk, -1) === "\n") { break; }
+            $nl = \strpos($data, "\n", $dp);
+            while ($nl === false && !$eof) {
+                $got = \Manticore\fread($buf, 1, $cap, $in);
+                if ($got <= 0) { $eof = true; break; }
+                $data = \substr($data, $dp) . \str_from_buffer($buf, $got);
+                $dp = 0;
+                $nl = \strpos($data, "\n");
             }
-            if ($line === '') { break; }
-            $n = \strlen($line);
-            if ($cur !== '') {
-                $body .= $line;
-                $pos = $pos + $n;
-                if ($line[0] === '}' && \rtrim($line) === '}') {
-                    $this->collectRefsBulk($body, $refs);
-                    $body = '';
-                    $defOff[$cur] = $start;
-                    $defSize[$cur] = $pos - $start;
-                    $defRefs[$cur] = $refs;
-                    $defOrder[] = $cur;
-                    $refs = [];
-                    $cur = '';
-                }
-                continue;
-            }
+            $len = \strlen($data);
+            if ($dp >= $len) { break; }
+            $end = $nl === false ? $len : $nl + 1;
             // The stored text must match `run`'s: lines joined by "\n" with the
             // closing brace's newline included, since run appends one itself.
-            $bare = \rtrim($line, "\n");
+            $bare = \substr($data, $dp, ($nl === false ? $len : $nl) - $dp);
             if (\strlen($bare) > 7 && \substr($bare, 0, 7) === 'define ') {
                 $sym = $this->defineSymbol($bare);
-                if ($sym === '') { $header[] = $bare; $pos = $pos + $n; continue; }
-                $cur = $sym;
-                $start = $pos;
-                $defHead[$sym] = $bare;
-                $refs = [];
-                $this->collectRefs($bare, $refs);
-                $pos = $pos + $n;
+                if ($sym !== '') {
+                    /** @var array<string, bool> */
+                    $refs = [];
+                    $this->collectRefs($bare, $refs);
+                    // The body ends at the first line that is exactly `}`.
+                    $close = $nl === false ? false : \strpos($data, "\n}\n", $nl);
+                    while ($close === false && !$eof) {
+                        $got = \Manticore\fread($buf, 1, $cap, $in);
+                        if ($got <= 0) { $eof = true; break; }
+                        $nl = $nl - $dp;
+                        $end = $end - $dp;
+                        $data = \substr($data, $dp) . \str_from_buffer($buf, $got);
+                        $dp = 0;
+                        $close = \strpos($data, "\n}\n", $nl);
+                    }
+                    $closeEnd = $close === false ? -1 : $close + 3;
+                    if ($close === false && \substr($data, -2) === "\n}" && \strlen($data) - 2 >= $nl) {
+                        $closeEnd = \strlen($data);
+                    }
+                    if ($closeEnd < 0) { break; }
+                    $this->collectRefsBulk(\substr($data, $end, $closeEnd - $end), $refs);
+                    $defHead[$sym] = $bare;
+                    $defOff[$sym] = $pos;
+                    $defSize[$sym] = $closeEnd - $dp;
+                    $defRefs[$sym] = $refs;
+                    $defOrder[] = $sym;
+                    $pos = $pos + ($closeEnd - $dp);
+                    $dp = $closeEnd;
+                    continue;
+                }
+                $header[] = $bare;
+                $pos = $pos + ($end - $dp);
+                $dp = $end;
                 continue;
             }
-            $pos = $pos + $n;
+            $pos = $pos + ($end - $dp);
+            $dp = $end;
             if ($bare !== '' && $bare[0] === '@') {
                 $sym = $this->globalName($bare);
                 if ($sym === '') { $header[] = $bare; continue; }
