@@ -186,6 +186,7 @@ tier/switch_guard.php:8: warning[undefined.class]: class Missing\DsnParser is no
 front end: 0 error(s), 2 warning(s)
 == tier_guard_helpers
 rc=65
+tier/guard_helpers.php:103: warning[undefined.function]: function pol_pos_helper() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
 tier/guard_helpers.php:11: warning[undefined.function]: function apcu_second() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
 tier/guard_helpers.php:14: warning[undefined.class]: class Missing\ViaThis is not declared (guarded by supportsX() → class_exists('Missing\Probe'))
 tier/guard_helpers.php:17: warning[undefined.function]: function missing_via_fn() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
@@ -207,8 +208,12 @@ tier/guard_helpers.php:66: error[undefined.function]: function pol_or_operand() 
 tier/guard_helpers.php:70: error[undefined.function]: function pol_double_not() is not declared (reachable: polDoubleNot <- __main)
 tier/guard_helpers.php:74: error[undefined.function]: function pol_not_false() is not declared (reachable: polNotFalse <- __main)
 tier/guard_helpers.php:78: warning[undefined.function]: function pol_and_operand() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:85: error[undefined.function]: function pol_neg_helper() is not declared (reachable: polNegHelper <- __main)
+tier/guard_helpers.php:89: error[undefined.function]: function pol_mixed_helper() is not declared (reachable: polMixedHelper <- __main)
 tier/guard_helpers.php:9: warning[undefined.function]: function apcu_fetch_m() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
-front end: 11 error(s), 11 warning(s)
+tier/guard_helpers.php:94: error[undefined.function]: function pol_neg_local() is not declared (reachable: polNegLocal <- __main)
+tier/guard_helpers.php:99: warning[undefined.function]: function pol_pos_local() is not declared (guarded by class_exists(...))
+front end: 14 error(s), 13 warning(s)
 == tier_static_hierarchy
 rc=0
 front end: 1 unreachable undeclared name(s) hidden (--all to list)

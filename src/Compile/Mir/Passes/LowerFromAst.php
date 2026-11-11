@@ -4574,6 +4574,12 @@ final class LowerFromAst implements Pass
     private int $guardHelperDepth = 0;
     /** @var array<string, string> helper key => `name() → inner guard`; '' = not a guard helper */
     private array $guardHelperMemo = [];
+    /** @var array<string, bool> helpers whose value IS the guard (true when the guard holds), not its negation */
+    private array $guardHelperPos = [];
+    /** Set by the guard-label functions: the label just returned names a guard that is TRUE when it holds. */
+    private bool $lastGuardPos = false;
+    /** @var array<string, bool> */
+    private array $glNotPos = [];
     /** @var array<string, bool> */
     private array $glBad = [];
     /** @var array<string, string> */
@@ -4663,13 +4669,16 @@ final class LowerFromAst implements Pass
         if (\count($e->args) > 0 && $e->args[0]->kind === 'StringLiteral') {
             $arg = "'" . $this->stringLitValue($e->args[0]) . "'";
         }
+        $this->lastGuardPos = true;
         return $fn . '(' . $arg . ')';
     }
 
     /** A local every write to which is a guard value (see {@see computeGuardLocals}). */
     private function guardLabelVar(\Parser\Ast\Variable $e): string
     {
-        return $this->guardHelperDepth > 0 ? '' : ($this->guardLocals[$e->name] ?? '');
+        if ($this->guardHelperDepth > 0) { return ''; }
+        $this->lastGuardPos = isset($this->guardLocals['+' . $e->name]);
+        return $this->guardLocals[$e->name] ?? '';
     }
 
     /** `self::f()` / `static::f()` / `parent::f()` naming a guard helper. */
@@ -4699,7 +4708,7 @@ final class LowerFromAst implements Pass
         $lm = \strtolower($method);
         for ($i = 0; $i < 8 && $cls !== ''; $i = $i + 1) {
             $key = 'm:' . \strtolower($cls) . '::' . $lm;
-            if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemo[$key]; }
+            if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemoHit($key); }
             $d = $this->classDecls[$cls] ?? null;
             if ($d === null) { return ''; }
             foreach ($d->methods as $m) {
@@ -4718,7 +4727,7 @@ final class LowerFromAst implements Pass
         if ($this->guardHelperDepth > 0) { return ''; }
         $sym = $this->resolveCallName(\ltrim($e->function, '\\'), $e->qualified);
         $key = 'f:' . $sym;
-        if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemo[$key]; }
+        if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemoHit($key); }
         $d = $this->fnDecls[$sym] ?? null;
         if ($d === null) { return ''; }
         if ($d->body === null && $d->lazyBody !== null) {
@@ -4733,19 +4742,29 @@ final class LowerFromAst implements Pass
      */
     private function noteGuardHelper(string $key, string $name, ?\Parser\Ast\Block $body): string
     {
-        if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemo[$key]; }
+        if (isset($this->guardHelperMemo[$key])) { return $this->guardHelperMemoHit($key); }
         $r = '';
+        $pos = false;
         if ($body !== null && \count($body->statements) === 1 && $body->statements[0]->kind === 'Return') {
             $v = $this->returnStmtValue($body->statements[0]);
             if ($v !== null) {
                 $this->guardHelperDepth = $this->guardHelperDepth + 1;
                 $inner = $this->guardLabel($v);
+                $pos = $this->plainOrAndGuardLabel($v) !== '';
                 $this->guardHelperDepth = $this->guardHelperDepth - 1;
                 if ($inner !== '') { $r = $name . '() → ' . $inner; }
             }
         }
         $this->guardHelperMemo[$key] = $r;
+        if ($pos && $r !== '') { $this->guardHelperPos[$key] = true; }
+        $this->lastGuardPos = isset($this->guardHelperPos[$key]);
         return $r;
+    }
+
+    private function guardHelperMemoHit(string $key): string
+    {
+        $this->lastGuardPos = isset($this->guardHelperPos[$key]);
+        return $this->guardHelperMemo[$key];
     }
 
     private function returnStmtValue(\Parser\Ast\ReturnStmt $s): ?\Parser\Ast\Expr
@@ -4769,6 +4788,7 @@ final class LowerFromAst implements Pass
         $w->stmts($body->statements);
         $this->glBad = $w->boundNames;
         $this->glLabel = [];
+        $this->glNotPos = [];
         foreach ($params as $p) { $this->glBad[$p->name] = true; }
         foreach ($w->foreachTargets as $t) { $this->glTaintVars($t); }
         foreach ($w->exprs as $e) {
@@ -4777,7 +4797,10 @@ final class LowerFromAst implements Pass
         }
         $out = [];
         foreach ($this->glLabel as $n => $l) {
-            if (!isset($this->glBad[$n])) { $out[$n] = $l; }
+            if (isset($this->glBad[$n])) { continue; }
+            $out[$n] = $l;
+            // '+name' marks a local whose every guard value is POSITIVE (a name cannot start with '+').
+            if (!isset($this->glNotPos[$n])) { $out['+' . $n] = '1'; }
         }
         return $out;
     }
@@ -4789,6 +4812,7 @@ final class LowerFromAst implements Pass
             if ($e->target instanceof \Parser\Ast\Variable) {
                 $l = $this->guardLabel($e->value);
                 $n = $e->target->name;
+                if ($this->plainOrAndGuardLabel($e->value) === '') { $this->glNotPos[$n] = true; }
                 if ($l === '') { $this->glBad[$n] = true; } elseif (!isset($this->glLabel[$n])) { $this->glLabel[$n] = $l; }
             } else {
                 $this->glTaintVars($e->target);

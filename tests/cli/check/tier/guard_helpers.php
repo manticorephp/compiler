@@ -78,3 +78,28 @@ function polAndOperand(bool $x) {
     return pol_and_operand();
 }
 polOrOperand('a', true); polDoubleNot(); polNotFalse(); polAndOperand(true);
+function no_cls(): bool { return !class_exists('Missing\Probe2'); }
+function mixed_g(bool $x): bool { return has_apcu() || $x; }
+function polNegHelper() {
+    if (!no_cls()) { return 1; }
+    return pol_neg_helper();
+}
+function polMixedHelper() {
+    if (!mixed_g(true)) { return 1; }
+    return pol_mixed_helper();
+}
+function polNegLocal(string $c) {
+    $v = !class_exists($c);
+    if (!$v) { return 1; }
+    return pol_neg_local();
+}
+function polPosLocal(string $c) {
+    $v = class_exists($c);
+    if (!$v) { return 1; }
+    return pol_pos_local();
+}
+function polPosHelper() {
+    if (!has_apcu()) { return 1; }
+    return pol_pos_helper();
+}
+polNegHelper(); polMixedHelper(); polNegLocal('a'); polPosLocal('a'); polPosHelper();

@@ -170,8 +170,11 @@ trait LowerStmts
     {
         if ($e instanceof \Parser\Ast\Assign) { return $this->plainGuardLabel($e->value); }
         $k = $e->kind;
-        if ($k === 'Call' || $k === 'StaticCall' || $k === 'MethodCall' || $k === 'Variable') { return $this->guardLabel($e); }
-        return '';
+        if ($k !== 'Call' && $k !== 'StaticCall' && $k !== 'MethodCall' && $k !== 'Variable') { return ''; }
+        $this->lastGuardPos = false;
+        $l = $this->guardLabel($e);
+        // A helper / local whose value is the NEGATION of a guard (`return !class_exists(..)`) is no positive guard.
+        return $this->lastGuardPos ? $l : '';
     }
 
     /** Operand of `!`: a plain guard, or `a && b` with a plain guard among the conjuncts (it exits unless both hold). */
