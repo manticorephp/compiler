@@ -887,6 +887,8 @@ trait LowerExprs
         // Unwrap positionally for now — full reordering against the
         // callee's params on those paths is a TODO.
         if ($expr->kind === 'NamedArg')       { return $this->lowerExpr($this->namedArgValue($expr)); }
+        // A bare `exit;` / `die;` (no parentheses) is the exit construct, not a constant.
+        if ($expr->kind === 'Identifier' && $this->identIsExit($expr)) { return $this->lowerCallExpr(new \Parser\Ast\CallExpr(\strtolower($this->constBareName($expr->name)), [], $expr->span)); }
         if ($expr->kind === 'Identifier')     { return $this->lowerIdentifier($expr->name, $expr->span->line, $expr->span, $expr->qualified); }
         if ($expr->kind === 'Yield') {
             // Read subclass fields through a YieldExpr-typed param (the kind

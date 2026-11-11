@@ -268,6 +268,8 @@ front end: 2 error(s), 1 warning(s)
 rc=65
 tier/trait_two_users.php:2: error[undefined.function]: function missing_via_trait() is not declared (reachable: Used2__t <- __main)
 front end: 1 error(s), 0 warning(s)
+== tier_exit_bare
+rc=0
 == tier_reachable_new_allow_traps
 rc=0
 tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared

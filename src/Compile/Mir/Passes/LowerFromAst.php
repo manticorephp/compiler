@@ -4899,9 +4899,11 @@ final class LowerFromAst implements Pass
         return $k === 'Call' && $this->callIsExit($s->expr);
     }
 
+    /** A bare `exit` / `die` (no parentheses); the parser resolved it against the namespace like a constant. */
     private function identIsExit(\Parser\Ast\Identifier $i): bool
     {
-        $f = \strtolower($i->name);
+        if ($i->qualified) { return false; }
+        $f = \strtolower($this->constBareName($i->name));
         return $f === 'exit' || $f === 'die';
     }
 
