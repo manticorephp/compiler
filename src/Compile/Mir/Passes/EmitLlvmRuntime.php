@@ -4284,23 +4284,32 @@ end:
         $out .= "  store i64 %rwd, ptr %rwp\n";
         $out .= "  br label %rdone\n";
         $out .= "rdone:\n  ret void\n}\n";
-        // ── the deferred free of one garbage entry ──
-        $out .= "define void @__cc_gfree(ptr %s, i64 %kind) {\n";
+        // ── the deferred release of one garbage entry's members ──
+        // ⚠ EVERY ENTRY IS RELEASED BEFORE ANY IS FREED. A white node's cell
+        // slot (`public $other`) holds a sibling garbage node, and its release
+        // tells object from closure env by the target's header word — a read of
+        // the sibling's memory. Freed in one interleaved pass, `$a`'s free came
+        // first and `$b`'s `__cc_cellclo_free` read `$a`'s -8 off a freed block
+        // (a pool free-list link there), and a closure env / Ds buffer holding a
+        // sibling reads it the same way.
+        $out .= "define void @__cc_grelease(ptr %s, i64 %kind) {\n";
         $out .= "entry:\n";
-        $out .= "  %fr = load i64, ptr @__manticore_cc_freed\n";
-        $out .= "  %fr1 = add i64 %fr, 1\n";
-        $out .= "  store i64 %fr1, ptr @__manticore_cc_freed\n";
         $out .= "  %isroot = icmp ne i64 %kind, 0\n";
         $out .= "  br i1 %isroot, label %rootk, label %whitek\n";
         $out .= "rootk:\n";
         $out .= "  call void @__mir_drop_dispatch(ptr %s)\n";
-        $out .= "  br label %go\n";
+        $out .= "  ret void\n";
         $out .= "whitek:\n";
         // Drop this node's string props (obj props handled by the recursion
         // above) so collected cycles don't leak their strings.
         $out .= "  call void @__manticore_cc_drop_strings(ptr %s)\n";
-        $out .= "  br label %go\n";
-        $out .= "go:\n";
+        $out .= "  ret void\n}\n";
+        // ── the deferred free of one garbage entry ──
+        $out .= "define void @__cc_gfree(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %fr = load i64, ptr @__manticore_cc_freed\n";
+        $out .= "  %fr1 = add i64 %fr, 1\n";
+        $out .= "  store i64 %fr1, ptr @__manticore_cc_freed\n";
         $out .= "  call void @__mir_obj_handle_free(ptr %s)\n";
         $out .= "  %base = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
@@ -4511,11 +4520,29 @@ end:
         $out .= "  %gkind = and i64 %gw, 1\n";
         $out .= "  %gpi = and i64 %gw, -2\n";
         $out .= "  %gp = inttoptr i64 %gpi to ptr\n";
-        $out .= "  call void @__cc_gfree(ptr %gp, i64 %gkind)\n";
+        $out .= "  call void @__cc_grelease(ptr %gp, i64 %gkind)\n";
         $out .= "  %gin = add i64 %gi, 1\n";
         $out .= "  store i64 %gin, ptr %ip\n";
         $out .= "  br label %gr\n";
         $out .= "grd:\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %fq\n";
+        $out .= "fq:\n";
+        $out .= "  %fqi = load i64, ptr %ip\n";
+        $out .= "  %fqc = load i64, ptr @__manticore_cc_gcount\n";
+        $out .= "  %fqgo = icmp slt i64 %fqi, %fqc\n";
+        $out .= "  br i1 %fqgo, label %fqb, label %fqd\n";
+        $out .= "fqb:\n";
+        $out .= "  %fqbuf = load ptr, ptr @__manticore_cc_garbage\n";
+        $out .= "  %fqsp = getelementptr i64, ptr %fqbuf, i64 %fqi\n";
+        $out .= "  %fqw = load i64, ptr %fqsp\n";
+        $out .= "  %fqpi = and i64 %fqw, -2\n";
+        $out .= "  %fqp = inttoptr i64 %fqpi to ptr\n";
+        $out .= "  call void @__cc_gfree(ptr %fqp)\n";
+        $out .= "  %fqn = add i64 %fqi, 1\n";
+        $out .= "  store i64 %fqn, ptr %ip\n";
+        $out .= "  br label %fq\n";
+        $out .= "fqd:\n";
         $out .= "  store i64 0, ptr @__manticore_cc_gcount\n";
         $out .= "  %endcnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %endbuf = load ptr, ptr @__manticore_cc_roots\n";
