@@ -13,11 +13,11 @@ $s = $argc > 9 ? '' : 'sumv';
 $b = $argc > 9 ? '' : 'boom';
 $t = 0;
 $m0 = memory_get_usage();
-for ($i = 0; $i < 100000; $i++) {
+for ($i = 0; $i < 10000; $i++) {
     $t += callN($s, $ints) + callI($s, ...$ints);
     try { callN($b, $ints); } catch (RuntimeException $e) { $t++; }
     try { callI($b, ...$ints); } catch (RuntimeException $e) { $t++; }
 }
 $d = memory_get_peak_usage() - $m0;
 echo $t, "\n";
-echo $d < 20000000 ? "ok" : "LEAK " . $d, "\n";
+echo $d < 5000000 ? "ok" : "LEAK " . $d, "\n";

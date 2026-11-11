@@ -286,6 +286,15 @@ public bool $needsClosureRc = false;
             $decls['_Unwind_GetLanguageSpecificData'] = "declare ptr @_Unwind_GetLanguageSpecificData(ptr)";
             $decls['_Unwind_SetGR'] = "declare void @_Unwind_SetGR(ptr, i32, i64)";
             $decls['_Unwind_SetIP'] = "declare void @_Unwind_SetIP(ptr, i64)";
+            if (\Manticore\is_darwin()) {
+                // libunwind's own API, for the raise/resume that start in this image (UnwindRuntime::darwinFastUnwindIr).
+                $decls['unw_getcontext'] = "declare i32 @unw_getcontext(ptr)";
+                $decls['unw_init_local'] = "declare i32 @unw_init_local(ptr, ptr)";
+                $decls['unw_step'] = "declare i32 @unw_step(ptr)";
+                $decls['unw_get_proc_info'] = "declare i32 @unw_get_proc_info(ptr, ptr)";
+                $decls['unw_resume'] = "declare i32 @unw_resume(ptr)";
+                $decls['_Unwind_Resume'] = "declare void @_Unwind_Resume(ptr)";
+            }
             $decls['abort'] = "declare void @abort() noreturn";
         }
         if ($this->needsStrtodDecl()) { $decls['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl(); }

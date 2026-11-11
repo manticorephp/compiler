@@ -30,6 +30,91 @@ use Compile\MemoryAbi;
  */
 final class UnwindRuntime
 {
+    /**
+     * Darwin's raise and resume, driven from this image through libunwind's
+     * `unw_*` API (#648). The system `_Unwind_RaiseException` and `_Unwind_Resume`
+     * start from their own frame inside libunwind.dylib, an address dyld resolves
+     * by walking every image of the shared cache (~20 µs per throw, again per
+     * cleanup pad); a cursor started here is resolved in our own image.
+     *
+     * One pass, not Itanium's two: a PHP throw runs every unwound frame's
+     * cleanups whether or not a catch takes it (the uncaught path force-unwinds
+     * before the fatal), so the search phase only decided where to stop, and
+     * each step costs dyld a header walk. Per frame the personality is asked to
+     * search; a handler is installed at once (`_UA_CLEANUP_PHASE |
+     * _UA_HANDLER_FRAME`), otherwise the frame's cleanup pad, which ends in
+     * `@__mc_resume` and continues from its own frame. The end of the stack is
+     * the uncaught fatal ({@see __mc_uncaught_stop}). A foreign or forced unwind
+     * reaching one of our cleanup pads goes back to the system `_Unwind_Resume`.
+     */
+    private static function darwinFastUnwindIr(): string
+    {
+        $cls = (string)MemoryAbi::EXC_CLASS;
+        $o = "define void @__mc_unwind(ptr %ex) alwaysinline {\nentry:\n";
+        $o .= "  %uc = alloca [256 x i64], align 16\n  %cur = alloca [256 x i64], align 16\n";
+        $o .= "  %pi = alloca [16 x i64], align 8\n";
+        $o .= "  %cls = load i64, ptr %ex\n";
+        // libunwind leaves the cursor's walked-frame count to the caller's memory; unw_resume
+        // pops that many return-stack entries, so stack garbage there spins for billions.
+        $o .= "  store [256 x i64] zeroinitializer, ptr %cur\n";
+        $o .= "  %g = call i32 @unw_getcontext(ptr %uc)\n";
+        $o .= "  %i = call i32 @unw_init_local(ptr %cur, ptr %uc)\n";
+        $o .= "  br label %step\n";
+        $o .= "step:\n";
+        $o .= "  %st = call i32 @unw_step(ptr %cur)\n";
+        $o .= "  %more = icmp sgt i32 %st, 0\n";
+        $o .= "  br i1 %more, label %info, label %eos\n";
+        $o .= "info:\n";
+        $o .= "  %pr = call i32 @unw_get_proc_info(ptr %cur, ptr %pi)\n";
+        $o .= "  %hp = getelementptr inbounds i8, ptr %pi, i64 24\n";
+        $o .= "  %h = load ptr, ptr %hp\n";
+        $o .= "  %hn = icmp eq ptr %h, null\n";
+        $o .= "  br i1 %hn, label %step, label %ask\n";
+        $o .= "ask:\n";
+        $o .= "  %r = call i32 %h(i32 1, i32 1, i64 %cls, ptr %ex, ptr %cur)\n";
+        $o .= "  %found = icmp eq i32 %r, 6\n";
+        $o .= "  br i1 %found, label %handler, label %nofound\n";
+        $o .= "nofound:\n";
+        $o .= "  %pass = icmp eq i32 %r, 8\n";
+        $o .= "  br i1 %pass, label %clean, label %lost\n";
+        $o .= "handler:\n";
+        $o .= "  %rh = call i32 %h(i32 1, i32 6, i64 %cls, ptr %ex, ptr %cur)\n";
+        $o .= "  %ih = icmp eq i32 %rh, 7\n";
+        $o .= "  br i1 %ih, label %install, label %lost\n";
+        $o .= "clean:\n";
+        $o .= "  %rc = call i32 %h(i32 1, i32 2, i64 %cls, ptr %ex, ptr %cur)\n";
+        $o .= "  %ic = icmp eq i32 %rc, 7\n";
+        $o .= "  br i1 %ic, label %install, label %cont\n";
+        $o .= "cont:\n";
+        $o .= "  %c8 = icmp eq i32 %rc, 8\n";
+        $o .= "  br i1 %c8, label %step, label %lost\n";
+        $o .= "install:\n";
+        $o .= "  %rs = call i32 @unw_resume(ptr %cur)\n";
+        $o .= "  br label %lost\n";
+        $o .= "eos:\n";
+        $o .= "  %u = call i32 @__mc_uncaught_stop(i32 1, i32 16, i64 %cls, ptr %ex, ptr null, ptr null)\n";
+        $o .= "  br label %lost\n";
+        $o .= "lost:\n";
+        $o .= "  call void @abort()\n";
+        $o .= "  unreachable\n}\n";
+
+        $o .= "define void @__mc_resume(ptr %ex) noinline {\nentry:\n";
+        $o .= "  %c = load i64, ptr %ex\n";
+        $o .= "  %ours = icmp eq i64 %c, " . $cls . "\n";
+        $o .= "  %p1 = getelementptr inbounds i8, ptr %ex, i64 16\n";
+        $o .= "  %stop = load i64, ptr %p1\n";
+        $o .= "  %unforced = icmp eq i64 %stop, 0\n";
+        $o .= "  %fast = and i1 %ours, %unforced\n";
+        $o .= "  br i1 %fast, label %fast.l, label %system\n";
+        $o .= "system:\n";
+        $o .= "  call void @_Unwind_Resume(ptr %ex)\n";
+        $o .= "  unreachable\n";
+        $o .= "fast.l:\n";
+        $o .= "  call void @__mc_unwind(ptr %ex)\n";
+        $o .= "  unreachable\n}\n";
+        return $o;
+    }
+
     /** Module-level IR: two globals and the helpers (declarations live in RuntimeFeatures). */
     public static function ir(): string
     {
@@ -37,6 +122,7 @@ final class UnwindRuntime
         $size = (string)MemoryAbi::EXC_SIZE;
         $pay = (string)MemoryAbi::EXC_PAYLOAD_OFFSET;
         $o = "@__mc_typeinfo = linkonce_odr constant i8 0\n";
+        if (\Manticore\is_darwin()) { $o .= self::darwinFastUnwindIr(); }
         $o .= "@__mc_uncaught_fn = linkonce_odr global ptr null\n";
 
         $o .= "define void @__mc_throw(ptr %obj) {\nentry:\n";
@@ -50,6 +136,8 @@ final class UnwindRuntime
         $o .= "  store i64 0, ptr %p2\n";
         $o .= "  %pl = getelementptr inbounds i8, ptr %ex, i64 " . $pay . "\n";
         $o .= "  store ptr %obj, ptr %pl\n";
+        // Darwin: the whole unwind is ours ({@see darwinFastUnwindIr}); it never returns.
+        if (\Manticore\is_darwin()) { $o .= "  call void @__mc_unwind(ptr %ex)\n"; }
         $o .= "  %rc = call i32 @_Unwind_RaiseException(ptr %ex)\n";
         // No frame catches it: unwind anyway, running every frame's cleanups (php
         // destroys the unwound frames' locals before the fatal), and report it

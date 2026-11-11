@@ -1014,7 +1014,7 @@ trait EmitLlvmObjects
                     . '  %h1 = or i64 %h0, ' . (string)\Compile\MemoryAbi::DTOR_CALLED_MASK . "\n"
                     . "  store i64 %h1, ptr %hp\n";
             }
-            $body .= $this->rcReleaseReg('%a0', 'obj') . "  resume { ptr, i32 } %l\n}\n\n";
+            $body .= $this->rcReleaseReg('%a0', 'obj') . $this->ehResume('%l') . "}\n\n";
             $this->ssa = $oldSsa;
             $this->dynamicMethodHelpers[$key] = $body;
         }
