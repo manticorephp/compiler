@@ -7,6 +7,7 @@
 #   bash tests/cli/run.sh --update   rewrite help.txt and the completions.* goldens
 #   bash tests/cli/run.sh --capture  rewrite behaviour.txt (CLI-behaviour changes only)
 set -uo pipefail
+export LC_ALL=C  # sort order in the goldens is byte order on every host
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MC="${MC:-$ROOT/bin/manticore}"
 HERE="$ROOT/tests/cli"

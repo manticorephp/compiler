@@ -229,9 +229,9 @@ tier/guard_helpers.php:74: error[undefined.function]: function pol_not_false() i
 tier/guard_helpers.php:78: warning[undefined.function]: function pol_and_operand() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
 tier/guard_helpers.php:85: error[undefined.function]: function pol_neg_helper() is not declared (reachable: polNegHelper <- __main)
 tier/guard_helpers.php:89: error[undefined.function]: function pol_mixed_helper() is not declared (reachable: polMixedHelper <- __main)
-tier/guard_helpers.php:9: warning[undefined.function]: function apcu_fetch_m() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
 tier/guard_helpers.php:94: error[undefined.function]: function pol_neg_local() is not declared (reachable: polNegLocal <- __main)
 tier/guard_helpers.php:99: warning[undefined.function]: function pol_pos_local() is not declared (guarded by class_exists(...))
+tier/guard_helpers.php:9: warning[undefined.function]: function apcu_fetch_m() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
 front end: 14 error(s), 13 warning(s)
 == tier_static_hierarchy
 rc=0
@@ -334,13 +334,12 @@ reach: b
 == reach_interface_dispatch
 rc=0
 class: A
-reach: __main
 reach: A__find
+reach: __main
 reach: look
 == reach_magic_and_interfaces
 rc=0
 class: M
-reach: __main
 reach: M____construct
 reach: M____toString
 reach: M__getIterator
@@ -349,17 +348,18 @@ reach: M__offsetExists
 reach: M__offsetGet
 reach: M__offsetSet
 reach: M__offsetUnset
+reach: __main
 == reach_callables
 rc=0
 class: C
 class?: stdClass
+reach: C__cmp
+reach: C__s
+reach: C__sortIt
 reach: __closure_0
 reach: __closure_2
 reach: __closure_3
 reach: __main
-reach: C__cmp
-reach: C__s
-reach: C__sortIt
 reach: f
 reach: g
 reach: makesClosure
@@ -367,10 +367,10 @@ reach?: __closure_1
 reach?: neverCalled
 == reach_dynamic_new
 rc=0
-class?: stdClass
 class?: X
 class?: Y
 class?: Z
+class?: stdClass
 reach: __main
 reach?: X____construct
 reach?: Y____construct
@@ -379,10 +379,10 @@ rc=65
 class: Holder
 class: Konst
 class: Used
-reach: __main
+reach/class_level.php:2: error[undefined.constant]: constant UNDEF_USED is not declared
 reach: Holder__v
 reach: Used__m
-reach/class_level.php:2: error[undefined.constant]: constant UNDEF_USED is not declared
+reach: __main
 site: undefined.class|missinghint line=3 fn=@class:Dead reach=0 maybe=0
 site: undefined.constant|undef_dead line=3 fn=@class:Dead reach=0 maybe=0
 site: undefined.constant|undef_used line=2 fn=@class:Used reach=1 maybe=1
@@ -398,27 +398,27 @@ rc=0
 class: Plain
 class?: S
 class?: stdClass
-reach: __main
 reach: Plain__p
+reach: __main
 reach?: S__inst
 reach?: S__s
 == reach_attr_reflect
 rc=0
 class: T
 class: Tag
-class?: stdClass
 class?: Unrelated
-reach: __main
+class?: stdClass
 reach: Tag____construct
+reach: __main
 reach?: Unrelated____construct
 == reach_unused_interface
 rc=0
 class: Base
 class: Impl
-reach: __main
-reach: Impl__g
 reach/unused_interface.php:3: warning[undefined.class]: class MissingB is not declared
 reach/unused_interface.php:4: warning[undefined.class]: class MissingC is not declared
+reach: Impl__g
+reach: __main
 site: undefined.class|missinga line=2 fn=@class:Unused reach=0 maybe=0
 site: undefined.class|missingb line=3 fn=@class:UsedI reach=1 maybe=1
 site: undefined.class|missingc line=4 fn=@class:Base reach=1 maybe=1
@@ -428,9 +428,9 @@ front end: 0 error(s), 2 warning(s)
 rc=0
 class: A
 class: B
-reach: __main
 reach: A____construct
 reach: B____construct
+reach: __main
 reach: pick
 == reach_param_class
 rc=0
@@ -485,13 +485,13 @@ reach?: B____construct
 rc=0
 class: X
 class?: stdClass
+reach: X__a
+reach: X__b
+reach: X__sa
 reach: __main
 reach: viaClassAndName
 reach: viaConcat
 reach: viaLocal
-reach: X__a
-reach: X__b
-reach: X__sa
 reach?: X__c
 reach?: X__sc
 == reach_param_method
@@ -513,8 +513,8 @@ reach?: Q__make
 == reach_unserialize_new
 rc=0
 class?: Other
-class?: stdClass
 class?: Svc
+class?: stdClass
 reach: __main
 reach?: Svc__run
 == reach_reflection_literal
@@ -522,8 +522,8 @@ rc=0
 class: A
 class?: B
 class?: stdClass
-reach: __main
 reach: A____construct
+reach: __main
 reach?: B____construct
 == reach_reflection_runtime
 rc=0
@@ -544,8 +544,8 @@ rc=0
 class: App\Log\Live_Box
 class?: App\Log\Dead_Logger
 class?: stdClass
-reach: __main
 reach/class_consts_ns.php:5: warning[undefined.class]: class Missing\AbstractLogger is not declared
+reach: __main
 site: undefined.class|missing\abstractlogger line=5 fn=@class:App\Log\Dead_Logger reach=0 maybe=1
 front end: 0 error(s), 1 warning(s)
 == builtin names in sync
