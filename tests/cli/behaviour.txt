@@ -278,8 +278,8 @@ rc=0
 rc=65
 tier/string_not_callable.php:10: error[undefined.function]: function missing_sd() is not declared (reachable: sd <- __main)
 tier/string_not_callable.php:2: warning[undefined.function]: function missing_from_string_named() is not declared
-tier/string_not_callable.php:3: error[undefined.function]: function missing_cb_fn() is not declared (reachable: cb <- __closure_8 <- __main)
-tier/string_not_callable.php:5: error[undefined.function]: function missing_hk() is not declared (reachable: hk <- __closure_9 <- __main)
+tier/string_not_callable.php:3: error[undefined.function]: function missing_cb_fn() is not declared (reachable: cb <- __closure_0 <- __main)
+tier/string_not_callable.php:5: error[undefined.function]: function missing_hk() is not declared (reachable: hk <- __closure_1 <- __main)
 front end: 3 error(s), 1 warning(s)
 == tier_toplevel_return_guard
 rc=0
@@ -353,9 +353,9 @@ reach: M__offsetUnset
 rc=0
 class: C
 class?: stdClass
-reach: __closure_10
-reach: __closure_7
-reach: __closure_9
+reach: __closure_0
+reach: __closure_2
+reach: __closure_3
 reach: __main
 reach: C__cmp
 reach: C__s
@@ -363,7 +363,7 @@ reach: C__sortIt
 reach: f
 reach: g
 reach: makesClosure
-reach?: __closure_8
+reach?: __closure_1
 reach?: neverCalled
 == reach_dynamic_new
 rc=0
