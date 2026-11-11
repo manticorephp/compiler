@@ -1,0 +1,8 @@
+subclass: 12
+interface: 6
+closure: 3
+untyped: 6
+object: 3
+self: 3
+acyclic: 3
+leaf: 4

@@ -1124,6 +1124,12 @@ final class MemoryAbi
      *  the root buffer for the collector. */
     public const COLOR_DEAD = 4;
 
+    /** Never a cycle member: its class is acyclic in the collector's class
+     *  graph, so `cc_add_root` leaves it unbuffered (Bacon-Rajan's green, php's
+     *  GC_NOT_COLLECTABLE). Set on the first decrement that would buffer it;
+     *  the collector may recolor it like a black object. */
+    public const COLOR_GREEN = 5;
+
     // ─── Blocking-offload job record ──────────────────────────────
 
     /**

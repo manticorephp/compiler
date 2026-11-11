@@ -470,7 +470,7 @@ trait LowerFns
             || $n === 'implode' || $n === 'join'
             || $n === 'sprintf' || $n === 'printf'
             || $n === 'exit' || $n === 'die' || $n === 'error_log'
-            || $n === 'gc_collect_cycles' || $n === 'gc_disable' || $n === 'gc_enable' || $n === 'gc_enabled' || $n === 'spl_object_id' || $n === '__mc_obj_addr'
+            || $n === 'gc_collect_cycles' || $n === 'gc_disable' || $n === 'gc_enable' || $n === 'gc_enabled' || $n === '__mc_gc_roots' || $n === 'spl_object_id' || $n === '__mc_obj_addr'
             || $n === 'get_class' || $n === 'array_pop' || $n === 'array_shift'
             || $n === 'array_unshift' || $n === 'addslashes' || $n === 'getenv'
             || $n === 'putenv' || $n === '__mir_fn_exists'

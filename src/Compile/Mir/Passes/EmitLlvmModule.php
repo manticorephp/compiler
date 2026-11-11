@@ -671,6 +671,7 @@ trait EmitLlvmModule
         if ($this->rt->needsCc) {
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
+            $this->libcExtra['clock'] = 'declare i64 @clock()';
             $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
         }
         $decls = $this->rt->libcDecls(\Compile\Debug::$verify);

@@ -445,6 +445,7 @@ trait EmitLlvmBuiltins
         if ($name === 'gc_disable')                   { return $this->biGcSwitch(1); }
         if ($name === 'gc_enable')                    { return $this->biGcSwitch(0); }
         if ($name === 'gc_enabled')                   { return $this->biGcEnabled(); }
+        if ($name === '__mc_gc_roots')                { return $this->biGcRoots(); }
         if ($name === 'spl_object_id')                { return $this->biSplObjectId($args); }
         if ($name === '__mc_obj_addr')               { return $this->biObjAddr($args); }
         // Reflection Tier-2 metadata reads. Internal (`__mc_` prefix) — the
@@ -7043,9 +7044,18 @@ trait EmitLlvmBuiltins
     /** `gc_collect_cycles()` → run the Bacon-Rajan collector, return freed count. */
     private function biGcCollect(): string
     {
-        $this->rt->needsCc = true;
         $this->rt->needsRc = true;
         $reg = $this->ssa->allocReg();
+        // ⚠ A LIBRARY carries no collector. Its class tables (child walkers, the
+        // acyclic set) know only the library's own classes, and the shared hooks
+        // in `__mir_rc_release` resolve to whichever copy keeps a symbol after
+        // inlining — the stdlib's `add_root` without its `unroot` buffered every
+        // Fiber of a program that never collects and never freed one. A library
+        // call reaches the program's collector through a weak hook instead.
+        if ($this->emitLibrary) {
+            return $this->finishI64('  ' . $reg . " = call i64 @__mc_gc_collect_weak()\n", $reg);
+        }
+        $this->rt->needsCc = true;
         $out = '  ' . $reg . " = call i64 @__manticore_cc_collect_cycles()\n";
         return $this->finishI64($out, $reg);
     }
@@ -7069,6 +7079,16 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out = '  ' . $off . " = load i64, ptr @__manticore_cc_gcoff\n";
         $out .= '  ' . $reg . ' = xor i64 ' . $off . ", 1\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `__mc_gc_roots()` → the cycle collector's buffered candidate count (gc_status()['roots']). */
+    private function biGcRoots(): string
+    {
+        $this->rt->needsGcFlag = true;
+        $this->rt->needsRc = true;
+        $reg = $this->ssa->allocReg();
+        $out = '  ' . $reg . " = load i64, ptr @__manticore_cc_count\n";
         return $this->finishI64($out, $reg);
     }
 

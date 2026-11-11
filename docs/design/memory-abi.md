@@ -118,7 +118,7 @@ One i64 at offset 8:
 |---|---|---|
 | 63 | 1 | `buffered` — member of the cc candidate list (`BUFFERED_MASK`) |
 | 62 | 1 | `__destruct` already ran (`DTOR_CALLED_MASK`) |
-| 61..56 | 6 | `color` — 0 BLACK, 1 PURPLE, 2 GRAY, 3 WHITE, 4 DEAD (`COLOR_MASK`, `COLOR_SHIFT = 56`) |
+| 61..56 | 6 | `color` — 0 BLACK, 1 PURPLE, 2 GRAY, 3 WHITE, 4 DEAD, 5 GREEN (`COLOR_MASK`, `COLOR_SHIFT = 56`) |
 | 55..32 | 24 | root-buffer slot while buffered (`CC_SLOT_MASK`, `CC_SLOT_SHIFT = 32`; `CC_SLOT_NONE` = past the field) |
 | 31..0 | 32 | `rc` — signed; trial deletion drives it negative (`RC_MASK`) |
 
@@ -126,6 +126,16 @@ The slot makes leaving the root buffer O(1): a buffered object whose rc reaches 
 outside a collection is swap-removed (`__manticore_cc_unroot`: the last entry moves
 into its slot) and freed at once. Only an object pushed past slot `CC_SLOT_NONE`
 still dies the old way — dropped, its DEAD shell left for the next collection.
+
+An object of an ACYCLIC class is never buffered. The collector's class graph has
+an edge per traced property (an obj slot reaches its class and every subclass; a
+closure, cell, native-buffer, `object` or unknown-class slot reaches every class);
+a class on no cycle of it cannot have an object on a heap cycle the collector
+could find. `cc_add_root` colors such an object GREEN instead of buffering it, so
+later decrements leave on the color test. The class graph is the collector module's own, so only
+the application module carries a collector: a library (the stdlib) knows only its
+own classes, and its `gc_collect_cycles()` calls the program's collector through a
+weak hook (0 when the program has none).
 
 Read by sign-extending from bit 31 (`RC_SIGN_SHIFT`); compare with **signed** predicates:
 

@@ -1025,7 +1025,10 @@ trait EmitLlvmRuntime
             $out .= "}\n";
             $out .= $this->dropRuntime();
             if ($this->rt->needsCc) { $out .= $this->ccRuntime(); }
-            elseif ($this->rt->needsGcFlag) { $out .= "@__manticore_cc_gcoff = linkonce_odr global i64 0\n"; }
+            elseif ($this->rt->needsGcFlag) {
+                $out .= "@__manticore_cc_gcoff = linkonce_odr global i64 0\n";
+                $out .= "@__manticore_cc_count = linkonce_odr global i64 0\n";
+            }
         }
         // Unconditional: `__mir_cell_retain` / `__mir_cell_drop` reach a
         // closure env boxed as an object, and they are emitted in every module.
@@ -3122,9 +3125,18 @@ trait EmitLlvmRuntime
         $this->weakSyms['__manticore_cc_add_root'] = true;
         $this->weakSyms['__manticore_cc_unroot'] = true;
         $this->weakSyms['__manticore_cc_autogc'] = true;
+        $this->weakSyms['__manticore_cc_collect_cycles'] = true;
+        // `gc_collect_cycles()` in a LIBRARY ({@see EmitLlvmBuiltins::biGcCollect})
+        // runs the program's collector, or frees nothing when it has none.
         return "declare extern_weak void @__manticore_cc_add_root(ptr)\n"
             . "declare extern_weak i1 @__manticore_cc_unroot(ptr)\n"
-            . "declare extern_weak void @__manticore_cc_autogc()\n";
+            . "declare extern_weak void @__manticore_cc_autogc()\n"
+            . "declare extern_weak i64 @__manticore_cc_collect_cycles()\n"
+            . "define i64 @__mc_gc_collect_weak() {\nentry:\n"
+            . "  %has = icmp ne ptr @__manticore_cc_collect_cycles, null\n"
+            . "  br i1 %has, label %run, label %none\n"
+            . "run:\n  %n = call i64 @__manticore_cc_collect_cycles()\n  ret i64 %n\n"
+            . "none:\n  ret i64 0\n}\n";
     }
 
     /** {@see ccWeakHooks} declares the hooks once per module. */
@@ -3243,15 +3255,21 @@ trait EmitLlvmRuntime
         $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
         $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
         $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        $this->libcExtra['clock'] = 'declare i64 @clock()';
         $out = "@__cc_census_inited = linkonce_odr global i64 0\n";
         $out .= "@__cc_census_on = linkonce_odr global i64 0\n";
         $out .= "@__cc_census_runs = linkonce_odr global i64 0\n";
         $out .= "@__cc_census_roots = linkonce_odr global i64 0\n";
         $out .= "@__cc_census_freed = linkonce_odr global i64 0\n";
+        // process CPU time inside the collector (clock(), microseconds)
+        $out .= "@__cc_census_t0 = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_us = linkonce_odr global i64 0\n";
         $out .= "@__cc_census_tab = linkonce_odr global [8192 x i64] zeroinitializer\n";
+        $out .= "@__cc_census_rtab = linkonce_odr global [8192 x i64] zeroinitializer\n";
         $out .= "@.cc.env = private unnamed_addr constant [19 x i8] c\"MANTICORE_CC_STATS\\00\"\n";
-        $out .= "@.cc.hdr = private unnamed_addr constant [64 x i8] c\"[cc-stats] collections=%lld roots=%lld freed=%lld garbage=%lld\\0A\\00\"\n";
-        $out .= "@.cc.row = private unnamed_addr constant [22 x i8] c\"  %9lld  id=%lld  %s\\0A\\00\"\n";
+        $out .= "@.cc.hdr = private unnamed_addr constant [76 x i8] c\"[cc-stats] collections=%lld roots=%lld freed=%lld garbage=%lld cpu_ms=%lld\\0A\\00\"\n";
+        $out .= "@.cc.row = private unnamed_addr constant [25 x i8] c\"  %9lld  id=%lld  %c %s\\0A\\00\"\n";
+        $out .= "@.cc.rhdr = private unnamed_addr constant [36 x i8] c\"[cc-stats] roots scanned, by class\\0A\\00\"\n";
         $out .= "@.cc.unk = private unnamed_addr constant [2 x i8] c\"?\\00\"\n";
         $out .= "define void @__cc_census_begin(i64 %roots) {\n";
         $out .= "entry:\n";
@@ -3278,6 +3296,24 @@ trait EmitLlvmRuntime
         $out .= "  %s0 = load i64, ptr @__cc_census_roots\n";
         $out .= "  %s1 = add i64 %s0, %roots\n";
         $out .= "  store i64 %s1, ptr @__cc_census_roots\n";
+        $out .= "  %ip = alloca i64\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %rl\n";
+        $out .= "rl:\n";
+        $out .= "  %i = load i64, ptr %ip\n";
+        $out .= "  %rgo = icmp slt i64 %i, %roots\n";
+        $out .= "  br i1 %rgo, label %rb, label %tim\n";
+        $out .= "rb:\n";
+        $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= "  %sp = getelementptr ptr, ptr %buf, i64 %i\n";
+        $out .= "  %p = load ptr, ptr %sp\n";
+        $out .= "  call void @__cc_census_note(ptr @__cc_census_rtab, ptr %p)\n";
+        $out .= "  %in = add i64 %i, 1\n";
+        $out .= "  store i64 %in, ptr %ip\n";
+        $out .= "  br label %rl\n";
+        $out .= "tim:\n";
+        $out .= "  %t0 = call i64 @clock()\n";
+        $out .= "  store i64 %t0, ptr @__cc_census_t0\n";
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
         $out .= "define void @__cc_census_end(i64 %freed) {\n";
@@ -3289,9 +3325,15 @@ trait EmitLlvmRuntime
         $out .= "  %f0 = load i64, ptr @__cc_census_freed\n";
         $out .= "  %f1 = add i64 %f0, %freed\n";
         $out .= "  store i64 %f1, ptr @__cc_census_freed\n";
+        $out .= "  %t1 = call i64 @clock()\n";
+        $out .= "  %t0 = load i64, ptr @__cc_census_t0\n";
+        $out .= "  %dt = sub i64 %t1, %t0\n";
+        $out .= "  %u0 = load i64, ptr @__cc_census_us\n";
+        $out .= "  %u1 = add i64 %u0, %dt\n";
+        $out .= "  store i64 %u1, ptr @__cc_census_us\n";
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
-        $out .= "define void @__cc_census_note(ptr %o) {\n";
+        $out .= "define void @__cc_census_note(ptr %tab, ptr %o) {\n";
         $out .= "entry:\n";
         $out .= "  %di = load i64, ptr %o\n";
         $out .= "  %dp = inttoptr i64 %di to ptr\n";
@@ -3304,7 +3346,7 @@ trait EmitLlvmRuntime
         $out .= "probe:\n";
         $out .= "  %h = load i64, ptr %hp\n";
         $out .= "  %ki = mul i64 %h, 2\n";
-        $out .= "  %kp = getelementptr i64, ptr @__cc_census_tab, i64 %ki\n";
+        $out .= "  %kp = getelementptr i64, ptr %tab, i64 %ki\n";
         $out .= "  %key = load i64, ptr %kp\n";
         $out .= "  %hit = icmp eq i64 %key, %id\n";
         $out .= "  %empty = icmp eq i64 %key, 0\n";
@@ -3338,7 +3380,7 @@ trait EmitLlvmRuntime
         $out .= "  %w = load i64, ptr %sp\n";
         $out .= "  %pi = and i64 %w, -2\n";
         $out .= "  %p = inttoptr i64 %pi to ptr\n";
-        $out .= "  call void @__cc_census_note(ptr %p)\n";
+        $out .= "  call void @__cc_census_note(ptr @__cc_census_tab, ptr %p)\n";
         $out .= "  %in = add i64 %i, 1\n";
         $out .= "  store i64 %in, ptr %ip\n";
         $out .= "  br label %lp\n";
@@ -3371,8 +3413,8 @@ trait EmitLlvmRuntime
         $out .= "miss:\n  ret ptr @.cc.unk\n}\n";
         $out .= "define void @__cc_census_report() {\n";
         $out .= "entry:\n";
-        // total of the table = objects that went through the garbage list
-        $out .= "  %kk = alloca i64\n  %j = alloca i64\n  %best = alloca i64\n  %bestc = alloca i64\n  %tot = alloca i64\n";
+        // total of the garbage table = objects that went through the garbage list
+        $out .= "  %j = alloca i64\n  %tot = alloca i64\n";
         $out .= "  store i64 0, ptr %tot\n  store i64 0, ptr %j\n";
         $out .= "  br label %sum\n";
         $out .= "sum:\n";
@@ -3395,7 +3437,18 @@ trait EmitLlvmRuntime
         $out .= "  %roots = load i64, ptr @__cc_census_roots\n";
         $out .= "  %freed = load i64, ptr @__cc_census_freed\n";
         $out .= "  %total = load i64, ptr %tot\n";
-        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.hdr, i64 %runs, i64 %roots, i64 %freed, i64 %total)\n";
+        $out .= "  %us = load i64, ptr @__cc_census_us\n";
+        $out .= "  %ms = sdiv i64 %us, 1000\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.hdr, i64 %runs, i64 %roots, i64 %freed, i64 %total, i64 %ms)\n";
+        $out .= "  call void @__cc_census_top(ptr @__cc_census_tab)\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.rhdr)\n";
+        $out .= "  call void @__cc_census_top(ptr @__cc_census_rtab)\n";
+        $out .= "  ret void\n}\n";
+        // the 15 biggest rows of a table, largest first; `*` = a cyclic class,
+        // `-` = one `cc_add_root` never buffers
+        $out .= "define void @__cc_census_top(ptr %tab) {\n";
+        $out .= "entry:\n";
+        $out .= "  %kk = alloca i64\n  %j = alloca i64\n  %best = alloca i64\n  %bestc = alloca i64\n";
         $out .= "  store i64 0, ptr %kk\n";
         $out .= "  br label %outer\n";
         $out .= "outer:\n";
@@ -3411,7 +3464,7 @@ trait EmitLlvmRuntime
         $out .= "  br i1 %jgo, label %scanb, label %scand\n";
         $out .= "scanb:\n";
         $out .= "  %ci = mul i64 %j1, 2\n";
-        $out .= "  %cp0 = getelementptr i64, ptr @__cc_census_tab, i64 %ci\n";
+        $out .= "  %cp0 = getelementptr i64, ptr %tab, i64 %ci\n";
         $out .= "  %cp = getelementptr i64, ptr %cp0, i64 1\n";
         $out .= "  %c = load i64, ptr %cp\n";
         $out .= "  %bc = load i64, ptr %bestc\n";
@@ -3431,17 +3484,185 @@ trait EmitLlvmRuntime
         $out .= "emit:\n";
         $out .= "  %bi = load i64, ptr %best\n";
         $out .= "  %bki = mul i64 %bi, 2\n";
-        $out .= "  %bkp = getelementptr i64, ptr @__cc_census_tab, i64 %bki\n";
+        $out .= "  %bkp = getelementptr i64, ptr %tab, i64 %bki\n";
         $out .= "  %bid = load i64, ptr %bkp\n";
         $out .= "  %bcp = getelementptr i64, ptr %bkp, i64 1\n";
         $out .= "  store i64 0, ptr %bcp\n";
         $out .= "  %nm = call ptr @__cc_census_name(i64 %bid)\n";
-        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.row, i64 %bcf, i64 %bid, ptr %nm)\n";
+        $out .= "  %tr = call i1 @__manticore_cc_cyclic(i64 %bid)\n";
+        $out .= "  %trc = select i1 %tr, i32 42, i32 45\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.row, i64 %bcf, i64 %bid, i32 %trc, ptr %nm)\n";
         $out .= "  %k1 = add i64 %k, 1\n";
         $out .= "  store i64 %k1, ptr %kk\n";
         $out .= "  br label %outer\n";
         $out .= "fin:\n  ret void\n}\n";
         return $out;
+    }
+    /**
+     * What the cycle collector follows through property `$pn` of `$cls`: 'obj'
+     * (a direct rc object handle), the name of the walker it calls for a
+     * native buffer / closure / cell slot, or '' (not a collector edge). The
+     * child walker and {@see ccCyclicClassIds} both ask here, so the analysis
+     * sees exactly the edges MarkGray walks.
+     */
+    private function ccChildSlot(\Compile\Mir\ClassDef $cls, string $pn): string
+    {
+        $bw = $this->ccBufWalker($cls, $pn);
+        if ($bw !== '') { return $bw; }
+        $pt = $cls->propertyTypes[$pn] ?? null;
+        if ($pt === null) { return ''; }
+        if ($this->isClosureValueType($pt)) { return '@__cc_closure_walk'; }
+        $fl = $this->discardReleaseFlavor($pt);
+        if ($fl === 'cell') { return '@__cc_cellclo_walk'; }
+        return $fl === 'obj' ? 'obj' : '';
+    }
+
+    /**
+     * Class ids whose objects can lie on a cycle the collector can find: the
+     * classes on a cycle of the class graph, whose edges are the collector's
+     * own ({@see ccChildSlot}). A slot typed `X` reaches X and every class
+     * below it (parent, interface, reified origin); a cell whose declared type
+     * admits no object is no edge; a closure, other cell, buffer,
+     * `object` slot or a name this module does not know reaches every class.
+     * An object of any other class is never a cycle member — MarkGray from it
+     * cannot come back to it — so `cc_add_root` need not buffer it (Bacon-Rajan's
+     * green objects, php's GC_NOT_COLLECTABLE). Decided over the classes of
+     * the module that emits the collector, as the walker is: a class it does
+     * not list has no walker, so it is no edge to the collector either.
+     *
+     * @return array<int, bool>
+     */
+    private function ccCyclicClassIds(): array
+    {
+        /** @var array<string, int> */
+        $tnode = [];
+        /** @var array<int, int[]> */
+        $adj = [[]];
+        $n = 1; // node 0 = ANY
+        /** @var array<string, int> */
+        $cnode = [];
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            $cnode[$cls->name] = $n;
+            $adj[$n] = [];
+            $n = $n + 1;
+            $adj[0][] = $cnode[$cls->name];
+        }
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            $sups = $cls->interfaces;
+            if ($cls->parent !== '') { $sups[] = $cls->parent; }
+            if ($cls->originClass !== '') { $sups[] = $cls->originClass; }
+            $self = \strtolower($cls->name);
+            if (!isset($tnode[$self])) { $tnode[$self] = $n; $adj[$n] = []; $n = $n + 1; }
+            $adj[$tnode[$self]][] = $cnode[$cls->name];
+            foreach ($sups as $sup) {
+                $k = \strtolower(\ltrim($sup, '\\'));
+                if (!isset($tnode[$k])) { $tnode[$k] = $n; $adj[$n] = []; $n = $n + 1; }
+                $adj[$tnode[$k]][] = $tnode[$self];
+            }
+        }
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            $from = $cnode[$cls->name];
+            foreach ($cls->propertyNames as $pn) {
+                $slot = $this->ccChildSlot($cls, $pn);
+                if ($slot === '') { continue; }
+                // A cell the declared type keeps objects (closures too) out of walks nothing.
+                if ($slot === '@__cc_cellclo_walk' && ($cls->propertyNeverObject[$pn] ?? false)) { continue; }
+                $to = 0;
+                if ($slot === 'obj') {
+                    $pt = $cls->propertyTypes[$pn] ?? null;
+                    $k = $pt === null ? '' : \strtolower(\ltrim($pt->class ?? '', '\\'));
+                    if ($k === 'self' || $k === 'static') { $k = \strtolower($this->ccPropRootClass($cls, $pn)); }
+                    if ($k !== '' && $k !== 'stringable' && $k !== 'traversable' && isset($tnode[$k])) {
+                        $to = $tnode[$k];
+                    }
+                }
+                $adj[$from][] = $to;
+            }
+        }
+        // Tarjan, iterative: a C node is cyclic iff its component has > 1 node
+        // (a class node has no self edge — its edges go to type nodes).
+        /** @var int[] */
+        $index = \array_fill(0, $n, -1);
+        /** @var int[] */
+        $low = \array_fill(0, $n, 0);
+        /** @var bool[] */
+        $onStack = \array_fill(0, $n, false);
+        /** @var int[] */
+        $comp = \array_fill(0, $n, -1);
+        /** @var int[] */
+        $compSize = [];
+        /** @var int[] */
+        $stack = [];
+        $next = 0;
+        for ($root = 0; $root < $n; $root++) {
+            if ($index[$root] !== -1) { continue; }
+            /** @var int[] */
+            $work = [$root];
+            /** @var int[] */
+            $pos = [0];
+            $index[$root] = $next; $low[$root] = $next; $next = $next + 1;
+            $stack[] = $root; $onStack[$root] = true;
+            while (\count($work) > 0) {
+                $top = \count($work) - 1;
+                $v = $work[$top];
+                $i = $pos[$top];
+                if ($i < \count($adj[$v])) {
+                    $pos[$top] = $i + 1;
+                    $w = $adj[$v][$i];
+                    if ($index[$w] === -1) {
+                        $index[$w] = $next; $low[$w] = $next; $next = $next + 1;
+                        $stack[] = $w; $onStack[$w] = true;
+                        $work[] = $w; $pos[] = 0;
+                    } elseif ($onStack[$w] && $index[$w] < $low[$v]) {
+                        $low[$v] = $index[$w];
+                    }
+                    continue;
+                }
+                \array_pop($work);
+                \array_pop($pos);
+                if (\count($work) > 0) {
+                    $u = $work[\count($work) - 1];
+                    if ($low[$v] < $low[$u]) { $low[$u] = $low[$v]; }
+                }
+                if ($low[$v] === $index[$v]) {
+                    $c = \count($compSize);
+                    $size = 0;
+                    do {
+                        $w = \array_pop($stack);
+                        $onStack[$w] = false;
+                        $comp[$w] = $c;
+                        $size = $size + 1;
+                    } while ($w !== $v);
+                    $compSize[] = $size;
+                }
+            }
+        }
+        /** @var array<int, bool> */
+        $out = [];
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            if ($compSize[$comp[$cnode[$cls->name]]] > 1) { $out[$cls->classId] = true; }
+        }
+        return $out;
+    }
+    /**
+     * The topmost ancestor of `$cls` that lists property `$pn`: what a `self` /
+     * `static` slot type of it may hold is that class or below. A redeclaring
+     * subclass only narrows that, so the answer stays an upper bound.
+     */
+    private function ccPropRootClass(\Compile\Mir\ClassDef $cls, string $pn): string
+    {
+        $root = $cls->name;
+        $c = $cls->parent;
+        while ($c !== '' && isset($this->classes[$c])) {
+            $cd = $this->classes[$c];
+            if (\in_array($pn, $cd->propertyNames, true)) { $root = $cd->name; }
+            $c = $cd->parent;
+        }
+        return $root;
     }
     /**
      * The cycle-collector walker of a native-buffer slot: `@__cc_hmap_walk` for
@@ -3747,6 +3968,7 @@ end:
         $GRAY   = (string)\Compile\MemoryAbi::COLOR_GRAY;
         $WHITE  = (string)\Compile\MemoryAbi::COLOR_WHITE;
         $BLACK  = (string)\Compile\MemoryAbi::COLOR_BLACK;
+        $GREEN  = (string)\Compile\MemoryAbi::COLOR_GREEN;
 
         $out = "\n; ── Bacon-Rajan cycle collector ──\n";
         // linkonce_odr: cycle-collector root buffer is shared mutable state;
@@ -3879,9 +4101,22 @@ end:
             $out .= "noact:\n";
         }
         $out .= "  %isp = icmp eq i64 %col, " . $PURPLE . "\n";
-        $out .= "  br i1 %isp, label %purplec, label %mark\n";
+        $out .= "  br i1 %isp, label %purplec, label %notp\n";
         $out .= "purplec:\n";
         $out .= $this->profBump(63);
+        $out .= "  br label %done\n";
+        $out .= "notp:\n";
+        $out .= "  %isgr = icmp eq i64 %col, " . $GREEN . "\n";
+        $out .= "  br i1 %isgr, label %done, label %cyc\n";
+        // An object of an acyclic class is never a cycle member: green, unbuffered.
+        $out .= "cyc:\n";
+        $out .= "  %cdesc = load i64, ptr %s\n";
+        $out .= "  %cdescp = inttoptr i64 %cdesc to ptr\n";
+        $out .= "  %cid = load i64, ptr %cdescp\n";
+        $out .= "  %iscyc = call i1 @__manticore_cc_cyclic(i64 %cid)\n";
+        $out .= "  br i1 %iscyc, label %mark, label %green\n";
+        $out .= "green:\n";
+        $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $GREEN . ")\n";
         $out .= "  br label %done\n";
         $out .= "mark:\n";
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $PURPLE . ")\n";
@@ -3992,34 +4227,16 @@ end:
             $body = '';
             $k = 0;
             foreach ($cls->propertyNames as $pn) {
-                $bw = $this->ccBufWalker($cls, $pn);
-                if ($bw !== '') {
+                $slot = $this->ccChildSlot($cls, $pn);
+                if ($slot === '') { continue; }
+                if ($slot !== 'obj') {
                     $s = (string)$k;
                     $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
                     $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
-                    $body .= '  call void ' . $bw . '(i64 %v' . $s . ", i64 %a)\n";
+                    $body .= '  call void ' . $slot . '(i64 %v' . $s . ", i64 %a)\n";
                     $k = $k + 1;
                     continue;
                 }
-                $pt = $cls->propertyTypes[$pn] ?? null;
-                if ($pt === null) { continue; }
-                if ($this->isClosureValueType($pt)) {
-                    $s = (string)$k;
-                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
-                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
-                    $body .= '  call void @__cc_closure_walk(i64 %v' . $s . ', i64 %a)' . "\n";
-                    $k = $k + 1;
-                    continue;
-                }
-                if ($this->discardReleaseFlavor($pt) === 'cell') {
-                    $s = (string)$k;
-                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
-                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
-                    $body .= '  call void @__cc_cellclo_walk(i64 %v' . $s . ', i64 %a)' . "\n";
-                    $k = $k + 1;
-                    continue;
-                }
-                if ($this->discardReleaseFlavor($pt) !== 'obj') { continue; }
                 $s = (string)$k;
                 $off = (string)$cls->propertyOffset($pn);
                 $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . $off . "\n";
@@ -4078,6 +4295,18 @@ end:
             $out .= "  switch i64 %cid, label %end [\n" . $cases . "  ]\n";
             $out .= $dispatch;
             $out .= "end:\n  ret void\n}\n";
+        }
+        // 1 = objects of the class can be cycle members ({@see ccCyclicClassIds}).
+        $cyc = '';
+        foreach ($this->ccCyclicClassIds() as $cid => $_) {
+            $cyc .= '    i64 ' . (string)$cid . ", label %yes\n";
+        }
+        $out .= "define i1 @__manticore_cc_cyclic(i64 %cid) {\nentry:\n";
+        if ($cyc === '') {
+            $out .= "  ret i1 0\n}\n";
+        } else {
+            $out .= "  switch i64 %cid, label %no [\n" . $cyc . "  ]\n";
+            $out .= "yes:\n  ret i1 1\nno:\n  ret i1 0\n}\n";
         }
 
         // ── per-class NON-OBJ (string/vec/assoc) prop drop (white free path) ──
