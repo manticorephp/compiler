@@ -270,6 +270,13 @@ tier/trait_two_users.php:2: error[undefined.function]: function missing_via_trai
 front end: 1 error(s), 0 warning(s)
 == tier_exit_bare
 rc=0
+== tier_string_not_callable
+rc=65
+tier/string_not_callable.php:10: error[undefined.function]: function missing_sd() is not declared (reachable: sd <- __main)
+tier/string_not_callable.php:2: warning[undefined.function]: function missing_from_string_named() is not declared
+tier/string_not_callable.php:3: error[undefined.function]: function missing_cb_fn() is not declared (reachable: cb <- __closure_8 <- __main)
+tier/string_not_callable.php:5: error[undefined.function]: function missing_hk() is not declared (reachable: hk <- __closure_9 <- __main)
+front end: 3 error(s), 1 warning(s)
 == tier_reachable_new_allow_traps
 rc=0
 tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared
@@ -413,7 +420,7 @@ rc=0
 reach: __closure_0
 reach: __main
 reach: byRef
-reach: fa
+reach?: fa
 reach?: unrelated
 == reach_byref_arg_class
 rc=0

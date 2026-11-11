@@ -99,6 +99,8 @@ final class Reachability
     private array $dynClassRefs = [];
     /** @var array<int, array{string, string, string}> runtime-class `$cls::m()` arms met at the static level: replayed once the dynamic level starts */
     private array $deferredArms = [];
+    /** @var array<int, array{string, string}> string literals met at the static level outside a callable position: replayed at the dynamic level */
+    private array $deferredStrings = [];
     /** @var array<string, bool>|null lowercase class / interface names in use, null until first asked */
     private ?array $usedClasses = null;
     /** @var array<string, string[]> interface => every interface it extends */
@@ -190,6 +192,7 @@ final class Reachability
         $r->staticStaticCalled = $r->staticCalled;
         $r->widen = true;
         foreach ($r->deferredArms as $arm) { $r->staticCall($arm[0], $arm[1], $arm[2]); }
+        foreach ($r->deferredStrings as $ds) { $r->stringLiteral($ds[0], $ds[1]); }
         foreach ($dynRoots as $dr) { $r->enqueue($dr, ''); }
         if (isset($r->pending['fns'])) { $r->reachNameableFns(''); }
         if (isset($r->pending['methods'])) { $r->reachAllMethods(''); }
@@ -594,6 +597,50 @@ final class Reachability
         if ($cc !== false && $cc > 0) { $this->staticCall(\substr($s, 0, $cc), \substr($s, $cc + 2), $from); }
     }
 
+    /**
+     * Argument positions of a PHP builtin that take a callable (-1: every argument, the `u*diff` / `u*intersect`
+     * family whose callbacks trail the arrays).
+     * @return int[]
+     */
+    private static function builtinCallableArgs(string $fn): array
+    {
+        $f = \strtolower(\ltrim($fn, '\\'));
+        if ($f === 'call_user_func' || $f === 'call_user_func_array' || $f === 'is_callable' || $f === 'array_map'
+            || $f === 'register_shutdown_function' || $f === 'set_error_handler' || $f === 'set_exception_handler'
+            || $f === 'spl_autoload_register' || $f === 'ob_start' || $f === 'forward_static_call'
+            || $f === 'forward_static_call_array' || $f === 'header_register_callback' || $f === 'register_tick_function') { return [0]; }
+        if ($f === 'array_filter' || $f === 'array_reduce' || $f === 'array_walk' || $f === 'array_walk_recursive'
+            || $f === 'usort' || $f === 'uasort' || $f === 'uksort' || $f === 'array_find' || $f === 'array_find_key'
+            || $f === 'array_any' || $f === 'array_all' || $f === 'iterator_apply' || $f === 'preg_replace_callback') { return [1]; }
+        if (\str_starts_with($f, 'array_udiff') || \str_starts_with($f, 'array_uintersect')
+            || $f === 'array_diff_ukey' || $f === 'array_diff_uassoc' || $f === 'array_intersect_ukey' || $f === 'array_intersect_uassoc') { return [-1]; }
+        return [];
+    }
+
+    /**
+     * A string literal (or a local holding only literals) in a callable position is a static edge: an argument a builtin calls back
+     * (`$builtin` positions) or one bound to a `callable` / `Closure` parameter of `$callee`.
+     * @param Node[] $args
+     * @param int[] $builtin
+     */
+    private function callableArgs(array $args, array $builtin, ?FunctionDef $callee, string $from): void
+    {
+        $params = $callee === null ? [] : $callee->params;
+        $off = \count($params) > 0 && $params[0]->name === 'this' ? 1 : 0;
+        if (\count($builtin) === 0 && \count($params) <= $off) { return; }
+        foreach ($args as $i => $a) {
+            $hit = \in_array(-1, $builtin, true) || \in_array($i, $builtin, true);
+            if (!$hit && \count($params) > $off) {
+                $pi = \min($i + $off, \count($params) - 1);
+                $p = $params[$pi];
+                $hit = ($pi === $i + $off || $p->variadic) && $p->type->kind === Type::KIND_CLOSURE;
+            }
+            if (!$hit) { continue; }
+            if ($a->kind === Node::KIND_STRING_CONST) { $this->stringLiteral($this->asString($a)->value, $from); continue; }
+            foreach (($this->callableTargets($a, $from) ?? []) as $cs) { $this->stringLiteral($cs, $from); }
+        }
+    }
+
     /** The strings `$e` can hold, from the locals of function `$from`; null = unknown. @return array<string, bool>|null */
     private function valueSetOf(Node $e, string $from): ?array
     {
@@ -684,8 +731,12 @@ final class Reachability
                 if ($f === 'unserialize' || $f === '__mc_refl_alloc' || $f === '__mc_refl_ctor') { $this->newDynamic($from); }
                 // A synthesized dispatcher (`__mc_uninit_by_name`, …) is a dynamic edge: the dynamic roots reach it.
                 if ($this->widen || !$this->isDynamicHelper($f)) { $this->enqueue($f, $from); }
+                $ca = $this->asCall($n);
+                $this->callableArgs($ca->args, self::builtinCallableArgs($ca->function), $this->fnDefs[$f] ?? null, $from);
             } elseif ($k === Node::KIND_STRING_CONST) {
-                $this->stringLiteral($this->asString($n)->value, $from);
+                // Outside a callable position a string naming a function is no call: the dynamic level only.
+                if ($this->widen) { $this->stringLiteral($this->asString($n)->value, $from); }
+                else { $this->deferredStrings[] = [$this->asString($n)->value, $from]; }
             } elseif ($k === Node::KIND_CLOSURE) {
                 $cl = '__closure_' . (string)$this->asClosure($n)->id;
                 if (isset($this->hiddenFns[$from]) || $this->isSynthesized($from)) { $this->hiddenFns[$cl] = true; }
@@ -707,7 +758,11 @@ final class Reachability
                 if ($cls === null) { $this->newDynamic($from); }
                 else { foreach ($cls as $lc) { $this->instantiate($lc, $from); } }
             } elseif ($k === Node::KIND_METHOD_CALL) {
-                $this->demand($this->asMethodCall($n)->method, $from);
+                $mc = $this->asMethodCall($n);
+                $this->demand($mc->method, $from);
+                foreach (($this->declaringClasses[\strtolower($mc->method)] ?? []) as $dlc => $_d) {
+                    $this->callableArgs($mc->args, [], $this->fnDefs[$this->methodsOf[$dlc][\strtolower($mc->method)]] ?? null, $from);
+                }
             } elseif ($k === Node::KIND_STATIC_CALL) {
                 $sc = $this->asStaticCall($n);
                 if ($sc->dynArm) {
@@ -718,6 +773,9 @@ final class Reachability
                     continue;
                 }
                 $this->staticCall($sc->class, $sc->method, $from);
+                $scl = \strtolower(\ltrim($sc->class, '\\'));
+                $this->callableArgs($sc->args, $scl === 'closure' && \strtolower($sc->method) === 'fromcallable' ? [0] : [],
+                    $this->fnDefs[$this->methodsOf[$scl][\strtolower($sc->method)] ?? ''] ?? null, $from);
                 if ($sc->staticClass !== '' && \strtolower($sc->staticClass) !== \strtolower($sc->class)) {
                     $this->staticCall($sc->staticClass, $sc->method, $from);
                 }
@@ -751,7 +809,9 @@ final class Reachability
                             }
                         }
                     }
-                } elseif ($ck !== Node::KIND_CLOSURE && $ck !== Node::KIND_STRING_CONST) {
+                } elseif ($ck === Node::KIND_STRING_CONST) {
+                    $this->stringLiteral($this->asString($callee)->value, $from);
+                } elseif ($ck !== Node::KIND_CLOSURE) {
                     $fnsNamed = $this->callableTargets($callee, $from);
                     if ($fnsNamed === null) { $this->reachNameableFns($from); }
                     else { foreach ($fnsNamed as $s) { $this->stringLiteral($s, $from); } }
