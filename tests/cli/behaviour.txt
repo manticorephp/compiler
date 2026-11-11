@@ -197,8 +197,14 @@ tier/guard_helpers.php:29: error[undefined.class]: class Missing\Tainted is not 
 tier/guard_helpers.php:32: error[undefined.class]: class Missing\Incr is not declared (reachable: taintedVar <- __main)
 tier/guard_helpers.php:35: error[undefined.class]: class Missing\Loop is not declared (reachable: taintedVar <- __main)
 tier/guard_helpers.php:36: error[undefined.class]: class Missing\Param is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:43: warning[undefined.function]: function pol_in_arm() is not declared (guarded by on() → function_exists('pol_probe'))
+tier/guard_helpers.php:44: error[undefined.function]: function pol_rest_unguarded() is not declared (reachable: Polarity__positive <- __main)
+tier/guard_helpers.php:48: warning[undefined.function]: function pol_rest_guarded() is not declared (guarded by on() → function_exists('pol_probe'))
+tier/guard_helpers.php:52: warning[undefined.function]: function pol_rest_cmp() is not declared (guarded by on() → function_exists('pol_probe'))
+tier/guard_helpers.php:57: error[undefined.function]: function pol_fn_unguarded() is not declared (reachable: polPositive <- __main)
+tier/guard_helpers.php:61: warning[undefined.function]: function pol_fn_guarded() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
 tier/guard_helpers.php:9: warning[undefined.function]: function apcu_fetch_m() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
-front end: 6 error(s), 6 warning(s)
+front end: 8 error(s), 10 warning(s)
 == tier_static_hierarchy
 rc=0
 front end: 1 unreachable undeclared name(s) hidden (--all to list)

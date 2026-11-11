@@ -167,8 +167,26 @@ trait LowerStmts
 
     private function earlyExitGuard(\Parser\Ast\IfStmt $s): string
     {
-        $l = $this->guardLabel($s->condition);
+        $l = $this->negatedGuardLabel($s->condition);
         return ($l !== '' && $this->blockEndsInJump($s->then)) ? $l : '';
+    }
+
+    /**
+     * Guard label when the condition being TRUE means the guard is FALSE (`!guard`, `guard === false`, or
+     * a `||` with such a side): only then does an early exit leave the rest of the block guarded.
+     */
+    private function negatedGuardLabel(\Parser\Ast\Expr $e): string
+    {
+        if ($e instanceof \Parser\Ast\UnaryOp) { return $e->op === '!' ? $this->guardLabel($e->operand) : ''; }
+        if (!($e instanceof \Parser\Ast\BinaryOp)) { return ''; }
+        if ($e->op === '||') {
+            $l = $this->negatedGuardLabel($e->left);
+            return $l !== '' ? $l : $this->negatedGuardLabel($e->right);
+        }
+        if ($e->op !== '===' && $e->op !== '==') { return ''; }
+        if ($e->right instanceof \Parser\Ast\BoolLiteral && !$e->right->value) { return $this->guardLabel($e->left); }
+        if ($e->left instanceof \Parser\Ast\BoolLiteral && !$e->left->value) { return $this->guardLabel($e->right); }
+        return '';
     }
 
     /** Whether a lowered statement unconditionally leaves the block — a

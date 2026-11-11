@@ -37,3 +37,27 @@ function taintedVar(string $c, bool $p) {
 }
 (new Cache())->get(); (new Cache())->put();
 viaFn(); viaVar('x'); notHelper(); notNested(); taintedVar('x', true);
+final class Polarity {
+    public static function on(): bool { return function_exists('pol_probe'); }
+    public function positive() {
+        if (self::on()) { return pol_in_arm(); }
+        return pol_rest_unguarded();
+    }
+    public function negated() {
+        if (!self::on()) { return null; }
+        return pol_rest_guarded();
+    }
+    public function falseCmp() {
+        if (self::on() === false) { return null; }
+        return pol_rest_cmp();
+    }
+}
+function polPositive() {
+    if (has_apcu()) { return 1; }
+    return pol_fn_unguarded();
+}
+function polNegated() {
+    if (!has_apcu()) { return 1; }
+    return pol_fn_guarded();
+}
+$pl = new Polarity(); $pl->positive(); $pl->negated(); $pl->falseCmp(); polPositive(); polNegated();
