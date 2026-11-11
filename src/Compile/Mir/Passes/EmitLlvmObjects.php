@@ -9443,15 +9443,20 @@ trait EmitLlvmObjects
         foreach ($parts as $p) {
             if (!\str_starts_with($p, 'i64 ')) { $plain = false; break; }
         }
-        // A pending spread is SITE state the key does not carry: built under it the
-        // body is not closed and stays inline, and a thunk another site registered
-        // first would drop the spread. Whichever came first decided — order-dependent.
-        if (!$plain || $n < 1 || \count($cands) < 2 || $this->spreadTail !== null) {
+        if (!$plain || $n < 1 || \count($cands) < 2) {
             return $this->emitVirtualDispatchInline($thisArg, $argList, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
         }
+        // A pending `...$arr` is part of the shape: the pack comes in as one more
+        // parameter and its first index and element type go in the key. Left out,
+        // a spread site reused a plain site's thunk and dropped its tail — or the
+        // body read the site's pack register and stayed inline — whichever came first.
+        $tail = $this->spreadTail;
         $key = $this->virtualDispatchKey($n, $cands, $targets, $fallback, $method,
             $boxCell, $erasedSyms, $argOutTypes);
+        if ($tail !== null) {
+            $key .= '#sp' . (string)$tail[1] . ':' . ($tail[2] === null ? '-' : $tail[2]->exactString());
+        }
         $sym = $this->vdSyms[$key] ?? '';
         if ($sym === '') {
             $sym = $this->mirHelperSym($this->keyedHelperName('__mir_vdisp_', $key));
@@ -9467,6 +9472,10 @@ trait EmitLlvmObjects
                 $params .= 'i64 %a' . (string)$i;
                 $thunkArgs .= 'i64 %a' . (string)$i;
             }
+            if ($tail !== null) {
+                $params .= ', ptr %sp';
+                $this->spreadTail = ['%sp', $tail[1], $tail[2]];
+            }
             // Its own counters, not the requesting frame's: built on those, the body
             // took that frame's numbering and the frame lost registers only when it
             // happened to ask first, so an edit anywhere renumbered later functions.
@@ -9477,6 +9486,7 @@ trait EmitLlvmObjects
             $this->ssa->startAt(1000000000);
             $body = $this->emitVirtualDispatchInline('%a0', $thunkArgs, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
+            $this->spreadTail = $tail;
             $this->ssa = $oldSsa;
             $this->classIdReg = $oldCid;
             // ⚠ A body is only a function if it is CLOSED. Some arms reach
@@ -9497,6 +9507,7 @@ trait EmitLlvmObjects
         $r = $this->ssa->allocReg();
         $callArgs = 'i64 ' . $thisArg;
         for ($i = 1; $i < $n; $i++) { $callArgs .= ', ' . $parts[$i]; }
+        if ($tail !== null) { $callArgs .= ', ptr ' . $tail[0]; }
         $this->vdResult = $r;
         return '  ' . $r . ' = call i64 @' . $sym . '(' . $callArgs . ")\n";
     }
