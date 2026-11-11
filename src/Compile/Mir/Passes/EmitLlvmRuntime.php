@@ -2530,9 +2530,15 @@ trait EmitLlvmRuntime
         $defs = '';
         /** @var string[] class ids to register in the name→rmeta registry */
         $reflIds = [];
+        /** @var string[] id/name-pointer words for the collector's census ({@see ccCensusIr}) */
+        $ccNameWords = [];
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
             $id = (string)$cls->classId;
+            if ($this->rt->needsCc) {
+                $ccNameWords[] = 'i64 ' . $id;
+                $ccNameWords[] = 'i64 ptrtoint (ptr ' . $this->strLitId($this->pool->intern($cls->name)) . ' to i64)';
+            }
             $body = '';
             $i = 0;
             // The FREE half of the class census. Here rather than at the raw
@@ -2908,6 +2914,11 @@ trait EmitLlvmRuntime
         // stays sound. They carry no parent/method/property tables — nothing
         // reads those for a name-existence answer.
         $descs .= $this->reflNameOnlyEntries($reflIds);
+        if ($this->rt->needsCc) {
+            $descs .= '@__mir_cc_names_n = internal constant i64 ' . (string)(\count($ccNameWords) >> 1) . "\n";
+            $descs .= '@__mir_cc_names = internal constant [' . (string)\count($ccNameWords) . ' x i64] '
+                . ($ccNameWords === [] ? 'zeroinitializer' : '[' . \implode(', ', $ccNameWords) . ']') . "\n";
+        }
         // Ф5 ReflectionFunction: a metadata row + registry entry per reflected
         // free function. Its startup ctors join the SAME @llvm.global_ctors array
         // (LLVM permits only one), so they are handed to reflRegistry below.
@@ -3190,6 +3201,219 @@ trait EmitLlvmRuntime
         return $out;
     }
 
+    /**
+     * `MANTICORE_CC_STATS=1` — a census of what the cycle collector does, read at
+     * RUN time (the first collection looks the variable up once; unset, a
+     * collection costs two calls that return at once and one load). At exit it
+     * prints collections run, roots scanned, objects freed and the 15 classes
+     * with the most objects on the collector's garbage list (white cycle members
+     * and black rc-0 roots), keyed by class id and named from `@__mir_cc_names`.
+     */
+    private function ccCensusIr(): string
+    {
+        $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
+        $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+        $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        $out = "@__cc_census_inited = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_on = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_runs = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_roots = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_freed = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_tab = linkonce_odr global [8192 x i64] zeroinitializer\n";
+        $out .= "@.cc.env = private unnamed_addr constant [19 x i8] c\"MANTICORE_CC_STATS\\00\"\n";
+        $out .= "@.cc.hdr = private unnamed_addr constant [64 x i8] c\"[cc-stats] collections=%lld roots=%lld freed=%lld garbage=%lld\\0A\\00\"\n";
+        $out .= "@.cc.row = private unnamed_addr constant [22 x i8] c\"  %9lld  id=%lld  %s\\0A\\00\"\n";
+        $out .= "@.cc.unk = private unnamed_addr constant [2 x i8] c\"?\\00\"\n";
+        $out .= "define void @__cc_census_begin(i64 %roots) {\n";
+        $out .= "entry:\n";
+        $out .= "  %ini = load i64, ptr @__cc_census_inited\n";
+        $out .= "  %isi = icmp ne i64 %ini, 0\n";
+        $out .= "  br i1 %isi, label %chk, label %init\n";
+        $out .= "init:\n";
+        $out .= "  store i64 1, ptr @__cc_census_inited\n";
+        $out .= "  %e = call ptr @getenv(ptr @.cc.env)\n";
+        $out .= "  %enz = icmp ne ptr %e, null\n";
+        $out .= "  br i1 %enz, label %arm, label %chk\n";
+        $out .= "arm:\n";
+        $out .= "  store i64 1, ptr @__cc_census_on\n";
+        $out .= "  call i32 @atexit(ptr @__cc_census_report)\n";
+        $out .= "  br label %chk\n";
+        $out .= "chk:\n";
+        $out .= "  %on = load i64, ptr @__cc_census_on\n";
+        $out .= "  %ison = icmp ne i64 %on, 0\n";
+        $out .= "  br i1 %ison, label %acc, label %done\n";
+        $out .= "acc:\n";
+        $out .= "  %r0 = load i64, ptr @__cc_census_runs\n";
+        $out .= "  %r1 = add i64 %r0, 1\n";
+        $out .= "  store i64 %r1, ptr @__cc_census_runs\n";
+        $out .= "  %s0 = load i64, ptr @__cc_census_roots\n";
+        $out .= "  %s1 = add i64 %s0, %roots\n";
+        $out .= "  store i64 %s1, ptr @__cc_census_roots\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+        $out .= "define void @__cc_census_end(i64 %freed) {\n";
+        $out .= "entry:\n";
+        $out .= "  %on = load i64, ptr @__cc_census_on\n";
+        $out .= "  %ison = icmp ne i64 %on, 0\n";
+        $out .= "  br i1 %ison, label %acc, label %done\n";
+        $out .= "acc:\n";
+        $out .= "  %f0 = load i64, ptr @__cc_census_freed\n";
+        $out .= "  %f1 = add i64 %f0, %freed\n";
+        $out .= "  store i64 %f1, ptr @__cc_census_freed\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+        $out .= "define void @__cc_census_note(ptr %o) {\n";
+        $out .= "entry:\n";
+        $out .= "  %di = load i64, ptr %o\n";
+        $out .= "  %dp = inttoptr i64 %di to ptr\n";
+        $out .= "  %id = load i64, ptr %dp\n";
+        $out .= "  %hm = mul i64 %id, -7046029254386353131\n";
+        $out .= "  %h0 = lshr i64 %hm, 52\n";
+        $out .= "  %hp = alloca i64\n";
+        $out .= "  store i64 %h0, ptr %hp\n";
+        $out .= "  br label %probe\n";
+        $out .= "probe:\n";
+        $out .= "  %h = load i64, ptr %hp\n";
+        $out .= "  %ki = mul i64 %h, 2\n";
+        $out .= "  %kp = getelementptr i64, ptr @__cc_census_tab, i64 %ki\n";
+        $out .= "  %key = load i64, ptr %kp\n";
+        $out .= "  %hit = icmp eq i64 %key, %id\n";
+        $out .= "  %empty = icmp eq i64 %key, 0\n";
+        $out .= "  %take = or i1 %hit, %empty\n";
+        $out .= "  br i1 %take, label %bump, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %hn = add i64 %h, 1\n";
+        $out .= "  %hw = and i64 %hn, 4095\n";
+        $out .= "  store i64 %hw, ptr %hp\n";
+        $out .= "  br label %probe\n";
+        $out .= "bump:\n";
+        $out .= "  store i64 %id, ptr %kp\n";
+        $out .= "  %cp = getelementptr i64, ptr %kp, i64 1\n";
+        $out .= "  %c0 = load i64, ptr %cp\n";
+        $out .= "  %c1 = add i64 %c0, 1\n";
+        $out .= "  store i64 %c1, ptr %cp\n";
+        $out .= "  ret void\n}\n";
+        $out .= "define void @__cc_census_garbage() {\n";
+        $out .= "entry:\n";
+        $out .= "  %ip = alloca i64\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %lp\n";
+        $out .= "lp:\n";
+        $out .= "  %i = load i64, ptr %ip\n";
+        $out .= "  %n = load i64, ptr @__manticore_cc_gcount\n";
+        $out .= "  %go = icmp slt i64 %i, %n\n";
+        $out .= "  br i1 %go, label %body, label %done\n";
+        $out .= "body:\n";
+        $out .= "  %buf = load ptr, ptr @__manticore_cc_garbage\n";
+        $out .= "  %sp = getelementptr i64, ptr %buf, i64 %i\n";
+        $out .= "  %w = load i64, ptr %sp\n";
+        $out .= "  %pi = and i64 %w, -2\n";
+        $out .= "  %p = inttoptr i64 %pi to ptr\n";
+        $out .= "  call void @__cc_census_note(ptr %p)\n";
+        $out .= "  %in = add i64 %i, 1\n";
+        $out .= "  store i64 %in, ptr %ip\n";
+        $out .= "  br label %lp\n";
+        $out .= "done:\n  ret void\n}\n";
+        $out .= "define ptr @__cc_census_name(i64 %id) {\n";
+        $out .= "entry:\n";
+        $out .= "  %n = load i64, ptr @__mir_cc_names_n\n";
+        $out .= "  %ip = alloca i64\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %lp\n";
+        $out .= "lp:\n";
+        $out .= "  %i = load i64, ptr %ip\n";
+        $out .= "  %go = icmp slt i64 %i, %n\n";
+        $out .= "  br i1 %go, label %body, label %miss\n";
+        $out .= "body:\n";
+        $out .= "  %ki = mul i64 %i, 2\n";
+        $out .= "  %kp = getelementptr i64, ptr @__mir_cc_names, i64 %ki\n";
+        $out .= "  %key = load i64, ptr %kp\n";
+        $out .= "  %eq = icmp eq i64 %key, %id\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= "  %vp = getelementptr i64, ptr %kp, i64 1\n";
+        $out .= "  %v = load i64, ptr %vp\n";
+        $out .= "  %np = inttoptr i64 %v to ptr\n";
+        $out .= "  ret ptr %np\n";
+        $out .= "cont:\n";
+        $out .= "  %in = add i64 %i, 1\n";
+        $out .= "  store i64 %in, ptr %ip\n";
+        $out .= "  br label %lp\n";
+        $out .= "miss:\n  ret ptr @.cc.unk\n}\n";
+        $out .= "define void @__cc_census_report() {\n";
+        $out .= "entry:\n";
+        // total of the table = objects that went through the garbage list
+        $out .= "  %kk = alloca i64\n  %j = alloca i64\n  %best = alloca i64\n  %bestc = alloca i64\n  %tot = alloca i64\n";
+        $out .= "  store i64 0, ptr %tot\n  store i64 0, ptr %j\n";
+        $out .= "  br label %sum\n";
+        $out .= "sum:\n";
+        $out .= "  %sj = load i64, ptr %j\n";
+        $out .= "  %sgo = icmp slt i64 %sj, 4096\n";
+        $out .= "  br i1 %sgo, label %sumb, label %hdr\n";
+        $out .= "sumb:\n";
+        $out .= "  %sci = mul i64 %sj, 2\n";
+        $out .= "  %scp0 = getelementptr i64, ptr @__cc_census_tab, i64 %sci\n";
+        $out .= "  %scp = getelementptr i64, ptr %scp0, i64 1\n";
+        $out .= "  %sc = load i64, ptr %scp\n";
+        $out .= "  %st = load i64, ptr %tot\n";
+        $out .= "  %st1 = add i64 %st, %sc\n";
+        $out .= "  store i64 %st1, ptr %tot\n";
+        $out .= "  %sj1 = add i64 %sj, 1\n";
+        $out .= "  store i64 %sj1, ptr %j\n";
+        $out .= "  br label %sum\n";
+        $out .= "hdr:\n";
+        $out .= "  %runs = load i64, ptr @__cc_census_runs\n";
+        $out .= "  %roots = load i64, ptr @__cc_census_roots\n";
+        $out .= "  %freed = load i64, ptr @__cc_census_freed\n";
+        $out .= "  %total = load i64, ptr %tot\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.hdr, i64 %runs, i64 %roots, i64 %freed, i64 %total)\n";
+        $out .= "  store i64 0, ptr %kk\n";
+        $out .= "  br label %outer\n";
+        $out .= "outer:\n";
+        $out .= "  %k = load i64, ptr %kk\n";
+        $out .= "  %kgo = icmp slt i64 %k, 15\n";
+        $out .= "  br i1 %kgo, label %pick, label %fin\n";
+        $out .= "pick:\n";
+        $out .= "  store i64 -1, ptr %best\n  store i64 0, ptr %bestc\n  store i64 0, ptr %j\n";
+        $out .= "  br label %scan\n";
+        $out .= "scan:\n";
+        $out .= "  %j1 = load i64, ptr %j\n";
+        $out .= "  %jgo = icmp slt i64 %j1, 4096\n";
+        $out .= "  br i1 %jgo, label %scanb, label %scand\n";
+        $out .= "scanb:\n";
+        $out .= "  %ci = mul i64 %j1, 2\n";
+        $out .= "  %cp0 = getelementptr i64, ptr @__cc_census_tab, i64 %ci\n";
+        $out .= "  %cp = getelementptr i64, ptr %cp0, i64 1\n";
+        $out .= "  %c = load i64, ptr %cp\n";
+        $out .= "  %bc = load i64, ptr %bestc\n";
+        $out .= "  %gt = icmp sgt i64 %c, %bc\n";
+        $out .= "  br i1 %gt, label %setb, label %scann\n";
+        $out .= "setb:\n";
+        $out .= "  store i64 %c, ptr %bestc\n  store i64 %j1, ptr %best\n";
+        $out .= "  br label %scann\n";
+        $out .= "scann:\n";
+        $out .= "  %j2 = add i64 %j1, 1\n";
+        $out .= "  store i64 %j2, ptr %j\n";
+        $out .= "  br label %scan\n";
+        $out .= "scand:\n";
+        $out .= "  %bcf = load i64, ptr %bestc\n";
+        $out .= "  %none = icmp eq i64 %bcf, 0\n";
+        $out .= "  br i1 %none, label %fin, label %emit\n";
+        $out .= "emit:\n";
+        $out .= "  %bi = load i64, ptr %best\n";
+        $out .= "  %bki = mul i64 %bi, 2\n";
+        $out .= "  %bkp = getelementptr i64, ptr @__cc_census_tab, i64 %bki\n";
+        $out .= "  %bid = load i64, ptr %bkp\n";
+        $out .= "  %bcp = getelementptr i64, ptr %bkp, i64 1\n";
+        $out .= "  store i64 0, ptr %bcp\n";
+        $out .= "  %nm = call ptr @__cc_census_name(i64 %bid)\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.row, i64 %bcf, i64 %bid, ptr %nm)\n";
+        $out .= "  %k1 = add i64 %k, 1\n";
+        $out .= "  store i64 %k1, ptr %kk\n";
+        $out .= "  br label %outer\n";
+        $out .= "fin:\n  ret void\n}\n";
+        return $out;
+    }
     /**
      * The cycle-collector walker of a native-buffer slot: `@__cc_hmap_walk` for
      * the table behind Manticore\Ds\Map / Set, `@__cc_nbuf_walk` for a
@@ -3525,6 +3749,7 @@ end:
 
         $out .= $this->ccDropDeadIr();
         $out .= $this->ccAutoGcIr();
+        $out .= $this->ccCensusIr();
 
         // ── header-word accessors (rc word @ ptr+8) ──
         $out .= "define i64 @__cc_color(ptr %s) {\n";
@@ -4081,6 +4306,7 @@ end:
         $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
         $out .= $this->ccTrace('begin', 'i64 %cnt, ptr %buf');
+        $out .= "  call void @__cc_census_begin(i64 %cnt)\n";
         $out .= "  %ip = alloca i64\n";
         $out .= "  %wp = alloca i64\n";
         $out .= "  store i64 0, ptr %ip\n";
@@ -4223,6 +4449,13 @@ end:
         $out .= "  store i64 %dqn, ptr %ip\n";
         $out .= "  br label %dq\n";
         $out .= "dqd:\n";
+        $out .= "  %cson = load i64, ptr @__cc_census_on\n";
+        $out .= "  %csyes = icmp ne i64 %cson, 0\n";
+        $out .= "  br i1 %csyes, label %csrun, label %csgo\n";
+        $out .= "csrun:\n";
+        $out .= "  call void @__cc_census_garbage()\n";
+        $out .= "  br label %csgo\n";
+        $out .= "csgo:\n";
         $out .= "  store i64 0, ptr %ip\n";
         $out .= "  br label %gr\n";
         $out .= "gr:\n";
@@ -4249,6 +4482,7 @@ end:
         $out .= "  store i64 0, ptr @__manticore_cc_count\n";
         $out .= "  store i64 0, ptr @__manticore_cc_active\n";
         $out .= "  %freed = load i64, ptr @__manticore_cc_freed\n";
+        $out .= "  call void @__cc_census_end(i64 %freed)\n";
         $out .= "  ret i64 %freed\n";
         $out .= "}\n";
         return $out;

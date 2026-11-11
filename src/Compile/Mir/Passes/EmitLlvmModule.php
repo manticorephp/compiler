@@ -661,6 +661,12 @@ trait EmitLlvmModule
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
             $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
         }
+        // The collector's MANTICORE_CC_STATS census ({@see ccCensusIr}).
+        if ($this->rt->needsCc) {
+            $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
+            $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        }
         $decls = $this->rt->libcDecls(\Compile\Debug::$verify);
         foreach ($this->libcExtra as $sym => $line) { $decls[$sym] = $line; }
         foreach ($this->rtExterns as $sym => $line) { $decls[$sym] = $line; }
