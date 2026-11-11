@@ -145,8 +145,12 @@ run_one() {
     # compared across parts (internal closures are copied per part) only breaks there.
     local splitenv=(env)
     if grep -rqs '@split' "$src"; then splitenv=(env MANTICORE_SPLIT_JOBS=4); fi
+    # A case that declares `@allow-undefined-traps` tests the runtime trap of an undeclared name on a
+    # reachable site, which the build otherwise refuses.
+    local trapargs=()
+    if grep -rqs '@allow-undefined-traps' "$src"; then trapargs=(--allow-undefined-traps); fi
     mc_limit "$COMPILE_TIMEOUT" \
-        "${splitenv[@]}" "$MANTICORE" compile $BACKEND_ARGS -O"$OPT" "$src" -o "$bin" > "$stderr_log" 2>&1 || crc=$?
+        "${splitenv[@]}" "$MANTICORE" compile $BACKEND_ARGS ${trapargs[@]+"${trapargs[@]}"} -O"$OPT" "$src" -o "$bin" > "$stderr_log" 2>&1 || crc=$?
     if [[ $crc -ne 0 ]]; then
         if [[ $crc -eq 124 ]]; then
             printf 'FAIL %s  (compile TIMEOUT >%ss)\n' "$name" "$COMPILE_TIMEOUT"
