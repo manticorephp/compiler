@@ -278,7 +278,8 @@ final class CompileCommand extends Command
         $rc2 = \Manticore\system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
         // Cached library flags may predate a change on the host: probe again, once.
         if ($rc2 !== 0 && \Manticore\link_flags_forget()) {
-            $linkExtra = $preLib . \Manticore\ffi_link_flags($libs);
+            // Probed directly: a cache entry that could not be removed would hand back the same flags.
+            $linkExtra = $preLib . \Manticore\ffi_link_flags_probe($libs);
             $rc2 = \Manticore\system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
         }
         \Compile\Stats::step('link', $linkT, -1, -1);

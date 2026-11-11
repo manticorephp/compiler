@@ -101,6 +101,12 @@ linkdir="$(dirname "$MANTICORE_OBJ_CACHE_DIR")/link"
 if ls "$linkdir"/*.txt >/dev/null 2>&1; then
     for lf in "$linkdir"/*.txt; do printf ' -lmanticore_no_such_library' > "$lf"; done
     compile arrays_sort relink && expect "stale cached link flags: probed again and linked" '! grep -q manticore_no_such_library "$linkdir"/*.txt'
+    # The same with an entry that cannot be removed: the retry must not read it back.
+    compile arrays_sort relink_seed >/dev/null
+    for lf in "$linkdir"/*.txt; do printf ' -lmanticore_no_such_library' > "$lf"; done
+    chmod a-w "$linkdir"
+    compile arrays_sort relink_ro && expect "stale entry in a read-only link cache: still links" 'true'
+    chmod u+w "$linkdir"
 else
     echo "FAIL link flags were not cached"; fail=1
 fi
