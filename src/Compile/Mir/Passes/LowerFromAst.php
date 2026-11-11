@@ -1438,6 +1438,9 @@ final class LowerFromAst implements Pass
         $this->pendingSynthFns = [];
 
         $mainStmts = [];
+        /** @var string[] $mainGuards early-exit guards of earlier top-level statements, up to the next label */
+        $mainGuards = [];
+        $mainDead = false;
         $mainFile = '';
         $stmtIdx = 0;
         $measureLower = \Compile\Stats::$on;
@@ -1527,7 +1530,7 @@ final class LowerFromAst implements Pass
             $this->currentLowerClass = '';
             $this->currentLowerFn = '';
             $this->currentFnSym = '';
-            $this->guardStack = [];
+            $this->guardStack = $mainGuards;
             $this->guardLocals = [];
             $this->currentLowerFnHasThis = false;
         $this->currentTypeParams = [];
@@ -1537,8 +1540,17 @@ final class LowerFromAst implements Pass
             $lowerStart = $measureLower ? \Compile\Stats::now() : 0;
             $this->lowerInMain = true;
             if ($stmt->span->file !== '') { $module->loweringFile = $stmt->span->file; $mainFile = $stmt->span->file; }
+            // `if (!extension_loaded('x')) { return; }` guards the rest of the file (an include's `return` is a
+            // jump to its end label, where the guard stops); an `exit` guards the rest of the program. After an
+            // unconditional terminator (a folded guard) nothing runs up to the next label, as in a block.
+            if ($stmt->kind === 'Label') { $mainGuards = []; $this->guardStack = []; $mainDead = false; }
+            if ($mainDead) { $this->lowerInMain = false; continue; }
+            $eg = $stmt->kind === 'If' && !$isPrelude ? $this->earlyExitGuard($stmt) : '';
             try {
-                $mainStmts[] = $this->lowerStmt($stmt);
+                $lowered = $this->lowerStmt($stmt);
+                $mainStmts[] = $lowered;
+                if ($eg !== '') { $mainGuards[] = $eg; }
+                if (!$isPrelude && $this->nodeAlwaysTerminates($lowered)) { $mainDead = true; }
             } catch (\Throwable $e) {
                 if ($this->diags === null) { throw $e; }
                 $this->recoverLowering($e, 'statement', $stmt->span);
@@ -4889,7 +4901,14 @@ final class LowerFromAst implements Pass
         if ($n === 0) { return false; }
         $k = $b->statements[$n - 1]->kind;
         if ($k === 'Return' || $k === 'Throw' || $k === 'Break' || $k === 'Continue') { return true; }
+        // A file-level `return` rewritten to a jump past the file (Main.php `__mc_rewrite_file_returns`).
+        if ($k === 'Goto') { return \str_starts_with($this->gotoLabel($b->statements[$n - 1]), '__mc_eof_'); }
         return $k === 'Expression' && $this->stmtIsExit($b->statements[$n - 1]);
+    }
+
+    private function gotoLabel(\Parser\Ast\GotoStmt $g): string
+    {
+        return $g->label;
     }
 
     private function stmtIsExit(\Parser\Ast\ExpressionStmt $s): bool

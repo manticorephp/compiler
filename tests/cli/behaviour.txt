@@ -117,6 +117,10 @@ front end: 1 error(s), 0 warning(s)
 rc=65
 unit_top_level/src/u.php:3: error[undefined.class]: class Missing\U is not declared (reachable: __mc_unit_0)
 front end: 1 error(s), 0 warning(s)
+== check_unit_guard
+rc=0
+unit_guard/src/g.php:4: warning[undefined.class]: class Missing\UG is not declared (guarded by defined('UNIT_GUARD'))
+front end: 0 error(s), 1 warning(s)
 == check_allow_undefined_exact
 rc=65
 allow_undefined/src/main.php:2: warning[undefined.class]: class Missing\Alpha is not declared
@@ -277,6 +281,12 @@ tier/string_not_callable.php:2: warning[undefined.function]: function missing_fr
 tier/string_not_callable.php:3: error[undefined.function]: function missing_cb_fn() is not declared (reachable: cb <- __closure_8 <- __main)
 tier/string_not_callable.php:5: error[undefined.function]: function missing_hk() is not declared (reachable: hk <- __closure_9 <- __main)
 front end: 3 error(s), 1 warning(s)
+== tier_toplevel_return_guard
+rc=0
+tier/toplevel_return_guard.php:4: warning[undefined.class]: class Missing\Q is not declared (guarded by class_exists(...))
+front end: 0 error(s), 1 warning(s)
+== tier_toplevel_exit_guard
+rc=0
 == tier_reachable_new_allow_traps
 rc=0
 tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared

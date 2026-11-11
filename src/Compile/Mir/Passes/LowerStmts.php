@@ -212,17 +212,24 @@ trait LowerStmts
     }
 
     /** Whether a lowered statement unconditionally leaves the block — a
-     *  `return` / `throw`, or a block ending in one (a folded static guard). */
+     *  `return` / `throw` / `exit`, or a block ending in one (a folded static guard). */
     private function nodeAlwaysTerminates(Node $n): bool
     {
         $k = $n->kind;
         if ($k === Node::KIND_RETURN || $k === Node::KIND_THROW) { return true; }
+        if ($k === Node::KIND_CALL) { return $this->callIsExitNode($n); }
         if ($k === Node::KIND_BLOCK) {
             $ss = $n->stmts;
             $c = \count($ss);
             return $c > 0 && $this->nodeAlwaysTerminates($ss[$c - 1]);
         }
         return false;
+    }
+
+    private function callIsExitNode(Call $c): bool
+    {
+        $f = \strtolower($c->function);
+        return $f === 'exit' || $f === 'die';
     }
 
     private function lowerStmt(\Parser\Ast\Stmt $stmt): Node
