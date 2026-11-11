@@ -1026,6 +1026,14 @@ final class SplitModule
             $header[] = $bare;
         }
 
+        // A stable split is a function of the module's CONTENT, not of the order it was
+        // written in: parallel emission writes the same definitions in another order, and
+        // an object cache keyed by part text should not care either.
+        if ($this->stable) {
+            \sort($defOrder, SORT_STRING);
+            \sort($globalOrder, SORT_STRING);
+            \sort($declares, SORT_STRING);
+        }
         $promoted = $this->promoteLarge($defOrder, $defHead, $defSize, $defRefs);
         /** @var array<string, bool> */
         $internal = [];
