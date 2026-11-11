@@ -55,13 +55,15 @@ Third-party code is the quality bar. Each target has a runnable exit criterion.
 | Static analyzers (PHPStan / Psalm class) | [ ] | analyzes its own source |
 | PHPUnit running a real test suite | [ ] | same pass/fail list as php |
 
-How it works: compile an application, collect every missing function and crash, and turn each
+How it works: run `manticore build --check` to collect every front-end error and missing name in
+one pass, compile the application, collect the crashes, and turn each
 into a stdlib item (§2) or a bug report with a minimal repro that becomes a regression test.
 
 ## 2. Standard library coverage
 
 Priority is how many real applications reach a function, not the percentage. A missing
-function compiles and fails at run time with `Call to undefined function`.
+function is reported at build as an `unsupported.builtin` warning, compiles, and fails at run
+time with `Call to undefined function` if reached.
 
 **P0 — every application**
 - [~] Core 92 % — remaining `get_defined_vars`, `get_class_vars` [#215] · [x] `SPL` 100 % [#214]
@@ -142,6 +144,7 @@ Known semantic gaps in detail: [`gaps.md`](gaps.md).
 - [x] Release tarballs and container images built from the pinned bootstrap
 - [x] `manticore upgrade` ([#174](https://github.com/manticorephp/compiler/issues/174))
 - [x] `manticore doctor`, `manticore completions`, `manticore version --check`
+- [x] Every front-end error and reachable undeclared name reported in one pass (`--check`, #627, #489 steps 1–3)
 - [x] One version source: `COMPILER_VERSION`, checked in CI and at release
 - [ ] Surface the ABI version in `manticore version`
 - [ ] Dependency fetching and a shared module cache (design exists, not built)
