@@ -4107,14 +4107,12 @@ final class LowerFromAst implements Pass
     private function injectGlobalDecls(array $mainStmts): array
     {
         $pre = [];
+        $want = [];
+        foreach ($this->module->globalVarNames as $gname) { $want[$gname] = true; }
+        $touched = [];
+        foreach ($mainStmts as $s) { $this->collectTouchedLocals($s, $want, false, $touched); }
         foreach ($this->module->globalVarNames as $gname) {
-            $used = false;
-            foreach ($mainStmts as $s) {
-                if ($this->nodeReadsLocal($s, $gname) || $this->nodeWritesLocal($s, $gname)) {
-                    $used = true;
-                    break;
-                }
-            }
+            $used = isset($touched[$gname]);
             if ($used) {
                 $pre[] = new StaticLocalDecl_($gname, '@g_' . $gname, '', null, Type::int_());
             }
@@ -4170,6 +4168,30 @@ final class LowerFromAst implements Pass
             }
         }
         foreach (Walk::children($n) as $c) { $this->rebindGlobalForeachVars($c, $globals); }
+    }
+
+    /**
+     * One walk: record into $out every name in $want that the tree loads or stores
+     * (and, with $aliases, binds by reference) — the union of nodeReadsLocal,
+     * nodeWritesLocal and nodeAliasesLocal over all of $want at once.
+     *
+     * @param array<string, bool> $want
+     * @param array<string, bool> $out
+     */
+    private function collectTouchedLocals(Node $n, array $want, bool $aliases, array &$out): void
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL || $k === Node::KIND_STORE_LOCAL) {
+            if (isset($want[$n->name])) { $out[$n->name] = true; }
+        } elseif ($aliases) {
+            if ($k === Node::KIND_REF_ALIAS) {
+                if (isset($want[$n->target])) { $out[$n->target] = true; }
+                if (isset($want[$n->source])) { $out[$n->source] = true; }
+            } elseif ($k === Node::KIND_REF_ADDR || $k === Node::KIND_REF_BIND) {
+                if (isset($want[$n->target])) { $out[$n->target] = true; }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->collectTouchedLocals($c, $want, $aliases, $out); }
     }
 
     /** Whether the node tree reads the named local (LoadLocal). */

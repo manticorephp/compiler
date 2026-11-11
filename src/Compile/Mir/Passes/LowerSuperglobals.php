@@ -68,30 +68,28 @@ trait LowerSuperglobals
         // every function read an uninitialised `int`. symfony's ArgvInput reads
         // `$_SERVER['argv']` and no console entry point mentions it, so argv was
         // empty and every command fell through to the application default.
+        $want = [];
+        foreach ($names as $sg) { $want[$sg] = true; }
         $demanded = [];
-        foreach ($module->functions as $fn) {
-            foreach ($names as $sg) {
-                if ($this->nodeReadsLocal($fn->body, $sg)
-                    || $this->nodeWritesLocal($fn->body, $sg)
-                    || $this->nodeAliasesLocal($fn->body, $sg)) {
-                    $demanded[$sg] = true;
-                }
-            }
+        /** @var array<int, array<string, bool>> $touchedBy */
+        $touchedBy = [];
+        foreach ($module->functions as $i => $fn) {
+            $t = [];
+            $this->collectTouchedLocals($fn->body, $want, true, $t);
+            if ($t === []) { continue; }
+            $touchedBy[$i] = $t;
+            foreach ($t as $sg => $_) { $demanded[$sg] = true; }
         }
         if ($demanded === []) { return; }
-        foreach ($module->functions as $fn) {
+        foreach ($module->functions as $i => $fn) {
             $isMain = $fn->name === '__main';
+            $t = $touchedBy[$i] ?? [];
             $used = [];
             foreach ($names as $sg) {
                 if (!isset($demanded[$sg])) { continue; }
                 // __main binds every DEMANDED name so it can seed it; every
                 // other scope binds only what it actually touches.
-                if ($isMain
-                    || $this->nodeReadsLocal($fn->body, $sg)
-                    || $this->nodeWritesLocal($fn->body, $sg)
-                    || $this->nodeAliasesLocal($fn->body, $sg)) {
-                    $used[] = $sg;
-                }
+                if ($isMain || isset($t[$sg])) { $used[] = $sg; }
             }
             if ($used === []) { continue; }
             $pre = [];
