@@ -1,6 +1,5 @@
 <?php
 // A function called by run-time name with a spread of a typed pack throws, and the packs built for the calls leak.
-// issue: #647
 // @serial: a memory measurement.
 function boom(int ...$xs): int { throw new RuntimeException('n=' . count($xs)); }
 function callI(string $f, int ...$a): mixed { return $f(...$a); }

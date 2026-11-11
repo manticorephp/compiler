@@ -1,6 +1,5 @@
 <?php
 // A spread into a variadic function that throws leaks the pack built for the call.
-// issue: #647
 function boom(int ...$xs): int { throw new RuntimeException('n=' . count($xs)); }
 $ints = range(1, 64);
 $m0 = memory_get_usage();

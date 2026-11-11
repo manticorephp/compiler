@@ -2562,6 +2562,7 @@ trait EmitLlvmModule
     {
         $this->rt->needsCliArgv = true;
         $this->frame->isMain = true;
+        $this->ehTmpBeginMain($fn);
         $header = "define i32 @main(i32 %argc, ptr %argv)"
             . $this->personalityClause() . " {\nentry:\n";
         if ($this->rt->needsExceptions) {
@@ -2693,7 +2694,7 @@ trait EmitLlvmModule
             $dsh .= "  call void @__mir_dtor_sweep()\n";
             $dsh .= "  ret void\n}\n\n";
         }
-        $body .= "  ret i32 0\n";
+        $body .= "  ret i32 0\n" . $this->ehTmpEnd();
         return $header . $body . "}\n\n" . $dsh;
     }
 

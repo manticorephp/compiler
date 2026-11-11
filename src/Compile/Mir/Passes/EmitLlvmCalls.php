@@ -1236,6 +1236,7 @@ trait EmitLlvmCalls
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
+        $ehSaved = $this->ehHelperBegin();
 
         // The pack goes on as a spread of an ordinary call, so the callee's own
         // spread lowering binds it: a short pack takes the defaults, a variadic
@@ -1270,6 +1271,8 @@ trait EmitLlvmCalls
         $this->builtinDeclined = $oldDeclined;
         $body .= $this->boxToCell($rt);
         $ret = $this->lastValue;
+        $body = $this->ehHelperEnd($ehSaved, $body);
+        $ehTail = $this->ehHelperTail;
         $closed = $this->irIsClosed($body . '  ret i64 ' . $ret . "\n");
 
         $this->ssa = $oldSsa;
@@ -1288,7 +1291,7 @@ trait EmitLlvmCalls
             return '';
         }
         $this->dynfExtraBodies .= 'define ' . ($exported ? '' : 'linkonce_odr ') . 'i64 @' . $sym . '(' . $params
-            . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
+            . ")" . ($ehTail !== '' ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
         return $sym;
     }
 
@@ -1382,6 +1385,11 @@ trait EmitLlvmCalls
             if ($mask !== 0) { $this->dynfExports[$fname] = $mask; }
         }
     }
+
+    /** @var array<int, string[]> [reg, release flavor] of the arrays the last {@see emitSpreadFill} built for its call */
+    private array $spreadFillOwned = [];
+    /** The {@see emitSpreadFill} caller releases what it lists in {@see $spreadFillOwned} (the function-call path). */
+    private bool $spreadFillReleases = false;
 
     /** The one call {@see emitBuiltin} must leave to the function body ({@see dynfSpreadThunk}). */
     private ?Call $builtinDeclined = null;
@@ -1545,6 +1553,7 @@ trait EmitLlvmCalls
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
+        $ehSaved = $this->ehHelperBegin();
         $this->rawRefCall = false;
         $this->spreadTail = null;
         $this->lastPadArgs = '';
@@ -1585,6 +1594,8 @@ trait EmitLlvmCalls
         $inner->line = $iv->line;
         $body .= $this->emitDynFnCall($inner, '%dc.name');
         $ret = $this->lastValue;
+        $body = $this->ehHelperEnd($ehSaved, $body);
+        $ehTail = $this->ehHelperTail;
 
         $this->dyncallDepth = $this->dyncallDepth - 1;
         $this->dynByValue = $oldByValue;
@@ -1609,7 +1620,7 @@ trait EmitLlvmCalls
         $this->cellSinkFnOverride = $oldCellSinkFn;
 
         $this->dynfExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
-            . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
+            . ")" . ($ehTail !== '' ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
         return $sym;
     }
 
@@ -1942,6 +1953,7 @@ trait EmitLlvmCalls
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
+        $ehSaved = $this->ehHelperBegin();
 
         $params = '';
         $body = '';
@@ -1979,6 +1991,8 @@ trait EmitLlvmCalls
         $body .= $this->emitNode(new Call($fname, $callArgs, $rt));
         $body .= $this->boxToCell($rt);
         $ret = $this->lastValue;
+        $body = $this->ehHelperEnd($ehSaved, $body);
+        $ehTail = $this->ehHelperTail;
         $closed = $this->irIsClosed($body . '  ret i64 ' . $ret . "\n");
 
         $this->ssa = $oldSsa;
@@ -1997,7 +2011,7 @@ trait EmitLlvmCalls
             return '';
         }
         $this->dynfExtraBodies .= 'define ' . ($exported ? '' : 'linkonce_odr ') . 'i64 @' . $sym . '(' . $params
-            . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
+            . ")" . ($ehTail !== '' ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
         return $sym;
     }
 
@@ -5482,6 +5496,7 @@ trait EmitLlvmCalls
         // old path until a cell-array conversion fact is available; never guess
         // that an arbitrary cell is a typed array.
         $vmask = $fnKey !== '' ? ($this->sigs->variadicParams[$fnKey] ?? []) : [];
+        $this->spreadFillOwned = [];
         if (($vmask[$firstParam] ?? false) && $firstParam < $n) {
             $target = $ptypes[$firstParam]->element ?? null;
             $compatible = $target === null
@@ -5505,7 +5520,12 @@ trait EmitLlvmCalls
                 $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
                 $this->lastValue = $srcI;
                 $this->lastValueType = 'i64';
-                $out .= $this->emitCellArrayToTyped(Type::vec($target));
+                // For a caller that releases it ({@see $spreadFillReleases}) a co-owning
+                // copy: the pack is borrowed, and the copy is the call's own temp.
+                $own = $this->spreadFillReleases;
+                $out .= $this->emitCellArrayToTyped(Type::vec($target), $own);
+                $out .= $this->coerceToI64();
+                if ($own) { $this->spreadFillOwned[] = [$this->lastValue, $this->discardReleaseFlavor(Type::vec($target))]; }
                 return [$out, [$this->lastValue]];
             }
         }
@@ -5540,7 +5560,10 @@ trait EmitLlvmCalls
                 $this->lastValue = $srcI;
                 $this->lastValueType = 'i64';
                 $out .= $this->emitCellArrayToTyped(Type::vec($tel), true, (string)($k - $firstParam));
+                $out .= $this->coerceToI64();
                 $regs[] = $this->lastValue;
+                // The rest of the pack is a co-owning copy, the call's own temp.
+                $this->spreadFillOwned[] = [$this->lastValue, $this->discardReleaseFlavor(Type::vec($tel))];
                 break;
             }
             $ev = $this->ssa->allocReg();
@@ -6409,9 +6432,14 @@ trait EmitLlvmCalls
                 $out .= $this->emitSpreadOperand($operand);
                 $arr = $this->lastValue;
                 $elemType = $operand->type->element ?? null;
+                $this->spreadFillReleases = true;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask,
                                                        $elemType, $c->function, $operand->type);
+                $this->spreadFillReleases = false;
                 $out .= $sir;
+                // A variadic tail it rebuilt is released after the call like any call temp.
+                foreach ($this->spreadFillOwned as $sown) { $rcArgRegs[] = $sown[0]; $rcArgFlavs[] = $sown[1]; }
+                $this->spreadFillOwned = [];
                 foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }
                     $first = false;
@@ -6577,8 +6605,16 @@ trait EmitLlvmCalls
             $out .= $this->btPush($btName, $n->line);
         }
         $out .= $this->faPush($c->function, $c->srcArgc, $c->args);
+        // The call's own temps are listed for an unwind, which skips the releases below.
+        $tmpHeld = 0;
+        if (!($this->sigs->returnsByRef[$c->function] ?? false)) {
+            foreach ($rcArgRegs as $ti => $rg) {
+                $hold = $this->ehTmpPush($rg, $rcArgFlavs[$ti]);
+                if ($hold !== '') { $out .= $hold; $tmpHeld = $tmpHeld + 1; }
+            }
+        }
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $mangled
-              . '(' . $argList . ")\n";
+              . '(' . $argList . ")" . ($tmpHeld > 0 ? ' ;!t' : '') . "\n";
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $omitRefDrops;
         // Re-box each unboxed by-ref arg. The value is READ BACK, not assumed
@@ -6615,6 +6651,7 @@ trait EmitLlvmCalls
                 $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$ri]);
                 $ri = $ri + 1;
             }
+            $out .= $this->ehTmpPop($tmpHeld);
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
