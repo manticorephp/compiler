@@ -226,6 +226,15 @@ front end: 0 error(s), 1 warning(s)
 rc=0
 tier/unserialize_missing.php:2: warning[undefined.function]: function missing_fn() is not declared
 front end: 0 error(s), 1 warning(s)
+== tier_unsupported_builtin
+rc=0
+tier/unsupported_builtin.php:2: warning[unsupported.builtin]: function request_parse_body is part of PHP but not implemented by Manticore
+front end: 0 error(s), 1 warning(s)
+== tier_unsupported_mixed
+rc=65
+tier/unsupported_mixed.php:2: warning[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
+tier/unsupported_mixed.php:3: error[undefined.function]: function my_missing_fn() is not declared (reachable: g <- __main)
+front end: 1 error(s), 1 warning(s)
 == tier_reachable_new_allow_traps
 rc=0
 tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared
@@ -233,6 +242,10 @@ front end: 0 error(s), 1 warning(s)
 == tier_dead_fn_all
 rc=0
 tier/dead_fn.php:2: note[undefined.class]: class Missing\B is not declared
+front end: 0 error(s), 0 warning(s)
+== tier_unsupported_dead_all
+rc=0
+tier/unsupported_dead.php:2: note[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
 front end: 0 error(s), 0 warning(s)
 == tier_build_error_no_output
 rc=65

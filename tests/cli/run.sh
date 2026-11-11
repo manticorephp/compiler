@@ -127,11 +127,12 @@ PHP
     diag "check_numeric_class"      "$MC" compile --check "$HERE/check/numeric_class.php" -o "$WORK/nc"
     diag "check_missing_package"    sh -c "cd \"$HERE/check/missing_package\" && \"$MC\" build --check"
     diag "check_unit_top_level"     sh -c "cd \"$HERE/check/unit_top_level\" && \"$MC\" build --check"
-    for t in reachable_new dead_fn guards soft method_never method_called default_param default_param_unused dyn_define fold_define cascade class_consts_unused dyn_const_probe callable_array_instance switch_guard guard_helpers static_hierarchy dyn_static_missing unserialize_missing; do
+    for t in reachable_new dead_fn guards soft method_never method_called default_param default_param_unused dyn_define fold_define cascade class_consts_unused dyn_const_probe callable_array_instance switch_guard guard_helpers static_hierarchy dyn_static_missing unserialize_missing unsupported_builtin unsupported_mixed; do
         diag "tier_$t" "$MC" compile --check "$HERE/check/tier/$t.php" -o "$WORK/tr"
     done
     diag "tier_reachable_new_allow_traps" "$MC" compile --check --allow-undefined-traps "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"
     diag "tier_dead_fn_all"  "$MC" compile --check --all "$HERE/check/tier/dead_fn.php" -o "$WORK/tr"
+    diag "tier_unsupported_dead_all" "$MC" compile --check --all "$HERE/check/tier/unsupported_dead.php" -o "$WORK/tr"
     diag "tier_build_error_no_output" "$MC" compile "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"
     [ -e "$WORK/tr" ] && echo "BAD: wrote a binary"
     for r in basic interface_dispatch magic_and_interfaces callables dynamic_new class_level dyn_fn_name dyn_static attr_reflect unused_interface literal_class param_class literal_fn byref_fn byref_arg_class include_class include_in_fn literal_method param_method dyn_static_call unserialize_new reflection_literal reflection_runtime dyn_static_const; do

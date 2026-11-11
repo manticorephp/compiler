@@ -90,13 +90,18 @@ final class Diagnostics
     {
         $cascade = false;
         foreach ($this->items as $d) {
-            if ($d->severity === Diagnostic::SEV_ERROR && !\str_starts_with($d->code, 'undefined.')) { $cascade = true; }
+            if ($d->severity === Diagnostic::SEV_ERROR && !\str_starts_with($d->code, 'undefined.') && $d->code !== 'unsupported.builtin') { $cascade = true; }
         }
         foreach ($this->useSites as $k => $sites) {
             $idx = $this->useIdx[$k] ?? -1;
             if ($idx < 0 || !\str_starts_with($this->items[$idx]->code, 'undefined.')) { continue; }
             $d = $this->items[$idx];
-            $canError = !$allowTraps && !$cascade && !($d->code === 'undefined.constant' && $dynConstants);
+            $unsupported = self::unsupportedName($d);
+            if ($unsupported !== '') {
+                $d->code = 'unsupported.builtin';
+                $d->message = $unsupported . ' is part of PHP but not implemented by Manticore';
+            }
+            $canError = $unsupported === '' && !$allowTraps && !$cascade && !($d->code === 'undefined.constant' && $dynConstants);
             $hard = null;
             $maybe = null;
             foreach ($sites as $s) {
@@ -119,6 +124,17 @@ final class Diagnostics
                 $d->severity = 'note';
             }
         }
+    }
+
+    /** `<kind> <name>` of an undefined.* finding naming something PHP itself defines, else ''. */
+    private static function unsupportedName(\Analyze\Diagnostic $d): string
+    {
+        $kind = $d->code === 'undefined.function' ? 'function' : ($d->code === 'undefined.class' ? 'class' : ($d->code === 'undefined.constant' ? 'constant' : ''));
+        if ($kind === '') { return ''; }
+        $name = \substr($d->message, \strlen($kind) + 1);
+        $name = \substr($name, 0, \strpos($name, ' is not declared'));
+        if ($kind === 'function') { $name = \substr($name, 0, -2); }
+        return \Compile\PhpInternalNames::has($kind, $name) ? $kind . ' ' . $name : '';
     }
 
     public function hasErrors(): bool
