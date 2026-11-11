@@ -1409,19 +1409,29 @@ trait EmitLlvmCalls
         if ($this->dyncallDepth > 0 || $iv->args === []) { return ''; }
         $slots = [];
         $byValue = false;
+        $spread = false;
         foreach ($iv->args as $a) {
-            if ($a->kind === Node::KIND_SPREAD) { return ''; }
+            if ($a->kind === Node::KIND_SPREAD) { $spread = true; continue; }
             if (!$this->dynPlainLocalArg($a)) { $byValue = true; }
         }
         // Only a prelude body may take the by-value form: it stands for an
         // internal function, and php calls an internal function's callback
         // with values (`usort`'s comparator gets copies, never the elements).
-        if ($byValue && !$this->frameIsPreludeCode()) { return ''; }
-        $key = ($byValue ? 'v' : 'r') . (string)\count($iv->args);
+        // A spread call goes by value anywhere: its dispatch never binds a
+        // reference (a by-reference callee is refused), so the values are all it reads.
+        if ($byValue && !$spread && !$this->frameIsPreludeCode()) { return ''; }
+        if ($spread) { $byValue = true; }
+        $key = ($spread ? 's' : ($byValue ? 'v' : 'r')) . (string)\count($iv->args);
         $out = '';
         foreach ($iv->args as $a) {
             $key .= '|' . $a->type->exactString();
-            if ($byValue) {
+            if ($a->kind === Node::KIND_SPREAD) {
+                $op = $this->asSpreadNode($a)->operand;
+                $key .= '<' . $op->type->exactString();
+                $out .= $this->emitNode($op);
+                $out .= $this->coerceToI64();
+                $slots[] = 'i64 ' . $this->lastValue;
+            } elseif ($byValue) {
                 $out .= $this->emitNode($a);
                 $out .= $this->coerceToI64();
                 $slots[] = 'i64 ' . $this->lastValue;
@@ -1562,6 +1572,10 @@ trait EmitLlvmCalls
             } else {
                 $params .= ', ptr %dc.a' . (string)$i;
                 $this->locals->slots[$ln] = '%dc.a' . (string)$i;
+            }
+            if ($a->kind === Node::KIND_SPREAD) {
+                $args[] = new \Compile\Mir\Spread_(new LoadLocal($ln, $this->asSpreadNode($a)->operand->type), $a->type);
+                continue;
             }
             $args[] = new LoadLocal($ln, $a->type);
         }
