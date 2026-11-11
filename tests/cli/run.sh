@@ -138,6 +138,8 @@ PHP
     diag "tier_dead_fn_all"  "$MC" compile --check --all "$HERE/check/tier/dead_fn.php" -o "$WORK/tr"
     diag "tier_library"      "$MC" compile --check --emit-library "$HERE/check/tier/library.php" -o "$WORK/tr.o"
     diag "tier_unsupported_dead_all" "$MC" compile --check --all "$HERE/check/tier/unsupported_dead.php" -o "$WORK/tr"
+    diag "tier_closure_sites_all" "$MC" compile --check --all "$HERE/check/tier/closure_sites.php" -o "$WORK/tr"
+    diag "tier_method_default_all" "$MC" compile --check --all "$HERE/check/tier/method_default.php" -o "$WORK/tr"
     diag "tier_build_error_no_output" "$MC" compile "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"
     [ -e "$WORK/tr" ] && echo "BAD: wrote a binary"
     for r in basic interface_dispatch magic_and_interfaces callables dynamic_new class_level dyn_fn_name dyn_static attr_reflect unused_interface literal_class param_class literal_fn byref_fn byref_arg_class include_class include_in_fn literal_method param_method dyn_static_call unserialize_new reflection_literal reflection_runtime dyn_static_const; do

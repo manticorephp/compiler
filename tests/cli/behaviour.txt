@@ -309,6 +309,18 @@ front end: 2 error(s), 0 warning(s)
 rc=0
 tier/unsupported_dead.php:2: note[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
 front end: 0 error(s), 0 warning(s)
+== tier_closure_sites_all
+rc=65
+tier/closure_sites.php:2: note[undefined.class]: class Missing\InDeadClosure is not declared
+tier/closure_sites.php:3: error[undefined.class]: class Missing\InMethodClosure is not declared (reachable: __closure_1 <- W__run <- __main)
+tier/closure_sites.php:4: error[undefined.constant]: constant MISSING_ARROW_CONST is not declared (reachable: __closure_2 <- __main)
+front end: 2 error(s), 0 warning(s)
+== tier_method_default_all
+rc=65
+tier/method_default.php:2: error[undefined.constant]: constant MISSING_USED_DEFAULT is not declared (reachable: Used__m <- __main)
+tier/method_default.php:3: note[undefined.constant]: constant MISSING_UNUSED_DEFAULT is not declared
+tier/method_default.php:4: note[undefined.constant]: constant MISSING_NEVER_CALLED_DEFAULT is not declared
+front end: 1 error(s), 0 warning(s)
 == tier_build_error_no_output
 rc=65
 compile: front-end (parse/typeck/IR) returned null (rc=65)
