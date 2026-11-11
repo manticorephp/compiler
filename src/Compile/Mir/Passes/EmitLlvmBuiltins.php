@@ -7087,8 +7087,12 @@ trait EmitLlvmBuiltins
     {
         $this->rt->needsGcFlag = true;
         $this->rt->needsRc = true;
+        $y = $this->ssa->allocReg();
+        $o = $this->ssa->allocReg();
         $reg = $this->ssa->allocReg();
-        $out = '  ' . $reg . " = load i64, ptr @__manticore_cc_count\n";
+        $out = '  ' . $y . " = load i64, ptr @__manticore_cc_count\n";
+        $out .= '  ' . $o . " = load i64, ptr @__manticore_cc_ocount\n";
+        $out .= '  ' . $reg . ' = add i64 ' . $y . ', ' . $o . "\n";
         return $this->finishI64($out, $reg);
     }
 

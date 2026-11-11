@@ -1089,8 +1089,17 @@ final class MemoryAbi
     public const CC_SLOT_MASK = 0x00FFFFFF00000000;
     public const CC_SLOT_NONE = 0xFFFFFF;
 
-    /** Bits 56-61 hold the color (Bacon-Rajan uses 0..3). */
-    public const COLOR_MASK = 0x3F00000000000000;
+    /** Bits 56-60 hold the color ({@see COLOR_BLACK} .. {@see COLOR_GREEN}). */
+    public const COLOR_MASK = 0x1F00000000000000;
+
+    /**
+     * Bit 61: the object survived a cycle collection and belongs to the OLD
+     * generation. A young collection does not traverse an old object; it only
+     * counts the edges into it, so an object it frees has no reference from
+     * any old object (docs/memory.md). Outside {@see COLOR_MASK}, so recoloring
+     * keeps it; it also picks the root buffer the slot field indexes.
+     */
+    public const CC_OLD_MASK = 0x2000000000000000;
 
     /**
      * Bit 62: `__destruct` already ran. php calls a destructor ONCE; an object

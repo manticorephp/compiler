@@ -118,7 +118,8 @@ One i64 at offset 8:
 |---|---|---|
 | 63 | 1 | `buffered` — member of the cc candidate list (`BUFFERED_MASK`) |
 | 62 | 1 | `__destruct` already ran (`DTOR_CALLED_MASK`) |
-| 61..56 | 6 | `color` — 0 BLACK, 1 PURPLE, 2 GRAY, 3 WHITE, 4 DEAD, 5 GREEN (`COLOR_MASK`, `COLOR_SHIFT = 56`) |
+| 61 | 1 | `old` — survived a cycle collection: OLD generation (`CC_OLD_MASK`) |
+| 60..56 | 5 | `color` — 0 BLACK, 1 PURPLE, 2 GRAY, 3 WHITE, 4 DEAD, 5 GREEN (`COLOR_MASK`, `COLOR_SHIFT = 56`) |
 | 55..32 | 24 | root-buffer slot while buffered (`CC_SLOT_MASK`, `CC_SLOT_SHIFT = 32`; `CC_SLOT_NONE` = past the field) |
 | 31..0 | 32 | `rc` — signed; trial deletion drives it negative (`RC_MASK`) |
 
@@ -126,6 +127,12 @@ The slot makes leaving the root buffer O(1): a buffered object whose rc reaches 
 outside a collection is swap-removed (`__manticore_cc_unroot`: the last entry moves
 into its slot) and freed at once. Only an object pushed past slot `CC_SLOT_NONE`
 still dies the old way — dropped, its DEAD shell left for the next collection.
+
+The `old` bit picks the root buffer the slot indexes: a young object is buffered in
+`@__manticore_cc_roots`, an old one in `@__manticore_cc_oroots` ([memory.md](../memory.md#generations)).
+It took the top bit of what was a 6-bit colour field; only the application module's
+collector reads colour or `old` (a library reads `buffered` and the rc field), so no
+library compiled before the split can misread it.
 
 An object of an ACYCLIC class is never buffered. The collector's class graph has
 an edge per traced property (an obj slot reaches its class and every subclass; a

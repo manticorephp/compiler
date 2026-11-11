@@ -1028,6 +1028,7 @@ trait EmitLlvmRuntime
             elseif ($this->rt->needsGcFlag) {
                 $out .= "@__manticore_cc_gcoff = linkonce_odr global i64 0\n";
                 $out .= "@__manticore_cc_count = linkonce_odr global i64 0\n";
+                $out .= "@__manticore_cc_ocount = linkonce_odr global i64 0\n";
             }
         }
         // Unconditional: `__mir_cell_retain` / `__mir_cell_drop` reach a
@@ -3168,29 +3169,9 @@ trait EmitLlvmRuntime
         $out .= "  %bdead = icmp eq i64 %bcol, " . $DEAD . "\n";
         $out .= "  br i1 %bdead, label %keep, label %slot\n";
         $out .= "slot:\n";
-        $out .= "  %wp = getelementptr i8, ptr %p, i64 8\n";
-        $out .= "  %w = load i64, ptr %wp\n";
-        $out .= "  %ws = lshr i64 %w, " . (string)\Compile\MemoryAbi::CC_SLOT_SHIFT . "\n";
-        $out .= "  %i = and i64 %ws, " . (string)\Compile\MemoryAbi::CC_SLOT_NONE . "\n";
-        $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
-        $out .= "  %inr = icmp ult i64 %i, %cnt\n";
-        $out .= "  br i1 %inr, label %chk, label %shell\n";
-        $out .= "chk:\n";
-        $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
-        $out .= "  %sp = getelementptr ptr, ptr %buf, i64 %i\n";
-        $out .= "  %sv = load ptr, ptr %sp\n";
-        $out .= "  %mine = icmp eq ptr %sv, %p\n";
-        $out .= "  br i1 %mine, label %swap, label %shell\n";
-        $out .= "swap:\n";
-        $out .= "  %last = sub i64 %cnt, 1\n";
-        $out .= "  %lp = getelementptr ptr, ptr %buf, i64 %last\n";
-        $out .= "  %lv = load ptr, ptr %lp\n";
-        $out .= "  store ptr %lv, ptr %sp\n";
-        $out .= "  call void @__cc_setslot(ptr %lv, i64 %i)\n";
-        $out .= "  store i64 %last, ptr @__manticore_cc_count\n";
-        $out .= "  call void @__cc_setbuffered(ptr %p, i64 0)\n";
-        // BLACK, not purple: a destructor that resurrects it must be able to buffer it again.
-        $out .= "  call void @__cc_setcolor(ptr %p, i64 " . (string)\Compile\MemoryAbi::COLOR_BLACK . ")\n";
+        $out .= "  %got = call i1 @__cc_detach(ptr %p)\n";
+        $out .= "  br i1 %got, label %freed, label %shell\n";
+        $out .= "freed:\n";
         $out .= "  ret i1 1\n";
         $out .= "shell:\n";
         $out .= "  call void @__cc_setcolor(ptr %p, i64 " . $DEAD . ")\n";
@@ -3207,6 +3188,12 @@ trait EmitLlvmRuntime
      * buffer reaches the adaptive threshold, collect, then adjust the threshold as
      * php's gc_adjust_threshold does.
      */
+    /** A full collection runs once the old generation grew by 1/RATIO ({@see ccAutoGcIr}). */
+    private const CC_FULL_RATIO = 4;
+
+    /** Young collections in a row after which old candidates force a full one. */
+    private const CC_YOUNG_PER_FULL = 64;
+
     private function ccAutoGcIr(): string
     {
         $out = "define void @__manticore_cc_autogc() {\n";
@@ -3219,10 +3206,36 @@ trait EmitLlvmRuntime
         $out .= "gccheck:\n";
         $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %gcthr = load i64, ptr @__manticore_cc_threshold\n";
+        // FULL when the old generation has grown by 1/RATIO since the last full
+        // collection, or holds as many candidates as it held survivors (both
+        // measured against at least the default threshold): CPython's 25% rule,
+        // plus a bound on old garbage when nothing is promoted. A young
+        // collection becomes full after CC_YOUNG_PER_FULL young ones while old
+        // candidates wait, so every garbage cycle is collected eventually.
+        $out .= "  %gcoc = load i64, ptr @__manticore_cc_ocount\n";
+        $out .= "  %gcpr = load i64, ptr @__manticore_cc_promoted\n";
+        $out .= "  %gcol = load i64, ptr @__manticore_cc_oldlive\n";
+        $out .= "  %gcflo = icmp slt i64 %gcol, " . (string)\Compile\Debug::$autoGcThreshold . "\n";
+        $out .= "  %gcbase = select i1 %gcflo, i64 " . (string)\Compile\Debug::$autoGcThreshold . ", i64 %gcol\n";
+        $out .= "  %gcpr4 = mul i64 %gcpr, " . (string)self::CC_FULL_RATIO . "\n";
+        $out .= "  %gcpend = add i64 %gcpr4, %gcoc\n";
+        $out .= "  %gcgrew = icmp sgt i64 %gcpend, %gcbase\n";
+        $out .= "  br i1 %gcgrew, label %gcfull, label %gcyq\n";
+        $out .= "gcyq:\n";
         $out .= "  %gchit = icmp sge i64 %gccnt, %gcthr\n";
-        $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
+        $out .= "  br i1 %gchit, label %gcyrun, label %gcskip\n";
+        $out .= "gcyrun:\n";
+        $out .= "  %gcys = load i64, ptr @__manticore_cc_ysince\n";
+        $out .= "  %gcyold = icmp sge i64 %gcys, " . (string)self::CC_YOUNG_PER_FULL . "\n";
+        $out .= "  %gcwait = icmp sgt i64 %gcoc, 0\n";
+        $out .= "  %gcdue = and i1 %gcyold, %gcwait\n";
+        $out .= "  %gcmode = zext i1 %gcdue to i64\n";
+        $out .= "  br label %gcrun\n";
+        $out .= "gcfull:\n";
+        $out .= "  br label %gcrun\n";
         $out .= "gcrun:\n";
-        $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
+        $out .= "  %gcm = phi i64 [ %gcmode, %gcyrun ], [ 1, %gcfull ]\n";
+        $out .= "  %gcfreed = call i64 @__manticore_cc_collect(i64 %gcm)\n";
         // php's gc_adjust_threshold: under 100 freed, +10000 (to 1e9); a
         // productive run steps back toward the default. Every Token of a
         // php-cs-fixer run is a root, and a fixed threshold re-walked the
@@ -3267,7 +3280,8 @@ trait EmitLlvmRuntime
         $out .= "@__cc_census_tab = linkonce_odr global [8192 x i64] zeroinitializer\n";
         $out .= "@__cc_census_rtab = linkonce_odr global [8192 x i64] zeroinitializer\n";
         $out .= "@.cc.env = private unnamed_addr constant [19 x i8] c\"MANTICORE_CC_STATS\\00\"\n";
-        $out .= "@.cc.hdr = private unnamed_addr constant [76 x i8] c\"[cc-stats] collections=%lld roots=%lld freed=%lld garbage=%lld cpu_ms=%lld\\0A\\00\"\n";
+        $hdr = '[cc-stats] collections=%lld full=%lld roots=%lld marked=%lld freed=%lld garbage=%lld cpu_ms=%lld';
+        $out .= '@.cc.hdr = private unnamed_addr constant [' . (string)(\strlen($hdr) + 2) . ' x i8] c"' . $hdr . '\0A\00"' . "\n";
         $out .= "@.cc.row = private unnamed_addr constant [25 x i8] c\"  %9lld  id=%lld  %c %s\\0A\\00\"\n";
         $out .= "@.cc.rhdr = private unnamed_addr constant [36 x i8] c\"[cc-stats] roots scanned, by class\\0A\\00\"\n";
         $out .= "@.cc.unk = private unnamed_addr constant [2 x i8] c\"?\\00\"\n";
@@ -3439,7 +3453,9 @@ trait EmitLlvmRuntime
         $out .= "  %total = load i64, ptr %tot\n";
         $out .= "  %us = load i64, ptr @__cc_census_us\n";
         $out .= "  %ms = sdiv i64 %us, 1000\n";
-        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.hdr, i64 %runs, i64 %roots, i64 %freed, i64 %total, i64 %ms)\n";
+        $out .= "  %nfull = load i64, ptr @__manticore_cc_nfull\n";
+        $out .= "  %marked = load i64, ptr @__manticore_cc_marked\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.hdr, i64 %runs, i64 %nfull, i64 %roots, i64 %marked, i64 %freed, i64 %total, i64 %ms)\n";
         $out .= "  call void @__cc_census_top(ptr @__cc_census_tab)\n";
         $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.rhdr)\n";
         $out .= "  call void @__cc_census_top(ptr @__cc_census_rtab)\n";
@@ -3994,6 +4010,21 @@ end:
         $out .= "@__manticore_cc_garbage = linkonce_odr global ptr null\n";
         $out .= "@__manticore_cc_gcount = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_gcap = linkonce_odr global i64 0\n";
+        // The OLD generation's root buffer: buffered objects carrying
+        // {@see MemoryAbi::CC_OLD_MASK}. A young collection leaves it alone; a
+        // full one takes it in with the young roots.
+        $out .= "@__manticore_cc_oroots = linkonce_odr global ptr null\n";
+        $out .= "@__manticore_cc_ocount = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_ocap = linkonce_odr global i64 0\n";
+        // Survivors of the running collection (scan_black calls); objects promoted
+        // by young collections since the last full one; survivors of that full
+        // one; young collections since it; full collections run.
+        $out .= "@__manticore_cc_nblack = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_promoted = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_oldlive = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_ysince = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_nfull = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_marked = linkonce_odr global i64 0\n";
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
         $this->libcExtra['free'] = 'declare void @free(ptr)';
@@ -4006,8 +4037,8 @@ end:
         $out .= "define i64 @__cc_color(ptr %s) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
         $out .= "  %w = load i64, ptr %wp\n";
-        $out .= "  %c = lshr i64 %w, 56\n";
-        $out .= "  %m = and i64 %c, 63\n";
+        $out .= "  %c = lshr i64 %w, " . (string)\Compile\MemoryAbi::COLOR_SHIFT . "\n";
+        $out .= "  %m = and i64 %c, " . (string)(\Compile\MemoryAbi::COLOR_MASK >> \Compile\MemoryAbi::COLOR_SHIFT) . "\n";
         $out .= "  ret i64 %m\n}\n";
         $out .= "define void @__cc_setcolor(ptr %s, i64 %c) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
@@ -4063,6 +4094,100 @@ end:
         $out .= "  %nw = or i64 %clr, %vs\n";
         $out .= "  store i64 %nw, ptr %wp\n";
         $out .= "  ret void\n}\n";
+        $oldMask = (string)\Compile\MemoryAbi::CC_OLD_MASK;
+        $out .= "define i1 @__cc_isold(ptr %s) {\n";
+        $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %o = and i64 %w, " . $oldMask . "\n";
+        $out .= "  %r = icmp ne i64 %o, 0\n";
+        $out .= "  ret i1 %r\n}\n";
+        // append %s to a root buffer (grow x2, min 8) and record its slot
+        $out .= "define void @__cc_bpush(ptr %s, ptr %bufg, ptr %cntg, ptr %capg) {\n";
+        $out .= "entry:\n";
+        $out .= "  %cnt = load i64, ptr %cntg\n";
+        $out .= "  %cap = load i64, ptr %capg\n";
+        $out .= "  %full = icmp sge i64 %cnt, %cap\n";
+        $out .= "  br i1 %full, label %grow, label %store\n";
+        $out .= "grow:\n";
+        $out .= "  %dbl = mul i64 %cap, 2\n";
+        $out .= "  %small = icmp slt i64 %dbl, 8\n";
+        $out .= "  %ncap = select i1 %small, i64 8, i64 %dbl\n";
+        $out .= "  %bytes = mul i64 %ncap, 8\n";
+        $out .= "  %old = load ptr, ptr %bufg\n";
+        $out .= "  %nb = call ptr @realloc(ptr %old, i64 %bytes)\n";
+        $out .= "  store ptr %nb, ptr %bufg\n";
+        $out .= "  store i64 %ncap, ptr %capg\n";
+        $out .= "  br label %store\n";
+        $out .= "store:\n";
+        $out .= "  %buf = load ptr, ptr %bufg\n";
+        $out .= "  %slot = getelementptr ptr, ptr %buf, i64 %cnt\n";
+        $out .= "  store ptr %s, ptr %slot\n";
+        $out .= "  call void @__cc_setslot(ptr %s, i64 %cnt)\n";
+        $out .= "  %cnt1 = add i64 %cnt, 1\n";
+        $out .= "  store i64 %cnt1, ptr %cntg\n";
+        $out .= "  ret void\n}\n";
+        // Take a buffered object out of its generation's root buffer in O(1):
+        // the last entry moves into its slot. 0 = not found there (a slot past
+        // the field's range); the object stays buffered.
+        $out .= "define i1 @__cc_detach(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %old = call i1 @__cc_isold(ptr %p)\n";
+        $out .= "  %bufg = select i1 %old, ptr @__manticore_cc_oroots, ptr @__manticore_cc_roots\n";
+        $out .= "  %cntg = select i1 %old, ptr @__manticore_cc_ocount, ptr @__manticore_cc_count\n";
+        $out .= "  %wp = getelementptr i8, ptr %p, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %ws = lshr i64 %w, " . (string)\Compile\MemoryAbi::CC_SLOT_SHIFT . "\n";
+        $out .= "  %i = and i64 %ws, " . (string)\Compile\MemoryAbi::CC_SLOT_NONE . "\n";
+        $out .= "  %cnt = load i64, ptr %cntg\n";
+        $out .= "  %inr = icmp ult i64 %i, %cnt\n";
+        $out .= "  br i1 %inr, label %chk, label %miss\n";
+        $out .= "chk:\n";
+        $out .= "  %buf = load ptr, ptr %bufg\n";
+        $out .= "  %sp = getelementptr ptr, ptr %buf, i64 %i\n";
+        $out .= "  %sv = load ptr, ptr %sp\n";
+        $out .= "  %mine = icmp eq ptr %sv, %p\n";
+        $out .= "  br i1 %mine, label %swap, label %miss\n";
+        $out .= "swap:\n";
+        $out .= "  %last = sub i64 %cnt, 1\n";
+        $out .= "  %lp = getelementptr ptr, ptr %buf, i64 %last\n";
+        $out .= "  %lv = load ptr, ptr %lp\n";
+        $out .= "  store ptr %lv, ptr %sp\n";
+        $out .= "  call void @__cc_setslot(ptr %lv, i64 %i)\n";
+        $out .= "  store i64 %last, ptr %cntg\n";
+        $out .= "  call void @__cc_setbuffered(ptr %p, i64 0)\n";
+        // BLACK, not purple: a destructor that resurrects it must be able to buffer it again.
+        $out .= "  call void @__cc_setcolor(ptr %p, i64 " . $BLACK . ")\n";
+        $out .= "  ret i1 1\n";
+        $out .= "miss:\n";
+        $out .= "  ret i1 0\n}\n";
+        // A young collection's white node let go of an OLD child, which it does
+        // not traverse but whose count it did lower (the edge was counted). At a
+        // count of zero after the scan, every reference to the child came from
+        // the garbage: it dies with it, as a black rc-0 root does (destructor,
+        // children released, freed). GRAY marks it listed; no old object is gray
+        // in a young collection otherwise.
+        $out .= "define void @__cc_orphan(ptr %o) {\n";
+        $out .= "entry:\n";
+        $out .= "  %c = call i64 @__cc_color(ptr %o)\n";
+        $out .= "  %listed = icmp eq i64 %c, " . $GRAY . "\n";
+        $out .= "  br i1 %listed, label %done, label %rc\n";
+        $out .= "rc:\n";
+        $out .= "  %r = call i64 @__cc_rcval(ptr %o)\n";
+        $out .= "  %live = icmp sgt i64 %r, 0\n";
+        $out .= "  br i1 %live, label %done, label %buf\n";
+        $out .= "buf:\n";
+        $out .= "  %b = call i64 @__cc_buffered(ptr %o)\n";
+        $out .= "  %isb = icmp ne i64 %b, 0\n";
+        $out .= "  br i1 %isb, label %det, label %take\n";
+        // Not found in its buffer: it stays an old root, and the next full collection frees it.
+        $out .= "det:\n";
+        $out .= "  %got = call i1 @__cc_detach(ptr %o)\n";
+        $out .= "  br i1 %got, label %take, label %done\n";
+        $out .= "take:\n";
+        $out .= "  call void @__cc_setcolor(ptr %o, i64 " . $GRAY . ")\n";
+        $out .= "  call void @__cc_gpush(ptr %o, i64 1)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
 
         // ── candidate-buffer push (grow x2, min 8) ──
         $out .= "define void @__manticore_cc_add_root(ptr %s) {\n";
@@ -4129,27 +4254,17 @@ end:
         $out .= "push:\n";
         $out .= $this->profBump(65);
         $out .= "  call void @__cc_setbuffered(ptr %s, i64 1)\n";
-        $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
-        $out .= "  %cap = load i64, ptr @__manticore_cc_cap\n";
-        $out .= "  %full = icmp sge i64 %cnt, %cap\n";
-        $out .= "  br i1 %full, label %grow, label %store\n";
-        $out .= "grow:\n";
-        $out .= "  %dbl = mul i64 %cap, 2\n";
-        $out .= "  %small = icmp slt i64 %dbl, 8\n";
-        $out .= "  %ncap = select i1 %small, i64 8, i64 %dbl\n";
-        $out .= "  %bytes = mul i64 %ncap, 8\n";
-        $out .= "  %old = load ptr, ptr @__manticore_cc_roots\n";
-        $out .= "  %nb = call ptr @realloc(ptr %old, i64 %bytes)\n";
-        $out .= "  store ptr %nb, ptr @__manticore_cc_roots\n";
-        $out .= "  store i64 %ncap, ptr @__manticore_cc_cap\n";
-        $out .= "  br label %store\n";
-        $out .= "store:\n";
-        $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
-        $out .= "  %slot = getelementptr ptr, ptr %buf, i64 %cnt\n";
-        $out .= "  store ptr %s, ptr %slot\n";
-        $out .= "  call void @__cc_setslot(ptr %s, i64 %cnt)\n";
-        $out .= "  %cnt1 = add i64 %cnt, 1\n";
-        $out .= "  store i64 %cnt1, ptr @__manticore_cc_count\n";
+        $out .= "  %isold = call i1 @__cc_isold(ptr %s)\n";
+        $out .= "  br i1 %isold, label %opush, label %ypush\n";
+        $out .= "opush:\n";
+        $out .= "  call void @__cc_bpush(ptr %s, ptr @__manticore_cc_oroots, ptr @__manticore_cc_ocount, ptr @__manticore_cc_ocap)\n";
+        $out .= "  br label %done\n";
+        $out .= "ypush:\n";
+        $out .= "  call void @__cc_bpush(ptr %s, ptr @__manticore_cc_roots, ptr @__manticore_cc_count, ptr @__manticore_cc_cap)\n";
+        if (\Compile\Debug::$ccTrace) {
+            $out .= "  %cnt1 = load i64, ptr @__manticore_cc_count\n";
+            $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
+        }
         $out .= $this->ccTrace('push', 'ptr %s, i64 %cnt1, ptr %buf');
         // ⚠⚠ THE ROOT BUFFER HAD NO DRAIN. A decrement that leaves rc > 0 buffers
         // the object as a possible cycle root (purple + buffered), and
@@ -4167,8 +4282,31 @@ end:
         $out .= "done:\n  ret void\n}\n";
 
         // ── per-child action dispatch ──
+        //
+        // A YOUNG collection (`active` = 1) stops at an OLD child: the edge into
+        // it is counted (-1 on mark, +1 back on scan_black) so the count stays
+        // exact, but the child is neither colored nor walked — its own
+        // references are left uncounted, which keeps whatever it reaches alive.
         $out .= "define void @__manticore_cc_child_apply(ptr %child, i64 %a) {\n";
         $out .= "entry:\n";
+        $out .= "  %act = load i64, ptr @__manticore_cc_active\n";
+        $out .= "  %young = icmp eq i64 %act, 1\n";
+        $out .= "  br i1 %young, label %ychk, label %disp\n";
+        $out .= "ychk:\n";
+        $out .= "  %old = call i1 @__cc_isold(ptr %child)\n";
+        $out .= "  br i1 %old, label %oldc, label %disp\n";
+        $out .= "oldc:\n";
+        $out .= "  switch i64 %a, label %done [ i64 0, label %omg i64 2, label %osb i64 3, label %ocw ]\n";
+        $out .= "omg:\n";
+        $out .= "  call void @__cc_rcadd(ptr %child, i64 -1)\n";
+        $out .= "  br label %done\n";
+        $out .= "osb:\n";
+        $out .= "  call void @__cc_rcadd(ptr %child, i64 1)\n";
+        $out .= "  br label %done\n";
+        $out .= "ocw:\n";
+        $out .= "  call void @__cc_orphan(ptr %child)\n";
+        $out .= "  br label %done\n";
+        $out .= "disp:\n";
         $out .= "  switch i64 %a, label %done [ i64 0, label %mg i64 1, label %sc i64 2, label %sb i64 3, label %cw ]\n";
         $out .= "mg:\n";
         $out .= "  call void @__cc_rcadd(ptr %child, i64 -1)\n";
@@ -4428,6 +4566,9 @@ end:
         $out .= "  br i1 %isg, label %done, label %go\n";
         $out .= "go:\n";
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $GRAY . ")\n";
+        $out .= "  %mk0 = load i64, ptr @__manticore_cc_marked\n";
+        $out .= "  %mk1 = add i64 %mk0, 1\n";
+        $out .= "  store i64 %mk1, ptr @__manticore_cc_marked\n";
         $out .= "  call void @__manticore_cc_children(ptr %s, i64 0)\n";
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
@@ -4455,9 +4596,17 @@ end:
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
 
+        // A survivor: BLACK, and promoted to the old generation.
         $out .= "define void @__manticore_cc_scan_black(ptr %s) {\n";
         $out .= "entry:\n";
-        $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $BLACK . ")\n";
+        $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %wc = and i64 %w, " . $colorClr . "\n";
+        $out .= "  %wo = or i64 %wc, " . (string)(\Compile\MemoryAbi::CC_OLD_MASK | (\Compile\MemoryAbi::COLOR_BLACK << \Compile\MemoryAbi::COLOR_SHIFT)) . "\n";
+        $out .= "  store i64 %wo, ptr %wp\n";
+        $out .= "  %nb0 = load i64, ptr @__manticore_cc_nblack\n";
+        $out .= "  %nb1 = add i64 %nb0, 1\n";
+        $out .= "  store i64 %nb1, ptr @__manticore_cc_nblack\n";
         $out .= "  call void @__manticore_cc_children(ptr %s, i64 2)\n";
         $out .= "  ret void\n}\n";
 
@@ -4572,16 +4721,63 @@ end:
         $out .= "  ret void\n}\n";
 
         // ── gc_collect_cycles(): MarkRoots → ScanRoots → CollectRoots ──
+        // An explicit `gc_collect_cycles()` collects everything collectable: full.
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $this->libcExtra['memmove'] = 'declare ptr @memmove(ptr, ptr, i64)';
         $out .= "define i64 @__manticore_cc_collect_cycles() {\n";
+        $out .= "entry:\n  %n = call i64 @__manticore_cc_collect(i64 1)\n  ret i64 %n\n}\n";
+        // %full = 0: YOUNG — the young roots only, old objects not traversed;
+        // 1: FULL — the old roots join the young ones and nothing is skipped.
+        $out .= "define i64 @__manticore_cc_collect(i64 %full) {\n";
         $out .= "entry:\n";
         // ⚠ THE COLLECTION OWNS THIS FLAG, not its callers. It used to be
         // set around the AUTO trigger in `__mir_alloc_tagged` only, so a
         // plain `gc_collect_cycles()` — the builtin, which calls straight
         // in — ran with the flag CLEAR and `cc_add_root` happily buffered
         // objects mid-phase. One guard at the one entry point, and every
-        // caller is covered.
-        $out .= "  store i64 1, ptr @__manticore_cc_active\n";
+        // caller is covered. 1 = young, 2 = full.
+        $out .= "  %isfull = icmp ne i64 %full, 0\n";
+        $out .= "  %mode = select i1 %isfull, i64 2, i64 1\n";
+        $out .= "  %young0 = xor i1 %isfull, true\n";
+        $out .= "  store i64 %mode, ptr @__manticore_cc_active\n";
         $out .= "  store i64 0, ptr @__manticore_cc_freed\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_nblack\n";
+        $out .= "  br i1 %isfull, label %fmerge, label %start\n";
+        // The old roots go in FRONT of the young ones (they were buffered
+        // earlier). Their slots go stale; nothing reads a slot while a
+        // collection runs, and every root is unbuffered by its end.
+        $out .= "fmerge:\n";
+        $out .= "  %nf0 = load i64, ptr @__manticore_cc_nfull\n";
+        $out .= "  %nf1 = add i64 %nf0, 1\n";
+        $out .= "  store i64 %nf1, ptr @__manticore_cc_nfull\n";
+        $out .= "  %ocnt = load i64, ptr @__manticore_cc_ocount\n";
+        $out .= "  %hasold = icmp sgt i64 %ocnt, 0\n";
+        $out .= "  br i1 %hasold, label %fneed, label %start\n";
+        $out .= "fneed:\n";
+        $out .= "  %ycnt = load i64, ptr @__manticore_cc_count\n";
+        $out .= "  %need = add i64 %ycnt, %ocnt\n";
+        $out .= "  %ycap = load i64, ptr @__manticore_cc_cap\n";
+        $out .= "  %short = icmp sgt i64 %need, %ycap\n";
+        $out .= "  br i1 %short, label %fgrow, label %fcopy\n";
+        $out .= "fgrow:\n";
+        $out .= "  %fob = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= "  %fbytes = mul i64 %need, 8\n";
+        $out .= "  %fnb = call ptr @realloc(ptr %fob, i64 %fbytes)\n";
+        $out .= "  store ptr %fnb, ptr @__manticore_cc_roots\n";
+        $out .= "  store i64 %need, ptr @__manticore_cc_cap\n";
+        $out .= "  br label %fcopy\n";
+        $out .= "fcopy:\n";
+        $out .= "  %fmb = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= "  %fdst = getelementptr ptr, ptr %fmb, i64 %ocnt\n";
+        $out .= "  %fyb = mul i64 %ycnt, 8\n";
+        $out .= "  call ptr @memmove(ptr %fdst, ptr %fmb, i64 %fyb)\n";
+        $out .= "  %fos = load ptr, ptr @__manticore_cc_oroots\n";
+        $out .= "  %fobytes = mul i64 %ocnt, 8\n";
+        $out .= "  call ptr @memcpy(ptr %fmb, ptr %fos, i64 %fobytes)\n";
+        $out .= "  store i64 %need, ptr @__manticore_cc_count\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_ocount\n";
+        $out .= "  br label %start\n";
+        $out .= "start:\n";
         $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
         $out .= $this->ccTrace('begin', 'i64 %cnt, ptr %buf');
@@ -4703,6 +4899,17 @@ end:
         $out .= "  call void @__cc_gpush(ptr %cs, i64 1)\n";
         $out .= "  br label %crn\n";
         $out .= "crwhite:\n";
+        $out .= "  %ckeep = and i1 %cisbk, %young0\n";
+        $out .= "  br i1 %ckeep, label %crold, label %crcw\n";
+        // A root a YOUNG collection kept may be alive only through an old object
+        // that is itself garbage (a cycle through the old generation): it stays
+        // a candidate, now in the old buffer, for the next full collection.
+        $out .= "crold:\n";
+        $out .= "  call void @__cc_setcolor(ptr %cs, i64 " . $PURPLE . ")\n";
+        $out .= "  call void @__cc_setbuffered(ptr %cs, i64 1)\n";
+        $out .= "  call void @__cc_bpush(ptr %cs, ptr @__manticore_cc_oroots, ptr @__manticore_cc_ocount, ptr @__manticore_cc_ocap)\n";
+        $out .= "  br label %crn\n";
+        $out .= "crcw:\n";
         $out .= "  call void @__manticore_cc_collect_white(ptr %cs)\n";
         $out .= "  br label %crn\n";
         $out .= "crn:\n";
@@ -4778,6 +4985,24 @@ end:
         $out .= $this->ccTrace('end', 'i64 %endcnt, ptr %endbuf');
         $out .= "  store i64 0, ptr @__manticore_cc_count\n";
         $out .= "  store i64 0, ptr @__manticore_cc_active\n";
+        // A young collection's survivors were all young: promoted. A full one's are
+        // the old generation the next full collection is measured against.
+        $out .= "  %nbk = load i64, ptr @__manticore_cc_nblack\n";
+        $out .= "  br i1 %isfull, label %bkfull, label %bkyoung\n";
+        $out .= "bkfull:\n";
+        $out .= "  store i64 %nbk, ptr @__manticore_cc_oldlive\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_promoted\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_ysince\n";
+        $out .= "  br label %bkdone\n";
+        $out .= "bkyoung:\n";
+        $out .= "  %pr0 = load i64, ptr @__manticore_cc_promoted\n";
+        $out .= "  %pr1 = add i64 %pr0, %nbk\n";
+        $out .= "  store i64 %pr1, ptr @__manticore_cc_promoted\n";
+        $out .= "  %ys0 = load i64, ptr @__manticore_cc_ysince\n";
+        $out .= "  %ys1 = add i64 %ys0, 1\n";
+        $out .= "  store i64 %ys1, ptr @__manticore_cc_ysince\n";
+        $out .= "  br label %bkdone\n";
+        $out .= "bkdone:\n";
         $out .= "  %freed = load i64, ptr @__manticore_cc_freed\n";
         $out .= "  call void @__cc_census_end(i64 %freed)\n";
         $out .= "  ret i64 %freed\n";
