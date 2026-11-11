@@ -129,6 +129,10 @@ run_one() {
         return 2
     fi
 
+    # A @serial case is compiled in the parallel pool (MC_PHASE=compile, which
+    # stops after the build) and only RUN alone afterwards (MC_PHASE=run, which
+    # reuses that binary): the measurement needs a quiet machine, the build does not.
+    if [[ "${MC_PHASE:-}" != run ]]; then
     # Wipe any stale binary from a previous run so a silently-failing
     # compile (manticore returns 0 but produces nothing) doesn't fall
     # through to running the previous build — that masked a real
@@ -163,6 +167,11 @@ run_one() {
     if [[ ! -x "$bin" ]]; then
         printf 'FAIL %s  (no binary produced)\n' "$name"
         [[ $VERBOSE -eq 1 ]] && sed 's/^/      /' "$stderr_log"
+        return 1
+    fi
+    [[ "${MC_PHASE:-}" == compile ]] && return 3
+    elif [[ ! -x "$bin" ]]; then
+        printf 'FAIL %s  (no binary from the compile phase)\n' "$name"
         return 1
     fi
 
@@ -234,9 +243,13 @@ run_one() {
 # discovery order afterwards. Always exits 0 — the verdict file carries the
 # result, and a non-zero worker would abort xargs mid-run.
 if [[ -n "$ONE" ]]; then
+    # `@c:<name>`: the compile phase of a @serial case ({@see run_one}).
+    if [[ "$ONE" == @c:* ]]; then ONE="${ONE#@c:}"; export MC_PHASE=compile; fi
     rc=0
     run_one "$ONE" > "$WORK/$ONE.verdict" 2>&1 || rc=$?
     printf '%d\n' "$rc" > "$WORK/$ONE.rc"
+    # Built and waiting for its serial run: no verdict yet, nothing to show.
+    if [[ $rc -eq 3 ]]; then rm -f "$WORK/$ONE.verdict"; exit 0; fi
     # Live progress on STDERR. stdout is the ordered, diffable log and must not
     # carry interleaved lines; stderr is where a human watching a five-minute
     # run needs to see that it is moving. One short line per case is a single
@@ -347,17 +360,26 @@ if [[ "$JOBS" -gt 1 ]]; then
     rm -f "$WORK"/*.verdict "$WORK"/*.rc 2>/dev/null || true
     VOPT=""
     [[ $VERBOSE -eq 1 ]] && VOPT="-v"
-    if [[ ${#parallel[@]} -gt 0 ]]; then
-        # shellcheck disable=SC2086  # VOPT is one optional flag, split on purpose
-        printf '%s\n' "${parallel[@]}" \
-            | xargs -P "$JOBS" -n 1 "$0" $VOPT --one
-    fi
+    # The pool builds every case, the @serial ones included (`@c:<name>`: compile
+    # only); only their RUN waits for the serial loop below.
     # Guarded: bash 3.2 (what macOS ships) treats `"${empty[@]}"` as an unbound
     # variable under `set -u`, so an all-parallel run would die right here.
+    pool=()
+    if [[ ${#parallel[@]} -gt 0 ]]; then pool=("${parallel[@]}"); fi
+    if [[ ${#serial[@]} -gt 0 ]]; then
+        for name in "${serial[@]}"; do pool+=("@c:$name"); done
+    fi
+    if [[ ${#pool[@]} -gt 0 ]]; then
+        # shellcheck disable=SC2086  # VOPT is one optional flag, split on purpose
+        printf '%s\n' "${pool[@]}" \
+            | xargs -P "$JOBS" -n 1 "$0" $VOPT --one
+    fi
     if [[ ${#serial[@]} -gt 0 ]]; then
         for name in "${serial[@]}"; do
+            # A compile that failed, or a SKIP, already wrote its verdict.
+            [[ "$(cat "$WORK/$name.rc" 2>/dev/null || echo 3)" == "3" ]] || continue
             # shellcheck disable=SC2086
-            "$0" $VOPT --one "$name"
+            MC_PHASE=run "$0" $VOPT --one "$name"
         done
     fi
     # Replay in DISCOVERY order: a parallel run's log must diff cleanly against
