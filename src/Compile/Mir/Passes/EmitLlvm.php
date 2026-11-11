@@ -542,6 +542,11 @@ final class EmitLlvm implements EmitVisitor
     private array $rtExterns = [];
     /** @var array<string, bool> mangled module-fn name → defined (for extern detection) */
     private array $definedFns = [];
+    /** @var array<string, true> functions the program itself declares (not stdlib, not prelude):
+     *  php drops surplus arguments to these, where an internal function throws */
+    private array $userFnNames = [];
+    /** @var array<string, bool> {@see \Compile\Mir\Module::$countReadInlineNames} */
+    private array $countReadInlineNames = [];
     /** @var array<string, \Compile\Mir\FunctionDef> reified spec method name → its def, each with claimed params ({@see ResolveOverloads::claimRoute}) */
     private array $claimedFns = [];
     /** @var array<string, bool> FFI bindings (`#[Ffi\Symbol]`): a pointer arrives as an int */
@@ -818,6 +823,7 @@ final class EmitLlvm implements EmitVisitor
         $this->builtinTwinRet = $module->builtinTwinRet;
         $this->builtinTwinParams = $module->builtinTwinParams;
         $this->builtinTwinRef = $module->builtinTwinRef;
+        $this->countReadInlineNames = $module->countReadInlineNames;
         // Only a twin the program NAMES in a string literal can be the target of
         // a call by name. Arming every one at every dynamic site inlined builtins
         // the program never uses — `gc_collect_cycles` pulled the cycle
@@ -859,11 +865,15 @@ final class EmitLlvm implements EmitVisitor
         $this->sigs->closureRefUnion = FunctionSignatures::closureRefUnion(
             $module->functions, $module->closureCaptures);
         $this->externFnNames = [];
+        $this->userFnNames = [];
         $this->dynfExportFns = [];
         $this->dynfExports = [];
         $this->sigs->namedSpread = $module->namedSpread;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
+            if (!$fn->isExtern && !$fn->isPrelude) {
+                $this->userFnNames[$fn->name] = true;
+            }
             if ($fn->isExtern) {
                 $this->externFnNames[$fn->name] = true;
             } elseif ($this->exportDynf && !$fn->isPrelude && $this->dynfNameable($fn->name)) {
@@ -943,6 +953,9 @@ final class EmitLlvm implements EmitVisitor
         // property's REPR is its declaration's, {@see cellPropBoxed}).
         $this->cellPropArrayBase = [];
         $this->refCellPropNames = [];
+        $this->refCellPropShared = [];
+        $this->refCellPropPrivate = [];
+        $this->refCellPropPrivNames = [];
         $this->needsObjectVarsFn = false;
         $this->needsObjectVarsMgFn = false;
         $this->needsGetClassFn = false;
@@ -954,8 +967,14 @@ final class EmitLlvm implements EmitVisitor
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
-        $this->modToken = \dechex($this->fnvHash64($module->sourceFile
-            . '|' . ($this->emitLibrary ? 'lib' : 'app')));
+        // Only a library can share an executable with another module, so only a
+        // library needs a name of its own. The executable's module takes a fixed
+        // token: identical prelude code then emits identical text in every
+        // program (shared object reuse), and `app` is not hex, so it can never
+        // equal a library's token.
+        $this->modToken = $this->emitLibrary
+            ? \dechex($this->fnvHash64($module->sourceFile . '|lib'))
+            : 'app';
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
         $this->cloneErasedSym = '';
@@ -966,6 +985,7 @@ final class EmitLlvm implements EmitVisitor
         $this->scmpSyms = [];
         $this->scmpExtraBodies = '';
         $this->dynfThunks = [];
+        $this->dyncallSyms = [];
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
@@ -1448,6 +1468,7 @@ final class EmitLlvm implements EmitVisitor
                 $bodyBytes += \strlen($body);
             });
             \Compile\Stats::line('IR: bodies ' . (string)$bodyBytes . ' bytes');
+            $this->reportIrCensus($bodyBytes);
         }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
@@ -2317,30 +2338,90 @@ final class EmitLlvm implements EmitVisitor
      * (`[&$o->p]`). Such a slot is promoted in place on the first `&`
      * ({@see EmitLlvmObjects::emitRefCell}): it holds `cell(REF, box)` from
      * then on, so a store of that name tests the slot's tag and writes through
-     * the box, and the class drop gives the slot's count on the box back. By
-     * NAME, not by class: the object may be typed as a parent or a child of the
-     * class the `&` named, and the runtime tag is the real answer anyway.
+     * the box, and the class drop gives the slot's count on the box back.
      *
-     * @var array<string, bool>
+     * Keyed by SLOT OWNER where the receiver's class says who owns the slot
+     * ({@see refSlotOwner}): a SHARED (public/protected) slot by name across
+     * every class — the object may be typed as a parent or a child of the class
+     * the `&` named — and a PRIVATE slot by its declaring class. A `&` whose
+     * receiver class is unknown, or a slot the class does not declare, stays by
+     * NAME and governs every slot of that name. Without the private split, a `&`
+     * to any `$__s` made every read of a prelude class's private `$__s` deref,
+     * so the same prelude body compiled differently from program to program.
+     *
+     * @var array<string, bool> names a `&` reached through an unknown receiver
      */
     private array $refCellPropNames = [];
+    /** @var array<string, bool> names of SHARED slots a `&` reached */
+    private array $refCellPropShared = [];
+    /** @var array<string, bool> `Owner::slot` of PRIVATE slots a `&` reached */
+    private array $refCellPropPrivate = [];
+    /** @var array<string, bool> names of the {@see $refCellPropPrivate} slots */
+    private array $refCellPropPrivNames = [];
 
-    /** Fill {@see $refCellPropNames} from one function body. */
+    /** Fill the `&`-reached slot sets from one function body. */
     private function collectRefCellPropNames(Node $n): void
     {
         if ($n->kind === Node::KIND_REF_CELL) {
             $kids = \Compile\Mir\Walk::children($n);
             if ($kids[0]->kind === Node::KIND_PROPERTY_ACCESS) {
-                $this->refCellPropNames[$this->asPropAccess($kids[0])->property] = true;
+                $pa = $this->asPropAccess($kids[0]);
+                $this->noteRefSlot($pa->object, $pa->property);
             }
             return;
         }
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
             $sp = \Compile\Mir\Walk::children($n);
             $last = $sp[\count($sp) - 1];
-            if ($last->kind === Node::KIND_REF_CELL) { $this->refCellPropNames[$this->asStoreProp($n)->property] = true; }
+            if ($last->kind === Node::KIND_REF_CELL) {
+                $st = $this->asStoreProp($n);
+                $this->noteRefSlot($st->object, $st->property);
+            }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectRefCellPropNames($c); }
+    }
+
+    /**
+     * Who owns `$prop` on a receiver: '' when unknown (no class, or a slot the
+     * class does not declare), '*' for a shared (non-private) slot, else the
+     * class that declared the private slot. `$cd` when the caller already has
+     * the receiver's class, else read from `$recv`'s type.
+     */
+    private function refSlotOwner(?Node $recv, ?\Compile\Mir\ClassDef $cd, string $prop): string
+    {
+        if ($cd === null && $recv !== null && $recv->type->kind === Type::KIND_OBJ && $recv->type->class !== null) {
+            $cd = $this->classes[\ltrim($recv->type->class, '\\')] ?? null;
+        }
+        if ($cd === null) { return ''; }
+        $pm = $cd->propertyMeta[$prop] ?? null;
+        if ($pm === null) { return ''; }
+        if ($pm->visibility !== 'private') { return '*'; }
+        return $pm->declaringClass !== '' ? \ltrim($pm->declaringClass, '\\') : $cd->name;
+    }
+
+    private function noteRefSlot(Node $recv, string $prop): void
+    {
+        $owner = $this->refSlotOwner($recv, null, $prop);
+        if ($owner === '') {
+            $this->refCellPropNames[$prop] = true;
+        } elseif ($owner === '*') {
+            $this->refCellPropShared[$prop] = true;
+        } else {
+            $this->refCellPropPrivate[$owner . '::' . $prop] = true;
+            $this->refCellPropPrivNames[$prop] = true;
+        }
+    }
+
+    /** May the slot `$recv->$prop` hold a `&`-promoted REF cell? See {@see $refCellPropNames}. */
+    private function propMayHoldRef(?Node $recv, ?\Compile\Mir\ClassDef $cd, string $prop): bool
+    {
+        if (isset($this->refCellPropNames[$prop])) { return true; }
+        $owner = $this->refSlotOwner($recv, $cd, $prop);
+        if ($owner === '') {
+            return isset($this->refCellPropShared[$prop]) || isset($this->refCellPropPrivNames[$prop]);
+        }
+        if ($owner === '*') { return isset($this->refCellPropShared[$prop]); }
+        return isset($this->refCellPropPrivate[$owner . '::' . $prop]);
     }
 
     private function asStoreProp(Node $n): \Compile\Mir\StoreProperty { return $n; }

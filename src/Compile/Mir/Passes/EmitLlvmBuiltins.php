@@ -93,8 +93,25 @@ trait EmitLlvmBuiltins
     /** Line of the builtin call being emitted: the line its trace frame reports. */
     private int $btCallLine = 0;
 
+    /**
+     * A spread into a builtin that has a same-named PHP body: the builtin emitters
+     * index their arguments positionally and cannot read a pack, the body binds it
+     * like any call (defaults, variadics, names). Lowering already expands the
+     * fixed-arity ones ({@see \Compile\Mir\Passes\LowerFromAst::expandBuiltinSpread}).
+     */
+    private function spreadIntoBodiedBuiltin(Call $c): bool
+    {
+        $name = $c->function;
+        if (!isset($this->allTwinTot[$name]) && !isset($this->sigs->paramTypes[$name])) { return false; }
+        foreach ($c->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return true; }
+        }
+        return false;
+    }
+
     private function emitBuiltin(Call $c): ?string
     {
+        if ($c === $this->builtinDeclined || $this->spreadIntoBodiedBuiltin($c)) { return null; }
         $this->btCallLine = $c->line;
         $mark = \count($this->arrArgTempRegs);
         $ir = $this->emitBuiltinDispatch($c);
@@ -11497,7 +11514,7 @@ trait EmitLlvmBuiltins
             $out .= $this->packArrayBack($arr2, $asI, $asCell);
             // A slot a `&` bound holds `cell(REF, box)`: the buffer is the box's, and the
             // binding stays. The count moved with the buffer, so nothing is dropped here.
-            if ($asCell && isset($this->refCellPropNames[$arrNode->property])) {
+            if ($asCell && $this->propMayHoldRef($arrNode->object, null, $arrNode->property)) {
                 $w = $this->ssa->allocReg();
                 $hi = $this->ssa->allocReg();
                 $isCell = $this->ssa->allocReg();

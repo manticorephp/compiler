@@ -396,8 +396,14 @@ trait EmitLlvmModule
         $out .= $globalCells;
         // Zero word: a null vec/assoc base (the empty-literal optimization
         // stores `[]` as a null ptr) is redirected here so a foreach length
-        // load reads 0 instead of faulting.
-        $out .= "@__mir_zero_word = internal global i64 0\n";
+        // load reads 0 instead of faulting. It is an EMPTY ARRAY, not a word: a
+        // redirected base has its flags, capacity and buckets read too, and an
+        // 8-byte object read at +32 is out of bounds — undefined behavior the
+        // optimizer is free to turn into a trap. Read-only by contract (only
+        // loads go through it), so a constant: the loads fold, and a module
+        // split may copy it instead of sharing state.
+        $out .= '@__mir_zero_word = private unnamed_addr constant ['
+            . (string)\intdiv(\Compile\MemoryAbi::ARRAY_HEADER_SIZE, 8) . " x i64] zeroinitializer\n";
         // …or whenever the ARRAY rc trace is on: it names its caller through
         // {@see $out `@__mir_bt_top`} below, and a LIBRARY module needs no
         // backtraces of its own, so without this the stdlib emitted a call to
@@ -2556,6 +2562,7 @@ trait EmitLlvmModule
     {
         $this->rt->needsCliArgv = true;
         $this->frame->isMain = true;
+        $this->ehTmpBeginMain($fn);
         $header = "define i32 @main(i32 %argc, ptr %argv)"
             . $this->personalityClause() . " {\nentry:\n";
         if ($this->rt->needsExceptions) {
@@ -2687,7 +2694,7 @@ trait EmitLlvmModule
             $dsh .= "  call void @__mir_dtor_sweep()\n";
             $dsh .= "  ret void\n}\n\n";
         }
-        $body .= "  ret i32 0\n";
+        $body .= "  ret i32 0\n" . $this->ehTmpEnd();
         return $header . $body . "}\n\n" . $dsh;
     }
 

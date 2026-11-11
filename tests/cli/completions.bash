@@ -10,7 +10,7 @@ _manticore() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "compile build dump-llvm dump-ast analyze dump-mir dump-llvm-mir split-ir dump-sig version upgrade doctor completions help --version --help" -- "$cur"))
+        COMPREPLY=($(compgen -W "compile build dump-llvm dump-ast analyze dump-mir dump-llvm-mir split-ir dump-sig version upgrade doctor cache completions help --version --help" -- "$cur"))
         return 0
     fi
     cmd="${COMP_WORDS[1]}"
@@ -130,6 +130,13 @@ _manticore() {
         doctor)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--help --offline --no-smoke" -- "$cur"))
+            else
+                _manticore_files "$cur"
+            fi
+            ;;
+        cache)
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--help" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi

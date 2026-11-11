@@ -110,79 +110,89 @@ trait LowerPrelude
      */
     private function preludeStatements(): array
     {
-        $src = "<?php\n" . $this->exceptionsSrc . $this->resourceSrc . $this->fiberSrc . $this->backtraceSrc;
+        // Each prelude file is parsed ON ITS OWN and the statements are joined in
+        // this order (classes are still built in source order). Parsed as one
+        // concatenated blob, a function's line numbers were its offset in the
+        // blob, so they moved with whichever files a program injected — the same
+        // prelude function compiled to different text in different programs.
+        /** @var string[] */
+        $parts = [];
+        $parts[] = $this->exceptionsSrc;
+        $parts[] = $this->resourceSrc;
+        $parts[] = $this->fiberSrc;
+        $parts[] = $this->backtraceSrc;
         if ($this->includeVarDump) {
-            $src .= $this->varDumpSrc;
+            $parts[] = $this->varDumpSrc;
         }
         if ($this->includeArrayClasses) {
-            $src .= $this->arrayClassesSrc;
+            $parts[] = $this->arrayClassesSrc;
         }
         if ($this->splIteratorsSrc !== '') {
             // After spl_arrays.php: AppendIterator hands out an ArrayIterator.
-            $src .= $this->splIteratorsSrc;
+            $parts[] = $this->splIteratorsSrc;
         }
         if ($this->includeCli) {
-            $src .= $this->cliSrc;
+            $parts[] = $this->cliSrc;
         }
         if ($this->includeVarExport) {
-            $src .= $this->varExportSrc;
+            $parts[] = $this->varExportSrc;
         }
         if ($this->includePrintR) {
-            $src .= $this->printRSrc;
+            $parts[] = $this->printRSrc;
         }
         if ($this->includeSerialize) {
-            $src .= $this->serializeSrc;
+            $parts[] = $this->serializeSrc;
         }
         if ($this->includeUnserialize) {
-            $src .= $this->unserializeSrc;
+            $parts[] = $this->unserializeSrc;
         }
         if ($this->includeReflection) {
             // After exceptions.php: ReflectionException extends Exception, and
             // the sources are concatenated then parsed as one unit.
-            $src .= $this->reflectionSrc;
+            $parts[] = $this->reflectionSrc;
         }
         if ($this->includeAttributes) {
             // Depends on nothing (and nothing depends on it) — placed beside
             // reflection because that is what gates it.
-            $src .= $this->attributesSrc;
+            $parts[] = $this->attributesSrc;
         }
         if ($this->includeDateTime) {
             // After exceptions.php (DateMalformedStringException extends
             // Exception, DateError extends Error) and after spl_arrays.php,
             // whose interfaces DatePeriod implements.
-            $src .= $this->dateTimeSrc;
+            $parts[] = $this->dateTimeSrc;
         }
         if ($this->binarySrc !== '') {
-            $src .= $this->binarySrc;
+            $parts[] = $this->binarySrc;
         }
         if ($this->errorsSrc !== '') {
             // After exceptions.php — __mc_dispatch_uncaught takes a Throwable.
-            $src .= $this->errorsSrc;
+            $parts[] = $this->errorsSrc;
         }
         if ($this->obSrc !== '') {
             // After errors.php: both are drained from the same atexit family,
             // and __mc_ob_shutdown must run after the shutdown queue it may be
             // buffering the output of.
-            $src .= $this->obSrc;
+            $parts[] = $this->obSrc;
         }
         if ($this->filterFnsSrc !== '') {
             // Calls the stdlib validators and throws Filter\ (parsed after this blob).
-            $src .= $this->filterFnsSrc;
+            $parts[] = $this->filterFnsSrc;
         }
         if ($this->autoloadSrc !== '') {
             // Order-independent — the queue holds callables and calls nothing
             // else in the prelude.
-            $src .= $this->autoloadSrc;
+            $parts[] = $this->autoloadSrc;
         }
         if ($this->sapiSrc !== '') {
             // After exceptions.php (setcookie throws ValueError) and after
             // cli.php, which Main forces on: the request context seeds $_SERVER.
-            $src .= $this->sapiSrc;
+            $parts[] = $this->sapiSrc;
         }
         if ($this->sessionSrc !== '') {
             // LAST: it names Manticore\Sapi\Context (sapi.php), __McUnSt (unserialize.php) and
             // the Throwable hierarchy, and Main forces every one of those on.
-            $src .= $this->sessionSrc;
+            $parts[] = $this->sessionSrc;
         }
         if ($this->xmlSrc !== '') {
             // ext/simplexml — global namespace, so it belongs to this blob and
@@ -194,7 +204,9 @@ trait LowerPrelude
             // objects walk off their own layout: xml.php defines
             // SimpleXMLElement before SimpleXMLIterator extends it, and
             // xml_dom.php defines DOMNode before every DOM subclass.
-            $src .= $this->xmlSrc . $this->xmlXpathSrc . $this->xmlDomSrc;
+            $parts[] = $this->xmlSrc;
+            $parts[] = $this->xmlXpathSrc;
+            $parts[] = $this->xmlDomSrc;
         }
         if ($this->curlSrc !== '') {
             // ext/curl — global namespace, so it rides this blob too. After
@@ -204,7 +216,8 @@ trait LowerPrelude
             //
             // ⚠ ORDER IS LOAD-BEARING, same rule as xml above: curl_multi.php
             // names __McCurl and CurlHandle, both defined in curl.php.
-            $src .= $this->curlSrc . $this->curlMultiSrc;
+            $parts[] = $this->curlSrc;
+            $parts[] = $this->curlMultiSrc;
         }
         if ($this->pdoSrc !== '') {
             // ext/pdo — global namespace, so it rides this blob. After
@@ -216,31 +229,35 @@ trait LowerPrelude
             // pdo_sqlite.php implements the __McPdoDrv / __McPdoDrvStmt
             // interfaces pdo.php declares, and a class built before the
             // interface it implements inherits nothing.
-            $src .= $this->pdoSrc . $this->pdoSqliteSrc . $this->pdoSqlSrc
-                . $this->pdoPgsqlSrc . $this->pdoMysqlSrc;
+            $parts[] = $this->pdoSrc;
+            $parts[] = $this->pdoSqliteSrc;
+            $parts[] = $this->pdoSqlSrc;
+            $parts[] = $this->pdoPgsqlSrc;
+            $parts[] = $this->pdoMysqlSrc;
         }
         if ($this->mysqliSrc !== '') {
             // After exceptions.php and spl_arrays.php (RuntimeException, IteratorAggregate).
-            $src .= $this->mysqliSrc;
+            $parts[] = $this->mysqliSrc;
         }
         if ($this->tokenizerSrc !== '') {
             // ext/tokenizer. Core BEFORE api — classes are built in source order
             // and token_get_all() constructs __McTok.
-            $src .= $this->tokenizerSrc . $this->tokenizerApiSrc;
+            $parts[] = $this->tokenizerSrc;
+            $parts[] = $this->tokenizerApiSrc;
         }
         if ($this->opensslSrc !== '') {
             // ext/openssl certificate reading. Self-contained: DER in, arrays out,
             // no dependency on any other prelude fragment.
-            $src .= $this->opensslSrc;
+            $parts[] = $this->opensslSrc;
         }
         if ($this->intlSrc !== '') {
             // ext/intl. After exceptions.php (ValueError).
-            $src .= $this->intlSrc;
+            $parts[] = $this->intlSrc;
         }
         if ($this->weakSrc !== '') {
             // WeakMap / WeakReference. After spl_arrays.php: WeakMap implements
             // ArrayAccess, Countable and IteratorAggregate.
-            $src .= $this->weakSrc;
+            $parts[] = $this->weakSrc;
         }
         // The array functions come last, because the prelude calls them too
         // (`SplQueue` slices its list, `SplDoublyLinkedList::add` splices):
@@ -250,7 +267,7 @@ trait LowerPrelude
         // call the same function itself.
         if (!$this->includeArrayFns || !$this->includeArrayFnsExt) {
             $own = new \Compile\Mir\PreludeDemand([
-                "<?php\n" . $src, "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
+                "<?php\n" . \implode('', $parts), "<?php\n" . $this->ioPollSrc, "<?php\n" . $this->pcntlSrc,
                 "<?php\n" . $this->asyncSrc, "<?php\n" . $this->bufferSrc, "<?php\n" . $this->httpSrc,
                 "<?php\n" . $this->wsSrc, "<?php\n" . $this->dsSrc, "<?php\n" . $this->randomSrc,
                 "<?php\n" . $this->bcmathSrc, "<?php\n" . $this->overloadSrc,
@@ -269,20 +286,21 @@ trait LowerPrelude
             }
         }
         if ($this->includeArrayFns) {
-            $src .= $this->arrayFnsSrc;
+            $parts[] = $this->arrayFnsSrc;
         }
         if ($this->includeArrayFnsExt) {
-            $src .= $this->arrayFnsExtSrc;
+            $parts[] = $this->arrayFnsExtSrc;
         }
-        // Belt and braces: the concatenation ALREADY starts with the Throwable
-        // prelude's own `<?php`, so this leading tag is redundant today and the
-        // parser skips the duplicate. It is here so that the invariant — this
-        // blob is CODE, whatever fragment happens to lead it — does not depend
-        // on which fragment that is. (It is not what fixed the headerless
-        // fragments; that was PreludeDemand::definedFunctions, which decides
-        // whether they are injected at all.)
-        $program = \Parser\Parser::parseSource("<?php\n" . $src);
-        $stmts = $program->statements;
+        // A file that does not open with `<?php` is still CODE: the tag is added,
+        // never assumed. (Headerless fragments are decided upstream, by
+        // PreludeDemand::definedFunctions, which chooses whether they are injected.)
+        /** @var \Parser\Ast\Stmt[] */
+        $stmts = [];
+        foreach ($parts as $part) {
+            if ($part === '') { continue; }
+            $code = \str_starts_with($part, '<?php') ? $part : "<?php\n" . $part;
+            foreach (\Parser\Parser::parseSource($code)->statements as $s) { $stmts[] = $s; }
+        }
         // Io\Poll is a NAMESPACED class tree (braced `namespace Io\Poll {}`).
         // PHP forbids mixing bracketed + unbracketed namespaces in one unit, so
         // it is parsed on its OWN (all-braced, self-contained) and its statements

@@ -937,8 +937,12 @@ trait EmitLlvmObjects
             // constructor never appears in the trace.
             $out .= $this->btPush('__construct', $n->line);
             $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->args, 1);
+            // The call's own temps are listed for an unwind, which skips the releases below.
+            [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
+            $out .= $tmpIr;
             $cr = $this->ssa->allocReg();
-            $out .= $this->ctorCallIr($cr, $cd->name, $ctorTarget, $argList);
+            $ctorIr = $this->ctorCallIr($cr, $cd->name, $ctorTarget, $argList);
+            $out .= $tmpHeld > 0 ? $this->ehTmpMarkCalls($ctorIr) : $ctorIr;
             $out .= $this->btPop();
             $out .= $refSlotDrops;
             $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
@@ -959,6 +963,7 @@ trait EmitLlvmObjects
                 $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$ri]);
                 $ri = $ri + 1;
             }
+            $out .= $this->ehTmpPop($tmpHeld);
         }
         // Capture the `new` site into a Throwable (PHP records it at construction):
         // line and file always — two stores, and `(string)$e` reads them through a
@@ -1673,7 +1678,7 @@ trait EmitLlvmObjects
         // A slot a `&` promoted holds `cell(REF, box)`; the property IS the
         // referenced value, as an element holding one is ({@see
         // EmitLlvmArrays}'s element read, the same deref).
-        if ($n->type->kind === Type::KIND_CELL && isset($this->refCellPropNames[$pa->property])) {
+        if ($n->type->kind === Type::KIND_CELL && $this->propMayHoldRef($pa->object, null, $pa->property)) {
             $this->rt->needsTagged = true;
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
@@ -2566,7 +2571,7 @@ trait EmitLlvmObjects
         $spt = $cd->propertyTypes[$prop] ?? null;
         if ($spt !== null && $cd->propertyWidth($prop) === 8) {
             if ($this->cellPropBoxed($spt, $cd->name, $prop)) {
-                if ($dropBoxed && !isset($this->refCellPropNames[$prop])) { $oldFlavor = 'cell'; }
+                if ($dropBoxed && !$this->propMayHoldRef(null, $cd, $prop)) { $oldFlavor = 'cell'; }
             } elseif ($dropRaw && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))) {
                 $oldFlavor = $this->discardReleaseFlavor($spt);
             }
@@ -3690,7 +3695,7 @@ trait EmitLlvmObjects
         // `cell(REF, box)`: the store goes THROUGH to the box, which takes the
         // count the value already carries.
         $thruDone = '';
-        if (isset($this->refCellPropNames[$n->property]) && $propType !== null
+        if ($this->propMayHoldRef($n->object, null, $n->property) && $propType !== null
             && $propType->kind === Type::KIND_CELL) {
             $wt = $this->ssa->allocReg();
             $out .= '  ' . $wt . ' = call i1 @__mir_ref_slot_store(ptr ' . $gep . ', i64 ' . $val . ")\n";
@@ -8899,6 +8904,10 @@ trait EmitLlvmObjects
             $btPushIr = $this->btPush($btName, $n->line);
         }
         $faIr = $this->faPush($target, $n->srcArgc, $n->args);
+        // The call's own temps are listed for an unwind, which skips the releases below.
+        [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
+        $out .= $tmpIr;
+        $tmpFrom = \strlen($out);
         $reg = $this->ssa->allocReg();
         $sfaInline = null;
         if ($target === 'SplFixedArray__offsetSet' && $faIr === '') {
@@ -8920,6 +8929,7 @@ trait EmitLlvmObjects
                   . '(' . $argList . ")\n";
             if ($btName !== '') { $out .= $this->btPop(); }
         }
+        if ($tmpHeld > 0) { $out = \substr($out, 0, $tmpFrom) . $this->ehTmpMarkCalls(\substr($out, $tmpFrom)); }
         $out .= $padDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
@@ -8929,6 +8939,7 @@ trait EmitLlvmObjects
             $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$rci]);
             $rci = $rci + 1;
         }
+        $out .= $this->ehTmpPop($tmpHeld);
         foreach ($cellBoxDrops as $cbd) {
             $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
         }
@@ -11572,6 +11583,10 @@ trait EmitLlvmObjects
         $boxCell = $n->type->kind === Type::KIND_CELL;
         $this->vdWiden = $widen;
         $this->vdAddrLoad = $addrLoad;
+        // The call's own temps are listed for an unwind, which skips the releases below.
+        [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
+        $out .= $tmpIr;
+        $tmpFrom = \strlen($out);
         if (\count($distinct) <= 1) {
             $sym = $distinct[0] ?? $fallbackFull;
             // The fallback is derived from the static type before the candidate
@@ -11583,6 +11598,7 @@ trait EmitLlvmObjects
             // the PHP semantics for reaching an unavailable method.
             if (!$this->hasEmittedFunction($sym)) {
                 if ($btName !== '') { $out .= $this->btPop(); }
+                $out .= $this->ehTmpPop($tmpHeld);
                 $this->spreadTail = null;
                 $this->lastValue = '0';
                 $this->lastValueType = 'i64';
@@ -11600,6 +11616,7 @@ trait EmitLlvmObjects
             if ($distinct === [] && !isset($this->sigs->paramTypes[$sym])
                 && ($static === '' || !isset($this->classes[$static]))) {
                 if ($btName !== '') { $out .= $this->btPop(); }
+                $out .= $this->ehTmpPop($tmpHeld);
                 $this->spreadTail = null;
                 $this->lastValue = '0';
                 $this->lastValueType = 'i64';
@@ -11621,6 +11638,7 @@ trait EmitLlvmObjects
             $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms, $argOutTypes);
             $reg = $this->vdResult;
         }
+        if ($tmpHeld > 0) { $out = \substr($out, 0, $tmpFrom) . $this->ehTmpMarkCalls(\substr($out, $tmpFrom)); }
         $this->spreadTail = null;
         $this->vdWiden = [];
         $this->vdAddrLoad = [];
@@ -11634,6 +11652,7 @@ trait EmitLlvmObjects
             $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$rci]);
             $rci = $rci + 1;
         }
+        $out .= $this->ehTmpPop($tmpHeld);
         foreach ($cellBoxDrops as $cbd) {
             $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
         }

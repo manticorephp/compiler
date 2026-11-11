@@ -246,12 +246,23 @@ jobs:
           name: compiler-macos-arm64
       - name: Unpack the compiler
         run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
+      # Shared prelude bodies, as in linux-target.yml: every shard reads, shard 1
+      # of a push to main writes; content-keyed, so stale entries only miss.
+      - name: Restore the object cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-objcache
+          key: mc-objcache-macos-arm64-${{ github.run_id }}
+          restore-keys: |
+            mc-objcache-macos-arm64-
       # The same gate.sh, run bare: it copies the checkout to a scratch tree
       # (RUNNER_TEMP, never the checkout itself — the build writes bin/ and lib/
       # into whatever it is pointed at) and does the same steps the container does.
       - name: Build + suite
         run: |
-          mkdir -p ci-logs
+          mkdir -p ci-logs ci-objcache
+          MANTICORE_OBJ_CACHE_DIR="$PWD/ci-objcache" \
+          MANTICORE_OBJ_CACHE_MAX_MB=512 \
           MC_GATE=0 \
           MC_JOBS=0 \
           MC_SMOKES=0 \
@@ -264,6 +275,16 @@ jobs:
           MC_COMPILER_CACHE="$PWD/ci-cache" \
           MC_COMMIT="${GITHUB_SHA::12} ${GITHUB_REF_NAME}" \
           bash tools/docker/gate.sh
+
+      - name: Drop the program parts from the object cache
+        if: always() && matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: rm -rf ci-objcache/prog
+      - name: Save the object cache
+        if: always() && matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: ci-objcache
+          key: mc-objcache-macos-arm64-${{ github.run_id }}
 
       - name: Summary
         if: always()
