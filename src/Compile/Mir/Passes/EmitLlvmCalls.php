@@ -879,10 +879,12 @@ trait EmitLlvmCalls
                 $spNode = $this->asSpreadNode($iv->args[$spreadIdx]);
                 $spElem = $spNode->operand->type->element;
                 $spreadElem = $spElem === null ? Type::unknown() : $spElem;
-                // A TYPED pack (int[], string[], P[]) is handed to the table as a
-                // cellified copy, so it shares the cell thunks — the stdlib's
-                // exports, one module set for the rest — instead of building a
-                // thunk per nameable function for each element type it meets.
+                // A TYPED pack (int[], string[], P[]) shares the cell thunks — the
+                // stdlib's exports, one module set for the rest — instead of a thunk
+                // per nameable function for each element type it meets. It goes as
+                // it is: the thunk binds it through the callee's spread fill, which
+                // decodes each element by the buffer's own hint, so raw words read
+                // right and nothing is copied (a copy leaked when the callee threw).
                 if ($spreadElem->kind !== Type::KIND_UNKNOWN && $spreadElem->kind !== Type::KIND_CELL) {
                     $spreadElem = Type::cell();
                     $packCells = true;
@@ -1135,7 +1137,7 @@ trait EmitLlvmCalls
         $missL = $dynfSyms !== [] ? $this->ssa->allocLabel('dynf.miss') : '';
         if ($dynfSyms !== []) {
             $out .= $hasSpread
-                ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr, $missL, $packCells ? $this->asSpreadNode($iv->args[$spreadIdx])->operand->type : null)
+                ? $this->emitDynfSpreadTablePath($iv, $keyP, $res, $endL, $dynfSyms, $fixedRegs, $spreadArr, $missL)
                 : $this->emitDynfTablePath($iv, $keyP, $res, $endL, $dynfSyms, $missL);
             $out .= '  br label %' . $endL . "\n";
             $out .= $missL . ":\n";
@@ -1619,13 +1621,12 @@ trait EmitLlvmCalls
      * @param string[]              $fixedRegs hoisted fixed-prefix values
      * @param array<string, string> $syms      candidate name => thunk symbol
      */
-    private function emitDynfSpreadTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, array $fixedRegs, string $spreadArr, string $missL, ?Type $cellifyPack = null): string
+    private function emitDynfSpreadTablePath(Invoke_ $iv, string $keyP, string $res, string $endL, array $syms, array $fixedRegs, string $spreadArr, string $missL): string
     {
         $this->dynfExtraBodies .= $this->dynfLookupFn();
         $pair = $this->dynfTable($syms);
         $out = '';
         $argList = 'ptr ' . $spreadArr;
-        $cells = '';
         foreach ($fixedRegs as $i => $r) {
             $this->lastValue = $r;
             $this->lastValueType = 'i64';
@@ -1640,21 +1641,9 @@ trait EmitLlvmCalls
         $callL = $this->ssa->allocLabel('dynf.stab');
         $out .= '  br i1 ' . $hit . ', label %' . $callL . ', label %' . $missL . "\n";
         $out .= $callL . ":\n";
-        if ($cellifyPack !== null) {
-            // The thunks read CELL elements; this pack stores raw ones. The copy
-            // is the call's own and is released once the callee returns.
-            $cells = $this->ssa->allocReg();
-            $out .= '  ' . $cells . ' = call ptr @__mir_array_cellified_copy(ptr ' . $spreadArr . ")\n";
-            $argList = 'ptr ' . $cells . \substr($argList, \strlen('ptr ' . $spreadArr));
-        }
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 ' . $fn . '(' . $argList . ")\n";
         $out .= '  store i64 ' . $r . ', ptr ' . $res . "\n";
-        if ($cellifyPack !== null) {
-            $ci = $this->ssa->allocReg();
-            $out .= '  ' . $ci . ' = ptrtoint ptr ' . $cells . " to i64\n";
-            $out .= $this->rcReleaseReg($ci, $cellifyPack->isAssoc() ? 'assoccell' : 'veccell');
-        }
         return $out;
     }
 
@@ -5573,10 +5562,25 @@ trait EmitLlvmCalls
             }
             if ($elemType === null || $elemType->kind === Type::KIND_CELL || $elemType->kind === Type::KIND_UNKNOWN) {
                 // An erased pack may hold a raw-hinted buffer (a variadic `string ...$args`): its words are
-                // untagged payloads, which only the buffer's own hint can say.
+                // untagged payloads, which only the buffer's own hint can say. Past the end of the pack the
+                // word is a stray 0 that a raw hint would decode into a value; it stays 0, the missing
+                // argument the default below replaces.
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $real = $this->ssa->allocReg();
+                $out .= '  ' . $real . ' = icmp ugt i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                if ($posHas !== '') {
+                    $named = $this->ssa->allocReg();
+                    $out .= '  ' . $named . ' = or i1 ' . $real . ', ' . $hit[$k][0] . "\n";
+                    $real = $named;
+                }
                 $dec = $this->ssa->allocReg();
                 $out .= '  ' . $dec . ' = call i64 @__mir_elem_decode(ptr ' . $arrReg . ', i64 ' . $ev . ")\n";
-                $ev = $dec;
+                $kept = $this->ssa->allocReg();
+                $out .= '  ' . $kept . ' = select i1 ' . $real . ', i64 ' . $dec . ", i64 0\n";
+                $ev = $kept;
             }
             $pt = $ptypes[$k] ?? null;
             $needBox = ($tmask[$k] ?? false)
