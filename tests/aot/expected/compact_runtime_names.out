@@ -1,0 +1,21 @@
+array(4) {
+  ["fields"]=>
+  string(2) "id"
+  ["join"]=>
+  string(0) ""
+  ["where"]=>
+  string(5) "a = 1"
+  ["limits"]=>
+  string(8) "LIMIT 10"
+}
+array(3) {
+  ["a"]=>
+  int(1)
+  ["b"]=>
+  array(1) {
+    [0]=>
+    int(2)
+  }
+  ["c"]=>
+  string(1) "c"
+}

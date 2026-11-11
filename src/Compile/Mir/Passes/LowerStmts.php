@@ -580,9 +580,13 @@ trait LowerStmts
         if ($stmt->kind === 'Global') { return $this->lowerGlobal($stmt); }
         if ($stmt->kind === 'Throw') { return new Throw_($this->lowerExpr($stmt->expr), Type::void()); }
         if ($stmt->kind === 'TryCatch') { return $this->lowerTryCatch($stmt); }
+        // Declared at the top level instead ({@see hoistNestedDecls}).
+        if (($stmt->kind === 'Function' || $stmt->kind === 'Class') && $this->isHoistedNestedDecl($stmt)) {
+            return new Block([], Type::void());
+        }
         return $this->lowerFail('lower.unsupported', 'unsupported statement kind ' . $stmt->kind, $stmt->span,
             'MIR.lower: unsupported statement kind ' . $stmt->kind
-            . ' at line ' . (string)$stmt->span->line);
+            . ' in ' . $stmt->span->file . ' on line ' . (string)$stmt->span->line);
     }
 
     /**

@@ -299,7 +299,7 @@ There is no `php.ini`, no `-d` flag, no extension loader, no PECL
 - **`date_default_timezone_get()` follows the host's zone**; php without a `date.timezone`
   setting says `UTC`. Call `date_default_timezone_set()` in programs whose output
   depends on it. On Alpine install `tzdata` ([install.md](install.md)).
-- `extension_loaded()` answers for what is *linked in*: `true` for `mbstring`, `intl`,
+- `extension_loaded()` answers for what is *linked in*: `true` for `hash`, `mbstring`, `intl`, `curl`, `zlib`,
   `json`, …; `false` for `gmp`, `gd`, `Zend OPcache`.
   `function_exists('gmp_add')` is the right guard for optional extensions.
 - `php_sapi_name()` is `cli`; under `Http\Server` the request state is per fiber

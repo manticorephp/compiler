@@ -1009,6 +1009,7 @@ final class Parser
                 }
                 continue;
             }
+            if ($kw === 'var')      { $this->advance(); continue; }
             if ($kw === 'static')   { $static   = true; $this->advance(); continue; }
             if ($kw === 'final')    { $final    = true; $this->advance(); continue; }
             if ($kw === 'abstract') { $abstract = true; $this->advance(); continue; }
@@ -1190,7 +1191,7 @@ final class Parser
         $body = null;
         $lazyBody = null;
         if ($this->check(TokenKind::OpenBrace)) {
-            if ($this->lazyBodies && !$this->upcomingBlockHasAnonymousClass()) {
+            if ($this->lazyBodies && !$this->upcomingBlockNeedsEagerParse()) {
                 $lazyBody = $this->skipLazyBody();
             } else {
                 $body = $this->parseBlock();
@@ -1251,7 +1252,7 @@ final class Parser
 
         $body = null;
         $lazyBody = null;
-        if ($this->lazyBodies && !$this->upcomingBlockHasAnonymousClass()) {
+        if ($this->lazyBodies && !$this->upcomingBlockNeedsEagerParse()) {
             $lazyBody = $this->skipLazyBody();
         } else {
             $body = $this->parseBlock();
@@ -1434,15 +1435,26 @@ final class Parser
         throw $this->error('expected type name');
     }
 
-    private function upcomingBlockHasAnonymousClass(): bool
+    /**
+     * A body that must be parsed now rather than kept lazy: one holding an
+     * anonymous class, or a NAMED function / class / interface / trait
+     * declaration — lowering hoists those to the top level, so it has to see
+     * them before any body is lowered.
+     */
+    private function upcomingBlockNeedsEagerParse(): bool
     {
         $depth = 0;
-        $previousWasNew = false;
+        $prev = '';
         $n = count($this->tokens);
         for ($i = $this->pos; $i < $n; $i = $i + 1) {
             $tok = $this->tokens[$i];
-            if ($previousWasNew && strtolower($tok->lexeme) === 'class') {
-                return true;
+            $lex = strtolower($tok->lexeme);
+            if ($lex === 'class' && $prev === 'new') { return true; }
+            if ($depth > 0 && $tok->kind === TokenKind::Keyword && $prev !== '::' && $prev !== '->' && $prev !== '?->'
+                && ($lex === 'function' || $lex === 'class' || $lex === 'interface' || $lex === 'trait')) {
+                $j = $i + 1;
+                if ($j < $n && $this->tokens[$j]->lexeme === '&') { $j = $j + 1; }
+                if ($j < $n && $this->tokens[$j]->kind === TokenKind::Identifier) { return true; }
             }
             if ($tok->kind === TokenKind::OpenBrace) {
                 $depth = $depth + 1;
@@ -1450,7 +1462,7 @@ final class Parser
                 $depth = $depth - 1;
                 if ($depth === 0) { return false; }
             }
-            $previousWasNew = strtolower($tok->lexeme) === 'new';
+            $prev = $lex;
         }
         return false;
     }
@@ -1949,10 +1961,15 @@ final class Parser
         $this->expect(TokenKind::OpenParen, "expected '(' after switch");
         $expr = $this->parseExpression();
         $this->expect(TokenKind::CloseParen, "expected ')' after switch expression");
-        $this->expect(TokenKind::OpenBrace, "expected '{' in switch body");
+        $alt = $this->match(TokenKind::Colon);
+        if (!$alt) { $this->expect(TokenKind::OpenBrace, "expected '{' in switch body"); }
         $cases = [];
-        while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
+        while (!$this->switchBodyEnds($alt) && !$this->isAtEnd()) {
             $value = null;
+            if ($this->check(TokenKind::InlineHtml) && \trim($this->peek()->lexeme) === '') {
+                $this->advance();
+                continue;
+            }
             if ($this->checkKeyword('case')) {
                 $this->advance();
                 $value = $this->parseExpression();
@@ -1969,7 +1986,7 @@ final class Parser
             $this->expect(TokenKind::Colon, "expected ':' after case label");
             $body = [];
             while (
-                !$this->check(TokenKind::CloseBrace)
+                !$this->switchBodyEnds($alt)
                 && !$this->checkKeyword('case')
                 && !$this->checkKeyword('default')
                 && !$this->isAtEnd()
@@ -1979,8 +1996,17 @@ final class Parser
             }
             $cases[] = new SwitchArm($value, $body);
         }
-        $this->expect(TokenKind::CloseBrace, "expected '}' to close switch");
+        if ($alt) {
+            $this->endAltBody('endswitch');
+        } else {
+            $this->expect(TokenKind::CloseBrace, "expected '}' to close switch");
+        }
         return Stmt::switch_($expr, $cases, $this->end($span));
+    }
+
+    private function switchBodyEnds(bool $alt): bool
+    {
+        return $alt ? $this->checkKeyword('endswitch') : $this->check(TokenKind::CloseBrace);
     }
 
     // ── Expressions (Pratt) ──────────────────────────────────────────────────

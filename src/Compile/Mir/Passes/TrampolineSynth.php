@@ -56,14 +56,14 @@ final class TrampolineSynth
      */
     public static function symBase(string $class, string $method): string
     {
-        $c = \str_replace('\\', '_', \ltrim($class, '\\'));
+        $c = \Compile\SymbolName::ident($class);
         return '__mc_rtramp_' . $c . '__' . $method;
     }
 
     /** Uniform erased fallback for `__call(string $name, array $arguments)`. */
     public static function magicSymBase(string $class): string
     {
-        $c = \str_replace('\\', '_', \ltrim($class, '\\'));
+        $c = \Compile\SymbolName::ident($class);
         return '__mc_rmagic_' . $c;
     }
 
@@ -105,7 +105,7 @@ final class TrampolineSynth
      *  Backslash-free, matched on the synthesis + emission sides. */
     public static function fnTrampBase(string $fn): string
     {
-        return '__mc_fntramp_' . \str_replace('\\', '_', \ltrim($fn, '\\'));
+        return '__mc_fntramp_' . \Compile\SymbolName::ident($fn);
     }
 
     /**

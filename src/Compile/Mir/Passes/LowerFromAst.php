@@ -642,6 +642,37 @@ final class LowerFromAst implements Pass
      *  inlined at the site, in the includer's scope ({@see lowerScopedInclude}). */
     public array $compileUnitFiles = [];
 
+    /** @var array<string, string> a LAZY include unit's file (as parsed, and its
+     *  real path) → the `$GLOBALS` key its body sets once it has run. Set by the
+     *  driver; {@see lazyFnDoneKey}. */
+    public array $lazyUnitDone = [];
+
+    /** The top-level declaration guards are being folded (polyfill idiom): a
+     *  function_exists() there is a compile-time question. */
+    private bool $foldingTopDecls = false;
+
+    /**
+     * The `$GLOBALS` key that says whether the file declaring user function
+     * `$name` has been included yet, '' when the function exists from the start.
+     * php declares a file's functions when the file runs: WordPress asks
+     * `function_exists('language_attributes')` to learn how far it has loaded.
+     */
+    private function lazyFnDoneKey(string $name): string
+    {
+        if ($this->lazyUnitDone === []) { return ''; }
+        $decl = $this->fnDecls[\ltrim($name, '\\')] ?? null;
+        if ($decl === null) {
+            $canon = $this->fnCanon[\strtolower(\ltrim($name, '\\'))] ?? '';
+            $decl = $canon === '' ? null : ($this->fnDecls[$canon] ?? null);
+        }
+        if ($decl === null) { return ''; }
+        $file = $decl->span->file;
+        if ($file === '') { return ''; }
+        if (isset($this->lazyUnitDone[$file])) { return $this->lazyUnitDone[$file]; }
+        $real = \realpath($file);
+        return \is_string($real) ? ($this->lazyUnitDone[$real] ?? '') : '';
+    }
+
     /** @var array<string, \Parser\Ast\Stmt[]> parsed inlinable include targets
      *  by absolute path; an uninlinable one maps to an empty list. */
     private array $scopedIncludeAst = [];
@@ -1007,7 +1038,9 @@ final class LowerFromAst implements Pass
         // Registration only — the statement list is still rewritten later by
         // the real flatten. A guard that needs `fnDecls` (not populated yet)
         // folds to UNKNOWN here, is not remembered, and is decided there.
+        $this->foldingTopDecls = true;
         $this->preregisterFoldableDecls(\array_slice($stmts, $preludeCount));
+        $this->foldingTopDecls = false;
         // `#[TypeDef]` classes, BEFORE any ClassDef is built: a class registered
         // earlier may already name one in a property or parameter hint, and
         // `lowerTypeHint` must resolve it to the carrier scalar from the first use.
@@ -1226,7 +1259,10 @@ final class LowerFromAst implements Pass
         // functions) and only over the user portion (the prelude window stays put).
         if ($preludeCount < \count($stmts)) {
             $head = \array_slice($stmts, 0, $preludeCount);
+            $this->foldingTopDecls = true;
             $tail = $this->flattenConstantIfs(\array_slice($stmts, $preludeCount));
+            $this->foldingTopDecls = false;
+            $tail = \array_merge($tail, $this->hoistNestedDecls($tail));
             $stmts = \array_merge($head, $tail);
             // Every hoisted class's DECL is registered by now; give them their
             // ClassDefs before anything lowers a method body against one.
@@ -1597,6 +1633,18 @@ final class LowerFromAst implements Pass
                 $module->addFunction($dfn);
             }
         }
+        // `$GLOBALS[$name]` with a computed name: the by-name table over every
+        // global cell. Before injectGlobalDecls, which binds those cells.
+        if ($this->sawDynGlobals) {
+            $dgProg = \Parser\Parser::parseSource("<?php\n" . $this->dynGlobalsSrc($module));
+            foreach ($dgProg->statements as $dstmt) {
+                if ($dstmt->kind !== 'Function') { continue; }
+                $this->declareFn($dstmt->decl->name, $dstmt->decl);
+                $dfn = $this->lowerFunction($dstmt->decl);
+                $dfn->isPrelude = true;
+                $module->addFunction($dfn);
+            }
+        }
         $this->releaseAllClassMetadata();
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
         $mainStmts = $this->injectGlobalDecls($mainStmts);
@@ -1606,6 +1654,18 @@ final class LowerFromAst implements Pass
             if (!\str_starts_with($ufn->name, '__mc_unit_')) { continue; }
             $ufn->body = new Block($this->injectGlobalDecls($ufn->body->stmts), $ufn->body->type);
         }
+        // A `foreach` whose loop variable is a global writes it through the
+        // module cell ({@see rebindGlobalForeachVars}).
+        /** @var array<string, bool> $mainGlobals */
+        $mainGlobals = [];
+        foreach ($module->globalVarNames as $gname) { $mainGlobals[$gname] = true; }
+        foreach ($module->functions as $gfn) {
+            /** @var array<string, bool> $fnGlobals */
+            $fnGlobals = \str_starts_with($gfn->name, '__mc_unit_') ? $mainGlobals : [];
+            $this->collectGlobalDeclNames($gfn->body, $fnGlobals);
+            if ($fnGlobals !== []) { $this->rebindGlobalForeachVars($gfn->body, $fnGlobals); }
+        }
+        foreach ($mainStmts as $ms) { $this->rebindGlobalForeachVars($ms, $mainGlobals); }
         $mainStmts = $this->injectShutdownDrain($mainStmts);
         $mainBody = new Block($mainStmts, Type::void());
         $module->loweringFile = $mainFile;
@@ -2293,6 +2353,8 @@ final class LowerFromAst implements Pass
      */
     /** A `constant()` / `defined()` call whose name is not a literal was lowered. */
     public bool $sawDynConstant = false;
+    /** A `$GLOBALS[$name]` with a computed name was lowered: generate `__mc_globals`. */
+    public bool $sawDynGlobals = false;
 
     /**
      * `__mc_constant(string): mixed` and `__mc_defined(string): bool` over every
@@ -4055,6 +4117,54 @@ final class LowerFromAst implements Pass
         if ($pre === []) { return $mainStmts; }
         foreach ($mainStmts as $s) { $pre[] = $s; }
         return $pre;
+    }
+
+    /** @param array<string, bool> $out names bound to a module cell by `global $x` / `static $x` */
+    private function collectGlobalDeclNames(Node $n, array &$out): void
+    {
+        if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) { $out[$this->asStaticDecl($n)->name] = true; }
+        foreach (Walk::children($n) as $c) { $this->collectGlobalDeclNames($c, $out); }
+    }
+
+    private function asStaticDecl(StaticLocalDecl_ $n): StaticLocalDecl_ { return $n; }
+
+    /**
+     * A loop variable that is a global (`foreach ($a as $action)` at a file's top
+     * level, where `$action` is also some function's `global $action`) has no
+     * stack slot: the module cell is its storage. The loop binds a fresh local
+     * and the body opens by assigning it, which every store path already writes
+     * through the cell — left alone, the loop filled an alloca and every read of
+     * the name answered the cell's NULL (WordPress default-filters.php hooked
+     * its counters on hook "").
+     *
+     * @param array<string, bool> $globals
+     */
+    private function rebindGlobalForeachVars(Node $n, array $globals): void
+    {
+        if ($n->kind === Node::KIND_FOREACH) {
+            $fe = self::asForeachNode($n);
+            if (!$fe->byRef) {
+                $pre = [];
+                if (isset($globals[$fe->valueVar])) {
+                    $tmp = '__fev' . (string)$this->destrCounter;
+                    $this->destrCounter = $this->destrCounter + 1;
+                    $pre[] = new StoreLocal($fe->valueVar, new LoadLocal($tmp, Type::unknown()), Type::unknown());
+                    $fe->valueVar = $tmp;
+                }
+                $kv = $fe->keyVar;
+                if ($kv !== null && isset($globals[$kv])) {
+                    $tmp = '__fek' . (string)$this->destrCounter;
+                    $this->destrCounter = $this->destrCounter + 1;
+                    $pre[] = new StoreLocal($kv, new LoadLocal($tmp, Type::unknown()), Type::unknown());
+                    $fe->keyVar = $tmp;
+                }
+                if ($pre !== []) {
+                    foreach ($fe->body->stmts as $bs) { $pre[] = $bs; }
+                    $fe->body->stmts = $pre;
+                }
+            }
+        }
+        foreach (Walk::children($n) as $c) { $this->rebindGlobalForeachVars($c, $globals); }
     }
 
     /** Whether the node tree reads the named local (LoadLocal). */
@@ -6299,6 +6409,183 @@ final class LowerFromAst implements Pass
     }
 
     /**
+     * Hoist every function / class declaration that is not a top-level statement —
+     * one under a runtime `if` (`if (!is_multisite()) { function f() {} }`), or one
+     * inside a function body (WordPress `export_wp()` declares its `wxr_*` helpers)
+     * — to the top level. php declares it when control reaches it; a compiled
+     * program declares it up front, so `function_exists()` may answer true before
+     * the branch runs. Only a name declared exactly once can be hoisted: two
+     * declarations of one name behind a guard that does not fold have no single
+     * answer at compile time.
+     *
+     * The statement stays where it was and lowers to nothing
+     * ({@see isHoistedNestedDecl}).
+     *
+     * @param \Parser\Ast\Stmt[] $top
+     * @return \Parser\Ast\Stmt[] the hoisted declarations, already registered
+     */
+    private function hoistNestedDecls(array $top): array
+    {
+        /** @var \Parser\Ast\Stmt[] $found */
+        $found = [];
+        foreach ($top as $s) {
+            if ($s->kind === 'Function') {
+                $this->collectNestedDecls($this->fnStmtBody($s), $found);
+                continue;
+            }
+            if ($s->kind === 'Class') {
+                foreach ($this->classStmtMethodBodies($s) as $mb) { $this->collectNestedDecls($mb, $found); }
+                continue;
+            }
+            $this->collectNestedDecls([$s], $found);
+        }
+        if ($found === []) { return []; }
+        /** @var array<string, \Parser\Ast\Stmt> $seen */
+        $seen = [];
+        foreach ($found as $d) {
+            $key = $this->nestedDeclKey($d);
+            if ($key === '') { continue; }
+            $taken = isset($seen[$key]);
+            if (!$taken && $d->kind === 'Function') {
+                $taken = isset($this->fnCanon[\strtolower(\substr($key, 2))]);
+            } elseif (!$taken) {
+                $taken = isset($this->classDecls[\substr($key, 2)]) || isset($this->traitTable[\substr($key, 2)]);
+            }
+            if ($taken) {
+                throw new \RuntimeException('Cannot compile the conditional declaration of '
+                    . \substr($key, 2) . ' in ' . $d->span->file . ' on line ' . (string)$d->span->line
+                    . ': it is declared more than once and the guard choosing between them is not known at compile time');
+            }
+            $seen[$key] = $d;
+        }
+        $out = [];
+        foreach ($seen as $d) {
+            $this->registerHoistedDecl($d);
+            $this->hoistedNestedDecls[$this->nestedDeclKey($d)] = $d;
+            $out[] = $d;
+        }
+        return $out;
+    }
+
+    /** @var array<string, \Parser\Ast\Stmt> */
+    private array $hoistedNestedDecls = [];
+
+    private function isHoistedNestedDecl(\Parser\Ast\Stmt $s): bool
+    {
+        $key = $this->nestedDeclKey($s);
+        return $key !== '' && isset($this->hoistedNestedDecls[$key]) && $this->hoistedNestedDecls[$key] === $s;
+    }
+
+    private function nestedDeclKey(\Parser\Ast\Stmt $s): string
+    {
+        if ($s->kind === 'Function') { return 'f:' . \strtolower(\ltrim($this->fnStmtName($s), '\\')); }
+        if ($s->kind !== 'Class') { return ''; }
+        $cdecl = $this->classStmtDecl($s);
+        $name = ($cdecl->kind ?? 'class') === 'trait' ? $this->declName($cdecl) : $this->classDeclName($cdecl);
+        return $name === '' ? '' : 'c:' . $name;
+    }
+
+    /**
+     * @param \Parser\Ast\Stmt[] $stmts
+     * @param \Parser\Ast\Stmt[] $found
+     */
+    private function collectNestedDecls(array $stmts, array &$found): void
+    {
+        foreach ($stmts as $s) {
+            $k = $s->kind;
+            if ($k === 'Function') {
+                $found[] = $s;
+                $this->collectNestedDecls($this->fnStmtBody($s), $found);
+            } elseif ($k === 'Class') {
+                $found[] = $s;
+                foreach ($this->classStmtMethodBodies($s) as $mb) { $this->collectNestedDecls($mb, $found); }
+            } elseif ($k === 'If') {
+                $live = $this->constIfBranch($this->asIfStmt($s));
+                if ($live !== null) {
+                    $this->collectNestedDecls($live, $found);
+                } else {
+                    foreach ($this->ifStmtBlocks($s) as $b) { $this->collectNestedDecls($b, $found); }
+                }
+            } else {
+                foreach ($this->stmtChildBlocks($s) as $b) { $this->collectNestedDecls($b, $found); }
+            }
+        }
+    }
+
+    private function asIfStmt(\Parser\Ast\IfStmt $s): \Parser\Ast\IfStmt { return $s; }
+    private function fnStmtName(\Parser\Ast\FunctionStmt $s): string { return $s->decl->name; }
+    private function classStmtDecl(\Parser\Ast\ClassStmt $s): \Parser\Ast\ClassDecl { return $s->decl; }
+
+    /** @return \Parser\Ast\Stmt[] */
+    private function fnStmtBody(\Parser\Ast\FunctionStmt $s): array
+    {
+        $b = $s->decl->body;
+        return $b === null ? [] : $b->statements;
+    }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function classStmtMethodBodies(\Parser\Ast\ClassStmt $s): array
+    {
+        $out = [];
+        foreach ($s->decl->methods as $m) {
+            $mb = $m->body;
+            if ($mb !== null) { $out[] = $mb->statements; }
+        }
+        return $out;
+    }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function ifStmtBlocks(\Parser\Ast\IfStmt $s): array
+    {
+        $out = [$s->then->statements];
+        foreach ($s->elseifs as $arm) { $out[] = $arm->body->statements; }
+        if ($s->else !== null) { $out[] = $s->else->statements; }
+        return $out;
+    }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function stmtChildBlocks(\Parser\Ast\Stmt $s): array
+    {
+        $k = $s->kind;
+        if ($k === 'While')   { return [$this->whileBody($s)]; }
+        if ($k === 'DoWhile') { return [$this->doWhileBody($s)]; }
+        if ($k === 'For')     { return [$this->forBody($s)]; }
+        if ($k === 'Foreach') { return [$this->foreachBody($s)]; }
+        if ($k === 'Switch')  { return $this->switchBodies($s); }
+        if ($k === 'TryCatch') { return $this->tryBodies($s); }
+        if ($k === 'Namespace') { return [$this->namespaceBody($s)]; }
+        return [];
+    }
+
+    /** @return \Parser\Ast\Stmt[] */
+    private function whileBody(\Parser\Ast\WhileStmt $s): array { return $s->body->statements; }
+    /** @return \Parser\Ast\Stmt[] */
+    private function doWhileBody(\Parser\Ast\DoWhileStmt $s): array { return $s->body->statements; }
+    /** @return \Parser\Ast\Stmt[] */
+    private function forBody(\Parser\Ast\ForStmt $s): array { return $s->body->statements; }
+    /** @return \Parser\Ast\Stmt[] */
+    private function foreachBody(\Parser\Ast\ForeachStmt $s): array { return $s->body->statements; }
+    /** @return \Parser\Ast\Stmt[] */
+    private function namespaceBody(\Parser\Ast\NamespaceStmt $s): array { return $s->body === null ? [] : $s->body->statements; }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function switchBodies(\Parser\Ast\SwitchStmt $s): array
+    {
+        $out = [];
+        foreach ($s->cases as $arm) { $out[] = $arm->body; }
+        return $out;
+    }
+
+    /** @return array<int, \Parser\Ast\Stmt[]> */
+    private function tryBodies(\Parser\Ast\TryCatchStmt $s): array
+    {
+        $out = [$s->try->statements];
+        foreach ($s->catches as $c) { $out[] = $c->body->statements; }
+        if ($s->finally !== null) { $out[] = $s->finally->statements; }
+        return $out;
+    }
+
+    /**
      * The live branch's statements of a compile-time `if`, or null when the guard
      * (or a preceding elseif guard) is not statically foldable.
      *
@@ -6386,12 +6673,30 @@ final class LowerFromAst implements Pass
      * Compiled anyway, it redefined the prelude's constructor and clang refused
      * the module.
      *
+     * Any file does the same when it leaves before the declaration once the type
+     * exists — sodium_compat's `if (class_exists('SplFixedArray')) { return; }`
+     * ahead of its own SplFixedArray.
+     *
      * @param \Parser\Ast\Stmt[] $stmts
      * @return \Parser\Ast\Stmt[]
      */
     private function dropShadowedBuiltinTypes(array $stmts, int $preludeCount, int $userStart): array
     {
-        if ($this->demandLoadedFiles === []) { return $stmts; }
+        /** @var array<string, bool> $guarded file . "\0" . lowercased type name */
+        $guarded = [];
+        $n0 = \count($stmts);
+        for ($i = $userStart; $i < $n0; $i = $i + 1) {
+            $gs = $stmts[$i];
+            // A lazy include unit (Main.php `__mc_unit_N`) keeps the file's guard
+            // in its body while the declaration it guards sits at the top level.
+            $cands = ($gs->kind === 'Function' && \str_starts_with($this->fnStmtName($gs), '__mc_unit_'))
+                ? $this->fnStmtBody($gs) : [$gs];
+            foreach ($cands as $c) {
+                $g = $this->existsGuardedReturn($c);
+                if ($g !== '') { $guarded[$c->span->file . "\0" . $g] = true; }
+            }
+        }
+        if ($this->demandLoadedFiles === [] && $guarded === []) { return $stmts; }
         /** @var array<string, bool> $builtin */
         $builtin = [];
         for ($i = 0; $i < $preludeCount; $i = $i + 1) {
@@ -6404,14 +6709,45 @@ final class LowerFromAst implements Pass
         $n = \count($stmts);
         for ($i = 0; $i < $n; $i = $i + 1) {
             $s = $stmts[$i];
-            if ($i >= $userStart && $s->kind === 'Class' && isset($this->demandLoadedFiles[$s->span->file])) {
+            if ($i >= $userStart && $s->kind === 'Class') {
                 $udecl = $s->decl;
-                if (isset($builtin[\strtolower(\ltrim($this->classDeclName($udecl), '\\'))])) { continue; }
+                $uname = \strtolower(\ltrim($this->classDeclName($udecl), '\\'));
+                if (isset($builtin[$uname])
+                    && (isset($this->demandLoadedFiles[$s->span->file]) || isset($guarded[$s->span->file . "\0" . $uname]))) {
+                    continue;
+                }
             }
             $out[] = $s;
         }
         return $out;
     }
+
+    /**
+     * The lowercased type name of a file-level `if (class_exists('X')) { return; }`
+     * (or `interface_exists` / `trait_exists` / `enum_exists`), '' for any other
+     * statement. The `return` may already be the jump past the file it is
+     * rewritten to.
+     */
+    private function existsGuardedReturn(\Parser\Ast\Stmt $s): string
+    {
+        if ($s->kind !== 'If') { return ''; }
+        $if = $this->asIfStmt($s);
+        if ($if->elseifs !== [] || $if->else !== null) { return ''; }
+        $body = $if->then->statements;
+        $nb = \count($body);
+        if ($nb === 0) { return ''; }
+        $last = $body[$nb - 1]->kind;
+        if ($last !== 'Return' && $last !== 'Goto') { return ''; }
+        $c = $if->condition;
+        if ($c->kind !== 'Call') { return ''; }
+        $call = $this->asCallExpr($c);
+        $fn = \strtolower($this->bareName(\ltrim($call->function, '\\')));
+        if ($fn !== 'class_exists' && $fn !== 'interface_exists' && $fn !== 'trait_exists' && $fn !== 'enum_exists') { return ''; }
+        if (\count($call->args) < 1 || $call->args[0]->kind !== 'StringLiteral') { return ''; }
+        return \strtolower(\ltrim($this->stringLitValue($call->args[0]), '\\'));
+    }
+
+    private function asCallExpr(\Parser\Ast\CallExpr $e): \Parser\Ast\CallExpr { return $e; }
 
     /**
      * Register a declaration hoisted out of a folded `if`, so later code
@@ -6594,6 +6930,13 @@ final class LowerFromAst implements Pass
         // concrete parameter type.
         $k = $e->kind;
         if ($k === 'BoolLiteral') { return $this->boolLitValue($e) ? self::GUARD_TRUE : self::GUARD_FALSE; }
+        // `\false` / `\TRUE` parse as a name, not a literal; they are the same constants.
+        if ($k === 'Identifier') {
+            $lit = \strtolower(\ltrim($this->identifierName($e), '\\'));
+            if ($lit === 'true') { return self::GUARD_TRUE; }
+            if ($lit === 'false' || $lit === 'null') { return self::GUARD_FALSE; }
+            return self::GUARD_UNKNOWN;
+        }
         if ($k === 'UnaryOp')     { return $this->foldGuardUnary($e); }
         if ($k === 'BinaryOp')    { return $this->foldGuardBinary($e); }
         if ($k === 'Call')        { return $this->foldGuardCall($e); }
@@ -6704,6 +7047,21 @@ final class LowerFromAst implements Pass
                     || $op === '!=' || $op === 'ne' || $op === '<>';
                 return $this->guardOf($lower);
             }
+            // `version_compare(PHP_VERSION, '8.1.6', '>=')` — both versions are
+            // compile-time strings (the target's PHP_VERSION is fixed), so the
+            // answer is too. WordPress picks its UTF-8 functions by it.
+            $va = $this->constScalarKey($e->args[0]);
+            $vb = $this->constScalarKey($e->args[1]);
+            if (\strtolower($vfn) === 'version_compare'
+                && $va !== null && $vb !== null
+                && \strncmp($va, 's:', 2) === 0 && \strncmp($vb, 's:', 2) === 0
+                && $e->args[2]->kind === 'StringLiteral') {
+                $vop = \strtolower($this->stringLitValue($e->args[2]));
+                $known = ['<', 'lt', '<=', 'le', '>', 'gt', '>=', 'ge', '==', 'eq', '!=', '<>', 'ne'];
+                if (\in_array($vop, $known, true)) {
+                    return $this->guardOf(\version_compare(\substr($va, 2), \substr($vb, 2), $vop) === true);
+                }
+            }
         }
         $guardQual = \ltrim($e->function, '\\');
         $guardFn = $this->bareName($guardQual);
@@ -6741,6 +7099,7 @@ final class LowerFromAst implements Pass
                 // the fully-qualified function name. guardClassArgName handles both.
                 $cn = $this->guardClassArgName($a0);
                 if ($cn === null) { return self::GUARD_UNKNOWN; }
+                if (!$this->foldingTopDecls && $this->lazyFnDoneKey($cn) !== '') { return self::GUARD_UNKNOWN; }
                 return $this->guardOf($this->functionIsKnown($cn));
             }
             // `defined('NAME')` — whole-program AOT knows every constant, so an
@@ -6833,6 +7192,8 @@ final class LowerFromAst implements Pass
             || $ext === 'openssl' || $ext === 'core' || $ext === 'standard'
             || $ext === 'tokenizer' || $ext === 'mbstring' || $ext === 'intl'
             || $ext === 'session' || $ext === 'mysqli'
+            || $ext === 'hash' || $ext === 'date' || $ext === 'spl' || $ext === 'filter' || $ext === 'iconv' || $ext === 'random' || $ext === 'reflection'
+            || $ext === 'sockets' || $ext === 'curl' || $ext === 'simplexml' || $ext === 'libxml' || $ext === 'zlib' || $ext === 'pdo'
             || $ext === 'bcmath';
     }
 
@@ -6848,6 +7209,9 @@ final class LowerFromAst implements Pass
         if ($k === 'BoolLiteral')   { return 'b:' . ($this->boolLitValue($e) ? '1' : '0'); }
         if ($k === 'NullLiteral')   { return 'n:'; }
         if ($k === 'Identifier') {
+            $lit = \strtolower(\ltrim($this->identifierName($e), '\\'));
+            if ($lit === 'true' || $lit === 'false') { return 'b:' . ($lit === 'true' ? '1' : '0'); }
+            if ($lit === 'null') { return 'n:'; }
             $nm = $this->constBareName($this->identifierName($e));
             if (isset($this->userConstants[$nm])) {
                 return $this->constScalarKey($this->userConstants[$nm], $depth + 1);
@@ -7454,6 +7818,40 @@ final class LowerFromAst implements Pass
         $lowered = $this->lowerExpr($chain);
         $this->dynRefDepth = $this->dynRefDepth - 1;
         return $lowered;
+    }
+
+    /**
+     * `$cls::$sp = v` / `$obj::$sp = v` — the write side of {@see lowerDynStaticAccess}:
+     * the value goes to a temp first (php evaluates it before resolving the class),
+     * then a chain over every class declaring `$sp` stores it into the matching one.
+     */
+    private function storeDynStaticProp(\Parser\Ast\DynamicStaticAccess $e, Node $value): Node
+    {
+        $recv = $e->receiver;
+        $nm = $e->name;
+        $span = $e->span;
+        $names = [];
+        foreach ($this->classTable as $cname => $cd) {
+            if ($this->staticPropRef($cname, $nm) !== null) { $names[] = $cname; }
+        }
+        $val = '__dynsv' . (string)$this->destrCounter;
+        $tmp = '__dynrc' . (string)$this->destrCounter;
+        $this->destrCounter = $this->destrCounter + 1;
+        $nameExpr = \Parser\Ast\Expr::ternary(
+            \Parser\Ast\Expr::call('is_object', [$recv], $span),
+            \Parser\Ast\Expr::call('get_class', [$recv], $span),
+            $recv,
+            $span,
+        );
+        $v = \Parser\Ast\Expr::variable($val, $span);
+        $chain = \Parser\Ast\Expr::null($span);
+        for ($i = \count($names) - 1; $i >= 0; $i = $i - 1) {
+            $cname = $names[$i];
+            $cond = \Parser\Ast\Expr::binary('===', $this->dynArmName($nameExpr, $tmp, $i, $span), new \Parser\Ast\StringLiteral($cname, $span), $span);
+            $then = \Parser\Ast\Expr::assign(\Parser\Ast\Expr::staticAccess($cname, $nm, $span), $v, $span);
+            $chain = \Parser\Ast\Expr::ternary($cond, $then, $chain, $span);
+        }
+        return new Block([new StoreLocal($val, $value, $value->type), $this->lowerExpr($chain)], $value->type);
     }
 
     /**
@@ -9050,7 +9448,7 @@ final class LowerFromAst implements Pass
         // calls retain the PHP FQN. Treat either spelling as an exported
         // method; otherwise internal Runtime classes such as AsyncHook are
         // falsely diagnosed as absent although stdlib.o defines them.
-        $wireSym = \str_replace('\\', '_', $c) . '__' . $method;
+        $wireSym = \Compile\SymbolName::mangle($c) . '__' . $method;
         if (isset($this->externMethodSyms[$wireSym])) { return false; }
         return true;
     }
