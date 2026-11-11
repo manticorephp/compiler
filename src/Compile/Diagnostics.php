@@ -29,8 +29,8 @@ final class Diagnostics
     private array $siteIdx = [];
 
     /**
-     * Every distinct (file, line) site per group key (`code|lcname`): file, line, enclosing MIR fn,
-     * kind ('hard' | 'soft') and guard label ('' when unguarded).
+     * Every distinct (file, line) site per group key (`code|lcname`): file, line, enclosing MIR fns (`fns`:
+     * a trait body is lowered once per using class, all copies on one line), kind ('hard' | 'soft') and guard label ('' when unguarded).
      * @var array<string, array<int, array<string, mixed>>>
      */
     public array $useSites = [];
@@ -51,7 +51,10 @@ final class Diagnostics
     {
         foreach ($this->useSites as $k => $list) {
             foreach ($list as $i => $s) {
-                $this->useSites[$k][$i]['fn'] = $this->resolveFn((string)$s['fn']);
+                /** @var string[] $fns */
+                $fns = [];
+                foreach ($s['fns'] as $sf) { $fns[] = $this->resolveFn((string)$sf); }
+                $this->useSites[$k][$i]['fns'] = $fns;
             }
         }
     }
@@ -67,12 +70,15 @@ final class Diagnostics
             if (!isset($this->siteIdx[$sk])) {
                 $this->useCount[$i] = $this->useCount[$i] + 1;
                 $this->siteIdx[$sk] = \count($this->useSites[$k]);
-                $this->useSites[$k][] = ['file' => $file, 'line' => $line, 'fn' => $fn, 'kind' => $kind, 'guard' => $guard];
+                $this->useSites[$k][] = ['file' => $file, 'line' => $line, 'fns' => [$fn], 'kind' => $kind, 'guard' => $guard];
             } else {
                 // Two references on one line: the strongest one decides.
                 $j = $this->siteIdx[$sk];
                 if ($kind === 'hard') { $this->useSites[$k][$j]['kind'] = 'hard'; }
                 if ($guard === '') { $this->useSites[$k][$j]['guard'] = ''; }
+                /** @var string[] $fns */
+                $fns = $this->useSites[$k][$j]['fns'];
+                if (!\in_array($fn, $fns, true)) { $fns[] = $fn; $this->useSites[$k][$j]['fns'] = $fns; }
             }
             return;
         }
@@ -81,7 +87,7 @@ final class Diagnostics
         $this->useIdx[$k] = $n;
         $this->useCount[$n] = 1;
         $this->siteIdx[$sk] = 0;
-        $this->useSites[$k] = [['file' => $file, 'line' => $line, 'fn' => $fn, 'kind' => $kind, 'guard' => $guard]];
+        $this->useSites[$k] = [['file' => $file, 'line' => $line, 'fns' => [$fn], 'kind' => $kind, 'guard' => $guard]];
         $this->items[] = new Diagnostic($file, $line, 0, $severity, $code, $message);
     }
 
@@ -116,16 +122,19 @@ final class Diagnostics
             $canError = $unsupported === '' && !$allowed && !$allowTraps && !$cascade && !($d->code === 'undefined.constant' && $dynConstants);
             $hard = null;
             $maybe = null;
+            $hardFn = '';
             foreach ($sites as $s) {
-                $fn = (string)$s['fn'];
-                if ($canError && $hard === null && $s['kind'] === 'hard' && $s['guard'] === '' && $r->reaches($fn)) { $hard = $s; }
-                if ($maybe === null && $r->maybeReaches($fn)) { $maybe = $s; }
+                foreach ($s['fns'] as $sf) {
+                    $fn = (string)$sf;
+                    if ($canError && $hard === null && $s['kind'] === 'hard' && $s['guard'] === '' && $r->reaches($fn)) { $hard = $s; $hardFn = $fn; }
+                    if ($maybe === null && $r->maybeReaches($fn)) { $maybe = $s; }
+                }
             }
             if ($hard !== null) {
                 $d->severity = Diagnostic::SEV_ERROR;
                 $d->file = (string)$hard['file'];
                 $d->line = (int)$hard['line'];
-                $chain = $r->chain((string)$hard['fn'], 4);
+                $chain = $r->chain($hardFn, 4);
                 if (\count($chain) > 0) { $d->message .= ' (reachable: ' . \implode(' <- ', $chain) . ')'; }
             } elseif ($maybe !== null) {
                 $d->severity = Diagnostic::SEV_WARNING;

@@ -130,7 +130,7 @@ PHP
     for m in exact wild both; do
         diag "check_allow_undefined_$m" sh -c "cd \"$HERE/check/allow_undefined\" && \"$MC\" build --check $m.json"
     done
-    for t in reachable_new dead_fn guards soft method_never method_called default_param default_param_unused dyn_define fold_define cascade class_consts_unused dyn_const_probe callable_array_instance switch_guard guard_helpers static_hierarchy dyn_static_missing unserialize_missing unsupported_builtin unsupported_mixed unsupported_ns_const unsupported_ns_const_fq unsupported_ns_fn; do
+    for t in reachable_new dead_fn guards soft method_never method_called default_param default_param_unused dyn_define fold_define cascade class_consts_unused dyn_const_probe callable_array_instance switch_guard guard_helpers static_hierarchy dyn_static_missing unserialize_missing unsupported_builtin unsupported_mixed unsupported_ns_const unsupported_ns_const_fq unsupported_ns_fn trait_two_users; do
         diag "tier_$t" "$MC" compile --check "$HERE/check/tier/$t.php" -o "$WORK/tr"
     done
     diag "tier_reachable_new_allow_traps" "$MC" compile --check --allow-undefined-traps "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"

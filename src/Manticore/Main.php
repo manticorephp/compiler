@@ -5499,9 +5499,11 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 $rd = $reach->dump();
                 foreach ($diag->useSites as $sk => $sites) {
                     foreach ($sites as $site) {
-                        $sfn = (string)$site['fn'];
-                        $rd .= 'site: ' . (string)$sk . ' line=' . (string)$site['line'] . ' fn=' . $sfn
-                            . ' reach=' . ($reach->reaches($sfn) ? '1' : '0') . ' maybe=' . ($reach->maybeReaches($sfn) ? '1' : '0') . "\n";
+                        foreach ($site['fns'] as $sfnv) {
+                            $sfn = (string)$sfnv;
+                            $rd .= 'site: ' . (string)$sk . ' line=' . (string)$site['line'] . ' fn=' . $sfn
+                                . ' reach=' . ($reach->reaches($sfn) ? '1' : '0') . ' maybe=' . ($reach->maybeReaches($sfn) ? '1' : '0') . "\n";
+                        }
                     }
                 }
                 dprint(\rtrim($rd, "\n"));
