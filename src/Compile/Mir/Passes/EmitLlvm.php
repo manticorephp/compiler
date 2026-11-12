@@ -1546,6 +1546,18 @@ final class EmitLlvm implements EmitVisitor
             \Manticore\sys_unlink($bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
             $stagedBytes = $preambleBytes + $bodyBytes;
+            // Exceptions: the global slot replaces every invoke / landing pad ({@see \Compile\Mir\EhLowerIr}).
+            // Before pruning: the lowering adds references (`@__mc_uncaught`) the pruner must see.
+            $statT = \Compile\Stats::begin('  exceptions: slot lowering (staged)');
+            $eh = $this->ehLowerIr();
+            $ehPath = $this->streamIrPath . '.eh';
+            if (!$eh->runFile($this->streamIrPath, $ehPath)
+                || \Manticore\sys_rename($ehPath, $this->streamIrPath) !== 0) {
+                throw new \RuntimeException('EmitLlvm: cannot lower exceptions in staged IR ' . $this->streamIrPath);
+            }
+            $stagedBytes = $eh->bytes;
+            \Compile\Stats::step('  exceptions: slot lowering (staged)', $statT, $eh->checks, $eh->mayThrow);
+            \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
             // PruneIr used to be unreachable from here: this branch returns the
             // staged marker before the in-memory pruner below ever runs, so every
             // manifest build has been handing clang the discardable helpers it
@@ -1569,17 +1581,6 @@ final class EmitLlvm implements EmitVisitor
                     . (string)($prune->dropped + $prune->kept) . ' defs, '
                     . (string)$stagedBytes . ' bytes');
             }
-            // Exceptions: the global slot replaces every invoke / landing pad ({@see \Compile\Mir\EhLowerIr}).
-            $statT = \Compile\Stats::begin('  exceptions: slot lowering (staged)');
-            $eh = $this->ehLowerIr();
-            $ehPath = $this->streamIrPath . '.eh';
-            if (!$eh->runFile($this->streamIrPath, $ehPath)
-                || \Manticore\sys_rename($ehPath, $this->streamIrPath) !== 0) {
-                throw new \RuntimeException('EmitLlvm: cannot lower exceptions in staged IR ' . $this->streamIrPath);
-            }
-            $stagedBytes = $eh->bytes;
-            \Compile\Stats::step('  exceptions: slot lowering (staged)', $statT, $eh->checks, $eh->mayThrow);
-            \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
             \Compile\Stats::line('IR: staged at ' . $this->streamIrPath . ' ('
                 . (string)$stagedBytes . ' bytes)');
             // This streaming path is the DEFAULT (Main.php sets streamIrPath
@@ -1607,6 +1608,12 @@ final class EmitLlvm implements EmitVisitor
         $hoist = new \Compile\Mir\HoistAllocas();
         $ir = $hoist->runFast($ir);
         \Compile\Stats::step('  hoist allocas', $statT, $hoist->moved, -1);
+        // Before pruning: the lowering adds references (`@__mc_uncaught`) the pruner must see.
+        $statT = \Compile\Stats::begin('  exceptions: slot lowering');
+        $eh = $this->ehLowerIr();
+        $ir = $eh->run($ir);
+        \Compile\Stats::step('  exceptions: slot lowering', $statT, $eh->checks, $eh->mayThrow);
+        \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
         // Everything above is emitted on DEMAND FLAGS, not on reachability: the
         // whole unified array runtime, the rc/arena/pool helpers and the
         // unconditional prelude land in every module whether or not the program
@@ -1631,11 +1638,6 @@ final class EmitLlvm implements EmitVisitor
         } elseif (!$this->emitLibrary && $pruneMode === 'off') {
             \Compile\Stats::line('  prune IR skipped (MANTICORE_PRUNE_IR=off)');
         }
-        $statT = \Compile\Stats::begin('  exceptions: slot lowering');
-        $eh = $this->ehLowerIr();
-        $ir = $eh->run($ir);
-        \Compile\Stats::step('  exceptions: slot lowering', $statT, $eh->checks, $eh->mayThrow);
-        \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
         // One coverage line per module emission, on a side channel
         // (`\error_log`) — never appended to `$ir`, so this changes nothing a
         // build compares against.

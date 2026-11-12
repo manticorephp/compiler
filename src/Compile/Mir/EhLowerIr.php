@@ -50,8 +50,6 @@ final class EhLowerIr
     private bool $inFn = false;
     private bool $skip = false;
     private bool $isMain = false;
-    private bool $isThrow = false;
-    private bool $dropRest = false;
     private bool $needProp = false;
     private string $retTy = 'void';
     private string $cur = '';
@@ -82,6 +80,8 @@ final class EhLowerIr
     private bool $assert = false;
     private bool $hasWrite = false;
     private bool $hasTrap = false;
+    private bool $hasUncaught = false;
+    private bool $usedUncaught = false;
     /** @var array<string, string> callee → its message global */
     private array $assertMsg = [];
 
@@ -89,6 +89,7 @@ final class EhLowerIr
     private function tail(): string
     {
         $t = '@__mc_exc = linkonce_odr global ptr null';
+        if ($this->usedUncaught && !$this->hasUncaught) { $t .= "\ndeclare void @__mc_uncaught(ptr)"; }
         if ($this->assertMsg === []) { return $t; }
         foreach ($this->assertMsg as $c => $g) {
             $m = 'EH ASSERT: exception set after nothrow call to ' . $c . "\n";
@@ -170,11 +171,13 @@ final class EhLowerIr
             if (\str_starts_with($l, 'declare ')) {
                 if (\strpos($l, ' @write(') !== false) { $this->hasWrite = true; }
                 if (\strpos($l, ' @llvm.trap(') !== false) { $this->hasTrap = true; }
+                if (\strpos($l, ' @__mc_uncaught(') !== false) { $this->hasUncaught = true; }
                 return;
             }
             $fn = self::defineName($l);
             if ($fn !== '') {
                 $this->scanFn = $fn;
+                if ($fn === '@__mc_uncaught') { $this->hasUncaught = true; }
                 $this->callees[$fn] = [];
                 $this->may[$fn] = false;
             }
@@ -361,29 +364,20 @@ final class EhLowerIr
             $name = self::defineName($l);
             if ($name !== '') {
                 $this->inFn = true;
-                $this->skip = $name === '@__mc_personality' || \str_starts_with($name, '@__mc_eh_')
-                    || $name === '@__mc_throw' || $name === '@__mc_uncaught_stop'
-                    || $name === '@__mc_unwind' || $name === '@__mc_resume';
+                // The runtime's own entry points never propagate: no checks inside.
+                $this->skip = \str_starts_with($name, '@__mc_eh_') || $name === '@__mc_throw' || $name === '@__mc_uncaught';
                 $this->isMain = $name === '@main';
-                $this->isThrow = $name === '@__mc_throw';
-                $this->dropRest = false;
                 $at = \strpos($l, ' @');
                 $this->retTy = $at === false ? 'void' : self::retTypeOf(\substr($l, 0, $at));
                 $this->cur = '';
                 $this->needProp = false;
-                $l = \str_replace(' personality ptr @__mc_personality', '', $l);
             }
             $this->emit($l);
             return;
         }
         if ($l === '}') { $this->endFn(); return; }
         if ($this->skip) {
-            if ($this->isThrow && (\strpos($l, '@_Unwind_RaiseException') !== false || \strpos($l, '@__mc_unwind(') !== false)) {
-                $this->emit('  store ptr %ex, ptr @__mc_exc');
-                $this->emit('  ret void');
-                $this->dropRest = true;
-            }
-            if (!$this->dropRest) { $this->emit($l); }
+            $this->emit($l);
             return;
         }
         $len = \strlen($l);
@@ -474,8 +468,8 @@ final class EhLowerIr
             if ($this->isMain) {
                 $this->fnBuf[] = '  %mc.pe = load ptr, ptr @__mc_exc';
                 $this->fnBuf[] = '  store ptr null, ptr @__mc_exc';
-                $this->fnBuf[] = '  %mc.pu = call i32 @__mc_uncaught_stop(i32 1, i32 16, i64 '
-                    . (string)\Compile\MemoryAbi::EXC_CLASS . ', ptr %mc.pe, ptr null, ptr null)';
+                $this->fnBuf[] = '  call void @__mc_uncaught(ptr %mc.pe)';
+                $this->usedUncaught = true;
                 $this->fnBuf[] = '  unreachable';
             } elseif ($this->retTy === 'void') {
                 $this->fnBuf[] = '  ret void';

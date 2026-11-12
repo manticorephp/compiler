@@ -615,21 +615,21 @@ trait EmitLlvmModule
             $out .= $this->fiberRuntime();
         }
         if ($this->rt->needsExceptions) {
-            // Zero-cost exception runtime ({@see \Compile\Runtime\UnwindRuntime}).
-            // @__mir_thrown holds the exception a catch pad just took off the
-            // unwinder, until the catch binds it or a finally parks it.
+            // Exception runtime ({@see \Compile\Runtime\ExceptionRuntime}).
+            // @__mir_thrown holds the exception a catch pad just took out of the
+            // slot, until the catch binds it or a finally parks it.
             // linkonce_odr (NOT internal): the stdlib.o and the user .o share
             // one slot, and one `@__mc_uncaught_fn` — the fatal @main installs.
             $out .= "@__mir_thrown = linkonce_odr global ptr null\n";
-            $out .= \Compile\Runtime\UnwindRuntime::ir();
+            $out .= \Compile\Runtime\ExceptionRuntime::ir();
             // `$gen->throw($e)` pending injection: non-null = throw at the
             // next yield resume point (the suspended `yield` expression raises).
             if ($this->gen->throwUsed) {
                 $out .= "@__mir_gen_throw = linkonce_odr global ptr null\n";
             }
             // Top-level fatal for an UNCAUGHT throw: @main stores it into
-            // `@__mc_uncaught_fn`, which `@__mc_throw` calls when the unwinder's
-            // search phase finds no catch pad on the stack. Emitted
+            // `@__mc_uncaught_fn`, which `@__mc_uncaught` calls when an exception
+            // propagates out of @main ({@see \Compile\Mir\EhLowerIr}). Emitted
             // ONLY in the module that owns @main (the user program): its class
             // switch is module-specific, so a linkonce_odr copy in stdlib.o
             // (different class table) would be an ODR mismatch.
@@ -1212,7 +1212,7 @@ trait EmitLlvmModule
             // user object and the prebuilt stdlib.o (whose ctype arrow-fns are
             // also `__closure_N`) collide at link time.
             $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')'
-                . $this->closureMetaPrefix($fn->name, $capCnt) . $this->personalityClause() . " {\nentry:\n";
+                . $this->closureMetaPrefix($fn->name, $capCnt) . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -1275,7 +1275,7 @@ trait EmitLlvmModule
                 $first = false;
                 $paramSig .= 'i64 %arg.' . $p->name;
             }
-            $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . $this->personalityClause() . " {\nentry:\n";
+            $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -2481,7 +2481,7 @@ trait EmitLlvmModule
 
     /**
      * `@__mir_uncaught()` — the top-level fatal an uncaught throw ends in
-     * (`@__mc_throw` calls it through `@__mc_uncaught_fn`, which @main sets).
+     * (`@__mc_uncaught` calls it through `@__mc_uncaught_fn`, which @main sets).
      * Renders PHP's `PHP Fatal error:  Uncaught <Class>: <message>` to stderr
      * and exits 255. Class name comes from a runtime class_id switch; the
      * message is the Throwable's first property (`message`, same offset for
@@ -2576,7 +2576,7 @@ trait EmitLlvmModule
         $this->frame->isMain = true;
         $this->ehTmpBeginMain($fn);
         $header = "define i32 @main(i32 %argc, ptr %argv)"
-            . $this->personalityClause() . " {\nentry:\n";
+            . " {\nentry:\n";
         if ($this->rt->needsExceptions) {
             // A throw no catch pad takes ends in the uncaught fatal: `@__mc_throw`
             // calls it through this hook, which the stdlib.o copy shares.
@@ -2664,7 +2664,7 @@ trait EmitLlvmModule
         // destructor that throws needs a landing pad of its own. Uncaught there,
         // php prints the fatal and runs no further destructor.
         $dsh = "define void @__manticore_dtor_shutdown()"
-            . ($this->rt->needsExceptions ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n";
+            . " {\nentry:\n";
         // Once: exit() inside a destructor re-enters libc's exit, which runs this
         // hook again — that nested run must not resume the sweep (php stops).
         $dsh .= "  %dn = load i64, ptr @__mir_dtor_done\n";
@@ -2679,7 +2679,7 @@ trait EmitLlvmModule
             $dsh .= "  invoke void @__mir_dtor_sweep() to label %swept unwind label %lp\n";
             $dsh .= "swept:\n";
             $dsh .= "  ret void\n";
-            $dsh .= \Compile\Runtime\UnwindRuntime::catchPad('lp', '%l', '%lx', '%lo');
+            $dsh .= \Compile\Runtime\ExceptionRuntime::catchPad('lp', '%l', '%lx', '%lo');
             $dsh .= "  br label %unc\n";
             $dsh .= "unc:\n";
             if ($this->needsErrorHandlers) {

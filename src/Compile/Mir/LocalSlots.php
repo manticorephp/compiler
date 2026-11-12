@@ -73,9 +73,8 @@ final class LocalSlots
     public array $refCellTargets = [];
 
     /**
-     * True when this function contains a `try`: its `define` carries the
-     * unwinder personality ({@see \Compile\Runtime\UnwindRuntime}), since only
-     * a try emits a landing pad. Declared AFTER the arrays above — a field
+     * True when this function contains a `try` (only a try emits a catch pad).
+     * Declared AFTER the arrays above — a field
      * added mid-struct shifts every later offset; the map that follows was
      * appended later still.
      */

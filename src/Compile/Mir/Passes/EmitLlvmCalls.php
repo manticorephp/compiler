@@ -1295,7 +1295,7 @@ trait EmitLlvmCalls
             return '';
         }
         $this->dynfExtraBodies .= 'define ' . ($exported ? '' : 'linkonce_odr ') . 'i64 @' . $sym . '(' . $params
-            . ")" . ($ehTail !== '' ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
+            . ")" . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
         return $sym;
     }
 
@@ -1624,7 +1624,7 @@ trait EmitLlvmCalls
         $this->cellSinkFnOverride = $oldCellSinkFn;
 
         $this->dynfExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
-            . ")" . ($ehTail !== '' ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
+            . ")" . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
         return $sym;
     }
 
@@ -2032,7 +2032,7 @@ trait EmitLlvmCalls
             return '';
         }
         $this->dynfExtraBodies .= 'define ' . ($exported ? '' : 'linkonce_odr ') . 'i64 @' . $sym . '(' . $params
-            . ")" . ($ehTail !== '' ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
+            . ")" . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
         return $sym;
     }
 
