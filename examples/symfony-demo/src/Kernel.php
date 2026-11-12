@@ -40,6 +40,17 @@ class Kernel extends BaseKernel
         yield new \Symfony\UX\Icons\UXIconsBundle();
     }
 
+    /**
+     * The system cache pool (Doctrine's parsed queries, ux-icons, validator metadata) in process memory.
+     * Its default, PhpFilesAdapter, writes PHP files and `include`s them back, which a compiled binary
+     * does not do: every save failed, every request recomputed, and the flock/fopen of that path is
+     * where a second request cut in. One process serves every request, so memory is the shared cache.
+     */
+    protected function build(ContainerBuilder $container): void
+    {
+        $container->prependExtensionConfig('framework', ['cache' => ['system' => 'cache.adapter.array']]);
+    }
+
     /** The container is compiled in memory once per process, not dumped to var/cache and included. */
     protected function initializeContainer(): void
     {
