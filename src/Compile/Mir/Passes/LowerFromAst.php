@@ -7250,6 +7250,16 @@ final class LowerFromAst implements Pass
         if ($k === 'StaticAccess' && \strtolower($this->staticAccessName($e)) === 'class') {
             return 's:' . \ltrim($this->staticAccessClass($e), '\\');
         }
+        // `Logger::API` of a declared class — the Monolog-version guard of compat traits.
+        // `self`/`static`/`parent` have no fixed class outside a method body.
+        if ($k === 'StaticAccess') {
+            $cls = \ltrim($this->staticAccessClass($e), '\\');
+            $name = $this->staticAccessName($e);
+            $lc = \strtolower($cls);
+            if ($name === '' || $name[0] === '$' || $lc === 'self' || $lc === 'static' || $lc === 'parent') { return null; }
+            $cv = $this->findClassConst($this->declaredClassCase($cls), $name);
+            if ($cv !== null) { return $this->constScalarKey($cv, $depth + 1); }
+        }
         return null;
     }
 
