@@ -280,6 +280,17 @@ final class TypeCheck
         return $t;
     }
 
+    private function arrayPropTypeError(string $local, string $suffix): Node
+    {
+        return new Call('__mir_throw_type_error', [new \Compile\Mir\Concat(
+            new \Compile\Mir\StringConst('Cannot assign ', Type::string_()),
+            new \Compile\Mir\Concat(
+                new Call('get_debug_type', [new \Compile\Mir\LoadLocal($local, Type::cell())], Type::string_()),
+                new \Compile\Mir\StringConst($suffix, Type::string_()),
+            ),
+        )], Type::cell());
+    }
+
     /** A store into a plain `array` property: a scalar is php's TypeError (statically when its kind is known, else by the cell's tag). */
     private function arrayPropGuard(Node $v, \Compile\Mir\ClassDef $cd, string $prop): Node
     {
@@ -295,7 +306,25 @@ final class TypeCheck
             return new Call('__mir_throw_type_error', [new \Compile\Mir\StringConst('Cannot assign ' . $given . $suffix, Type::string_())], $v->type);
         }
         if ($k === Type::KIND_CELL) {
-            return new Call('__mir_assert_array_prop', [$v, new \Compile\Mir\StringConst($suffix, Type::string_())], $v->type);
+            // `is_scalar($t = v) || $t === null ? throw TypeError : $t` through a temp, the
+            // {@see intToFloatValue} shape: the store reads a LOCAL, so ownership is the ordinary
+            // local-copy one. (A call wrapping the value was owned-or-borrowed wrong either way: a
+            // leak per store, or the argument temp freed before the store retained it.) Only a
+            // definite scalar or null throws — a cell is a static claim, so a raw word passes.
+            $name = '__aap';
+            $t = new \Compile\Mir\Ternary(
+                new Call('is_scalar', [new \Compile\Mir\StoreLocal($name, $v, Type::cell())], Type::bool_()),
+                $this->arrayPropTypeError($name, $suffix),
+                new \Compile\Mir\Ternary(
+                    new Call('is_null', [new \Compile\Mir\LoadLocal($name, Type::cell())], Type::bool_()),
+                    $this->arrayPropTypeError($name, $suffix),
+                    new \Compile\Mir\LoadLocal($name, Type::cell()),
+                    Type::cell(),
+                ),
+                Type::cell(),
+            );
+            $t->line = $v->line;
+            return $t;
         }
         return $v;
     }

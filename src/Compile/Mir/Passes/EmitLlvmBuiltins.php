@@ -313,7 +313,6 @@ trait EmitLlvmBuiltins
         if ($name === '__mir_throw_error')     { return $this->biThrowError($args); }
         if ($name === '__mir_member_call_error') { return $this->biMemberCallError($args); }
         if ($name === '__mir_throw_type_error') { return $this->biThrowError($args, 'TypeError'); }
-        if ($name === '__mir_assert_array_prop') { return $this->biAssertArrayProp($args); }
         if ($name === '__mir_throw_argcount_error') { return $this->biThrowError($args, 'ArgumentCountError'); }
         if ($name === '__mir_untag_str')              { return $this->biUntagStr($args); }
         if ($name === '__mir_obj_bag')                { return $this->biObjBag($args); }
@@ -8850,42 +8849,6 @@ trait EmitLlvmBuiltins
         $this->lastValueType = 'i64';
         return $out;
     }
-    /**
-     * `__mir_assert_array_prop($cell, ' to property C::$p of type array')` — the value being stored into an
-     * `array` property, handed back unchanged; a cell that holds a scalar throws php's TypeError instead.
-     * Only a definite scalar tag throws: a cell is a static claim, so a raw word is given the benefit of the doubt.
-     * @param Node[] $args
-     */
-    private function biAssertArrayProp(array $args): string
-    {
-        $out = $this->emitNode($args[0]);
-        $out .= $this->coerceToI64();
-        $v = $this->lastValue;
-        $slot = $this->ssa->allocReg();
-        $out .= '  ' . $slot . " = alloca i64\n";
-        $out .= '  store i64 ' . $v . ', ptr ' . $slot . "\n";
-        $sn = '__maap' . \substr($this->ssa->allocReg(), 2);
-        $this->locals->slots[$sn] = $slot;
-        $out .= $this->cellTagIr($v);
-        $m1 = $this->ssa->allocReg();
-        $out .= '  ' . $m1 . ' = sub i64 ' . $this->cellTagReg . ", 1\n";
-        $scalar = $this->ssa->allocReg();
-        $out .= '  ' . $scalar . ' = icmp ult i64 ' . $m1 . ", 5\n";
-        $msg = new \Compile\Mir\Concat(
-            new \Compile\Mir\StringConst('Cannot assign ', Type::string_()),
-            new \Compile\Mir\Concat(
-                new \Compile\Mir\Call('get_debug_type', [new \Compile\Mir\LoadLocal($sn, Type::cell())], Type::string_()),
-                $args[1],
-            ),
-        );
-        $out .= $this->emitThrowNodeIf($scalar, new \Compile\Mir\Call('__mir_throw_type_error', [$msg], Type::cell()));
-        // +1 for the caller ({@see Ownership::tempCellOwned}): the argument temp is released right after this call.
-        $out .= $this->rcRetainReg($v, 'cell');
-        $this->lastValue = $v;
-        $this->lastValueType = 'i64';
-        return $out;
-    }
-
     private function biThrowError(array $args, string $cls = 'Error'): string
     {
         // The message is the ARGUMENT NODE, not a re-wrapped literal. It used to
