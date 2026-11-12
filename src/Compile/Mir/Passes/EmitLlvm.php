@@ -275,6 +275,8 @@ final class EmitLlvm implements EmitVisitor
     private ?Node $dynQuietRead = null;
     /** @var array<string, string> erased dynamic-method helper bodies */
     private array $dynamicMethodHelpers = [];
+    /** @var array<string, int[]>|null lower-cased method name → ids of the classes the method_exists table lists it for */
+    private ?array $methodClassIds = null;
     /** Prevent recursive uniform-ABI selection while emitting an extracted fallback. */
     private bool $dynamicMethodAbiDisabled = false;
 
@@ -786,6 +788,7 @@ final class EmitLlvm implements EmitVisitor
         $this->propDenyHelpers = [];
         $this->propDenyRows = [];
         $this->dynamicMethodHelpers = [];
+        $this->methodClassIds = null;
         $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;
         $this->reflectNames = $module->reflectNames;
@@ -3651,6 +3654,23 @@ final class EmitLlvm implements EmitVisitor
     {
         $out = '';
         $acc = '';
+        if (\count($ids) > 8) {
+            // One switch per id set, called: an inline compare chain over every implementor of an
+            // interface (or every class with a method) repeated at each site.
+            $sorted = $ids;
+            \sort($sorted);
+            $key = '__mir_cidin|' . \implode(',', $sorted);
+            $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_cidin_', \implode(',', $sorted)));
+            if (!isset($this->dynamicMethodHelpers[$key])) {
+                $body = 'define hidden i1 ' . $sym . "(i64 %c) {\nentry:\n  switch i64 %c, label %no [";
+                foreach ($sorted as $id) { $body .= ' i64 ' . (string)$id . ', label %yes'; }
+                $body .= " ]\nyes:\n  ret i1 true\nno:\n  ret i1 false\n}\n\n";
+                $this->dynamicMethodHelpers[$key] = $body;
+            }
+            $acc = $this->ssa->allocReg();
+            $this->classIdMatchReg = $acc;
+            return '  ' . $acc . ' = call i1 ' . $sym . '(i64 ' . $cid . ")\n";
+        }
         foreach ($ids as $id) {
             $m = $this->ssa->allocReg();
             $out .= '  ' . $m . ' = icmp eq i64 ' . $cid . ', ' . (string)$id . "\n";
@@ -3849,9 +3869,8 @@ final class EmitLlvm implements EmitVisitor
             // word too; {@see EmitLlvmExpr::coerceToStr} parks it by this ptr.
             $this->rt->needsStrRc = true;
             $out = '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
-            $cell = $this->ptrArgCellByReg[$ptr] ?? '';
+            $cell = $this->ssa->takeCell($ptr);
             if ($cell !== '') {
-                unset($this->ptrArgCellByReg[$ptr]);
                 $out .= $this->rcReleaseReg($cell, 'cell');
             }
             return $out;
@@ -3923,34 +3942,13 @@ final class EmitLlvm implements EmitVisitor
     /** {@see \Compile\Mir\Ownership::tempCellOwned} */
     private function isFreshCellTemp(Node $n): bool { return !$this->isPreEvaluated($n) && $this->own->tempCellOwned($n, $this->lastCallWasBuiltin); }
 
-    /**
-     * Result reg of an {@see EmitLlvmBuiltins::emitPtrArg} operand that was a
-     * fresh CELL temp -> the TAGGED word to drop once the builtin has read it.
-     *
-     * Keyed by the reg rather than passed along because the ~30 string builtins
-     * all already hand {@see freeStrTemp} exactly that reg — so the cell twin
-     * costs no per-site edit and cannot be forgotten at a new one. SSA regs
-     * restart per function, so {@see EmitLlvmModule::emitFunction} clears it.
-     *
-     * @var array<string,string>
-     */
-    private array $ptrArgCellByReg = [];
-
-    /** Forget every pending cell temp; the reg keys are only valid inside one
-     *  function ({@see $ptrArgCellByReg}). */
-    private function clearPtrArgCells(): void
-    {
-        $this->ptrArgCellByReg = [];
-    }
-
     private function freeStrTemp(Node $node, string $ptr): string
     {
         // A fresh CELL temp: `$ptr` is only its PAYLOAD, and the payload of a
         // `string|false` may be a boxed bool whose untagged word is not an
         // address. Drop the tagged word instead — __mir_cell_drop dispatches.
-        $cell = $this->ptrArgCellByReg[$ptr] ?? '';
+        $cell = $this->ssa->takeCell($ptr);
         if ($cell !== '') {
-            unset($this->ptrArgCellByReg[$ptr]);
             return $this->rcReleaseReg($cell, 'cell');
         }
         if (!$this->isFreshStringTemp($node)) { return ''; }

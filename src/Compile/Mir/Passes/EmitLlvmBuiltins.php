@@ -222,9 +222,8 @@ trait EmitLlvmBuiltins
             // A fresh cell behind an {@see emitPtrArg} payload: dropped by its
             // tagged word, unless the builtin already did ({@see freeStrTemp}).
             if ($flavor === 'cellptr') {
-                $cw = $this->ptrArgCellByReg[$reg] ?? '';
+                $cw = $this->ssa->takeCell($reg);
                 if ($cw !== '') {
-                    unset($this->ptrArgCellByReg[$reg]);
                     $out .= $this->rcReleaseReg($cw, 'cell');
                 }
                 continue;
@@ -2162,7 +2161,7 @@ trait EmitLlvmBuiltins
             // A string builtin gives the cell back itself ({@see freeStrTemp});
             // every other consumer left it stranded. The deferred entry drops
             // it after the builtin unless that already happened.
-            $this->ptrArgCellByReg[$safe] = $cellTemp;
+            $this->ssa->parkCell($safe, $cellTemp);
             $this->arrArgTempRegs[] = $safe;
             $this->arrArgTempFlavors[] = 'cellptr';
         }
@@ -8682,6 +8681,7 @@ trait EmitLlvmBuiltins
         if ($arg->kind === Node::KIND_STRING_CONST) {
             return \ltrim($arg->value, '\\');
         }
+        if ($arg->type->kind === Type::KIND_CLOSURE) { return 'Closure'; }
         if ($arg->type->kind !== Type::KIND_OBJ) { return ''; }
         // Type::class is populated for concrete object types only. Do not
         // route erased scalar/cell metadata through ltrim(null) natively.
@@ -9204,7 +9204,78 @@ trait EmitLlvmBuiltins
                 return $this->biMethodExistsByClassId($args, $cls, $m);
             }
         }
+        $k = $args[0]->type->kind;
+        if ($m !== '' && !$this->moduleIsLibrary
+            && ($k === Type::KIND_CELL || ($k === Type::KIND_OBJ && !$this->isClosureClass($args[0]->type->class ?? '')))) {
+            return $this->biMethodExistsErased($args, $m);
+        }
         return $this->biMethodExistsDynamic($args);
+    }
+
+    /**
+     * `method_exists($v, 'm')` over a value whose class is known only at run time: its class id
+     * against the classes the name table lists `m` for. The table search costs `get_class()`
+     * plus name compares over shared namespace prefixes — Laravel asks it per middleware per
+     * request, and the `__call`-reroute predicate twice per erased call. A library module does
+     * not see the program's classes and keeps the table; a boxed STRING (a class name) too.
+     * @param Node[] $args
+     */
+    private function biMethodExistsErased(array $args, string $m): string
+    {
+        // A closure carries no class id: its methods go through the table, which knows `Closure`.
+        $lm = \strtolower($m);
+        if ($lm === '__invoke' || \in_array($lm, ['bind', 'bindto', 'call', 'fromcallable', 'getcurrent'], true)) {
+            return $this->biMethodExistsDynamic($args);
+        }
+        if ($this->methodClassIds === null) {
+            $idx = [];
+            foreach ($this->reflMethodOwners() as $owner) {
+                $cd = $this->classes[$owner] ?? null;
+                $ed = $this->enums[$owner] ?? null;
+                $id = $cd !== null ? $cd->classId : ($ed !== null ? $ed->classId : 0);
+                if ($id <= 0 || ($cd !== null && $cd->isStruct)) { continue; }
+                $seen = [];
+                foreach ($this->reflAllMethods($owner) as $mm) {
+                    $lc = \strtolower((string)$mm);
+                    if (isset($seen[$lc])) { continue; }
+                    $seen[$lc] = true;
+                    $idx[$lc][] = $id;
+                }
+            }
+            $this->methodClassIds = $idx;
+        }
+        $ids = $this->methodClassIds[\strtolower($m)] ?? [];
+        if ($args[0]->type->kind !== Type::KIND_CELL) {
+            return $this->emitClassIdTest($args[0], $ids);
+        }
+        $out = $this->emitNode($args[0]);
+        $out .= $this->coerceToI64();
+        $w = $this->lastValue;
+        $sn = '__mex' . \substr($this->ssa->allocReg(), 2);
+        $slot = $this->ssa->allocReg();
+        $res = $this->ssa->allocReg();
+        $out .= '  ' . $slot . " = alloca i64\n  store i64 " . $w . ', ptr ' . $slot . "\n";
+        $out .= '  ' . $res . " = alloca i64\n";
+        $this->locals->slots[$sn] = $slot;
+        $out .= $this->cellTagIr($w);
+        $isStr = $this->ssa->allocReg();
+        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $this->cellTagReg . ", 4\n";
+        $strL = $this->ssa->allocLabel('mex.str');
+        $objL = $this->ssa->allocLabel('mex.obj');
+        $doneL = $this->ssa->allocLabel('mex.done');
+        $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $objL . "\n";
+        $out .= $strL . ":\n";
+        $out .= $this->biMethodExistsDynamic([new \Compile\Mir\LoadLocal($sn, Type::cell()), $args[1]]);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n  br label %" . $doneL . "\n";
+        $out .= $objL . ":\n";
+        $out .= $this->classIdTestTail(new \Compile\Mir\LoadLocal($sn, Type::cell()), $ids, $w);
+        $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n  br label %" . $doneL . "\n";
+        $out .= $doneL . ":\n";
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = load i64, ptr ' . $res . "\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        return $out;
     }
 
     /**
@@ -9244,16 +9315,29 @@ trait EmitLlvmBuiltins
     private function classHasMethodCI(string $cls, string $m): bool
     {
         if ($this->resolveMethodClass($cls, $m) !== '') { return true; }
-        $c = $cls;
-        while ($c !== '') {
-            $cd = $this->classes[$c] ?? null;
-            if ($cd === null) { return false; }
-            foreach ($cd->methodNames as $name => $_) {
-                if (\strcasecmp((string)$name, $m) === 0) { return true; }
-            }
-            $c = $cd->parent;
+        if (\strcasecmp($m, '__invoke') === 0 && ($cls === 'Closure' || $this->isClosureClass($cls))) { return true; }
+        foreach ($this->reflAllMethods($cls) as $name) {
+            if (\strcasecmp((string)$name, $m) === 0) { return true; }
         }
         return false;
+    }
+
+    /**
+     * The classes the method tables list: every class, every enum (one without methods
+     * owns no ClassDef) and `Closure`, whose closures are classes of their own.
+     * @return string[]
+     */
+    private function reflMethodOwners(): array
+    {
+        $o = [];
+        foreach ($this->classes as $cd) {
+            if (!$this->isClosureClass($cd->name)) { $o[$cd->name] = true; }
+        }
+        foreach ($this->enums as $ed) { $o[$ed->name] = true; }
+        $o['Closure'] = true;
+        $names = [];
+        foreach ($o as $n => $_) { $names[] = (string)$n; }
+        return $names;
     }
 
     /** Whether a class that is-a `$cls` (other than itself) declares `$m`. */
@@ -9913,8 +9997,24 @@ trait EmitLlvmBuiltins
     /** Declared + inherited method names (parent chain, child-first, deduped). */
     private function reflAllMethods(string $cls): array
     {
+        if ($cls === 'Closure' || $this->isClosureClass($cls)) {
+            return ['bind', 'bindTo', 'call', 'fromCallable', 'getCurrent'];
+        }
         $names = [];
         $seen = [];
+        $ed = $this->enums[$cls] ?? null;
+        if ($ed !== null) {
+            // php lists the declared methods, then the built-ins.
+            $c = $cls;
+            $cd = $this->classes[$c] ?? null;
+            if ($cd !== null) {
+                foreach ($cd->methodNames as $m => $_) { $seen[$m] = true; $names[] = $m; }
+            }
+            foreach ($ed->backing !== '' ? ['cases', 'from', 'tryFrom'] : ['cases'] as $b) {
+                if (!isset($seen[$b])) { $names[] = $b; }
+            }
+            return $names;
+        }
         $c = $cls;
         while ($c !== '') {
             $cd = $this->classes[$c] ?? null;
@@ -10077,41 +10177,57 @@ trait EmitLlvmBuiltins
      */
     private function emitGetClassFn(): string
     {
-        $this->ssa->reset();
-        $res = $this->ssa->allocReg();
-        $out = '  ' . $res . " = alloca ptr\n";
-        $endL = $this->ssa->allocLabel('gcf.end');
-        $defL = $this->ssa->allocLabel('gcf.def');
-        $caseMap = [];
-        $bodies = '';
+        // An open-addressing table keyed by class id (ids are {@see \Compile\Mir\ClassDef::stableId}
+        // hashes, never 0): the switch over every class was a ≥1 MB optnone body that a mixed
+        // receiver's get_class() walked as a binary search.
+        /** @var array<int, string> $names */
+        $names = [];
         foreach ($this->classes as $cd) {
             if ($cd->isStruct) { continue; }
-            $caseL = $this->ssa->allocLabel('gcf.case');
-            $caseMap[$cd->classId] = $caseL;
-            $bodies .= $caseL . ":\n";
-            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($cd->name))) . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $endL . "\n";
+            $names[$cd->classId] = $this->strLitId($this->pool->intern($this->displayClassName($cd->name)));
         }
         // An enum without methods owns no ClassDef, only an id: its singletons
         // still reach here through a mixed receiver (get_class, the string-
         // conversion Error).
         foreach ($this->enums as $ed) {
             if ($ed->classId <= 0 || isset($this->classes[$ed->name])) { continue; }
-            $caseL = $this->ssa->allocLabel('gcf.case');
-            $caseMap[$ed->classId] = $caseL;
-            $bodies .= $caseL . ":\n";
-            $bodies .= '  store ptr ' . $this->strLitId($this->pool->intern($this->displayClassName($ed->name))) . ', ptr ' . $res . "\n";
-            $bodies .= '  br label %' . $endL . "\n";
+            $names[$ed->classId] = $this->strLitId($this->pool->intern($this->displayClassName($ed->name)));
         }
-        $out .= $this->emitAdaptiveClassIdBranch('%gcf.cid', $caseMap, $defL) . $bodies;
-        $out .= $defL . ":\n";
-        $out .= '  store ptr ' . $this->strLitId($this->pool->intern('')) . ', ptr ' . $res . "\n";
-        $out .= '  br label %' . $endL . "\n";
-        $out .= $endL . ":\n";
-        $ld = $this->ssa->allocReg();
-        $out .= '  ' . $ld . ' = load ptr, ptr ' . $res . "\n";
-        return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_get_class') . "(i64 %gcf.cid) noinline {\nentry:\n"
-            . $out . '  ret ptr ' . $ld . "\n}\n\n";
+        $size = 16;
+        while ($size < 2 * \count($names)) { $size = $size * 2; }
+        $mask = $size - 1;
+        /** @var int[] $keys */
+        $keys = \array_fill(0, $size, 0);
+        /** @var string[] $vals */
+        $vals = \array_fill(0, $size, 'null');
+        foreach ($names as $id => $lit) {
+            $i = $id & $mask;
+            while ($keys[$i] !== 0) { $i = ($i + 1) & $mask; }
+            $keys[$i] = $id;
+            $vals[$i] = $lit;
+        }
+        $kr = [];
+        $vr = [];
+        for ($i = 0; $i < $size; $i++) {
+            $kr[] = 'i64 ' . (string)$keys[$i];
+            $vr[] = 'ptr ' . $vals[$i];
+        }
+        $n = (string)$size;
+        $kt = '@' . $this->mirHelperSym('__mir_get_class_keys');
+        $vt = '@' . $this->mirHelperSym('__mir_get_class_names');
+        $empty = $this->strLitId($this->pool->intern(''));
+        return $kt . ' = linkonce_odr constant [' . $n . ' x i64] [' . \implode(', ', $kr) . "]\n"
+            . $vt . ' = linkonce_odr constant [' . $n . ' x ptr] [' . \implode(', ', $vr) . "]\n"
+            . 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_get_class') . "(i64 %c) {\nentry:\n"
+            . '  %h = and i64 %c, ' . (string)$mask . "\n  br label %probe\nprobe:\n"
+            . "  %i = phi i64 [ %h, %entry ], [ %i2, %next ]\n"
+            . '  %kp = getelementptr inbounds [' . $n . ' x i64], ptr ' . $kt . ", i64 0, i64 %i\n"
+            . "  %k = load i64, ptr %kp\n  %hit = icmp eq i64 %k, %c\n  br i1 %hit, label %found, label %miss\n"
+            . "miss:\n  %end = icmp eq i64 %k, 0\n  br i1 %end, label %none, label %next\n"
+            . "next:\n  %i1 = add i64 %i, 1\n  %i2 = and i64 %i1, " . (string)$mask . "\n  br label %probe\n"
+            . 'found:' . "\n" . '  %vp = getelementptr inbounds [' . $n . ' x ptr], ptr ' . $vt . ", i64 0, i64 %i\n"
+            . "  %v = load ptr, ptr %vp\n  ret ptr %v\n"
+            . 'none:' . "\n" . '  ret ptr ' . $empty . "\n}\n\n";
     }
 
     /** The one shared body {@see emitObjectVarsOfPtr} calls. Emitted beside the

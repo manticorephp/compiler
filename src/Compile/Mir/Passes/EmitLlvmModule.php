@@ -275,9 +275,10 @@ trait EmitLlvmModule
         if ($this->rt->needsMethodExists) {
             /** @var string[][] $mxPairs */
             $mxPairs = [];
-            foreach ($this->classes as $cd) {
-                $disp = $this->displayClassName($cd->name);
-                foreach ($this->reflAllMethods($cd->name) as $m) { $mxPairs[] = [$disp, (string)$m]; }
+            foreach ($this->reflMethodOwners() as $owner) {
+                $disp = $this->displayClassName($owner);
+                foreach ($this->reflAllMethods($owner) as $m) { $mxPairs[] = [$disp, (string)$m]; }
+                if ($owner === 'Closure') { $mxPairs[] = [$disp, '__invoke']; }
             }
             $mxCount = $this->memberRowsSorted($mxPairs, true, $mxClsRows, $mxMthRows);
         }
@@ -291,8 +292,8 @@ trait EmitLlvmModule
         $gcmTotal = 0;
         if ($this->rt->needsClassMethods) {
             $gcmKeys = [];
-            foreach ($this->classes as $cd) {
-                $gcmKeys[] = [\strtolower($this->displayClassName($cd->name)), $cd->name];
+            foreach ($this->reflMethodOwners() as $owner) {
+                $gcmKeys[] = [\strtolower($this->displayClassName($owner)), $owner];
             }
             \usort($gcmKeys, fn (array $x, array $y): int => \strcmp($x[0], $y[0]));
             foreach ($gcmKeys as $k) {
@@ -1059,9 +1060,6 @@ trait EmitLlvmModule
         $this->ssa->reset();
         $this->ehOn = false;
         $this->ehPersonality = false;
-        // SSA regs restart here, so a leftover reg key would name a DIFFERENT
-        // value in this function ({@see EmitLlvm::$ptrArgCellByReg}).
-        $this->clearPtrArgCells();
         $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
         $this->frame->file = $fn->file;
