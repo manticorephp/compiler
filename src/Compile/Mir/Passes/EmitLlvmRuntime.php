@@ -2931,7 +2931,7 @@ trait EmitLlvmRuntime
         // it, and __mc_refl_find. Nothing is emitted for a module with no
         // classes, so a program that declares none carries no startup cost.
         $this->rt->needsStrcmp = true;
-        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds, $fnRegCtors);
+        $descs .= $this->nameIcmpFn() . \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds, $fnRegCtors);
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
         // identical in every object → linkonce_odr coalesces it cleanly.

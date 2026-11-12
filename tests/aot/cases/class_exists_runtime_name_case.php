@@ -1,6 +1,5 @@
 <?php
 // class_exists() / interface_exists() / trait_exists() with a runtime name answer false for a different-case spelling php accepts
-// issue: #603
 namespace App\Deep;
 trait T1 {}
 class C {}

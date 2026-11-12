@@ -465,7 +465,7 @@ final class RuntimeLibrary
         // An empty slot means absent: the table always has one (cap >= 2*count),
         // so the probe terminates.
         $out .= "  %hfree = icmp eq ptr %hv, null\n";
-        $out .= "  br i1 %hfree, label %miss, label %hcheck\n";
+        $out .= "  br i1 %hfree, label %walk, label %hcheck\n";
         $out .= "hcheck:\n";
         $out .= '  %hnmp = getelementptr i8, ptr %hv, i64 '
               . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
@@ -493,7 +493,7 @@ final class RuntimeLibrary
         $out .= '  %nmp = getelementptr i8, ptr %m, i64 '
               . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
         $out .= "  %nm = load ptr, ptr %nmp\n";
-        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %c = call i32 @__mir_name_icmp(ptr %nm, ptr %name)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  br i1 %eq, label %hit, label %cont\n";
         $out .= "hit:\n";
@@ -560,7 +560,7 @@ final class RuntimeLibrary
         $out .= "  br i1 %end, label %miss, label %body\n";
         $out .= "body:\n";
         $out .= "  %nm = load ptr, ptr %p\n";
-        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %c = call i32 @__mir_name_icmp(ptr %nm, ptr %name)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  br i1 %eq, label %hit, label %cont\n";
         $out .= "hit:\n";

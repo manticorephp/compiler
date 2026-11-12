@@ -2428,10 +2428,14 @@ final class LowerFromAst implements Pass
         // A static name map (data) and a bucketed integer tree, not a chain of string
         // compares: O(log n) per lookup, and no function of 66K IR lines.
         $map = '  static $__ix = [' . \implode(', ', $rows) . "];\n";
+        // Declared type names, so an unknown `X::C` can tell a missing class from a missing constant.
+        $cls = [];
+        foreach ($this->classDecls as $cdn => $_cd) { $cls[] = "'" . \addcslashes(\strtolower(\ltrim((string)$cdn, '\\')), "'\\") . "' => 1"; }
+        $clsMap = '  static $__cl = [' . \implode(', ', $cls) . "];\n";
         [$bfns, $pick] = $leaves === [] ? ['', ''] : self::bucketTreeSrc('__mc_constant', 'int $__i', '$__i', 'mixed', '$__i', $leaves, false);
         return $bfns . "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $map
-            . "  \$__i = \$__ix[\$n] ?? -1;\n"
-            . "  if (\$__i < 0) { throw new \\Error('Undefined constant ' . (\\strpos(\$n, '::') === false ? '\"' . \$n . '\"' : \$n)); }\n"
+            . $clsMap . "  \$__i = \$__ix[\$n] ?? -1;\n"
+            . "  if (\$__i < 0) {\n    \$__p = \\strpos(\$n, '::');\n    if (\$__p !== false && !isset(\$__cl[\\strtolower(\\substr(\$n, 0, \$__p))])) { throw new \\Error('Class \"' . \\substr(\$n, 0, \$__p) . '\" not found'); }\n    throw new \\Error('Undefined constant ' . (\$__p === false ? '\"' . \$n . '\"' : \$n));\n  }\n"
             . $pick . "  return null;\n}\n"
             . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $map
             . "  return isset(\$__ix[\$n]);\n}\n";
