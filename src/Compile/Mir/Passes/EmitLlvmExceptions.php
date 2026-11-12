@@ -159,7 +159,7 @@ trait EmitLlvmExceptions
      */
     private function ehResume(string $lp): string
     {
-        if (!\Manticore\is_darwin()) { return '  resume { ptr, i32 } ' . $lp . "\n"; }
+        if (!\Manticore\is_darwin() || \getenv('MANTICORE_EH') === 'ret') { return '  resume { ptr, i32 } ' . $lp . "\n"; }
         $this->ehResumeN = $this->ehResumeN + 1;
         $x = '%mc.rx' . (string)$this->ehResumeN;
         return '  ' . $x . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n  call void @__mc_resume(ptr " . $x . ")\n  unreachable\n";
@@ -1087,21 +1087,7 @@ trait EmitLlvmExceptions
     /** Runtime helpers that never run user code and never throw. */
     private function ehNounwind(string $callee): bool
     {
-        // Each invoke costs a block and an unwind edge per call site: in the
-        // Laravel build the backtrace ring alone was 648K of them.
-        return $callee === '@__mc_eh_catch'
-            || $callee === '@__mir_elem_untag'
-            || $callee === '@__mir_bt_push'
-            || $callee === '@__mir_bt_push_rel'
-            || $callee === '@__mir_bt_pop'
-            || $callee === '@__manticore_deref'
-            || $callee === '@__manticore_tag'
-            || $callee === '@__manticore_cell_int_bad'
-            || $callee === '@__mir_obj_handle_alloc'
-            || \str_starts_with($callee, '@__mc_dynf_')
-            || \str_starts_with($callee, '@__mir_arena_')
-            || \str_starts_with($callee, '@__mir_rc_retain')
-            || \str_starts_with($callee, '@__manticore_box_');
+        return \Compile\Mir\EhLowerIr::nounwind($callee);
     }
 
     /**
@@ -1109,32 +1095,20 @@ trait EmitLlvmExceptions
      * split renamed to its last continuation.
      * @param array<string, string> $last
      */
+    /** The final-text exception lowering, told which `@manticore_*` callees cannot throw. */
+    private function ehLowerIr(): \Compile\Mir\EhLowerIr
+    {
+        /** @var array<string, bool> */
+        $syms = [];
+        if ($this->nothrow !== null) {
+            foreach ($this->nothrow->nothrowNames() as $fn) { $syms['@manticore_' . $this->mangle($fn)] = true; }
+        }
+        return new \Compile\Mir\EhLowerIr($syms);
+    }
+
     private function ehPhiRetarget(string $line, array $last): string
     {
-        // An incoming block is the `%name` after the last comma of a pair, right
-        // before its `]` — both `[ v, %b ]` and `[v, %b]` are emitted. A value
-        // never sits there, so no bracket matching is needed.
-        $out = '';
-        $p = 0;
-        $len = \strlen($line);
-        while ($p < $len) {
-            $cm = \strpos($line, ', %', $p);
-            if ($cm === false) { break; }
-            $s = $cm + 3;
-            $e = $s;
-            while ($e < $len && $line[$e] !== ']' && $line[$e] !== ' ' && $line[$e] !== ',') { $e = $e + 1; }
-            $f = $e;
-            while ($f < $len && $line[$f] === ' ') { $f = $f + 1; }
-            $lab = \substr($line, $s, $e - $s);
-            $out .= \substr($line, $p, $s - $p);
-            if ($f < $len && $line[$f] === ']' && isset($last[$lab])) {
-                $out .= $last[$lab];
-            } else {
-                $out .= $lab;
-            }
-            $p = $e;
-        }
-        return $out . \substr($line, $p);
+        return \Compile\Mir\EhLowerIr::phiRetarget($line, $last);
     }
 
     private function emitThrow(\Compile\Mir\Throw_ $n): string

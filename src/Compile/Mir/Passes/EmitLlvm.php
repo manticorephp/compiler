@@ -1569,6 +1569,18 @@ final class EmitLlvm implements EmitVisitor
                     . (string)($prune->dropped + $prune->kept) . ' defs, '
                     . (string)$stagedBytes . ' bytes');
             }
+            if (\getenv('MANTICORE_EH') === 'ret') {
+                $statT = \Compile\Stats::begin('  exceptions: slot lowering (staged)');
+                $eh = $this->ehLowerIr();
+                $ehPath = $this->streamIrPath . '.eh';
+                if (!$eh->runFile($this->streamIrPath, $ehPath)
+                    || \Manticore\sys_rename($ehPath, $this->streamIrPath) !== 0) {
+                    throw new \RuntimeException('EmitLlvm: cannot lower exceptions in staged IR ' . $this->streamIrPath);
+                }
+                $stagedBytes = $eh->bytes;
+                \Compile\Stats::step('  exceptions: slot lowering (staged)', $statT, $eh->checks, $eh->mayThrow);
+                \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
+            }
             \Compile\Stats::line('IR: staged at ' . $this->streamIrPath . ' ('
                 . (string)$stagedBytes . ' bytes)');
             // This streaming path is the DEFAULT (Main.php sets streamIrPath
@@ -1619,6 +1631,13 @@ final class EmitLlvm implements EmitVisitor
                 . (string)\strlen($ir) . ' bytes');
         } elseif (!$this->emitLibrary && $pruneMode === 'off') {
             \Compile\Stats::line('  prune IR skipped (MANTICORE_PRUNE_IR=off)');
+        }
+        if (\getenv('MANTICORE_EH') === 'ret') {
+            $statT = \Compile\Stats::begin('  exceptions: slot lowering');
+            $eh = $this->ehLowerIr();
+            $ir = $eh->run($ir);
+            \Compile\Stats::step('  exceptions: slot lowering', $statT, $eh->checks, $eh->mayThrow);
+            \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
         }
         // One coverage line per module emission, on a side channel
         // (`\error_log`) — never appended to `$ir`, so this changes nothing a
