@@ -90,7 +90,9 @@ built when the process starts.
 - `src/Kernel.php` keeps the **system cache pool in memory** (`cache.adapter.array`). Its
   default, `PhpFilesAdapter`, writes PHP files and `include`s them back, which a binary
   does not do: every save failed and every request re-parsed its Doctrine queries and
-  icons (~5x slower). One process serves every request, so memory is the shared cache.
+  icons (~5x slower). One process serves every request, so memory is the shared cache; the
+  kernel would empty an array pool before every request (`kernel.reset`), so a compiler
+  pass takes that tag off the cache pools.
 - `src/Kernel.php` registers its bundles in code instead of `require`-ing
   `config/bundles.php` (which `setup.sh` removes), keeps the compiled container in memory
   instead of dumping it to `var/cache`, and builds lazy *services* eagerly:
