@@ -776,6 +776,20 @@ trait LowerExprs
         return null;
     }
 
+    /** php's run-time Error for `C::K` / `C::$p` naming a member (or class) that is not there. */
+    private function undeclaredStaticMemberError(\Parser\Ast\StaticAccess $expr): Node
+    {
+        $cls = $this->resolveStaticClass($this->staticAccessClass($expr));
+        $name = $this->staticAccessName($expr);
+        if (!isset($this->classTable[$cls]) && !isset($this->enumTable[$cls]) && !isset($this->classDecls[$cls])) {
+            $this->noteClassRef($cls, $expr->span);
+            return $this->throwErrorExpr('Class "' . $cls . '" not found');
+        }
+        return $this->throwErrorExpr(\str_starts_with($name, '$')
+            ? 'Access to undeclared static property ' . $cls . '::' . $name
+            : 'Undefined constant ' . $cls . '::' . $name);
+    }
+
     private function lowerDynamicStaticAccessExpr(\Parser\Ast\DynamicStaticAccess $expr): Node
     {
             // `$obj::class` → the operand's class name as a string. Read the
@@ -966,16 +980,9 @@ trait LowerExprs
         // compiler simply failed to route, and turning that into a runtime
         // error would hide compiler gaps instead of reporting them.
         if ($expr->kind === 'StaticAccess') {
-            $saCls = $this->resolveStaticClass($this->staticAccessClass($expr));
             $saName = $this->staticAccessName($expr);
-            $classKnown = isset($this->classTable[$saCls])
-                || isset($this->enumTable[$saCls])
-                || isset($this->classDecls[$saCls]);
             if ($saName !== '' && \strtolower($saName) !== 'class') {
-                if (!$classKnown) { $this->noteClassRef($saCls, $expr->span); }
-                return $this->throwErrorExpr($classKnown
-                    ? 'Undefined constant ' . $saCls . '::' . $saName
-                    : 'Class "' . $saCls . '" not found');
+                return $this->undeclaredStaticMemberError($expr);
             }
         }
         $extra = '';
@@ -1228,6 +1235,11 @@ trait LowerExprs
                 $den = $this->staticPropAccessError($this->staticAccessClass($target), $this->staticAccessName($target));
                 if ($den !== '') { return $this->throwErrorExpr($den); }
                 return new StoreStaticProp_($ref->global, $value, $value->type, $ref->type);
+            }
+            // `static::$p = v` in a parent whose subclasses alone declare `$p`: the
+            // parent-scope body is reached only by a direct call, where php throws.
+            if (\str_starts_with($this->staticAccessName($target), '$')) {
+                return new Block([$value, $this->undeclaredStaticMemberError($target)], $value->type);
             }
             $this->noteClassRef($this->resolveStaticClass($this->staticAccessClass($target)), $target->span);
         }
