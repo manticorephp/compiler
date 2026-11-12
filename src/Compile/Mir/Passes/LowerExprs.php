@@ -1234,6 +1234,7 @@ trait LowerExprs
             if ($ref !== null) {
                 $den = $this->staticPropAccessError($this->staticAccessClass($target), $this->staticAccessName($target));
                 if ($den !== '') { return $this->throwErrorExpr($den); }
+                if ($this->staticPropIntToFloat($this->staticAccessClass($target), $this->staticAccessName($target))) { $value = TypeCheck::intToFloatValue($value, false); }
                 return new StoreStaticProp_($ref->global, $value, $value->type, $ref->type);
             }
             // `static::$p = v` in a parent whose subclasses alone declare `$p`: the

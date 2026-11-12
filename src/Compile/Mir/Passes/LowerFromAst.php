@@ -310,6 +310,9 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentLowerParamHints = [];
 
+    /** The body being lowered returns under a hint that turns an int into a float ({@see TypeCheck::intToFloatHint}). */
+    private bool $currentRetToFloat = false;
+
     /**
      * Names the closure being lowered captures BY VALUE out of an enclosing
      * bare-`array` param (or such a capture itself): their erased type says
@@ -3221,7 +3224,7 @@ final class LowerFromAst implements Pass
         // starts with `Box__`).
         $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
-        $this->setCurrentLowerParams($m->params);
+        $this->setCurrentLowerParams($m->params, $m->returnType, (bool)($m->returnsByRef ?? false));
         $this->scanStableCallables($m->body->statements);
         $prevGuardLocals = $this->guardLocals;
         $this->noteGuardHelper('m:' . \strtolower(\ltrim($decl->name, '\\')) . '::' . \strtolower($m->name), $m->name, $m->body);
@@ -3291,7 +3294,7 @@ final class LowerFromAst implements Pass
             $params[] = $mp;
             $pi = $pi + 1;
         }
-        $stmts = [];
+        $stmts = $this->intToFloatPrologue($m->params);
         if ($m->name === '__construct') {
             // Promoted-param stores first. The property defaults are NOT here: they
             // run once, at allocation (`C____mc_defaults`), so a second
@@ -3919,17 +3922,18 @@ final class LowerFromAst implements Pass
         // lowering once this expression is done.
         $savedParams = $this->currentLowerParams;
         $savedParamHints = $this->currentLowerParamHints;
+        $savedRetToFloat = $this->currentRetToFloat;
         $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
-        $this->setCurrentLowerParams($expr->params);
+        $this->setCurrentLowerParams($expr->params, $expr->returnType, (bool)($expr->returnsByRef ?? false));
         $savedHasThis = $this->currentLowerFnHasThis;
         if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
         $savedClosureMagic = $this->closureMagic;
         $this->closureMagic = $this->closureMagicName($expr->span);
         $this->lowerClosureDepth = $this->lowerClosureDepth + 1;
         $this->enterClosureFrame();
-        $body = $this->lowerBlockNode($expr->body);
+        $body = $this->withIntToFloatPrologue($this->lowerBlockNode($expr->body), $expr->params);
         $this->leaveClosureFrame();
         $this->lowerClosureDepth = $this->lowerClosureDepth - 1;
         $this->closureMagic = $savedClosureMagic;
@@ -3943,6 +3947,7 @@ final class LowerFromAst implements Pass
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
         $this->currentLowerParamHints = $savedParamHints;
+        $this->currentRetToFloat = $savedRetToFloat;
         $this->currentArrayCaps = $savedArrayCaps;
         $this->currentRefParamNames = $savedRefParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
@@ -4000,6 +4005,7 @@ final class LowerFromAst implements Pass
         // Its own parameter scope, like a full closure — see lowerClosure.
         $savedParams = $this->currentLowerParams;
         $savedParamHints = $this->currentLowerParamHints;
+        $savedRetToFloat = $this->currentRetToFloat;
         $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
@@ -4010,14 +4016,15 @@ final class LowerFromAst implements Pass
         // not claim its enclosing function's yield.
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
-        $this->setCurrentLowerParams($expr->params);
+        $this->setCurrentLowerParams($expr->params, $expr->returnType, (bool)($expr->returnsByRef ?? false));
         $savedHasThis = $this->currentLowerFnHasThis;
         if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
         $savedClosureMagic = $this->closureMagic;
         $this->closureMagic = $this->closureMagicName($expr->span);
         $this->lowerClosureDepth = $this->lowerClosureDepth + 1;
         $this->enterClosureFrame();
-        $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
+        $body = new Block([new Return_($this->lowerReturnValue($expr->body), Type::void())], Type::void());
+        $body = $this->withIntToFloatPrologue($body, $expr->params);
         $this->leaveClosureFrame();
         $this->lowerClosureDepth = $this->lowerClosureDepth - 1;
         $this->closureMagic = $savedClosureMagic;
@@ -4031,6 +4038,7 @@ final class LowerFromAst implements Pass
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
         $this->currentLowerParamHints = $savedParamHints;
+        $this->currentRetToFloat = $savedRetToFloat;
         $this->currentRefParamNames = $savedRefParams;
         // An arrow fn has no captures list — that argument stays at its default.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,
@@ -5506,6 +5514,15 @@ final class LowerFromAst implements Pass
         return new StaticProp_($global, $pt);
     }
 
+    /** The static property is declared with a hint that turns an int into a float ({@see TypeCheck::intToFloatHint}). */
+    private function staticPropIntToFloat(string $rawClass, string $rawName): bool
+    {
+        $pn = \ltrim($rawName, '$');
+        $dc = $this->staticPropDeclClass($this->resolveStaticClass($rawClass), $pn);
+        $pm = isset($this->classTable[$dc]) ? ($this->classTable[$dc]->propertyMeta[$pn] ?? null) : null;
+        return $pm !== null && TypeCheck::intToFloatHint($pm->typeHint);
+    }
+
     /**
      * `static $a = e, $b;` → one {@see StaticLocalDecl_} per binding,
      * each backed by a module global cell `@<fn>__sl_<name>`. A binding
@@ -6339,8 +6356,9 @@ final class LowerFromAst implements Pass
      *
      * @param \Parser\Ast\Param[] $params
      */
-    private function setCurrentLowerParams(array $params): void
+    private function setCurrentLowerParams(array $params, ?string $retHint = null, bool $returnsByRef = false): void
     {
+        $this->currentRetToFloat = !$returnsByRef && TypeCheck::intToFloatHint($retHint);
         $this->currentLowerParams = [];
         $this->currentLowerParamHints = [];
         $this->currentRefParamNames = [];

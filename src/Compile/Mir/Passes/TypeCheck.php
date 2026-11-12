@@ -212,12 +212,71 @@ final class TypeCheck
                     // A typed slot a reference retyped to a cell ({@see InferScans::scanRefCellProps})
                     // still owes its declared scalar the coercion and the TypeError.
                     if ($pt->kind === Type::KIND_CELL) { $pt = $this->declaredScalarHint($cd, $n->property) ?? $pt; }
-                    if (!isset($cd->propHooks[$n->property])) { $n->value = $this->scalarCast($n->value, $pt, $inFn, 'Cannot assign string to property ' . $cls . '::$' . $n->property . ' of type ' . $this->phpTypeName($pt)); }
+                    if (isset($cd->propHooks[$n->property])) { return; }
+                    $pm = $cd->propertyMeta[$n->property] ?? null;
+                    if ($pt->kind === Type::KIND_CELL && $pm !== null && self::intToFloatHint($pm->typeHint)) {
+                        $n->value = self::intToFloatValue($n->value, true);
+                        return;
+                    }
+                    $n->value = $this->scalarCast($n->value, $pt, $inFn, 'Cannot assign string to property ' . $cls . '::$' . $n->property . ' of type ' . $this->phpTypeName($pt));
                     return;
                 }
                 $cls = $cd->parent;
             }
         }
+    }
+
+    /**
+     * A declared hint that admits `float` but not `int` (`?float`, `float|string`):
+     * php's weak mode turns an int landing there into a float. Such a slot is a
+     * cell, which keeps whatever tag it is handed, so the sink converts. A plain
+     * `float` is a double slot and converts on its own.
+     */
+    public static function intToFloatHint(?string $hint): bool
+    {
+        if ($hint === null || $hint === '') { return false; }
+        $nullable = $hint[0] === '?';
+        // A declared type's `|` never nests: a DNF group holds only `&`.
+        $arms = \explode('|', \ltrim($hint, '?'));
+        if (!$nullable && \count($arms) < 2) { return false; }
+        $float = false;
+        foreach ($arms as $a) {
+            $l = \strtolower(\ltrim(\trim($a), '\\'));
+            if ($l === 'int' || $l === 'mixed') { return false; }
+            if ($l === 'float') { $float = true; }
+        }
+        return $float;
+    }
+
+    /**
+     * `$v` as an {@see intToFloatHint} slot takes it: a static int is cast, a cell
+     * is tested at run time (`is_int($v) ? (float)$v : $v`, through a temp unless
+     * `$v` is a local), anything else is no int and passes. `$late`: types are
+     * final, so an erased word is left alone; while lowering, unknown is a cell.
+     */
+    public static function intToFloatValue(Node $v, bool $late): Node
+    {
+        $k = $v->type->kind;
+        if ($v->kind === Node::KIND_INT_CONST || $k === Type::KIND_INT) {
+            $c = new \Compile\Mir\Cast('float', $v, Type::float_());
+            $c->line = $v->line;
+            return $c;
+        }
+        if ($v->kind === Node::KIND_FLOAT_CONST || $v->kind === Node::KIND_STRING_CONST
+            || $v->kind === Node::KIND_NULL_CONST || $v->kind === Node::KIND_BOOL_CONST) { return $v; }
+        if ($k !== Type::KIND_CELL && ($late || $k !== Type::KIND_UNKNOWN)) { return $v; }
+        $local = $v->kind === Node::KIND_LOAD_LOCAL;
+        $name = $local ? $v->name : '__i2f';
+        $first = $local ? $v : new \Compile\Mir\StoreLocal($name, $v, $late ? Type::cell() : $v->type);
+        $rt = $late ? Type::cell() : Type::unknown();
+        $t = new \Compile\Mir\Ternary(
+            new Call('is_int', [$first], Type::bool_()),
+            new \Compile\Mir\Cast('float', new \Compile\Mir\LoadLocal($name, $rt), Type::float_()),
+            new \Compile\Mir\LoadLocal($name, $rt),
+            $rt,
+        );
+        $t->line = $v->line;
+        return $t;
     }
 
     private function declaredScalarHint(\Compile\Mir\ClassDef $cd, string $prop): ?Type
@@ -356,7 +415,7 @@ final class TypeCheck
             $pi = $ai + $offset;
             if (!isset($params[$pi])) { break; }
             $p = $params[$pi];
-            if ($p->variadic) { break; }
+            if ($p->variadic) { $this->floatPack($arg, $p); break; }
             // Coercive mode: an object bound to a `string` param is rendered by its
             // `__toString`, a scalar by its text. Left alone, the callee read the
             // object POINTER, or the raw int (`$this->escape(404)`), as string bytes.
@@ -415,6 +474,22 @@ final class TypeCheck
             }
             $this->takeShapeWarn($arg, $inFn . '(): argument ' . (string)($ai + 1) . ' to ' . $label . '() — ');
         }
+    }
+
+    /**
+     * A `float ...$xs` pack built from int arguments: each int becomes a float,
+     * as php binds them. Left alone, the vec[int] reached a vec[float] param.
+     */
+    private function floatPack(Node $arg, \Compile\Mir\Param $p): void
+    {
+        $et = $p->type->isArray() ? $p->type->element : null;
+        if ($p->byRef || $et === null || $et->kind !== Type::KIND_FLOAT || !($arg instanceof \Compile\Mir\ArrayLit)) { return; }
+        foreach ($arg->elements as $el) {
+            $vk = $el->value->type->kind;
+            if ($vk === Type::KIND_INT) { $el->value = self::intToFloatValue($el->value, true); }
+            elseif ($vk !== Type::KIND_FLOAT) { return; }
+        }
+        $arg->type = $p->type;
     }
 
     /**

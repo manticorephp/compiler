@@ -98,7 +98,7 @@ trait LowerFns
         }
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         $this->constCallables = [];
-        $this->setCurrentLowerParams($decl->params);
+        $this->setCurrentLowerParams($decl->params, $decl->returnType, (bool)($decl->returnsByRef ?? false));
         $this->scanStableCallables($decl->body->statements);
         $prevGuardLocals = $this->guardLocals;
         $this->noteGuardHelper('f:' . $decl->name, $this->bareName($decl->name), $decl->body);
@@ -214,7 +214,7 @@ trait LowerFns
         $this->sawYield = false;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
-        $loweredBody = $this->lowerBlockNode($decl->body);
+        $loweredBody = $this->withIntToFloatPrologue($this->lowerBlockNode($decl->body), $decl->params);
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
         $usesFuncArgs = $this->sawFuncArgs;
@@ -1363,6 +1363,66 @@ trait LowerFns
         ];
         foreach ($body->stmts as $s) { $stmts[] = $s; }
         return new Block($stmts, $body->type);
+    }
+
+    /**
+     * `if (is_int($p)) { $p = (float)$p; }` for each parameter whose hint turns an
+     * int into a float ({@see TypeCheck::intToFloatHint}). Callee-side, so a dynamic call, a
+     * default and a by-ref argument convert as php does.
+     *
+     * @param \Parser\Ast\Param[] $params
+     * @return Node[]
+     */
+    private function intToFloatPrologue(array $params): array
+    {
+        $out = [];
+        foreach ($params as $p) {
+            if ($p->byRef && $p->variadic || !TypeCheck::intToFloatHint($p->typeHint)) { continue; }
+            $sp = $p->span;
+            $v = \Parser\Ast\Expr::variable($p->variadic ? '__i2f_v' : $p->name, $sp);
+            $target = $v;
+            if ($p->variadic) {
+                $target = \Parser\Ast\Expr::arrayAccess(\Parser\Ast\Expr::variable($p->name, $sp),
+                    \Parser\Ast\Expr::variable('__i2f_k', $sp), $sp);
+            }
+            $if = \Parser\Ast\Stmt::if_(
+                \Parser\Ast\Expr::call('is_int', [$v], $sp),
+                new \Parser\Ast\Block([\Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign($target, \Parser\Ast\Expr::cast('float', $v, $sp), $sp), $sp)]),
+                [], null, $sp);
+            if ($p->variadic) {
+                $if = \Parser\Ast\Stmt::foreach_(\Parser\Ast\Expr::variable($p->name, $sp),
+                    \Parser\Ast\Expr::variable('__i2f_k', $sp), $v, false, new \Parser\Ast\Block([$if]), $sp);
+            }
+            $out[] = $this->lowerStmt($if);
+        }
+        return $out;
+    }
+
+    /** @param \Parser\Ast\Param[] $params */
+    private function withIntToFloatPrologue(Block $body, array $params): Block
+    {
+        $stmts = $this->intToFloatPrologue($params);
+        if ($stmts === []) { return $body; }
+        foreach ($body->stmts as $s) { $stmts[] = $s; }
+        return new Block($stmts, $body->type);
+    }
+
+    /** A `return`ed value, converted int → float when the declared return type asks ({@see TypeCheck::intToFloatHint}). */
+    private function lowerReturnValue(\Parser\Ast\Expr $e): Node
+    {
+        if (!$this->currentRetToFloat) { return $this->lowerExpr($e); }
+        $k = $e->kind;
+        if ($k === 'FloatLiteral' || $k === 'StringLiteral' || $k === 'NullLiteral' || $k === 'BoolLiteral') {
+            return $this->lowerExpr($e);
+        }
+        $sp = $e->span;
+        if ($k === 'IntLiteral') { return $this->lowerExpr(\Parser\Ast\Expr::cast('float', $e, $sp)); }
+        $v = $k === 'Variable' ? $e : \Parser\Ast\Expr::variable('__i2f', $sp);
+        $first = $k === 'Variable' ? $e : \Parser\Ast\Expr::assign($v, $e, $sp);
+        return $this->lowerExpr(\Parser\Ast\Expr::ternary(
+            \Parser\Ast\Expr::call('is_int', [$first], $sp),
+            \Parser\Ast\Expr::cast('float', $v, $sp), $v, $sp));
     }
 
     /**
