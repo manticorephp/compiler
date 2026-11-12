@@ -7176,6 +7176,24 @@ trait EmitLlvmExpr
         // An object UNION is the bare object pointer `obj<C>` is ({@see boxToCell}
         // boxes both by box_object): left out, a cell stored into a `vec[A|C]`
         // slot kept its tag bits under an `obj` hint.
+        if ($pk === Type::KIND_CLOSURE && ($pt->class ?? '') === '') {
+            // A `callable` slot may hold a function-NAME string (`'C::m'` out of an
+            // erased element): it stays tagged, the one shape the invoke can tell
+            // from a closure env ({@see EmitLlvmCalls::emitErasedInvokeArms}); a raw
+            // string pointer there was jumped to as a closure.
+            $w = $this->lastValue;
+            $top = $this->ssa->allocReg();
+            $out = '  ' . $top . ' = lshr i64 ' . $w . ", 48\n";
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $top . ", 65524\n";
+            $m = $this->ssa->allocReg();
+            $out .= '  ' . $m . ' = and i64 ' . $w . ", 281474976710655\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = select i1 ' . $isStr . ', i64 ' . $w . ', i64 ' . $m . "\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE || $pk === Type::KIND_UNION) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";

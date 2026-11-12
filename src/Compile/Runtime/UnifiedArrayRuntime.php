@@ -149,6 +149,7 @@ final class UnifiedArrayRuntime
         $this->emitArrayConform();
         $this->emitArrayConformInner();
         $this->emitArrayIsList();
+        $this->emitArrayPosPrefix();
         $this->emitListRange();
         $this->emitFastList();
         $this->emitFastCat();
@@ -5993,6 +5994,40 @@ final class UnifiedArrayRuntime
         $next->br($head);
         $yes->ret(Value::int(Type::i64(), 1));
         $no->ret(Value::int(Type::i64(), 0));
+    }
+
+    /**
+     * `__mir_array_pos_prefix(arr) -> i64` — how many leading entries carry an
+     * INT key: the positional run of an unpacked argument array, ahead of its
+     * named (string-keyed) entries.
+     */
+    private function emitArrayPosPrefix(): void
+    {
+        $fn = $this->module->func('__mir_array_pos_prefix', Type::i64());
+        $arr = $fn->param(Type::ptr(), 'arr');
+        $e = $fn->block('entry');
+        $go = $fn->block('go');
+        $packed = $fn->block('packed');
+        $head = $fn->block('head');
+        $body = $fn->block('body');
+        $next = $fn->block('next');
+        $done = $fn->block('done');
+        $zero = $fn->block('zero');
+        $e->brIf($e->icmp('eq', $arr, Value::null()), $zero, $go);
+        $len = $go->call('__mir_array_live_len', Type::i64(), [$arr]);
+        $flags = $go->load(Type::i64(), $this->hdr($go, $arr, MemoryAbi::ARRAY_FLAGS_OFFSET));
+        $iSlot = $go->alloca(Type::i64(), 'ip');
+        $go->store(Value::int(Type::i64(), 0), $iSlot);
+        $go->brIf($go->icmp('eq', $this->hashedBit($go, $flags), Value::int(Type::i64(), 0)), $packed, $head);
+        $packed->ret($len);
+        $i = $head->load(Type::i64(), $iSlot);
+        $head->brIf($head->icmp('sge', $i, $len), $done, $body);
+        $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
+        $body->brIf($body->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $done, $next);
+        $next->store($next->add($i, Value::int(Type::i64(), 1)), $iSlot);
+        $next->br($head);
+        $done->ret($done->load(Type::i64(), $iSlot));
+        $zero->ret(Value::int(Type::i64(), 0));
     }
 
     /**

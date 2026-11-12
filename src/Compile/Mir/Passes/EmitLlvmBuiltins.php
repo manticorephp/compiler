@@ -1831,8 +1831,12 @@ trait EmitLlvmBuiltins
      * LowerFromAst::lowerCallArgs freed each spread-expanded ArrayAccess twice
      * and the self-built compiler crashed on `method_exists(...$pack)`.
      */
-    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false, string $from = ''): string
+    private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false, string $from = '', string $into = '', ?array $keyedSkip = null): string
     {
+        // `$keyedSkip` (with `$from`): the rest of an unpacked argument array for a variadic —
+        // positional entries from `$from` on, renumbered, plus every string-keyed entry under its
+        // own key except those naming one of these (fixed) parameters.
+        $keyed = $keyedSkip !== null && $from !== '';
         $this->rt->needsTagged = true;
         $this->rt->needsCellKey = true;
         $elem = $arrType->element ?? Type::unknown();
@@ -1862,15 +1866,20 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $hint . ' = and i64 ' . $hfl . ', ' . (string)\Compile\MemoryAbi::ARRAY_ELEM_HINT_MASK . "\n";
         $slot = $this->ssa->allocReg();
         $out .= '  ' . $slot . " = alloca ptr\n";
-        $nv = $this->ssa->allocReg();
-        $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $len . ")\n";
+        // `$into`: an array the appended values extend instead of a fresh one.
+        $nv = $into;
+        if ($nv === '') {
+            $nv = $this->ssa->allocReg();
+            $out .= '  ' . $nv . ' = call ptr @__mir_array_alloc(i64 ' . $len . ")\n";
+        }
         $out .= '  store ptr ' . $nv . ', ptr ' . $slot . "\n";
         $iSlot = $this->ssa->allocReg();
         $out .= '  ' . $iSlot . " = alloca i64\n";
-        $out .= '  store i64 ' . ($from !== '' ? $from : '0') . ', ptr ' . $iSlot . "\n";
+        $out .= '  store i64 ' . ($from !== '' && !$keyed ? $from : '0') . ', ptr ' . $iSlot . "\n";
         $cond = $this->ssa->allocLabel('uct.cond');
         $body = $this->ssa->allocLabel('uct.body');
         $end  = $this->ssa->allocLabel('uct.end');
+        $next = $this->ssa->allocLabel('uct.next');
         $out .= '  br label %' . $cond . "\n" . $cond . ":\n";
         $i = $this->ssa->allocReg();
         $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
@@ -1878,6 +1887,35 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c . ' = icmp slt i64 ' . $i . ', ' . $len . "\n";
         $out .= '  br i1 ' . $c . ', label %' . $body . ', label %' . $end . "\n";
         $out .= $body . ":\n";
+        $kKey = '';
+        if ($keyed) {
+            $keep = $this->ssa->allocLabel('uct.keep');
+            $strL = $this->ssa->allocLabel('uct.str');
+            $posL = $this->ssa->allocLabel('uct.pos');
+            $kc = $this->ssa->allocReg();
+            $out .= '  ' . $kc . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
+            $top = $this->ssa->allocReg();
+            $out .= '  ' . $top . ' = lshr i64 ' . $kc . ", 48\n";
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $top . ", 65524\n";
+            $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $posL . "\n" . $strL . ":\n";
+            $kw = $this->ssa->allocReg();
+            $out .= '  ' . $kw . ' = and i64 ' . $kc . ", 281474976710655\n";
+            $out .= $this->strIsOneOfIr($kw, $keyedSkip);
+            $out .= '  br i1 ' . $this->lastValue . ', label %' . $next . ', label %' . $keep . "\n" . $posL . ":\n";
+            $early = $this->ssa->allocReg();
+            $out .= '  ' . $early . ' = icmp slt i64 ' . $i . ', ' . $from . "\n";
+            $out .= '  br i1 ' . $early . ', label %' . $next . ', label %' . $keep . "\n" . $keep . ":\n";
+            // A positional entry is renumbered from 0; a named one keeps its key.
+            $ri = $this->ssa->allocReg();
+            $out .= '  ' . $ri . ' = sub i64 ' . $i . ', ' . $from . "\n";
+            $rm = $this->ssa->allocReg();
+            $out .= '  ' . $rm . ' = and i64 ' . $ri . ", 281474976710655\n";
+            $rk = $this->ssa->allocReg();
+            $out .= '  ' . $rk . ' = or i64 ' . $rm . ", -4222124650659840\n";
+            $kKey = $this->ssa->allocReg();
+            $out .= '  ' . $kKey . ' = select i1 ' . $isStr . ', i64 ' . $kc . ', i64 ' . $rk . "\n";
+        }
         $ev0 = $this->ssa->allocReg();
         $out .= '  ' . $ev0 . ' = call i64 @__mir_array_value_at(ptr ' . $src . ', i64 ' . $i . ")\n";
         $ev = $this->ssa->allocReg();
@@ -1922,10 +1960,12 @@ trait EmitLlvmBuiltins
         // TypeExpression glued `null|Expr[]` as `null0Expr[]`.
         $kb = $this->ssa->allocReg();
         $out .= '  ' . $kb . ' = call i64 @__mir_array_key_cell_at(ptr ' . $src . ', i64 ' . $i . ")\n";
-        $out .= $from !== ''
+        if ($keyed) { $kb = $kKey; }
+        $out .= $from !== '' && !$keyed
             ? '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $cur . ', i64 ' . $raw . ")\n"
             : '  ' . $nx . ' = call ptr @__mir_array_set_cell(ptr ' . $cur . ', i64 ' . $kb . ', i64 ' . $raw . ")\n";
         $out .= '  store ptr ' . $nx . ', ptr ' . $slot . "\n";
+        $out .= '  br label %' . $next . "\n" . $next . ":\n";
         $i2 = $this->ssa->allocReg();
         $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n";
         $out .= '  store i64 ' . $i2 . ', ptr ' . $iSlot . "\n";

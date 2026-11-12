@@ -841,6 +841,7 @@ trait EmitLlvmObjects
             // later `= []` then copied as a length of 0xa77…, so the first
             // append to any such array wrote off the end of the world.
             $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
+            $spreadPack = '';
             $ai = 0;
             foreach ($n->args as $a) {
                 // `new C(...$arr)`: expand the pack across the ctor's remaining
@@ -849,6 +850,7 @@ trait EmitLlvmObjects
                 // still held, so `new R(...['C'])` constructed from garbage.
                 if ($a->kind === Node::KIND_SPREAD) {
                     $out .= $this->emitSpreadOperand($a->operand);
+                    $spreadPack = $this->lastValue;
                     [$sir, $sregs] = $this->emitSpreadFill(
                         $this->lastValue, $ai + 1, $ptypes, $tmask,
                         $a->operand->type->element ?? null, $ctorClass . '____construct', $a->operand->type);
@@ -938,7 +940,7 @@ trait EmitLlvmObjects
             // Popped before the throwable capture below, so — like PHP — the
             // constructor never appears in the trace.
             $out .= $this->btPush('__construct', $n->line);
-            $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->args, 1);
+            $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->args, 1, $spreadPack);
             // The call's own temps are listed for an unwind, which skips the releases below.
             [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
             $out .= $tmpIr;
@@ -8797,12 +8799,14 @@ trait EmitLlvmObjects
         $cellBoxTypes = [];
         $ai = 0;
         $refSlotDrops = '';
+        $spreadPack = '';
         foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
             if ($a->kind === Node::KIND_SPREAD) {
                 $out .= $this->emitSpreadOperand($a->operand);
                 $arr = $this->lastValue;
+                $spreadPack = $arr;
                 $elemType = $a->operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
                                                        $cls . '__' . $n->method, $a->operand->type);
@@ -8914,7 +8918,7 @@ trait EmitLlvmObjects
             $btName = $n->class . '::' . $n->method;
             $btPushIr = $this->btPush($btName, $n->line);
         }
-        $faIr = $this->faPush($target, $n->srcArgc, $n->args);
+        $faIr = $this->faPush($target, $n->srcArgc, $n->args, 0, $spreadPack);
         // The call's own temps are listed for an unwind, which skips the releases below.
         [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
         $out .= $tmpIr;
@@ -9044,7 +9048,58 @@ trait EmitLlvmObjects
      * @param array<int, Type> $srcTypes the repr each arg was emitted in
      * @param array<int, Type> $cTypes   this arm's own signature
      */
+    /** Set while an arm for a STATIC method is built: its params have no `$this` at index 0. */
+    private bool $vdArmStatic = false;
+    /** The dispatching site is a METHOD call: its list starts with the receiver word. */
+    private bool $vdRecvSite = false;
+
+    /** Is `$sym` (`Cls__m`) a static method? */
+    private function symIsStaticMethod(string $sym): bool
+    {
+        for ($p = \strpos($sym, '__'); $p !== false && $p > 0; $p = \strpos($sym, '__', $p + 1)) {
+            $cls = \substr($sym, 0, $p);
+            if (isset($this->classes[$cls])) { return $this->holderIsStaticMethod($cls, \substr($sym, $p + 2)); }
+        }
+        return false;
+    }
+
+    /**
+     * {@see vdArmArgsInner}, and for an arm whose callee is STATIC — a `[$o, 'm']` callable or an
+     * erased `$o->m()` that names a static method — the site's receiver word is dropped and every
+     * index shifts down by one: the static symbol takes no `$this`, and handing it one shifted
+     * each argument into the next parameter.
+     */
     private function vdArmArgs(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
+    {
+        if ($sym === '' || !$this->vdRecvSite || $this->vdArmStatic || !$this->symIsStaticMethod($sym)) {
+            return $this->vdArmArgsInner($argList, $srcTypes, $cTypes, $sym);
+        }
+        $parts = \explode(', ', $argList);
+        \array_shift($parts);
+        $st = [];
+        foreach ($srcTypes as $i => $t) { if ($i > 0) { $st[$i - 1] = $t; } }
+        $oldWiden = $this->vdWiden;
+        $oldAddr = $this->vdAddrLoad;
+        $oldSite = $this->vdSiteArgc;
+        $w = [];
+        foreach ($oldWiden as $i => $t) { if ($i > 0) { $w[$i - 1] = $t; } }
+        $a = [];
+        foreach ($oldAddr as $i => $t) { if ($i > 0) { $a[$i - 1] = $t; } }
+        $this->vdWiden = $w;
+        $this->vdAddrLoad = $a;
+        if ($oldSite > 0) { $this->vdSiteArgc = $oldSite - 1; }
+        $this->vdArmStatic = true;
+        $r = $this->vdArmArgsInner(\implode(', ', $parts), $st, $cTypes, $sym);
+        // Only a spread tail followed the receiver: its words were appended `, i64 …`.
+        if (\str_starts_with($this->vdArmList, ', ')) { $this->vdArmList = \substr($this->vdArmList, 2); }
+        $this->vdArmStatic = false;
+        $this->vdWiden = $oldWiden;
+        $this->vdAddrLoad = $oldAddr;
+        $this->vdSiteArgc = $oldSite;
+        return $r;
+    }
+
+    private function vdArmArgsInner(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         // An address the site passed for a param another candidate takes by reference: an arm
         // that takes it by value reads the value through it.
@@ -9177,7 +9232,100 @@ trait EmitLlvmObjects
         return $u;
     }
 
+    /** The site's arguments are as written ({@see MethodCall_::$argsUnbound}): lowering could
+     *  not name the method, so a VARIADIC arm still has to pack its trailing arguments. */
+    private bool $vdUnbound = false;
+
     private function vdArmArgsBase(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
+    {
+        if (!$this->vdUnbound || $sym === '' || $this->spreadTail !== null) {
+            return $this->vdArmArgsCore($argList, $srcTypes, $cTypes, $sym);
+        }
+        $packed = $this->vdArmPackVariadic($argList, $srcTypes, $sym);
+        if ($packed === null) { return $this->vdArmArgsCore($argList, $srcTypes, $cTypes, $sym); }
+        [$pl, $pt, $ir, $drop, $site] = $packed;
+        $oldSite = $this->vdSiteArgc;
+        $this->vdSiteArgc = $site;
+        $ir .= $this->vdArmArgsCore($pl, $pt, $cTypes, $sym);
+        $this->vdSiteArgc = $oldSite;
+        $this->vdArmDrops .= $drop;
+        return $ir;
+    }
+
+    /**
+     * The arm's trailing arguments — written past the fixed params of a variadic `$sym` —
+     * as the ONE vec it takes. Each element is co-owned by the pack, which the arm
+     * releases after the call. null when `$sym` takes no by-value variadic, or a
+     * written argument's repr is unknown.
+     *
+     * @param array<int, Type> $srcTypes
+     * @return array{0:string,1:array<int,Type>,2:string,3:string,4:int}|null
+     */
+    private function vdArmPackVariadic(string $argList, array $srcTypes, string $sym): ?array
+    {
+        $pts = $this->sigs->paramTypes[$sym] ?? [];
+        $vi = \count($pts) - 1;
+        if ($vi < ($this->vdArmStatic ? 0 : 1) || !($this->sigs->variadicParams[$sym][$vi] ?? false)
+            || ($this->sigs->refParams[$sym][$vi] ?? false)) { return null; }
+        $parts = \explode(', ', $argList);
+        $site = \count($parts);
+        if ($this->vdSiteArgc > 0 && $this->vdSiteArgc < $site) { $site = $this->vdSiteArgc; }
+        if ($site < $vi) { return null; }
+        $elem = $pts[$vi]->element ?? null;
+        if ($elem === null || $elem->kind === Type::KIND_UNKNOWN) { $elem = Type::cell(); }
+        for ($i = $vi; $i < $site; $i = $i + 1) {
+            $src = $srcTypes[$i] ?? null;
+            if ($src === null || $src->kind === Type::KIND_UNKNOWN || !\str_starts_with($parts[$i], 'i64 ')) { return null; }
+        }
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = '';
+        $arr = $this->ssa->allocReg();
+        $out .= '  ' . $arr . ' = call ptr @__mir_array_alloc(i64 ' . (string)\max(1, $site - $vi) . ")\n";
+        for ($i = $vi; $i < $site; $i = $i + 1) {
+            $src = $srcTypes[$i];
+            $this->lastValue = \substr($parts[$i], 4);
+            $this->lastValueType = 'i64';
+            if ($src->kind !== Type::KIND_CELL) {
+                if ($src->kind === Type::KIND_FLOAT) {
+                    $fb = $this->ssa->allocReg();
+                    $out .= '  ' . $fb . ' = bitcast i64 ' . $this->lastValue . " to double\n";
+                    $this->lastValue = $fb;
+                    $this->lastValueType = 'double';
+                }
+                $out .= $this->boxToCell($src) . $this->coerceToI64();
+            }
+            $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+            if ($elem->kind !== Type::KIND_CELL) {
+                $out .= $this->unboxCellToType($elem);
+                if ($this->lastValueType === 'double') {
+                    $bc = $this->ssa->allocReg();
+                    $out .= '  ' . $bc . ' = bitcast double ' . $this->lastValue . " to i64\n";
+                    $this->lastValue = $bc;
+                    $this->lastValueType = 'i64';
+                }
+                $out .= $this->coerceToI64();
+            }
+            $nx = $this->ssa->allocReg();
+            $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $arr . ', i64 ' . $this->lastValue . ")\n";
+            $arr = $nx;
+        }
+        $eHint = $this->elementHintCodeForType($elem);
+        if ($eHint !== null) { $out .= $this->emitElemHintStamp($arr, $eHint); }
+        $ai = $this->ssa->allocReg();
+        $out .= '  ' . $ai . ' = ptrtoint ptr ' . $arr . " to i64\n";
+        $kept = [];
+        $kt = [];
+        for ($i = 0; $i < $vi; $i = $i + 1) {
+            $kept[] = $parts[$i];
+            if (isset($srcTypes[$i])) { $kt[$i] = $srcTypes[$i]; }
+        }
+        $kept[] = 'i64 ' . $ai;
+        $kt[$vi] = $pts[$vi];
+        return [\implode(', ', $kept), $kt, $out, $this->rcReleaseReg($ai, $this->discardReleaseFlavor(Type::vec($elem))), $vi + 1];
+    }
+
+    private function vdArmArgsCore(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         $this->vdArmList = $argList;
         // ARITY first, and OUTSIDE the repr early-return: a site that emitted no
@@ -9191,7 +9339,7 @@ trait EmitLlvmObjects
         $changed = false;
         $n = \count($parts);
         $ahmask = $sym !== '' ? ($this->sigs->arrayHintedParams[$sym] ?? []) : [];
-        $i = 1;                       // index 0 is the implicit `$this`
+        $i = $this->vdArmStatic ? 0 : 1;   // index 0 is the implicit `$this`
         while ($i < $n) {
             $src = $srcTypes[$i] ?? null;
             $ct = $cTypes[$i] ?? null;
@@ -9268,6 +9416,7 @@ trait EmitLlvmObjects
         // defaults, and this arm's own defaults are a different answer. Keeping
         // them is what handed `Row::__construct($tag = '-')` the placeholder
         // Exception::$message slot and left `$tag` empty.
+        if ($parts === ['']) { $parts = []; }   // a static arm with no written argument
         $have = \count($parts);
         $site = $this->vdSiteArgc;
         if ($site > 0 && $site < $have) {
@@ -9553,7 +9702,7 @@ trait EmitLlvmObjects
         // a defaulted argument (`newCollection()`) and one that passed it (`newCollection($m)`)
         // build the same-length list, but each arm pads/truncates against the written count.
         // Without it the second site reuses the first's thunk and gets the default.
-        $k .= '#s' . (string)$this->vdSiteArgc;
+        $k .= '#s' . (string)$this->vdSiteArgc . ($this->vdUnbound ? 'u' : '') . ($this->vdRecvSite ? 'r' : '');
         foreach ($cands as $c) {
             $t = $targets[$c] ?? '';
             $k .= '|' . $c . '>' . $t . (isset($erasedSyms[$t]) ? 'E' : '');
@@ -9857,6 +10006,7 @@ trait EmitLlvmObjects
         }
         return false;
     }
+
 
     /** Whether `$holder` DECLARES `$method` static (unknown metadata answers false). */
     private function holderIsStaticMethod(string $holder, string $method): bool
@@ -11300,6 +11450,28 @@ trait EmitLlvmObjects
         $ptypes = $this->sigs->paramTypes[$fallback . '__' . $mc->method] ?? [];
         $tmask = $this->sigs->taggedParams[$fallback . '__' . $mc->method] ?? [];
         $ahmask = $this->sigs->arrayHintedParams[$fallback . '__' . $mc->method] ?? [];
+        // A STATIC fallback (`[$o, 'm']` / an erased `$o->m()` naming a static method) has no
+        // `$this` param: the site still builds receiver-first, so its signature is read one
+        // slot to the right, and each arm drops the receiver word ({@see vdArmArgs}).
+        $fbStatic = $this->holderIsStaticMethod($fallback, $mc->method);
+        if ($fbStatic) {
+            /** @var array<int, bool> $m2 */
+            $m2 = [];
+            foreach ($mask as $i => $v) { $m2[(int)$i + 1] = $v; }
+            $mask = $m2;
+            /** @var array<int, Type> $p2 */
+            $p2 = [];
+            foreach ($ptypes as $i => $v) { $p2[(int)$i + 1] = $v; }
+            $ptypes = $p2;
+            /** @var array<int, bool> $t2 */
+            $t2 = [];
+            foreach ($tmask as $i => $v) { $t2[(int)$i + 1] = $v; }
+            $tmask = $t2;
+            /** @var array<int, bool> $a2 */
+            $a2 = [];
+            foreach ($ahmask as $i => $v) { $a2[(int)$i + 1] = $v; }
+            $ahmask = $a2;
+        }
         // The repr each argument is ACTUALLY emitted in, indexed like the
         // parameter list (0 is `$this`). A virtual-dispatch arm that disagrees
         // with the fallback's signature has to re-coerce, and it can only do
@@ -11325,8 +11497,26 @@ trait EmitLlvmObjects
         $cellBoxSlots = [];
         $cellBoxTmps = [];
         $cellBoxTypes = [];
+        $siteArgs = $this->faCallArgs($fallback . '__' . $mc->method, $mc->args, $fbStatic ? 0 : 1);
+        // Lowering could not name the method ({@see MethodCall_::$argsUnbound}): the written
+        // arguments past a variadic fallback's fixed params cross one by one, each in its own
+        // repr, and every arm packs or binds them against its own signature ({@see vdArmArgsBase}).
+        $unboundPack = false;
+        if ($mc->argsUnbound) {
+            foreach ($this->methodHolders($mc->method) as $decl) {
+                if (\in_array(true, $this->sigs->variadicParams[$decl . '__' . $mc->method] ?? [], true)) { $unboundPack = true; break; }
+            }
+        }
+        if ($unboundPack) {
+            $siteArgs = $mc->args;
+            $fvi = \count($ptypes) - 1;
+            if ($fvi >= 1 && ($this->sigs->variadicParams[$fallback . '__' . $mc->method][$fbStatic ? $fvi - 1 : $fvi] ?? false)) {
+                $ptypes[$fvi] = Type::cell();
+            }
+            for ($q = \count($ptypes); $q <= \count($mc->args); $q = $q + 1) { $ptypes[$q] = Type::cell(); }
+        }
         $ai = 0;
-        foreach ($this->faCallArgsRecv($fallback . '__' . $mc->method, $mc->args) as $a) {
+        foreach ($siteArgs as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
             // (index 0 is `$this`, so call arg `ai` is param `ai+1`).
             if ($a->kind === Node::KIND_SPREAD) {
@@ -11484,12 +11674,12 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
-        $out .= $this->surplusArgEffects($fallback . '__' . $mc->method, $mc->args, 1);
+        if (!$unboundPack) { $out .= $this->surplusArgEffects($fallback . '__' . $mc->method, $mc->args, $fbStatic ? 0 : 1); }
         // Pad omitted trailing optionals: a typed-receiver call (`$x->m()`)
         // isn't default-filled at lowering (class unknown pre-InferTypes),
         // so the callee would read an uninitialized arg register. Param 0 is
         // `$this`, so provided params cover indices [0 .. $ai].
-        $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $ai + 1, true);
+        $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $fbStatic ? $ai : $ai + 1, true);
         $argList .= $this->lastPadArgs;
         // The fallback's by-ref pad slots are the site's: an arm that re-pads
         // leaves them holding the default, one that keeps them sees the
@@ -11603,13 +11793,17 @@ trait EmitLlvmObjects
         }
         $faCands = $distinct;
         $faCands[] = $fallbackFull;
-        $out .= $this->faPushAny($faCands, $mc->srcArgc, $mc->args, 1);
+        $out .= $this->faPushAny($faCands, $mc->srcArgc, $mc->args, 1, $this->spreadTail[0] ?? '');
         // A CELL result over candidates whose declared returns disagree: each
         // dispatch arm boxes its raw return by its own type (a mixed-repr raw
         // merge would mis-read). The result is then a uniform self-describing cell.
         $boxCell = $n->type->kind === Type::KIND_CELL;
         $this->vdWiden = $widen;
         $this->vdAddrLoad = $addrLoad;
+        $oldVdUnbound = $this->vdUnbound;
+        $oldVdRecvSite = $this->vdRecvSite;
+        $this->vdUnbound = $unboundPack;
+        $this->vdRecvSite = true;
         // The call's own temps are listed for an unwind, which skips the releases below.
         [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
         $out .= $tmpIr;
@@ -11627,6 +11821,8 @@ trait EmitLlvmObjects
                 if ($btName !== '') { $out .= $this->btPop(); }
                 $out .= $this->ehTmpPop($tmpHeld);
                 $this->spreadTail = null;
+                $this->vdUnbound = $oldVdUnbound;
+                $this->vdRecvSite = $oldVdRecvSite;
                 $this->lastValue = '0';
                 $this->lastValueType = 'i64';
                 return $out;
@@ -11645,6 +11841,8 @@ trait EmitLlvmObjects
                 if ($btName !== '') { $out .= $this->btPop(); }
                 $out .= $this->ehTmpPop($tmpHeld);
                 $this->spreadTail = null;
+                $this->vdUnbound = $oldVdUnbound;
+                $this->vdRecvSite = $oldVdRecvSite;
                 $this->lastValue = '0';
                 $this->lastValueType = 'i64';
                 return $out;
@@ -11669,6 +11867,8 @@ trait EmitLlvmObjects
         $this->spreadTail = null;
         $this->vdWiden = [];
         $this->vdAddrLoad = [];
+        $this->vdUnbound = $oldVdUnbound;
+        $this->vdRecvSite = $oldVdRecvSite;
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $refSlotDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);

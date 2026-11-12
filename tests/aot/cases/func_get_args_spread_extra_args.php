@@ -1,6 +1,5 @@
 <?php
 // func_get_args() drops spread arguments beyond the declared parameters
-// issue: #650
 class O { function z() { return func_get_args(); } }
 function f() { return func_get_args(); }
 $o = new O();

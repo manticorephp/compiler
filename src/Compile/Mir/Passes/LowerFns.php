@@ -1445,10 +1445,6 @@ trait LowerFns
         }
         // Variadic last param: pack trailing positional args into a vec.
         $np = \count($params);
-        if ($np > 0 && $this->paramVariadic($params[$np - 1])) {
-            $spreadFill = $this->spreadAheadOfPack($params, $astArgs, $selfClass);
-            if ($spreadFill !== null) { return $spreadFill; }
-        }
         // Any other `...$arr` ahead of the variadic covers fixed params AND the pack, a
         // run-time split the emitter makes against the signature
         // ({@see EmitLlvmCalls::emitSpreadFill}); an eager empty pack here became a
@@ -1581,60 +1577,6 @@ trait LowerFns
             $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass, $params, $astArgs);
             $i = $i + 1;
         }
-        return $out;
-    }
-
-    /**
-     * `f(...$arr)` where the spread starts AHEAD of f's variadic: the array feeds
-     * the fixed params from its position on (each element, or the param's default
-     * past the end) and the pack is its tail —
-     * `f($t[0] ?? default, …, ...array_slice($t, k))` with `$t` the array,
-     * evaluated once. Treating the spread as the first fixed argument read the
-     * array's first element as the PACK (`count($parts)` answered garbage). null
-     * when no spread precedes the pack.
-     *
-     * @param \Parser\Ast\Param[] $params
-     * @param \Parser\Ast\Expr[]  $astArgs
-     * @return Node[]|null
-     */
-    private function spreadAheadOfPack(array $params, array $astArgs, string $selfClass): ?array
-    {
-        $vidx = \count($params) - 1;
-        $si = -1;
-        foreach ($astArgs as $i => $a) {
-            if ($a->kind === 'Spread') { $si = (int)$i; break; }
-        }
-        if ($si < 0 || $si >= $vidx || $si !== \count($astArgs) - 1) { return null; }
-        $spread = $astArgs[$si];
-        // A string key binds by parameter NAME ({@see foldSpreadNamed}); the emitter's spread
-        // expansion does that against the signature, positional reads here would not.
-        $sv = $this->spreadValueOf($spread);
-        if ($sv instanceof \Parser\Ast\ArrayLit) {
-            foreach ($sv->elements as $el) {
-                if ($el->key instanceof \Parser\Ast\StringLiteral) { return null; }
-            }
-        }
-        $span = $spread->span;
-        $tmp = \Parser\Ast\Expr::variable('__sprpk' . (string)$this->destrCounter, $span);
-        $this->destrCounter = $this->destrCounter + 1;
-        $out = [];
-        for ($j = 0; $j < $si; $j = $j + 1) { $out[] = $this->lowerArgForParam($params[$j], $astArgs[$j]); }
-        for ($j = $si; $j < $vidx; $j = $j + 1) {
-            $src = $j === $si ? \Parser\Ast\Expr::assign($tmp, $this->spreadValueOf($spread), $span) : $tmp;
-            $idx = \Parser\Ast\Expr::int($j - $si, $span);
-            // Positional by iteration order, as php unpacks: an array keyed 1, 2 (or sparse) still
-            // feeds its first value to the first parameter. Reading through the key list keeps
-            // the element typed (array_values would re-box it).
-            $cnt = \Parser\Ast\Expr::binary('>', \Parser\Ast\Expr::call('count', [$src], $span), $idx, $span);
-            $kAt = \Parser\Ast\Expr::arrayAccess(\Parser\Ast\Expr::call('array_keys', [$tmp], $span), $idx, $span);
-            $out[] = new \Compile\Mir\Ternary(
-                $this->lowerExpr($cnt),
-                $this->lowerExpr(\Parser\Ast\Expr::arrayAccess($tmp, $kAt, $span)),
-                $this->lowerOmittedParam($params[$j], $selfClass, $params, $astArgs),
-                Type::unknown());
-        }
-        $tail = \Parser\Ast\Expr::call('array_slice', [$tmp, \Parser\Ast\Expr::int($vidx - $si, $span)], $span);
-        $out[] = new ArrayLit([new ArrayElement_(null, $this->lowerExpr(new \Parser\Ast\Spread($tail, $span)))], Type::unknown());
         return $out;
     }
 
