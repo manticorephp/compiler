@@ -4087,7 +4087,7 @@ trait EmitLlvmExpr
                 }
                 // A CAST was the one consumer of a fresh cell temp with no
                 // owner: the ~30 string builtins get the drop through
-                // {@see EmitLlvm::$ptrArgCellByReg} and `echo` has its own, but
+                // {@see \Compile\Mir\SsaBuilder::parkCell} and `echo` has its own, but
                 // `strlen((string)json_encode($v))` stranded the whole document
                 // where `strlen(json_encode($v))` was flat. Sound because the
                 // result already CO-OWNS: {@see cellStrResultOwnIr} retains it
@@ -5019,7 +5019,7 @@ trait EmitLlvmExpr
             $out = $this->coerceToI64();
             $cv = $this->lastValue;
             $out .= $this->coerceCellToStr($cv);
-            if ($this->isFreshCellTemp($operand)) { $this->ptrArgCellByReg[$this->lastValue] = $cv; }
+            if ($this->isFreshCellTemp($operand)) { $this->ssa->parkCell($this->lastValue, $cv); }
             return $out;
         }
         // An ERASED operand may carry either a boxed cell or a raw i64, and
