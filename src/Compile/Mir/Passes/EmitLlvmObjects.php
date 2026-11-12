@@ -1777,9 +1777,9 @@ trait EmitLlvmObjects
      * @param array<string,\Compile\Mir\EnumDef> $enumArms
      * @param array<string,string> $magic class name → declaring class (a bare `array` would erase its key channel)
      */
-    private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag, bool $fresh = false): string
+    private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag, bool $fresh = false, bool $check = false): string
     {
-        $key = '__mc_prop_read_' . $this->mangle($prop) . ($fresh ? '__fresh' : '');
+        $key = '__mc_prop_read_' . $this->mangle($prop) . ($fresh ? '__fresh' : '') . ($check ? '__chk' : '');
         // linkonce_odr under the module token, not internal: the module's property tables name
         // every reader, and a split part copies an internal body with each body naming it, so
         // the part holding the tables took all of them (51 MB on symfony-demo).
@@ -1821,9 +1821,11 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('pr.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
-            // An erased receiver may hold a lazy ghost. Nothing is thrown here: this helper
-            // also serves isset / `??`, which test a still-unset slot rather than fail on it.
-            if ($this->lazyHolder($cd) && $cd->initChecked($prop)) {
+            // An erased receiver may hold a lazy ghost. A plain read ($check) also throws on a still-unset
+            // typed slot; the unchecked flavor serves isset / `??`, which test it rather than fail on it.
+            if ($check && $cd->initChecked($prop)) {
+                $bodies .= $this->emitInitReadCheck($obj, $cd, $prop, $cd->propertyOffset($prop), '');
+            } elseif ($this->lazyHolder($cd) && $cd->initChecked($prop)) {
                 $lzOut = '';
                 $lzC = $this->emitInitTest($obj, $cd, $prop, $cd->propertyOffset($prop), '', $lzOut);
                 if ($lzC !== '') {
@@ -1937,7 +1939,7 @@ trait EmitLlvmObjects
         // extracted once per property: the caller keeps only the object coercion
         // and a normal call, while the helper owns the shared switch.
         if (\count($fixed) + \count($enumArms) + \count($magic) > 1 || $hooked) {
-            $helper = $this->cellPropertyReadHelper($prop, $fixed, $enumArms, $magic, $hasBag, $this->own->hookFreshRead($pa));
+            $helper = $this->cellPropertyReadHelper($prop, $fixed, $enumArms, $magic, $hasBag, $this->own->hookFreshRead($pa), $pa->initCheck);
             $r = $this->ssa->allocReg();
             $outChunks[] = '  ' . $r . ' = call i64 ' . $helper . '(ptr ' . $objPtr . ")\n";
             $this->lastValue = $r;
@@ -1963,7 +1965,8 @@ trait EmitLlvmObjects
         foreach ($fixed as $cd) {
             $lbl = $this->ssa->allocLabel('cp.case');
             /** @var string[] $armChunks */
-            $armChunks = [$this->emitFixedPropLoad($objPtr, $cd, $prop)];
+            $armChunks = [$pa->initCheck && $cd->initChecked($prop) ? $this->emitInitReadCheck($objPtr, $cd, $prop, $cd->propertyOffset($prop), '') : ''];
+            $armChunks[] = $this->emitFixedPropLoad($objPtr, $cd, $prop);
             $armChunks[] = '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $armChunks[] = '  br label %' . $end . "\n";
             $arm = \implode('', $armChunks);
@@ -2319,7 +2322,7 @@ trait EmitLlvmObjects
         // Dispatch on class_id: each holder reads (and boxes) its OWN slot. The switch is
         // the shared per-name reader, not a copy per site: one symfony-demo closure read
         // ~40 erased properties and spliced 25 MB of `__get` arms.
-        $sym = $this->cellPropReadHelperFor($prop, $fresh);
+        $sym = $this->cellPropReadHelperFor($prop, $fresh, $pa->initCheck);
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $objPtr . ")\n";
         $this->lastValue = $r;
@@ -4993,7 +4996,7 @@ trait EmitLlvmObjects
     /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
      *  path this asks for one even when a single class declares the name: the
      *  point is that the SITE stays a call, whatever the arm count. */
-    private function cellPropReadHelperFor(string $prop, bool $fresh = false): string
+    private function cellPropReadHelperFor(string $prop, bool $fresh = false, bool $check = false): string
     {
         $enumArms = [];
         if ($prop === 'name' || $prop === 'value') {
@@ -5009,6 +5012,7 @@ trait EmitLlvmObjects
             $this->magicPropHolders($prop, '__get'),
             $this->bagClassNames() !== [],
             $fresh,
+            $check,
         );
     }
 

@@ -285,6 +285,8 @@ final class TypeCheck
     {
         $pm = $cd->propertyMeta[$prop] ?? null;
         if ($pm === null || \strtolower($pm->typeHint) !== 'array' || isset($cd->propHooks[$prop])) { return $v; }
+        // `$o->p = &$x` rebinds the slot ({@see EmitLlvmObjects::emitRebindProperty}) — the node must stay a REF_CELL.
+        if ($v->kind === Node::KIND_REF_CELL || $v->kind === Node::KIND_REF_ADDR) { return $v; }
         $suffix = ' to property ' . ($pm->declaringClass !== '' ? $pm->declaringClass : $cd->name) . '::$' . $prop . ' of type array';
         $k = $v->type->kind;
         $given = $k === Type::KIND_INT ? 'int' : ($k === Type::KIND_FLOAT ? 'float' : ($k === Type::KIND_STRING ? 'string'
