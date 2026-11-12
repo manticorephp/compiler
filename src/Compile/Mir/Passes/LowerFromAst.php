@@ -310,6 +310,9 @@ final class LowerFromAst implements Pass
      *  @var string[] */
     private array $currentLowerParamHints = [];
 
+    /** The body being lowered returns under a hint that turns an int into a float ({@see TypeCheck::intToFloatHint}). */
+    private bool $currentRetToFloat = false;
+
     /**
      * Names the closure being lowered captures BY VALUE out of an enclosing
      * bare-`array` param (or such a capture itself): their erased type says
@@ -1414,6 +1417,7 @@ final class LowerFromAst implements Pass
                 $module->addFunction($afn);
             }
             \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
+            \Compile\Mir\Passes\TrampolineSynth::$ctorCall = true;
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
@@ -1650,7 +1654,7 @@ final class LowerFromAst implements Pass
                 $module->addFunction($dfn);
             }
         }
-        $this->releaseAllClassMetadata();
+        $this->releaseAllClassMetadata($module);
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
         $mainStmts = $this->injectGlobalDecls($mainStmts);
         // A lazy include unit (Main.php `__mc_unit_N`) is a file's top level run at its
@@ -1853,6 +1857,7 @@ final class LowerFromAst implements Pass
             // modules still need the dynamic ABI trampolines here.
             if (!$this->includeReflection) {
                 \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
+                \Compile\Mir\Passes\TrampolineSynth::$ctorCall = false;
                 $dynamicTrampSrc = '';
                 foreach ($module->classes as $cd) {
                     $dynamicTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
@@ -2131,12 +2136,17 @@ final class LowerFromAst implements Pass
         $decl->cases = [];
         $decl->traitAdaptations = [];
     }
-    /** Drop declaration metadata no longer read after all specialisations. */
-    private function releaseAllClassMetadata(): void
+    /**
+     * Drop declaration metadata no longer read after all specialisations. An
+     * EXPORTED type (a library's, {@see Module::$typeDecls}) keeps it: the
+     * constant fold for the `.sig` and the `.sig` writer still read its consts.
+     */
+    private function releaseAllClassMetadata(Module $module): void
     {
         foreach ($this->classDecls as $decl) {
             if ($this->classTypeParams($decl->name) !== []
-                || isset($this->reifyOrigin[$decl->name])) { continue; }
+                || isset($this->reifyOrigin[$decl->name])
+                || isset($module->typeDecls[$this->classDeclName($decl)])) { continue; }
             $decl->properties = [];
             $decl->attributes = [];
             $decl->cases = [];
@@ -2420,10 +2430,14 @@ final class LowerFromAst implements Pass
         // A static name map (data) and a bucketed integer tree, not a chain of string
         // compares: O(log n) per lookup, and no function of 66K IR lines.
         $map = '  static $__ix = [' . \implode(', ', $rows) . "];\n";
+        // Declared type names, so an unknown `X::C` can tell a missing class from a missing constant.
+        $cls = [];
+        foreach ($this->classDecls as $cdn => $_cd) { $cls[] = "'" . \addcslashes(\strtolower(\ltrim((string)$cdn, '\\')), "'\\") . "' => 1"; }
+        $clsMap = '  static $__cl = [' . \implode(', ', $cls) . "];\n";
         [$bfns, $pick] = $leaves === [] ? ['', ''] : self::bucketTreeSrc('__mc_constant', 'int $__i', '$__i', 'mixed', '$__i', $leaves, false);
         return $bfns . "function __mc_constant(string \$n): mixed {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $map
-            . "  \$__i = \$__ix[\$n] ?? -1;\n"
-            . "  if (\$__i < 0) { throw new \\Error('Undefined constant ' . (\\strpos(\$n, '::') === false ? '\"' . \$n . '\"' : \$n)); }\n"
+            . $clsMap . "  \$__i = \$__ix[\$n] ?? -1;\n"
+            . "  if (\$__i < 0) {\n    \$__p = \\strpos(\$n, '::');\n    if (\$__p !== false && !isset(\$__cl[\\strtolower(\\substr(\$n, 0, \$__p))])) { throw new \\Error('Class \"' . \\substr(\$n, 0, \$__p) . '\" not found'); }\n    throw new \\Error('Undefined constant ' . (\$__p === false ? '\"' . \$n . '\"' : \$n));\n  }\n"
             . $pick . "  return null;\n}\n"
             . "function __mc_defined(string \$n): bool {\n  \$n = \\ltrim(\$n, '\\\\');\n" . $map
             . "  return isset(\$__ix[\$n]);\n}\n";
@@ -3216,7 +3230,7 @@ final class LowerFromAst implements Pass
         // starts with `Box__`).
         $this->methodOwner[$fnName] = $decl->name;
         $this->constCallables = [];
-        $this->setCurrentLowerParams($m->params);
+        $this->setCurrentLowerParams($m->params, $m->returnType, (bool)($m->returnsByRef ?? false));
         $this->scanStableCallables($m->body->statements);
         $prevGuardLocals = $this->guardLocals;
         $this->noteGuardHelper('m:' . \strtolower(\ltrim($decl->name, '\\')) . '::' . \strtolower($m->name), $m->name, $m->body);
@@ -3286,7 +3300,7 @@ final class LowerFromAst implements Pass
             $params[] = $mp;
             $pi = $pi + 1;
         }
-        $stmts = [];
+        $stmts = $this->intToFloatPrologue($m->params);
         if ($m->name === '__construct') {
             // Promoted-param stores first. The property defaults are NOT here: they
             // run once, at allocation (`C____mc_defaults`), so a second
@@ -3914,17 +3928,18 @@ final class LowerFromAst implements Pass
         // lowering once this expression is done.
         $savedParams = $this->currentLowerParams;
         $savedParamHints = $this->currentLowerParamHints;
+        $savedRetToFloat = $this->currentRetToFloat;
         $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
-        $this->setCurrentLowerParams($expr->params);
+        $this->setCurrentLowerParams($expr->params, $expr->returnType, (bool)($expr->returnsByRef ?? false));
         $savedHasThis = $this->currentLowerFnHasThis;
         if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
         $savedClosureMagic = $this->closureMagic;
         $this->closureMagic = $this->closureMagicName($expr->span);
         $this->lowerClosureDepth = $this->lowerClosureDepth + 1;
         $this->enterClosureFrame();
-        $body = $this->lowerBlockNode($expr->body);
+        $body = $this->withIntToFloatPrologue($this->lowerBlockNode($expr->body), $expr->params);
         $this->leaveClosureFrame();
         $this->lowerClosureDepth = $this->lowerClosureDepth - 1;
         $this->closureMagic = $savedClosureMagic;
@@ -3938,6 +3953,7 @@ final class LowerFromAst implements Pass
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
         $this->currentLowerParamHints = $savedParamHints;
+        $this->currentRetToFloat = $savedRetToFloat;
         $this->currentArrayCaps = $savedArrayCaps;
         $this->currentRefParamNames = $savedRefParams;
         return $this->finishClosure($capNames, $expr->params, $body, $expr->returnType, $capByRef, $isGen,
@@ -3995,6 +4011,7 @@ final class LowerFromAst implements Pass
         // Its own parameter scope, like a full closure — see lowerClosure.
         $savedParams = $this->currentLowerParams;
         $savedParamHints = $this->currentLowerParamHints;
+        $savedRetToFloat = $this->currentRetToFloat;
         $savedRefParams = $this->currentRefParamNames;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
@@ -4005,14 +4022,15 @@ final class LowerFromAst implements Pass
         // not claim its enclosing function's yield.
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
-        $this->setCurrentLowerParams($expr->params);
+        $this->setCurrentLowerParams($expr->params, $expr->returnType, (bool)($expr->returnsByRef ?? false));
         $savedHasThis = $this->currentLowerFnHasThis;
         if ($expr->isStatic) { $this->currentLowerFnHasThis = false; }
         $savedClosureMagic = $this->closureMagic;
         $this->closureMagic = $this->closureMagicName($expr->span);
         $this->lowerClosureDepth = $this->lowerClosureDepth + 1;
         $this->enterClosureFrame();
-        $body = new Block([new Return_($this->lowerExpr($expr->body), Type::void())], Type::void());
+        $body = new Block([new Return_($this->lowerReturnValue($expr->body), Type::void())], Type::void());
+        $body = $this->withIntToFloatPrologue($body, $expr->params);
         $this->leaveClosureFrame();
         $this->lowerClosureDepth = $this->lowerClosureDepth - 1;
         $this->closureMagic = $savedClosureMagic;
@@ -4026,6 +4044,7 @@ final class LowerFromAst implements Pass
         $this->sawFuncArgs = $savedSawFuncArgs;
         $this->currentLowerParams = $savedParams;
         $this->currentLowerParamHints = $savedParamHints;
+        $this->currentRetToFloat = $savedRetToFloat;
         $this->currentRefParamNames = $savedRefParams;
         // An arrow fn has no captures list — that argument stays at its default.
         return $this->finishClosure($free, $expr->params, $body, $expr->returnType, [], $afIsGen,
@@ -5501,6 +5520,15 @@ final class LowerFromAst implements Pass
         return new StaticProp_($global, $pt);
     }
 
+    /** The static property is declared with a hint that turns an int into a float ({@see TypeCheck::intToFloatHint}). */
+    private function staticPropIntToFloat(string $rawClass, string $rawName): bool
+    {
+        $pn = \ltrim($rawName, '$');
+        $dc = $this->staticPropDeclClass($this->resolveStaticClass($rawClass), $pn);
+        $pm = isset($this->classTable[$dc]) ? ($this->classTable[$dc]->propertyMeta[$pn] ?? null) : null;
+        return $pm !== null && TypeCheck::intToFloatHint($pm->typeHint);
+    }
+
     /**
      * `static $a = e, $b;` → one {@see StaticLocalDecl_} per binding,
      * each backed by a module global cell `@<fn>__sl_<name>`. A binding
@@ -6334,8 +6362,9 @@ final class LowerFromAst implements Pass
      *
      * @param \Parser\Ast\Param[] $params
      */
-    private function setCurrentLowerParams(array $params): void
+    private function setCurrentLowerParams(array $params, ?string $retHint = null, bool $returnsByRef = false): void
     {
+        $this->currentRetToFloat = !$returnsByRef && TypeCheck::intToFloatHint($retHint);
         $this->currentLowerParams = [];
         $this->currentLowerParamHints = [];
         $this->currentRefParamNames = [];
@@ -7249,6 +7278,16 @@ final class LowerFromAst implements Pass
         // `X::class` folds to its resolved FQN string.
         if ($k === 'StaticAccess' && \strtolower($this->staticAccessName($e)) === 'class') {
             return 's:' . \ltrim($this->staticAccessClass($e), '\\');
+        }
+        // `Logger::API` of a declared class — the Monolog-version guard of compat traits.
+        // `self`/`static`/`parent` have no fixed class outside a method body.
+        if ($k === 'StaticAccess') {
+            $cls = \ltrim($this->staticAccessClass($e), '\\');
+            $name = $this->staticAccessName($e);
+            $lc = \strtolower($cls);
+            if ($name === '' || $name[0] === '$' || $lc === 'self' || $lc === 'static' || $lc === 'parent') { return null; }
+            $cv = $this->findClassConst($this->declaredClassCase($cls), $name);
+            if ($cv !== null) { return $this->constScalarKey($cv, $depth + 1); }
         }
         return null;
     }

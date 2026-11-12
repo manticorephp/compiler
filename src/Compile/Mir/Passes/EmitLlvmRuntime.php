@@ -2358,7 +2358,7 @@ trait EmitLlvmRuntime
     {
         if (!\Compile\Mir\Passes\TrampolineSynth::reflectable($mm)) { return 'null'; }
         $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
-        $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name);
+        $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name === '__construct' ? \Compile\Mir\Passes\TrampolineSynth::CTOR_CALL : $name);
         // Only reference a trampoline that was actually synthesized — a data
         // reference to an undefined symbol is a LINK error (unlike a call, which
         // the stub generator fills). Synthesis is not gated per class, so any
@@ -2931,7 +2931,7 @@ trait EmitLlvmRuntime
         // it, and __mc_refl_find. Nothing is emitted for a module with no
         // classes, so a program that declares none carries no startup cost.
         $this->rt->needsStrcmp = true;
-        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds, $fnRegCtors);
+        $descs .= $this->nameIcmpFn() . \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds, $fnRegCtors);
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
         // identical in every object → linkonce_odr coalesces it cleanly.

@@ -1820,8 +1820,15 @@ final class Parser
         $span = $this->span();
         $this->advance();
         $level = 1;
-        if ($this->check(TokenKind::IntLiteral)) {
-            $level = (int)$this->advance()->lexeme;
+        $parens = 0;
+        while ($this->match(TokenKind::OpenParen)) {
+            $parens++;
+        }
+        if ($parens > 0 || $this->check(TokenKind::IntLiteral)) {
+            $level = (int)$this->expect(TokenKind::IntLiteral, "'" . strtolower($kind) . "' operator accepts only positive integers")->lexeme;
+        }
+        for (; $parens > 0; $parens--) {
+            $this->expect(TokenKind::CloseParen, "expected ')' after " . strtolower($kind) . " level");
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after " . strtolower($kind));
         return $kind === 'Break'
@@ -2590,6 +2597,10 @@ final class Parser
                 $classExpr = $this->parsePostfix($this->parsePrimary());
                 return Expr::call('is_a', [$left, $classExpr], $this->end($span, $left));
             }
+            $classExpr = $this->parseStaticPropClassRef($span);
+            if ($classExpr !== null) {
+                return Expr::call('is_a', [$left, $classExpr], $this->end($span, $left));
+            }
             $class = $this->parseClassName();
             return Expr::instanceof_($left, $class, $this->end($span, $left));
         }
@@ -3238,6 +3249,11 @@ final class Parser
             $this->advance();
             $inner = $this->parseExpression();
             $this->expect(TokenKind::CloseParen, "expected ')' to close parenthesised expression");
+            if ($this->ranges === 1) {
+                $this->parenInner = $inner;
+                $this->parenLine = $tok->line;
+                $this->parenColumn = $tok->column;
+            }
             return $inner;
         }
 
@@ -3359,6 +3375,35 @@ final class Parser
         return Expr::match_($subject, $arms, $this->end($span));
     }
 
+    /**
+     * `Name::$prop` (plus `[...]` subscripts) naming a class by the VALUE of a static
+     * property — PHP's new_variable, after `new` and `instanceof`. Null (position
+     * restored) when the class reference is a plain name.
+     */
+    private function parseStaticPropClassRef(Span $span): ?Expr
+    {
+        $save = $this->pos;
+        $literal = $this->parseClassNameLiteral();
+        $dc = $this->peek();
+        $pv = $this->tokens[$this->pos + 1] ?? null;
+        if ($dc->kind !== TokenKind::DoubleColon || $pv === null || $pv->kind !== TokenKind::Variable || $pv->lexeme === '$') {
+            $this->rewind($save);
+            return null;
+        }
+        if ($this->collectNames === 1) { $this->noteClass($literal, $this->resolveClassName($literal)); }
+        $this->advance();
+        $this->advance();
+        $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
+        while ($this->check(TokenKind::OpenBracket)) {
+            $bspan = $this->span();
+            $this->advance();
+            $bindex = $this->parseExpression();
+            $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
+            $classExpr = Expr::arrayAccess($classExpr, $bindex, $this->end($bspan, $classExpr));
+        }
+        return $classExpr;
+    }
+
     private function parseNew(Span $span): Expr
     {
         $this->advance(); // 'new'
@@ -3427,33 +3472,16 @@ final class Parser
             }
             return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $this->end($span));
         }
-        // `new static::$cls(args)` / `new Foo::$cls(args)` — the class is the VALUE
-        // of a static property (PHP's new_variable). Left to parseClassName it
+        // `new static::$cls(args)` / `new Foo::$cls(args)`. Left to parseClassName it
         // read `new static` and then a static call through a local `$cls`.
-        $save = $this->pos;
-        $literal = $this->parseClassNameLiteral();
-        $dc = $this->peek();
-        $pv = $this->tokens[$this->pos + 1] ?? null;
-        if ($dc->kind === TokenKind::DoubleColon && $pv !== null && $pv->kind === TokenKind::Variable && $pv->lexeme !== '$') {
-            if ($this->collectNames === 1) { $this->noteClass($literal, $this->resolveClassName($literal)); }
-            $this->advance();
-            $this->advance();
-            $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
-            // `new static::$map[$k](args)`: subscripts still name the class; only `(` starts the arguments.
-            while ($this->check(TokenKind::OpenBracket)) {
-                $bspan = $this->span();
-                $this->advance();
-                $bindex = $this->parseExpression();
-                $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
-                $classExpr = Expr::arrayAccess($classExpr, $bindex, $this->end($bspan, $classExpr));
-            }
+        $classExpr = $this->parseStaticPropClassRef($span);
+        if ($classExpr !== null) {
             $dargs = [];
             if ($this->check(TokenKind::OpenParen)) {
                 $dargs = $this->parseArgList();
             }
             return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $this->end($span));
         }
-        $this->rewind($save);
         $class = $this->parseClassName();
         $args = [];
         if ($this->check(TokenKind::OpenParen)) {
@@ -4283,6 +4311,10 @@ final class Parser
     }
 
     /** End of the last consumed token: where a node completing now ends. */
+    /** The expression most recently closed by `( … )`, and where its `(` stands (ranges mode only). */
+    private ?Expr $parenInner = null;
+    private int $parenLine = 0;
+    private int $parenColumn = 0;
     private int $prevEndLine = 0;
     private int $prevEndColumn = 0;
 
@@ -4319,6 +4351,11 @@ final class Parser
         if ($from !== null) {
             $bl = $from->span->startLine();
             $bc = $from->span->startColumn();
+            // `(new Foo)->m()`: a postfix on a parenthesised receiver starts at the `(`.
+            if ($from === $this->parenInner) {
+                $bl = $this->parenLine;
+                $bc = $this->parenColumn;
+            }
         }
         $el = $this->prevEndLine;
         $ec = $this->prevEndColumn;

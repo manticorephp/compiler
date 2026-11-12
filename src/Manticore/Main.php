@@ -6434,6 +6434,25 @@ function analyze_prelude_sources(): array
         // Same for mysqli / mysqli_result / mysqli_stmt type hints and the mysqli_* functions.
         "mysqli.php",
         "mysqli_fn.php",
+        // ext/intl: Collator, NumberFormatter, IntlDateFormatter, … and the intl_*/
+        // grapheme_*/idn_* functions. (`*_off.php` are stand-ins for a driver file and
+        // redeclare its names, so they never belong here.)
+        "intl.php",
+        "intl_breakiter.php",
+        "intl_calendar.php",
+        "intl_char.php",
+        "intl_collator.php",
+        "intl_datefmt.php",
+        "intl_idn.php",
+        "intl_listfmt.php",
+        "intl_locale.php",
+        "intl_msgfmt.php",
+        "intl_numfmt.php",
+        "intl_rb.php",
+        "intl_spoof.php",
+        "intl_timezone.php",
+        "intl_translit.php",
+        "intl_ucnv.php",
     ];
     /** @var array<string, string> $out */
     $out = [];

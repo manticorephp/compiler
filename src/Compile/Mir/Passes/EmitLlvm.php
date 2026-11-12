@@ -4858,12 +4858,19 @@ final class EmitLlvm implements EmitVisitor
      * lowering path did not record one, and a callee that never asks leaves the
      * channel alone.
      */
-    private function faPush(string $callee, int $srcArgc, array $args = [], int $recvParams = 0): string
+    private function faPush(string $callee, int $srcArgc, array $args = [], int $recvParams = 0, string $pack = ''): string
     {
         if ($srcArgc < 0) { return ''; }
         if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return ''; }
         $this->rt->needsFuncArgs = true;
         $out = '';
+        if ($pack !== '') {
+            $spreadAt = -1;
+            foreach ($args as $si => $a) {
+                if ($a->kind === Node::KIND_SPREAD) { $spreadAt = (int)$si; break; }
+            }
+            if ($spreadAt >= 0) { return $this->faPushSpread($callee, $spreadAt, $args, $recvParams, $pack); }
+        }
         // Arguments past the callee's real arity have no parameter to land in.
         // Decided HERE and not at lowering: a stdlib entry routinely declares
         // fewer parameters than php accepts and lets its emitter builtin read
@@ -4891,6 +4898,36 @@ final class EmitLlvm implements EmitVisitor
             $out .= '  store i64 ' . $this->lastValue . ", ptr @__mir_fa_argx\n";
         }
         return $out . '  store i64 ' . (string)$srcArgc . ", ptr @__mir_fa_argc\n";
+    }
+
+    /**
+     * {@see faPush} for `f($a, ...$pack)`: the count is only known at run time —
+     * the fixed arguments plus the pack's length — and the overflow is every
+     * argument past the callee's arity, fixed surplus first, then the pack's tail.
+     * @param Node[] $args
+     */
+    private function faPushSpread(string $callee, int $spreadAt, array $args, int $recvParams, string $pack): string
+    {
+        $arity = \count($this->sigs->paramTypes[$callee] ?? []) - $recvParams;
+        if ($arity < 0) { $arity = 0; }
+        $over = [];
+        for ($ai = $arity; $ai < $spreadAt; $ai = $ai + 1) { $over[] = new \Compile\Mir\ArrayElement_(null, $args[$ai]); }
+        $out = '';
+        $into = '';
+        if (\count($over) > 0) {
+            $out .= $this->emitNode(new \Compile\Mir\ArrayLit($over, Type::vec(Type::cell())));
+            $out .= $this->coerceToPtr();
+            $into = $this->lastValue;
+        }
+        $this->lastValue = $pack;
+        $this->lastValueType = 'ptr';
+        $out .= $this->emitCellArrayToTyped(Type::vec(Type::cell()), true, (string)\max(0, $arity - $spreadAt), $into);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ", ptr @__mir_fa_argx\n";
+        $out .= $this->arrayCountFromPtrIr($pack);
+        $argc = $this->ssa->allocReg();
+        $out .= '  ' . $argc . ' = add i64 ' . $this->lastValue . ', ' . (string)$spreadAt . "\n";
+        return $out . '  store i64 ' . $argc . ", ptr @__mir_fa_argc\n";
     }
 
     /** The prefix of `$args` the callee actually has parameters for. Keeps the
@@ -5105,11 +5142,11 @@ final class EmitLlvm implements EmitVisitor
      *
      * @param string[] $callees
      */
-    private function faPushAny(array $callees, int $srcArgc, array $args = [], int $recvParams = 0): string
+    private function faPushAny(array $callees, int $srcArgc, array $args = [], int $recvParams = 0, string $pack = ''): string
     {
         foreach ($callees as $cal) {
             if ($this->sigs->usesFuncArgs[$cal] ?? false) {
-                return $this->faPush($cal, $srcArgc, $args, $recvParams);
+                return $this->faPush($cal, $srcArgc, $args, $recvParams, $pack);
             }
         }
         return '';

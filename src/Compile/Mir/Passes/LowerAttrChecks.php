@@ -676,6 +676,26 @@ trait LowerAttrChecks
                 if (\strtolower($this->methodDeclName($m)) === \strtolower($method)) { return true; }
             }
         }
+        // php: an ABSTRACT method of a trait the class itself uses (directly or through
+        // trait-uses-trait) is overridden too; a concrete one is not — it is copied in.
+        /** @var string[] $queue */
+        $queue = [];
+        foreach ($this->classDeclUses($d) as $t) { $queue[] = \ltrim($t, '\\'); }
+        /** @var array<string,bool> $seen */
+        $seen = [];
+        $i = 0;
+        while ($i < \count($queue)) {
+            $name = $queue[$i];
+            $i = $i + 1;
+            if (isset($seen[$name])) { continue; }
+            $seen[$name] = true;
+            $t = $this->traitTable[$name] ?? null;
+            if ($t === null) { continue; }
+            foreach ($this->classDeclMethods($t) as $m) {
+                if ($m->isAbstract && \strtolower($this->methodDeclName($m)) === \strtolower($method)) { return true; }
+            }
+            foreach ($this->classDeclUses($t) as $u) { $queue[] = \ltrim($u, '\\'); }
+        }
         return false;
     }
 

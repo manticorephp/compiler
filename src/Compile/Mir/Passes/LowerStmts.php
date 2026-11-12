@@ -563,7 +563,7 @@ trait LowerStmts
             return new Echo_($items, Type::void());
         }
         if ($stmt->kind === 'Return') {
-            $value = $stmt->value === null ? null : $this->lowerExpr($stmt->value);
+            $value = $stmt->value === null ? null : $this->lowerReturnValue($stmt->value);
             return new Return_($value, Type::void());
         }
         if ($stmt->kind === 'If')       { return $this->lowerIf($stmt); }

@@ -331,6 +331,14 @@ final class BuildCommand extends Command
             // the `libraries` selection (omit ⇒ all, [] ⇒ none, names ⇒ subset),
             // independent of the stdlib so `libraries: ["mylib"]` never drops it.
             $skipStdlib = isset($app["stdlib"]) && (string)$app["stdlib"] === "";
+            // The codegen calls runtime helpers (`__mc_dtoa_core`, …) directly, so an
+            // app that opts out must compile the runtime library's source itself.
+            if ($skipStdlib && !self::embedsRuntime($libs, $paths)) {
+                \Manticore\dprint("build: application '" . $name . "' sets \"stdlib\": false but does not"
+                    . " compile the runtime library's source; remove \"stdlib\": false (it is only for an"
+                    . " application that embeds src/Runtime, like the compiler itself)");
+                return 65;
+            }
             $selectAll = !isset($app["libraries"]);
             /** @var string[] $wanted */
             $wanted = [];
@@ -429,6 +437,24 @@ final class BuildCommand extends Command
     }
 
     /** @param mixed[] $libs */
+    /**
+     * True when one of `$paths` lies inside the source tree of a `"runtime": true` library.
+     * @param string[] $paths
+     */
+    private static function embedsRuntime(array $libs, array $paths): bool
+    {
+        foreach ($libs as $lib) {
+            if (!isset($lib["runtime"]) || (string)$lib["runtime"] !== "1") { continue; }
+            $dir = \realpath((string)$lib["src"]);
+            if ($dir === false) { continue; }
+            foreach ($paths as $p) {
+                $rp = \realpath($p);
+                if ($rp !== false && \str_starts_with($rp, $dir . '/')) { return true; }
+            }
+        }
+        return false;
+    }
+
     private function buildManifestLibraries(array $libs, bool $appsOnly): int
     {
         foreach ($libs as $lib) {
