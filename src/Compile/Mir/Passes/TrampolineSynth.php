@@ -45,6 +45,12 @@ final class TrampolineSynth
     /** The module spreads a string-keyed array into a call ({@see \Compile\Mir\Module::$namedSpread}). */
     public static bool $bindByName = false;
 
+    /** Reflection is linked: a constructor also gets the instance-style trampoline. */
+    public static bool $ctorCall = false;
+
+    /** The symbol suffix of a constructor's instance-style trampoline ({@see sourceFor}). */
+    public const CTOR_CALL = '__construct_call';
+
     private const ARGS_HINT = "/** @param mixed[] \$a */\n";
 
     /**
@@ -165,6 +171,13 @@ final class TrampolineSynth
         if ($magic !== null && ($magic->declaringClass === '' || $magic->declaringClass === $cls->name)
             && self::magicInvokable($magic)) {
             $out .= self::magicTramp($cls->name);
+        }
+        // `ReflectionMethod::invoke` of `__construct` runs the body on an EXISTING object; the
+        // constructor trampoline above builds a new one.
+        $ctorMeta = $cls->methodMeta['__construct'] ?? null;
+        if (self::$ctorCall && $ctorMeta !== null && ($ctorMeta->declaringClass === '' || $ctorMeta->declaringClass === $cls->name)
+            && self::reflectable($ctorMeta)) {
+            $out .= self::methodTramp($cls->name, '__construct', $ctorMeta, self::CTOR_CALL);
         }
         foreach ($cls->methodMeta as $mn => $mm) {
             if ($mn === '__construct' || $mn === '__call') { continue; }
@@ -339,7 +352,7 @@ final class TrampolineSynth
     }
 
     /** `$t->m(args)` (instance) or `\C::m(args)` (static). */
-    private static function methodTramp(string $class, string $method, MethodMeta $mm): string
+    private static function methodTramp(string $class, string $method, MethodMeta $mm, string $symMethod = ''): string
     {
         $fqn = '\\' . \ltrim($class, '\\');
         $req = $mm->requiredParams();
@@ -352,7 +365,7 @@ final class TrampolineSynth
             $recv = $fqn . ' $t';
             $mk = fn (string $args): string => '$t->' . $method . '(' . $args . ')';
         }
-        $name = self::symBase($class, $method);
+        $name = self::symBase($class, $symMethod !== '' ? $symMethod : $method);
         $variadic = $tot > 0 && $mm->params[$tot - 1]->variadic;
         $body = ($variadic || self::$bindByName) ? self::spreadBody($mk, $void) : self::arms($req, $tot, $mk, $void);
         return self::ARGS_HINT . 'function ' . $name . '(' . $recv . ", array \$a): mixed {\n" . $body . "}\n";

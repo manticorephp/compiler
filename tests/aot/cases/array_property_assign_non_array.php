@@ -1,6 +1,5 @@
 <?php
 // Assigning a non-array to an `array` property is a TypeError; the store is accepted silently.
-// issue: #579
 class O { public array $p = []; }
 $o = new O; $v = 5;
 try { $o->p = $v; echo "no error\n"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }

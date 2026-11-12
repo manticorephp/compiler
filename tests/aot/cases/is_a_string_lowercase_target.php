@@ -1,6 +1,5 @@
 <?php
 // is_a($className, 'lowercase', true) answers false when the class name is a runtime string and the target differs in case.
-// issue: #584
 class Aaa {}
 class Mmm extends Aaa {}
 foreach (['Aaa', 'Mmm'] as $c) {

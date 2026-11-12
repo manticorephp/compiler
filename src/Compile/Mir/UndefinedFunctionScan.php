@@ -147,6 +147,7 @@ final class UndefinedFunctionScan
         '__mir_obj_bag',
         '__mir_object_class_id',
         '__mir_out_write_str',
+        '__mir_assert_array_prop',
         '__mir_prop_inited',
         '__mir_stderr',
         '__mir_stdin',

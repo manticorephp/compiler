@@ -1417,6 +1417,7 @@ final class LowerFromAst implements Pass
                 $module->addFunction($afn);
             }
             \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
+            \Compile\Mir\Passes\TrampolineSynth::$ctorCall = true;
             $trampSrc = '';
             foreach ($module->classes as $cd) {
                 $trampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);
@@ -1856,6 +1857,7 @@ final class LowerFromAst implements Pass
             // modules still need the dynamic ABI trampolines here.
             if (!$this->includeReflection) {
                 \Compile\Mir\Passes\TrampolineSynth::$bindByName = $module->namedSpread;
+                \Compile\Mir\Passes\TrampolineSynth::$ctorCall = false;
                 $dynamicTrampSrc = '';
                 foreach ($module->classes as $cd) {
                     $dynamicTrampSrc .= \Compile\Mir\Passes\TrampolineSynth::sourceFor($cd);

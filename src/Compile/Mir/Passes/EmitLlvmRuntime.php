@@ -2358,7 +2358,7 @@ trait EmitLlvmRuntime
     {
         if (!\Compile\Mir\Passes\TrampolineSynth::reflectable($mm)) { return 'null'; }
         $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
-        $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name);
+        $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name === '__construct' ? \Compile\Mir\Passes\TrampolineSynth::CTOR_CALL : $name);
         // Only reference a trampoline that was actually synthesized — a data
         // reference to an undefined symbol is a LINK error (unlike a call, which
         // the stub generator fills). Synthesis is not gated per class, so any

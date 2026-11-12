@@ -1916,6 +1916,21 @@ trait EmitLlvmCalls
      * module's different body — except a stdlib callee's, which the stdlib
      * exports once under a fixed name ({@see emitDynfExports}).
      */
+    /**
+     * php's TypeError for an array / non-Stringable object handed to a `string` parameter of a function called by
+     * runtime name: the thunk's cell arguments reach the string cast, which would convert instead of refusing.
+     * Stdlib thunks only (the stdlib defines the checker): a user function's message carries a call site this cannot name.
+     */
+    private function dynStringArgGuard(string $fname, int $ci, string $pname): string
+    {
+        if (!$this->emitLibrary) { return ''; }
+        $msg = \ltrim($fname, '\\') . '(): Argument #' . (string)($ci + 1) . ' ($' . $pname . ') must be of type string, ';
+        return $this->emitNode(new Call('__mc_dyn_str_arg', [
+            new LoadLocal('__mc_dynft_a' . (string)$ci, Type::cell()),
+            new \Compile\Mir\StringConst($msg, Type::string_()),
+        ], Type::void()));
+    }
+
     private function dynfThunk(string $fname, int $argc, Type $rt): string
     {
         $key = $fname . '|' . (string)$argc;
@@ -1979,6 +1994,8 @@ trait EmitLlvmCalls
         foreach ($callArgs as $ci => $ca) {
             $tp = $thunkPts[$ci] ?? null;
             if ($tp === null || $tp->kind !== Type::KIND_STRING) { continue; }
+            $pname = $this->sigs->paramNames[$fname][$ci] ?? null;
+            if ($pname !== null) { $body .= $this->dynStringArgGuard($fname, $ci, (string)$pname); }
             $cast = new \Compile\Mir\Cast('string', $ca, Type::string_());
             $cast->keepNull = true;
             $callArgs[$ci] = $cast;

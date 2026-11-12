@@ -209,6 +209,7 @@ final class TypeCheck
                 $cd = $this->classes[$cls];
                 $pt = $cd->propertyTypes[$n->property] ?? null;
                 if ($pt !== null) {
+                    $n->value = $this->arrayPropGuard($n->value, $cd, $n->property);
                     // A typed slot a reference retyped to a cell ({@see InferScans::scanRefCellProps})
                     // still owes its declared scalar the coercion and the TypeError.
                     if ($pt->kind === Type::KIND_CELL) { $pt = $this->declaredScalarHint($cd, $n->property) ?? $pt; }
@@ -277,6 +278,24 @@ final class TypeCheck
         );
         $t->line = $v->line;
         return $t;
+    }
+
+    /** A store into a plain `array` property: a scalar is php's TypeError (statically when its kind is known, else by the cell's tag). */
+    private function arrayPropGuard(Node $v, \Compile\Mir\ClassDef $cd, string $prop): Node
+    {
+        $pm = $cd->propertyMeta[$prop] ?? null;
+        if ($pm === null || \strtolower($pm->typeHint) !== 'array' || isset($cd->propHooks[$prop])) { return $v; }
+        $suffix = ' to property ' . ($pm->declaringClass !== '' ? $pm->declaringClass : $cd->name) . '::$' . $prop . ' of type array';
+        $k = $v->type->kind;
+        $given = $k === Type::KIND_INT ? 'int' : ($k === Type::KIND_FLOAT ? 'float' : ($k === Type::KIND_STRING ? 'string'
+            : ($k === Type::KIND_BOOL ? 'bool' : ($k === Type::KIND_NULL ? 'null' : ''))));
+        if ($given !== '') {
+            return new Call('__mir_throw_type_error', [new \Compile\Mir\StringConst('Cannot assign ' . $given . $suffix, Type::string_())], $v->type);
+        }
+        if ($k === Type::KIND_CELL) {
+            return new Call('__mir_assert_array_prop', [$v, new \Compile\Mir\StringConst($suffix, Type::string_())], $v->type);
+        }
+        return $v;
     }
 
     private function declaredScalarHint(\Compile\Mir\ClassDef $cd, string $prop): ?Type

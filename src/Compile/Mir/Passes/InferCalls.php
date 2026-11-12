@@ -278,7 +278,7 @@ trait InferCalls
         if ($n === '__mir_argc' || $n === '__mir_env_count'
             || $n === '__mir_clock_ns' || $n === '__mc_errno'
             || $n === '__mc_pool_start') { return Type::int_(); }
-        if ($n === '__mir_to_cell') { return Type::cell(); }
+        if ($n === '__mir_to_cell' || $n === '__mir_assert_array_prop') { return Type::cell(); }
         // Never actually returns — it throws php's `Undefined constant` Error.
         // Typed CELL so whatever position the constant stood in accepts it: the
         // value is unreachable, but the type has to be one every consumer takes.

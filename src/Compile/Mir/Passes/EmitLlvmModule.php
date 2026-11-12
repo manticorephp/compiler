@@ -352,6 +352,10 @@ trait EmitLlvmModule
             foreach ($this->enums as $name => $ed) {
                 if (!isset($targets[$name])) { $targets[$name] = $ed->classId; }
             }
+            // The engine's enum interfaces have no declaration to enumerate; every enum case is-a them.
+            foreach (['UnitEnum', 'BackedEnum'] as $enumIface) {
+                if (!isset($targets[$enumIface])) { $targets[$enumIface] = -1; }
+            }
             // Sorted by lower-cased name for the binary search in {@see isaDynTable}.
             /** @var string[] $targetNames */
             $targetNames = [];

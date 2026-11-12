@@ -926,6 +926,7 @@ final class Ownership
         foreach ([
             'array_first', 'array_last', 'array_key_first', 'array_key_last',
             'current', 'pos', 'key', 'reset', 'end', 'next', 'prev', 'array_pop', 'array_shift',
+            '__mir_assert_array_prop',
         ] as $cn) {
             if ($fn === $cn) { return true; }
         }

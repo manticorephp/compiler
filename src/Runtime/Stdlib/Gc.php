@@ -91,3 +91,11 @@ function __mc_obj_from_addr(int $addr): mixed
 {
     throw new \Error('WeakMap/WeakReference need a compiler that knows __mc_obj_from_addr');
 }
+
+/** php's TypeError for an array / non-Stringable object handed to a `string` parameter by a runtime-name call. */
+function __mc_dyn_str_arg(mixed $v, string $msg): void
+{
+    if (\is_array($v) || (\is_object($v) && !($v instanceof \Stringable))) {
+        throw new \TypeError($msg . \get_debug_type($v) . ' given');
+    }
+}
