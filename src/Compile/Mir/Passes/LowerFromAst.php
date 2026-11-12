@@ -1650,7 +1650,7 @@ final class LowerFromAst implements Pass
                 $module->addFunction($dfn);
             }
         }
-        $this->releaseAllClassMetadata();
+        $this->releaseAllClassMetadata($module);
         $mainStmts = $this->injectCliSuperglobals($mainStmts);
         $mainStmts = $this->injectGlobalDecls($mainStmts);
         // A lazy include unit (Main.php `__mc_unit_N`) is a file's top level run at its
@@ -2131,12 +2131,17 @@ final class LowerFromAst implements Pass
         $decl->cases = [];
         $decl->traitAdaptations = [];
     }
-    /** Drop declaration metadata no longer read after all specialisations. */
-    private function releaseAllClassMetadata(): void
+    /**
+     * Drop declaration metadata no longer read after all specialisations. An
+     * EXPORTED type (a library's, {@see Module::$typeDecls}) keeps it: the
+     * constant fold for the `.sig` and the `.sig` writer still read its consts.
+     */
+    private function releaseAllClassMetadata(Module $module): void
     {
         foreach ($this->classDecls as $decl) {
             if ($this->classTypeParams($decl->name) !== []
-                || isset($this->reifyOrigin[$decl->name])) { continue; }
+                || isset($this->reifyOrigin[$decl->name])
+                || isset($module->typeDecls[$this->classDeclName($decl)])) { continue; }
             $decl->properties = [];
             $decl->attributes = [];
             $decl->cases = [];
