@@ -364,8 +364,8 @@ trait EmitLlvmMemory
         // whole `MANTICORE_DEBUG_VERIFY=1` cold seed aborted inside the parser
         // on a live Token. Same field, same spelling as the zero-test below —
         // that is the lesson `__mir_rc_release` already carries in its comment.
-        $out  = "  %vsh = shl i64 %rc, 8\n";
-        $out .= "  %vsig = ashr i64 %vsh, 8\n";
+        $out  = "  %vsh = shl i64 %rc, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+        $out .= "  %vsig = ashr i64 %vsh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
         $out .= "  %vbad = icmp slt i64 %vsig, 1\n";
         $out .= "  br i1 %vbad, label %vcorrupt, label %vok\n";
         $out .= "vcorrupt:\n";

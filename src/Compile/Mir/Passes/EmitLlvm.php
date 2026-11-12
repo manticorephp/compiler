@@ -202,7 +202,6 @@ final class EmitLlvm implements EmitVisitor
 
     /** Per-function SSA register + label allocator (fresh each {@see emit}). */
     private ?SsaBuilder $ssa = null;
-    private int $switchCounter = 0;
     /** Sequence for private per-function raw text sink files. */
     private int $functionTextCounter = 0;
     private string $bodyPend = '';
@@ -1794,7 +1793,12 @@ final class EmitLlvm implements EmitVisitor
             $out .= $this->strGlobalDef('@' . $en . '__pk_value', 'value');
             $valueKey = $this->strSymBytes('@' . $en . '__pk_value');
         }
+        // Its own counters: numbered from the caller's, the bytes depended on what was emitted before.
+        $oldSsa = $this->ssa;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
         $ir = $this->emitEnumVarsArray('%o', $name, $ed, $nameKey, $valueKey);
+        $this->ssa = $oldSsa;
         $sym = \Compile\Mir\RuntimeLibrary::propsFnSymbol($ed->classId);
         return $out . 'define i64 ' . $sym . "(ptr %o) {\nentry:\n" . $ir
             . '  %epri = ptrtoint ptr ' . $this->lastValue . " to i64\n"

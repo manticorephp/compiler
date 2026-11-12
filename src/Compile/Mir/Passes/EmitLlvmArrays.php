@@ -2111,6 +2111,7 @@ trait EmitLlvmArrays
     {
         $out = '';
         foreach ($this->eidxNeeded as $variant => $ignoredFlag) {
+            $this->ssa->reset();
             $wKey = \str_starts_with($variant, 'w_');
             $vbase = $wKey ? \substr($variant, 2) : $variant;
             $decode = \str_ends_with($vbase, 'c');

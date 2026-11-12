@@ -445,6 +445,7 @@ trait EmitLlvmBuiltins
         if ($name === 'gc_disable')                   { return $this->biGcSwitch(1); }
         if ($name === 'gc_enable')                    { return $this->biGcSwitch(0); }
         if ($name === 'gc_enabled')                   { return $this->biGcEnabled(); }
+        if ($name === '__mc_gc_roots')                { return $this->biGcRoots(); }
         if ($name === 'spl_object_id')                { return $this->biSplObjectId($args); }
         if ($name === '__mc_obj_addr')               { return $this->biObjAddr($args); }
         // Reflection Tier-2 metadata reads. Internal (`__mc_` prefix) — the
@@ -879,6 +880,7 @@ trait EmitLlvmBuiltins
     /** The one shared body {@see boxUnknownShallowIr} calls. */
     private function emitBoxUnknownFn(): string
     {
+        $this->ssa->reset();
         $body = $this->boxUnknownShallowInlineIr('%bxf.v');
         return 'define linkonce_odr i64 @' . $this->mirHelperSym('__mir_box_unknown')
             . "(i64 %bxf.v) noinline {\nentry:\n" . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
@@ -7042,9 +7044,18 @@ trait EmitLlvmBuiltins
     /** `gc_collect_cycles()` → run the Bacon-Rajan collector, return freed count. */
     private function biGcCollect(): string
     {
-        $this->rt->needsCc = true;
         $this->rt->needsRc = true;
         $reg = $this->ssa->allocReg();
+        // ⚠ A LIBRARY carries no collector. Its class tables (child walkers, the
+        // acyclic set) know only the library's own classes, and the shared hooks
+        // in `__mir_rc_release` resolve to whichever copy keeps a symbol after
+        // inlining — the stdlib's `add_root` without its `unroot` buffered every
+        // Fiber of a program that never collects and never freed one. A library
+        // call reaches the program's collector through a weak hook instead.
+        if ($this->emitLibrary) {
+            return $this->finishI64('  ' . $reg . " = call i64 @__mc_gc_collect_weak()\n", $reg);
+        }
+        $this->rt->needsCc = true;
         $out = '  ' . $reg . " = call i64 @__manticore_cc_collect_cycles()\n";
         return $this->finishI64($out, $reg);
     }
@@ -7068,6 +7079,20 @@ trait EmitLlvmBuiltins
         $reg = $this->ssa->allocReg();
         $out = '  ' . $off . " = load i64, ptr @__manticore_cc_gcoff\n";
         $out .= '  ' . $reg . ' = xor i64 ' . $off . ", 1\n";
+        return $this->finishI64($out, $reg);
+    }
+
+    /** `__mc_gc_roots()` → the cycle collector's buffered candidate count (gc_status()['roots']). */
+    private function biGcRoots(): string
+    {
+        $this->rt->needsGcFlag = true;
+        $this->rt->needsRc = true;
+        $y = $this->ssa->allocReg();
+        $o = $this->ssa->allocReg();
+        $reg = $this->ssa->allocReg();
+        $out = '  ' . $y . " = load i64, ptr @__manticore_cc_count\n";
+        $out .= '  ' . $o . " = load i64, ptr @__manticore_cc_ocount\n";
+        $out .= '  ' . $reg . ' = add i64 ' . $y . ', ' . $o . "\n";
         return $this->finishI64($out, $reg);
     }
 
@@ -10052,6 +10077,7 @@ trait EmitLlvmBuiltins
      */
     private function emitGetClassFn(): string
     {
+        $this->ssa->reset();
         $res = $this->ssa->allocReg();
         $out = '  ' . $res . " = alloca ptr\n";
         $endL = $this->ssa->allocLabel('gcf.end');
@@ -10092,6 +10118,7 @@ trait EmitLlvmBuiltins
      *  function bodies (not the preamble) when a site asked for it. */
     private function emitObjectVarsFn(bool $mangle = false): string
     {
+        $this->ssa->reset();
         $body = $this->emitObjectVarsInline('%gov.obj', $mangle);
         // Not `optnone`, for all it costs clang: unoptimized, the switch below is a chain of
         // compares over every class, and Eloquent's `(array) $row` on a stdClass per fetched

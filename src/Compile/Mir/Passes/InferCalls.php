@@ -362,7 +362,7 @@ trait InferCalls
 
         if ($n === 'strlen' || $n === 'count' || $n === 'sizeof'
             || $n === 'ord' || $n === '__mc_str_cmp_bytes' || $n === '__mc_mb_ascii_run' || $n === 'intval' || $n === 'intdiv'
-            || $n === 'printf' || $n === 'spl_object_id' || $n === '__mc_obj_addr' || $n === 'gc_collect_cycles'
+            || $n === 'printf' || $n === 'spl_object_id' || $n === '__mc_obj_addr' || $n === 'gc_collect_cycles' || $n === '__mc_gc_roots'
             || $n === 'strcspn' || $n === '__mc_crc32b'
             || $n === '__mc_b64_ok' || $n === '__mc_hex_ok'
             || $n === '__float_bits' || $n === '__ryu_msp'

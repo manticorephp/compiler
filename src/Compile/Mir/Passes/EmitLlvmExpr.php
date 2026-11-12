@@ -3961,6 +3961,7 @@ trait EmitLlvmExpr
     /** The one shared body {@see emitBagOfUnknownClass} calls. */
     private function emitBagOfFn(): string
     {
+        $this->ssa->reset();
         $body = $this->emitBagOfUnknownClassInline('%bagf.obj');
         return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_bag_of') . "(ptr %bagf.obj) noinline {\nentry:\n"
             . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";

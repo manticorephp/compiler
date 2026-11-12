@@ -32,6 +32,7 @@ final class UndefinedFunctionScan
         '__mc_fmt_float',
         '__mc_fmt_int',
         '__mc_fmt_str',
+        '__mc_gc_roots',
         '__mc_int_seq',
         '__mc_json_encode_native',
         '__mc_json_escape',

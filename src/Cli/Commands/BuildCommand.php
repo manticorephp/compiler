@@ -46,6 +46,7 @@ final class BuildCommand extends Command
 
     public function run(ParsedArgs $args): int
     {
+        \gc_disable(); // the front end makes no cyclic garbage (CC census: 0 freed); a pass over the live graph is pure cost
         $err = \Compile\Progress::configure($args->value('progress', 'auto'), $args->flag('quiet'), $args->flag('timings'), $args->value('color', 'auto'));
         if ($err !== '') {
             \Manticore\dprint('build: ' . $err);

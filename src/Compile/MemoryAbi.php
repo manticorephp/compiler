@@ -1069,14 +1069,37 @@ final class MemoryAbi
     // ─── rc_word packing (object header offset 8) ─────────────────
 
     /**
-     * Low 56 bits hold the signed rc value. Trial-deletion (the
+     * Low 32 bits hold the signed rc value. Trial-deletion (the
      * Bacon-Rajan cycle collector) can drive it negative; reads
-     * sign-extend from bit 55.
+     * sign-extend from bit 31 (`shl RC_SIGN_SHIFT` + `ashr RC_SIGN_SHIFT`).
      */
-    public const RC_MASK = 0x00FFFFFFFFFFFFFF;
+    public const RC_MASK = 0x00000000FFFFFFFF;
 
-    /** Bits 56-61 hold the color (Bacon-Rajan uses 0..3). */
-    public const COLOR_MASK = 0x3F00000000000000;
+    /** Shift pair that sign-extends the rc field out of the whole word. */
+    public const RC_SIGN_SHIFT = 32;
+
+    /**
+     * Bits 32-55: the object's slot in the cycle collector's root buffer while
+     * it is buffered, so a buffered object that dies is swap-removed in O(1)
+     * and freed at once instead of staying behind as a dead shell.
+     * {@see CC_SLOT_NONE} marks a slot past the field's range (the object then
+     * dies the old way, {@see COLOR_DEAD}). Meaningless while not buffered.
+     */
+    public const CC_SLOT_SHIFT = 32;
+    public const CC_SLOT_MASK = 0x00FFFFFF00000000;
+    public const CC_SLOT_NONE = 0xFFFFFF;
+
+    /** Bits 56-60 hold the color ({@see COLOR_BLACK} .. {@see COLOR_GREEN}). */
+    public const COLOR_MASK = 0x1F00000000000000;
+
+    /**
+     * Bit 61: the object survived a cycle collection and belongs to the OLD
+     * generation. A young collection does not traverse an old object; it only
+     * counts the edges into it, so an object it frees has no reference from
+     * any old object (docs/memory.md). Outside {@see COLOR_MASK}, so recoloring
+     * keeps it; it also picks the root buffer the slot field indexes.
+     */
+    public const CC_OLD_MASK = 0x2000000000000000;
 
     /**
      * Bit 62: `__destruct` already ran. php calls a destructor ONCE; an object
@@ -1104,10 +1127,17 @@ final class MemoryAbi
     public const COLOR_GRAY = 2;
     public const COLOR_WHITE = 3;
 
-    /** A buffered root whose count reached zero outside a collection: already
-     *  DROPPED (destructor run, children released) the moment it died, as php
-     *  frees it; only its SHELL waits in the root buffer for the collector. */
+    /** A buffered root whose count reached zero outside a collection while its
+     *  slot was {@see CC_SLOT_NONE}: already DROPPED (destructor run, children
+     *  released) the moment it died, as php frees it; only its SHELL waits in
+     *  the root buffer for the collector. */
     public const COLOR_DEAD = 4;
+
+    /** Never a cycle member: its class is acyclic in the collector's class
+     *  graph, so `cc_add_root` leaves it unbuffered (Bacon-Rajan's green, php's
+     *  GC_NOT_COLLECTABLE). Set on the first decrement that would buffer it;
+     *  the collector may recolor it like a black object. */
+    public const COLOR_GREEN = 5;
 
     // ─── Blocking-offload job record ──────────────────────────────
 

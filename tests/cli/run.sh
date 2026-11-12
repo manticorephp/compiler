@@ -96,6 +96,17 @@ PHP
     if ! printf '%s\n' "$mir" | grep -q '^fn M__f'; then echo "BAD: no MIR for M::f"
     elif printf '%s\n' "$mir" | grep -q 'load_local this : cell'; then echo "BAD: \$this typed cell"
     else echo "ok"; fi
+    # A string literal's symbol is a function of its bytes alone. "s29685295" and "s32060020" share a crc32; with a
+    # second CRC that was linear in the first they shared the whole name and the later one got `_<id>`, so the name
+    # depended on insertion order (object-cache churn; two strings under one name across parallel emission).
+    printf '<?php\necho "s29685295", "\\n", "s32060020", "\\n";\n' > "$WORK/crc_ab.php"
+    printf '<?php\necho "s32060020", "\\n", "s29685295", "\\n";\n' > "$WORK/crc_ba.php"
+    printf '== string literal names order independent\n'
+    strnames() { "$MC" dump-llvm-mir "$1" 2>/dev/null | grep -E '^@\.str\.[^ ]* = .*c"s(29685295|32060020)\\00"' | sed -E 's/^(@[^ ]*) .*c"(s[0-9]*).*/\2 \1/' | sort; }
+    ab="$(strnames "$WORK/crc_ab.php")"; ba="$(strnames "$WORK/crc_ba.php")"
+    if [ "$(printf '%s\n' "$ab" | grep -c .)" != 2 ]; then echo "BAD: literals not found"
+    elif [ "$ab" != "$ba" ]; then echo "BAD: names depend on order"
+    else echo "ok"; fi
     shape "analyze json"  "["          "]"                     "$MC" analyze --json "f.php"
     run "dump-ast bogus flag"      "$MC" dump-ast --bogus "f.php"
     run "dump-ast missing file"    "$MC" dump-ast "nope.php"

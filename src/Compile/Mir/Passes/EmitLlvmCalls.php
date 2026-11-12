@@ -603,7 +603,9 @@ trait EmitLlvmCalls
             }
         }
         foreach ($this->closureDrops as $fnName => $flavors) {
+            $this->ssa->reset();
             $out .= $this->closureRcFn($fnName, $flavors, false);
+            $this->ssa->reset();
             $out .= $this->closureRcFn($fnName, $flavors, true);
         }
         return $out;

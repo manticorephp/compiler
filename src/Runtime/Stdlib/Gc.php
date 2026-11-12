@@ -39,8 +39,8 @@ function gc_collect_cycles(): int
 }
 
 /**
- * php 8.5's key set. Every counter reads zero: this collector is manual-trigger
- * only and keeps no run statistics, so there is nothing else honest to report.
+ * php 8.5's key set. `roots` is the collector's buffered candidate count; the
+ * other counters read zero — no run statistics are kept.
  *
  * @return array<string,mixed>
  */
@@ -54,12 +54,18 @@ function gc_status(): array
         'collected' => 0,
         'threshold' => 10001,
         'buffer_size' => 16384,
-        'roots' => 0,
+        'roots' => __mc_gc_roots(),
         'application_time' => 0.0,
         'collector_time' => 0.0,
         'destructor_time' => 0.0,
         'free_time' => 0.0,
     ];
+}
+
+/** Bootstrap twin of the codegen builtin: the buffered root count. */
+function __mc_gc_roots(): int
+{
+    return 0;
 }
 
 function gc_mem_caches(): int{

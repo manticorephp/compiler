@@ -389,6 +389,7 @@ trait EmitLlvmObjects
     {
         $out = '';
         foreach ($this->newDynNeeded as $sym => $shape) {
+            $this->ssa->reset();
             $params = 'ptr %ndy.n';
             $body = '';
             $regs = [];
@@ -418,6 +419,7 @@ trait EmitLlvmObjects
                   . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
         }
         foreach ($this->newDynRestNeeded as $sym => [$srcArgc, $boxResult]) {
+            $this->ssa->reset();
             $this->rt->needsStrcmp = true;
             $body = $this->newDynChainIr('%ndy.n', [], [], [], $srcArgc, $boxResult,
                 '%ndy.s', Type::cell(), $this->newDynTable()[2]);
@@ -1244,8 +1246,16 @@ trait EmitLlvmObjects
             if ($this->cloneErasedSym === '') {
                 $sym = $this->mirHelperSym('__mir_clone_erased');
                 $helpers = '';
+                // Its own counters: numbered from the first requester's frame, the bytes
+                // depended on which function asked first.
+                $oldSsa = $this->ssa;
+                $oldCid = $this->classIdReg;
+                $this->ssa = new SsaBuilder();
+                $this->ssa->reset();
                 $body = $this->emitCloneSwitch($n, '%a0', $impls, $helpers);
                 $ret = $this->lastValue;
+                $this->ssa = $oldSsa;
+                $this->classIdReg = $oldCid;
                 if ($body !== '' && $this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
                     $this->cloneErasedSym = $sym;
                     $this->vdExtraBodies .= $helpers . 'define linkonce_odr ptr @' . $sym
@@ -3112,6 +3122,7 @@ trait EmitLlvmObjects
     {
         $out = '';
         foreach ($this->erasedIfaceIface as $key => $iface) {
+            $this->ssa->reset();
             $method = $this->erasedIfaceMethod[$key] ?? '';
             $argc = $this->erasedIfaceArgc[$key] ?? 0;
             if ($method === '') { continue; }
@@ -9436,8 +9447,16 @@ trait EmitLlvmObjects
             return $this->emitVirtualDispatchInline($thisArg, $argList, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
         }
+        // A pending `...$arr` is part of the shape: the pack comes in as one more
+        // parameter and its first index and element type go in the key. Left out,
+        // a spread site reused a plain site's thunk and dropped its tail — or the
+        // body read the site's pack register and stayed inline — whichever came first.
+        $tail = $this->spreadTail;
         $key = $this->virtualDispatchKey($n, $cands, $targets, $fallback, $method,
             $boxCell, $erasedSyms, $argOutTypes);
+        if ($tail !== null) {
+            $key .= '#sp' . (string)$tail[1] . ':' . ($tail[2] === null ? '-' : $tail[2]->exactString());
+        }
         $sym = $this->vdSyms[$key] ?? '';
         if ($sym === '') {
             $sym = $this->mirHelperSym($this->keyedHelperName('__mir_vdisp_', $key));
@@ -9453,6 +9472,10 @@ trait EmitLlvmObjects
                 $params .= 'i64 %a' . (string)$i;
                 $thunkArgs .= 'i64 %a' . (string)$i;
             }
+            if ($tail !== null) {
+                $params .= ', ptr %sp';
+                $this->spreadTail = ['%sp', $tail[1], $tail[2]];
+            }
             // Its own counters, not the requesting frame's: built on those, the body
             // took that frame's numbering and the frame lost registers only when it
             // happened to ask first, so an edit anywhere renumbered later functions.
@@ -9463,6 +9486,7 @@ trait EmitLlvmObjects
             $this->ssa->startAt(1000000000);
             $body = $this->emitVirtualDispatchInline('%a0', $thunkArgs, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
+            $this->spreadTail = $tail;
             $this->ssa = $oldSsa;
             $this->classIdReg = $oldCid;
             // ⚠ A body is only a function if it is CLOSED. Some arms reach
@@ -9483,6 +9507,7 @@ trait EmitLlvmObjects
         $r = $this->ssa->allocReg();
         $callArgs = 'i64 ' . $thisArg;
         for ($i = 1; $i < $n; $i++) { $callArgs .= ', ' . $parts[$i]; }
+        if ($tail !== null) { $callArgs .= ', ptr ' . $tail[0]; }
         $this->vdResult = $r;
         return '  ' . $r . ' = call i64 @' . $sym . '(' . $callArgs . ")\n";
     }
@@ -10531,7 +10556,9 @@ trait EmitLlvmObjects
         $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
         $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
             new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
-                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str($method)]), $false(), $true(), $bool),
+                // The body is shared by every spelling of the name (keyed lowercase): bake the lowercase
+                // one, or the first requester's spelling would decide the bytes. method_exists ignores case.
+                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str(\strtolower($method))]), $false(), $true(), $bool),
                 $false(), $bool),
             $false(), $bool);
         $body .= $this->emitNode($magicOnly);
