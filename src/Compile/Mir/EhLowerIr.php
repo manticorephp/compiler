@@ -71,6 +71,35 @@ final class EhLowerIr
     public function __construct(array $nothrowSyms)
     {
         $this->nothrowSyms = $nothrowSyms;
+        $this->assert = \getenv('MANTICORE_EH_ASSERT') === '1';
+    }
+
+    /**
+     * `MANTICORE_EH_ASSERT=1`: after every PHP / runtime call judged nothrow, a
+     * set slot aborts with `EH ASSERT: exception set after nothrow call to @f`.
+     * A wrong nothrow lets code run after a throw; this finds it.
+     */
+    private bool $assert = false;
+    private bool $hasWrite = false;
+    private bool $hasTrap = false;
+    /** @var array<string, string> callee → its message global */
+    private array $assertMsg = [];
+
+    /** What follows the last function: the slot, and the assert helper when used. */
+    private function tail(): string
+    {
+        $t = '@__mc_exc = linkonce_odr global ptr null';
+        if ($this->assertMsg === []) { return $t; }
+        foreach ($this->assertMsg as $c => $g) {
+            $m = 'EH ASSERT: exception set after nothrow call to ' . $c . "\n";
+            $t .= "\n" . $g . ' = private unnamed_addr constant [' . (string)\strlen($m) . ' x i8] c"'
+                . \str_replace("\n", '\0A', $m) . '"';
+        }
+        if (!$this->hasWrite) { $t .= "\ndeclare i64 @write(i32, ptr, i64)"; }
+        if (!$this->hasTrap) { $t .= "\ndeclare void @llvm.trap()"; }
+        return $t . "\ndefine linkonce_odr void @__mc_eh_assert_fail(ptr %m, i64 %n) cold noinline {\nentry:\n"
+            . "  %w = call i64 (i32, ptr, i64) @write(i32 2, ptr %m, i64 %n)\n"
+            . "  call void @llvm.trap()\n  unreachable\n}";
     }
 
     public function run(string $ir): string
@@ -81,7 +110,7 @@ final class EhLowerIr
         $this->out = [];
         $this->outFile = null;
         foreach ($lines as $l) { $this->lower((string)$l); }
-        $this->out[] = '@__mc_exc = linkonce_odr global ptr null';
+        $this->out[] = $this->tail();
         return \implode("\n", $this->out) . "\n";
     }
 
@@ -93,7 +122,7 @@ final class EhLowerIr
         $this->outFile = \Manticore\fopen($outPath, 'wb');
         if ($this->outFile === null) { return false; }
         $ok = $this->eachLine($path, false);
-        $tail = "@__mc_exc = linkonce_odr global ptr null\n";
+        $tail = $this->tail() . "\n";
         if (\Manticore\fwrite($tail, 1, \strlen($tail), $this->outFile) !== \strlen($tail)) { $ok = false; }
         $this->bytes = $this->bytes + \strlen($tail);
         \Manticore\fclose($this->outFile);
@@ -138,6 +167,11 @@ final class EhLowerIr
     {
         if ($this->scanFn === '') {
             if (\str_starts_with($l, '; mc.ccallable @')) { $this->ccallable[] = \substr($l, 15); return; }
+            if (\str_starts_with($l, 'declare ')) {
+                if (\strpos($l, ' @write(') !== false) { $this->hasWrite = true; }
+                if (\strpos($l, ' @llvm.trap(') !== false) { $this->hasTrap = true; }
+                return;
+            }
             $fn = self::defineName($l);
             if ($fn !== '') {
                 $this->scanFn = $fn;
@@ -198,7 +232,7 @@ final class EhLowerIr
      * intrinsic, inline asm, a C symbol (outside `@manticore_` / `@__`), or a
      * runtime helper on {@see nounwind}.
      */
-    public static function callee(string $l): ?string
+    public static function callee(string $l, bool $all = false): ?string
     {
         if (\str_ends_with($l, ' ;!t')) { $l = \substr($l, 0, \strlen($l) - 4); }
         if (\strlen($l) < 3 || $l[0] !== ' ') { return null; }
@@ -225,7 +259,7 @@ final class EhLowerIr
         if ($q === false) { return null; }
         $c = \substr($rest, $p, $q - $p);
         if (!\str_starts_with($c, '@manticore_') && !\str_starts_with($c, '@__')) { return null; }
-        if (self::nounwind($c)) { return null; }
+        if (!$all && self::nounwind($c)) { return null; }
         return $c;
     }
 
@@ -407,6 +441,23 @@ final class EhLowerIr
                 if ($this->cur !== '') { $this->last[$this->cur] = $k; }
                 $this->needProp = true;
                 $this->checks = $this->checks + 1;
+                return;
+            }
+            $a = $this->assert ? self::callee($l, true) : null;
+            if ($a !== null && $a !== '' && $a !== self::POLL) {
+                if (!isset($this->assertMsg[$a])) { $this->assertMsg[$a] = '@.mc.ea.' . (string)\count($this->assertMsg); }
+                $len = \strlen('EH ASSERT: exception set after nothrow call to ' . $a . "\n");
+                $s = $this->nextSeq();
+                $k = 'mc.k' . $s;
+                $this->emit($l);
+                $this->emit('  %mc.c' . $s . ' = load ptr, ptr @__mc_exc');
+                $this->emit('  %mc.d' . $s . ' = icmp ne ptr %mc.c' . $s . ', null');
+                $this->emit('  br i1 %mc.d' . $s . ', label %mc.af' . $s . ', label %' . $k);
+                $this->emit('mc.af' . $s . ':');
+                $this->emit('  call void @__mc_eh_assert_fail(ptr ' . $this->assertMsg[$a] . ', i64 ' . (string)$len . ')');
+                $this->emit('  unreachable');
+                $this->emit($k . ':');
+                if ($this->cur !== '') { $this->last[$this->cur] = $k; }
                 return;
             }
         }
