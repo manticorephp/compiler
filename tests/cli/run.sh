@@ -284,6 +284,11 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     ( cd mf && MANTICORE_SPLIT_JOBS=4 "$MC" build --progress=json >/dev/null 2>"$e" ); ck "split build rc" $?
     splitck "split json clang counters (build)" "$e"
     [ "$(./sp_off)" = "$(./mf/bin/d)" ]; ck "split build binary output same" $?
+    # "stdlib": false on an app that does not embed the runtime source is refused up front (#506)
+    mkdir -p nostd/src
+    printf '<?php\necho match (4) { 3 => "three" }, "\\n";\n' > nostd/src/m.php
+    printf '{"applications":[{"name":"m","src":"src","entry":"src/m.php","output":"m.bin","stdlib":false}]}\n' > nostd/manticore.json
+    ( cd nostd && "$MC" build >/dev/null 2>"$e" ); [ $? -eq 65 ] && grep -q 'sets "stdlib": false but does not compile the runtime' "$e"; ck "stdlib:false without the runtime source is refused" $?
     [ -z "$(find . -name '*.done' -o -name '*.pid')" ]; ck "no stale .done/.pid markers" $?
     pairck() { # label, stderr file: every stage_start name has exactly one stage_end of the same name, and vice versa
         sed -n 's/.*"event":"stage_start","name":"\(.*\)","t_ms.*/\1/p' "$2" | sort >"$WORK/ps"
