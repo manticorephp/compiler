@@ -58,8 +58,6 @@ trait EmitLlvmExceptions
 
     /** Marking is on for the function being emitted. */
     private bool $ehOn = false;
-    /** Names the payload register of each Darwin pad resume ({@see ehResume}). */
-    private int $ehResumeN = 0;
     /** The function's define carries a personality for its cleanup pads. */
     private bool $ehPersonality = false;
     /** The SSA the function body is emitted in; an outlined helper's nodes are not marked. */
@@ -153,16 +151,12 @@ trait EmitLlvmExceptions
     }
 
     /**
-     * The end of a cleanup pad. Darwin continues the unwind through the runtime's
-     * own phase 2 (UnwindRuntime::darwinFastUnwindIr): the system `_Unwind_Resume`
-     * starts from a shared-cache frame dyld resolves by a linear scan (#648).
+     * The end of a cleanup pad: {@see \Compile\Mir\EhLowerIr} turns it into
+     * "put the exception back in the slot and leave through the propagate block".
      */
     private function ehResume(string $lp): string
     {
-        if (!\Manticore\is_darwin() || \getenv('MANTICORE_EH') === 'ret') { return '  resume { ptr, i32 } ' . $lp . "\n"; }
-        $this->ehResumeN = $this->ehResumeN + 1;
-        $x = '%mc.rx' . (string)$this->ehResumeN;
-        return '  ' . $x . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n  call void @__mc_resume(ptr " . $x . ")\n  unreachable\n";
+        return '  resume { ptr, i32 } ' . $lp . "\n";
     }
 
     /** What a landing pad of this frame runs first: release whatever call temps are still listed. */

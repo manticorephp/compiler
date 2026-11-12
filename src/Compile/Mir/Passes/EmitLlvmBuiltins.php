@@ -2420,6 +2420,8 @@ trait EmitLlvmBuiltins
         $name = \ltrim($a0->value, '\\');
         $sym = $this->callbackTarget($name);
         $this->lastValue = '@manticore_' . $this->mangle($sym);
+        // C may call it: an exception it leaves set is polled after every FFI call ({@see \Compile\Mir\EhLowerIr}).
+        $this->libcExtra['ccallable:' . $sym] = '; mc.ccallable ' . $this->lastValue;
         $this->lastValueType = 'ptr';
         return '';
     }

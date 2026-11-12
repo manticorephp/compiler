@@ -272,10 +272,12 @@ trait EmitLlvmCalls
         }
         if ($ret === 'void') {
             $out .= '  call ' . $callTypeTok . ' @' . $cSym . '(' . $callArgs . ")\n";
+            $out .= "  call void @__mc_exc_poll()\n";
             $out .= "  ret i64 0\n";
         } else {
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call ' . $callTypeTok . ' @' . $cSym . '(' . $callArgs . ")\n";
+            $out .= "  call void @__mc_exc_poll()\n";
             if ($ret === 'ptr') {
                 $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";

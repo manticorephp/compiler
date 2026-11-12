@@ -36,6 +36,11 @@ final class EhLowerIr
 
     /** @var array<string, bool> `@manticore_*` symbols judged nothrow */
     private array $nothrowSyms;
+    /** Marker an FFI wrapper emits after its C call; lowered to a bare slot test or dropped. */
+    public const POLL = '@__mc_exc_poll';
+
+    /** @var string[] PHP functions whose address `fn_to_ptr` hands to C */
+    private array $ccallable = [];
     /** @var array<string, string[]> */
     private array $callees = [];
     /** @var array<string, bool> */
@@ -132,6 +137,7 @@ final class EhLowerIr
     private function scan(string $l): void
     {
         if ($this->scanFn === '') {
+            if (\str_starts_with($l, '; mc.ccallable @')) { $this->ccallable[] = \substr($l, 15); return; }
             $fn = self::defineName($l);
             if ($fn !== '') {
                 $this->scanFn = $fn;
@@ -167,6 +173,11 @@ final class EhLowerIr
     private function calleeMay(string $c): bool
     {
         if ($c === '' || $c === '@__mc_throw') { return true; }
+        if ($c === self::POLL) {
+            // After an FFI call: C may have called a PHP callback that left the slot set.
+            foreach ($this->ccallable as $cc) { if ($this->calleeMay($cc)) { return true; } }
+            return false;
+        }
         if (isset($this->may[$c])) { return $this->may[$c]; }
         if (\str_starts_with($c, '@manticore_')) { return !isset($this->nothrowSyms[$c]); }
         return true;
@@ -326,6 +337,7 @@ final class EhLowerIr
                 $this->retTy = $at === false ? 'void' : self::retTypeOf(\substr($l, 0, $at));
                 $this->cur = '';
                 $this->needProp = false;
+                $l = \str_replace(' personality ptr @__mc_personality', '', $l);
             }
             $this->emit($l);
             return;
@@ -383,10 +395,11 @@ final class EhLowerIr
         }
         if ($len > 8 && \strpos($l, 'call ') !== false && \strpos($l, 'musttail') === false) {
             $c = self::callee($l);
+            if ($c === self::POLL && !$this->calleeMay($c)) { return; }
             if ($c !== null && $this->calleeMay($c)) {
                 $s = $this->nextSeq();
                 $k = 'mc.k' . $s;
-                $this->emit($l);
+                if ($c !== self::POLL) { $this->emit($l); }
                 $this->emit('  %mc.c' . $s . ' = load ptr, ptr @__mc_exc');
                 $this->emit('  %mc.d' . $s . ' = icmp ne ptr %mc.c' . $s . ', null');
                 $this->emit('  br i1 %mc.d' . $s . ', label %mc.prop, label %' . $k);
@@ -396,6 +409,9 @@ final class EhLowerIr
                 $this->checks = $this->checks + 1;
                 return;
             }
+        }
+        if (\strpos($l, ' = landingpad ') !== false || \str_starts_with($l, '  invoke ') || \strpos($l, ' = invoke ') !== false) {
+            throw new \RuntimeException('EhLowerIr: unlowered exception edge: ' . \substr($l, 0, 200));
         }
         $this->emit($l);
     }

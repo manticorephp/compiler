@@ -1,0 +1,6 @@
+start
+dtor c3
+dtor c2
+dtor c1
+handler LogicException deep
+dtor top
