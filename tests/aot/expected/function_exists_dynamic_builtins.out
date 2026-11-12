@@ -1,0 +1,14 @@
+stripos=true
+gc_enable=true
+gc_disable=true
+gc_enabled=true
+in_array=true
+array_key_exists=true
+range=true
+strrev=true
+log1p=true
+substr_count=true
+json_validate=true
+class_alias=true
+no_such_fn=false
+3

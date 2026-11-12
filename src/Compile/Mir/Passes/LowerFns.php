@@ -440,6 +440,8 @@ trait LowerFns
             'poke_i64', 'poke_i8', 'print_r', 'ptr_offset',
             'ptr_to_int', 'rad2deg', 'round', 'sin', 'sinh', 'sqrt', 'tan',
             'tanh', 'var_dump',
+            'array_key_exists', 'in_array', 'array_is_list', 'range', 'strrev', 'json_validate',
+            'substr_count', 'class_alias',
         ];
     }
 
