@@ -36,7 +36,7 @@ final class EhLowerIr
 
     /** @var array<string, bool> `@manticore_*` symbols judged nothrow */
     private array $nothrowSyms;
-    /** Marker an FFI wrapper emits after its C call; lowered to a bare slot test or dropped. */
+    /** Marker an FFI wrapper emits after its C call; lowered to a slot test. */
     public const POLL = '@__mc_exc_poll';
 
     /** @var string[] PHP functions whose address `fn_to_ptr` hands to C */
@@ -63,6 +63,7 @@ final class EhLowerIr
     /** @var string[] */
     private array $out = [];
     private ?\Ffi\Ptr $outFile = null;
+    private bool $writeOk = true;
 
     // sweep-1 state
     private string $scanFn = '';
@@ -124,11 +125,14 @@ final class EhLowerIr
         $this->solve();
         $this->outFile = \Manticore\fopen($outPath, 'wb');
         if ($this->outFile === null) { return false; }
+        $this->writeOk = true;
         $ok = $this->eachLine($path, false);
         $tail = $this->tail() . "\n";
         if (\Manticore\fwrite($tail, 1, \strlen($tail), $this->outFile) !== \strlen($tail)) { $ok = false; }
         $this->bytes = $this->bytes + \strlen($tail);
-        \Manticore\fclose($this->outFile);
+        // A short write anywhere (ENOSPC) or a failed flush is a failed lowering, never a truncated module.
+        $closed = \Manticore\fclose($this->outFile) === 0;
+        if (!$this->writeOk || !$closed) { $ok = false; }
         $this->outFile = null;
         return $ok;
     }
@@ -361,7 +365,7 @@ final class EhLowerIr
         if ($this->outFile === null) { $this->out[] = $l; return; }
         $s = $l . "\n";
         $this->bytes = $this->bytes + \strlen($s);
-        \Manticore\fwrite($s, 1, \strlen($s), $this->outFile);
+        if (\Manticore\fwrite($s, 1, \strlen($s), $this->outFile) !== \strlen($s)) { $this->writeOk = false; }
     }
 
     private function nextSeq(): string
@@ -378,7 +382,8 @@ final class EhLowerIr
                 $this->inFn = true;
                 // The runtime's own entry points never propagate: no checks inside.
                 $this->skip = \str_starts_with($name, '@__mc_eh_') || $name === '@__mc_throw' || $name === '@__mc_uncaught'
-                    || $name === '@__mir_uncaught' || \str_starts_with($name, '@"__mc_cc.');
+                    || $name === '@__mir_uncaught' || \str_starts_with($name, '@"__mc_cc.')
+                    || $name === '@__manticore_shutdown' || $name === '@__manticore_ob_shutdown';
                 $this->isMain = $name === '@main';
                 $at = \strpos($l, ' @');
                 $this->retTy = $at === false ? 'void' : self::retTypeOf(\substr($l, 0, $at));
@@ -449,8 +454,9 @@ final class EhLowerIr
         }
         if ($len > 8 && \strpos($l, 'call ') !== false && \strpos($l, 'musttail') === false) {
             $c = self::callee($l);
-            if ($c === self::POLL && !$this->calleeMay($c)) { return; }
-            if ($c !== null && $this->calleeMay($c)) {
+            // The poll is always a test, so a linkonce_odr FFI wrapper reads the same in
+            // every module; only whether its CALLERS check depends on the module.
+            if ($c === self::POLL || ($c !== null && $this->calleeMay($c))) {
                 $s = $this->nextSeq();
                 $k = 'mc.k' . $s;
                 if ($c !== self::POLL) { $this->emit($l); }

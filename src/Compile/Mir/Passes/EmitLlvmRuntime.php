@@ -771,11 +771,12 @@ trait EmitLlvmRuntime
         // reaches `__mir_gen_destroy`, so it — and every release built on it —
         // cannot throw, and callers skip the exception check
         // ({@see \Compile\Mir\EhLowerIr}). A frame here is an emitter bug:
-        // MANTICORE_DEBUG_VERIFY aborts on it.
+        // it traps: freeing the frame without its destroy would skip `finally`.
+        $this->libcExtra['llvm.trap'] = 'declare void @llvm.trap()';
         $rcl = \substr($out, \strrpos($out, "define void @__mir_str_reclaim(ptr %sbase) {\n"));
         $out .= \str_replace(
             ['@__mir_str_reclaim(ptr %sbase)', "  call void @__mir_gen_destroy(ptr %gfr)\n  br label %df\n"],
-            ['@__mir_str_free(ptr %sbase)', \Compile\Debug::$verify ? "  call void @abort()\n  unreachable\n" : "  br label %df\n"],
+            ['@__mir_str_free(ptr %sbase)', "  call void @llvm.trap()\n  unreachable\n"],
             $rcl);
         // The last reference to a Generator frame is gone. One that is not
         // finished (state ≥ 0: never started, or suspended at yield k) is

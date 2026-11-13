@@ -2201,7 +2201,7 @@ trait EmitLlvmModule
         if (!$this->needsErrorHandlers) { return ''; }
         $out  = "define void @__manticore_shutdown() {\nentry:\n";
         $out .= "  %r = call i64 @manticore___mc_run_shutdown()\n";
-        $out .= "  ret void\n}\n";
+        $out .= $this->atexitUncaughtTail();
         return $out;
     }
 
@@ -2215,8 +2215,28 @@ trait EmitLlvmModule
         if (!$this->needsOb) { return ''; }
         $out  = "define void @__manticore_ob_shutdown() {\nentry:\n";
         $out .= "  %r = call i64 @manticore___mc_ob_shutdown()\n";
-        $out .= "  ret void\n}\n";
+        $out .= $this->atexitUncaughtTail();
         return $out;
+    }
+
+    /**
+     * The end of an atexit trampoline: an exception the PHP drain left in the
+     * slot goes to the uncaught path (handler, else the fatal), as php reports
+     * one thrown at shutdown. libc would otherwise carry on with it pending.
+     * EhLowerIr leaves the trampolines unlowered.
+     */
+    private function atexitUncaughtTail(): string
+    {
+        if (!$this->rt->needsExceptions) { return "  ret void\n}\n"; }
+        return "  %x = load ptr, ptr @__mc_exc\n"
+            . "  %xs = icmp ne ptr %x, null\n"
+            . "  br i1 %xs, label %unc, label %ok\n"
+            . "unc:\n"
+            . "  store ptr null, ptr @__mc_exc\n"
+            . "  call void @__mc_uncaught(ptr %x)\n"
+            . "  unreachable\n"
+            . "ok:\n"
+            . "  ret void\n}\n";
     }
 
     private function profileRuntime(): string
