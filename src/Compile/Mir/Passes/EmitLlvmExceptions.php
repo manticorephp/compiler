@@ -5,17 +5,17 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\MirCatch;
 use Compile\Mir\Node;
 use Compile\Mir\Type;
-use Compile\Runtime\UnwindRuntime;
+use Compile\Runtime\ExceptionRuntime;
 
 /**
  * Exception emitters extracted from {@see EmitLlvm}: throw / try-catch /
  * rethrow, MirCatch field accessors, and catch-class matching (class-id
  * chains, descendant sets).
  *
- * Zero-cost unwinding ({@see UnwindRuntime}): a throw is `@__mc_throw`, and
+ * Exceptions ({@see ExceptionRuntime}): a throw is `@__mc_throw`, and
  * every call inside a try region that may unwind is an `invoke` whose unwind
- * edge is the region's landing pad ({@see ehInvokeRegion}). A try costs
- * nothing until something throws.
+ * edge is the region's landing pad ({@see ehInvokeRegion}); {@see \Compile\Mir\EhLowerIr}
+ * lowers that to a test of the exception slot after the call.
  */
 trait EmitLlvmExceptions
 {
@@ -33,14 +33,8 @@ trait EmitLlvmExceptions
     private string $ehLhs = '';
     /** The named callee (`@sym`) of the line {@see ehCallRest} just accepted; '' when indirect. */
     private string $ehCallee = '';
-    /** The Throwable the last {@see ehPad} took off the unwinder. */
+    /** The Throwable the last {@see ehPad} took out of the slot. */
     private string $ehPadObj = '';
-
-    /** ` personality …` for the `define` of a function that holds a landing pad. */
-    private function personalityClause(): string
-    {
-        return $this->locals->hasTry || $this->ehPersonality ? UnwindRuntime::PERSONALITY : '';
-    }
 
     // ── cleanup pads: an unwind out of the frame drops its owned locals ──
     //
@@ -58,9 +52,7 @@ trait EmitLlvmExceptions
 
     /** Marking is on for the function being emitted. */
     private bool $ehOn = false;
-    /** Names the payload register of each Darwin pad resume ({@see ehResume}). */
-    private int $ehResumeN = 0;
-    /** The function's define carries a personality for its cleanup pads. */
+    /** The function has cleanup pads: its may-throw calls are marked. */
     private bool $ehPersonality = false;
     /** The SSA the function body is emitted in; an outlined helper's nodes are not marked. */
     private ?\Compile\Mir\SsaBuilder $ehSsa = null;
@@ -153,16 +145,12 @@ trait EmitLlvmExceptions
     }
 
     /**
-     * The end of a cleanup pad. Darwin continues the unwind through the runtime's
-     * own phase 2 (UnwindRuntime::darwinFastUnwindIr): the system `_Unwind_Resume`
-     * starts from a shared-cache frame dyld resolves by a linear scan (#648).
+     * The end of a cleanup pad: {@see \Compile\Mir\EhLowerIr} turns it into
+     * "put the exception back in the slot and leave through the propagate block".
      */
     private function ehResume(string $lp): string
     {
-        if (!\Manticore\is_darwin()) { return '  resume { ptr, i32 } ' . $lp . "\n"; }
-        $this->ehResumeN = $this->ehResumeN + 1;
-        $x = '%mc.rx' . (string)$this->ehResumeN;
-        return '  ' . $x . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n  call void @__mc_resume(ptr " . $x . ")\n  unreachable\n";
+        return '  resume { ptr, i32 } ' . $lp . "\n";
     }
 
     /** What a landing pad of this frame runs first: release whatever call temps are still listed. */
@@ -702,10 +690,9 @@ trait EmitLlvmExceptions
      * exception takes the one in flight as its deepest `previous`, and the rest
      * of the frame's locals are still destroyed). Each drop is an `invoke`:
      * while the original exception is in flight its unwind lands in a catch that
-     * chains that exception's payload under the new one and frees the exception
-     * object; from then on the newest Throwable sits in a slot, every later
-     * drop that throws chains the slot's under its own, and after the last drop
-     * the slot's is raised afresh. A foreign exception just drops and resumes.
+     * chains that exception under the new one; from then on the newest
+     * Throwable sits in a slot, every later drop that throws chains the slot's
+     * under its own, and after the last drop the slot's is raised afresh.
      *
      * @param array<string, \Compile\Mir\MemoryOp_> $live
      */
@@ -728,19 +715,11 @@ trait EmitLlvmExceptions
         $n = \count($slots);
         $lp = $this->ssa->allocReg();
         $ex = $this->ssa->allocReg();
-        $cls = $this->ssa->allocReg();
-        $ours = $this->ssa->allocReg();
         $cur = $this->ssa->allocReg();
-        $plain = $this->ssa->allocLabel('ehlp.foreign');
         $drops = $this->ssa->allocLabel('ehlp.drops');
         $out = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n" . $this->ehTmpDrainIr();
         $out .= '  ' . $ex . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n";
-        $out .= '  ' . $cls . ' = load i64, ptr ' . $ex . "\n";
-        $out .= '  ' . $ours . ' = icmp eq i64 ' . $cls . ', ' . (string)\Compile\MemoryAbi::EXC_CLASS . "\n";
-        $out .= '  br i1 ' . $ours . ', label %' . $drops . ', label %' . $plain . "\n";
-        $out .= $plain . ":\n";
-        for ($i = 0; $i < $n; $i = $i + 1) { $out .= $this->ownDropIr($slots[$i], $ops[$i]); }
-        $out .= $this->ehResume($lp);
+        $out .= '  br label %' . $drops . "\n";
         /** @var string[] catch while the original is in flight, per drop */
         $inFlight = [];
         /** @var string[] object mode: continue at drop j (j = n: raise) */
@@ -755,16 +734,10 @@ trait EmitLlvmExceptions
         $out .= $drops . ":\n  " . $cur . " = alloca ptr\n";
         for ($i = 0; $i < $n; $i = $i + 1) { $out .= $this->ehDropInvoke($slots[$i], $ops[$i], $inFlight[$i]); }
         $out .= $this->ehResume($lp);
-        $pay = (string)\Compile\MemoryAbi::EXC_PAYLOAD_OFFSET;
         for ($i = 0; $i < $n; $i = $i + 1) {
             $out .= $this->ehPad($inFlight[$i]);
             $obj = $this->ehPadObj;
-            $pp = $this->ssa->allocReg();
-            $old = $this->ssa->allocReg();
-            $out .= '  ' . $pp . ' = getelementptr inbounds i8, ptr ' . $ex . ', i64 ' . $pay . "\n";
-            $out .= '  ' . $old . ' = load ptr, ptr ' . $pp . "\n";
-            $out .= '  call void @free(ptr ' . $ex . ")\n";
-            $out .= $this->ehChainUnder($obj, $old);
+            $out .= $this->ehChainUnder($obj, $ex);
             $out .= '  store ptr ' . $obj . ', ptr ' . $cur . "\n";
             $out .= '  br label %' . $next[$i + 1] . "\n";
         }
@@ -803,23 +776,13 @@ trait EmitLlvmExceptions
         $n = \count($slots);
         $lp = $this->ssa->allocReg();
         $ex = $this->ssa->allocReg();
-        $cls = $this->ssa->allocReg();
-        $ours = $this->ssa->allocReg();
         $cur = $this->ssa->allocReg();
-        $plain = $this->ssa->allocLabel('ehlp.foreign');
         $drops = $this->ssa->allocLabel('ehlp.drops');
         $resumeL = $this->ssa->allocLabel('ehlp.resume');
         $raiseL = $this->ssa->allocLabel('ehlp.raise');
         $out = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n" . $this->ehTmpDrainIr();
         $out .= '  ' . $ex . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n";
-        $out .= '  ' . $cls . ' = load i64, ptr ' . $ex . "\n";
-        $out .= '  ' . $ours . ' = icmp eq i64 ' . $cls . ', ' . (string)\Compile\MemoryAbi::EXC_CLASS . "\n";
-        $out .= '  br i1 ' . $ours . ', label %' . $drops . ', label %' . $plain . "\n";
-        $out .= $plain . ":\n";
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $out .= '  call void ' . $this->ehDropHelper($this->rcReleaseFlavor($ops[$i])) . '(ptr ' . $slots[$i] . ")\n";
-        }
-        $out .= $this->ehResume($lp);
+        $out .= '  br label %' . $drops . "\n";
         $out .= $drops . ":\n  " . $cur . " = alloca ptr\n";
         $out .= '  store ptr null, ptr ' . $cur . "\n";
         for ($i = 0; $i < $n; $i = $i + 1) {
@@ -840,8 +803,8 @@ trait EmitLlvmExceptions
     /**
      * `void (ptr slot, ptr ex, ptr cur)`: drop `slot` by `$flavor` while our
      * exception `ex` unwinds. A Throwable the drop raises becomes the newest in
-     * `*cur`: the first one takes `ex`'s payload as its deepest `previous` and
-     * frees `ex`, a later one takes `*cur`'s ({@see ehRaisingPad}).
+     * `*cur`: the first one takes `ex` as its deepest `previous`, a later one
+     * takes `*cur`'s ({@see ehRaisingPad}).
      */
     private function ehRaiseDropHelper(string $flavor): string
     {
@@ -854,7 +817,7 @@ trait EmitLlvmExceptions
         $first = $this->ssa->allocLabel('ehr.first');
         $later = $this->ssa->allocLabel('ehr.later');
         $body = 'define linkonce_odr void ' . $sym . '(ptr %s, ptr %ex, ptr %cur) noinline cold'
-            . \Compile\Runtime\UnwindRuntime::PERSONALITY . " {\nentry:\n  br label %ehr.d\n";
+            . " {\nentry:\n  br label %ehr.d\n";
         $body .= $this->ehInvokeRegion("ehr.d:\n" . $this->rcReleaseSlot('%s', $flavor), $pad, -1);
         $body .= "  ret void\n";
         $body .= $this->ehPad($pad);
@@ -864,13 +827,8 @@ trait EmitLlvmExceptions
         $body .= '  ' . $c . " = load ptr, ptr %cur\n";
         $body .= '  ' . $isn . ' = icmp eq ptr ' . $c . ", null\n";
         $body .= '  br i1 ' . $isn . ', label %' . $first . ', label %' . $later . "\n";
-        $pp = $this->ssa->allocReg();
-        $old = $this->ssa->allocReg();
         $body .= $first . ":\n";
-        $body .= '  ' . $pp . ' = getelementptr inbounds i8, ptr %ex, i64 ' . (string)\Compile\MemoryAbi::EXC_PAYLOAD_OFFSET . "\n";
-        $body .= '  ' . $old . ' = load ptr, ptr ' . $pp . "\n";
-        $body .= "  call void @free(ptr %ex)\n";
-        $body .= $this->ehChainUnder($obj, $old);
+        $body .= $this->ehChainUnder($obj, '%ex');
         $body .= '  store ptr ' . $obj . ", ptr %cur\n  ret void\n";
         $body .= $later . ":\n";
         $body .= $this->ehChainUnder($obj, $c);
@@ -981,7 +939,7 @@ trait EmitLlvmExceptions
         $lp = $this->ssa->allocReg();
         $ex = $this->ssa->allocReg();
         $this->ehPadObj = $this->ssa->allocReg();
-        return UnwindRuntime::catchPad($label, $lp, $ex, $this->ehPadObj) . $this->ehTmpDrainIr();
+        return ExceptionRuntime::catchPad($label, $lp, $ex, $this->ehPadObj) . $this->ehTmpDrainIr();
     }
 
     /**
@@ -1087,21 +1045,7 @@ trait EmitLlvmExceptions
     /** Runtime helpers that never run user code and never throw. */
     private function ehNounwind(string $callee): bool
     {
-        // Each invoke costs a block and an unwind edge per call site: in the
-        // Laravel build the backtrace ring alone was 648K of them.
-        return $callee === '@__mc_eh_catch'
-            || $callee === '@__mir_elem_untag'
-            || $callee === '@__mir_bt_push'
-            || $callee === '@__mir_bt_push_rel'
-            || $callee === '@__mir_bt_pop'
-            || $callee === '@__manticore_deref'
-            || $callee === '@__manticore_tag'
-            || $callee === '@__manticore_cell_int_bad'
-            || $callee === '@__mir_obj_handle_alloc'
-            || \str_starts_with($callee, '@__mc_dynf_')
-            || \str_starts_with($callee, '@__mir_arena_')
-            || \str_starts_with($callee, '@__mir_rc_retain')
-            || \str_starts_with($callee, '@__manticore_box_');
+        return \Compile\Mir\EhLowerIr::nounwind($callee);
     }
 
     /**
@@ -1109,32 +1053,20 @@ trait EmitLlvmExceptions
      * split renamed to its last continuation.
      * @param array<string, string> $last
      */
+    /** The final-text exception lowering, told which `@manticore_*` callees cannot throw. */
+    private function ehLowerIr(): \Compile\Mir\EhLowerIr
+    {
+        /** @var array<string, bool> */
+        $syms = [];
+        if ($this->nothrow !== null) {
+            foreach ($this->nothrow->nothrowNames() as $fn) { $syms['@manticore_' . $this->mangle($fn)] = true; }
+        }
+        return new \Compile\Mir\EhLowerIr($syms);
+    }
+
     private function ehPhiRetarget(string $line, array $last): string
     {
-        // An incoming block is the `%name` after the last comma of a pair, right
-        // before its `]` — both `[ v, %b ]` and `[v, %b]` are emitted. A value
-        // never sits there, so no bracket matching is needed.
-        $out = '';
-        $p = 0;
-        $len = \strlen($line);
-        while ($p < $len) {
-            $cm = \strpos($line, ', %', $p);
-            if ($cm === false) { break; }
-            $s = $cm + 3;
-            $e = $s;
-            while ($e < $len && $line[$e] !== ']' && $line[$e] !== ' ' && $line[$e] !== ',') { $e = $e + 1; }
-            $f = $e;
-            while ($f < $len && $line[$f] === ' ') { $f = $f + 1; }
-            $lab = \substr($line, $s, $e - $s);
-            $out .= \substr($line, $p, $s - $p);
-            if ($f < $len && $line[$f] === ']' && isset($last[$lab])) {
-                $out .= $last[$lab];
-            } else {
-                $out .= $lab;
-            }
-            $p = $e;
-        }
-        return $out . \substr($line, $p);
+        return \Compile\Mir\EhLowerIr::phiRetarget($line, $last);
     }
 
     private function emitThrow(\Compile\Mir\Throw_ $n): string

@@ -75,8 +75,13 @@ final class MemoryAbi
      * UNINITIALIZED carries an INIT BITMAP ({@see INIT_MAP_SLOT_BYTES}) at an
      * offset agreed across the tree, past every member's properties and bag;
      * the instance grows by its words. A v23 object of such a class is shorter.
+     *
+     * v26: exceptions are error-return: a throw stores the Throwable in the
+     * slot `@__mc_exc` and every call that may throw tests it (no unwinding,
+     * no `EXC_*` exception object). A v25 object raises through the unwinder,
+     * which a v26 caller never consults.
      */
-    public const VERSION = 25;
+    public const VERSION = 26;
 
     // ─── rc self-routing tag (obj/vec only) ───────────────────────
 
@@ -1219,24 +1224,4 @@ final class MemoryAbi
     public const HMAP_SLOT_EMPTY     = -1;  // u32 0xFFFFFFFF
     public const HMAP_SLOT_DEAD      = -2;  // u32 0xFFFFFFFE: deleted slot, probes continue past it; an insert may reuse it
     public const HMAP_MIN_CAP        = 8;
-
-    // ─── exception object (zero-cost unwinding) ───────────────────
-
-    /**
-     * `_Unwind_Exception::exception_class` of a PHP throw ("MNTCPHP\0"). The
-     * personality catches only this class; a foreign exception (C++, forced
-     * unwind) passes through every PHP catch pad.
-     */
-    public const EXC_CLASS = 0x4D4E544350485000;
-
-    /**
-     * The exception object `@__mc_throw` hands `_Unwind_RaiseException`:
-     * the Itanium `_Unwind_Exception` header (class@0, cleanup@8,
-     * private_1@16, private_2@24 — 32 bytes on every 64-bit target) followed
-     * by the thrown Throwable's address. malloc'd per raise, freed by the
-     * landing pad that takes the payload ({@see \Compile\Runtime\UnwindRuntime}).
-     */
-    public const EXC_HEADER_SIZE = 32;
-    public const EXC_PAYLOAD_OFFSET = 32;
-    public const EXC_SIZE = 48;
 }

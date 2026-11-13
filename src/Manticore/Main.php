@@ -3006,18 +3006,14 @@ function target_os_family(): string
 }
 
 /**
- * Where the unwinder (`_Unwind_RaiseException` & co., which every PHP throw goes
- * through — {@see \Compile\Runtime\UnwindRuntime}) comes from at link time.
- *
- * Darwin: libSystem carries libunwind, nothing to add. Linux (glibc and musl):
- * `-static-libgcc` links libgcc_eh.a into the binary instead of the default
- * dynamic `libgcc_s.so.1`, so a binary gains no runtime dependency it did not
- * have before (docs/audit/ownership/eh-spike.md).
+ * Link flags of the measurement builds, appended at both link sites: the ASan
+ * runtime (MANTICORE_ASAN=1), and on Darwin `-no_compact_unwind` for ASan /
+ * MANTICORE_REF_QUARANTINE backtraces. Exceptions need nothing from the
+ * linker: they never unwind ({@see \Compile\Runtime\ExceptionRuntime}).
  */
-function unwind_link_flags(): string
+function debug_link_flags(): string
 {
-    // Both link sites append this, so the ASan runtime (MANTICORE_ASAN=1) rides along here.
-    return (is_darwin() ? "" : " -static-libgcc") . (\Compile\Debug::$asan ? " -fsanitize=address" : "") . ((\Compile\Debug::$asan || \Compile\Debug::$refQuarantine) && is_darwin() ? " -Wl,-no_compact_unwind" : "");
+    return (\Compile\Debug::$asan ? " -fsanitize=address" : "") . ((\Compile\Debug::$asan || \Compile\Debug::$refQuarantine) && is_darwin() ? " -Wl,-no_compact_unwind" : "");
 }
 
 /** True when the compile target is Darwin/macOS. */
@@ -3960,7 +3956,7 @@ function build_compile_module(
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
-    $tail = $tail . thinlto_link_flags() . unwind_link_flags();
+    $tail = $tail . thinlto_link_flags() . debug_link_flags();
     // Probed, not cached: a failed link here is usually the program's own
     // (an undefined symbol), and a retry would rerun the whole ThinLTO link.
     $linkExtra = $preLib . ffi_link_flags_probe($libs, $linkFlags) . $tail;

@@ -1,0 +1,5 @@
+dtor caught inside a
+main caught outer
+work2
+caught from dtor
+end

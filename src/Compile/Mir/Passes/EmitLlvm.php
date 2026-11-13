@@ -1546,6 +1546,18 @@ final class EmitLlvm implements EmitVisitor
             \Manticore\sys_unlink($bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
             $stagedBytes = $preambleBytes + $bodyBytes;
+            // Exceptions: the global slot replaces every invoke / landing pad ({@see \Compile\Mir\EhLowerIr}).
+            // Before pruning: the lowering adds references (`@__mc_uncaught`) the pruner must see.
+            $statT = \Compile\Stats::begin('  exceptions: slot lowering (staged)');
+            $eh = $this->ehLowerIr();
+            $ehPath = $this->streamIrPath . '.eh';
+            if (!$eh->runFile($this->streamIrPath, $ehPath)
+                || \Manticore\sys_rename($ehPath, $this->streamIrPath) !== 0) {
+                throw new \RuntimeException('EmitLlvm: cannot lower exceptions in staged IR ' . $this->streamIrPath);
+            }
+            $stagedBytes = $eh->bytes;
+            \Compile\Stats::step('  exceptions: slot lowering (staged)', $statT, $eh->checks, $eh->mayThrow);
+            \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
             // PruneIr used to be unreachable from here: this branch returns the
             // staged marker before the in-memory pruner below ever runs, so every
             // manifest build has been handing clang the discardable helpers it
@@ -1596,6 +1608,12 @@ final class EmitLlvm implements EmitVisitor
         $hoist = new \Compile\Mir\HoistAllocas();
         $ir = $hoist->runFast($ir);
         \Compile\Stats::step('  hoist allocas', $statT, $hoist->moved, -1);
+        // Before pruning: the lowering adds references (`@__mc_uncaught`) the pruner must see.
+        $statT = \Compile\Stats::begin('  exceptions: slot lowering');
+        $eh = $this->ehLowerIr();
+        $ir = $eh->run($ir);
+        \Compile\Stats::step('  exceptions: slot lowering', $statT, $eh->checks, $eh->mayThrow);
+        \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
         // Everything above is emitted on DEMAND FLAGS, not on reachability: the
         // whole unified array runtime, the rc/arena/pool helpers and the
         // unconditional prelude land in every module whether or not the program
@@ -1974,7 +1992,7 @@ final class EmitLlvm implements EmitVisitor
         $out .= "  %nbuf = call ptr @__mir_str_alloc(i64 %ncap)\n";
         $out .= "  %oldbuf = load ptr, ptr %bufp\n";
         $out .= "  call ptr @memcpy(ptr %nbuf, ptr %oldbuf, i64 %w)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %oldbuf)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %oldbuf)\n";
         $out .= "  store ptr %nbuf, ptr %bufp\n";
         $out .= "  store i64 %ncap, ptr %capp\n";
         $out .= "  br label %write\n";
@@ -3856,7 +3874,7 @@ final class EmitLlvm implements EmitVisitor
             || $tk === Type::KIND_BOOL) {
             // int/float_to_str coercion temp — always fresh.
             $this->rt->needsStrRc = true;
-            return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+            return '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
         }
         if ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN || $op->type->isArray()) {
             // A cell / erased operand's text is uniformly OWNED: {@see
@@ -3868,7 +3886,7 @@ final class EmitLlvm implements EmitVisitor
             // A fresh cell temp (`$cell ?? '-'`, a cell call) owes its tagged
             // word too; {@see EmitLlvmExpr::coerceToStr} parks it by this ptr.
             $this->rt->needsStrRc = true;
-            $out = '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+            $out = '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
             $cell = $this->ssa->takeCell($ptr);
             if ($cell !== '') {
                 $out .= $this->rcReleaseReg($cell, 'cell');
@@ -3953,7 +3971,7 @@ final class EmitLlvm implements EmitVisitor
         }
         if (!$this->isFreshStringTemp($node)) { return ''; }
         $this->rt->needsStrRc = true;
-        return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+        return '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
     }
 
     /**

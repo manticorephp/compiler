@@ -1007,7 +1007,7 @@ trait EmitLlvmObjects
             $oldSsa = $this->ssa;
             $this->ssa = new \Compile\Mir\SsaBuilder();
             $body = 'define linkonce_odr i64 ' . $sym . '(' . $pl . ') alwaysinline'
-                . \Compile\Runtime\UnwindRuntime::PERSONALITY . " {\nentry:\n"
+                . " {\nentry:\n"
                 . '  %r = invoke i64 ' . $callee . '(' . $pl . ") to label %ok unwind label %lp\n"
                 . "ok:\n  ret i64 %r\nlp:\n  %l = landingpad { ptr, i32 } cleanup\n";
             if ($this->resolveMethodClass($class, '__destruct') !== '') {

@@ -1547,7 +1547,7 @@ trait EmitLlvmExpr
             $out .= "  %ossel = select i1 %osgt, i64 1, i64 0\n";
             $out .= "  %osres = select i1 %oslt, i64 -1, i64 %ossel\n";
         }
-        $out .= "  call void @__mir_rc_release_str(ptr %osostr)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %osostr)\n";
         $out .= "  ret i64 %osres\n";
         $out .= "objgreater:\n";
         $out .= $eq
@@ -1627,10 +1627,10 @@ trait EmitLlvmExpr
         // per comparison, i.e. per sort step. Release what it made.
         $out .= "  %pla = and i64 %a, 281474976710655\n  %plap = inttoptr i64 %pla to ptr\n";
         $out .= "  %fra = icmp ne ptr %ppa, %plap\n  br i1 %fra, label %rela, label %chkrelb\n";
-        $out .= "rela:\n  call void @__mir_rc_release_str(ptr %ppa)\n  br label %chkrelb\n";
+        $out .= "rela:\n  call void @__mir_rc_release_s(ptr %ppa)\n  br label %chkrelb\n";
         $out .= "chkrelb:\n  %plb = and i64 %b, 281474976710655\n  %plbp = inttoptr i64 %plb to ptr\n";
         $out .= "  %frb = icmp ne ptr %ppb, %plbp\n  br i1 %frb, label %relb, label %scdone\n";
-        $out .= "relb:\n  call void @__mir_rc_release_str(ptr %ppb)\n  br label %scdone\n";
+        $out .= "relb:\n  call void @__mir_rc_release_s(ptr %ppb)\n  br label %scdone\n";
         $out .= "scdone:\n";
         // str_cmp hands back the raw byte difference; this function's contract is
         // -1/0/+1 (a `<=>` result is returned verbatim now, not merely tested

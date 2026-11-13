@@ -2199,7 +2199,7 @@ final class UnifiedArrayRuntime
 
         // tag 4: string payload.
         $sp = $dostr->inttoptr($dostr->and_($v, Value::int(Type::i64(), 281474976710655)), Type::ptr());
-        $dostr->call('__mir_rc_release_str', Type::void(), [$sp]);
+        $dostr->call('__mir_rc_release_s', Type::void(), [$sp]);
         $dostr->br($done);
 
         // tag 8: object payload (guarded).
@@ -2860,7 +2860,7 @@ final class UnifiedArrayRuntime
         $hskip->br($hadv);
         $hlive->brIf($hlive->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $hkey, $hval);
         $kp = $hkey->load(Type::ptr(), $this->entryAddr($hkey, $arr, $hi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $hkey->call('__mir_rc_release_str', Type::void(), [$kp]);
+        $hkey->call('__mir_rc_release_s', Type::void(), [$kp]);
         $hkey->br($hval);
         if ($repr) {
             $hvdrop = $fn->block('hvdrop');
@@ -5304,14 +5304,14 @@ final class UnifiedArrayRuntime
         $nbuf = $grow->call('__mir_str_alloc', Type::ptr(), [$need]);
         $obuf = $grow->load(Type::ptr(), $bufSlot);
         $grow->call('memcpy', Type::ptr(), [$nbuf, $obuf, $ws]);
-        $grow->call('__mir_rc_release_str', Type::void(), [$obuf]);
+        $grow->call('__mir_rc_release_s', Type::void(), [$obuf]);
         $grow->store($nbuf, $bufSlot);
         $grow->store($need, $capSlot);
         $grow->br($scopy);
         $bs = $scopy->load(Type::ptr(), $bufSlot);
         $scopy->call('memcpy', Type::ptr(), [$scopy->gep(Type::i8(), $bs, [$ws]), $str, $sl]);
         $scopy->store($scopy->add($ws, $sl), $wSlot);
-        $scopy->call('__mir_rc_release_str', Type::void(), [$str]);
+        $scopy->call('__mir_rc_release_s', Type::void(), [$str]);
         $scopy->br($next);
 
         $next->store($next->add($next->load(Type::i64(), $iSlot), Value::int(Type::i64(), 1)), $iSlot);
@@ -5942,7 +5942,7 @@ final class UnifiedArrayRuntime
         $kind = $body->load(Type::i64(), $this->entryAddr($body, $arr, $i, MemoryAbi::ARRAY_ENTRY_KIND_OFFSET));
         $body->brIf($body->icmp('eq', $kind, Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_STRING)), $skey, $mv);
         $kp = $skey->load(Type::ptr(), $this->entryAddr($skey, $arr, $i, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-        $skey->call('__mir_rc_release_str', Type::void(), [$kp]);
+        $skey->call('__mir_rc_release_s', Type::void(), [$kp]);
         $skey->br($mv);
         $v = $mv->load(Type::i64(), $this->entryAddr($mv, $arr, $i, MemoryAbi::ARRAY_ENTRY_VALUE_OFFSET));
         $mv->store($v, $this->packedSlot($mv, $arr, $i));
@@ -8262,7 +8262,7 @@ final class UnifiedArrayRuntime
         $found->call('__mir_array_index_remove', Type::void(), [$arr, $fi]);
         if ($isStr) {
             $kp = $found->load(Type::ptr(), $this->entryAddr($found, $arr, $fi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
-            $found->call('__mir_rc_release_str', Type::void(), [$kp]);
+            $found->call('__mir_rc_release_s', Type::void(), [$kp]);
             $found->store(Value::null(), $this->entryAddr($found, $arr, $fi, MemoryAbi::ARRAY_ENTRY_KEY_OFFSET));
         }
         $found->store(Value::int(Type::i64(), MemoryAbi::ARRAY_KIND_DELETED),

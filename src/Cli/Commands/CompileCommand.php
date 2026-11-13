@@ -277,7 +277,7 @@ final class CompileCommand extends Command
         $gc = \Manticore\is_darwin()
             ? " -Wl,-dead_strip -Wl,-dead_strip_dylibs" . \Manticore\weak_undef_flags($weak) . \Manticore\darwin_export_flags()
             : " -Wl,--gc-sections -lm";
-        $gc = $gc . \Manticore\unwind_link_flags();
+        $gc = $gc . \Manticore\debug_link_flags();
         $asNeeded = \Manticore\is_darwin() ? "" : " -Wl,--as-needed";
         \Compile\Stats::step('link flags', $flagsT, -1, -1);
         $linkT = \Compile\Stats::begin('link');

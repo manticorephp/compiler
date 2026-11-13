@@ -2431,7 +2431,25 @@ trait EmitLlvmBuiltins
         }
         $name = \ltrim($a0->value, '\\');
         $sym = $this->callbackTarget($name);
-        $this->lastValue = '@manticore_' . $this->mangle($sym);
+        $target = '@manticore_' . $this->mangle($sym);
+        // C may call it: an exception it leaves set is polled after every FFI call ({@see \Compile\Mir\EhLowerIr}).
+        $this->libcExtra['ccallable:' . $sym] = '; mc.ccallable ' . $target;
+        // C gets a trampoline, not the function: C keeps calling (qsort calls
+        // the comparator again after it threw), so a call that finds an
+        // exception pending does nothing, and one that leaves it pending answers
+        // 0, never undef. EhLowerIr leaves `@__mc_cc.*` unlowered.
+        $n = \count($this->sigs->paramTypes[$sym] ?? []);
+        $ps = [];
+        $as = [];
+        for ($i = 0; $i < $n; $i++) { $ps[] = 'i64 %a' . (string)$i; $as[] = 'i64 %a' . (string)$i; }
+        $tramp = '@"__mc_cc.' . \substr($target, 1) . '"';
+        $this->libcExtra['cctramp:' . $sym] = 'define i64 ' . $tramp . '(' . \implode(', ', $ps) . ") {\nentry:\n"
+            . "  %p = load ptr, ptr @__mc_exc\n  %pn = icmp ne ptr %p, null\n  br i1 %pn, label %skip, label %go\n"
+            . "go:\n  %r = call i64 " . $target . '(' . \implode(', ', $as) . ")\n"
+            . "  %q = load ptr, ptr @__mc_exc\n  %qn = icmp ne ptr %q, null\n"
+            . "  %v = select i1 %qn, i64 0, i64 %r\n  ret i64 %v\n"
+            . "skip:\n  ret i64 0\n}";
+        $this->lastValue = $tramp;
         $this->lastValueType = 'ptr';
         return '';
     }
@@ -6924,7 +6942,7 @@ trait EmitLlvmBuiltins
             $dropL = $this->ssa->allocLabel('fmt.rendered');
             $doneL = $this->ssa->allocLabel('fmt.done');
             $out .= '  br i1 ' . $rendered . ', label %' . $dropL . ', label %' . $doneL . "\n";
-            $out .= $dropL . ":\n  call void @__mir_rc_release_str(ptr " . $val . ")\n  br label %" . $doneL . "\n";
+            $out .= $dropL . ":\n  call void @__mir_rc_release_s(ptr " . $val . ")\n  br label %" . $doneL . "\n";
             $out .= $doneL . ":\n";
         }
         $this->lastValue = $buf; $this->lastValueType = 'ptr';
@@ -10958,7 +10976,7 @@ trait EmitLlvmBuiltins
         $buf = $this->lastValue;
         $this->rt->needsStrRc = true;
         $out .= $this->emitOutStr($buf);
-        $out .= '  call void @__mir_rc_release_str(ptr ' . $buf . ")\n";
+        $out .= '  call void @__mir_rc_release_s(ptr ' . $buf . ")\n";
         $this->lastValue = $this->litStr('');
         $this->lastValueType = 'ptr';
         return $out;
@@ -11123,7 +11141,7 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr($pre) . ', ptr ' . $s . ")\n";
         $c2 = $this->ssa->allocReg();
         $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr($post) . ")\n";
-        $out .= '  call void @__mir_rc_release_str(ptr ' . $c1 . ")\n";
+        $out .= '  call void @__mir_rc_release_s(ptr ' . $c1 . ")\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr($nullLit);
@@ -11165,8 +11183,8 @@ trait EmitLlvmBuiltins
         $out .= '  ' . $c1 . ' = call ptr @__mir_concat(ptr ' . $this->litStr("'") . ', ptr ' . $qp . ")\n";
         $c2 = $this->ssa->allocReg();
         $out .= '  ' . $c2 . ' = call ptr @__mir_concat(ptr ' . $c1 . ', ptr ' . $this->litStr("'") . ")\n";
-        $out .= '  call void @__mir_rc_release_str(ptr ' . $qp . ")\n";
-        $out .= '  call void @__mir_rc_release_str(ptr ' . $c1 . ")\n";
+        $out .= '  call void @__mir_rc_release_s(ptr ' . $qp . ")\n";
+        $out .= '  call void @__mir_rc_release_s(ptr ' . $c1 . ")\n";
         $out .= '  br label %' . $lEnd . "\n";
         $out .= $lNull . ":\n";
         $nl = $this->litStr('NULL');
@@ -11384,7 +11402,7 @@ trait EmitLlvmBuiltins
         $err = $this->ssa->allocReg();
         $out .= '  ' . $err . " = call i64 @manticore___mc_json_err(i64 -1)\n";
         $out .= $this->jsonThrowTail($args, 1, $flags, $err, 1,
-            '  call void @__mir_rc_release_str(ptr ' . $reg . ")\n");
+            '  call void @__mir_rc_release_s(ptr ' . $reg . ")\n");
         $pf = $this->ssa->allocReg();
         $out .= '  ' . $pf . ' = and i64 ' . $flags . ", 512\n";
         $part = $this->ssa->allocReg();
@@ -11403,7 +11421,7 @@ trait EmitLlvmBuiltins
         $out .= '  br label %' . $joinL . "\n";
         // A failed call answers false and the buffer it wrote is nobody's.
         $out .= $failL . ":\n";
-        $out .= '  call void @__mir_rc_release_str(ptr ' . $reg . ")\n";
+        $out .= '  call void @__mir_rc_release_s(ptr ' . $reg . ")\n";
         $fc = $this->ssa->allocReg();
         $out .= '  ' . $fc . " = call i64 @__manticore_box_bool(i64 0)\n";
         $out .= '  br label %' . $joinL . "\n";
