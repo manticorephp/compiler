@@ -101,6 +101,7 @@ Rules of evidence:
   `unknown` and a bug in that path vanishes from the dump. Read the final binary.
 - A test that passes without the fix is not a test.
 - A crash inside libmalloc (`mfm_alloc`, "memory corruption of free block") is a write past or after a block, far from its cause. Find it with `MANTICORE_ASAN=1` (stdlib `--libs-only` AND app; 0xbe fill names an uninitialized read) before anything else; `MANTICORE_REF_QUARANTINE=1` (freed arrays / ref boxes poisoned, never reused; adds `-no_compact_unwind`) and `MANTICORE_POOL_POISON=1` (pool blocks 0xDE) are measurement builds, `bin/build` restores the normal libraries.
+- Code that keeps running after a `throw` (a line printed past the throw, a catch skipped) means a call the exception lowering judged nothrow did throw (`src/Compile/Mir/EhLowerIr.php`). Build with `MANTICORE_EH_ASSERT=1` (stdlib `--libs-only` AND app): every call judged nothrow is followed by a slot test that traps with `EH ASSERT: exception set after nothrow call to @f`, naming the callee. `MANTICORE_EH_WHY=1` prints, at compile time, the callee that makes each runtime helper may-throw. A debug build: `bin/build` restores the normal libraries.
 - Cap every log you write (`| tail`, `head -c`). A runaway trace log has filled
   the disk more than once. Delete probe binaries and `.ll` files as soon as they
   are read.
