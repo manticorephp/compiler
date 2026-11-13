@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# The stdlib bootstrap twins compiled into a stdlib:false program: builtins still shadow them. Byte parity against php.
+# The stdlib bootstrap twins (a runtime: true library) compiled into a stdlib:false program: builtins still
+# shadow them. --apps-only: the twins library alone does not build (it calls the stdlib it stands in for).
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,7 +17,7 @@ fi
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
-if ! "$MC" build "$FIX/manticore.json" > "$WORK/build.log" 2>&1; then
+if ! "$MC" build --apps-only "$FIX/manticore.json" > "$WORK/build.log" 2>&1; then
     echo "FAIL build"
     cat "$WORK/build.log"
     exit 1
