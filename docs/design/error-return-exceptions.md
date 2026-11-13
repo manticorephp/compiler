@@ -1,6 +1,6 @@
 # Error-return exceptions
 
-Status: design + probes (2026-11-11). Issue #648.
+Status: implemented (2026-11-13), PR #670. Issue #648. "As built" below records where the build departs from this design.
 
 ## Why
 
@@ -97,7 +97,9 @@ check. Indirect / virtual / `$f()` calls stay checked.
   generator exclusion the call-temp work had to make.
 - **Fibers**: the fiber entry returns with the slot set → the trampoline
   switches back to the resumer, which sees the slot set after `resume()` /
-  `start()` and propagates. Slot is saved/restored per fiber.
+  `start()` and propagates. No per-fiber save (as built): a switch happens only
+  inside `resume`/`suspend`, both may-throw calls, so the slot is clear at every
+  switch.
 
 ## Cost (probe, macOS arm64, clang -O2)
 
@@ -146,3 +148,48 @@ measures it on the compiler itself.
 Exact IR of the propagate block per return type; how `ehPhiRetarget` maps the
 new edges (same as invoke today); block layout/`!prof` weights; the generator
 `resume` contract details.
+
+## As built (2026-11-13)
+
+Rulings that differ from the text above:
+
+1. **Switch point is the final IR text**, not `ehLower`: `Compile\Mir\EhLowerIr`
+   lowers `invoke`/`landingpad`/`resume` after emission (streamed for staged
+   modules), before `PruneIr`. Emitters are unchanged.
+2. **No per-fiber slot save** (see Boundaries).
+3. **A wrong nothrow is a correctness bug**, not a missed optimisation: code
+   runs after a throw. `MANTICORE_EH_ASSERT=1` checks the slot after every call
+   judged nothrow and traps with `EH ASSERT: exception set after nothrow call
+   to @f`.
+4. **Every function is `nounwind`**: nothing unwinds, so no CFI is emitted.
+   `__eh_frame` is gone and the compiler's `__unwind_info` shrank from 848 KB
+   to 174 KB. (clang's `-fno-asynchronous-unwind-tables` has no effect on `.ll`
+   input; the attribute is what counts.)
+5. **The slot holds the Throwable itself**: no 48-byte header and no malloc per
+   throw. Memory ABI v26.
+6. **String releases**: a Generator frame shares the string header, so the
+   generic `__mir_rc_release_str` may throw (`__mir_gen_destroy` runs
+   `finally`). Releases of values that are strings by construction (cell tag
+   4, array keys, string buffers, coercion temps) go through the nothrow twin
+   `__mir_rc_release_s` / `__mir_str_free`. Typed `'str'` flavor releases still
+   take the gen-capable helper, because Ownership gives a Generator the `str`
+   flavor.
+7. `MANTICORE_EH_WHY=1` prints, for each may-throw runtime helper, the callee
+   that made it so.
+
+Measured on macOS arm64 under a loaded host (load 35–190). Timings are
+interleaved medians; instruction counts come from `/usr/bin/time -l` and do
+not depend on load.
+
+| | zero-cost (main) | error-return | php 8.5 |
+|---|---|---|---|
+| `bench/cases/throw_catch.php` (900k throws) | 4.8–7.0 s | 45 ms | 0.38 s |
+| per throw | 5–8 µs | ~0.05 µs | ~0.42 µs |
+| bench corpus total without throw_catch | 5855 ms | 5690 ms | |
+| self-build (`bin/build`, loaded) | | 207 s | |
+
+The happy path costs a load plus a predicted branch after each may-throw call.
+In instructions retired: fib +50% (its time is unchanged), json_records +1.9%,
+net_lines +2.0%, json +3.5%, bcmath +3.9–5.6%, fiber_switch +5.6%,
+generator_yield +8%. The rest is honest: an object or cell release can run a
+destructor. Removing it needs a "class without destructor" analysis.
