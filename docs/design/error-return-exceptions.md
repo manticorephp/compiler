@@ -174,7 +174,15 @@ Rulings that differ from the text above:
    `__mir_rc_release_s` / `__mir_str_free`. Typed `'str'` flavor releases still
    take the gen-capable helper, because Ownership gives a Generator the `str`
    flavor.
-7. `MANTICORE_EH_WHY=1` prints, for each may-throw runtime helper, the callee
+7. **C gets a trampoline** `@"__mc_cc.<fn>"` from `fn_to_ptr`: C keeps
+   calling (qsort calls the comparator after it threw), so a call that finds
+   an exception pending does nothing and answers 0, and one that leaves it
+   pending answers 0, never undef. The FFI wrapper always tests the slot after
+   the C call, so a linkonce_odr wrapper reads the same in every module.
+8. **Exceptions at exit**: a throwing shutdown function or ob callback goes
+   to the exception handler (else the fatal) and the queue carries on, as php
+   does; the atexit trampolines hand a pending exception to `@__mc_uncaught`.
+9. `MANTICORE_EH_WHY=1` prints, for each may-throw runtime helper, the callee
    that made it so.
 
 Measured on macOS arm64 under a loaded host (load 35–190). Timings are
