@@ -173,7 +173,7 @@ Rulings that differ from the text above:
    4, array keys, string buffers, coercion temps) go through the nothrow twin
    `__mir_rc_release_s` / `__mir_str_free`. Typed `'str'` flavor releases still
    take the gen-capable helper, because Ownership gives a Generator the `str`
-   flavor.
+   flavor; a local drop whose slot is statically `string` takes the twin too (#679).
 7. **C gets a trampoline** `@"__mc_cc.<fn>"` from `fn_to_ptr`: C keeps
    calling (qsort calls the comparator after it threw), so a call that finds
    an exception pending does nothing and answers 0, and one that leaves it
@@ -184,6 +184,14 @@ Rulings that differ from the text above:
    does; the atexit trampolines hand a pending exception to `@__mc_uncaught`.
 9. `MANTICORE_EH_WHY=1` prints, for each may-throw runtime helper, the callee
    that made it so.
+10. **An `alwaysinline` helper reports a throw in its return value** (#679).
+    A slot load after an inlined body cannot fold: nothing tells LLVM the slot
+    was null before the call. So each may-throw void `alwaysinline` define gets
+    an `internal` twin `@f.r` returning i1 (1 from its propagate block, 0 from
+    every other `ret`), and calls test that. Inlined, the fast path returns a
+    constant 0 and the test disappears. `__mir_cell_drop` of an int cell paid
+    a check on every loop iteration before this: generator_yield −7%
+    instructions, bcmath −2%, fiber_switch −2%.
 
 Measured on macOS arm64 under a loaded host (load 35–190). Timings are
 interleaved medians; instruction counts come from `/usr/bin/time -l` and do
@@ -199,5 +207,6 @@ not depend on load.
 The happy path costs a load plus a predicted branch after each may-throw call.
 In instructions retired: fib +50% (its time is unchanged), json_records +1.9%,
 net_lines +2.0%, json +3.5%, bcmath +3.9–5.6%, fiber_switch +5.6%,
-generator_yield +8%. The rest is honest: an object or cell release can run a
-destructor. Removing it needs a "class without destructor" analysis.
+generator_yield +8% (before item 10). Measured with every release helper forced
+nothrow, what remains after item 10 is at most ~1% of instructions on these
+benches, so a "class without destructor" analysis has little left to win.

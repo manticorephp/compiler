@@ -67,6 +67,19 @@ final class EhLowerIr
 
     // sweep-1 state
     private string $scanFn = '';
+    /** @var array<string, bool> void `alwaysinline` defines, before {@see solve} */
+    private array $inline = [];
+    /**
+     * @var array<string, bool> the may-throw ones among them. Each gets an
+     * `internal` twin returning i1 = "left with the slot set" ({@see flagTwin}),
+     * and a call tests that instead of the slot. Inlined, the fast path returns
+     * a constant 0 and the test folds away: a slot load cannot, as nothing tells
+     * LLVM the slot was null before the call. `__mir_cell_drop` of an int cell
+     * paid the check on every iteration of a loop.
+     */
+    private array $flagRet = [];
+    /** The function sweep 2 is in. */
+    private string $fnName = '';
 
     /** @param array<string, bool> $nothrowSyms */
     public function __construct(array $nothrowSyms)
@@ -184,6 +197,10 @@ final class EhLowerIr
             if ($fn !== '') {
                 $this->scanFn = $fn;
                 if ($fn === '@__mc_uncaught') { $this->hasUncaught = true; }
+                $at = \strpos($l, ' @');
+                if (\strpos($l, ' alwaysinline') !== false && $at !== false && self::retTypeOf(\substr($l, 0, $at)) === 'void') {
+                    $this->inline[$fn] = true;
+                }
                 $this->callees[$fn] = [];
                 $this->may[$fn] = false;
             }
@@ -215,6 +232,7 @@ final class EhLowerIr
         }
         $this->mayThrow = 0;
         foreach ($this->may as $v) { if ($v) { $this->mayThrow = $this->mayThrow + 1; } }
+        foreach ($this->inline as $f => $unused) { if ($this->may[$f]) { $this->flagRet[$f] = true; } }
         // MANTICORE_EH_WHY=1: why each runtime helper may throw (one edge each).
         if (\getenv('MANTICORE_EH_WHY') === '1') {
             foreach ($this->why as $f => $c) {
@@ -380,6 +398,7 @@ final class EhLowerIr
             $name = self::defineName($l);
             if ($name !== '') {
                 $this->inFn = true;
+                $this->fnName = $name;
                 // The runtime's own entry points never propagate: no checks inside.
                 $this->skip = \str_starts_with($name, '@__mc_eh_') || $name === '@__mc_throw' || $name === '@__mc_uncaught'
                     || $name === '@__mir_uncaught' || \str_starts_with($name, '@"__mc_cc.')
@@ -444,7 +463,15 @@ final class EhLowerIr
                 $norm = \substr($l, $tl + 11, $ul - $tl - 11);
                 $pad = self::labelAt(\substr($l, $ul + 15));
                 $s = $this->nextSeq();
-                $this->emit(\substr($l, 0, $iv) . 'call ' . \substr($l, $iv + 7, $tl - $iv - 7));
+                $call = \substr($l, 0, $iv) . 'call ' . \substr($l, $iv + 7, $tl - $iv - 7);
+                $flag = $this->flagCall($call, $s);
+                if ($flag !== '') {
+                    $this->emit($flag);
+                    $this->emit('  br i1 %mc.r' . $s . ', label %' . $pad . ', label %' . $norm);
+                    $this->checks = $this->checks + 1;
+                    return;
+                }
+                $this->emit($call);
                 $this->emit('  %mc.c' . $s . ' = load ptr, ptr @__mc_exc');
                 $this->emit('  %mc.d' . $s . ' = icmp ne ptr %mc.c' . $s . ', null');
                 $this->emit('  br i1 %mc.d' . $s . ', label %' . $pad . ', label %' . $norm);
@@ -459,10 +486,16 @@ final class EhLowerIr
             if ($c === self::POLL || ($c !== null && $this->calleeMay($c))) {
                 $s = $this->nextSeq();
                 $k = 'mc.k' . $s;
-                if ($c !== self::POLL) { $this->emit($l); }
-                $this->emit('  %mc.c' . $s . ' = load ptr, ptr @__mc_exc');
-                $this->emit('  %mc.d' . $s . ' = icmp ne ptr %mc.c' . $s . ', null');
-                $this->emit('  br i1 %mc.d' . $s . ', label %mc.prop, label %' . $k);
+                $flag = $c === self::POLL ? '' : $this->flagCall($l, $s);
+                if ($flag !== '') {
+                    $this->emit($flag);
+                    $this->emit('  br i1 %mc.r' . $s . ', label %mc.prop, label %' . $k);
+                } else {
+                    if ($c !== self::POLL) { $this->emit($l); }
+                    $this->emit('  %mc.c' . $s . ' = load ptr, ptr @__mc_exc');
+                    $this->emit('  %mc.d' . $s . ' = icmp ne ptr %mc.c' . $s . ', null');
+                    $this->emit('  br i1 %mc.d' . $s . ', label %mc.prop, label %' . $k);
+                }
                 $this->emit($k . ':');
                 if ($this->cur !== '') { $this->last[$this->cur] = $k; }
                 $this->needProp = true;
@@ -517,7 +550,55 @@ final class EhLowerIr
             if ($retarget && \strpos($line, ' = phi ') !== false) { $line = self::phiRetarget($line, $this->last); }
             $this->put($line);
         }
+        if (isset($this->flagRet[$this->fnName])) { $this->flagTwin($retarget); }
         $this->fnBuf = [];
         $this->last = [];
+    }
+
+    /** `@f` → `@f.r`, `@"f"` → `@"f.r"`: the flag-returning twin's name. */
+    private static function twinName(string $f): string
+    {
+        return \str_ends_with($f, '"') ? \substr($f, 0, \strlen($f) - 1) . '.r"' : $f . '.r';
+    }
+
+    /**
+     * `$l` (a void call of a {@see $flagRet} function, no result) as a call of its
+     * twin into `%mc.r<s>`; '' when `$l` is not such a call.
+     */
+    private function flagCall(string $l, string $s): string
+    {
+        if ($this->flagRet === []) { return ''; }
+        $c = self::callee($l, true);
+        if ($c === null || $c === '' || !isset($this->flagRet[$c])) { return ''; }
+        $needle = 'call void ' . $c . '(';
+        $p = \strpos($l, $needle);
+        if ($p === false) { return ''; }
+        $head = \substr($l, 0, $p);
+        if (\trim($head) !== '' && \trim($head) !== 'tail') { return ''; }
+        return '  %mc.r' . $s . ' = call i1 ' . self::twinName($c) . '(' . \substr($l, $p + \strlen($needle));
+    }
+
+    /**
+     * The `internal` twin of the void function just written: the same lowered
+     * body, returning 1 from its propagate block and 0 from every other `ret`.
+     */
+    private function flagTwin(bool $retarget): void
+    {
+        $label = '';
+        $n = \count($this->fnBuf);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $line = (string)$this->fnBuf[$i];
+            if ($i === 0) {
+                $pe = \strpos($line, $this->fnName . '(');
+                $line = 'define internal i1 ' . self::twinName($this->fnName) . \substr($line, $pe + \strlen($this->fnName));
+            } elseif ($line === '  ret void') {
+                $line = $label === 'mc.prop' ? '  ret i1 1' : '  ret i1 0';
+            } else {
+                $len = \strlen($line);
+                if ($len > 0 && $line[0] !== ' ' && $line[$len - 1] === ':' && $line[0] !== ';') { $label = \substr($line, 0, $len - 1); }
+                if ($retarget && \strpos($line, ' = phi ') !== false) { $line = self::phiRetarget($line, $this->last); }
+            }
+            $this->put($line);
+        }
     }
 }
