@@ -2530,6 +2530,18 @@ trait EmitLlvmModule
         if ($this->needsErrorHandlers) {
             $out .= "  %eb = call i64 @__manticore_box_object(ptr %e)\n";
             $out .= "  %handled = call i64 @manticore___mc_dispatch_uncaught(i64 %eb)\n";
+            // A handler that throws: its exception is the uncaught one now (php
+            // prints its fatal). The handler stack is already empty, so the
+            // re-entry prints. EhLowerIr leaves this function unlowered.
+            $out .= "  %hx = load ptr, ptr @__mc_exc\n";
+            $out .= "  %hxs = icmp ne ptr %hx, null\n";
+            $out .= "  br i1 %hxs, label %uc_rethrown, label %uc_ret\n";
+            $out .= "uc_rethrown:\n";
+            $out .= "  store ptr null, ptr @__mc_exc\n";
+            $out .= "  store ptr %hx, ptr @__mir_thrown\n";
+            $out .= "  call void @__mir_uncaught()\n";
+            $out .= "  unreachable\n";
+            $out .= "uc_ret:\n";
             $out .= "  %washandled = icmp ne i64 %handled, 0\n";
             $out .= "  br i1 %washandled, label %uc_handled, label %uc_print\n";
             $out .= "uc_handled:\n";
@@ -2578,7 +2590,7 @@ trait EmitLlvmModule
         $header = "define i32 @main(i32 %argc, ptr %argv)"
             . " {\nentry:\n";
         if ($this->rt->needsExceptions) {
-            // A throw no catch pad takes ends in the uncaught fatal: `@__mc_throw`
+            // A throw no catch pad takes ends in the uncaught fatal: `@__mc_uncaught`
             // calls it through this hook, which the stdlib.o copy shares.
             $header .= "  store ptr @__mir_uncaught, ptr @__mc_uncaught_fn\n";
         }

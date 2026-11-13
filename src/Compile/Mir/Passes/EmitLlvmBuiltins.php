@@ -2419,9 +2419,25 @@ trait EmitLlvmBuiltins
         }
         $name = \ltrim($a0->value, '\\');
         $sym = $this->callbackTarget($name);
-        $this->lastValue = '@manticore_' . $this->mangle($sym);
+        $target = '@manticore_' . $this->mangle($sym);
         // C may call it: an exception it leaves set is polled after every FFI call ({@see \Compile\Mir\EhLowerIr}).
-        $this->libcExtra['ccallable:' . $sym] = '; mc.ccallable ' . $this->lastValue;
+        $this->libcExtra['ccallable:' . $sym] = '; mc.ccallable ' . $target;
+        // C gets a trampoline, not the function: C keeps calling (qsort calls
+        // the comparator again after it threw), so a call that finds an
+        // exception pending does nothing, and one that leaves it pending answers
+        // 0, never undef. EhLowerIr leaves `@__mc_cc.*` unlowered.
+        $n = \count($this->sigs->paramTypes[$sym] ?? []);
+        $ps = [];
+        $as = [];
+        for ($i = 0; $i < $n; $i++) { $ps[] = 'i64 %a' . (string)$i; $as[] = 'i64 %a' . (string)$i; }
+        $tramp = '@"__mc_cc.' . \substr($target, 1) . '"';
+        $this->libcExtra['cctramp:' . $sym] = 'define i64 ' . $tramp . '(' . \implode(', ', $ps) . ") {\nentry:\n"
+            . "  %p = load ptr, ptr @__mc_exc\n  %pn = icmp ne ptr %p, null\n  br i1 %pn, label %skip, label %go\n"
+            . "go:\n  %r = call i64 " . $target . '(' . \implode(', ', $as) . ")\n"
+            . "  %q = load ptr, ptr @__mc_exc\n  %qn = icmp ne ptr %q, null\n"
+            . "  %v = select i1 %qn, i64 0, i64 %r\n  ret i64 %v\n"
+            . "skip:\n  ret i64 0\n}";
+        $this->lastValue = $tramp;
         $this->lastValueType = 'ptr';
         return '';
     }

@@ -377,11 +377,16 @@ final class EhLowerIr
             if ($name !== '') {
                 $this->inFn = true;
                 // The runtime's own entry points never propagate: no checks inside.
-                $this->skip = \str_starts_with($name, '@__mc_eh_') || $name === '@__mc_throw' || $name === '@__mc_uncaught';
+                $this->skip = \str_starts_with($name, '@__mc_eh_') || $name === '@__mc_throw' || $name === '@__mc_uncaught'
+                    || $name === '@__mir_uncaught' || \str_starts_with($name, '@"__mc_cc.');
                 $this->isMain = $name === '@main';
                 $at = \strpos($l, ' @');
                 $this->retTy = $at === false ? 'void' : self::retTypeOf(\substr($l, 0, $at));
                 $this->cur = '';
+                // Labels and registers are function-local: numbering per function
+                // keeps a linkonce_odr body byte-identical across modules (the
+                // shared-generics object cache keys on its text).
+                $this->seq = 0;
                 $this->needProp = false;
                 // Nothing unwinds in this model: without nounwind every function
                 // keeps a CFI frame (__eh_frame / .eh_frame) nobody reads.
@@ -460,7 +465,7 @@ final class EhLowerIr
             }
             $a = $this->assert ? self::callee($l, true) : null;
             if ($a !== null && $a !== '' && $a !== self::POLL) {
-                if (!isset($this->assertMsg[$a])) { $this->assertMsg[$a] = '@.mc.ea.' . (string)\count($this->assertMsg); }
+                if (!isset($this->assertMsg[$a])) { $this->assertMsg[$a] = '@".mc.ea.' . \trim(\substr($a, 1), '"') . '"'; }
                 $len = \strlen('EH ASSERT: exception set after nothrow call to ' . $a . "\n");
                 $s = $this->nextSeq();
                 $k = 'mc.k' . $s;
