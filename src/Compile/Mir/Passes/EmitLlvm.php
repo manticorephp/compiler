@@ -3999,7 +3999,7 @@ final class EmitLlvm implements EmitVisitor
             $slot = $this->ownOpSlot($mo);
             if ($slot === '') { return ''; }
             if ($mo->op === 'drop') {
-                return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo))
+                return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo), $this->releaseNothrow($mo))
                     . '  store i64 0, ptr ' . $slot . "\n";
             }
             return $this->ownRetainSlot($slot, $mo);
