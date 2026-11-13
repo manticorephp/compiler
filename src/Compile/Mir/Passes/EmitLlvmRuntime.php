@@ -766,6 +766,17 @@ trait EmitLlvmRuntime
         $out .= "  call void @free(ptr %sbase)\n";
         $out .= "  ret void\n";
         $out .= "}\n";
+        // `__mir_str_free`: the same reclaim for a base that is a STRING by
+        // construction (cell tag 4, array keys, string buffers). It never
+        // reaches `__mir_gen_destroy`, so it — and every release built on it —
+        // cannot throw, and callers skip the exception check
+        // ({@see \Compile\Mir\EhLowerIr}). A frame here is an emitter bug:
+        // MANTICORE_DEBUG_VERIFY aborts on it.
+        $rcl = \substr($out, \strrpos($out, "define void @__mir_str_reclaim(ptr %sbase) {\n"));
+        $out .= \str_replace(
+            ['@__mir_str_reclaim(ptr %sbase)', "  call void @__mir_gen_destroy(ptr %gfr)\n  br label %df\n"],
+            ['@__mir_str_free(ptr %sbase)', \Compile\Debug::$verify ? "  call void @abort()\n  unreachable\n" : "  br label %df\n"],
+            $rcl);
         // The last reference to a Generator frame is gone. One that is not
         // finished (state ≥ 0: never started, or suspended at yield k) is
         // re-entered at `-2 - state`, where the resume function carries the exit
@@ -1188,6 +1199,13 @@ trait EmitLlvmRuntime
             $out .= "done:\n";
             $out .= "  ret void\n";
             $out .= "}\n";
+            // `__mir_rc_release_s`: the release of a value that is a string by
+            // construction, over `__mir_str_free` — nothrow (see there).
+            $rel = \substr($out, \strrpos($out, "define void @__mir_rc_release_str(ptr %p) {\n"));
+            $out .= \str_replace(
+                ['@__mir_rc_release_str(ptr %p)', '@__mir_str_reclaim('],
+                ['@__mir_rc_release_s(ptr %p)', '@__mir_str_free('],
+                $rel);
         }
         if (!$this->rt->needsArena) {
             return $out;
@@ -5187,7 +5205,7 @@ end:
         $out .= "  %gnul = getelementptr inbounds i8, ptr %buf, i64 %sum\n";
         $out .= "  store i8 0, ptr %gnul\n";
         $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %sum)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %s)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %s)\n";
         $out .= "  ret ptr %buf\n";
         $out .= "}\n";
 
@@ -5284,7 +5302,7 @@ end:
         $out .= "entry:\n";
         $out .= "  %s = call ptr @__mir_float_to_str(double %d)\n";
         $out .= "  call void @__mir_out_str(ptr %s)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %s)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %s)\n";
         $out .= "  ret void\n}\n";
 
         // fflush(stdout), NOT fflush(NULL): draining every stream would also
@@ -5355,7 +5373,7 @@ end:
         $out .= "  %held = icmp ne ptr %cur, null\n";
         $out .= "  br i1 %held, label %drop, label %fin\n";
         $out .= "drop:\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %cur)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %cur)\n";
         $out .= "  br label %fin\n";
         $out .= "fin:\n";
         $out .= "  store ptr null, ptr %sp\n";
@@ -5435,7 +5453,7 @@ end:
         $out .= "  %s = call ptr @__mir_ob_take(i64 %l)\n";
         // take() answers the immortal empty sentinel for an empty level; its rc
         // is -1, and release skips an immortal, so this needs no extra guard.
-        $out .= "  call void @__mir_rc_release_str(ptr %s)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %s)\n";
         $out .= "  ret void\n}\n";
 
         // `_set_` in the name, not just `@__mir_ob_inuse`: LLVM has ONE global

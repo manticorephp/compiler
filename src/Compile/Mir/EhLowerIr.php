@@ -45,6 +45,8 @@ final class EhLowerIr
     private array $callees = [];
     /** @var array<string, bool> */
     private array $may = [];
+    /** @var array<string, string> may-throw function → the callee that made it so */
+    private array $why = [];
 
     // sweep-2 state, per function
     private bool $inFn = false;
@@ -98,7 +100,7 @@ final class EhLowerIr
         }
         if (!$this->hasWrite) { $t .= "\ndeclare i64 @write(i32, ptr, i64)"; }
         if (!$this->hasTrap) { $t .= "\ndeclare void @llvm.trap()"; }
-        return $t . "\ndefine linkonce_odr void @__mc_eh_assert_fail(ptr %m, i64 %n) cold noinline {\nentry:\n"
+        return $t . "\ndefine linkonce_odr void @__mc_eh_assert_fail(ptr %m, i64 %n) cold noinline nounwind {\nentry:\n"
             . "  %w = call i64 (i32, ptr, i64) @write(i32 2, ptr %m, i64 %n)\n"
             . "  call void @llvm.trap()\n  unreachable\n}";
     }
@@ -187,7 +189,11 @@ final class EhLowerIr
         if (\strpos($l, 'call ') === false && \strpos($l, 'invoke ') === false) { return; }
         $c = self::callee(self::invokeAsCall($l));
         if ($c === null) { return; }
-        if ($c === '' || $c === '@__mc_throw') { $this->may[$this->scanFn] = true; return; }
+        if ($c === '' || $c === '@__mc_throw') {
+            if (!$this->may[$this->scanFn]) { $this->why[$this->scanFn] = $c === '' ? '(indirect)' : $c; }
+            $this->may[$this->scanFn] = true;
+            return;
+        }
         $this->callees[$this->scanFn][] = $c;
     }
 
@@ -199,12 +205,18 @@ final class EhLowerIr
             foreach ($this->callees as $f => $cs) {
                 if ($this->may[$f]) { continue; }
                 foreach ($cs as $c) {
-                    if ($this->calleeMay($c)) { $this->may[$f] = true; $changed = true; break; }
+                    if ($this->calleeMay($c)) { $this->may[$f] = true; $this->why[$f] = $c; $changed = true; break; }
                 }
             }
         }
         $this->mayThrow = 0;
         foreach ($this->may as $v) { if ($v) { $this->mayThrow = $this->mayThrow + 1; } }
+        // MANTICORE_EH_WHY=1: why each runtime helper may throw (one edge each).
+        if (\getenv('MANTICORE_EH_WHY') === '1') {
+            foreach ($this->why as $f => $c) {
+                if (\str_starts_with($f, '@__')) { \fwrite(\STDERR, 'eh-why ' . $f . ' <- ' . $c . "\n"); }
+            }
+        }
     }
 
     private function calleeMay(string $c): bool
@@ -371,6 +383,15 @@ final class EhLowerIr
                 $this->retTy = $at === false ? 'void' : self::retTypeOf(\substr($l, 0, $at));
                 $this->cur = '';
                 $this->needProp = false;
+                // Nothing unwinds in this model: without nounwind every function
+                // keeps a CFI frame (__eh_frame / .eh_frame) nobody reads.
+                // Attributes go before `prefix` data (closures carry one).
+                if (\strpos($l, ' nounwind') === false) {
+                    $px = \strpos($l, ' prefix [');
+                    $l = $px !== false
+                        ? \substr($l, 0, $px) . ' nounwind' . \substr($l, $px)
+                        : \substr($l, 0, \strrpos($l, '{')) . 'nounwind {';
+                }
             }
             $this->emit($l);
             return;

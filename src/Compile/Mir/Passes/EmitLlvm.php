@@ -1992,7 +1992,7 @@ final class EmitLlvm implements EmitVisitor
         $out .= "  %nbuf = call ptr @__mir_str_alloc(i64 %ncap)\n";
         $out .= "  %oldbuf = load ptr, ptr %bufp\n";
         $out .= "  call ptr @memcpy(ptr %nbuf, ptr %oldbuf, i64 %w)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %oldbuf)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %oldbuf)\n";
         $out .= "  store ptr %nbuf, ptr %bufp\n";
         $out .= "  store i64 %ncap, ptr %capp\n";
         $out .= "  br label %write\n";
@@ -3874,7 +3874,7 @@ final class EmitLlvm implements EmitVisitor
             || $tk === Type::KIND_BOOL) {
             // int/float_to_str coercion temp — always fresh.
             $this->rt->needsStrRc = true;
-            return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+            return '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
         }
         if ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN || $op->type->isArray()) {
             // A cell / erased operand's text is uniformly OWNED: {@see
@@ -3886,7 +3886,7 @@ final class EmitLlvm implements EmitVisitor
             // A fresh cell temp (`$cell ?? '-'`, a cell call) owes its tagged
             // word too; {@see EmitLlvmExpr::coerceToStr} parks it by this ptr.
             $this->rt->needsStrRc = true;
-            $out = '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+            $out = '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
             $cell = $this->ssa->takeCell($ptr);
             if ($cell !== '') {
                 $out .= $this->rcReleaseReg($cell, 'cell');
@@ -3971,7 +3971,7 @@ final class EmitLlvm implements EmitVisitor
         }
         if (!$this->isFreshStringTemp($node)) { return ''; }
         $this->rt->needsStrRc = true;
-        return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+        return '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
     }
 
     /**
