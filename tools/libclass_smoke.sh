@@ -41,7 +41,7 @@ fi
 # what proves the class really crossed as a link-time dependency instead of
 # being compiled twice.
 libsyms="$(nm -g "$WORK/acme.o" 2>/dev/null)"
-for sym in Acme_Point____construct Acme_Point__sum Acme_Point__sp_count; do
+for sym in Acme.Point____construct Acme.Point__sum Acme_Point__sp_count; do
     if ! printf '%s' "$libsyms" | grep -q "$sym"; then
         fail "library does not define $sym"
     fi

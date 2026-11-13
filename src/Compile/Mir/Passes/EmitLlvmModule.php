@@ -275,9 +275,10 @@ trait EmitLlvmModule
         if ($this->rt->needsMethodExists) {
             /** @var string[][] $mxPairs */
             $mxPairs = [];
-            foreach ($this->classes as $cd) {
-                $disp = $this->displayClassName($cd->name);
-                foreach ($this->reflAllMethods($cd->name) as $m) { $mxPairs[] = [$disp, (string)$m]; }
+            foreach ($this->reflMethodOwners() as $owner) {
+                $disp = $this->displayClassName($owner);
+                foreach ($this->reflAllMethods($owner) as $m) { $mxPairs[] = [$disp, (string)$m]; }
+                if ($owner === 'Closure') { $mxPairs[] = [$disp, '__invoke']; }
             }
             $mxCount = $this->memberRowsSorted($mxPairs, true, $mxClsRows, $mxMthRows);
         }
@@ -291,8 +292,8 @@ trait EmitLlvmModule
         $gcmTotal = 0;
         if ($this->rt->needsClassMethods) {
             $gcmKeys = [];
-            foreach ($this->classes as $cd) {
-                $gcmKeys[] = [\strtolower($this->displayClassName($cd->name)), $cd->name];
+            foreach ($this->reflMethodOwners() as $owner) {
+                $gcmKeys[] = [\strtolower($this->displayClassName($owner)), $owner];
             }
             \usort($gcmKeys, fn (array $x, array $y): int => \strcmp($x[0], $y[0]));
             foreach ($gcmKeys as $k) {
@@ -352,6 +353,10 @@ trait EmitLlvmModule
             foreach ($this->enums as $name => $ed) {
                 if (!isset($targets[$name])) { $targets[$name] = $ed->classId; }
             }
+            // The engine's enum interfaces have no declaration to enumerate; every enum case is-a them.
+            foreach (['UnitEnum', 'BackedEnum'] as $enumIface) {
+                if (!isset($targets[$enumIface])) { $targets[$enumIface] = -1; }
+            }
             // Sorted by lower-cased name for the binary search in {@see isaDynTable}.
             /** @var string[] $targetNames */
             $targetNames = [];
@@ -396,8 +401,14 @@ trait EmitLlvmModule
         $out .= $globalCells;
         // Zero word: a null vec/assoc base (the empty-literal optimization
         // stores `[]` as a null ptr) is redirected here so a foreach length
-        // load reads 0 instead of faulting.
-        $out .= "@__mir_zero_word = internal global i64 0\n";
+        // load reads 0 instead of faulting. It is an EMPTY ARRAY, not a word: a
+        // redirected base has its flags, capacity and buckets read too, and an
+        // 8-byte object read at +32 is out of bounds — undefined behavior the
+        // optimizer is free to turn into a trap. Read-only by contract (only
+        // loads go through it), so a constant: the loads fold, and a module
+        // split may copy it instead of sharing state.
+        $out .= '@__mir_zero_word = private unnamed_addr constant ['
+            . (string)\intdiv(\Compile\MemoryAbi::ARRAY_HEADER_SIZE, 8) . " x i64] zeroinitializer\n";
         // …or whenever the ARRAY rc trace is on: it names its caller through
         // {@see $out `@__mir_bt_top`} below, and a LIBRARY module needs no
         // backtraces of its own, so without this the stdlib emitted a call to
@@ -659,6 +670,13 @@ trait EmitLlvmModule
         // MANTICORE_PROFILE unusable on any module with exceptions).
         if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        }
+        // The collector's MANTICORE_CC_STATS census ({@see ccCensusIr}).
+        if ($this->rt->needsCc) {
+            $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
+            $this->libcExtra['clock'] = 'declare i64 @clock()';
             $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
         }
         $decls = $this->rt->libcDecls(\Compile\Debug::$verify);
@@ -1046,9 +1064,6 @@ trait EmitLlvmModule
         $this->ssa->reset();
         $this->ehOn = false;
         $this->ehPersonality = false;
-        // SSA regs restart here, so a leftover reg key would name a DIFFERENT
-        // value in this function ({@see EmitLlvm::$ptrArgCellByReg}).
-        $this->clearPtrArgCells();
         $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
         $this->frame->file = $fn->file;
@@ -1068,6 +1083,9 @@ trait EmitLlvmModule
         $this->locals->hasTry = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
+        // Call-site scratch read into the virtual-dispatch KEY: left over from the
+        // previous body, it made this body depend on what was emitted before it.
+        $this->vdSiteArgc = 0;
         $this->arrayHintedRefParams = [];
         foreach ($fn->params as $ahp) {
             if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }
@@ -2556,6 +2574,7 @@ trait EmitLlvmModule
     {
         $this->rt->needsCliArgv = true;
         $this->frame->isMain = true;
+        $this->ehTmpBeginMain($fn);
         $header = "define i32 @main(i32 %argc, ptr %argv)"
             . $this->personalityClause() . " {\nentry:\n";
         if ($this->rt->needsExceptions) {
@@ -2687,7 +2706,7 @@ trait EmitLlvmModule
             $dsh .= "  call void @__mir_dtor_sweep()\n";
             $dsh .= "  ret void\n}\n\n";
         }
-        $body .= "  ret i32 0\n";
+        $body .= "  ret i32 0\n" . $this->ehTmpEnd();
         return $header . $body . "}\n\n" . $dsh;
     }
 

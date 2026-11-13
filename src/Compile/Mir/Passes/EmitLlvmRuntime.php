@@ -959,8 +959,8 @@ trait EmitLlvmRuntime
                 // rc actually does. Same flag — the two halves are one story.
                 $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.orc.rel, ptr %p, i64 %rc1)\n";
             }
-            $out .= "  %rcsh = shl i64 %rc1, 8\n";
-            $out .= "  %rcsig = ashr i64 %rcsh, 8\n";
+            $out .= "  %rcsh = shl i64 %rc1, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+            $out .= "  %rcsig = ashr i64 %rcsh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
             $out .= "  %zero = icmp sle i64 %rcsig, 0\n";
             $out .= "  br i1 %zero, label %free, label %keep\n";
             $out .= "keep:\n";
@@ -974,21 +974,20 @@ trait EmitLlvmRuntime
             $out .= "  call void @__manticore_cc_add_root(ptr %p)\n";
             $out .= "  br label %done\n";
             $out .= "free:\n";
-            // A *buffered* object is NOT freed here even at rc<=0 — the
-            // collector owns it, else its candidate list dangles. The mask is
-            // zero in a program that never buffers, so this is a no-op there.
+            // A *buffered* object leaves the root buffer first ({@see ccUnrootIr}),
+            // else the candidate list dangles; the collector keeps it only during
+            // a collection. The bit is never set in a program that never buffers.
             $out .= "  %bufb = and i64 %rc1, " . (string)\Compile\MemoryAbi::BUFFERED_MASK . "\n";
             $out .= "  %isbuf = icmp ne i64 %bufb, 0\n";
             $out .= "  br i1 %isbuf, label %blocked, label %dofree\n";
             $out .= "blocked:\n";
             $out .= $this->ccTrace('blocked', 'ptr %p');
-            // DEAD NOW, not at the next collection ({@see ccDropDeadIr}) — through
-            // the weak hook for the same linkonce_odr reason as the root push.
-            $out .= "  %ccdd = icmp ne ptr @__manticore_cc_drop_dead, null\n";
+            // Through the weak hook for the same linkonce_odr reason as the root push.
+            $out .= "  %ccdd = icmp ne ptr @__manticore_cc_unroot, null\n";
             $out .= "  br i1 %ccdd, label %bdrop, label %done\n";
             $out .= "bdrop:\n";
-            $out .= "  call void @__manticore_cc_drop_dead(ptr %p)\n";
-            $out .= "  br label %done\n";
+            $out .= "  %unrooted = call i1 @__manticore_cc_unroot(ptr %p)\n";
+            $out .= "  br i1 %unrooted, label %dofree, label %done\n";
             $out .= "dofree:\n";
             if ($this->rt->needsCc) { $out .= $this->ccTrace('rcfree', 'ptr %p'); }
             $out .= $this->profBump(25);
@@ -998,8 +997,8 @@ trait EmitLlvmRuntime
             // A destructor that resurrected the object left rc > 0: it lives on.
             $out .= "  %rwp2 = getelementptr i8, ptr %p, i64 8\n";
             $out .= "  %rw2 = load i64, ptr %rwp2\n";
-            $out .= "  %rsh2 = shl i64 %rw2, 8\n";
-            $out .= "  %rsg2 = ashr i64 %rsh2, 8\n";
+            $out .= "  %rsh2 = shl i64 %rw2, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+            $out .= "  %rsg2 = ashr i64 %rsh2, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
             $out .= "  %alive2 = icmp sgt i64 %rsg2, 0\n";
             $out .= "  br i1 %alive2, label %done, label %reallyfree\n";
             $out .= "reallyfree:\n";
@@ -1026,6 +1025,11 @@ trait EmitLlvmRuntime
             $out .= "}\n";
             $out .= $this->dropRuntime();
             if ($this->rt->needsCc) { $out .= $this->ccRuntime(); }
+            elseif ($this->rt->needsGcFlag) {
+                $out .= "@__manticore_cc_gcoff = linkonce_odr global i64 0\n";
+                $out .= "@__manticore_cc_count = linkonce_odr global i64 0\n";
+                $out .= "@__manticore_cc_ocount = linkonce_odr global i64 0\n";
+            }
         }
         // Unconditional: `__mir_cell_retain` / `__mir_cell_drop` reach a
         // closure env boxed as an object, and they are emitted in every module.
@@ -2354,7 +2358,7 @@ trait EmitLlvmRuntime
     {
         if (!\Compile\Mir\Passes\TrampolineSynth::reflectable($mm)) { return 'null'; }
         $decl = $mm->declaringClass !== '' ? $mm->declaringClass : $cls->name;
-        $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name);
+        $tramp = \Compile\Mir\Passes\TrampolineSynth::symBase($decl, $name === '__construct' ? \Compile\Mir\Passes\TrampolineSynth::CTOR_CALL : $name);
         // Only reference a trampoline that was actually synthesized — a data
         // reference to an undefined symbol is a LINK error (unlike a call, which
         // the stub generator fills). Synthesis is not gated per class, so any
@@ -2529,9 +2533,15 @@ trait EmitLlvmRuntime
         $defs = '';
         /** @var string[] class ids to register in the name→rmeta registry */
         $reflIds = [];
+        /** @var string[] id/name-pointer words for the collector's census ({@see ccCensusIr}) */
+        $ccNameWords = [];
         foreach ($this->classes as $cls) {
             if ($cls->isStruct) { continue; }
             $id = (string)$cls->classId;
+            if ($this->rt->needsCc) {
+                $ccNameWords[] = 'i64 ' . $id;
+                $ccNameWords[] = 'i64 ptrtoint (ptr ' . $this->strLitId($this->pool->intern($cls->name)) . ' to i64)';
+            }
             $body = '';
             $i = 0;
             // The FREE half of the class census. Here rather than at the raw
@@ -2594,8 +2604,8 @@ trait EmitLlvmRuntime
                 $body .= '  %dr = call i64 @manticore_' . $this->mangle($dtorCls)
                        . '____destruct(i64 %oi)' . "\n";
                 $body .= "  %dw1 = load i64, ptr %dwp\n";
-                $body .= "  %dsh = shl i64 %dw1, 8\n";
-                $body .= "  %drc = ashr i64 %dsh, 8\n";
+                $body .= "  %dsh = shl i64 %dw1, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+                $body .= "  %drc = ashr i64 %dsh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
                 $body .= "  %drc1 = sub i64 %drc, 1\n";
                 $body .= "  %dfl1 = and i64 %dw1, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
                 $body .= "  %drcm = and i64 %drc1, " . $rcMask . "\n";
@@ -2907,6 +2917,11 @@ trait EmitLlvmRuntime
         // stays sound. They carry no parent/method/property tables — nothing
         // reads those for a name-existence answer.
         $descs .= $this->reflNameOnlyEntries($reflIds);
+        if ($this->rt->needsCc) {
+            $descs .= '@__mir_cc_names_n = internal constant i64 ' . (string)(\count($ccNameWords) >> 1) . "\n";
+            $descs .= '@__mir_cc_names = internal constant [' . (string)\count($ccNameWords) . ' x i64] '
+                . ($ccNameWords === [] ? 'zeroinitializer' : '[' . \implode(', ', $ccNameWords) . ']') . "\n";
+        }
         // Ф5 ReflectionFunction: a metadata row + registry entry per reflected
         // free function. Its startup ctors join the SAME @llvm.global_ctors array
         // (LLVM permits only one), so they are handed to reflRegistry below.
@@ -2916,7 +2931,7 @@ trait EmitLlvmRuntime
         // it, and __mc_refl_find. Nothing is emitted for a module with no
         // classes, so a program that declares none carries no startup cost.
         $this->rt->needsStrcmp = true;
-        $descs .= \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds, $fnRegCtors);
+        $descs .= $this->nameIcmpFn() . \Compile\Mir\RuntimeLibrary::reflRegistry($reflIds, $fnRegCtors);
         // Indirect dispatch: load the per-object descriptor (header slot 0),
         // then its drop_fn (descriptor offset 8), and call it. The body is
         // identical in every object → linkonce_odr coalesces it cleanly.
@@ -3109,43 +3124,62 @@ trait EmitLlvmRuntime
         if ($this->rt->needsCc || $this->ccHooksDeclared) { return ''; }
         $this->ccHooksDeclared = true;
         $this->weakSyms['__manticore_cc_add_root'] = true;
-        $this->weakSyms['__manticore_cc_drop_dead'] = true;
+        $this->weakSyms['__manticore_cc_unroot'] = true;
         $this->weakSyms['__manticore_cc_autogc'] = true;
+        $this->weakSyms['__manticore_cc_collect_cycles'] = true;
+        // `gc_collect_cycles()` in a LIBRARY ({@see EmitLlvmBuiltins::biGcCollect})
+        // runs the program's collector, or frees nothing when it has none.
         return "declare extern_weak void @__manticore_cc_add_root(ptr)\n"
-            . "declare extern_weak void @__manticore_cc_drop_dead(ptr)\n"
-            . "declare extern_weak void @__manticore_cc_autogc()\n";
+            . "declare extern_weak i1 @__manticore_cc_unroot(ptr)\n"
+            . "declare extern_weak void @__manticore_cc_autogc()\n"
+            . "declare extern_weak i64 @__manticore_cc_collect_cycles()\n"
+            . "define i64 @__mc_gc_collect_weak() {\nentry:\n"
+            . "  %has = icmp ne ptr @__manticore_cc_collect_cycles, null\n"
+            . "  br i1 %has, label %run, label %none\n"
+            . "run:\n  %n = call i64 @__manticore_cc_collect_cycles()\n  ret i64 %n\n"
+            . "none:\n  ret i64 0\n}\n";
     }
 
     /** {@see ccWeakHooks} declares the hooks once per module. */
     private bool $ccHooksDeclared = false;
 
     /**
-     * A buffered object whose count reached zero outside a collection: DEAD NOW,
-     * not at the next collection. It used to wait, with everything it held, until
-     * the root buffer hit its threshold — and every such wait made the collector
-     * walk it. Drop it as php does (destructor, children) and keep only the SHELL
-     * for the buffer's sake ({@see MemoryAbi::COLOR_DEAD}). During a collection
-     * the collector still decides (its CollectRoots arm).
+     * A buffered object whose count reached zero outside a collection leaves the
+     * root buffer NOW: its slot ({@see MemoryAbi::CC_SLOT_MASK}) names its entry,
+     * the last entry moves into it, and the answer 1 tells `__mir_rc_release` to
+     * free the object like an unbuffered one. The buffer then holds only live
+     * candidates. It used to keep a dropped SHELL there until the next collection,
+     * which grew the heap with automatic collection off and made every
+     * collection walk the corpses.
+     *
+     * Answer 0 = the collector keeps it: during a collection (its CollectRoots arm
+     * decides), or a slot past the field's range, where the object is dropped as
+     * php does and only its shell waits ({@see MemoryAbi::COLOR_DEAD}).
      */
-    private function ccDropDeadIr(): string
+    private function ccUnrootIr(): string
     {
         $DEAD = (string)\Compile\MemoryAbi::COLOR_DEAD;
-        $out = "define void @__manticore_cc_drop_dead(ptr %p) {\n";
+        $out = "define i1 @__manticore_cc_unroot(ptr %p) {\n";
         $out .= "entry:\n";
         $out .= "  %bact = load i64, ptr @__manticore_cc_active\n";
         $out .= "  %bbusy = icmp ne i64 %bact, 0\n";
-        $out .= "  br i1 %bbusy, label %done, label %bchk\n";
+        $out .= "  br i1 %bbusy, label %keep, label %bchk\n";
         $out .= "bchk:\n";
         $out .= "  %bcol = call i64 @__cc_color(ptr %p)\n";
         $out .= "  %bdead = icmp eq i64 %bcol, " . $DEAD . "\n";
-        $out .= "  br i1 %bdead, label %done, label %bdrop\n";
-        $out .= "bdrop:\n";
+        $out .= "  br i1 %bdead, label %keep, label %slot\n";
+        $out .= "slot:\n";
+        $out .= "  %got = call i1 @__cc_detach(ptr %p)\n";
+        $out .= "  br i1 %got, label %freed, label %shell\n";
+        $out .= "freed:\n";
+        $out .= "  ret i1 1\n";
+        $out .= "shell:\n";
         $out .= "  call void @__cc_setcolor(ptr %p, i64 " . $DEAD . ")\n";
         $out .= $this->profBump(25);
         $out .= "  call void @__mir_drop_dispatch(ptr %p)\n";
-        $out .= "  br label %done\n";
-        $out .= "done:\n";
-        $out .= "  ret void\n}\n";
+        $out .= "  br label %keep\n";
+        $out .= "keep:\n";
+        $out .= "  ret i1 0\n}\n";
         return $out;
     }
 
@@ -3154,20 +3188,54 @@ trait EmitLlvmRuntime
      * buffer reaches the adaptive threshold, collect, then adjust the threshold as
      * php's gc_adjust_threshold does.
      */
+    /** A full collection runs once the old generation grew by 1/RATIO ({@see ccAutoGcIr}). */
+    private const CC_FULL_RATIO = 4;
+
+    /** Young collections in a row after which old candidates force a full one. */
+    private const CC_YOUNG_PER_FULL = 64;
+
     private function ccAutoGcIr(): string
     {
         $out = "define void @__manticore_cc_autogc() {\n";
         $out .= "entry:\n";
         $out .= "  %gcact = load i64, ptr @__manticore_cc_active\n";
-        $out .= "  %gcbusy = icmp ne i64 %gcact, 0\n";
+        $out .= "  %gcoff = load i64, ptr @__manticore_cc_gcoff\n";
+        $out .= "  %gcact2 = or i64 %gcact, %gcoff\n";
+        $out .= "  %gcbusy = icmp ne i64 %gcact2, 0\n";
         $out .= "  br i1 %gcbusy, label %gcskip, label %gccheck\n";
         $out .= "gccheck:\n";
         $out .= "  %gccnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %gcthr = load i64, ptr @__manticore_cc_threshold\n";
+        // FULL when the old generation has grown by 1/RATIO since the last full
+        // collection, or holds as many candidates as it held survivors (both
+        // measured against at least the default threshold): CPython's 25% rule,
+        // plus a bound on old garbage when nothing is promoted. A young
+        // collection becomes full after CC_YOUNG_PER_FULL young ones while old
+        // candidates wait, so every garbage cycle is collected eventually.
+        $out .= "  %gcoc = load i64, ptr @__manticore_cc_ocount\n";
+        $out .= "  %gcpr = load i64, ptr @__manticore_cc_promoted\n";
+        $out .= "  %gcol = load i64, ptr @__manticore_cc_oldlive\n";
+        $out .= "  %gcflo = icmp slt i64 %gcol, " . (string)\Compile\Debug::$autoGcThreshold . "\n";
+        $out .= "  %gcbase = select i1 %gcflo, i64 " . (string)\Compile\Debug::$autoGcThreshold . ", i64 %gcol\n";
+        $out .= "  %gcpr4 = mul i64 %gcpr, " . (string)self::CC_FULL_RATIO . "\n";
+        $out .= "  %gcpend = add i64 %gcpr4, %gcoc\n";
+        $out .= "  %gcgrew = icmp sgt i64 %gcpend, %gcbase\n";
+        $out .= "  br i1 %gcgrew, label %gcfull, label %gcyq\n";
+        $out .= "gcyq:\n";
         $out .= "  %gchit = icmp sge i64 %gccnt, %gcthr\n";
-        $out .= "  br i1 %gchit, label %gcrun, label %gcskip\n";
+        $out .= "  br i1 %gchit, label %gcyrun, label %gcskip\n";
+        $out .= "gcyrun:\n";
+        $out .= "  %gcys = load i64, ptr @__manticore_cc_ysince\n";
+        $out .= "  %gcyold = icmp sge i64 %gcys, " . (string)self::CC_YOUNG_PER_FULL . "\n";
+        $out .= "  %gcwait = icmp sgt i64 %gcoc, 0\n";
+        $out .= "  %gcdue = and i1 %gcyold, %gcwait\n";
+        $out .= "  %gcmode = zext i1 %gcdue to i64\n";
+        $out .= "  br label %gcrun\n";
+        $out .= "gcfull:\n";
+        $out .= "  br label %gcrun\n";
         $out .= "gcrun:\n";
-        $out .= "  %gcfreed = call i64 @__manticore_cc_collect_cycles()\n";
+        $out .= "  %gcm = phi i64 [ %gcmode, %gcyrun ], [ 1, %gcfull ]\n";
+        $out .= "  %gcfreed = call i64 @__manticore_cc_collect(i64 %gcm)\n";
         // php's gc_adjust_threshold: under 100 freed, +10000 (to 1e9); a
         // productive run steps back toward the default. Every Token of a
         // php-cs-fixer run is a root, and a fixed threshold re-walked the
@@ -3187,6 +3255,431 @@ trait EmitLlvmRuntime
         return $out;
     }
 
+    /**
+     * `MANTICORE_CC_STATS=1` — a census of what the cycle collector does, read at
+     * RUN time (the first collection looks the variable up once; unset, a
+     * collection costs two calls that return at once and one load). At exit it
+     * prints collections run, roots scanned, objects freed and the 15 classes
+     * with the most objects on the collector's garbage list (white cycle members
+     * and black rc-0 roots), keyed by class id and named from `@__mir_cc_names`.
+     */
+    private function ccCensusIr(): string
+    {
+        $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
+        $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+        $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        $this->libcExtra['clock'] = 'declare i64 @clock()';
+        $out = "@__cc_census_inited = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_on = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_runs = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_roots = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_freed = linkonce_odr global i64 0\n";
+        // process CPU time inside the collector (clock(), microseconds)
+        $out .= "@__cc_census_t0 = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_us = linkonce_odr global i64 0\n";
+        $out .= "@__cc_census_tab = linkonce_odr global [8192 x i64] zeroinitializer\n";
+        $out .= "@__cc_census_rtab = linkonce_odr global [8192 x i64] zeroinitializer\n";
+        $out .= "@.cc.env = private unnamed_addr constant [19 x i8] c\"MANTICORE_CC_STATS\\00\"\n";
+        $hdr = '[cc-stats] collections=%lld full=%lld roots=%lld marked=%lld freed=%lld garbage=%lld cpu_ms=%lld';
+        $out .= '@.cc.hdr = private unnamed_addr constant [' . (string)(\strlen($hdr) + 2) . ' x i8] c"' . $hdr . '\0A\00"' . "\n";
+        $out .= "@.cc.row = private unnamed_addr constant [25 x i8] c\"  %9lld  id=%lld  %c %s\\0A\\00\"\n";
+        $out .= "@.cc.rhdr = private unnamed_addr constant [36 x i8] c\"[cc-stats] roots scanned, by class\\0A\\00\"\n";
+        $out .= "@.cc.unk = private unnamed_addr constant [2 x i8] c\"?\\00\"\n";
+        $out .= "define void @__cc_census_begin(i64 %roots) {\n";
+        $out .= "entry:\n";
+        $out .= "  %ini = load i64, ptr @__cc_census_inited\n";
+        $out .= "  %isi = icmp ne i64 %ini, 0\n";
+        $out .= "  br i1 %isi, label %chk, label %init\n";
+        $out .= "init:\n";
+        $out .= "  store i64 1, ptr @__cc_census_inited\n";
+        $out .= "  %e = call ptr @getenv(ptr @.cc.env)\n";
+        $out .= "  %enz = icmp ne ptr %e, null\n";
+        $out .= "  br i1 %enz, label %arm, label %chk\n";
+        $out .= "arm:\n";
+        $out .= "  store i64 1, ptr @__cc_census_on\n";
+        $out .= "  call i32 @atexit(ptr @__cc_census_report)\n";
+        $out .= "  br label %chk\n";
+        $out .= "chk:\n";
+        $out .= "  %on = load i64, ptr @__cc_census_on\n";
+        $out .= "  %ison = icmp ne i64 %on, 0\n";
+        $out .= "  br i1 %ison, label %acc, label %done\n";
+        $out .= "acc:\n";
+        $out .= "  %r0 = load i64, ptr @__cc_census_runs\n";
+        $out .= "  %r1 = add i64 %r0, 1\n";
+        $out .= "  store i64 %r1, ptr @__cc_census_runs\n";
+        $out .= "  %s0 = load i64, ptr @__cc_census_roots\n";
+        $out .= "  %s1 = add i64 %s0, %roots\n";
+        $out .= "  store i64 %s1, ptr @__cc_census_roots\n";
+        $out .= "  %ip = alloca i64\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %rl\n";
+        $out .= "rl:\n";
+        $out .= "  %i = load i64, ptr %ip\n";
+        $out .= "  %rgo = icmp slt i64 %i, %roots\n";
+        $out .= "  br i1 %rgo, label %rb, label %tim\n";
+        $out .= "rb:\n";
+        $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= "  %sp = getelementptr ptr, ptr %buf, i64 %i\n";
+        $out .= "  %p = load ptr, ptr %sp\n";
+        $out .= "  call void @__cc_census_note(ptr @__cc_census_rtab, ptr %p)\n";
+        $out .= "  %in = add i64 %i, 1\n";
+        $out .= "  store i64 %in, ptr %ip\n";
+        $out .= "  br label %rl\n";
+        $out .= "tim:\n";
+        $out .= "  %t0 = call i64 @clock()\n";
+        $out .= "  store i64 %t0, ptr @__cc_census_t0\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+        $out .= "define void @__cc_census_end(i64 %freed) {\n";
+        $out .= "entry:\n";
+        $out .= "  %on = load i64, ptr @__cc_census_on\n";
+        $out .= "  %ison = icmp ne i64 %on, 0\n";
+        $out .= "  br i1 %ison, label %acc, label %done\n";
+        $out .= "acc:\n";
+        $out .= "  %f0 = load i64, ptr @__cc_census_freed\n";
+        $out .= "  %f1 = add i64 %f0, %freed\n";
+        $out .= "  store i64 %f1, ptr @__cc_census_freed\n";
+        $out .= "  %t1 = call i64 @clock()\n";
+        $out .= "  %t0 = load i64, ptr @__cc_census_t0\n";
+        $out .= "  %dt = sub i64 %t1, %t0\n";
+        $out .= "  %u0 = load i64, ptr @__cc_census_us\n";
+        $out .= "  %u1 = add i64 %u0, %dt\n";
+        $out .= "  store i64 %u1, ptr @__cc_census_us\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
+        $out .= "define void @__cc_census_note(ptr %tab, ptr %o) {\n";
+        $out .= "entry:\n";
+        $out .= "  %di = load i64, ptr %o\n";
+        $out .= "  %dp = inttoptr i64 %di to ptr\n";
+        $out .= "  %id = load i64, ptr %dp\n";
+        $out .= "  %hm = mul i64 %id, -7046029254386353131\n";
+        $out .= "  %h0 = lshr i64 %hm, 52\n";
+        $out .= "  %hp = alloca i64\n";
+        $out .= "  store i64 %h0, ptr %hp\n";
+        $out .= "  br label %probe\n";
+        $out .= "probe:\n";
+        $out .= "  %h = load i64, ptr %hp\n";
+        $out .= "  %ki = mul i64 %h, 2\n";
+        $out .= "  %kp = getelementptr i64, ptr %tab, i64 %ki\n";
+        $out .= "  %key = load i64, ptr %kp\n";
+        $out .= "  %hit = icmp eq i64 %key, %id\n";
+        $out .= "  %empty = icmp eq i64 %key, 0\n";
+        $out .= "  %take = or i1 %hit, %empty\n";
+        $out .= "  br i1 %take, label %bump, label %next\n";
+        $out .= "next:\n";
+        $out .= "  %hn = add i64 %h, 1\n";
+        $out .= "  %hw = and i64 %hn, 4095\n";
+        $out .= "  store i64 %hw, ptr %hp\n";
+        $out .= "  br label %probe\n";
+        $out .= "bump:\n";
+        $out .= "  store i64 %id, ptr %kp\n";
+        $out .= "  %cp = getelementptr i64, ptr %kp, i64 1\n";
+        $out .= "  %c0 = load i64, ptr %cp\n";
+        $out .= "  %c1 = add i64 %c0, 1\n";
+        $out .= "  store i64 %c1, ptr %cp\n";
+        $out .= "  ret void\n}\n";
+        $out .= "define void @__cc_census_garbage() {\n";
+        $out .= "entry:\n";
+        $out .= "  %ip = alloca i64\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %lp\n";
+        $out .= "lp:\n";
+        $out .= "  %i = load i64, ptr %ip\n";
+        $out .= "  %n = load i64, ptr @__manticore_cc_gcount\n";
+        $out .= "  %go = icmp slt i64 %i, %n\n";
+        $out .= "  br i1 %go, label %body, label %done\n";
+        $out .= "body:\n";
+        $out .= "  %buf = load ptr, ptr @__manticore_cc_garbage\n";
+        $out .= "  %sp = getelementptr i64, ptr %buf, i64 %i\n";
+        $out .= "  %w = load i64, ptr %sp\n";
+        $out .= "  %pi = and i64 %w, -2\n";
+        $out .= "  %p = inttoptr i64 %pi to ptr\n";
+        $out .= "  call void @__cc_census_note(ptr @__cc_census_tab, ptr %p)\n";
+        $out .= "  %in = add i64 %i, 1\n";
+        $out .= "  store i64 %in, ptr %ip\n";
+        $out .= "  br label %lp\n";
+        $out .= "done:\n  ret void\n}\n";
+        $out .= "define ptr @__cc_census_name(i64 %id) {\n";
+        $out .= "entry:\n";
+        $out .= "  %n = load i64, ptr @__mir_cc_names_n\n";
+        $out .= "  %ip = alloca i64\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %lp\n";
+        $out .= "lp:\n";
+        $out .= "  %i = load i64, ptr %ip\n";
+        $out .= "  %go = icmp slt i64 %i, %n\n";
+        $out .= "  br i1 %go, label %body, label %miss\n";
+        $out .= "body:\n";
+        $out .= "  %ki = mul i64 %i, 2\n";
+        $out .= "  %kp = getelementptr i64, ptr @__mir_cc_names, i64 %ki\n";
+        $out .= "  %key = load i64, ptr %kp\n";
+        $out .= "  %eq = icmp eq i64 %key, %id\n";
+        $out .= "  br i1 %eq, label %hit, label %cont\n";
+        $out .= "hit:\n";
+        $out .= "  %vp = getelementptr i64, ptr %kp, i64 1\n";
+        $out .= "  %v = load i64, ptr %vp\n";
+        $out .= "  %np = inttoptr i64 %v to ptr\n";
+        $out .= "  ret ptr %np\n";
+        $out .= "cont:\n";
+        $out .= "  %in = add i64 %i, 1\n";
+        $out .= "  store i64 %in, ptr %ip\n";
+        $out .= "  br label %lp\n";
+        $out .= "miss:\n  ret ptr @.cc.unk\n}\n";
+        $out .= "define void @__cc_census_report() {\n";
+        $out .= "entry:\n";
+        // total of the garbage table = objects that went through the garbage list
+        $out .= "  %j = alloca i64\n  %tot = alloca i64\n";
+        $out .= "  store i64 0, ptr %tot\n  store i64 0, ptr %j\n";
+        $out .= "  br label %sum\n";
+        $out .= "sum:\n";
+        $out .= "  %sj = load i64, ptr %j\n";
+        $out .= "  %sgo = icmp slt i64 %sj, 4096\n";
+        $out .= "  br i1 %sgo, label %sumb, label %hdr\n";
+        $out .= "sumb:\n";
+        $out .= "  %sci = mul i64 %sj, 2\n";
+        $out .= "  %scp0 = getelementptr i64, ptr @__cc_census_tab, i64 %sci\n";
+        $out .= "  %scp = getelementptr i64, ptr %scp0, i64 1\n";
+        $out .= "  %sc = load i64, ptr %scp\n";
+        $out .= "  %st = load i64, ptr %tot\n";
+        $out .= "  %st1 = add i64 %st, %sc\n";
+        $out .= "  store i64 %st1, ptr %tot\n";
+        $out .= "  %sj1 = add i64 %sj, 1\n";
+        $out .= "  store i64 %sj1, ptr %j\n";
+        $out .= "  br label %sum\n";
+        $out .= "hdr:\n";
+        $out .= "  %runs = load i64, ptr @__cc_census_runs\n";
+        $out .= "  %roots = load i64, ptr @__cc_census_roots\n";
+        $out .= "  %freed = load i64, ptr @__cc_census_freed\n";
+        $out .= "  %total = load i64, ptr %tot\n";
+        $out .= "  %us = load i64, ptr @__cc_census_us\n";
+        $out .= "  %ms = sdiv i64 %us, 1000\n";
+        $out .= "  %nfull = load i64, ptr @__manticore_cc_nfull\n";
+        $out .= "  %marked = load i64, ptr @__manticore_cc_marked\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.hdr, i64 %runs, i64 %nfull, i64 %roots, i64 %marked, i64 %freed, i64 %total, i64 %ms)\n";
+        $out .= "  call void @__cc_census_top(ptr @__cc_census_tab)\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.rhdr)\n";
+        $out .= "  call void @__cc_census_top(ptr @__cc_census_rtab)\n";
+        $out .= "  ret void\n}\n";
+        // the 15 biggest rows of a table, largest first; `*` = a cyclic class,
+        // `-` = one `cc_add_root` never buffers
+        $out .= "define void @__cc_census_top(ptr %tab) {\n";
+        $out .= "entry:\n";
+        $out .= "  %kk = alloca i64\n  %j = alloca i64\n  %best = alloca i64\n  %bestc = alloca i64\n";
+        $out .= "  store i64 0, ptr %kk\n";
+        $out .= "  br label %outer\n";
+        $out .= "outer:\n";
+        $out .= "  %k = load i64, ptr %kk\n";
+        $out .= "  %kgo = icmp slt i64 %k, 15\n";
+        $out .= "  br i1 %kgo, label %pick, label %fin\n";
+        $out .= "pick:\n";
+        $out .= "  store i64 -1, ptr %best\n  store i64 0, ptr %bestc\n  store i64 0, ptr %j\n";
+        $out .= "  br label %scan\n";
+        $out .= "scan:\n";
+        $out .= "  %j1 = load i64, ptr %j\n";
+        $out .= "  %jgo = icmp slt i64 %j1, 4096\n";
+        $out .= "  br i1 %jgo, label %scanb, label %scand\n";
+        $out .= "scanb:\n";
+        $out .= "  %ci = mul i64 %j1, 2\n";
+        $out .= "  %cp0 = getelementptr i64, ptr %tab, i64 %ci\n";
+        $out .= "  %cp = getelementptr i64, ptr %cp0, i64 1\n";
+        $out .= "  %c = load i64, ptr %cp\n";
+        $out .= "  %bc = load i64, ptr %bestc\n";
+        $out .= "  %gt = icmp sgt i64 %c, %bc\n";
+        $out .= "  br i1 %gt, label %setb, label %scann\n";
+        $out .= "setb:\n";
+        $out .= "  store i64 %c, ptr %bestc\n  store i64 %j1, ptr %best\n";
+        $out .= "  br label %scann\n";
+        $out .= "scann:\n";
+        $out .= "  %j2 = add i64 %j1, 1\n";
+        $out .= "  store i64 %j2, ptr %j\n";
+        $out .= "  br label %scan\n";
+        $out .= "scand:\n";
+        $out .= "  %bcf = load i64, ptr %bestc\n";
+        $out .= "  %none = icmp eq i64 %bcf, 0\n";
+        $out .= "  br i1 %none, label %fin, label %emit\n";
+        $out .= "emit:\n";
+        $out .= "  %bi = load i64, ptr %best\n";
+        $out .= "  %bki = mul i64 %bi, 2\n";
+        $out .= "  %bkp = getelementptr i64, ptr %tab, i64 %bki\n";
+        $out .= "  %bid = load i64, ptr %bkp\n";
+        $out .= "  %bcp = getelementptr i64, ptr %bkp, i64 1\n";
+        $out .= "  store i64 0, ptr %bcp\n";
+        $out .= "  %nm = call ptr @__cc_census_name(i64 %bid)\n";
+        $out .= "  %tr = call i1 @__manticore_cc_cyclic(i64 %bid)\n";
+        $out .= "  %trc = select i1 %tr, i32 42, i32 45\n";
+        $out .= "  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @.cc.row, i64 %bcf, i64 %bid, i32 %trc, ptr %nm)\n";
+        $out .= "  %k1 = add i64 %k, 1\n";
+        $out .= "  store i64 %k1, ptr %kk\n";
+        $out .= "  br label %outer\n";
+        $out .= "fin:\n  ret void\n}\n";
+        return $out;
+    }
+    /**
+     * What the cycle collector follows through property `$pn` of `$cls`: 'obj'
+     * (a direct rc object handle), the name of the walker it calls for a
+     * native buffer / closure / cell slot, or '' (not a collector edge). The
+     * child walker and {@see ccCyclicClassIds} both ask here, so the analysis
+     * sees exactly the edges MarkGray walks.
+     */
+    private function ccChildSlot(\Compile\Mir\ClassDef $cls, string $pn): string
+    {
+        $bw = $this->ccBufWalker($cls, $pn);
+        if ($bw !== '') { return $bw; }
+        $pt = $cls->propertyTypes[$pn] ?? null;
+        if ($pt === null) { return ''; }
+        if ($this->isClosureValueType($pt)) { return '@__cc_closure_walk'; }
+        $fl = $this->discardReleaseFlavor($pt);
+        if ($fl === 'cell') { return '@__cc_cellclo_walk'; }
+        return $fl === 'obj' ? 'obj' : '';
+    }
+
+    /**
+     * Class ids whose objects can lie on a cycle the collector can find: the
+     * classes on a cycle of the class graph, whose edges are the collector's
+     * own ({@see ccChildSlot}). A slot typed `X` reaches X and every class
+     * below it (parent, interface, reified origin); a cell whose declared type
+     * admits no object is no edge; a closure, other cell, buffer,
+     * `object` slot or a name this module does not know reaches every class.
+     * An object of any other class is never a cycle member — MarkGray from it
+     * cannot come back to it — so `cc_add_root` need not buffer it (Bacon-Rajan's
+     * green objects, php's GC_NOT_COLLECTABLE). Decided over the classes of
+     * the module that emits the collector, as the walker is: a class it does
+     * not list has no walker, so it is no edge to the collector either.
+     *
+     * @return array<int, bool>
+     */
+    private function ccCyclicClassIds(): array
+    {
+        /** @var array<string, int> */
+        $tnode = [];
+        /** @var array<int, int[]> */
+        $adj = [[]];
+        $n = 1; // node 0 = ANY
+        /** @var array<string, int> */
+        $cnode = [];
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            $cnode[$cls->name] = $n;
+            $adj[$n] = [];
+            $n = $n + 1;
+            $adj[0][] = $cnode[$cls->name];
+        }
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            $sups = $cls->interfaces;
+            if ($cls->parent !== '') { $sups[] = $cls->parent; }
+            if ($cls->originClass !== '') { $sups[] = $cls->originClass; }
+            $self = \strtolower($cls->name);
+            if (!isset($tnode[$self])) { $tnode[$self] = $n; $adj[$n] = []; $n = $n + 1; }
+            $adj[$tnode[$self]][] = $cnode[$cls->name];
+            foreach ($sups as $sup) {
+                $k = \strtolower(\ltrim($sup, '\\'));
+                if (!isset($tnode[$k])) { $tnode[$k] = $n; $adj[$n] = []; $n = $n + 1; }
+                $adj[$tnode[$k]][] = $tnode[$self];
+            }
+        }
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            $from = $cnode[$cls->name];
+            foreach ($cls->propertyNames as $pn) {
+                $slot = $this->ccChildSlot($cls, $pn);
+                if ($slot === '') { continue; }
+                // A cell the declared type keeps objects (closures too) out of walks nothing.
+                if ($slot === '@__cc_cellclo_walk' && ($cls->propertyNeverObject[$pn] ?? false)) { continue; }
+                $to = 0;
+                if ($slot === 'obj') {
+                    $pt = $cls->propertyTypes[$pn] ?? null;
+                    $k = $pt === null ? '' : \strtolower(\ltrim($pt->class ?? '', '\\'));
+                    if ($k === 'self' || $k === 'static') { $k = \strtolower($this->ccPropRootClass($cls, $pn)); }
+                    if ($k !== '' && $k !== 'stringable' && $k !== 'traversable' && isset($tnode[$k])) {
+                        $to = $tnode[$k];
+                    }
+                }
+                $adj[$from][] = $to;
+            }
+        }
+        // Tarjan, iterative: a C node is cyclic iff its component has > 1 node
+        // (a class node has no self edge — its edges go to type nodes).
+        /** @var int[] */
+        $index = \array_fill(0, $n, -1);
+        /** @var int[] */
+        $low = \array_fill(0, $n, 0);
+        /** @var bool[] */
+        $onStack = \array_fill(0, $n, false);
+        /** @var int[] */
+        $comp = \array_fill(0, $n, -1);
+        /** @var int[] */
+        $compSize = [];
+        /** @var int[] */
+        $stack = [];
+        $next = 0;
+        for ($root = 0; $root < $n; $root++) {
+            if ($index[$root] !== -1) { continue; }
+            /** @var int[] */
+            $work = [$root];
+            /** @var int[] */
+            $pos = [0];
+            $index[$root] = $next; $low[$root] = $next; $next = $next + 1;
+            $stack[] = $root; $onStack[$root] = true;
+            while (\count($work) > 0) {
+                $top = \count($work) - 1;
+                $v = $work[$top];
+                $i = $pos[$top];
+                if ($i < \count($adj[$v])) {
+                    $pos[$top] = $i + 1;
+                    $w = $adj[$v][$i];
+                    if ($index[$w] === -1) {
+                        $index[$w] = $next; $low[$w] = $next; $next = $next + 1;
+                        $stack[] = $w; $onStack[$w] = true;
+                        $work[] = $w; $pos[] = 0;
+                    } elseif ($onStack[$w] && $index[$w] < $low[$v]) {
+                        $low[$v] = $index[$w];
+                    }
+                    continue;
+                }
+                \array_pop($work);
+                \array_pop($pos);
+                if (\count($work) > 0) {
+                    $u = $work[\count($work) - 1];
+                    if ($low[$v] < $low[$u]) { $low[$u] = $low[$v]; }
+                }
+                if ($low[$v] === $index[$v]) {
+                    $c = \count($compSize);
+                    $size = 0;
+                    do {
+                        $w = \array_pop($stack);
+                        $onStack[$w] = false;
+                        $comp[$w] = $c;
+                        $size = $size + 1;
+                    } while ($w !== $v);
+                    $compSize[] = $size;
+                }
+            }
+        }
+        /** @var array<int, bool> */
+        $out = [];
+        foreach ($this->classes as $cls) {
+            if ($cls->isStruct) { continue; }
+            if ($compSize[$comp[$cnode[$cls->name]]] > 1) { $out[$cls->classId] = true; }
+        }
+        return $out;
+    }
+    /**
+     * The topmost ancestor of `$cls` that lists property `$pn`: what a `self` /
+     * `static` slot type of it may hold is that class or below. A redeclaring
+     * subclass only narrows that, so the answer stays an upper bound.
+     */
+    private function ccPropRootClass(\Compile\Mir\ClassDef $cls, string $pn): string
+    {
+        $root = $cls->name;
+        $c = $cls->parent;
+        while ($c !== '' && isset($this->classes[$c])) {
+            $cd = $this->classes[$c];
+            if (\in_array($pn, $cd->propertyNames, true)) { $root = $cd->name; }
+            $c = $cd->parent;
+        }
+        return $root;
+    }
     /**
      * The cycle-collector walker of a native-buffer slot: `@__cc_hmap_walk` for
      * the table behind Manticore\Ds\Map / Set, `@__cc_nbuf_walk` for a
@@ -3491,6 +3984,7 @@ end:
         $GRAY   = (string)\Compile\MemoryAbi::COLOR_GRAY;
         $WHITE  = (string)\Compile\MemoryAbi::COLOR_WHITE;
         $BLACK  = (string)\Compile\MemoryAbi::COLOR_BLACK;
+        $GREEN  = (string)\Compile\MemoryAbi::COLOR_GREEN;
 
         $out = "\n; ── Bacon-Rajan cycle collector ──\n";
         // linkonce_odr: cycle-collector root buffer is shared mutable state;
@@ -3499,6 +3993,9 @@ end:
         $out .= "@__manticore_cc_count = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_cap   = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_active = linkonce_odr global i64 0\n";
+        // `gc_disable()`: 1 skips AUTOMATIC collection only; roots are still buffered
+        // and an explicit `gc_collect_cycles()` still runs, as in Zend.
+        $out .= "@__manticore_cc_gcoff = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_freed = linkonce_odr global i64 0\n";
         // The auto-collection threshold, ADAPTIVE as php's: a run that frees
         // almost nothing raises it, a productive one lowers it back.
@@ -3513,19 +4010,35 @@ end:
         $out .= "@__manticore_cc_garbage = linkonce_odr global ptr null\n";
         $out .= "@__manticore_cc_gcount = linkonce_odr global i64 0\n";
         $out .= "@__manticore_cc_gcap = linkonce_odr global i64 0\n";
+        // The OLD generation's root buffer: buffered objects carrying
+        // {@see MemoryAbi::CC_OLD_MASK}. A young collection leaves it alone; a
+        // full one takes it in with the young roots.
+        $out .= "@__manticore_cc_oroots = linkonce_odr global ptr null\n";
+        $out .= "@__manticore_cc_ocount = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_ocap = linkonce_odr global i64 0\n";
+        // Survivors of the running collection (scan_black calls); objects promoted
+        // by young collections since the last full one; survivors of that full
+        // one; young collections since it; full collections run.
+        $out .= "@__manticore_cc_nblack = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_promoted = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_oldlive = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_ysince = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_nfull = linkonce_odr global i64 0\n";
+        $out .= "@__manticore_cc_marked = linkonce_odr global i64 0\n";
         $this->libcExtra['malloc'] = 'declare ptr @malloc(i64)';
         $this->libcExtra['realloc'] = 'declare ptr @realloc(ptr, i64)';
         $this->libcExtra['free'] = 'declare void @free(ptr)';
 
-        $out .= $this->ccDropDeadIr();
+        $out .= $this->ccUnrootIr();
         $out .= $this->ccAutoGcIr();
+        $out .= $this->ccCensusIr();
 
         // ── header-word accessors (rc word @ ptr+8) ──
         $out .= "define i64 @__cc_color(ptr %s) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
         $out .= "  %w = load i64, ptr %wp\n";
-        $out .= "  %c = lshr i64 %w, 56\n";
-        $out .= "  %m = and i64 %c, 63\n";
+        $out .= "  %c = lshr i64 %w, " . (string)\Compile\MemoryAbi::COLOR_SHIFT . "\n";
+        $out .= "  %m = and i64 %c, " . (string)(\Compile\MemoryAbi::COLOR_MASK >> \Compile\MemoryAbi::COLOR_SHIFT) . "\n";
         $out .= "  ret i64 %m\n}\n";
         $out .= "define void @__cc_setcolor(ptr %s, i64 %c) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
@@ -3553,23 +4066,128 @@ end:
         $out .= "define i64 @__cc_rcval(ptr %s) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
         $out .= "  %w = load i64, ptr %wp\n";
-        $out .= "  %sh = shl i64 %w, 8\n";
-        $out .= "  %r = ashr i64 %sh, 8\n";
+        $out .= "  %sh = shl i64 %w, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+        $out .= "  %r = ashr i64 %sh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
         $out .= "  ret i64 %r\n}\n";
-        // add %d to signed rc, preserving color/buffered
+        // add %d to signed rc, preserving every bit outside the rc field
+        // (color, dtor-called, root slot, buffered)
         $out .= "define void @__cc_rcadd(ptr %s, i64 %d) {\n";
         $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
         $out .= "  %w = load i64, ptr %wp\n";
-        $out .= "  %hi = and i64 %w, " . $colorMask . "\n";
-        $out .= "  %hib = and i64 %w, " . $bufMask . "\n";
-        $out .= "  %hiboth = or i64 %hi, %hib\n";
-        $out .= "  %sh = shl i64 %w, 8\n";
-        $out .= "  %rc = ashr i64 %sh, 8\n";
+        $out .= "  %hiboth = and i64 %w, " . (string)~\Compile\MemoryAbi::RC_MASK . "\n";
+        $out .= "  %sh = shl i64 %w, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+        $out .= "  %rc = ashr i64 %sh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
         $out .= "  %rc2 = add i64 %rc, %d\n";
         $out .= "  %lo = and i64 %rc2, " . $rcMask . "\n";
         $out .= "  %nw = or i64 %hiboth, %lo\n";
         $out .= "  store i64 %nw, ptr %wp\n";
         $out .= "  ret void\n}\n";
+        // record the root-buffer slot (clamped to CC_SLOT_NONE past the field)
+        $none = (string)\Compile\MemoryAbi::CC_SLOT_NONE;
+        $out .= "define void @__cc_setslot(ptr %s, i64 %i) {\n";
+        $out .= "  %big = icmp ugt i64 %i, " . $none . "\n";
+        $out .= "  %v = select i1 %big, i64 " . $none . ", i64 %i\n";
+        $out .= "  %vs = shl i64 %v, " . (string)\Compile\MemoryAbi::CC_SLOT_SHIFT . "\n";
+        $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %clr = and i64 %w, " . (string)~\Compile\MemoryAbi::CC_SLOT_MASK . "\n";
+        $out .= "  %nw = or i64 %clr, %vs\n";
+        $out .= "  store i64 %nw, ptr %wp\n";
+        $out .= "  ret void\n}\n";
+        $oldMask = (string)\Compile\MemoryAbi::CC_OLD_MASK;
+        $out .= "define i1 @__cc_isold(ptr %s) {\n";
+        $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %o = and i64 %w, " . $oldMask . "\n";
+        $out .= "  %r = icmp ne i64 %o, 0\n";
+        $out .= "  ret i1 %r\n}\n";
+        // append %s to a root buffer (grow x2, min 8) and record its slot
+        $out .= "define void @__cc_bpush(ptr %s, ptr %bufg, ptr %cntg, ptr %capg) {\n";
+        $out .= "entry:\n";
+        $out .= "  %cnt = load i64, ptr %cntg\n";
+        $out .= "  %cap = load i64, ptr %capg\n";
+        $out .= "  %full = icmp sge i64 %cnt, %cap\n";
+        $out .= "  br i1 %full, label %grow, label %store\n";
+        $out .= "grow:\n";
+        $out .= "  %dbl = mul i64 %cap, 2\n";
+        $out .= "  %small = icmp slt i64 %dbl, 8\n";
+        $out .= "  %ncap = select i1 %small, i64 8, i64 %dbl\n";
+        $out .= "  %bytes = mul i64 %ncap, 8\n";
+        $out .= "  %old = load ptr, ptr %bufg\n";
+        $out .= "  %nb = call ptr @realloc(ptr %old, i64 %bytes)\n";
+        $out .= "  store ptr %nb, ptr %bufg\n";
+        $out .= "  store i64 %ncap, ptr %capg\n";
+        $out .= "  br label %store\n";
+        $out .= "store:\n";
+        $out .= "  %buf = load ptr, ptr %bufg\n";
+        $out .= "  %slot = getelementptr ptr, ptr %buf, i64 %cnt\n";
+        $out .= "  store ptr %s, ptr %slot\n";
+        $out .= "  call void @__cc_setslot(ptr %s, i64 %cnt)\n";
+        $out .= "  %cnt1 = add i64 %cnt, 1\n";
+        $out .= "  store i64 %cnt1, ptr %cntg\n";
+        $out .= "  ret void\n}\n";
+        // Take a buffered object out of its generation's root buffer in O(1):
+        // the last entry moves into its slot. 0 = not found there (a slot past
+        // the field's range); the object stays buffered.
+        $out .= "define i1 @__cc_detach(ptr %p) {\n";
+        $out .= "entry:\n";
+        $out .= "  %old = call i1 @__cc_isold(ptr %p)\n";
+        $out .= "  %bufg = select i1 %old, ptr @__manticore_cc_oroots, ptr @__manticore_cc_roots\n";
+        $out .= "  %cntg = select i1 %old, ptr @__manticore_cc_ocount, ptr @__manticore_cc_count\n";
+        $out .= "  %wp = getelementptr i8, ptr %p, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %ws = lshr i64 %w, " . (string)\Compile\MemoryAbi::CC_SLOT_SHIFT . "\n";
+        $out .= "  %i = and i64 %ws, " . (string)\Compile\MemoryAbi::CC_SLOT_NONE . "\n";
+        $out .= "  %cnt = load i64, ptr %cntg\n";
+        $out .= "  %inr = icmp ult i64 %i, %cnt\n";
+        $out .= "  br i1 %inr, label %chk, label %miss\n";
+        $out .= "chk:\n";
+        $out .= "  %buf = load ptr, ptr %bufg\n";
+        $out .= "  %sp = getelementptr ptr, ptr %buf, i64 %i\n";
+        $out .= "  %sv = load ptr, ptr %sp\n";
+        $out .= "  %mine = icmp eq ptr %sv, %p\n";
+        $out .= "  br i1 %mine, label %swap, label %miss\n";
+        $out .= "swap:\n";
+        $out .= "  %last = sub i64 %cnt, 1\n";
+        $out .= "  %lp = getelementptr ptr, ptr %buf, i64 %last\n";
+        $out .= "  %lv = load ptr, ptr %lp\n";
+        $out .= "  store ptr %lv, ptr %sp\n";
+        $out .= "  call void @__cc_setslot(ptr %lv, i64 %i)\n";
+        $out .= "  store i64 %last, ptr %cntg\n";
+        $out .= "  call void @__cc_setbuffered(ptr %p, i64 0)\n";
+        // BLACK, not purple: a destructor that resurrects it must be able to buffer it again.
+        $out .= "  call void @__cc_setcolor(ptr %p, i64 " . $BLACK . ")\n";
+        $out .= "  ret i1 1\n";
+        $out .= "miss:\n";
+        $out .= "  ret i1 0\n}\n";
+        // A young collection's white node let go of an OLD child, which it does
+        // not traverse but whose count it did lower (the edge was counted). At a
+        // count of zero after the scan, every reference to the child came from
+        // the garbage: it dies with it, as a black rc-0 root does (destructor,
+        // children released, freed). GRAY marks it listed; no old object is gray
+        // in a young collection otherwise.
+        $out .= "define void @__cc_orphan(ptr %o) {\n";
+        $out .= "entry:\n";
+        $out .= "  %c = call i64 @__cc_color(ptr %o)\n";
+        $out .= "  %listed = icmp eq i64 %c, " . $GRAY . "\n";
+        $out .= "  br i1 %listed, label %done, label %rc\n";
+        $out .= "rc:\n";
+        $out .= "  %r = call i64 @__cc_rcval(ptr %o)\n";
+        $out .= "  %live = icmp sgt i64 %r, 0\n";
+        $out .= "  br i1 %live, label %done, label %buf\n";
+        $out .= "buf:\n";
+        $out .= "  %b = call i64 @__cc_buffered(ptr %o)\n";
+        $out .= "  %isb = icmp ne i64 %b, 0\n";
+        $out .= "  br i1 %isb, label %det, label %take\n";
+        // Not found in its buffer: it stays an old root, and the next full collection frees it.
+        $out .= "det:\n";
+        $out .= "  %got = call i1 @__cc_detach(ptr %o)\n";
+        $out .= "  br i1 %got, label %take, label %done\n";
+        $out .= "take:\n";
+        $out .= "  call void @__cc_setcolor(ptr %o, i64 " . $GRAY . ")\n";
+        $out .= "  call void @__cc_gpush(ptr %o, i64 1)\n";
+        $out .= "  br label %done\n";
+        $out .= "done:\n  ret void\n}\n";
 
         // ── candidate-buffer push (grow x2, min 8) ──
         $out .= "define void @__manticore_cc_add_root(ptr %s) {\n";
@@ -3608,9 +4226,22 @@ end:
             $out .= "noact:\n";
         }
         $out .= "  %isp = icmp eq i64 %col, " . $PURPLE . "\n";
-        $out .= "  br i1 %isp, label %purplec, label %mark\n";
+        $out .= "  br i1 %isp, label %purplec, label %notp\n";
         $out .= "purplec:\n";
         $out .= $this->profBump(63);
+        $out .= "  br label %done\n";
+        $out .= "notp:\n";
+        $out .= "  %isgr = icmp eq i64 %col, " . $GREEN . "\n";
+        $out .= "  br i1 %isgr, label %done, label %cyc\n";
+        // An object of an acyclic class is never a cycle member: green, unbuffered.
+        $out .= "cyc:\n";
+        $out .= "  %cdesc = load i64, ptr %s\n";
+        $out .= "  %cdescp = inttoptr i64 %cdesc to ptr\n";
+        $out .= "  %cid = load i64, ptr %cdescp\n";
+        $out .= "  %iscyc = call i1 @__manticore_cc_cyclic(i64 %cid)\n";
+        $out .= "  br i1 %iscyc, label %mark, label %green\n";
+        $out .= "green:\n";
+        $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $GREEN . ")\n";
         $out .= "  br label %done\n";
         $out .= "mark:\n";
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $PURPLE . ")\n";
@@ -3623,26 +4254,17 @@ end:
         $out .= "push:\n";
         $out .= $this->profBump(65);
         $out .= "  call void @__cc_setbuffered(ptr %s, i64 1)\n";
-        $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
-        $out .= "  %cap = load i64, ptr @__manticore_cc_cap\n";
-        $out .= "  %full = icmp sge i64 %cnt, %cap\n";
-        $out .= "  br i1 %full, label %grow, label %store\n";
-        $out .= "grow:\n";
-        $out .= "  %dbl = mul i64 %cap, 2\n";
-        $out .= "  %small = icmp slt i64 %dbl, 8\n";
-        $out .= "  %ncap = select i1 %small, i64 8, i64 %dbl\n";
-        $out .= "  %bytes = mul i64 %ncap, 8\n";
-        $out .= "  %old = load ptr, ptr @__manticore_cc_roots\n";
-        $out .= "  %nb = call ptr @realloc(ptr %old, i64 %bytes)\n";
-        $out .= "  store ptr %nb, ptr @__manticore_cc_roots\n";
-        $out .= "  store i64 %ncap, ptr @__manticore_cc_cap\n";
-        $out .= "  br label %store\n";
-        $out .= "store:\n";
-        $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
-        $out .= "  %slot = getelementptr ptr, ptr %buf, i64 %cnt\n";
-        $out .= "  store ptr %s, ptr %slot\n";
-        $out .= "  %cnt1 = add i64 %cnt, 1\n";
-        $out .= "  store i64 %cnt1, ptr @__manticore_cc_count\n";
+        $out .= "  %isold = call i1 @__cc_isold(ptr %s)\n";
+        $out .= "  br i1 %isold, label %opush, label %ypush\n";
+        $out .= "opush:\n";
+        $out .= "  call void @__cc_bpush(ptr %s, ptr @__manticore_cc_oroots, ptr @__manticore_cc_ocount, ptr @__manticore_cc_ocap)\n";
+        $out .= "  br label %done\n";
+        $out .= "ypush:\n";
+        $out .= "  call void @__cc_bpush(ptr %s, ptr @__manticore_cc_roots, ptr @__manticore_cc_count, ptr @__manticore_cc_cap)\n";
+        if (\Compile\Debug::$ccTrace) {
+            $out .= "  %cnt1 = load i64, ptr @__manticore_cc_count\n";
+            $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
+        }
         $out .= $this->ccTrace('push', 'ptr %s, i64 %cnt1, ptr %buf');
         // ⚠⚠ THE ROOT BUFFER HAD NO DRAIN. A decrement that leaves rc > 0 buffers
         // the object as a possible cycle root (purple + buffered), and
@@ -3660,8 +4282,31 @@ end:
         $out .= "done:\n  ret void\n}\n";
 
         // ── per-child action dispatch ──
+        //
+        // A YOUNG collection (`active` = 1) stops at an OLD child: the edge into
+        // it is counted (-1 on mark, +1 back on scan_black) so the count stays
+        // exact, but the child is neither colored nor walked — its own
+        // references are left uncounted, which keeps whatever it reaches alive.
         $out .= "define void @__manticore_cc_child_apply(ptr %child, i64 %a) {\n";
         $out .= "entry:\n";
+        $out .= "  %act = load i64, ptr @__manticore_cc_active\n";
+        $out .= "  %young = icmp eq i64 %act, 1\n";
+        $out .= "  br i1 %young, label %ychk, label %disp\n";
+        $out .= "ychk:\n";
+        $out .= "  %old = call i1 @__cc_isold(ptr %child)\n";
+        $out .= "  br i1 %old, label %oldc, label %disp\n";
+        $out .= "oldc:\n";
+        $out .= "  switch i64 %a, label %done [ i64 0, label %omg i64 2, label %osb i64 3, label %ocw ]\n";
+        $out .= "omg:\n";
+        $out .= "  call void @__cc_rcadd(ptr %child, i64 -1)\n";
+        $out .= "  br label %done\n";
+        $out .= "osb:\n";
+        $out .= "  call void @__cc_rcadd(ptr %child, i64 1)\n";
+        $out .= "  br label %done\n";
+        $out .= "ocw:\n";
+        $out .= "  call void @__cc_orphan(ptr %child)\n";
+        $out .= "  br label %done\n";
+        $out .= "disp:\n";
         $out .= "  switch i64 %a, label %done [ i64 0, label %mg i64 1, label %sc i64 2, label %sb i64 3, label %cw ]\n";
         $out .= "mg:\n";
         $out .= "  call void @__cc_rcadd(ptr %child, i64 -1)\n";
@@ -3720,34 +4365,16 @@ end:
             $body = '';
             $k = 0;
             foreach ($cls->propertyNames as $pn) {
-                $bw = $this->ccBufWalker($cls, $pn);
-                if ($bw !== '') {
+                $slot = $this->ccChildSlot($cls, $pn);
+                if ($slot === '') { continue; }
+                if ($slot !== 'obj') {
                     $s = (string)$k;
                     $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
                     $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
-                    $body .= '  call void ' . $bw . '(i64 %v' . $s . ", i64 %a)\n";
+                    $body .= '  call void ' . $slot . '(i64 %v' . $s . ", i64 %a)\n";
                     $k = $k + 1;
                     continue;
                 }
-                $pt = $cls->propertyTypes[$pn] ?? null;
-                if ($pt === null) { continue; }
-                if ($this->isClosureValueType($pt)) {
-                    $s = (string)$k;
-                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
-                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
-                    $body .= '  call void @__cc_closure_walk(i64 %v' . $s . ', i64 %a)' . "\n";
-                    $k = $k + 1;
-                    continue;
-                }
-                if ($this->discardReleaseFlavor($pt) === 'cell') {
-                    $s = (string)$k;
-                    $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . (string)$cls->propertyOffset($pn) . "\n";
-                    $body .= '  %v' . $s . ' = load i64, ptr %g' . $s . "\n";
-                    $body .= '  call void @__cc_cellclo_walk(i64 %v' . $s . ', i64 %a)' . "\n";
-                    $k = $k + 1;
-                    continue;
-                }
-                if ($this->discardReleaseFlavor($pt) !== 'obj') { continue; }
                 $s = (string)$k;
                 $off = (string)$cls->propertyOffset($pn);
                 $body .= '  %g' . $s . ' = getelementptr i8, ptr %s, i64 ' . $off . "\n";
@@ -3806,6 +4433,18 @@ end:
             $out .= "  switch i64 %cid, label %end [\n" . $cases . "  ]\n";
             $out .= $dispatch;
             $out .= "end:\n  ret void\n}\n";
+        }
+        // 1 = objects of the class can be cycle members ({@see ccCyclicClassIds}).
+        $cyc = '';
+        foreach ($this->ccCyclicClassIds() as $cid => $_) {
+            $cyc .= '    i64 ' . (string)$cid . ", label %yes\n";
+        }
+        $out .= "define i1 @__manticore_cc_cyclic(i64 %cid) {\nentry:\n";
+        if ($cyc === '') {
+            $out .= "  ret i1 0\n}\n";
+        } else {
+            $out .= "  switch i64 %cid, label %no [\n" . $cyc . "  ]\n";
+            $out .= "yes:\n  ret i1 1\nno:\n  ret i1 0\n}\n";
         }
 
         // ── per-class NON-OBJ (string/vec/assoc) prop drop (white free path) ──
@@ -3927,6 +4566,9 @@ end:
         $out .= "  br i1 %isg, label %done, label %go\n";
         $out .= "go:\n";
         $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $GRAY . ")\n";
+        $out .= "  %mk0 = load i64, ptr @__manticore_cc_marked\n";
+        $out .= "  %mk1 = add i64 %mk0, 1\n";
+        $out .= "  store i64 %mk1, ptr @__manticore_cc_marked\n";
         $out .= "  call void @__manticore_cc_children(ptr %s, i64 0)\n";
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
@@ -3954,9 +4596,17 @@ end:
         $out .= "  br label %done\n";
         $out .= "done:\n  ret void\n}\n";
 
+        // A survivor: BLACK, and promoted to the old generation.
         $out .= "define void @__manticore_cc_scan_black(ptr %s) {\n";
         $out .= "entry:\n";
-        $out .= "  call void @__cc_setcolor(ptr %s, i64 " . $BLACK . ")\n";
+        $out .= "  %wp = getelementptr i8, ptr %s, i64 8\n";
+        $out .= "  %w = load i64, ptr %wp\n";
+        $out .= "  %wc = and i64 %w, " . $colorClr . "\n";
+        $out .= "  %wo = or i64 %wc, " . (string)(\Compile\MemoryAbi::CC_OLD_MASK | (\Compile\MemoryAbi::COLOR_BLACK << \Compile\MemoryAbi::COLOR_SHIFT)) . "\n";
+        $out .= "  store i64 %wo, ptr %wp\n";
+        $out .= "  %nb0 = load i64, ptr @__manticore_cc_nblack\n";
+        $out .= "  %nb1 = add i64 %nb0, 1\n";
+        $out .= "  store i64 %nb1, ptr @__manticore_cc_nblack\n";
         $out .= "  call void @__manticore_cc_children(ptr %s, i64 2)\n";
         $out .= "  ret void\n}\n";
 
@@ -4012,23 +4662,32 @@ end:
         $out .= "  store i64 %rwd, ptr %rwp\n";
         $out .= "  br label %rdone\n";
         $out .= "rdone:\n  ret void\n}\n";
-        // ── the deferred free of one garbage entry ──
-        $out .= "define void @__cc_gfree(ptr %s, i64 %kind) {\n";
+        // ── the deferred release of one garbage entry's members ──
+        // ⚠ EVERY ENTRY IS RELEASED BEFORE ANY IS FREED. A white node's cell
+        // slot (`public $other`) holds a sibling garbage node, and its release
+        // tells object from closure env by the target's header word — a read of
+        // the sibling's memory. Freed in one interleaved pass, `$a`'s free came
+        // first and `$b`'s `__cc_cellclo_free` read `$a`'s -8 off a freed block
+        // (a pool free-list link there), and a closure env / Ds buffer holding a
+        // sibling reads it the same way.
+        $out .= "define void @__cc_grelease(ptr %s, i64 %kind) {\n";
         $out .= "entry:\n";
-        $out .= "  %fr = load i64, ptr @__manticore_cc_freed\n";
-        $out .= "  %fr1 = add i64 %fr, 1\n";
-        $out .= "  store i64 %fr1, ptr @__manticore_cc_freed\n";
         $out .= "  %isroot = icmp ne i64 %kind, 0\n";
         $out .= "  br i1 %isroot, label %rootk, label %whitek\n";
         $out .= "rootk:\n";
         $out .= "  call void @__mir_drop_dispatch(ptr %s)\n";
-        $out .= "  br label %go\n";
+        $out .= "  ret void\n";
         $out .= "whitek:\n";
         // Drop this node's string props (obj props handled by the recursion
         // above) so collected cycles don't leak their strings.
         $out .= "  call void @__manticore_cc_drop_strings(ptr %s)\n";
-        $out .= "  br label %go\n";
-        $out .= "go:\n";
+        $out .= "  ret void\n}\n";
+        // ── the deferred free of one garbage entry ──
+        $out .= "define void @__cc_gfree(ptr %s) {\n";
+        $out .= "entry:\n";
+        $out .= "  %fr = load i64, ptr @__manticore_cc_freed\n";
+        $out .= "  %fr1 = add i64 %fr, 1\n";
+        $out .= "  store i64 %fr1, ptr @__manticore_cc_freed\n";
         $out .= "  call void @__mir_obj_handle_free(ptr %s)\n";
         $out .= "  %base = getelementptr i8, ptr %s, i64 -8\n";
         $out .= $this->profBump(30);
@@ -4062,19 +4721,67 @@ end:
         $out .= "  ret void\n}\n";
 
         // ── gc_collect_cycles(): MarkRoots → ScanRoots → CollectRoots ──
+        // An explicit `gc_collect_cycles()` collects everything collectable: full.
+        $this->libcExtra['memcpy'] = 'declare ptr @memcpy(ptr, ptr, i64)';
+        $this->libcExtra['memmove'] = 'declare ptr @memmove(ptr, ptr, i64)';
         $out .= "define i64 @__manticore_cc_collect_cycles() {\n";
+        $out .= "entry:\n  %n = call i64 @__manticore_cc_collect(i64 1)\n  ret i64 %n\n}\n";
+        // %full = 0: YOUNG — the young roots only, old objects not traversed;
+        // 1: FULL — the old roots join the young ones and nothing is skipped.
+        $out .= "define i64 @__manticore_cc_collect(i64 %full) {\n";
         $out .= "entry:\n";
         // ⚠ THE COLLECTION OWNS THIS FLAG, not its callers. It used to be
         // set around the AUTO trigger in `__mir_alloc_tagged` only, so a
         // plain `gc_collect_cycles()` — the builtin, which calls straight
         // in — ran with the flag CLEAR and `cc_add_root` happily buffered
         // objects mid-phase. One guard at the one entry point, and every
-        // caller is covered.
-        $out .= "  store i64 1, ptr @__manticore_cc_active\n";
+        // caller is covered. 1 = young, 2 = full.
+        $out .= "  %isfull = icmp ne i64 %full, 0\n";
+        $out .= "  %mode = select i1 %isfull, i64 2, i64 1\n";
+        $out .= "  %young0 = xor i1 %isfull, true\n";
+        $out .= "  store i64 %mode, ptr @__manticore_cc_active\n";
         $out .= "  store i64 0, ptr @__manticore_cc_freed\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_nblack\n";
+        $out .= "  br i1 %isfull, label %fmerge, label %start\n";
+        // The old roots go in FRONT of the young ones (they were buffered
+        // earlier). Their slots go stale; nothing reads a slot while a
+        // collection runs, and every root is unbuffered by its end.
+        $out .= "fmerge:\n";
+        $out .= "  %nf0 = load i64, ptr @__manticore_cc_nfull\n";
+        $out .= "  %nf1 = add i64 %nf0, 1\n";
+        $out .= "  store i64 %nf1, ptr @__manticore_cc_nfull\n";
+        $out .= "  %ocnt = load i64, ptr @__manticore_cc_ocount\n";
+        $out .= "  %hasold = icmp sgt i64 %ocnt, 0\n";
+        $out .= "  br i1 %hasold, label %fneed, label %start\n";
+        $out .= "fneed:\n";
+        $out .= "  %ycnt = load i64, ptr @__manticore_cc_count\n";
+        $out .= "  %need = add i64 %ycnt, %ocnt\n";
+        $out .= "  %ycap = load i64, ptr @__manticore_cc_cap\n";
+        $out .= "  %short = icmp sgt i64 %need, %ycap\n";
+        $out .= "  br i1 %short, label %fgrow, label %fcopy\n";
+        $out .= "fgrow:\n";
+        $out .= "  %fob = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= "  %fbytes = mul i64 %need, 8\n";
+        $out .= "  %fnb = call ptr @realloc(ptr %fob, i64 %fbytes)\n";
+        $out .= "  store ptr %fnb, ptr @__manticore_cc_roots\n";
+        $out .= "  store i64 %need, ptr @__manticore_cc_cap\n";
+        $out .= "  br label %fcopy\n";
+        $out .= "fcopy:\n";
+        $out .= "  %fmb = load ptr, ptr @__manticore_cc_roots\n";
+        $out .= "  %fdst = getelementptr ptr, ptr %fmb, i64 %ocnt\n";
+        $out .= "  %fyb = mul i64 %ycnt, 8\n";
+        $out .= "  call ptr @memmove(ptr %fdst, ptr %fmb, i64 %fyb)\n";
+        $out .= "  %fos = load ptr, ptr @__manticore_cc_oroots\n";
+        $out .= "  %fobytes = mul i64 %ocnt, 8\n";
+        $out .= "  call ptr @memcpy(ptr %fmb, ptr %fos, i64 %fobytes)\n";
+        $out .= "  store i64 %need, ptr @__manticore_cc_count\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_ocount\n";
+        $out .= "  br label %start\n";
+        $out .= "start:\n";
         $out .= "  %cnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %buf = load ptr, ptr @__manticore_cc_roots\n";
         $out .= $this->ccTrace('begin', 'i64 %cnt, ptr %buf');
+        $out .= "  call void @__cc_census_begin(i64 %cnt)\n";
         $out .= "  %ip = alloca i64\n";
         $out .= "  %wp = alloca i64\n";
         $out .= "  store i64 0, ptr %ip\n";
@@ -4192,6 +4899,17 @@ end:
         $out .= "  call void @__cc_gpush(ptr %cs, i64 1)\n";
         $out .= "  br label %crn\n";
         $out .= "crwhite:\n";
+        $out .= "  %ckeep = and i1 %cisbk, %young0\n";
+        $out .= "  br i1 %ckeep, label %crold, label %crcw\n";
+        // A root a YOUNG collection kept may be alive only through an old object
+        // that is itself garbage (a cycle through the old generation): it stays
+        // a candidate, now in the old buffer, for the next full collection.
+        $out .= "crold:\n";
+        $out .= "  call void @__cc_setcolor(ptr %cs, i64 " . $PURPLE . ")\n";
+        $out .= "  call void @__cc_setbuffered(ptr %cs, i64 1)\n";
+        $out .= "  call void @__cc_bpush(ptr %cs, ptr @__manticore_cc_oroots, ptr @__manticore_cc_ocount, ptr @__manticore_cc_ocap)\n";
+        $out .= "  br label %crn\n";
+        $out .= "crcw:\n";
         $out .= "  call void @__manticore_cc_collect_white(ptr %cs)\n";
         $out .= "  br label %crn\n";
         $out .= "crn:\n";
@@ -4217,6 +4935,13 @@ end:
         $out .= "  store i64 %dqn, ptr %ip\n";
         $out .= "  br label %dq\n";
         $out .= "dqd:\n";
+        $out .= "  %cson = load i64, ptr @__cc_census_on\n";
+        $out .= "  %csyes = icmp ne i64 %cson, 0\n";
+        $out .= "  br i1 %csyes, label %csrun, label %csgo\n";
+        $out .= "csrun:\n";
+        $out .= "  call void @__cc_census_garbage()\n";
+        $out .= "  br label %csgo\n";
+        $out .= "csgo:\n";
         $out .= "  store i64 0, ptr %ip\n";
         $out .= "  br label %gr\n";
         $out .= "gr:\n";
@@ -4231,18 +4956,55 @@ end:
         $out .= "  %gkind = and i64 %gw, 1\n";
         $out .= "  %gpi = and i64 %gw, -2\n";
         $out .= "  %gp = inttoptr i64 %gpi to ptr\n";
-        $out .= "  call void @__cc_gfree(ptr %gp, i64 %gkind)\n";
+        $out .= "  call void @__cc_grelease(ptr %gp, i64 %gkind)\n";
         $out .= "  %gin = add i64 %gi, 1\n";
         $out .= "  store i64 %gin, ptr %ip\n";
         $out .= "  br label %gr\n";
         $out .= "grd:\n";
+        $out .= "  store i64 0, ptr %ip\n";
+        $out .= "  br label %fq\n";
+        $out .= "fq:\n";
+        $out .= "  %fqi = load i64, ptr %ip\n";
+        $out .= "  %fqc = load i64, ptr @__manticore_cc_gcount\n";
+        $out .= "  %fqgo = icmp slt i64 %fqi, %fqc\n";
+        $out .= "  br i1 %fqgo, label %fqb, label %fqd\n";
+        $out .= "fqb:\n";
+        $out .= "  %fqbuf = load ptr, ptr @__manticore_cc_garbage\n";
+        $out .= "  %fqsp = getelementptr i64, ptr %fqbuf, i64 %fqi\n";
+        $out .= "  %fqw = load i64, ptr %fqsp\n";
+        $out .= "  %fqpi = and i64 %fqw, -2\n";
+        $out .= "  %fqp = inttoptr i64 %fqpi to ptr\n";
+        $out .= "  call void @__cc_gfree(ptr %fqp)\n";
+        $out .= "  %fqn = add i64 %fqi, 1\n";
+        $out .= "  store i64 %fqn, ptr %ip\n";
+        $out .= "  br label %fq\n";
+        $out .= "fqd:\n";
         $out .= "  store i64 0, ptr @__manticore_cc_gcount\n";
         $out .= "  %endcnt = load i64, ptr @__manticore_cc_count\n";
         $out .= "  %endbuf = load ptr, ptr @__manticore_cc_roots\n";
         $out .= $this->ccTrace('end', 'i64 %endcnt, ptr %endbuf');
         $out .= "  store i64 0, ptr @__manticore_cc_count\n";
         $out .= "  store i64 0, ptr @__manticore_cc_active\n";
+        // A young collection's survivors were all young: promoted. A full one's are
+        // the old generation the next full collection is measured against.
+        $out .= "  %nbk = load i64, ptr @__manticore_cc_nblack\n";
+        $out .= "  br i1 %isfull, label %bkfull, label %bkyoung\n";
+        $out .= "bkfull:\n";
+        $out .= "  store i64 %nbk, ptr @__manticore_cc_oldlive\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_promoted\n";
+        $out .= "  store i64 0, ptr @__manticore_cc_ysince\n";
+        $out .= "  br label %bkdone\n";
+        $out .= "bkyoung:\n";
+        $out .= "  %pr0 = load i64, ptr @__manticore_cc_promoted\n";
+        $out .= "  %pr1 = add i64 %pr0, %nbk\n";
+        $out .= "  store i64 %pr1, ptr @__manticore_cc_promoted\n";
+        $out .= "  %ys0 = load i64, ptr @__manticore_cc_ysince\n";
+        $out .= "  %ys1 = add i64 %ys0, 1\n";
+        $out .= "  store i64 %ys1, ptr @__manticore_cc_ysince\n";
+        $out .= "  br label %bkdone\n";
+        $out .= "bkdone:\n";
         $out .= "  %freed = load i64, ptr @__manticore_cc_freed\n";
+        $out .= "  call void @__cc_census_end(i64 %freed)\n";
         $out .= "  ret i64 %freed\n";
         $out .= "}\n";
         return $out;

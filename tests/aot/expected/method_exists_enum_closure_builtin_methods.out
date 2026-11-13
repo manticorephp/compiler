@@ -1,0 +1,23 @@
+Array
+(
+    [0] => color
+    [1] => cases
+)
+Array
+(
+    [0] => x
+    [1] => cases
+    [2] => from
+    [3] => tryFrom
+)
+Array
+(
+    [0] => bind
+    [1] => bindTo
+    [2] => call
+    [3] => fromCallable
+    [4] => getCurrent
+)
+bool(true)
+bool(true)
+bool(true)

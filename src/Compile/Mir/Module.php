@@ -503,6 +503,9 @@ final class Module
     /** Whether the program reflects a computed name, so a closure built after lowering
      *  ({@see Passes\ResolveMethodFcc}) must record its shape too. Declared LAST. */
     public bool $reflClosureWanted = false;
+    /** @var array<string, bool> names the emitter answers inline that read their arguments by count:
+     *  their stdlib declarations list fewer parameters than php on purpose (LowerFns::emitterInlineNames) */
+    public array $countReadInlineNames = [];
 
 
     public function markPassApplied(string $name): void

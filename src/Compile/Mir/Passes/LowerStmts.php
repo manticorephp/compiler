@@ -91,31 +91,53 @@ trait LowerStmts
 {
     private function lowerTryCatch(\Parser\Ast\TryCatchStmt $stmt): Node
     {
-        $tryBody = [];
-        foreach ($stmt->try->statements as $s) { $tryBody[] = $this->lowerStmt($s); }
+        $tryBody = $this->lowerStmtList($stmt->try->statements);
         $catches = [];
         foreach ($stmt->catches as $c) {
             $types = [];
-            foreach ($c->types as $t) { $types[] = \ltrim($t, '\\'); }
+            foreach ($c->types as $t) { $types[] = \ltrim($t, '\\'); $this->noteClassRef(\ltrim($t, '\\'), $stmt->span, 'soft'); }
             // The arm takes the thrown object's +1 out of `@__mir_thrown`
             // first: into its variable, or discarded (released) without one.
             $caught = new CaughtValue_($types, Type::obj(\count($types) > 0 ? $types[0] : 'Throwable'));
             $body = [$c->name === null ? $caught : new StoreLocal($c->name, $caught, $caught->type)];
-            foreach ($c->body->statements as $s) { $body[] = $this->lowerStmt($s); }
+            foreach ($this->lowerStmtList($c->body->statements) as $s) { $body[] = $s; }
             $catches[] = new MirCatch($types, $c->name, $body);
         }
         $finallyBody = [];
         $hasFinally = $stmt->finally !== null;
         if ($hasFinally) {
-            foreach ($stmt->finally->statements as $s) { $finallyBody[] = $this->lowerStmt($s); }
+            $finallyBody = $this->lowerStmtList($stmt->finally->statements);
         }
         return new TryCatch_($tryBody, $catches, $finallyBody, $hasFinally, Type::void());
+    }
+
+    /**
+     * A statement list that is not a Block (switch arm, try / catch / finally body): each statement
+     * lowered as is, and `if (!class_exists('X')) { throw …; }` guards the rest of the list.
+     * @param \Parser\Ast\Stmt[] $list
+     * @return Node[]
+     */
+    private function lowerStmtList(array $list): array
+    {
+        $out = [];
+        $pushed = 0;
+        foreach ($list as $stmt) {
+            // Resolved before lowering: lowering the condition may lower a helper and move the class scope.
+            $eg = $stmt->kind === 'If' ? $this->earlyExitGuard($stmt) : '';
+            $out[] = $this->lowerStmt($stmt);
+            if ($stmt->kind === 'If') {
+                if ($eg !== '') { $this->guardStack[] = $eg; $pushed = $pushed + 1; }
+            }
+        }
+        for ($pi = 0; $pi < $pushed; $pi = $pi + 1) { \array_pop($this->guardStack); }
+        return $out;
     }
 
     private function lowerBlockNode(\Parser\Ast\Block $block): Block
     {
         $stmts = [];
         $dead = false;
+        $pushed = 0;
         foreach ($block->statements as $stmt) {
             // A LABEL re-enters the flow: `goto` may jump straight to it, so the
             // statements it heads are live no matter what precedes them (the
@@ -123,6 +145,7 @@ trait LowerStmts
             // Skipping a label emitted a `br` to a block that was never defined.
             if ($dead && $stmt->kind !== 'Label') { continue; }
             $dead = false;
+            $eg = $stmt->kind === 'If' ? $this->earlyExitGuard($stmt) : '';
             $lowered = $this->lowerStmt($stmt);
             $stmts[] = $lowered;
             // Drop statements after an UNCONDITIONAL terminator (php treats
@@ -133,22 +156,80 @@ trait LowerStmts
             // lowering it avoids a spurious "unknown constant" on a branch that
             // can never run.
             if ($this->nodeAlwaysTerminates($lowered)) { $dead = true; }
+            // `if (!class_exists('X')) { return; }` guards everything after it in this block.
+            if ($stmt->kind === 'If') {
+                if ($eg !== '') { $this->guardStack[] = $eg; $pushed = $pushed + 1; }
+            }
         }
+        for ($pi = 0; $pi < $pushed; $pi = $pi + 1) { \array_pop($this->guardStack); }
         return new Block($stmts, Type::void());
     }
 
+    /** A guard call, a guard-valued local or an assignment of one: no `!` / `||` / comparison on the way, which would flip the polarity. */
+    private function plainGuardLabel(\Parser\Ast\Expr $e): string
+    {
+        if ($e instanceof \Parser\Ast\Assign) { return $this->plainGuardLabel($e->value); }
+        $k = $e->kind;
+        if ($k !== 'Call' && $k !== 'StaticCall' && $k !== 'MethodCall' && $k !== 'Variable') { return ''; }
+        $this->lastGuardPos = false;
+        $l = $this->guardLabel($e);
+        // A helper / local whose value is the NEGATION of a guard (`return !class_exists(..)`) is no positive guard.
+        return $this->lastGuardPos ? $l : '';
+    }
+
+    /** Operand of `!`: a plain guard, or `a && b` with a plain guard among the conjuncts (it exits unless both hold). */
+    private function plainOrAndGuardLabel(\Parser\Ast\Expr $e): string
+    {
+        if ($e instanceof \Parser\Ast\BinaryOp && $e->op === '&&') {
+            $l = $this->plainOrAndGuardLabel($e->left);
+            return $l !== '' ? $l : $this->plainOrAndGuardLabel($e->right);
+        }
+        return $this->plainGuardLabel($e);
+    }
+
+    private function earlyExitGuard(\Parser\Ast\IfStmt $s): string
+    {
+        $l = $this->negatedGuardLabel($s->condition);
+        return ($l !== '' && $this->blockEndsInJump($s->then)) ? $l : '';
+    }
+
+    /**
+     * Guard label when the condition being TRUE means the guard is FALSE (`!guard`, `guard === false`, or
+     * a `||` with such a side): only then does an early exit leave the rest of the block guarded.
+     */
+    private function negatedGuardLabel(\Parser\Ast\Expr $e): string
+    {
+        if ($e instanceof \Parser\Ast\UnaryOp) { return $e->op === '!' ? $this->plainOrAndGuardLabel($e->operand) : ''; }
+        if (!($e instanceof \Parser\Ast\BinaryOp)) { return ''; }
+        if ($e->op === '||') {
+            $l = $this->negatedGuardLabel($e->left);
+            return $l !== '' ? $l : $this->negatedGuardLabel($e->right);
+        }
+        if ($e->op !== '===' && $e->op !== '==') { return ''; }
+        if ($e->right instanceof \Parser\Ast\BoolLiteral && !$e->right->value) { return $this->plainGuardLabel($e->left); }
+        if ($e->left instanceof \Parser\Ast\BoolLiteral && !$e->left->value) { return $this->plainGuardLabel($e->right); }
+        return '';
+    }
+
     /** Whether a lowered statement unconditionally leaves the block — a
-     *  `return` / `throw`, or a block ending in one (a folded static guard). */
+     *  `return` / `throw` / `exit`, or a block ending in one (a folded static guard). */
     private function nodeAlwaysTerminates(Node $n): bool
     {
         $k = $n->kind;
         if ($k === Node::KIND_RETURN || $k === Node::KIND_THROW) { return true; }
+        if ($k === Node::KIND_CALL) { return $this->callIsExitNode($n); }
         if ($k === Node::KIND_BLOCK) {
             $ss = $n->stmts;
             $c = \count($ss);
             return $c > 0 && $this->nodeAlwaysTerminates($ss[$c - 1]);
         }
         return false;
+    }
+
+    private function callIsExitNode(Call $c): bool
+    {
+        $f = \strtolower($c->function);
+        return $f === 'exit' || $f === 'die';
     }
 
     private function lowerStmt(\Parser\Ast\Stmt $stmt): Node
@@ -482,7 +563,7 @@ trait LowerStmts
             return new Echo_($items, Type::void());
         }
         if ($stmt->kind === 'Return') {
-            $value = $stmt->value === null ? null : $this->lowerExpr($stmt->value);
+            $value = $stmt->value === null ? null : $this->lowerReturnValue($stmt->value);
             return new Return_($value, Type::void());
         }
         if ($stmt->kind === 'If')       { return $this->lowerIf($stmt); }
@@ -499,10 +580,13 @@ trait LowerStmts
         if ($stmt->kind === 'Global') { return $this->lowerGlobal($stmt); }
         if ($stmt->kind === 'Throw') { return new Throw_($this->lowerExpr($stmt->expr), Type::void()); }
         if ($stmt->kind === 'TryCatch') { return $this->lowerTryCatch($stmt); }
-        throw new \RuntimeException(
+        // Declared at the top level instead ({@see hoistNestedDecls}).
+        if (($stmt->kind === 'Function' || $stmt->kind === 'Class') && $this->isHoistedNestedDecl($stmt)) {
+            return new Block([], Type::void());
+        }
+        return $this->lowerFail('lower.unsupported', 'unsupported statement kind ' . $stmt->kind, $stmt->span,
             'MIR.lower: unsupported statement kind ' . $stmt->kind
-            . ' at line ' . (string)$stmt->span->line
-        );
+            . ' in ' . $stmt->span->file . ' on line ' . (string)$stmt->span->line);
     }
 
     /**
@@ -517,10 +601,13 @@ trait LowerStmts
         // unresolvable symbols — an undefined constant like SIGINT behind
         // `defined('SIGINT')` — never reach codegen. Same fold flattenConstantIfs
         // applies at top level, extended here to nested (method-body) `if`s.
+        $gl = $this->ifGuardLabel($stmt);
         $live = $this->constIfBranch($stmt);
         if ($live !== null) {
             $stmts = [];
+            if ($gl !== '') { $this->guardStack[] = $gl; }
             foreach ($live as $s) { $stmts[] = $this->lowerStmt($s); }
+            if ($gl !== '') { \array_pop($this->guardStack); }
             return new Block($stmts, Type::void());
         }
         // Not every arm folds — but the ones that fold FALSE are still dead, and
@@ -544,7 +631,7 @@ trait LowerStmts
             $armConds[] = $pair->condition;
             $armBodies[] = $pair->body;
         }
-        $else_ = $stmt->else === null ? null : $this->lowerBlockNode($stmt->else);
+        $else_ = $stmt->else === null ? null : $this->lowerBlockGuarded($stmt->else, $gl);
         $n = \count($armConds);
         if ($n === 0) {
             // Every arm is statically dead — only the `else` can run.
@@ -553,14 +640,14 @@ trait LowerStmts
         for ($i = $n - 1; $i >= 1; $i = $i - 1) {
             $nested = new If_(
                 $this->lowerExpr($armConds[$i]),
-                $this->lowerBlockNode($armBodies[$i]),
+                $this->lowerBlockGuarded($armBodies[$i], $gl),
                 $else_,
             );
             $else_ = new Block([$nested], Type::void());
         }
         return new If_(
             $this->lowerExpr($armConds[0]),
-            $this->lowerBlockNode($armBodies[0]),
+            $this->lowerBlockGuarded($armBodies[0], $gl),
             $else_,
         );
     }
@@ -659,10 +746,9 @@ trait LowerStmts
         // synthetic local, not the target, so writes through it would be lost —
         // refuse it rather than compile something silently wrong.
         if ($stmt->valueByRef && $stmt->value->kind !== 'Variable') {
-            throw new \RuntimeException(
+            return $this->lowerFail('lower.unsupported',
                 'unsupported: foreach cannot bind BY REFERENCE into anything but a '
-                . 'variable — the alias would reach a temporary, not the target.'
-            );
+                . 'variable — the alias would reach a temporary, not the target.', $stmt->span);
         }
         // List-destructuring value pattern — `foreach ($x as [$a, $b])` /
         // `foreach ($x as ['k' => $v])`: the value binding can't name the
@@ -830,8 +916,7 @@ trait LowerStmts
         foreach ($stmt->cases as $arm) {
             $val = null;
             if ($arm->value !== null) { $val = $this->lowerExpr($arm->value); }
-            $body = [];
-            foreach ($arm->body as $s) { $body[] = $this->lowerStmt($s); }
+            $body = $this->lowerStmtList($arm->body);
             $arms[] = new SwitchArm_($val, $body);
         }
         return new Switch_($subject, $arms);

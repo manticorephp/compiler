@@ -220,6 +220,9 @@ final class Parser
         return new ParseResult($program, $errors);
     }
 
+    /** @var ParseError[] every error of the lazy body whose materialization last failed (tolerant re-parse). */
+    public static array $lazyBodyErrors = [];
+
     /** Materialize one deferred function/method body and release its source copy. */
     public static function materializeLazyBody(LazyBody $lazy): Block
     {
@@ -241,6 +244,11 @@ final class Parser
             }
             throw new \RuntimeException('manticore: failed to materialize lazy body');
         } catch (\Throwable $e) {
+            self::$lazyBodyErrors = [];
+            try {
+                self::$lazyBodyErrors = self::parseTolerant($wrapped, $lazy->file, false, false)->errors;
+            } catch (\Throwable $te) {
+            }
             $preview = substr(str_replace(["\n", "\r"], ' ', $raw), 0, 120);
             throw new \RuntimeException('lazy body ' . $lazy->file . ':' . (string)$lazy->line
                 . ' [' . $preview . ']: ' . $e->getMessage(), 0, $e);
@@ -1001,6 +1009,7 @@ final class Parser
                 }
                 continue;
             }
+            if ($kw === 'var')      { $this->advance(); continue; }
             if ($kw === 'static')   { $static   = true; $this->advance(); continue; }
             if ($kw === 'final')    { $final    = true; $this->advance(); continue; }
             if ($kw === 'abstract') { $abstract = true; $this->advance(); continue; }
@@ -1182,7 +1191,7 @@ final class Parser
         $body = null;
         $lazyBody = null;
         if ($this->check(TokenKind::OpenBrace)) {
-            if ($this->lazyBodies && !$this->upcomingBlockHasAnonymousClass()) {
+            if ($this->lazyBodies && !$this->upcomingBlockNeedsEagerParse()) {
                 $lazyBody = $this->skipLazyBody();
             } else {
                 $body = $this->parseBlock();
@@ -1243,7 +1252,7 @@ final class Parser
 
         $body = null;
         $lazyBody = null;
-        if ($this->lazyBodies && !$this->upcomingBlockHasAnonymousClass()) {
+        if ($this->lazyBodies && !$this->upcomingBlockNeedsEagerParse()) {
             $lazyBody = $this->skipLazyBody();
         } else {
             $body = $this->parseBlock();
@@ -1426,15 +1435,26 @@ final class Parser
         throw $this->error('expected type name');
     }
 
-    private function upcomingBlockHasAnonymousClass(): bool
+    /**
+     * A body that must be parsed now rather than kept lazy: one holding an
+     * anonymous class, or a NAMED function / class / interface / trait
+     * declaration — lowering hoists those to the top level, so it has to see
+     * them before any body is lowered.
+     */
+    private function upcomingBlockNeedsEagerParse(): bool
     {
         $depth = 0;
-        $previousWasNew = false;
+        $prev = '';
         $n = count($this->tokens);
         for ($i = $this->pos; $i < $n; $i = $i + 1) {
             $tok = $this->tokens[$i];
-            if ($previousWasNew && strtolower($tok->lexeme) === 'class') {
-                return true;
+            $lex = strtolower($tok->lexeme);
+            if ($lex === 'class' && $prev === 'new') { return true; }
+            if ($depth > 0 && $tok->kind === TokenKind::Keyword && $prev !== '::' && $prev !== '->' && $prev !== '?->'
+                && ($lex === 'function' || $lex === 'class' || $lex === 'interface' || $lex === 'trait')) {
+                $j = $i + 1;
+                if ($j < $n && $this->tokens[$j]->lexeme === '&') { $j = $j + 1; }
+                if ($j < $n && $this->tokens[$j]->kind === TokenKind::Identifier) { return true; }
             }
             if ($tok->kind === TokenKind::OpenBrace) {
                 $depth = $depth + 1;
@@ -1442,7 +1462,7 @@ final class Parser
                 $depth = $depth - 1;
                 if ($depth === 0) { return false; }
             }
-            $previousWasNew = strtolower($tok->lexeme) === 'new';
+            $prev = $lex;
         }
         return false;
     }
@@ -1800,8 +1820,15 @@ final class Parser
         $span = $this->span();
         $this->advance();
         $level = 1;
-        if ($this->check(TokenKind::IntLiteral)) {
-            $level = (int)$this->advance()->lexeme;
+        $parens = 0;
+        while ($this->match(TokenKind::OpenParen)) {
+            $parens++;
+        }
+        if ($parens > 0 || $this->check(TokenKind::IntLiteral)) {
+            $level = (int)$this->expect(TokenKind::IntLiteral, "'" . strtolower($kind) . "' operator accepts only positive integers")->lexeme;
+        }
+        for (; $parens > 0; $parens--) {
+            $this->expect(TokenKind::CloseParen, "expected ')' after " . strtolower($kind) . " level");
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after " . strtolower($kind));
         return $kind === 'Break'
@@ -1941,10 +1968,15 @@ final class Parser
         $this->expect(TokenKind::OpenParen, "expected '(' after switch");
         $expr = $this->parseExpression();
         $this->expect(TokenKind::CloseParen, "expected ')' after switch expression");
-        $this->expect(TokenKind::OpenBrace, "expected '{' in switch body");
+        $alt = $this->match(TokenKind::Colon);
+        if (!$alt) { $this->expect(TokenKind::OpenBrace, "expected '{' in switch body"); }
         $cases = [];
-        while (!$this->check(TokenKind::CloseBrace) && !$this->isAtEnd()) {
+        while (!$this->switchBodyEnds($alt) && !$this->isAtEnd()) {
             $value = null;
+            if ($this->check(TokenKind::InlineHtml) && \trim($this->peek()->lexeme) === '') {
+                $this->advance();
+                continue;
+            }
             if ($this->checkKeyword('case')) {
                 $this->advance();
                 $value = $this->parseExpression();
@@ -1961,7 +1993,7 @@ final class Parser
             $this->expect(TokenKind::Colon, "expected ':' after case label");
             $body = [];
             while (
-                !$this->check(TokenKind::CloseBrace)
+                !$this->switchBodyEnds($alt)
                 && !$this->checkKeyword('case')
                 && !$this->checkKeyword('default')
                 && !$this->isAtEnd()
@@ -1971,8 +2003,17 @@ final class Parser
             }
             $cases[] = new SwitchArm($value, $body);
         }
-        $this->expect(TokenKind::CloseBrace, "expected '}' to close switch");
+        if ($alt) {
+            $this->endAltBody('endswitch');
+        } else {
+            $this->expect(TokenKind::CloseBrace, "expected '}' to close switch");
+        }
         return Stmt::switch_($expr, $cases, $this->end($span));
+    }
+
+    private function switchBodyEnds(bool $alt): bool
+    {
+        return $alt ? $this->checkKeyword('endswitch') : $this->check(TokenKind::CloseBrace);
     }
 
     // ── Expressions (Pratt) ──────────────────────────────────────────────────
@@ -2556,6 +2597,10 @@ final class Parser
                 $classExpr = $this->parsePostfix($this->parsePrimary());
                 return Expr::call('is_a', [$left, $classExpr], $this->end($span, $left));
             }
+            $classExpr = $this->parseStaticPropClassRef($span);
+            if ($classExpr !== null) {
+                return Expr::call('is_a', [$left, $classExpr], $this->end($span, $left));
+            }
             $class = $this->parseClassName();
             return Expr::instanceof_($left, $class, $this->end($span, $left));
         }
@@ -2915,7 +2960,7 @@ final class Parser
             || $low === 'float' || $low === 'double' || $low === 'string' || $low === 'array'
             || $low === 'mixed' || $low === 'void' || $low === 'null' || $low === 'callable'
             || $low === 'iterable' || $low === 'object' || $low === 'never' || $low === 'false'
-            || $low === 'true' || $low === 'numeric'
+            || $low === 'true'
         ) {
             return;
         }
@@ -2998,7 +3043,6 @@ final class Parser
             || $low === 'mixed' || $low === 'void' || $low === 'null'
             || $low === 'callable' || $low === 'iterable' || $low === 'object'
             || $low === 'never' || $low === 'false' || $low === 'true'
-            || $low === 'numeric'
         ) {
             return $literal;
         }
@@ -3205,6 +3249,11 @@ final class Parser
             $this->advance();
             $inner = $this->parseExpression();
             $this->expect(TokenKind::CloseParen, "expected ')' to close parenthesised expression");
+            if ($this->ranges === 1) {
+                $this->parenInner = $inner;
+                $this->parenLine = $tok->line;
+                $this->parenColumn = $tok->column;
+            }
             return $inner;
         }
 
@@ -3326,6 +3375,35 @@ final class Parser
         return Expr::match_($subject, $arms, $this->end($span));
     }
 
+    /**
+     * `Name::$prop` (plus `[...]` subscripts) naming a class by the VALUE of a static
+     * property — PHP's new_variable, after `new` and `instanceof`. Null (position
+     * restored) when the class reference is a plain name.
+     */
+    private function parseStaticPropClassRef(Span $span): ?Expr
+    {
+        $save = $this->pos;
+        $literal = $this->parseClassNameLiteral();
+        $dc = $this->peek();
+        $pv = $this->tokens[$this->pos + 1] ?? null;
+        if ($dc->kind !== TokenKind::DoubleColon || $pv === null || $pv->kind !== TokenKind::Variable || $pv->lexeme === '$') {
+            $this->rewind($save);
+            return null;
+        }
+        if ($this->collectNames === 1) { $this->noteClass($literal, $this->resolveClassName($literal)); }
+        $this->advance();
+        $this->advance();
+        $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
+        while ($this->check(TokenKind::OpenBracket)) {
+            $bspan = $this->span();
+            $this->advance();
+            $bindex = $this->parseExpression();
+            $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
+            $classExpr = Expr::arrayAccess($classExpr, $bindex, $this->end($bspan, $classExpr));
+        }
+        return $classExpr;
+    }
+
     private function parseNew(Span $span): Expr
     {
         $this->advance(); // 'new'
@@ -3394,33 +3472,16 @@ final class Parser
             }
             return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $this->end($span));
         }
-        // `new static::$cls(args)` / `new Foo::$cls(args)` — the class is the VALUE
-        // of a static property (PHP's new_variable). Left to parseClassName it
+        // `new static::$cls(args)` / `new Foo::$cls(args)`. Left to parseClassName it
         // read `new static` and then a static call through a local `$cls`.
-        $save = $this->pos;
-        $literal = $this->parseClassNameLiteral();
-        $dc = $this->peek();
-        $pv = $this->tokens[$this->pos + 1] ?? null;
-        if ($dc->kind === TokenKind::DoubleColon && $pv !== null && $pv->kind === TokenKind::Variable && $pv->lexeme !== '$') {
-            if ($this->collectNames === 1) { $this->noteClass($literal, $this->resolveClassName($literal)); }
-            $this->advance();
-            $this->advance();
-            $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
-            // `new static::$map[$k](args)`: subscripts still name the class; only `(` starts the arguments.
-            while ($this->check(TokenKind::OpenBracket)) {
-                $bspan = $this->span();
-                $this->advance();
-                $bindex = $this->parseExpression();
-                $this->expect(TokenKind::CloseBracket, "expected ']' after subscript");
-                $classExpr = Expr::arrayAccess($classExpr, $bindex, $this->end($bspan, $classExpr));
-            }
+        $classExpr = $this->parseStaticPropClassRef($span);
+        if ($classExpr !== null) {
             $dargs = [];
             if ($this->check(TokenKind::OpenParen)) {
                 $dargs = $this->parseArgList();
             }
             return new \Parser\Ast\NewDynExpr($classExpr, $dargs, $this->end($span));
         }
-        $this->rewind($save);
         $class = $this->parseClassName();
         $args = [];
         if ($this->check(TokenKind::OpenParen)) {
@@ -3604,7 +3665,7 @@ final class Parser
             return Expr::call($name, $args, $this->end($span), $qualified);
         }
 
-        return Expr::identifier($name, $this->end($span));
+        return Expr::identifier($name, $this->end($span), \str_contains($literal, '\\') || isset($this->useConstAliases[$literal]));
     }
 
     private function parseIntLiteral(string $lex): int
@@ -4250,6 +4311,10 @@ final class Parser
     }
 
     /** End of the last consumed token: where a node completing now ends. */
+    /** The expression most recently closed by `( … )`, and where its `(` stands (ranges mode only). */
+    private ?Expr $parenInner = null;
+    private int $parenLine = 0;
+    private int $parenColumn = 0;
     private int $prevEndLine = 0;
     private int $prevEndColumn = 0;
 
@@ -4286,6 +4351,11 @@ final class Parser
         if ($from !== null) {
             $bl = $from->span->startLine();
             $bc = $from->span->startColumn();
+            // `(new Foo)->m()`: a postfix on a parenthesised receiver starts at the `(`.
+            if ($from === $this->parenInner) {
+                $bl = $this->parenLine;
+                $bc = $this->parenColumn;
+            }
         }
         $el = $this->prevEndLine;
         $ec = $this->prevEndColumn;

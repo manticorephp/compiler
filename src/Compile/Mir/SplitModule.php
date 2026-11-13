@@ -91,6 +91,15 @@ final class SplitModule
     /** @var array<string, int> global name => index in globalOrder */
     private array $gpos = [];
 
+    /**
+     * Symbols the INPUT module pins with its own `@llvm.compiler.used` (a shared-
+     * generics program part pins what its body parts name). The array itself is
+     * dropped — each part writes one — and a pinned global is defined, non-
+     * discardable, in part 0.
+     * @var array<string, bool>
+     */
+    private array $inputPins = [];
+
     /** @var array<int, string[]> part => its own non-internal definitions in defOrder order */
     private array $partMine = [];
 
@@ -101,6 +110,7 @@ final class SplitModule
     {
         if ($parts < 2) { return [$ir]; }
         $this->refsCache = [];
+        $this->inputPins = [];
         $lines = \explode("\n", $ir);
         $n = \count($lines);
 
@@ -140,6 +150,7 @@ final class SplitModule
             if ($l !== '' && $l[0] === '@') {
                 $sym = $this->globalName($l);
                 if ($sym === '') { $header[] = $l; continue; }
+                if ($sym === 'llvm.compiler.used') { $this->notePins($l); continue; }
                 $globals[$sym] = $l;
                 $globalOrder[] = $sym;
                 continue;
@@ -221,19 +232,51 @@ final class SplitModule
     }
 
     /**
-     * Insert $v into the sorted tail of $a starting at $from.
+     * Push $v onto the binary min-heap $h.
      *
-     * @param int[] $a
+     * The closure's worklist was a sorted array grown by `array_splice`, one O(n)
+     * rebuild per insertion: 81 s of a 97 s Laravel split. In write order a body's
+     * callees mostly come BEFORE it (deferred, a cheap append); in the stable split's
+     * name order half of them come after it and were spliced. A heap pops in the same
+     * ascending order, so the visit order (and with it every part's text) is unchanged.
+     *
+     * @param int[] $h
      */
-    private function sortedInsert(array &$a, int $from, int $v): void
+    private function heapPush(array &$h, int $v): void
     {
-        $lo = $from;
-        $hi = \count($a);
-        while ($lo < $hi) {
-            $mid = ($lo + $hi) >> 1;
-            if ($a[$mid] < $v) { $lo = $mid + 1; } else { $hi = $mid; }
+        $i = \count($h);
+        $h[] = $v;
+        while ($i > 0) {
+            $up = ($i - 1) >> 1;
+            if ($h[$up] <= $v) { break; }
+            $h[$i] = $h[$up];
+            $i = $up;
         }
-        \array_splice($a, $lo, 0, [$v]);
+        $h[$i] = $v;
+    }
+
+    /**
+     * Pop the smallest value of the non-empty min-heap $h.
+     *
+     * @param int[] $h
+     */
+    private function heapPop(array &$h): int
+    {
+        $top = $h[0];
+        $last = (int)\array_pop($h);
+        $n = \count($h);
+        if ($n === 0) { return $top; }
+        $i = 0;
+        while (true) {
+            $c = 2 * $i + 1;
+            if ($c >= $n) { break; }
+            if ($c + 1 < $n && $h[$c + 1] < $h[$c]) { $c = $c + 1; }
+            if ($h[$c] >= $last) { break; }
+            $h[$i] = $h[$c];
+            $i = $c;
+        }
+        $h[$i] = $last;
+        return $top;
     }
 
     /**
@@ -247,7 +290,8 @@ final class SplitModule
         $this->gpos = [];
         $k = 0;
         foreach ($globalOrder as $g) {
-            $this->gcls[$g] = $this->globalClass($globals[$g]);
+            // A pinned global is defined once, in part 0, whatever its linkage.
+            $this->gcls[$g] = isset($this->inputPins[$g]) ? 'strong' : $this->globalClass($globals[$g]);
             $this->gpos[$g] = $k;
             $k = $k + 1;
         }
@@ -736,13 +780,12 @@ final class SplitModule
         }
         while ($pendI !== [] || $pendG !== []) {
             while ($pendI !== []) {
+                // A sorted array is already a valid min-heap.
                 $cur = $pendI;
                 $pendI = [];
                 \sort($cur);
-                $idx = 0;
-                while ($idx < \count($cur)) {
-                    $i = $cur[$idx];
-                    $idx = $idx + 1;
+                while ($cur !== []) {
+                    $i = $this->heapPop($cur);
                     $sym = $defOrder[$i];
                     $haveInternal[$sym] = true;
                     foreach ($defRefs[$sym] as $r => $_) {
@@ -752,7 +795,7 @@ final class SplitModule
                         if (isset($internal[$r])) {
                             $haveInternal[$r] = false;
                             $j = $this->defPos[$r];
-                            if ($j > $i) { $this->sortedInsert($cur, $idx, $j); } else { $pendI[] = $j; }
+                            if ($j > $i) { $this->heapPush($cur, $j); } else { $pendI[] = $j; }
                         } elseif (isset($this->gcls[$r])) {
                             $needG[$r] = false;
                             $pendG[] = $this->gpos[$r];
@@ -764,10 +807,8 @@ final class SplitModule
                 $cur = $pendG;
                 $pendG = [];
                 \sort($cur);
-                $idx = 0;
-                while ($idx < \count($cur)) {
-                    $i = $cur[$idx];
-                    $idx = $idx + 1;
+                while ($cur !== []) {
+                    $i = $this->heapPop($cur);
                     $g = $globalOrder[$i];
                     $needG[$g] = true;
                     $cls = $this->gcls[$g];
@@ -788,7 +829,7 @@ final class SplitModule
                         } elseif (isset($this->gcls[$r])) {
                             $needG[$r] = false;
                             $j = $this->gpos[$r];
-                            if ($j > $i) { $this->sortedInsert($cur, $idx, $j); } else { $pendG[] = $j; }
+                            if ($j > $i) { $this->heapPush($cur, $j); } else { $pendG[] = $j; }
                         }
                     }
                 }
@@ -823,12 +864,24 @@ final class SplitModule
         $needG = $plan->needG;
         $refs = $plan->refs;
         $gtext = '';
-        foreach ($globalOrder as $g) {
+        // Part 0 defines every strong global; any other part emits only what it
+        // names. Walking all globals per part was parts x globals map probes
+        // (65 x 588k on Laravel) — visit the named ones, in module order.
+        $order = $globalOrder;
+        if ($p !== 0) {
+            /** @var int[] */
+            $gp = [];
+            foreach ($needG as $g => $_) { $gp[] = $this->gpos[(string)$g]; }
+            \sort($gp);
+            $order = [];
+            foreach ($gp as $i) { $order[] = $globalOrder[$i]; }
+        }
+        foreach ($order as $g) {
             $gl = $globals[$g];
             $cls = $this->gcls[$g];
             if ($cls === 'local') {
                 if (!isset($needG[$g])) { continue; }
-                $gtext = $gtext . $this->promoteGlobal($gl) . "\n";
+                $gtext .= $this->promoteGlobal($gl) . "\n";
                 continue;
             }
             if ($cls === 'coalesced') {
@@ -839,15 +892,18 @@ final class SplitModule
                 // — every other part would then hold an unresolved external.
                 // weak_odr is the same coalescing with no discard.
                 if (isset($plan->ownG[$g])) {
-                    $gtext = $gtext . $this->pinGlobal($this->promoteGlobal($gl)) . "\n";
+                    $gtext .= $this->pinGlobal($this->promoteGlobal($gl)) . "\n";
                     continue;
                 }
-                $gtext = $gtext . $this->externGlobal($gl) . "\n";
+                $gtext .= $this->externGlobal($gl) . "\n";
                 continue;
             }
-            if ($p === 0) { $gtext = $gtext . $gl . "\n"; continue; }
+            if ($p === 0) {
+                $gtext .= (isset($this->inputPins[$g]) ? $this->pinGlobal($gl) : $gl) . "\n";
+                continue;
+            }
             if (!isset($needG[$g])) { continue; }
-            $gtext = $gtext . $this->externGlobal($gl) . "\n";
+            $gtext .= $this->externGlobal($gl) . "\n";
         }
         // Declares for what this part calls but another part defines.
         /** @var array<string, bool> */
@@ -858,7 +914,7 @@ final class SplitModule
             if (!isset($defHead[$r]) || isset($internal[$r]) || isset($availSet[$r])) { continue; }
             if (($assign[$r] ?? -1) === $p) { continue; }
             $d = $this->declareFromDefine($defHead[$r]);
-            if ($d !== '') { $dtext = $dtext . $d . "\n"; }
+            if ($d !== '') { $dtext .= $d . "\n"; }
         }
         /** @var string[] */
         $keep = [];
@@ -878,6 +934,13 @@ final class SplitModule
     }
 
     /** A coalesced global's definition, made non-discardable for its owning part. */
+    private function notePins(string $line): void
+    {
+        if (\preg_match_all('/ptr @("[^"]+"|[A-Za-z0-9_.$\\\\-]+)/', $line, $m) > 0) {
+            foreach ($m[1] as $raw) { $this->inputPins[\trim((string)$raw, '"')] = true; }
+        }
+    }
+
     private function pinGlobal(string $line): string
     {
         $eq = \strpos($line, ' = ');
@@ -912,9 +975,11 @@ final class SplitModule
     public function runFile(string $llPath, int $parts, string $outBase): array
     {
         if ($parts < 2) { return []; }
+        $tStart = \Compile\Stats::now();
         $this->refsCache = [];
+        $this->inputPins = [];
         $in = \Manticore\fopen($llPath, 'rb');
-        $cap = 1048576;
+        $cap = 4194304;
         $buf = \Manticore\malloc($cap);
 
         /** @var string[] */
@@ -936,64 +1001,76 @@ final class SplitModule
         /** @var array<string, int> */
         $defSize = [];
 
+        // The file is read in blocks, never line by line: a body's end is ONE
+        // strpos for its closing `}` line, so only module-level lines (globals,
+        // declares, headers) are cut out one at a time. fgets per line plus a
+        // string per line was most of the parse on Laravel's 48M-line module.
+        //
+        // ⚠ A module-level line can run to megabytes (a per-enum case table, a
+        // class descriptor array): the window grows until the newline arrives.
+        $data = '';
+        $dp = 0;
+        // File offset of $data[$dp].
         $pos = 0;
-        $cur = '';
-        $start = 0;
-        /** @var array<string, bool> */
-        $refs = [];
-        // The body of the define being read, scanned for `@symbol` once at its closing brace.
-        $body = '';
+        $eof = false;
         while (true) {
-            // fgets stops at the BUFFER as readily as at the newline, and this
-            // module has global initialisers whose single line runs to megabytes
-            // (a per-enum case table, a class descriptor array). Treating each
-            // chunk as a line put the tail of one on a line of its own, where it
-            // parses as nothing: `p0.ll:4:1: error: expected top-level entity`,
-            // and the whole split fell back to the serial path that cannot
-            // compile the module at all. Read until the newline actually arrives.
-            $line = '';
-            while (true) {
-                $p = \Manticore\fgets($buf, $cap, $in);
-                if ($p === 0) { break; }
-                $chunk = \cstr_to_str($p);
-                $line .= $chunk;
-                if (\substr($chunk, -1) === "\n") { break; }
+            $nl = \strpos($data, "\n", $dp);
+            while ($nl === false && !$eof) {
+                $got = \Manticore\fread($buf, 1, $cap, $in);
+                if ($got <= 0) { $eof = true; break; }
+                $data = \substr($data, $dp) . \str_from_buffer($buf, $got);
+                $dp = 0;
+                $nl = \strpos($data, "\n");
             }
-            if ($line === '') { break; }
-            $n = \strlen($line);
-            if ($cur !== '') {
-                $body .= $line;
-                $pos = $pos + $n;
-                if ($line[0] === '}' && \rtrim($line) === '}') {
-                    $this->collectRefsBulk($body, $refs);
-                    $body = '';
-                    $defOff[$cur] = $start;
-                    $defSize[$cur] = $pos - $start;
-                    $defRefs[$cur] = $refs;
-                    $defOrder[] = $cur;
-                    $refs = [];
-                    $cur = '';
-                }
-                continue;
-            }
+            $len = \strlen($data);
+            if ($dp >= $len) { break; }
+            $end = $nl === false ? $len : $nl + 1;
             // The stored text must match `run`'s: lines joined by "\n" with the
             // closing brace's newline included, since run appends one itself.
-            $bare = \rtrim($line, "\n");
+            $bare = \substr($data, $dp, ($nl === false ? $len : $nl) - $dp);
             if (\strlen($bare) > 7 && \substr($bare, 0, 7) === 'define ') {
                 $sym = $this->defineSymbol($bare);
-                if ($sym === '') { $header[] = $bare; $pos = $pos + $n; continue; }
-                $cur = $sym;
-                $start = $pos;
-                $defHead[$sym] = $bare;
-                $refs = [];
-                $this->collectRefs($bare, $refs);
-                $pos = $pos + $n;
+                if ($sym !== '') {
+                    /** @var array<string, bool> */
+                    $refs = [];
+                    $this->collectRefs($bare, $refs);
+                    // The body ends at the first line that is exactly `}`.
+                    $close = $nl === false ? false : \strpos($data, "\n}\n", $nl);
+                    while ($close === false && !$eof) {
+                        $got = \Manticore\fread($buf, 1, $cap, $in);
+                        if ($got <= 0) { $eof = true; break; }
+                        $nl = $nl - $dp;
+                        $end = $end - $dp;
+                        $data = \substr($data, $dp) . \str_from_buffer($buf, $got);
+                        $dp = 0;
+                        $close = \strpos($data, "\n}\n", $nl);
+                    }
+                    $closeEnd = $close === false ? -1 : $close + 3;
+                    if ($close === false && \substr($data, -2) === "\n}" && \strlen($data) - 2 >= $nl) {
+                        $closeEnd = \strlen($data);
+                    }
+                    if ($closeEnd < 0) { break; }
+                    $this->collectRefsBulk(\substr($data, $end, $closeEnd - $end), $refs);
+                    $defHead[$sym] = $bare;
+                    $defOff[$sym] = $pos;
+                    $defSize[$sym] = $closeEnd - $dp;
+                    $defRefs[$sym] = $refs;
+                    $defOrder[] = $sym;
+                    $pos = $pos + ($closeEnd - $dp);
+                    $dp = $closeEnd;
+                    continue;
+                }
+                $header[] = $bare;
+                $pos = $pos + ($end - $dp);
+                $dp = $end;
                 continue;
             }
-            $pos = $pos + $n;
+            $pos = $pos + ($end - $dp);
+            $dp = $end;
             if ($bare !== '' && $bare[0] === '@') {
                 $sym = $this->globalName($bare);
                 if ($sym === '') { $header[] = $bare; continue; }
+                if ($sym === 'llvm.compiler.used') { $this->notePins($bare); continue; }
                 $globals[$sym] = $bare;
                 $globalOrder[] = $sym;
                 continue;
@@ -1002,6 +1079,15 @@ final class SplitModule
             $header[] = $bare;
         }
 
+        // A stable split is a function of the module's CONTENT, not of the order it was
+        // written in: parallel emission writes the same definitions in another order, and
+        // an object cache keyed by part text should not care either.
+        $tParse = \Compile\Stats::now();
+        if ($this->stable) {
+            \sort($defOrder, SORT_STRING);
+            \sort($globalOrder, SORT_STRING);
+            \sort($declares, SORT_STRING);
+        }
         $promoted = $this->promoteLarge($defOrder, $defHead, $defSize, $defRefs);
         /** @var array<string, bool> */
         $internal = [];
@@ -1023,6 +1109,8 @@ final class SplitModule
         /** @var array<string, bool> */
         $owned = [];
         $lineTable = $this->lineTableGlobals($globalOrder, $owned);
+        $tAssign = \Compile\Stats::now();
+        $tPlan = 0;
 
         $headerText = \implode("\n", $header);
         $declText = \implode("\n", $declares);
@@ -1033,8 +1121,10 @@ final class SplitModule
             if ($p !== 0) {
                 $partHeader = (string)\preg_replace('/^module asm .*\n?/m', '', $partHeader);
             }
+            $t1 = \Compile\Stats::now();
             $plan = $this->planPart($p, $defOrder, $defHead, $defRefs, $defSize, $assign,
                                     $internal, $globalOrder, $globals, $owned);
+            $tPlan += \Compile\Stats::now() - $t1;
             $path = $outBase . '.p' . (string)$p . '.ll';
             if (!\Manticore\write_file($path,
                     $partHeader . "\n" . $declText . "\n" . $plan->gtext . $plan->dtext . $plan->usedText)) {
@@ -1086,6 +1176,9 @@ final class SplitModule
             }
             $out[] = $path;
         }
+        \Compile\Stats::line('  split: parse ' . (string)\intdiv($tParse - $tStart, 1000000) . 'ms, assign '
+            . (string)\intdiv($tAssign - $tParse, 1000000) . 'ms, plan ' . (string)\intdiv($tPlan, 1000000)
+            . 'ms, write ' . (string)\intdiv(\Compile\Stats::now() - $tAssign - $tPlan, 1000000) . 'ms');
         \Manticore\free($buf);
         \Manticore\fclose($in);
         return $out;
@@ -1106,7 +1199,7 @@ final class SplitModule
         return true;
     }
 
-    private function head(string $def): string
+    public function head(string $def): string
     {
         $nl = \strpos($def, "\n");
         return $nl === false ? $def : \substr($def, 0, $nl);
@@ -1126,14 +1219,14 @@ final class SplitModule
         return '@' . $sym;
     }
 
-    private function defineSymbol(string $line): string
+    public function defineSymbol(string $line): string
     {
         $at = \strpos($line, '@');
         if ($at === false) { return ''; }
         return $this->readSymbol($line, $at + 1);
     }
 
-    private function globalName(string $line): string
+    public function globalName(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return ''; }
@@ -1160,7 +1253,7 @@ final class SplitModule
         return 'strong';
     }
 
-    private function promoteGlobal(string $line): string
+    public function promoteGlobal(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return $line; }
@@ -1176,7 +1269,7 @@ final class SplitModule
     }
 
     /** The `external` form of a global definition — same name and type, no initializer. */
-    private function externGlobal(string $line): string
+    public function externGlobal(string $line): string
     {
         $eq = \strpos($line, ' = ');
         if ($eq === false) { return $line; }
@@ -1244,7 +1337,7 @@ final class SplitModule
     }
 
     /** A definition header relinked `available_externally` — same signature and attributes. */
-    private function availHead(string $headLine): string
+    public function availHead(string $headLine): string
     {
         $rest = \substr($headLine, 7);
         $keys = ['linkonce_odr ', 'weak_odr ', 'external ', 'dso_local ', 'weak ', 'linkonce '];
@@ -1262,7 +1355,7 @@ final class SplitModule
     }
 
     /** A `declare` taken from the definition's own header — never invented. */
-    private function declareFromDefine(string $def): string
+    public function declareFromDefine(string $def): string
     {
         $headLine = $this->head($def);
         $paren = \strpos($headLine, '(');
@@ -1319,7 +1412,7 @@ final class SplitModule
      *
      * @param array<string, bool> $into
      */
-    private function collectRefsBulk(string $text, array &$into): void
+    public function collectRefsBulk(string $text, array &$into): void
     {
         if (\strpos($text, '@') === false) { return; }
         \preg_match_all('/@("[^"\n]*"|[A-Za-z0-9_.$\\\\-]+)/', $text, $m);

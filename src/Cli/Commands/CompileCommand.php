@@ -27,12 +27,15 @@ final class CompileCommand extends Command
         return \array_merge(CompileOptions::shared(), [
             new Option('analyze', \Cli\ArgParse::FLAG, 'Run the analyzer (default)'),
             new Option('no-analyze', \Cli\ArgParse::FLAG, 'Skip the analyzer'),
+            new Option('check', \Cli\ArgParse::FLAG, 'Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen'),
+            new Option('all', \Cli\ArgParse::FLAG, 'List unreachable undeclared names too'),
             new Option('analyze-strict', \Cli\ArgParse::FLAG, 'Fail with rc 65 on analyzer errors'),
         ], ProgressOptions::all());
     }
 
     public function run(ParsedArgs $args): int
     {
+        \gc_disable(); // the front end makes no cyclic garbage (CC census: 0 freed); a pass over the live graph is pure cost
         $err = \Compile\Progress::configure($args->value('progress', 'auto'), $args->flag('quiet'), $args->flag('timings'), $args->value('color', 'auto'));
         if ($err !== '') {
             \Manticore\dprint('compile: ' . $err);
@@ -49,7 +52,7 @@ final class CompileCommand extends Command
             \Manticore\dprint("compile: failed to parse args (rc=64)");
             return 64;
         }
-        $analyze = !$args->flag("no-analyze");
+        $analyze = !$args->flag("no-analyze") && !\Manticore\CompileArgs::$checkOnly;
         $strict = \Manticore\CompileArgs::$strictAnalyze;
         $output = \Manticore\CompileArgs::$output;
 
@@ -122,6 +125,9 @@ final class CompileCommand extends Command
         // compiler on some stdlib+user combinations (the "stdlib as guest"
         // hazard). The chosen design is a prebuilt stdlib.o linked at the cc step
         // (see discover_stdlib_files / the link tail) — built once, in isolation.
+        if (\Manticore\CompileArgs::$checkOnly) {
+            return \Manticore\lower_module($sources, null, $paths) === null ? 65 : 0;
+        }
         $ir = \Manticore\compile_with_backend($sources, $paths);
         if ($ir === null) {
             \Manticore\dprint("compile: front-end (parse/typeck/IR) returned null (rc=65)");
@@ -187,6 +193,7 @@ final class CompileCommand extends Command
         if ($keep) {
             \Manticore\dprint("compile: kept IR " . $base . ".*.ll");
         }
+        $flagsT = \Compile\Stats::begin('link flags');
         $objList = \implode(" ", $objs);
         // Link the prebuilt stdlib.o only when the program imported a bundled
         // stdlib function (str_starts_with / ctype_* / file_*). A self-contained
@@ -232,6 +239,7 @@ final class CompileCommand extends Command
                 $weak[] = $w;
             }
         }
+        $preLib = $linkExtra;
         $libFlags = \Manticore\ffi_link_flags($libs);
         if ($libFlags !== "") {
             $linkExtra .= $libFlags;
@@ -271,8 +279,15 @@ final class CompileCommand extends Command
             : " -Wl,--gc-sections -lm";
         $gc = $gc . \Manticore\unwind_link_flags();
         $asNeeded = \Manticore\is_darwin() ? "" : " -Wl,--as-needed";
+        \Compile\Stats::step('link flags', $flagsT, -1, -1);
         $linkT = \Compile\Stats::begin('link');
         $rc2 = \Manticore\system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
+        // Cached library flags may predate a change on the host: probe again, once.
+        if ($rc2 !== 0 && \Manticore\link_flags_forget()) {
+            // Probed directly: a cache entry that could not be removed would hand back the same flags.
+            $linkExtra = $preLib . \Manticore\ffi_link_flags_probe($libs);
+            $rc2 = \Manticore\system("cc" . $asNeeded . " " . $objList . $linkExtra . $gc . " -o " . $output);
+        }
         \Compile\Stats::step('link', $linkT, -1, -1);
         if ($rc2 !== 0) {
             \Manticore\dprint("compile: cc link failed (rc=" . (string)$rc2 . "); objects at " . $objList);
@@ -281,7 +296,7 @@ final class CompileCommand extends Command
         // Linked: the staged IR and objects have no further use. Kept under
         // --keep-ir, which is the escape hatch for reading what was emitted.
         if (!$keep) {
-            \Manticore\system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll");
+            \Manticore\system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll " . $base . ".s*.ll");
         }
         return 0;
     }

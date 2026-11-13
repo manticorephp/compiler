@@ -389,6 +389,7 @@ trait EmitLlvmObjects
     {
         $out = '';
         foreach ($this->newDynNeeded as $sym => $shape) {
+            $this->ssa->reset();
             $params = 'ptr %ndy.n';
             $body = '';
             $regs = [];
@@ -418,6 +419,7 @@ trait EmitLlvmObjects
                   . $body . '  ret i64 ' . $this->lastValue . "\n}\n\n";
         }
         foreach ($this->newDynRestNeeded as $sym => [$srcArgc, $boxResult]) {
+            $this->ssa->reset();
             $this->rt->needsStrcmp = true;
             $body = $this->newDynChainIr('%ndy.n', [], [], [], $srcArgc, $boxResult,
                 '%ndy.s', Type::cell(), $this->newDynTable()[2]);
@@ -839,6 +841,7 @@ trait EmitLlvmObjects
             // later `= []` then copied as a length of 0xa77…, so the first
             // append to any such array wrote off the end of the world.
             $mask = $this->sigs->refParams[$ctorClass . '____construct'] ?? [];
+            $spreadPack = '';
             $ai = 0;
             foreach ($n->args as $a) {
                 // `new C(...$arr)`: expand the pack across the ctor's remaining
@@ -847,6 +850,7 @@ trait EmitLlvmObjects
                 // still held, so `new R(...['C'])` constructed from garbage.
                 if ($a->kind === Node::KIND_SPREAD) {
                     $out .= $this->emitSpreadOperand($a->operand);
+                    $spreadPack = $this->lastValue;
                     [$sir, $sregs] = $this->emitSpreadFill(
                         $this->lastValue, $ai + 1, $ptypes, $tmask,
                         $a->operand->type->element ?? null, $ctorClass . '____construct', $a->operand->type);
@@ -936,9 +940,13 @@ trait EmitLlvmObjects
             // Popped before the throwable capture below, so — like PHP — the
             // constructor never appears in the trace.
             $out .= $this->btPush('__construct', $n->line);
-            $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->args, 1);
+            $out .= $this->faPush($ctorTarget, $n->srcArgc, $n->args, 1, $spreadPack);
+            // The call's own temps are listed for an unwind, which skips the releases below.
+            [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
+            $out .= $tmpIr;
             $cr = $this->ssa->allocReg();
-            $out .= $this->ctorCallIr($cr, $cd->name, $ctorTarget, $argList);
+            $ctorIr = $this->ctorCallIr($cr, $cd->name, $ctorTarget, $argList);
+            $out .= $tmpHeld > 0 ? $this->ehTmpMarkCalls($ctorIr) : $ctorIr;
             $out .= $this->btPop();
             $out .= $refSlotDrops;
             $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
@@ -959,6 +967,7 @@ trait EmitLlvmObjects
                 $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$ri]);
                 $ri = $ri + 1;
             }
+            $out .= $this->ehTmpPop($tmpHeld);
         }
         // Capture the `new` site into a Throwable (PHP records it at construction):
         // line and file always — two stores, and `(string)$e` reads them through a
@@ -1009,7 +1018,7 @@ trait EmitLlvmObjects
                     . '  %h1 = or i64 %h0, ' . (string)\Compile\MemoryAbi::DTOR_CALLED_MASK . "\n"
                     . "  store i64 %h1, ptr %hp\n";
             }
-            $body .= $this->rcReleaseReg('%a0', 'obj') . "  resume { ptr, i32 } %l\n}\n\n";
+            $body .= $this->rcReleaseReg('%a0', 'obj') . $this->ehResume('%l') . "}\n\n";
             $this->ssa = $oldSsa;
             $this->dynamicMethodHelpers[$key] = $body;
         }
@@ -1239,8 +1248,16 @@ trait EmitLlvmObjects
             if ($this->cloneErasedSym === '') {
                 $sym = $this->mirHelperSym('__mir_clone_erased');
                 $helpers = '';
+                // Its own counters: numbered from the first requester's frame, the bytes
+                // depended on which function asked first.
+                $oldSsa = $this->ssa;
+                $oldCid = $this->classIdReg;
+                $this->ssa = new SsaBuilder();
+                $this->ssa->reset();
                 $body = $this->emitCloneSwitch($n, '%a0', $impls, $helpers);
                 $ret = $this->lastValue;
+                $this->ssa = $oldSsa;
+                $this->classIdReg = $oldCid;
                 if ($body !== '' && $this->irIsClosed($body . '  ret ptr ' . $ret . "\n")) {
                     $this->cloneErasedSym = $sym;
                     $this->vdExtraBodies .= $helpers . 'define linkonce_odr ptr @' . $sym
@@ -1673,7 +1690,7 @@ trait EmitLlvmObjects
         // A slot a `&` promoted holds `cell(REF, box)`; the property IS the
         // referenced value, as an element holding one is ({@see
         // EmitLlvmArrays}'s element read, the same deref).
-        if ($n->type->kind === Type::KIND_CELL && isset($this->refCellPropNames[$pa->property])) {
+        if ($n->type->kind === Type::KIND_CELL && $this->propMayHoldRef($pa->object, null, $pa->property)) {
             $this->rt->needsTagged = true;
             $d = $this->ssa->allocReg();
             $out .= '  ' . $d . ' = call i64 @__manticore_deref(i64 ' . $this->lastValue . ")\n";
@@ -1760,9 +1777,9 @@ trait EmitLlvmObjects
      * @param array<string,\Compile\Mir\EnumDef> $enumArms
      * @param array<string,string> $magic class name → declaring class (a bare `array` would erase its key channel)
      */
-    private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag, bool $fresh = false): string
+    private function cellPropertyReadHelper(string $prop, array $fixed, array $enumArms, array $magic, bool $hasBag, bool $fresh = false, bool $check = false): string
     {
-        $key = '__mc_prop_read_' . $this->mangle($prop) . ($fresh ? '__fresh' : '');
+        $key = '__mc_prop_read_' . $this->mangle($prop) . ($fresh ? '__fresh' : '') . ($check ? '__chk' : '');
         // linkonce_odr under the module token, not internal: the module's property tables name
         // every reader, and a split part copies an internal body with each body naming it, so
         // the part holding the tables took all of them (51 MB on symfony-demo).
@@ -1804,9 +1821,11 @@ trait EmitLlvmObjects
             $lbl = $this->ssa->allocLabel('pr.case');
             $switch .= '    i64 ' . (string)$cd->classId . ', label %' . $lbl . "\n";
             $bodies .= $lbl . ":\n";
-            // An erased receiver may hold a lazy ghost. Nothing is thrown here: this helper
-            // also serves isset / `??`, which test a still-unset slot rather than fail on it.
-            if ($this->lazyHolder($cd) && $cd->initChecked($prop)) {
+            // An erased receiver may hold a lazy ghost. A plain read ($check) also throws on a still-unset
+            // typed slot; the unchecked flavor serves isset / `??`, which test it rather than fail on it.
+            if ($check && $cd->initChecked($prop)) {
+                $bodies .= $this->emitInitReadCheck($obj, $cd, $prop, $cd->propertyOffset($prop), '');
+            } elseif ($this->lazyHolder($cd) && $cd->initChecked($prop)) {
                 $lzOut = '';
                 $lzC = $this->emitInitTest($obj, $cd, $prop, $cd->propertyOffset($prop), '', $lzOut);
                 if ($lzC !== '') {
@@ -1920,7 +1939,7 @@ trait EmitLlvmObjects
         // extracted once per property: the caller keeps only the object coercion
         // and a normal call, while the helper owns the shared switch.
         if (\count($fixed) + \count($enumArms) + \count($magic) > 1 || $hooked) {
-            $helper = $this->cellPropertyReadHelper($prop, $fixed, $enumArms, $magic, $hasBag, $this->own->hookFreshRead($pa));
+            $helper = $this->cellPropertyReadHelper($prop, $fixed, $enumArms, $magic, $hasBag, $this->own->hookFreshRead($pa), $pa->initCheck);
             $r = $this->ssa->allocReg();
             $outChunks[] = '  ' . $r . ' = call i64 ' . $helper . '(ptr ' . $objPtr . ")\n";
             $this->lastValue = $r;
@@ -1946,7 +1965,8 @@ trait EmitLlvmObjects
         foreach ($fixed as $cd) {
             $lbl = $this->ssa->allocLabel('cp.case');
             /** @var string[] $armChunks */
-            $armChunks = [$this->emitFixedPropLoad($objPtr, $cd, $prop)];
+            $armChunks = [$pa->initCheck && $cd->initChecked($prop) ? $this->emitInitReadCheck($objPtr, $cd, $prop, $cd->propertyOffset($prop), '') : ''];
+            $armChunks[] = $this->emitFixedPropLoad($objPtr, $cd, $prop);
             $armChunks[] = '  store i64 ' . $this->lastValue . ', ptr ' . $res . "\n";
             $armChunks[] = '  br label %' . $end . "\n";
             $arm = \implode('', $armChunks);
@@ -2302,7 +2322,7 @@ trait EmitLlvmObjects
         // Dispatch on class_id: each holder reads (and boxes) its OWN slot. The switch is
         // the shared per-name reader, not a copy per site: one symfony-demo closure read
         // ~40 erased properties and spliced 25 MB of `__get` arms.
-        $sym = $this->cellPropReadHelperFor($prop, $fresh);
+        $sym = $this->cellPropReadHelperFor($prop, $fresh, $pa->initCheck);
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $objPtr . ")\n";
         $this->lastValue = $r;
@@ -2566,7 +2586,7 @@ trait EmitLlvmObjects
         $spt = $cd->propertyTypes[$prop] ?? null;
         if ($spt !== null && $cd->propertyWidth($prop) === 8) {
             if ($this->cellPropBoxed($spt, $cd->name, $prop)) {
-                if ($dropBoxed && !isset($this->refCellPropNames[$prop])) { $oldFlavor = 'cell'; }
+                if ($dropBoxed && !$this->propMayHoldRef(null, $cd, $prop)) { $oldFlavor = 'cell'; }
             } elseif ($dropRaw && ($spt->kind !== Type::KIND_ARRAY || !$this->boxRawValueBorrows($spt))) {
                 $oldFlavor = $this->discardReleaseFlavor($spt);
             }
@@ -3088,7 +3108,7 @@ trait EmitLlvmObjects
     /** The out-of-line symbol for one erased-interface dispatcher. */
     private function erasedIfaceSym(string $iface, string $method, int $argc): string
     {
-        $i = \str_replace('\\', '_', \ltrim($iface, '\\'));
+        $i = \Compile\SymbolName::ident($iface);
         return $this->mirHelperSym('__mir_eicall_' . $i . '__' . $method . '_' . (string)$argc);
     }
 
@@ -3107,6 +3127,7 @@ trait EmitLlvmObjects
     {
         $out = '';
         foreach ($this->erasedIfaceIface as $key => $iface) {
+            $this->ssa->reset();
             $method = $this->erasedIfaceMethod[$key] ?? '';
             $argc = $this->erasedIfaceArgc[$key] ?? 0;
             if ($method === '') { continue; }
@@ -3690,7 +3711,7 @@ trait EmitLlvmObjects
         // `cell(REF, box)`: the store goes THROUGH to the box, which takes the
         // count the value already carries.
         $thruDone = '';
-        if (isset($this->refCellPropNames[$n->property]) && $propType !== null
+        if ($this->propMayHoldRef($n->object, null, $n->property) && $propType !== null
             && $propType->kind === Type::KIND_CELL) {
             $wt = $this->ssa->allocReg();
             $out .= '  ' . $wt . ' = call i1 @__mir_ref_slot_store(ptr ' . $gep . ', i64 ' . $val . ")\n";
@@ -4159,11 +4180,25 @@ trait EmitLlvmObjects
             // A PROPERTY source answers its promoted BOX here, not its slot
             // ({@see EmitLlvmLocals::byRefAddrOf}).
             $addrIr = $this->byRefAddrOf($src);
+            // A `$GLOBALS`-viewed global (`$GLOBALS['bar'] = …; f([&$bar])`): its
+            // module cell holds the value BOXED, which is what a REF cell's
+            // readers expect of its target. byRefAddrOf refuses it only for a raw
+            // by-ref parameter, which would write an untagged word there.
+            if ($addrIr === null && $src instanceof \Compile\Mir\LoadLocal && $this->isGlobalsViewName($src->name)) {
+                $gcell = $this->locals->globalBacked[$src->name] ?? '';
+                if ($gcell !== '') {
+                    $ga = $this->ssa->allocReg();
+                    $addrIr = '  ' . $ga . ' = ptrtoint ptr ' . $gcell . " to i64\n";
+                    $this->lastValue = $ga;
+                    $this->lastValueType = 'i64';
+                }
+            }
         }
         if ($addrIr === null) {
             throw new \RuntimeException(
-                'unsupported: cannot take a storable reference to this expression '
-                . '— it has no address, so the reference would be a copy and every '
+                'unsupported: cannot take a storable reference to this expression ('
+                . ($src instanceof \Compile\Mir\LoadLocal ? '$' . $src->name : $src->kind)
+                . ') — it has no address, so the reference would be a copy and every '
                 . 'write through it would be lost'
             );
         }
@@ -4961,7 +4996,7 @@ trait EmitLlvmObjects
     /** The shared reader symbol for `$prop`, built on demand. Unlike the inline
      *  path this asks for one even when a single class declares the name: the
      *  point is that the SITE stays a call, whatever the arm count. */
-    private function cellPropReadHelperFor(string $prop, bool $fresh = false): string
+    private function cellPropReadHelperFor(string $prop, bool $fresh = false, bool $check = false): string
     {
         $enumArms = [];
         if ($prop === 'name' || $prop === 'value') {
@@ -4977,6 +5012,7 @@ trait EmitLlvmObjects
             $this->magicPropHolders($prop, '__get'),
             $this->bagClassNames() !== [],
             $fresh,
+            $check,
         );
     }
 
@@ -8767,12 +8803,14 @@ trait EmitLlvmObjects
         $cellBoxTypes = [];
         $ai = 0;
         $refSlotDrops = '';
+        $spreadPack = '';
         foreach ($this->faCallArgs($target, $n->args) as $a) {
             // `Cls::m(...$arr)`: expand across the method's declared params
             // (a static call has no implicit `$this`, so arg `ai` is param `ai`).
             if ($a->kind === Node::KIND_SPREAD) {
                 $out .= $this->emitSpreadOperand($a->operand);
                 $arr = $this->lastValue;
+                $spreadPack = $arr;
                 $elemType = $a->operand->type->element ?? null;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask, $elemType,
                                                        $cls . '__' . $n->method, $a->operand->type);
@@ -8884,7 +8922,11 @@ trait EmitLlvmObjects
             $btName = $n->class . '::' . $n->method;
             $btPushIr = $this->btPush($btName, $n->line);
         }
-        $faIr = $this->faPush($target, $n->srcArgc, $n->args);
+        $faIr = $this->faPush($target, $n->srcArgc, $n->args, 0, $spreadPack);
+        // The call's own temps are listed for an unwind, which skips the releases below.
+        [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
+        $out .= $tmpIr;
+        $tmpFrom = \strlen($out);
         $reg = $this->ssa->allocReg();
         $sfaInline = null;
         if ($target === 'SplFixedArray__offsetSet' && $faIr === '') {
@@ -8906,6 +8948,7 @@ trait EmitLlvmObjects
                   . '(' . $argList . ")\n";
             if ($btName !== '') { $out .= $this->btPop(); }
         }
+        if ($tmpHeld > 0) { $out = \substr($out, 0, $tmpFrom) . $this->ehTmpMarkCalls(\substr($out, $tmpFrom)); }
         $out .= $padDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
         $out .= $this->freeStrArgTemps($argTemps);
@@ -8915,6 +8958,7 @@ trait EmitLlvmObjects
             $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$rci]);
             $rci = $rci + 1;
         }
+        $out .= $this->ehTmpPop($tmpHeld);
         foreach ($cellBoxDrops as $cbd) {
             $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
         }
@@ -9008,7 +9052,58 @@ trait EmitLlvmObjects
      * @param array<int, Type> $srcTypes the repr each arg was emitted in
      * @param array<int, Type> $cTypes   this arm's own signature
      */
+    /** Set while an arm for a STATIC method is built: its params have no `$this` at index 0. */
+    private bool $vdArmStatic = false;
+    /** The dispatching site is a METHOD call: its list starts with the receiver word. */
+    private bool $vdRecvSite = false;
+
+    /** Is `$sym` (`Cls__m`) a static method? */
+    private function symIsStaticMethod(string $sym): bool
+    {
+        for ($p = \strpos($sym, '__'); $p !== false && $p > 0; $p = \strpos($sym, '__', $p + 1)) {
+            $cls = \substr($sym, 0, $p);
+            if (isset($this->classes[$cls])) { return $this->holderIsStaticMethod($cls, \substr($sym, $p + 2)); }
+        }
+        return false;
+    }
+
+    /**
+     * {@see vdArmArgsInner}, and for an arm whose callee is STATIC — a `[$o, 'm']` callable or an
+     * erased `$o->m()` that names a static method — the site's receiver word is dropped and every
+     * index shifts down by one: the static symbol takes no `$this`, and handing it one shifted
+     * each argument into the next parameter.
+     */
     private function vdArmArgs(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
+    {
+        if ($sym === '' || !$this->vdRecvSite || $this->vdArmStatic || !$this->symIsStaticMethod($sym)) {
+            return $this->vdArmArgsInner($argList, $srcTypes, $cTypes, $sym);
+        }
+        $parts = \explode(', ', $argList);
+        \array_shift($parts);
+        $st = [];
+        foreach ($srcTypes as $i => $t) { if ($i > 0) { $st[$i - 1] = $t; } }
+        $oldWiden = $this->vdWiden;
+        $oldAddr = $this->vdAddrLoad;
+        $oldSite = $this->vdSiteArgc;
+        $w = [];
+        foreach ($oldWiden as $i => $t) { if ($i > 0) { $w[$i - 1] = $t; } }
+        $a = [];
+        foreach ($oldAddr as $i => $t) { if ($i > 0) { $a[$i - 1] = $t; } }
+        $this->vdWiden = $w;
+        $this->vdAddrLoad = $a;
+        if ($oldSite > 0) { $this->vdSiteArgc = $oldSite - 1; }
+        $this->vdArmStatic = true;
+        $r = $this->vdArmArgsInner(\implode(', ', $parts), $st, $cTypes, $sym);
+        // Only a spread tail followed the receiver: its words were appended `, i64 …`.
+        if (\str_starts_with($this->vdArmList, ', ')) { $this->vdArmList = \substr($this->vdArmList, 2); }
+        $this->vdArmStatic = false;
+        $this->vdWiden = $oldWiden;
+        $this->vdAddrLoad = $oldAddr;
+        $this->vdSiteArgc = $oldSite;
+        return $r;
+    }
+
+    private function vdArmArgsInner(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         // An address the site passed for a param another candidate takes by reference: an arm
         // that takes it by value reads the value through it.
@@ -9141,7 +9236,100 @@ trait EmitLlvmObjects
         return $u;
     }
 
+    /** The site's arguments are as written ({@see MethodCall_::$argsUnbound}): lowering could
+     *  not name the method, so a VARIADIC arm still has to pack its trailing arguments. */
+    private bool $vdUnbound = false;
+
     private function vdArmArgsBase(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
+    {
+        if (!$this->vdUnbound || $sym === '' || $this->spreadTail !== null) {
+            return $this->vdArmArgsCore($argList, $srcTypes, $cTypes, $sym);
+        }
+        $packed = $this->vdArmPackVariadic($argList, $srcTypes, $sym);
+        if ($packed === null) { return $this->vdArmArgsCore($argList, $srcTypes, $cTypes, $sym); }
+        [$pl, $pt, $ir, $drop, $site] = $packed;
+        $oldSite = $this->vdSiteArgc;
+        $this->vdSiteArgc = $site;
+        $ir .= $this->vdArmArgsCore($pl, $pt, $cTypes, $sym);
+        $this->vdSiteArgc = $oldSite;
+        $this->vdArmDrops .= $drop;
+        return $ir;
+    }
+
+    /**
+     * The arm's trailing arguments — written past the fixed params of a variadic `$sym` —
+     * as the ONE vec it takes. Each element is co-owned by the pack, which the arm
+     * releases after the call. null when `$sym` takes no by-value variadic, or a
+     * written argument's repr is unknown.
+     *
+     * @param array<int, Type> $srcTypes
+     * @return array{0:string,1:array<int,Type>,2:string,3:string,4:int}|null
+     */
+    private function vdArmPackVariadic(string $argList, array $srcTypes, string $sym): ?array
+    {
+        $pts = $this->sigs->paramTypes[$sym] ?? [];
+        $vi = \count($pts) - 1;
+        if ($vi < ($this->vdArmStatic ? 0 : 1) || !($this->sigs->variadicParams[$sym][$vi] ?? false)
+            || ($this->sigs->refParams[$sym][$vi] ?? false)) { return null; }
+        $parts = \explode(', ', $argList);
+        $site = \count($parts);
+        if ($this->vdSiteArgc > 0 && $this->vdSiteArgc < $site) { $site = $this->vdSiteArgc; }
+        if ($site < $vi) { return null; }
+        $elem = $pts[$vi]->element ?? null;
+        if ($elem === null || $elem->kind === Type::KIND_UNKNOWN) { $elem = Type::cell(); }
+        for ($i = $vi; $i < $site; $i = $i + 1) {
+            $src = $srcTypes[$i] ?? null;
+            if ($src === null || $src->kind === Type::KIND_UNKNOWN || !\str_starts_with($parts[$i], 'i64 ')) { return null; }
+        }
+        $this->rt->needsRc = true;
+        $this->rt->needsStrRc = true;
+        $out = '';
+        $arr = $this->ssa->allocReg();
+        $out .= '  ' . $arr . ' = call ptr @__mir_array_alloc(i64 ' . (string)\max(1, $site - $vi) . ")\n";
+        for ($i = $vi; $i < $site; $i = $i + 1) {
+            $src = $srcTypes[$i];
+            $this->lastValue = \substr($parts[$i], 4);
+            $this->lastValueType = 'i64';
+            if ($src->kind !== Type::KIND_CELL) {
+                if ($src->kind === Type::KIND_FLOAT) {
+                    $fb = $this->ssa->allocReg();
+                    $out .= '  ' . $fb . ' = bitcast i64 ' . $this->lastValue . " to double\n";
+                    $this->lastValue = $fb;
+                    $this->lastValueType = 'double';
+                }
+                $out .= $this->boxToCell($src) . $this->coerceToI64();
+            }
+            $out .= '  call void @__mir_cell_retain(i64 ' . $this->lastValue . ")\n";
+            if ($elem->kind !== Type::KIND_CELL) {
+                $out .= $this->unboxCellToType($elem);
+                if ($this->lastValueType === 'double') {
+                    $bc = $this->ssa->allocReg();
+                    $out .= '  ' . $bc . ' = bitcast double ' . $this->lastValue . " to i64\n";
+                    $this->lastValue = $bc;
+                    $this->lastValueType = 'i64';
+                }
+                $out .= $this->coerceToI64();
+            }
+            $nx = $this->ssa->allocReg();
+            $out .= '  ' . $nx . ' = call ptr @__mir_array_append(ptr ' . $arr . ', i64 ' . $this->lastValue . ")\n";
+            $arr = $nx;
+        }
+        $eHint = $this->elementHintCodeForType($elem);
+        if ($eHint !== null) { $out .= $this->emitElemHintStamp($arr, $eHint); }
+        $ai = $this->ssa->allocReg();
+        $out .= '  ' . $ai . ' = ptrtoint ptr ' . $arr . " to i64\n";
+        $kept = [];
+        $kt = [];
+        for ($i = 0; $i < $vi; $i = $i + 1) {
+            $kept[] = $parts[$i];
+            if (isset($srcTypes[$i])) { $kt[$i] = $srcTypes[$i]; }
+        }
+        $kept[] = 'i64 ' . $ai;
+        $kt[$vi] = $pts[$vi];
+        return [\implode(', ', $kept), $kt, $out, $this->rcReleaseReg($ai, $this->discardReleaseFlavor(Type::vec($elem))), $vi + 1];
+    }
+
+    private function vdArmArgsCore(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         $this->vdArmList = $argList;
         // ARITY first, and OUTSIDE the repr early-return: a site that emitted no
@@ -9155,7 +9343,7 @@ trait EmitLlvmObjects
         $changed = false;
         $n = \count($parts);
         $ahmask = $sym !== '' ? ($this->sigs->arrayHintedParams[$sym] ?? []) : [];
-        $i = 1;                       // index 0 is the implicit `$this`
+        $i = $this->vdArmStatic ? 0 : 1;   // index 0 is the implicit `$this`
         while ($i < $n) {
             $src = $srcTypes[$i] ?? null;
             $ct = $cTypes[$i] ?? null;
@@ -9232,6 +9420,7 @@ trait EmitLlvmObjects
         // defaults, and this arm's own defaults are a different answer. Keeping
         // them is what handed `Row::__construct($tag = '-')` the placeholder
         // Exception::$message slot and left `$tag` empty.
+        if ($parts === ['']) { $parts = []; }   // a static arm with no written argument
         $have = \count($parts);
         $site = $this->vdSiteArgc;
         if ($site > 0 && $site < $have) {
@@ -9411,8 +9600,16 @@ trait EmitLlvmObjects
             return $this->emitVirtualDispatchInline($thisArg, $argList, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
         }
+        // A pending `...$arr` is part of the shape: the pack comes in as one more
+        // parameter and its first index and element type go in the key. Left out,
+        // a spread site reused a plain site's thunk and dropped its tail — or the
+        // body read the site's pack register and stayed inline — whichever came first.
+        $tail = $this->spreadTail;
         $key = $this->virtualDispatchKey($n, $cands, $targets, $fallback, $method,
             $boxCell, $erasedSyms, $argOutTypes);
+        if ($tail !== null) {
+            $key .= '#sp' . (string)$tail[1] . ':' . ($tail[2] === null ? '-' : $tail[2]->exactString());
+        }
         $sym = $this->vdSyms[$key] ?? '';
         if ($sym === '') {
             $sym = $this->mirHelperSym($this->keyedHelperName('__mir_vdisp_', $key));
@@ -9428,6 +9625,10 @@ trait EmitLlvmObjects
                 $params .= 'i64 %a' . (string)$i;
                 $thunkArgs .= 'i64 %a' . (string)$i;
             }
+            if ($tail !== null) {
+                $params .= ', ptr %sp';
+                $this->spreadTail = ['%sp', $tail[1], $tail[2]];
+            }
             // Its own counters, not the requesting frame's: built on those, the body
             // took that frame's numbering and the frame lost registers only when it
             // happened to ask first, so an edit anywhere renumbered later functions.
@@ -9438,6 +9639,7 @@ trait EmitLlvmObjects
             $this->ssa->startAt(1000000000);
             $body = $this->emitVirtualDispatchInline('%a0', $thunkArgs, $cands, $targets,
                 $fallback, $method, $boxCell, $erasedSyms, $argOutTypes);
+            $this->spreadTail = $tail;
             $this->ssa = $oldSsa;
             $this->classIdReg = $oldCid;
             // ⚠ A body is only a function if it is CLOSED. Some arms reach
@@ -9458,6 +9660,7 @@ trait EmitLlvmObjects
         $r = $this->ssa->allocReg();
         $callArgs = 'i64 ' . $thisArg;
         for ($i = 1; $i < $n; $i++) { $callArgs .= ', ' . $parts[$i]; }
+        if ($tail !== null) { $callArgs .= ', ptr ' . $tail[0]; }
         $this->vdResult = $r;
         return '  ' . $r . ' = call i64 @' . $sym . '(' . $callArgs . ")\n";
     }
@@ -9503,7 +9706,7 @@ trait EmitLlvmObjects
         // a defaulted argument (`newCollection()`) and one that passed it (`newCollection($m)`)
         // build the same-length list, but each arm pads/truncates against the written count.
         // Without it the second site reuses the first's thunk and gets the default.
-        $k .= '#s' . (string)$this->vdSiteArgc;
+        $k .= '#s' . (string)$this->vdSiteArgc . ($this->vdUnbound ? 'u' : '') . ($this->vdRecvSite ? 'r' : '');
         foreach ($cands as $c) {
             $t = $targets[$c] ?? '';
             $k .= '|' . $c . '>' . $t . (isset($erasedSyms[$t]) ? 'E' : '');
@@ -9710,7 +9913,7 @@ trait EmitLlvmObjects
         // module. Its linked method is still a valid implementation; the
         // emitter must not replace the call with an undefined-method trap.
         $fqn = \ltrim($class, '\\') . '__' . $method;
-        $wire = \str_replace('\\', '_', \ltrim($class, '\\')) . '__' . $method;
+        $wire = \Compile\SymbolName::mangle(\ltrim($class, '\\')) . '__' . $method;
         if (isset($this->sigs->paramTypes[$fqn]) || isset($this->sigs->paramTypes[$wire])) {
             return false;
         }
@@ -9807,6 +10010,7 @@ trait EmitLlvmObjects
         }
         return false;
     }
+
 
     /** Whether `$holder` DECLARES `$method` static (unknown metadata answers false). */
     private function holderIsStaticMethod(string $holder, string $method): bool
@@ -10506,7 +10710,9 @@ trait EmitLlvmObjects
         $true = fn (): Node => new \Compile\Mir\BoolConst(true, $bool);
         $magicOnly = new \Compile\Mir\Ternary($call('is_object', [$t()]),
             new \Compile\Mir\Ternary($call('method_exists', [$t(), $str('__call')]),
-                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str($method)]), $false(), $true(), $bool),
+                // The body is shared by every spelling of the name (keyed lowercase): bake the lowercase
+                // one, or the first requester's spelling would decide the bytes. method_exists ignores case.
+                new \Compile\Mir\Ternary($call('method_exists', [$t(), $str(\strtolower($method))]), $false(), $true(), $bool),
                 $false(), $bool),
             $false(), $bool);
         $body .= $this->emitNode($magicOnly);
@@ -11248,6 +11454,28 @@ trait EmitLlvmObjects
         $ptypes = $this->sigs->paramTypes[$fallback . '__' . $mc->method] ?? [];
         $tmask = $this->sigs->taggedParams[$fallback . '__' . $mc->method] ?? [];
         $ahmask = $this->sigs->arrayHintedParams[$fallback . '__' . $mc->method] ?? [];
+        // A STATIC fallback (`[$o, 'm']` / an erased `$o->m()` naming a static method) has no
+        // `$this` param: the site still builds receiver-first, so its signature is read one
+        // slot to the right, and each arm drops the receiver word ({@see vdArmArgs}).
+        $fbStatic = $this->holderIsStaticMethod($fallback, $mc->method);
+        if ($fbStatic) {
+            /** @var array<int, bool> $m2 */
+            $m2 = [];
+            foreach ($mask as $i => $v) { $m2[(int)$i + 1] = $v; }
+            $mask = $m2;
+            /** @var array<int, Type> $p2 */
+            $p2 = [];
+            foreach ($ptypes as $i => $v) { $p2[(int)$i + 1] = $v; }
+            $ptypes = $p2;
+            /** @var array<int, bool> $t2 */
+            $t2 = [];
+            foreach ($tmask as $i => $v) { $t2[(int)$i + 1] = $v; }
+            $tmask = $t2;
+            /** @var array<int, bool> $a2 */
+            $a2 = [];
+            foreach ($ahmask as $i => $v) { $a2[(int)$i + 1] = $v; }
+            $ahmask = $a2;
+        }
         // The repr each argument is ACTUALLY emitted in, indexed like the
         // parameter list (0 is `$this`). A virtual-dispatch arm that disagrees
         // with the fallback's signature has to re-coerce, and it can only do
@@ -11273,8 +11501,26 @@ trait EmitLlvmObjects
         $cellBoxSlots = [];
         $cellBoxTmps = [];
         $cellBoxTypes = [];
+        $siteArgs = $this->faCallArgs($fallback . '__' . $mc->method, $mc->args, $fbStatic ? 0 : 1);
+        // Lowering could not name the method ({@see MethodCall_::$argsUnbound}): the written
+        // arguments past a variadic fallback's fixed params cross one by one, each in its own
+        // repr, and every arm packs or binds them against its own signature ({@see vdArmArgsBase}).
+        $unboundPack = false;
+        if ($mc->argsUnbound) {
+            foreach ($this->methodHolders($mc->method) as $decl) {
+                if (\in_array(true, $this->sigs->variadicParams[$decl . '__' . $mc->method] ?? [], true)) { $unboundPack = true; break; }
+            }
+        }
+        if ($unboundPack) {
+            $siteArgs = $mc->args;
+            $fvi = \count($ptypes) - 1;
+            if ($fvi >= 1 && ($this->sigs->variadicParams[$fallback . '__' . $mc->method][$fbStatic ? $fvi - 1 : $fvi] ?? false)) {
+                $ptypes[$fvi] = Type::cell();
+            }
+            for ($q = \count($ptypes); $q <= \count($mc->args); $q = $q + 1) { $ptypes[$q] = Type::cell(); }
+        }
         $ai = 0;
-        foreach ($this->faCallArgsRecv($fallback . '__' . $mc->method, $mc->args) as $a) {
+        foreach ($siteArgs as $a) {
             // `$obj->m(...$arr)`: expand across the method's declared params
             // (index 0 is `$this`, so call arg `ai` is param `ai+1`).
             if ($a->kind === Node::KIND_SPREAD) {
@@ -11432,12 +11678,12 @@ trait EmitLlvmObjects
             }
             $ai = $ai + 1;
         }
-        $out .= $this->surplusArgEffects($fallback . '__' . $mc->method, $mc->args, 1);
+        if (!$unboundPack) { $out .= $this->surplusArgEffects($fallback . '__' . $mc->method, $mc->args, $fbStatic ? 0 : 1); }
         // Pad omitted trailing optionals: a typed-receiver call (`$x->m()`)
         // isn't default-filled at lowering (class unknown pre-InferTypes),
         // so the callee would read an uninitialized arg register. Param 0 is
         // `$this`, so provided params cover indices [0 .. $ai].
-        $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $ai + 1, true);
+        $out .= $this->emitDefaultArgPad($fallback . '__' . $mc->method, $fbStatic ? $ai : $ai + 1, true);
         $argList .= $this->lastPadArgs;
         // The fallback's by-ref pad slots are the site's: an arm that re-pads
         // leaves them holding the default, one that keeps them sees the
@@ -11551,13 +11797,21 @@ trait EmitLlvmObjects
         }
         $faCands = $distinct;
         $faCands[] = $fallbackFull;
-        $out .= $this->faPushAny($faCands, $mc->srcArgc, $mc->args, 1);
+        $out .= $this->faPushAny($faCands, $mc->srcArgc, $mc->args, 1, $this->spreadTail[0] ?? '');
         // A CELL result over candidates whose declared returns disagree: each
         // dispatch arm boxes its raw return by its own type (a mixed-repr raw
         // merge would mis-read). The result is then a uniform self-describing cell.
         $boxCell = $n->type->kind === Type::KIND_CELL;
         $this->vdWiden = $widen;
         $this->vdAddrLoad = $addrLoad;
+        $oldVdUnbound = $this->vdUnbound;
+        $oldVdRecvSite = $this->vdRecvSite;
+        $this->vdUnbound = $unboundPack;
+        $this->vdRecvSite = true;
+        // The call's own temps are listed for an unwind, which skips the releases below.
+        [$tmpIr, $tmpHeld] = $this->ehTmpPushAll($rcArgRegs, $rcArgFlavs);
+        $out .= $tmpIr;
+        $tmpFrom = \strlen($out);
         if (\count($distinct) <= 1) {
             $sym = $distinct[0] ?? $fallbackFull;
             // The fallback is derived from the static type before the candidate
@@ -11569,7 +11823,10 @@ trait EmitLlvmObjects
             // the PHP semantics for reaching an unavailable method.
             if (!$this->hasEmittedFunction($sym)) {
                 if ($btName !== '') { $out .= $this->btPop(); }
+                $out .= $this->ehTmpPop($tmpHeld);
                 $this->spreadTail = null;
+                $this->vdUnbound = $oldVdUnbound;
+                $this->vdRecvSite = $oldVdRecvSite;
                 $this->lastValue = '0';
                 $this->lastValueType = 'i64';
                 return $out;
@@ -11586,7 +11843,10 @@ trait EmitLlvmObjects
             if ($distinct === [] && !isset($this->sigs->paramTypes[$sym])
                 && ($static === '' || !isset($this->classes[$static]))) {
                 if ($btName !== '') { $out .= $this->btPop(); }
+                $out .= $this->ehTmpPop($tmpHeld);
                 $this->spreadTail = null;
+                $this->vdUnbound = $oldVdUnbound;
+                $this->vdRecvSite = $oldVdRecvSite;
                 $this->lastValue = '0';
                 $this->lastValueType = 'i64';
                 return $out;
@@ -11607,9 +11867,12 @@ trait EmitLlvmObjects
             $out .= $this->emitVirtualDispatch($thisArg, $argList, $liveCands, $targets, $fallbackFull, $mc->method, $boxCell, $erasedSyms, $argOutTypes);
             $reg = $this->vdResult;
         }
+        if ($tmpHeld > 0) { $out = \substr($out, 0, $tmpFrom) . $this->ehTmpMarkCalls(\substr($out, $tmpFrom)); }
         $this->spreadTail = null;
         $this->vdWiden = [];
         $this->vdAddrLoad = [];
+        $this->vdUnbound = $oldVdUnbound;
+        $this->vdRecvSite = $oldVdRecvSite;
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $refSlotDrops;
         $out .= $this->emitByRefCellRebox($reboxSlots, $reboxTmps);
@@ -11620,6 +11883,7 @@ trait EmitLlvmObjects
             $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$rci]);
             $rci = $rci + 1;
         }
+        $out .= $this->ehTmpPop($tmpHeld);
         foreach ($cellBoxDrops as $cbd) {
             $out .= $this->cellBoxTempDrop($cbd[0]->type, $cbd[1], $cbd[0]);
         }

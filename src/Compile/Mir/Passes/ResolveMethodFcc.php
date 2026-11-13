@@ -79,11 +79,11 @@ final class ResolveMethodFcc implements Pass
                 }
                 continue;
             }
-            $module->functions[$i] = $this->rebuild($fn, $target);
+            $mm = $this->methodMetaFor($module, $cls, $fn->fccMethod);
+            $module->functions[$i] = $this->rebuild($fn, $target, $mm !== null && $mm->isStatic);
             $module->functions[$i]->fccTarget = $fn->fccMethod;
             $module->functions[$i]->fccTargetClass = $cls;
             if ($module->reflClosureWanted) {
-                $mm = $this->methodMetaFor($module, $cls, $fn->fccMethod);
                 if ($mm !== null) { $module->reflClosureMeta[$fn->name] = $mm; }
             }
         }
@@ -441,15 +441,16 @@ final class ResolveMethodFcc implements Pass
         return $args;
     }
 
-    private function rebuild(FunctionDef $fn, FunctionDef $target): FunctionDef
+    /** A static target has no `$this` param to skip: every param is forwarded. */
+    private function rebuild(FunctionDef $fn, FunctionDef $target, bool $static = false): FunctionDef
     {
         $recv = $fn->params[0];
         $params = [$recv];
         $loads = [];
         $tp = $target->params;
         $k = \count($tp);
-        // params[0] of a method is `$this`.
-        for ($j = 1; $j < $k; $j = $j + 1) {
+        // params[0] of an instance method is `$this`.
+        for ($j = $static ? 0 : 1; $j < $k; $j = $j + 1) {
             $p = $tp[$j];
             $t = $p->siteRefinedFrom !== null ? $p->siteRefinedFrom : $p->type;
             $def = $p->default === null ? null : NodeClone::node($p->default);

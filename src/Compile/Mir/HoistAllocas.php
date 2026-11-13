@@ -310,6 +310,17 @@ final class HoistAllocas
                     $allocs .= $line . "\n";
                     $copyFrom = $le + 1;
                     $this->moved = $this->moved + 1;
+                    // An entry-only initializer written right after its alloca travels with it.
+                    if ($le < $blen) {
+                        $ne = \strpos($body, "\n", $le + 1);
+                        if ($ne === false) { $ne = $blen; }
+                        $next = \substr($body, $le + 1, $ne - $le - 1);
+                        if (\str_ends_with(\rtrim($next), '; mc.hoist')) {
+                            $allocs .= $next . "\n";
+                            $copyFrom = $ne + 1;
+                            $le = $ne;
+                        }
+                    }
                 }
                 $q = $le;
             }
@@ -328,6 +339,8 @@ final class HoistAllocas
      */
     private function isStaticAlloca(string $l): bool
     {
+        // An entry-only initializer travels with the allocas (the frame's call-temp count, EmitLlvmExceptions::ehTmpDecl).
+        if (\str_ends_with(\rtrim($l), '; mc.hoist')) { return true; }
         $at = \strpos($l, ' = alloca ');
         if ($at === false) { return false; }
         // Must be an instruction (leading whitespace, then a register).

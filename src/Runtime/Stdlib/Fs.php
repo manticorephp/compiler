@@ -17,7 +17,7 @@
  * already-existing *parent* is fine — but an existing leaf still fails, as
  * php.net specifies.
  */
-function mkdir(string $directory, int $permissions = 0777, bool $recursive = false): bool
+function mkdir(string $directory, int $permissions = 0777, bool $recursive = false, mixed $context = null): bool
 {
     if (!$recursive) {
         if (\__mc_offload_active()) {
@@ -58,7 +58,7 @@ function mkdir(string $directory, int $permissions = 0777, bool $recursive = fal
 }
 
 /** Remove an empty directory. */
-function rmdir(string $directory): bool
+function rmdir(string $directory, mixed $context = null): bool
 {
     if (\__mc_offload_active()) {
         \__mc_offload_cancel_point();
@@ -68,7 +68,7 @@ function rmdir(string $directory): bool
 }
 
 /** Rename (move) a file or directory. */
-function rename(string $from, string $to): bool
+function rename(string $from, string $to, mixed $context = null): bool
 {
     if (\__mc_offload_active()) {
         \__mc_offload_cancel_point();
@@ -78,7 +78,7 @@ function rename(string $from, string $to): bool
 }
 
 /** Copy a file, streaming in 64 KiB chunks rather than loading it whole. */
-function copy(string $from, string $to): bool
+function copy(string $from, string $to, mixed $context = null): bool
 {
     $in = \Runtime\Libc\fopen($from, 'rb');
     if ($in === null) {
@@ -109,7 +109,11 @@ function copy(string $from, string $to): bool
     }
     \Runtime\Libc\free($buf);
     \Runtime\Libc\fclose($in);
-    \Runtime\Libc\fclose($out);
+    // The last buffered bytes are written by fclose: a full disk fails HERE, and
+    // a copy that reports success over a short file is worse than a failed one.
+    if (\Runtime\Libc\fclose($out) !== 0) {
+        $ok = false;
+    }
     return $ok;
 }
 
@@ -377,7 +381,7 @@ function umask(?int $mask = null): int
  * which matches php.net.
  * @return string[]|false
  */
-function file(string $filename, int $flags = 0): array|false
+function file(string $filename, int $flags = 0, mixed $context = null): array|false
 {
     $raw = \file_get_contents($filename);
     if ($raw === false) {
@@ -418,7 +422,7 @@ function file(string $filename, int $flags = 0): array|false
 }
 
 /** Write a file straight to stdout; returns the byte count or false. */
-function readfile(string $filename): int|false
+function readfile(string $filename, bool $use_include_path = false, mixed $context = null): int|false
 {
     $data = \file_get_contents($filename);
     if ($data === false) {

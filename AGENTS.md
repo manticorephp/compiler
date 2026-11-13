@@ -110,6 +110,9 @@ Rules of evidence:
 Create `tests/aot/cases/<name>.php` + `tests/aot/expected/<name>.out`. No manifest.
 The expected output should be what `php` prints (`php -d xdebug.mode=off` — xdebug
 poisons the oracle). Run it with `bash tests/aot/run.sh -k <name>`.
+A case that tests the runtime `Error` of an undeclared class, function or constant on a reachable
+site (which the build otherwise refuses) carries a `// @allow-undefined-traps` comment; both runners
+then compile it with `--allow-undefined-traps`.
 
 ### Reporting a bug you are not fixing now
 
@@ -178,6 +181,7 @@ annotation of the passes: `src/Compile/README.md` and `docs/design/mir.md`.
 | Static analyzer (`analyze`, compile-time warnings) | `src/Analyze/` |
 | CLI + driver, manifest build, stdlib resolution | `src/Manticore/Main.php`, `src/Cli/` |
 | CLI commands | `src/Cli/Commands/*Command.php` (one class per command, options declared on the class), `src/Cli/Cli.php` |
+| Shared generics (body parts through the object cache) | `src/Compile/Mir/ShareSplit.php`, `assemble_shared` in `src/Manticore/Main.php`, `docs/design/shared-generics.md` |
 | Test harness | `tests/aot/run.sh` |
 | Gates and tooling | `tools/` |
 
@@ -235,6 +239,10 @@ Corollaries:
   `MemoryAbi`; never hard-code one in an emitter or a runtime helper.
 - **`linkonce_odr` bodies coalesce by name across modules.** Never specialize one
   from module-local information — the other module's copy may win at link time.
+- **Prelude code must emit the same text in every program that does not
+  specialize it.** A per-program token, counter or position in a prelude body's
+  name or constants makes every shared-generics part a cache miss
+  (`docs/design/shared-generics.md`); `bash tests/generic/run.sh` measures it.
 - **`__mir_array_retain*` is refcount-only; a value COPY must `__mir_array_adopt*`.**
   An array element read is a BORROW, not an owned value.
 - **Node field order is load-bearing** in the AST/MIR node classes — append, never

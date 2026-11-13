@@ -63,3 +63,10 @@ There is no `bin/console` here: a console is a separate program, see
   `Call to undefined function`.
 - **Debugging a crash:** build with `MANTICORE_FRAME_POINTERS=1 manticore build` and run
   the binary under `lldb` (macOS) or `gdb` (Linux) to get a usable backtrace.
+
+## Undeclared names (`allowUndefined`)
+
+`manticore build --check` reports a reachable use of an optional package or extension this app does
+not install as an error. `manticore.json` lists them under `allowUndefined` so the build passes: APCu, Memcached, Redis cluster / Relay (cache adapters, VarDumper casters), ExpressionLanguage and the Serializer component.
+Each path throws `Error` at run time if it runs. A new missing dependency not in the list still fails
+the build. See [`docs/cli.md`](../../docs/cli.md#allowundefined).

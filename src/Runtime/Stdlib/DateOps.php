@@ -202,6 +202,7 @@ function __mc_dt_from_format(string $format, string $value): int
         $rest = \substr($value, $vp);
         if ($c === '\\') {
             $k = $k + 1;
+            if ($k < $fn && ($vp >= $vn || $value[$vp] !== $format[$k])) { return \__mc_dt_fail(); }
             $vp = $vp + 1;
             continue;
         }
@@ -256,7 +257,11 @@ function __mc_dt_from_format(string $format, string $value): int
             if (\preg_match('/^(-?\d+)/', $rest, $m) !== 1) { return \__mc_dt_fail(); }
             $epoch = (int)$m[1]; $vp = $vp + \strlen($m[1]); continue;
         }
-        if ($c === 'P' || $c === 'O') {
+        if ($c === 'P' || $c === 'O' || $c === 'p') {
+            // php reads a `Z` (UTC, ISO 8601) wherever an offset is expected.
+            if ($vp < $vn && ($value[$vp] === 'Z' || $value[$vp] === 'z')) {
+                $zoff = 0; $haveZone = 1; $vp = $vp + 1; continue;
+            }
             if (\preg_match('/^([+-])(\d{2}):?(\d{2})/', $rest, $m) !== 1) { return \__mc_dt_fail(); }
             $o = (int)$m[2] * 3600 + (int)$m[3] * 60;
             $zoff = $m[1] === '-' ? -$o : $o;
@@ -287,6 +292,8 @@ function __mc_dt_from_format(string $format, string $value): int
         }
         $vp = $vp + 1;
     }
+    // An epoch is an absolute instant: php gives it the +00:00 zone.
+    if ($epoch !== -99999 && $haveZone === 0) { $haveZone = 1; $zoff = 0; }
     // Publish the raw fields for date_parse_from_format, before any default
     // fills them in — one leaf call (see __mc_dt_publish).
     \__mc_dt_publish($y, $mo, $d, $h, $mi, $sec, $us, $zoff, $haveZone);
