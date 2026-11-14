@@ -1844,6 +1844,7 @@ trait EmitLlvmBuiltins
      * or both arrays release the same payload — `$astArgs = $expanded` in
      * LowerFromAst::lowerCallArgs freed each spread-expanded ArrayAccess twice
      * and the self-built compiler crashed on `method_exists(...$pack)`.
+     * @param string[]|null $keyedSkip
      */
     private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false, string $from = '', string $into = '', ?array $keyedSkip = null): string
     {

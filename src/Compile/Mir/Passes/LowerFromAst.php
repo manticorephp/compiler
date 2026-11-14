@@ -4332,19 +4332,14 @@ final class LowerFromAst implements Pass
      * MIR call-params + their LoadLocal arg nodes for a synthesised callable
      * wrapper. `null` declParams (unknown arity, e.g. a builtin) falls back to
      * a single cell param. Returns `[Param[], Node[]]`.
+     * @param \Parser\Ast\Param[]|null $declParams
      */
     private function fccParamsAndArgs(?array $declParams, ?string $defaultScope = null): array
     {
         $mir = [];
         $loads = [];
         if ($declParams !== null) {
-            // Rebind to a NON-nullable local before typing it: a `@param T[]` on
-            // the nullable `?array` parameter itself coerces a null argument to
-            // `[]` under the native self-build (dropping the __fa0 fallback →
-            // a param-less closure). Type the local inside the null guard instead.
-            /** @var \Parser\Ast\Param[] $dp */
-            $dp = $declParams;
-            foreach ($dp as $p) {
+            foreach ($declParams as $p) {
                 $t = ($p->variadic ?? false)
                     ? $this->variadicPackType($p)
                     : $this->lowerParamType($p->typeHint);

@@ -583,7 +583,10 @@ final class InferTypes implements Pass
         foreach (Walk::children($n) as $c) { $this->collectClosureNodes($c); }
     }
 
-    /** Re-infer the current scope and record its aggregate cost. */
+    /**
+     * Re-infer the current scope and record its aggregate cost.
+     * @param array<string, bool>|null $only
+     */
     private function inferFunctionsForScope(Module $module, string $reason = 'other', ?array $only = null): void
     {
         // A scoped pass takes a property a scan just retyped IN THIS RUN to its
