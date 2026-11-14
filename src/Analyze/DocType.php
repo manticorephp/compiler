@@ -62,6 +62,8 @@ final class DocType
                 if ($c !== ' ' && $c !== "\t") { break; }
                 $j = $j + 1;
             }
+            if ($j < $n && \substr($doc, $j, 1) === '&') { $j = $j + 1; }
+            if ($j + 3 <= $n && \substr($doc, $j, 3) === '...') { $j = $j + 3; }
             $want = '$' . $varName;
             $wl = \strlen($want);
             if ($j + $wl <= $n && \substr($doc, $j, $wl) === $want) {

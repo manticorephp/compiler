@@ -10,6 +10,8 @@ final class Completer
 {
     public const CAP = 200;
 
+    private const KEYWORDS = ['abstract', 'as', 'break', 'case', 'catch', 'class', 'clone', 'const', 'continue', 'default', 'do', 'echo', 'else', 'elseif', 'enum', 'extends', 'final', 'finally', 'fn', 'for', 'foreach', 'function', 'if', 'implements', 'instanceof', 'interface', 'match', 'namespace', 'new', 'private', 'protected', 'public', 'readonly', 'return', 'static', 'switch', 'throw', 'trait', 'try', 'use', 'while', 'yield'];
+
     public function __construct(private Index $idx) {}
 
     /**
@@ -54,6 +56,11 @@ final class Completer
         foreach ($this->idx->constNames() as $n) {
             if (self::matches($n, $p)) { $out['k:' . $n] = new Completion($n, 'constant'); }
         }
+        if ($p !== '' && !\str_contains($p, '\\')) {
+            foreach (self::KEYWORDS as $kw) {
+                if (\str_starts_with($kw, $p)) { $out['w:' . $kw] = new Completion($kw, 'keyword'); }
+            }
+        }
         return self::finish($out);
     }
 
@@ -89,7 +96,7 @@ final class Completer
 
     private static function item(MemberInfo $m, bool $static, bool $withInstance): ?Completion
     {
-        if (\str_starts_with($m->name, '__')) { return null; }
+        if (\str_starts_with($m->name, '__') && !($static && $withInstance && \strcasecmp($m->name, '__construct') === 0)) { return null; }
         $detail = $m->declClass . ($m->typeHint !== null ? ': ' . $m->typeHint : '');
         if ($m->kind === 'case') {
             return $static ? new Completion($m->name, 'enumMember', $detail) : null;
@@ -99,7 +106,6 @@ final class Completer
         }
         if ($m->kind === 'method') {
             if ($static && !$m->isStatic && !$withInstance) { return null; }
-            if (!$static && $m->isStatic) { return null; }
             return new Completion($m->name, 'method', $detail);
         }
         if ($m->isStatic !== $static) { return null; }

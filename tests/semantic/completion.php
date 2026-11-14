@@ -51,7 +51,7 @@ check('this_lists_all_including_private', function (): bool|string {
     foreach (['pub', 'priv', 'prot', 'open', 'hidden', 'test'] as $n) {
         if (!in_array($n, $l, true)) { return "missing $n: " . json_encode($l); }
     }
-    return in_array('make', $l, true) || in_array('cnt', $l, true) ? 'static leaked: ' . json_encode($l) : true;
+    return in_array('cnt', $l, true) ? 'static leaked: ' . json_encode($l) : true;
 });
 
 check('other_object_lists_only_public', function (): bool|string {
@@ -186,6 +186,60 @@ check('cap_and_sorted', function (): bool|string {
 check('byte_columns_after_multibyte', function (): bool|string {
     $src = "<?php\nclass Foo { public \$pub; }\nfunction t(Foo \$a) { \$s = 'é'; \$a->| }\n";
     return in_array('pub', labels($src), true) ? true : 'no pub';
+});
+
+check('arrow_offers_static_methods_not_static_props', function (): bool|string {
+    $l = labels(CLS);
+    return in_array('make', $l, true) && !in_array('cnt', $l, true) ? true : json_encode($l);
+});
+
+check('parent_construct_offered_other_magic_hidden', function (): bool|string {
+    $src = "<?php\nclass P { public function __construct() {} public function __toString() {} public function a() {} }\nclass C extends P { public function __construct() { parent::| } }\n";
+    $l = labels($src);
+    sort($l);
+    if ($l !== ['__construct', 'a']) { return json_encode($l); }
+    $o = labels("<?php\nclass P { public function __construct() {} public function a() {} }\nfunction f(P \$p) { \$p->| }\n");
+    return $o === ['a'] ? true : json_encode($o);
+});
+
+check('multi_line_chain_completes', function (): bool|string {
+    $src = "<?php\nclass B { public function one(): B { return \$this; } public function two() {} }\nfunction f(B \$b) {\n    \$b->one()\n        ->|\n}\n";
+    $l = labels($src);
+    sort($l);
+    return $l === ['one', 'two'] ? true : json_encode($l);
+});
+
+check('keywords_offered_by_prefix', function (): bool|string {
+    $w = ws();
+    $l = labels("<?php\nretu|\n", $w);
+    $items = $w->completionsAt('t.php', 2, 5);
+    return in_array('return', $l, true) && $items[0]->kind === 'keyword' ? true : json_encode($l);
+});
+
+check('class_completion_adds_use_after_existing_uses', function (): bool|string {
+    $w = ws();
+    $w->open('lib.php', "<?php\nnamespace Lib;\nclass Widget {}\n");
+    $w->open('t.php', "<?php\nnamespace App;\nuse Other\\Thing;\nWidg\n");
+    foreach ($w->completionsAt('t.php', 4, 5) as $c) {
+        if ($c->label === 'Widget') { return $c->insertText === 'Widget' && $c->useFqn === 'Lib\\Widget' && $c->useLine === 4 ? true : json_encode([$c->insertText, $c->useFqn, $c->useLine]); }
+    }
+    return 'Widget not offered';
+});
+
+check('imported_and_same_namespace_classes_need_no_use', function (): bool|string {
+    $w = ws();
+    $w->open('lib.php', "<?php\nnamespace Lib;\nclass Widget {}\n");
+    $w->open('t.php', "<?php\nnamespace Lib;\nWidg\n");
+    $ok = false;
+    foreach ($w->completionsAt('t.php', 3, 5) as $c) {
+        if ($c->label === 'Widget' && $c->useFqn === null) { $ok = true; }
+    }
+    if (!$ok) { return 'same-namespace got a use'; }
+    $w->open('t2.php', "<?php\nnamespace App;\nuse Lib\\Widget as W;\nWidg\n");
+    foreach ($w->completionsAt('t2.php', 4, 5) as $c) {
+        if ($c->label === 'Widget') { return $c->useFqn === null && $c->insertText === 'W' ? true : json_encode([$c->insertText, $c->useFqn]); }
+    }
+    return 'not offered';
 });
 
 exit($fail);

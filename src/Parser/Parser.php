@@ -880,7 +880,7 @@ final class Parser
         }
 
         if ($this->checkKeyword('const')) {
-            foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan, $memberFirst) as $const) {
+            foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan, $memberFirst, $memberDoc) as $const) {
                 $acc->consts[] = $const;
             }
             return;
@@ -1131,7 +1131,7 @@ final class Parser
      * @param AttributeNode[] $attrs
      * @return ConstDecl[]
      */
-    private function parseClassConsts(MemberModifiers $modifiers, array $attrs, Span $span, ?Token $first = null): array
+    private function parseClassConsts(MemberModifiers $modifiers, array $attrs, Span $span, ?Token $first = null, ?string $docComment = null): array
     {
         $this->advance(); // 'const'
         $typeHint = null;
@@ -1165,6 +1165,7 @@ final class Parser
                 $attrs,
                 $consts === [] && $first !== null ? $this->endFrom($span, $first) : $this->endFrom($span, $nameTok),
                 $modifiers->isFinal,
+                $docComment,
             );
             if ($last) { return $consts; }
             $this->advance(); // ','

@@ -457,7 +457,7 @@ final class ExprTyper
             $k = $e->index instanceof StringLiteral ? $e->index->value : null;
             $parts = [];
             foreach ($b->args as $i => $a) {
-                if ($k === null || \rtrim($b->keys[$i], '?') === $k) { $parts[] = $a; }
+                if ($k === null || \rtrim($b->keys[$i], SourceType::OPT) === $k) { $parts[] = $a; }
             }
             return \count($parts) === 0 ? null : self::union($parts);
         }

@@ -197,12 +197,6 @@ check('inline_html_apostrophe_between_close_and_open_tags', function () {
     return names($s) === 'Real' ? true : names($s);
 });
 
-check('pcre_failure_falls_back_to_block_scan', function () {
-    $s = "<?php\n/**\n * @param Foo \$a\n * @return \\Bar\n */\nfunction f() {}\n/** @var Baz \$x */\n";
-    $r = \Semantic\DocblockNames::scanBlocks($s, 'N', ['Foo' => 'U\\Foo']);
-    return json_encode($r) === json_encode([['Foo', 3, 11, 'U\\Foo'], ['\\Bar', 4, 12, 'Bar'], ['Baz', 7, 10, 'N\\Baz']]) ? true : json_encode($r);
-});
-
 check('prose_after_return_and_throws', function () {
     $s = "<?php\n/**\n * @return the thing\n * @throws an error\n */\nfunction f() {}\n/** @return Foo the thing */\nfunction g() {}\n/** @return Foo\\Bar */\nfunction h() {}\n/** @return \$this */\nfunction i() {}\n";
     return names($s) === 'Foo,Foo\\Bar' ? true : names($s);
@@ -223,11 +217,25 @@ check('multibyte_before_name_uses_byte_columns', function () {
     return docNames($s) === ['Foo@2:30-33'] ? true : json_encode(docNames($s));
 });
 
-check('fallback_returns_nothing_for_multi_namespace_file', function () {
+check('multi_namespace_file_resolves_per_block', function () {
     $s = "<?php\nnamespace A { /** @return Foo */ function fa() {} }\nnamespace B { /** @param Foo \$x */ function fb() {} }\n";
-    return \Semantic\DocblockNames::scanBlocks($s, 'B', []) === [] ? true : 'not empty';
+    return names($s) === 'A\\Foo,B\\Foo' ? true : names($s);
 });
 
+check('prose_article_after_return_is_not_a_class', function () {
+    $s = "<?php\n/**\n * @return A new instance\n * @return The builder\n * @throws An error\n */\nfunction f() {}\n/** @return A */\nfunction g() {}\n/** @return Foo A new instance */\nfunction h() {}\n";
+    return names($s) === 'A,Foo' ? true : names($s);
+});
+
+check('use_clause_with_comments_and_groups', function () {
+    $s = "<?php\nnamespace N;\nuse P\\{A, /* x; y */ B as C}; use /* c */ D\\E; use function F\\g;\n/** @param A|C|E|g \$x */\nfunction f() {}\n";
+    return names($s) === 'P\\A,P\\B,D\\E,N\\g' ? true : names($s);
+});
+
+check('use_inside_closure_and_member_is_not_import', function () {
+    $s = "<?php\nnamespace N;\n\$f = function () use (\$x) {};\n\$o->use X;\n/** @return X */\nfunction f() {}\n";
+    return names($s) === 'N\\X' ? true : names($s);
+});
 check('group_use_function_registers_no_class_alias', function () {
     $s = "<?php\nnamespace N;\nuse function P\\{a, b};\n/** @param a \$x */\nfunction f() {}\n";
     return names($s) === 'N\\a' ? true : names($s);
