@@ -7,11 +7,12 @@ namespace Compile\Mir;
  */
 final class InferenceBarriers
 {
+    /** @var array<string, bool> */
     private array $reasons = [];
     private int $nodes = 0;
-    /** Functions carrying at least one barrier construct. */
+    /** Functions carrying at least one barrier construct. @var array<string, bool> */
     private array $escapers = [];
-    /** reason => how many functions carry it. */
+    /** reason => how many functions carry it. @var array<string, int> */
     private array $reasonFns = [];
     private string $fn = '';
 
@@ -31,6 +32,7 @@ final class InferenceBarriers
     public function isEmpty(): bool { return \count($this->reasons) === 0; }
     public function nodeCount(): int { return $this->nodes; }
     public function reasonCount(): int { return \count($this->reasons); }
+    /** @return string[] */
     public function reasons(): array { return \array_keys($this->reasons); }
 
     public function escaperCount(): int { return \count($this->escapers); }

@@ -15,6 +15,7 @@ use Parser\Ast\ForeachStmt;
 use Parser\Ast\IfStmt;
 use Parser\Ast\IncDec;
 use Parser\Ast\RefAssign;
+use Parser\Ast\StaticLocalDecl;
 use Parser\Ast\StaticLocalStmt;
 use Parser\Ast\Stmt;
 use Parser\Ast\SwitchStmt;
@@ -133,7 +134,8 @@ final class AsyncStaticLocal
     }
 
     /** Field reads funnelled through a typed param — a subclass field read off a
-     * base-typed expression picks the wrong layout under self-host. */
+     * base-typed expression picks the wrong layout under self-host.
+     * @return StaticLocalDecl[] */
     private function staticDecls(StaticLocalStmt $s): array
     {
         return $s->decls;

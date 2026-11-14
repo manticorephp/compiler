@@ -9,6 +9,7 @@ final class InferenceScope
 
     private function __construct(
         public readonly string $mode,
+        /** @var string[] */
         public readonly array $functions,
         public readonly string $reason,
     ) {}

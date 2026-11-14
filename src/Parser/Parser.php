@@ -2331,7 +2331,8 @@ final class Parser
         return \count($args) === 1 && $args[0]->kind === 'Ellipsis';
     }
 
-    /** A string callable `"fn"` / `"C::m"` applied to `$args`. */
+    /** A string callable `"fn"` / `"C::m"` applied to `$args`.
+     * @param \Parser\Ast\Expr[] $args */
     private function callableFromString(string $name, array $args, Span $span): Expr
     {
         $cc = \strpos($name, '::');
@@ -2342,7 +2343,8 @@ final class Parser
     }
 
     /** An array callable `[$o,"m"]` / `["C","m"]` applied to `$args`, or null
-     *  when the literal isn't a `[receiver, methodName]` shape. */
+     *  when the literal isn't a `[receiver, methodName]` shape.
+     * @param \Parser\Ast\Expr[] $args */
     private function callableFromArray(\Parser\Ast\ArrayLit $arr, array $args, Span $span): ?Expr
     {
         if (\count($arr->elements) !== 2) { return null; }
@@ -2822,6 +2824,7 @@ final class Parser
         return $left;
     }
 
+    /** @return \Parser\Ast\Expr[] */
     private function parseArgList(): array
     {
         $this->expect(TokenKind::OpenParen, "expected '('");

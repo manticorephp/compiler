@@ -3,17 +3,21 @@ namespace Compile\Mir;
 
 final class DependencyIndex
 {
+    /** @var array<string, array<string, bool>> */
     private array $callees = [];
+    /** @var array<string, array<string, bool>> */
     private array $callers = [];
+    /** @var array<string, bool> */
     private array $functions = [];
+    /** @var array<string, bool> */
     private array $dynamicCallers = [];
-    /** Callees that are not module functions: builtins, FFI bindings, .sig imports. */
+    /** Callees that are not module functions: builtins, FFI bindings, .sig imports. @var array<string, bool> */
     private array $externCallees = [];
-    /** Bare method name => the functions that dispatch on it. */
+    /** Bare method name => the functions that dispatch on it. @var array<string, array<string, bool>> */
     private array $methodCallers = [];
-    /** Functions containing a `new $cls(...)`, i.e. callers of every constructor. */
+    /** Functions containing a `new $cls(...)`, i.e. callers of every constructor. @var array<string, bool> */
     private array $dynNewCallers = [];
-    /** Functions containing a closure INVOKE — the callers of every closure body. */
+    /** Functions containing a closure INVOKE — the callers of every closure body. @var array<string, bool> */
     private array $invokers = [];
     /**
      * Bare property name => the functions that read or write it.
@@ -25,10 +29,11 @@ final class DependencyIndex
      * `array_pad` narrowing only after a full round. Keyed by NAME, like method
      * dispatch, and for the same reason: whatever class the receiver is, the
      * slot reached is some `C::prop`.
+     * @var array<string, array<string, bool>>
      */
     private array $propUsers = [];
     /** Functions reading or writing a property by a RUNTIME name — every
-     *  property change reaches them. */
+     *  property change reaches them. @var array<string, bool> */
     private array $dynPropUsers = [];
     /**
      * A method's own symbol => its bare name.
@@ -36,15 +41,18 @@ final class DependencyIndex
      * Composed from the class table (`Class` ⧺ `__` ⧺ `method`), never split out
      * of the symbol: `__` is also legal inside a class name, so parsing it back
      * is ambiguous while composing it is exact.
+     * @var array<string, string>
      */
     private array $methodOf = [];
     /** Bare method name => every module symbol implementing it. @var array<string, array<string, bool>> */
     private array $methodSyms = [];
     /** Caller => the bare method names it dispatches on (static or dynamic). @var array<string, array<string, bool>> */
     private array $methodCallsOf = [];
+    /** @var array<string, bool> */
     private array $unknownReasons = [];
     private bool $unknownEscape = false;
 
+    /** @param array<string, bool> $functions */
     private function __construct(array $functions) { $this->functions = $functions; }
 
     public static function build(Module $module): self
@@ -83,6 +91,7 @@ final class DependencyIndex
         return $n;
     }
 
+    /** @param string[] $changed @return string[] */
     public function invalidate(array $changed): array
     {
         if ($this->unknownEscape) { return \array_keys($this->functions); }
@@ -236,6 +245,7 @@ final class DependencyIndex
         return $out;
     }
 
+    /** @return string[] */
     public function invalidateChanges(ChangeSet $changes): array
     {
         if ($changes->unknownEscape || \count($changes->classes) > 0 || \count($changes->globals) > 0) {

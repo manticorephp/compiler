@@ -4,16 +4,23 @@ namespace Compile\Mir;
 /** Monotonic facts changed by one analysis/transformation pass. */
 final class ChangeSet
 {
+    /** @var array<string, bool> */
     public array $functions = [];
+    /** @var array<string, bool> */
     public array $returns = [];
+    /** @var array<string, bool> */
     public array $params = [];
+    /** @var array<string, bool> */
     public array $classes = [];
     /** Bare PROPERTY names whose type a scan moved. Kept apart from
      *  {@see $classes}, which is a blanket "fall back to the whole module":
      *  a property is reachable through the functions that name it, and that is
-     *  a set {@see DependencyIndex} can produce. */
+     *  a set {@see DependencyIndex} can produce.
+     *  @var array<string, bool> */
     public array $props = [];
+    /** @var array<string, bool> */
     public array $globals = [];
+    /** @var array<string, bool> */
     public array $newFunctions = [];
     public bool $unknownEscape = false;
 

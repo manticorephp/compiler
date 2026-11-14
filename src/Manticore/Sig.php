@@ -697,7 +697,7 @@ final class Sig
         return $any ? $val : 0;
     }
 
-    /** A JSON list body (no brackets) of quoted strings. */
+    /** A JSON list body (no brackets) of quoted strings. @param string[] $names */
     private static function jsonStrList(array $names): string
     {
         $out = '';

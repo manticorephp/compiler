@@ -54,6 +54,7 @@ final class Index
         foreach ($lib->classes as $k => $c) { $this->classes[$k] = $c; }
     }
 
+    /** @param ParsedFile[] $files */
     public static function build(array $files): Index
     {
         $idx = new Index();
