@@ -2,7 +2,7 @@
 
 namespace Semantic;
 
-/** reason: string-class-name | dynamic-member | callable-string | docblock */
+/** reason: string-class-name | dynamic-member | callable-string | docblock | heredoc-interpolation | unresolved-receiver */
 final class UncertainSite
 {
     public function __construct(

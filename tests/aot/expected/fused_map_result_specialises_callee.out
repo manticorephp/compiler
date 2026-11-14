@@ -1,0 +1,65 @@
+array(2) {
+  [0]=>
+  int(1)
+  [2]=>
+  int(2)
+}
+array(2) {
+  [0]=>
+  string(2) "dm"
+  [2]=>
+  string(1) "x"
+}
+array(2) {
+  [0]=>
+  float(0.5)
+  [2]=>
+  float(1.5)
+}
+array(2) {
+  [0]=>
+  bool(true)
+  [2]=>
+  bool(false)
+}
+bool(true)
+array(2) {
+  [0]=>
+  int(2)
+  [1]=>
+  int(4)
+}
+int(10)
+array(2) {
+  [2]=>
+  int(0)
+  [4]=>
+  int(2)
+}
+array(3) {
+  [0]=>
+  int(4)
+  [1]=>
+  int(4)
+  [2]=>
+  int(2)
+}
+bool(true)
+array(2) {
+  ["a"]=>
+  int(4)
+  ["c"]=>
+  int(5)
+}
+array(2) {
+  [4]=>
+  int(2)
+  [5]=>
+  int(1)
+}
+array(2) {
+  [0]=>
+  string(1) "1"
+  [2]=>
+  string(1) "2"
+}

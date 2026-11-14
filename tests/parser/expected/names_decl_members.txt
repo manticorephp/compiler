@@ -1,0 +1,36 @@
+names:
+  @2:11-2:14 namespace App -> App
+  @4:6-4:10 class:decl Suit -> App\Suit
+  @4:18-4:24 member:decl Hearts -> Hearts
+  @6:7-6:10 class:decl Box -> App\Box
+  @8:23-8:25 member:decl $n -> n
+  @9:21-9:32 member:decl __construct -> __construct
+  @9:45-9:47 variable:param $q -> q
+  @9:45-9:47 member:decl $q -> q
+  @9:64-9:70 variable:param $label -> label
+  @9:64-9:70 member:decl $label -> label
+  @9:92-9:94 variable:param $z -> z
+  @9:92-9:94 member:decl $z -> z
+  @10:21-10:24 member:decl run -> run
+  @10:25-10:28 class Box -> App\Box
+  @10:29-10:31 variable:param $o -> o
+  @10:36-10:41 variable:param $rest -> rest
+  @12:16-12:18 variable:global $g -> g
+  @13:16-13:22 variable:static $calls -> calls
+  @14:13-14:14 member:prop q -> q
+  @15:14-15:19 member:prop label -> label
+  @16:13-16:16 member:method run -> run
+  @17:9-17:13 class self -> self
+  @17:15-17:17 member:sprop $n -> n
+  @18:9-18:15 class static -> static
+  @18:17-18:21 member:method peek -> peek
+  @19:9-19:13 class Suit -> App\Suit
+  @19:15-19:21 member:const Hearts -> Hearts
+  @20:9-20:12 class Box -> App\Box
+  @21:13-21:20 member:const VERSION -> VERSION
+  @23:24-23:29 member:prop label -> label
+  @24:18-24:28 class \Exception -> Exception
+  @24:29-24:31 variable:catch $e -> e
+  @26:21-26:26 member:prop label -> label
+  @27:21-27:23 variable:param $x -> x
+

@@ -18,6 +18,8 @@ final class ClassInfo
      * @param array<string, bool>       $consts      const / enum-case name → true
      * @param array<string, ?string>    $propTypes   property name → declared hint
      *                                                (incl. promoted ctor params)
+     * @param array<string, MemberInfo> $members  `kind:name` → member (methods keyed by lowercased name)
+     * @param array<string, int[]> $traitAdapted  lowercased method name (and alias) touched by a `use T { … }` adaptation → [line, col] of the rule (0, 0 when unranged)
      * @param bool $partial  recovered from a file with syntax errors: members may be missing
      */
     public function __construct(
@@ -31,5 +33,7 @@ final class ClassInfo
         public bool $isAbstract,
         public array $propTypes = [],
         public bool $partial = false,
+        public array $members = [],
+        public array $traitAdapted = [],
     ) {}
 }
