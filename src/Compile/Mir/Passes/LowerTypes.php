@@ -1332,7 +1332,7 @@ trait LowerTypes
      */
     private function docTagType(?string $doc, string $tag, string $varName, bool $unnamedOnly = false): ?string
     {
-        $t = $this->docTagTypeRaw($doc, $tag, $varName, $unnamedOnly);
+        $t = \Analyze\DocType::tag($doc, $tag, $varName, $unnamedOnly);
         if ($t === null || $doc === null) { return $t; }
         if ($tag !== '@param' && $tag !== '@param-out' && $tag !== '@return') { return $t; }
         if (!\str_contains($doc, '@template')) { return $t; }
@@ -1344,93 +1344,5 @@ trait LowerTypes
             $t = \preg_replace('/(?<![A-Za-z0-9_\\\\$])' . $name . '(?![A-Za-z0-9_\\\\])/', $sub, $t) ?? $t;
         }
         return $t;
-    }
-
-    private function docTagTypeRaw(?string $doc, string $tag, string $varName, bool $unnamedOnly = false): ?string
-    {
-        if ($doc === null) { return null; }
-        $n = \strlen($doc);
-        $tlen = \strlen($tag);
-        // Single forward scan — self-host `strpos` ignores the offset
-        // arg (`@__mir_strpos` is 2-ary), so a positional re-search
-        // would loop on the first hit. Walk the buffer once instead,
-        // using only bounded `substr`.
-        $i = 0;
-        while ($i + $tlen <= $n) {
-            if (\substr($doc, $i, $tlen) !== $tag) { $i = $i + 1; continue; }
-            $j = $i + $tlen;
-            // Require a whitespace boundary after the tag (`@param` not
-            // `@params`).
-            $b = ($j < $n) ? \substr($doc, $j, 1) : '';
-            if ($b !== ' ' && $b !== "\t") { $i = $i + 1; continue; }
-            while ($j < $n) {
-                $c = \substr($doc, $j, 1);
-                if ($c !== ' ' && $c !== "\t") { break; }
-                $j = $j + 1;
-            }
-            $typeStart = $j;
-            // Angle-bracket-aware: a generic like `array<string, ClassDef>`
-            // carries a space after the comma — don't stop the type token
-            // on whitespace while inside `<...>`, or the value type is lost.
-            // Brace-aware too: a shape (`array{name: string, tags: string[]}`)
-            // carries the same space-after-comma / space-after-colon — without
-            // tracking `{}` depth the token cut off at the first field's
-            // comma, and `array{name:string,` (unbalanced) reached the parser.
-            $depth = 0;
-            while ($j < $n) {
-                $c = \substr($doc, $j, 1);
-                if ($c === '<') { $depth = $depth + 1; }
-                elseif ($c === '>') { if ($depth > 0) { $depth = $depth - 1; } }
-                // Paren-aware too, and a `callable(int): int` continues PAST the
-                // colon: the type token is `callable(int): int`, not the prefix up
-                // to the first space. Truncating it left `callable(int):`, which
-                // resolved to no type at all — and once a docblock became the type
-                // of an un-hinted param, that segfaulted instead of being ignored.
-                elseif ($c === '(') { $depth = $depth + 1; }
-                elseif ($c === ')') { if ($depth > 0) { $depth = $depth - 1; } }
-                elseif ($c === '{') { $depth = $depth + 1; }
-                elseif ($c === '}') { if ($depth > 0) { $depth = $depth - 1; } }
-                elseif ($depth === 0 && $c === ':') { $j = $this->skipDocSpaces($doc, $j + 1, $n); continue; }
-                elseif ($depth === 0
-                    && ($c === ' ' || $c === "\t" || $c === "\n" || $c === "\r")) {
-                    break;
-                }
-                $j = $j + 1;
-            }
-            $type = \substr($doc, $typeStart, $j - $typeStart);
-            if (\str_contains($type, '/*') || \str_contains($type, '//') || \str_contains($type, '#')) {
-                $type = (string)\preg_replace('/\/\*.*?\*\\\\?\//s', '', $type);
-                $type = (string)\preg_replace('/\/\/[^\r\n]*/', '', $type);
-                $type = (string)\preg_replace('/#[^\r\n]*/', '', $type);
-            }
-            // A shape or generic written over several docblock lines carries
-            // each line's ` * ` gutter inside it — `array{\n *     type: int}`
-            // otherwise names a key `*     type`.
-            if (\str_contains($type, "\n")) {
-                $type = (string)\preg_replace('/\r?\n[ \t]*\*?[ \t]*/', ' ', $type);
-            }
-            if ($varName === '' && !$unnamedOnly) { return $type; }
-            while ($j < $n) {
-                $c = \substr($doc, $j, 1);
-                if ($c !== ' ' && $c !== "\t") { break; }
-                $j = $j + 1;
-            }
-            if ($varName === '') {
-                // `$unnamedOnly`: a tag that names a variable belongs to THAT variable.
-                if ($j < $n && \substr($doc, $j, 1) === '$') { $i = $j; continue; }
-                return $type;
-            }
-            $want = '$' . $varName;
-            $wl = \strlen($want);
-            if ($j + $wl <= $n && \substr($doc, $j, $wl) === $want) {
-                $after = ($j + $wl < $n) ? \substr($doc, $j + $wl, 1) : ' ';
-                if ($after === ' ' || $after === "\t"
-                    || $after === "\n" || $after === "\r") {
-                    return $type;
-                }
-            }
-            $i = $j;
-        }
-        return null;
     }
 }

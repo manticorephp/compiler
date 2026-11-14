@@ -4,17 +4,17 @@ namespace Analyze;
 
 /**
  * Extracts the type string a docblock associates with a `@param $x`,
- * `@return`, or `@var $x` tag. A faithful port of the compiler's own
- * `LowerTypes::docTagType` single-forward-scan (same `<…>` / `(…)` / `{…}` /
- * `callable(): T` awareness), so the analyzer reads docblocks exactly the way
- * the codegen does — no second, diverging interpretation.
+ * `@return`, or `@var $x` tag. The one docblock tag scanner: the compiler
+ * (`LowerTypes::docTagType`) and the analyzer both read docblocks through it.
+ * A single forward scan, `<…>` / `(…)` / `{…}` / `callable(): T` aware.
  *
- * `$varName` is the bare name without `$`; pass '' for `@return` (which has no
- * variable). Returns null when the tag is absent.
+ * `$varName` is the bare name without `$` (`&$x` and `...$x` match it); pass ''
+ * for `@return` (which has no variable). `$unnamedOnly` with `$varName === ''`
+ * skips a tag that names a variable. Returns null when the tag is absent.
  */
 final class DocType
 {
-    public static function tag(?string $doc, string $tag, string $varName): ?string
+    public static function tag(?string $doc, string $tag, string $varName, bool $unnamedOnly = false): ?string
     {
         if ($doc === null) { return null; }
         $n = \strlen($doc);
@@ -56,11 +56,11 @@ final class DocType
             if (\str_contains($type, "\n")) {
                 $type = (string)\preg_replace('/\r?\n[ \t]*\*?[ \t]*/', ' ', $type);
             }
-            if ($varName === '') { return $type; }
-            while ($j < $n) {
-                $c = \substr($doc, $j, 1);
-                if ($c !== ' ' && $c !== "\t") { break; }
-                $j = $j + 1;
+            if ($varName === '' && !$unnamedOnly) { return $type; }
+            $j = self::skipSpaces($doc, $j, $n);
+            if ($varName === '') {
+                if ($j < $n && \substr($doc, $j, 1) === '$') { $i = $j; continue; }
+                return $type;
             }
             if ($j < $n && \substr($doc, $j, 1) === '&') { $j = $j + 1; }
             if ($j + 3 <= $n && \substr($doc, $j, 3) === '...') { $j = $j + 3; }
