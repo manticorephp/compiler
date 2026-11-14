@@ -131,4 +131,42 @@ check('callable_return_binds_tight_rest_is_union_arm', function () {
     return ($t !== null && $t->kind === SourceType::UNION && $t->toString() === 'callable():A|B') ?: ts($t);
 });
 
+check('compiler_grammar_forms', function () {
+    $rows = [
+        ['non-empty-string', 'non-empty-string'], ['array-key', 'array-key'], ['positive-int', 'positive-int'],
+        ['non-negative-int', 'non-negative-int'], ['literal-string', 'literal-string'], ['numeric-string', 'numeric-string'],
+        ['class-string<T>', 'class-string<T>'], ['?class-string<Foo>', '?class-string<Foo>'],
+        ['non-empty-array<string, int>', 'non-empty-array<string,int>'], ['non-empty-list<A>', 'non-empty-list<A>'],
+        ['int<0, max>', 'int<0,max>'], ['int<min, -1>', 'int<min,-1>'],
+        ['array<Foo::BAR, int>', 'array<Foo::BAR,int>'], ['array<Foo::*, int>', 'array<Foo::*,int>'],
+        ['array<\Foo\Bar::PREFIX_*, int>', 'array<\Foo\Bar::PREFIX_*,int>'], ['Foo::A|Foo::B', 'Foo::A|Foo::B'],
+        ['Foo::BAR[]', 'array<Foo::BAR>'],
+        ['array{a: int, ...}', 'array{a:int,...}'], ['list<array{file?: string, ...}>', 'list<array{file?:string,...}>'],
+        ['array{process-manager: string}', 'array{process-manager:string}'],
+        ['\Closure(string):void', '\Closure(string):void'], ['(\Closure(int): int)|null', '?\Closure(int):int'],
+        ['callable(mixed $v, ?A &$e = null): bool', 'callable(mixed,?A):bool'],
+        ['callable(int ...$xs): void', 'callable(int):void'],
+        ['ReflectionClass<covariant T>', 'ReflectionClass<T>'],
+    ];
+    foreach ($rows as [$in, $want]) {
+        $t = SourceTypeParser::fromHint($in);
+        if (ts($t) !== $want) { return "$in => " . ts($t) . " want $want"; }
+        $again = SourceTypeParser::fromHint($want);
+        if (ts($again) !== $want) { return "round-trip $want => " . ts($again); }
+    }
+    return true;
+});
+
+check('const_ref_kind', function () {
+    $t = SourceTypeParser::fromHint('Foo::BAR');
+    return ($t !== null && $t->kind === SourceType::CONST_REF && $t->name === 'Foo::BAR') ?: ts($t);
+});
+
+check('compiler_grammar_malformed_stays_null', function () {
+    foreach (['Foo::', 'array{a: int', '-', 'non-', 'callable(int', 'array<Foo::>', 'Foo::*|'] as $in) {
+        if (SourceTypeParser::fromHint($in) !== null) { return $in; }
+    }
+    return true;
+});
+
 exit($fail);

@@ -95,7 +95,7 @@ final class SourceTypeParser
             if ($a === null) { return null; }
             $arms[] = $a;
             self::ws($c);
-            if (self::peek($c) === '&') { $c->pos = $c->pos + 1; continue; }
+            if (self::peek($c) === '&' && !self::paramMarkerAfterAmp($c)) { $c->pos = $c->pos + 1; continue; }
             break;
         }
         return \count($arms) === 1 ? $arms[0] : new SourceType(SourceType::INTERSECTION, '', $arms);
@@ -135,13 +135,21 @@ final class SourceTypeParser
             $c->pos = $c->pos + 5;
             return self::postfix($c, new SourceType(SourceType::STATIC, 'static', [], $cls));
         }
-        while (self::isIdent(self::peek($c))) { $c->pos = $c->pos + 1; }
+        while (self::isIdent(self::peek($c)) || (self::peek($c) === '-' && $c->pos > $start && self::isAlpha(self::peekAt($c, 1)))) { $c->pos = $c->pos + 1; }
         if ($c->pos === $start) { return null; }
+        if (self::peek($c) === ':' && self::peekAt($c, 1) === ':') {
+            $c->pos = $c->pos + 2;
+            $cs = $c->pos;
+            while (self::isIdent(self::peek($c)) || self::peek($c) === '*') { $c->pos = $c->pos + 1; }
+            if ($c->pos === $cs) { return null; }
+            return self::postfix($c, new SourceType(SourceType::CONST_REF, \substr($c->raw, $start, $c->pos - $start)));
+        }
         $name = \substr($c->raw, $start, $c->pos - $start);
         $low = \strtolower($name);
+        $bare = \ltrim($low, '\\');
 
-        if (self::peek($c) === '{' && ($low === 'array' || $low === 'list')) {
-            $sh = self::parseShape($c, $low, $cls, $d + 1);
+        if (self::peek($c) === '{' && ($bare === 'array' || $bare === 'list')) {
+            $sh = self::parseShape($c, $bare, $cls, $d + 1);
             return $sh === null ? null : self::postfix($c, $sh);
         }
         $args = [];
@@ -150,6 +158,9 @@ final class SourceTypeParser
             $c->pos = $c->pos + 1;
             $hasArgs = true;
             while (true) {
+                self::ws($c);
+                if (\substr($c->raw, $c->pos, 10) === 'covariant ') { $c->pos = $c->pos + 10; }
+                elseif (\substr($c->raw, $c->pos, 14) === 'contravariant ') { $c->pos = $c->pos + 14; }
                 $a = self::parseUnion($c, $cls, true, $d + 1);
                 if ($a === null) { return null; }
                 $args[] = $a;
@@ -160,8 +171,8 @@ final class SourceTypeParser
             if (self::peek($c) !== '>') { return null; }
             $c->pos = $c->pos + 1;
         }
-        if (self::peek($c) === '(' && !$hasArgs && ($low === 'callable' || $low === 'closure')) {
-            $cb = self::parseCallable($c, $low === 'callable' ? 'callable' : $name, $cls, $d + 1);
+        if (self::peek($c) === '(' && !$hasArgs && ($bare === 'callable' || $bare === 'closure')) {
+            $cb = self::parseCallable($c, $bare === 'callable' ? 'callable' : $name, $cls, $d + 1);
             return $cb === null ? null : self::postfix($c, $cb);
         }
         $t = self::named($name, $low, $args, $hasArgs, $cls);
@@ -174,16 +185,27 @@ final class SourceTypeParser
         $keys = [];
         $vals = [];
         $auto = 0;
+        $sealed = true;
         self::ws($c);
         while (self::peek($c) !== '}') {
             if (self::peek($c) === '') { return null; }
+            if (\substr($c->raw, $c->pos, 3) === '...') {
+                $c->pos = $c->pos + 3;
+                $sealed = false;
+                self::ws($c);
+                if (self::peek($c) !== ',' && self::peek($c) !== '}' && self::parseUnion($c, $cls, true, $d) === null) { return null; }
+                self::ws($c);
+                if (self::peek($c) === ',') { $c->pos = $c->pos + 1; self::ws($c); continue; }
+                if (self::peek($c) !== '}') { return null; }
+                continue;
+            }
             $key = (string)$auto;
             $save = $c->pos;
             $k = self::shapeKey($c);
             self::ws($c);
             $opt = false;
             if ($k !== null && self::peek($c) === '?') { $opt = true; $c->pos = $c->pos + 1; self::ws($c); }
-            if ($k !== null && self::peek($c) === ':') {
+            if ($k !== null && self::peek($c) === ':' && self::peekAt($c, 1) !== ':') {
                 $c->pos = $c->pos + 1;
                 $key = $k;
             } else {
@@ -200,7 +222,7 @@ final class SourceTypeParser
             if (self::peek($c) !== '}') { return null; }
         }
         $c->pos = $c->pos + 1;
-        return new SourceType(SourceType::SHAPE, $name, $vals, '', null, $keys);
+        return new SourceType(SourceType::SHAPE, $name, $vals, $sealed ? '' : '...', null, $keys);
     }
 
     private static function shapeKey(GenericCursor $c): ?string
@@ -214,7 +236,7 @@ final class SourceTypeParser
             return $k;
         }
         $start = $c->pos;
-        while (self::isIdent(self::peek($c)) && self::peek($c) !== '\\') { $c->pos = $c->pos + 1; }
+        while ((self::isIdent(self::peek($c)) && self::peek($c) !== '\\') || (self::peek($c) === '-' && $c->pos > $start)) { $c->pos = $c->pos + 1; }
         return $c->pos === $start ? null : \substr($c->raw, $start, $c->pos - $start);
     }
 
@@ -231,10 +253,23 @@ final class SourceTypeParser
                 if ($p === null) { return null; }
                 $params[] = $p;
                 self::ws($c);
+                if (self::peek($c) === '&') { $c->pos = $c->pos + 1; self::ws($c); }
+                if (\substr($c->raw, $c->pos, 3) === '...') { $c->pos = $c->pos + 3; self::ws($c); }
                 if (self::peek($c) === '$') {
                     $c->pos = $c->pos + 1;
                     while (self::isIdent(self::peek($c))) { $c->pos = $c->pos + 1; }
                     self::ws($c);
+                    if (self::peek($c) === '=') {
+                        $depth = 0;
+                        while ($c->pos < $c->len) {
+                            $ch = self::peek($c);
+                            if ($ch === '(' || $ch === '[' || $ch === '{') { $depth = $depth + 1; }
+                            elseif ($ch === ')' && $depth === 0) { break; }
+                            elseif ($ch === ')' || $ch === ']' || $ch === '}') { $depth = $depth - 1; }
+                            elseif ($ch === ',' && $depth === 0) { break; }
+                            $c->pos = $c->pos + 1;
+                        }
+                    }
                 }
                 if (self::peek($c) === ',') { $c->pos = $c->pos + 1; continue; }
                 if (self::peek($c) !== ')') { return null; }
@@ -296,6 +331,25 @@ final class SourceTypeParser
     private static function peek(GenericCursor $c): string
     {
         return $c->pos < $c->len ? $c->raw[$c->pos] : '';
+    }
+
+    /** `&` followed by `$x`, `...` or `&` is a by-ref / variadic marker in a callable signature, not an intersection. */
+    private static function paramMarkerAfterAmp(GenericCursor $c): bool
+    {
+        $i = $c->pos + 1;
+        while ($i < $c->len && ($c->raw[$i] === ' ' || $c->raw[$i] === "\t")) { $i = $i + 1; }
+        $ch = $i < $c->len ? $c->raw[$i] : '';
+        return $ch === '$' || $ch === '&' || \substr($c->raw, $i, 3) === '...';
+    }
+
+    private static function peekAt(GenericCursor $c, int $off): string
+    {
+        return $c->pos + $off < $c->len ? $c->raw[$c->pos + $off] : '';
+    }
+
+    private static function isAlpha(string $ch): bool
+    {
+        return $ch !== '' && (($ch >= 'a' && $ch <= 'z') || ($ch >= 'A' && $ch <= 'Z'));
     }
 
     private static function ws(GenericCursor $c): void
