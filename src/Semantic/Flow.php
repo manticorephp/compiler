@@ -468,7 +468,8 @@ final class Flow
     {
         if ($this->found !== null) { return $env; }
         if ($e === $this->target && $this->silent === 0) { $this->found = $env; return $env; }
-        if ($e instanceof Variable) { return $e->name === '' ? self::onlyThis($env) : $env; } // nameless: `$$n`, any variable may be written
+        if ($e instanceof Variable) { return $env; }
+        if ($e instanceof \Parser\Ast\VarVar) { return self::onlyThis($this->expr($e->nameExpr, $env)); } // `$$n`: any variable may be written
         if ($e instanceof Assign) { return $this->assign($e, $env); }
         if ($e instanceof BinaryOp) {
             $op = $e->op;
@@ -614,11 +615,10 @@ final class Flow
     /** Record that target $t now holds $ty (null = unknown). Returns a new env. */
     private function store(Expr $t, ?SourceType $ty, TypeEnv $env): TypeEnv
     {
+        if ($t instanceof \Parser\Ast\VarVar) { return self::onlyThis($env); } // `$$n = …`: any variable may be written
         $out = $env->copy();
         if ($t instanceof Variable) {
             if ($t->name === 'this') { return $env; }
-            // a nameless Variable is `$$n`: any variable may be written
-            if ($t->name === '') { return self::onlyThis($env); }
             $out->forget($t->name);
             if ($ty !== null && $ty->kind !== SourceType::NEVER && !isset($this->aliased[$t->name])) { $out->vars[$t->name] = $ty; }
             return $out;

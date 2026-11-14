@@ -596,7 +596,6 @@ final class Workspace
     private function variableUncertain(string $uri, VarIndex $vi, int $b): array
     {
         $out = $vi->uncertainOf($b);
-        foreach ($this->names->legacySites($uri) as $l) { $out[] = $l; }
         if (!$vi->isGlobalScoped($b) || $vi->isSpecial($b)) { return $out; }
         $name = $vi->nameOf($b);
         foreach ($this->names->allOccurrences() as $c) {
@@ -606,7 +605,6 @@ final class Workspace
         }
         foreach ($this->asts as $other => $_) {
             if ($other === $uri) { continue; }
-            foreach ($this->names->legacySites($other) as $l) { $out[] = $l; }
             $ov = $this->varsOf($other);
             $ob = $ov === null ? -1 : $ov->mainBinding($name);
             if ($ob < 0) { continue; }
