@@ -5,8 +5,26 @@ framing). It is built on the semantic core (`src/Semantic/`, see
 [`design/semantic-core.md`](design/semantic-core.md)): the same name index, type inference and
 analyzer the `analyze` command uses, so editor diagnostics and `manticore analyze` agree.
 
-A VS Code client is developed in a separate repository; any LSP client
-works with the command `manticore lsp`.
+Any LSP client works with the command `manticore lsp`. The binary must be the installed one (its
+`lib/` and prelude sit next to it); a bare copy does not start.
+
+## Editors
+
+- **VS Code** — [manticorephp/vscode-manticore](https://github.com/manticorephp/vscode-manticore);
+  setting `manticore.path`.
+- **Neovim** (0.11+, built-in client):
+
+  ```lua
+  vim.lsp.config('manticore', {
+    cmd = { 'manticore', 'lsp' },
+    filetypes = { 'php' },
+    root_markers = { 'manticore.json', 'composer.json', '.git' },
+  })
+  vim.lsp.enable('manticore')
+  ```
+
+  Disable other PHP servers (`intelephense`, `phpactor`) for the same buffers, or both sets of
+  diagnostics show.
 
 ## Supported methods
 
