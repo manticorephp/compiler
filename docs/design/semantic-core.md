@@ -329,8 +329,16 @@ narrowing, hover, member and variable `referencesTo` / `definitionOf`, `renameBl
 - Docblock types resolve class names through the file's own `use` map only.
 - Native (compiled) P2c numbers and the Linux run are not recorded here.
 
-**P3** - document symbols, completion, the LSP transport.
-- Closed files: member use sites in a closed file resolve to nothing and are listed uncertain (`unresolved-receiver`), so a project-wide rename is uncertain everywhere outside open files. Root-cause fix: keep each indexed file's text (or re-read it from disk) and lazily reparse it, building `ExprAt` / `UnitLookup` on demand through a small LRU; never keep every AST.
+**P3** - closed: document symbols, completion, the LSP transport and server (see [`../lsp.md`](../lsp.md)); the closed-file
+member-site gap is worked around, not fixed: a member query temporarily opens every scanned closed file (cap 5000, rename refuses beyond it).
+Member references cost ~1.8 s p50 on `src/` (362 files) for that reason.
+
+**P3 remains**
+- Incremental text sync (full text is re-sent and re-parsed per change).
+- Closed files: keep each indexed file's text and reparse lazily through a small LRU (`ExprAt` / `UnitLookup` on demand, never every AST) instead of the open-all pass.
+- `.sig` by-ref flags and return types.
+- Heredoc/nowdoc names: a heredoc anywhere in the workspace blocks every rename (`renameBlockers`).
+- Library (`lib:`) locations are not navigable; `.gitignore` is not honoured by the workspace scan.
 
 **Open**
 - Diagnostics for closed files (a closed file reports only the parse errors it had).
