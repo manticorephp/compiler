@@ -7,6 +7,7 @@
 #   bash tests/cli/run.sh --update   rewrite help.txt and the completions.* goldens
 #   bash tests/cli/run.sh --capture  rewrite behaviour.txt (CLI-behaviour changes only)
 set -uo pipefail
+export LC_ALL=C  # sort order in the goldens is byte order on every host
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MC="${MC:-$ROOT/bin/manticore}"
 HERE="$ROOT/tests/cli"
@@ -35,6 +36,13 @@ shape() { # label, first-line prefix, fixed-string markers, then the command: rc
     if [ -z "$bad" ]; then echo "ok rc=0 first='$first' markers='$markers'"; else echo "BAD:$bad"; fi
 }
 
+diag() { # label, then the command: rc + stderr (paths stripped), sorted, summary line last
+    local label="$1" rc; shift
+    env -u CI "$@" >/dev/null 2>"$WORK/e"; rc=$?   # CI=1 turns progress on; goldens hold diagnostics only
+    printf '== %s\nrc=%s\n' "$label" "$rc"
+    sed -e "s|$WORK/||g" -e "s|$HERE/check/||g" "$WORK/e" | grep -v -e '^front end:' -e '^build:' | sort
+    grep '^front end:' "$WORK/e"
+}
 doctor_case() { # label; PATH for the compiler is only $WORK/shim
     local label="$1" out rc
     out="$(PATH="$WORK/shim" "$MC" doctor --offline --no-smoke 2>&1)"; rc=$?
@@ -88,13 +96,68 @@ PHP
     if ! printf '%s\n' "$mir" | grep -q '^fn M__f'; then echo "BAD: no MIR for M::f"
     elif printf '%s\n' "$mir" | grep -q 'load_local this : cell'; then echo "BAD: \$this typed cell"
     else echo "ok"; fi
+    # A string literal's symbol is a function of its bytes alone. "s29685295" and "s32060020" share a crc32; with a
+    # second CRC that was linear in the first they shared the whole name and the later one got `_<id>`, so the name
+    # depended on insertion order (object-cache churn; two strings under one name across parallel emission).
+    printf '<?php\necho "s29685295", "\\n", "s32060020", "\\n";\n' > "$WORK/crc_ab.php"
+    printf '<?php\necho "s32060020", "\\n", "s29685295", "\\n";\n' > "$WORK/crc_ba.php"
+    printf '== string literal names order independent\n'
+    strnames() { "$MC" dump-llvm-mir "$1" 2>/dev/null | grep -E '^@\.str\.[^ ]* = .*c"s(29685295|32060020)\\00"' | sed -E 's/^(@[^ ]*) .*c"(s[0-9]*).*/\2 \1/' | sort; }
+    ab="$(strnames "$WORK/crc_ab.php")"; ba="$(strnames "$WORK/crc_ba.php")"
+    if [ "$(printf '%s\n' "$ab" | grep -c .)" != 2 ]; then echo "BAD: literals not found"
+    elif [ "$ab" != "$ba" ]; then echo "BAD: names depend on order"
+    else echo "ok"; fi
     shape "analyze json"  "["          "]"                     "$MC" analyze --json "f.php"
     run "dump-ast bogus flag"      "$MC" dump-ast --bogus "f.php"
     run "dump-ast missing file"    "$MC" dump-ast "nope.php"
     run "dump-ast with compile-only flag" "$MC" dump-ast --analyze "f.php"
+    run "dump-mir rejects --check"  "$MC" dump-mir --check "f.php"
+    run "analyze rejects --check"   "$MC" analyze --check "f.php"
     run "compile bad -O"           "$MC" compile "f.php" -o "x" -O9
     run "compile bad --memory"     "$MC" compile "f.php" -o "x" --memory bogus
     run "compile bad --strict"     "$MC" compile "f.php" -o "x" --strict=bogus
+    diag "check_parse_two_files"    sh -c "cd \"$HERE/check/parse2\" && \"$MC\" build --check"
+    diag "check_unsupported_three_files" sh -c "cd \"$HERE/check/unsupported3\" && \"$MC\" build --check"
+    printf "== analyze_decl_and_type_both\n"; "$MC" analyze --deep --json "$HERE/check/analyze_decl_and_type.php" 2>"$WORK/e" | grep -o "repr.type\|arg.type" | sort; [ -s "$WORK/e" ] && echo "BAD: stderr"
+    diag "check_clean"              "$MC" compile --check "$HERE/check/clean.php" -o "$WORK/clean"
+    [ -e "$WORK/clean" ] && echo "BAD: --check wrote output"
+    diag "check_two_bad_fns_then_good" "$MC" compile --check "$HERE/check/two_bad_then_good.php" -o "$WORK/tb"
+    diag "build_two_bad_fns_then_good" "$MC" compile "$HERE/check/two_bad_then_good.php" -o "$WORK/tb"
+    [ -e "$WORK/tb" ] && echo "BAD: wrote a binary"
+    diag "check_parse_in_body"      "$MC" compile --check "$HERE/check/parse_in_body.php" -o "$WORK/pb"
+    diag "check_parse_two_in_body"  "$MC" compile --check "$HERE/check/parse_two_in_body.php" -o "$WORK/p2"
+    diag "check_dedup"              "$MC" compile --check "$HERE/check/dedup.php" -o "$WORK/dd"
+    diag "check_unresolved_classes" sh -c "cd \"$HERE/check/unresolved_classes\" && \"$MC\" build --check"
+    diag "check_known_builtin_classes" "$MC" compile --check "$HERE/check/known_builtin_classes.php" -o "$WORK/kb"
+    diag "check_guarded_decls"      "$MC" compile --check "$HERE/check/guarded_decls.php" -o "$WORK/gd"
+    diag "check_ref_after_class"    "$MC" compile --check "$HERE/check/ref_after_class_lowered.php" -o "$WORK/rc"
+    diag "check_class_alias_literal" "$MC" compile --check "$HERE/check/class_alias_literal.php" -o "$WORK/ca"
+    diag "check_unresolved_fns"     "$MC" compile --check "$HERE/check/unresolved_fns.php" -o "$WORK/uf"
+    diag "check_unresolved_hints"   "$MC" compile --check "$HERE/check/unresolved_hints.php" -o "$WORK/uh"
+    diag "check_uses_distinct_trait"   "$MC" compile --check "$HERE/check/uses_distinct_trait.php" -o "$WORK/ut"
+    diag "check_uses_distinct_default" "$MC" compile --check "$HERE/check/uses_distinct_default.php" -o "$WORK/ud"
+    diag "check_numeric_class"      "$MC" compile --check "$HERE/check/numeric_class.php" -o "$WORK/nc"
+    diag "check_missing_package"    sh -c "cd \"$HERE/check/missing_package\" && \"$MC\" build --check"
+    diag "check_unit_top_level"     sh -c "cd \"$HERE/check/unit_top_level\" && \"$MC\" build --check"
+    diag "check_unit_guard"         sh -c "cd \"$HERE/check/unit_guard\" && \"$MC\" build --check"
+    for m in exact wild both; do
+        diag "check_allow_undefined_$m" sh -c "cd \"$HERE/check/allow_undefined\" && \"$MC\" build --check $m.json"
+    done
+    for t in reachable_new dead_fn guards soft method_never method_called default_param default_param_unused dyn_define fold_define cascade class_consts_unused dyn_const_probe callable_array_instance switch_guard guard_helpers static_hierarchy dyn_static_missing unserialize_missing unsupported_builtin unsupported_mixed unsupported_ns_const unsupported_ns_const_fq unsupported_ns_fn trait_two_users exit_bare string_not_callable toplevel_return_guard toplevel_exit_guard static_lsb_base; do
+        diag "tier_$t" "$MC" compile --check "$HERE/check/tier/$t.php" -o "$WORK/tr"
+    done
+    diag "tier_reachable_new_allow_traps" "$MC" compile --check --allow-undefined-traps "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"
+    diag "tier_dead_fn_all"  "$MC" compile --check --all "$HERE/check/tier/dead_fn.php" -o "$WORK/tr"
+    diag "tier_library"      "$MC" compile --check --emit-library "$HERE/check/tier/library.php" -o "$WORK/tr.o"
+    diag "tier_unsupported_dead_all" "$MC" compile --check --all "$HERE/check/tier/unsupported_dead.php" -o "$WORK/tr"
+    diag "tier_closure_sites_all" "$MC" compile --check --all "$HERE/check/tier/closure_sites.php" -o "$WORK/tr"
+    diag "tier_method_default_all" "$MC" compile --check --all "$HERE/check/tier/method_default.php" -o "$WORK/tr"
+    diag "tier_build_error_no_output" "$MC" compile "$HERE/check/tier/reachable_new.php" -o "$WORK/tr"
+    [ -e "$WORK/tr" ] && echo "BAD: wrote a binary"
+    for r in basic interface_dispatch magic_and_interfaces callables dynamic_new class_level dyn_fn_name dyn_static attr_reflect unused_interface literal_class param_class literal_fn byref_fn byref_arg_class include_class include_in_fn literal_method param_method dyn_static_call unserialize_new reflection_literal reflection_runtime dyn_static_const class_consts_ns; do
+        diag "reach_$r" env MANTICORE_REACH_DUMP=1 "$MC" compile --check "$HERE/check/reach/$r.php" -o "$WORK/rh"
+    done
+    printf '== builtin names in sync\n'; bash "$ROOT/tools/check_builtin_names.sh"
     run "compile bad --progress"  "$MC" compile "f.php" -o "x" --progress=bogus
     run "compile bad --color"      "$MC" compile "f.php" -o "x" --color=bogus
     run "split-ir no args"         "$MC" split-ir
@@ -105,6 +168,18 @@ PHP
     shim clang14 cc; doctor_case "doctor: old clang"
     shim clang17 cc; doctor_case "doctor: no pcre2/pkg-config"
     shim clang17 cc pcre2-config pkg-config; doctor_case "doctor: full toolchain"
+    # `cache` reports and `cache clear` empties the object cache — only the cache's own
+    # `<sha1>.o` files (top and prog/); anything else in the directory stays.
+    cdir="$WORK/objcache"; mkdir -p "$cdir/prog"
+    printf 'xx' > "$cdir/$(printf 'a%.0s' $(seq 40)).o"; printf 'yyy' > "$cdir/prog/$(printf 'b%.0s' $(seq 40)).o"
+    printf 'keep' > "$cdir/notes.txt"; printf 'keep' > "$cdir/user.o"
+    mkdir -p "$WORK/analyze"; printf '{}' > "$WORK/analyze/$(printf 'c%.0s' $(seq 40)).json"
+    printf '== cache show\n'
+    MANTICORE_OBJ_CACHE_DIR="$cdir" "$MC" cache 2>&1 | sed "s|$cdir|<dir>|"
+    printf '== cache clear\n'
+    MANTICORE_OBJ_CACHE_DIR="$cdir" "$MC" cache clear 2>&1 | sed "s|$cdir|<dir>|"
+    echo "left: $(cd "$cdir" && find . -type f | sort | paste -sd' ' -) analyze: $(ls "$WORK/analyze" | wc -l | tr -d ' ')"
+    run "cache unknown action"      "$MC" cache wipe
     run "completions no shell"      "$MC" completions
     run "completions unknown shell" "$MC" completions tcsh
     run "unknown command"          "$MC" frobnicate
@@ -209,6 +284,11 @@ progress_check() { # --progress/--quiet/--timings/--color behaviour; failures pr
     ( cd mf && MANTICORE_SPLIT_JOBS=4 "$MC" build --progress=json >/dev/null 2>"$e" ); ck "split build rc" $?
     splitck "split json clang counters (build)" "$e"
     [ "$(./sp_off)" = "$(./mf/bin/d)" ]; ck "split build binary output same" $?
+    # "stdlib": false on an app that does not embed the runtime source is refused up front (#506)
+    mkdir -p nostd/src
+    printf '<?php\necho match (4) { 3 => "three" }, "\\n";\n' > nostd/src/m.php
+    printf '{"applications":[{"name":"m","src":"src","entry":"src/m.php","output":"m.bin","stdlib":false}]}\n' > nostd/manticore.json
+    ( cd nostd && "$MC" build >/dev/null 2>"$e" ); [ $? -eq 65 ] && grep -q 'sets "stdlib": false but does not compile the runtime' "$e"; ck "stdlib:false without the runtime source is refused" $?
     [ -z "$(find . -name '*.done' -o -name '*.pid')" ]; ck "no stale .done/.pid markers" $?
     pairck() { # label, stderr file: every stage_start name has exactly one stage_end of the same name, and vice versa
         sed -n 's/.*"event":"stage_start","name":"\(.*\)","t_ms.*/\1/p' "$2" | sort >"$WORK/ps"

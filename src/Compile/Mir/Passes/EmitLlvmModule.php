@@ -275,9 +275,10 @@ trait EmitLlvmModule
         if ($this->rt->needsMethodExists) {
             /** @var string[][] $mxPairs */
             $mxPairs = [];
-            foreach ($this->classes as $cd) {
-                $disp = $this->displayClassName($cd->name);
-                foreach ($this->reflAllMethods($cd->name) as $m) { $mxPairs[] = [$disp, (string)$m]; }
+            foreach ($this->reflMethodOwners() as $owner) {
+                $disp = $this->displayClassName($owner);
+                foreach ($this->reflAllMethods($owner) as $m) { $mxPairs[] = [$disp, (string)$m]; }
+                if ($owner === 'Closure') { $mxPairs[] = [$disp, '__invoke']; }
             }
             $mxCount = $this->memberRowsSorted($mxPairs, true, $mxClsRows, $mxMthRows);
         }
@@ -291,8 +292,8 @@ trait EmitLlvmModule
         $gcmTotal = 0;
         if ($this->rt->needsClassMethods) {
             $gcmKeys = [];
-            foreach ($this->classes as $cd) {
-                $gcmKeys[] = [\strtolower($this->displayClassName($cd->name)), $cd->name];
+            foreach ($this->reflMethodOwners() as $owner) {
+                $gcmKeys[] = [\strtolower($this->displayClassName($owner)), $owner];
             }
             \usort($gcmKeys, fn (array $x, array $y): int => \strcmp($x[0], $y[0]));
             foreach ($gcmKeys as $k) {
@@ -352,6 +353,10 @@ trait EmitLlvmModule
             foreach ($this->enums as $name => $ed) {
                 if (!isset($targets[$name])) { $targets[$name] = $ed->classId; }
             }
+            // The engine's enum interfaces have no declaration to enumerate; every enum case is-a them.
+            foreach (['UnitEnum', 'BackedEnum'] as $enumIface) {
+                if (!isset($targets[$enumIface])) { $targets[$enumIface] = -1; }
+            }
             // Sorted by lower-cased name for the binary search in {@see isaDynTable}.
             /** @var string[] $targetNames */
             $targetNames = [];
@@ -396,8 +401,14 @@ trait EmitLlvmModule
         $out .= $globalCells;
         // Zero word: a null vec/assoc base (the empty-literal optimization
         // stores `[]` as a null ptr) is redirected here so a foreach length
-        // load reads 0 instead of faulting.
-        $out .= "@__mir_zero_word = internal global i64 0\n";
+        // load reads 0 instead of faulting. It is an EMPTY ARRAY, not a word: a
+        // redirected base has its flags, capacity and buckets read too, and an
+        // 8-byte object read at +32 is out of bounds — undefined behavior the
+        // optimizer is free to turn into a trap. Read-only by contract (only
+        // loads go through it), so a constant: the loads fold, and a module
+        // split may copy it instead of sharing state.
+        $out .= '@__mir_zero_word = private unnamed_addr constant ['
+            . (string)\intdiv(\Compile\MemoryAbi::ARRAY_HEADER_SIZE, 8) . " x i64] zeroinitializer\n";
         // …or whenever the ARRAY rc trace is on: it names its caller through
         // {@see $out `@__mir_bt_top`} below, and a LIBRARY module needs no
         // backtraces of its own, so without this the stdlib emitted a call to
@@ -604,21 +615,21 @@ trait EmitLlvmModule
             $out .= $this->fiberRuntime();
         }
         if ($this->rt->needsExceptions) {
-            // Zero-cost exception runtime ({@see \Compile\Runtime\UnwindRuntime}).
-            // @__mir_thrown holds the exception a catch pad just took off the
-            // unwinder, until the catch binds it or a finally parks it.
+            // Exception runtime ({@see \Compile\Runtime\ExceptionRuntime}).
+            // @__mir_thrown holds the exception a catch pad just took out of the
+            // slot, until the catch binds it or a finally parks it.
             // linkonce_odr (NOT internal): the stdlib.o and the user .o share
             // one slot, and one `@__mc_uncaught_fn` — the fatal @main installs.
             $out .= "@__mir_thrown = linkonce_odr global ptr null\n";
-            $out .= \Compile\Runtime\UnwindRuntime::ir();
+            $out .= \Compile\Runtime\ExceptionRuntime::ir();
             // `$gen->throw($e)` pending injection: non-null = throw at the
             // next yield resume point (the suspended `yield` expression raises).
             if ($this->gen->throwUsed) {
                 $out .= "@__mir_gen_throw = linkonce_odr global ptr null\n";
             }
             // Top-level fatal for an UNCAUGHT throw: @main stores it into
-            // `@__mc_uncaught_fn`, which `@__mc_throw` calls when the unwinder's
-            // search phase finds no catch pad on the stack. Emitted
+            // `@__mc_uncaught_fn`, which `@__mc_uncaught` calls when an exception
+            // propagates out of @main ({@see \Compile\Mir\EhLowerIr}). Emitted
             // ONLY in the module that owns @main (the user program): its class
             // switch is module-specific, so a linkonce_odr copy in stdlib.o
             // (different class table) would be an ODR mismatch.
@@ -659,6 +670,13 @@ trait EmitLlvmModule
         // MANTICORE_PROFILE unusable on any module with exceptions).
         if (\Compile\Debug::$profile || \Compile\Debug::$allocTrace) {
             $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
+        }
+        // The collector's MANTICORE_CC_STATS census ({@see ccCensusIr}).
+        if ($this->rt->needsCc) {
+            $this->libcExtra['atexit'] = 'declare i32 @atexit(ptr)';
+            $this->libcExtra['getenv'] = 'declare ptr @getenv(ptr)';
+            $this->libcExtra['clock'] = 'declare i64 @clock()';
             $this->libcExtra['dprintf'] = 'declare i32 @dprintf(i32, ptr, ...)';
         }
         $decls = $this->rt->libcDecls(\Compile\Debug::$verify);
@@ -1046,9 +1064,6 @@ trait EmitLlvmModule
         $this->ssa->reset();
         $this->ehOn = false;
         $this->ehPersonality = false;
-        // SSA regs restart here, so a leftover reg key would name a DIFFERENT
-        // value in this function ({@see EmitLlvm::$ptrArgCellByReg}).
-        $this->clearPtrArgCells();
         $this->resetCellGuardFrame();
         $this->frame->name = $fn->name;
         $this->frame->file = $fn->file;
@@ -1068,6 +1083,9 @@ trait EmitLlvmModule
         $this->locals->hasTry = false;
         $this->frame->mutatedVecLocals = [];
         $this->arrayHintedParams = [];
+        // Call-site scratch read into the virtual-dispatch KEY: left over from the
+        // previous body, it made this body depend on what was emitted before it.
+        $this->vdSiteArgc = 0;
         $this->arrayHintedRefParams = [];
         foreach ($fn->params as $ahp) {
             if ($ahp->arrayHinted && !$ahp->byRef) { $this->arrayHintedParams[$ahp->name] = true; }
@@ -1194,7 +1212,7 @@ trait EmitLlvmModule
             // user object and the prebuilt stdlib.o (whose ctype arrow-fns are
             // also `__closure_N`) collide at link time.
             $header = 'define internal i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')'
-                . $this->closureMetaPrefix($fn->name, $capCnt) . $this->personalityClause() . " {\nentry:\n";
+                . $this->closureMetaPrefix($fn->name, $capCnt) . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -1257,7 +1275,7 @@ trait EmitLlvmModule
                 $first = false;
                 $paramSig .= 'i64 %arg.' . $p->name;
             }
-            $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . $this->personalityClause() . " {\nentry:\n";
+            $header = 'define ' . $linkage . 'i64 @manticore_' . $this->mangle($fn->name) . '(' . $paramSig . ')' . " {\nentry:\n";
             $sinkPath = '';
             if ($this->streamIrPath !== '') {
                 $sinkPath = $this->streamIrPath . '.fnraw.' . (string)$this->functionTextCounter;
@@ -2183,7 +2201,7 @@ trait EmitLlvmModule
         if (!$this->needsErrorHandlers) { return ''; }
         $out  = "define void @__manticore_shutdown() {\nentry:\n";
         $out .= "  %r = call i64 @manticore___mc_run_shutdown()\n";
-        $out .= "  ret void\n}\n";
+        $out .= $this->atexitUncaughtTail();
         return $out;
     }
 
@@ -2197,8 +2215,28 @@ trait EmitLlvmModule
         if (!$this->needsOb) { return ''; }
         $out  = "define void @__manticore_ob_shutdown() {\nentry:\n";
         $out .= "  %r = call i64 @manticore___mc_ob_shutdown()\n";
-        $out .= "  ret void\n}\n";
+        $out .= $this->atexitUncaughtTail();
         return $out;
+    }
+
+    /**
+     * The end of an atexit trampoline: an exception the PHP drain left in the
+     * slot goes to the uncaught path (handler, else the fatal), as php reports
+     * one thrown at shutdown. libc would otherwise carry on with it pending.
+     * EhLowerIr leaves the trampolines unlowered.
+     */
+    private function atexitUncaughtTail(): string
+    {
+        if (!$this->rt->needsExceptions) { return "  ret void\n}\n"; }
+        return "  %x = load ptr, ptr @__mc_exc\n"
+            . "  %xs = icmp ne ptr %x, null\n"
+            . "  br i1 %xs, label %unc, label %ok\n"
+            . "unc:\n"
+            . "  store ptr null, ptr @__mc_exc\n"
+            . "  call void @__mc_uncaught(ptr %x)\n"
+            . "  unreachable\n"
+            . "ok:\n"
+            . "  ret void\n}\n";
     }
 
     private function profileRuntime(): string
@@ -2463,7 +2501,7 @@ trait EmitLlvmModule
 
     /**
      * `@__mir_uncaught()` — the top-level fatal an uncaught throw ends in
-     * (`@__mc_throw` calls it through `@__mc_uncaught_fn`, which @main sets).
+     * (`@__mc_uncaught` calls it through `@__mc_uncaught_fn`, which @main sets).
      * Renders PHP's `PHP Fatal error:  Uncaught <Class>: <message>` to stderr
      * and exits 255. Class name comes from a runtime class_id switch; the
      * message is the Throwable's first property (`message`, same offset for
@@ -2512,6 +2550,18 @@ trait EmitLlvmModule
         if ($this->needsErrorHandlers) {
             $out .= "  %eb = call i64 @__manticore_box_object(ptr %e)\n";
             $out .= "  %handled = call i64 @manticore___mc_dispatch_uncaught(i64 %eb)\n";
+            // A handler that throws: its exception is the uncaught one now (php
+            // prints its fatal). The handler stack is already empty, so the
+            // re-entry prints. EhLowerIr leaves this function unlowered.
+            $out .= "  %hx = load ptr, ptr @__mc_exc\n";
+            $out .= "  %hxs = icmp ne ptr %hx, null\n";
+            $out .= "  br i1 %hxs, label %uc_rethrown, label %uc_ret\n";
+            $out .= "uc_rethrown:\n";
+            $out .= "  store ptr null, ptr @__mc_exc\n";
+            $out .= "  store ptr %hx, ptr @__mir_thrown\n";
+            $out .= "  call void @__mir_uncaught()\n";
+            $out .= "  unreachable\n";
+            $out .= "uc_ret:\n";
             $out .= "  %washandled = icmp ne i64 %handled, 0\n";
             $out .= "  br i1 %washandled, label %uc_handled, label %uc_print\n";
             $out .= "uc_handled:\n";
@@ -2556,10 +2606,11 @@ trait EmitLlvmModule
     {
         $this->rt->needsCliArgv = true;
         $this->frame->isMain = true;
+        $this->ehTmpBeginMain($fn);
         $header = "define i32 @main(i32 %argc, ptr %argv)"
-            . $this->personalityClause() . " {\nentry:\n";
+            . " {\nentry:\n";
         if ($this->rt->needsExceptions) {
-            // A throw no catch pad takes ends in the uncaught fatal: `@__mc_throw`
+            // A throw no catch pad takes ends in the uncaught fatal: `@__mc_uncaught`
             // calls it through this hook, which the stdlib.o copy shares.
             $header .= "  store ptr @__mir_uncaught, ptr @__mc_uncaught_fn\n";
         }
@@ -2645,7 +2696,7 @@ trait EmitLlvmModule
         // destructor that throws needs a landing pad of its own. Uncaught there,
         // php prints the fatal and runs no further destructor.
         $dsh = "define void @__manticore_dtor_shutdown()"
-            . ($this->rt->needsExceptions ? \Compile\Runtime\UnwindRuntime::PERSONALITY : '') . " {\nentry:\n";
+            . " {\nentry:\n";
         // Once: exit() inside a destructor re-enters libc's exit, which runs this
         // hook again — that nested run must not resume the sweep (php stops).
         $dsh .= "  %dn = load i64, ptr @__mir_dtor_done\n";
@@ -2660,7 +2711,7 @@ trait EmitLlvmModule
             $dsh .= "  invoke void @__mir_dtor_sweep() to label %swept unwind label %lp\n";
             $dsh .= "swept:\n";
             $dsh .= "  ret void\n";
-            $dsh .= \Compile\Runtime\UnwindRuntime::catchPad('lp', '%l', '%lx', '%lo');
+            $dsh .= \Compile\Runtime\ExceptionRuntime::catchPad('lp', '%l', '%lx', '%lo');
             $dsh .= "  br label %unc\n";
             $dsh .= "unc:\n";
             if ($this->needsErrorHandlers) {
@@ -2687,7 +2738,7 @@ trait EmitLlvmModule
             $dsh .= "  call void @__mir_dtor_sweep()\n";
             $dsh .= "  ret void\n}\n\n";
         }
-        $body .= "  ret i32 0\n";
+        $body .= "  ret i32 0\n" . $this->ehTmpEnd();
         return $header . $body . "}\n\n" . $dsh;
     }
 

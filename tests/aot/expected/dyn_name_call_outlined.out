@@ -1,0 +1,21 @@
+int(1)
+array(2) {
+  [0]=>
+  string(3) "123"
+  [1]=>
+  string(3) "123"
+}
+1,2,3
+1,9
+int(15)
+int(15)
+3/3
+3/7
+RuntimeException:bad:7
+Error:Call to undefined function no_such_fn()
+string(4) "abab"
+int(-1)
+int(9)
+a,bb,ccc
+2,4,6
+1,3,5

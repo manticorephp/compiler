@@ -1,4 +1,5 @@
 <?php
+// @allow-undefined-traps — tests the runtime trap of an undeclared name; see tests/aot/run.sh
 $never = getenv("MANTICORE_NEVER_SET_XYZ");
 if ($never === "yes") { echo apcu_add("k","v"), "\n"; }
 echo "unreached branch cost nothing\n";

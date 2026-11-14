@@ -21,6 +21,9 @@ declare(strict_types=1);
  *   i  intrinsic class   Analyze\Builtins::isKnownClass(): engine-provided, no PHP body
  *
  * Presence is not parity: tools/difftest.sh is the gate for behaviour.
+ *
+ * Regenerate src/Compile/PhpInternalNames.php too (tools/gen_php_internal_names.php): same php, same
+ * non-bundled filter; it feeds the `unsupported.builtin` front-end warning.
  */
 
 $root = \dirname(__DIR__);

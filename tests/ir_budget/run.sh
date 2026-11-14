@@ -57,6 +57,8 @@ CASES=(
     "dyn_static|tests/aot/cases/dyn_static_call_many_arms.php"
     "invoke_nested|tests/aot/cases/invoke_erased_nested_call_arg.php"
     "dyn_inline|tests/aot/cases/dyn_method_inline_fallback_shared.php"
+    "dyn_spread_typed|tests/aot/cases/dyn_spread_typed_pack.php"
+    "dyn_outlined|tests/aot/cases/dyn_name_call_outlined.php"
 )
 
 # Headroom over the measured figure when blessing. Small enough that a real

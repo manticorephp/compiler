@@ -974,6 +974,11 @@ trait LowerTypes
             // its place is routinely `false` (a failed fopen): an obj<Resource>
             // slot took that cell's bits as a pointer and `$this->os ?? …` crashed.
             if (\preg_match('/(^|[|?<,\s])resource($|[|>,\s\[])/i', $docType) === 1) { return null; }
+            // `@param callable $cb` is a union — a function-name string, a
+            // `[class, method]` pair or a Closure — and a docblock converts
+            // nothing at the call: typed `closure`, WordPress's add_filter() took
+            // a hook's string callback as an env pointer.
+            if (\preg_match('/(^|[|?\s])callable($|[|\s])/i', \trim($docType)) === 1) { return null; }
             if ($this->lowerTypeHint($docType)->kind === Type::KIND_UNKNOWN
                 && !$this->isBareArrayHint($docType)
                 && !$this->looksLikeArrayElemType($docType)

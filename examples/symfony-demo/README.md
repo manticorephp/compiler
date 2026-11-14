@@ -83,7 +83,16 @@ built when the process starts.
 - `public/index.php` is the program entry: it loads `.env` itself (the Symfony Runtime
   component does not run), boots the kernel **once** before the server starts, and serves
   every request through `$kernel->handle()` from Manticore's `Http\Server`, including the
-  static files under `public/`.
+  static files under `public/`. A worker runs **one request at a time** through the kernel
+  (an `Async\Mutex` around `handle()`), as php-fpm does: Symfony's kernel and services are
+  not reentrant, and a request that entered while another waited on I/O found half-built
+  services (`twig -> twig`) and answered 500s. Concurrency comes from `WORKERS`.
+- `src/Kernel.php` keeps the **system cache pool in memory** (`cache.adapter.array`). Its
+  default, `PhpFilesAdapter`, writes PHP files and `include`s them back, which a binary
+  does not do: every save failed and every request re-parsed its Doctrine queries and
+  icons (~5x slower). One process serves every request, so memory is the shared cache; the
+  kernel would empty an array pool before every request (`kernel.reset`), so a compiler
+  pass takes that tag off the cache pools.
 - `src/Kernel.php` registers its bundles in code instead of `require`-ing
   `config/bundles.php` (which `setup.sh` removes), keeps the compiled container in memory
   instead of dumping it to `var/cache`, and builds lazy *services* eagerly:
@@ -105,3 +114,10 @@ built when the process starts.
   `manticore.json`.
 - **The build was interrupted**: an interrupted build leaves `bin/app` unchanged; just run
   it again.
+
+## Undeclared names (`allowUndefined`)
+
+`manticore build --check` reports a reachable use of an optional package or extension this app does
+not install as an error. `manticore.json` lists them under `allowUndefined` so the build passes: APCu, Memcached, Redis cluster / Relay, the Serializer component, amphp / Revolt (AmpHttpClient), `awaitFirst` and the phpdoc-parser.
+Each path throws `Error` at run time if it runs. A new missing dependency not in the list still fails
+the build. See [`docs/cli.md`](../../docs/cli.md#allowundefined).

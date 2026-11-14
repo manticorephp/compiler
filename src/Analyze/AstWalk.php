@@ -67,6 +67,10 @@ final class AstWalk
 {
     /** @var Expr[] every expression node, in pre-order */
     public array $exprs = [];
+    /** @var Expr[] `foreach` key / value targets */
+    public array $foreachTargets = [];
+    /** @var array<string, bool> names bound by `global`, `static` and `catch` */
+    public array $boundNames = [];
 
     /** @var ForeachStmt[] every foreach statement, in pre-order */
     public array $foreachs = [];
@@ -127,6 +131,8 @@ final class AstWalk
             $this->expr($s->expr);
             $this->expr($s->key);
             $this->expr($s->value);
+            if ($s->key !== null) { $this->foreachTargets[] = $s->key; }
+            $this->foreachTargets[] = $s->value;
             $this->block($s->body);
             return;
         }
@@ -153,7 +159,10 @@ final class AstWalk
         if ($s instanceof ThrowStmt) { $this->expr($s->expr); return; }
         if ($s instanceof TryCatchStmt) {
             $this->block($s->try);
-            foreach ($s->catches as $c) { $this->block($c->body); }
+            foreach ($s->catches as $c) {
+                if ($c->name !== null) { $this->boundNames[$c->name] = true; }
+                $this->block($c->body);
+            }
             $this->block($s->finally);
             return;
         }
@@ -166,7 +175,11 @@ final class AstWalk
             return;
         }
         if ($s instanceof StaticLocalStmt) {
-            foreach ($s->decls as $d) { $this->expr($d->default); }
+            foreach ($s->decls as $d) { $this->boundNames[$d->name] = true; $this->expr($d->default); }
+            return;
+        }
+        if ($s instanceof \Parser\Ast\GlobalStmt) {
+            foreach ($s->names as $gn) { $this->boundNames[$gn] = true; }
             return;
         }
         // Break / Continue / Global / Goto / Label / UseDecl carry no expressions.

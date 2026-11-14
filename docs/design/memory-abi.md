@@ -9,7 +9,7 @@ patch.
 
 **Every number here is mirrored by a constant in `src/Compile/MemoryAbi.php`** — that file
 is the machine-readable version and wins any disagreement. Cite it, do not re-derive it.
-Current `MemoryAbi::VERSION` is **24** (v24: a class tree with a typed property php starts UNINITIALIZED carries a per-object INIT BITMAP, §3.3; v23: a risky DENORMAL float (bits in (0xFFFF, 2^48)) is boxed or'ed with `FLOAT_DENORM_TAG` (0x7FF0<<48), so no cell can look like a heap pointer; every cell->double read decodes it; v22: a PACKED array's `buckets@48` word is its head gap, §4.1; v21: a closure DROP fn takes a mode; v20: `Manticore\Ds` hash table block and the cell object-tag constants; v19: descriptor grew `visit_fn@64` — the json encoders walk public props without a temporary array; v18: v17 AND the native-buffer lineage — the `BUF_*` block, §7c, the descriptor's `json_fn@56`, buffer kind 12 (`U64`); v17: a Generator frame OWNS every cell of its header and `__mir_str_reclaim` destroys a frame it frees — v17 and v18 each merged two lineages that both called themselves v17, so neither links with the other, see the comments at the top of `MemoryAbi`; v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
+Current `MemoryAbi::VERSION` is **26** (v26: exceptions are error-return — a slot `@__mc_exc` tested after every call that may throw, no exception object, §7b; v24: a class tree with a typed property php starts UNINITIALIZED carries a per-object INIT BITMAP, §3.3; v23: a risky DENORMAL float (bits in (0xFFFF, 2^48)) is boxed or'ed with `FLOAT_DENORM_TAG` (0x7FF0<<48), so no cell can look like a heap pointer; every cell->double read decodes it; v22: a PACKED array's `buckets@48` word is its head gap, §4.1; v21: a closure DROP fn takes a mode; v20: `Manticore\Ds` hash table block and the cell object-tag constants; v19: descriptor grew `visit_fn@64` — the json encoders walk public props without a temporary array; v18: v17 AND the native-buffer lineage — the `BUF_*` block, §7c, the descriptor's `json_fn@56`, buffer kind 12 (`U64`); v17: a Generator frame OWNS every cell of its header and `__mir_str_reclaim` destroys a frame it frees — v17 and v18 each merged two lineages that both called themselves v17, so neither links with the other, see the comments at the top of `MemoryAbi`; v16: zero-cost exception object, §7b, AND tagged bucket words + int bucket hash, §4.1 — two separate v15 lineages merged, so neither v15 links with v16; v11: element repr `ARRAY_REPR_CLO = 10` — raw closure-slot words the buffer counted, §4.1; v10: descriptor grew `cmp_view_fn@40` and `cmp_group@48` — php's object `==`/`<=>`; v9: a reference box carries `[REF_TAG_MAGIC@-8, value@0, rc@+8]`; v8: descriptor grew `dyn_methods@24`; `props_fn@32`
 followed without a bump — it is appended, older `.o`s never read it).
 
 > Supersedes the former `docs/bootstrap/12-memory-abi-contract.md` and the unified-array
@@ -117,15 +117,38 @@ One i64 at offset 8:
 | Bits | Width | Purpose |
 |---|---|---|
 | 63 | 1 | `buffered` — member of the cc candidate list (`BUFFERED_MASK`) |
-| 62..56 | 7 | `color` — 0 BLACK, 1 PURPLE, 2 GRAY, 3 WHITE (`COLOR_MASK`, `COLOR_SHIFT = 56`) |
-| 55..0 | 56 | `rc` — signed; trial deletion drives it negative (`RC_MASK`) |
+| 62 | 1 | `__destruct` already ran (`DTOR_CALLED_MASK`) |
+| 61 | 1 | `old` — survived a cycle collection: OLD generation (`CC_OLD_MASK`) |
+| 60..56 | 5 | `color` — 0 BLACK, 1 PURPLE, 2 GRAY, 3 WHITE, 4 DEAD, 5 GREEN (`COLOR_MASK`, `COLOR_SHIFT = 56`) |
+| 55..32 | 24 | root-buffer slot while buffered (`CC_SLOT_MASK`, `CC_SLOT_SHIFT = 32`; `CC_SLOT_NONE` = past the field) |
+| 31..0 | 32 | `rc` — signed; trial deletion drives it negative (`RC_MASK`) |
 
-Read by masking and sign-extending from bit 55; compare with **signed** predicates:
+The slot makes leaving the root buffer O(1): a buffered object whose rc reaches 0
+outside a collection is swap-removed (`__manticore_cc_unroot`: the last entry moves
+into its slot) and freed at once. Only an object pushed past slot `CC_SLOT_NONE`
+still dies the old way — dropped, its DEAD shell left for the next collection.
+
+The `old` bit picks the root buffer the slot indexes: a young object is buffered in
+`@__manticore_cc_roots`, an old one in `@__manticore_cc_oroots` ([memory.md](../memory.md#generations)).
+It took the top bit of what was a 6-bit colour field; only the application module's
+collector reads colour or `old` (a library reads `buffered` and the rc field), so no
+library compiled before the split can misread it.
+
+An object of an ACYCLIC class is never buffered. The collector's class graph has
+an edge per traced property (an obj slot reaches its class and every subclass; a
+closure, cell, native-buffer, `object` or unknown-class slot reaches every class);
+a class on no cycle of it cannot have an object on a heap cycle the collector
+could find. `cc_add_root` colors such an object GREEN instead of buffering it, so
+later decrements leave on the color test. The class graph is the collector module's own, so only
+the application module carries a collector: a library (the stdlib) knows only its
+own classes, and its `gc_collect_cycles()` calls the program's collector through a
+weak hook (0 when the program has none).
+
+Read by sign-extending from bit 31 (`RC_SIGN_SHIFT`); compare with **signed** predicates:
 
 ```llvm
-%rc_only = and i64 %word, 0x00FFFFFFFFFFFFFF
-%shl8    = shl i64 %rc_only, 8
-%rc_s    = ashr i64 %shl8, 8
+%shl  = shl i64 %word, 32
+%rc_s = ashr i64 %shl, 32
 ```
 
 Write only the rc field — colour and buffered are mutated by their own helpers:
@@ -134,7 +157,7 @@ Write only the rc field — colour and buffered are mutated by their own helpers
 new_word = (word & ~RC_MASK) | ((rc + delta) & RC_MASK)
 ```
 
-A plain `add %word, 1` is **forbidden**: the carry overflows into the colour field. It used
+A plain `add %word, 1` is **forbidden** where rc may be negative: the carry overflows into the slot field. It used
 to look like it worked because the corruption landed in bytes nobody read.
 
 ### 3.2 `#[Struct]` opt-out
@@ -474,34 +497,26 @@ Invariants worth stating out loud:
   and aborts by name on a double free — libc used to catch those for us, and a
   pooled double free would otherwise just cycle a free list, silently.
 
-## 7b. Exception object (ABI v15, carried into v16)
+## 7b. Exceptions (ABI v26; the v15–v25 exception object is gone)
 
-A PHP `throw` is a zero-cost Itanium unwind (`src/Compile/Runtime/UnwindRuntime.php`).
-`@__mc_throw(obj)` mallocs one exception object per raise and hands it to
-`_Unwind_RaiseException`:
+A PHP `throw` is an error return (`docs/design/error-return-exceptions.md`,
+`src/Compile/Runtime/ExceptionRuntime.php`, `src/Compile/Mir/EhLowerIr.php`). There is no
+exception object and no unwinding:
 
-| Offset | Size | Field |
-|---|---|---|
-| 0 | 8 | `exception_class` = `MemoryAbi::EXC_CLASS` (`"MNTCPHP\0"`) |
-| 8 | 8 | `exception_cleanup` = null (the landing pad frees the object) |
-| 16 | 8 | `private_1` (unwinder) |
-| 24 | 8 | `private_2` (unwinder) |
-| 32 | 8 | payload: the Throwable's address, owning one reference |
-
-`EXC_HEADER_SIZE` = 32 (the `_Unwind_Exception` header on every 64-bit target),
-`EXC_PAYLOAD_OFFSET` = 32, `EXC_SIZE` = 48.
-
-- Personality `@__mc_personality` (own, so no binary links a C++ runtime) reads only the
-  LSDA call-site table: action ≠ 0 is a PHP catch pad (`catch ptr @__mc_typeinfo`) and
-  takes only `EXC_CLASS`; action 0 is a cleanup pad and runs for any exception.
-- Every catch pad starts with `@__mc_eh_catch(ex)`: the payload moves into `@__mir_thrown`
-  (which then owns the +1, as before) and the exception object is freed. A rethrow — no
-  catch matched, or a finally re-raising — is a fresh `@__mc_throw`.
-- When the search phase finds no catch pad, `_Unwind_RaiseException` returns having
-  unwound nothing, and `@__mc_throw` calls the uncaught fatal through
-  `@__mc_uncaught_fn` (set by `@main`).
-- Link: Darwin's libSystem carries the unwinder; Linux links `-static-libgcc`
-  (libgcc_eh.a), so no `libgcc_s.so` dependency is added.
+- `@__mc_exc` (one `ptr` per process, `linkonce_odr`, defined in every module) holds the
+  Throwable in flight, owning one reference; null = none. `@__mc_throw(obj)` stores it.
+- Every call that may throw is followed by `load @__mc_exc` / `icmp ne` / `br` to the
+  frame's pad or its propagate block, which returns at once (`ret <ty> undef`). A pad
+  starts by TAKING the slot (load, store null); a cleanup pad ends by putting it back.
+- Every catch pad starts with `@__mc_eh_catch(obj)`: the Throwable moves into
+  `@__mir_thrown` (which then owns the +1). A rethrow — no catch matched, or a finally
+  re-raising — is a fresh `@__mc_throw`.
+- `@main`'s propagate block calls `@__mc_uncaught(obj)`, which runs the uncaught fatal
+  through `@__mc_uncaught_fn` (set by `@main`); every frame above has already run its
+  cleanups.
+- An FFI call is followed by a slot test when a `fn_to_ptr` target of the module may
+  throw (C may have called it); the exception surfaces after the C function returns.
+- Link: nothing — no unwinder, no personality, no `libgcc_eh`.
 - Fiber context (64 B, `EmitLlvmFiber`): the five arena globals at 0..39, bytes
   40..55 unused (they held the setjmp try-slot stack before v15), `@__mir_thrown` at 56.
   The context OWNS the arena it saved: `__mir_fiber_ctx_free` walks the chunk chain

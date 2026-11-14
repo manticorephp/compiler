@@ -5,17 +5,17 @@ namespace Compile\Mir\Passes;
 use Compile\Mir\MirCatch;
 use Compile\Mir\Node;
 use Compile\Mir\Type;
-use Compile\Runtime\UnwindRuntime;
+use Compile\Runtime\ExceptionRuntime;
 
 /**
  * Exception emitters extracted from {@see EmitLlvm}: throw / try-catch /
  * rethrow, MirCatch field accessors, and catch-class matching (class-id
  * chains, descendant sets).
  *
- * Zero-cost unwinding ({@see UnwindRuntime}): a throw is `@__mc_throw`, and
+ * Exceptions ({@see ExceptionRuntime}): a throw is `@__mc_throw`, and
  * every call inside a try region that may unwind is an `invoke` whose unwind
- * edge is the region's landing pad ({@see ehInvokeRegion}). A try costs
- * nothing until something throws.
+ * edge is the region's landing pad ({@see ehInvokeRegion}); {@see \Compile\Mir\EhLowerIr}
+ * lowers that to a test of the exception slot after the call.
  */
 trait EmitLlvmExceptions
 {
@@ -33,14 +33,8 @@ trait EmitLlvmExceptions
     private string $ehLhs = '';
     /** The named callee (`@sym`) of the line {@see ehCallRest} just accepted; '' when indirect. */
     private string $ehCallee = '';
-    /** The Throwable the last {@see ehPad} took off the unwinder. */
+    /** The Throwable the last {@see ehPad} took out of the slot. */
     private string $ehPadObj = '';
-
-    /** ` personality …` for the `define` of a function that holds a landing pad. */
-    private function personalityClause(): string
-    {
-        return $this->locals->hasTry || $this->ehPersonality ? UnwindRuntime::PERSONALITY : '';
-    }
 
     // ── cleanup pads: an unwind out of the frame drops its owned locals ──
     //
@@ -58,7 +52,7 @@ trait EmitLlvmExceptions
 
     /** Marking is on for the function being emitted. */
     private bool $ehOn = false;
-    /** The function's define carries a personality for its cleanup pads. */
+    /** The function has cleanup pads: its may-throw calls are marked. */
     private bool $ehPersonality = false;
     /** The SSA the function body is emitted in; an outlined helper's nodes are not marked. */
     private ?\Compile\Mir\SsaBuilder $ehSsa = null;
@@ -77,6 +71,10 @@ trait EmitLlvmExceptions
     /** The frame owns reference boxes ({@see EmitLlvmModule::newOwnedBoxIr}): every
      *  unwind out of it gives their counts back, whatever else is live. */
     private bool $ehBoxes = false;
+    /** The frame keeps a list of the call temps it owns across a call ({@see ehTmpPush}). */
+    private bool $ehTmpOn = false;
+    /** This function's temp list slots are declared ({@see ehTmpDecl}). */
+    private bool $ehTmpDeclared = false;
     /** The function being emitted, for its leaf-statement drop sets. */
     private ?\Compile\Mir\FunctionDef $ehFn = null;
     /** @var array<int, int> leaf statement `spl_object_id` → its index in {@see \Compile\Mir\FunctionDef::$ownStmtNodes} */
@@ -98,12 +96,279 @@ trait EmitLlvmExceptions
         $this->ehFn = null;
         $this->ehStmtIdx = [];
         $this->ehBoxes = false;
+        $this->ehTmpOn = false;
+        $this->ehTmpDeclared = false;
         if ($this->nothrow === null || (!$resume && ($fn->isGenerator || $this->gen->inGenerator))) { return; }
         $this->ehFn = $fn;
         foreach ($fn->ownStmtNodes as $si => $st) { $this->ehStmtIdx[\spl_object_id($st)] = $si; }
         $this->ehPersonality = $fn->ownStmtNodes !== [] || $this->ehNeedsPads($fn->body)
             || (!$resume && !$fn->returnsByRef && $this->ehMayOwnBoxes($fn->body));
+        // ponytail: a generator's resume body keeps no temp list (its pads are laid out by EmitLlvmGenerator); add it there when a generator calls a variadic that throws.
+        $this->ehTmpOn = !$resume && !$fn->isGenerator && $this->ehMayHoldCallTemps($fn->body);
+        if ($this->ehTmpOn) { $this->ehPersonality = true; }
         $this->ehOn = $this->ehPersonality;
+    }
+
+    /**
+     * Call temps across an unwind. The emitter owns some values only for one
+     * call — a pack rebuilt into the callee's typed vec, a co-owning typed copy
+     * of a cell array — and releases them once the call returns. A callee that
+     * throws skipped that release, and the value leaked. Such a frame keeps a
+     * short list of (value, release routine) pairs: pushed before the call,
+     * popped after its release, and drained by every landing pad of the frame
+     * (cleanup, raising or catch) before anything else runs there.
+     */
+    private function ehMayHoldCallTemps(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($k === Node::KIND_CALL || $k === Node::KIND_METHOD_CALL || $k === Node::KIND_STATIC_CALL
+            || $k === Node::KIND_NEW_OBJ || $k === Node::KIND_INVOKE) {
+            foreach (\Compile\Mir\Walk::children($n) as $c) {
+                if ($c->kind === Node::KIND_SPREAD || $c->kind === Node::KIND_ARRAY_LIT || ($c->type !== null && $c->type->isArray())) { return true; }
+            }
+        }
+        foreach (\Compile\Mir\Walk::children($n) as $c) {
+            if ($this->ehMayHoldCallTemps($c)) { return true; }
+        }
+        return false;
+    }
+
+    /**
+     * The frame's temp list, declared where it is first used; HoistAllocas moves
+     * the slots and the count's zeroing to the entry block, ahead of any pad.
+     */
+    private function ehTmpDecl(): string
+    {
+        // Declared once, at the end of the function ({@see ehEnd}): a pad body may never be emitted.
+        $this->ehTmpDeclared = true;
+        return '';
+    }
+
+    /**
+     * The end of a cleanup pad: {@see \Compile\Mir\EhLowerIr} turns it into
+     * "put the exception back in the slot and leave through the propagate block".
+     */
+    private function ehResume(string $lp): string
+    {
+        return '  resume { ptr, i32 } ' . $lp . "\n";
+    }
+
+    /** What a landing pad of this frame runs first: release whatever call temps are still listed. */
+    private function ehTmpDrainIr(): string
+    {
+        if (!$this->ehTmpOn || $this->ssa !== $this->ehSsa) { return ''; }
+        $this->ehTmpHelpers();
+        return $this->ehTmpDecl() . "  call void @__mc_tmpdrain(ptr %mc.tmpv, ptr %mc.tmpn)\n";
+    }
+
+    /**
+     * List `$word` (released by `$flavor`) for the call about to be emitted, or
+     * answer '' when this frame keeps no list. The caller marks the call line
+     * with ` ;!t` and pops after its own release ({@see ehTmpPop}).
+     */
+    private function ehTmpPush(string $word, string $flavor): string
+    {
+        if (!$this->ehTmpOn || $this->ssa !== $this->ehSsa) { return ''; }
+        // A flavor that names another register of this frame (`sole:%r…`) has no context-free releaser.
+        if (\str_contains($flavor, '%')) { return ''; }
+        $this->ehTmpHelpers();
+        $rel = $this->ehTmpReleaser($flavor);
+        $n = $this->ssa->allocReg();
+        $ok = $this->ssa->allocReg();
+        $ni = $this->ssa->allocReg();
+        $k = $this->ssa->allocReg();
+        $p = $this->ssa->allocReg();
+        $k1 = $this->ssa->allocReg();
+        $q = $this->ssa->allocReg();
+        $n1 = $this->ssa->allocReg();
+        // Sixteen deep is the bound: a deeper nest shares the last entry (a leak on its unwind, never a wrong release).
+        return $this->ehTmpDecl() . '  ' . $n . " = load i64, ptr %mc.tmpn\n"
+            . '  ' . $ok . ' = icmp ult i64 ' . $n . ", 16\n"
+            . '  ' . $ni . ' = select i1 ' . $ok . ', i64 ' . $n . ", i64 15\n"
+            . '  ' . $k . ' = shl i64 ' . $ni . ", 1\n"
+            . '  ' . $p . ' = getelementptr i64, ptr %mc.tmpv, i64 ' . $k . "\n"
+            . '  store i64 ' . $word . ', ptr ' . $p . "\n"
+            . '  ' . $k1 . ' = add i64 ' . $k . ", 1\n"
+            . '  ' . $q . ' = getelementptr i64, ptr %mc.tmpv, i64 ' . $k1 . "\n"
+            . '  store ptr ' . $rel . ', ptr ' . $q . "\n"
+            . '  ' . $n1 . ' = add i64 ' . $ni . ", 1\n"
+            . '  store i64 ' . $n1 . ", ptr %mc.tmpn\n";
+    }
+
+    /**
+     * List every call temp of one call site ({@see ehTmpPush}): the IR and how
+     * many were listed, for {@see ehTmpPop} after the site's own releases.
+     *
+     * @param string[] $regs
+     * @param string[] $flavs
+     * @return array{0: string, 1: int}
+     */
+    private function ehTmpPushAll(array $regs, array $flavs): array
+    {
+        $ir = '';
+        $count = 0;
+        foreach ($regs as $i => $rg) {
+            $hold = $this->ehTmpPush((string)$rg, (string)($flavs[$i] ?? ''));
+            if ($hold !== '') { $ir .= $hold; $count = $count + 1; }
+        }
+        return [$ir, $count];
+    }
+
+    /** `$ir` with every call that may unwind marked as owning listed temps (` ;!t`). */
+    private function ehTmpMarkCalls(string $ir): string
+    {
+        $lines = \explode("\n", $ir);
+        $n = \count($lines);
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            $l = $lines[$i];
+            if (\strlen($l) < 8 || $l[0] !== ' ' || \strpos($l, 'call ') === false || \strpos($l, ' ;!') !== false) { continue; }
+            if (!$this->ehLineMayThrow($l)) { continue; }
+            $lines[$i] = $l . ' ;!t';
+        }
+        return \implode("\n", $lines);
+    }
+
+    /** Unlist `$count` temps after the call released them itself. */
+    private function ehTmpPop(int $count): string
+    {
+        if ($count === 0 || !$this->ehTmpOn || $this->ssa !== $this->ehSsa) { return ''; }
+        $n = $this->ssa->allocReg();
+        $ge = $this->ssa->allocReg();
+        $d = $this->ssa->allocReg();
+        $r = $this->ssa->allocReg();
+        return '  ' . $n . " = load i64, ptr %mc.tmpn\n"
+            . '  ' . $ge . ' = icmp uge i64 ' . $n . ', ' . (string)$count . "\n"
+            . '  ' . $d . ' = sub i64 ' . $n . ', ' . (string)$count . "\n"
+            . '  ' . $r . ' = select i1 ' . $ge . ', i64 ' . $d . ", i64 0\n"
+            . '  store i64 ' . $r . ", ptr %mc.tmpn\n";
+    }
+
+    /**
+     * `@main` runs without the frame's cleanup marking ({@see ehBegin}), but its
+     * try regions catch: it keeps the temp list for their pads to drain.
+     */
+    private function ehTmpBeginMain(\Compile\Mir\FunctionDef $fn): void
+    {
+        $this->ehSsa = $this->ssa;
+        $this->ehTmpDeclared = false;
+        $this->ehTmpOn = $this->nothrow !== null && $this->ehMayHoldCallTemps($fn->body);
+    }
+
+    /** The temp list's slots, when this function used it (hoisted to the entry block). */
+    private function ehTmpEnd(): string
+    {
+        $out = $this->ehTmpDeclared
+            ? "  %mc.tmpv = alloca [32 x i64]\n  %mc.tmpn = alloca i64\n  store i64 0, ptr %mc.tmpn ; mc.hoist\n" : '';
+        $this->ehTmpDeclared = false;
+        $this->ehTmpOn = false;
+        return $out;
+    }
+
+    /**
+     * An outlined helper (a dispatch thunk, a by-name dispatcher) has no frame
+     * of its own to mark, but the calls it makes can own temps just like a
+     * body's. While its text is built it keeps its own temp list; {@see
+     * ehHelperEnd} turns the marked calls into invokes to one pad that drains
+     * the list and resumes (the helper owns nothing else).
+     *
+     * @return array<int, mixed> the state to restore
+     */
+    private function ehHelperBegin(): array
+    {
+        $saved = [$this->ehSsa, $this->ehTmpOn, $this->ehTmpDeclared, $this->ehOn, $this->ehPadKeys,
+            $this->ehPadLabels, $this->ehPadBodies, $this->ehPadUsed, $this->ehBoxes, $this->ehCallDepth];
+        $this->ehSsa = $this->ssa;
+        $this->ehTmpOn = $this->nothrow !== null;
+        $this->ehTmpDeclared = false;
+        $this->ehOn = false;
+        $this->ehPadKeys = [];
+        $this->ehPadLabels = [];
+        $this->ehPadBodies = [];
+        $this->ehPadUsed = [];
+        $this->ehBoxes = false;
+        $this->ehCallDepth = 0;
+        $this->ehHelperTail = '';
+        return $saved;
+    }
+
+    /** What follows a helper's last `ret`: its pad and its temp list slots ({@see ehHelperEnd}). */
+    private string $ehHelperTail = '';
+
+    /**
+     * The helper's body with its temp-owning calls routed to the drain pad; the
+     * pad and the slots land in {@see $ehHelperTail}, and a non-empty tail means
+     * the helper's define needs the personality.
+     *
+     * @param array<int, mixed> $saved from {@see ehHelperBegin}
+     */
+    private function ehHelperEnd(array $saved, string $body): string
+    {
+        $out = $body;
+        $tail = '';
+        if ($this->ehTmpDeclared) {
+            $this->ehOn = true;
+            $out = $this->ehLower($out);
+            foreach ($this->ehPadBodies as $k => $pb) {
+                if (isset($this->ehPadUsed[$k])) { $tail .= $pb; }
+            }
+            $tail .= $this->ehTmpEnd();
+        }
+        $this->ehSsa = $saved[0];
+        $this->ehTmpOn = (bool)$saved[1];
+        $this->ehTmpDeclared = (bool)$saved[2];
+        $this->ehOn = (bool)$saved[3];
+        $this->ehPadKeys = $saved[4];
+        $this->ehPadLabels = $saved[5];
+        $this->ehPadBodies = $saved[6];
+        $this->ehPadUsed = $saved[7];
+        $this->ehBoxes = (bool)$saved[8];
+        $this->ehCallDepth = (int)$saved[9];
+        $this->ehHelperTail = $tail;
+        return $out;
+    }
+
+    /** The pad of a call that owns temps but no statement drop set covers: drain, resume. */
+    private function ehTmpPad(): int
+    {
+        $key = "\0tmp";
+        if (isset($this->ehPadKeys[$key])) { return $this->ehPadKeys[$key]; }
+        $pad = \count($this->ehPadKeys) + 1;
+        $this->ehPadKeys[$key] = $pad;
+        $lbl = $this->ssa->allocLabel('ehlp');
+        $this->ehPadLabels[$pad] = $lbl;
+        $lp = $this->ssa->allocReg();
+        $this->ehPadBodies[$pad] = $this->ehWithBoxReleases($lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n"
+            . $this->ehTmpDrainIr() . $this->ehResume($lp));
+        return $pad;
+    }
+
+    /** `@__mc_ehtr.<flavor>(i64)`: release one listed temp by its flavor. */
+    private function ehTmpReleaser(string $flavor): string
+    {
+        $sym = '@__mc_ehtr.' . (string)\preg_replace('/[^A-Za-z0-9_]/', '_', $flavor);
+        $key = 'ehtr:' . $flavor;
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $oldSsa = $this->ssa;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $body = 'define linkonce_odr void ' . $sym . "(i64 %w) noinline cold {\nentry:\n"
+            . $this->rcReleaseReg('%w', $flavor) . "  ret void\n}\n\n";
+        $this->ssa = $oldSsa;
+        $this->dynamicMethodHelpers[$key] = $body;
+        return $sym;
+    }
+
+    /** `@__mc_tmpdrain(ptr list, ptr count)`: release every listed temp, newest first, and empty the list. */
+    private function ehTmpHelpers(): void
+    {
+        if (isset($this->dynamicMethodHelpers['tmpdrain'])) { return; }
+        $this->dynamicMethodHelpers['tmpdrain'] = "define linkonce_odr void @__mc_tmpdrain(ptr %v, ptr %n) noinline cold {\n"
+            . "entry:\n  %c = load i64, ptr %n\n  store i64 0, ptr %n\n  br label %loop\n"
+            . "loop:\n  %i = phi i64 [ %c, %entry ], [ %j, %body ]\n  %done = icmp eq i64 %i, 0\n"
+            . "  br i1 %done, label %out, label %body\n"
+            . "body:\n  %j = sub i64 %i, 1\n  %k = shl i64 %j, 1\n  %wp = getelementptr i64, ptr %v, i64 %k\n"
+            . "  %w = load i64, ptr %wp\n  %k1 = add i64 %k, 1\n  %fp = getelementptr i64, ptr %v, i64 %k1\n"
+            . "  %f = load ptr, ptr %fp\n  call void %f(i64 %w)\n  br label %loop\n"
+            . "out:\n  ret void\n}\n\n";
     }
 
     /** The prologue may make a frame-owned box: a `&` cell, a by-ref capture, an element alias. */
@@ -142,6 +407,7 @@ trait EmitLlvmExceptions
     private function ehEnd(): string
     {
         $out = '';
+        $out .= $this->ehTmpEnd();
         foreach ($this->ehPadBodies as $k => $body) {
             if (isset($this->ehPadUsed[$k])) { $out .= $body; }
         }
@@ -274,7 +540,12 @@ trait EmitLlvmExceptions
         for ($i = 0; $i < $n; $i = $i + 1) {
             $l = $lines[$i];
             if (\strlen($l) < 8 || $l[0] !== ' ') { continue; }
-            if (\strpos($l, 'call ') === false || \strpos($l, ' ;!') !== false) { continue; }
+            if (\strpos($l, 'call ') === false) { continue; }
+            if (\str_ends_with($l, ' ;!t')) {
+                $l = \substr($l, 0, \strlen($l) - 4);
+            } elseif (\strpos($l, ' ;!') !== false) {
+                continue;
+            }
             if (!$this->ehLineMayThrow($l)) { continue; }
             if ($raisesOnly && !$this->ehRaiseCallee($this->ehCallee)) { continue; }
             $lines[$i] = $l . $tag;
@@ -369,7 +640,7 @@ trait EmitLlvmExceptions
             return $pad;
         }
         $lp = $this->ssa->allocReg();
-        $body = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n";
+        $body = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n" . $this->ehTmpDrainIr();
         foreach ($live as $name => $op) {
             $slot = $this->ownOpSlot($op);
             if ($slot === '') { continue; }
@@ -378,7 +649,7 @@ trait EmitLlvmExceptions
             $body .= \str_starts_with($fl, 'mix') ? $this->ownDropIr($slot, $op)
                 : '  call void ' . $this->ehDropHelper($fl) . '(ptr ' . $slot . ")\n";
         }
-        $body .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $body .= $this->ehResume($lp);
         $this->ehPadBodies[$pad] = $this->ehWithBoxReleases($body);
         return $pad;
     }
@@ -419,10 +690,9 @@ trait EmitLlvmExceptions
      * exception takes the one in flight as its deepest `previous`, and the rest
      * of the frame's locals are still destroyed). Each drop is an `invoke`:
      * while the original exception is in flight its unwind lands in a catch that
-     * chains that exception's payload under the new one and frees the exception
-     * object; from then on the newest Throwable sits in a slot, every later
-     * drop that throws chains the slot's under its own, and after the last drop
-     * the slot's is raised afresh. A foreign exception just drops and resumes.
+     * chains that exception under the new one; from then on the newest
+     * Throwable sits in a slot, every later drop that throws chains the slot's
+     * under its own, and after the last drop the slot's is raised afresh.
      *
      * @param array<string, \Compile\Mir\MemoryOp_> $live
      */
@@ -445,19 +715,11 @@ trait EmitLlvmExceptions
         $n = \count($slots);
         $lp = $this->ssa->allocReg();
         $ex = $this->ssa->allocReg();
-        $cls = $this->ssa->allocReg();
-        $ours = $this->ssa->allocReg();
         $cur = $this->ssa->allocReg();
-        $plain = $this->ssa->allocLabel('ehlp.foreign');
         $drops = $this->ssa->allocLabel('ehlp.drops');
-        $out = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n";
+        $out = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n" . $this->ehTmpDrainIr();
         $out .= '  ' . $ex . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n";
-        $out .= '  ' . $cls . ' = load i64, ptr ' . $ex . "\n";
-        $out .= '  ' . $ours . ' = icmp eq i64 ' . $cls . ', ' . (string)\Compile\MemoryAbi::EXC_CLASS . "\n";
-        $out .= '  br i1 ' . $ours . ', label %' . $drops . ', label %' . $plain . "\n";
-        $out .= $plain . ":\n";
-        for ($i = 0; $i < $n; $i = $i + 1) { $out .= $this->ownDropIr($slots[$i], $ops[$i]); }
-        $out .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $out .= '  br label %' . $drops . "\n";
         /** @var string[] catch while the original is in flight, per drop */
         $inFlight = [];
         /** @var string[] object mode: continue at drop j (j = n: raise) */
@@ -471,17 +733,11 @@ trait EmitLlvmExceptions
         for ($j = 0; $j <= $n; $j = $j + 1) { $next[] = $this->ssa->allocLabel('ehlp.next'); }
         $out .= $drops . ":\n  " . $cur . " = alloca ptr\n";
         for ($i = 0; $i < $n; $i = $i + 1) { $out .= $this->ehDropInvoke($slots[$i], $ops[$i], $inFlight[$i]); }
-        $out .= '  resume { ptr, i32 } ' . $lp . "\n";
-        $pay = (string)\Compile\MemoryAbi::EXC_PAYLOAD_OFFSET;
+        $out .= $this->ehResume($lp);
         for ($i = 0; $i < $n; $i = $i + 1) {
             $out .= $this->ehPad($inFlight[$i]);
             $obj = $this->ehPadObj;
-            $pp = $this->ssa->allocReg();
-            $old = $this->ssa->allocReg();
-            $out .= '  ' . $pp . ' = getelementptr inbounds i8, ptr ' . $ex . ', i64 ' . $pay . "\n";
-            $out .= '  ' . $old . ' = load ptr, ptr ' . $pp . "\n";
-            $out .= '  call void @free(ptr ' . $ex . ")\n";
-            $out .= $this->ehChainUnder($obj, $old);
+            $out .= $this->ehChainUnder($obj, $ex);
             $out .= '  store ptr ' . $obj . ', ptr ' . $cur . "\n";
             $out .= '  br label %' . $next[$i + 1] . "\n";
         }
@@ -520,23 +776,13 @@ trait EmitLlvmExceptions
         $n = \count($slots);
         $lp = $this->ssa->allocReg();
         $ex = $this->ssa->allocReg();
-        $cls = $this->ssa->allocReg();
-        $ours = $this->ssa->allocReg();
         $cur = $this->ssa->allocReg();
-        $plain = $this->ssa->allocLabel('ehlp.foreign');
         $drops = $this->ssa->allocLabel('ehlp.drops');
         $resumeL = $this->ssa->allocLabel('ehlp.resume');
         $raiseL = $this->ssa->allocLabel('ehlp.raise');
-        $out = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n";
+        $out = $lbl . ":\n  " . $lp . " = landingpad { ptr, i32 } cleanup\n" . $this->ehTmpDrainIr();
         $out .= '  ' . $ex . ' = extractvalue { ptr, i32 } ' . $lp . ", 0\n";
-        $out .= '  ' . $cls . ' = load i64, ptr ' . $ex . "\n";
-        $out .= '  ' . $ours . ' = icmp eq i64 ' . $cls . ', ' . (string)\Compile\MemoryAbi::EXC_CLASS . "\n";
-        $out .= '  br i1 ' . $ours . ', label %' . $drops . ', label %' . $plain . "\n";
-        $out .= $plain . ":\n";
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $out .= '  call void ' . $this->ehDropHelper($this->rcReleaseFlavor($ops[$i])) . '(ptr ' . $slots[$i] . ")\n";
-        }
-        $out .= '  resume { ptr, i32 } ' . $lp . "\n";
+        $out .= '  br label %' . $drops . "\n";
         $out .= $drops . ":\n  " . $cur . " = alloca ptr\n";
         $out .= '  store ptr null, ptr ' . $cur . "\n";
         for ($i = 0; $i < $n; $i = $i + 1) {
@@ -548,7 +794,7 @@ trait EmitLlvmExceptions
         $out .= '  ' . $last . ' = load ptr, ptr ' . $cur . "\n";
         $out .= '  ' . $none . ' = icmp eq ptr ' . $last . ", null\n";
         $out .= '  br i1 ' . $none . ', label %' . $resumeL . ', label %' . $raiseL . "\n";
-        $out .= $resumeL . ":\n  resume { ptr, i32 } " . $lp . "\n";
+        $out .= $resumeL . ":\n" . $this->ehResume($lp);
         $out .= $raiseL . ":\n";
         $out .= $this->emitRethrowAt($last);
         return $out;
@@ -557,8 +803,8 @@ trait EmitLlvmExceptions
     /**
      * `void (ptr slot, ptr ex, ptr cur)`: drop `slot` by `$flavor` while our
      * exception `ex` unwinds. A Throwable the drop raises becomes the newest in
-     * `*cur`: the first one takes `ex`'s payload as its deepest `previous` and
-     * frees `ex`, a later one takes `*cur`'s ({@see ehRaisingPad}).
+     * `*cur`: the first one takes `ex` as its deepest `previous`, a later one
+     * takes `*cur`'s ({@see ehRaisingPad}).
      */
     private function ehRaiseDropHelper(string $flavor): string
     {
@@ -571,7 +817,7 @@ trait EmitLlvmExceptions
         $first = $this->ssa->allocLabel('ehr.first');
         $later = $this->ssa->allocLabel('ehr.later');
         $body = 'define linkonce_odr void ' . $sym . '(ptr %s, ptr %ex, ptr %cur) noinline cold'
-            . \Compile\Runtime\UnwindRuntime::PERSONALITY . " {\nentry:\n  br label %ehr.d\n";
+            . " {\nentry:\n  br label %ehr.d\n";
         $body .= $this->ehInvokeRegion("ehr.d:\n" . $this->rcReleaseSlot('%s', $flavor), $pad, -1);
         $body .= "  ret void\n";
         $body .= $this->ehPad($pad);
@@ -581,13 +827,8 @@ trait EmitLlvmExceptions
         $body .= '  ' . $c . " = load ptr, ptr %cur\n";
         $body .= '  ' . $isn . ' = icmp eq ptr ' . $c . ", null\n";
         $body .= '  br i1 ' . $isn . ', label %' . $first . ', label %' . $later . "\n";
-        $pp = $this->ssa->allocReg();
-        $old = $this->ssa->allocReg();
         $body .= $first . ":\n";
-        $body .= '  ' . $pp . ' = getelementptr inbounds i8, ptr %ex, i64 ' . (string)\Compile\MemoryAbi::EXC_PAYLOAD_OFFSET . "\n";
-        $body .= '  ' . $old . ' = load ptr, ptr ' . $pp . "\n";
-        $body .= "  call void @free(ptr %ex)\n";
-        $body .= $this->ehChainUnder($obj, $old);
+        $body .= $this->ehChainUnder($obj, '%ex');
         $body .= '  store ptr ' . $obj . ", ptr %cur\n  ret void\n";
         $body .= $later . ":\n";
         $body .= $this->ehChainUnder($obj, $c);
@@ -628,7 +869,9 @@ trait EmitLlvmExceptions
      */
     private function ehLower(string $text): string
     {
-        if (!$this->ehOn || \strpos($text, ' ;!e') === false) { return $text; }
+        if (!$this->ehOn) { return $text; }
+        if (\strpos($text, ' ;!t') !== false) { $text = $this->ehResolveTmpMarks($text); }
+        if (\strpos($text, ' ;!e') === false) { return $text; }
         $lines = \explode("\n", $text);
         $n = \count($lines);
         // A split before the statement's first label is not retargeted: no emitter puts a phi naming that block in the same statement.
@@ -666,13 +909,37 @@ trait EmitLlvmExceptions
         }
         return \implode("\n", $lines);
     }
+    /**
+     * A call line that owns call temps and that no statement drop set marked
+     * goes to the temps-only pad ({@see ehTmpPad}): every unwind out of it drains.
+     */
+    private function ehResolveTmpMarks(string $text): string
+    {
+        $out = '';
+        foreach (\explode("\n", $text) as $i => $line) {
+            $ln = (string)$line;
+            if ($i > 0) { $out .= "\n"; }
+            if (\str_ends_with($ln, ' ;!t')) {
+                $base = \substr($ln, 0, \strlen($ln) - 4);
+                if (\strpos($base, ' ;!e') === false) {
+                    $out .= $base . ' ;!e' . (string)$this->ehTmpPad();
+                } else {
+                    $out .= $base;
+                }
+                continue;
+            }
+            $out .= $ln;
+        }
+        return $out;
+    }
+
     /** A PHP catch pad at `$label`; the Throwable lands in {@see $ehPadObj}. */
     private function ehPad(string $label): string
     {
         $lp = $this->ssa->allocReg();
         $ex = $this->ssa->allocReg();
         $this->ehPadObj = $this->ssa->allocReg();
-        return UnwindRuntime::catchPad($label, $lp, $ex, $this->ehPadObj);
+        return ExceptionRuntime::catchPad($label, $lp, $ex, $this->ehPadObj) . $this->ehTmpDrainIr();
     }
 
     /**
@@ -739,6 +1006,7 @@ trait EmitLlvmExceptions
      */
     private function ehCallRest(string $l): string
     {
+        if (\str_ends_with($l, ' ;!t')) { $l = \substr($l, 0, \strlen($l) - 4); }
         $body = \substr($l, 2);
         $lhs = '';
         $callee = '';
@@ -777,21 +1045,7 @@ trait EmitLlvmExceptions
     /** Runtime helpers that never run user code and never throw. */
     private function ehNounwind(string $callee): bool
     {
-        // Each invoke costs a block and an unwind edge per call site: in the
-        // Laravel build the backtrace ring alone was 648K of them.
-        return $callee === '@__mc_eh_catch'
-            || $callee === '@__mir_elem_untag'
-            || $callee === '@__mir_bt_push'
-            || $callee === '@__mir_bt_push_rel'
-            || $callee === '@__mir_bt_pop'
-            || $callee === '@__manticore_deref'
-            || $callee === '@__manticore_tag'
-            || $callee === '@__manticore_cell_int_bad'
-            || $callee === '@__mir_obj_handle_alloc'
-            || \str_starts_with($callee, '@__mc_dynf_')
-            || \str_starts_with($callee, '@__mir_arena_')
-            || \str_starts_with($callee, '@__mir_rc_retain')
-            || \str_starts_with($callee, '@__manticore_box_');
+        return \Compile\Mir\EhLowerIr::nounwind($callee);
     }
 
     /**
@@ -799,32 +1053,20 @@ trait EmitLlvmExceptions
      * split renamed to its last continuation.
      * @param array<string, string> $last
      */
+    /** The final-text exception lowering, told which `@manticore_*` callees cannot throw. */
+    private function ehLowerIr(): \Compile\Mir\EhLowerIr
+    {
+        /** @var array<string, bool> */
+        $syms = [];
+        if ($this->nothrow !== null) {
+            foreach ($this->nothrow->nothrowNames() as $fn) { $syms['@manticore_' . $this->mangle($fn)] = true; }
+        }
+        return new \Compile\Mir\EhLowerIr($syms);
+    }
+
     private function ehPhiRetarget(string $line, array $last): string
     {
-        // An incoming block is the `%name` after the last comma of a pair, right
-        // before its `]` — both `[ v, %b ]` and `[v, %b]` are emitted. A value
-        // never sits there, so no bracket matching is needed.
-        $out = '';
-        $p = 0;
-        $len = \strlen($line);
-        while ($p < $len) {
-            $cm = \strpos($line, ', %', $p);
-            if ($cm === false) { break; }
-            $s = $cm + 3;
-            $e = $s;
-            while ($e < $len && $line[$e] !== ']' && $line[$e] !== ' ' && $line[$e] !== ',') { $e = $e + 1; }
-            $f = $e;
-            while ($f < $len && $line[$f] === ' ') { $f = $f + 1; }
-            $lab = \substr($line, $s, $e - $s);
-            $out .= \substr($line, $p, $s - $p);
-            if ($f < $len && $line[$f] === ']' && isset($last[$lab])) {
-                $out .= $last[$lab];
-            } else {
-                $out .= $lab;
-            }
-            $p = $e;
-        }
-        return $out . \substr($line, $p);
+        return \Compile\Mir\EhLowerIr::phiRetarget($line, $last);
     }
 
     private function emitThrow(\Compile\Mir\Throw_ $n): string

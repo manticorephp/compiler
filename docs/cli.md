@@ -54,7 +54,7 @@ manticore compile [options] <files…|manifest.json> -o <out>
 | `--effects` | | `dump-mir`: show inferred effects |
 | `--emit-library` | | Emit a library object instead of an executable |
 | `--runtime` | | With `--emit-library`: this library is the bundled stdlib |
-| `--allow-undefined-traps` | | Do not refuse a library that contains undefined-function traps |
+| `--allow-undefined-traps` | | Cap reachable undeclared classes, functions and constants at a warning (the binary is built, a use throws `Error` if it runs); also allow undefined-function traps in a library |
 | `--keep-ir` | | Keep the intermediate `.ll` files |
 | `--strict` | `<list>` | Comma-separated strict checks: `shapes` (a PHPDoc `array{…}` shape is closed: an extra key is an error instead of a warning), `analyze` (= `--analyze-strict`) |
 | `-j` | `<n>` | Parallel clang jobs; `0` = one per core |
@@ -65,6 +65,8 @@ manticore compile [options] <files…|manifest.json> -o <out>
 | `--quiet` | | Silence progress and timings (diagnostics stay) |
 | `--timings` | | Print a per-stage time table at the end |
 | `--color` | `<when>` | Colour: `auto`\|`always`\|`never` (default `auto`) |
+| `--check` | | Run the front end only (parse, lowering, declaration, attribute and typedef checks), stop before type inference; exit `0` with no output file when clean |
+| `--all` | | List unreachable undeclared names too (hidden notes, see below) |
 
 Exit codes:
 
@@ -72,7 +74,7 @@ Exit codes:
 |---|---|
 | `0` | binary written |
 | `64` | usage error: unknown flag, missing value, bad `--progress` / `--color` value |
-| `65` | front end failed (parse / type check / empty IR), or `--analyze-strict` found errors |
+| `65` | front end failed (every parse / lowering / declaration / attribute / typedef error is reported, then exit), type check or empty IR failed, or `--analyze-strict` found errors |
 | `66` | no input read: source missing or the source list is empty |
 | `73` | `--emit-library`: cannot write the `.ll` file |
 | `75` | `clang` failed (object, or library with `--emit-library`) |
@@ -82,6 +84,98 @@ Exit codes:
 manticore compile hello.php -o hello && ./hello
 manticore compile src/ -o app -O2 -j 0
 ```
+
+### Front-end diagnostics and `--check`
+
+The front end collects every error instead of stopping at the first. Each prints as
+`<file>:<line>: <severity>[<code>]: <message>`, followed by `front end: N error(s), M warning(s)`;
+any error means exit `65`. Codes:
+
+| Code | Meaning |
+|---|---|
+| `parse.error` | syntax error (the file is skipped, the rest still lowers) |
+| `lower.unsupported` | construct the compiler does not support |
+| `decl.error` | invalid class / function / constant declaration |
+| `attr.error` | invalid attribute |
+| `typedef.error` | invalid type definition |
+| `lower.internal` | internal lowering failure, recorded at a function / method / top-level boundary |
+
+Four more codes flag a name in the program's own sources (app and vendor) that no compiled source,
+prelude, stdlib `.sig` extern or compiler builtin declares:
+
+| Code | Meaning |
+|---|---|
+| `undefined.class` | class / interface / trait / enum used in `new`, static access, `instanceof`, `catch`, a type hint, `extends`, `implements` or `use` and never declared (a missing package, or an extension class) |
+| `undefined.function` | direct call of a function that is not declared, not a stdlib / FFI function and not a builtin |
+| `undefined.constant` | bare constant that is not declared |
+| `unsupported.builtin` | the name is not declared, but PHP itself defines it (`request_parse_body`, `finfo_open`, `GMP_ROUND_ZERO`, …): a gap in Manticore, not a missing package. Never an error: a **warning** when the site may run, a hidden note when it is unreachable (`--all` lists it); the message reads `function f is part of PHP but not implemented by Manticore`. The binary builds and the use throws `Error` if it runs |
+
+They are grouped: one line per (code, name), at the most severe site, with ` (N uses)` when the name
+is used more than once. A name declared only conditionally behind a guard that is false in this build
+(for example `fake()` behind `class_exists(Faker\Factory::class)`) is reported as undeclared.
+
+Their severity comes from **reachability**: which functions the program can run, computed from the
+roots (`__main`, include units, the reflection tables of a class in use, global initialisers) over the
+lowered program. For a library target (`--emit-library`, a manifest library, the stdlib) every
+function, class and method it exports is a root too. It has two levels. *Statically reached* follows
+explicit edges only: named calls, `new C`, `C::m()`, `$o->m()` over the classes the program
+instantiates, closure literals (a closure's body counts as reached whether or not it is called),
+callable arrays (`[C::class, 'm']`, `[$o, 'm']`), a string naming a function (`'f'`, `'C::m'`) in a
+callable position (called as `'f'()`, passed to a builtin that calls it back such as `array_map`,
+`usort`, `call_user_func` or `register_shutdown_function`, or to a `callable` / `Closure` parameter),
+and dynamic targets whose value is a set of literals. `static::m()` in a method of `C` reaches `m` as
+resolved from each subclass of `C` (or `C` itself) that is instantiated or named by a static call.
+*Maybe reached* also assumes that a call by a runtime name (`$f()`, `call_user_func($name)`),
+`new $class`, `$o->$method()` or `[$class, $method]` reaches everything it could, that a string
+naming a function anywhere else may be called, and that `static::m()` may bind to any class of the
+hierarchy. A class's own code (`extends`, `implements`, `use`, constants, property defaults) counts once
+the class is instantiated, statically referenced or an ancestor of such a class. A trait method is
+compiled once per using class; a site in it is reached when any of the copies is.
+
+| Site | Tier | Effect |
+|---|---|---|
+| statically reached, *hard* use (`new`, static access, call, constant read, `extends` / `implements` / `use`), not guarded | **error** | exit `65`; the message ends with ` (reachable: f <- g <- root)`, the call path that reaches it |
+| maybe reached, a *soft* use (type hint, `instanceof`, `catch`: these never throw for a missing class), or guarded | warning | exit code unchanged |
+| not reached at either level | note | hidden; the summary line counts them, `--all` lists them |
+
+A site is *guarded* when it sits inside the branch of an `if`, `?:`, `&&` / `||` operand, or after an
+early exit (`if (!class_exists(X::class)) { throw …; }` in the same statement list, switch arm,
+`try` body, or at the top level of the main script or of an included file, to its end), whose condition calls `class_exists`, `interface_exists`, `trait_exists`, `enum_exists`,
+`function_exists`, `method_exists`, `is_callable`, `extension_loaded` or `defined`. A guard is also followed through
+a helper: a function or method whose body is a single `return <guard expression>;` (`self::isSupported()`,
+`$this->supports()`, `has_apcu()`), including a `&&` of guards, and a local assigned from a guard
+and not reassigned (`$ok = class_exists($c); if ($ok) { … }`). A helper that does more than return
+the guard, or one that calls another helper, is not followed.
+
+An undeclared name never escalates to an error when it matches a manifest
+[`allowUndefined`](#allowundefined) pattern, with `--allow-undefined-traps` (the binary is built and
+the use throws `Error` at run time if it executes), when the front end already reported another error
+(a parse or lowering error can hide the declaration), or, for `undefined.constant`, when the program
+defines a constant under a runtime name (`define($name, …)`). `MANTICORE_REACH_DUMP=1` prints the
+reached functions (`reach:` static, `reach?:` maybe) and used classes (`class:` / `class?:`); `=2` also names
+the first edge that makes each `class:` statically used (`<- new C in f`, `<- ref in f`, `<- static call m in f`).
+
+### allowUndefined
+
+A reachable use of a missing optional package is a true error: the path throws if it runs. When the
+application accepts that (the feature is never used, or the extension is absent on purpose), list the
+names in the per-application `allowUndefined` field of `manticore.json`:
+
+```json
+{"applications": [{"name": "app", "src": "src", "output": "bin/app",
+  "allowUndefined": ["apcu_*", "Memcached", "Symfony\\Component\\Serializer\\*"]}]}
+```
+
+Each entry is a glob matched against the whole finding name, case-insensitively: `*` matches any run
+of characters, everything else is literal; namespaces use `\` (written `\\` in JSON). A matching
+`undefined.*` finding is capped at a warning; names that do not match keep their tier, so a new
+missing dependency still fails the build. Keep patterns narrow: an exact name or one package
+namespace. The list applies to that application only. The examples use it for the optional
+packages and extensions they do not install.
+
+`--check` (on `compile` and `build`) stops after these checks, before `InferTypes`: exit `0` and no output
+file when clean, `65` with the diagnostics otherwise. In `analyze --deep` the same errors feed the
+analyzer and lowering continues.
 
 ## build
 
