@@ -3202,7 +3202,10 @@ trait EmitLlvmExpr
         return $out;
     }
 
-    /** The right arm of a fused `??`: no element was read, so give back the key and base temps. */
+    /**
+     * The right arm of a fused `??`: no element was read, so give back the key and base temps.
+     * @param array{node: ArrayAccess_, arr: string, key: string, word: string} $pre
+     */
     private function coalesceMissRelease(Node $left, array $pre): string
     {
         $out = '';
@@ -3944,7 +3947,10 @@ trait EmitLlvmExpr
         return '  ' . $r . ' = call ptr @' . $this->mirHelperSym('__mir_bag_of') . '(ptr ' . $objPtr . ")\n";
     }
 
-    /** The classes whose dynamic-property bag is NOT at the default offset. */
+    /**
+     * The classes whose dynamic-property bag is NOT at the default offset.
+     * @return \Compile\Mir\ClassDef[]
+     */
     private function bagOfClassArms(): array
     {
         $std = $this->classes['stdClass'] ?? null;
@@ -6919,6 +6925,10 @@ trait EmitLlvmExpr
         return $out;
     }
 
+    /**
+     * @param Type[] $ptypes
+     * @param bool[] $ahmask
+     */
     private function unboxCellArg(Node $a, array $ptypes, int $pi, array $ahmask = []): string
     {
         $this->cellStrOwn = '';

@@ -94,6 +94,7 @@ final class InlineClosures implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [InferTypes::NAME]; }
 
     public function run(Module $module): Module

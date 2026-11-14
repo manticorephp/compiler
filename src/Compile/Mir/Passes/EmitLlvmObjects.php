@@ -1732,6 +1732,9 @@ trait EmitLlvmObjects
      */
     /** Fixed property holders are module metadata, so compute them once per
      * property name instead of rescanning every class at every erased read. */
+    /**
+     * @return \Compile\Mir\ClassDef[]
+     */
     private function fixedPropertyHolders(string $prop): array
     {
         if (isset($this->fixedPropertyHoldersCache[$prop])) {
@@ -1745,7 +1748,10 @@ trait EmitLlvmObjects
         return $fixed;
     }
 
-    /** Names of classes with dynamic-property bags, cached once per module. */
+    /**
+     * Names of classes with dynamic-property bags, cached once per module.
+     * @return string[]
+     */
     private function bagClassNames(): array
     {
         if (isset($this->bagClassNamesCache['*'])) {
@@ -3076,6 +3082,7 @@ trait EmitLlvmObjects
      * loaded the object header as a vec length. Same shape as the `__get` arms
      * in {@see emitRawPropByClassId}: one arm per class, the declarer resolved
      * per class so an override still wins.
+     * @param string[] $argRegs
      */
     private function emitErasedIfaceCall(string $objPtr, string $iface, string $method,
                                          array $argRegs): string
@@ -5141,6 +5148,9 @@ trait EmitLlvmObjects
      *  ancestors) or a union (across the atoms) — as name => return Type.
      *  Atoms disagreeing on a method's return kind collapse it to a cell.
      *  Null when the receiver has no static class set (cell / unknown). */
+    /**
+     * @return array<string, Type>|null
+     */
     private function dynMethodCandidates(Type $t, int $argc): ?array
     {
         $roots = [];
@@ -5222,6 +5232,9 @@ trait EmitLlvmObjects
      *  disagree on the return kind collapse to a cell — the emit-side dispatch
      *  boxes each arm's return by its own type (emitMethodCall's per-arm boxing
      *  when the result is cell), so the merged value is a uniform cell. */
+    /**
+     * @return array<string, Type>
+     */
     private function classlessMethodCandidates(int $argc): array
     {
         // Every erased dynamic call site asked this — classes x methods walks
@@ -5975,6 +5988,9 @@ trait EmitLlvmObjects
      *  a local or a string literal is already that. An ARGUMENT that is a fresh
      *  +1 temp ({@see freshRcArgFlavor}) is recorded in `$owned` (slot => flavor)
      *  for the caller to give back after the call, as an inline argument would be. */
+    /**
+     * @param array<string, string> $owned slot => flavor
+     */
     private function dynHoistOperand(Node $n, string &$out, array &$owned, bool $isArg): Node
     {
         if ($n->kind === Node::KIND_LOAD_LOCAL || $n->kind === Node::KIND_STRING_CONST) { return $n; }
@@ -6739,6 +6755,7 @@ trait EmitLlvmObjects
      *
      * @param array<string, Type> $methods
      * @return array<string, Type>
+     * @param array<string, bool> $nodeNames
      */
     private function dynInlineOnlyNames(array $methods, bool &$needsNodes, array &$nodeNames): array
     {
@@ -6863,6 +6880,9 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * @param array<string, Type> $methods
+     */
     private function emitDynMethodInlineFallback(\Compile\Mir\DynProp_ $dp, \Compile\Mir\Invoke_ $iv, array $methods, ?int $armFixedN = null): string
     {
         $recv = $dp->object;
@@ -9072,6 +9092,8 @@ trait EmitLlvmObjects
      * erased `$o->m()` that names a static method — the site's receiver word is dropped and every
      * index shifts down by one: the static symbol takes no `$this`, and handing it one shifted
      * each argument into the next parameter.
+     * @param array<int, ?Type> $srcTypes
+     * @param array<int, Type> $cTypes
      */
     private function vdArmArgs(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
@@ -9103,6 +9125,10 @@ trait EmitLlvmObjects
         return $r;
     }
 
+    /**
+     * @param array<int, ?Type> $srcTypes
+     * @param array<int, Type> $cTypes
+     */
     private function vdArmArgsInner(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         // An address the site passed for a param another candidate takes by reference: an arm
@@ -9240,6 +9266,10 @@ trait EmitLlvmObjects
      *  not name the method, so a VARIADIC arm still has to pack its trailing arguments. */
     private bool $vdUnbound = false;
 
+    /**
+     * @param array<int, ?Type> $srcTypes
+     * @param array<int, Type> $cTypes
+     */
     private function vdArmArgsBase(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         if (!$this->vdUnbound || $sym === '' || $this->spreadTail !== null) {
@@ -9329,6 +9359,10 @@ trait EmitLlvmObjects
         return [\implode(', ', $kept), $kt, $out, $this->rcReleaseReg($ai, $this->discardReleaseFlavor(Type::vec($elem))), $vi + 1];
     }
 
+    /**
+     * @param array<int, ?Type> $srcTypes
+     * @param array<int, Type> $cTypes
+     */
     private function vdArmArgsCore(string $argList, array $srcTypes, array $cTypes, string $sym = ''): string
     {
         $this->vdArmList = $argList;
@@ -9587,6 +9621,10 @@ trait EmitLlvmObjects
      * Out-lined only when every argument is already an `i64` operand: the per-arm
      * coercion in {@see vdArmArgs} matches on `i64 ` and would otherwise fire
      * inside the thunk where it did not fire at the site.
+     * @param string[] $cands
+     * @param array<string, string> $targets candidate class => declaring class
+     * @param array<string, bool> $erasedSyms
+     * @param array<int, ?Type> $argOutTypes
      */
     private function emitVirtualDispatch(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = [], array $argOutTypes = []): string
     {
@@ -9735,6 +9773,12 @@ trait EmitLlvmObjects
         return $out;
     }
 
+    /**
+     * @param string[] $cands
+     * @param array<string, string> $targets candidate class => declaring class
+     * @param array<string, bool> $erasedSyms
+     * @param array<int, ?Type> $argOutTypes
+     */
     private function emitVirtualDispatchInline(string $thisArg, string $argList, array $cands, array $targets, string $fallback, string $method, bool $boxCell = false, array $erasedSyms = [], array $argOutTypes = []): string
     {
         $objp = $this->ssa->allocReg();
@@ -10021,6 +10065,9 @@ trait EmitLlvmObjects
         return $mm !== null && $mm->isStatic;
     }
 
+    /**
+     * @return array<string, string> class => the class whose body the method resolves to
+     */
     private function methodHolders(string $method): array
     {
         $this->ensureMethodIndex();

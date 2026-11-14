@@ -274,6 +274,10 @@ trait LowerClasses
         return $out;
     }
 
+    /**
+     * @param array<string, array{get: ?string, set: ?string}> $propHooks
+     * @return array<string,bool>
+     */
     private function maybeUninitProps(\Parser\Ast\ClassDecl $decl, string $parent, array $propHooks): array
     {
         $out = [];

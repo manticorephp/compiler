@@ -88,6 +88,7 @@ final class DeadStore implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [LowerFromAst::NAME]; }
 
     /** @var array<string, true> */

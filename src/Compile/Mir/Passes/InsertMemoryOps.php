@@ -32,6 +32,7 @@ final class InsertMemoryOps implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [InferAllocKind::NAME]; }
 
     public function run(Module $module): Module
@@ -73,6 +74,8 @@ final class InsertMemoryOps implements Pass
      * retain/release pair is fully exercised: a STRING or a plain OBJECT.
      * A cell / unknown / erased element is exactly the raw-word case that
      * corrupted, and it is refused here.
+     * @param array<string, \Compile\Mir\EnumDef> $enums
+     * @param array<string, \Compile\Mir\ClassDef> $classes
      */
     public static function arrayAliasCoOwns(?Type $value, ?Type $slot,
                                             array $enums, array $classes = []): bool
@@ -99,7 +102,11 @@ final class InsertMemoryOps implements Pass
         return $t->kind === Type::KIND_OBJ && ($c === 'Closure' || \str_starts_with($c, '__closure_'));
     }
 
-    /** {@see \Compile\Mir\Ownership::elemReadCoOwns} */
+    /**
+     * {@see \Compile\Mir\Ownership::elemReadCoOwns}
+     * @param array<string, \Compile\Mir\EnumDef> $enums
+     * @param array<string, \Compile\Mir\ClassDef> $classes
+     */
     public static function elemReadCoOwns(?Type $t, array $enums, array $classes = []): bool
     {
         return \Compile\Mir\Ownership::elemReadCoOwns($t, $enums, $classes);
@@ -119,6 +126,7 @@ final class InsertMemoryOps implements Pass
      * the slot, it does not copy it.
      *
      * @param array<string, mixed> $enums enum name → def; enum values are non-rc
+     * @param array<string, \Compile\Mir\ClassDef> $classes
      */
     public static function foreachValueCoOwns(\Compile\Mir\Foreach_ $fe, array $enums, array $classes = []): bool
     {
@@ -143,6 +151,7 @@ final class InsertMemoryOps implements Pass
      *    does not see; it stays borrowed.
      *
      * @param array<string, mixed> $enums
+     * @param array<string, \Compile\Mir\ClassDef> $classes
      */
     public static function foreachValueSlotType(\Compile\Mir\Foreach_ $fe, array $enums, array $classes = []): ?Type
     {
@@ -228,6 +237,7 @@ final class InsertMemoryOps implements Pass
      *
      * @param array<string, mixed> $enums
      * @return array<string, bool> name → vetoed
+     * @param array<string, \Compile\Mir\ClassDef> $classes
      */
     public static function foreachOwnVetoes(Node $body, array $enums, array $classes = []): array
     {
@@ -236,7 +246,11 @@ final class InsertMemoryOps implements Pass
         return $veto;
     }
 
-    /** @param array<string, bool> $veto */
+    /**
+     * @param array<string, bool> $veto
+     * @param array<string, \Compile\Mir\EnumDef> $enums
+     * @param array<string, \Compile\Mir\ClassDef> $classes
+     */
     private static function collectForeachVetoes(Node $n, array $enums, array $classes, array &$veto): void
     {
         if ($n->kind === Node::KIND_FOREACH) {

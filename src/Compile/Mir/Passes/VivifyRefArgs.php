@@ -75,6 +75,7 @@ final class VivifyRefArgs implements Pass
         return '';
     }
 
+    /** @return string[] */
     public function requires(): array { return [InferTypes::NAME]; }
 
     /** @var array<string, bool[]> mangled fn name → per-param by-ref mask */

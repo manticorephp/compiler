@@ -2363,7 +2363,8 @@ final class EmitLlvm implements EmitVisitor
     }
 
     /** Prop names used as a RAW array base (`$this->p[...]`, `foreach ($this->p)`)
-     *  — the SPL backing-slot pattern; never box (array-access reads the raw buffer). */
+     *  — the SPL backing-slot pattern; never box (array-access reads the raw buffer).
+     *  @var array<string, bool> */
     private array $cellPropArrayBase = [];
 
     /**
@@ -4735,6 +4736,9 @@ final class EmitLlvm implements EmitVisitor
      *  ({@see EmitLlvmCalls::emitRefValueSlot}) and drops what the callee
      *  wrote there. Routing it down the by-VALUE path handed the callee the
      *  value as its address. */
+    /**
+     * @param bool[] $mask
+     */
     private function argIsByRef(array $mask, int $pi, Node $a): bool
     {
         return ($mask[$pi] ?? false) && $this->isByRefAddressable($a);
@@ -4875,6 +4879,7 @@ final class EmitLlvm implements EmitVisitor
      * Silent (and free) for every other callee: `$srcArgc` is -1 when the
      * lowering path did not record one, and a callee that never asks leaves the
      * channel alone.
+     * @param Node[] $args
      */
     private function faPush(string $callee, int $srcArgc, array $args = [], int $recvParams = 0, string $pack = ''): string
     {
@@ -5159,6 +5164,7 @@ final class EmitLlvm implements EmitVisitor
      * prologue that asked for it, and {@see faPop} clears what is left.
      *
      * @param string[] $callees
+     * @param Node[] $args
      */
     private function faPushAny(array $callees, int $srcArgc, array $args = [], int $recvParams = 0, string $pack = ''): string
     {

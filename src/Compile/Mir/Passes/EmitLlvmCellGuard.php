@@ -116,6 +116,9 @@ trait EmitLlvmCellGuard
 
     /** The build-failing lines for `MANTICORE_CELLGUARD=strict`: one per
      *  violation, in emission order; empty when the mode is off or clean. */
+    /**
+     * @return string[]
+     */
     public function cellGuardErrors(): array
     {
         if (!$this->cellGuardStrict) { return []; }

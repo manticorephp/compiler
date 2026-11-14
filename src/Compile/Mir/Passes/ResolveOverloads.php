@@ -41,6 +41,7 @@ final class ResolveOverloads implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [InferTypes::NAME]; }
 
     public function run(Module $module): Module
@@ -105,7 +106,10 @@ final class ResolveOverloads implements Pass
         }
     }
 
-    /** `$given` is a concrete type that is certainly not what a `$want` claim holds. */
+    /**
+     * `$given` is a concrete type that is certainly not what a `$want` claim holds.
+     * @param array<string, \Compile\Mir\ClassDef> $classes
+     */
     private static function claimMisfits(Type $given, Type $want, array $classes): bool
     {
         $gk = $given->kind;
