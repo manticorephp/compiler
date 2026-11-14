@@ -1,0 +1,8 @@
+names:
+  @2:7-2:12 class:decl Plain -> Plain
+  @2:21-2:22 member:decl X -> X
+  @2:35-2:37 member:decl $y -> y
+  @2:48-2:49 member:decl z -> z
+  @3:10-3:13 function:decl top -> top
+  @4:27-4:28 member:decl m -> m
+

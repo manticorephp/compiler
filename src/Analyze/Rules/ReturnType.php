@@ -53,8 +53,8 @@ final class ReturnType
                 if ($this->permissive($target) || $target->kind === Ty::KIND_VOID) { continue; }
                 $src = $infer->of($u->exprBody);
                 if (!Ty::assignable($target, $src, $idx) && !Ty::coercedScalars($target, $src, $pf->path)) {
-                    $this->diags[] = Diagnostic::error(
-                        $pf->path, $u->exprBody->span->line, $u->exprBody->span->column, 'return.type',
+                    $this->diags[] = Diagnostic::at(
+                        $pf->path, $u->exprBody->span, Diagnostic::SEV_ERROR, 'return.type',
                         $u->label . ': returns ' . $src->display() . ', declared ' . $target->display()
                     );
                 }
@@ -69,8 +69,8 @@ final class ReturnType
             if ($target->kind === Ty::KIND_VOID) {
                 foreach ($this->returns as $ret) {
                     if ($ret->value === null) { continue; }
-                    $this->diags[] = Diagnostic::error(
-                        $pf->path, $ret->span->line, $ret->span->column, 'return.void',
+                    $this->diags[] = Diagnostic::at(
+                        $pf->path, $ret->span, Diagnostic::SEV_ERROR, 'return.void',
                         $u->label . ': declared void but returns a value'
                     );
                 }
@@ -82,8 +82,8 @@ final class ReturnType
                 if ($ret->value === null) { continue; }
                 $src = $infer->of($ret->value);
                 if (Ty::assignable($target, $src, $idx) || Ty::coercedScalars($target, $src, $pf->path)) { continue; }
-                $this->diags[] = Diagnostic::error(
-                    $pf->path, $ret->span->line, $ret->span->column, 'return.type',
+                $this->diags[] = Diagnostic::at(
+                    $pf->path, $ret->span, Diagnostic::SEV_ERROR, 'return.type',
                     $u->label . ': returns ' . $src->display() . ', declared ' . $target->display()
                 );
             }

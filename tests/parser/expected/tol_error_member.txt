@@ -1,0 +1,20 @@
+Program
+  Stmt:Class @2:1-7:2
+    decl: class A
+      Property $ : int [public] @5:5-5:17
+      Property $b : (untyped) [private] @6:5-6:20
+        default:
+          Expr:IntLiteral @6:18-6:19
+            value: 2
+      Method ok [public] -> (none) @3:5-3:39
+        params: 0
+        body: Block @3:26-3:39
+          Stmt:Return @3:28-3:37
+            value:
+              Expr:IntLiteral @3:35-3:36
+                value: 1
+      ErrorMember @4:5-4:28
+        skipped: 7
+error 4:24-4:25 expected method name
+error 5:16-5:17 expected $property
+

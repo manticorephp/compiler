@@ -42,16 +42,16 @@ final class UndefinedMethod
                 $infer = new Infer($idx, $flow->scopes[$k]);
                 $k = $k + 1;
                 if ($e instanceof MethodCallExpr) {
-                    $this->check($pf, $idx, $infer->of($e->object), $e->method, '->', $e->span->line, $e->span->column);
+                    $this->check($pf, $idx, $infer->of($e->object), $e->method, '->', $e->span);
                 } elseif ($e instanceof DynamicStaticCall) {
-                    $this->check($pf, $idx, $infer->of($e->receiver), $e->method, '::', $e->span->line, $e->span->column);
+                    $this->check($pf, $idx, $infer->of($e->receiver), $e->method, '::', $e->span);
                 }
             }
         }
         return $this->diags;
     }
 
-    private function check(ParsedFile $pf, Index $idx, Ty $recv, string $method, string $sep, int $line, int $col): void
+    private function check(ParsedFile $pf, Index $idx, Ty $recv, string $method, string $sep, \Parser\Ast\Span $span): void
     {
         if ($recv->kind !== Ty::KIND_OBJECT || $recv->className === '') { return; }
         $ci = $idx->findClass($recv->className);
@@ -66,8 +66,8 @@ final class UndefinedMethod
         // Through an INTERFACE the object is some implementer; a method one of
         // them declares is a legal call (`$rii->getSubIterator()->getSubPathname()`).
         if ($ci->kind === 'interface' && $idx->implementerHasMethod($recv->className, \strtolower($method))) { return; }
-        $this->diags[] = Diagnostic::error(
-            $pf->path, $line, $col, 'undefined.method',
+        $this->diags[] = Diagnostic::at(
+            $pf->path, $span, Diagnostic::SEV_ERROR, 'undefined.method',
             'unknown method ' . $recv->className . $sep . $method . '()'
         );
     }

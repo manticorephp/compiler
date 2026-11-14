@@ -5,6 +5,7 @@ namespace Analyze\Rules;
 use Analyze\Decls;
 use Analyze\Diagnostic;
 use Analyze\DocType;
+use Analyze\NameRanges;
 use Analyze\ParsedFile;
 use Compile\TypeHint\GenericType;
 use Parser\Ast\FunctionDecl;
@@ -59,8 +60,8 @@ final class MissingArrayType
         }
         if ($this->isBareArray($fn->returnType)
             && !$this->docHasElement(DocType::tag($fn->docComment, '@return', ''))) {
-            $this->warn($pf, $fn->span->line, $fn->span->column,
-                $label . ': return type is bare `array` — annotate its element type (`@return T[]`)');
+            $this->warn($pf, $fn->span,
+                $label . ': return type is bare `array` — annotate its element type (`@return T[]`)', $fn->name);
         }
     }
 
@@ -71,8 +72,8 @@ final class MissingArrayType
         }
         if ($this->isBareArray($m->returnType)
             && !$this->docHasElement(DocType::tag($m->docComment, '@return', ''))) {
-            $this->warn($pf, $m->span->line, $m->span->column,
-                $label . ': return type is bare `array` — annotate its element type (`@return T[]`)');
+            $this->warn($pf, $m->span,
+                $label . ': return type is bare `array` — annotate its element type (`@return T[]`)', $m->name);
         }
     }
 
@@ -80,7 +81,7 @@ final class MissingArrayType
     {
         if (!$this->isBareArray($p->typeHint)) { return; }
         if ($this->docHasElement(DocType::tag($doc, '@param', $p->name))) { return; }
-        $this->warn($pf, $p->span->line, $p->span->column,
+        $this->warn($pf, $p->span,
             $label . ': parameter $' . $p->name . ' is typed bare `array` — annotate its element type (`@param T[] $' . $p->name . '`)');
     }
 
@@ -92,7 +93,7 @@ final class MissingArrayType
         $docType = DocType::tag($p->docComment, '@var', $p->name);
         if ($docType === null) { $docType = DocType::tag($p->docComment, '@var', ''); }
         if ($this->docHasElement($docType)) { return; }
-        $this->warn($pf, $p->span->line, $p->span->column,
+        $this->warn($pf, $p->span,
             'property ' . $cls . '::$' . $p->name . ' is typed bare `array` — annotate its element type (`@var T[]`)');
     }
 
@@ -122,8 +123,13 @@ final class MissingArrayType
         return $g->isArraySugar || \count($g->params) > 0;
     }
 
-    private function warn(ParsedFile $pf, int $line, int $col, string $msg): void
+    private function warn(ParsedFile $pf, \Parser\Ast\Span $span, string $msg, string $declName = ''): void
     {
-        $this->diags[] = Diagnostic::warning($pf->path, $line, $col, 'array.no-value-type', $msg);
+        $d = Diagnostic::at($pf->path, $span, Diagnostic::SEV_WARNING, 'array.no-value-type', $msg);
+        if ($declName !== '') {
+            $ref = NameRanges::declOf($pf->program->names, $declName, $span);
+            if ($ref !== null) { $d->withRange($ref->span); }
+        }
+        $this->diags[] = $d;
     }
 }

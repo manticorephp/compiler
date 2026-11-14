@@ -55,5 +55,7 @@ final class ClassDecl
          * @var array<string, string>
          */
         public array $useDocs = [],
+        /** @var ErrorMember[] */
+        public array $errorMembers = [],
     ) {}
 }

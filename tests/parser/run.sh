@@ -86,6 +86,8 @@ for name in "${cases[@]}"; do
     flags="--tolerant --ranges"
     [[ "$name" == *.strict ]] && flags=""
     [[ "$name" == names* ]] && flags="--tolerant --names"
+    declflag=""
+    [[ "$name" == names_decl* ]] && { declflag="--decl-names=2"; flags="$flags $declflag"; }
 
     run_limited "$MANTICORE" dump-ast $flags "$rel" > "$actual" 2>&1
     rc=$?
@@ -96,7 +98,7 @@ for name in "${cases[@]}"; do
         chk="$WORK/$name.check"
         run_limited "$MANTICORE" dump-ast --tolerant --check-ranges "$rel" > "$chk" 2>&1
         [[ $? -ne 0 || -s "$chk" ]] && range_bad=1
-        run_limited "$MANTICORE" dump-ast --tolerant --check-names "$rel" > "$chk" 2>&1
+        run_limited "$MANTICORE" dump-ast --tolerant --check-names $declflag "$rel" > "$chk" 2>&1
         [[ $? -ne 0 || -s "$chk" ]] && range_bad=1
     fi
 

@@ -18,6 +18,7 @@ final class ClassInfo
      * @param array<string, bool>       $consts      const / enum-case name → true
      * @param array<string, ?string>    $propTypes   property name → declared hint
      *                                                (incl. promoted ctor params)
+     * @param bool $partial  recovered from a file with syntax errors: members may be missing
      */
     public function __construct(
         public string $fqn,
@@ -29,5 +30,6 @@ final class ClassInfo
         public array $consts,
         public bool $isAbstract,
         public array $propTypes = [],
+        public bool $partial = false,
     ) {}
 }
