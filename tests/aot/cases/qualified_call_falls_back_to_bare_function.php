@@ -1,4 +1,5 @@
 <?php
+// @allow-undefined-traps — tests the runtime trap of an undeclared name; see tests/aot/run.sh
 // A qualified call to an undefined function (foo\f() in namespace A) falls back to A\f / the global function instead of throwing.
 namespace A;
 

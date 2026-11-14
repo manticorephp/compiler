@@ -47,14 +47,19 @@ final class StringPool
      * every later `@.str.N` in the module — and with it every split part: a
      * one-line edit to the compiler changed all 16 parts, so the object cache
      * never hit. A content name moves only with the content. Two 32-bit CRCs
-     * (the second over the value plus a separator) make a collision a practical
+     * (the second over the reversed bytes) make a collision a practical
      * impossibility; one still gets the id appended rather than a wrong alias.
      */
     public function sym(int $id): string
     {
         if (isset($this->symById[$id])) { return $this->symById[$id]; }
         $v = $this->byId[$id] ?? '';
-        $sym = '@.str.' . \dechex(\crc32($v)) . '_' . \dechex(\crc32($v . "\x1f"));
+        // The second CRC runs over the REVERSED bytes. Over `$v . "\x1f"` it was a function of
+        // the first (CRC is linear: crc(v . s) follows from crc(v) and s), so the name held 32 bits,
+        // and Laravel has real collisions (`Illuminate\\Database\\Migrations\\Migrator` vs a 112-byte
+        // error message). The `_<id>` fallback then named by insertion order: an object-cache miss
+        // serially, and two different strings under ONE name across parallel emission workers.
+        $sym = '@.str.' . \dechex(\crc32($v)) . '_' . \dechex(\crc32(\strrev($v)));
         if (isset($this->idBySym[$sym]) && $this->idBySym[$sym] !== $id) {
             $sym = $sym . '_' . (string)$id;
         }

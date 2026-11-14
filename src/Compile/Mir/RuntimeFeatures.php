@@ -28,6 +28,8 @@ final class RuntimeFeatures
     public bool $needsRc = false;
     /** `gc_collect_cycles()` is used — gates the Bacon-Rajan cycle collector. */
     public bool $needsCc = false;
+    /** `gc_disable()` / `gc_enable()` / `gc_enabled()` is used — gates the auto-collection flag cell. */
+    public bool $needsGcFlag = false;
     /** Any string is rc retained/released (sentinel-guarded str rc helpers). */
     public bool $needsStrRc = false;
 
@@ -277,15 +279,6 @@ public bool $needsClosureRc = false;
         }
         if ($this->needsStrcmp) { $decls['strcmp'] = "declare i32 @strcmp(ptr, ptr)"; }
         if ($this->needsExceptions) {
-            // The unwinder ({@see \Compile\Runtime\UnwindRuntime}): libSystem on
-            // Darwin, libgcc_eh on Linux (`-static-libgcc` at the link).
-            $decls['_Unwind_RaiseException'] = "declare i32 @_Unwind_RaiseException(ptr)";
-            $decls['_Unwind_ForcedUnwind'] = "declare i32 @_Unwind_ForcedUnwind(ptr, ptr, ptr)";
-            $decls['_Unwind_GetIP'] = "declare i64 @_Unwind_GetIP(ptr)";
-            $decls['_Unwind_GetRegionStart'] = "declare i64 @_Unwind_GetRegionStart(ptr)";
-            $decls['_Unwind_GetLanguageSpecificData'] = "declare ptr @_Unwind_GetLanguageSpecificData(ptr)";
-            $decls['_Unwind_SetGR'] = "declare void @_Unwind_SetGR(ptr, i32, i64)";
-            $decls['_Unwind_SetIP'] = "declare void @_Unwind_SetIP(ptr, i64)";
             $decls['abort'] = "declare void @abort() noreturn";
         }
         if ($this->needsStrtodDecl()) { $decls['strtod'] = \Compile\Mir\RuntimeLibrary::strtodDecl(); }

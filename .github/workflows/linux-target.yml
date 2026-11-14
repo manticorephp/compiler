@@ -187,6 +187,18 @@ jobs:
           name: compiler-${{ inputs.tag }}
       - name: Unpack the compiler
         run: mkdir ci-cache && tar -C ci-cache -xf compiler.tar && rm compiler.tar
+      # Shared prelude bodies, each compiled once per variant
+      # (docs/design/compile-speed-roadmap.md, E1). Every shard reads the newest
+      # cache of its row; shard 1 of a push to main writes it. The objects are
+      # keyed by their exact IR, flags and clang, so a stale or foreign entry is
+      # a miss, never a wrong object.
+      - name: Restore the object cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-objcache
+          key: mc-objcache-${{ inputs.tag }}-${{ github.run_id }}
+          restore-keys: |
+            mc-objcache-${{ inputs.tag }}-
       # /logs and /compiler-cache are mounts the unprivileged container user
       # (uid 1000) must be able to write; /build stays inside the container (the
       # gate copies the tree into it, and that copy has no business crossing a
@@ -197,11 +209,14 @@ jobs:
           # RUNNER, and the container is uid 1000 — unlinking an entry needs write
           # permission on the directory that holds it, so a restored lib/ is
           # unremovable from inside without this and the cache never updates.
-          mkdir -p ci-logs && chmod -R 777 ci-logs ci-cache
+          mkdir -p ci-logs ci-objcache && chmod -R 777 ci-logs ci-cache ci-objcache
           docker run --rm \
             -v "$PWD":/repo:ro \
             -v "$PWD/ci-logs":/logs \
             -v "$PWD/ci-cache":/compiler-cache \
+            -v "$PWD/ci-objcache":/objcache \
+            -e MANTICORE_OBJ_CACHE_DIR=/objcache \
+            -e MANTICORE_OBJ_CACHE_MAX_MB=512 \
             -e MC_GATE=0 \
             -e MC_JOBS=0 \
             -e MC_LOGDIR=/logs \
@@ -213,6 +228,18 @@ jobs:
             -e MC_XFAIL=${{ matrix.shard == 1 && 1 || 0 }} \
             manticore-toolchain:${{ inputs.tag }} \
             /bin/bash /repo/tools/docker/gate.sh
+
+      # Only the shared bodies travel: the program parts in prog/ are one program
+      # each and would fill the repository's cache quota for little reuse.
+      - name: Drop the program parts from the object cache
+        if: always() && matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: sudo rm -rf ci-objcache/prog
+      - name: Save the object cache
+        if: always() && matrix.shard == 1 && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: ci-objcache
+          key: mc-objcache-${{ inputs.tag }}-${{ github.run_id }}
 
       - name: Summary
         if: always()

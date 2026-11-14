@@ -40,6 +40,28 @@ class Kernel extends BaseKernel
         yield new \Symfony\UX\Icons\UXIconsBundle();
     }
 
+    /**
+     * The system cache pool (Doctrine's parsed queries, ux-icons, validator metadata) in process memory.
+     * Its default, PhpFilesAdapter, writes PHP files and `include`s them back, which a compiled binary
+     * does not do: every save failed, every request recomputed, and the flock/fopen of that path is
+     * where a second request cut in. One process serves every request, so memory is the shared cache —
+     * as long as the kernel does not reset it: an array pool is tagged `kernel.reset`, and the next
+     * handle() emptied it, so every request still re-read its icons and re-parsed its queries.
+     */
+    protected function build(ContainerBuilder $container): void
+    {
+        $container->prependExtensionConfig('framework', ['cache' => ['system' => 'cache.adapter.array']]);
+        // Between CachePoolPass (32), which adds the tag, and ResettableServicePass (-32), which collects it.
+        $container->addCompilerPass(new class implements \Symfony\Component\DependencyInjection\Compiler\CompilerPassInterface {
+            public function process(ContainerBuilder $container): void
+            {
+                foreach ($container->findTaggedServiceIds('cache.pool') as $id => $_) {
+                    $container->getDefinition($id)->clearTag('kernel.reset');
+                }
+            }
+        }, \Symfony\Component\DependencyInjection\Compiler\PassConfig::TYPE_BEFORE_OPTIMIZATION, 0);
+    }
+
     /** The container is compiled in memory once per process, not dumped to var/cache and included. */
     protected function initializeContainer(): void
     {

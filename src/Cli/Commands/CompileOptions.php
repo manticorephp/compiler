@@ -20,7 +20,7 @@ final class CompileOptions
             new Option('effects', ArgParse::FLAG, 'dump-mir: show inferred effects'),
             new Option('emit-library', ArgParse::FLAG, 'Emit a library object instead of an executable'),
             new Option('runtime', ArgParse::FLAG, 'With --emit-library: this library is the bundled stdlib'),
-            new Option('allow-undefined-traps', ArgParse::FLAG, 'Do not refuse a library that contains undefined-function traps'),
+            new Option('allow-undefined-traps', ArgParse::FLAG, 'Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library'),
             new Option('keep-ir', ArgParse::FLAG, 'Keep the intermediate .ll files'),
             new Option('strict', ArgParse::VALUE, 'Comma-separated strict checks: shapes (closed array shapes), analyze', 'list'),
             new Option('j', ArgParse::VALUE, 'Parallel clang jobs; 0 = one per core', 'n'),

@@ -1,0 +1,5 @@
+caught dtor a
+caught in dtor b
+inTry: done
+caught dtor c3
+end

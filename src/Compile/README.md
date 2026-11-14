@@ -58,7 +58,7 @@ by `SpillFreshBases` and the emitter).
 |--------|------|
 | `RuntimeHost` | Contract the standalone runtime emitters need from a backend: alloc + labels/instrumentation |
 | `BareHost` | MIR's host: plain libc `malloc`/`realloc`, no arena/profile/verify, private label counter |
-| `UnwindRuntime` | Zero-cost Itanium unwinding runtime: own personality, no `__cxa_throw`, no C++ runtime |
+| `ExceptionRuntime` | Error-return exceptions: throw / catch / uncaught helpers around the slot `@__mc_exc` (lowered by `Mir/EhLowerIr`) |
 | `UnifiedArrayRuntime` | The ONE PhpArray runtime (`docs/design/memory-abi.md` §4): 56-byte header, PACKED (vec fast path) ↔ HASHED (assoc map) modes, rc always at one offset |
 
 ### Type-hint parser (`src/Compile/TypeHint/`)
@@ -140,8 +140,8 @@ a "trait" here is a file-level split of one emitter, not an independent unit.
   at descriptor offset 0. Single inheritance;
   virtual dispatch is a class-id chain collapsing to a direct call when
   one concrete class is reachable.
-- Exceptions are zero-cost Itanium unwinding with an own personality
-  (`Runtime/UnwindRuntime.php`): no `__cxa_throw`, no C++ runtime. Injected Throwable/Exception/Error hierarchy.
+- Exceptions are error returns: a throw stores the Throwable in `@__mc_exc`, every call
+  that may throw tests it (`Mir/EhLowerIr.php`, `Runtime/ExceptionRuntime.php`); no unwinder. Injected Throwable/Exception/Error hierarchy.
 - Self-host constraints shape the code: kind-discriminant dispatch over
   `instanceof` (bare short-name collisions across namespaces), return-value
   accumulators over `string &$out`, type-map held on `$this` over

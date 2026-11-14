@@ -147,6 +147,8 @@ final class EmitLlvm implements EmitVisitor
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
         $this->classIsACache = [];
+        $this->ancestorSets = [];
+        $this->instanceofIdsCache = [];
         $this->selfDescendantsCache = [];
         $this->fixedPropertyHoldersCache = [];
         $this->bagClassNamesCache = [];
@@ -200,7 +202,6 @@ final class EmitLlvm implements EmitVisitor
 
     /** Per-function SSA register + label allocator (fresh each {@see emit}). */
     private ?SsaBuilder $ssa = null;
-    private int $switchCounter = 0;
     /** Sequence for private per-function raw text sink files. */
     private int $functionTextCounter = 0;
     private string $bodyPend = '';
@@ -248,6 +249,10 @@ final class EmitLlvm implements EmitVisitor
     private array $classImplementsIfaceCache = [];
     /** @var array<string, bool> */
     private array $classIsACache = [];
+    /** @var array<string, array<string, bool>> class → self + parents + interfaces + origin closure, exactly what classIsA walks (class table is frozen during emit) */
+    private array $ancestorSets = [];
+    /** @var array<string, int[]> */
+    private array $instanceofIdsCache = [];
     /** @var array<string, string[]> */
     private array $selfDescendantsCache = [];
     /** @var array<string, ClassDef[]> */
@@ -270,6 +275,8 @@ final class EmitLlvm implements EmitVisitor
     private ?Node $dynQuietRead = null;
     /** @var array<string, string> erased dynamic-method helper bodies */
     private array $dynamicMethodHelpers = [];
+    /** @var array<string, int[]>|null lower-cased method name → ids of the classes the method_exists table lists it for */
+    private ?array $methodClassIds = null;
     /** Prevent recursive uniform-ABI selection while emitting an extracted fallback. */
     private bool $dynamicMethodAbiDisabled = false;
 
@@ -542,6 +549,11 @@ final class EmitLlvm implements EmitVisitor
     private array $rtExterns = [];
     /** @var array<string, bool> mangled module-fn name → defined (for extern detection) */
     private array $definedFns = [];
+    /** @var array<string, true> functions the program itself declares (not stdlib, not prelude):
+     *  php drops surplus arguments to these, where an internal function throws */
+    private array $userFnNames = [];
+    /** @var array<string, bool> {@see \Compile\Mir\Module::$countReadInlineNames} */
+    private array $countReadInlineNames = [];
     /** @var array<string, \Compile\Mir\FunctionDef> reified spec method name → its def, each with claimed params ({@see ResolveOverloads::claimRoute}) */
     private array $claimedFns = [];
     /** @var array<string, bool> FFI bindings (`#[Ffi\Symbol]`): a pointer arrives as an int */
@@ -765,6 +777,8 @@ final class EmitLlvm implements EmitVisitor
         $this->classImplementsCache = [];
         $this->classImplementsIfaceCache = [];
         $this->classIsACache = [];
+        $this->ancestorSets = [];
+        $this->instanceofIdsCache = [];
         $this->selfDescendantsCache = [];
         $this->fixedPropertyHoldersCache = [];
         $this->bagClassNamesCache = [];
@@ -774,6 +788,7 @@ final class EmitLlvm implements EmitVisitor
         $this->propDenyHelpers = [];
         $this->propDenyRows = [];
         $this->dynamicMethodHelpers = [];
+        $this->methodClassIds = null;
         $this->raiseRejected = [];
         $this->dynamicMethodAbiDisabled = false;
         $this->reflectNames = $module->reflectNames;
@@ -818,6 +833,7 @@ final class EmitLlvm implements EmitVisitor
         $this->builtinTwinRet = $module->builtinTwinRet;
         $this->builtinTwinParams = $module->builtinTwinParams;
         $this->builtinTwinRef = $module->builtinTwinRef;
+        $this->countReadInlineNames = $module->countReadInlineNames;
         // Only a twin the program NAMES in a string literal can be the target of
         // a call by name. Arming every one at every dynamic site inlined builtins
         // the program never uses — `gc_collect_cycles` pulled the cycle
@@ -859,11 +875,15 @@ final class EmitLlvm implements EmitVisitor
         $this->sigs->closureRefUnion = FunctionSignatures::closureRefUnion(
             $module->functions, $module->closureCaptures);
         $this->externFnNames = [];
+        $this->userFnNames = [];
         $this->dynfExportFns = [];
         $this->dynfExports = [];
         $this->sigs->namedSpread = $module->namedSpread;
         // Per-function by-ref + tagged(cell) param masks for call sites.
         foreach ($module->functions as $fn) {
+            if (!$fn->isExtern && !$fn->isPrelude) {
+                $this->userFnNames[$fn->name] = true;
+            }
             if ($fn->isExtern) {
                 $this->externFnNames[$fn->name] = true;
             } elseif ($this->exportDynf && !$fn->isPrelude && $this->dynfNameable($fn->name)) {
@@ -943,6 +963,9 @@ final class EmitLlvm implements EmitVisitor
         // property's REPR is its declaration's, {@see cellPropBoxed}).
         $this->cellPropArrayBase = [];
         $this->refCellPropNames = [];
+        $this->refCellPropShared = [];
+        $this->refCellPropPrivate = [];
+        $this->refCellPropPrivNames = [];
         $this->needsObjectVarsFn = false;
         $this->needsObjectVarsMgFn = false;
         $this->needsGetClassFn = false;
@@ -954,8 +977,14 @@ final class EmitLlvm implements EmitVisitor
         $this->erasedIfaceIface = [];
         $this->erasedIfaceMethod = [];
         $this->erasedIfaceArgc = [];
-        $this->modToken = \dechex($this->fnvHash64($module->sourceFile
-            . '|' . ($this->emitLibrary ? 'lib' : 'app')));
+        // Only a library can share an executable with another module, so only a
+        // library needs a name of its own. The executable's module takes a fixed
+        // token: identical prelude code then emits identical text in every
+        // program (shared object reuse), and `app` is not hex, so it can never
+        // equal a library's token.
+        $this->modToken = $this->emitLibrary
+            ? \dechex($this->fnvHash64($module->sourceFile . '|lib'))
+            : 'app';
         $this->vdSyms = [];
         $this->vdExtraBodies = '';
         $this->cloneErasedSym = '';
@@ -966,6 +995,7 @@ final class EmitLlvm implements EmitVisitor
         $this->scmpSyms = [];
         $this->scmpExtraBodies = '';
         $this->dynfThunks = [];
+        $this->dyncallSyms = [];
         $this->dynfTables = [];
         $this->dynfExtraBodies = '';
         $this->litTableBodies = '';
@@ -1448,6 +1478,7 @@ final class EmitLlvm implements EmitVisitor
                 $bodyBytes += \strlen($body);
             });
             \Compile\Stats::line('IR: bodies ' . (string)$bodyBytes . ' bytes');
+            $this->reportIrCensus($bodyBytes);
         }
         // Mark every RUNTIME helper (`@__mir_*`, `@__manticore_*`, cc/box
         // helpers) `linkonce_odr` so the linker dedups them when a user `.o`
@@ -1515,6 +1546,18 @@ final class EmitLlvm implements EmitVisitor
             \Manticore\sys_unlink($bodyPath);
             \Compile\Stats::step('  hoist allocas (streamed)', $statT, $hoistedAllocas, -1);
             $stagedBytes = $preambleBytes + $bodyBytes;
+            // Exceptions: the global slot replaces every invoke / landing pad ({@see \Compile\Mir\EhLowerIr}).
+            // Before pruning: the lowering adds references (`@__mc_uncaught`) the pruner must see.
+            $statT = \Compile\Stats::begin('  exceptions: slot lowering (staged)');
+            $eh = $this->ehLowerIr();
+            $ehPath = $this->streamIrPath . '.eh';
+            if (!$eh->runFile($this->streamIrPath, $ehPath)
+                || \Manticore\sys_rename($ehPath, $this->streamIrPath) !== 0) {
+                throw new \RuntimeException('EmitLlvm: cannot lower exceptions in staged IR ' . $this->streamIrPath);
+            }
+            $stagedBytes = $eh->bytes;
+            \Compile\Stats::step('  exceptions: slot lowering (staged)', $statT, $eh->checks, $eh->mayThrow);
+            \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
             // PruneIr used to be unreachable from here: this branch returns the
             // staged marker before the in-memory pruner below ever runs, so every
             // manifest build has been handing clang the discardable helpers it
@@ -1565,6 +1608,12 @@ final class EmitLlvm implements EmitVisitor
         $hoist = new \Compile\Mir\HoistAllocas();
         $ir = $hoist->runFast($ir);
         \Compile\Stats::step('  hoist allocas', $statT, $hoist->moved, -1);
+        // Before pruning: the lowering adds references (`@__mc_uncaught`) the pruner must see.
+        $statT = \Compile\Stats::begin('  exceptions: slot lowering');
+        $eh = $this->ehLowerIr();
+        $ir = $eh->run($ir);
+        \Compile\Stats::step('  exceptions: slot lowering', $statT, $eh->checks, $eh->mayThrow);
+        \Compile\Stats::line('eh: checks=' . (string)$eh->checks . ' mayThrow=' . (string)$eh->mayThrow);
         // Everything above is emitted on DEMAND FLAGS, not on reachability: the
         // whole unified array runtime, the rc/arena/pool helpers and the
         // unconditional prelude land in every module whether or not the program
@@ -1765,7 +1814,12 @@ final class EmitLlvm implements EmitVisitor
             $out .= $this->strGlobalDef('@' . $en . '__pk_value', 'value');
             $valueKey = $this->strSymBytes('@' . $en . '__pk_value');
         }
+        // Its own counters: numbered from the caller's, the bytes depended on what was emitted before.
+        $oldSsa = $this->ssa;
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
         $ir = $this->emitEnumVarsArray('%o', $name, $ed, $nameKey, $valueKey);
+        $this->ssa = $oldSsa;
         $sym = \Compile\Mir\RuntimeLibrary::propsFnSymbol($ed->classId);
         return $out . 'define i64 ' . $sym . "(ptr %o) {\nentry:\n" . $ir
             . '  %epri = ptrtoint ptr ' . $this->lastValue . " to i64\n"
@@ -1938,7 +1992,7 @@ final class EmitLlvm implements EmitVisitor
         $out .= "  %nbuf = call ptr @__mir_str_alloc(i64 %ncap)\n";
         $out .= "  %oldbuf = load ptr, ptr %bufp\n";
         $out .= "  call ptr @memcpy(ptr %nbuf, ptr %oldbuf, i64 %w)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %oldbuf)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %oldbuf)\n";
         $out .= "  store ptr %nbuf, ptr %bufp\n";
         $out .= "  store i64 %ncap, ptr %capp\n";
         $out .= "  br label %write\n";
@@ -2236,24 +2290,7 @@ final class EmitLlvm implements EmitVisitor
     private function mangle(string $name): string
     {
         if (isset($this->mangleCache[$name])) { return $this->mangleCache[$name]; }
-        // Keep fragments in an array: `.=` per byte has quadratic copy cost when
-        // a generated symbol is long, and mangle is called from nearly every
-        // emitter site. The resulting spelling is byte-for-byte unchanged.
-        /** @var string[] $parts */
-        $parts = [];
-        $n = \strlen($name);
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $c = \substr($name, $i, 1);
-            if ($c === '\\') { $parts[] = '_'; continue; }
-            // php identifiers admit every byte >= 0x80, so a class can be named
-            // in UTF-8 — symfony/cache declares `class \\xa9`. An LLVM identifier
-            // cannot carry those bytes raw, so they are hex-escaped into a
-            // still-unique ASCII name. `$u` keeps the escape from colliding with
-            // an ordinary `_XX` in a source name.
-            $b = \ord($c);
-            $parts[] = $b >= 0x80 ? '_u' . \strtoupper(\dechex($b)) : $c;
-        }
-        $out = \implode('', $parts);
+        $out = \Compile\SymbolName::mangle($name);
         $this->mangleCache[$name] = $out;
         return $out;
     }
@@ -2334,30 +2371,90 @@ final class EmitLlvm implements EmitVisitor
      * (`[&$o->p]`). Such a slot is promoted in place on the first `&`
      * ({@see EmitLlvmObjects::emitRefCell}): it holds `cell(REF, box)` from
      * then on, so a store of that name tests the slot's tag and writes through
-     * the box, and the class drop gives the slot's count on the box back. By
-     * NAME, not by class: the object may be typed as a parent or a child of the
-     * class the `&` named, and the runtime tag is the real answer anyway.
+     * the box, and the class drop gives the slot's count on the box back.
      *
-     * @var array<string, bool>
+     * Keyed by SLOT OWNER where the receiver's class says who owns the slot
+     * ({@see refSlotOwner}): a SHARED (public/protected) slot by name across
+     * every class — the object may be typed as a parent or a child of the class
+     * the `&` named — and a PRIVATE slot by its declaring class. A `&` whose
+     * receiver class is unknown, or a slot the class does not declare, stays by
+     * NAME and governs every slot of that name. Without the private split, a `&`
+     * to any `$__s` made every read of a prelude class's private `$__s` deref,
+     * so the same prelude body compiled differently from program to program.
+     *
+     * @var array<string, bool> names a `&` reached through an unknown receiver
      */
     private array $refCellPropNames = [];
+    /** @var array<string, bool> names of SHARED slots a `&` reached */
+    private array $refCellPropShared = [];
+    /** @var array<string, bool> `Owner::slot` of PRIVATE slots a `&` reached */
+    private array $refCellPropPrivate = [];
+    /** @var array<string, bool> names of the {@see $refCellPropPrivate} slots */
+    private array $refCellPropPrivNames = [];
 
-    /** Fill {@see $refCellPropNames} from one function body. */
+    /** Fill the `&`-reached slot sets from one function body. */
     private function collectRefCellPropNames(Node $n): void
     {
         if ($n->kind === Node::KIND_REF_CELL) {
             $kids = \Compile\Mir\Walk::children($n);
             if ($kids[0]->kind === Node::KIND_PROPERTY_ACCESS) {
-                $this->refCellPropNames[$this->asPropAccess($kids[0])->property] = true;
+                $pa = $this->asPropAccess($kids[0]);
+                $this->noteRefSlot($pa->object, $pa->property);
             }
             return;
         }
         if ($n->kind === Node::KIND_STORE_PROPERTY) {
             $sp = \Compile\Mir\Walk::children($n);
             $last = $sp[\count($sp) - 1];
-            if ($last->kind === Node::KIND_REF_CELL) { $this->refCellPropNames[$this->asStoreProp($n)->property] = true; }
+            if ($last->kind === Node::KIND_REF_CELL) {
+                $st = $this->asStoreProp($n);
+                $this->noteRefSlot($st->object, $st->property);
+            }
         }
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectRefCellPropNames($c); }
+    }
+
+    /**
+     * Who owns `$prop` on a receiver: '' when unknown (no class, or a slot the
+     * class does not declare), '*' for a shared (non-private) slot, else the
+     * class that declared the private slot. `$cd` when the caller already has
+     * the receiver's class, else read from `$recv`'s type.
+     */
+    private function refSlotOwner(?Node $recv, ?\Compile\Mir\ClassDef $cd, string $prop): string
+    {
+        if ($cd === null && $recv !== null && $recv->type->kind === Type::KIND_OBJ && $recv->type->class !== null) {
+            $cd = $this->classes[\ltrim($recv->type->class, '\\')] ?? null;
+        }
+        if ($cd === null) { return ''; }
+        $pm = $cd->propertyMeta[$prop] ?? null;
+        if ($pm === null) { return ''; }
+        if ($pm->visibility !== 'private') { return '*'; }
+        return $pm->declaringClass !== '' ? \ltrim($pm->declaringClass, '\\') : $cd->name;
+    }
+
+    private function noteRefSlot(Node $recv, string $prop): void
+    {
+        $owner = $this->refSlotOwner($recv, null, $prop);
+        if ($owner === '') {
+            $this->refCellPropNames[$prop] = true;
+        } elseif ($owner === '*') {
+            $this->refCellPropShared[$prop] = true;
+        } else {
+            $this->refCellPropPrivate[$owner . '::' . $prop] = true;
+            $this->refCellPropPrivNames[$prop] = true;
+        }
+    }
+
+    /** May the slot `$recv->$prop` hold a `&`-promoted REF cell? See {@see $refCellPropNames}. */
+    private function propMayHoldRef(?Node $recv, ?\Compile\Mir\ClassDef $cd, string $prop): bool
+    {
+        if (isset($this->refCellPropNames[$prop])) { return true; }
+        $owner = $this->refSlotOwner($recv, $cd, $prop);
+        if ($owner === '') {
+            return isset($this->refCellPropShared[$prop]) || isset($this->refCellPropPrivNames[$prop]);
+        }
+        if ($owner === '*') { return isset($this->refCellPropShared[$prop]); }
+        return isset($this->refCellPropPrivate[$owner . '::' . $prop]);
     }
 
     private function asStoreProp(Node $n): \Compile\Mir\StoreProperty { return $n; }
@@ -3575,6 +3672,23 @@ final class EmitLlvm implements EmitVisitor
     {
         $out = '';
         $acc = '';
+        if (\count($ids) > 8) {
+            // One switch per id set, called: an inline compare chain over every implementor of an
+            // interface (or every class with a method) repeated at each site.
+            $sorted = $ids;
+            \sort($sorted);
+            $key = '__mir_cidin|' . \implode(',', $sorted);
+            $sym = '@' . $this->mirHelperSym($this->keyedHelperName('__mir_cidin_', \implode(',', $sorted)));
+            if (!isset($this->dynamicMethodHelpers[$key])) {
+                $body = 'define hidden i1 ' . $sym . "(i64 %c) {\nentry:\n  switch i64 %c, label %no [";
+                foreach ($sorted as $id) { $body .= ' i64 ' . (string)$id . ', label %yes'; }
+                $body .= " ]\nyes:\n  ret i1 true\nno:\n  ret i1 false\n}\n\n";
+                $this->dynamicMethodHelpers[$key] = $body;
+            }
+            $acc = $this->ssa->allocReg();
+            $this->classIdMatchReg = $acc;
+            return '  ' . $acc . ' = call i1 ' . $sym . '(i64 ' . $cid . ")\n";
+        }
         foreach ($ids as $id) {
             $m = $this->ssa->allocReg();
             $out .= '  ' . $m . ' = icmp eq i64 ' . $cid . ', ' . (string)$id . "\n";
@@ -3612,6 +3726,7 @@ final class EmitLlvm implements EmitVisitor
      */
     private function instanceofMatchIds(string $target): array
     {
+        if (isset($this->instanceofIdsCache[$target])) { return $this->instanceofIdsCache[$target]; }
         $ids = [];
         foreach ($this->classes as $name => $cd) {
             if ($this->classIsA($name, $target)) { $ids[] = $cd->classId; }
@@ -3629,6 +3744,7 @@ final class EmitLlvm implements EmitVisitor
                 if ($lt === 'unitenum' || $ed->backing !== '') { $ids[] = $ed->classId; }
             }
         }
+        $this->instanceofIdsCache[$target] = $ids;
         return $ids;
     }
 
@@ -3648,30 +3764,37 @@ final class EmitLlvm implements EmitVisitor
                 || $this->classImplements($name, 'IteratorAggregate')
                 || $this->classImplements($name, 'Traversable');
         }
+        $set = $this->ancestorSetOf($name);
+        return isset($set[$target]);
+    }
+
+    /**
+     * Every name `classIsA` accepts for `$name`: each class on the parent chain
+     * (up to the first one missing from the table), their interfaces, and the
+     * same closure of each ORIGIN class (see LowerReify).
+     *
+     * @return array<string, bool>
+     */
+    private function ancestorSetOf(string $name): array
+    {
+        if (isset($this->ancestorSets[$name])) { return $this->ancestorSets[$name]; }
+        $set = [];
         $c = $name;
         while ($c !== '') {
             // `isset`, NOT `$cd = … ?? null` + `$cd === null`: a `ClassDef|null`
             // local types as NON-null, so the native self-build leaves the slot
-            // un-zeroed and the null test reads garbage — then `->interfaces`
-            // walks it. Latent for as long as the stale slot happened to hold
-            // something benign; adding an unrelated stdlib file shifted the
-            // layout and it SIGSEGV'd on `$x instanceof $cls` over an interface.
-            if (!isset($this->classes[$c])) { return false; }
+            // un-zeroed and the null test reads garbage.
+            if (!isset($this->classes[$c])) { break; }
             $cd = $this->classes[$c];
-            if ($c === $target) { return true; }
-            if (\in_array($target, $cd->interfaces, true)) { return true; }
-            // A REIFIED specialization is-a its ORIGIN, and everything the origin
-            // is: `Box$of$float` answers `instanceof Box`, and `Bag$of$float` —
-            // whose PARENT is the specialized `Base$of$float`, so the plain chain
-            // never reaches `Bag` — answers `instanceof Bag` and `instanceof Base`.
-            // The origin edge is what carries PHP's identity across the layout
-            // split (see LowerReify).
-            if ($cd->originClass !== '' && $this->classIsA($cd->originClass, $target)) {
-                return true;
+            $set[$c] = true;
+            foreach ($cd->interfaces as $i) { $set[$i] = true; }
+            if ($cd->originClass !== '') {
+                $set += $this->ancestorSetOf($cd->originClass);
             }
             $c = $cd->parent;
         }
-        return false;
+        $this->ancestorSets[$name] = $set;
+        return $set;
     }
 
     /**
@@ -3751,7 +3874,7 @@ final class EmitLlvm implements EmitVisitor
             || $tk === Type::KIND_BOOL) {
             // int/float_to_str coercion temp — always fresh.
             $this->rt->needsStrRc = true;
-            return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+            return '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
         }
         if ($tk === Type::KIND_CELL || $tk === Type::KIND_UNKNOWN || $op->type->isArray()) {
             // A cell / erased operand's text is uniformly OWNED: {@see
@@ -3763,10 +3886,9 @@ final class EmitLlvm implements EmitVisitor
             // A fresh cell temp (`$cell ?? '-'`, a cell call) owes its tagged
             // word too; {@see EmitLlvmExpr::coerceToStr} parks it by this ptr.
             $this->rt->needsStrRc = true;
-            $out = '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
-            $cell = $this->ptrArgCellByReg[$ptr] ?? '';
+            $out = '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
+            $cell = $this->ssa->takeCell($ptr);
             if ($cell !== '') {
-                unset($this->ptrArgCellByReg[$ptr]);
                 $out .= $this->rcReleaseReg($cell, 'cell');
             }
             return $out;
@@ -3838,39 +3960,18 @@ final class EmitLlvm implements EmitVisitor
     /** {@see \Compile\Mir\Ownership::tempCellOwned} */
     private function isFreshCellTemp(Node $n): bool { return !$this->isPreEvaluated($n) && $this->own->tempCellOwned($n, $this->lastCallWasBuiltin); }
 
-    /**
-     * Result reg of an {@see EmitLlvmBuiltins::emitPtrArg} operand that was a
-     * fresh CELL temp -> the TAGGED word to drop once the builtin has read it.
-     *
-     * Keyed by the reg rather than passed along because the ~30 string builtins
-     * all already hand {@see freeStrTemp} exactly that reg — so the cell twin
-     * costs no per-site edit and cannot be forgotten at a new one. SSA regs
-     * restart per function, so {@see EmitLlvmModule::emitFunction} clears it.
-     *
-     * @var array<string,string>
-     */
-    private array $ptrArgCellByReg = [];
-
-    /** Forget every pending cell temp; the reg keys are only valid inside one
-     *  function ({@see $ptrArgCellByReg}). */
-    private function clearPtrArgCells(): void
-    {
-        $this->ptrArgCellByReg = [];
-    }
-
     private function freeStrTemp(Node $node, string $ptr): string
     {
         // A fresh CELL temp: `$ptr` is only its PAYLOAD, and the payload of a
         // `string|false` may be a boxed bool whose untagged word is not an
         // address. Drop the tagged word instead — __mir_cell_drop dispatches.
-        $cell = $this->ptrArgCellByReg[$ptr] ?? '';
+        $cell = $this->ssa->takeCell($ptr);
         if ($cell !== '') {
-            unset($this->ptrArgCellByReg[$ptr]);
             return $this->rcReleaseReg($cell, 'cell');
         }
         if (!$this->isFreshStringTemp($node)) { return ''; }
         $this->rt->needsStrRc = true;
-        return '  call void @__mir_rc_release_str(ptr ' . $ptr . ")\n";
+        return '  call void @__mir_rc_release_s(ptr ' . $ptr . ")\n";
     }
 
     /**
@@ -3898,7 +3999,7 @@ final class EmitLlvm implements EmitVisitor
             $slot = $this->ownOpSlot($mo);
             if ($slot === '') { return ''; }
             if ($mo->op === 'drop') {
-                return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo))
+                return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo), $this->releaseNothrow($mo))
                     . '  store i64 0, ptr ' . $slot . "\n";
             }
             return $this->ownRetainSlot($slot, $mo);
@@ -4775,12 +4876,19 @@ final class EmitLlvm implements EmitVisitor
      * lowering path did not record one, and a callee that never asks leaves the
      * channel alone.
      */
-    private function faPush(string $callee, int $srcArgc, array $args = [], int $recvParams = 0): string
+    private function faPush(string $callee, int $srcArgc, array $args = [], int $recvParams = 0, string $pack = ''): string
     {
         if ($srcArgc < 0) { return ''; }
         if (!($this->sigs->usesFuncArgs[$callee] ?? false)) { return ''; }
         $this->rt->needsFuncArgs = true;
         $out = '';
+        if ($pack !== '') {
+            $spreadAt = -1;
+            foreach ($args as $si => $a) {
+                if ($a->kind === Node::KIND_SPREAD) { $spreadAt = (int)$si; break; }
+            }
+            if ($spreadAt >= 0) { return $this->faPushSpread($callee, $spreadAt, $args, $recvParams, $pack); }
+        }
         // Arguments past the callee's real arity have no parameter to land in.
         // Decided HERE and not at lowering: a stdlib entry routinely declares
         // fewer parameters than php accepts and lets its emitter builtin read
@@ -4808,6 +4916,36 @@ final class EmitLlvm implements EmitVisitor
             $out .= '  store i64 ' . $this->lastValue . ", ptr @__mir_fa_argx\n";
         }
         return $out . '  store i64 ' . (string)$srcArgc . ", ptr @__mir_fa_argc\n";
+    }
+
+    /**
+     * {@see faPush} for `f($a, ...$pack)`: the count is only known at run time —
+     * the fixed arguments plus the pack's length — and the overflow is every
+     * argument past the callee's arity, fixed surplus first, then the pack's tail.
+     * @param Node[] $args
+     */
+    private function faPushSpread(string $callee, int $spreadAt, array $args, int $recvParams, string $pack): string
+    {
+        $arity = \count($this->sigs->paramTypes[$callee] ?? []) - $recvParams;
+        if ($arity < 0) { $arity = 0; }
+        $over = [];
+        for ($ai = $arity; $ai < $spreadAt; $ai = $ai + 1) { $over[] = new \Compile\Mir\ArrayElement_(null, $args[$ai]); }
+        $out = '';
+        $into = '';
+        if (\count($over) > 0) {
+            $out .= $this->emitNode(new \Compile\Mir\ArrayLit($over, Type::vec(Type::cell())));
+            $out .= $this->coerceToPtr();
+            $into = $this->lastValue;
+        }
+        $this->lastValue = $pack;
+        $this->lastValueType = 'ptr';
+        $out .= $this->emitCellArrayToTyped(Type::vec(Type::cell()), true, (string)\max(0, $arity - $spreadAt), $into);
+        $out .= $this->coerceToI64();
+        $out .= '  store i64 ' . $this->lastValue . ", ptr @__mir_fa_argx\n";
+        $out .= $this->arrayCountFromPtrIr($pack);
+        $argc = $this->ssa->allocReg();
+        $out .= '  ' . $argc . ' = add i64 ' . $this->lastValue . ', ' . (string)$spreadAt . "\n";
+        return $out . '  store i64 ' . $argc . ", ptr @__mir_fa_argc\n";
     }
 
     /** The prefix of `$args` the callee actually has parameters for. Keeps the
@@ -5022,11 +5160,11 @@ final class EmitLlvm implements EmitVisitor
      *
      * @param string[] $callees
      */
-    private function faPushAny(array $callees, int $srcArgc, array $args = [], int $recvParams = 0): string
+    private function faPushAny(array $callees, int $srcArgc, array $args = [], int $recvParams = 0, string $pack = ''): string
     {
         foreach ($callees as $cal) {
             if ($this->sigs->usesFuncArgs[$cal] ?? false) {
-                return $this->faPush($cal, $srcArgc, $args, $recvParams);
+                return $this->faPush($cal, $srcArgc, $args, $recvParams, $pack);
             }
         }
         return '';

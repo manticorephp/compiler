@@ -1,0 +1,28 @@
+string(9) "Exception"
+string(12) "CompileError"
+string(5) "Error"
+string(5) "Error"
+string(9) "Exception"
+string(9) "Exception"
+string(9) "Exception"
+string(14) "LogicException"
+string(5) "Error"
+string(9) "TypeError"
+string(5) "Error"
+string(15) "ArithmeticError"
+string(5) "Error"
+string(9) "Exception"
+bool(false)
+bool(false)
+bool(false)
+bool(false)
+string(19) "SplDoublyLinkedList"
+string(19) "SplDoublyLinkedList"
+bool(false)
+bool(false)
+bool(false)
+bool(false)
+string(9) "Exception"
+string(12) "CompileError"
+string(5) "Error"
+string(19) "SplDoublyLinkedList"

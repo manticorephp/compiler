@@ -1,0 +1,73 @@
+float(6)
+float(4)
+float(4)
+int(3)
+float(9)
+string(1) "s"
+float(1.5)
+float(6)
+float(8)
+NULL
+float(5)
+NULL
+float(2.5)
+int(5)
+int(5)
+int(1)
+int(2)
+NULL
+NULL
+float(5)
+float(3)
+NULL
+bool(true)
+float(5)
+float(1)
+NULL
+float(20)
+float(6)
+float(0)
+float(4)
+string(7) "{"a":1}"
+float(5)
+float(6)
+float(7)
+NULL
+float(1)
+NULL
+float(2)
+string(1) "x"
+float(3)
+float(4)
+bool(true)
+array(2) {
+  [0]=>
+  float(1)
+  [1]=>
+  float(2.5)
+}
+array(2) {
+  [0]=>
+  float(1)
+  [1]=>
+  NULL
+}
+float(9)
+float(9)
+float(8)
+float(5)
+float(6)
+float(3)
+float(4)
+float(5)
+float(1)
+float(2)
+float(2)
+float(3)
+float(11)
+array(2) {
+  [0]=>
+  float(1)
+  [1]=>
+  NULL
+}

@@ -1,5 +1,6 @@
 <?php
 // isset($o[1][2]) on a nested ArrayAccess skips the outer offsetExists() call that php makes first.
+// issue: #606
 class Inner implements ArrayAccess {
     public function offsetExists(mixed $o): bool { echo "Inner::exists\n"; return true; }
     public function offsetGet(mixed $o): mixed { return 'v'; }

@@ -1,0 +1,1 @@
+{"applications": [{"name": "m", "src": "src", "output": "out/app", "allowUndefined": ["Missing\\*"]}]}

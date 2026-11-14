@@ -102,6 +102,9 @@ final class VivifyRefArgs implements Pass
     /** @var array<string, Type> candidate local → the callee's declared param type */
     private array $candidates = [];
 
+    /** @var array<string, bool> every local the current function reads */
+    private array $reads = [];
+
     /** @var array<string, true> locals php auto-vivifies as an ARRAY (`$x[] = v`) */
     private array $autoviv = [];
 
@@ -403,8 +406,15 @@ final class VivifyRefArgs implements Pass
         $this->candidates = [];
         $this->autoviv = [];
         $this->holds = [];
+        $this->reads = [];
         $this->walk($fn->body);
-        if (\count($this->candidates) === 0 && \count($this->autoviv) === 0 && \count($this->holds) === 0) { return; }
+        /** @var array<string, bool> $undef */
+        $undef = [];
+        foreach ($this->reads as $rname => $unusedR) {
+            if ($rname !== 'this' && !isset($this->defined[$rname])) { $undef[$rname] = true; }
+        }
+        if (\count($this->candidates) === 0 && \count($this->autoviv) === 0 && \count($this->holds) === 0
+            && \count($undef) === 0) { return; }
 
         // A `global $x` name in __main writes through `@g_x`, not a stack slot
         // ({@see EmitLlvmModule}), so an init here would neither create the
@@ -440,6 +450,14 @@ final class VivifyRefArgs implements Pass
             if (isset($skip[$name]) || isset($this->defined[$name])
                 || isset($this->candidates[$name])) { continue; }
             $inits[] = new StoreLocal($name, new \Compile\Mir\ArrayLit([], Type::unknown()), Type::unknown());
+        }
+        // A local read but written NOWHERE in the function — a template that
+        // reads what its includer would have set (`if (!empty($notices))`), dead
+        // code on this program's paths. php reads NULL; so does a local undefined
+        // on one path only, which is what this makes it.
+        foreach ($undef as $uname => $unusedU) {
+            if (isset($skip[$uname]) || isset($this->candidates[$uname]) || isset($this->autoviv[$uname])) { continue; }
+            $inits[] = new StoreLocal($uname, new NullConst(Type::null_()), Type::null_());
         }
         // A local a callee keeps a reference to is a ref-cell target for its whole
         // frame: the frame owns a counted box, and the callee's stored REF cell
@@ -509,6 +527,7 @@ final class VivifyRefArgs implements Pass
     private function walk(Node $n): void
     {
         $k = $n->kind;
+        if ($k === Node::KIND_LOAD_LOCAL) { $this->reads[$this->asLoadLocal($n)->name] = true; }
         if ($k === Node::KIND_CALL) {
             $c = $this->asCall($n);
             $this->scanArgs($c->function, $c->args, 0);

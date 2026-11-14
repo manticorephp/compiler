@@ -7,10 +7,11 @@
  * `docs/design/memory-abi.md` §7). Collection is manual-trigger only
  * and does not scan static/global roots — `docs/ROADMAP.md`.
  *
- * Every function here except `gc_collect_cycles` is a genuine no-op in
- * AOT mode — there is no runtime-tunable collector to toggle. The
- * presence of these symbols keeps user PHP that calls them
- * compiling.
+ * `gc_enable` / `gc_disable` / `gc_enabled` and `gc_collect_cycles` are codegen
+ * builtins ({@see EmitLlvmBuiltins}); the bodies here are the fallback stubs a
+ * compiler without the builtin links. As in Zend, `gc_disable()` stops only the
+ * AUTOMATIC (threshold-triggered) collection — roots are still buffered and an
+ * explicit `gc_collect_cycles()` still collects.
  */
 
 function gc_enabled(): bool
@@ -38,8 +39,8 @@ function gc_collect_cycles(): int
 }
 
 /**
- * php 8.5's key set. Every counter reads zero: this collector is manual-trigger
- * only and keeps no run statistics, so there is nothing else honest to report.
+ * php 8.5's key set. `roots` is the collector's buffered candidate count; the
+ * other counters read zero — no run statistics are kept.
  *
  * @return array<string,mixed>
  */
@@ -53,12 +54,18 @@ function gc_status(): array
         'collected' => 0,
         'threshold' => 10001,
         'buffer_size' => 16384,
-        'roots' => 0,
+        'roots' => __mc_gc_roots(),
         'application_time' => 0.0,
         'collector_time' => 0.0,
         'destructor_time' => 0.0,
         'free_time' => 0.0,
     ];
+}
+
+/** Bootstrap twin of the codegen builtin: the buffered root count. */
+function __mc_gc_roots(): int
+{
+    return 0;
 }
 
 function gc_mem_caches(): int{
@@ -83,4 +90,12 @@ function __mc_obj_addr(object $o): int
 function __mc_obj_from_addr(int $addr): mixed
 {
     throw new \Error('WeakMap/WeakReference need a compiler that knows __mc_obj_from_addr');
+}
+
+/** php's TypeError for an array / non-Stringable object handed to a `string` parameter by a runtime-name call. */
+function __mc_dyn_str_arg(mixed $v, string $msg): void
+{
+    if (\is_array($v) || (\is_object($v) && !($v instanceof \Stringable))) {
+        throw new \TypeError($msg . \get_debug_type($v) . ' given');
+    }
 }

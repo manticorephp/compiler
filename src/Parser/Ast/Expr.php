@@ -53,9 +53,9 @@ abstract class Expr
         return new Variable($name, $span);
     }
 
-    public static function identifier(string $name, Span $span): Identifier
+    public static function identifier(string $name, Span $span, bool $qualified = false): Identifier
     {
-        return new Identifier($name, $span);
+        return new Identifier($name, $span, $qualified);
     }
 
     public static function magicConstant(string $name, Span $span): MagicConstant
@@ -279,7 +279,8 @@ final class VarVar extends Expr
 
 final class Identifier extends Expr
 {
-    public function __construct(public readonly string $name, Span $span)
+    /** @param bool $qualified the source spelled a `\` or a `use const` alias: php never falls back to the global constant. */
+    public function __construct(public readonly string $name, Span $span, public readonly bool $qualified = false)
     {
         parent::__construct('Identifier', $span);
     }

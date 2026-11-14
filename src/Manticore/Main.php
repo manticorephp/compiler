@@ -475,7 +475,7 @@ function pcre2_link_flags(): string
 
 /**
  * Linker flags for the host OpenSSL (libssl + libcrypto), via `pkg-config`
- * so the -L path is right on any host (Homebrew keeps openssl@3 off the default
+ * so the -L path is right on any host (Homebrew keeps openssl off the default
  * search path). Falls back to bare `-lssl -lcrypto`. Used by the TLS transport
  * under `https://`; dead-strip drops it for a program that never opens a TLS
  * stream, exactly as pcre2 is dropped when regex is unused.
@@ -491,9 +491,11 @@ function openssl_link_flags(): string
             return $t;
         }
     }
-    $home = homebrew_opt_lib('openssl@3');
-    if ($home !== '' && \is_file($home . '/libssl.dylib') && \is_file($home . '/libcrypto.dylib')) {
-        return '-L' . $home . ' -lssl -lcrypto';
+    foreach (['openssl@4', 'openssl@3'] as $formula) {
+        $home = homebrew_opt_lib($formula);
+        if ($home !== '' && \is_file($home . '/libssl.dylib') && \is_file($home . '/libcrypto.dylib')) {
+            return '-L' . $home . ' -lssl -lcrypto';
+        }
     }
     return '-lssl -lcrypto';
 }
@@ -605,7 +607,7 @@ function icu_link_flags(string $name): string
  * Resolve a set of `#[Ffi\Library]` names to `cc` link tokens.
  *
  * The two probes above stay the RESOLVERS — they exist because Homebrew keeps
- * openssl@3 and pcre2 off the default search path, so a bare `-lssl` would not
+ * openssl and pcre2 off the default search path, so a bare `-lssl` would not
  * link here. What changes is who asks: the flags used to be appended
  * unconditionally from a "did we link stdlib.o" branch, which made
  * `#[Ffi\Library]` decorative. Now the bindings that name a library are what
@@ -619,7 +621,89 @@ function icu_link_flags(string $name): string
  *
  * @param string[] $libs
  */
+/**
+ * Linker flags for `$libs`, served from an on-disk cache of earlier probes.
+ *
+ * The probes (`pkg-config`, `pcre2-config`, Homebrew lookups) cost ~50 ms of
+ * shell processes per compile and answer the same thing until the host changes.
+ * The key covers what decides the answer (compiler binary, OS, PATH,
+ * PKG_CONFIG_PATH, the library list); a host change it does not cover shows up
+ * as a failed link, after which the caller forgets the entry, probes again and
+ * links once more ({@see link_flags_forget}).
+ *
+ * @param string[] $libs
+ */
 function ffi_link_flags(array $libs, string $already = ""): string
+{
+    CompileArgs::$linkFlagsCachePath = '';
+    $path = link_flags_cache_path($libs, $already);
+    if ($path !== '') {
+        try {
+            if (\file_exists($path)) {
+                $c = read_file($path);
+                if ($c !== null) {
+                    CompileArgs::$linkFlagsCachePath = $path;
+                    return $c;
+                }
+            }
+        } catch (\Throwable $e) {
+            // a miss
+        }
+    }
+    $out = ffi_link_flags_probe($libs, $already);
+    if ($path !== '') {
+        try {
+            $dir = \dirname($path);
+            if (!\is_dir($dir)) {
+                \mkdir($dir, 0777, true);
+            }
+            $tmp = $path . '.tmp' . (string)getpid();
+            if (\file_put_contents($tmp, $out) === \strlen($out)) {
+                \rename($tmp, $path);
+            }
+            side_cache_prune($dir);
+        } catch (\Throwable $e) {
+            // not cached; the next compile probes again
+        }
+    }
+    return $out;
+}
+
+/** @param string[] $libs */
+function link_flags_cache_path(array $libs, string $already): string
+{
+    $exe = self_exe_id();
+    if ($exe === '') {
+        return '';
+    }
+    $pathEnv = \getenv('PATH');
+    $pkgEnv = \getenv('PKG_CONFIG_PATH');
+    $key = \sha1($exe . "\0" . host_os() . "\0" . ($pathEnv === false ? '' : $pathEnv) . "\0"
+        . ($pkgEnv === false ? '' : $pkgEnv) . "\0" . \implode(',', $libs) . "\0" . $already);
+    return \dirname(obj_cache_dir()) . '/link/' . $key . '.txt';
+}
+
+/**
+ * Drop the cached flags the last {@see ffi_link_flags} served. True when there
+ * was one: the caller then probes again and retries its link once.
+ */
+function link_flags_forget(): bool
+{
+    $p = CompileArgs::$linkFlagsCachePath;
+    if ($p === '') {
+        return false;
+    }
+    CompileArgs::$linkFlagsCachePath = '';
+    try {
+        \unlink($p);
+    } catch (\Throwable $e) {
+        // gone already
+    }
+    return true;
+}
+
+/** @param string[] $libs */
+function ffi_link_flags_probe(array $libs, string $already = ""): string
 {
     $seen = [];
     foreach (\explode(" ", $already) as $tok) {
@@ -928,10 +1012,48 @@ function obj_cache_prune(): void
         $mb = 1;
     }
     $cap = $mb * 1048576;
-    system(
-        'cd ' . $dir . ' && ls -lt | awk -v cap=' . (string)$cap
-        . " 'NR>1 && \$9 ~ /\\.o\$/ { s += \$5; if (s > cap) print \$9 }' | xargs rm -f"
-    );
+    // The program parts live in `prog/` ({@see assemble_shared}) and age on
+    // their own budget, so the shared bodies are never pushed out by them.
+    foreach ([$dir, $dir . '/prog'] as $d) {
+        if (!\is_dir($d)) {
+            continue;
+        }
+        system(
+            'cd ' . $d . ' && ls -lt | awk -v cap=' . (string)$cap
+            . " 'NR>1 && \$9 ~ /\\.o\$/ { s += \$5; if (s > cap) print \$9 }' | xargs rm -f"
+        );
+    }
+}
+
+/**
+ * Drop entries of a side cache (analyzer index, link flags, prelude gates)
+ * that nothing has written for two weeks. Their keys carry the compiler's
+ * identity, so every rebuild leaves the previous set unread for good; a live
+ * entry that ages out is simply recomputed once. Runs when a new entry is
+ * stored, at most once per directory per process; any error is ignored.
+ */
+function side_cache_prune(string $dir): void
+{
+    static $done = [];
+    if (isset($done[$dir])) {
+        return;
+    }
+    $done[$dir] = true;
+    try {
+        $cut = \time() - 14 * 86400;
+        foreach (\scandir($dir) ?: [] as $e) {
+            $e = (string)$e;
+            if (\preg_match('/^[0-9a-f]{40}\.(json|txt)(\.tmp[0-9_]*)?$/', $e) !== 1) {
+                continue;
+            }
+            $m = \filemtime($dir . '/' . $e);
+            if ($m !== false && $m < $cut) {
+                \unlink($dir . '/' . $e);
+            }
+        }
+    } catch (\Throwable $e) {
+        // best effort
+    }
 }
 
 function obj_cache_dir(): string
@@ -951,11 +1073,14 @@ function obj_cache_dir(): string
 /** The toolchain's identity. A different clang is a different object. */
 function clang_id(): string
 {
-    $v = \shell_exec('clang --version 2>/dev/null | head -1');
-    if ($v === null || $v === false) {
-        return 'clang?';
+    // Asked once per process: every part's cache key needs it, and a fork per
+    // part sat on the compile path, hits included.
+    if (CompileArgs::$clangId !== '') {
+        return CompileArgs::$clangId;
     }
-    return \trim((string)$v);
+    $v = \shell_exec('clang --version 2>/dev/null | head -1');
+    CompileArgs::$clangId = ($v === null || $v === false) ? 'clang?' : \trim((string)$v);
+    return CompileArgs::$clangId;
 }
 
 function obj_cache_key(string $llPath, string $flags): string
@@ -1000,17 +1125,24 @@ function obj_cache_put(string $key, string $src): void
     if ($key === '' || !\file_exists($src)) {
         return;
     }
-    $dir = obj_cache_dir();
+    $final = obj_cache_dir() . '/' . $key . '.o';
+    // A key may name a subdirectory (`prog/<sha>`, {@see assemble_shared}).
+    $dir = \dirname($final);
     if (!\is_dir($dir)) {
         system('mkdir -p ' . $dir);
     }
-    $final = $dir . '/' . $key . '.o';
     if (\file_exists($final)) {
         return;
     }
-    $tmp = $final . '.tmp' . \str_replace('.', '', (string)\microtime(true));
-    if (\copy($src, $tmp)) {
-        if (!\rename($tmp, $final)) {
+    // Unique per writer: with the cache shared across programs, parallel builds
+    // put the SAME key at the same moment, and two writers on one temp name
+    // would truncate each other's object. A short copy (a full disk) is never
+    // renamed into place, where every later program would link it.
+    $tmp = $final . '.tmp' . (string)getpid() . '_' . \str_replace('.', '', (string)\microtime(true))
+        . '_' . (string)\mt_rand();
+    $size = \filesize($src);
+    if ($size === false || !\copy($src, $tmp) || \filesize($tmp) !== $size || !\rename($tmp, $final)) {
+        if (\file_exists($tmp)) {
             \unlink($tmp);
         }
     }
@@ -1181,8 +1313,21 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
                 );
             }
         }
+        $stagedPath = \substr($payload, 0, $cut);
+        // Every `build` stages, small apps included: shared generics apply here
+        // too, the program part keeping the split decided above.
+        if (shared_generics_enabled() && $stagedBytes <= share_staged_max_bytes()) {
+            $whole = read_file($stagedPath);
+            if ($whole !== null) {
+                $objs = assemble_shared($whole, $base, $cflags, true, $stagedJobs);
+                unset($whole);
+                if ($objs !== []) {
+                    return $objs;
+                }
+            }
+        }
         return assemble_ir_file(
-            \substr($payload, 0, $cut),
+            $stagedPath,
             $base,
             $cflags,
             $stagedBytes,
@@ -1203,6 +1348,12 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
         ? $forcedJobs : ($largeModule ? 1 : ($irBytes < 262144 ? 1 : assemble_jobs()));
     if ($largeModule && $forcedJobs >= 2) {
         \Compile\Stats::line('  assembly: forced split jobs=' . (string)$jobs);
+    }
+    if ($jobs < 2 && shared_generics_enabled()) {
+        $objs = assemble_shared($ir, $base, $cflags);
+        if ($objs !== []) {
+            return $objs;
+        }
     }
     if ($jobs < 2) {
         // Below a few hundred KB the split cannot pay for itself.
@@ -1344,6 +1495,130 @@ function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit =
     return $objs;
 }
 
+/**
+ * Shared generics: each large prelude/runtime body is compiled once per VARIANT
+ * and reused from the object cache by every program that emits the same text
+ * ({@see \Compile\Mir\ShareSplit}). Default on for an executable's module;
+ * `MANTICORE_SHARED_GENERICS=0` compiles the whole module as one unit (A/B
+ * measurement). A library shares its link with the app, so it stays one unit.
+ */
+function shared_generics_enabled(): bool
+{
+    if (CompileArgs::$emitLibrary) {
+        return false;
+    }
+    $e = \getenv('MANTICORE_SHARED_GENERICS');
+    return $e === false || $e === '' || ($e !== '0' && $e !== 'off');
+}
+
+/**
+ * Largest staged module (MB) that {@see assemble_shared} reads into memory
+ * (`MANTICORE_SHARE_MAX_MB`, default 512); a larger one keeps the file-based
+ * split. The split holds ~3x the module while it runs.
+ */
+function share_staged_max_bytes(): int
+{
+    $e = \getenv('MANTICORE_SHARE_MAX_MB');
+    $mb = ($e === false || $e === '') ? 512 : (int)$e;
+    return $mb * 1048576;
+}
+
+/**
+ * The executable's module as a program part plus one part per large shareable
+ * body, every part through the object cache.
+ *
+ * `$staged`: the IR came from a staged file, which already carries its attribute
+ * group (in-memory IR gets it per part). `$progParts` >= 2: the program part is
+ * itself big enough to split and goes through the hash-stable split of
+ * {@see assemble_ir_file_split}, its parts cached like any other.
+ *
+ * @return string[] the objects, or [] when the module has nothing to share or
+ *                  a part failed (the caller then assembles the module as before)
+ */
+function assemble_shared(string $ir, string $base, string $cflags, bool $staged = false, int $progParts = 1): array
+{
+    $statT = \Compile\Stats::begin('  shared split');
+    $splitter = new \Compile\Mir\ShareSplit();
+    // Tuning knobs for measurement; the defaults are the measured choice.
+    $em = \getenv('MANTICORE_SHARE_MIN');
+    if ($em !== false && $em !== '') { $splitter->minBytes = (int)$em; }
+    $ea = \getenv('MANTICORE_SHARE_AVAIL');
+    if ($ea !== false && $ea !== '') { $splitter->availMaxBytes = (int)$ea; }
+    $ed = \getenv('MANTICORE_SHARE_DEPTH');
+    if ($ed !== false && $ed !== '') { $splitter->availDepth = (int)$ed; }
+    $texts = $splitter->run($ir);
+    $bodies = $splitter->bodies;
+    unset($splitter);
+    if (\count($texts) < 2) {
+        return [];
+    }
+    $flags = '-O' . clang_opt_level() . clang_tuning_flags() . ' ' . $cflags;
+    /** @var string[] */
+    $paths = [];
+    $progPath = '';
+    $progBytes = 0;
+    foreach ($texts as $i => $t) {
+        // Per part, as for any split: the attribute group must sit in the file
+        // that names `#0`. A staged module already carries it.
+        $text = $staged ? $t : with_frame_pointers($t);
+        if ($i === 0 && $progParts >= 2) {
+            $progPath = $base . '.prog.ll';
+            $progBytes = \strlen($text);
+            if (!write_file($progPath, $text)) {
+                dprint('assemble: cannot write ' . $progPath);
+                return [];
+            }
+            continue;
+        }
+        // Numbered by POSITION in $paths: compile_parts_cached names part n's
+        // object `<base>.s<n>.o`, and a grouped clang names it after its input.
+        $p = $base . '.s' . (string)\count($paths) . '.ll';
+        if (!write_file($p, $text)) {
+            dprint('assemble: cannot write ' . $p);
+            return [];
+        }
+        $paths[] = $p;
+    }
+    unset($texts);
+    \Compile\Stats::step('  shared split (' . (string)$bodies . ' bodies)', $statT, -1, -1);
+    /** @var string[] */
+    $objs = [];
+    if ($progPath !== '') {
+        $objs = assemble_ir_file_split($progPath, $base . '.prog', $cflags, $progBytes, $progParts);
+        if ($objs === []) {
+            dprint('assemble: shared split: the program part failed; assembling the module as before');
+            shared_drop_objects($base);
+            return [];
+        }
+    }
+    $bodyObjs = compile_parts_cached(
+        $paths,
+        $base,
+        $flags,
+        '.s',
+        false,
+        true,
+        // The program part is this program alone; it is kept apart so a cache
+        // shipped between machines (CI) can carry only the shared bodies.
+        $progPath === '' ? 'prog/' : ''
+    );
+    if ($bodyObjs === []) {
+        dprint('assemble: shared split failed; assembling the module as before');
+        shared_drop_objects($base);
+        return [];
+    }
+    foreach ($bodyObjs as $o) {
+        $objs[] = $o;
+    }
+    return $objs;
+}
+
+/** The part objects a failed shared assembly built: the fallback links none of them. */
+function shared_drop_objects(string $base): void
+{
+    system('rm -f ' . $base . '.s*.o ' . $base . '.prog.p*.o');
+}
+
 /** Assemble already-staged large IR without reading it back into PHP. */
 function assemble_ir_file(
     string $llPath,
@@ -1416,6 +1691,25 @@ function assemble_ir_file_split(
     // Its module index would otherwise stay resident beside every clang.
     unset($splitter);
     $lto = thinlto_flags();
+    return compile_parts_cached(
+        $parts,
+        $base,
+        '-O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags,
+        '.p',
+        $lto !== ''
+    );
+}
+
+/**
+ * Compile part files to `<base><tag><i>.o` through the object cache: hits are
+ * copied, misses run in batches of what the machine can take ({@see host_jobs},
+ * `MANTICORE_SPLIT_BATCH`), and a miss that built is stored for the next build.
+ *
+ * @param string[] $parts the part `.ll` files
+ * @return string[] the objects in part order, or [] when any part failed
+ */
+function compile_parts_cached(array $parts, string $base, string $flags, string $tag, bool $lto, bool $group = false, string $firstKeyPrefix = ''): array
+{
     $objs = [];
     /** @var string[] */
     $cmds = [];
@@ -1423,13 +1717,12 @@ function assemble_ir_file_split(
     $putKeys = [];
     $hits = 0;
     foreach ($parts as $i => $partPath) {
-        $pobj = $base . '.p' . (string)$i . '.o';
+        $pobj = $base . $tag . (string)$i . '.o';
         $objs[] = $pobj;
-        $flags = '-O' . clang_opt_level() . clang_tuning_flags() . $lto . ' ' . $cflags;
         if (obj_cache_enabled(true)) {
             $k = obj_cache_key($partPath, $flags);
             if ($k !== '') {
-                $putKeys[$i] = $k;
+                $putKeys[$i] = ($i === 0 ? $firstKeyPrefix : '') . $k;
             }
         }
         $cmds[$i] = 'clang ' . $flags . ' -c -x ir ' . $partPath . ' -o ' . $pobj
@@ -1452,9 +1745,11 @@ function assemble_ir_file_split(
     if (obj_cache_enabled(true)) {
         \Compile\Stats::line('  obj cache: ' . (string)$hits . '/' . (string)\count($objs) . ' parts hit');
     }
+    /** @var int[] */
+    $missIdx = \array_keys($cmds);
     $cmds = \array_values($cmds);
     $stage = '  clang -O' . clang_opt_level() . ' -c x' . (string)\count($cmds)
-        . ($lto === '' ? '' : ' (thinlto)');
+        . ($lto ? ' (thinlto)' : '');
     $statT = \Compile\Stats::begin($stage);
     // ⚠ PARTS and CONCURRENCY are two different numbers, and conflating them is
     // what makes a big module unbuildable. clang's peak is roughly proportional
@@ -1494,13 +1789,39 @@ function assemble_ir_file_split(
             $batch = $b;
         }
     }
+    if ($group && \count($missIdx) > $batch) {
+        // ONE clang per group of misses, the groups side by side. Starting clang
+        // costs ~40 ms before it reads a byte, which is most of what a small part
+        // costs; one driver over many inputs pays it once (24 body parts: 1048 ms
+        // as 24 runs, 516 ms as one). clang names each object after its input,
+        // so from the parts' own directory `<base>.s<i>.ll` lands on `<base>.s<i>.o`.
+        $dir = \dirname($base);
+        /** @var array<int, string> */
+        $groups = [];
+        // Part 0 is the largest by far (the program part); it runs alone.
+        $j = 0;
+        foreach ($missIdx as $pi) {
+            if ($pi === 0 && $batch >= 2) {
+                $groups[0] = ' ' . \basename($parts[0]);
+                continue;
+            }
+            $g = $batch >= 2 && isset($groups[0]) && $groups[0] === ' ' . \basename($parts[0])
+                ? 1 + $j % ($batch - 1) : $j % $batch;
+            $groups[$g] = ($groups[$g] ?? '') . ' ' . \basename($parts[$pi]);
+            $j = $j + 1;
+        }
+        $cmds = [];
+        foreach ($groups as $files) {
+            $cmds[] = 'cd ' . $dir . ' && clang ' . $flags . ' -c -x ir' . $files . ' -Wno-override-module';
+        }
+    }
     // `wait` must be INSIDE the subshell: the background jobs are ITS children.
     $i = 0;
     $n = \count($cmds);
     if (\Compile\Progress::active() && $n === 0) {
         \Compile\Progress::counter('clang', $hits, \count($objs));
     }
-    if (\Compile\Progress::active() && $n > 0) {
+    if (\Compile\Progress::active() && $n > 0 && $n === \count($missIdx)) {
         // Progress-aware twin of the loop below: same batches, same commands,
         // but the parent polls the finished parts instead of blocking.
         /** @var string[] */
@@ -1555,8 +1876,8 @@ function assemble_ir_file_split(
     foreach ($objs as $i => $o) {
         if (!\file_exists($o)) {
             dprint(
-                'assemble: staged part ' . (string)$i . ' failed to build; IR at '
-                . $base . '.p' . (string)$i . '.ll'
+                'assemble: part ' . (string)$i . ' failed to build; IR at '
+                . $parts[$i]
             );
             return [];
         }
@@ -1769,7 +2090,8 @@ function self_dir(): string
     return CompileArgs::$selfDirCache;
 }
 
-function self_dir_resolve(): string
+/** The running compiler's own path (symlinks resolved), or ''. */
+function self_exe_resolve(): string
 {
     // GUARDED: the libc `argv` binding and `cstr_to_str` are throwing stubs
     // under the Zend cold-seed, where the env overrides are the resolution path.
@@ -1793,7 +2115,12 @@ function self_dir_resolve(): string
     } elseif ($self !== "") {
         $self = path_lookup($self);
     }
+    return $self;
+}
 
+function self_dir_resolve(): string
+{
+    $self = self_exe_resolve();
     if ($self === "") {
         return "";
     }
@@ -1802,6 +2129,29 @@ function self_dir_resolve(): string
         return "";
     }
     return \substr($self, 0, $slashAt);
+}
+
+/**
+ * Which compiler binary is running, as `size:mtime` of its file: a rebuilt
+ * compiler is a different one even at the same version. '' when unknown.
+ */
+function self_exe_id(): string
+{
+    static $id = null;
+    if ($id !== null) {
+        return $id;
+    }
+    $id = '';
+    $exe = self_exe_resolve();
+    if ($exe === '') {
+        return $id;
+    }
+    $size = \filesize($exe);
+    $mtime = \filemtime($exe);
+    if ($size !== false && $mtime !== false) {
+        $id = (string)$size . ':' . (string)$mtime;
+    }
+    return $id;
 }
 
 /**
@@ -2158,6 +2508,12 @@ final class CompileArgs
     /** `--strict=shapes`: a declared array shape is closed (extra key = error). */
     public static bool $strictShapes = false;
 
+    /** `--check`: stop after the front end, report every error, write nothing. */
+    public static bool $checkOnly = false;
+
+    /** `--all`: list undeclared names no reachable code uses (notes) too. */
+    public static bool $showAllDiagnostics = false;
+
     /** `--strict=analyze` (alias `--analyze-strict`): analyzer errors fail the compile. */
     public static bool $strictAnalyze = false;
 
@@ -2250,6 +2606,10 @@ final class CompileArgs
      * link). With `--runtime` it is the bundled stdlib itself.
      */
     public static bool $emitLibrary = false;
+    /** The cache file the last ffi_link_flags() answer came from ('' = probed). */
+    public static string $linkFlagsCachePath = '';
+    /** `clang --version`, asked once ({@see clang_id}). */
+    public static string $clangId = '';
 
     /**
      * `--allow-undefined-traps` — permit a LIBRARY target to ship calls the
@@ -2367,6 +2727,14 @@ final class CompileArgs
      */
     public static array $lazyUnitPaths = [];
 
+    /**
+     * Manifest `allowUndefined`: glob patterns (`*`, case-insensitive) of undefined.* names that never
+     * escalate past a warning. Set per application by `build`.
+     *
+     * @var string[]
+     */
+    public static array $allowUndefined = [];
+
     /** @var array<string, \Parser\Ast\Expr> */
     public static array $externConstants = [];
 
@@ -2436,6 +2804,8 @@ function apply_compile_args(\Cli\ParsedArgs $p): bool
     if ($p->flag("runtime")) { CompileArgs::$runtimeLibrary = true; CompileArgs::$exportTypes = false; }
     if ($p->flag("allow-undefined-traps")) { CompileArgs::$allowUndefinedTraps = true; }
     if ($p->flag("keep-ir")) { CompileArgs::$keepIr = true; }
+    if ($p->flag("check")) { CompileArgs::$checkOnly = true; }
+    if ($p->flag("all")) { CompileArgs::$showAllDiagnostics = true; }
     $jobs = $p->value("j", "");
     if ($jobs !== "") {
         $jn = (int)$jobs;
@@ -2636,18 +3006,14 @@ function target_os_family(): string
 }
 
 /**
- * Where the unwinder (`_Unwind_RaiseException` & co., which every PHP throw goes
- * through — {@see \Compile\Runtime\UnwindRuntime}) comes from at link time.
- *
- * Darwin: libSystem carries libunwind, nothing to add. Linux (glibc and musl):
- * `-static-libgcc` links libgcc_eh.a into the binary instead of the default
- * dynamic `libgcc_s.so.1`, so a binary gains no runtime dependency it did not
- * have before (docs/audit/ownership/eh-spike.md).
+ * Link flags of the measurement builds, appended at both link sites: the ASan
+ * runtime (MANTICORE_ASAN=1), and on Darwin `-no_compact_unwind` for ASan /
+ * MANTICORE_REF_QUARANTINE backtraces. Exceptions need nothing from the
+ * linker: they never unwind ({@see \Compile\Runtime\ExceptionRuntime}).
  */
-function unwind_link_flags(): string
+function debug_link_flags(): string
 {
-    // Both link sites append this, so the ASan runtime (MANTICORE_ASAN=1) rides along here.
-    return (is_darwin() ? "" : " -static-libgcc") . (\Compile\Debug::$asan ? " -fsanitize=address" : "") . ((\Compile\Debug::$asan || \Compile\Debug::$refQuarantine) && is_darwin() ? " -Wl,-no_compact_unwind" : "");
+    return (\Compile\Debug::$asan ? " -fsanitize=address" : "") . ((\Compile\Debug::$asan || \Compile\Debug::$refQuarantine) && is_darwin() ? " -Wl,-no_compact_unwind" : "");
 }
 
 /** True when the compile target is Darwin/macOS. */
@@ -2959,9 +3325,32 @@ function __mc_library_source_may_declare(string $src): bool
             }
         }
         return false;
-    } catch (Throwable $e) {
+    } catch (\Throwable $e) {
         return true;
     }
+}
+
+/**
+ * {@see __mc_stmt_declares} without `define()`: what a LAZY include unit hoists
+ * to the top level. A class or function is declared for the whole program, but
+ * a `define()` runs when its file does — hoisted, WordPress's xmlrpc.php
+ * `define('XMLRPC_REQUEST', true)` ran in every request of a binary that never
+ * includes it, and `wp_die()` answered in XML.
+ */
+function __mc_stmt_declares_code(\Parser\Ast\Stmt $s): bool
+{
+    $k = $s->kind;
+    if ($k === 'Class' || $k === 'Function' || $k === 'UseDecl'
+        || $k === 'Namespace' || $k === 'StaticLocal' || $k === 'Label') {
+        return true;
+    }
+    if ($k === 'Expression') { return false; }
+    foreach (__mc_stmt_children($s) as $c) {
+        if (__mc_stmt_declares_code($c)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -3342,6 +3731,9 @@ function build_compile_module(
         dprint("build: front-end returned null for " . $output);
         return 65;
     }
+    if (CompileArgs::$checkOnly) {
+        return 0;
+    }
     /** @var string[] $undefTraps */
     $undefTraps = [];
     try {
@@ -3449,7 +3841,7 @@ function build_compile_module(
         }
         if (!$keep) {
             system(
-                "rm -f " . $llPath . " " . $base . ".p*.ll "
+                "rm -f " . $llPath . " " . $base . ".p*.ll " . $base . ".s*.ll " . $base . ".s*.o "
                 . $base . ".p*.o " . $base . ".o"
             );
         }
@@ -3546,15 +3938,13 @@ function build_compile_module(
             $weak[] = $w;
         }
     }
-    $libFlags = ffi_link_flags($libs, $linkFlags);
-    if ($libFlags !== "") {
-        $linkExtra = $linkExtra . $libFlags;
-    }
+    $preLib = $linkExtra;
+    $tail = '';
     // Darwin's weak-undefined allowance, derived exactly as in CompileCommand.
     // This path carried NO -U flags at all before, which is a divergence that
     // only stayed invisible because link_stubs.sh defines what ld would reject.
     if (is_darwin()) {
-        $linkExtra = $linkExtra . weak_undef_flags($weak) . darwin_export_flags();
+        $tail = $tail . weak_undef_flags($weak) . darwin_export_flags();
     }
     // Drop what nothing reaches, as CompileCommand does. A split module pins its
     // linkonce_odr bodies per part (@llvm.compiler.used) and inlines copies of
@@ -3562,21 +3952,20 @@ function build_compile_module(
     // built in 8 parts came out 20.5 MB against 14.3 MB for one unit.
     // -lm as cmd_compile does: libm is separate on glibc/musl, and a manifest application that calls
     // floor/fmod/pow/... (Symfony's) fails to link without it. Darwin folds libm into libSystem.
-    $linkExtra = $linkExtra . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections -lm");
+    $tail = $tail . (is_darwin() ? " -Wl,-dead_strip" : " -Wl,--gc-sections -lm");
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
-    $linkExtra = $linkExtra . thinlto_link_flags() . unwind_link_flags();
+    $tail = $tail . thinlto_link_flags() . debug_link_flags();
+    // Probed, not cached: a failed link here is usually the program's own
+    // (an undefined symbol), and a retry would rerun the whole ThinLTO link.
+    $linkExtra = $preLib . ffi_link_flags_probe($libs, $linkFlags) . $tail;
     // Link via the stub-generating tail: the bootstrap leaves native
     // FFI-boundary primitives (`manticore_rt_*`) undefined; they link-stub to
     // 0. Falls back to a plain cc when the helper isn't found.
     $stubs = find_link_stubs_script();
     $statT = \Compile\Stats::begin('link');
-    if ($stubs !== "") {
-        $rc2 = system("bash " . $stubs . " " . $output . " " . $objList . $linkExtra);
-    } else {
-        $rc2 = system("cc " . $objList . $linkExtra . " -o " . $output);
-    }
+    $rc2 = build_link($stubs, $output, $objList, $linkExtra);
     \Compile\Stats::step('link', $statT, -1, -1);
     \Compile\Stats::dumpCounters();
     if ($rc2 !== 0) {
@@ -3584,9 +3973,17 @@ function build_compile_module(
         return 76;
     }
     if (!$keep) {
-        system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll");
+        system("rm -f " . $llPath . " " . $objPath . " " . $objList . " " . $base . ".p*.ll " . $base . ".s*.ll");
     }
     return 0;
+}
+
+function build_link(string $stubs, string $output, string $objList, string $linkExtra): int
+{
+    if ($stubs !== "") {
+        return system("bash " . $stubs . " " . $output . " " . $objList . $linkExtra);
+    }
+    return system("cc " . $objList . $linkExtra . " -o " . $output);
 }
 
 /**
@@ -3863,7 +4260,7 @@ function __mc_source_is_data_file(string $src): bool
     }
     try {
         $program = \Parser\Parser::parseSource($src);
-    } catch (Throwable $e) {
+    } catch (\Throwable $e) {
         return false;
     }
     $ret = null;
@@ -4094,6 +4491,7 @@ function __mc_rewrite_stmt_returns(\Parser\Ast\Stmt $s, string $slot, string $la
 function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module
 {
     $stmts = [];
+    $diag = new \Compile\Diagnostics();
     $aliases = [];
     $docs = [];
     $statT = \Compile\Stats::now();
@@ -4124,6 +4522,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $lastIdx = \count($sources) - 1;
     /** @var array<string, string> resolved path → value-slot global name */
     $includeSlots = [];
+    /** @var array<string, string> $lazyUnitDone */
+    $lazyUnitDone = [];
     /** @var array<string, string> resolved path → function that runs the file on its first `require` */
     $includeUnits = [];
     // Compute all source-wide lexical metadata before releasing raw source
@@ -4150,9 +4550,24 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 true,
             );
         } catch (\Throwable $e) {
-            $where = isset($paths[$i]) ? $paths[$i] : "<source>";
-            dprint($where . ": parse failed: " . $e->getMessage());
-            return null;
+            $where = __mc_abs_source_path(isset($paths[$i]) ? $paths[$i] : '');
+            if ($where === '') {
+                $where = "<source>";
+            }
+            $tolErrors = [];
+            try {
+                $tolErrors = Parser::parseTolerant($source, $where, false, false)->errors;
+            } catch (\Throwable $te) {
+            }
+            foreach ($tolErrors as $pe) {
+                $diag->add('error', 'parse.error', $pe->reason !== '' ? $pe->reason : $pe->getMessage(), $where, $pe->errLine, $pe->column);
+            }
+            if (\count($tolErrors) === 0) {
+                $pl = $e instanceof \Parser\ParseError ? $e->errLine : 0;
+                $pc = $e instanceof \Parser\ParseError ? $e->column : 0;
+                $diag->add('error', 'parse.error', $e instanceof \Parser\ParseError && $e->reason !== '' ? $e->reason : $e->getMessage(), $where, $pl, $pc);
+            }
+            continue;
         }
         foreach (\Compile\Mir\PreludeDemand::definedFunctions($source) as $fn) {
             $ownFns[$fn] = true;
@@ -4292,7 +4707,14 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         if (!$isEntry && $incSlot !== '' && $srcPath !== '' && isset(CompileArgs::$lazyUnitPaths[$srcPath])) {
             $effects = false;
             foreach ($topStmts as $s) {
-                if (!__mc_stmt_declares($s) && !__mc_stmt_is_pure_return($s)) {
+                if (!__mc_stmt_declares_code($s) && !__mc_stmt_is_pure_return($s)) {
+                    $effects = true;
+                    break;
+                }
+                // A file of function declarations alone still gets a unit: its
+                // done flag is what function_exists() asks before the file runs
+                // ({@see \Compile\Mir\Passes\LowerFromAst::lazyFnDoneKey}).
+                if ($s->kind === 'Function') {
                     $effects = true;
                     break;
                 }
@@ -4301,7 +4723,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             // would go into `__main` whole, and its `return` would end the PROGRAM. Such a file takes the eager path below,
             // where each return becomes a jump past the file.
             foreach ($topStmts as $s) {
-                if (__mc_stmt_declares($s) && __mc_file_return_kind([$s]) > 0) {
+                if (__mc_stmt_declares_code($s) && __mc_file_return_kind([$s]) > 0) {
                     $effects = false;
                     break;
                 }
@@ -4310,6 +4732,8 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 $unitName = '__mc_unit_' . (string)$i;
                 $includeSlots[$incAbs] = $incSlot;
                 $includeUnits[$incAbs] = $unitName;
+                $lazyUnitDone[$incAbs] = $incSlot . '_d';
+                $lazyUnitDone[$srcPath] = $incSlot . '_d';
                 $span0 = $topStmts[0]->span;
                 $doneKey = $incSlot . '_d';
                 $slotRef = function (string $key) use ($span0): \Parser\Ast\Expr {
@@ -4340,7 +4764,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
                 /** @var \Parser\Ast\Stmt[] $effectStmts */
                 $effectStmts = [];
                 foreach ($topStmts as $s) {
-                    if (__mc_stmt_declares($s)) {
+                    if (__mc_stmt_declares_code($s)) {
                         $stmts[] = $s;
                     } else {
                         $effectStmts[] = $s;
@@ -4452,6 +4876,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         }
     }
     \Compile\Stats::step('parse', $statT, \count($stmts), -1);
+    if ($diag->hasErrors()) {
+        dprint($diag->render());
+        return null;
+    }
 
     // The on-disk prelude sources. Reading them goes through the libc fopen
     // binding (a throwing stub under the Zend cold-seed), so guard: an
@@ -4584,6 +5012,7 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     $intlSrc = prelude_src_or_empty("intl.php");
     $weakSrc = prelude_src_or_empty("weak.php");
     \Compile\Stats::step('prelude read (all files)', $statT, -1, -1);
+    $demandT = \Compile\Stats::begin('prelude demand');
 
     // array_fns gates on the functions the FILE defines (sort/usort/explode/…),
     // so adding one there needs no second edit here. These live in the prelude,
@@ -5426,13 +5855,73 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $unitAbs[$entryAbs] = true;
         }
         $lower->compileUnitFiles = $unitAbs;
-        // Reserved-attribute errors (#[Override] with no parent, a bad target, a
-        // repeat) abort the build by default; analysis collects them instead.
-        if ($collect !== null) {
-            $lower->attrCollectMode = true;
-        }
+        $lower->lazyUnitDone = $lazyUnitDone;
+        // User-facing lowering errors are recorded (and lowering carries on); the
+        // gate after run() reports them all.
+        $lower->diags = $diag;
+        \Compile\Stats::step('prelude demand', $demandT, -1, -1);
         $statT = \Compile\Stats::begin('LowerFromAst');
         $module = $lower->run($module);
+        if ($collect === null) {
+            /** @var string[] $extNames */
+            $extNames = [];
+            foreach (CompileArgs::$externDecls as $extDecl) { $extNames[] = \strtolower($extDecl->name); }
+            /** @var array<string, bool> $userAbs */
+            $userAbs = [];
+            foreach ($paths as $up) { $userAbs[__mc_abs_source_path((string)$up)] = true; }
+            \Compile\Mir\UndefinedFunctionScan::run($module, $diag, $extNames, $userAbs, $lower->userCallNames, $lower->userCallFiles, $lower->userCallLines, $lower->userCallFns, $lower->userCallGuards);
+        }
+        $diag->resolveSiteFns();
+        $reach = null;
+        if ($collect === null) {
+            /** @var array<string, array<string, bool>> $classRefs */
+            $classRefs = [];
+            foreach ($lower->staticClassRefs as $rc => $rfns) {
+                foreach ($rfns as $rfn => $_r) { $classRefs[(string)$rc][$diag->resolveFn((string)$rfn)] = true; }
+            }
+            $reachT = \Compile\Stats::begin('Reachability');
+            /** @var array<string, array<string, bool>> $dynRefs */
+            $dynRefs = [];
+            foreach ($lower->dynClassRefs as $rc => $rfns) {
+                foreach ($rfns as $rfn => $_r) { $dynRefs[(string)$rc][$diag->resolveFn((string)$rfn)] = true; }
+            }
+            $reach = \Compile\Mir\Reachability::compute($module, $classRefs, $dynRefs, CompileArgs::$emitLibrary);
+            \Compile\Stats::step('Reachability', $reachT, \count($module->functions), \count($module->classes));
+            $reachDump = (string)\getenv('MANTICORE_REACH_DUMP');
+            if ($reachDump === '1' || $reachDump === '2') {
+                $rd = $reach->dump($reachDump === '2');
+                foreach ($diag->useSites as $sk => $sites) {
+                    foreach ($sites as $site) {
+                        foreach ($site['fns'] as $sfnv) {
+                            $sfn = (string)$sfnv;
+                            $rd .= 'site: ' . (string)$sk . ' line=' . (string)$site['line'] . ' fn=' . $sfn
+                                . ' reach=' . ($reach->reaches($sfn) ? '1' : '0') . ' maybe=' . ($reach->maybeReaches($sfn) ? '1' : '0') . "\n";
+                        }
+                    }
+                }
+                dprint(\rtrim($rd, "\n"));
+            }
+            $diag->applyReachability($reach, CompileArgs::$allowUndefinedTraps, $lower->sawDynConstant, CompileArgs::$allowUndefined);
+        }
+        if ($collect !== null) {
+            foreach ($diag->items as $it) {
+                if ($it->severity === 'error') {
+                    $collect->lines[] = 'line ' . (string)$it->line . ': error: ' . $it->message;
+                }
+            }
+        }
+        if ($collect === null) {
+            if ($diag->hasErrors()) {
+                dprint($diag->render(CompileArgs::$showAllDiagnostics));
+                return null;
+            }
+            if (\count($diag->items) > 0) {
+                dprint($diag->render(CompileArgs::$showAllDiagnostics));
+            }
+        }
+        if (CompileArgs::$checkOnly) {
+            return $module;
+        }
         // Path → value-slot map for `require`/`include`. Set after lowering
         // because that is when the Module exists; the map itself was built at
         // parse-merge time, the only point that still knows which file each
@@ -5442,11 +5931,6 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
         \Compile\Stats::step('LowerFromAst', $statT, \count($module->functions), \count($module->classes));
         // `if (is_int($x))` reads an unboxed copy of a cell $x ({@see NarrowScalarGuards}).
         $module = (new \Compile\Mir\Passes\NarrowScalarGuards())->run($module);
-        if ($collect !== null) {
-            foreach ($lower->attrErrors as $ae) {
-                $collect->lines[] = $ae;
-            }
-        }
         CompileArgs::$linkStdlib = $lower->externInjected;
         $analysisContext = null;
         $worklistMode = \getenv('MANTICORE_WORKLIST');
@@ -5750,6 +6234,9 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
             $collect->lines[] = $e->getMessage();
             return null;
         }
+        if (\count($diag->items) > 0) {
+            dprint($diag->render());
+        }
         dprint("compile failed: " . $e->getMessage());
         return null;
     }
@@ -5851,11 +6338,34 @@ function compile_via_mir(array $sources, array $paths = []): ?string
  * the compiler resolves the prelude (`prelude_src_or_empty`). Best-effort: a
  * missing / unparseable prelude file is skipped, not fatal.
  *
+ * @return array<string, string> prelude file name => contents
+ */
+function analyze_prelude_sources(): array
+{
+    return \Semantic\LibrarySymbols::preludeSources();
+}
+
+/**
+ * The prelude files of {@see analyze_prelude_sources}, parsed.
+ *
+ * @param array<string, string> $sources file name => contents
  * @return \Analyze\ParsedFile[]
  */
-function analyze_prelude_files(): array
+function analyze_prelude_files(array $sources): array
 {
-    return \Semantic\LibrarySymbols::load()->preludeFiles();
+    /** @var \Analyze\ParsedFile[] $out */
+    $out = [];
+    foreach ($sources as $name => $src) {
+        // `prelude_src_or_empty` strips the opening `<?php` (it is built to append
+        // after a prelude header); re-add it so this parses as a standalone file.
+        try {
+            $program = \Parser\Parser::parseSource("<?php\n" . $src);
+            $out[] = new \Analyze\ParsedFile("prelude/" . (string)$name, $program);
+        } catch (\Throwable $e) {
+            // A prelude file that does not parse standalone is simply skipped.
+        }
+    }
+    return $out;
 }
 
 /**
@@ -5964,12 +6474,28 @@ function perform_analysis(array $files, array $argPaths, bool $deep): array
     }
 
     /** @var \Analyze\ParsedFile[] $libFiles prelude — known symbols, never reported */
-    $libFiles = analyze_prelude_files();
+    // The prelude's symbol table, cached between compiles: parsing every prelude
+    // file to rebuild it was most of the analyzer's cost ({@see \Analyze\PreludeIndex}).
+    $statT = \Compile\Stats::begin('analyze: prelude');
+    $preludeSrc = analyze_prelude_sources();
+    $piKey = \Analyze\PreludeIndex::key($preludeSrc, self_exe_id());
+    $libIndex = \Analyze\PreludeIndex::load($piKey);
+    if ($libIndex !== null) {
+        \Compile\Stats::line('analyze: prelude index (cached)');
+    } else {
+        $libIndex = \Analyze\Index::build(analyze_prelude_files($preludeSrc));
+        \Analyze\PreludeIndex::store($piKey, $libIndex);
+        \Compile\Stats::line('analyze: prelude files (parsed)');
+    }
+    \Compile\Stats::step('analyze: prelude', $statT, \count($libIndex->functions), -1);
+    unset($preludeSrc);
     $stdlibFns = $checkUndefined ? analyze_stdlib_fn_names() : [];
+    $statT = \Compile\Stats::begin('analyze: rules');
     $analyzer = new \Analyze\Analyzer();
-    foreach ($analyzer->run($parsed, $libFiles, $checkUndefined, $stdlibFns) as $d) {
+    foreach ($analyzer->run($parsed, [], $checkUndefined, $stdlibFns, $libIndex) as $d) {
         $diags[] = $d;
     }
+    \Compile\Stats::step('analyze: rules', $statT, \count($parsed), -1);
 
     // Deep pass: drive the compiler's OWN MIR type checks (no duplicated logic).
     if ($deep) {
@@ -6006,6 +6532,7 @@ function main_driver(): int
     $cli->add(new \Cli\Commands\LspCommand());
     $cli->add(new \Cli\Commands\UpgradeCommand());
     $cli->add(new \Cli\Commands\DoctorCommand());
+    $cli->add(new \Cli\Commands\CacheCommand());
     $cli->add(new \Cli\Commands\CompletionsCommand($cli));
     return $cli->run(collect_argv());
 }

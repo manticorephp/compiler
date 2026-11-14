@@ -108,7 +108,20 @@ function __mc_file_fclose(\Ffi\Ptr $fp): int
     return \Runtime\Libc\fclose($fp);
 }
 
-function file_get_contents(string $path, bool $use_include_path = false, ?\Resource $context = null): string|false
+function file_get_contents(string $filename, bool $use_include_path = false, ?\Resource $context = null, int $offset = 0, ?int $length = null): string|false
+{
+    if ($length !== null && $length < 0) {
+        throw new \ValueError('file_get_contents(): Argument #5 ($length) must be greater than or equal to 0');
+    }
+    $s = \__mc_file_get_contents_whole($filename, $context);
+    if ($s === false || ($offset === 0 && $length === null)) {
+        return $s;
+    }
+    return $length === null ? \substr($s, $offset) : \substr($s, $offset, $length);
+}
+
+/** The whole of `$path` (a file, http(s):// or php://input) — {@see file_get_contents}. */
+function __mc_file_get_contents_whole(string $path, ?\Resource $context): string|false
 {
     // The seam. http:// and https:// share the HTTP layer; the only difference is
     // the transport __mc_http_get opens (plain socket vs TLS), so both route here.
@@ -176,8 +189,9 @@ function file_get_contents(string $path, bool $use_include_path = false, ?\Resou
  * Write a string to a file. `$flags & FILE_APPEND` (8) appends instead of
  * truncating. Returns the byte count, or false on failure.
  */
-function file_put_contents(string $path, string $data, int $flags = 0): int|false
+function file_put_contents(string $filename, string $data, int $flags = 0, mixed $context = null): int|false
 {
+    $path = $filename;
     $mode = ($flags & 8) !== 0 ? "ab" : "wb";
     if (\__mc_offload_active()) {
         \__mc_offload_cancel_point();
@@ -1496,7 +1510,7 @@ function __mc_input(?string $set = null): string
     return $body;
 }
 
-function fopen(string $filename, string $mode)
+function fopen(string $filename, string $mode, bool $use_include_path = false, mixed $context = null)
 {
     $scheme = \__mc_scheme_of($filename);
     if ($scheme === 'php') {
@@ -2015,8 +2029,9 @@ function is_readable(string $path): bool
 /**
  * Delete a file. Returns true on success.
  */
-function unlink(string $path): bool
+function unlink(string $filename, mixed $context = null): bool
 {
+    $path = $filename;
     if (\__mc_offload_active()) {
         \__mc_offload_cancel_point();
         return \__mc_offload_path(__MC_OFF_UNLINK, $path) === 0;
