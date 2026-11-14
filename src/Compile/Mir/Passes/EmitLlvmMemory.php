@@ -364,8 +364,8 @@ trait EmitLlvmMemory
         // whole `MANTICORE_DEBUG_VERIFY=1` cold seed aborted inside the parser
         // on a live Token. Same field, same spelling as the zero-test below —
         // that is the lesson `__mir_rc_release` already carries in its comment.
-        $out  = "  %vsh = shl i64 %rc, 8\n";
-        $out .= "  %vsig = ashr i64 %vsh, 8\n";
+        $out  = "  %vsh = shl i64 %rc, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
+        $out .= "  %vsig = ashr i64 %vsh, " . (string)\Compile\MemoryAbi::RC_SIGN_SHIFT . "\n";
         $out .= "  %vbad = icmp slt i64 %vsig, 1\n";
         $out .= "  br i1 %vbad, label %vcorrupt, label %vok\n";
         $out .= "vcorrupt:\n";
@@ -445,7 +445,9 @@ trait EmitLlvmMemory
             $deeper = $el->element;
             if ($deeper !== null && $deeper->kind === Type::KIND_ARRAY) {
                 $sub = $this->nestedArrFlavor($deeper, '');
-                if ($sub !== 'arr') { return $prefix . 'arr' . $sub; }
+                // Bounded HERE, not by the comment: a fourth level asked for a
+                // helper nobody emits (`__mir_array_release_ownel_arrarrarrarrstr`).
+                if ($sub !== 'arr' && \substr_count('arr' . $sub, 'arr') <= 3) { return $prefix . 'arr' . $sub; }
             }
         }
         return $prefix . 'arr';
@@ -523,7 +525,19 @@ trait EmitLlvmMemory
      *  (the slot is left as it is — the caller stores over it). */
     private function ownDropIr(string $slot, \Compile\Mir\MemoryOp_ $mo): string
     {
-        return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo));
+        return $this->rcReleaseSlot($slot, $this->rcReleaseFlavor($mo), $this->releaseNothrow($mo));
+    }
+
+    /**
+     * The drop cannot run user code, so its call needs no exception check: a
+     * slot whose static type is a string never holds a Generator (the one `str`
+     * flavor value whose free runs a `finally`). The nothrow twin traps on a
+     * Generator frame, so a wrong type is loud ({@see EmitLlvmRuntime}).
+     */
+    private function releaseNothrow(\Compile\Mir\MemoryOp_ $mo): bool
+    {
+        $t = $mo->target;
+        return $t !== null && $mo->flavor === 'str' && $t->type->kind === Type::KIND_STRING;
     }
 
     /** `own_retain`: a +1 on the word `$slot` holds, at the depth its release
@@ -785,7 +799,7 @@ trait EmitLlvmMemory
     }
 
     /** Emit a release of the rc value held in `$slot` (obj / vec / vecobj / str). */
-    private function rcReleaseSlot(string $slot, string $flavor): string
+    private function rcReleaseSlot(string $slot, string $flavor, bool $nothrow = false): string
     {
         $iv = $this->ssa->allocReg();
         $out = '  ' . $iv . ' = load i64, ptr ' . $slot . "\n";
@@ -793,7 +807,7 @@ trait EmitLlvmMemory
             return $out . $this->mixedReleaseIr($iv, \substr($flavor, 3),
                 $this->frame->mixedFlagBySlot[$slot] ?? '');
         }
-        return $out . $this->rcReleaseReg($iv, $flavor);
+        return $out . $this->rcReleaseReg($iv, $flavor, $nothrow);
     }
 
     /**
@@ -892,7 +906,7 @@ trait EmitLlvmMemory
     }
 
     /** Emit a release of the rc value carried in the i64 register `$i64reg`. */
-    private function rcReleaseReg(string $i64reg, string $flavor): string
+    private function rcReleaseReg(string $i64reg, string $flavor, bool $nothrow = false): string
     {
         // Every vec/assoc flavor releases through the one __mir_array_release*
         // (mode-driven; drops hashed string keys, and the _obj/_str variants
@@ -941,7 +955,7 @@ trait EmitLlvmMemory
             return $this->mixedReleaseIr($i64reg, 'vecbuf', '');
         }
         $fn = '@__mir_array_release';
-        if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = '@__mir_rc_release_str'; }
+        if ($flavor === 'str') { $this->rt->needsStrRc = true; $fn = $nothrow ? '@__mir_rc_release_s' : '@__mir_rc_release_str'; }
         elseif ($flavor === 'obj') { $this->rt->needsRc = true; $fn = '@__mir_rc_release'; }
         // A capturing closure env: rc@-8 behind its own magic, and its generated
         // drop releases the captures ({@see EmitLlvmRuntime::closureRcRuntime}).

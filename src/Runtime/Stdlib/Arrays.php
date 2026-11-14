@@ -100,10 +100,10 @@ function array_key_exists(int|string $key, array $arr): bool
     return false;
 }
 
-function array_keys(array $arr): array
+function array_keys(array $array): array
 {
     $out = [];
-    foreach ($arr as $k => $_) {
+    foreach ($array as $k => $_) {
         $out[] = $k;
     }
     return $out;

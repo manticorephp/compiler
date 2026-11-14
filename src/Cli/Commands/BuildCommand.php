@@ -39,11 +39,14 @@ final class BuildCommand extends Command
             new Option('libs-only', \Cli\ArgParse::FLAG, 'Build library targets and stop (cold seed)'),
             new Option('apps-only', \Cli\ArgParse::FLAG, 'Build application targets only'),
             new Option('no-analyze', \Cli\ArgParse::FLAG, 'Accepted for compile parity; build does not run the analyzer'),
+            new Option('check', \Cli\ArgParse::FLAG, 'Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen'),
+            new Option('all', \Cli\ArgParse::FLAG, 'List unreachable undeclared names too'),
         ], ProgressOptions::all());
     }
 
     public function run(ParsedArgs $args): int
     {
+        \gc_disable(); // the front end makes no cyclic garbage (CC census: 0 freed); a pass over the live graph is pure cost
         $err = \Compile\Progress::configure($args->value('progress', 'auto'), $args->flag('quiet'), $args->flag('timings'), $args->value('color', 'auto'));
         if ($err !== '') {
             \Manticore\dprint('build: ' . $err);
@@ -74,6 +77,7 @@ final class BuildCommand extends Command
         }
         \Manticore\CompileArgs::$allowUndefinedTraps = $args->flag("allow-undefined-traps");
         \Manticore\CompileArgs::$keepIr = $args->flag("keep-ir");
+        \Manticore\CompileArgs::$checkOnly = $args->flag("check");
         $src = \Manticore\read_file($manifestPath);
         if ($src === null) {
             \Manticore\dprint("build: cannot read manifest: " . $manifestPath);
@@ -113,6 +117,12 @@ final class BuildCommand extends Command
             }
             $srcDir = $srcDirs[0];
             $output = (string)$app["output"];
+            \Manticore\CompileArgs::$allowUndefined = [];
+            if (isset($app["allowUndefined"])) {
+                foreach ((array)$app["allowUndefined"] as $ap) {
+                    \Manticore\CompileArgs::$allowUndefined[] = (string)$ap;
+                }
+            }
             /** @var string[] $excludes */
             $excludes = [];
             foreach ($app["exclude"] as $e) {
@@ -321,6 +331,14 @@ final class BuildCommand extends Command
             // the `libraries` selection (omit ⇒ all, [] ⇒ none, names ⇒ subset),
             // independent of the stdlib so `libraries: ["mylib"]` never drops it.
             $skipStdlib = isset($app["stdlib"]) && (string)$app["stdlib"] === "";
+            // The codegen calls runtime helpers (`__mc_dtoa_core`, …) directly, so an
+            // app that opts out must compile the runtime library's source itself.
+            if ($skipStdlib && !self::embedsRuntime($libs, $paths)) {
+                \Manticore\dprint("build: application '" . $name . "' sets \"stdlib\": false but does not"
+                    . " compile the runtime library's source; remove \"stdlib\": false (it is only for an"
+                    . " application that embeds src/Runtime, like the compiler itself)");
+                return 65;
+            }
             $selectAll = !isset($app["libraries"]);
             /** @var string[] $wanted */
             $wanted = [];
@@ -399,7 +417,7 @@ final class BuildCommand extends Command
             \Manticore\CompileArgs::$externClassDecls = $externClassDecls;
             \Manticore\CompileArgs::$externClassMeta = $externClassMeta;
             \Manticore\CompileArgs::$externConstants = $externConstants;
-            if (\Manticore\build_cache_hit($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib)) {
+            if (!\Manticore\CompileArgs::$checkOnly && \Manticore\build_cache_hit($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib)) {
                 \Manticore\dprint("build: cache hit application " . $name);
                 $rc = 0;
             } else {
@@ -407,7 +425,7 @@ final class BuildCommand extends Command
                 // retain the cache identity before that intentional mutation.
                 $cacheKey = \Manticore\build_cache_key($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib);
                 $rc = \Manticore\build_compile_module($sources, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $paths);
-                if ($rc === 0) {
+                if ($rc === 0 && !\Manticore\CompileArgs::$checkOnly) {
                     \Manticore\build_cache_store($sources, $paths, $output, false, $linkObjs, $linkFlags, !$skipStdlib, $cacheKey);
                 }
             }
@@ -419,6 +437,24 @@ final class BuildCommand extends Command
     }
 
     /** @param mixed[] $libs */
+    /**
+     * True when one of `$paths` lies inside the source tree of a `"runtime": true` library.
+     * @param string[] $paths
+     */
+    private static function embedsRuntime(array $libs, array $paths): bool
+    {
+        foreach ($libs as $lib) {
+            if (!isset($lib["runtime"]) || (string)$lib["runtime"] !== "1") { continue; }
+            $dir = \realpath((string)$lib["src"]);
+            if ($dir === false) { continue; }
+            foreach ($paths as $p) {
+                $rp = \realpath($p);
+                if ($rp !== false && \str_starts_with($rp, $dir . '/')) { return true; }
+            }
+        }
+        return false;
+    }
+
     private function buildManifestLibraries(array $libs, bool $appsOnly): int
     {
         foreach ($libs as $lib) {
@@ -428,6 +464,7 @@ final class BuildCommand extends Command
             if ($appsOnly) {
                 break;
             }
+            \Manticore\CompileArgs::$allowUndefined = [];
             $name = (string)$lib["name"];
             $srcDir = (string)$lib["src"];
             $output = (string)$lib["output"];
@@ -516,7 +553,7 @@ final class BuildCommand extends Command
             // Every library but the stdlib itself declares the stdlib's functions
             // ({@see build_compile_module}).
             $libStdlib = \Manticore\CompileArgs::$exportTypes;
-            if (\Manticore\build_cache_hit($sources, $paths, $output, true, [], "", $libStdlib)) {
+            if (!\Manticore\CompileArgs::$checkOnly && \Manticore\build_cache_hit($sources, $paths, $output, true, [], "", $libStdlib)) {
                 \Manticore\dprint("build: cache hit library " . $name);
                 $rc = 0;
             } else {
@@ -524,7 +561,7 @@ final class BuildCommand extends Command
                 // contents through its reference parameter.
                 $cacheKey = \Manticore\build_cache_key($sources, $paths, $output, true, [], "", $libStdlib);
                 $rc = \Manticore\build_compile_module($sources, $output, true, [], "", $libStdlib, $paths);
-                if ($rc === 0) { \Manticore\build_cache_store($sources, $paths, $output, true, [], "", $libStdlib, $cacheKey); }
+                if ($rc === 0 && !\Manticore\CompileArgs::$checkOnly) { \Manticore\build_cache_store($sources, $paths, $output, true, [], "", $libStdlib, $cacheKey); }
             }
             \Manticore\CompileArgs::$exportTypes = true;
             if ($rc !== 0) {

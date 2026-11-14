@@ -100,6 +100,21 @@ class DateMalformedPeriodStringException extends DateException {}
  */
 class DateTimeZone
 {
+    public const AFRICA = 1;
+    public const AMERICA = 2;
+    public const ANTARCTICA = 4;
+    public const ARCTIC = 8;
+    public const ASIA = 16;
+    public const ATLANTIC = 32;
+    public const AUSTRALIA = 64;
+    public const EUROPE = 128;
+    public const INDIAN = 256;
+    public const PACIFIC = 512;
+    public const UTC = 1024;
+    public const ALL = 2047;
+    public const ALL_WITH_BC = 4095;
+    public const PER_COUNTRY = 4096;
+
     private string $tzname = '';
     private int $tztype = 3;
     private int $tzoffset = 0;
@@ -614,18 +629,8 @@ class DateTime implements DateTimeInterface
 
     public static function createFromFormat(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTime|false
     {
-        $t = \__mc_dt_from_format($format, $datetime);
-        if ($t === \__mc_dt_fail()) {
-            \__mc_dt_last_errors(2);
-            return false;
-        }
-        \__mc_dt_last_errors(1);
         $d = \__mc_new_uninit(static::class);
-        $d->__mcInit('@' . $t, $timezone);
-        if ($timezone !== null) {
-            $d->setTimezone($timezone);
-        }
-        return $d;
+        return \__mc_dt_init_from_format($d, $format, $datetime, $timezone) ? $d : false;
     }
 
     public static function createFromImmutable(DateTimeImmutable $object): DateTime
@@ -866,18 +871,8 @@ class DateTimeImmutable implements DateTimeInterface
 
     public static function createFromFormat(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTimeImmutable|false
     {
-        $t = \__mc_dt_from_format($format, $datetime);
-        if ($t === \__mc_dt_fail()) {
-            \__mc_dt_last_errors(2);
-            return false;
-        }
-        \__mc_dt_last_errors(1);
         $d = \__mc_new_uninit(static::class);
-        $d->__mcInit('@' . $t, $timezone);
-        if ($timezone !== null) {
-            return $d->setTimezone($timezone);
-        }
-        return $d;
+        return \__mc_dt_init_from_format($d, $format, $datetime, $timezone) ? $d : false;
     }
 
     public static function createFromMutable(DateTime $object): DateTimeImmutable
@@ -1057,6 +1052,11 @@ function date_create_from_format(string $format, string $datetime, ?DateTimeZone
     return DateTime::createFromFormat($format, $datetime, $timezone);
 }
 
+function date_create_immutable_from_format(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTimeImmutable|false
+{
+    return DateTimeImmutable::createFromFormat($format, $datetime, $timezone);
+}
+
 function date_format(DateTimeInterface $object, string $format): string
 {
     return $object->format($format);
@@ -1220,6 +1220,33 @@ function date_parse(string $datetime): array
  *
  * @return array<string, mixed>
  */
+/**
+ * createFromFormat's object half: a zone written in the string (`P`/`O`/`p`, `Z`,
+ * an epoch) becomes the object's zone; otherwise the fields are wall-clock time
+ * in `$timezone`, or the default zone. Microseconds carry over.
+ */
+function __mc_dt_init_from_format(DateTime|DateTimeImmutable $d, string $format, string $datetime, ?DateTimeZone $timezone): bool
+{
+    $t = \__mc_dt_from_format($format, $datetime);
+    if ($t === \__mc_dt_fail()) {
+        \__mc_dt_last_errors(2);
+        return false;
+    }
+    \__mc_dt_last_errors(1);
+    $us = \__mc_dt_us(0, 0);
+    if (\__mc_dt_slot(8) === 1) {
+        $o = \__mc_dt_slot(7);
+        $a = $o < 0 ? -$o : $o;
+        $tz = new DateTimeZone(($o < 0 ? '-' : '+') . \sprintf('%02d:%02d', \intdiv($a, 3600), \intdiv($a % 3600, 60)));
+    } else {
+        $tz = $timezone ?? new DateTimeZone(\date_default_timezone_get());
+        $t = \__mc_dt_utc($t, $tz->__mcId(), $tz->__mcType(), $tz->__mcOffset());
+    }
+    $d->__mcSetZone($tz->getName(), $tz->__mcId(), $tz->__mcType(), $tz->__mcOffset());
+    $d->__mcSet($t, $us);
+    return true;
+}
+
 function date_parse_from_format(string $format, string $datetime): array
 {
     $t = \__mc_dt_from_format($format, $datetime);

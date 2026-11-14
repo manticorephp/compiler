@@ -295,11 +295,17 @@ function ob_end_flush(): bool
     $s = \__mir_ob_take($l);
     $cb = __McOb::$handlers[$l - 1];
     \__mir_ob_inuse($l, 1);
-    if ($cb !== null) { $s = \__mc_ob_call($cb, $s, \__mc_ob_phase($l, 8)); }
+    // A handler that throws: php writes the buffer as it was, closes the level,
+    // then the exception propagates.
+    $err = null;
+    if ($cb !== null) {
+        try { $s = \__mc_ob_call($cb, $s, \__mc_ob_phase($l, 8)); } catch (\Throwable $t) { $err = $t; }
+    }
     \__mir_out_write_str($s);
     \__mir_ob_inuse($l, 0);
     \__mir_ob_pop();
     \__mc_ob_drop_meta();
+    if ($err !== null) { throw $err; }
     return true;
 }
 
@@ -312,11 +318,15 @@ function ob_get_flush(): string|false
     $cb = __McOb::$handlers[$l - 1];
     \__mir_ob_inuse($l, 1);
     $out = $s;
-    if ($cb !== null) { $out = \__mc_ob_call($cb, $s, \__mc_ob_phase($l, 8)); }
+    $err = null;
+    if ($cb !== null) {
+        try { $out = \__mc_ob_call($cb, $s, \__mc_ob_phase($l, 8)); } catch (\Throwable $t) { $err = $t; }
+    }
     \__mir_out_write_str($out);
     \__mir_ob_inuse($l, 0);
     \__mir_ob_pop();
     \__mc_ob_drop_meta();
+    if ($err !== null) { throw $err; }
     return $s;
 }
 
@@ -334,9 +344,13 @@ function ob_flush(): bool
     $s = \__mir_ob_take($l);
     $cb = __McOb::$handlers[$l - 1];
     \__mir_ob_inuse($l, 1);
-    if ($cb !== null) { $s = \__mc_ob_call($cb, $s, \__mc_ob_phase($l, 4)); }
+    $err = null;
+    if ($cb !== null) {
+        try { $s = \__mc_ob_call($cb, $s, \__mc_ob_phase($l, 4)); } catch (\Throwable $t) { $err = $t; }
+    }
     \__mir_out_write_str($s);
     \__mir_ob_inuse($l, 0);
+    if ($err !== null) { throw $err; }
     return true;
 }
 
@@ -408,8 +422,13 @@ function ob_get_status(bool $full_status = false): array
  */
 function __mc_ob_shutdown(): int
 {
+    // Every level drains even when a handler throws; the first exception then
+    // leaves through the atexit trampoline into the uncaught path (handler or
+    // fatal), as php reports it.
+    $err = null;
     while (\__mir_ob_level() > 0) {
-        \ob_end_flush();
+        try { \ob_end_flush(); } catch (\Throwable $t) { if ($err === null) { $err = $t; } }
     }
+    if ($err !== null) { throw $err; }
     return 0;
 }

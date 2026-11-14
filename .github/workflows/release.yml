@@ -209,7 +209,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Toolchain
-        run: brew install pcre2 openssl@3 sqlite icu4c
+        run: brew install pcre2 openssl@4 sqlite icu4c
 
       - name: Version
         id: v

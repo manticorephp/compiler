@@ -62,10 +62,6 @@ trait LowerAttrChecks
 
     // ── reserved-attribute checks ────────────────────────────────────────────
 
-    /** Collected `line N: error: …` diagnostics when {@see $attrCollectMode}. */
-    public array $attrErrors = [];
-    /** Analyze mode: collect instead of aborting the build. */
-    public bool $attrCollectMode = false;
 
     /**
      * Validate every reserved-attribute USE in the user program. Runs right
@@ -680,6 +676,26 @@ trait LowerAttrChecks
                 if (\strtolower($this->methodDeclName($m)) === \strtolower($method)) { return true; }
             }
         }
+        // php: an ABSTRACT method of a trait the class itself uses (directly or through
+        // trait-uses-trait) is overridden too; a concrete one is not — it is copied in.
+        /** @var string[] $queue */
+        $queue = [];
+        foreach ($this->classDeclUses($d) as $t) { $queue[] = \ltrim($t, '\\'); }
+        /** @var array<string,bool> $seen */
+        $seen = [];
+        $i = 0;
+        while ($i < \count($queue)) {
+            $name = $queue[$i];
+            $i = $i + 1;
+            if (isset($seen[$name])) { continue; }
+            $seen[$name] = true;
+            $t = $this->traitTable[$name] ?? null;
+            if ($t === null) { continue; }
+            foreach ($this->classDeclMethods($t) as $m) {
+                if ($m->isAbstract && \strtolower($this->methodDeclName($m)) === \strtolower($method)) { return true; }
+            }
+            foreach ($this->classDeclUses($t) as $u) { $queue[] = \ltrim($u, '\\'); }
+        }
         return false;
     }
 
@@ -745,17 +761,12 @@ trait LowerAttrChecks
     }
 
     /**
-     * Report one attribute error. Analyze mode collects it in the
-     * `line N: error: …` shape the driver already parses back into a
-     * diagnostic; a normal build throws, and Main's catch prints it.
+     * Report one attribute error: recorded in the front-end diagnostics when a
+     * sink is set (the build), else thrown as `$msg at line N`.
      */
     private function attrFail(string $msg, \Parser\Ast\Span $span): void
     {
-        if ($this->attrCollectMode) {
-            $this->attrErrors[] = 'line ' . (string)$span->line . ': error: ' . $msg;
-            return;
-        }
-        throw new \RuntimeException($msg . ' at line ' . (string)$span->line);
+        $this->lowerFail('attr.error', $msg, $span, $msg . ' at line ' . (string)$span->line);
     }
 
     // ── typed field reads (T5: a base-typed read resolves by OFFSET) ─────────

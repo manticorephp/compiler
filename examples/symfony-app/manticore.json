@@ -6,6 +6,7 @@
             "entry": "public/index.php",
             "output": "bin/app",
             "composer": true,
+            "allowUndefined": ["apcu_*","Memcached","RedisCluster","Relay\\*","Symfony\\Component\\ExpressionLanguage\\*","Symfony\\Component\\Serializer\\*"],
             "extensions": [
                 "compat"
             ]

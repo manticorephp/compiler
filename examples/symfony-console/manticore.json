@@ -5,7 +5,8 @@
       "src": "src",
       "entry": "src/app.php",
       "output": "bin/demo",
-      "composer": true
+      "composer": true,
+      "allowUndefined": ["Symfony\\Component\\Process\\Process","Symfony\\Contracts\\EventDispatcher\\Event"]
     }
   ]
 }

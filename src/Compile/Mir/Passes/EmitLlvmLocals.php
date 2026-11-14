@@ -1834,7 +1834,7 @@ trait EmitLlvmLocals
             // `$r = &$o->p`, a by-ref argument): the slot's address dies with the
             // object and a write through it would overwrite the REF cell the
             // promotion left there. The box is the storage from then on.
-            if (isset($this->refCellPropNames[$pa->property]) && $pa->type->kind === Type::KIND_CELL) {
+            if ($this->propMayHoldRef($pa->object, null, $pa->property) && $pa->type->kind === Type::KIND_CELL) {
                 $bx = $this->ssa->allocReg();
                 $out .= '  ' . $bx . ' = call ptr @__mir_ref_promote_slot(ptr ' . $g . ")\n";
                 $g = $bx;

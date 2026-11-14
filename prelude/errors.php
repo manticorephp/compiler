@@ -210,7 +210,16 @@ function __mc_run_shutdown(): void
         // array<int, mixed[]> is a known self-host miscompile hazard, and the
         // two are only ever appended together.
         $args = $i < \count(__McErrors::$shutdownArgs) ? __McErrors::$shutdownArgs[$i] : [];
-        if ($cb !== null) { __mc_call_shutdown($cb, $args); }
+        // A throwing shutdown function goes to the exception handler and the
+        // queue carries on; with no handler it is fatal and the rest do not run
+        // (php's order, both checked against the oracle).
+        if ($cb !== null) {
+            try {
+                __mc_call_shutdown($cb, $args);
+            } catch (\Throwable $e) {
+                if (!__mc_dispatch_uncaught_keep($e)) { throw $e; }
+            }
+        }
         $i = $i + 1;
         // A shutdown function may register another; php runs those too.
         $n = \count(__McErrors::$shutdown);

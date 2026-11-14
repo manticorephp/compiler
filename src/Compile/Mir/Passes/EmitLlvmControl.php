@@ -2383,8 +2383,9 @@ trait EmitLlvmControl
         // from a position counter (not stored/read from string lists,
         // which self-host mis-reads as i64; not written onto the arm
         // objects, which self-host can't type from a foreach value).
-        $base = 'sw' . (string)$this->switchCounter;
-        $this->switchCounter = $this->switchCounter + 1;
+        // From the body's own label allocator: a module-wide counter made every
+        // body's text depend on how many switches were emitted before it.
+        $base = $this->ssa->allocLabel('sw');
 
         // Pass 1 — locate the default arm + count value arms.
         $defaultAi = -1;

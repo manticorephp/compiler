@@ -1,0 +1,52 @@
+Program
+  Stmt:Expression @2:1-2:19
+    expr:
+      Expr:MethodCall @2:1-2:18
+        object:
+          Expr:New @2:2-2:9
+            class: "Foo"
+            args: [0]
+        method: "nope"
+        args: [0]
+        nullsafe: false
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @3:1-3:16
+    expr:
+      Expr:PropertyAccess @3:1-3:15
+        object:
+          Expr:New @3:3-3:10
+            class: "Foo"
+            args: [0]
+        property: "p"
+        nullsafe: false
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @4:1-4:15
+    expr:
+      Expr:ArrayAccess @4:1-4:14
+        array:
+          Expr:Ternary @4:2-4:10
+            condition:
+              Expr:Variable @4:2-4:4
+                name: "a"
+            then: null
+            else:
+              Expr:Variable @4:8-4:10
+                name: "b"
+        index:
+          Expr:IntLiteral @4:12-4:13
+            value: 0
+    docComment: null
+    attributes: [0]
+  Stmt:Expression @5:1-5:11
+    expr:
+      Expr:DynamicStaticCall @5:1-5:10
+        receiver:
+          Expr:Variable @5:2-5:4
+            name: "x"
+        method: "m"
+        args: [0]
+    docComment: null
+    attributes: [0]
+

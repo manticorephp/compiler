@@ -730,10 +730,29 @@ final class Sig
         return self::strListFromJson($json, 'weak');
     }
 
+    private static ?string $memoJson = null;
+    private static mixed $memoData = null;
+
+    /**
+     * One decode per distinct `.sig` text. A compile reads the stdlib's interface
+     * in up to seven places (declarations, classes, constants, dynf, libs, weak,
+     * class metadata), each of which decoded the same 0.6 MB again.
+     */
+    private static function decoded(string $json): mixed
+    {
+        if (self::$memoJson !== null && self::$memoJson === $json) {
+            return self::$memoData;
+        }
+        $data = \json_decode($json, true);
+        self::$memoJson = $json;
+        self::$memoData = $data;
+        return $data;
+    }
+
     /** @return string[]|null */
     private static function strListFromJson(string $json, string $key): ?array
     {
-        $data = \json_decode($json, true);
+        $data = self::decoded($json);
         if (!\is_array($data)) { return null; }
         if (!isset($data[$key])) { return null; }
         $raw = $data[$key];
@@ -901,7 +920,7 @@ final class Sig
     {
         /** @var FunctionDecl[] $decls */
         $decls = [];
-        $data = \json_decode($json, true);
+        $data = self::decoded($json);
         if (!\is_array($data)) { return $decls; }
         $fns = $data["functions"] ?? null;
         if (!\is_array($fns)) { return $decls; }
@@ -970,7 +989,7 @@ final class Sig
     {
         /** @var \Parser\Ast\ClassDecl[] $out */
         $out = [];
-        $data = \json_decode($json, true);
+        $data = self::decoded($json);
         if (!\is_array($data)) { return $out; }
         if (!isset($data["classes"])) { return $out; }
         $classes = $data["classes"];
@@ -1063,7 +1082,7 @@ final class Sig
     {
         /** @var array<string, \Compile\Mir\ExternClassMeta> $out */
         $out = [];
-        $data = \json_decode($json, true);
+        $data = self::decoded($json);
         if (!\is_array($data)) { return $out; }
         if (!isset($data["classes"])) { return $out; }
         $classes = $data["classes"];
@@ -1146,7 +1165,7 @@ final class Sig
     {
         /** @var array<string, Expr> $out */
         $out = [];
-        $data = \json_decode($json, true);
+        $data = self::decoded($json);
         if (!\is_array($data)) { return $out; }
         if (!isset($data["constants"])) { return $out; }
         $cs = $data["constants"];
@@ -1306,16 +1325,10 @@ final class Sig
         return false;
     }
 
-    /** Mangle a PHP name to its LLVM symbol fragment (`\` → `_`). */
+    /** A PHP name's LLVM symbol fragment — the one the emitter spells. */
     private static function mangle(string $name): string
     {
-        $out = '';
-        $n = \strlen($name);
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $c = \substr($name, $i, 1);
-            $out = $out . ($c === '\\' ? '_' : $c);
-        }
-        return $out;
+        return \Compile\SymbolName::mangle($name);
     }
 
     /** Minimal JSON string literal: quote + escape the bytes that need it. */

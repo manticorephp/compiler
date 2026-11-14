@@ -247,11 +247,49 @@ final class PreludeDemand
      * module gates on what it PROVIDES, so adding a function to the file needs
      * no second edit in the gate.
      *
+     * Lexing every gated prelude file costs ~50 ms per compile and the answer is
+     * a pure function of the file and the compiler, so it is kept on disk beside
+     * the object cache, keyed by both. Any cache error is a miss.
+     *
      * @return string[] lowercased names
      */
     public static function definedFunctions(string $src): array
     {
         if ($src === '') { return []; }
+        $path = '';
+        try {
+            $exe = \Manticore\self_exe_id();
+            if ($exe !== '') {
+                $path = \dirname(\Manticore\obj_cache_dir()) . '/demand/' . \sha1("df1\0" . $exe . "\0" . $src) . '.txt';
+                if (\file_exists($path)) {
+                    $c = \file_get_contents($path);
+                    if (\is_string($c)) {
+                        return $c === '' ? [] : \explode("\n", $c);
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            $path = '';
+        }
+        $out = self::scanDefinedFunctions($src);
+        if ($path !== '') {
+            try {
+                $dir = \dirname($path);
+                if (!\is_dir($dir)) { \mkdir($dir, 0777, true); }
+                $txt = \implode("\n", $out);
+                $tmp = $path . '.tmp' . (string)\Manticore\getpid();
+                if (\file_put_contents($tmp, $txt) === \strlen($txt)) { \rename($tmp, $path); }
+                \Manticore\side_cache_prune($dir);
+            } catch (\Throwable $e) {
+                // not cached
+            }
+        }
+        return $out;
+    }
+
+    /** @return string[] */
+    private static function scanDefinedFunctions(string $src): array
+    {
         $lx = new Lexer();
         try {
             // A prelude file is a FRAGMENT: several of them (errors, sapi,
