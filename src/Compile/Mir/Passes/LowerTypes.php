@@ -1007,33 +1007,45 @@ trait LowerTypes
     }
 
     /**
-     * Record on `$fn` the function's own `@template T` bound by a `class-string<T>` param when
-     * `@return` is `T` / `?T` / `T|null` ({@see FunctionDef::$tplClassArg}). `@phpstan-` / `@psalm-`
-     * spellings win. Containers of T (`T[]`, `list<T>`) are not recorded.
+     * Record on `$fn` the function's own `@template T` bound by a `class-string<T>` param
+     * ({@see FunctionDef::$tplClassArg}, {@see classTemplateCode}).
      * @param \Parser\Ast\Param[] $params
      */
     private function recordClassTemplate(FunctionDef $fn, ?string $doc, array $params): void
     {
-        if ($doc === null || !\str_contains($doc, 'template')) { return; }
+        $code = $this->classTemplateCode($doc, $params);
+        if ($code < 0) { return; }
+        $fn->tplClassArg = \intdiv($code, 2);
+        $fn->tplNullable = $code % 2 === 1;
+    }
+
+    /**
+     * A doc's own `@template T` bound by a `class-string<T>` param with `@return` `T` / `?T` /
+     * `T|null`: `2 * <source param index> + <1 when nullable>`, -1 for none. `@phpstan-` /
+     * `@psalm-` spellings win. Containers of T (`T[]`, `list<T>`) do not count.
+     * @param \Parser\Ast\Param[] $params
+     */
+    private function classTemplateCode(?string $doc, array $params): int
+    {
+        if ($doc === null || !\str_contains($doc, 'template')) { return -1; }
         $ret = \Semantic\DocNames::rawTag($doc, '@return', '');
-        if ($ret === null) { return; }
+        if ($ret === null) { return -1; }
         $ret = \str_replace(' ', '', $ret);
-        $nullable = true;
+        $nullable = 1;
         if (\str_starts_with($ret, '?')) { $ret = \substr($ret, 1); }
         elseif (\str_starts_with($ret, 'null|')) { $ret = \substr($ret, 5); }
         elseif (\str_ends_with($ret, '|null')) { $ret = \substr($ret, 0, \strlen($ret) - 5); }
-        else { $nullable = false; }
+        else { $nullable = 0; }
         if (\preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $ret) !== 1
             || \preg_match('/@(?:phpstan-|psalm-)?template(?:-covariant)?[ \t]+' . $ret . '(?![A-Za-z0-9_])/', $doc) !== 1) {
-            return;
+            return -1;
         }
         foreach ($params as $i => $p) {
             $pt = \Semantic\DocNames::rawTag($doc, '@param', $p->name);
             if ($pt !== null && \str_replace(' ', '', $pt) === 'class-string<' . $ret . '>') {
-                $fn->tplClassArg = $i;
-                $fn->tplNullable = $nullable;
-                return;
+                return 2 * $i + $nullable;
             }
         }
+        return -1;
     }
 }
