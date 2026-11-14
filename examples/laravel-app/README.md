@@ -69,6 +69,14 @@ Everything below is in this directory:
   runtime check, and the framework's own config files are merged by a computed `require`;
   the build follows only constant paths, so those directories have to be compiled in. `manticore analyze` warns about such a `require` (`include.unresolved`);
   a package with the same shape needs its directory listed the same way.
+- Three changes for throughput, each sound only because one long-lived process serves every
+  request (Octane's model, not php-fpm's):
+  `AppServiceProvider::register()` binds the framework's stateless middleware as singletons,
+  where the kernel would build each one per request; `App\Models\Note` names its `$table`
+  instead of deriving it from the class name on every query; and `public/index.php` builds the
+  request with `LaravelRequest::createFromGlobals()` instead of `capture()`, which builds a
+  Symfony request and copies it. Middleware that keeps per-request state in its properties
+  must stay out of that singleton list.
 
 ## Adding to it
 
@@ -101,3 +109,10 @@ showed up as the `libmalloc` free-list aborts tracked in
 - **A crash in the allocator (`mfm_alloc`, `memory corruption of free block`).** A write
   past or after a block, far from its cause. Build with `MANTICORE_ASAN=1` (see `AGENTS.md`
   in the repository root) before anything else.
+
+## Undeclared names (`allowUndefined`)
+
+`manticore build --check` reports a reachable use of an optional package or extension this app does
+not install as an error. `manticore.json` lists them under `allowUndefined` so the build passes: APCu, Memcached, Redis cluster / Relay, the AWS SDK (SQS), the PSR-7 bridge, Composer's ClassLoader, VarExporter internals, the Symfony config helpers (`service`, `param`, `abstract_arg`) and `headers_send`.
+Each path throws `Error` at run time if it runs. A new missing dependency not in the list still fails
+the build. See [`docs/cli.md`](../../docs/cli.md#allowundefined).

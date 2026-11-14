@@ -38,7 +38,8 @@ name: [builtins.md](builtins.md).
 | Line of an exception raised by the runtime | the call site | `0` | gap |
 | `php.ini`, `ini_set('memory_limit')`, extensions, PECL | yes | none; the manifest and FFI replace them ([details](#configuration)) | by design |
 | Default time zone | `UTC` | the host's zone | by design |
-| A function Manticore does not ship | n/a | compiles, traps at run time with `Call to undefined function` ([details](#functions-that-do-not-exist-yet)) | by design |
+| A function Manticore does not ship | n/a | `unsupported.builtin` warning at build; traps at run time with `Call to undefined function` if reached ([details](#functions-that-do-not-exist-yet)) | by design |
+| Reference to an undeclared class / function / constant on a statically reachable, unguarded path | fails only when that line runs | build error (`--check` lists them; `allowUndefined` / `--allow-undefined-traps` to accept) ([details](#undeclared-names-fail-the-build)) | by design |
 | `"10" + "5.5"` | `15.5` | `15` ([#403](https://github.com/manticorephp/compiler/issues/403)) | bug |
 
 ---
@@ -299,7 +300,7 @@ There is no `php.ini`, no `-d` flag, no extension loader, no PECL
 - **`date_default_timezone_get()` follows the host's zone**; php without a `date.timezone`
   setting says `UTC`. Call `date_default_timezone_set()` in programs whose output
   depends on it. On Alpine install `tzdata` ([install.md](install.md)).
-- `extension_loaded()` answers for what is *linked in*: `true` for `mbstring`, `intl`,
+- `extension_loaded()` answers for what is *linked in*: `true` for `hash`, `mbstring`, `intl`, `curl`, `zlib`,
   `json`, …; `false` for `gmp`, `gd`, `Zend OPcache`.
   `function_exists('gmp_add')` is the right guard for optional extensions.
 - `php_sapi_name()` is `cli`; under `Http\Server` the request state is per fiber
@@ -317,21 +318,45 @@ implemented (`gd`, `gmp`, `sodium`, `ftp`, `xmlwriter`, most of `pgsql`, `posix`
 `calendar`, `ldap`, `bz2`, …; 1127 of 2135 functions, 206 of 327 classes at the time of
 writing). The full, generated, per-extension list is [builtins.md](builtins.md).
 
-A missing function does **not** fail the build. The compile prints a note and the call
-traps if reached:
+A function that php defines and Manticore does not implement does **not** fail the build.
+The compile prints a warning and the call traps if reached:
 
 ```
-build: undefined-function traps (1): imagecreate
+src/Img.php:12: warning[unsupported.builtin]: function imagecreate is part of PHP but not implemented by Manticore
 …
 PHP Fatal error:  Uncaught Error: Call to undefined function imagecreate()
 ```
 
 The behaviour is the same as php's for a function that is not installed, so
 `function_exists()` / `extension_loaded()` guards keep working
-(`function_exists('gmp_add')` is `false` here). Read the `undefined-function traps` line of
-your build; it is the porting checklist. `ArrayObject::uasort()` is an example at class
+(`function_exists('gmp_add')` is `false` here). The `unsupported.builtin` warnings of
+`manticore build --check` are the porting checklist. `ArrayObject::uasort()` is an example at class
 level: a missing method compiles with an `error: unknown method` line and traps at run
 time.
+
+## Undeclared names fail the build
+
+A class, function or constant that no source, stdlib or builtin declares is a different
+case from a missing PHP function: it is usually a missing package. php notices only when the
+line runs; Manticore ranks every such name by reachability from the entry point:
+
+```
+src/Mailer.php:31: error[undefined.class]: class Symfony\Component\String\UnicodeString is not declared (reachable: Mailer::send <- App::run <- __main)
+```
+
+- **Error** (exit `65`, no binary): a hard use (`new`, `X::m()`, `X::C`, a call, a constant
+  read, `extends` / `implements`) on a statically reachable path with no guard.
+- **Warning**: the site is guarded (`class_exists`, `function_exists`, `extension_loaded`,
+  `defined`, an early `if (!…) return;`, `&&`, `?:`, an `isSupported()`-style helper), the use is
+  dynamic only (`$f()`, `new $class`), or soft (`instanceof`, `catch`, type hints).
+- **Hidden**: unreachable code. `--all` lists it.
+
+`manticore build --check` reports all of them in one front-end pass. To accept a known gap, list
+the names in the manifest, for example `"allowUndefined": ["Vendor\\Pkg\\*", "apcu_*"]`; they stay
+warnings and any new missing name still fails ([cli.md](cli.md#allowundefined),
+[modules.md](modules.md)). `--allow-undefined-traps` restores the old behaviour entirely: every
+such name builds and throws `Error` if it runs. Reference:
+[cli.md](cli.md#front-end-diagnostics-and---check).
 
 ## Platforms
 
@@ -366,7 +391,8 @@ The memory model is refcounting plus escape-routed arenas
 
 ## Porting checklist
 
-1. Build and read the `undefined-function traps` and `warning:` / `error:` lines.
+1. Start with `manticore build --check` and read every `error[…]` and `warning[…]` line
+   (`unsupported.builtin` is the missing-function list, `undefined.*` the missing packages).
 2. Search for `eval(`, `$$`, `get_defined_vars(`, `class Resource`.
 3. Cast strings to numbers where they enter typed parameters, properties and returns.
 4. Replace bare reads of possibly-missing keys with `??` / `isset()` / `array_key_exists()`.

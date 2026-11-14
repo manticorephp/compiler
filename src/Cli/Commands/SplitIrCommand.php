@@ -32,6 +32,7 @@ final class SplitIrCommand extends Command
         }
         $t = \Compile\Stats::begin('split-ir');
         $splitter = new \Compile\Mir\SplitModule();
+        $splitter->stable = \Manticore\obj_cache_enabled(true) || \getenv('MANTICORE_SPLIT_STABLE') === '1';
         $out = $splitter->runFile($in, $parts, $base);
         if ($out === []) {
             \Manticore\dprint('split-ir: split produced no parts');

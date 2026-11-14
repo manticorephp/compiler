@@ -139,21 +139,35 @@ final class LibrarySymbols
         }
     }
 
+    /**
+     * The prelude files the analyzer knows, unparsed; a missing file is left out.
+     *
+     * @return array<string, string> prelude file name => contents
+     */
+    public static function preludeSources(): array
+    {
+        /** @var array<string, string> $out */
+        $out = [];
+        foreach (self::preludeFileNames() as $name) {
+            $src = \Manticore\prelude_src_or_empty($name);
+            if ($src !== "") {
+                $out[$name] = $src;
+            }
+        }
+        return $out;
+    }
+
     /** @return ParsedFile[] */
     private static function readPrelude(): array
     {
         /** @var ParsedFile[] $out */
         $out = [];
-        foreach (self::preludeFileNames() as $name) {
-            $src = \Manticore\prelude_src_or_empty($name);
-            if ($src === "") {
-                continue;
-            }
+        foreach (self::preludeSources() as $name => $src) {
             // `prelude_src_or_empty` strips the opening `<?php` (it is built to append
             // after a prelude header); re-add it so this parses as a standalone file.
             try {
                 $program = \Parser\Parser::parseSource("<?php\n" . $src);
-                $out[] = new ParsedFile(self::LABEL_PREFIX . "prelude/" . $name, $program);
+                $out[] = new ParsedFile(self::LABEL_PREFIX . "prelude/" . (string)$name, $program);
             } catch (\Throwable $e) {
                 // A prelude file that does not parse standalone is simply skipped.
             }
@@ -256,6 +270,25 @@ final class LibrarySymbols
             // Same for mysqli / mysqli_result / mysqli_stmt type hints and the mysqli_* functions.
             "mysqli.php",
             "mysqli_fn.php",
+            // ext/intl: Collator, NumberFormatter, IntlDateFormatter, … and the intl_*/
+            // grapheme_*/idn_* functions. (`*_off.php` are stand-ins for a driver file and
+            // redeclare its names, so they never belong here.)
+            "intl.php",
+            "intl_breakiter.php",
+            "intl_calendar.php",
+            "intl_char.php",
+            "intl_collator.php",
+            "intl_datefmt.php",
+            "intl_idn.php",
+            "intl_listfmt.php",
+            "intl_locale.php",
+            "intl_msgfmt.php",
+            "intl_numfmt.php",
+            "intl_rb.php",
+            "intl_spoof.php",
+            "intl_timezone.php",
+            "intl_translit.php",
+            "intl_ucnv.php",
         ];
         return $names;
     }

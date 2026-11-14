@@ -14,6 +14,8 @@ ok rc=0 first='; ModuleID' markers='source_filename define probe-stack'
 ok
 == this is no ref cell
 ok
+== string literal names order independent
+ok
 == analyze json
 ok rc=0 first='[' markers=']'
 == dump-ast bogus flag
@@ -22,12 +24,534 @@ rc=64
 rc=66
 == dump-ast with compile-only flag
 rc=64
+== dump-mir rejects --check
+rc=64
+== analyze rejects --check
+rc=64
 == compile bad -O
 rc=64
 == compile bad --memory
 rc=64
 == compile bad --strict
 rc=64
+== check_parse_two_files
+rc=65
+parse2/a.php:3: error[parse.error]: unexpected token in expression: Semicolon
+parse2/b.php:2: error[parse.error]: unexpected token in expression: Semicolon
+front end: 2 error(s), 0 warning(s)
+== check_unsupported_three_files
+rc=65
+unsupported3/a.php:4: error[lower.unsupported]: unsupported: foreach cannot bind BY REFERENCE into anything but a variable — the alias would reach a temporary, not the target.
+unsupported3/b.php:2: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
+unsupported3/c.php:3: error[lower.unsupported]: unsupported: an array literal can bind a VARIABLE, a PROPERTY or an ELEMENT by reference (`[&$a, &$this->p, &$a[$k], …]`), and nothing else yet. This element would receive a copy, not an alias, so every write through it would be lost.
+front end: 3 error(s), 0 warning(s)
+== analyze_decl_and_type_both
+arg.type
+repr.type
+== check_clean
+rc=0
+== check_two_bad_fns_then_good
+rc=65
+two_bad_then_good.php:2: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
+two_bad_then_good.php:3: error[lower.unsupported]: unsupported: foreach cannot bind BY REFERENCE into anything but a variable — the alias would reach a temporary, not the target.
+front end: 2 error(s), 0 warning(s)
+== build_two_bad_fns_then_good
+rc=65
+compile: front-end (parse/typeck/IR) returned null (rc=65)
+two_bad_then_good.php:2: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
+two_bad_then_good.php:3: error[lower.unsupported]: unsupported: foreach cannot bind BY REFERENCE into anything but a variable — the alias would reach a temporary, not the target.
+front end: 2 error(s), 0 warning(s)
+== check_parse_in_body
+rc=65
+parse_in_body.php:5: error[parse.error]: unexpected token in expression: Semicolon
+front end: 1 error(s), 0 warning(s)
+== check_parse_two_in_body
+rc=65
+parse_two_in_body.php:5: error[parse.error]: unexpected token in expression: Semicolon
+parse_two_in_body.php:6: error[parse.error]: unexpected token in expression: Semicolon
+front end: 2 error(s), 0 warning(s)
+== check_dedup
+rc=65
+dedup.php:5: error[lower.unsupported]: $GLOBALS as a whole array is unsupported (it would need a runtime name table); use $GLOBALS['name']
+front end: 1 error(s), 0 warning(s)
+== check_unresolved_classes
+rc=65
+unresolved_classes/main.php:2: error[undefined.class]: class Missing\A is not declared (reachable: __main) (2 uses)
+unresolved_classes/main.php:3: error[undefined.class]: class Missing\B is not declared (reachable: __main)
+unresolved_classes/main.php:4: error[undefined.class]: class Missing\C is not declared (reachable: __main)
+unresolved_classes/main.php:6: warning[undefined.class]: class Missing\E is not declared
+unresolved_classes/main.php:8: error[undefined.constant]: constant NO_SUCH_CONST is not declared (reachable: __main)
+unresolved_classes/main.php:9: error[undefined.class]: class Missing\S is not declared (reachable: __main)
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 5 error(s), 1 warning(s)
+== check_known_builtin_classes
+rc=0
+== check_guarded_decls
+rc=0
+== check_ref_after_class
+rc=0
+== check_class_alias_literal
+rc=0
+== check_unresolved_fns
+rc=65
+unresolved_fns.php:10: error[undefined.function]: function apcu_fetch() is not declared (reachable: __main) (2 uses)
+unresolved_fns.php:12: error[undefined.function]: function no_such_fn() is not declared (reachable: __main)
+front end: 2 error(s), 0 warning(s)
+== check_unresolved_hints
+rc=0
+front end: 8 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== check_uses_distinct_trait
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== check_uses_distinct_default
+rc=65
+uses_distinct_default.php:2: error[undefined.constant]: constant NO_SUCH_CONST is not declared (reachable: f <- __main)
+front end: 1 error(s), 0 warning(s)
+== check_numeric_class
+rc=0
+== check_missing_package
+rc=65
+missing_package/src/main.php:4: error[undefined.class]: class Symfony\Component\String\UnicodeString is not declared (reachable: __main)
+front end: 1 error(s), 0 warning(s)
+== check_unit_top_level
+rc=65
+unit_top_level/src/u.php:3: error[undefined.class]: class Missing\U is not declared (reachable: __mc_unit_0)
+front end: 1 error(s), 0 warning(s)
+== check_unit_guard
+rc=0
+unit_guard/src/g.php:4: warning[undefined.class]: class Missing\UG is not declared (guarded by defined('UNIT_GUARD'))
+front end: 0 error(s), 1 warning(s)
+== check_allow_undefined_exact
+rc=65
+allow_undefined/src/main.php:2: warning[undefined.class]: class Missing\Alpha is not declared
+allow_undefined/src/main.php:3: error[undefined.class]: class Other\Beta is not declared (reachable: __main)
+front end: 1 error(s), 1 warning(s)
+== check_allow_undefined_wild
+rc=65
+allow_undefined/src/main.php:2: warning[undefined.class]: class Missing\Alpha is not declared
+allow_undefined/src/main.php:3: error[undefined.class]: class Other\Beta is not declared (reachable: __main)
+front end: 1 error(s), 1 warning(s)
+== check_allow_undefined_both
+rc=0
+allow_undefined/src/main.php:2: warning[undefined.class]: class Missing\Alpha is not declared
+allow_undefined/src/main.php:3: warning[undefined.class]: class Other\Beta is not declared
+front end: 0 error(s), 2 warning(s)
+== tier_reachable_new
+rc=65
+tier/reachable_new.php:2: error[undefined.class]: class Missing\A is not declared (reachable: __main)
+front end: 1 error(s), 0 warning(s)
+== tier_dead_fn
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_guards
+rc=0
+tier/guards.php:11: warning[undefined.function]: function missing_mg() is not declared (guarded by function_exists(...))
+tier/guards.php:14: warning[undefined.class]: class Missing\D is not declared (guarded by class_exists(...))
+tier/guards.php:21: warning[undefined.class]: class Missing\G6 is not declared (guarded by class_exists(...))
+tier/guards.php:4: warning[undefined.class]: class Missing\C is not declared (guarded by class_exists(...))
+tier/guards.php:8: warning[undefined.function]: function missing_mf() is not declared (guarded by function_exists(...))
+front end: 0 error(s), 5 warning(s)
+== tier_soft
+rc=0
+tier/soft.php:2: warning[undefined.class]: class Missing\G is not declared
+tier/soft.php:4: warning[undefined.class]: class Missing\E is not declared
+tier/soft.php:5: warning[undefined.class]: class Missing\F is not declared
+front end: 0 error(s), 3 warning(s)
+== tier_method_never
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_method_called
+rc=65
+tier/method_called.php:2: error[undefined.function]: function missing_fn() is not declared (reachable: K__run <- __main)
+front end: 1 error(s), 0 warning(s)
+== tier_default_param
+rc=65
+tier/default_param.php:2: error[undefined.constant]: constant NO_CONST is not declared (reachable: d <- __main)
+front end: 1 error(s), 0 warning(s)
+== tier_default_param_unused
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_dyn_define
+rc=0
+tier/dyn_define.php:4: warning[undefined.constant]: constant SOME_CONST is not declared
+front end: 0 error(s), 1 warning(s)
+== tier_fold_define
+rc=0
+== tier_cascade
+rc=65
+tier/cascade.php:4: error[lower.unsupported]: unsupported: foreach cannot bind BY REFERENCE into anything but a variable — the alias would reach a temporary, not the target.
+tier/cascade.php:5: warning[undefined.function]: function inner_missing() is not declared
+front end: 1 error(s), 1 warning(s)
+== tier_class_consts_unused
+rc=65
+tier/class_consts_unused.php:2: warning[undefined.class]: class Missing\AbstractLogger is not declared
+tier/class_consts_unused.php:7: error[undefined.class]: class Missing\Event is not declared
+front end: 1 error(s), 1 warning(s)
+== tier_dyn_const_probe
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_callable_array_instance
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_switch_guard
+rc=0
+tier/switch_guard.php:12: warning[undefined.function]: function missing_fetch() is not declared (guarded by function_exists('missing_fetch'))
+tier/switch_guard.php:8: warning[undefined.class]: class Missing\DsnParser is not declared (guarded by class_exists(...))
+front end: 0 error(s), 2 warning(s)
+== tier_guard_helpers
+rc=65
+tier/guard_helpers.php:103: warning[undefined.function]: function pol_pos_helper() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:11: warning[undefined.function]: function apcu_second() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
+tier/guard_helpers.php:14: warning[undefined.class]: class Missing\ViaThis is not declared (guarded by supportsX() → class_exists('Missing\Probe'))
+tier/guard_helpers.php:17: warning[undefined.function]: function missing_via_fn() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:20: warning[undefined.class]: class Missing\M is not declared (guarded by class_exists(...))
+tier/guard_helpers.php:22: warning[undefined.function]: function missing_both() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:24: error[undefined.function]: function missing_two() is not declared (reachable: notHelper <- __main)
+tier/guard_helpers.php:25: error[undefined.function]: function missing_nested() is not declared (reachable: notNested <- __main)
+tier/guard_helpers.php:29: error[undefined.class]: class Missing\Tainted is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:32: error[undefined.class]: class Missing\Incr is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:35: error[undefined.class]: class Missing\Loop is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:36: error[undefined.class]: class Missing\Param is not declared (reachable: taintedVar <- __main)
+tier/guard_helpers.php:43: warning[undefined.function]: function pol_in_arm() is not declared (guarded by on() → function_exists('pol_probe'))
+tier/guard_helpers.php:44: error[undefined.function]: function pol_rest_unguarded() is not declared (reachable: Polarity__positive <- __main)
+tier/guard_helpers.php:48: warning[undefined.function]: function pol_rest_guarded() is not declared (guarded by on() → function_exists('pol_probe'))
+tier/guard_helpers.php:52: warning[undefined.function]: function pol_rest_cmp() is not declared (guarded by on() → function_exists('pol_probe'))
+tier/guard_helpers.php:57: error[undefined.function]: function pol_fn_unguarded() is not declared (reachable: polPositive <- __main)
+tier/guard_helpers.php:61: warning[undefined.function]: function pol_fn_guarded() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:66: error[undefined.function]: function pol_or_operand() is not declared (reachable: polOrOperand <- __main)
+tier/guard_helpers.php:70: error[undefined.function]: function pol_double_not() is not declared (reachable: polDoubleNot <- __main)
+tier/guard_helpers.php:74: error[undefined.function]: function pol_not_false() is not declared (reachable: polNotFalse <- __main)
+tier/guard_helpers.php:78: warning[undefined.function]: function pol_and_operand() is not declared (guarded by has_apcu() → extension_loaded('apcu'))
+tier/guard_helpers.php:85: error[undefined.function]: function pol_neg_helper() is not declared (reachable: polNegHelper <- __main)
+tier/guard_helpers.php:89: error[undefined.function]: function pol_mixed_helper() is not declared (reachable: polMixedHelper <- __main)
+tier/guard_helpers.php:94: error[undefined.function]: function pol_neg_local() is not declared (reachable: polNegLocal <- __main)
+tier/guard_helpers.php:99: warning[undefined.function]: function pol_pos_local() is not declared (guarded by class_exists(...))
+tier/guard_helpers.php:9: warning[undefined.function]: function apcu_fetch_m() is not declared (guarded by isSupported() → function_exists('apcu_fetch'))
+front end: 14 error(s), 13 warning(s)
+== tier_static_hierarchy
+rc=0
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 0 warning(s)
+== tier_dyn_static_missing
+rc=0
+tier/dyn_static_missing.php:2: warning[undefined.function]: function missing_fn() is not declared
+front end: 0 error(s), 1 warning(s)
+== tier_unserialize_missing
+rc=0
+tier/unserialize_missing.php:2: warning[undefined.function]: function missing_fn() is not declared
+front end: 0 error(s), 1 warning(s)
+== tier_unsupported_builtin
+rc=0
+tier/unsupported_builtin.php:2: warning[unsupported.builtin]: function request_parse_body is part of PHP but not implemented by Manticore
+front end: 0 error(s), 1 warning(s)
+== tier_unsupported_mixed
+rc=65
+tier/unsupported_mixed.php:2: warning[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
+tier/unsupported_mixed.php:3: error[undefined.function]: function my_missing_fn() is not declared (reachable: g <- __main)
+front end: 1 error(s), 1 warning(s)
+== tier_unsupported_ns_const
+rc=0
+tier/unsupported_ns_const.php:3: warning[unsupported.builtin]: constant GMP_ROUND_ZERO is part of PHP but not implemented by Manticore
+front end: 0 error(s), 1 warning(s)
+== tier_unsupported_ns_const_fq
+rc=65
+tier/unsupported_ns_const_fq.php:3: error[undefined.constant]: constant App\GMP_ROUND_ZERO is not declared (reachable: __main)
+front end: 1 error(s), 0 warning(s)
+== tier_unsupported_ns_fn
+rc=65
+tier/unsupported_ns_fn.php:3: warning[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
+tier/unsupported_ns_fn.php:4: error[undefined.function]: function strlen2() is not declared (reachable: __main)
+tier/unsupported_ns_fn.php:5: error[undefined.class]: class App\ReflectionGenerator is not declared (reachable: __main) (2 uses)
+front end: 2 error(s), 1 warning(s)
+== tier_trait_two_users
+rc=65
+tier/trait_two_users.php:2: error[undefined.function]: function missing_via_trait() is not declared (reachable: Used2__t <- __main)
+front end: 1 error(s), 0 warning(s)
+== tier_exit_bare
+rc=0
+== tier_string_not_callable
+rc=65
+tier/string_not_callable.php:10: error[undefined.function]: function missing_sd() is not declared (reachable: sd <- __main)
+tier/string_not_callable.php:2: warning[undefined.function]: function missing_from_string_named() is not declared
+tier/string_not_callable.php:3: error[undefined.function]: function missing_cb_fn() is not declared (reachable: cb <- __closure_0 <- __main)
+tier/string_not_callable.php:5: error[undefined.function]: function missing_hk() is not declared (reachable: hk <- __closure_1 <- __main)
+front end: 3 error(s), 1 warning(s)
+== tier_toplevel_return_guard
+rc=0
+tier/toplevel_return_guard.php:4: warning[undefined.class]: class Missing\Q is not declared (guarded by class_exists(...))
+front end: 0 error(s), 1 warning(s)
+== tier_toplevel_exit_guard
+rc=0
+== tier_static_lsb_base
+rc=65
+tier/static_lsb_base.php:4: warning[undefined.function]: function missing_base_hook() is not declared
+tier/static_lsb_base.php:7: error[undefined.function]: function missing_leaf_hook() is not declared (reachable: Leaf6__hook <- Base5__mk <- __main)
+front end: 1 error(s), 1 warning(s)
+== tier_reachable_new_allow_traps
+rc=0
+tier/reachable_new.php:2: warning[undefined.class]: class Missing\A is not declared
+front end: 0 error(s), 1 warning(s)
+== tier_dead_fn_all
+rc=0
+tier/dead_fn.php:2: note[undefined.class]: class Missing\B is not declared
+front end: 0 error(s), 0 warning(s)
+== tier_library
+rc=65
+tier/library.php:2: error[undefined.class]: class MissingLibClass is not declared (reachable: libf)
+tier/library.php:3: error[undefined.constant]: constant MISSING_LIB_CONST is not declared (reachable: LibK__k)
+front end: 2 error(s), 0 warning(s)
+== tier_unsupported_dead_all
+rc=0
+tier/unsupported_dead.php:2: note[unsupported.builtin]: function finfo_open is part of PHP but not implemented by Manticore
+front end: 0 error(s), 0 warning(s)
+== tier_closure_sites_all
+rc=65
+tier/closure_sites.php:2: note[undefined.class]: class Missing\InDeadClosure is not declared
+tier/closure_sites.php:3: error[undefined.class]: class Missing\InMethodClosure is not declared (reachable: __closure_1 <- W__run <- __main)
+tier/closure_sites.php:4: error[undefined.constant]: constant MISSING_ARROW_CONST is not declared (reachable: __closure_2 <- __main)
+front end: 2 error(s), 0 warning(s)
+== tier_method_default_all
+rc=65
+tier/method_default.php:2: error[undefined.constant]: constant MISSING_USED_DEFAULT is not declared (reachable: Used__m <- __main)
+tier/method_default.php:3: note[undefined.constant]: constant MISSING_UNUSED_DEFAULT is not declared
+tier/method_default.php:4: note[undefined.constant]: constant MISSING_NEVER_CALLED_DEFAULT is not declared
+front end: 1 error(s), 0 warning(s)
+== tier_build_error_no_output
+rc=65
+compile: front-end (parse/typeck/IR) returned null (rc=65)
+tier/reachable_new.php:2: error[undefined.class]: class Missing\A is not declared (reachable: __main)
+front end: 1 error(s), 0 warning(s)
+== reach_basic
+rc=0
+reach: __main
+reach: a
+reach: b
+== reach_interface_dispatch
+rc=0
+class: A
+reach: A__find
+reach: __main
+reach: look
+== reach_magic_and_interfaces
+rc=0
+class: M
+reach: M____construct
+reach: M____toString
+reach: M__getIterator
+reach: M__jsonSerialize
+reach: M__offsetExists
+reach: M__offsetGet
+reach: M__offsetSet
+reach: M__offsetUnset
+reach: __main
+== reach_callables
+rc=0
+class: C
+class?: stdClass
+reach: C__cmp
+reach: C__s
+reach: C__sortIt
+reach: __closure_0
+reach: __closure_2
+reach: __closure_3
+reach: __main
+reach: f
+reach: g
+reach: makesClosure
+reach?: __closure_1
+reach?: neverCalled
+== reach_dynamic_new
+rc=0
+class?: X
+class?: Y
+class?: Z
+class?: stdClass
+reach: __main
+reach?: X____construct
+reach?: Y____construct
+== reach_class_level
+rc=65
+class: Holder
+class: Konst
+class: Used
+reach/class_level.php:2: error[undefined.constant]: constant UNDEF_USED is not declared
+reach: Holder__v
+reach: Used__m
+reach: __main
+site: undefined.class|missinghint line=3 fn=@class:Dead reach=0 maybe=0
+site: undefined.constant|undef_dead line=3 fn=@class:Dead reach=0 maybe=0
+site: undefined.constant|undef_used line=2 fn=@class:Used reach=1 maybe=1
+front end: 2 unreachable undeclared name(s) hidden (--all to list)
+front end: 1 error(s), 0 warning(s)
+== reach_dyn_fn_name
+rc=0
+reach: __main
+reach: direct
+reach?: target
+== reach_dyn_static
+rc=0
+class: Plain
+class?: S
+class?: stdClass
+reach: Plain__p
+reach: __main
+reach?: S__inst
+reach?: S__s
+== reach_attr_reflect
+rc=0
+class: T
+class: Tag
+class?: Unrelated
+class?: stdClass
+reach: Tag____construct
+reach: __main
+reach?: Unrelated____construct
+== reach_unused_interface
+rc=0
+class: Base
+class: Impl
+reach/unused_interface.php:3: warning[undefined.class]: class MissingB is not declared
+reach/unused_interface.php:4: warning[undefined.class]: class MissingC is not declared
+reach: Impl__g
+reach: __main
+site: undefined.class|missinga line=2 fn=@class:Unused reach=0 maybe=0
+site: undefined.class|missingb line=3 fn=@class:UsedI reach=1 maybe=1
+site: undefined.class|missingc line=4 fn=@class:Base reach=1 maybe=1
+front end: 1 unreachable undeclared name(s) hidden (--all to list)
+front end: 0 error(s), 2 warning(s)
+== reach_literal_class
+rc=0
+class: A
+class: B
+reach: A____construct
+reach: B____construct
+reach: __main
+reach: pick
+== reach_param_class
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach: viaParam
+reach?: A____construct
+reach?: B____construct
+== reach_literal_fn
+rc=0
+reach: __main
+reach: fa
+reach: fb
+reach: run
+== reach_byref_fn
+rc=0
+reach: __closure_0
+reach: __main
+reach: byRef
+reach?: fa
+reach?: unrelated
+== reach_byref_arg_class
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach: make
+reach: swap
+reach?: A____construct
+reach?: B____construct
+== reach_include_class
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach?: A____construct
+reach?: B____construct
+== reach_include_in_fn
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach: make
+reach?: A____construct
+reach?: B____construct
+== reach_literal_method
+rc=0
+class: X
+class?: stdClass
+reach: X__a
+reach: X__b
+reach: X__sa
+reach: __main
+reach: viaClassAndName
+reach: viaConcat
+reach: viaLocal
+reach?: X__c
+reach?: X__sc
+== reach_param_method
+rc=0
+class: X
+class?: stdClass
+reach: __main
+reach: viaParam
+reach?: X__a
+reach?: X__b
+== reach_dyn_static_call
+rc=0
+class?: P
+class?: Q
+reach: __main
+reach: pick
+reach?: P__make
+reach?: Q__make
+== reach_unserialize_new
+rc=0
+class?: Other
+class?: Svc
+class?: stdClass
+reach: __main
+reach?: Svc__run
+== reach_reflection_literal
+rc=0
+class: A
+class?: B
+class?: stdClass
+reach: A____construct
+reach: __main
+reach?: B____construct
+== reach_reflection_runtime
+rc=0
+class?: A
+class?: B
+class?: stdClass
+reach: __main
+reach?: A____construct
+reach?: B____construct
+== reach_dyn_static_const
+rc=0
+class?: K1
+class?: K2
+reach: __main
+reach: get
+== reach_class_consts_ns
+rc=0
+class: App\Log\Live_Box
+class?: App\Log\Dead_Logger
+class?: stdClass
+reach/class_consts_ns.php:5: warning[undefined.class]: class Missing\AbstractLogger is not declared
+reach: __main
+site: undefined.class|missing\abstractlogger line=5 fn=@class:App\Log\Dead_Logger reach=0 maybe=1
+front end: 0 error(s), 1 warning(s)
+== builtin names in sync
+ok
 == compile bad --progress
 rc=64
 == compile bad --color
@@ -48,6 +572,13 @@ rc=1 fail=1 warn=3
 rc=0 fail=0 warn=3
 == doctor: full toolchain
 rc=0 fail=0 warn=1
+== cache show
+<dir>: 2 objects, 1 indexes, 7 B
+== cache clear
+cleared 2 objects, 1 indexes (7 B) from <dir>
+left: ./notes.txt ./user.o analyze: 0
+== cache unknown action
+rc=64
 == completions no shell
 rc=64
 == completions unknown shell

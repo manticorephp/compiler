@@ -100,7 +100,8 @@ Rules of evidence:
 - The `dump-*` commands do not link the stdlib, so a stdlib/FFI callee resolves as
   `unknown` and a bug in that path vanishes from the dump. Read the final binary.
 - A test that passes without the fix is not a test.
-- A crash inside libmalloc (`mfm_alloc`, "memory corruption of free block") is a write past or after a block, far from its cause. Find it with `MANTICORE_ASAN=1` (stdlib `--libs-only` AND app; 0xbe fill names an uninitialized read) before anything else; `MANTICORE_REF_QUARANTINE=1` (freed arrays / ref boxes poisoned, never reused; adds `-no_compact_unwind`, so exception paths crash) and `MANTICORE_POOL_POISON=1` (pool blocks 0xDE) are measurement builds, `bin/build` restores the normal libraries.
+- A crash inside libmalloc (`mfm_alloc`, "memory corruption of free block") is a write past or after a block, far from its cause. Find it with `MANTICORE_ASAN=1` (stdlib `--libs-only` AND app; 0xbe fill names an uninitialized read) before anything else; `MANTICORE_REF_QUARANTINE=1` (freed arrays / ref boxes poisoned, never reused; adds `-no_compact_unwind`) and `MANTICORE_POOL_POISON=1` (pool blocks 0xDE) are measurement builds, `bin/build` restores the normal libraries.
+- Code that keeps running after a `throw` (a line printed past the throw, a catch skipped) means a call the exception lowering judged nothrow did throw (`src/Compile/Mir/EhLowerIr.php`). Build with `MANTICORE_EH_ASSERT=1` (stdlib `--libs-only` AND app): every call judged nothrow is followed by a slot test that traps with `EH ASSERT: exception set after nothrow call to @f`, naming the callee. `MANTICORE_EH_WHY=1` prints, at compile time, the callee that makes each runtime helper may-throw. A debug build: `bin/build` restores the normal libraries.
 - Cap every log you write (`| tail`, `head -c`). A runaway trace log has filled
   the disk more than once. Delete probe binaries and `.ll` files as soon as they
   are read.
@@ -110,6 +111,9 @@ Rules of evidence:
 Create `tests/aot/cases/<name>.php` + `tests/aot/expected/<name>.out`. No manifest.
 The expected output should be what `php` prints (`php -d xdebug.mode=off` — xdebug
 poisons the oracle). Run it with `bash tests/aot/run.sh -k <name>`.
+A case that tests the runtime `Error` of an undeclared class, function or constant on a reachable
+site (which the build otherwise refuses) carries a `// @allow-undefined-traps` comment; both runners
+then compile it with `--allow-undefined-traps`.
 
 ### Reporting a bug you are not fixing now
 
@@ -178,6 +182,7 @@ annotation of the passes: `src/Compile/README.md` and `docs/design/mir.md`.
 | Static analyzer (`analyze`, compile-time warnings) | `src/Analyze/` |
 | CLI + driver, manifest build, stdlib resolution | `src/Manticore/Main.php`, `src/Cli/` |
 | CLI commands | `src/Cli/Commands/*Command.php` (one class per command, options declared on the class), `src/Cli/Cli.php` |
+| Shared generics (body parts through the object cache) | `src/Compile/Mir/ShareSplit.php`, `assemble_shared` in `src/Manticore/Main.php`, `docs/design/shared-generics.md` |
 | Test harness | `tests/aot/run.sh` |
 | Gates and tooling | `tools/` |
 
@@ -235,6 +240,10 @@ Corollaries:
   `MemoryAbi`; never hard-code one in an emitter or a runtime helper.
 - **`linkonce_odr` bodies coalesce by name across modules.** Never specialize one
   from module-local information — the other module's copy may win at link time.
+- **Prelude code must emit the same text in every program that does not
+  specialize it.** A per-program token, counter or position in a prelude body's
+  name or constants makes every shared-generics part a cache miss
+  (`docs/design/shared-generics.md`); `bash tests/generic/run.sh` measures it.
 - **`__mir_array_retain*` is refcount-only; a value COPY must `__mir_array_adopt*`.**
   An array element read is a BORROW, not an owned value.
 - **Node field order is load-bearing** in the AST/MIR node classes — append, never

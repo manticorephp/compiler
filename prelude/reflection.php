@@ -1272,9 +1272,16 @@ class ReflectionMethod extends ReflectionFunctionAbstract
         return new ReflectionClass($this->class);
     }
 
+    /** An internal method's return type is tentative, not real, unless it is final / static / magic. */
+    private function tentativeRet(): bool
+    {
+        return __mc_refl_row_rettype($this->row) !== "" && !$this->isFinal() && !$this->isStatic()
+            && \substr($this->name, 0, 2) !== "__" && $this->isInternal();
+    }
+
     public function hasReturnType(): bool
     {
-        return __mc_refl_row_rettype($this->row) !== "";
+        return __mc_refl_row_rettype($this->row) !== "" && !$this->tentativeRet();
     }
 
     /**
@@ -1283,6 +1290,11 @@ class ReflectionMethod extends ReflectionFunctionAbstract
      * (best-effort — `parent` is left as written).
      */
     public function getReturnType(): ReflectionType|null
+    {
+        return $this->tentativeRet() ? null : $this->declaredRet();
+    }
+
+    private function declaredRet(): ReflectionType|null
     {
         $t = __mc_refl_row_rettype($this->row);
         if ($t === "") { return null; }
@@ -1395,12 +1407,12 @@ class ReflectionMethod extends ReflectionFunctionAbstract
 
     public function hasTentativeReturnType(): bool
     {
-        return false;
+        return $this->tentativeRet();
     }
 
     public function getTentativeReturnType(): ReflectionType|null
     {
-        return null;
+        return $this->tentativeRet() ? $this->declaredRet() : null;
     }
 
     public function getExtension(): ?object

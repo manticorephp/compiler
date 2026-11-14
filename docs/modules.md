@@ -59,6 +59,7 @@ executable that imports its dependencies' `.sig` and links their `.o`).
 | `composer` | *optional* — `true` also compiles the Composer view of the project (see below); the object form `{ "vendor": false }` narrows it |
 | `extensions` | *optional* — names of native extensions to bind and link. Every name must exist in the manifest's top-level `extensions` map, or the build fails |
 | `lazy` | *optional* — class-name prefixes `ReflectionClass::newLazyGhost` may make ghosts of (e.g. `["App\\Entity\\"]` for Doctrine). Each class listed, and its ancestors, test an init bit on every property read; omit it and every user class does, if the program mentions `newLazyGhost` at all. A ghost of a class outside the list throws `ReflectionException` |
+| `allowUndefined` | *optional* — glob patterns (`*`, case-insensitive, `\` namespaces) of undeclared names (`undefined.*`) that stay warnings even when reachable; see [`cli.md`](cli.md#allowundefined) |
 
 ### Library fields
 

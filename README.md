@@ -46,7 +46,7 @@ fixpoint; Alpine has its own image tag (`:alpine`) and `linux-musl` tarballs. Se
 
 ```bash
 # macOS
-brew install php pcre2 openssl@3 pkg-config
+brew install php pcre2 openssl@4 pkg-config
 
 # Debian / Ubuntu — plus clang from your distro or apt.llvm.org, and PHP 8.5 from sury.org
 sudo apt-get install -y build-essential pkg-config libpcre2-dev libssl-dev
@@ -76,6 +76,10 @@ download), `MANTICORE_REF` (branch/tag), `MANTICORE_REPO`, `MANTICORE_SRC` (buil
 local checkout instead of cloning). Building from source is the same self-hosting
 loop it always was: an existing `manticore` rebuilds the new version *with itself*,
 and a first build starts from the pinned bootstrap release (`BOOTSTRAP_VERSION`) — no php.
+
+On macOS (arm64) Homebrew works too: `brew install manticorephp/tap/manticore`. Upgrade
+it with `brew upgrade`, not `manticore upgrade`, and keep only one of the two installs
+on PATH.
 
 In a container, with the toolchain already in it:
 
@@ -173,18 +177,30 @@ echo '<?php echo "hi\n";' | manticore compile -o /tmp/hi && /tmp/hi
 # a project — a cargo-style manifest, see docs/modules.md
 manticore build                    # reads ./manticore.json
 manticore build --libs-only        # library targets only
+manticore build --check            # front end only: every error and unresolved name in one pass
+manticore compile app.php --check  # the same for one file; no binary is written
 
 # a Composer project: "composer": true in the manifest compiles the project's
 # autoload dirs AND every package in composer.lock — vendor/ is source, not an
 # autoload map evaluated at runtime.
 ```
 
+`--check` parses and lowers the whole manifest, vendor included, and skips inference and
+codegen (about 30 s for Laravel). It reports every front-end error in one run (`parse.error`,
+`lower.unsupported`, `decl.error`, …) as `<file>:<line>: <severity>[<code>]: <message>` and exits
+`65` on errors; a normal build prints the same list and writes no binary. A class, function or
+constant that nothing declares is an **error** when a statically reachable, unguarded path from the
+entry needs it (`new`, `X::m()`, a call, `extends`), and a warning when it is guarded
+(`class_exists`, `function_exists`, …), dynamic or only type-hinted. A PHP function Manticore does
+not implement is an `unsupported.builtin` warning. Details, tiers and `allowUndefined`:
+[`docs/cli.md`](docs/cli.md#front-end-diagnostics-and---check).
+
 Everything else is inspection — every stage of the pipeline is dumpable:
 
 | Command | Purpose |
 |---|---|
-| `compile <file> -o <out>` | PHP source → native binary (file arg or stdin) |
-| `build [manticore.json]` | build all manifest targets (libraries + applications) |
+| `compile <file> -o <out>` | PHP source → native binary (file arg or stdin); `--check` stops after the front end |
+| `build [manticore.json]` | build all manifest targets (libraries + applications); `--check` stops after the front end |
 | `analyze <file>` | the static checks a compiler can make and an interpreter never gets to |
 | `dump-ast` / `dump-mir` / `dump-llvm-mir` | parse / typed MIR / LLVM IR |
 | `dump-llvm` | LLVM IR from stdin |

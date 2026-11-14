@@ -1547,7 +1547,7 @@ trait EmitLlvmExpr
             $out .= "  %ossel = select i1 %osgt, i64 1, i64 0\n";
             $out .= "  %osres = select i1 %oslt, i64 -1, i64 %ossel\n";
         }
-        $out .= "  call void @__mir_rc_release_str(ptr %osostr)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %osostr)\n";
         $out .= "  ret i64 %osres\n";
         $out .= "objgreater:\n";
         $out .= $eq
@@ -1627,10 +1627,10 @@ trait EmitLlvmExpr
         // per comparison, i.e. per sort step. Release what it made.
         $out .= "  %pla = and i64 %a, 281474976710655\n  %plap = inttoptr i64 %pla to ptr\n";
         $out .= "  %fra = icmp ne ptr %ppa, %plap\n  br i1 %fra, label %rela, label %chkrelb\n";
-        $out .= "rela:\n  call void @__mir_rc_release_str(ptr %ppa)\n  br label %chkrelb\n";
+        $out .= "rela:\n  call void @__mir_rc_release_s(ptr %ppa)\n  br label %chkrelb\n";
         $out .= "chkrelb:\n  %plb = and i64 %b, 281474976710655\n  %plbp = inttoptr i64 %plb to ptr\n";
         $out .= "  %frb = icmp ne ptr %ppb, %plbp\n  br i1 %frb, label %relb, label %scdone\n";
-        $out .= "relb:\n  call void @__mir_rc_release_str(ptr %ppb)\n  br label %scdone\n";
+        $out .= "relb:\n  call void @__mir_rc_release_s(ptr %ppb)\n  br label %scdone\n";
         $out .= "scdone:\n";
         // str_cmp hands back the raw byte difference; this function's contract is
         // -1/0/+1 (a `<=>` result is returned verbatim now, not merely tested
@@ -3961,6 +3961,7 @@ trait EmitLlvmExpr
     /** The one shared body {@see emitBagOfUnknownClass} calls. */
     private function emitBagOfFn(): string
     {
+        $this->ssa->reset();
         $body = $this->emitBagOfUnknownClassInline('%bagf.obj');
         return 'define linkonce_odr ptr @' . $this->mirHelperSym('__mir_bag_of') . "(ptr %bagf.obj) noinline {\nentry:\n"
             . $body . '  ret ptr ' . $this->lastValue . "\n}\n\n";
@@ -4086,7 +4087,7 @@ trait EmitLlvmExpr
                 }
                 // A CAST was the one consumer of a fresh cell temp with no
                 // owner: the ~30 string builtins get the drop through
-                // {@see EmitLlvm::$ptrArgCellByReg} and `echo` has its own, but
+                // {@see \Compile\Mir\SsaBuilder::parkCell} and `echo` has its own, but
                 // `strlen((string)json_encode($v))` stranded the whole document
                 // where `strlen(json_encode($v))` was flat. Sound because the
                 // result already CO-OWNS: {@see cellStrResultOwnIr} retains it
@@ -5018,7 +5019,7 @@ trait EmitLlvmExpr
             $out = $this->coerceToI64();
             $cv = $this->lastValue;
             $out .= $this->coerceCellToStr($cv);
-            if ($this->isFreshCellTemp($operand)) { $this->ptrArgCellByReg[$this->lastValue] = $cv; }
+            if ($this->isFreshCellTemp($operand)) { $this->ssa->parkCell($this->lastValue, $cv); }
             return $out;
         }
         // An ERASED operand may carry either a boxed cell or a raw i64, and
@@ -7175,6 +7176,24 @@ trait EmitLlvmExpr
         // An object UNION is the bare object pointer `obj<C>` is ({@see boxToCell}
         // boxes both by box_object): left out, a cell stored into a `vec[A|C]`
         // slot kept its tag bits under an `obj` hint.
+        if ($pk === Type::KIND_CLOSURE && ($pt->class ?? '') === '') {
+            // A `callable` slot may hold a function-NAME string (`'C::m'` out of an
+            // erased element): it stays tagged, the one shape the invoke can tell
+            // from a closure env ({@see EmitLlvmCalls::emitErasedInvokeArms}); a raw
+            // string pointer there was jumped to as a closure.
+            $w = $this->lastValue;
+            $top = $this->ssa->allocReg();
+            $out = '  ' . $top . ' = lshr i64 ' . $w . ", 48\n";
+            $isStr = $this->ssa->allocReg();
+            $out .= '  ' . $isStr . ' = icmp eq i64 ' . $top . ", 65524\n";
+            $m = $this->ssa->allocReg();
+            $out .= '  ' . $m . ' = and i64 ' . $w . ", 281474976710655\n";
+            $r = $this->ssa->allocReg();
+            $out .= '  ' . $r . ' = select i1 ' . $isStr . ', i64 ' . $w . ', i64 ' . $m . "\n";
+            $this->lastValue = $r;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE || $pk === Type::KIND_UNION) {
             $r = $this->ssa->allocReg();
             $out = '  ' . $r . ' = and i64 ' . $this->lastValue . ", 281474976710655\n";

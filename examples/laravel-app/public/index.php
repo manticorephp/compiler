@@ -18,6 +18,10 @@ $kernel->bootstrap();
 // them: one request at a time through the kernel in a worker, and concurrency from WORKERS.
 $gate = new Async\Mutex();
 
+// What LaravelRequest::capture() does, without building a Symfony request first and copying it into a
+// Laravel one (createFromBase) on every request.
+LaravelRequest::enableHttpMethodParameterOverride();
+
 (new Server('tcp://127.0.0.1:' . (getenv('PORT') ?: '8181')))
     ->workers((int)(getenv('WORKERS') ?: 1))
     ->maxConnections(512)
@@ -28,7 +32,11 @@ $gate = new Async\Mutex();
     })
     ->serve(function (Request $req) use ($kernel, $gate): Response {
         return $gate->withLock(function () use ($kernel): Response {
-            $request = LaravelRequest::capture();
+            $request = LaravelRequest::createFromGlobals();
+            if ($request->isJson()) {
+                $request->request->replace($request->json()->all());
+                $request->setJson($request->request);
+            }
             $laravel = $kernel->handle($request);
             $kernel->terminate($request, $laravel);
 

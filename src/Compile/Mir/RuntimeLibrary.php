@@ -465,7 +465,7 @@ final class RuntimeLibrary
         // An empty slot means absent: the table always has one (cap >= 2*count),
         // so the probe terminates.
         $out .= "  %hfree = icmp eq ptr %hv, null\n";
-        $out .= "  br i1 %hfree, label %miss, label %hcheck\n";
+        $out .= "  br i1 %hfree, label %walk, label %hcheck\n";
         $out .= "hcheck:\n";
         $out .= '  %hnmp = getelementptr i8, ptr %hv, i64 '
               . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
@@ -493,7 +493,7 @@ final class RuntimeLibrary
         $out .= '  %nmp = getelementptr i8, ptr %m, i64 '
               . (string)\Compile\MemoryAbi::RMETA_NAME_OFFSET . "\n";
         $out .= "  %nm = load ptr, ptr %nmp\n";
-        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %c = call i32 @__mir_name_icmp(ptr %nm, ptr %name)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  br i1 %eq, label %hit, label %cont\n";
         $out .= "hit:\n";
@@ -560,7 +560,7 @@ final class RuntimeLibrary
         $out .= "  br i1 %end, label %miss, label %body\n";
         $out .= "body:\n";
         $out .= "  %nm = load ptr, ptr %p\n";
-        $out .= "  %c = call i32 @strcmp(ptr %nm, ptr %name)\n";
+        $out .= "  %c = call i32 @__mir_name_icmp(ptr %nm, ptr %name)\n";
         $out .= "  %eq = icmp eq i32 %c, 0\n";
         $out .= "  br i1 %eq, label %hit, label %cont\n";
         $out .= "hit:\n";
@@ -1770,7 +1770,7 @@ final class RuntimeLibrary
         $out .= "  %gnulp = getelementptr inbounds i8, ptr %buf, i64 %sum\n";
         $out .= "  store i8 0, ptr %gnulp\n";
         $out .= "  call void @__mir_str_set_len(ptr %buf, i64 %sum)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %s)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %s)\n";
         $out .= "  ret ptr %buf\n";
         $out .= "}\n";
         return $out;
@@ -2523,7 +2523,7 @@ final class RuntimeLibrary
         $out .= "  %nc = shl i64 %need1, 1\n";
         $out .= "  %nb = call ptr @__mir_str_alloc(i64 %nc)\n";
         $out .= "  call ptr @memcpy(ptr %nb, ptr %buf, i64 %len)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %buf)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %buf)\n";
         $out .= "  store ptr %nb, ptr %slotp\n";
         $out .= "  ret ptr %nb\n}\n";
         // A short copy (a key, a float's digits, one UTF-8 sequence) as a
@@ -3117,7 +3117,7 @@ no:
         $out .= "  %fs = inttoptr i64 %fsi to ptr\n";
         $out .= "  %fn = call i64 @__mir_strlen(ptr %fs)\n";
         $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr %fs, i64 %fn)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %fs)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %fs)\n";
         // JSON_PRESERVE_ZERO_FRACTION: ±0 is `0.0` / `-0.0`. INF and NAN (the
         // other fallback inputs) are `0` either way — php writes the zero bare.
         $out .= "  %fbz0 = and i64 %cell, 9223372036854775807\n";
@@ -3538,7 +3538,7 @@ no:
         $out .= "  %os = inttoptr i64 %osi to ptr\n";
         $out .= "  %on = call i64 @__mir_strlen(ptr %os)\n";
         $out .= "  call void @__mir_json_ncat(ptr %slotp, ptr %lp, ptr %os, i64 %on)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %os)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %os)\n";
         $out .= "  ret void\n";
         $H = (string) \Compile\MemoryAbi::ARRAY_HEADER_SIZE;
         $ES = (string) \Compile\MemoryAbi::ARRAY_ENTRY_SIZE;
@@ -4762,14 +4762,14 @@ no:
         $out .= "  %iskstr = icmp ne i64 %kind, 0\n";
         $out .= "  br i1 %iskstr, label %avfree, label %afail\n";
         $out .= "avfree:\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %kstrp)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %kstrp)\n";
         $out .= "  br label %afail\n";
         $out .= "astore:\n";
         $out .= "  %isstr = icmp ne i64 %kind, 0\n";
         $out .= "  br i1 %isstr, label %asets, label %aseti\n";
         $out .= "asets:\n";
         $out .= "  %nxs = call ptr @__mir_array_set_str(ptr %acur, ptr %kstrp, i64 %val, i64 0, i64 0)\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %kstrp)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %kstrp)\n";
         $out .= "  br label %anext\n";
         $out .= "aseti:\n";
         $out .= "  %ahash = call i64 @__mir_array_is_hashed(ptr %acur)\n";
@@ -6022,7 +6022,7 @@ no:
         $out .= "  %hasold = icmp ne ptr %old, null\n";
         $out .= "  br i1 %hasold, label %evict, label %take\n";
         $out .= "evict:\n";
-        $out .= "  call void @__mir_rc_release_str(ptr %old)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %old)\n";
         $out .= "  br label %take\n";
         $out .= "take:\n";
         $out .= "  call void @__mir_rc_retain_str(ptr %ns)\n";
@@ -6883,7 +6883,7 @@ asint:
         $out .= "  %onx = phi ptr [%onxi, %oseti], [%onxs, %osets]\n";
         $out .= "  store ptr %onx, ptr %ap\n";
         // set_str took its own reference on the key; drop the one jd_str minted.
-        $out .= "  call void @__mir_rc_release_str(ptr %okey)\n";
+        $out .= "  call void @__mir_rc_release_s(ptr %okey)\n";
         $out .= "  call void @__mir_jd_ws(ptr %s, i64 %n, ptr %pp)\n";
         $out .= "  %occ = load i64, ptr %pp\n";
         $out .= "  %occoob = icmp sge i64 %occ, %n\n";

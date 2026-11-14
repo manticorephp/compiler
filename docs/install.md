@@ -89,6 +89,19 @@ manticore completions fish > ~/.config/fish/completions/manticore.fish
 The scripts are generated from the command and option declarations, so they match the
 installed compiler; regenerate them after an upgrade.
 
+### Via Homebrew (macOS arm64)
+
+```bash
+brew install manticorephp/tap/manticore
+```
+
+The formula installs the published macOS build and its libraries (`openssl@4`, `pcre2`,
+`icu4c`, `pkgconf`); clang, `cc`, zlib, iconv, libcurl, libsqlite3 and libxml2 come from
+macOS. A scheduled workflow in the tap points the formula at the latest release. Upgrade with
+`brew upgrade manticore`; `manticore upgrade` refuses a Homebrew install. It does not
+touch an `install.sh` install under `~/.manticore`; with both present, the one earlier in
+`PATH` wins, and `brew info manticore` warns about it.
+
 ### Via Composer
 
 ```bash
@@ -183,7 +196,7 @@ runtime.
 
 ```bash
 xcode-select --install                  # clang + cc + ld
-brew install php pcre2 openssl@3 pkg-config curl   # curl: only for ext/curl
+brew install php pcre2 openssl@4 pkg-config curl   # curl: only for ext/curl
 ```
 
 Homebrew's `php` tracks the current release; check `php -v` reports 8.5.

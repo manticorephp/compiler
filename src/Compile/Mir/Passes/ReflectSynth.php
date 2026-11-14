@@ -42,14 +42,14 @@ final class ReflectSynth
      *  class `A\B` prop `x` and a class `A` prop `B__x` cannot collide. */
     public static function propAccessor(string $declClass, string $prop, bool $setter): string
     {
-        $c = \str_replace('\\', '_', \ltrim($declClass, '\\'));
+        $c = \Compile\SymbolName::ident($declClass);
         return ($setter ? '__mc_pset_' : '__mc_pget_') . $c . '__' . $prop;
     }
 
     /** The set-hook-bypassing setter of a HOOKED property — what `setRawValue` calls. */
     public static function propRawSetter(string $declClass, string $prop): string
     {
-        return '__mc_prraw_' . \str_replace('\\', '_', \ltrim($declClass, '\\')) . '__' . $prop;
+        return '__mc_prraw_' . \Compile\SymbolName::ident($declClass) . '__' . $prop;
     }
 
     /**
@@ -61,8 +61,8 @@ final class ReflectSynth
      */
     public static function attrFn(string $declClass, string $kind, string $member, int $k, bool $new): string
     {
-        $c = \str_replace('\\', '_', \ltrim($declClass, '\\'));
-        $m = \str_replace(['\\', '$'], '_', $member);
+        $c = \Compile\SymbolName::ident($declClass);
+        $m = \str_replace('$', '_', \Compile\SymbolName::ident($member));
         return ($new ? '__mc_attr_new_' : '__mc_attr_args_')
              . $c . '__' . $kind . '_' . $m . '_' . (string)$k;
     }
@@ -80,8 +80,8 @@ final class ReflectSynth
      */
     public static function paramDefaultFn(string $declClass, string $method, int $pos): string
     {
-        $c = \str_replace('\\', '_', \ltrim($declClass, '\\'));
-        $m = \str_replace(['\\', '$'], '_', $method);
+        $c = \Compile\SymbolName::ident($declClass);
+        $m = \str_replace('$', '_', \Compile\SymbolName::ident($method));
         return '__mc_pdef_' . $c . '__' . $m . '_' . (string)$pos;
     }
 
@@ -89,25 +89,25 @@ final class ReflectSynth
      *  `name => value`. Matched on the synthesis + emission sides. */
     public static function constsFn(string $class): string
     {
-        return '__mc_consts_' . \str_replace('\\', '_', \ltrim($class, '\\'));
+        return '__mc_consts_' . \Compile\SymbolName::ident($class);
     }
 
     /** The docblock / start-line factory symbol: `__mc_cdoc_<C>()` → see LowerFromAst::synthDocFactories. */
     public static function docFn(string $class): string
     {
-        return '__mc_cdoc_' . \str_replace('\\', '_', \ltrim($class, '\\'));
+        return '__mc_cdoc_' . \Compile\SymbolName::ident($class);
     }
 
     /** The declaring-file factory symbol: `__mc_cfile_<C>()` → the path string. */
     public static function fileFn(string $class): string
     {
-        return '__mc_cfile_' . \str_replace('\\', '_', \ltrim($class, '\\'));
+        return '__mc_cfile_' . \Compile\SymbolName::ident($class);
     }
 
     /** The interface-names factory symbol (Ф5): `__mc_ifaces_<C>()` → string[]. */
     public static function ifacesFn(string $class): string
     {
-        return '__mc_ifaces_' . \str_replace('\\', '_', \ltrim($class, '\\'));
+        return '__mc_ifaces_' . \Compile\SymbolName::ident($class);
     }
 
     /**
