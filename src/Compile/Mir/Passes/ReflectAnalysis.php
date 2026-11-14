@@ -62,6 +62,8 @@ final class ReflectAnalysis
             // `__mc_refl_find($name)` is a parameter by construction and would
             // escape every program to `all`. The demand comes from user code.
             if ($fn->isPrelude) { continue; }
+            // The synthesized static-callable dispatcher walks parents by a computed name; it must not make every class reflectable.
+            if (\str_starts_with($fn->name, '__mc_static_callable')) { continue; }
             $this->scan($fn->body);
         }
         if ($this->all) { return; }
@@ -124,6 +126,9 @@ final class ReflectAnalysis
                 $this->fromArg($n->args[1]);
             }
             if ($fname === '__mc_refl_find' && \count($n->args) >= 1) {
+                $this->fromArg($n->args[0]);
+            }
+            if ($fname === 'get_parent_class' && \count($n->args) >= 1) {
                 $this->fromArg($n->args[0]);
             }
             if ($fname === '__mc_get_class_vars' && \count($n->args) >= 1) {

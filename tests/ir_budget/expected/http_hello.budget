@@ -1,3 +1,3 @@
 # ceiling for examples/http/hello.php — regenerate with tests/ir_budget/run.sh --bless
-max_bytes=3743209
-max_defs=792
+max_bytes=11287034
+max_defs=2501

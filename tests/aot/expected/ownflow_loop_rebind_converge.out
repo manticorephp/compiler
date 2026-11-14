@@ -1,0 +1,13 @@
+Array
+(
+    [.a:hover] => Array
+        (
+            [color] => red
+        )
+
+    [.btn:hover] => Array
+        (
+            [x] => 1
+        )
+
+)

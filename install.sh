@@ -194,7 +194,18 @@ try_prebuilt() {
     if [ -f "$tmp/$name/share/install.sh" ]; then cp "$tmp/$name/share/install.sh" "$stage/share/install.sh"
     elif [ -n "$SELF" ] && [ -f "$SELF" ]; then cp "$SELF" "$stage/share/install.sh"; fi
     printf 'install.sh %s\n' "$rel_ver" > "$stage/share/.installed-by"
-    if [ "$OS" = Darwin ]; then xattr -d com.apple.quarantine "$stage/bin/manticore" 2>/dev/null || true; fi
+    if [ "$OS" = Darwin ]; then
+        xattr -d com.apple.quarantine "$stage/bin/manticore" 2>/dev/null || true
+        # Homebrew dylibs the binary was linked against (openssl@4, pcre2): without
+        # them dyld kills it before main, and the smoke test below says only "failed".
+        local lib missing=""
+        for lib in $(otool -L "$stage/bin/manticore" 2>/dev/null | awk 'NR>1 && $1 ~ /\/opt\// {print $1}'); do
+            [ -f "$lib" ] || missing="$missing $(printf '%s' "$lib" | sed -E 's#.*/opt/([^/]+)/lib/.*#\1#')"
+        done
+        if [ -n "$missing" ]; then
+            rm -rf "$tmp" "$stage"; miss $EX_STAGE "the published build needs:$missing — run: brew install$missing"; return 1
+        fi
+    fi
     if ! smoke_compile "$stage/bin/manticore" "$stage"; then
         rm -rf "$tmp" "$stage"; miss $EX_STAGE "the downloaded compiler failed its smoke test; the installed one is untouched"; return 1
     fi
@@ -226,7 +237,7 @@ have pcre2-config || soft+=("libpcre2 dev (pcre2-config) — for preg_*")
     && soft+=("openssl 3 dev (libssl) — for https:// streams + hash/hmac")
 show_hints() {
     case "$OS" in
-        Darwin) echo "  xcode-select --install; brew install php pcre2 openssl@3 pkg-config" >&2;;
+        Darwin) echo "  xcode-select --install; brew install php pcre2 openssl@4 pkg-config" >&2;;
         Linux)  if [ "$MUSL" = 1 ]; then
                     echo "  apk add clang lld gcc musl-dev pcre2-dev openssl-dev zlib-dev pkgconf tzdata libxml2-dev php85 php85-ctype" >&2
                 else

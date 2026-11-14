@@ -319,7 +319,7 @@ trait EmitLlvmGenerator
         $this->frame->erasedArrayReturn = false;
         $this->frame->erasedCond = null;
         $this->ehBegin($fn, true);
-        $out .= 'define ' . $defLinkage . 'i64 ' . $resume . '(ptr %frame)' . $this->personalityClause() . " {\nentry:\n";
+        $out .= 'define ' . $defLinkage . 'i64 ' . $resume . '(ptr %frame)' . " {\nentry:\n";
         // Local slots = frame GEPs computed in entry (dominate every block).
         $this->gen->frameSlots = [];
         foreach ($locals as $name => $idx) {

@@ -1,4 +1,5 @@
 <?php
+// @allow-undefined-traps — tests the runtime trap of an undeclared name; see tests/aot/run.sh
 // php resolves a constant when the expression is EVALUATED, and throws
 // `Error: Undefined constant "X"` there. A reference sitting behind a guard
 // that is false therefore costs nothing — which is the whole reason

@@ -184,6 +184,50 @@ class ArrayIterator implements SeekableIterator, ArrayAccess, Countable
         $this->__s[] = $v;
     }
 
+    // Bound to an ArrayObject, a sort reorders THAT storage (php shares it);
+    // otherwise the own copy, through a local ({@see ArrayObject::asort}).
+    public function asort(int $flags = \SORT_REGULAR): bool
+    {
+        if ($this->__o !== null) { return $this->__o->asort($flags); }
+        if (\is_array($this->__s)) { $s = $this->__s; \asort($s, $flags); $this->__s = $s; $this->__rebuildKeys(); }
+        return true;
+    }
+
+    public function ksort(int $flags = \SORT_REGULAR): bool
+    {
+        if ($this->__o !== null) { return $this->__o->ksort($flags); }
+        if (\is_array($this->__s)) { $s = $this->__s; \ksort($s, $flags); $this->__s = $s; $this->__rebuildKeys(); }
+        return true;
+    }
+
+    public function uasort(callable $callback): bool
+    {
+        if ($this->__o !== null) { return $this->__o->uasort($callback); }
+        if (\is_array($this->__s)) { $s = $this->__s; \uasort($s, $callback); $this->__s = $s; $this->__rebuildKeys(); }
+        return true;
+    }
+
+    public function uksort(callable $callback): bool
+    {
+        if ($this->__o !== null) { return $this->__o->uksort($callback); }
+        if (\is_array($this->__s)) { $s = $this->__s; \uksort($s, $callback); $this->__s = $s; $this->__rebuildKeys(); }
+        return true;
+    }
+
+    public function natsort(): bool
+    {
+        if ($this->__o !== null) { return $this->__o->natsort(); }
+        if (\is_array($this->__s)) { $s = $this->__s; \natsort($s); $this->__s = $s; $this->__rebuildKeys(); }
+        return true;
+    }
+
+    public function natcasesort(): bool
+    {
+        if ($this->__o !== null) { return $this->__o->natcasesort(); }
+        if (\is_array($this->__s)) { $s = $this->__s; \natcasesort($s); $this->__s = $s; $this->__rebuildKeys(); }
+        return true;
+    }
+
     public function getArrayCopy(): mixed
     {
         return $this->__st();
@@ -266,6 +310,46 @@ class ArrayObject implements IteratorAggregate, ArrayAccess, Countable
     public function append(mixed $v): void
     {
         $this->__s[] = $v;
+    }
+
+    // The sorts work on a local copy and store it back: handing the slot itself
+    // to a by-reference parameter would make it a reference-holding slot for
+    // the whole program. ponytail: an OBJECT storage is left unsorted (php
+    // reorders its property table); add when a caller needs it.
+    public function asort(int $flags = \SORT_REGULAR): bool
+    {
+        if (\is_array($this->__s)) { $s = $this->__s; \asort($s, $flags); $this->__s = $s; }
+        return true;
+    }
+
+    public function ksort(int $flags = \SORT_REGULAR): bool
+    {
+        if (\is_array($this->__s)) { $s = $this->__s; \ksort($s, $flags); $this->__s = $s; }
+        return true;
+    }
+
+    public function uasort(callable $callback): bool
+    {
+        if (\is_array($this->__s)) { $s = $this->__s; \uasort($s, $callback); $this->__s = $s; }
+        return true;
+    }
+
+    public function uksort(callable $callback): bool
+    {
+        if (\is_array($this->__s)) { $s = $this->__s; \uksort($s, $callback); $this->__s = $s; }
+        return true;
+    }
+
+    public function natsort(): bool
+    {
+        if (\is_array($this->__s)) { $s = $this->__s; \natsort($s); $this->__s = $s; }
+        return true;
+    }
+
+    public function natcasesort(): bool
+    {
+        if (\is_array($this->__s)) { $s = $this->__s; \natcasesort($s); $this->__s = $s; }
+        return true;
     }
 
     public function __storage(): mixed

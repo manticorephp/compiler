@@ -1,0 +1,11 @@
+dtor 0
+dtor 6
+dtor 12
+dtor 18
+dtor 24
+caught bottom
+dtor 0
+inner
+finally
+LogicException re <- bottom
+loop 2000

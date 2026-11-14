@@ -96,7 +96,7 @@ function sha1_file(string $filename, bool $binary = false): string|false
  * hash($algo, $data, $binary). Supports the EVP digests plus crc32b (== crc32())
  * crc32 (the MSB-first variant) and xxh128 (Xxhash.php). Throws on an unknown algo.
  */
-function hash(string $algo, string $data, bool $binary = false): string
+function hash(string $algo, string $data, bool $binary = false, array $options = []): string
 {
     $a = \strtolower($algo);
     if ($a === 'crc32b') {
@@ -121,7 +121,7 @@ function hash(string $algo, string $data, bool $binary = false): string
     return $binary ? $raw : \bin2hex($raw);
 }
 
-function hash_file(string $algo, string $filename, bool $binary = false): string|false
+function hash_file(string $algo, string $filename, bool $binary = false, array $options = []): string|false
 {
     $c = \file_get_contents($filename);
     if ($c === false) {

@@ -27,9 +27,10 @@ final class Analyzer
      *                                 index but never themselves reported
      * @param bool $checkUndefined  run closed-world undefined-symbol rules (only
      *                              safe in whole-project mode)
+     * @param ?Index $libIndex    the libFiles already indexed (a cached prelude index), used instead of them
      * @return Diagnostic[]
      */
-    public function run(array $files, array $libFiles = [], bool $checkUndefined = false, array $stdlibFns = []): array
+    public function run(array $files, array $libFiles = [], bool $checkUndefined = false, array $stdlibFns = [], ?Index $libIndex = null): array
     {
         /** @var ParsedFile[] $all */
         $all = [];
@@ -37,8 +38,11 @@ final class Analyzer
         // and library over user, so feed the library first and the user files reversed.
         foreach ($libFiles as $pf) { $all[] = $pf; }
         for ($i = \count($files) - 1; $i >= 0; $i--) { $all[] = $files[$i]; }
+        $statT = \Compile\Stats::begin('analyze: index');
         $index = Index::build($all);
+        if ($libIndex !== null) { $index->merge($libIndex); }
         $index->addExternFunctions($stdlibFns);
+        \Compile\Stats::step('analyze: index', $statT, \count($all), -1);
 
         /** @var array<string, bool> $unitPaths */
         $unitPaths = [];

@@ -1,0 +1,1 @@
+{"libraries":[{"name":"rt","src":"rt","runtime":true,"output":".work/rt.o"}],"applications":[{"name":"twins","src":".","entry":"main.php","output":".work/twins","stdlib":false}]}

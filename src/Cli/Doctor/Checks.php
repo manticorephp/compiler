@@ -18,7 +18,7 @@ final class Checks
     private static function installHint(): string
     {
         if (\Manticore\host_os() === 'Darwin') {
-            return 'xcode-select --install; brew install pcre2 openssl@3 pkg-config';
+            return 'xcode-select --install; brew install pcre2 openssl@4 pkg-config';
         }
         if (\file_exists('/etc/alpine-release')) {
             return 'apk add clang lld gcc musl-dev pcre2-dev openssl-dev zlib-dev pkgconf';
