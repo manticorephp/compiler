@@ -660,6 +660,7 @@ function __preg_capture_count(int $code): int
     return $n;
 }
 
+/** @return mixed[] */
 function __preg_pair(string $s, int $off): array
 {
     return [\__mir_to_cell($s), \__mir_to_cell($off < 0 ? -1 : $off)];

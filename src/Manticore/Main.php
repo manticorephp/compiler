@@ -1280,6 +1280,7 @@ function clang_run_counted(array $cmds, array $objs, int $doneBefore, int $total
     return $last;
 }
 
+/** @return string[] the object files to link */
 function assemble_ir(string $ir, string $base, string $cflags, bool $autoSplit = false): array
 {
     $llPath = $base . ".ll";
@@ -1619,7 +1620,7 @@ function shared_drop_objects(string $base): void
     system('rm -f ' . $base . '.s*.o ' . $base . '.prog.p*.o');
 }
 
-/** Assemble already-staged large IR without reading it back into PHP. */
+/** Assemble already-staged large IR without reading it back into PHP. @return string[] the object files to link */
 function assemble_ir_file(
     string $llPath,
     string $base,
@@ -1985,6 +1986,7 @@ function import_stdlib_decls(bool $emitLibrary, bool $runtime): bool
     return true;
 }
 
+/** @return \Parser\Ast\FunctionDecl[] */
 function collect_stdlib_extern_decls(bool $withTypes = false): array
 {
     /** @var \Parser\Ast\FunctionDecl[] $decls */
@@ -2478,6 +2480,7 @@ function undefined_traps_ok(array $traps, bool $emitLibrary, string $output): bo
     return true;
 }
 
+/** @param string[] $names */
 function dump_undefined_traps(array $names): void
 {
     $out = \getenv("MANTICORE_DUMP_TRAPS");
@@ -3057,6 +3060,10 @@ function exclude_matches(string $path, string $ex): bool
     return \str_starts_with($p, $e);
 }
 
+/**
+ * @param string[] $excludes
+ * @return string[]
+ */
 function collect_php_sources(string $dir, array $excludes): array
 {
     /** @var string[] $out */
@@ -3194,17 +3201,7 @@ function composer_autoload_dirs(array $autoload, string $base): array
     return $out;
 }
 
-/**
- * The `autoload.files` entries of a composer project, as a path set. These are
- * composer's BOOTSTRAP files: it `require`s each one on every request, so their
- * top-level statements genuinely run at program start.
- *
- * Every other autoload mechanism is DEMAND-driven — psr-4/psr-0 map a class
- * NAME to a file and classmap maps a declared symbol to one, so such a file is
- * read only when a class lookup resolves to it, and never otherwise.
- *
- * @return array<string,bool>
- */
+/** @param string[] $allow */
 function composer_package_selected(array $allow, string $name): bool
 {
     if ($allow === []) {
@@ -3218,6 +3215,18 @@ function composer_package_selected(array $allow, string $name): bool
     return false;
 }
 
+/**
+ * The `autoload.files` entries of a composer project, as a path set. These are
+ * composer's BOOTSTRAP files: it `require`s each one on every request, so their
+ * top-level statements genuinely run at program start.
+ *
+ * Every other autoload mechanism is DEMAND-driven — psr-4/psr-0 map a class
+ * NAME to a file and classmap maps a declared symbol to one, so such a file is
+ * read only when a class lookup resolves to it, and never otherwise.
+ *
+ * @param string[] $packageAllow
+ * @return array<string,bool>
+ */
 function composer_autoload_file_entries(string $projRoot, bool $withVendor, array $packageAllow = []): array
 {
     /** @var array<string,bool> $out */
@@ -3493,6 +3502,7 @@ function __mc_stmt_children(\Parser\Ast\Stmt $s): array
  * autoload roots; the result feeds straight into {@see collect_php_sources}.
  * Deduplicated by path, order preserved.
  *
+ * @param string[] $packageAllow
  * @return string[]
  */
 function composer_source_dirs(string $projRoot, bool $withVendor, array $packageAllow = []): array
@@ -3561,6 +3571,7 @@ function composer_source_dirs(string $projRoot, bool $withVendor, array $package
  * about another's, and over-EXCLUSION is a regression exactly as
  * over-inclusion is.
  *
+ * @param string[] $packageAllow
  * @return string[]
  */
 function composer_classmap_excludes(string $projRoot, bool $withVendor, array $packageAllow = []): array
@@ -3678,6 +3689,7 @@ function collect_extern_decls_from_dir(string $dir, array $excludes): array
  *
  * @param string[] $sources
  * @param string[] $linkObjs
+ * @param string[] $paths
  */
 function build_compile_module(
     array &$sources,
@@ -4488,6 +4500,10 @@ function __mc_rewrite_stmt_returns(\Parser\Ast\Stmt $s, string $slot, string $la
     return $s;
 }
 
+/**
+ * @param string[] $sources file contents, parallel to `$paths`
+ * @param string[] $paths
+ */
 function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array $paths = []): ?\Compile\Mir\Module
 {
     $stmts = [];
@@ -6242,6 +6258,10 @@ function lower_module(array &$sources, ?\Analyze\MirDiags $collect = null, array
     }
 }
 
+/**
+ * @param string[] $sources file contents, parallel to `$paths`
+ * @param string[] $paths
+ */
 function compile_via_mir(array $sources, array $paths = []): ?string
 {
     $module = lower_module($sources, null, $paths);
@@ -6724,6 +6744,11 @@ function build_cache_file_stamp(string $path): string
     return $path . ':' . (string)$size . ':' . (string)$mtime;
 }
 
+/**
+ * @param string[] $sources file contents, parallel to `$paths`
+ * @param string[] $paths
+ * @param string[] $linkObjs
+ */
 function build_cache_key(
     array $sources,
     array $paths,
@@ -6779,6 +6804,11 @@ function build_cache_stamp_path(string $output): string
     return \rtrim($dir, '/') . '/' . \hash('sha256', $output) . '.stamp';
 }
 
+/**
+ * @param string[] $sources file contents, parallel to `$paths`
+ * @param string[] $paths
+ * @param string[] $linkObjs
+ */
 function build_cache_hit(
     array $sources,
     array $paths,
@@ -6812,6 +6842,11 @@ function build_cache_artifact_stamp(string $output, bool $emitLibrary): string
     return build_cache_file_stamp($output) . '|' . ($emitLibrary ? build_cache_file_stamp($output . '.sig') : '');
 }
 
+/**
+ * @param string[] $sources file contents, parallel to `$paths`
+ * @param string[] $paths
+ * @param string[] $linkObjs
+ */
 function build_cache_store(
     array $sources,
     array $paths,

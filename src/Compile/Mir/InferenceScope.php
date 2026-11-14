@@ -7,8 +7,10 @@ final class InferenceScope
     public const FULL = 'full';
     public const TARGETED = 'targeted';
 
+    /** @param string[] $functions */
     private function __construct(
         public readonly string $mode,
+        /** @var string[] */
         public readonly array $functions,
         public readonly string $reason,
     ) {}

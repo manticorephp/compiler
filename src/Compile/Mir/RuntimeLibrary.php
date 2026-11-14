@@ -164,7 +164,9 @@ final class RuntimeLibrary
         return '{ i64, ptr, ptr }';
     }
 
-    /** Build one immutable dynamic-method table global. */
+    /** Build one immutable dynamic-method table global.
+     * @param string[] $rowsIr
+     * @return string[] [definition IR, `ptr` operand] */
     public static function dynamicMethodTable(string $sym, array $rowsIr): array
     {
         $n = \count($rowsIr);
@@ -425,6 +427,7 @@ final class RuntimeLibrary
      * given class points at the same coalesced rmeta.
      *
      * @param string[] $ids symbol suffixes
+     * @param string[] $extraCtors registry ctor symbols
      */
     public static function reflRegistry(array $ids, array $extraCtors = []): string
     {

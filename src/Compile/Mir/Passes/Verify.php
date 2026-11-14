@@ -30,6 +30,7 @@ final class Verify implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [InferTypes::NAME]; }
 
     /** @var array<string, true> locals defined in the current function

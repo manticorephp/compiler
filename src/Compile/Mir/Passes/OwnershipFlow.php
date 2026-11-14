@@ -81,6 +81,7 @@ final class OwnershipFlow implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [SpillFreshBases::NAME]; }
 
     private ?Ownership $own = null;

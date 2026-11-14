@@ -53,6 +53,10 @@ final class ClassDef
      * @param string[]            $propertyNames ordered, for offsets
      * @param array<string, Type> $propertyTypes name → type
      * @param array<string, true> $methodNames   declared method names
+     * @param string[]            $interfaces
+     * @param string[]            $staticPropNames
+     * @param array<string, array{get: ?string, set: ?string}> $propHooks
+     * @param Type[]              $staticPropTypes
      */
     public function __construct(
         public readonly string $name,

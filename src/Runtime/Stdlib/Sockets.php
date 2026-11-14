@@ -950,7 +950,11 @@ function __mc_sock_id(\Socket $s): \Socket
     return $s;
 }
 
-/** Linear lookup of $fd in the parallel $fds list (small n; avoids an assoc). */
+/**
+ * Linear lookup of $fd in the parallel $fds list (small n; avoids an assoc).
+ *
+ * @param int[] $fds
+ */
 function __mc_sel_index(array $fds, int $fd): int
 {
     $n = \count($fds);

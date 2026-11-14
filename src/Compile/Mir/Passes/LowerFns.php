@@ -732,6 +732,7 @@ trait LowerFns
      * @param string[] $capNames
      * @param Type[]   $capTypes
      * @param Node[]   $capVals
+     * @param \Parser\Ast\Param[]|null $metaParams
      */
     private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret, bool $forwardsErasedArray = false, ?array $metaParams = null): Node
     {

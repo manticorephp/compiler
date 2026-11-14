@@ -1658,7 +1658,11 @@ trait InferScans
         }
     }
 
-    /** @param array<string,Type> $initTypes name → its initialiser's type */
+    /**
+     * @param array<string,Type> $initTypes name → its initialiser's type
+     * @param array<string,bool> $active
+     * @param array<string,string> $cells
+     */
     private function collectPlainStaticLocals(Node $n, array &$active, array &$cells, array &$initTypes): void
     {
         if ($n->kind === Node::KIND_STATIC_LOCAL_DECL) {
@@ -1986,7 +1990,10 @@ trait InferScans
         return false;
     }
 
-    /** Every value KIND stored into one local's ELEMENTS, as a set. */
+    /**
+     * Every value KIND stored into one local's ELEMENTS, as a set.
+     * @param array<string,bool> $kinds Type kinds stored
+     */
     private function scanStoreElemKinds(Node $n, string $name, array &$kinds): void
     {
         if ($n->kind === Node::KIND_STORE_ELEMENT
@@ -1997,7 +2004,10 @@ trait InferScans
         foreach (Walk::children($n) as $c) { $this->scanStoreElemKinds($c, $name, $kinds); }
     }
 
-    /** Every value KIND stored into one local, as a set. */
+    /**
+     * Every value KIND stored into one local, as a set.
+     * @param array<string,bool> $kinds Type kinds stored
+     */
     private function scanStoreLocalKinds(Node $n, string $name, array &$kinds): void
     {
         if ($n->kind === Node::KIND_STORE_LOCAL && $n->name === $name) {
@@ -2006,7 +2016,10 @@ trait InferScans
         foreach (Walk::children($n) as $c) { $this->scanStoreLocalKinds($c, $name, $kinds); }
     }
 
-    /** Every BY-REF capture site in a body, flat: "closureFn#idx#local#kind". */
+    /**
+     * Every BY-REF capture site in a body, flat: "closureFn#idx#local#kind".
+     * @param array<string,bool> $sites
+     */
     private function scanByRefCaptureNode(Node $n, array &$sites): void
     {
         if ($n->kind === Node::KIND_CLOSURE) {
@@ -3716,6 +3729,7 @@ trait InferScans
      * @param array<string,bool> $names locals whose slot must be a cell
      * @param array<string,bool> $elems locals whose ELEMENT channel must be a cell
      * @param array<string,bool> $props `Class::prop` whose element channel must be a cell
+     * @param array<string,bool> $statics globals whose slot must be a cell
      */
     private function scanRefCellArgNode(Node $n, array &$names, array &$elems, array &$props, array &$statics): void
     {
@@ -3896,7 +3910,11 @@ trait InferScans
 
     /** A whole array argument whose buffer must hold cells: a local's (or a
      *  by-value param's, or — transitively — a by-ref param's) element
-     *  channel, or a property's. @param array<string,bool> $elems @param array<string,bool> $props */
+     *  channel, or a property's.
+     * @param array<string,bool> $elems
+     * @param array<string,bool> $props
+     * @param array<string,bool> $statics
+     */
     private function refArrayArgSink(Node $a, array &$elems, array &$props, array &$statics): void
     {
         $t = $a->type;
@@ -3939,6 +3957,7 @@ trait InferScans
      * @param array<string,bool> $names
      * @param array<string,bool> $elems
      * @param array<string,bool> $props
+     * @param array<string,bool> $statics
      */
     private function refArgSlotSink(\Compile\Mir\Param $p, Node $a, array &$names, array &$elems, array &$props, array &$statics): void
     {

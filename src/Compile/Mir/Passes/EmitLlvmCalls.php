@@ -4867,6 +4867,7 @@ trait EmitLlvmCalls
      * @param string[] $slots
      * @param string[] $tmps
      * @param string[] $bits
+     * @param bool[] $unbox
      */
     private function emitDynByRefRebox(array $slots, array $tmps, array $bits, array $unbox = []): string
     {
@@ -5139,6 +5140,7 @@ trait EmitLlvmCalls
      * callee's param declares an erased or cell element (a bare `array &`, a
      * `mixed[] &`), so its writes are what the callee's channel makes them.
      * A callee that declares the same concrete element writes raw words already.
+     * @param Type[] $ptypes
      */
     private function byRefConformKind(Node $a, array $ptypes, int $ai): ?int
     {

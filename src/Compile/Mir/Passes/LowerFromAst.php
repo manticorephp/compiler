@@ -108,11 +108,12 @@ final class LowerFromAst implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return []; }
 
     /** @var array<string, ClassDef> built during the class pre-pass */
     private array $classTable = [];
-    /**  array<string, true> Classes that can reach the generated object walkers. */
+    /** @var array<string, bool> Classes that can reach the generated object walkers. */
     public array $walkerReachableClasses = [];
     /** True when the class set above is a sound closed-world subset. */
     public bool $walkerReachabilityKnown = false;
@@ -171,7 +172,8 @@ final class LowerFromAst implements Pass
      *  @var array<string, \Parser\Ast\ClassDecl> */
     private array $reifyMethodQueue = [];
 
-    /** Remaining ordinary class consumers for each trait's method bodies. */
+    /** Remaining ordinary class consumers for each trait's method bodies. @var array<string, int> */
+    /** @var array<string, int> */
     private array $traitBodyUsers = [];
     private bool $traitBodyUsersReady = false;
 
@@ -181,10 +183,12 @@ final class LowerFromAst implements Pass
      *  @var array<string, string> */
     private array $methodOwner = [];
     /** Resolved method-name return classes. Invalidated when a hoisted class
-     * declaration is added because the global agreement can change. */
+     * declaration is added because the global agreement can change.
+     * @var array<string, string> */
     private array $methodReturnClassCache = [];
 
     /** Cached trailing segments for repeatedly lowered names. */
+    /** @var array<string, string> */
     private array $bareNameCache = [];
     private ?bool $hasNamespacedGetenvCache = null;
     private int $hasNamespacedGetenvAt = -1;
@@ -3542,6 +3546,10 @@ final class LowerFromAst implements Pass
 
     /** Function-level `#[CellArg('a','b')]` → names of element-consuming array
      *  params (the portable form; a param attribute alone doesn't survive .sig). */
+    /**
+     * @param \Parser\Ast\AttributeNode[] $attributes
+     * @return array<string, bool>
+     */
     private function cellArgParamNames(array $attributes): array
     {
         $out = [];
@@ -3568,6 +3576,9 @@ final class LowerFromAst implements Pass
     /** Param->cellArg via a typed param (self-host offset), for the .sig-carried flag. */
     private function paramCellArg(\Parser\Ast\Param $p): bool { return $p->cellArg; }
 
+    /**
+     * @param \Parser\Ast\AttributeNode[] $attributes
+     */
     private function ffiSymbolOf(array $attributes): ?string
     {
         foreach ($attributes as $attr) {
@@ -3589,6 +3600,7 @@ final class LowerFromAst implements Pass
      * `#[Ffi\Library('name')]` → the native library this binding needs at link
      * time, or '' when absent. 'c' is carried through and dropped later, at the
      * one place that knows libc is implicit.
+     * @param \Parser\Ast\AttributeNode[] $attributes
      */
     private function ffiLibraryOf(array $attributes): string
     {
@@ -3605,7 +3617,10 @@ final class LowerFromAst implements Pass
         return '';
     }
 
-    /** True when a `#[Ffi\Weak]` attribute is present (extern_weak binding). */
+    /**
+     * True when a `#[Ffi\Weak]` attribute is present (extern_weak binding).
+     * @param \Parser\Ast\AttributeNode[] $attributes
+     */
     private function ffiIsWeak(array $attributes): bool
     {
         foreach ($attributes as $attr) {
@@ -3624,6 +3639,7 @@ final class LowerFromAst implements Pass
      * Accepts the positional form `#[Ffi\Variadic(2)]` and the named form
      * `#[Ffi\Variadic(fixed: 2)]`. `$arity` is the binding's declared parameter
      * count, so a count past the end is caught here rather than in LLVM.
+     * @param \Parser\Ast\AttributeNode[] $attributes
      */
     private function ffiVariadicFixed(array $attributes, int $arity,
                                       \Parser\Ast\Span $span, string $fnName): int
@@ -3677,6 +3693,7 @@ final class LowerFromAst implements Pass
      * __mc_stream_fill and memmove'd off the end of the heap. Hand-written libc
      * syscall stubs happen to sign-extend (they write the full x0), which is why
      * only the C libraries — OpenSSL, PCRE2 — were exposed.
+     * @param \Parser\Ast\AttributeNode[] $attributes
      */
     private function ffiCTypeToken(array $attributes, string $where,
                                    \Parser\Ast\Span $span): string
@@ -4123,6 +4140,10 @@ final class LowerFromAst implements Pass
         return $mainStmts;
     }
 
+    /**
+     * @param Node[] $mainStmts
+     * @return Node[]
+     */
     private function injectGlobalDecls(array $mainStmts): array
     {
         $pre = [];
@@ -4311,19 +4332,14 @@ final class LowerFromAst implements Pass
      * MIR call-params + their LoadLocal arg nodes for a synthesised callable
      * wrapper. `null` declParams (unknown arity, e.g. a builtin) falls back to
      * a single cell param. Returns `[Param[], Node[]]`.
+     * @param \Parser\Ast\Param[]|null $declParams
      */
     private function fccParamsAndArgs(?array $declParams, ?string $defaultScope = null): array
     {
         $mir = [];
         $loads = [];
         if ($declParams !== null) {
-            // Rebind to a NON-nullable local before typing it: a `@param T[]` on
-            // the nullable `?array` parameter itself coerces a null argument to
-            // `[]` under the native self-build (dropping the __fa0 fallback →
-            // a param-less closure). Type the local inside the null guard instead.
-            /** @var \Parser\Ast\Param[] $dp */
-            $dp = $declParams;
-            foreach ($dp as $p) {
+            foreach ($declParams as $p) {
                 $t = ($p->variadic ?? false)
                     ? $this->variadicPackType($p)
                     : $this->lowerParamType($p->typeHint);
@@ -4426,7 +4442,10 @@ final class LowerFromAst implements Pass
         return $this->buildClosureNode($mir, ['__frecv', '__fname'], [$recv->type, $name->type], [$recv, $name], $body, Type::unknown());
     }
 
-    /** A string callable `"fn"` / `"C::m"` applied to `$astArgs`. */
+    /**
+     * A string callable `"fn"` / `"C::m"` applied to `$astArgs`.
+     * @param \Parser\Ast\Expr[] $astArgs
+     */
     private function lowerStringCallable(string $name, array $astArgs): Node
     {
         $cc = \strpos($name, '::');
@@ -4460,6 +4479,7 @@ final class LowerFromAst implements Pass
      * caller read an undefined local and printed denormal floats. Only a direct
      * call carries the by-ref ABI, and only one arm ever executes, so the
      * duplicated argument lowering costs nothing at run time.
+     * @param \Parser\Ast\Expr[] $astArgs
      */
     private function lowerStrSetCallable(string $var, string $n1, string $n2, array $astArgs): Node
     {
@@ -4476,6 +4496,9 @@ final class LowerFromAst implements Pass
 
     /** An array callable `[$o,"m"]` / `["C","m"]` applied to `$astArgs`, or
      *  null when the literal isn't a `[receiver, methodName]` shape. */
+    /**
+     * @param \Parser\Ast\Expr[] $astArgs
+     */
     private function lowerArrayCallable(\Parser\Ast\ArrayLit $arr, array $astArgs): ?Node
     {
         if (\count($arr->elements) !== 2) { return null; }
@@ -4678,7 +4701,10 @@ final class LowerFromAst implements Pass
         return isset($this->declaredLower[$low]);
     }
 
-    /** Collect `class_alias('Orig', 'Alias')` literal targets; function/method bodies are still lazy, so scanned as text. */
+    /**
+     * Collect `class_alias('Orig', 'Alias')` literal targets; function/method bodies are still lazy, so scanned as text.
+     * @param \Parser\Ast\Stmt[] $stmts
+     */
     private function registerClassAliases(array $stmts): void
     {
         $w = new \Analyze\AstWalk(false);
@@ -5158,7 +5184,10 @@ final class LowerFromAst implements Pass
         'string' => true, 'bool' => true, 'array' => true, 'iterable' => true, 'callable' => true, 'object' => true,
         'mixed' => true, 'void' => true, 'never' => true, 'null' => true, 'false' => true, 'true' => true];
 
-    /** `undefined.class` for every class name a user declaration's signature, property types and class hierarchy spell. */
+    /**
+     * `undefined.class` for every class name a user declaration's signature, property types and class hierarchy spell.
+     * @param \Parser\Ast\Stmt[] $stmts
+     */
     private function checkDeclTypeNames(array $stmts, int $userStart): void
     {
         if ($this->diags === null) { return; }
@@ -6434,6 +6463,9 @@ final class LowerFromAst implements Pass
         return new MethodCall_($recv, $info["method"], $args, Type::unknown());
     }
 
+    /**
+     * @return \Parser\Ast\ArrayElement[]
+     */
     private function arrayLitElements(\Parser\Ast\ArrayLit $a): array { return $a->elements; }
 
     /**
@@ -7567,6 +7599,9 @@ final class LowerFromAst implements Pass
     /** Variable->name via a typed param (subclass field, self-host offset). */
     private function variableName(\Parser\Ast\Variable $v): string { return $v->name; }
 
+    /**
+     * @return Node[]
+     */
     private function lowerCallArgs(string $fnName, array $astArgs): array
     {
         $expanded = $this->expandBuiltinSpread($fnName, $astArgs);
@@ -7751,6 +7786,7 @@ final class LowerFromAst implements Pass
      * a name belongs here only once its `bi*` emitter reads a `Spread` argument.
      * `tools/audit/builtin_arity_scan.php` is the standing check that a builtin
      * accepts what php accepts; this list is its spread-shaped half.
+     * @param \Parser\Ast\Expr[] $astArgs
      */
     private function rejectSpreadIntoBuiltin(string $fnName, array $astArgs): void
     {
@@ -8089,6 +8125,9 @@ final class LowerFromAst implements Pass
         }
         return $unknown ? null : false;
     }
+    /**
+     * @return \Parser\Ast\MethodDecl[]
+     */
     private function classDeclMethods(\Parser\Ast\ClassDecl $d): array { return $d->methods; }
     /** @return string[] */
     private function classDeclExtends(\Parser\Ast\ClassDecl $d): array { return $d->extends; }
@@ -8825,6 +8864,9 @@ final class LowerFromAst implements Pass
         return $this->methodReturnClassCache[$method] = $ret;
     }
 
+    /**
+     * @return \Parser\Ast\Param[]|null
+     */
     private function resolveMethodParams(string $class, string $method): ?array
     {
         $key = $class . "\0" . $method;

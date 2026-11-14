@@ -23,6 +23,8 @@ final class ClassDecl
      * @param ConstDecl[]     $consts
      * @param EnumCase[] $cases  enum case name + optional value
      * @param string[]        $uses              names of traits the class mixes in
+     * @param TraitAdaptation[] $traitAdaptations
+     * @param array<string, string> $useDocs trait name => docblock on its `use` line
      */
     public function __construct(
         public readonly string $kind,

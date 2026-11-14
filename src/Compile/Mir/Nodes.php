@@ -918,11 +918,6 @@ final class MirCatch
 /** `try { } catch { } finally { }` — calls in the body `invoke` the try's landing pad. */
 final class TryCatch_ extends Node
 {
-    /**
-     * @param Node[]      $tryBody
-     * @param MirCatch[]  $catches
-     * @param Node[]      $finallyBody (empty when no finally)
-     */
     /** Generator frame slot indices for the depth snapshots ($idb / $od);
      *  -1 outside a generator. A yield inside the try makes the resume switch
      *  bypass the entry-block depth SSA, so the snapshot lives in the frame. */
@@ -950,6 +945,11 @@ final class TryCatch_ extends Node
      * @var array<string, MemoryOp_> */
     public array $ownFinally = [];
 
+    /**
+     * @param Node[]      $tryBody
+     * @param MirCatch[]  $catches
+     * @param Node[]      $finallyBody (empty when no finally)
+     */
     public function __construct(
         public array $tryBody,
         public array $catches,
@@ -1226,7 +1226,8 @@ final class Invoke_ extends Node
     /** Index-parallel to {@see $args}: the name of a named argument, '' for a
      *  positional one. Empty when the call has none. Bound by
      *  {@see Passes\ResolveMethodFcc} once the callee closure is known.
-     *  Declared LAST: a field added mid-struct shifts every later offset. */
+     *  Declared LAST: a field added mid-struct shifts every later offset.
+     * @var string[] */
     public array $argNames = [];
 
     public function accept(EmitVisitor $v): string

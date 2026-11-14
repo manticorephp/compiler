@@ -2136,7 +2136,11 @@ function __mc_stream_id(\Resource $s): \Resource
     return $s;
 }
 
-/** The transports stream_socket_client/server understand here. */
+/**
+ * The transports stream_socket_client/server understand here.
+ *
+ * @return string[]
+ */
 function stream_get_transports(): array
 {
     return ['tcp', 'udp', 'unix', 'ssl', 'tls'];

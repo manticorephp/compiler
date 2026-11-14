@@ -92,6 +92,7 @@ final class InferTypes implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [LowerFromAst::NAME]; }
     /** @var array<string, true>|null */
     private ?array $scopeNames = null;
@@ -343,6 +344,9 @@ final class InferTypes implements Pass
         $this->inferPropagating($module, $reason, $seed);
     }
 
+    /**
+     * @return array<string,bool>|null
+     */
     private function rescanScope(Module $module): ?array
     {
         if ($this->rescanTouched === []) { return null; }
@@ -579,7 +583,10 @@ final class InferTypes implements Pass
         foreach (Walk::children($n) as $c) { $this->collectClosureNodes($c); }
     }
 
-    /** Re-infer the current scope and record its aggregate cost. */
+    /**
+     * Re-infer the current scope and record its aggregate cost.
+     * @param array<string, bool>|null $only
+     */
     private function inferFunctionsForScope(Module $module, string $reason = 'other', ?array $only = null): void
     {
         // A scoped pass takes a property a scan just retyped IN THIS RUN to its
@@ -673,18 +680,20 @@ final class InferTypes implements Pass
     private array $aliasSources = [];
     /** @var array<string,string> by-ref foreach value var → the array local it walks: a store to it IS an element store */
     private array $byRefFeBind = [];
-    /** fn name => [local name => true]: locals a post-inference store scan proved
-     *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores} */
     /** @var array<string, bool> locals a RefCell_ points at, in the function
      *  currently being inferred. A CELL for their whole lifetime. */
     private array $refCellLocalsCur = [];
 
+    /** fn name => [local name => true]: locals a post-inference store scan proved
+     *  hold CELL elements, seeded on the next pass. {@see scanLocalElemFromStores}
+     *  @var array<string, array<string, bool>> */
     private array $forcedCellElemLocals = [];
     /** fn name => [local name => true]: locals handed BY-REF to a callee that
      *  appends a FOREIGN element type. Kept apart from {@see $forcedCellElemLocals}
      *  because this one also disqualifies a RECORD local — an all-string-key
      *  literal keeps per-field types, and the callee is about to write a field
-     *  the record has no slot repr for. {@see scanByRefElemWiden} */
+     *  the record has no slot repr for. {@see scanByRefElemWiden}
+     *  @var array<string, array<string, bool>> */
     private array $byRefCellElemLocals = [];
     /** @var array<string, bool> {@see Module::$inferByRefElemRetyped} */
     private array $byRefElemRetyped = [];
@@ -693,7 +702,8 @@ final class InferTypes implements Pass
     /** fn name => [local name => true]: one side of a BY-REF CAPTURE whose two
      *  frames disagreed about the kind in that shared word. Both the outer local
      *  and the closure's capture param are recorded, and both become a CELL — the
-     *  word is one slot, so it has one representation. {@see scanByRefCaptureWiden} */
+     *  word is one slot, so it has one representation. {@see scanByRefCaptureWiden}
+     *  @var array<string, array<string, bool>> */
     private array $byRefCaptureCellLocals = [];
     /** @var array<string,bool> array locals whose element is an inner array built
      *  from an EMPTY `[]` literal (`$a[k] = []`) — the inner element infers
@@ -783,7 +793,7 @@ final class InferTypes implements Pass
     private array $labelStates = [];
     /** The CURRENT function's slice of {@see $byRefCaptureCellLocals} — the same
      *  role {@see $cellLoopLocals} plays for a loop-rekinded slot: every store
-     *  boxes, every read dispatches by tag. */
+     *  boxes, every read dispatches by tag. @var array<string, bool> */
     private array $cellCaptureLocals = [];
     /** @var array<string,bool> locals a loop widens int→float (`$f = 1;` then
      *  `$f = 2.5` in the body). Same story, cheaper answer: the slot is a FLOAT,
@@ -1647,13 +1657,13 @@ final class InferTypes implements Pass
             || ($k === Type::KIND_OBJ && $t->class !== null);
     }
 
+    /** @var array<string, bool> `Class::prop` stored through a key not provably an int */
+    private array $propElemDynKey = [];
+
     /**
      * @param array<string, Type> $observed
      * @param array<string, bool> $unusable
      */
-    /** @var array<string, bool> `Class::prop` stored through a key not provably an int */
-    private array $propElemDynKey = [];
-
     private function collectPropElemStores(Node $n, string $cls, array &$observed, array &$unusable): void
     {
         // A WHOLE-property store of an array is evidence about the elements
@@ -2356,6 +2366,9 @@ final class InferTypes implements Pass
 
     /** Return functions whose vec-local stores currently use a STRING/CELL key.
      *  These are the only bodies that need another pass in the assoc-key loop. */
+    /**
+     * @return array<string,bool>
+     */
     private function untypedAssocKeyStoreFunctions(Module $module): array
     {
         $out = [];

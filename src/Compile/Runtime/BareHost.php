@@ -46,6 +46,7 @@ final class BareHost implements RuntimeHost
         return $hint . '_' . (string)$this->labelCounter;
     }
 
+    /** @param array<int, Value> $args */
     public function rtDebugDprintf(Block $b, string $fmt, array $args): void
     {
     }

@@ -765,6 +765,9 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biObjectClassId(array $args): string
     {
         $out = $this->emitNode($args[0]);
@@ -1841,6 +1844,7 @@ trait EmitLlvmBuiltins
      * or both arrays release the same payload — `$astArgs = $expanded` in
      * LowerFromAst::lowerCallArgs freed each spread-expanded ArrayAccess twice
      * and the self-built compiler crashed on `method_exists(...$pack)`.
+     * @param string[]|null $keyedSkip
      */
     private function emitCellArrayToTyped(Type $arrType, bool $coOwn = false, string $from = '', string $into = '', ?array $keyedSkip = null): string
     {
@@ -2289,6 +2293,9 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biUntagStr(array $args): string
     {
         $out = $this->emitPtrArg($args[0]);
@@ -2346,6 +2353,7 @@ trait EmitLlvmBuiltins
      * compiler uses it when rendering compile-time string literals, where an
      * empty host string is represented by a null data pointer.
      *  Node[] $args
+     * @param Node[] $args
      */
     private function biRawStrBytes(array $args): string
     {
@@ -2517,6 +2525,9 @@ trait EmitLlvmBuiltins
         }
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biIntToPtr(array $args): string
     {
         $out = $this->emitIntArg($args[0]);
@@ -2527,6 +2538,9 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biPtrOffset(array $args): string
     {
         $out = $this->emitFfiPtrArg($args[0]);
@@ -3069,6 +3083,9 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $r);
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biMbAsciiRun(array $args): string
     {
         $out = $this->emitPtrArg($args[0]);
@@ -3085,6 +3102,9 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biStrCmpBytes(array $args): string
     {
         $out = $this->emitPtrArg($args[0]);
@@ -3104,6 +3124,9 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $reg);
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biStrlen(array $args): string
     {
         // Binary-safe O(1): the central reader loads len@-16 (null-safe). Every
@@ -4203,6 +4226,9 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biArrayKeys(array $args): string
     {
         $this->rt->needsTagged = true;
@@ -4812,7 +4838,10 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
-    /** `log($x)` natural log; `log($x, $base)` = log(x)/log(base). */
+    /**
+     * `log($x)` natural log; `log($x, $base)` = log(x)/log(base).
+     * @param Node[] $args
+     */
     private function biLog(array $args): string
     {
         $this->libcExtra['llvm.log.f64'] = 'declare double @llvm.log.f64(double)';
@@ -5156,6 +5185,9 @@ trait EmitLlvmBuiltins
         $this->lastValue = '0'; $this->lastValueType = 'i64'; return '';
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biIsType(array $args, int $wantTag, string $kind): string
     {
         $a = $args[0];
@@ -6858,6 +6890,7 @@ trait EmitLlvmBuiltins
      * analogue of {@see biSprintf}'s compile-time inline. `$kind` picks the C
      * vararg type: i=i64, f=double, s=char*. snprintf is declared ONCE as
      * variadic so all three calls share a compatible `@snprintf`.
+     * @param Node[] $args
      */
     private function biFmt1(array $args, string $kind): ?string
     {
@@ -7731,7 +7764,10 @@ trait EmitLlvmBuiltins
      *
      * @param Node[] $args
      */
-    /** `__mc_refl_row_at($base, $i)` — the address of row `i` of a method/property/constant table. */
+    /**
+     * `__mc_refl_row_at($base, $i)` — the address of row `i` of a method/property/constant table.
+     * @param Node[] $args
+     */
     private function biMcReflRowAt(array $args): string
     {
         $out = $this->emitNode($args[0]);
@@ -7746,6 +7782,9 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function emitReflFieldI64(array $args, int $off, bool $isPtr): string
     {
         $out = $this->emitNode($args[0]);
@@ -8798,6 +8837,7 @@ trait EmitLlvmBuiltins
      * for an erased receiver, as ONE cold helper per method name: the get_class /
      * get_debug_type select chains and the Error construction were spliced
      * (~570 IR lines) into every erased call site.
+     * @param Node[] $args
      */
     private function biMemberCallError(array $args): string
     {
@@ -8882,6 +8922,9 @@ trait EmitLlvmBuiltins
         $this->lastValueType = 'i64';
         return $out;
     }
+    /**
+     * @param Node[] $args
+     */
     private function biThrowError(array $args, string $cls = 'Error'): string
     {
         // The message is the ARGUMENT NODE, not a re-wrapped literal. It used to
@@ -8983,6 +9026,9 @@ trait EmitLlvmBuiltins
         return $name;
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biClassExists(array $args, string $kind): string
     {
         $name = $this->reflClassName($args[0]);
@@ -9129,6 +9175,9 @@ trait EmitLlvmBuiltins
         return $mm->isStatic;
     }
 
+    /**
+     * @param Node[] $args
+     */
     private function biIsCallable(array $args): string
     {
         // Route through a `Node`-typed helper: reading `$args[0]->type->…` off
@@ -9271,7 +9320,10 @@ trait EmitLlvmBuiltins
         return $out . $this->coerceToI64();
     }
 
-    /** method_exists($obj|'C', 'm') — walk the parent chain for the method. */
+    /**
+     * method_exists($obj|'C', 'm') — walk the parent chain for the method.
+     * @param Node[] $args
+     */
     private function biMethodExists(array $args): string
     {
         if (\count($args) < 2) { return $this->biMethodExistsDynamic($args); }
@@ -9525,7 +9577,10 @@ trait EmitLlvmBuiltins
         return $this->finishI64($out, $r);
     }
 
-    /** property_exists($obj|'C', 'p') — walk the parent chain for the prop. */
+    /**
+     * property_exists($obj|'C', 'p') — walk the parent chain for the prop.
+     * @param Node[] $args
+     */
     private function biPropertyExists(array $args): string
     {
         $out = $this->biPropertyExistsDeclared($args);
@@ -9676,6 +9731,9 @@ trait EmitLlvmBuiltins
      *  `reflClassName` cannot see the difference — it returns the literal for a
      *  string and the class for an object — so the test has to be made here,
      *  before the fold. */
+    /**
+     * @param Node[] $args
+     */
     private function biIsA(array $args, bool $strict, ?bool $allowString = true): string
     {
         // An ERASED local subject with allow_string on is a string or an object, known only at run time: pick the
@@ -9858,6 +9916,9 @@ trait EmitLlvmBuiltins
      *  then ORs, over every module class C, `strcmp(name,"C")==0 AND class_id
      *  in idsOf(C)`. `idsOf` is C's is-a set (descendants + implementers); the
      *  strict form drops C's own id (proper-subclass only). */
+    /**
+     * @param Node[] $args
+     */
     private function biIsADynamic(array $args, bool $strict, bool $allowString = false): string
     {
         // A scalar operand (string/int/float/bool/null) is an instance of
@@ -10032,7 +10093,10 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
-    /** get_parent_class($obj|'C') — parent name string, or boxed false. */
+    /**
+     * get_parent_class($obj|'C') — parent name string, or boxed false.
+     * @param Node[] $args
+     */
     private function biGetParentClass(array $args): string
     {
         $this->rt->needsTagged = true;
@@ -10104,6 +10168,9 @@ trait EmitLlvmBuiltins
 
     /** get_class_methods($obj|'C') — vec[cell] of declared + inherited method
      *  names. The full list is known at compile time → a fixed append chain. */
+    /**
+     * @param Node[] $args
+     */
     private function biGetClassMethods(array $args): string
     {
         $this->rt->needsTagged = true;
@@ -10139,7 +10206,10 @@ trait EmitLlvmBuiltins
         return $out;
     }
 
-    /** Declared + inherited method names (parent chain, child-first, deduped). */
+    /**
+     * Declared + inherited method names (parent chain, child-first, deduped).
+     * @return string[]
+     */
     private function reflAllMethods(string $cls): array
     {
         if ($cls === 'Closure' || $this->isClosureClass($cls)) {
@@ -11727,6 +11797,9 @@ trait EmitLlvmBuiltins
 
     /** True for `substr_count($h, $n)` with the offset/length defaults the call
      *  lowering fills in (`0`, `null`): the whole-string count the builtin does. */
+    /**
+     * @param Node[] $args
+     */
     private function substrCountPlain(array $args): bool
     {
         $c = \count($args);
