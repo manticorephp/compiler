@@ -181,4 +181,11 @@ final class FunctionDef
     public array $claimParams = [];
     /** The source file the function was written in ('' = unknown: the module's). */
     public string $file = '';
+    /**
+     * `@template T` + `@param class-string<T> $p` + `@return T` (or `?T`): the SOURCE index of `$p`, -1 for
+     * none. A call passing a class literal there yields that class, guarded ({@see Passes\TemplateReturns}).
+     */
+    public int $tplClassArg = -1;
+    /** `@return ?T`: null passes the guard. */
+    public bool $tplNullable = false;
 }

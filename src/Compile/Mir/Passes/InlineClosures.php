@@ -91,6 +91,8 @@ final class InlineClosures implements Pass
     private ?FunctionDef $dsCbFn = null;
     /** Rewriting a `__mc_overload_*` helper body: its own fallback operators must stay plain. */
     private bool $inOverloadHelper = false;
+    /** Guards a call whose callee binds `@template T` from a class literal ({@see TemplateReturns}). */
+    private ?TemplateReturns $tpl = null;
 
     public function name(): string { return self::NAME; }
 
@@ -100,6 +102,7 @@ final class InlineClosures implements Pass
     {
         $this->module = $module;
         $this->captureCount = $module->closureCaptures;
+        $this->tpl = new TemplateReturns($module);
         // Snapshot the function list: synthesized fused loop fns are appended
         // during the walk and must not be re-traversed (their bodies hold no
         // further closures / array fns to rewrite).
@@ -360,6 +363,8 @@ final class InlineClosures implements Pass
             $n->args = $args;
             $op = $this->tryOperator($n);
             if ($op !== null) { return $op; }
+            $tw = $this->tpl === null ? null : $this->tpl->wrap($n);
+            if ($tw !== null) { return $tw; }
             if ($this->opOnly && $n->function !== 'in_array' && $n->function !== 'array_search') { return $n; }
             $fused = $this->tryFuseArrayFn($n);
             return $fused ?? $n;
@@ -437,13 +442,13 @@ final class InlineClosures implements Pass
             $args = [];
             foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
             $n->args = $args;
-            return $this->tryFuseDsMethod($n) ?? $n;
+            return $this->tryFuseDsMethod($n) ?? $this->templated($n);
         }
         if ($n->kind === Node::KIND_STATIC_CALL) {
             $args = [];
             foreach ($n->args as $a) { $args[] = $this->rewrite($a); }
             $n->args = $args;
-            return $n;
+            return $this->templated($n);
         }
 
         // ── Control flow ──
@@ -525,6 +530,11 @@ final class InlineClosures implements Pass
      * Splice an eligible captureless single-expr arrow closure at the invoke,
      * or return null to keep the normal invoke (always correct).
      */
+    private function templated(Node $n): Node
+    {
+        return ($this->tpl === null ? null : $this->tpl->wrap($n)) ?? $n;
+    }
+
     private function tryInline(Invoke_ $iv): ?Node
     {
         $cls = $iv->callee->type->class ?? '';

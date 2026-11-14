@@ -3386,6 +3386,7 @@ final class LowerFromAst implements Pass
         $mfn->isGenerator = $isGen;
         $mfn->usesFuncArgs = $usesFuncArgs;
         $mfn->returnArrayHinted = $this->isBareArrayReturnHint($m->returnType);
+        $this->recordClassTemplate($mfn, $m->docComment, $m->params);
         $this->currentFnSym = $prevFnSym;
         $this->guardLocals = $prevGuardLocals;
         return $mfn;
