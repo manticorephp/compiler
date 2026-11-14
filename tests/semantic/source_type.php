@@ -169,4 +169,13 @@ check('compiler_grammar_malformed_stays_null', function () {
     return true;
 });
 
+check('doc_tag_only_at_line_start', function () {
+    $doc = "/**\n * Prose: with `@var array<string,int>` on the property the read is fast.\n *\n * @var array<string,self>\n */";
+    $one = "/** @var int[] \$x */";
+    $inline = "/** Flag the arms. @param array<string, bool> \$classes */";
+    $got = [\Analyze\DocType::tag($doc, '@var', ''), \Analyze\DocType::tag($one, '@var', 'x'), \Analyze\DocType::tag("/**\n\t@return Foo\n*/", '@return', ''),
+        \Analyze\DocType::tag($inline, '@param', 'classes'), \Analyze\DocType::tag('/** mail a@var.io */', '@var', '')];
+    return $got === ['array<string,self>', 'int[]', 'Foo', 'array<string, bool>', null] ? true : json_encode($got);
+});
+
 exit($fail);
