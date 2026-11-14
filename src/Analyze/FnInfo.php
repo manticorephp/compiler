@@ -15,5 +15,6 @@ final class FnInfo
         public ?string $docType = null,
         /** @var array<string, string> param name → qualified docblock type */
         public array $paramDocs = [],
+        public ?TemplateSig $tpl = null,
     ) {}
 }

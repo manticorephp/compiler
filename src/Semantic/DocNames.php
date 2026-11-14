@@ -27,14 +27,18 @@ final class DocNames
 
     /**
      * @param array<string, string> $uses alias → FQN
+     * @param string[] $keep names left as written (template parameters)
      */
-    public static function qualify(string $type, string $ns, array $uses): string
+    public static function qualify(string $type, string $ns, array $uses, array $keep = []): string
     {
         $n = \strlen($type);
         $out = '';
         $i = 0;
+        $braces = 0;
         while ($i < $n) {
             $c = $type[$i];
+            if ($c === '{') { $braces = $braces + 1; }
+            elseif ($c === '}' && $braces > 0) { $braces = $braces - 1; }
             if ($c === "'" || $c === '"') {
                 $e = \strpos($type, $c, $i + 1);
                 $e = $e === false ? $n - 1 : $e;
@@ -55,8 +59,12 @@ final class DocNames
             $tok = \substr($type, $i, $j - $i);
             $k = $j;
             while ($k < $n && ($type[$k] === ' ' || $type[$k] === "\t")) { $k = $k + 1; }
-            $isKey = $k < $n && ($type[$k] === ':' || ($type[$k] === '?' && $k + 1 < $n && $type[$k + 1] === ':'));
-            $out .= $isKey ? $tok : self::name($tok, $ns, $uses);
+            // a shape key (`array{k: T}`); outside braces `A : B` is a conditional's else
+            $isKey = $braces > 0 && $k < $n && ($type[$k] === ':' || ($type[$k] === '?' && $k + 1 < $n && $type[$k + 1] === ':'));
+            $member = $i >= 2 && $type[$i - 1] === ':' && $type[$i - 2] === ':';
+            // `($x is not T ? A : B)`
+            $word = ($tok === 'is' || $tok === 'not') && $i > 0 && $type[$i - 1] === ' ' && $j < $n && $type[$j] === ' ';
+            $out .= $isKey || $member || $word || \in_array($tok, $keep, true) ? $tok : self::name($tok, $ns, $uses);
             $i = $j;
         }
         return $out;
@@ -109,17 +117,73 @@ final class DocNames
      */
     public static function tagType(?string $doc, string $tag, string $var, string $ns, array $uses, array $templates): ?string
     {
-        $raw = null;
-        foreach (['@phpstan-', '@psalm-', '@'] as $pre) {
-            $raw = DocType::tag($doc, $pre . \substr($tag, 1), $var);
-            if ($raw !== null) { break; }
-        }
+        $raw = self::rawTag($doc, $tag, $var);
         if ($raw === null || $raw === '') { return null; }
         if (\count($templates) > 0) {
             \preg_match_all('/[A-Za-z_][A-Za-z0-9_]*/', $raw, $m);
             foreach ($m[0] as $w) { if (\in_array($w, $templates, true)) { return null; } }
         }
         return self::qualify($raw, $ns, $uses);
+    }
+
+    /** The tag text with `@phpstan-` then `@psalm-` spellings beating the plain tag. */
+    public static function rawTag(?string $doc, string $tag, string $var): ?string
+    {
+        foreach (['@phpstan-', '@psalm-', '@'] as $pre) {
+            $raw = DocType::tag($doc, $pre . \substr($tag, 1), $var);
+            if ($raw !== null) { return $raw; }
+        }
+        return null;
+    }
+
+    /**
+     * The signature's own `@template` parameters with the qualified param / return texts that use them;
+     * null when the docblock declares none. A text that also names a class-level template is dropped.
+     *
+     * @param \Parser\Ast\Param[] $params
+     * @param array<string, string> $uses
+     * @param string[] $classTemplates
+     */
+    public static function templateSig(?string $doc, array $params, string $ns, array $uses, array $classTemplates): ?\Analyze\TemplateSig
+    {
+        if ($doc === null || \strpos($doc, 'template') === false) { return null; }
+        /** @var array<string, string> $tpl */
+        $tpl = [];
+        foreach (['', 'psalm-', 'phpstan-'] as $pre) {
+            \preg_match_all('/@' . $pre . 'template(?:-covariant|-contravariant)?[ \t]+([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]+(?:of|as)[ \t]+([^\s*]+))?/', $doc, $m, \PREG_SET_ORDER);
+            foreach ($m as $hit) {
+                $tpl[$hit[1]] = isset($hit[2]) ? self::qualify($hit[2], $ns, $uses, \array_keys($tpl)) : '';
+            }
+        }
+        if (\count($tpl) === 0) { return null; }
+        $names = \array_keys($tpl);
+        $order = [];
+        /** @var array<string, string> $ps */
+        $ps = [];
+        foreach ($params as $p) {
+            $order[] = $p->name;
+            $raw = self::rawTag($doc, '@param', $p->name);
+            $q = self::usable($raw, $names, $classTemplates, $ns, $uses);
+            if ($q !== null) { $ps[$p->name] = $q; }
+        }
+        return new \Analyze\TemplateSig($tpl, $order, $ps, self::usable(self::rawTag($doc, '@return', ''), $names, $classTemplates, $ns, $uses));
+    }
+
+    /**
+     * @param string[] $names
+     * @param string[] $classTemplates
+     * @param array<string, string> $uses
+     */
+    private static function usable(?string $raw, array $names, array $classTemplates, string $ns, array $uses): ?string
+    {
+        if ($raw === null || $raw === '') { return null; }
+        \preg_match_all('/[A-Za-z_][A-Za-z0-9_]*/', $raw, $m);
+        $uses1 = false;
+        foreach ($m[0] as $w) {
+            if (\in_array($w, $classTemplates, true) && !\in_array($w, $names, true)) { return null; }
+            if (\in_array($w, $names, true)) { $uses1 = true; }
+        }
+        return $uses1 ? self::qualify($raw, $ns, $uses, $names) : null;
     }
 
     /** FQN's namespace ('' for the global one). */
