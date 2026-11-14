@@ -18,6 +18,10 @@ $appEnv = getenv('APP_ENV') ?: 'prod';
 $kernel = new Kernel(environment: $appEnv, debug: $appEnv === 'dev');
 $kernel->boot();
 
+// The kernel and its services are built for one request at a time (php-fpm's model): one request at a
+// time through the kernel in a worker, concurrency from WORKERS.
+$gate = new Async\Mutex();
+
 (new Server('tcp://127.0.0.1:' . (getenv('PORT') ?: '8181')))
     ->workers((int)(getenv('WORKERS') ?: 1))   // >0 binds once, then forks that many workers under a supervisor
     ->maxConnections(512)                      // per worker; the permit is taken BEFORE accept
@@ -26,16 +30,18 @@ $kernel->boot();
         fwrite(STDERR, get_class($e) . ': ' . $e->getMessage() . ' @ ' . $e->getFile() . ':' . $e->getLine() . "\n" . $e->getTraceAsString() . "\n");
         return (new Response(500))->text("Internal Server Error\n");
     })
-    ->serve(function (Request $req) use ($kernel): Response {
-        $request = SymfonyRequest::createFromGlobals();
-        $kernelResponse = $kernel->handle($request);
-        $kernel->terminate($request, $kernelResponse);
+    ->serve(function (Request $req) use ($kernel, $gate): Response {
+        return $gate->withLock(function () use ($kernel): Response {
+            $request = SymfonyRequest::createFromGlobals();
+            $kernelResponse = $kernel->handle($request);
+            $kernel->terminate($request, $kernelResponse);
 
-        $response = new Response($kernelResponse->getStatusCode(), $kernelResponse->getContent());
-        foreach ($kernelResponse->headers->all() as $name => $values) {
-            foreach ($values as $value) {
-                $response->header($name, $value);
+            $response = new Response($kernelResponse->getStatusCode(), $kernelResponse->getContent());
+            foreach ($kernelResponse->headers->all() as $name => $values) {
+                foreach ($values as $value) {
+                    $response->header($name, $value);
+                }
             }
-        }
-        return $response;
+            return $response;
+        });
     });

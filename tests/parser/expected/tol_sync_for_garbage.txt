@@ -45,6 +45,7 @@ Program
     update: [1]
       Expr:Identifier @6:9-6:16
         name: "garbage"
+        qualified: false
     body: Block @7:1-7:1
       Stmt:Expression @7:1-7:1
         expr:

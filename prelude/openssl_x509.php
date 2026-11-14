@@ -450,8 +450,9 @@ function openssl_pkey_export(mixed $key, #[\Manticore\Attr\RefOut] ?string &$out
     return true;
 }
 
-function openssl_sign(string $data, #[\Manticore\Attr\RefOut] ?string &$signature, mixed $private_key, mixed $algorithm = 1): bool
+function openssl_sign(string $data, #[\Manticore\Attr\RefOut] ?string &$signature, mixed $private_key, mixed $algorithm = 1, int $padding = 0): bool
 {
+    if ($padding !== 0) { throw new \ValueError('openssl_sign(): Argument #5 ($padding) is not supported'); }
     $priv = \__mc_ossl_priv_of($private_key, null);
     if ($priv === '') {
         throw new \ValueError('openssl_sign(): Argument #3 ($private_key) must be a valid private key');
@@ -463,8 +464,9 @@ function openssl_sign(string $data, #[\Manticore\Attr\RefOut] ?string &$signatur
     return true;
 }
 
-function openssl_verify(string $data, string $signature, mixed $public_key, mixed $algorithm = 1): int|false
+function openssl_verify(string $data, string $signature, mixed $public_key, mixed $algorithm = 1, int $padding = 0): int|false
 {
+    if ($padding !== 0) { throw new \ValueError('openssl_verify(): Argument #5 ($padding) is not supported'); }
     $pub = \__mc_ossl_pub_of($public_key);
     if ($pub === '') {
         throw new \ValueError('openssl_verify(): Argument #3 ($public_key) must be a valid public key');
@@ -490,8 +492,9 @@ function __mc_ossl_rsa_call(string $fn, int $op, string $data, mixed $key, int $
     return \__mc_ossl_rsa($op, $data, $pem, $padding);
 }
 
-function openssl_public_encrypt(string $data, #[\Manticore\Attr\RefOut] ?string &$encrypted_data, mixed $public_key, int $padding = 1): bool
+function openssl_public_encrypt(string $data, #[\Manticore\Attr\RefOut] ?string &$encrypted_data, mixed $public_key, int $padding = 1, ?string $digest_algo = null): bool
 {
+    if ($digest_algo !== null) { throw new \ValueError('openssl_public_encrypt(): Argument #5 ($digest_algo) is not supported'); }
     $r = \__mc_ossl_rsa_call('openssl_public_encrypt', 0, $data, $public_key, $padding);
     if ($r === false) { return false; }
     $encrypted_data = (string)$r;
@@ -499,8 +502,9 @@ function openssl_public_encrypt(string $data, #[\Manticore\Attr\RefOut] ?string 
     return true;
 }
 
-function openssl_private_decrypt(string $data, #[\Manticore\Attr\RefOut] ?string &$decrypted_data, mixed $private_key, int $padding = 1): bool
+function openssl_private_decrypt(string $data, #[\Manticore\Attr\RefOut] ?string &$decrypted_data, mixed $private_key, int $padding = 1, ?string $digest_algo = null): bool
 {
+    if ($digest_algo !== null) { throw new \ValueError('openssl_private_decrypt(): Argument #5 ($digest_algo) is not supported'); }
     $r = \__mc_ossl_rsa_call('openssl_private_decrypt', 1, $data, $private_key, $padding);
     if ($r === false) { return false; }
     $decrypted_data = (string)$r;
@@ -771,8 +775,9 @@ function openssl_csr_get_public_key(OpenSSLCertificateSigningRequest|string $csr
  * @param array<string,mixed>|null $options
  * @return OpenSSLCertificate|false
  */
-function openssl_csr_sign(OpenSSLCertificateSigningRequest|string $csr, OpenSSLCertificate|string|null $ca_certificate, mixed $private_key, int $days, ?array $options = null, int $serial = 0)
+function openssl_csr_sign(OpenSSLCertificateSigningRequest|string $csr, OpenSSLCertificate|string|null $ca_certificate, mixed $private_key, int $days, ?array $options = null, int $serial = 0, ?string $serial_hex = null)
 {
+    if ($serial_hex !== null) { throw new \ValueError('openssl_csr_sign(): Argument #7 ($serial_hex) is not supported'); }
     if ($options !== null) { \__mc_ossl_no_config('openssl_csr_sign', $options); }
     $priv = \__mc_ossl_priv_of($private_key, null);
     if ($priv === '') {

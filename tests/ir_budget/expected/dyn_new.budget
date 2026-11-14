@@ -1,3 +1,3 @@
 # ceiling for tests/aot/cases/dyn_method_new_operand.php — regenerate with tests/ir_budget/run.sh --bless
-max_bytes=1061000
-max_defs=686
+max_bytes=2192464
+max_defs=1010

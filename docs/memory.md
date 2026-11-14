@@ -86,6 +86,56 @@ linked in only by a program that references `gc_collect_cycles()` (zero overhead
 otherwise, and cycles then leak). Once linked it also runs **automatically** at
 allocations when the root buffer reaches an adaptive threshold, as php's
 `gc_adjust_threshold` does; call it explicitly at a natural boundary to reclaim sooner.
+A root candidate whose count reaches zero leaves the buffer in O(1) and is freed at
+once, so the buffer holds only live candidates and `gc_disable()` does not grow the heap
+with dead objects.
+
+### Generations
+
+A long-running program keeps re-decrementing the same live objects, and a plain
+Bacon–Rajan collection re-walks all of them and everything they reach, every time.
+The collector is therefore generational, CPython-style:
+
+- An object that survives a collection is promoted to the **old** generation (a bit
+  in its rc word). A candidate is buffered by generation: young roots in one
+  buffer, old roots in another.
+- The automatic collection is **young**: it starts from the young roots only and
+  does not walk into an old object. It still counts the edge into one (−1 on mark,
+  +1 when a survivor is restored), so every count stays exact; the old object's own
+  references are simply never subtracted, which keeps whatever it reaches alive.
+- A **full** collection takes both buffers and walks everything. It runs when the
+  old generation has grown by a quarter since the last full one
+  (`4 × promoted + old candidates > survivors of the last full`, never below the
+  default threshold), after 64 young collections in a row while old candidates
+  wait, and on every explicit `gc_collect_cycles()` — an explicit call collects
+  everything collectable, as in php.
+
+Why a young collection is sound. Let Y be the objects it marks gray: young objects
+reachable from the young roots without passing an old object. Marking subtracts one
+count per edge leaving Y, so a marked object `x` ends the scan with
+`rc'(x) = rc(x) − (edges from Y to x)`, and `rc(x)` counts every reference to `x` —
+stack, globals, old objects, young objects. `x` turns white only if `rc'(x) ≤ 0`,
+i.e. every reference to `x` comes from Y, and no black (surviving) object of Y
+reaches it. No old object is in Y — a young root is young, and marking never
+colors an old child — so a reference from any old object leaves `rc'(x) ≥ 1` and
+`x` survives. Hence an object freed by a young collection is referenced only by
+other freed objects: none from an old object, none from outside. The white set's
+edges into old objects were counted, so after the collection every old object's
+count equals its real count with the garbage gone; one that drops to zero was
+referenced only by the garbage and is freed with it (destructor, children
+released), like any object whose count reaches zero.
+
+Why every garbage cycle is still collected. A garbage cycle has a buffered member
+(the object whose decrement cut it loose), young or old. A young collection frees
+it if the whole cycle is young. If it runs through an old object, the young roots on
+it survive the young collection, and every young root that survives is kept as a
+candidate in the old buffer instead of dropped — so the next full collection,
+which walks from every candidate of both buffers, finds the cycle. A full
+collection is guaranteed to come: the young-collection count forces one while old
+candidates wait.
+
+`MANTICORE_CC_STATS=1` prints `collections`, `full`, `roots` (candidates scanned),
+`marked` (objects colored gray — the traversal work), `freed` and `cpu_ms`.
 
 ---
 

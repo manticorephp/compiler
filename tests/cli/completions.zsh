@@ -16,6 +16,7 @@ _manticore() {
     'lsp:Run the language server on stdio'
     'upgrade:Update the installed compiler to the latest release (--check only reports)'
     'doctor:Check that this compiler and its toolchain work; exit 1 on a failure'
+    'cache:Show the compiled-object cache, or clear it'
     'completions:Print a shell completion script (bash, zsh or fish)'
     'help:Show this help text'
   )
@@ -39,12 +40,14 @@ _manticore() {
         '--effects[dump-mir: show inferred effects]' \
         '--emit-library[Emit a library object instead of an executable]' \
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
-        '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
+        '--allow-undefined-traps[Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '--analyze[Run the analyzer (default)]' \
         '--no-analyze[Skip the analyzer]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
+        '--all[List unreachable undeclared names too]' \
         '--analyze-strict[Fail with rc 65 on analyzer errors]' \
         '--progress=[Progress output: auto|live|plain|json|off (default auto)]:mode:' \
         '--quiet[Silence progress and timings (diagnostics stay)]' \
@@ -63,13 +66,15 @@ _manticore() {
         '--effects[dump-mir: show inferred effects]' \
         '--emit-library[Emit a library object instead of an executable]' \
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
-        '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
+        '--allow-undefined-traps[Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
         '--libs-only[Build library targets and stop (cold seed)]' \
         '--apps-only[Build application targets only]' \
         '--no-analyze[Accepted for compile parity; build does not run the analyzer]' \
+        '--check[Report every front-end error (parse, lowering, declarations) and stop before type inference and codegen]' \
+        '--all[List unreachable undeclared names too]' \
         '--progress=[Progress output: auto|live|plain|json|off (default auto)]:mode:' \
         '--quiet[Silence progress and timings (diagnostics stay)]' \
         '--timings[Print a per-stage time table at the end]' \
@@ -87,7 +92,7 @@ _manticore() {
         '--effects[dump-mir: show inferred effects]' \
         '--emit-library[Emit a library object instead of an executable]' \
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
-        '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
+        '--allow-undefined-traps[Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
@@ -104,7 +109,7 @@ _manticore() {
         '--effects[dump-mir: show inferred effects]' \
         '--emit-library[Emit a library object instead of an executable]' \
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
-        '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
+        '--allow-undefined-traps[Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
@@ -127,7 +132,7 @@ _manticore() {
         '--effects[dump-mir: show inferred effects]' \
         '--emit-library[Emit a library object instead of an executable]' \
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
-        '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
+        '--allow-undefined-traps[Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
@@ -149,7 +154,7 @@ _manticore() {
         '--effects[dump-mir: show inferred effects]' \
         '--emit-library[Emit a library object instead of an executable]' \
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
-        '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
+        '--allow-undefined-traps[Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
@@ -166,7 +171,7 @@ _manticore() {
         '--effects[dump-mir: show inferred effects]' \
         '--emit-library[Emit a library object instead of an executable]' \
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
-        '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
+        '--allow-undefined-traps[Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
@@ -188,7 +193,7 @@ _manticore() {
         '--effects[dump-mir: show inferred effects]' \
         '--emit-library[Emit a library object instead of an executable]' \
         '--runtime[With --emit-library: this library is the bundled stdlib]' \
-        '--allow-undefined-traps[Do not refuse a library that contains undefined-function traps]' \
+        '--allow-undefined-traps[Cap reachable undeclared classes, functions and constants at a warning (they throw if run); allow undefined-function traps in a library]' \
         '--keep-ir[Keep the intermediate .ll files]' \
         '--strict=[Comma-separated strict checks: shapes (closed array shapes), analyze]:list:' \
         '-j+[Parallel clang jobs; 0 = one per core]:n:' \
@@ -217,6 +222,11 @@ _manticore() {
         '--help[Show this help text]' \
         '--offline[Skip the update check]' \
         '--no-smoke[Skip compiling and running a hello-world]' \
+        '*:file:_files'
+      ;;
+    cache)
+      _arguments \
+        '--help[Show this help text]' \
         '*:file:_files'
       ;;
     completions)

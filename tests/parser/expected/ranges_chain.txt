@@ -109,7 +109,7 @@ Program
           Expr:Variable @6:1-6:3
             name: "p"
         value:
-          Expr:BinaryOp @6:7-6:19
+          Expr:BinaryOp @6:6-6:19
             op: "*"
             left:
               Expr:BinaryOp @6:7-6:14

@@ -1,0 +1,5 @@
+Array
+(
+    [fields] => x
+    [where] => post_author = 3 AND post_status IN publish
+)

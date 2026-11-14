@@ -1,4 +1,5 @@
 <?php
+// @allow-undefined-traps — tests the runtime trap of an undeclared name; see tests/aot/run.sh
 
 // A static call whose RECEIVER CLASS is declared nowhere is php's runtime
 // `Error: Class "X" not found`, raised only if the call is REACHED. Emitting

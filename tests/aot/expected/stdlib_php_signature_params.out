@@ -1,0 +1,93 @@
+array(3) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "d"
+}
+array(2) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "d"
+}
+array(4) {
+  [0]=>
+  string(1) "a"
+  [1]=>
+  string(1) "b"
+  [2]=>
+  string(1) "c"
+  [3]=>
+  string(1) "d"
+}
+string(2) "/c"
+string(3) "a/b"
+string(3) "a/b"
+int(2)
+int(2)
+int(1)
+int(3)
+int(2)
+array(6) {
+  [0]=>
+  string(5) "Hello"
+  [1]=>
+  string(6) "fri3nd"
+  [2]=>
+  string(6) "you're"
+  [3]=>
+  string(7) "looking"
+  [4]=>
+  string(4) "good"
+  [5]=>
+  string(5) "today"
+}
+int(2)
+array(2) {
+  [0]=>
+  string(3) "x1y"
+  [4]=>
+  string(1) "z"
+}
+string(8) "352441c2"
+bool(true)
+bool(true)
+int(17)
+string(3) "234"
+string(6) "line2
+"
+string(6) "line2
+"
+string(2) "56"
+ValueError: file_get_contents(): Argument #5 ($length) must be greater than or equal to 0
+0123456789
+line2
+array(2) {
+  [0]=>
+  string(11) "0123456789
+"
+  [1]=>
+  string(6) "line2
+"
+}
+int(17)
+bool(true)
+bool(true)
+array(4) {
+  [0]=>
+  string(1) "."
+  [1]=>
+  string(2) ".."
+  [2]=>
+  string(5) "f.txt"
+  [3]=>
+  string(7) "f.txt.r"
+}
+bool(true)
+string(11) "0123456789
+"
+bool(true)
+bool(true)
+bool(true)

@@ -274,11 +274,20 @@ function strpbrk(string $string, string $characters): string|false
 
 /** Length of the initial segment of `$subject` consisting only of bytes in
  *  `$mask` (PHP `strspn`; the complement of the `strcspn` builtin). */
-function strspn(string $subject, string $mask, int $offset = 0): int
+function strspn(string $string, string $characters, int $offset = 0, ?int $length = null): int
 {
+    $subject = $string;
+    $mask = $characters;
     $n = \strlen($subject);
     if ($offset < 0) { $offset = $n + $offset; }
     if ($offset < 0) { $offset = 0; }
+    if ($offset > $n) { $offset = $n; }
+    // A length bounds the scan; a negative one counts back from the end.
+    if ($length !== null) {
+        $end = $length < 0 ? $n + $length : $offset + $length;
+        if ($end < $offset) { $end = $offset; }
+        if ($end < $n) { $n = $end; }
+    }
     $i = $offset;
     while ($i < $n) {
         if (!__mask_has_byte($mask, \ord($subject[$i]))) { break; }

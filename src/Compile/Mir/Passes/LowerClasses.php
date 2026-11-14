@@ -1227,6 +1227,7 @@ trait LowerClasses
             if (!isset($meta->symbolIsStatic[$m->name])) { continue; }
             $fnName = $decl->name . '__' . $m->name;
             $this->currentLowerFn = $m->name;
+            $this->currentFnSym = $fnName;
             $params = [];
             if (!$m->isStatic) {
                 $params[] = new Param(
@@ -1271,6 +1272,7 @@ trait LowerClasses
             $module->methodDisplay[$fnName] = $decl->name . $sep . $m->name;
         }
         $this->currentLowerClass = '';
+        $this->currentFnSym = '';
     }
 
     /**
@@ -1484,7 +1486,14 @@ trait LowerClasses
         }
         $isTypeDefDecl = $this->isTypeDef($decl->name);
         foreach ($methods as $m) {
-            $this->materializeMethodBody($m);
+            try {
+                $this->materializeMethodBody($m);
+            } catch (\Throwable $e) {
+                if ($this->diags === null) { throw $e; }
+                $this->recoverLowering($e, 'method ' . $decl->name . '::' . $m->name, $m->span);
+                $this->restoreClassScope($decl);
+                continue;
+            }
             if ($m->body === null) { continue; }
             // A `#[TypeDef]`'s constructor is Zend-only glue: it exists so `new C($x)`
             // builds a real object when `php` runs the same source. The compiler never
@@ -1492,10 +1501,17 @@ trait LowerClasses
             // promoted-property shape, to the argument itself.
             if ($isTypeDefDecl && $m->name === '__construct') { continue; }
             // Normal copy: late-static scope == the lexical class.
-            $mfn = $this->lowerMethodFn(
-                $decl, $m, $cd, $defaultStores,
-                $decl->name, $decl->name . '__' . $m->name,
-            );
+            try {
+                $mfn = $this->lowerMethodFn(
+                    $decl, $m, $cd, $defaultStores,
+                    $decl->name, $decl->name . '__' . $m->name,
+                );
+            } catch (\Throwable $e) {
+                if ($this->diags === null) { throw $e; }
+                $this->recoverLowering($e, 'method ' . $decl->name . '::' . $m->name, $m->span);
+                $this->restoreClassScope($decl);
+                continue;
+            }
             $module->addFunction($mfn);
             $sep = $m->isStatic ? '::' : '->';
             $module->methodDisplay[$decl->name . '__' . $m->name] =

@@ -98,13 +98,20 @@ trait LowerFns
         }
         $this->currentDeclNamespace = $this->nsOf($decl->name);
         $this->constCallables = [];
-        $this->setCurrentLowerParams($decl->params);
+        $this->setCurrentLowerParams($decl->params, $decl->returnType, (bool)($decl->returnsByRef ?? false));
         $this->scanStableCallables($decl->body->statements);
+        $prevGuardLocals = $this->guardLocals;
+        $this->noteGuardHelper('f:' . $decl->name, $this->bareName($decl->name), $decl->body);
+        $this->guardLocals = $this->computeGuardLocals($decl->params, $decl->body);
         // `#[RefOut('a', 'b')]` names the pure-output by-ref params (portable
         // across .sig + self-host parse); `@param-out T $x` is the PHPStan-side
         // equivalent.
         $refOutNames = $this->refOutParamNames($decl->attributes);
         $cellArgNames = $this->cellArgParamNames($decl->attributes);
+        // Parameter defaults lower under the function itself: their undeclared names run only when it does.
+        $prevFnSym = $this->currentFnSym;
+        $this->currentFnSym = $decl->name;
+        $this->currentLowerFn = $decl->name;
         $params = [];
         foreach ($decl->params as $p) {
             $isVariadic = (bool)($p->variadic ?? false);
@@ -199,13 +206,15 @@ trait LowerFns
             // free-function files do not remain rooted through fnDecls.
             $decl->body = null;
 
+            $this->currentFnSym = $prevFnSym;
+            $this->guardLocals = $prevGuardLocals;
             return $fn;
         }
         $savedSawYield = $this->sawYield;
         $this->sawYield = false;
         $savedSawFuncArgs = $this->sawFuncArgs;
         $this->sawFuncArgs = false;
-        $loweredBody = $this->lowerBlockNode($decl->body);
+        $loweredBody = $this->withIntToFloatPrologue($this->lowerBlockNode($decl->body), $decl->params);
         $isGen = $this->sawYield;
         $this->sawYield = $savedSawYield;
         $usesFuncArgs = $this->sawFuncArgs;
@@ -239,6 +248,8 @@ trait LowerFns
         // argument filling; the lowered body itself is no longer needed.
         $decl->body = null;
 
+        $this->currentFnSym = $prevFnSym;
+        $this->guardLocals = $prevGuardLocals;
         return $fn;
     }
 
@@ -255,6 +266,8 @@ trait LowerFns
         $this->currentLowerClass = '';
         $this->currentTypeParams = [];
         $this->currentLowerFn = $decl->name;
+        $prevFnSym = $this->currentFnSym;
+        $this->currentFnSym = $decl->name;
         if ($decl->span->file !== '') { $this->module->loweringFile = $decl->span->file; }
         // `#[RefOut('a', 'b')]` on the function names its pure-output by-ref
         // params (survives the .sig + self-host parse; a param-position marker
@@ -308,6 +321,7 @@ trait LowerFns
             returnsByRef: (bool)($decl->returnsByRef ?? false),
         );
         $ext->returnArrayHinted = $this->isBareArrayReturnHint($decl->returnType);
+        $this->currentFnSym = $prevFnSym;
         return $ext;
     }
 
@@ -426,6 +440,8 @@ trait LowerFns
             'poke_i64', 'poke_i8', 'print_r', 'ptr_offset',
             'ptr_to_int', 'rad2deg', 'round', 'sin', 'sinh', 'sqrt', 'tan',
             'tanh', 'var_dump',
+            'array_key_exists', 'in_array', 'array_is_list', 'range', 'strrev', 'json_validate',
+            'substr_count', 'class_alias',
         ];
     }
 
@@ -456,7 +472,7 @@ trait LowerFns
             || $n === 'implode' || $n === 'join'
             || $n === 'sprintf' || $n === 'printf'
             || $n === 'exit' || $n === 'die' || $n === 'error_log'
-            || $n === 'gc_collect_cycles' || $n === 'spl_object_id' || $n === '__mc_obj_addr'
+            || $n === 'gc_collect_cycles' || $n === 'gc_disable' || $n === 'gc_enable' || $n === 'gc_enabled' || $n === '__mc_gc_roots' || $n === 'spl_object_id' || $n === '__mc_obj_addr'
             || $n === 'get_class' || $n === 'array_pop' || $n === 'array_shift'
             || $n === 'array_unshift' || $n === 'addslashes' || $n === 'getenv'
             || $n === 'putenv' || $n === '__mir_fn_exists'
@@ -516,9 +532,10 @@ trait LowerFns
             foreach ($capNames as $cn) { $prepended[] = $cn; }
             $capNames = $prepended;
         }
-        $id = $this->closureCounter;
-        $this->closureCounter = $this->closureCounter + 1;
+        $id = $this->allocClosureId();
         $fnName = '__closure_' . (string)$id;
+        if ($this->lastClosureFrame !== '' && $this->diags !== null) { $this->diags->fnAlias[$this->lastClosureFrame] = $fnName; }
+        $this->lastClosureFrame = '';
         $params = [];
         // A by-value capture the body writes THROUGH (append, element store,
         // array_pop($x), …) arrives borrowed: the environment keeps its own
@@ -683,6 +700,30 @@ trait LowerFns
     }
 
     /**
+     * The id behind `__closure_<id>`. A user closure takes the next counter
+     * value. A prelude closure's id is derived from where it is written
+     * (enclosing class, function, ordinal) and lives above 2^53, far past any
+     * counter: the counter runs through the prelude first, so a counter id
+     * would shift with the set of injected prelude files and the same prelude
+     * body would name a different closure in every program.
+     */
+    private function allocClosureId(): int
+    {
+        if (!$this->lowerInPrelude) {
+            $id = $this->closureCounter;
+            $this->closureCounter = $id + 1;
+            return $id;
+        }
+        $scope = $this->currentLowerClass . '::' . $this->currentLowerFn;
+        $ord = $this->preludeClosureOrd[$scope] ?? 0;
+        $this->preludeClosureOrd[$scope] = $ord + 1;
+        $id = 9007199254740992 + (int)\hexdec(\substr(\sha1($scope . '#' . (string)$ord), 0, 13));
+        while (isset($this->preludeClosureIds[$id])) { $id = $id + 1; }
+        $this->preludeClosureIds[$id] = true;
+        return $id;
+    }
+
+    /**
      * Assemble a closure value: leading capture params (`$capNames`, bound to
      * `$capVals`) followed by the call params, with body `return <callNode>`.
      * Used by the method/static/builtin first-class-callable lowering.
@@ -694,9 +735,10 @@ trait LowerFns
      */
     private function buildClosureNode(array $mirParams, array $capNames, array $capTypes, array $capVals, Node $callNode, Type $ret, bool $forwardsErasedArray = false, ?array $metaParams = null): Node
     {
-        $id = $this->closureCounter;
-        $this->closureCounter = $id + 1;
+        $id = $this->allocClosureId();
         $fnName = '__closure_' . (string)$id;
+        if ($this->lastClosureFrame !== '' && $this->diags !== null) { $this->diags->fnAlias[$this->lastClosureFrame] = $fnName; }
+        $this->lastClosureFrame = '';
         $params = [];
         $i = 0;
         foreach ($capNames as $cn) {
@@ -1324,6 +1366,66 @@ trait LowerFns
     }
 
     /**
+     * `if (is_int($p)) { $p = (float)$p; }` for each parameter whose hint turns an
+     * int into a float ({@see TypeCheck::intToFloatHint}). Callee-side, so a dynamic call, a
+     * default and a by-ref argument convert as php does.
+     *
+     * @param \Parser\Ast\Param[] $params
+     * @return Node[]
+     */
+    private function intToFloatPrologue(array $params): array
+    {
+        $out = [];
+        foreach ($params as $p) {
+            if ($p->byRef && $p->variadic || !TypeCheck::intToFloatHint($p->typeHint)) { continue; }
+            $sp = $p->span;
+            $v = \Parser\Ast\Expr::variable($p->variadic ? '__i2f_v' : $p->name, $sp);
+            $target = $v;
+            if ($p->variadic) {
+                $target = \Parser\Ast\Expr::arrayAccess(\Parser\Ast\Expr::variable($p->name, $sp),
+                    \Parser\Ast\Expr::variable('__i2f_k', $sp), $sp);
+            }
+            $if = \Parser\Ast\Stmt::if_(
+                \Parser\Ast\Expr::call('is_int', [$v], $sp),
+                new \Parser\Ast\Block([\Parser\Ast\Stmt::expression(
+                    \Parser\Ast\Expr::assign($target, \Parser\Ast\Expr::cast('float', $v, $sp), $sp), $sp)]),
+                [], null, $sp);
+            if ($p->variadic) {
+                $if = \Parser\Ast\Stmt::foreach_(\Parser\Ast\Expr::variable($p->name, $sp),
+                    \Parser\Ast\Expr::variable('__i2f_k', $sp), $v, false, new \Parser\Ast\Block([$if]), $sp);
+            }
+            $out[] = $this->lowerStmt($if);
+        }
+        return $out;
+    }
+
+    /** @param \Parser\Ast\Param[] $params */
+    private function withIntToFloatPrologue(Block $body, array $params): Block
+    {
+        $stmts = $this->intToFloatPrologue($params);
+        if ($stmts === []) { return $body; }
+        foreach ($body->stmts as $s) { $stmts[] = $s; }
+        return new Block($stmts, $body->type);
+    }
+
+    /** A `return`ed value, converted int → float when the declared return type asks ({@see TypeCheck::intToFloatHint}). */
+    private function lowerReturnValue(\Parser\Ast\Expr $e): Node
+    {
+        if (!$this->currentRetToFloat) { return $this->lowerExpr($e); }
+        $k = $e->kind;
+        if ($k === 'FloatLiteral' || $k === 'StringLiteral' || $k === 'NullLiteral' || $k === 'BoolLiteral') {
+            return $this->lowerExpr($e);
+        }
+        $sp = $e->span;
+        if ($k === 'IntLiteral') { return $this->lowerExpr(\Parser\Ast\Expr::cast('float', $e, $sp)); }
+        $v = $k === 'Variable' ? $e : \Parser\Ast\Expr::variable('__i2f', $sp);
+        $first = $k === 'Variable' ? $e : \Parser\Ast\Expr::assign($v, $e, $sp);
+        return $this->lowerExpr(\Parser\Ast\Expr::ternary(
+            \Parser\Ast\Expr::call('is_int', [$first], $sp),
+            \Parser\Ast\Expr::cast('float', $v, $sp), $v, $sp));
+    }
+
+    /**
      * Lower AST call args against a known parameter signature, filling
      * omitted trailing params with their default expression (or null),
      * reordering named args, and packing a trailing variadic into a vec.
@@ -1343,10 +1445,6 @@ trait LowerFns
         }
         // Variadic last param: pack trailing positional args into a vec.
         $np = \count($params);
-        if ($np > 0 && $this->paramVariadic($params[$np - 1])) {
-            $spreadFill = $this->spreadAheadOfPack($params, $astArgs, $selfClass);
-            if ($spreadFill !== null) { return $spreadFill; }
-        }
         // Any other `...$arr` ahead of the variadic covers fixed params AND the pack, a
         // run-time split the emitter makes against the signature
         // ({@see EmitLlvmCalls::emitSpreadFill}); an eager empty pack here became a
@@ -1479,60 +1577,6 @@ trait LowerFns
             $out[] = $slotSet[$i] ? $slotNode[$i] : $this->lowerOmittedParam($p, $selfClass, $params, $astArgs);
             $i = $i + 1;
         }
-        return $out;
-    }
-
-    /**
-     * `f(...$arr)` where the spread starts AHEAD of f's variadic: the array feeds
-     * the fixed params from its position on (each element, or the param's default
-     * past the end) and the pack is its tail —
-     * `f($t[0] ?? default, …, ...array_slice($t, k))` with `$t` the array,
-     * evaluated once. Treating the spread as the first fixed argument read the
-     * array's first element as the PACK (`count($parts)` answered garbage). null
-     * when no spread precedes the pack.
-     *
-     * @param \Parser\Ast\Param[] $params
-     * @param \Parser\Ast\Expr[]  $astArgs
-     * @return Node[]|null
-     */
-    private function spreadAheadOfPack(array $params, array $astArgs, string $selfClass): ?array
-    {
-        $vidx = \count($params) - 1;
-        $si = -1;
-        foreach ($astArgs as $i => $a) {
-            if ($a->kind === 'Spread') { $si = (int)$i; break; }
-        }
-        if ($si < 0 || $si >= $vidx || $si !== \count($astArgs) - 1) { return null; }
-        $spread = $astArgs[$si];
-        // A string key binds by parameter NAME ({@see foldSpreadNamed}); the emitter's spread
-        // expansion does that against the signature, positional reads here would not.
-        $sv = $this->spreadValueOf($spread);
-        if ($sv instanceof \Parser\Ast\ArrayLit) {
-            foreach ($sv->elements as $el) {
-                if ($el->key instanceof \Parser\Ast\StringLiteral) { return null; }
-            }
-        }
-        $span = $spread->span;
-        $tmp = \Parser\Ast\Expr::variable('__sprpk' . (string)$this->destrCounter, $span);
-        $this->destrCounter = $this->destrCounter + 1;
-        $out = [];
-        for ($j = 0; $j < $si; $j = $j + 1) { $out[] = $this->lowerArgForParam($params[$j], $astArgs[$j]); }
-        for ($j = $si; $j < $vidx; $j = $j + 1) {
-            $src = $j === $si ? \Parser\Ast\Expr::assign($tmp, $this->spreadValueOf($spread), $span) : $tmp;
-            $idx = \Parser\Ast\Expr::int($j - $si, $span);
-            // Positional by iteration order, as php unpacks: an array keyed 1, 2 (or sparse) still
-            // feeds its first value to the first parameter. Reading through the key list keeps
-            // the element typed (array_values would re-box it).
-            $cnt = \Parser\Ast\Expr::binary('>', \Parser\Ast\Expr::call('count', [$src], $span), $idx, $span);
-            $kAt = \Parser\Ast\Expr::arrayAccess(\Parser\Ast\Expr::call('array_keys', [$tmp], $span), $idx, $span);
-            $out[] = new \Compile\Mir\Ternary(
-                $this->lowerExpr($cnt),
-                $this->lowerExpr(\Parser\Ast\Expr::arrayAccess($tmp, $kAt, $span)),
-                $this->lowerOmittedParam($params[$j], $selfClass, $params, $astArgs),
-                Type::unknown());
-        }
-        $tail = \Parser\Ast\Expr::call('array_slice', [$tmp, \Parser\Ast\Expr::int($vidx - $si, $span)], $span);
-        $out[] = new ArrayLit([new ArrayElement_(null, $this->lowerExpr(new \Parser\Ast\Spread($tail, $span)))], Type::unknown());
         return $out;
     }
 

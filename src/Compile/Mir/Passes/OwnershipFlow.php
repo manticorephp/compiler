@@ -424,6 +424,8 @@ final class OwnershipFlow implements Pass
         $deadRead = [];
         /** @var array<string, string> $mismatch */
         $mismatch = [];
+        /** @var array<string, bool> $unsettled names the last round's compensation still left unsettled */
+        $unsettled = [];
         for ($round = 0; $round < 256; $round++) {
             $this->resetPlan();
             $stuck = [];
@@ -478,17 +480,21 @@ final class OwnershipFlow implements Pass
             $l2 = $this->runFlow($body, $lat, $entry, $force);
             if ($l2 === null) { return; }
             $bad = false;
+            $unsettled = [];
             foreach ($l2->conflicts as $name => $unused) {
                 $force[$name] = true;
+                $unsettled[$name] = true;
                 $bad = true;
             }
             foreach ($l2->doubleRetain as $name => $unused) {
                 $force[$name] = true;
+                $unsettled[$name] = true;
                 $bad = true;
             }
             foreach ($l2->refArgIn as $lid => $x) {
                 if (!OwnLattice::isBorrow($x)) { continue; }
                 $force[$l2->refArgName[$lid]] = true;
+                $unsettled[$l2->refArgName[$lid]] = true;
                 $bad = true;
             }
             if (!$bad) {
@@ -499,15 +505,32 @@ final class OwnershipFlow implements Pass
             $this->inserted = [];
         }
         if ($final === null) {
+            // The same edge drops come back every round (a drop placed on an edge
+            // that one path reaches with the name still unset): no placement
+            // settles it. Leave those names unowned, as for a stuck join below —
+            // the value leaks, nothing is freed twice.
+            if (\count($unsettled) > 0 && \count($this->leaked) === 0) {
+                foreach ($unsettled as $name => $unused) { $this->leaked[$name] = true; }
+                if ($this->trace) { \error_log('OWNFLOW ' . $fn->name . ': LEAK (no convergence) ' . \implode(',', \array_keys($this->leaked))); }
+                if (\Compile\Stats::$on) { \Compile\Stats::bump('own.flow.leaked', \count($this->leaked)); }
+                $this->removeInserted($body);
+                $this->inserted = [];
+                $this->retry = true;
+                return;
+            }
             $this->errors[] = 'ownflow: ' . $fn->name . ': compensation did not converge';
             return;
         }
         // A join of an owned array with a word of unknown ownership (an untyped
         // callee's result) has no drop that is right on both edges. Leave the name
         // unowned: the value leaks, nothing is ever freed twice.
-        if ((\count($stuck) > 0 || \count($deadRead) > 0) && \count($this->leaked) === 0) {
+        // A symbol-table reader (`compact` by a runtime name, `extract`,
+        // `get_defined_vars`) can read any local, so a mismatch is a read past it.
+        $dynMismatch = $this->dynNames ? $mismatch : [];
+        if ((\count($stuck) > 0 || \count($deadRead) > 0 || \count($dynMismatch) > 0) && \count($this->leaked) === 0) {
             foreach ($stuck as $name => $unused) { $this->leaked[$name] = true; }
             foreach ($deadRead as $name => $unused) { $this->leaked[$name] = true; }
+            foreach ($dynMismatch as $name => $unused) { $this->leaked[$name] = true; }
             if ($this->trace) { \error_log('OWNFLOW ' . $fn->name . ': LEAK ' . \implode(',', \array_keys($this->leaked))); }
             if (\Compile\Stats::$on) { \Compile\Stats::bump('own.flow.leaked', \count($this->leaked)); }
             $this->removeInserted($body);

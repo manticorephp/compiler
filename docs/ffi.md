@@ -229,11 +229,13 @@ A **C varargs** callback (`void (*)(void *, const char *, ...)`, e.g. libxml2's
 `xmlGenericErrorFunc`) cannot be expressed as a PHP function at all. Where a library offers
 both, bind the non-varargs one — libxml2's *structured* error handler is the usable half.
 
-> ⚠ **An exception must not escape a callback.** A `throw` inside one longjmps to the
-> nearest enclosing PHP `try`, which sits **above** the C frame — so the C library's own
-> frames are skipped and whatever state it was mid-way through updating is left behind.
-> Catch inside the callback and signal failure through its return value, the way the C API
-> expects.
+> ⚠ **An exception escaping a callback is deferred, not unwound through C.** The callback
+> returns to C at once (its return value is undefined) and the exception stays pending; C
+> carries on — including further calls of the same callback, which return immediately at
+> their first call that can throw — and the exception is raised in the PHP code right
+> after the C function returns. php unwinds through the C frames instead. Either way the C
+> library sees results it did not expect: catch inside the callback and signal failure
+> through its return value, the way the C API expects.
 
 The callback runs on the C library's stack with the caller's arena live. Keep it short, and
 do not let it allocate anything the C side is expected to own.

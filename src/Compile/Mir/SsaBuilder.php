@@ -15,6 +15,14 @@ final class SsaBuilder
     private int $nextLabel = 0;
     /** @var array<string, string> user goto-label name → its stable block label */
     private array $userLabels = [];
+    /**
+     * Payload register → the tagged word of the fresh cell it came from, still owed a drop.
+     * Lives here because its keys name THIS body's registers: a helper body emitted
+     * mid-function gets a builder of its own, and an outer entry read there named an
+     * unrelated register of the helper (`__mir_cell_drop(i64 %r113)` of a ptr).
+     * @var array<string, string>
+     */
+    private array $cellByReg = [];
 
     /** Restart numbering for a new function body. */
     public function reset(): void
@@ -22,6 +30,20 @@ final class SsaBuilder
         $this->nextId = 0;
         $this->nextLabel = 0;
         $this->userLabels = [];
+        $this->cellByReg = [];
+    }
+
+    public function parkCell(string $reg, string $cell): void
+    {
+        $this->cellByReg[$reg] = $cell;
+    }
+
+    /** The cell parked by `$reg` ('' when none), forgotten as it is handed out. */
+    public function takeCell(string $reg): string
+    {
+        $c = $this->cellByReg[$reg] ?? '';
+        if ($c !== '') { unset($this->cellByReg[$reg]); }
+        return $c;
     }
 
     /**
