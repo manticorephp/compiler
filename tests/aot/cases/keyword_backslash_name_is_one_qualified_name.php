@@ -1,4 +1,5 @@
 <?php
+// @allow-undefined-traps — tests the runtime trap of an undeclared name; see tests/aot/run.sh
 // a reserved word followed by \Name is one qualified name to Zend (echo\A\f() is a call), but the compiler lexes it as the keyword
 namespace A;
 

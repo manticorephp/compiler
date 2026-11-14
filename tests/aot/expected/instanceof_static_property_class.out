@@ -1,0 +1,14 @@
+bool(true)
+bool(false)
+array(2) {
+  [0]=>
+  bool(true)
+  [1]=>
+  bool(true)
+}
+array(2) {
+  [0]=>
+  bool(false)
+  [1]=>
+  bool(false)
+}

@@ -66,8 +66,10 @@ $fail = 0;
 
 $disp = [];
 $src = (string)file_get_contents("$root/src/Compile/Mir/Passes/EmitLlvmBuiltins.php");
-preg_match_all("/\\\$name === .([a-z_0-9]+)./", $src, $m);
-foreach ($m[1] as $n) { $disp[$n] = true; }
+// A quoted literal closed by the SAME quote: `"runtime\\libc\\strlen"` and
+// `$name === $target` are not dispatch names.
+preg_match_all("/\\\$name === ([\\x27\"])([a-z_0-9]+)\\1/", $src, $m);
+foreach ($m[2] as $n) { $disp[$n] = true; }
 
 $known = [];
 $b = (string)file_get_contents("$root/src/Analyze/Builtins.php");
@@ -135,7 +137,8 @@ if ($s === false || $e === false) {
 preg_match_all("/.([a-z_0-9]+\.php)./", substr($main, $s, $e - $s), $pm);
 foreach ($pm[1] as $n) { $listed[$n] = true; }
 $onDisk = [];
-foreach (glob("$root/prelude/*.php") as $p) { $onDisk[basename($p)] = true; }
+// `<driver>_off.php` is a stand-in for `<driver>.php` and redeclares its names.
+foreach (glob("$root/prelude/*.php") as $p) { if (!str_ends_with($p, "_off.php")) { $onDisk[basename($p)] = true; } }
 $absent = array_values(array_diff(array_keys($onDisk), array_keys($listed)));
 if ($absent) {
     $fail = 1;

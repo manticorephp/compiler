@@ -2037,6 +2037,25 @@ final class InferTypes implements Pass
             $argl = $args;
             $i = 0;
             foreach ($argl as $a) {
+                // `f(...$xs)`: the pack is no argument of its own — which params its
+                // elements reach is a run-time split (keys, length), so the site
+                // observes none of them. Read as the argument at this index, the
+                // pack's ARRAY type refined the first param to an array of arrays.
+                if ($a->kind === Node::KIND_SPREAD) {
+                    foreach ([$fnName, $lsbFn] as $sf) {
+                        if ($sf === '') { continue; }
+                        $pre = $sf . '#';
+                        foreach ($cand as $ck => $_) {
+                            $ck = (string)$ck;
+                            if (\str_starts_with($ck, $pre) && (int)\substr($ck, \strlen($pre)) >= $base + $i) {
+                                $conflict[$ck] = true;
+                                $erasedArg[$ck] = true;
+                                unset($observed[$ck]);
+                            }
+                        }
+                    }
+                    break;
+                }
                 $key = $fnName . '#' . (string)($base + $i);
                 if ($lsbFn !== '' && isset($cand[$lsbFn . '#' . (string)($base + $i)])) { $key = $lsbFn . '#' . (string)($base + $i); }
                 $i = $i + 1;

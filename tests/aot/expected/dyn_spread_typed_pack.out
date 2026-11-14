@@ -1,0 +1,17 @@
+int(12)
+string(3) "7/5"
+string(1) "A"
+string(5) "a,b|,"
+string(3) "a,b"
+int(53)
+bool(true)
+array(1) {
+  [0]=>
+  string(1) ","
+}
+float(3.125)
+float(2.5)
+string(10) "true,false"
+int(42)
+string(3) "kkk"
+TypeError

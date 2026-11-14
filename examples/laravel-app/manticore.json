@@ -5,7 +5,8 @@
             "src": ["app", "bootstrap", "routes", "config", "vendor/laravel/framework/config", "vendor/nesbot/carbon/lazy"],
             "entry": "public/index.php",
             "output": "bin/app",
-            "composer": true
+            "composer": true,
+            "allowUndefined": ["apcu_*","Memcached","RedisCluster","Relay\\*","Aws\\*","Composer\\Autoload\\ClassLoader","Symfony\\Bridge\\PsrHttpMessage\\*","Symfony\\Component\\VarExporter\\Internal\\LazyObjectState","service","param","abstract_arg","headers_send"]
         }
     ]
 }

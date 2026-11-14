@@ -1535,6 +1535,28 @@ trait InferScans
             /** @var array<string,array<string,bool>> $kinds */
             $kinds = [];
             $this->collectStaticStoreKinds($fn->body, $active, $kinds);
+            // A static a stored reference points at (`$l10n[$d] = &$noop`) is a
+            // ref-cell target: its readers see through the reference and expect
+            // a cell there, so the module slot — initialiser included — is one.
+            if ($this->bodyHas($fn, Node::KIND_REF_CELL)) {
+                /** @var array<string, bool> $refSrc */
+                $refSrc = [];
+                $this->collectRefCellLocals($fn->body, $refSrc);
+                foreach ($refSrc as $rname => $unusedR) {
+                    $rcell = $cells[$rname] ?? '';
+                    if ($rcell === '') { continue; }
+                    // A null start rides the 0 word only in a pointer slot; a cell's null is boxed.
+                    $rit = $initTypes[$rname] ?? null;
+                    if ($rit === null || $rit->kind === Type::KIND_NULL) {
+                        $this->setGlobalCellDefault($module, $rcell, new IntConst(\Compile\MemoryAbi::CELL_NULL, Type::int_()));
+                    }
+                    $prev = $this->staticLocalTypes[$rcell] ?? null;
+                    if ($prev !== null && $prev->kind === Type::KIND_CELL) { continue; }
+                    $this->staticLocalTypes[$rcell] = Type::cell();
+                    $this->rescanTargets[$fn->name] = true;
+                    $changed = true;
+                }
+            }
             // An array static whose element stores disagree with the element
             // its initialiser gave it (`static $seen = ['k' => 'v']; $seen['n']
             // = 1;`) holds both kinds: its element is a cell, as for a global.
@@ -1690,6 +1712,7 @@ trait InferScans
         $names = [];
         foreach ($observed as $name => $t) { $names[$name] = true; }
         foreach ($elems as $name => $t) { $names[$name] = true; }
+        foreach ($elemBad as $name => $t) { $names[$name] = true; }
         // A superglobal is ONE slot shared by every module of the program — a
         // library `.o` declares it, the application defines it — so its
         // representation cannot be any one module's join of its own stores
@@ -1718,6 +1741,21 @@ trait InferScans
                 $newT = $keyT !== null
                     ? Type::assoc($keyT, $elems[$name])
                     : Type::vec($elems[$name]);
+                $prevT = $this->globalVarTypes[$name] ?? null;
+                if ($prevT === null || $prevT->exactString() !== $newT->exactString()) {
+                    $this->globalVarTypes[$name] = $newT;
+                    $changed = true;
+                }
+                continue;
+            }
+            // An element store whose key or value fits no static shape (a
+            // computed key, a stored reference: WordPress's
+            // `$l10n[$domain] = &$noop_translations`) still PROVES an array. Left
+            // to the decl's `int`, a reader took the buffer for a number and a
+            // stored reference was never dereferenced. The local rule applies:
+            // an array of cells.
+            if ($erasedArray && isset($elemBad[$name]) && !self::isSuperglobalVar($name)) {
+                $newT = Type::vec(Type::cell());
                 $prevT = $this->globalVarTypes[$name] ?? null;
                 if ($prevT === null || $prevT->exactString() !== $newT->exactString()) {
                     $this->globalVarTypes[$name] = $newT;

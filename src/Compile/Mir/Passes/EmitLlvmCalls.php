@@ -272,10 +272,12 @@ trait EmitLlvmCalls
         }
         if ($ret === 'void') {
             $out .= '  call ' . $callTypeTok . ' @' . $cSym . '(' . $callArgs . ")\n";
+            $out .= "  call void @__mc_exc_poll()\n";
             $out .= "  ret i64 0\n";
         } else {
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = call ' . $callTypeTok . ' @' . $cSym . '(' . $callArgs . ")\n";
+            $out .= "  call void @__mc_exc_poll()\n";
             if ($ret === 'ptr') {
                 $ri = $this->ssa->allocReg();
                 $out .= '  ' . $ri . ' = ptrtoint ptr ' . $r . " to i64\n";
@@ -603,7 +605,9 @@ trait EmitLlvmCalls
             }
         }
         foreach ($this->closureDrops as $fnName => $flavors) {
+            $this->ssa->reset();
             $out .= $this->closureRcFn($fnName, $flavors, false);
+            $this->ssa->reset();
             $out .= $this->closureRcFn($fnName, $flavors, true);
         }
         return $out;
@@ -779,6 +783,10 @@ trait EmitLlvmCalls
                 return $out . $this->releaseHoistedArgs($owned);
             }
         }
+        $outlined = $this->emitDynCallOutlined($iv, $keyP);
+        if ($outlined !== '') {
+            return $out . $outlined;
+        }
         $argc = \count($iv->args);
         // A `...$arr` spread makes the runtime arg count unknown. HOIST the
         // fixed-prefix arg values and the spread array pointer ONCE, before the
@@ -821,6 +829,7 @@ trait EmitLlvmCalls
         // evaluates them itself, and the table path below is reached only when
         // none did.
         $dynfSyms = [];
+        $packCells = false;
         // The candidate set depends on the argument count alone, so every site of that arity shares it.
         $memoHit = !$hasSpread && isset($this->dynfSymsMemo[$argc]);
         if ($memoHit) {
@@ -874,6 +883,16 @@ trait EmitLlvmCalls
                 $spNode = $this->asSpreadNode($iv->args[$spreadIdx]);
                 $spElem = $spNode->operand->type->element;
                 $spreadElem = $spElem === null ? Type::unknown() : $spElem;
+                // A TYPED pack (int[], string[], P[]) shares the cell thunks — the
+                // stdlib's exports, one module set for the rest — instead of a thunk
+                // per nameable function for each element type it meets. It goes as
+                // it is: the thunk binds it through the callee's spread fill, which
+                // decodes each element by the buffer's own hint, so raw words read
+                // right and nothing is copied (a copy leaked when the callee threw).
+                if ($spreadElem->kind !== Type::KIND_UNKNOWN && $spreadElem->kind !== Type::KIND_CELL) {
+                    $spreadElem = Type::cell();
+                    $packCells = true;
+                }
                 foreach ($clean as $cname => $crt) {
                     $tsym = $this->dynfSpreadThunk($cname, $numFixed, $spreadElem, $crt);
                     if ($tsym !== '') { $dynfSyms[$cname] = $tsym; }
@@ -885,7 +904,7 @@ trait EmitLlvmCalls
             $twElem = null;
             if ($hasSpread) {
                 $twSp = $this->asSpreadNode($iv->args[$spreadIdx])->operand->type->element;
-                $twElem = $twSp === null ? Type::unknown() : $twSp;
+                $twElem = $packCells ? Type::cell() : ($twSp === null ? Type::unknown() : $twSp);
             }
             foreach ($this->allTwinTot as $bname => $btot) {
                 $bname = (string)$bname;
@@ -915,7 +934,11 @@ trait EmitLlvmCalls
         $out .= '  ' . $keyP . ' = select i1 ' . $isBs0 . ', ptr ' . $tail0 . ', ptr ' . $keyRaw . "\n";
         $idTab = $this->dynfIdTable();
         $idMap = $idTab[2];
-        $out .= $this->dynfCachedRow($keyP, $idTab[0], $idTab[1], $rowReg);
+        // The row count is READ, not inlined: it is a property of the whole
+        // program, and the caller may be a prelude body that every program shares.
+        $idCnt = $this->ssa->allocReg();
+        $out .= '  ' . $idCnt . ' = load i64, ptr ' . $idTab[0] . ".n\n";
+        $out .= $this->dynfCachedRow($keyP, $idTab[0], $idCnt, $rowReg);
         $idp = $this->ssa->allocReg();
         $nameId = $this->ssa->allocReg();
         $hasRow = $this->ssa->allocReg();
@@ -940,7 +963,7 @@ trait EmitLlvmCalls
             // gives a static lower bound on the callee arity.
             if ($hasSpread) {
                 if ($tot < $numFixed) { continue; }
-            } elseif ($argc < $req || $argc > $tot) {
+            } elseif ($argc < $req || ($argc > $tot && !isset($this->userFnNames[$fname]))) {
                 continue;
             }
             // Arity alone is not enough to make a candidate emittable. A FLOAT is
@@ -960,6 +983,14 @@ trait EmitLlvmCalls
             $out .= '  ' . $eq . ' = icmp eq i64 ' . $nameId . ', ' . (string)$idMap[\strtolower($this->dynfPublicName($fname))] . "\n";
             $out .= '  br i1 ' . $eq . ', label %' . $hitL . ', label %' . $nextL . "\n";
             $out .= $hitL . ":\n";
+            if (!$hasSpread && $this->dynByValue && $this->firstRefParamBelow($fname, $argc) >= 0) {
+                // An internal function hands its callback values; php warns that a
+                // by-reference parameter got one, and a warning here is a throw.
+                $out .= $this->emitDynRefByValueError($fname, $this->firstRefParamBelow($fname, $argc));
+                $out .= '  br label %' . $endL . "\n";
+                $out .= $nextL . ":\n";
+                continue;
+            }
             if ($hasSpread && $this->anyRefParam($fname)) {
                 // This arm's callee takes a parameter by reference, and a spread
                 // supplies it from array ELEMENTS — there is no caller variable
@@ -1209,29 +1240,43 @@ trait EmitLlvmCalls
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
+        $ehSaved = $this->ehHelperBegin();
 
+        // The pack goes on as a spread of an ordinary call, so the callee's own
+        // spread lowering binds it: a short pack takes the defaults, a variadic
+        // tail collects the rest and string keys bind by name — reading element k
+        // into parameter numFixed+k handed a variadic a scalar and a default 0.
         $body = '';
         $callArgs = [];
         $cellT = Type::cell();
-        for ($i = 0; $i < $tot; $i = $i + 1) {
+        for ($i = 0; $i < $numFixed; $i = $i + 1) {
             $lname = '__mc_dynfs_a' . (string)$i;
             $slot = $this->ssa->allocReg();
             $body .= '  ' . $slot . " = alloca i64\n";
-            if ($i < $numFixed) {
-                $body .= '  store i64 %ft.a' . (string)$i . ', ptr ' . $slot . "\n";
-                $callArgs[] = new LoadLocal($lname, $cellT);
-            } else {
-                $ev = $this->ssa->allocReg();
-                $body .= '  ' . $ev . ' = call i64 @__mir_array_value_at(ptr %ft.sp, i64 '
-                       . (string)($i - $numFixed) . ")\n";
-                $body .= '  store i64 ' . $ev . ', ptr ' . $slot . "\n";
-                $callArgs[] = new LoadLocal($lname, $spreadElem);
-            }
+            $body .= '  store i64 %ft.a' . (string)$i . ', ptr ' . $slot . "\n";
+            $callArgs[] = new LoadLocal($lname, $cellT);
             $this->locals->slots[$lname] = $slot;
         }
-        $body .= $this->emitNode(new Call($fname, $callArgs, $rt));
+        $packT = Type::vec($spreadElem);
+        $packSlot = $this->ssa->allocReg();
+        $packWord = $this->ssa->allocReg();
+        $body .= '  ' . $packSlot . " = alloca i64\n"
+            . '  ' . $packWord . " = ptrtoint ptr %ft.sp to i64\n"
+            . '  store i64 ' . $packWord . ', ptr ' . $packSlot . "\n";
+        $this->locals->slots['__mc_dynfs_pack'] = $packSlot;
+        $callArgs[] = new \Compile\Mir\Spread_(new LoadLocal('__mc_dynfs_pack', $packT), Type::cell());
+        // A codegen builtin indexes its arguments positionally and has no spread
+        // lowering; its same-named PHP body (the bootstrap rule guarantees one)
+        // does, so this call goes to the body.
+        $call = new Call($fname, $callArgs, $rt);
+        $oldDeclined = $this->builtinDeclined;
+        $this->builtinDeclined = $call;
+        $body .= $this->emitNode($call);
+        $this->builtinDeclined = $oldDeclined;
         $body .= $this->boxToCell($rt);
         $ret = $this->lastValue;
+        $body = $this->ehHelperEnd($ehSaved, $body);
+        $ehTail = $this->ehHelperTail;
         $closed = $this->irIsClosed($body . '  ret i64 ' . $ret . "\n");
 
         $this->ssa = $oldSsa;
@@ -1250,7 +1295,7 @@ trait EmitLlvmCalls
             return '';
         }
         $this->dynfExtraBodies .= 'define ' . ($exported ? '' : 'linkonce_odr ') . 'i64 @' . $sym . '(' . $params
-            . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
+            . ")" . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
         return $sym;
     }
 
@@ -1345,6 +1390,244 @@ trait EmitLlvmCalls
         }
     }
 
+    /** @var array<int, string[]> [reg, release flavor] of the arrays the last {@see emitSpreadFill} built for its call */
+    private array $spreadFillOwned = [];
+    /** The {@see emitSpreadFill} caller releases what it lists in {@see $spreadFillOwned} (the function-call path). */
+    private bool $spreadFillReleases = false;
+
+    /** The one call {@see emitBuiltin} must leave to the function body ({@see dynfSpreadThunk}). */
+    private ?Call $builtinDeclined = null;
+
+    /** @var array<string, string> dispatcher key => symbol ({@see emitDynCallOutlined}) */
+    private array $dyncallSyms = [];
+    private int $dyncallDepth = 0;
+    /** Emitting a by-value dispatcher: a by-reference callee is refused ({@see emitDynCallDispatcher}). */
+    private bool $dynByValue = false;
+
+    /**
+     * A by-name call whose every argument is a plain local, as one call to a
+     * dispatcher shared by every site of the same argument types.
+     *
+     * The inline dispatch is the whole program's: an arm for each by-reference
+     * callee (sort, preg_match, …) and the name table. Spliced into each site it
+     * cost ~40 arms per site, and it made a prelude body that calls a callback
+     * (usort, array_map) the program's own text, so the shared-generics cache
+     * never saw the same body twice. The dispatcher takes the name and the
+     * address of each argument's slot: a by-reference callee binds the caller's
+     * variable exactly as the inline arm did. Sites with any other argument (an
+     * element or property that may be a by-reference target, a spread, a
+     * reference-backed local) keep the inline dispatch. Answers '' then.
+     */
+    private function emitDynCallOutlined(Invoke_ $iv, string $keyP): string
+    {
+        if ($this->dyncallDepth > 0 || $iv->args === []) { return ''; }
+        $slots = [];
+        $byValue = false;
+        $spread = false;
+        foreach ($iv->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { $spread = true; continue; }
+            if (!$this->dynPlainLocalArg($a)) { $byValue = true; }
+        }
+        // Only a prelude body may take the by-value form: it stands for an
+        // internal function, and php calls an internal function's callback
+        // with values (`usort`'s comparator gets copies, never the elements).
+        // A spread call goes by value anywhere: its dispatch never binds a
+        // reference (a by-reference callee is refused), so the values are all it reads.
+        if ($byValue && !$spread && !$this->frameIsPreludeCode()) { return ''; }
+        if ($spread) { $byValue = true; }
+        $key = ($spread ? 's' : ($byValue ? 'v' : 'r')) . (string)\count($iv->args);
+        $out = '';
+        foreach ($iv->args as $a) {
+            $key .= '|' . $a->type->exactString();
+            if ($a->kind === Node::KIND_SPREAD) {
+                $op = $this->asSpreadNode($a)->operand;
+                $key .= '<' . $op->type->exactString();
+                $out .= $this->emitNode($op);
+                $out .= $this->coerceToI64();
+                $slots[] = 'i64 ' . $this->lastValue;
+            } elseif ($byValue) {
+                $out .= $this->emitNode($a);
+                $out .= $this->coerceToI64();
+                $slots[] = 'i64 ' . $this->lastValue;
+            } else {
+                $slots[] = 'ptr ' . $this->locals->slots[$this->asLoadLocalNode($a)->name];
+            }
+        }
+        $key .= '|' . $iv->type->exactString();
+        if (!isset($this->dyncallSyms[$key])) {
+            $this->dyncallSyms[$key] = $this->emitDynCallDispatcher($iv, $key, $byValue);
+        }
+        $args = 'ptr ' . $keyP . ', ' . $this->siteTraceArgs($iv->line, $out);
+        foreach ($slots as $sl) { $args .= ', ' . $sl; }
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 @' . $this->dyncallSyms[$key] . '(' . $args . ")\n";
+        $this->lastValue = $r;
+        $this->lastValueType = 'i64';
+        if ($iv->type->kind === Type::KIND_CELL) {
+            $this->markCellOpaque($this->lastValue);
+        }
+        return $out;
+    }
+
+    /** The first by-reference parameter of $fname among its first $argc, or -1: php only complains about one it passes. */
+    private function firstRefParamBelow(string $fname, int $argc): int
+    {
+        foreach ($this->sigs->refParams[$fname] ?? [] as $i => $r) {
+            if ($r && (int)$i < $argc) { return (int)$i; }
+        }
+        return -1;
+    }
+
+    /** `Error: f(): Argument #N ($p) must be passed by reference, value given` for $fname's parameter $idx. */
+    private function emitDynRefByValueError(string $fname, int $idx): string
+    {
+        $pname = (string)($this->sigs->paramNames[$fname][$idx] ?? '');
+        $msg = $this->dynfPublicName($fname) . '(): Argument #' . (string)($idx + 1) . ' ($' . $pname
+            . ') must be passed by reference, value given';
+        return $this->emitNode(new \Compile\Mir\Throw_(
+            new \Compile\Mir\NewObj('Error', [
+                new \Compile\Mir\StringConst($msg, Type::string_()),
+                new \Compile\Mir\IntConst(0, Type::int_()),
+                new \Compile\Mir\NullConst(Type::obj('Throwable')),
+            ], Type::obj('Error')),
+            Type::void(),
+        ));
+    }
+
+    /**
+     * The function being emitted is prelude code: a prelude function, or a
+     * closure written inside one — those take ids from 2^53 up
+     * ({@see \Compile\Mir\Passes\LowerFns::allocClosureId}). Kept apart from
+     * `isPrelude`, which a closure does not carry and which also decides its
+     * scope, its frame's file and parameter inference.
+     */
+    private function frameIsPreludeCode(): bool
+    {
+        if ($this->frame === null) { return false; }
+        if ($this->frame->isPrelude) { return true; }
+        if (!$this->frame->isClosure || !\str_starts_with($this->frame->name, '__closure_')) { return false; }
+        $id = \substr($this->frame->name, \strlen('__closure_'));
+        return \ctype_digit($id) && (\strlen($id) > 16 || (int)$id >= 9007199254740992);
+    }
+
+    /** A local whose slot a by-reference callee may be handed as is. */
+    private function dynPlainLocalArg(Node $a): bool
+    {
+        if ($a->kind !== Node::KIND_LOAD_LOCAL) { return false; }
+        $name = $this->asLoadLocalNode($a)->name;
+        $L = $this->locals;
+        return isset($L->slots[$name]) && !isset($L->refLocals[$name]) && !isset($L->captureRefs[$name])
+            && !isset($L->globalBacked[$name]) && !isset($L->byRefCaptured[$name]) && !isset($L->unsetNames[$name])
+            && !isset($L->aliasLocals[$name]) && !isset($L->refCellTargets[$name]) && !isset($L->ownedBoxes[$name])
+            && !isset($L->byRefParamWb[$name]) && !isset($L->elemRefTargets[$name]) && !isset($L->elemRefBoxes[$name])
+            && !isset($L->aliasBoxNames[$name]);
+    }
+
+    /**
+     * The body behind {@see emitDynCallOutlined}: the inline dispatch over its
+     * own locals — the caller's slots, or (`$byValue`) copies of the values.
+     */
+    private function emitDynCallDispatcher(Invoke_ $iv, string $key, bool $byValue): string
+    {
+        $sym = $this->mirHelperSym($this->keyedHelperName('__mir_dyncall_', $key));
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldClassId = $this->classIdReg;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldRawRef = $this->rawRefCall;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
+        $oldBtLine = $this->btLineOverride;
+        $oldBtFile = $this->btFileOverride;
+        $oldBtSsa = $this->btLineOverrideSsa;
+
+        $this->ssa = new SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = $sym;
+        $this->locals = new LocalSlots();
+        $this->cf = new ControlFlow();
+        $this->arena = new ArenaContext();
+        $ehSaved = $this->ehHelperBegin();
+        $this->rawRefCall = false;
+        $this->spreadTail = null;
+        $this->lastPadArgs = '';
+        $this->vdResult = '';
+        $this->vdArmList = '';
+        $this->vdSiteArgc = 0;
+        $this->useSiteTraceParams();
+        $this->dyncallDepth = $this->dyncallDepth + 1;
+        $oldByValue = $this->dynByValue;
+        $this->dynByValue = $byValue;
+
+        $params = 'ptr %dc.name, i64 %btline, ptr %btfile';
+        $nameSlot = $this->ssa->allocReg();
+        $nameWord = $this->ssa->allocReg();
+        $body = '  ' . $nameSlot . " = alloca i64\n"
+            . '  ' . $nameWord . " = ptrtoint ptr %dc.name to i64\n"
+            . '  store i64 ' . $nameWord . ', ptr ' . $nameSlot . "\n";
+        $this->locals->slots['__mc_dc_name'] = $nameSlot;
+        $args = [];
+        foreach ($iv->args as $i => $a) {
+            $ln = '__mc_dc_a' . (string)$i;
+            if ($byValue) {
+                $params .= ', i64 %dc.a' . (string)$i;
+                $sl = $this->ssa->allocReg();
+                $body .= '  ' . $sl . " = alloca i64\n  store i64 %dc.a" . (string)$i . ', ptr ' . $sl . "\n";
+                $this->locals->slots[$ln] = $sl;
+            } else {
+                $params .= ', ptr %dc.a' . (string)$i;
+                $this->locals->slots[$ln] = '%dc.a' . (string)$i;
+            }
+            if ($a->kind === Node::KIND_SPREAD) {
+                $args[] = new \Compile\Mir\Spread_(new LoadLocal($ln, $this->asSpreadNode($a)->operand->type), $a->type);
+                continue;
+            }
+            $args[] = new LoadLocal($ln, $a->type);
+        }
+        $inner = new Invoke_(new LoadLocal('__mc_dc_name', Type::string_()), $args, $iv->type);
+        $inner->line = $iv->line;
+        $body .= $this->emitDynFnCall($inner, '%dc.name');
+        $ret = $this->lastValue;
+        $body = $this->ehHelperEnd($ehSaved, $body);
+        $ehTail = $this->ehHelperTail;
+
+        $this->dyncallDepth = $this->dyncallDepth - 1;
+        $this->dynByValue = $oldByValue;
+        $this->btLineOverride = $oldBtLine;
+        $this->btFileOverride = $oldBtFile;
+        $this->btLineOverrideSsa = $oldBtSsa;
+        $this->rawRefCall = $oldRawRef;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->classIdReg = $oldClassId;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+
+        $this->dynfExtraBodies .= 'define linkonce_odr i64 @' . $sym . '(' . $params
+            . ")" . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
+        return $sym;
+    }
+
     /**
      * The table half of a spread dynamic-name call. The fixed prefix was hoisted
      * before the arms (it has to dominate every one of them), so nothing is
@@ -1403,7 +1686,7 @@ trait EmitLlvmCalls
             $out .= $this->boxToCell($a->type, $a);
             $argRegs[] = $this->lastValue;
         }
-        $out .= $this->dynfCachedRow($keyP, $pair[0], $pair[1], $trow);
+        $out .= $this->dynfCachedRow($keyP, $pair[0], (string)$pair[1], $trow);
         $hit = $this->ssa->allocReg();
         $out .= '  ' . $hit . ' = icmp ne ptr ' . $trow . ", null\n";
         $callL = $this->ssa->allocLabel('dynf.tab');
@@ -1460,7 +1743,15 @@ trait EmitLlvmCalls
         return $out;
     }
 
-    /** Name table over every nameable function and builtin twin: [rows symbol, count, lowercase name => id]. Ids are 1-based sorted positions. */
+    /**
+     * Name table over every nameable function and builtin twin: [rows symbol,
+     * count, lowercase name => id]; `<rows symbol>.n` holds the count.
+     *
+     * An id is a hash of the NAME, never a position: a position shifts with every
+     * function the program adds, and the ids are inlined into the arms of every
+     * by-name call — prelude bodies included, which must read the same in every
+     * program. Never 0 (the miss row answers 0); a collision re-salts.
+     */
     private function dynfIdTable(): array
     {
         if ($this->dynfIdTab !== null) { return $this->dynfIdTab; }
@@ -1472,15 +1763,23 @@ trait EmitLlvmCalls
         \ksort($names, SORT_STRING);
         $this->dynfExtraBodies .= $this->dynfBsearchFn();
         $ids = [];
+        /** @var array<int, bool> */
+        $taken = [];
         $rows = [];
-        $i = 0;
         foreach ($names as $lc => $pub) {
-            $i = $i + 1;
-            $ids[$lc] = $i;
-            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($pub) . ', ptr inttoptr (i64 ' . (string)$i . ' to ptr) }';
+            $salt = '';
+            $id = $this->fnvHash64($lc) & 0x7FFFFFFFFFFFFFFF;
+            while ($id === 0 || isset($taken[$id])) {
+                $salt = $salt . '#';
+                $id = $this->fnvHash64($lc . $salt) & 0x7FFFFFFFFFFFFFFF;
+            }
+            $taken[$id] = true;
+            $ids[$lc] = $id;
+            $rows[] = '{ ptr, ptr } { ptr ' . $this->litStr($pub) . ', ptr inttoptr (i64 ' . (string)$id . ' to ptr) }';
         }
         $tsym = '@.dynf.ids.' . $this->mirHelperSym('0');
-        $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)\count($rows) . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n\n";
+        $this->dynfExtraBodies .= $tsym . ' = linkonce_odr constant [' . (string)\count($rows) . ' x { ptr, ptr }] [' . \implode(', ', $rows) . "]\n";
+        $this->dynfExtraBodies .= $tsym . '.n = linkonce_odr constant i64 ' . (string)\count($rows) . "\n\n";
         $this->dynfIdTab = [$tsym, \count($rows), $ids];
         return $this->dynfIdTab;
     }
@@ -1502,7 +1801,7 @@ trait EmitLlvmCalls
      * $rowReg to the row pointer, null on a miss (misses are not cached).
      * The cache global is `internal`: never shared across call sites or modules.
      */
-    private function dynfCachedRow(string $keyP, string $tsym, int $count, ?string &$rowReg): string
+    private function dynfCachedRow(string $keyP, string $tsym, string $count, ?string &$rowReg): string
     {
         $this->dynfExtraBodies .= $this->dynfBsearchFn() . $this->dynfIcmpFn();
         // Named by the function holding the site and the site's ordinal in it: a
@@ -1533,7 +1832,7 @@ trait EmitLlvmCalls
         $out .= '  br i1 ' . $ceq . ', label %' . $joinL . ', label %' . $slowL . "\n";
         $out .= $slowL . ":\n";
         $srow = $this->ssa->allocReg();
-        $out .= '  ' . $srow . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP . ', ptr ' . $tsym . ', i64 ' . (string)$count . ")\n";
+        $out .= '  ' . $srow . ' = call ptr @__mc_dynf_bsearch(ptr ' . $keyP . ', ptr ' . $tsym . ', i64 ' . $count . ")\n";
         $out .= '  store ptr ' . $srow . ', ptr ' . $cg . "\n";
         $out .= '  br label %' . $joinL . "\n" . $joinL . ":\n";
         $rowReg = $this->ssa->allocReg();
@@ -1619,6 +1918,21 @@ trait EmitLlvmCalls
      * module's different body — except a stdlib callee's, which the stdlib
      * exports once under a fixed name ({@see emitDynfExports}).
      */
+    /**
+     * php's TypeError for an array / non-Stringable object handed to a `string` parameter of a function called by
+     * runtime name: the thunk's cell arguments reach the string cast, which would convert instead of refusing.
+     * Stdlib thunks only (the stdlib defines the checker): a user function's message carries a call site this cannot name.
+     */
+    private function dynStringArgGuard(string $fname, int $ci, string $pname): string
+    {
+        if (!$this->emitLibrary) { return ''; }
+        $msg = \ltrim($fname, '\\') . '(): Argument #' . (string)($ci + 1) . ' ($' . $pname . ') must be of type string, ';
+        return $this->emitNode(new Call('__mc_dyn_str_arg', [
+            new LoadLocal('__mc_dynft_a' . (string)$ci, Type::cell()),
+            new \Compile\Mir\StringConst($msg, Type::string_()),
+        ], Type::void()));
+    }
+
     private function dynfThunk(string $fname, int $argc, Type $rt): string
     {
         $key = $fname . '|' . (string)$argc;
@@ -1658,6 +1972,7 @@ trait EmitLlvmCalls
         $this->locals = new LocalSlots();
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
+        $ehSaved = $this->ehHelperBegin();
 
         $params = '';
         $body = '';
@@ -1681,6 +1996,8 @@ trait EmitLlvmCalls
         foreach ($callArgs as $ci => $ca) {
             $tp = $thunkPts[$ci] ?? null;
             if ($tp === null || $tp->kind !== Type::KIND_STRING) { continue; }
+            $pname = $this->sigs->paramNames[$fname][$ci] ?? null;
+            if ($pname !== null) { $body .= $this->dynStringArgGuard($fname, $ci, (string)$pname); }
             $cast = new \Compile\Mir\Cast('string', $ca, Type::string_());
             $cast->keepNull = true;
             $callArgs[$ci] = $cast;
@@ -1695,6 +2012,8 @@ trait EmitLlvmCalls
         $body .= $this->emitNode(new Call($fname, $callArgs, $rt));
         $body .= $this->boxToCell($rt);
         $ret = $this->lastValue;
+        $body = $this->ehHelperEnd($ehSaved, $body);
+        $ehTail = $this->ehHelperTail;
         $closed = $this->irIsClosed($body . '  ret i64 ' . $ret . "\n");
 
         $this->ssa = $oldSsa;
@@ -1713,7 +2032,7 @@ trait EmitLlvmCalls
             return '';
         }
         $this->dynfExtraBodies .= 'define ' . ($exported ? '' : 'linkonce_odr ') . 'i64 @' . $sym . '(' . $params
-            . ") {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n}\n\n";
+            . ")" . " {\nentry:\n" . $body . '  ret i64 ' . $ret . "\n" . $ehTail . "}\n\n";
         return $sym;
     }
 
@@ -1828,7 +2147,8 @@ trait EmitLlvmCalls
         // reroutes to `$obj->__invoke(...)` (closures keep the struct path).
         if ($fn !== '' && isset($this->classes[$fn])
             && $this->resolveMethodClass($fn, '__invoke') !== '') {
-            $call = new \Compile\Mir\MethodCall_($iv->callee, '__invoke', $iv->args, $n->type);
+            $call = new \Compile\Mir\MethodCall_($iv->callee, '__invoke',
+                $this->packDynVariadicArgs($iv->callee, '__invoke', $iv->args), $n->type);
             $call->srcArgc = \count($iv->args);
             return $this->emitMethodCall($call);
         }
@@ -2887,6 +3207,7 @@ trait EmitLlvmCalls
         $faSurplus = $known && $dynSpread === -1 && ($this->sigs->usesFuncArgs[$fn] ?? false)
             && !\in_array(true, $this->sigs->variadicParams[$fn] ?? [], true);
         $faDeclared = \count($calleeParams) - $capCnt;
+        $spreadPack = '';
         foreach ($callArgs as $a) {
             if ($faSurplus && $pi >= $faDeclared) { continue; }
             // Argument unpacking `$fn(...$arr)`: expand the array across the
@@ -2902,6 +3223,7 @@ trait EmitLlvmCalls
                 }
                 $out .= $this->emitSpreadOperand($a->operand);
                 $arr = $this->lastValue;
+                $spreadPack = $arr;
                 $elemType = $a->operand->type->element ?? null;
                 // Declared ARGUMENT arity — the captures are not call slots.
                 $nparams = \count($calleeParams) - $capCnt;
@@ -2932,6 +3254,7 @@ trait EmitLlvmCalls
                     }
                     [$hs, $spHit, $spNpos] = $this->emitSpreadNameHits($arr, $byK, $spreadLen);
                     $out .= $hs;
+                    if ($spVi < 0) { $out .= $this->emitSpreadUnknownNameCheck($arr, $spreadLen, $spNpos, $spHit, $byK); }
                 }
                 while ($pi < $nparams) {
                     if ($spVi >= 0 && $pi === $spVpos) {
@@ -2943,7 +3266,8 @@ trait EmitLlvmCalls
                         $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arr . " to i64\n";
                         $this->lastValue = $srcI;
                         $this->lastValueType = 'i64';
-                        $out .= $this->emitCellArrayToTyped($packTy, true, (string)($pi - $base));
+                        $out .= $this->emitCellArrayToTyped($packTy, true, (string)($pi - $base), '',
+                            $spByName ? \array_values($byK) : null);
                         $packReg = $this->lastValue;
                         $out .= $this->closureArgRepr($packTy, $calleeParams[$spVi]);
                         $erasedArgDrops .= $this->rcReleaseReg($packReg, $this->discardReleaseFlavor($packTy));
@@ -3116,7 +3440,7 @@ trait EmitLlvmCalls
         $btClosure = $this->rt->needsBacktrace;
         if ($btClosure) { $out .= $this->btPush('{closure}', $n->line); }
         $out .= $known
-            ? $this->faPush($fn, $faN, $faSurplus ? $iv->args : [], $capCnt)
+            ? $this->faPush($fn, $faN, $faSurplus || $spreadPack !== '' ? $iv->args : [], $capCnt, $spreadPack)
             : ($this->rt->needsFuncArgs
                 ? '  store i64 ' . (string)$faN . ", ptr @__mir_fa_argc\n" : '');
         $reg = $this->ssa->allocReg();
@@ -4249,7 +4573,7 @@ trait EmitLlvmCalls
         $vars = $this->sigs->variadicParams[$fname] ?? [];
         // A trailing variadic over a cell pack takes any surplus and may be empty: the thunk packs it.
         $tailVar = $this->cellPackVariadic($fname);
-        if ($argc > $tot && !$tailVar) { return false; }
+        if ($argc > $tot && !$tailVar && !isset($this->userFnNames[$fname])) { return false; }
         for ($pi = $argc; $pi < $tot; $pi = $pi + 1) {
             if (($pdefs[$pi] ?? null) === null && !($vars[$pi] ?? false)) { return false; }
         }
@@ -5019,6 +5343,17 @@ trait EmitLlvmCalls
         return $this->emitDiagnosticLine('Warning', $msg, $s->line);
     }
 
+    /** php's spelling of a callee symbol: `Cls__m` is `Cls::m`, split at the class
+     *  prefix (a method name may itself start with `__`). */
+    private function fnDisplayName(string $fnKey): string
+    {
+        for ($p = \strpos($fnKey, '__'); $p !== false && $p > 0; $p = \strpos($fnKey, '__', $p + 1)) {
+            $cls = \substr($fnKey, 0, $p);
+            if (isset($this->classes[$cls])) { return $cls . '::' . \substr($fnKey, $p + 2); }
+        }
+        return $fnKey;
+    }
+
     /** Keyed by the DECLARING class — an ABSTRACT or interface declaration never
      *  registers one, so it does not propagate to the concrete implementation. */
     private function noDiscardMethodMsg(string $class, string $method): string
@@ -5198,6 +5533,7 @@ trait EmitLlvmCalls
         // old path until a cell-array conversion fact is available; never guess
         // that an arbitrary cell is a typed array.
         $vmask = $fnKey !== '' ? ($this->sigs->variadicParams[$fnKey] ?? []) : [];
+        $this->spreadFillOwned = [];
         if (($vmask[$firstParam] ?? false) && $firstParam < $n) {
             $target = $ptypes[$firstParam]->element ?? null;
             $compatible = $target === null
@@ -5221,42 +5557,61 @@ trait EmitLlvmCalls
                 $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
                 $this->lastValue = $srcI;
                 $this->lastValueType = 'i64';
-                $out .= $this->emitCellArrayToTyped(Type::vec($target));
+                // For a caller that releases it ({@see $spreadFillReleases}) a co-owning
+                // copy: the pack is borrowed, and the copy is the call's own temp.
+                $own = $this->spreadFillReleases;
+                $out .= $this->emitCellArrayToTyped(Type::vec($target), $own);
+                $out .= $this->coerceToI64();
+                if ($own) { $this->spreadFillOwned[] = [$this->lastValue, $this->discardReleaseFlavor(Type::vec($target))]; }
                 return [$out, [$this->lastValue]];
             }
         }
         $cnt = '';
         // php binds a string key of an unpacked array to the parameter of that name
         // (`f(...$pos, name: v)` is folded to such an array, {@see LowerFns::foldSpreadNamed}).
-        // The positional run is every entry that is not a name hit; a param takes its
-        // positional element, else its named one, else its default.
-        $pnames = ($this->spreadMayBeKeyed($arrType) && $fnKey !== '') ? ($this->sigs->paramNames[$fnKey] ?? []) : [];
+        // The positional run is the int-keyed prefix; a param takes its positional
+        // element, else its named one, else its default. A string key that names no
+        // parameter goes to the variadic, keyed — or, without one, is php's Error.
+        $keyed = $this->spreadMayBeKeyed($arrType) && $fnKey !== '' && isset($this->sigs->paramNames[$fnKey]);
+        $pnames = $keyed ? $this->sigs->paramNames[$fnKey] : [];
         $hit = [];
         $npos = '';
-        if ($pnames !== []) {
+        /** @var array<int,string> $byK */
+        $byK = [];
+        if ($keyed) {
             $out .= $this->arrayCountFromPtrIr($arrReg);
             $cnt = $this->lastValue;
-            $byK = [];
+            $hasVariadic = false;
             for ($k = $firstParam; $k < $n; $k = $k + 1) {
+                if ($vmask[$k] ?? false) { $hasVariadic = true; continue; }
                 $pn = $pnames[$k] ?? '';
-                if ($pn === '' || ($vmask[$k] ?? false)) { continue; }
+                if ($pn === '') { continue; }
                 $byK[$k] = $pn;
             }
             [$hs, $hit, $npos] = $this->emitSpreadNameHits($arrReg, $byK, $cnt);
             $out .= $hs;
+            if (!$hasVariadic) { $out .= $this->emitSpreadUnknownNameCheck($arrReg, $cnt, $npos, $hit, $byK); }
         }
         for ($k = $firstParam; $k < $n; $k = $k + 1) {
             if ($k > $firstParam && ($vmask[$k] ?? false)) {
                 // Fixed params first, then the variadic: the rest of the pack, renumbered,
                 // is its ONE vec argument ($k == $firstParam is the whole array, above).
                 $tel = $ptypes[$k]->element ?? null;
-                if ($tel === null || $tel->kind === Type::KIND_UNKNOWN) { $tel = Type::cell(); }
+                if ($tel === null || $tel->kind === Type::KIND_UNKNOWN) {
+                    // An erased pack element (`array ...$xs`) reads the words in the repr the
+                    // caller packs them — the source's own, when that is concrete.
+                    $tel = $elemType !== null && $elemType->kind !== Type::KIND_UNKNOWN ? $elemType : Type::cell();
+                }
                 $srcI = $this->ssa->allocReg();
                 $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
                 $this->lastValue = $srcI;
                 $this->lastValueType = 'i64';
-                $out .= $this->emitCellArrayToTyped(Type::vec($tel), true, (string)($k - $firstParam));
+                $out .= $this->emitCellArrayToTyped(Type::vec($tel), true, (string)($k - $firstParam), '',
+                    $keyed ? \array_values($byK) : null);
+                $out .= $this->coerceToI64();
                 $regs[] = $this->lastValue;
+                // The rest of the pack is a co-owning copy, the call's own temp.
+                $this->spreadFillOwned[] = [$this->lastValue, $this->discardReleaseFlavor(Type::vec($tel))];
                 break;
             }
             $ev = $this->ssa->allocReg();
@@ -5278,10 +5633,25 @@ trait EmitLlvmCalls
             }
             if ($elemType === null || $elemType->kind === Type::KIND_CELL || $elemType->kind === Type::KIND_UNKNOWN) {
                 // An erased pack may hold a raw-hinted buffer (a variadic `string ...$args`): its words are
-                // untagged payloads, which only the buffer's own hint can say.
+                // untagged payloads, which only the buffer's own hint can say. Past the end of the pack the
+                // word is a stray 0 that a raw hint would decode into a value; it stays 0, the missing
+                // argument the default below replaces.
+                if ($cnt === '') {
+                    $out .= $this->arrayCountFromPtrIr($arrReg);
+                    $cnt = $this->lastValue;
+                }
+                $real = $this->ssa->allocReg();
+                $out .= '  ' . $real . ' = icmp ugt i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
+                if ($posHas !== '') {
+                    $named = $this->ssa->allocReg();
+                    $out .= '  ' . $named . ' = or i1 ' . $real . ', ' . $hit[$k][0] . "\n";
+                    $real = $named;
+                }
                 $dec = $this->ssa->allocReg();
                 $out .= '  ' . $dec . ' = call i64 @__mir_elem_decode(ptr ' . $arrReg . ', i64 ' . $ev . ")\n";
-                $ev = $dec;
+                $kept = $this->ssa->allocReg();
+                $out .= '  ' . $kept . ' = select i1 ' . $real . ', i64 ' . $dec . ", i64 0\n";
+                $ev = $kept;
             }
             $pt = $ptypes[$k] ?? null;
             $needBox = ($tmask[$k] ?? false)
@@ -5335,7 +5705,7 @@ trait EmitLlvmCalls
                     $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
                 }
                 $out .= $this->emitThrowIf($short, 'ArgumentCountError',
-                    'Too few arguments to function ' . \str_replace('__', '::', $fnKey) . '()');
+                    'Too few arguments to function ' . $this->fnDisplayName($fnKey) . '()');
             }
             if ($def !== null) {
                 if ($cnt === '') {
@@ -5370,20 +5740,6 @@ trait EmitLlvmCalls
                 $out .= '  ' . $sel . ' = select i1 ' . $has . ', i64 ' . $ev
                       . ', i64 ' . $dv . "\n";
                 $ev = $sel;
-            } elseif ($fnKey !== '' && !($vmask[$k] ?? false) && !($this->sigs->refParams[$fnKey][$k] ?? false)) {
-                // A REQUIRED param the pack is too short to reach.
-                if ($cnt === '') {
-                    $out .= $this->arrayCountFromPtrIr($arrReg);
-                    $cnt = $this->lastValue;
-                }
-                $short = $this->ssa->allocReg();
-                if ($has !== '') {
-                    $out .= '  ' . $short . ' = xor i1 ' . $has . ", true\n";
-                } else {
-                    $out .= '  ' . $short . ' = icmp ule i64 ' . $cnt . ', ' . (string)($k - $firstParam) . "\n";
-                }
-                $out .= $this->emitThrowIf($short, 'ArgumentCountError',
-                    'Too few arguments to function ' . $fnKey . '()');
             }
             if ($coerce) {
                 $this->lastValue = $ev;
@@ -5446,13 +5802,15 @@ trait EmitLlvmCalls
     private function spreadMayBeKeyed(?Type $t): bool
     {
         if ($t === null || !$t->isVec()) { return true; }
+        // A mixed-key literal (`[5, 'q' => 7]`) types a CELL key: still a vec, keyed all the same.
+        if ($t->key !== null && $t->key->kind !== Type::KIND_INT) { return true; }
         $e = $t->element;
         return $e === null || $e->kind === Type::KIND_CELL || $e->kind === Type::KIND_UNKNOWN;
     }
     /**
      * Look up each named parameter among the string keys of a spread array: per param the
      * (hit flag, value slot) pair, and the register holding the length of the positional run
-     * (the entries that are not a name hit).
+     * (the int-keyed prefix: php refuses a positional entry after a named one).
      *
      * @param array<int,string> $names param index => name
      * @return array{0:string,1:array<int,array{0:string,1:string}>,2:string}
@@ -5461,21 +5819,109 @@ trait EmitLlvmCalls
     {
         $out = '';
         $hit = [];
-        $npos = $cnt;
         foreach ($names as $k => $pn) {
             $lp = $this->ssa->allocReg();
             $out .= '  ' . $lp . ' = call ptr @__mir_array_lookup_str(ptr ' . $arrReg . ', ptr '
                   . $this->litStr($pn) . ", i64 0, i64 0)\n";
             $isHit = $this->ssa->allocReg();
             $out .= '  ' . $isHit . ' = icmp ne ptr ' . $lp . ', @' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL . "\n";
-            $hi = $this->ssa->allocReg();
-            $out .= '  ' . $hi . ' = zext i1 ' . $isHit . " to i64\n";
-            $left = $this->ssa->allocReg();
-            $out .= '  ' . $left . ' = sub i64 ' . $npos . ', ' . $hi . "\n";
-            $npos = $left;
             $hit[(int)$k] = [$isHit, $lp];
         }
+        $npos = $this->ssa->allocReg();
+        $out .= '  ' . $npos . ' = call i64 @__mir_array_pos_prefix(ptr ' . $arrReg . ")\n";
         return [$out, $hit, $npos];
+    }
+
+    /**
+     * php's Error for an unpacked argument array the callee (no variadic) cannot bind: every
+     * entry past the positional run must be a name hit. Otherwise the first string key naming
+     * no parameter is "Unknown named parameter", and an int key after a named one is
+     * "Cannot use positional argument after named argument during unpacking".
+     *
+     * @param array<int,array{0:string,1:string}> $hit
+     * @param array<int,string> $names
+     */
+    private function emitSpreadUnknownNameCheck(string $arrReg, string $cnt, string $npos, array $hit, array $names): string
+    {
+        $out = '';
+        $sum = '0';
+        foreach ($hit as $h) {
+            $z = $this->ssa->allocReg();
+            $out .= '  ' . $z . ' = zext i1 ' . $h[0] . " to i64\n";
+            $a = $this->ssa->allocReg();
+            $out .= '  ' . $a . ' = add i64 ' . $sum . ', ' . $z . "\n";
+            $sum = $a;
+        }
+        $want = $this->ssa->allocReg();
+        $out .= '  ' . $want . ' = add i64 ' . $npos . ', ' . $sum . "\n";
+        $bad = $this->ssa->allocReg();
+        $out .= '  ' . $bad . ' = icmp ne i64 ' . $want . ', ' . $cnt . "\n";
+        $badL = $this->ssa->allocLabel('spread.badkey');
+        $headL = $this->ssa->allocLabel('spread.badkey.head');
+        $bodyL = $this->ssa->allocLabel('spread.badkey.body');
+        $strL = $this->ssa->allocLabel('spread.badkey.str');
+        $nextL = $this->ssa->allocLabel('spread.badkey.next');
+        $unkL = $this->ssa->allocLabel('spread.badkey.unknown');
+        $posL = $this->ssa->allocLabel('spread.badkey.pos');
+        $okL = $this->ssa->allocLabel('spread.keys.ok');
+        $iSlot = $this->ssa->allocReg();
+        $kSlot = $this->ssa->allocReg();
+        $out .= '  ' . $iSlot . " = alloca i64\n  " . $kSlot . " = alloca i64\n";
+        $out .= '  br i1 ' . $bad . ', label %' . $badL . ', label %' . $okL . "\n" . $badL . ":\n";
+        $out .= '  store i64 ' . $npos . ', ptr ' . $iSlot . "\n  br label %" . $headL . "\n" . $headL . ":\n";
+        $i = $this->ssa->allocReg();
+        $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
+        $more = $this->ssa->allocReg();
+        $out .= '  ' . $more . ' = icmp slt i64 ' . $i . ', ' . $cnt . "\n";
+        $out .= '  br i1 ' . $more . ', label %' . $bodyL . ', label %' . $posL . "\n" . $bodyL . ":\n";
+        $kc = $this->ssa->allocReg();
+        $out .= '  ' . $kc . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arrReg . ', i64 ' . $i . ")\n";
+        $top = $this->ssa->allocReg();
+        $out .= '  ' . $top . ' = lshr i64 ' . $kc . ", 48\n";
+        $isStr = $this->ssa->allocReg();
+        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $top . ", 65524\n";
+        $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $nextL . "\n" . $strL . ":\n";
+        $kw = $this->ssa->allocReg();
+        $out .= '  ' . $kw . ' = and i64 ' . $kc . ", 281474976710655\n";
+        $out .= '  store i64 ' . $kw . ', ptr ' . $kSlot . "\n";
+        $out .= $this->strIsOneOfIr($kw, $names);
+        $out .= '  br i1 ' . $this->lastValue . ', label %' . $nextL . ', label %' . $unkL . "\n" . $nextL . ":\n";
+        $i2 = $this->ssa->allocReg();
+        $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n  store i64 " . $i2 . ', ptr ' . $iSlot . "\n  br label %" . $headL . "\n";
+        $out .= $unkL . ":\n";
+        $kn = '__mc_spread_key';
+        $this->locals->slots[$kn] = $kSlot;
+        $out .= $this->emitNode(new Call('__mir_throw_error', [
+            new \Compile\Mir\Concat(new \Compile\Mir\StringConst('Unknown named parameter $', Type::string_()),
+                new \Compile\Mir\LoadLocal($kn, Type::string_())),
+        ], Type::cell()));
+        unset($this->locals->slots[$kn]);
+        $out .= "  unreachable\n" . $posL . ":\n";
+        $out .= $this->emitNode(new Call('__mir_throw_error', [
+            new \Compile\Mir\StringConst('Cannot use positional argument after named argument during unpacking', Type::string_()),
+        ], Type::cell()));
+        return $out . "  unreachable\n" . $okL . ":\n";
+    }
+
+    /** i1 in `lastValue`: is the string at word `$kw` one of `$names`? @param string[] $names */
+    private function strIsOneOfIr(string $kw, array $names): string
+    {
+        $this->rt->needsStrcmp = true;
+        $kp = $this->ssa->allocReg();
+        $out = '  ' . $kp . ' = inttoptr i64 ' . $kw . " to ptr\n";
+        $any = 'false';
+        foreach ($names as $nm) {
+            $c = $this->ssa->allocReg();
+            $out .= '  ' . $c . ' = call i32 @strcmp(ptr ' . $kp . ', ptr ' . $this->litStr((string)$nm) . ")\n";
+            $e = $this->ssa->allocReg();
+            $out .= '  ' . $e . ' = icmp eq i32 ' . $c . ", 0\n";
+            $o = $this->ssa->allocReg();
+            $out .= '  ' . $o . ' = or i1 ' . $any . ', ' . $e . "\n";
+            $any = $o;
+        }
+        $this->lastValue = $any;
+        $this->lastValueType = 'i1';
+        return $out;
     }
 
     /**
@@ -5545,7 +5991,7 @@ trait EmitLlvmCalls
                 if (!($this->sigs->variadicParams[$fnKey][$pi] ?? false)) {
                     $out .= $this->emitNode(new Call('__mir_throw_argcount_error', [
                         new \Compile\Mir\StringConst('Too few arguments to function '
-                            . \str_replace('__', '::', $fnKey) . '()', Type::string_()),
+                            . $this->fnDisplayName($fnKey) . '()', Type::string_()),
                     ], Type::cell()));
                 }
                 $this->lastPadArgs .= $sep . 'i64 0';
@@ -5950,6 +6396,10 @@ trait EmitLlvmCalls
     private function emitCall(Call $n): string
     {
         $c = $n;
+        $surplus = $this->internalSurplusArgs($n);
+        if ($surplus !== '') {
+            return $surplus . $this->emitCallUnguarded($n);
+        }
         if (\str_starts_with($c->function, '__mc_fuse_ds') && \count($c->args) > 0
             && $c->args[0]->kind === Node::KIND_LOAD_LOCAL && $c->args[0]->type->kind === Type::KIND_OBJ) {
             // A fused Ds callback method (`$m->reduce(fn …)`) stands in for a method call on its receiver.
@@ -5961,6 +6411,51 @@ trait EmitLlvmCalls
                 . $this->emitCallUnguarded($n);
         }
         return $this->emitCallUnguarded($n);
+    }
+
+    /**
+     * An internal function called with more arguments than it declares: php
+     * throws ArgumentCountError, a user function just drops the surplus. Only
+     * php-visible global names (no `__` helper prefix, no namespace) without a
+     * variadic. The arguments still run first, as php evaluates them before
+     * the count check; the call after the throw is never reached. Relies on the
+     * stdlib and prelude declaring every parameter php does.
+     */
+    private function internalSurplusArgs(Call $c): string
+    {
+        $name = $c->function;
+        if ($c === $this->builtinDeclined || isset($this->userFnNames[$name]) || isset($this->countReadInlineNames[\strtolower($name)])
+            || \str_starts_with($name, '__') || \str_contains($name, '\\')) { return ''; }
+        foreach ($c->args as $a) {
+            if ($a->kind === Node::KIND_SPREAD) { return ''; }
+        }
+        $argc = \count($c->args);
+        if (isset($this->sigs->paramTypes[$name])) {
+            $tot = \count($this->sigs->paramTypes[$name]);
+            if ($argc <= $tot || \in_array(true, $this->sigs->variadicParams[$name] ?? [], true)) { return ''; }
+            $req = 0;
+            foreach ($this->sigs->paramDefaults[$name] ?? [] as $d) {
+                if ($d === null) { $req = $req + 1; }
+            }
+        } elseif (isset($this->allTwinTot[$name])) {
+            $tot = $this->allTwinTot[$name];
+            if ($argc <= $tot) { return ''; }
+            $req = $this->builtinTwinReq[$name] ?? $tot;
+        } else {
+            return '';
+        }
+        $msg = $this->dynfPublicName($name) . '() expects ' . ($req === $tot ? 'exactly' : 'at most') . ' '
+            . (string)$tot . ($tot === 1 ? ' argument, ' : ' arguments, ') . (string)$argc . ' given';
+        if (\getenv('MANTICORE_SURPLUS_TRACE') !== false) {
+            \Manticore\dprint('surplus: ' . ($this->frame !== null ? $this->frame->name : '?') . ': ' . $msg);
+        }
+        $out = '';
+        foreach ($c->args as $a) {
+            if ($this->invokeArgRunsCode($a)) { $out .= $this->emitNode($a); }
+        }
+        return $out . $this->emitNode(new Call('__mir_throw_argcount_error', [
+            new \Compile\Mir\StringConst($msg, Type::string_()),
+        ], Type::cell()));
     }
 
     private function emitCallUnguarded(Call $n): string
@@ -6051,6 +6546,7 @@ trait EmitLlvmCalls
         // A func-args callee's surplus arguments ride the overflow channel, so
         // they must not also ride the call — the callee has no parameter for
         // them and the emitted call would not match its `declare`.
+        $spreadPack = '';
         $callArgs = $this->faCallArgs($c->function, $c->args);
         foreach ($callArgs as $a) {
             // Argument unpacking `f(...$arr)`: expand the array into the callee's
@@ -6060,10 +6556,16 @@ trait EmitLlvmCalls
                 $operand = $a->operand;
                 $out .= $this->emitSpreadOperand($operand);
                 $arr = $this->lastValue;
+                $spreadPack = $arr;
                 $elemType = $operand->type->element ?? null;
+                $this->spreadFillReleases = true;
                 [$sir, $sregs] = $this->emitSpreadFill($arr, $ai, $ptypes, $tmask,
                                                        $elemType, $c->function, $operand->type);
+                $this->spreadFillReleases = false;
                 $out .= $sir;
+                // A variadic tail it rebuilt is released after the call like any call temp.
+                foreach ($this->spreadFillOwned as $sown) { $rcArgRegs[] = $sown[0]; $rcArgFlavs[] = $sown[1]; }
+                $this->spreadFillOwned = [];
                 foreach ($sregs as $rg) {
                     if (!$first) { $argList .= ', '; }
                     $first = false;
@@ -6228,9 +6730,17 @@ trait EmitLlvmCalls
             if ($bs !== false) { $btName = \substr($btName, $bs + 1); }
             $out .= $this->btPush($btName, $n->line);
         }
-        $out .= $this->faPush($c->function, $c->srcArgc, $c->args);
+        $out .= $this->faPush($c->function, $c->srcArgc, $c->args, 0, $spreadPack);
+        // The call's own temps are listed for an unwind, which skips the releases below.
+        $tmpHeld = 0;
+        if (!($this->sigs->returnsByRef[$c->function] ?? false)) {
+            foreach ($rcArgRegs as $ti => $rg) {
+                $hold = $this->ehTmpPush($rg, $rcArgFlavs[$ti]);
+                if ($hold !== '') { $out .= $hold; $tmpHeld = $tmpHeld + 1; }
+            }
+        }
         $out .= '  ' . $reg . ' = call i64 @manticore_' . $mangled
-              . '(' . $argList . ")\n";
+              . '(' . $argList . ")" . ($tmpHeld > 0 ? ' ;!t' : '') . "\n";
         if ($btName !== '') { $out .= $this->btPop(); }
         $out .= $omitRefDrops;
         // Re-box each unboxed by-ref arg. The value is READ BACK, not assumed
@@ -6267,6 +6777,7 @@ trait EmitLlvmCalls
                 $out .= $this->rcReleaseReg($rg, $rcArgFlavs[$ri]);
                 $ri = $ri + 1;
             }
+            $out .= $this->ehTmpPop($tmpHeld);
         }
         $this->lastValue = $reg;
         $this->lastValueType = 'i64';
