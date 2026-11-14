@@ -12,6 +12,10 @@ Any LSP client works with the command `manticore lsp`. The binary must be the in
 
 - **VS Code** — [manticorephp/vscode-manticore](https://github.com/manticorephp/vscode-manticore);
   setting `manticore.path`.
+- **Zed** — [manticorephp/zed-manticore](https://github.com/manticorephp/zed-manticore) (registers
+  server `manticore` for PHP); enable with
+  `"languages": { "PHP": { "language_servers": ["manticore", "!intelephense", "!phpactor", "..."] } }`,
+  binary via `lsp.manticore.binary.path`.
 - **Neovim** (0.11+, built-in client):
 
   ```lua
