@@ -147,6 +147,8 @@ check('compiler_grammar_forms', function () {
         ['callable(mixed $v, ?A &$e = null): bool', 'callable(mixed,?A):bool'],
         ['callable(int ...$xs): void', 'callable(int):void'],
         ['ReflectionClass<covariant T>', 'ReflectionClass<T>'],
+        ['non-empty-array{a: int}', 'non-empty-array{a:int}'], ['non-empty-list{int, string}', 'non-empty-list{0:int,1:string}'],
+        ['array{1: int, string}', 'array{1:int,2:string}'], ['?string[]|null', '?array<string>'],
     ];
     foreach ($rows as [$in, $want]) {
         $t = SourceTypeParser::fromHint($in);

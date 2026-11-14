@@ -58,6 +58,15 @@ final class SourceTypeParser
             $c->pos = $c->pos + 1;
             $inner = self::parseInter($c, $cls, $d);
             if ($inner === null) { return null; }
+            self::ws($c);
+            // `?T|null` says `null` twice; it is `T|null`.
+            if ($allowUnion && self::peek($c) === '|') {
+                $c->pos = $c->pos + 1;
+                $rest = self::parseUnion($c, $cls, true, $d);
+                if ($rest === null || $rest->kind !== SourceType::SCALAR || $rest->name !== 'null') { return null; }
+                $core = $inner->kind === SourceType::NULLABLE ? $inner->args[0] : $inner;
+                return new SourceType(SourceType::NULLABLE, '', [$core], SourceType::UNION_NULL);
+            }
             return $inner->kind === SourceType::NULLABLE ? $inner : new SourceType(SourceType::NULLABLE, '', [$inner]);
         }
         $arms = [];
@@ -149,7 +158,7 @@ final class SourceTypeParser
         $low = \strtolower($name);
         $bare = \ltrim($low, '\\');
 
-        if (self::peek($c) === '{' && ($bare === 'array' || $bare === 'list')) {
+        if (self::peek($c) === '{' && ($bare === 'array' || $bare === 'list' || $bare === 'non-empty-array' || $bare === 'non-empty-list')) {
             $sh = self::parseShape($c, $bare, $cls, $d + 1);
             return $sh === null ? null : self::postfix($c, $sh);
         }
@@ -209,6 +218,8 @@ final class SourceTypeParser
             if ($k !== null && self::peek($c) === ':' && self::peekAt($c, 1) !== ':') {
                 $c->pos = $c->pos + 1;
                 $key = $k;
+                // An entry without a key takes the one after the last int key: `array{1: A, B}` keys B as 2.
+                if ((string)(int)$k === $k) { $auto = (int)$k + 1; }
             } else {
                 $c->pos = $save;
                 $opt = false;

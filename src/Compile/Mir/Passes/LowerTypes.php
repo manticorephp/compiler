@@ -105,555 +105,34 @@ trait LowerTypes
         return $this->lowerTypeHint($eff)->eraseTypeVars();
     }
 
-    /**
-     * Split a type hint on its TOP-LEVEL `|` only.
-     *
-     * Depth matters: `array<int, string|null>` and `callable(A|B): C` carry a
-     * `|` that belongs to an inner type, and splitting there would invent arms
-     * that do not exist.
-     *
-     * @return string[]
-     */
-    private function topLevelUnionArms(string $hint): array
-    {
-        return $this->splitTopLevel($hint, '|');
-    }
+    /** @var array<string, \Semantic\SourceType> parsed hints; a tree carries no class context */
+    private array $typeHintTrees = [];
+
+    /** @var array<string, bool> hints the parser rejects */
+    private array $typeHintBad = [];
 
     /**
-     * Split on a TOP-LEVEL `$sep` only — depth-aware on `<>`, `()`, `[]` and
-     * `{}`. A `|` or `,` inside `array{a:int|string}` / `array<int, array{…}>`
-     * belongs to the inner type; splitting there invents arms that do not
-     * exist. (`{}` was not counted before this, and a shape with a union field
-     * collapsed to a bare cell.)
-     * @return string[]
+     * A hint string → its Type: parsed once per distinct string
+     * ({@see \Semantic\SourceTypeParser}), lowered against the current pass
+     * state (class, type params, substitution) every time. Unparseable → unknown.
      */
-    private function splitTopLevel(string $s, string $sep): array
-    {
-        $parts = [];
-        $depth = 0;
-        $cur = '';
-        $n = \strlen($s);
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $c = $s[$i];
-            if ($c === '<' || $c === '(' || $c === '[' || $c === '{') { $depth = $depth + 1; }
-            elseif ($c === '>' || $c === ')' || $c === ']' || $c === '}') { $depth = $depth - 1; }
-            if ($c === $sep && $depth === 0) { $parts[] = \trim($cur); $cur = ''; continue; }
-            $cur = $cur . $c;
-        }
-        $parts[] = \trim($cur);
-        return $parts;
-    }
-
-    /**
-     * Offset of the first top-level single `:` (a `::` is a class constant,
-     * not a key separator), or -1. `cb: callable(int): string` splits at the
-     * first one: the key never contains a colon.
-     */
-    private function topLevelColon(string $s): int
-    {
-        $depth = 0;
-        $n = \strlen($s);
-        for ($i = 0; $i < $n; $i = $i + 1) {
-            $c = $s[$i];
-            if ($c === '<' || $c === '(' || $c === '[' || $c === '{') { $depth = $depth + 1; }
-            elseif ($c === '>' || $c === ')' || $c === ']' || $c === '}') { $depth = $depth - 1; }
-            if ($c !== ':' || $depth !== 0) { continue; }
-            if ($i + 1 < $n && $s[$i + 1] === ':') { $i = $i + 1; continue; }
-            return $i;
-        }
-        return -1;
-    }
-
-    /**
-     * `array{k:T, k2?:U, V}` → a SHAPE ({@see Type::shapeOf}): each field is
-     * lowered on its own, so a nested shape, a union field, a `?T` and a
-     * typevar all fall out of the recursion. A `\d+` key is an int key, a
-     * bare entry takes the next int key, any other key is a string (quotes
-     * stripped). `key?:` and a nullable field type mark the key NULL-able for
-     * the runtime check. A `...` entry makes the shape UNSEALED — then no key
-     * is a claim, and the hint lowers flat, as before this existed.
-     */
-    private function lowerArrayShape(string $base): Type
-    {
-        $lb = \strpos($base, '{');
-        $rb = \strrpos($base, '}');
-        $inner = ($rb !== false && $rb > $lb)
-            ? \substr($base, $lb + 1, $rb - $lb - 1)
-            : \substr($base, $lb + 1);
-        if (\str_contains($inner, '/*') || \str_contains($inner, '//') || \str_contains($inner, '#')) {
-            $inner = (string)\preg_replace('/\/\*.*?\*\\\\?\//s', '', $inner);
-            $inner = (string)\preg_replace('/\/\/[^\r\n]*/', '', $inner);
-            $inner = (string)\preg_replace('/#[^\r\n]*/', '', $inner);
-        }
-        if (\str_contains($inner, "\n")) {
-            $inner = (string)\preg_replace('/\r?\n[ \t]*\*?[ \t]*/', ' ', $inner);
-        }
-        if (\trim($inner) === '') { return Type::vec(Type::cell()); }
-        $fields = [];
-        $nullable = [];
-        $next = 0;
-        $list = true;
-        $sealed = true;
-        foreach ($this->splitTopLevel($inner, ',') as $ent) {
-            if ($ent === '') { continue; }
-            if (\strncmp($ent, '...', 3) === 0) { $sealed = false; continue; }
-            $colon = $this->topLevelColon($ent);
-            $opt = false;
-            if ($colon < 0) {
-                $key = $next;
-                $tyStr = $ent;
-            } else {
-                $keyStr = \trim(\substr($ent, 0, $colon));
-                $tyStr = \trim(\substr($ent, $colon + 1));
-                if ($keyStr !== '' && $keyStr[\strlen($keyStr) - 1] === '?') {
-                    $opt = true;
-                    $keyStr = \substr($keyStr, 0, \strlen($keyStr) - 1);
-                }
-                $keyStr = \trim($keyStr, "'\"");
-                if (Type::isIntKey($keyStr)) {
-                    $key = (int)$keyStr;
-                } else {
-                    $key = $keyStr;
-                    $list = false;
-                }
-            }
-            if (\is_int($key)) { $next = $key + 1; }
-            if ($tyStr === '') { $tyStr = 'mixed'; }
-            $fields[Type::shapeKey($key)] = $this->lowerTypeHint($tyStr);
-            if ($opt || $tyStr[0] === '?') { $nullable[Type::shapeKey($key)] = true; }
-            foreach ($this->topLevelUnionArms($tyStr) as $arm) {
-                if (\strtolower($arm) === 'null') { $nullable[Type::shapeKey($key)] = true; }
-            }
-        }
-        if (!$sealed || \count($fields) === 0) {
-            return $list ? Type::vec(Type::cell()) : Type::assoc(Type::string_(), Type::cell());
-        }
-        return Type::shapeOf($fields, $nullable, true);
-    }
-
-    /**
-     * The single non-null arm of a `T|null` / `null|T` union, or null when the
-     * hint is not that shape. `A|B|null` has two live arms and stays a cell —
-     * there is no one class to dispatch on.
-     */
-    private function nullableUnionArm(string $hint): ?string
-    {
-        $arms = $this->topLevelUnionArms($hint);
-        if (\count($arms) !== 2) { return null; }
-        $a0 = \strtolower(\ltrim($arms[0], '\\'));
-        $a1 = \strtolower(\ltrim($arms[1], '\\'));
-        $live = null;
-        if ($a1 === 'null' && $a0 !== 'null' && $arms[0] !== '') { $live = $arms[0]; }
-        elseif ($a0 === 'null' && $a1 !== 'null' && $arms[1] !== '') { $live = $arms[1]; }
-        if ($live === null) { return null; }
-        // A nullable CONTAINER keeps its old cell lowering. `string[]|null` and
-        // `array<string,mixed>|null` never matched isArrayUnion — that wants
-        // EVERY arm to be an array and `null` is not — so they fell through to a
-        // cell, and the tree is built on that. Collapsing them to `?string[]`
-        // hands back a raw array pointer where a null still has to be
-        // representable.
-        //
-        // This is what broke async TLS, and it took a single-variable rebuild to
-        // see: of the fifteen hints the collapse fires on tree-wide, TWELVE are
-        // containers and five of those sit in Runtime/Stdlib/Net.php. The three
-        // that remain — ReflectionNamedType|null, ReflectionMethod|null,
-        // string|null — are exactly the cases the fix exists for.
-        if ($this->looksLikeArrayElemType($live)) { return null; }
-        // A CALLABLE SIGNATURE arm does not survive the round trip either: the
-        // collapse re-lowers as `?<arm>`, and lowerCallableSignature — which runs
-        // BEFORE the union branch — does not recognise its own syntax behind a
-        // leading `?`. src/Cli/Command.php spells its handler field
-        // `\Closure(array<int, string>): int | null`.
-        if (\strpos($live, '(') !== false) { return null; }
-        return $live;
-    }
-
-    /** True if `$hint` is a union (`a|b|…`) whose every arm is an ARRAY shape
-     *  (`X[]` or `array<…>`) — e.g. `int[]|float[]`, `string[]|int[]`. */
-    private function isArrayUnion(string $hint): bool
-    {
-        $parts = \explode('|', \str_replace(['(', ')'], '', $hint));
-        if (\count($parts) < 2) { return false; }
-        foreach ($parts as $p) {
-            if (!$this->looksLikeArrayElemType(\trim($p))) { return false; }
-        }
-        return true;
-    }
-
-    /** True if `$hint` is a union (`a|b|…`) whose every arm is `int` or `float`
-     *  (`int|float`, `float|int`) — a purely-numeric scalar union. */
-    private function isNumericUnion(string $hint): bool
-    {
-        $parts = \explode('|', \str_replace(['(', ')', '?', '\\'], '', $hint));
-        if (\count($parts) < 2) { return false; }
-        foreach ($parts as $p) {
-            $low = \strtolower(\trim($p));
-            if ($low !== 'int' && $low !== 'integer'
-                && $low !== 'float' && $low !== 'double') {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private function lowerTypeHintText(?string $hint): Type
-    {
-        if ($hint === null) { return Type::unknown(); }
-        // A `@template T` parameter of the enclosing class. Checked before any
-        // lowercasing — a type-parameter name is case-sensitive. `T[]` and
-        // `array<string, T>` reach this through the recursive element/value
-        // lowering below, so they need no separate case.
-        // A generic TRAIT's parameter, already bound by the using class's
-        // `@use Items<string>`. The trait is copied per class, so there is no shared
-        // body to keep erased — `T` resolves straight to the concrete type.
-        if (isset($this->currentTypeSubst[$hint])) {
-            return $this->currentTypeSubst[$hint];
-        }
-        if ($this->isTypeParam($hint)) {
-            // A BOUNDED `T of Animal` carries its bound, so it erases to a raw
-            // obj<Animal> pointer rather than a tagged cell.
-            return Type::typeVar($hint, $this->currentTypeBounds[$hint] ?? null);
-        }
-        // `callable(int): string` — a callable with its signature spelled out.
-        // Checked BEFORE the union / intersection branches below, whose `|` and
-        // `&` scans would otherwise trip over a union INSIDE the parameter list.
-        $sig = $this->lowerCallableSignature($hint);
-        if ($sig !== null) { return $sig; }
-        // `mixed` and union types (`int|string`, DNF `(A&B)|C`) become a tagged
-        // cell (NaN-boxed i64): the value carries its runtime type tag. A purely
-        // NUMERIC union (`int|float`) is a NUMERIC cell — arithmetic promotes by
-        // tag AND a single-kind return/value narrows to the concrete scalar
-        // (InferTypes), so e.g. array_sum's float specialization returns a raw
-        // double instead of a mantissa-truncating box_float.
-        // A TOP-LEVEL `|` only. The plain strpos here was not depth-aware, so
-        // `array<int,string|null>` — str_getcsv's and fgetcsv's declared
-        // return, and every `array<K, V|null>` in the tree — entered the
-        // union branch, matched none of its shapes and collapsed to a bare
-        // `cell`. The `.sig` then carried `mixed` instead of `mixed[]`, and a
-        // caller cannot OWN an erased word: `count(str_getcsv($s))` leaked the
-        // whole record. {@see topLevelUnionArms} is the depth-aware split the
-        // arms below already use.
-        if (\count($this->topLevelUnionArms($hint)) > 1) {
-            // `S|null` IS `?S` — php treats the two spellings as one type. Only
-            // the shorthand was modelled, so the union spelling fell through to
-            // a plain cell and the class was gone: `(string)$x` on a value from
-            // a `S|null` method emitted the raw pointer because toStringClassOf
-            // saw no class, `get_debug_type` said `object`, and
-            // `method_exists($x, '__toString')` read false — while the RUNTIME
-            // object was intact all along (get_class and instanceof both right).
-            //
-            // prelude/reflection.php spells every one of its optional returns
-            // this way (`ReflectionNamedType|null`), which is how a
-            // compiler-wide type bug surfaced as "reflection is broken".
-            $arm = $this->nullableUnionArm($hint);
-            if ($arm !== null) { return $this->lowerTypeHint('?' . $arm); }
-            // A union whose every arm is an ARRAY shape (`int[]|float[]`,
-            // `string[]|int[]`) is still an ARRAY, not a scalar cell — lower it
-            // to an erased `vec[unknown]` so call-site element inference /
-            // monomorphization can refine the element per call (a plain cell
-            // would erase the array-ness and box every element).
-            if ($this->isArrayUnion($hint)) { return Type::vec(Type::unknown()); }
-            // A purely-NUMERIC scalar union (`int|float`) is a numeric cell:
-            // arithmetic promotes by tag and a single-kind return narrows to the
-            // concrete scalar (so e.g. array_sum's float specialization returns a
-            // raw double, not a mantissa-truncating box_float).
-            if ($this->isNumericUnion($hint)) { return Type::numericCell(); }
-            return Type::cell();
-        }
-        // Pure intersection `A&B` (DNF with no top-level union) — the value
-        // implements ALL the named types; type it as the FIRST so method
-        // dispatch + return-type resolution have a concrete class (the runtime
-        // object satisfies the rest, resolved virtually by class_id). Strip any
-        // grouping parens the parser preserved.
-        $bare = \str_replace(['(', ')'], '', $hint);
-        $amp = \strpos($bare, '&');
-        if ($amp !== false && $amp > 0) {
-            return $this->lowerTypeHint(\substr($bare, 0, $amp));
-        }
-        $low = strtolower(ltrim($hint, '?\\'));
-        if ($low === 'mixed') { return Type::cell(); }
-        // `iterable` = array|Traversable — a tagged cell (carries either at
-        // runtime). foreach over an `iterable` array works via the cell path;
-        // object iteration through an iterable binding needs runtime
-        // array-vs-object dispatch (a follow-up).
-        if ($low === 'iterable') { return Type::cell(); }
-        // `object` = any class: only a tagged cell says which. Erased to `unknown`,
-        // a caller handed the raw pointer and `(string)$o` printed the address
-        // where php throws "could not be converted to string".
-        if ($low === 'object') { return Type::cell(); }
-        // A nullable SCALAR (`?int`/`?float`/`?bool`) can't ride a raw i64: null
-        // would collide with 0 / 0.0 / false (so `=== null` and var_dump fail).
-        // Box it as a NUMERIC cell — null gets the NULL tag, the value its own,
-        // arithmetic promotes by tag. The `numeric` flag distinguishes it from a
-        // general mixed/array cell (whose property slot stays RAW for the SPL
-        // cell-array machinery) so only scalar-nullable props box-null/box-store.
-        // (Nullable POINTER types — `?string`/`?array`/`?Obj` — ride raw: a null
-        // is ptr 0, distinct from any valid ptr, mapped to NULL by box_ptr/etc.)
-        $nullable = \strlen($hint) > 0 && $hint[0] === '?';
-        if ($low === 'int' || $low === 'integer') {
-            return $nullable ? Type::numericCell() : Type::int_();
-        }
-        if ($low === 'float' || $low === 'double') {
-            return $nullable ? Type::numericCell() : Type::float_();
-        }
-        if ($low === 'bool' || $low === 'boolean') {
-            return $nullable ? Type::numericCell() : Type::bool_();
-        }
-        if ($low === 'string') { return Type::string_(); }
-        if ($low === 'void')   { return Type::void(); }
-        if ($low === 'null')   { return Type::null_(); }
-        // `resource` is not a declarable PHP type, so it only ever arrives from a
-        // docblock — and we model every handle as the prelude's \Resource object.
-        // Without this it fell through to an unknown CLASS name and erased to
-        // KIND_UNKNOWN: symfony's `@param resource $stream` demoted the otherwise
-        // correctly-`mixed` untyped param, is_resource($stream) then read a raw
-        // pointer through box_int, and every console app threw "needs a stream as
-        // its first argument". A nullable/`resource|false` spelling rides the
-        // ordinary pointer rules for an object.
-        if ($low === 'resource') { return Type::obj('Resource'); }
-        // `\Ffi\Ptr` is a built-in foreign handle (a libc FILE*/DIR*/raw addr):
-        // an i64 pointer, excluded from rc, with a runtime null-compare. It must
-        // resolve to obj<Ffi\Ptr> even in a module (the stdlib) that does NOT
-        // register the Ffi\Ptr class — otherwise it erases to `unknown`, the
-        // .sig drops the type, and a cross-module caller boxes the handle (ABI
-        // mismatch → the FILE* is read from NaN-boxed bits → crash).
-        //
-        // A bare `resource` hint falls through to the unknown-class path below
-        // and erases to `unknown`. That is NOT "matching PHP", as this comment
-        // used to claim: php has no `resource` type either, so it reads the hint
-        // as a CLASS NAME and raises "must be of type resource, resource given"
-        // at runtime. Our public handle type is the prelude class `\Resource`,
-        // and the lookup is case-SENSITIVE, so `resource` does not reach it
-        // while `\Resource` does — php would match both, being case-insensitive
-        // on class names. A niche divergence, since php code cannot usefully
-        // hint either one.
-        if ($low === 'ffi\\ptr') { return Type::obj('Ffi\\Ptr'); }
-        // `\Closure` is a header-less closure struct ([fn_ptr, captures...]),
-        // never rc-managed. Typing it KIND_CLOSURE (not obj) keeps every rc
-        // path from mis-routing a retain/release through it — the startup
-        // `Command::run(\Closure $h)` corruption. (A `\Closure(...): T` doc
-        // shape contains '|'/'(' and is handled above as a cell/union.)
-        if ($low === 'closure' || $low === 'callable') { return Type::closure(); }
-        // `self` / `static` → the enclosing class; `parent` → its base.
-        // Without this a `?self $next` property erases to unknown and a
-        // `$this->next->method()` dispatch can't resolve the return flavor.
-        if ($low === 'self' || $low === 'static') {
-            if ($this->currentLowerClass !== '') {
-                return Type::obj($this->currentLowerClass);
-            }
-        }
-        if ($low === 'parent') {
-            if (isset($this->classTable[$this->currentLowerClass])) {
-                $pc = $this->classTable[$this->currentLowerClass]->parent;
-                if ($pc !== '') { return Type::obj($pc); }
-            }
-        }
-        // `T[]` suffix → vec[T]. A list shape; assoc-keyed bare-array
-        // slots get re-typed by InferTypes::scanAssoc* from string-key use.
-        if (\strlen($low) > 2 && \substr($low, \strlen($low) - 2) === '[]') {
-            $base = \ltrim($hint, '?\\');
-            $elem = \substr($base, 0, \strlen($base) - 2);
-            // `(string|null)[]` groups its arms — the parens are the reason
-            // the `|` is not top level, and they must come off before the
-            // element is lowered or it reads as a class name.
-            $elem = \trim($elem);
-            if (\strlen($elem) > 1 && $elem[0] === '('
-                && $elem[\strlen($elem) - 1] === ')') {
-                $elem = \substr($elem, 1, \strlen($elem) - 2);
-            }
-            return Type::vec($this->lowerElemHint($elem));
-        }
-        // Generic array: `array<V>` → vec[V]; `array<K, V>` → assoc[V].
-        // An array SHAPE — `array{0:Node,1:bool}`, `array{name:string,age:int}`
-        // — names heterogeneous ELEMENTS, and the honest element type for a
-        // slot that holds a Node here and a bool there is the tag-dispatched
-        // CELL (an `[$n, true]` literal lowers to vec[cell] for the same
-        // reason). Unrecognised, the shape lowered to an ERASED element, and
-        // the body-usage guess ({@see detectStringElemUse}) then read a
-        // `$pair[0]` subscript as a CHAR offset and retyped the parameter to
-        // vec[string]: `ApplyMemoryMode::demote` compared `$pair[0]`, a 1-char
-        // string, against a Node (never equal) and, once a VERIFY guard looked,
-        // retained each pair's ARRAY as a string. Int keys (or none) make a
-        // list; any other key a string-keyed map.
-        if (\strncmp($low, 'array{', 6) === 0 || \strncmp($low, 'list{', 5) === 0
-            || \strncmp($low, 'non-empty-array{', 16) === 0
-            || \strncmp($low, 'non-empty-list{', 15) === 0) {
-            return $this->lowerArrayShape(\ltrim($hint, '?\\'));
-        }
-        // `list<T>` / `non-empty-list<T>` are `T[]`, `non-empty-array<K, V>` is
-        // `array<K, V>`. Unrecognised they read as a generic CLASS nobody
-        // declares — erased — and the body-usage guess then retyped
-        // sebastian/diff's `non-empty-list<array{0: mixed, 1: int}> $diff` from
-        // a `substr($diff[$n][0], -1)` as vec[vec[string]]: `$entry[1]` read
-        // the int 0 as a null string pointer.
-        if (\strncmp($low, 'list<', 5) === 0 || \strncmp($low, 'non-empty-list<', 15) === 0) {
-            $base = \ltrim($hint, '?\\');
-            $lt = \strpos($base, '<');
-            return Type::vec($this->lowerElemHint(\trim(\substr($base, $lt + 1, \strlen($base) - $lt - 2))));
-        }
-        // `int<0, max>` / `int<min, -1>` — phpstan's integer range is an int,
-        // and its refined scalars are their base type.
-        if (\strncmp($low, 'int<', 4) === 0) { return Type::int_(); }
-        if ($low === 'positive-int' || $low === 'negative-int' || $low === 'non-negative-int'
-            || $low === 'non-positive-int' || $low === 'non-zero-int') {
-            return $nullable ? Type::numericCell() : Type::int_();
-        }
-        if ($low === 'non-empty-string' || $low === 'numeric-string' || $low === 'class-string'
-            || $low === 'literal-string' || $low === 'lowercase-string' || $low === 'non-falsy-string'
-            || $low === 'truthy-string' || \strncmp($low, 'class-string<', 13) === 0) {
-            return Type::string_();
-        }
-        if (\strncmp($low, 'non-empty-array<', 16) === 0) {
-            return $this->lowerTypeHint('array' . \substr(\ltrim($hint, '?\\'), 15));
-        }
-        if (\strncmp($low, 'array<', 6) === 0) {
-            $base = \ltrim($hint, '?\\');
-            $lt = \strpos($base, '<');
-            $inner = \substr($base, $lt + 1, \strlen($base) - $lt - 2);
-            $kv = $this->splitTopLevel($inner, ',');
-            if (\count($kv) < 2) {
-                return Type::vec($this->lowerElemHint($kv[0]));
-            }
-            $keyStr = $kv[0];
-            $valStr = $kv[1];
-            // A key written as a CLASS CONSTANT is not a key type at all — it is
-            // a docblock naming which VALUES may appear (`array<Foo::BAR, V>`,
-            // `array<Foo::*, V>`, a union of those). Lowered as written it
-            // produced a key that is not KIND_STRING, `isAssoc()` answered
-            // false, and the parameter became a COMMITMENT to packed int keys:
-            // league/commonmark's
-            // `array<TableCell::ALIGN_*, array<string, string|string[]|bool>>`
-            // typed `vec[assoc[string,cell]]` while its own default — keyed by
-            // those very constants, which are 'left' / 'center' / 'right' —
-            // is string-keyed, so the one call site that fills the default read
-            // as an `array KEY repr conflict`. A CELL key is the tag-dispatched
-            // channel (the key reader picks `__mir_array_key_cell_at` off it and
-            // accepts either kind), which is the honest answer for a key whose
-            // TYPE the annotation never states.
-            //
-            // ⚠ Deliberately narrow. Every OTHER key that lowers to neither int
-            // nor string — `array-key` above all — is left as it lowered, even
-            // though `TypeCheck::keyKindOf` reads it as a commitment to int keys
-            // and refuses a legitimately string-keyed argument. Making those a
-            // cell key too changes their `typeToken`, and the ladder of
-            // Monomorphize clones the prelude's recursive merges depend on
-            // ("a cell argument gives Monomorphize an empty callKey") moves with
-            // it: `array_replace_recursive` at depth four then read a string
-            // element as a raw double (`[keep] => 2.1E-314`). That is a real
-            // second root and it is NOT this one.
-            $kt = $this->lowerTypeHint($keyStr);
-            if (\str_contains($keyStr, '::')) { $kt = Type::cell(); }
-            return Type::assoc($kt, $this->lowerElemHint($valStr));
-        }
-        // `Generator` / `Generator<V>` / `Generator<K, V>` → a Generator whose
-        // yielded value is V (the 2nd param when keyed, mirroring PHP's
-        // `Generator<TKey, TValue>`). Lets a generator PARAMETER / return hint
-        // carry the element type inference can't see across a call boundary.
-        if ($low === 'generator') { return Type::generator(null); }
-        if (\strncmp($low, 'generator<', 10) === 0) {
-            $base = \ltrim($hint, '?\\');
-            $lt = \strpos($base, '<');
-            $inner = \substr($base, $lt + 1, \strlen($base) - $lt - 2);
-            $comma = \strpos($inner, ',');
-            if ($comma === false || $comma < 0) {
-                return Type::generator($this->lowerTypeHint(\trim($inner)));
-            }
-            $keyStr = \trim(\substr($inner, 0, $comma));
-            $valStr = \trim(\substr($inner, $comma + 1, \strlen($inner) - $comma - 1));
-            return Type::generator($this->lowerTypeHint($valStr), $this->lowerTypeHint($keyStr));
-        }
-        // A generic class use — `Box<Tag>` → obj<Box> carrying the bound args.
-        // (`array<…>` and `Generator<…>` are handled above, so this is the
-        // user-declared case.) The args are a compile-time payload only: the
-        // class has ONE compiled body, and the binding is what lets a call site
-        // type `@return T` concretely instead of erasing it to unknown.
-        $ltg = \strpos($low, '<');
-        if ($ltg !== false && $ltg > 0) {
-            $gbase = \ltrim($hint, '?\\');
-            $glt = \strpos($gbase, '<');
-            $gname = \substr($gbase, 0, $glt);
-            $ginner = \substr($gbase, $glt + 1, \strlen($gbase) - $glt - 2);
-            // The base is a class NAME like any other: a short name behind a
-            // `use` or the enclosing namespace resolves the same way. Left
-            // unresolved, `UInt16Array<Kind>` fell through to the array reading
-            // below and the object was then walked as a PHP array.
-            $gname = $this->resolveClassHint($gname);
-            if ($gname !== '') {
-                // Stays the ERASED class carrying its binding. A hint does not get
-                // to name a specialization: a hint types a SLOT, and a slot can be
-                // handed an object built somewhere else — an unannotated
-                // `new Box()` is an erased instance, and a slot typed as the
-                // specialization would then read its cells as raw doubles. Only a
-                // site that also owns the CONSTRUCTION may name a spec, which is
-                // the `@var` + `new` pair in LowerStmts. Every other use of a
-                // specialized object goes through the erased type, which is sound:
-                // dispatch routes it to the erased thunks (see LowerReify).
-                $gargs = $this->lowerTypeArgs($ginner);
-                $this->checkNbufBinding($gname, $gargs);
-                return Type::objOf($gname, $gargs);
-            }
-        }
-        $cls = \ltrim($hint, '?\\');
-        // A `#[TypeDef]` names its CARRIER, not an object: the class is erased,
-        // so a slot declared `U8 $x` holds the bare scalar. Checked before the
-        // class table — a TypeDef is registered there too (its ClassDef is what
-        // resolves `->value` and its methods), and obj<U8> would point at nothing.
-        if ($this->isTypeDef($cls)) {
-            return $this->typeDefCarrier($cls);
-        }
-        // …under whatever spelling: a docblock names it as written (`Kind` behind
-        // a `use`), and read as an ordinary class that is obj<Kind> — a pointer
-        // type over what is a bare scalar.
-        $tdResolved = $this->resolveClassHint($cls);
-        if ($tdResolved !== '' && $tdResolved !== $cls && $this->isTypeDef($tdResolved)) {
-            return $this->typeDefCarrier($tdResolved);
-        }
-        // A bare class name → obj<Class> (so method returns / params of
-        // a class type carry their class for dispatch + __toString).
-        // `Ffi\Ptr` stays obj<Ffi\Ptr> but is treated as an opaque FOREIGN
-        // pointer downstream: excluded from rc (InsertMemoryOps) and given
-        // a RUNTIME null-compare (EmitLlvm) since `Runtime\Libc\fopen` /
-        // `sys_opendir` genuinely return NULL. A Ptr now stops at that FFI
-        // boundary: the PUBLIC handle type is the prelude class `\Resource`,
-        // which owns the address and can carry a destructor — a Ptr is excluded
-        // from rc, so it can own nothing.
-        $resolved = $this->resolveClassHint($cls);
-        if ($resolved !== '') { return $this->classHintType($resolved, $nullable); }
-        return Type::unknown();
-    }
-
-    /** -1 = not read yet; 1 when `MANTICORE_TYPEHINT_CHECK=1`. */
-    private int $typeHintCheck = -1;
-
-    /** True while {@see lowerSource} runs as the check-mode shadow: no diagnostics. */
-    private bool $lowerSourceShadow = false;
-
-    /** @var array<string, bool> hints already reported as a mismatch */
-    private array $typeHintMismatchSeen = [];
-
     private function lowerTypeHint(?string $hint): Type
     {
-        $old = $this->lowerTypeHintText($hint);
-        if ($this->typeHintCheck < 0) {
-            $this->typeHintCheck = \getenv('MANTICORE_TYPEHINT_CHECK') === '1' ? 1 : 0;
+        if ($hint === null) { return Type::unknown(); }
+        if (isset($this->typeHintTrees[$hint])) { return $this->lowerSource($this->typeHintTrees[$hint]); }
+        if (isset($this->typeHintBad[$hint])) { return Type::unknown(); }
+        $t = \Semantic\SourceTypeParser::fromHint($hint);
+        if ($t === null) {
+            $this->typeHintBad[$hint] = true;
+            return Type::unknown();
         }
-        if ($this->typeHintCheck === 1 && $hint !== null && !$this->lowerSourceShadow) {
-            $this->lowerSourceShadow = true;
-            $tree = \Semantic\SourceTypeParser::fromHint($hint);
-            $new = $tree === null ? Type::unknown() : $this->lowerSource($tree);
-            $this->lowerSourceShadow = false;
-            if ($new->exactString() !== $old->exactString() && !isset($this->typeHintMismatchSeen[$hint])) {
-                $this->typeHintMismatchSeen[$hint] = true;
-                \fwrite(\STDERR, 'TYPEHINT MISMATCH ' . \str_replace("\n", ' ', $hint) . ' old=' . $old->exactString()
-                    . ' new=' . $new->exactString() . "\n");
-            }
-        }
-        return $old;
+        $this->typeHintTrees[$hint] = $t;
+        return $this->lowerSource($t);
     }
 
     /**
-     * {@see lowerTypeHintText} over a parsed {@see \Semantic\SourceType}: the same
-     * ladder, the same pass state, case by case.
+     * A parsed {@see \Semantic\SourceType} → Type under the current pass state. A class
+     * type parameter or a bound trait parameter first; `A&B` types as its first arm.
      */
     private function lowerSource(\Semantic\SourceType $t): Type
     {
@@ -671,9 +150,10 @@ trait LowerTypes
     }
 
     /**
-     * `?T` reads the core with `nullable` set; `T|null` first asks what
-     * {@see nullableUnionArm} asks: a container or a parenthesised arm keeps the
-     * union's cell.
+     * `?T` reads the core with `nullable` set. Spelled `T|null`, a container
+     * (`string[]|null`, `array<K,V>|null`) or a parenthesised arm stays a cell: a
+     * raw array pointer cannot carry the null. `callable(A): R|null` — the `|null`
+     * belongs to the return.
      */
     private function lowerSourceNullable(\Semantic\SourceType $t): Type
     {
@@ -716,7 +196,8 @@ trait LowerTypes
 
     /**
      * `callable(A): R` / `Closure(A): R`. Spelled `…: R|null`, the `|null`
-     * belongs to the return ({@see lowerCallableSignature} reads the whole tail).
+     * belongs to the return. A bare `callable` / `Closure` (no signature) is the plain
+     * closure type. A parameter written with a name, `&` or `...` erases.
      */
     private function lowerSourceCallable(\Semantic\SourceType $t, bool $retOrNull): Type
     {
@@ -737,7 +218,7 @@ trait LowerTypes
         return Type::closureOf($ret, $params);
     }
 
-    /** {@see lowerElemHint}: a bare `callable` element is a cell. */
+    /** A collection ELEMENT: a bare `callable` is a cell — a string or `[class, method]` pair is not an env pointer. */
     private function lowerSourceElem(\Semantic\SourceType $t): Type
     {
         if (($t->kind === \Semantic\SourceType::CALLABLE || $t->kind === \Semantic\SourceType::CLASS_)
@@ -764,7 +245,7 @@ trait LowerTypes
         $n = \count($args);
         if ($low === 'array' || $low === 'non-empty-array') {
             if ($n < 2) { return Type::vec($this->lowerSourceElem($args[0])); }
-            // A class-constant key names VALUES, not a key type — see lowerTypeHintText.
+            // A class-constant key (`array<Foo::BAR, V>`) names VALUES, not a key type: a cell key.
             $kt = $this->lowerSource($args[0]);
             if (\str_contains($args[0]->toString(), '::')) { $kt = Type::cell(); }
             return Type::assoc($kt, $this->lowerSourceElem($args[1]));
@@ -783,11 +264,11 @@ trait LowerTypes
         if ($gname === '') { return Type::unknown(); }
         $gargs = [];
         foreach ($args as $a) { $gargs[] = $this->lowerSource($a); }
-        if (!$this->lowerSourceShadow) { $this->checkNbufBinding($gname, $gargs); }
+        $this->checkNbufBinding($gname, $gargs);
         return Type::objOf($gname, $gargs);
     }
 
-    /** A bare type NAME: the keyword ladder of {@see lowerTypeHintText}, then a class. */
+    /** A bare type NAME: keywords and pseudo-types, then a `#[TypeDef]` carrier, then a class. */
     private function lowerSourceName(string $name, bool $nullable): Type
     {
         $low = \strtolower(\ltrim($name, '\\'));
@@ -824,7 +305,11 @@ trait LowerTypes
         return $this->classHintType($resolved, $nullable);
     }
 
-    /** {@see lowerArrayShape} over a SHAPE node. */
+    /**
+     * `array{k: T, k2?: U, V}` → a SHAPE: an int key is an int key, any other a string.
+     * `k?:`, a `?T` or a `null` arm make the field NULL-able. Unsealed (`...`) or empty
+     * lowers flat.
+     */
     private function lowerSourceShape(\Semantic\SourceType $t): Type
     {
         $sealed = $t->resolved !== '...';
@@ -1143,20 +628,6 @@ trait LowerTypes
             return Type::unknown();
         }
         return null;
-    }
-
-    /**
-     * {@see lowerTypeHint} for the ELEMENT of a docblock collection. `callable`
-     * is a union — a Closure, a function-name string, a `[class, method]` pair —
-     * so a slot of them is a cell: lowered as `closure` (the hint for a lone
-     * `callable` parameter) every string or pair read back out was treated as
-     * an env pointer, and a nested append through the property faulted
-     * (symfony's `@var array<string, list<callable>> $casters`).
-     */
-    private function lowerElemHint(string $elem): Type
-    {
-        if (\strtolower(\ltrim(\trim($elem), '\\')) === 'callable') { return Type::cell(); }
-        return $this->lowerTypeHint($elem);
     }
 
     /**
@@ -1507,55 +978,6 @@ trait LowerTypes
             $j = $j + 1;
         }
         return $j;
-    }
-
-    /**
-     * `callable(A, B): R` / `Closure(A): R`, with the parameter and return types
-     * carried on the closure type. Null when `$hint` is not that shape.
-     *
-     * A bare `callable` / `Closure` keeps the plain closure type — it says nothing
-     * about the signature, so an invoke through it still returns a tagged cell.
-     */
-    private function lowerCallableSignature(?string $hint): ?Type
-    {
-        if ($hint === null) { return null; }
-        $h = \ltrim($hint, '?\\');
-        $lp = \strpos($h, '(');
-        if ($lp === false || $lp <= 0) { return null; }
-        $head = \strtolower(\substr($h, 0, $lp));
-        if ($head !== 'callable' && $head !== 'closure') { return null; }
-        $n = \strlen($h);
-        $depth = 0;
-        $i = $lp;
-        $rp = -1;
-        while ($i < $n) {
-            $c = \substr($h, $i, 1);
-            if ($c === '(') { $depth = $depth + 1; }
-            elseif ($c === ')') {
-                $depth = $depth - 1;
-                if ($depth === 0) { $rp = $i; break; }
-            }
-            $i = $i + 1;
-        }
-        if ($rp < 0) { return null; }
-        $inner = \substr($h, $lp + 1, $rp - $lp - 1);
-        $params = \trim($inner) === '' ? [] : $this->lowerTypeArgs($inner);
-        $ret = null;
-        $j = $this->skipDocSpaces($h, $rp + 1, $n);
-        if ($j < $n && \substr($h, $j, 1) === ':') {
-            $j = $this->skipDocSpaces($h, $j + 1, $n);
-            $rt = \trim(\substr($h, $j, $n - $j));
-            // The return type is ONE atom: in `\Closure(A): T|class-string<T>` the
-            // `|` closes the signature and starts an outer union (phpdoc-parser's
-            // callable return is a single atomic type). A union with a non-null
-            // arm is a tagged cell — typed `closure`, Laravel's
-            // `Container::build($concrete)` took a class-name string as a closure env.
-            foreach (\array_slice($this->topLevelUnionArms($rt), 1) as $arm) {
-                if (\strtolower(\trim($arm)) !== 'null') { return Type::cell(); }
-            }
-            if ($rt !== '') { $ret = $this->lowerTypeHint($rt); }
-        }
-        return Type::closureOf($ret, $params);
     }
 
     /**
