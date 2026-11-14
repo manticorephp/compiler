@@ -72,6 +72,9 @@ final class AstWalk
     /** @var array<string, bool> names bound by `global`, `static` and `catch` */
     public array $boundNames = [];
 
+    /** @var ForeachStmt[] every foreach statement, in pre-order */
+    public array $foreachs = [];
+
     /**
      * When true, a nested `Closure` / `ArrowFn` is recorded but NOT descended
      * into — its body belongs to a different variable scope and is analyzed as
@@ -124,6 +127,7 @@ final class AstWalk
             return;
         }
         if ($s instanceof ForeachStmt) {
+            $this->foreachs[] = $s;
             $this->expr($s->expr);
             $this->expr($s->key);
             $this->expr($s->value);

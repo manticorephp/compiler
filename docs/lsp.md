@@ -5,7 +5,7 @@ framing). It is built on the semantic core (`src/Semantic/`, see
 [`design/semantic-core.md`](design/semantic-core.md)): the same name index, type inference and
 analyzer the `analyze` command uses, so editor diagnostics and `manticore analyze` agree.
 
-A VS Code client lives in [`../editors/vscode/`](../editors/vscode/README.md); any LSP client
+A VS Code client is developed in a separate repository; any LSP client
 works with the command `manticore lsp`.
 
 ## Supported methods
@@ -15,7 +15,7 @@ works with the command `manticore lsp`.
 | `initialize`, `initialized`, `shutdown`, `exit` | `rootUri` (or the first workspace folder) is scanned at startup |
 | `textDocument/didOpen`, `didChange`, `didClose` | full text sync |
 | `textDocument/publishDiagnostics` | pushed on open and change |
-| `textDocument/hover` | members and expressions (types) |
+| `textDocument/hover` | members, functions, variables and expressions (types; see Hover) |
 | `textDocument/definition` | classes, functions, constants, members, variables |
 | `textDocument/references` | classes, functions, members, variables; honours `includeDeclaration` |
 | `textDocument/prepareRename`, `rename` | see [Rename](#rename) |
@@ -26,6 +26,52 @@ works with the command `manticore lsp`.
 Capabilities advertised: `textDocumentSync {openClose, change: 1}`, `hoverProvider`,
 `definitionProvider`, `referencesProvider`, `renameProvider {prepareProvider}`,
 `documentSymbolProvider`, `completionProvider`.
+
+## Hover
+
+The signature goes in a `php` code block; array types add a short bullet list below it, then one line saying where
+the type comes from.
+
+- Declared types are the native hint merged with the docblock (`@var`, `@param`, `@return`, `@psalm-` / `@phpstan-`
+  variants): a docblock refines a bare `array` / `iterable` (nullable too), any other native hint wins. Class names are
+  fully qualified through the file's namespace and `use` map.
+- Rendering: `list<V>`, `array<K, V>`, `array{id: int, name?: string}` (`?` = optional key; positional entries are
+  keyed `0`, `1`, ...; a key that is not a plain word is single-quoted with `\\`, `'`, backtick and newline escaped), and `V[]` for the one-argument `array<V>` (also what `@var V[]` means).
+- Variables: parameters show the declared type, locals the inferred type at that point (narrowing applies), foreach
+  variables the element type. A literal with distinct string keys (at most 8) is a shape, other keyed literals are
+  `array<K, V>`, elements of different types join into a union (`list<int|string>`), `[]` is a bare `array`.
+- A string-literal key that PHP casts to an int (`'1'`, `'-5'`) or ends in `?` makes the literal a plain `array<K, V>`, not a shape.
+- Source label: `*from annotation*` only while the shown type is the docblock-refined declared one; after a reassignment or
+  narrowing, and for locals, `*inferred*`; a plain native declaration has no label. A docblock never overrides a native
+  `int`/`string`/class hint, and a non-array docblock type is ignored on a native `array`.
+- Markdown safety: code spans use a delimiter longer than any backtick run inside, and the signature fence grows past a
+  ``` run in the text.
+- Detail lines list `keys` / `values` (generic arrays) or one `key: type` per entry (shapes), nested arrays indented,
+  at most 12 lines, `…` when cut. A method or function hover prefixes the list of its return type with `**Returns**`.
+
+```php
+App\A::$byName: array<string, App\Foo>
+```
+- keys: `string`
+- values: `App\Foo`
+
+*from annotation*
+
+Constants show their native type only (the parser keeps no docblock on a constant). Hover never fails: any error
+answers the plain type text.
+## Docblocks
+
+Class names in the type-carrying tags of `/** */` docblocks (`@param`, `@return`, `@var`, `@throws`, `@property*`,
+`@method`, `@mixin`, `@extends` / `@implements` / `@use`, `@template T of X`, and their `@psalm-` / `@phpstan-`
+variants) are class references: definition, references, hover and rename treat them like a written class name,
+including generics (`Foo<Bar>`), unions, `Foo[]`, `?Foo`, `class-string<Foo>`, and `\Fully\Qualified` names (rename edits
+the last segment only). Names resolve with the file's namespace and `use` map; a `use X as Y` alias is never edited.
+Built-in and pseudo types, `@template` / `@psalm-type` names, `array{...}` keys and prose lines are not indexed.
+A lone lowercase word right after `@return` / `@throws` followed by more words (`@return the thing`) is description, not a
+type; a capitalised word (`@return A new instance`) still reads as a class, a known ceiling. Docblocks are found by text
+(strings, plain comments, heredocs / nowdocs and inline HTML are skipped); the namespace and top-level `use` map in force at
+each docblock are tracked from the same pass, so files with several `namespace` blocks resolve per block. If the PCRE scan
+fails, a degraded linear scan of `/** */` blocks runs for files with a single `namespace` (it cannot tell strings from comments); files with several namespaces get no docblock names.
 
 ## Positions
 
@@ -63,19 +109,38 @@ declarations.
 - **Blockers refuse.** Cases the engine cannot rewrite safely (unknown owner, library
   declaration, named-argument and trait-adaptation uses, a parse-error region) fail the request
   with an error naming the reason.
-- **Uncertain sites are warned.** Sites that may or may not refer to the symbol (a class name
+- **Uncertain sites are flagged.** Sites that may or may not refer to the symbol (a class name
   in a string, a dynamic member, a callable string, a docblock mention, an unresolved
-  receiver) are edited where certain and listed in a `window/showMessage` warning.
-- **Members search the whole workspace.** A member query temporarily opens every scanned
-  closed file so their member use sites resolve. Rename refuses with `rename incomplete` when
-  the workspace has more than 5000 files or a file cannot be read, rather than apply a partial
-  edit.
+  receiver) are listed in a `window/showMessage` warning. When the client declares
+  `workspace.workspaceEdit.documentChanges` and `changeAnnotationSupport`, those sites whose
+  text really spells the old name (a qualified string such as `'App\Foo'` matches by its last segment only; `'Foo\Bar'` never matches `Foo`) are also returned as edits with a change annotation
+  (`uncertain:<reason>`, `needsConfirmation: true`), so VS Code's Refactor Preview shows them
+  unticked for the user to decide; the edit then uses `documentChanges` with the open
+  document's version (`null` for closed files). Certain edits carry no annotation. Uncertain
+  sites whose text does not match are dropped. Other clients get `changes` with the certain
+  edits only.
+- **Members search the workspace files that mention them.** A member query temporarily opens
+  every scanned closed file whose text contains the member name (case-insensitive) so its use
+  sites resolve; other files are not parsed. Rename refuses with `rename incomplete: N workspace
+  files could not be searched` when more than 5000 files would be opened, a file is over 2 MiB
+  or unreadable, or the startup scan could not index a file (any rename kind, since class and
+  function renames read the same index), rather than apply a partial edit.
+- **Only the last name segment is edited.** `use App\Models\User;`, `new \App\Models\User()` and
+  `new User()` become `...\Person`, `...\Person`, `Person`. A site spelled with an import alias
+  (`use ... as U2; new U2()`) is left alone; the `use` line is renamed. Before editing, every
+  site's text is checked against the symbol's name; if the file changed on disk since it was
+  indexed, the rename fails with `index out of date for <file>` instead of editing wrong bytes.
+- **Closing a file** re-reads it from disk into the index, so discarded edits do not leave stale
+  positions; a closed file that no longer exists is dropped from the index.
+- **Parameters:** renaming a parameter is refused while a named argument spelled like it exists
+  in the workspace (`m(val: 2)`).
 - **Sigils** (`$`) are decided per location from the source text, so renaming a property or
   static property never corrupts `$` and a leading `$` in the new name is stripped.
 
-Known limit: a heredoc anywhere in the workspace blocks **all** renames
-(`Workspace::renameBlockers` reports `heredoc-*`), because interpolation parts inside heredocs
-share one range.
+Known limit: an **interpolating** heredoc (a body containing `$name` or `{$`) anywhere in the
+workspace blocks **all** renames (`Workspace::renameBlockers` reports `heredoc-interpolation`),
+because interpolation parts inside heredocs share one range. Heredocs without interpolation do
+not block.
 
 ## Known ceilings
 
@@ -90,6 +155,13 @@ share one range.
   `parent::__construct` are not offered; keywords are not offered; capped at 200 items
   (`isIncomplete`).
 - Member references are the slowest operation (below): they re-parse the closed files.
+- Class, function and constant renames trust the startup index for closed files. A file that
+  gained a reference after startup (git checkout, external edit) is not re-read, so that site is
+  omitted. Stale sites already in the index are detected and refuse the rename; new ones are not.
+  There is no `didChangeWatchedFiles` / `didSave` handling yet. Restart the server after a branch switch.
+- Renaming a magic method (`__construct`, `__invoke`, …) or an interface method called implicitly
+  (`offsetGet`, `current`, `count`, `getIterator`, …) edits the declaration and not the implicit
+  callers; references miss them too. Do not rename these through the editor.
 
 ## Latency
 
@@ -102,12 +174,13 @@ compiler build, 2026-10-29:
 |---|---|---|---|---|
 | hover | 200 | 0.1 | 0.4 | 1.2 |
 | definition | 200 | 0.2 | 7.7 | 8.8 |
-| references (class) | 30 | 11.3 | 13.3 | 37.7 |
-| references (member) | 30 | 1761.5 | 2386.9 | 2667.4 |
-| completion after `->` | 200 | 6.1 | 7.5 | 16.8 |
-| documentSymbol | 200 | 0.8 | 0.8 | 3.2 |
-| didChange to diagnostics | 200 | 9.3 | 10.5 | 11.0 |
+| references (class) | 30 | 8.0 | 8.9 | 33.7 |
+| references (member) | 30 | 984.0 | 1859.4 | 1984.9 |
+| completion after `->` | 200 | 4.5 | 5.2 | 6.1 |
+| documentSymbol | 200 | 0.7 | 0.7 | 0.9 |
+| didChange to diagnostics | 200 | 7.6 | 8.7 | 10.8 |
 
-Startup scan of `src/`: 1.6 s. didOpen to first diagnostics: 11 ms. Server RSS: 126 MB after
-the scan, 546 MB at the end (after the member-references passes, which parse every closed
-file). Linux numbers are not recorded.
+Startup scan of `src/`: 1.2 s. didOpen to first diagnostics: 8 ms. Server RSS: 123 MB after
+the scan, 510 MB at the end (after the member-references passes, which parse every closed
+file that mentions the member name; 60 member queries end at 633 MB, so growth flattens
+rather than scaling per query). Linux numbers are not recorded.

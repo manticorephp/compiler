@@ -46,7 +46,9 @@ final class SourceTypeParser
         $core = $native->kind === SourceType::NULLABLE ? $native->args[0] : $native;
         $bare = $core->args === []
             && ($core->kind === SourceType::ITERABLE || ($core->kind === SourceType::SCALAR && $core->name === 'array'));
-        return $bare ? $doc : $native;
+        if (!$bare) { return $native; }
+        $plainArray = $core->kind === SourceType::SCALAR;
+        return $plainArray && TypeDetail::arrayPart($doc) === null ? $native : $doc;
     }
 
     private static function parseUnion(GenericCursor $c, string $cls, bool $allowUnion, int $d): ?SourceType
@@ -138,6 +140,10 @@ final class SourceTypeParser
         $name = \substr($c->raw, $start, $c->pos - $start);
         $low = \strtolower($name);
 
+        if (self::peek($c) === '{' && ($low === 'array' || $low === 'list')) {
+            $sh = self::parseShape($c, $low, $cls, $d + 1);
+            return $sh === null ? null : self::postfix($c, $sh);
+        }
         $args = [];
         $hasArgs = false;
         if (self::peek($c) === '<') {
@@ -160,6 +166,56 @@ final class SourceTypeParser
         }
         $t = self::named($name, $low, $args, $hasArgs, $cls);
         return $t === null ? null : self::postfix($c, $t);
+    }
+
+    private static function parseShape(GenericCursor $c, string $name, string $cls, int $d): ?SourceType
+    {
+        $c->pos = $c->pos + 1;
+        $keys = [];
+        $vals = [];
+        $auto = 0;
+        self::ws($c);
+        while (self::peek($c) !== '}') {
+            if (self::peek($c) === '') { return null; }
+            $key = (string)$auto;
+            $save = $c->pos;
+            $k = self::shapeKey($c);
+            self::ws($c);
+            $opt = false;
+            if ($k !== null && self::peek($c) === '?') { $opt = true; $c->pos = $c->pos + 1; self::ws($c); }
+            if ($k !== null && self::peek($c) === ':') {
+                $c->pos = $c->pos + 1;
+                $key = $k;
+            } else {
+                $c->pos = $save;
+                $opt = false;
+                $auto = $auto + 1;
+            }
+            $v = self::parseUnion($c, $cls, true, $d);
+            if ($v === null) { return null; }
+            $keys[] = $opt ? $key . '?' : $key;
+            $vals[] = $v;
+            self::ws($c);
+            if (self::peek($c) === ',') { $c->pos = $c->pos + 1; self::ws($c); continue; }
+            if (self::peek($c) !== '}') { return null; }
+        }
+        $c->pos = $c->pos + 1;
+        return new SourceType(SourceType::SHAPE, $name, $vals, '', null, $keys);
+    }
+
+    private static function shapeKey(GenericCursor $c): ?string
+    {
+        $ch = self::peek($c);
+        if ($ch === "'" || $ch === '"') {
+            $end = \strpos($c->raw, $ch, $c->pos + 1);
+            if ($end === false) { return null; }
+            $k = \substr($c->raw, $c->pos + 1, $end - $c->pos - 1);
+            $c->pos = $end + 1;
+            return $k;
+        }
+        $start = $c->pos;
+        while (self::isIdent(self::peek($c)) && self::peek($c) !== '\\') { $c->pos = $c->pos + 1; }
+        return $c->pos === $start ? null : \substr($c->raw, $start, $c->pos - $start);
     }
 
     private static function parseCallable(GenericCursor $c, string $name, string $cls, int $d): ?SourceType

@@ -123,7 +123,7 @@ node budgets degrade to unknown). `Flow::envAtUnit` computes the env at one expr
 unit (`UnitLookup` picks the unit): assignments, `instanceof` / `is_*` / null / `||` / ternary / `match(true)` narrowing,
 early exits, foreach and catch bindings, loops widened by silent passes, property paths dropped on writes or calls.
 Nothing is cached across calls, so nothing goes stale. It re-implements `FlowWalk`'s recognition over `SourceType`
-because `Ty` cannot hold unions (unify in P4). `DocNames` qualifies docblock class names with the file's `use` map.
+because `Ty` cannot hold unions (unify in P4). `DocNames` qualifies docblock class names with the file's `use` map; `DocblockNames` scans a file's text for the class names in type-carrying docblock tags and `NameIndex` stores them as `class` occurrences flagged `inDoc` (no comment text kept).
 `typeAt` returns a `SourceType`; `hover` returns the member signature (members) or the type (expressions).
 
 **VarIndex.** Variable bindings of one file: scopes (`{main}`, functions, methods, property hooks at any depth, closures,
@@ -347,7 +347,7 @@ Member references cost ~1.8 s p50 on `src/` (362 files) for that reason.
 - Heredoc/nowdoc interpolation parts share the whole-string range.
 - Latency tail on multi-thousand-line files (see G1 verdict).
 - `withDoc` has no production caller; `NameIndex::occurrenceAt` relies on NameRefs never overlapping;
-  `UncertainSite` has no end position; docblock and `Invoke` uncertain sites are not implemented.
+  `UncertainSite` has no end position; `Invoke` uncertain sites are not implemented, and docblock mentions other than class names in type tags are not collected.
 - `perform_analysis` (the CLI) still uses `Analyzer::run`, not the Workspace path; the CLI and
   Workspace winners differ for a name declared in two user files.
 - Four `tests/analyze` cases fail before this work and still do: `flow_depth`, `json_smoke`,

@@ -139,4 +139,21 @@ $items = $got[2]['result']['items'] ?? [];
 $lab = array_column($items, 'kind', 'label');
 check('completion round trip: public members of a broken-file receiver', ($got[2]['id'] ?? null) === 3 && $lab === ['bar' => 2, 'pub' => 5]
     && ($got[0]['result']['capabilities']['completionProvider']['triggerCharacters'] ?? null) === ['$', '>', ':', '\\'], json_encode($got[2] ?? null) . $err);
+$uri = 'file:///tmp/lspe2e_ann/main.php';
+[$got, $code, $rest, $err] = session($bin, [
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///nonexistent-e2e', 'capabilities' => ['workspace' => ['workspaceEdit' => ['documentChanges' => true, 'changeAnnotationSupport' => new stdClass()]]]]],
+    ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
+    ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'version' => 3, 'text' => "<?php\nclass Foo {\n    public function bar(): int { return 1; }\n}\nfunction mk(\$u) { \$u->bar(); }\n\$f = new Foo();\n\$f->bar();\n"]]],
+    ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/rename', 'params' => ['textDocument' => ['uri' => $uri], 'position' => ['line' => 2, 'character' => 22], 'newName' => 'baz']],
+    ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
+    ['jsonrpc' => '2.0', 'method' => 'exit'],
+], 5);
+$res = null;
+foreach ($got as $g) { if (($g['id'] ?? null) === 3) { $res = $g['result'] ?? null; } }
+$ed = $res['documentChanges'][0] ?? null;
+$ann = [];
+foreach ($ed['edits'] ?? [] as $e) { $ann[$e['range']['start']['line']] = $e['annotationId'] ?? null; }
+check('annotated rename round trip', ($ed['textDocument']['version'] ?? null) === 3 && $ann === [2 => null, 4 => 'uncertain:unresolved-receiver', 6 => null]
+    && ($res['changeAnnotations']['uncertain:unresolved-receiver']['needsConfirmation'] ?? false) === true, json_encode($got) . $err);
+
 exit($fail);

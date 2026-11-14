@@ -15,5 +15,7 @@ final class MethodInfo
         public string $visibility,
         public ?string $returnType,
         public string $declClass,
+        /** @var array<string, string> param name → qualified docblock type */
+        public array $paramDocs = [],
     ) {}
 }
