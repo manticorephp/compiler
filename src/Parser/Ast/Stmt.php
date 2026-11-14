@@ -132,6 +132,7 @@ abstract class Stmt
 
 final class ExpressionStmt extends Stmt
 {
+    /** @param AttributeNode[] $attributes */
     public function __construct(
         public readonly Expr $expr,
         Span $span,

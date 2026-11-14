@@ -9,6 +9,8 @@ final class Program
 {
     /**
      * @param Stmt[] $statements
+     * @param string[] $docComments
+     * @param NameRef[] $names
      * @param array<string, string> $useAliases Short alias → FQN map for
      *     this file's top-level scope. `use Foo\Bar` lands as
      *     `['Bar' => 'Foo\Bar']`. Drives namespace-aware short-name

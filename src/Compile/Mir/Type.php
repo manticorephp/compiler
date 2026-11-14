@@ -70,6 +70,8 @@ final class Type
      * int|string map, which the self-hosted compiler cannot read back.
      * @param array<string,self>|null $fields
      * @param array<string,true> $nullableFields
+     * @param self[] $atoms
+     * @param self[] $typeArgs
      */
     public function __construct(
         public readonly string $kind,

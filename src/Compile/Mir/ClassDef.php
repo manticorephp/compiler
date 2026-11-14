@@ -55,6 +55,7 @@ final class ClassDef
      * @param array<string, true> $methodNames   declared method names
      * @param string[]            $interfaces
      * @param string[]            $staticPropNames
+     * @param array<string, array{get: ?string, set: ?string}> $propHooks
      * @param Type[]              $staticPropTypes
      */
     public function __construct(

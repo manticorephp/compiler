@@ -13,6 +13,7 @@ final class PropertyDecl
 {
     /**
      * @param AttributeNode[] $attributes
+     * @param PropertyHook[] $hooks
      */
     public function __construct(
         public readonly string $name,
