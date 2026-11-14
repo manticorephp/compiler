@@ -159,7 +159,7 @@ check('const string by value', fn() => $t('Foo::TXT;') === 'string');
 check('const hinted', fn() => $t('Foo::TYPED;') === 'string');
 check('inherited const', fn() => $t('Foo2::NUM;') === 'int');
 check('enum case', fn() => $t('Suit::Hearts;') === 'N\Suit');
-check('::class', fn() => $t('Foo::class;') === 'class-string');
+check('::class', fn() => $t('Foo::class;') === 'class-string<N\Foo>');
 check('ternary union', fn() => $t('$c ? 1 : "s";', 'bool $c') === 'int|string');
 check('ternary same', fn() => $t('$c ? 1 : 2;', 'bool $c') === 'int');
 check('ternary unknown arm', fn() => $t('$c ? 1 : $u;', 'bool $c, $u') === 'null');

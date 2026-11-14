@@ -478,7 +478,7 @@ final class Index
     {
         if ($d->name === '') { return; }
         $l = \strtolower($d->name);
-        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $this->docTag($d->docComment, '@return', $d->name, \Semantic\DocNames::templates($d->docComment)), $this->paramDocs($d->docComment, $d->params, $d->name, []));
+        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $this->docTag($d->docComment, '@return', $d->name, \Semantic\DocNames::templates($d->docComment)), $this->paramDocs($d->docComment, $d->params, $d->name, []), $this->tplSig($d->docComment, $d->params, $d->name, []));
         $this->curFnSpans[$l] = $d->span;
     }
 
@@ -492,7 +492,7 @@ final class Index
         foreach ($d->methods as $m) {
             $methods[\strtolower($m->name)] = new MethodInfo(
                 $m->name, $m->params, $m->isStatic, $m->visibility, $m->returnType, $fqn,
-                $this->paramDocs($m->docComment, $m->params, $fqn, $classTpl)
+                $this->paramDocs($m->docComment, $m->params, $fqn, $classTpl), $this->tplSig($m->docComment, $m->params, $fqn, $classTpl)
             );
         }
         /** @var array<string, bool> $consts */
@@ -594,6 +594,17 @@ final class Index
         if ($doc === null) { return null; }
         $uses = $this->curFile === null ? [] : $this->curFile->program->useAliases;
         return \Semantic\DocNames::tagType($doc, $tag, "", \Semantic\DocNames::nsOf($declFqn), $uses, $templates);
+    }
+
+    /**
+     * @param \Parser\Ast\Param[] $params
+     * @param string[] $classTemplates
+     */
+    private function tplSig(?string $doc, array $params, string $declFqn, array $classTemplates): ?TemplateSig
+    {
+        if ($doc === null) { return null; }
+        $uses = $this->curFile === null ? [] : $this->curFile->program->useAliases;
+        return \Semantic\DocNames::templateSig($doc, $params, \Semantic\DocNames::nsOf($declFqn), $uses, $classTemplates);
     }
 
     /**

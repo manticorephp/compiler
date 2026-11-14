@@ -1,0 +1,4 @@
+tests/analyze/cases/class_string_arg/main.php:24:13: warning: argument names no known class: 'Nope\Missing' passed to class-string parameter $id
+tests/analyze/cases/class_string_arg/main.php:26:15: warning: argument names no known class: 'Typo' passed to class-string parameter $c
+
+Found 0 error(s), 2 warning(s).

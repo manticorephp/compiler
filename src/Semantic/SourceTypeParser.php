@@ -44,6 +44,9 @@ final class SourceTypeParser
         if ($doc === null) { return $native; }
         if ($native === null) { return $doc; }
         $core = $native->kind === SourceType::NULLABLE ? $native->args[0] : $native;
+        $dcore = $doc->kind === SourceType::NULLABLE ? $doc->args[0] : $doc;
+        // `string` + `class-string<Foo>`: the docblock says which strings
+        if ($core->kind === SourceType::SCALAR && $core->name === 'string' && $dcore->kind === SourceType::GENERIC && $dcore->name === 'class-string') { return $doc; }
         $bare = $core->args === []
             && ($core->kind === SourceType::ITERABLE || ($core->kind === SourceType::SCALAR && $core->name === 'array'));
         if (!$bare) { return $native; }
