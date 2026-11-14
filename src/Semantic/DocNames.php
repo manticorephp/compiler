@@ -34,8 +34,11 @@ final class DocNames
         $n = \strlen($type);
         $out = '';
         $i = 0;
+        $braces = 0;
         while ($i < $n) {
             $c = $type[$i];
+            if ($c === '{') { $braces = $braces + 1; }
+            elseif ($c === '}' && $braces > 0) { $braces = $braces - 1; }
             if ($c === "'" || $c === '"') {
                 $e = \strpos($type, $c, $i + 1);
                 $e = $e === false ? $n - 1 : $e;
@@ -56,9 +59,12 @@ final class DocNames
             $tok = \substr($type, $i, $j - $i);
             $k = $j;
             while ($k < $n && ($type[$k] === ' ' || $type[$k] === "\t")) { $k = $k + 1; }
-            $isKey = $k < $n && ($type[$k] === ':' || ($type[$k] === '?' && $k + 1 < $n && $type[$k + 1] === ':'));
+            // a shape key (`array{k: T}`); outside braces `A : B` is a conditional's else
+            $isKey = $braces > 0 && $k < $n && ($type[$k] === ':' || ($type[$k] === '?' && $k + 1 < $n && $type[$k + 1] === ':'));
             $member = $i >= 2 && $type[$i - 1] === ':' && $type[$i - 2] === ':';
-            $out .= $isKey || $member || \in_array($tok, $keep, true) ? $tok : self::name($tok, $ns, $uses);
+            // `($x is not T ? A : B)`
+            $word = ($tok === 'is' || $tok === 'not') && $i > 0 && $type[$i - 1] === ' ' && $j < $n && $type[$j] === ' ';
+            $out .= $isKey || $member || $word || \in_array($tok, $keep, true) ? $tok : self::name($tok, $ns, $uses);
             $i = $j;
         }
         return $out;

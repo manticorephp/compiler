@@ -252,17 +252,24 @@ final class ExprTyper
         if ($sig->ret === null) { return $fallback; }
         /** @var array<string, SourceType> $bound */
         $bound = [];
+        /** @var array<string, SourceType> $argTypes `$name` → the argument's type, for a conditional return */
+        $argTypes = [];
+        $cond = \str_contains($sig->ret, ' is ');
         foreach ($args as $i => $arg) {
             if ($arg instanceof Spread || $arg instanceof Ellipsis) { break; }
             $name = $arg instanceof NamedArg ? $arg->name : ($sig->order[$i] ?? null);
-            if ($name === null || !isset($sig->params[$name])) { continue; }
-            $want = SourceTypeParser::fromHint($sig->params[$name], $declClass);
-            if ($want === null) { continue; }
+            if ($name === null || (!$cond && !isset($sig->params[$name]))) { continue; }
             $got = $this->go($arg instanceof NamedArg ? $arg->value : $arg, $env, $d);
-            if ($got !== null) { $this->unify($want, $got, $sig, $bound); }
+            if ($got === null) { continue; }
+            $argTypes['$' . $name] = $got;
+            $want = isset($sig->params[$name]) ? SourceTypeParser::fromHint($sig->params[$name], $declClass) : null;
+            if ($want !== null) { $this->unify($want, $got, $sig, $bound); }
         }
-        $t = self::subst(SourceTypeParser::fromHint($sig->ret, $declClass), $bound, $sig, $declClass);
+        $rt = SourceTypeParser::fromHint($sig->ret, $declClass);
+        if ($rt !== null && $cond) { $rt = self::reduceConditional($rt, $argTypes, $bound); }
+        $t = self::subst($rt, $bound, $sig, $declClass);
         if ($t === null) { return $fallback; }
+        if ($cond && $t->kind === SourceType::UNION) { $t = self::union($t->args); }
         $t = $this->resolveOf($t, $declClass);
         $core = $native !== null && $native->kind === SourceType::NULLABLE ? $native->args[0] : $native;
         // a class or loose native hint is what the template refines; a bare array / iterable takes the element types
@@ -283,6 +290,13 @@ final class ExprTyper
             if (isset($sig->templates[$want->name]) && !isset($bound[$want->name])) { $bound[$want->name] = $got; }
             return;
         }
+        // `string|class-string<T>`: only a class-string argument binds T
+        if ($want->kind === SourceType::UNION) {
+            foreach ($want->args as $a) {
+                if ($a->kind === SourceType::GENERIC && $a->name === 'class-string') { $this->unify($a, $got, $sig, $bound); }
+            }
+            return;
+        }
         if ($want->kind === SourceType::GENERIC && $want->name === 'class-string') {
             if ($got->kind === SourceType::GENERIC && $got->name === 'class-string' && \count($got->args) === 1 && \count($want->args) === 1) {
                 $this->unify($want->args[0], $got->args[0], $sig, $bound);
@@ -297,6 +311,52 @@ final class ExprTyper
                 if (\count($want->args) === 2 && \count($got->args) === 2) { $this->unify($want->args[0], $got->args[0], $sig, $bound); }
             }
         }
+    }
+
+    /**
+     * `($x is TEST ? A : B)` → A when the argument (or template binding) named by the subject statically
+     * satisfies TEST, B when it statically does not, else `A|B`. Nested conditionals reduce the same way.
+     *
+     * @param array<string, SourceType> $argTypes
+     * @param array<string, SourceType> $bound
+     */
+    public static function reduceConditional(SourceType $t, array $argTypes, array $bound): SourceType
+    {
+        if ($t->kind === SourceType::CONDITIONAL) {
+            $got = \str_starts_with($t->name, '$') ? ($argTypes[$t->name] ?? null) : ($bound[$t->name] ?? null);
+            $hit = $got === null ? -1 : self::satisfies($got, $t->args[0]);
+            $then = self::reduceConditional($t->args[1], $argTypes, $bound);
+            $else = self::reduceConditional($t->args[2], $argTypes, $bound);
+            if ($hit === 1) { return $then; }
+            if ($hit === 0) { return $else; }
+            return self::union([$then, $else]);
+        }
+        if ($t->args === [] && $t->ret === null) { return $t; }
+        $args = [];
+        foreach ($t->args as $a) { $args[] = self::reduceConditional($a, $argTypes, $bound); }
+        $ret = $t->ret === null ? null : self::reduceConditional($t->ret, $argTypes, $bound);
+        return new SourceType($t->kind, $t->name, $args, $t->resolved, $ret, $t->keys);
+    }
+
+    /** 1: `$got` is certainly a `$test`; 0: certainly not; -1: not statically known. */
+    private static function satisfies(SourceType $got, SourceType $test): int
+    {
+        if ($test->kind === SourceType::GENERIC && $test->name === 'class-string') {
+            if ($got->kind === SourceType::GENERIC && $got->name === 'class-string') { return 1; }
+            if ($got->kind === SourceType::SCALAR && $got->name !== 'string' && $got->name !== 'scalar') { return 0; }
+            return -1;
+        }
+        if ($test->kind === SourceType::SCALAR && $test->name === 'null') {
+            if (self::isScalar($got, 'null')) { return 1; }
+            if (self::hasNull($got)) { return -1; }
+            $k = $got->kind;
+            return $k === SourceType::CLASS_ || $k === SourceType::SCALAR || $k === SourceType::LITERAL || $k === SourceType::GENERIC || $k === SourceType::SHAPE ? 0 : -1;
+        }
+        $lits = $test->kind === SourceType::UNION ? $test->args : [$test];
+        foreach ($lits as $l) { if ($l->kind !== SourceType::LITERAL) { return -1; } }
+        if ($got->kind !== SourceType::LITERAL) { return -1; }
+        foreach ($lits as $l) { if ($l->name === $got->name) { return 1; } }
+        return 0;
     }
 
     /**

@@ -120,6 +120,10 @@ final class SourceTypeParser
         $ch = self::peek($c);
         if ($ch === '(') {
             $c->pos = $c->pos + 1;
+            if (self::conditionalAhead($c)) {
+                $cond = self::parseConditional($c, $cls, $d + 1);
+                return $cond === null ? null : self::postfix($c, $cond);
+            }
             $t = self::parseUnion($c, $cls, true, $d + 1);
             if ($t === null) { return null; }
             self::ws($c);
@@ -190,6 +194,49 @@ final class SourceTypeParser
         }
         $t = self::named($name, $low, $args, $hasArgs, $cls);
         return $t === null ? null : self::postfix($c, $t);
+    }
+
+    /** At `(`+1: a subject (`$x` or a name) followed by ` is ` — a conditional type, not a group. */
+    private static function conditionalAhead(GenericCursor $c): bool
+    {
+        $p = $c->pos;
+        $n = $c->len;
+        while ($p < $n && ($c->raw[$p] === ' ' || $c->raw[$p] === "\t")) { $p = $p + 1; }
+        $s = $p;
+        if ($p < $n && $c->raw[$p] === '$') { $p = $p + 1; }
+        while ($p < $n && self::isIdent($c->raw[$p])) { $p = $p + 1; }
+        if ($p === $s || ($p === $s + 1 && $c->raw[$s] === '$')) { return false; }
+        return \substr($c->raw, $p, 4) === ' is ';
+    }
+
+    /**
+     * After `(`: `$x is T ? A : B)` / `N is not T ? A : B)` (phpstan / psalm conditional return);
+     * the caller checked {@see conditionalAhead}. Null when malformed.
+     */
+    private static function parseConditional(GenericCursor $c, string $cls, int $d): ?SourceType
+    {
+        self::ws($c);
+        $s = $c->pos;
+        if (self::peek($c) === '$') { $c->pos = $c->pos + 1; }
+        while (self::isIdent(self::peek($c))) { $c->pos = $c->pos + 1; }
+        $subject = \substr($c->raw, $s, $c->pos - $s);
+        $c->pos = $c->pos + 4;
+        self::ws($c);
+        $neg = false;
+        if (\substr($c->raw, $c->pos, 4) === 'not ') { $neg = true; $c->pos = $c->pos + 4; }
+        $test = self::parseUnion($c, $cls, true, $d);
+        self::ws($c);
+        if ($test === null || self::peek($c) !== '?') { return null; }
+        $c->pos = $c->pos + 1;
+        $then = self::parseUnion($c, $cls, true, $d);
+        self::ws($c);
+        if ($then === null || self::peek($c) !== ':') { return null; }
+        $c->pos = $c->pos + 1;
+        $else = self::parseUnion($c, $cls, true, $d);
+        self::ws($c);
+        if ($else === null || self::peek($c) !== ')') { return null; }
+        $c->pos = $c->pos + 1;
+        return new SourceType(SourceType::CONDITIONAL, $subject, $neg ? [$test, $else, $then] : [$test, $then, $else]);
     }
 
     private static function parseShape(GenericCursor $c, string $name, string $cls, int $d): ?SourceType

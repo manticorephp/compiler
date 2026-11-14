@@ -122,12 +122,21 @@ trait LowerTypes
         if (isset($this->typeHintTrees[$hint])) { return $this->lowerSource($this->typeHintTrees[$hint]); }
         if (isset($this->typeHintBad[$hint])) { return Type::unknown(); }
         $t = \Semantic\SourceTypeParser::fromHint($hint);
-        if ($t === null) {
+        // A conditional return (`($id is class-string<T> ? T : mixed)`) has no static Type here;
+        // a call site resolves it ({@see TemplateReturns}).
+        if ($t === null || self::hasConditional($t)) {
             $this->typeHintBad[$hint] = true;
             return Type::unknown();
         }
         $this->typeHintTrees[$hint] = $t;
         return $this->lowerSource($t);
+    }
+
+    private static function hasConditional(\Semantic\SourceType $t): bool
+    {
+        if ($t->kind === \Semantic\SourceType::CONDITIONAL) { return true; }
+        foreach ($t->args as $a) { if (self::hasConditional($a)) { return true; } }
+        return $t->ret !== null && self::hasConditional($t->ret);
     }
 
     /**
@@ -1020,32 +1029,52 @@ trait LowerTypes
     }
 
     /**
-     * A doc's own `@template T` bound by a `class-string<T>` param with `@return` `T` / `?T` /
-     * `T|null`: `2 * <source param index> + <1 when nullable>`, -1 for none. `@phpstan-` /
-     * `@psalm-` spellings win. Containers of T (`T[]`, `list<T>`) do not count.
+     * A doc's own `@template T` bound by a `class-string<T>` (or `string|class-string<T>`) param, with a
+     * `@return` that is `T` / `?T` / `T|null` once a class literal is passed there:
+     * `2 * <source param index> + <1 when nullable>`, -1 for none. `@phpstan-` / `@psalm-` spellings
+     * win. A conditional return on that param (`($id is class-string<T> ? T : mixed)`) takes its
+     * then-arm; one on anything else counts only when both arms do. Containers of T do not count.
      * @param \Parser\Ast\Param[] $params
      */
     private function classTemplateCode(?string $doc, array $params): int
     {
         if ($doc === null || !\str_contains($doc, 'template')) { return -1; }
-        $ret = \Semantic\DocNames::rawTag($doc, '@return', '');
-        if ($ret === null) { return -1; }
-        $ret = \str_replace(' ', '', $ret);
-        $nullable = 1;
-        if (\str_starts_with($ret, '?')) { $ret = \substr($ret, 1); }
-        elseif (\str_starts_with($ret, 'null|')) { $ret = \substr($ret, 5); }
-        elseif (\str_ends_with($ret, '|null')) { $ret = \substr($ret, 0, \strlen($ret) - 5); }
-        else { $nullable = 0; }
-        if (\preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $ret) !== 1
-            || \preg_match('/@(?:phpstan-|psalm-)?template(?:-covariant)?[ \t]+' . $ret . '(?![A-Za-z0-9_])/', $doc) !== 1) {
-            return -1;
-        }
+        $names = \Semantic\DocNames::templates($doc);
+        if ($names === []) { return -1; }
+        $idx = -1;
+        $tname = '';
+        $pname = '';
         foreach ($params as $i => $p) {
             $pt = \Semantic\DocNames::rawTag($doc, '@param', $p->name);
-            if ($pt !== null && \str_replace(' ', '', $pt) === 'class-string<' . $ret . '>') {
-                return 2 * $i + $nullable;
+            if ($pt === null) { continue; }
+            $pt = \str_replace(' ', '', $pt);
+            foreach ($names as $n) {
+                $cs = 'class-string<' . $n . '>';
+                if ($pt === $cs || $pt === 'string|' . $cs || $pt === $cs . '|string') { $idx = $i; $tname = $n; $pname = '$' . $p->name; break; }
             }
+            if ($idx >= 0) { break; }
         }
-        return -1;
+        if ($idx < 0) { return -1; }
+        $rt = \Semantic\SourceTypeParser::fromHint(\Semantic\DocNames::rawTag($doc, '@return', ''));
+        if ($rt === null) { return -1; }
+        $k = self::templateReturnShape($rt, $tname, $pname);
+        return $k === 0 ? -1 : 2 * $idx + ($k === 2 ? 1 : 0);
+    }
+
+    /** 1 when `$t` is the template `$tname` once `$pname` holds a class literal, 2 when it is `?T`, else 0. */
+    private static function templateReturnShape(\Semantic\SourceType $t, string $tname, string $pname): int
+    {
+        $k = $t->kind;
+        if ($k === \Semantic\SourceType::CLASS_) { return $t->name === $tname ? 1 : 0; }
+        if ($k === \Semantic\SourceType::NULLABLE) { return self::templateReturnShape($t->args[0], $tname, $pname) === 1 ? 2 : 0; }
+        if ($k !== \Semantic\SourceType::CONDITIONAL) { return 0; }
+        $test = $t->args[0];
+        if ($t->name === $pname && $test->kind === \Semantic\SourceType::GENERIC && $test->name === 'class-string') {
+            return self::templateReturnShape($t->args[1], $tname, $pname);
+        }
+        $a = self::templateReturnShape($t->args[1], $tname, $pname);
+        $b = self::templateReturnShape($t->args[2], $tname, $pname);
+        if ($a === 0 || $b === 0) { return 0; }
+        return $a === 2 || $b === 2 ? 2 : 1;
     }
 }

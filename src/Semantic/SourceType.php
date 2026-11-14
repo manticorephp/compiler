@@ -45,6 +45,8 @@ final class SourceType
     public const CONST_REF = 'const_ref';
     /** `array{k: T, o?: U}`: `args` hold the value types, `keys` the key names (`?` suffix = optional). */
     public const SHAPE = 'shape';
+    /** `($id is class-string<T> ? A : B)`: `name` is the subject (`$id`, or a template name), `args` = [test, then, else]; `is not` is stored with the arms swapped. */
+    public const CONDITIONAL = 'conditional';
 
     /**
      * @param SourceType[] $args
@@ -95,6 +97,8 @@ final class SourceType
                 $r = $this->ret->toString();
                 $wrap = $this->ret->kind === self::UNION || $this->ret->kind === self::INTERSECTION;
                 return $out . ':' . ($wrap ? '(' . $r . ')' : $r);
+            case self::CONDITIONAL:
+                return '(' . $this->name . ' is ' . $this->args[0]->toString() . ' ? ' . $this->args[1]->toString() . ' : ' . $this->args[2]->toString() . ')';
             case self::STATIC:
                 return 'static';
             default:

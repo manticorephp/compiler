@@ -105,6 +105,26 @@ class Container {
      */
     public function psalmPref(string $id): object { return new Foo; }
     /**
+     * @template C of object
+     * @param string|class-string<C> $id
+     * @return ($id is class-string<C> ? C : object)
+     */
+    public function svc(string $id): object { return new Foo; }
+    /**
+     * @template C of object
+     * @template B of self::*_REF
+     * @param string|class-string<C> $id
+     * @param B $b
+     * @return ($id is class-string<C> ? (B is 0|1 ? C|object : C|object|null) : (B is 0|1 ? object : object|null))
+     */
+    public function sfGet(string $id, int $b = 1): ?object { return null; }
+    /**
+     * @template T
+     * @param class-string<T>|null $id
+     * @return ($id is not null ? T : Foo)
+     */
+    public function orFoo(?string $id): object { return new Foo; }
+    /**
      * @param class-string $c
      * @param class-string<Foo> $d
      */
@@ -184,6 +204,17 @@ check('value-of list', fn() => ty('$t->lv();', 'Tbl $t') === 'App\Bar');
 check('key-of list', fn() => ty('$t->lk();', 'Tbl $t') === 'int');
 check('value-of unknown stays unknown', fn() => ty('$t->unk();', 'Tbl $t') === 'null');
 check('value-of template binds first', fn() => ty('$t->fromArg([1, 2]);', 'Tbl $t') === 'int');
+
+check('parse conditional', fn() => \Semantic\SourceTypeParser::fromHint('($id is class-string<C> ? (B is 0|1 ? C : ?C) : mixed)')?->toString() === '($id is class-string<C> ? (B is 0|1 ? C : ?C) : mixed)');
+check('parse is not swaps the arms', fn() => \Semantic\SourceTypeParser::fromHint('($x is not null ? A : B)')?->toString() === '($x is null ? B : A)');
+check('parse malformed conditional is null', fn() => \Semantic\SourceTypeParser::fromHint('($x is int ? A)') === null);
+check('parse group is not a conditional', fn() => \Semantic\SourceTypeParser::fromHint('(A|B)[]')?->toString() === 'array<App\A|App\B>' || \Semantic\SourceTypeParser::fromHint('(A|B)[]')?->toString() === 'array<A|B>');
+check('string|class-string<C> + conditional picks the class arm', fn() => ty('$c->svc(Foo::class);', 'Container $c') === 'App\Foo');
+check('conditional on a plain string takes the else arm bound', fn() => ty('$c->svc($s);', 'Container $c, string $s') === 'object');
+check('conditional on an int fails the test', fn() => ty('$c->svc(1);', 'Container $c') === 'object');
+check('Symfony get shape: class literal, default B', fn() => ty('$c->sfGet(Foo::class);', 'Container $c') === 'App\Foo|object|null');
+check('is not null: class literal takes T', fn() => ty('$c->orFoo(Bar::class);', 'Container $c') === 'App\Bar');
+check('is not null: null takes the else arm', fn() => ty('$c->orFoo(null);', 'Container $c') === 'App\Foo');
 
 // ── Workspace: hover + completion ───────────────────────────────────
 
