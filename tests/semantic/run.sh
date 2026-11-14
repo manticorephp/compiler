@@ -40,8 +40,8 @@ done
     for n in "${names[@]}"; do echo "require __DIR__ . '/$n.php';"; done
     echo "exit((int)(\$GLOBALS['sem_rc'] ?? 0));"
 } > "$W/src/SemTest/zz_end.php"
-printf '{"applications":[{"name":"semtest","src":"src","entry":"src/SemTest/zz_end.php","output":"bin/semtest","stdlib":false}]}\n' > "$W/manticore.json"
+printf '{"libraries":[{"name":"stdlib","src":"src/Runtime","output":"lib/manticore_stdlib.o","runtime":true}],"applications":[{"name":"semtest","src":"src","entry":"src/SemTest/zz_end.php","output":"bin/semtest","stdlib":false}]}\n' > "$W/manticore.json"
 
-(cd "$W" && "$BIN" build 2>&1 | tail -20) || exit 1
+(cd "$W" && "$BIN" build --apps-only 2>&1 | tail -20) || exit 1
 [ -x "$W/bin/semtest" ] || { echo "semantic tests: build failed"; exit 1; }
 "$W/bin/semtest"
