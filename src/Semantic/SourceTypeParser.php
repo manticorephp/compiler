@@ -80,7 +80,7 @@ final class SourceTypeParser
                 $o = $arms[1 - $i];
                 if ($arms[$i]->kind === SourceType::SCALAR && $arms[$i]->name === 'null'
                     && $o->kind !== SourceType::INTERSECTION) {
-                    return $o->kind === SourceType::NULLABLE ? $o : new SourceType(SourceType::NULLABLE, '', [$o]);
+                    return $o->kind === SourceType::NULLABLE ? $o : new SourceType(SourceType::NULLABLE, '', [$o], SourceType::UNION_NULL);
                 }
             }
         }
@@ -113,6 +113,7 @@ final class SourceTypeParser
             self::ws($c);
             if (self::peek($c) !== ')') { return null; }
             $c->pos = $c->pos + 1;
+            if ($t->kind === SourceType::CALLABLE) { $t = new SourceType(SourceType::CALLABLE, $t->name, $t->args, SourceType::PARENS, $t->ret); }
             return self::postfix($c, $t);
         }
         if ($ch === "'" || $ch === '"') {
@@ -133,7 +134,7 @@ final class SourceTypeParser
         if ($ch === '$') {
             if (\substr($c->raw, $c->pos, 5) !== '$this') { return null; }
             $c->pos = $c->pos + 5;
-            return self::postfix($c, new SourceType(SourceType::STATIC, 'static', [], $cls));
+            return self::postfix($c, new SourceType(SourceType::STATIC, '$this', [], $cls));
         }
         while (self::isIdent(self::peek($c)) || (self::peek($c) === '-' && $c->pos > $start && self::isAlpha(self::peekAt($c, 1)))) { $c->pos = $c->pos + 1; }
         if ($c->pos === $start) { return null; }
@@ -244,6 +245,7 @@ final class SourceTypeParser
     {
         $c->pos = $c->pos + 1;
         $params = [];
+        $marks = [];
         self::ws($c);
         if (self::peek($c) === ')') {
             $c->pos = $c->pos + 1;
@@ -253,6 +255,7 @@ final class SourceTypeParser
                 if ($p === null) { return null; }
                 $params[] = $p;
                 self::ws($c);
+                $markAt = $c->pos;
                 if (self::peek($c) === '&') { $c->pos = $c->pos + 1; self::ws($c); }
                 if (\substr($c->raw, $c->pos, 3) === '...') { $c->pos = $c->pos + 3; self::ws($c); }
                 if (self::peek($c) === '$') {
@@ -271,6 +274,7 @@ final class SourceTypeParser
                         }
                     }
                 }
+                $marks[] = \trim(\substr($c->raw, $markAt, $c->pos - $markAt));
                 if (self::peek($c) === ',') { $c->pos = $c->pos + 1; continue; }
                 if (self::peek($c) !== ')') { return null; }
                 $c->pos = $c->pos + 1;
@@ -288,7 +292,7 @@ final class SourceTypeParser
             if ($ret === null) { return null; }
             if ($nullable && $ret->kind !== SourceType::NULLABLE) { $ret = new SourceType(SourceType::NULLABLE, '', [$ret]); }
         }
-        return new SourceType(SourceType::CALLABLE, $name, $params, '', $ret);
+        return new SourceType(SourceType::CALLABLE, $name, $params, '', $ret, $marks);
     }
 
     /**

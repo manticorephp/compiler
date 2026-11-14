@@ -9,12 +9,21 @@ namespace Semantic;
  * `resolved` is the FQN a SELF/STATIC type refers to (the enclosing class at
  * parse time); '' when unknown or for PARENT.
  * `ret` is the return type of a CALLABLE written with a signature.
- * `keys` are the key names of a SHAPE, parallel to `args`; a SHAPE with
- * `resolved === '...'` is unsealed (`array{a: int, ...}`).
+ * `keys` are the key names of a SHAPE, parallel to `args` — for a CALLABLE
+ * with a signature, what follows each parameter type (`$x`, `&$x`, `...$xs`, '' for none); a SHAPE with
+ * `resolved === '...'` is unsealed (`array{a: int, ...}`). A NULLABLE with
+ * `resolved === UNION_NULL` was spelled `T|null`, not `?T` — the compiler
+ * lowers a nullable container differently under the two spellings.
  */
 final class SourceType
 {
     public const SCALAR = 'scalar';
+
+    /** `resolved` of a NULLABLE spelled as a union with `null`. */
+    public const UNION_NULL = '|null';
+
+    /** `resolved` of a CALLABLE written in parentheses: `(callable(): T)|null` does not give the return the `|null`. */
+    public const PARENS = '()';
 
     /** Suffix of an optional shape key; a NUL cannot be confused with a quoted key that ends in `?`. */
     public const OPT = "\0";
@@ -86,6 +95,8 @@ final class SourceType
                 $r = $this->ret->toString();
                 $wrap = $this->ret->kind === self::UNION || $this->ret->kind === self::INTERSECTION;
                 return $out . ':' . ($wrap ? '(' . $r . ')' : $r);
+            case self::STATIC:
+                return 'static';
             default:
                 return $this->name;
         }

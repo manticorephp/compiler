@@ -296,7 +296,7 @@ trait LowerTypes
         return true;
     }
 
-    private function lowerTypeHint(?string $hint): Type
+    private function lowerTypeHintText(?string $hint): Type
     {
         if ($hint === null) { return Type::unknown(); }
         // A `@template T` parameter of the enclosing class. Checked before any
@@ -620,6 +620,244 @@ trait LowerTypes
         $resolved = $this->resolveClassHint($cls);
         if ($resolved !== '') { return $this->classHintType($resolved, $nullable); }
         return Type::unknown();
+    }
+
+    /** -1 = not read yet; 1 when `MANTICORE_TYPEHINT_CHECK=1`. */
+    private int $typeHintCheck = -1;
+
+    /** True while {@see lowerSource} runs as the check-mode shadow: no diagnostics. */
+    private bool $lowerSourceShadow = false;
+
+    /** @var array<string, bool> hints already reported as a mismatch */
+    private array $typeHintMismatchSeen = [];
+
+    private function lowerTypeHint(?string $hint): Type
+    {
+        $old = $this->lowerTypeHintText($hint);
+        if ($this->typeHintCheck < 0) {
+            $this->typeHintCheck = \getenv('MANTICORE_TYPEHINT_CHECK') === '1' ? 1 : 0;
+        }
+        if ($this->typeHintCheck === 1 && $hint !== null && !$this->lowerSourceShadow) {
+            $this->lowerSourceShadow = true;
+            $tree = \Semantic\SourceTypeParser::fromHint($hint);
+            $new = $tree === null ? Type::unknown() : $this->lowerSource($tree);
+            $this->lowerSourceShadow = false;
+            if ($new->exactString() !== $old->exactString() && !isset($this->typeHintMismatchSeen[$hint])) {
+                $this->typeHintMismatchSeen[$hint] = true;
+                \fwrite(\STDERR, 'TYPEHINT MISMATCH ' . \str_replace("\n", ' ', $hint) . ' old=' . $old->exactString()
+                    . ' new=' . $new->exactString() . "\n");
+            }
+        }
+        return $old;
+    }
+
+    /**
+     * {@see lowerTypeHintText} over a parsed {@see \Semantic\SourceType}: the same
+     * ladder, the same pass state, case by case.
+     */
+    private function lowerSource(\Semantic\SourceType $t): Type
+    {
+        $k = $t->kind;
+        if ($k === \Semantic\SourceType::NULLABLE) { return $this->lowerSourceNullable($t); }
+        if ($k === \Semantic\SourceType::CLASS_) {
+            if (isset($this->currentTypeSubst[$t->name])) { return $this->currentTypeSubst[$t->name]; }
+            if ($this->isTypeParam($t->name)) {
+                return Type::typeVar($t->name, $this->currentTypeBounds[$t->name] ?? null);
+            }
+        }
+        if ($k === \Semantic\SourceType::UNION) { return $this->lowerSourceUnion($t); }
+        if ($k === \Semantic\SourceType::INTERSECTION) { return $this->lowerSource($t->args[0]); }
+        return $this->lowerSourceCore($t, false);
+    }
+
+    /**
+     * `?T` reads the core with `nullable` set; `T|null` first asks what
+     * {@see nullableUnionArm} asks: a container or a parenthesised arm keeps the
+     * union's cell.
+     */
+    private function lowerSourceNullable(\Semantic\SourceType $t): Type
+    {
+        $core = $t->args[0];
+        if ($t->resolved === \Semantic\SourceType::UNION_NULL) {
+            if ($this->isSourceCallableSig($core) && $core->resolved !== \Semantic\SourceType::PARENS) {
+                return $this->lowerSourceCallable($core, true);
+            }
+            if ($this->isSourceArrayLike($core) || \str_contains($core->toString(), '(')) { return Type::cell(); }
+        }
+        return $this->lowerSourceCore($core, true);
+    }
+
+    /** A union with no single nullable arm: an all-array union, a numeric union, else a cell. */
+    private function lowerSourceUnion(\Semantic\SourceType $t): Type
+    {
+        $arrays = true;
+        $numeric = true;
+        foreach ($t->args as $a) {
+            if (!$this->isSourceArrayLike($a) || \str_contains($a->toString(), '|')) { $arrays = false; }
+            if (!($a->kind === \Semantic\SourceType::SCALAR && ($a->name === 'int' || $a->name === 'float'))) { $numeric = false; }
+        }
+        if ($arrays) { return Type::vec(Type::unknown()); }
+        if ($numeric) { return Type::numericCell(); }
+        return Type::cell();
+    }
+
+    /** `X[]`, `array<…>`, `list<…>` and their non-empty spellings ({@see looksLikeArrayElemType}). */
+    private function isSourceArrayLike(\Semantic\SourceType $t): bool
+    {
+        if ($t->kind !== \Semantic\SourceType::GENERIC) { return false; }
+        $low = \strtolower(\ltrim($t->name, '\\'));
+        return $low === 'array' || $low === 'list' || $low === 'non-empty-list' || $low === 'non-empty-array';
+    }
+
+    private function isSourceCallableSig(\Semantic\SourceType $t): bool
+    {
+        return $t->kind === \Semantic\SourceType::CALLABLE && ($t->args !== [] || $t->ret !== null);
+    }
+
+    /**
+     * `callable(A): R` / `Closure(A): R`. Spelled `…: R|null`, the `|null`
+     * belongs to the return ({@see lowerCallableSignature} reads the whole tail).
+     */
+    private function lowerSourceCallable(\Semantic\SourceType $t, bool $retOrNull): Type
+    {
+        $params = [];
+        // A parameter written with a name, `&` or `...` after its type reads as
+        // one type token in lowerTypeArgs and erases (`int $x` is no type).
+        foreach ($t->args as $i => $a) {
+            $params[] = ($t->keys[$i] ?? '') !== '' ? Type::unknown() : $this->lowerSource($a);
+        }
+        $ret = null;
+        $r = $t->ret;
+        if ($r !== null) {
+            if ($retOrNull && $r->kind !== \Semantic\SourceType::NULLABLE) {
+                $r = new \Semantic\SourceType(\Semantic\SourceType::NULLABLE, '', [$r], \Semantic\SourceType::UNION_NULL);
+            }
+            $ret = $this->lowerSource($r);
+        }
+        return Type::closureOf($ret, $params);
+    }
+
+    /** {@see lowerElemHint}: a bare `callable` element is a cell. */
+    private function lowerSourceElem(\Semantic\SourceType $t): Type
+    {
+        if (($t->kind === \Semantic\SourceType::CALLABLE || $t->kind === \Semantic\SourceType::CLASS_)
+            && $t->args === [] && $t->ret === null && \strtolower(\ltrim($t->name, '\\')) === 'callable') {
+            return Type::cell();
+        }
+        return $this->lowerSource($t);
+    }
+
+    /** A non-union type; `$nullable` = written `?T` (a nullable scalar or enum boxes). */
+    private function lowerSourceCore(\Semantic\SourceType $t, bool $nullable): Type
+    {
+        $k = $t->kind;
+        if ($k === \Semantic\SourceType::INTERSECTION) { return $this->lowerSourceCore($t->args[0], $nullable); }
+        if ($k === \Semantic\SourceType::CALLABLE && $this->isSourceCallableSig($t)) { return $this->lowerSourceCallable($t, false); }
+        if ($k === \Semantic\SourceType::SHAPE) { return $this->lowerSourceShape($t); }
+        if ($k === \Semantic\SourceType::LITERAL || $k === \Semantic\SourceType::CONST_REF) { return Type::unknown(); }
+        if ($k === \Semantic\SourceType::UNION || $k === \Semantic\SourceType::NULLABLE) { return $this->lowerSource($t); }
+        if ($k !== \Semantic\SourceType::GENERIC && !($k === \Semantic\SourceType::ITERABLE && $t->args !== [])) {
+            return $this->lowerSourceName($t->name, $nullable);
+        }
+        $low = \strtolower(\ltrim($t->name, '\\'));
+        $args = $t->args;
+        $n = \count($args);
+        if ($low === 'array' || $low === 'non-empty-array') {
+            if ($n < 2) { return Type::vec($this->lowerSourceElem($args[0])); }
+            // A class-constant key names VALUES, not a key type — see lowerTypeHintText.
+            $kt = $this->lowerSource($args[0]);
+            if (\str_contains($args[0]->toString(), '::')) { $kt = Type::cell(); }
+            return Type::assoc($kt, $this->lowerSourceElem($args[1]));
+        }
+        if ($low === 'list' || $low === 'non-empty-list') {
+            return Type::vec($n === 1 ? $this->lowerSourceElem($args[0]) : Type::unknown());
+        }
+        if ($low === 'int') { return Type::int_(); }
+        if ($low === 'class-string') { return Type::string_(); }
+        if ($low === 'generator') {
+            if ($n === 1) { return Type::generator($this->lowerSource($args[0])); }
+            $key = $this->lowerSource($args[0]);
+            return Type::generator($n === 2 ? $this->lowerSource($args[1]) : Type::unknown(), $key);
+        }
+        $gname = $this->resolveClassHint(\ltrim($t->name, '\\'));
+        if ($gname === '') { return Type::unknown(); }
+        $gargs = [];
+        foreach ($args as $a) { $gargs[] = $this->lowerSource($a); }
+        if (!$this->lowerSourceShadow) { $this->checkNbufBinding($gname, $gargs); }
+        return Type::objOf($gname, $gargs);
+    }
+
+    /** A bare type NAME: the keyword ladder of {@see lowerTypeHintText}, then a class. */
+    private function lowerSourceName(string $name, bool $nullable): Type
+    {
+        $low = \strtolower(\ltrim($name, '\\'));
+        if ($low === 'mixed' || $low === 'iterable' || $low === 'object') { return Type::cell(); }
+        if ($low === 'int' || $low === 'integer' || $low === 'positive-int' || $low === 'negative-int'
+            || $low === 'non-negative-int' || $low === 'non-positive-int' || $low === 'non-zero-int') {
+            return $nullable ? Type::numericCell() : Type::int_();
+        }
+        if ($low === 'float' || $low === 'double') { return $nullable ? Type::numericCell() : Type::float_(); }
+        if ($low === 'bool' || $low === 'boolean') { return $nullable ? Type::numericCell() : Type::bool_(); }
+        if ($low === 'string' || $low === 'non-empty-string' || $low === 'numeric-string' || $low === 'class-string'
+            || $low === 'literal-string' || $low === 'lowercase-string' || $low === 'non-falsy-string'
+            || $low === 'truthy-string') {
+            return Type::string_();
+        }
+        if ($low === 'void') { return Type::void(); }
+        if ($low === 'null') { return Type::null_(); }
+        if ($low === 'resource') { return Type::obj('Resource'); }
+        if ($low === 'ffi\\ptr') { return Type::obj('Ffi\\Ptr'); }
+        if ($low === 'closure' || $low === 'callable') { return Type::closure(); }
+        if (($low === 'self' || $low === 'static') && $this->currentLowerClass !== '') {
+            return Type::obj($this->currentLowerClass);
+        }
+        if ($low === 'parent' && isset($this->classTable[$this->currentLowerClass])) {
+            $pc = $this->classTable[$this->currentLowerClass]->parent;
+            if ($pc !== '') { return Type::obj($pc); }
+        }
+        if ($low === 'generator') { return Type::generator(null); }
+        $cls = \ltrim($name, '\\');
+        if ($this->isTypeDef($cls)) { return $this->typeDefCarrier($cls); }
+        $resolved = $this->resolveClassHint($cls);
+        if ($resolved === '') { return Type::unknown(); }
+        if ($resolved !== $cls && $this->isTypeDef($resolved)) { return $this->typeDefCarrier($resolved); }
+        return $this->classHintType($resolved, $nullable);
+    }
+
+    /** {@see lowerArrayShape} over a SHAPE node. */
+    private function lowerSourceShape(\Semantic\SourceType $t): Type
+    {
+        $sealed = $t->resolved !== '...';
+        if ($sealed && $t->args === []) { return Type::vec(Type::cell()); }
+        $fields = [];
+        $nullable = [];
+        $list = true;
+        foreach ($t->args as $i => $v) {
+            $keyStr = $t->keys[$i];
+            $opt = \str_ends_with($keyStr, \Semantic\SourceType::OPT);
+            if ($opt) { $keyStr = \substr($keyStr, 0, \strlen($keyStr) - 1); }
+            if (Type::isIntKey($keyStr)) {
+                $key = (int)$keyStr;
+            } else {
+                $key = $keyStr;
+                $list = false;
+            }
+            $sk = Type::shapeKey($key);
+            $fields[$sk] = $this->lowerSource($v);
+            if ($opt || $v->kind === \Semantic\SourceType::NULLABLE
+                || ($v->kind === \Semantic\SourceType::SCALAR && $v->name === 'null')) {
+                $nullable[$sk] = true;
+            }
+            if ($v->kind === \Semantic\SourceType::UNION) {
+                foreach ($v->args as $arm) {
+                    if ($arm->kind === \Semantic\SourceType::SCALAR && $arm->name === 'null') { $nullable[$sk] = true; }
+                }
+            }
+        }
+        if (!$sealed || \count($fields) === 0) {
+            return $list ? Type::vec(Type::cell()) : Type::assoc(Type::string_(), Type::cell());
+        }
+        return Type::shapeOf($fields, $nullable, true);
     }
 
     /**
