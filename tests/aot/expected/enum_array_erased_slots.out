@@ -1,0 +1,37 @@
+enum(Suit::Spades)
+enum(Level::Info)
+enum(Suit::Hearts)
+enum(Suit::Hearts)
+Info
+Debug
+0=Spades
+1=Hearts
+array(1) {
+  ["a"]=>
+  enum(Level::Debug)
+}
+Array
+(
+    [a] => Level Enum:int
+        (
+            [name] => Debug
+            [value] => 100
+        )
+
+)
+
+bool(true)
+bool(true)
+bool(true)
+enum(Suit::Spades)
+enum(Suit::Spades)
+enum(Level::Info)
+Debug
+enum(Level::Info)
+{"l":[100,200]}
+enum(Suit::Spades)
+enum(Level::Info)
+enum(Suit::Spades)
+HeartsInfo
+HeartsInfo
+HeartsInfo
