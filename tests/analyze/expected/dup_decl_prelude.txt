@@ -1,0 +1,4 @@
+tests/analyze/cases/dup_decl_prelude/main.php:10:3: error: unknown method LogicException->mine()
+tests/analyze/cases/dup_decl_prelude/main.php:11:3: error: unknown method LogicException->other()
+
+Found 2 error(s), 0 warning(s).
