@@ -556,7 +556,8 @@ final class Index
             if (\strtolower($m->name) !== '__construct') { continue; }
             foreach ($m->params as $mp) {
                 if ($mp->promoted === '' && !$mp->promotedReadonly) { continue; }
-                $out['prop:' . $mp->name] ??= $this->member('prop', $mp->name, '$' . $mp->name, $fqn, $mp->promoted === '' ? 'public' : $mp->promoted, false, false, $mp->typeHint, $file, $mp->span, $end);
+                $out['prop:' . $mp->name] ??= $this->member('prop', $mp->name, '$' . $mp->name, $fqn, $mp->promoted === '' ? 'public' : $mp->promoted, false, false, $mp->typeHint, $file, $mp->span, $end,
+                    \Semantic\DocNames::paramType($m->docComment, $mp, \Semantic\DocNames::nsOf($fqn), $this->curFile === null ? [] : $this->curFile->program->useAliases, $tpl));
             }
         }
         $tpl = $ctpl;
@@ -615,11 +616,10 @@ final class Index
     private function paramDocs(?string $doc, array $params, string $declFqn, array $classTemplates): array
     {
         $out = [];
-        if ($doc === null) { return $out; }
         $uses = $this->curFile === null ? [] : $this->curFile->program->useAliases;
         $tpl = \array_merge($classTemplates, \Semantic\DocNames::templates($doc));
         foreach ($params as $p) {
-            $t = \Semantic\DocNames::tagType($doc, '@param', $p->name, \Semantic\DocNames::nsOf($declFqn), $uses, $tpl);
+            $t = \Semantic\DocNames::paramType($doc, $p, \Semantic\DocNames::nsOf($declFqn), $uses, $tpl);
             if ($t !== null) { $out[$p->name] = $t; }
         }
         return $out;

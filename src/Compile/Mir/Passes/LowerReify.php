@@ -262,7 +262,7 @@ trait LowerReify
             if ($m->name !== '__construct') { continue; }
             foreach ($m->params as $p) {
                 if ($p->promoted !== 'public') { continue; }
-                $doc = $this->docTagType($m->docComment, '@param', $p->name);
+                $doc = $this->docTagType($m->docComment, '@param', $p->name) ?? \Analyze\DocType::promotedVar($p);
                 if ($this->lowerTypeHint($this->effectiveHint($p->typeHint, $doc))->hasTypeVar()) {
                     $exposed = true;
                 }

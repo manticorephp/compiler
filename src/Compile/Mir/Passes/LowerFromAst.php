@@ -3275,7 +3275,7 @@ final class LowerFromAst implements Pass
             $outType = $this->docTagType($m->docComment, '@param-out', $p->name);
             $effHint = $this->effectiveHint(
                 $p->typeHint,
-                $outType ?? $this->docTagType($m->docComment, '@param', $p->name),
+                $outType ?? $this->docTagType($m->docComment, '@param', $p->name) ?? \Analyze\DocType::promotedVar($p),
             );
             $pt = $isVar
                 ? $this->variadicPackType($p)

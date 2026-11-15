@@ -317,4 +317,13 @@ check('class constant hover shows its @var type', function (): bool|string {
     return $g[0] === 'static K::C: list<int>' ? true : json_encode($g);
 });
 
+check('promoted param: inline @var types the property and the param (#688)', function (): bool|string {
+    $src = "<?php\nnamespace App;\nclass Foo {}\nclass B {\n    /** @param int[] \$byCtor */\n    public function __construct(\n        /** @var array<string, Foo> */\n        public array \$inline,\n        /** @var string[] */\n        public array \$byCtor,\n    ) { echo \$inline; }\n    function m() { return \$this->inline; }\n}\n";
+    $p = hv($src, 'inline;');
+    $u = hv($src, '>inline;');
+    $c = hv($src, 'byCtor,');
+    return $p[0] === '$inline: array<string, App\Foo>' && $u[0] === 'App\B::$inline: array<string, App\Foo>' && $c[0] === 'App\B::$byCtor: int[]'
+        ? true : json_encode([$p, $u, $c]);
+});
+
 exit($fail);

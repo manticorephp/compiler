@@ -80,7 +80,7 @@ final class MissingArrayType
     private function checkParam(ParsedFile $pf, string $label, ?string $doc, Param $p): void
     {
         if (!$this->isBareArray($p->typeHint)) { return; }
-        if ($this->docHasElement(DocType::tag($doc, '@param', $p->name))) { return; }
+        if ($this->docHasElement(DocType::tag($doc, '@param', $p->name) ?? DocType::promotedVar($p))) { return; }
         $this->warn($pf, $p->span,
             $label . ': parameter $' . $p->name . ' is typed bare `array` — annotate its element type (`@param T[] $' . $p->name . '`)');
     }
