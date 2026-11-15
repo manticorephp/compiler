@@ -1,0 +1,4 @@
+tests/analyze/cases/missing_array_type_doc_forms.php:40:20: warning: noElement(): parameter $xs is typed bare `array` — annotate its element type (`@param T[] $xs`)
+tests/analyze/cases/missing_array_type_doc_forms.php:43:18: warning: bareDoc(): parameter $xs is typed bare `array` — annotate its element type (`@param T[] $xs`)
+
+Found 0 error(s), 2 warning(s).

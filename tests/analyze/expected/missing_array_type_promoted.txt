@@ -1,0 +1,5 @@
+tests/analyze/cases/missing_array_type_promoted.php:14:9: warning: Bag::__construct(): parameter $bare is typed bare `array` — annotate its element type (`@param T[] $bare`)
+tests/analyze/cases/missing_array_type_promoted.php:16:9: warning: Bag::__construct(): parameter $prose is typed bare `array` — annotate its element type (`@param T[] $prose`)
+tests/analyze/cases/missing_array_type_promoted.php:18:9: warning: Bag::__construct(): parameter $notPromoted is typed bare `array` — annotate its element type (`@param T[] $notPromoted`)
+
+Found 0 error(s), 3 warning(s).

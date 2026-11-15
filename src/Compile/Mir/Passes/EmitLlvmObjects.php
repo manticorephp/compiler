@@ -3654,17 +3654,18 @@ trait EmitLlvmObjects
                 $out .= $this->boxToCell($n->value->type, $n->value);
                 $val = $this->lastValue;
             }
-        } elseif ($n->value->type->kind === Type::KIND_ARRAY && $n->value->type->element !== null
+        } elseif (($n->value->type->kind === Type::KIND_ARRAY && $n->value->type->element !== null
             && $this->isEnumType($n->value->type->element)
             && $propType !== null && $propType->kind === Type::KIND_ARRAY
-            && ($propType->element === null || !$this->isEnumType($propType->element))) {
+            && ($propType->element === null || !$this->isEnumType($propType->element)))
+            || ($this->enumOrdinalsIntoErased($n->value->type, $propType ?? Type::unknown())
+                && $this->slotIsArrayHinted($n->object, $n->property, $propType))) {
             // Enum ordinals into an array slot whose element is NOT that enum
-            // (a trait-imported `$levels = [...]` types as `vec[cell]`): the
-            // reader decodes each word as a cell, so rebuild with singletons
-            // and strip the tag. The rebuilt buffer is fresh — no retain.
-            $out .= $this->boxToCell($n->value->type, $n->value);
-            $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
-            $out .= $this->coerceToI64();
+            // (a trait-imported `$levels = [...]` types as `vec[cell]`, a bare
+            // `array` property erases): the reader decodes each word as a cell,
+            // so rebuild with singletons and strip the tag. The rebuilt buffer
+            // is fresh — no retain.
+            $out .= $this->rebuildEnumOrdinals($n->value);
             $val = $this->lastValue;
             $res = $val;
             $resTy = 'i64';
@@ -8260,6 +8261,31 @@ trait EmitLlvmObjects
         $vt = $n->value->type;
         $box = ($dk === Type::KIND_CELL || $dk === Type::KIND_UNKNOWN)
             && $this->viewSlotBoxes($vt);
+        // Enum ordinals are the one array a FLAT box cannot describe (no element
+        // hint, #513): the slot takes a fresh rebuild with each ordinal resolved
+        // to its singleton, and the expression yields that rebuild, raw — an
+        // owned-temp source is consumed by it.
+        if ($box && $this->holdsEnumOrdinals($vt)) {
+            $out .= $this->boxToCell($vt, $n->value);
+            $cell = $this->lastValue;
+            $out .= $this->storeStaticPropSlot($n->global, $cell, 'cell');
+            $raw = $this->ssa->allocReg();
+            $out .= '  ' . $raw . ' = and i64 ' . $cell . ', ' . (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK . "\n";
+            $this->lastValue = $raw;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
+        // The same into a raw bare-`array` slot (`public static array $x`): the
+        // slot takes the fresh rebuild raw, no retain owed.
+        if (!$box && $n->declared !== null && $dk === Type::KIND_ARRAY
+            && $this->enumOrdinalsIntoErased($vt, $n->declared)) {
+            $out .= $this->rebuildEnumOrdinals($n->value);
+            $val = $this->lastValue;
+            $out .= $this->storeStaticPropSlot($n->global, $val, $this->discardReleaseFlavor($n->declared));
+            $this->lastValue = $val;
+            $this->lastValueType = 'i64';
+            return $out;
+        }
         // A float is boxed from the DOUBLE register: coercing to i64 first would
         // hand box_float the bit pattern as an integer (1.5 stored as 4.6e18).
         // Floats are not rc-managed, so nothing is owed to the retain below.

@@ -1294,7 +1294,9 @@ final class Parser
     private function parseParam(): Param
     {
         $startSpan = $this->span();
+        $doc = $this->docCommentByPos[(string)$this->pos] ?? null;
         $attrs = $this->collectAttributes();
+        $doc ??= $this->docCommentByPos[(string)$this->pos] ?? null;
 
         // Constructor property promotion modifiers and readonly flag.
         $promoted = '';
@@ -1357,6 +1359,7 @@ final class Parser
             $promotedReadonly,
             $attrs,
             $this->end($startSpan),
+            $doc,
         );
     }
 

@@ -65,10 +65,9 @@ final class Units
     private static function paramDocs(?string $doc, array $params, string $declFqn, array $classTemplates, array $uses): array
     {
         $out = [];
-        if ($doc === null) { return $out; }
         $tpl = \array_merge($classTemplates, \Semantic\DocNames::templates($doc));
         foreach ($params as $p) {
-            $t = \Semantic\DocNames::tagType($doc, "@param", $p->name, \Semantic\DocNames::nsOf($declFqn), $uses, $tpl);
+            $t = \Semantic\DocNames::paramType($doc, $p, \Semantic\DocNames::nsOf($declFqn), $uses, $tpl);
             if ($t !== null) { $out[$p->name] = $t; }
         }
         return $out;

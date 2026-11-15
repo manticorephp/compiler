@@ -1060,6 +1060,42 @@ trait EmitLlvmBuiltins
     }
 
     /**
+     * An array holding enum ORDINALS, at any nesting depth. An ordinal has no
+     * element hint ({@see EmitLlvmArrays::elementHintCodeForType}), so the buffer
+     * is not self-describing: a reader that knows only the hint decodes a tag-0
+     * word (`float(5.0E-324)`, #513).
+     */
+    private function holdsEnumOrdinals(Type $t): bool
+    {
+        if (!$t->isArray() || $t->element === null) { return false; }
+        return $this->isEnumType($t->element) || $this->holdsEnumOrdinals($t->element);
+    }
+
+    /**
+     * `$val` holds enum ordinals and crosses into a bare-`array` slot — erased
+     * (`KIND_UNKNOWN`) or with an unknown element — whose every reader decodes
+     * by the buffer's hint.
+     */
+    private function enumOrdinalsIntoErased(Type $val, ?Type $slot): bool
+    {
+        if ($slot === null || !$this->holdsEnumOrdinals($val)) { return false; }
+        if ($slot->kind === Type::KIND_UNKNOWN) { return true; }
+        return $slot->isArray() && $slot->element !== null && $slot->element->kind === Type::KIND_UNKNOWN;
+    }
+
+    /**
+     * Rebuild the enum-ordinal array in lastValue into a FRESH cell-element
+     * array, each ordinal resolved to its singleton, left raw on the i64
+     * carrier. An owned-temp source is consumed ({@see boxToCell}).
+     */
+    private function rebuildEnumOrdinals(Node $value): string
+    {
+        $out = $this->boxToCell($value->type, $value);
+        $out .= $this->unboxCellToType(Type::vec(Type::unknown()));
+        return $out . $this->coerceToI64();
+    }
+
+    /**
      * IR loading enum `$cls`'s per-case singleton object for the ordinal in
      * register `$ord`; the object POINTER register is written to `$ptrReg`.
      *
