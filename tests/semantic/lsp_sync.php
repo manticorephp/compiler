@@ -103,6 +103,22 @@ check('didChangeWatchedFiles: create, change, delete keep the index fresh', func
     }
 });
 
+check('didSave re-indexes a closed file; textDocumentSync advertises save', function (): bool|string {
+    $dir = sys_get_temp_dir() . '/lspsave' . getmypid();
+    mkdir($dir);
+    try {
+        file_put_contents("$dir/a.php", "<?php\nclass Foo {}\n");
+        [$d] = rig('file://' . $dir);
+        $b = 'file://' . $dir . '/b.php';
+        note($d, 'textDocument/didOpen', ['textDocument' => ['uri' => $b, 'text' => "<?php new Foo;\n"]]);
+        file_put_contents("$dir/c.php", "<?php new Foo;\n");
+        note($d, 'textDocument/didSave', ['textDocument' => ['uri' => 'file://' . $dir . '/c.php']]);
+        return refs($d, $b, 0, 11) === ['a.php', 'b.php', 'c.php'] ?: json_encode(refs($d, $b, 0, 11));
+    } finally {
+        foreach (glob("$dir/*.php") ?: [] as $f) { unlink($f); }
+        rmdir($dir);
+    }
+});
 check('watcher registered only when the client supports it; client replies are not answered', function (): bool|string {
     [$d, $sent] = rig('file:///nonexistent-root');
     if ($sent !== []) { return 'sent without capability'; }

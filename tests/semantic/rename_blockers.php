@@ -158,4 +158,64 @@ check('renaming a plain local is not blocked by a named argument of the same nam
     $p = where($src, '$val', 1, 1);
     return $w->renameBlockers('file:///t/a.php', $p[0], $p[1]) === [] ?: 'blocked';
 });
+check('#519 a heredoc in an unrelated file does not block; one that mentions the symbol does; cursor file always', function () {
+    $a = "<?php\nclass Foo { public function run() {} }\n\$f = new Foo();\n";
+    $p = where($a, 'Foo', 1);
+    $q = where($a, 'run', 1);
+    $unrelated = "<?php\n\$o = 1;\n\$s = <<<EOT\nhello \$o\nEOT;\n";
+    $mentions = "<?php\n\$o = 1;\n\$s = <<<EOT\nhello \$o FOO\nEOT;\n";
+    $isHd = fn($b) => count(array_filter($b, fn($x) => str_starts_with($x, 'heredoc-interpolation:'))) > 0;
+    $w = ws(['a.php' => $a, 'v.php' => $unrelated]);
+    $w->close('v.php');
+    if ($isHd($w->renameBlockers('a.php', $p[0], $p[1])) || $isHd($w->renameBlockers('a.php', $q[0], $q[1]))) { return 'unrelated blocks'; }
+    $w = ws(['a.php' => $a, 'v.php' => $mentions]);
+    $w->close('v.php');
+    if (!$isHd($w->renameBlockers('a.php', $p[0], $p[1]))) { return 'mentioning file does not block (case-insensitive)'; }
+    if ($isHd($w->renameBlockers('a.php', $q[0], $q[1]))) { return 'mentioning Foo blocks a rename of run'; }
+    $w = ws(['a.php' => $a . "\$s = <<<EOT\nx \$a\nEOT;\n"]);
+    return $isHd($w->renameBlockers('a.php', $q[0], $q[1])) ?: 'cursor-file heredoc ignored';
+});
+
+check('#519 a parse-error file blocks only a symbol it mentions; cursor file always', function () {
+    $a = "<?php\nclass Foo { public function run() {} }\n\$f = new Foo();\n";
+    $p = where($a, 'Foo', 1);
+    $has = fn($b) => count(array_filter($b, fn($x) => str_starts_with($x, 'parse-error-region:'))) > 0;
+    $w = ws(['a.php' => $a, 'bad.php' => "<?php\n\$x = ;\nbar(;\n"]);
+    if ($has($w->renameBlockers('a.php', $p[0], $p[1]))) { return 'unrelated error blocks'; }
+    $w = ws(['a.php' => $a, 'bad.php' => "<?php\n\$x = ;\nnew foo(;\n"]);
+    if (!$has($w->renameBlockers('a.php', $p[0], $p[1]))) { return 'mentioning error file does not block'; }
+    $w = ws(['a.php' => $a . "bar(;\n"]);
+    return $has($w->renameBlockers('a.php', $p[0], $p[1])) ?: 'cursor-file error ignored';
+});
+
+check('#521 magic methods and implicit built-in interface methods are rename blockers', function () {
+    $a = "<?php\nclass K implements Countable, ArrayAccess, IteratorAggregate, JsonSerializable {\n"
+        . "    public function __construct() {}\n    public function __toString(): string { return ''; }\n"
+        . "    public function count(): int { return 0; }\n"
+        . "    public function offsetGet(mixed \$o): mixed { return 1; }\n    public function offsetSet(mixed \$o, mixed \$v): void {}\n"
+        . "    public function offsetExists(mixed \$o): bool { return true; }\n    public function offsetUnset(mixed \$o): void {}\n"
+        . "    public function getIterator(): Traversable { return new ArrayIterator([]); }\n"
+        . "    public function jsonSerialize(): mixed { return 1; }\n    public function plain() {}\n}\n"
+        . "class It implements Iterator { function current(): mixed { return 1; } function key(): mixed { return 1; } function next(): void {} function rewind(): void {} function valid(): bool { return false; } }\n"
+        . "class NoIface { public function count() {} public function current() {} }\n"
+        . "function f(K \$k) { \$k->count(); \$k->plain(); }\nfunction g(NoIface \$n) { \$n->count(); }\n";
+    $w = ws(['a.php' => $a]);
+    $bl = function (string $needle, int $nth = 1, int $off = 0) use ($w, $a): array { $p = where($a, $needle, $nth, $off); return $w->renameBlockers('a.php', $p[0], $p[1]); };
+    $magic = fn(array $b) => in_array('magic-method', $b, true);
+    $impl = fn(array $b, string $i) => in_array('implicit-interface-method:' . $i, $b, true);
+    $bad = [];
+    if (!$magic($bl('__construct'))) { $bad[] = '__construct'; }
+    if (!$magic($bl('__toString'))) { $bad[] = '__toString'; }
+    foreach ([['count()', 'Countable'], ['offsetGet', 'ArrayAccess'], ['offsetSet', 'ArrayAccess'], ['offsetExists', 'ArrayAccess'], ['offsetUnset', 'ArrayAccess'], ['getIterator', 'IteratorAggregate'], ['jsonSerialize', 'JsonSerializable']] as [$n, $i]) {
+        if (!$impl($bl($n), $i)) { $bad[] = $n; }
+    }
+    foreach (['current', 'key', 'next', 'rewind', 'valid'] as $n) {
+        if (!$impl($bl('function ' . $n, 1, 9), 'Iterator')) { $bad[] = $n; }
+    }
+    if (!$impl($bl('count()', 3), 'Countable')) { $bad[] = 'count use site'; }
+    $plain = array_filter($bl('plain'), fn($x) => $x === 'magic-method' || str_starts_with($x, 'implicit-interface-method'));
+    $no = array_filter($bl('count() {} public function current'), fn($x) => $x === 'magic-method' || str_starts_with($x, 'implicit-interface-method'));
+    if ($plain !== [] || $no !== []) { $bad[] = 'false positive ' . json_encode([$plain, $no]); }
+    return $bad === [] ? true : implode(',', $bad);
+});
 exit($fail);
