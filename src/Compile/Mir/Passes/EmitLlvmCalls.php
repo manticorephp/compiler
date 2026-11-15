@@ -5866,50 +5866,161 @@ trait EmitLlvmCalls
         $bad = $this->ssa->allocReg();
         $out .= '  ' . $bad . ' = icmp ne i64 ' . $want . ', ' . $cnt . "\n";
         $badL = $this->ssa->allocLabel('spread.badkey');
+        $okL = $this->ssa->allocLabel('spread.keys.ok');
+        $out .= '  br i1 ' . $bad . ', label %' . $badL . ', label %' . $okL . "\n" . $badL . ":\n";
+        $tbl = $this->spreadNamesTable($names);
+        $sym = $this->spreadBadKeyHelper();
+        $site = $this->siteTraceArgs(0, $out);
+        $r = $this->ssa->allocReg();
+        $out .= '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $arrReg . ', i64 ' . $npos . ', i64 ' . $cnt . ', ptr ' . $tbl
+            . ', i64 ' . (string)\count($names) . ', ' . $site . ")\n  unreachable\n" . $okL . ":\n";
+        return $out;
+    }
+
+    /**
+     * `[N x ptr]` of a callee's parameter names, named by CONTENT so the same list
+     * is one global per module and a split part's text does not depend on emission order.
+     * @param array<int,string> $names
+     */
+    private function spreadNamesTable(array $names): string
+    {
+        $key = \implode("\x01", $names);
+        $sym = '@.spn.' . \str_replace('-', 'n', (string)$this->fnvHash64($key)) . '.' . (string)\count($names) . '.' . (string)\strlen($key);
+        $hk = 'spnames|' . $sym;
+        if (!isset($this->dynamicMethodHelpers[$hk])) {
+            $elems = [];
+            foreach ($names as $nm) { $elems[] = 'ptr ' . $this->litStr((string)$nm); }
+            $this->dynamicMethodHelpers[$hk] = $sym . ' = internal constant [' . (string)\count($names) . ' x ptr] ['
+                . \implode(', ', $elems) . "], align 8\n\n";
+        }
+        return $sym;
+    }
+
+    /**
+     * `i64 (ptr arr, i64 npos, i64 cnt, ptr names, i64 nnames, i64 btline, ptr btfile)`, once
+     * per module: the cold half of {@see emitSpreadUnknownNameCheck}. Walks the keys past the
+     * positional run; the first string key in no `names` entry raises "Unknown named parameter",
+     * else the positional-after-named Error. Never returns normally.
+     */
+    private function spreadBadKeyHelper(): string
+    {
+        $key = '__mc_spread_badkey';
+        $sym = '@' . $this->mirHelperSym($key);
+        if (isset($this->dynamicMethodHelpers[$key])) { return $sym; }
+        $this->dynamicMethodHelpers[$key] = '';
+        $oldSsa = $this->ssa;
+        $oldLocals = $this->locals;
+        $oldCf = $this->cf;
+        $oldArena = $this->arena;
+        $oldLast = $this->lastValue;
+        $oldLastType = $this->lastValueType;
+        $oldVdResult = $this->vdResult;
+        $oldVdArm = $this->vdArmList;
+        $oldVdArgc = $this->vdSiteArgc;
+        $oldSpread = $this->spreadTail;
+        $oldPad = $this->lastPadArgs;
+        $oldCellProv = $this->cellProv;
+        $oldCellSinkOrd = $this->cellSinkOrd;
+        $oldCellSinkFn = $this->cellSinkFnOverride;
+        $oldBtLine = $this->btLineOverride;
+        $oldBtFile = $this->btFileOverride;
+        $oldBtSsa = $this->btLineOverrideSsa;
+        $this->ssa = new \Compile\Mir\SsaBuilder();
+        $this->ssa->reset();
+        $this->resetCellGuardFrame();
+        $this->cellSinkFnOverride = \ltrim($sym, '@');
+        $this->locals = new \Compile\Mir\LocalSlots();
+        $this->cf = new \Compile\Mir\ControlFlow();
+        $this->arena = new \Compile\Mir\ArenaContext();
+        $this->spreadTail = null;
+        $this->lastPadArgs = '';
+        $this->useSiteTraceParams();
+        $this->rt->needsStrcmp = true;
+
+        $iSlot = $this->ssa->allocReg();
+        $kSlot = $this->ssa->allocReg();
+        $jSlot = $this->ssa->allocReg();
         $headL = $this->ssa->allocLabel('spread.badkey.head');
         $bodyL = $this->ssa->allocLabel('spread.badkey.body');
         $strL = $this->ssa->allocLabel('spread.badkey.str');
         $nextL = $this->ssa->allocLabel('spread.badkey.next');
         $unkL = $this->ssa->allocLabel('spread.badkey.unknown');
         $posL = $this->ssa->allocLabel('spread.badkey.pos');
-        $okL = $this->ssa->allocLabel('spread.keys.ok');
-        $iSlot = $this->ssa->allocReg();
-        $kSlot = $this->ssa->allocReg();
-        $out .= '  ' . $iSlot . " = alloca i64\n  " . $kSlot . " = alloca i64\n";
-        $out .= '  br i1 ' . $bad . ', label %' . $badL . ', label %' . $okL . "\n" . $badL . ":\n";
-        $out .= '  store i64 ' . $npos . ', ptr ' . $iSlot . "\n  br label %" . $headL . "\n" . $headL . ":\n";
+        $jheadL = $this->ssa->allocLabel('spread.badkey.jhead');
+        $jbodyL = $this->ssa->allocLabel('spread.badkey.jbody');
+        $body = 'define hidden i64 ' . $sym . "(ptr %arr, i64 %npos, i64 %cnt, ptr %names, i64 %nn, i64 %btline, ptr %btfile) noinline cold {\nentry:\n";
+        $body .= '  ' . $iSlot . " = alloca i64\n  " . $kSlot . " = alloca i64\n  " . $jSlot . " = alloca i64\n";
+        $body .= '  store i64 %npos, ptr ' . $iSlot . "\n  br label %" . $headL . "\n" . $headL . ":\n";
         $i = $this->ssa->allocReg();
-        $out .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
+        $body .= '  ' . $i . ' = load i64, ptr ' . $iSlot . "\n";
         $more = $this->ssa->allocReg();
-        $out .= '  ' . $more . ' = icmp slt i64 ' . $i . ', ' . $cnt . "\n";
-        $out .= '  br i1 ' . $more . ', label %' . $bodyL . ', label %' . $posL . "\n" . $bodyL . ":\n";
+        $body .= '  ' . $more . ' = icmp slt i64 ' . $i . ', %cnt' . "\n";
+        $body .= '  br i1 ' . $more . ', label %' . $bodyL . ', label %' . $posL . "\n" . $bodyL . ":\n";
         $kc = $this->ssa->allocReg();
-        $out .= '  ' . $kc . ' = call i64 @__mir_array_key_cell_at(ptr ' . $arrReg . ', i64 ' . $i . ")\n";
+        $body .= '  ' . $kc . ' = call i64 @__mir_array_key_cell_at(ptr %arr, i64 ' . $i . ")\n";
         $top = $this->ssa->allocReg();
-        $out .= '  ' . $top . ' = lshr i64 ' . $kc . ", 48\n";
+        $body .= '  ' . $top . ' = lshr i64 ' . $kc . ", 48\n";
         $isStr = $this->ssa->allocReg();
-        $out .= '  ' . $isStr . ' = icmp eq i64 ' . $top . ", 65524\n";
-        $out .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $nextL . "\n" . $strL . ":\n";
+        $body .= '  ' . $isStr . ' = icmp eq i64 ' . $top . ", 65524\n";
+        $body .= '  br i1 ' . $isStr . ', label %' . $strL . ', label %' . $nextL . "\n" . $strL . ":\n";
         $kw = $this->ssa->allocReg();
-        $out .= '  ' . $kw . ' = and i64 ' . $kc . ", 281474976710655\n";
-        $out .= '  store i64 ' . $kw . ', ptr ' . $kSlot . "\n";
-        $out .= $this->strIsOneOfIr($kw, $names);
-        $out .= '  br i1 ' . $this->lastValue . ', label %' . $nextL . ', label %' . $unkL . "\n" . $nextL . ":\n";
+        $body .= '  ' . $kw . ' = and i64 ' . $kc . ", 281474976710655\n";
+        $body .= '  store i64 ' . $kw . ', ptr ' . $kSlot . "\n";
+        $kp = $this->ssa->allocReg();
+        $body .= '  ' . $kp . ' = inttoptr i64 ' . $kw . " to ptr\n";
+        $body .= '  store i64 0, ptr ' . $jSlot . "\n  br label %" . $jheadL . "\n" . $jheadL . ":\n";
+        $j = $this->ssa->allocReg();
+        $body .= '  ' . $j . ' = load i64, ptr ' . $jSlot . "\n";
+        $jm = $this->ssa->allocReg();
+        $body .= '  ' . $jm . ' = icmp slt i64 ' . $j . ', %nn' . "\n";
+        $body .= '  br i1 ' . $jm . ', label %' . $jbodyL . ', label %' . $unkL . "\n" . $jbodyL . ":\n";
+        $pp = $this->ssa->allocReg();
+        $body .= '  ' . $pp . ' = getelementptr inbounds ptr, ptr %names, i64 ' . $j . "\n";
+        $np = $this->ssa->allocReg();
+        $body .= '  ' . $np . ' = load ptr, ptr ' . $pp . "\n";
+        $c = $this->ssa->allocReg();
+        $body .= '  ' . $c . ' = call i32 @strcmp(ptr ' . $kp . ', ptr ' . $np . ")\n";
+        $e = $this->ssa->allocReg();
+        $body .= '  ' . $e . ' = icmp eq i32 ' . $c . ", 0\n";
+        $j2 = $this->ssa->allocReg();
+        $body .= '  ' . $j2 . ' = add i64 ' . $j . ", 1\n  store i64 " . $j2 . ', ptr ' . $jSlot . "\n";
+        $body .= '  br i1 ' . $e . ', label %' . $nextL . ', label %' . $jheadL . "\n" . $nextL . ":\n";
         $i2 = $this->ssa->allocReg();
-        $out .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n  store i64 " . $i2 . ', ptr ' . $iSlot . "\n  br label %" . $headL . "\n";
-        $out .= $unkL . ":\n";
+        $body .= '  ' . $i2 . ' = add i64 ' . $i . ", 1\n  store i64 " . $i2 . ', ptr ' . $iSlot . "\n  br label %" . $headL . "\n";
+        $body .= $unkL . ":\n";
         $kn = '__mc_spread_key';
         $this->locals->slots[$kn] = $kSlot;
-        $out .= $this->emitNode(new Call('__mir_throw_error', [
+        $body .= $this->emitNode(new Call('__mir_throw_error', [
             new \Compile\Mir\Concat(new \Compile\Mir\StringConst('Unknown named parameter $', Type::string_()),
                 new \Compile\Mir\LoadLocal($kn, Type::string_())),
         ], Type::cell()));
-        unset($this->locals->slots[$kn]);
-        $out .= "  unreachable\n" . $posL . ":\n";
-        $out .= $this->emitNode(new Call('__mir_throw_error', [
+        $body .= $this->coerceToI64();
+        $body .= '  ret i64 ' . $this->lastValue . "\n" . $posL . ":\n";
+        $body .= $this->emitNode(new Call('__mir_throw_error', [
             new \Compile\Mir\StringConst('Cannot use positional argument after named argument during unpacking', Type::string_()),
         ], Type::cell()));
-        return $out . "  unreachable\n" . $okL . ":\n";
+        $body .= $this->coerceToI64();
+        $body .= '  ret i64 ' . $this->lastValue . "\n}\n\n";
+        $this->dynamicMethodHelpers[$key] = $body;
+
+        $this->ssa = $oldSsa;
+        $this->locals = $oldLocals;
+        $this->cf = $oldCf;
+        $this->arena = $oldArena;
+        $this->lastValue = $oldLast;
+        $this->lastValueType = $oldLastType;
+        $this->vdResult = $oldVdResult;
+        $this->vdArmList = $oldVdArm;
+        $this->vdSiteArgc = $oldVdArgc;
+        $this->spreadTail = $oldSpread;
+        $this->lastPadArgs = $oldPad;
+        $this->cellProv = $oldCellProv;
+        $this->cellSinkOrd = $oldCellSinkOrd;
+        $this->cellSinkFnOverride = $oldCellSinkFn;
+        $this->btLineOverride = $oldBtLine;
+        $this->btFileOverride = $oldBtFile;
+        $this->btLineOverrideSsa = $oldBtSsa;
+        return $sym;
     }
 
     /** i1 in `lastValue`: is the string at word `$kw` one of `$names`? @param string[] $names */
