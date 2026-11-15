@@ -15,6 +15,7 @@ Commands:
   dump-sig  Parse PHP, print the module-interface .sig (exported symbol table)
   version  Print compiler version
   lsp  Run the language server on stdio
+  stubs  Export declaration-only stubs of PHP code
   upgrade  Update the installed compiler to the latest release (--check only reports)
   doctor  Check that this compiler and its toolchain work; exit 1 on a failure
   cache  Show the compiled-object cache, or clear it

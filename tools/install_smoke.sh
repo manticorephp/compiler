@@ -66,6 +66,21 @@ check "symlink from another dir" "$WORK/sym/manticore"
 # The dev-tree shape, which is the one that already worked.
 check "explicit path" "$WORK/opt/bin/manticore"
 
+# analyze / lsp need only the library stubs: an installed binary reads
+# lib/manticore.stubs.php, a bare copy (no lib/, no prelude) its embedded copy.
+mkdir -p "$WORK/bare/bin" "$WORK/proj"
+cp "$MC" "$WORK/bare/bin/manticore"
+printf '<?php\nfunction f(): RuntimeException { return new RuntimeException(str_pad("a", 3)); }\n' > "$WORK/proj/a.php"
+printf '<?php\necho f()->getMessage(), "\\n";\n' > "$WORK/proj/b.php"
+for m in "$WORK/opt/bin/manticore" "$WORK/bare/bin/manticore"; do
+    if out="$(env -u MANTICORE_PRELUDE -u MANTICORE_STUBS "$m" analyze --only undefined. "$WORK/proj" 2>&1)"; then
+        echo "PASS analyze knows the library ($m)"
+    else
+        echo "FAIL analyze knows the library ($m): $(printf '%s\n' "$out" | head -3)"
+        fail=1
+    fi
+done
+
 # The blocking-offload pool is pay-for-use: a program that never names Async\
 # carries no worker thread code. An Async\ program is the control that the
 # symbol names still match.

@@ -5,19 +5,29 @@ namespace Semantic;
 use Analyze\ParsedFile;
 
 /**
- * The analyzer's library universe: the prelude (parsed) and the stdlib function
- * names from the bundled `.o.sig`. Resolved the way the compiler resolves them.
+ * The analyzer's library universe: the library stubs (declarations of the prelude and
+ * signatures of the stdlib `.o.sig`, {@see sections}) parsed, and the stdlib function names.
  *
- * Prelude files are labelled `lib:prelude/<name>.php`. The label is not a disk path: the
- * prelude is found through `\Manticore\prelude_src_or_empty` (several candidate roots), so a
- * host that wants to open one maps the `lib:prelude/` prefix to its prelude directory.
+ * Prelude stubs are labelled `lib:prelude/<name>.php`, the stdlib's `lib:stubs/stdlib.php`.
+ * A label is not a disk path. A prelude stub keeps every declaration on its line in the
+ * prelude file, so a host opens the real file (`\Manticore\find_prelude_path`) at the same
+ * position when there is one, and the stub text otherwise.
  */
 final class LibrarySymbols
 {
     /** Reserved label prefix of every library file; a Workspace refuses it as a user URI. */
     public const LABEL_PREFIX = 'lib:';
 
+    /** The library stubs file, shipped in lib/ beside the prelude ({@see sections}). */
+    public const STUBS_FILE = "manticore.stubs.php";
+
+    /** Label of the stdlib signature section. */
+    public const STDLIB_LABEL = "stubs/stdlib.php";
+
     private static ?LibrarySymbols $loaded = null;
+
+    /** @var array<string, string>|null label => stub source, once read */
+    private static ?array $sections = null;
 
     /** @var ParsedFile[] */
     private array $prelude;
@@ -140,21 +150,141 @@ final class LibrarySymbols
     }
 
     /**
-     * The prelude files the analyzer knows, unparsed; a missing file is left out.
+     * The prelude files the analyzer knows, as their stubs; a missing file is left out.
      *
-     * @return array<string, string> prelude file name => contents
+     * @return array<string, string> prelude file name => stub source (a whole PHP file)
      */
     public static function preludeSources(): array
     {
         /** @var array<string, string> $out */
         $out = [];
-        foreach (self::preludeFileNames() as $name) {
-            $src = \Manticore\prelude_src_or_empty($name);
-            if ($src !== "") {
-                $out[$name] = $src;
+        foreach (self::sections() as $label => $src) {
+            if (\str_starts_with((string)$label, "prelude/")) {
+                $out[\substr((string)$label, 8)] = $src;
             }
         }
         return $out;
+    }
+
+    /** The stub source of one library label (`prelude/<name>.php`, `stubs/stdlib.php`), or null. */
+    public static function sectionSource(string $label): ?string
+    {
+        return self::sections()[$label] ?? null;
+    }
+
+    /**
+     * The library stubs, one section per prelude file and one for the stdlib `.sig`.
+     *
+     * Read from the stubs file (MANTICORE_STUBS, else `manticore.stubs.php` beside the binary,
+     * else the copy embedded in it), then checked against the prelude the compiler would read:
+     * a prelude file found on disk whose hash differs from its section's (an edited dev tree)
+     * is re-stubbed from that file. A bare binary has no prelude on disk and uses its copy as is.
+     *
+     * @return array<string, string> label => stub source
+     */
+    public static function sections(): array
+    {
+        if (self::$sections !== null) {
+            return self::$sections;
+        }
+        $text = self::stubsText();
+        /** @var array<string, string> $have */
+        $have = $text === "" ? [] : Stubber::split($text);
+        /** @var array<string, string> $out */
+        $out = [];
+        $st = new Stubber();
+        foreach (self::preludeFileNames() as $name) {
+            $label = "prelude/" . $name;
+            $path = \Manticore\find_prelude_path($name);
+            $src = $path === "" ? false : @\file_get_contents($path);
+            if (\is_string($src) && $src !== "") {
+                $old = $have[$label] ?? "";
+                if ($old !== "" && Stubber::sectionHash($old) === Stubber::sourceHash($src)) {
+                    $out[$label] = $old;
+                    continue;
+                }
+                try {
+                    $one = Stubber::split("<?php\n" . $st->stubFile($src, true, $label));
+                    if (isset($one[$label])) { $out[$label] = $one[$label]; }
+                } catch (\Throwable $e) {
+                    // A prelude file that does not lex is skipped, as it always was.
+                }
+                continue;
+            }
+            if (isset($have[$label])) { $out[$label] = $have[$label]; }
+        }
+        if (isset($have[self::STDLIB_LABEL])) {
+            $out[self::STDLIB_LABEL] = $have[self::STDLIB_LABEL];
+        } elseif ($text === "") {
+            $sig = self::stdlibSection($st);
+            if ($sig !== "") {
+                $one = Stubber::split("<?php\n" . $sig);
+                if (isset($one[self::STDLIB_LABEL])) { $out[self::STDLIB_LABEL] = $one[self::STDLIB_LABEL]; }
+            }
+        }
+        self::$sections = $out;
+        return $out;
+    }
+
+    /**
+     * The library stubs file, generated from the prelude and the stdlib `.sig` the compiler
+     * resolves: `manticore stubs --library`, which `bin/build` runs. Throws when a prelude
+     * file does not lex.
+     */
+    public static function generate(): string
+    {
+        $st = new Stubber();
+        /** @var string[] $parts */
+        $parts = [];
+        foreach (self::preludeFileNames() as $name) {
+            $path = \Manticore\find_prelude_path($name);
+            $src = $path === "" ? false : @\file_get_contents($path);
+            if (\is_string($src) && $src !== "") {
+                $parts[] = $st->stubFile($src, true, "prelude/" . $name);
+            }
+        }
+        $sig = self::stdlibSection($st);
+        if ($sig !== "") { $parts[] = $sig; }
+        return Stubber::merge($parts);
+    }
+
+    /** The stdlib section, signatures from the bundled `.sig`; "" when there is none. */
+    private static function stdlibSection(Stubber $st): string
+    {
+        $path = \Manticore\find_stdlib_sig();
+        $json = $path === "" ? null : \Manticore\read_file($path);
+        if ($json === null || $json === "") {
+            return "";
+        }
+        try {
+            return $st->sigSection($json, self::STDLIB_LABEL);
+        } catch (\Throwable $e) {
+            return "";
+        }
+    }
+
+    /** The stubs file text: MANTICORE_STUBS, else beside the binary, else embedded; "" when none. */
+    private static function stubsText(): string
+    {
+        $env = \getenv("MANTICORE_STUBS");
+        /** @var string[] $cands */
+        $cands = [];
+        if (\is_string($env) && $env !== "") {
+            $cands[] = $env;
+        }
+        $dir = \Manticore\self_dir();
+        if ($dir !== "") {
+            $cands[] = $dir . "/../lib/" . self::STUBS_FILE;
+            $cands[] = $dir . "/lib/" . self::STUBS_FILE;
+            $cands[] = $dir . "/" . self::STUBS_FILE;
+        }
+        foreach ($cands as $p) {
+            $t = @\file_get_contents($p);
+            if (\is_string($t) && $t !== "") {
+                return $t;
+            }
+        }
+        return \Manticore\EmbeddedStubs::TEXT;
     }
 
     /** @return ParsedFile[] */
@@ -162,14 +292,11 @@ final class LibrarySymbols
     {
         /** @var ParsedFile[] $out */
         $out = [];
-        foreach (self::preludeSources() as $name => $src) {
-            // `prelude_src_or_empty` strips the opening `<?php` (it is built to append
-            // after a prelude header); re-add it so this parses as a standalone file.
+        foreach (self::sections() as $label => $src) {
             try {
-                $program = \Parser\Parser::parseSource("<?php\n" . $src);
-                $out[] = new ParsedFile(self::LABEL_PREFIX . "prelude/" . (string)$name, $program);
+                $out[] = new ParsedFile(self::LABEL_PREFIX . (string)$label, \Parser\Parser::parseSource($src));
             } catch (\Throwable $e) {
-                // A prelude file that does not parse standalone is simply skipped.
+                // A section that does not parse is simply skipped.
             }
         }
         return $out;

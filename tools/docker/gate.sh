@@ -125,9 +125,14 @@ tree_sha() {
 }
 
 # What the COMPILER binary is a function of: its source, the manifest and the
-# script that drive its build, and the toolchain that compiles it.
+# script that drive its build, and the toolchain that compiles it. Not of the
+# library stubs bin/build embeds (src/Manticore/EmbeddedStubs.php, generated and
+# untracked): a fresh checkout has none, and the stubs are checked against the
+# prelude on disk when they are read.
 src_sha() {
-    { tree_sha src manticore.json bin/build; cache_id; } | tree_sha_stdin
+    local sum=sha256sum
+    command -v sha256sum > /dev/null 2>&1 || sum="shasum -a 256"
+    { find src manticore.json bin/build -type f ! -path src/Manticore/EmbeddedStubs.php | LC_ALL=C sort | xargs $sum | $sum | cut -d' ' -f1; cache_id; } | tree_sha_stdin
 }
 tree_sha_stdin() {
     local sum=sha256sum

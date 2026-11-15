@@ -18,6 +18,14 @@ ok
 ok
 == analyze json
 ok rc=0 first='[' markers=']'
+== stubs
+ok rc=0 first='<?php' markers='add(int {}'
+== stubs no paths
+rc=64
+== stubs --split without -o
+rc=64
+== stubs missing file
+rc=66
 == dump-ast bogus flag
 rc=64
 == dump-ast missing file

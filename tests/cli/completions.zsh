@@ -14,6 +14,7 @@ _manticore() {
     'dump-sig:Parse PHP, print the module-interface .sig (exported symbol table)'
     'version:Print compiler version'
     'lsp:Run the language server on stdio'
+    'stubs:Export declaration-only stubs of PHP code'
     'upgrade:Update the installed compiler to the latest release (--check only reports)'
     'doctor:Check that this compiler and its toolchain work; exit 1 on a failure'
     'cache:Show the compiled-object cache, or clear it'
@@ -208,6 +209,15 @@ _manticore() {
     lsp)
       _arguments \
         '--help[Show this help text]' \
+        '*:file:_files'
+      ;;
+    stubs)
+      _arguments \
+        '--help[Show this help text]' \
+        '-o+[Write to this file (with --split: directory) instead of stdout]:path:_files' \
+        '--split[One stub file per input file, under the -o directory]' \
+        '--keep-lines[Keep every declaration on its source line (bodies become blank lines)]' \
+        '--library[Write the library stubs the analyzer and LSP read (prelude + stdlib)]' \
         '*:file:_files'
       ;;
     upgrade)

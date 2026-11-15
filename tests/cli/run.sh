@@ -108,6 +108,10 @@ PHP
     elif [ "$ab" != "$ba" ]; then echo "BAD: names depend on order"
     else echo "ok"; fi
     shape "analyze json"  "["          "]"                     "$MC" analyze --json "f.php"
+    shape "stubs"         "<?php"      "add(int {}" "$MC" stubs "f.php"
+    run "stubs no paths"           "$MC" stubs
+    run "stubs --split without -o" "$MC" stubs --split "f.php"
+    run "stubs missing file"       "$MC" stubs "nope.php"
     run "dump-ast bogus flag"      "$MC" dump-ast --bogus "f.php"
     run "dump-ast missing file"    "$MC" dump-ast "nope.php"
     run "dump-ast with compile-only flag" "$MC" dump-ast --analyze "f.php"

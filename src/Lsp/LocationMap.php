@@ -2,6 +2,7 @@
 
 namespace Lsp;
 
+use Semantic\LibrarySymbols;
 use Semantic\Location;
 
 /** One instance per request (it caches disk reads). Core Location (1-based line, byte column) -> LSP Location. Target text comes from the open docs, else from disk. */
@@ -39,22 +40,40 @@ final class LocationMap
      */
     public static $libText = null;
 
-    /** Prelude text exactly as the library parse saw it (`<?php` re-added), or null. */
-    private static function libText(string $label): ?string
+    /**
+     * Where a `lib:` location opens: the prelude file itself when the compiler finds one (a
+     * prelude stub keeps each declaration on its line there), else the library stub text
+     * written to a cache file once. Null when neither exists.
+     *
+     * @return string[]|null [uri, text]
+     */
+    private static function libTarget(string $label): ?array
     {
         $name = \substr($label, \strlen('lib:prelude/'));
-        if (!\str_starts_with($label, 'lib:prelude/') || $name === '' || \str_contains($name, '/')) { return null; }
-        if (self::$libText !== null) { return (self::$libText)($name); }
-        if (!\function_exists('Manticore\\prelude_src_or_empty')) { return null; }
-        $src = \Manticore\prelude_src_or_empty($name);
-        return $src === '' ? null : "<?php\n" . $src;
+        $isPrelude = \str_starts_with($label, 'lib:prelude/') && $name !== '' && !\str_contains($name, '/');
+        if (self::$libText !== null) {
+            $text = $isPrelude ? (self::$libText)($name) : null;
+            $uri = $text === null ? null : self::libUri($label, $text);
+            return $uri === null || $text === null ? null : [$uri, $text];
+        }
+        if ($isPrelude) {
+            $path = \Manticore\find_prelude_path($name);
+            $disk = $path === '' ? false : @\file_get_contents($path);
+            if (\is_string($disk)) {
+                $real = \realpath($path);
+                return [Uri::fromPath($real === false ? $path : $real), $disk];
+            }
+        }
+        $text = LibrarySymbols::sectionSource(\substr($label, \strlen(LibrarySymbols::LABEL_PREFIX)));
+        $uri = $text === null ? null : self::libUri($label, $text);
+        return $uri === null || $text === null ? null : [$uri, $text];
     }
 
     /** A lib: label as a readable file: the text goes to a cache file once, and the file URI answers. */
     private static function libUri(string $label, string $text): ?string
     {
         $dir = \sys_get_temp_dir() . '/manticore-lsp-lib';
-        $path = $dir . '/' . \substr($label, \strlen('lib:prelude/'));
+        $path = $dir . '/' . \str_replace('/', '_', \substr($label, \strlen(LibrarySymbols::LABEL_PREFIX)));
         if (@\file_get_contents($path) !== $text) {
             if (!\is_dir($dir) && !@\mkdir($dir, 0755, true) && !\is_dir($dir)) { return null; }
             if (@\file_put_contents($path, $text) === false) { return null; }
@@ -63,7 +82,7 @@ final class LocationMap
     }
 
     /**
-     * @param bool $lib navigation only: a `lib:` location opens as a cached copy of the prelude file (never for edits)
+     * @param bool $lib navigation only: a `lib:` location opens the prelude file (or a cached copy of its stub; never for edits)
      * @return array<string, mixed>|null null for unreadable targets, and for `lib:` labels unless $lib
      */
     public function toLsp(Location $l, bool $lib = false): ?array
@@ -71,9 +90,10 @@ final class LocationMap
         $uri = $l->file;
         if (\str_starts_with($l->file, 'lib:')) {
             if (!$lib) { return null; }
-            $text = self::libText($l->file);
-            $uri = $text === null ? null : self::libUri($l->file, $text);
-            if ($uri === null) { return null; }
+            $t = self::libTarget($l->file);
+            if ($t === null) { return null; }
+            $uri = $t[0];
+            $text = $t[1];
         } else {
             $text = $this->text($l->file);
         }
