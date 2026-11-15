@@ -191,6 +191,9 @@ trait InferNodes
         foreach (\Compile\Mir\Walk::children($n) as $c) { $this->collectCellStaticLocals($c, $out); }
     }
 
+    /**
+     * @param array<string, bool> $out
+     */
     private function collectRefCellLocals(Node $n, array &$out): void
     {
         // ⚠ Via Walk, never a narrowing helper: this file is a TRAIT, and there

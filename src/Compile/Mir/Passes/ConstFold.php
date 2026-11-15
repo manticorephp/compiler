@@ -83,6 +83,7 @@ final class ConstFold implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [LowerFromAst::NAME]; }
 
     public function run(Module $module): Module

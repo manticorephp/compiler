@@ -18,6 +18,7 @@ final class Unit
     /**
      * @param \Parser\Ast\Param[] $params
      * @param \Parser\Ast\Stmt[]  $stmts
+     * @param array<string, string> $paramDocs param name → namespace-qualified `@param` tag type
      */
     public function __construct(
         public string $label,
@@ -26,7 +27,6 @@ final class Unit
         public array $stmts,
         public ?Expr $exprBody,
         public ?string $returnType,
-        /** @var array<string, string> param name → namespace-qualified `@param` tag type */
         public array $paramDocs = [],
         public string $ownerClass = '',
         /** the declaration / closure range (null for `{main}`), for position -> unit lookups */

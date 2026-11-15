@@ -305,7 +305,10 @@ trait EmitLlvmFiber
         ];
     }
 
-    /** __mir_fiber_jump(fctx) : int — the raw context switch. */
+    /**
+     * __mir_fiber_jump(fctx) : int — the raw context switch.
+     * @param Node[] $args
+     */
     private function biFiberJump(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -320,6 +323,9 @@ trait EmitLlvmFiber
 
     /** __mir_fiber_make(top, fiberObj) : int — context on a fresh stack whose
      *  first jump lands in @manticore___mc_fiber_run(fiberObj, resumer). */
+    /**
+     * @param Node[] $args
+     */
     private function biFiberMake(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -337,7 +343,10 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_current() : Fiber — the running fiber (raw ptr, 0 = none). */
+    /**
+     * __mir_fiber_current() : Fiber — the running fiber (raw ptr, 0 = none).
+     * @param Node[] $args
+     */
     private function biFiberCurrent(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -350,7 +359,10 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_set_current(fiber) : void */
+    /**
+     * __mir_fiber_set_current(fiber) : void
+     * @param Node[] $args
+     */
     private function biFiberSetCurrent(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -374,6 +386,9 @@ trait EmitLlvmFiber
      *  running out of address space was a SIGSEGV instead of an error. 0 is never a
      *  valid base, so it needs no second channel; Fiber::start() turns it into a
      *  FiberError, which is what Zend throws when it cannot allocate a fiber. */
+    /**
+     * @param Node[] $args
+     */
     private function biFiberStackAlloc(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -492,6 +507,9 @@ trait EmitLlvmFiber
 
     /** __mir_fiber_guard_set(base) : void — whose guard page the handler should
      *  recognise. Called around every switch; 0 means "no fiber is running". */
+    /**
+     * @param Node[] $args
+     */
     private function biFiberGuardSet(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -504,6 +522,9 @@ trait EmitLlvmFiber
 
     /** __mir_fiber_guard_install() : void — sigaltstack + a SIGSEGV/SIGBUS handler,
      *  once per process. Idempotent and cheap enough to call on every start(). */
+    /**
+     * @param Node[] $args
+     */
     private function biFiberGuardInstall(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -551,7 +572,10 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_stack_free(base, size) : void — munmap the fiber stack. */
+    /**
+     * __mir_fiber_stack_free(base, size) : void — munmap the fiber stack.
+     * @param Node[] $args
+     */
     private function biFiberStackFree(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -597,6 +621,7 @@ trait EmitLlvmFiber
      * saved: the fiber ran on its own chunk chain (head@0, each chunk's next at
      * its offset 0) and mark stack (@16), which nothing else points to once the
      * fiber is gone — every task that reached an arena scope kept its chunks.
+     * @param Node[] $args
      */
     private function biFiberCtxFree(array $args): string
     {
@@ -664,6 +689,9 @@ trait EmitLlvmFiber
     /** __mir_fiber_ctx_new() : int — a fresh 64B save area for a new fiber. Every
      *  field starts zeroed: the arena lazily self-builds, thrown starts null.
      *  0 when the allocation fails. */
+    /**
+     * @param Node[] $args
+     */
     private function biFiberCtxNew(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -680,7 +708,10 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_ctx_save(ctx) : void — snapshot the arena + exception globals into ctx. */
+    /**
+     * __mir_fiber_ctx_save(ctx) : void — snapshot the arena + exception globals into ctx.
+     * @param Node[] $args
+     */
     private function biFiberCtxSave(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -700,7 +731,10 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_ctx_load(ctx) : void — restore the arena + exception globals from ctx. */
+    /**
+     * __mir_fiber_ctx_load(ctx) : void — restore the arena + exception globals from ctx.
+     * @param Node[] $args
+     */
     private function biFiberCtxLoad(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -725,6 +759,9 @@ trait EmitLlvmFiber
 
     /** __mir_fiber_has_current() : bool — is a fiber running? (global != null).
      *  An int-level null test, so it dodges the unsound `=== null` on an obj. */
+    /**
+     * @param Node[] $args
+     */
     private function biFiberHasCurrent(array $args): string
     {
         $this->rt->needsFibers = true;
@@ -739,7 +776,10 @@ trait EmitLlvmFiber
         return $out;
     }
 
-    /** __mir_fiber_main_ctx() : int — address of the root (main) arena save area. */
+    /**
+     * __mir_fiber_main_ctx() : int — address of the root (main) arena save area.
+     * @param Node[] $args
+     */
     private function biFiberMainCtx(array $args): string
     {
         $this->rt->needsFibers = true;

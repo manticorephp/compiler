@@ -382,7 +382,10 @@ trait LowerTypeDefs
             . " does not fit an '" . $want . "' element. Bind it to an array at least that wide and of the same signedness");
     }
 
-    /** The `[min, max]` of a narrow integer repr, null for any other repr. */
+    /**
+     * The `[min, max]` of a narrow integer repr, null for any other repr.
+     * @return int[]|null
+     */
     private function reprIntRange(string $repr): ?array
     {
         if ($repr === 'i8')  { return [-128, 127]; }

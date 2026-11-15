@@ -100,6 +100,7 @@ function array_key_exists(int|string $key, array $arr): bool
     return false;
 }
 
+/** @return array<int,int|string> */
 function array_keys(array $array): array
 {
     $out = [];
@@ -319,7 +320,11 @@ function __mc_range_integral(int|float|string $v): bool
     return (string)(int)$v === $v;
 }
 
-/** `range('a', 'e')` — the character form, ascending or descending. */
+/**
+ * `range('a', 'e')` — the character form, ascending or descending.
+ *
+ * @return string[]
+ */
 function __mc_range_char(string $start, string $end, int $step): array
 {
     $a = \ord($start);

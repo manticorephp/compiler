@@ -725,7 +725,10 @@ final class Monomorphize implements Pass
         return $out;
     }
 
-    /** True when >=1 of `$dims` is a callable param (a callable dimension). */
+    /**
+     * True when >=1 of `$dims` is a callable param (a callable dimension).
+     * @param int[] $dims
+     */
     private function hasCallableDim(FunctionDef $fn, array $dims): bool
     {
         foreach ($dims as $di) {
