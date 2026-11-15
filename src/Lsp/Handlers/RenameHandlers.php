@@ -64,6 +64,7 @@ final class RenameHandlers
                 throw new RpcError(RpcError::INVALID_PARAMS, 'newName is not a valid PHP identifier');
             }
             if ($at === null) { return null; }
+            $this->closed->refresh();
             $gather = fn(): array => [
                 $this->ws->renameBlockers($at[0], $at[1], $at[2]),
                 $this->editSet($at),

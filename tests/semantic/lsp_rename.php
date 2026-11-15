@@ -307,7 +307,7 @@ check('qualified function reference edits only the function name', function (): 
     return ($o['file:///t/a.php'] === "<?php\nnamespace App;\nfunction hi() {}\n"
         && $o['file:///t/b.php'] === "<?php\nnamespace X;\nuse function App\\hi;\n\\App\\hi();\nhi();\n") ?: json_encode([$o, $r]);
 });
-check('rename refuses when a closed file changed on disk after the scan', function (): bool|string {
+check('rename re-reads a closed file that changed on disk after the scan (mtime+size guard)', function (): bool|string {
     $r = sys_get_temp_dir() . '/lsprn5' . getmypid();
     mkdir($r);
     file_put_contents("$r/c.php", "<?php\n\$g = new Foo();\n");
@@ -317,7 +317,8 @@ check('rename refuses when a closed file changed on disk after the scan', functi
     open($d, 'file:///t/a.php', "<?php\nclass Foo {}\n");
     $got = rn($d, 'file:///t/a.php', 1, 8, 'Bar');
     unlink("$r/c.php"); rmdir($r);
-    return (is_array($got) && ($got['error'] ?? 0) === -32602 && str_contains($got['message'], 'index out of date for file://')) ?: json_encode($got);
+    $e = array_values(array_filter(flat($got), fn($x) => str_contains($x, '/c.php:2:9-12:Bar')));
+    return $e !== [] ?: json_encode($got);
 });
 check('closing a file without saving re-indexes it from disk', function (): bool|string {
     $r = sys_get_temp_dir() . '/lsprn6' . getmypid();
@@ -491,5 +492,70 @@ check('ImportAliases: only file-level use statements introduce aliases', functio
     $ok = \Semantic\ImportAliases::has($yes, 'c') && \Semantic\ImportAliases::has($yes, 'H') && !\Semantic\ImportAliases::has($yes, 'E')
         && \Semantic\ImportAliases::has($grp, 'Y') && !\Semantic\ImportAliases::has($no, 'C');
     return $ok ?: 'wrong';
+});
+/** @param array<string, string> $files name => text; the root is removed by the caller */
+function mkRoot(string $tag, array $files): string
+{
+    $r = sys_get_temp_dir() . '/' . $tag . getmypid();
+    mkdir($r);
+    foreach ($files as $n => $t) { file_put_contents("$r/$n", $t); }
+    return $r;
+}
+function rmRoot(string $r): void
+{
+    foreach (glob("$r/*.php") ?: [] as $f) { unlink($f); }
+    rmdir($r);
+}
+/** @return string[] sorted basenames of the files a rename result edits, or ['ERR: ...'] */
+function editedFiles(mixed $r): array
+{
+    if (is_array($r) && isset($r['error'])) { return ['ERR: ' . $r['message']]; }
+    $o = [];
+    foreach (is_array($r) ? ($r['changes'] ?? []) : [] as $u => $_) { $o[] = basename($u); }
+    sort($o);
+    return $o;
+}
+
+check('#520 rename sees closed files created, modified and deleted after startup', function (): bool|string {
+    $r = mkRoot('lsprn520', ['b.php' => "<?php\necho 1;\n", 'd.php' => "<?php\n\$x = new Foo();\n"]);
+    try {
+        [$d] = rigWs(new Sink(), 'file://' . $r);
+        $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+        open($d, 'file://' . $r . '/a.php', "<?php\nclass Foo {}\n");
+        file_put_contents("$r/b.php", "<?php\necho 1;\n\$y = new Foo();\n");
+        file_put_contents("$r/c.php", "<?php\n\$z = new Foo();\n");
+        unlink("$r/d.php");
+        $got = editedFiles(rn($d, 'file://' . $r . '/a.php', 1, 8, 'Bar'));
+        return $got === ['a.php', 'b.php', 'c.php'] ?: json_encode($got);
+    } finally { rmRoot($r); }
+});
+
+check('#521 LSP rename of a magic or implicit interface method is refused', function (): bool|string {
+    [$d] = rigWs(new Sink());
+    $src = "<?php\nclass K implements Countable {\n    public function __construct() {}\n    public function count(): int { return 0; }\n}\nfunction f(K \$k) { return count(\$k); }\n";
+    open($d, 'file:///t/a.php', $src);
+    $a = rn($d, 'file:///t/a.php', 2, 22, 'make');
+    $b = rn($d, 'file:///t/a.php', 3, 22, 'size');
+    return (($a['error'] ?? 0) === -32602 && str_contains($a['message'], 'magic-method')
+        && ($b['error'] ?? 0) === -32602 && str_contains($b['message'], 'implicit-interface-method:Countable')) ?: json_encode([$a, $b]);
+});
+
+check('#519 LSP rename: heredoc / parse error in an unrelated file does not block, in a file mentioning the symbol does', function (): bool|string {
+    $hd = "<?php\n\$o = 1;\n\$s = <<<EOT\nhi \$o\nEOT;\n";
+    $r = mkRoot('lsprn519', ['v.php' => $hd, 'bad.php' => "<?php\n\$x = ;\n"]);
+    try {
+        [$d] = rigWs(new Sink(), 'file://' . $r);
+        $d->handle('{"jsonrpc":"2.0","method":"initialized","params":{}}');
+        open($d, 'file://' . $r . '/a.php', "<?php\nclass Foo {}\n\$f = new Foo();\n");
+        $ok = editedFiles(rn($d, 'file://' . $r . '/a.php', 1, 8, 'Bar'));
+        if ($ok !== ['a.php']) { return 'unrelated blocks: ' . json_encode($ok); }
+        file_put_contents("$r/v.php", "<?php\n\$o = 1;\n\$s = <<<EOT\nhi \$o foo\nEOT;\n");
+        $h = editedFiles(rn($d, 'file://' . $r . '/a.php', 1, 8, 'Bar'));
+        if (!str_contains($h[0], 'heredoc-interpolation')) { return 'heredoc mentioning Foo did not block: ' . json_encode($h); }
+        file_put_contents("$r/v.php", "<?php\necho 1;\n");
+        file_put_contents("$r/bad.php", "<?php\n\$x = ;\nnew Foo(;\n");
+        $e = editedFiles(rn($d, 'file://' . $r . '/a.php', 1, 8, 'Bar'));
+        return str_contains($e[0], 'parse-error-region') ?: 'parse error mentioning Foo did not block: ' . json_encode($e);
+    } finally { rmRoot($r); }
 });
 exit($fail);
