@@ -159,7 +159,7 @@ complete -c manticore -n '__fish_seen_subcommand_from stubs' -l help -d 'Show th
 complete -c manticore -n '__fish_seen_subcommand_from stubs' -s o -r -F -d 'Write to this file (with --split: directory) instead of stdout'
 complete -c manticore -n '__fish_seen_subcommand_from stubs' -l split -d 'One stub file per input file, under the -o directory'
 complete -c manticore -n '__fish_seen_subcommand_from stubs' -l keep-lines -d 'Keep every declaration on its source line (bodies become blank lines)'
-complete -c manticore -n '__fish_seen_subcommand_from stubs' -l library -d 'Write the library stubs the analyzer and LSP read (prelude + stdlib)'
+complete -c manticore -n '__fish_seen_subcommand_from stubs' -l library -d 'Write the library stubs the analyzer and LSP read (prelude + stdlib; paths = stdlib source)'
 complete -c manticore -n '__fish_seen_subcommand_from upgrade' -l help -d 'Show this help text'
 complete -c manticore -n '__fish_seen_subcommand_from upgrade' -l check -d 'Report installed and latest version; change nothing. Exit 1 if an update exists, 2 on error'
 complete -c manticore -n '__fish_seen_subcommand_from upgrade' -l version -r -f -d 'Install this release instead of the latest'

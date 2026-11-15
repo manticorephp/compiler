@@ -217,7 +217,7 @@ _manticore() {
         '-o+[Write to this file (with --split: directory) instead of stdout]:path:_files' \
         '--split[One stub file per input file, under the -o directory]' \
         '--keep-lines[Keep every declaration on its source line (bodies become blank lines)]' \
-        '--library[Write the library stubs the analyzer and LSP read (prelude + stdlib)]' \
+        '--library[Write the library stubs the analyzer and LSP read (prelude + stdlib; paths = stdlib source)]' \
         '*:file:_files'
       ;;
     upgrade)
