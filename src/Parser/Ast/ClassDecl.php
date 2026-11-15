@@ -25,6 +25,7 @@ final class ClassDecl
      * @param string[]        $uses              names of traits the class mixes in
      * @param TraitAdaptation[] $traitAdaptations
      * @param array<string, string> $useDocs trait name => docblock on its `use` line
+     * @param ErrorMember[] $errorMembers
      */
     public function __construct(
         public readonly string $kind,
@@ -57,7 +58,6 @@ final class ClassDecl
          * @var array<string, string>
          */
         public array $useDocs = [],
-        /** @var ErrorMember[] */
         public array $errorMembers = [],
     ) {}
 }

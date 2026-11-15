@@ -7,13 +7,15 @@ use Parser\Ast\Param;
 /** A resolved free function's signature, keyed in the {@see Index} by FQN. */
 final class FnInfo
 {
-    /** @param Param[] $params */
+    /**
+     * @param Param[] $params
+     * @param array<string, string> $paramDocs param name → qualified docblock type
+     */
     public function __construct(
         public string $name,
         public array $params,
         public ?string $returnType,
         public ?string $docType = null,
-        /** @var array<string, string> param name → qualified docblock type */
         public array $paramDocs = [],
         public ?TemplateSig $tpl = null,
     ) {}

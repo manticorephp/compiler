@@ -1209,7 +1209,7 @@ final class Flow
     /**
      * Key and value type of iterating $t; null where unknown.
      *
-     * @return (SourceType|null)[]
+     * @return array<int, ?SourceType>
      */
     public static function elementTypes(?SourceType $t): array
     {

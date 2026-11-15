@@ -7,7 +7,10 @@ use Parser\Ast\Param;
 /** A resolved method signature plus the metadata needed to check a call site. */
 final class MethodInfo
 {
-    /** @param Param[] $params */
+    /**
+     * @param Param[] $params
+     * @param array<string, string> $paramDocs param name → qualified docblock type
+     */
     public function __construct(
         public string $name,
         public array $params,
@@ -15,7 +18,6 @@ final class MethodInfo
         public string $visibility,
         public ?string $returnType,
         public string $declClass,
-        /** @var array<string, string> param name → qualified docblock type */
         public array $paramDocs = [],
         public ?TemplateSig $tpl = null,
     ) {}
