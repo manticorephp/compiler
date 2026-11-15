@@ -12,6 +12,8 @@ use Parser\Ast\FunctionDecl;
 use Parser\Ast\MethodDecl;
 use Parser\Ast\Param;
 use Parser\Ast\PropertyDecl;
+use Semantic\SourceType;
+use Semantic\SourceTypeParser;
 
 /**
  * Warns where a parameter, return, or property is typed the BARE `array`
@@ -106,21 +108,28 @@ final class MissingArrayType
         return $h === 'array';
     }
 
-    /** True when a docblock type string pins an array element/value type. A
-     *  shape (`array{…}`, `list{…}`, `non-empty-*{…}`) pins every field's type;
-     *  {@see GenericType::parse} reads only its `array` head. */
+    /** True when a docblock type string pins an array element/value type: some arm is a
+     *  shape (`array{…}`, `list{…}`) or carries type arguments (`T[]`, `(A|B)[]`,
+     *  `array<K, V>`, `list<(A|B)>`). Text {@see SourceTypeParser} rejects falls back to
+     *  the permissive {@see GenericType} head read. */
     private function docHasElement(?string $docType): bool
     {
         if ($docType === null) { return false; }
-        $low = \strtolower(\ltrim($docType, '?\\'));
-        if (\strncmp($low, 'array{', 6) === 0 || \strncmp($low, 'list{', 5) === 0
-            || \strncmp($low, 'non-empty-array{', 16) === 0
-            || \strncmp($low, 'non-empty-list{', 15) === 0) {
-            return true;
-        }
+        $t = SourceTypeParser::fromHint($docType);
+        if ($t !== null) { return self::pinsElement($t); }
         $g = GenericType::parse($docType);
         if ($g === null) { return false; }
         return $g->isArraySugar || \count($g->params) > 0;
+    }
+
+    private static function pinsElement(SourceType $t): bool
+    {
+        if ($t->kind === SourceType::NULLABLE || $t->kind === SourceType::UNION) {
+            foreach ($t->args as $a) { if (self::pinsElement($a)) { return true; } }
+            return false;
+        }
+        if ($t->kind === SourceType::SHAPE) { return true; }
+        return ($t->kind === SourceType::GENERIC || $t->kind === SourceType::ITERABLE) && \count($t->args) > 0;
     }
 
     private function warn(ParsedFile $pf, \Parser\Ast\Span $span, string $msg, string $declName = ''): void
