@@ -30,6 +30,9 @@ final class Decls
     /** @var string[] owning-class FQN, parallel to $properties */
     public array $propertyClasses = [];
 
+    /** @var array<string, string[]> class FQN → names declared by its `@template` tags */
+    public array $classTemplates = [];
+
     /** @param \Parser\Ast\Stmt[] $stmts */
     public function collect(array $stmts): void
     {
@@ -38,6 +41,7 @@ final class Decls
                 $this->functions[] = $s->decl;
             } elseif ($s instanceof ClassStmt) {
                 $cls = $s->decl->name;
+                $this->classTemplates[$cls] = \Semantic\DocNames::templates($s->decl->docComment);
                 foreach ($s->decl->methods as $m) {
                     $this->methods[] = $m;
                     $this->methodClasses[] = $cls;

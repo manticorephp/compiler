@@ -94,7 +94,7 @@ check('null_for_empty', function () {
 });
 
 check('malformed_is_null_no_throw', function () {
-    foreach (['int|', 'array<', '?', '|int', 'A&', '(int', 'int)', 'array<int', 'callable(int', "'a", 'array{a:int}', 'int string', '<int>', 'A&&B', 'int[', '-'] as $in) {
+    foreach (['int|', 'array<', '?', '|int', 'A&', '(int', 'int)', 'array<int', 'callable(int', "'a", 'array{a:int', 'array{a:}', 'int string', '<int>', 'A&&B', 'int[', '-'] as $in) {
         $got = ts(SourceTypeParser::fromHint($in));
         if ($got !== 'NULL') { return "$in: got $got"; }
     }
