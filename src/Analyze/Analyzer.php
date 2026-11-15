@@ -108,6 +108,9 @@ final class Analyzer
 
             $undefConst = new \Analyze\Rules\UndefinedClassConst();
             foreach ($undefConst->run($pf, $index) as $d) { $out[] = $d; }
+
+            $classString = new \Analyze\Rules\ClassStringArg();
+            foreach ($classString->run($pf, $index) as $d) { $out[] = $d; }
         }
         return $out;
     }

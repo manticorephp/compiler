@@ -88,8 +88,12 @@ trait InferNarrow
             // UnitEnum / BackedEnum are no class of ours: narrowing to them would type the value as an unknown object.
             $ioLow = \strtolower(\ltrim($io->class, '\\'));
             if ($ioLow === 'unitenum' || $ioLow === 'backedenum') { return; }
-            if ($io->operand->kind === Node::KIND_LOAD_LOCAL) {
-                $name = $io->operand->name;
+            // `($x = f()) instanceof C` narrows `$x` the same way.
+            $name = null;
+            $op = $io->operand;
+            if ($op->kind === Node::KIND_LOAD_LOCAL) { $name = $op->name; }
+            elseif ($op->kind === Node::KIND_STORE_LOCAL) { $name = $op->name; }
+            if ($name !== null) {
                 // Narrowing never WIDENS: a local already typed as a class that
                 // is-a the tested type keeps its class. `$this instanceof
                 // WhitespacesAwareFixerInterface` in AbstractFixer's constructor,

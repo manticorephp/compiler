@@ -17,5 +17,6 @@ final class MethodInfo
         public string $declClass,
         /** @var array<string, string> param name → qualified docblock type */
         public array $paramDocs = [],
+        public ?TemplateSig $tpl = null,
     ) {}
 }

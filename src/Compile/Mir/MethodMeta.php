@@ -50,4 +50,10 @@ final class MethodMeta
         }
         return $n;
     }
+
+    /** {@see FunctionDef::$tplClassArg} for this declaration (interface and abstract ones included). */
+    public int $tplClassArg = -1;
+    public bool $tplNullable = false;
+    /** The docblock has its own `@return`: an override without one inherits the parent / interface doc. */
+    public bool $docReturn = false;
 }

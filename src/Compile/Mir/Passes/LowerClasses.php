@@ -118,7 +118,7 @@ trait LowerClasses
                 $this->attrNames($p->attributes),
             );
         }
-        return new \Compile\Mir\MethodMeta(
+        $meta = new \Compile\Mir\MethodMeta(
             $m->name,
             $m->visibility === '' ? 'public' : $m->visibility,
             $m->isStatic,
@@ -129,6 +129,13 @@ trait LowerClasses
             $this->attrNames($m->attributes),
             $declaringClass,
         );
+        $code = $this->classTemplateCode($m->docComment, $m->params);
+        if ($code >= 0) {
+            $meta->tplClassArg = \intdiv($code, 2);
+            $meta->tplNullable = $code % 2 === 1;
+        }
+        $meta->docReturn = \Semantic\DocNames::rawTag($m->docComment, '@return', '') !== null;
+        return $meta;
     }
 
     /**

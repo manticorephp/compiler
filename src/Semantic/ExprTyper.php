@@ -3,6 +3,7 @@
 namespace Semantic;
 
 use Analyze\Index;
+use Analyze\TemplateSig;
 use Parser\Ast\ArrayAccess;
 use Parser\Ast\ArrayLit;
 use Parser\Ast\ArrowFn;
@@ -25,11 +26,13 @@ use Parser\Ast\Invoke;
 use Parser\Ast\MagicConstant;
 use Parser\Ast\MatchExpr;
 use Parser\Ast\MethodCallExpr;
+use Parser\Ast\NamedArg;
 use Parser\Ast\NewExpr;
 use Parser\Ast\NullCoalesce;
 use Parser\Ast\NullLiteral;
 use Parser\Ast\PropertyAccess;
 use Parser\Ast\RefAssign;
+use Parser\Ast\Spread;
 use Parser\Ast\StaticAccess;
 use Parser\Ast\StaticCall;
 use Parser\Ast\StringLiteral;
@@ -78,9 +81,9 @@ final class ExprTyper
         if ($e instanceof NewExpr) { return $this->classType($e->class, $env); }
         if ($e instanceof PropertyAccess) { return $this->property($e, $env, $d); }
         if ($e instanceof MethodCallExpr) { return $this->methodCall($e, $env, $d); }
-        if ($e instanceof StaticCall) { return $this->staticCall($e, $env); }
+        if ($e instanceof StaticCall) { return $this->staticCall($e, $env, $d); }
         if ($e instanceof StaticAccess) { return $this->staticAccess($e, $env, $d); }
-        if ($e instanceof CallExpr) { return $this->call($e); }
+        if ($e instanceof CallExpr) { return $this->call($e, $env, $d); }
         if ($e instanceof Invoke) { return $this->invoke($e, $env, $d); }
         if ($e instanceof Ternary) { return $this->ternary($e, $env, $d); }
         if ($e instanceof NullCoalesce) {
@@ -118,7 +121,7 @@ final class ExprTyper
 
     // ── calls and members ─────────────────────────────────────────────
 
-    private function call(CallExpr $e): ?SourceType
+    private function call(CallExpr $e, TypeEnv $env, int $d): ?SourceType
     {
         if (self::isFcc($e->args)) { return self::closure(); }
         $l = \strtolower($e->function);
@@ -127,7 +130,9 @@ final class ExprTyper
         if ($fn === null) { return null; }
         $native = SourceTypeParser::fromHint($fn->returnType, '');
         $doc = SourceTypeParser::fromHint($fn->docType, '');
-        return SourceTypeParser::withDoc($native, $doc);
+        $t = SourceTypeParser::withDoc($native, $doc);
+        if ($fn->docType !== null && \str_contains($fn->docType, '-of<')) { $t = $this->resolveOf($t, ''); }
+        return $fn->tpl === null ? $t : $this->instantiate($fn->tpl, $e->args, $env, $d, $native, $t, '');
     }
 
     private function invoke(Invoke $e, TypeEnv $env, int $d): ?SourceType
@@ -161,10 +166,14 @@ final class ExprTyper
         $classes = $this->classesOf($recv, $env);
         if ($classes === null) { return null; }
         $t = $this->overClasses($classes, $e->method, 'method');
+        if (\count($classes) === 1) {
+            $mi = $this->idx->findMethod($classes[0], \strtolower($e->method), 0);
+            if ($mi !== null && $mi->tpl !== null) { $t = $this->instantiate($mi->tpl, $e->args, $env, $d, SourceTypeParser::fromHint($mi->returnType, $mi->declClass), $t, $mi->declClass); }
+        }
         return $t !== null && ($e->nullsafe || self::chainHasNullsafe($e->object)) ? self::union([$t, self::scalar('null')]) : $t;
     }
 
-    private function staticCall(StaticCall $e, TypeEnv $env): ?SourceType
+    private function staticCall(StaticCall $e, TypeEnv $env, int $d): ?SourceType
     {
         if (self::isFcc($e->args)) { return self::closure(); }
         $cls = $this->classRef($e->class, $env);
@@ -172,12 +181,18 @@ final class ExprTyper
         $low = \strtolower($e->class);
         // self:: / parent:: forward the late-static class; Foo:: pins it.
         $static = ($low === 'self' || $low === 'parent' || $low === 'static') && $env->thisClass !== null ? $env->thisClass : $cls;
-        return $this->memberType($cls, $e->method, 'method', $static);
+        $t = $this->memberType($cls, $e->method, 'method', $static);
+        $mi = $this->idx->findMethod($cls, \strtolower($e->method), 0);
+        if ($mi !== null && $mi->tpl !== null) { $t = $this->instantiate($mi->tpl, $e->args, $env, $d, SourceTypeParser::fromHint($mi->returnType, $mi->declClass), $t, $mi->declClass); }
+        return $t;
     }
 
     private function staticAccess(StaticAccess $e, TypeEnv $env, int $d): ?SourceType
     {
-        if ($e->name === 'class') { return new SourceType(SourceType::GENERIC, 'class-string'); }
+        if ($e->name === 'class') {
+            $c = \strtolower($e->class) === 'static' ? null : $this->classRef($e->class, $env);
+            return new SourceType(SourceType::GENERIC, 'class-string', $c === null ? [] : [new SourceType(SourceType::CLASS_, $c)]);
+        }
         $cls = $this->classRef($e->class, $env);
         if ($cls === null) { return null; }
         if ($e->name !== '' && $e->name[0] === '$') { return $this->memberType($cls, \substr($e->name, 1), 'prop', $cls); }
@@ -216,10 +231,224 @@ final class ExprTyper
         $native = SourceTypeParser::fromHint($m->typeHint, $m->declClass);
         $doc = SourceTypeParser::fromHint($m->docType, $m->declClass);
         $t = SourceTypeParser::withDoc($native, $doc);
+        if ($m->docType !== null && \str_contains($m->docType, '-of<')) { $t = $this->resolveOf($t, $m->declClass); }
         // A trait's `self` is the using class.
         $di = $this->idx->findClass($m->declClass);
         $selfCls = $di !== null && $di->kind === 'trait' ? $cls : $m->declClass;
         return self::bind($t, $selfCls, $staticCls, $this->idx);
+    }
+
+    // ── @template binding ─────────────────────────────────────────────
+
+    /**
+     * The call's result type with the callee's own `@template` names bound from its arguments: a `Foo::class`
+     * or `class-string<Foo>` value for a `class-string<T>` parameter, the argument's type for a `T` one.
+     * An unbound name takes its `of` bound, else the substituted type is unknown and $fallback stays.
+     *
+     * @param Expr[] $args
+     */
+    private function instantiate(TemplateSig $sig, array $args, TypeEnv $env, int $d, ?SourceType $native, ?SourceType $fallback, string $declClass): ?SourceType
+    {
+        if ($sig->ret === null) { return $fallback; }
+        /** @var array<string, SourceType> $bound */
+        $bound = [];
+        /** @var array<string, SourceType> $argTypes `$name` → the argument's type, for a conditional return */
+        $argTypes = [];
+        $cond = \str_contains($sig->ret, ' is ');
+        foreach ($args as $i => $arg) {
+            if ($arg instanceof Spread || $arg instanceof Ellipsis) { break; }
+            $name = $arg instanceof NamedArg ? $arg->name : ($sig->order[$i] ?? null);
+            if ($name === null || (!$cond && !isset($sig->params[$name]))) { continue; }
+            $got = $this->go($arg instanceof NamedArg ? $arg->value : $arg, $env, $d);
+            if ($got === null) { continue; }
+            $argTypes['$' . $name] = $got;
+            $want = isset($sig->params[$name]) ? SourceTypeParser::fromHint($sig->params[$name], $declClass) : null;
+            if ($want !== null) { $this->unify($want, $got, $sig, $bound); }
+        }
+        $rt = SourceTypeParser::fromHint($sig->ret, $declClass);
+        if ($rt !== null && $cond) { $rt = self::reduceConditional($rt, $argTypes, $bound); }
+        $t = self::subst($rt, $bound, $sig, $declClass);
+        if ($t === null) { return $fallback; }
+        if ($cond && $t->kind === SourceType::UNION) { $t = self::union($t->args); }
+        $t = $this->resolveOf($t, $declClass);
+        $core = $native !== null && $native->kind === SourceType::NULLABLE ? $native->args[0] : $native;
+        // a class or loose native hint is what the template refines; a bare array / iterable takes the element types
+        if ($core === null || $core->kind === SourceType::MIXED || $core->kind === SourceType::CLASS_) { return $t; }
+        return $fallback === null ? $t : SourceTypeParser::withDoc($native, $t);
+    }
+
+    /**
+     * @param array<string, SourceType> $bound
+     */
+    private function unify(SourceType $want, SourceType $got, TemplateSig $sig, array &$bound): void
+    {
+        if ($want->kind === SourceType::NULLABLE) {
+            $this->unify($want->args[0], ExprTyper::hasNull($got) ? self::withoutNull($got) : $got, $sig, $bound);
+            return;
+        }
+        if ($want->kind === SourceType::CLASS_) {
+            if (isset($sig->templates[$want->name]) && !isset($bound[$want->name])) { $bound[$want->name] = $got; }
+            return;
+        }
+        // `string|class-string<T>`: only a class-string argument binds T
+        if ($want->kind === SourceType::UNION) {
+            foreach ($want->args as $a) {
+                if ($a->kind === SourceType::GENERIC && $a->name === 'class-string') { $this->unify($a, $got, $sig, $bound); }
+            }
+            return;
+        }
+        if ($want->kind === SourceType::GENERIC && $want->name === 'class-string') {
+            if ($got->kind === SourceType::GENERIC && $got->name === 'class-string' && \count($got->args) === 1 && \count($want->args) === 1) {
+                $this->unify($want->args[0], $got->args[0], $sig, $bound);
+            }
+            return;
+        }
+        $wl = $want->kind === SourceType::ITERABLE ? 'iterable' : ($want->kind === SourceType::GENERIC ? $want->name : '');
+        if ($wl === 'array' || $wl === 'list' || $wl === 'iterable') {
+            $gl = $got->kind === SourceType::GENERIC ? $got->name : '';
+            if (($gl === 'array' || $gl === 'list' || $got->kind === SourceType::ITERABLE) && \count($got->args) > 0 && \count($want->args) > 0) {
+                $this->unify($want->args[\count($want->args) - 1], $got->args[\count($got->args) - 1], $sig, $bound);
+                if (\count($want->args) === 2 && \count($got->args) === 2) { $this->unify($want->args[0], $got->args[0], $sig, $bound); }
+            }
+        }
+    }
+
+    /**
+     * `($x is TEST ? A : B)` → A when the argument (or template binding) named by the subject statically
+     * satisfies TEST, B when it statically does not, else `A|B`. Nested conditionals reduce the same way.
+     *
+     * @param array<string, SourceType> $argTypes
+     * @param array<string, SourceType> $bound
+     */
+    public static function reduceConditional(SourceType $t, array $argTypes, array $bound): SourceType
+    {
+        if ($t->kind === SourceType::CONDITIONAL) {
+            $got = \str_starts_with($t->name, '$') ? ($argTypes[$t->name] ?? null) : ($bound[$t->name] ?? null);
+            $hit = $got === null ? -1 : self::satisfies($got, $t->args[0]);
+            $then = self::reduceConditional($t->args[1], $argTypes, $bound);
+            $else = self::reduceConditional($t->args[2], $argTypes, $bound);
+            if ($hit === 1) { return $then; }
+            if ($hit === 0) { return $else; }
+            return self::union([$then, $else]);
+        }
+        if ($t->args === [] && $t->ret === null) { return $t; }
+        $args = [];
+        foreach ($t->args as $a) { $args[] = self::reduceConditional($a, $argTypes, $bound); }
+        $ret = $t->ret === null ? null : self::reduceConditional($t->ret, $argTypes, $bound);
+        return new SourceType($t->kind, $t->name, $args, $t->resolved, $ret, $t->keys);
+    }
+
+    /** 1: `$got` is certainly a `$test`; 0: certainly not; -1: not statically known. */
+    private static function satisfies(SourceType $got, SourceType $test): int
+    {
+        if ($test->kind === SourceType::GENERIC && $test->name === 'class-string') {
+            if ($got->kind === SourceType::GENERIC && $got->name === 'class-string') { return 1; }
+            if ($got->kind === SourceType::SCALAR && $got->name !== 'string' && $got->name !== 'scalar') { return 0; }
+            return -1;
+        }
+        if ($test->kind === SourceType::SCALAR && $test->name === 'null') {
+            if (self::isScalar($got, 'null')) { return 1; }
+            if (self::hasNull($got)) { return -1; }
+            $k = $got->kind;
+            return $k === SourceType::CLASS_ || $k === SourceType::SCALAR || $k === SourceType::LITERAL || $k === SourceType::GENERIC || $k === SourceType::SHAPE ? 0 : -1;
+        }
+        $lits = $test->kind === SourceType::UNION ? $test->args : [$test];
+        foreach ($lits as $l) { if ($l->kind !== SourceType::LITERAL) { return -1; } }
+        if ($got->kind !== SourceType::LITERAL) { return -1; }
+        foreach ($lits as $l) { if ($l->name === $got->name) { return 1; } }
+        return 0;
+    }
+
+    /**
+     * Replaces each template name in $t by its binding, else its bound; null when one has neither.
+     *
+     * @param array<string, SourceType> $bound
+     */
+    private static function subst(?SourceType $t, array $bound, TemplateSig $sig, string $declClass): ?SourceType
+    {
+        if ($t === null) { return null; }
+        if ($t->kind === SourceType::CLASS_ && isset($sig->templates[$t->name])) {
+            if (isset($bound[$t->name])) { return $bound[$t->name]; }
+            return $sig->templates[$t->name] === '' ? null : SourceTypeParser::fromHint($sig->templates[$t->name], $declClass);
+        }
+        if ($t->args === [] && $t->ret === null) { return $t; }
+        $args = [];
+        foreach ($t->args as $a) {
+            $s = self::subst($a, $bound, $sig, $declClass);
+            if ($s === null) { return null; }
+            $args[] = $s;
+        }
+        $ret = null;
+        if ($t->ret !== null) {
+            $ret = self::subst($t->ret, $bound, $sig, $declClass);
+            if ($ret === null) { return null; }
+        }
+        return new SourceType($t->kind, $t->name, $args, $t->resolved, $ret, $t->keys);
+    }
+
+    /**
+     * `key-of<X>` / `value-of<X>` over a known array type (generic, list, shape, or a class constant of one)
+     * become the key / value type; any other X leaves the whole type unknown.
+     */
+    private function resolveOf(?SourceType $t, string $declClass): ?SourceType
+    {
+        if ($t === null) { return null; }
+        if ($t->kind === SourceType::GENERIC && ($t->name === 'key-of' || $t->name === 'value-of')) {
+            if (\count($t->args) !== 1) { return null; }
+            $x = $t->args[0];
+            if ($x->kind === SourceType::CONST_REF) { $x = $this->constRefType($x->name, $declClass); }
+            else { $x = $this->resolveOf($x, $declClass); }
+            return $x === null ? null : self::keyOrValue($x, $t->name === 'key-of');
+        }
+        if ($t->args === [] && $t->ret === null) { return $t; }
+        $args = [];
+        foreach ($t->args as $a) {
+            $r = $this->resolveOf($a, $declClass);
+            if ($r === null) { return null; }
+            $args[] = $r;
+        }
+        $ret = null;
+        if ($t->ret !== null) {
+            $ret = $this->resolveOf($t->ret, $declClass);
+            if ($ret === null) { return null; }
+        }
+        return new SourceType($t->kind, $t->name, $args, $t->resolved, $ret, $t->keys);
+    }
+
+    private function constRefType(string $ref, string $declClass): ?SourceType
+    {
+        $p = \strpos($ref, '::');
+        if ($p === false) { return null; }
+        $cls = \substr($ref, 0, $p);
+        $low = \strtolower($cls);
+        if ($low === 'self' || $low === 'static') { $cls = $declClass; }
+        $name = \substr($ref, $p + 2);
+        if ($cls === '' || $name === '' || \str_contains($name, '*')) { return null; }
+        $key = \strtolower($ref) . '|of';
+        if (isset($this->busy[$key])) { return null; }
+        $this->busy[$key] = true;
+        $r = $this->memberType(\ltrim($cls, '\\'), $name, 'const', \ltrim($cls, '\\'));
+        unset($this->busy[$key]);
+        return $r;
+    }
+
+    private static function keyOrValue(SourceType $x, bool $key): ?SourceType
+    {
+        if ($x->kind === SourceType::SHAPE) {
+            if (\count($x->args) === 0 || $x->resolved === '...') { return null; }
+            $parts = [];
+            foreach ($x->args as $i => $a) {
+                $parts[] = $key ? new SourceType(SourceType::LITERAL, self::isIntKey(\rtrim($x->keys[$i], SourceType::OPT)) ? \rtrim($x->keys[$i], SourceType::OPT) : "'" . \rtrim($x->keys[$i], SourceType::OPT) . "'") : $a;
+            }
+            return self::union($parts);
+        }
+        if ($x->kind === SourceType::GENERIC && ($x->name === 'array' || $x->name === 'list' || $x->name === 'non-empty-array' || $x->name === 'non-empty-list')) {
+            $n = \count($x->args);
+            if ($n === 0) { return null; }
+            if (!$key) { return $x->args[$n - 1]; }
+            return $n === 2 ? $x->args[0] : self::scalar('int');
+        }
+        return null;
     }
 
     /** Class FQN a written class reference means here, or null. */
