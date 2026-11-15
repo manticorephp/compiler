@@ -16,5 +16,7 @@ final class FnInfo
         /** @var array<string, string> param name → qualified docblock type */
         public array $paramDocs = [],
         public ?TemplateSig $tpl = null,
+        /** A stdlib function: php's internal-function rules apply at its call sites (surplus arguments, null and Stringable coerced). */
+        public bool $internal = false,
     ) {}
 }

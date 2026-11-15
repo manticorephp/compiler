@@ -62,7 +62,7 @@ final class ArgCount
         if ($fn === null) { return; }
         // the prelude array_map takes one array; the call site lowers the zip form (LowerExprs)
         if (\strtolower(\ltrim($e->function, '\\')) === 'array_map') { return; }
-        $this->verify($pf, $e, $e->function . '()', $fn->params, \count($e->args));
+        $this->verify($pf, $e, $e->function . '()', $fn->params, \count($e->args), $fn->internal);
     }
 
     private function checkNew(ParsedFile $pf, Index $idx, NewExpr $e): void
@@ -103,7 +103,7 @@ final class ArgCount
     /**
      * @param Param[] $params
      */
-    private function verify(ParsedFile $pf, Expr $site, string $label, array $params, int $given): void
+    private function verify(ParsedFile $pf, Expr $site, string $label, array $params, int $given, bool $surplusOk = false): void
     {
         $min = 0;
         $variadic = false;
@@ -121,7 +121,7 @@ final class ArgCount
             );
             return;
         }
-        if (!$variadic && $given > $max) {
+        if (!$variadic && $given > $max && !$surplusOk) {
             $this->diags[] = Diagnostic::at(
                 $pf->path, $site->span, Diagnostic::SEV_WARNING, 'arg.count',
                 'too many arguments to ' . $label . ': ' . (string)$given

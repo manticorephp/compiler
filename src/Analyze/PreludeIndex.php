@@ -22,7 +22,7 @@ use Parser\Ast\Span;
 final class PreludeIndex
 {
     /** Bumped whenever the stored shape or what Index::build records changes. */
-    private const SCHEMA = 'pi1';
+    private const SCHEMA = 'pi2';
 
     /** @param array<string, string> $sources prelude file name => contents */
     public static function key(array $sources, string $exeId): string
@@ -97,7 +97,7 @@ final class PreludeIndex
         /** @var array<string, mixed> */
         $fns = [];
         foreach ($idx->functions as $k => $f) {
-            $fns[(string)$k] = [$f->name, self::paramsOut($f->params), $f->returnType];
+            $fns[(string)$k] = [$f->name, self::paramsOut($f->params), $f->returnType, $f->internal ? 1 : 0];
         }
         /** @var array<string, mixed> */
         $cls = [];
@@ -137,10 +137,10 @@ final class PreludeIndex
         }
         $idx = new Index();
         foreach ($fns as $k => $f) {
-            if (!\is_array($f) || \count($f) !== 3 || !\is_array($f[1])) {
+            if (!\is_array($f) || \count($f) !== 4 || !\is_array($f[1])) {
                 return null;
             }
-            $idx->functions[(string)$k] = new FnInfo((string)$f[0], self::paramsIn($f[1]), self::strOrNull($f[2]));
+            $idx->functions[(string)$k] = new FnInfo((string)$f[0], self::paramsIn($f[1]), self::strOrNull($f[2]), null, [], null, (int)$f[3] === 1);
         }
         foreach ($cls as $k => $c) {
             if (!\is_array($c) || \count($c) !== 9 || !\is_array($c[5]) || !\is_array($c[6]) || !\is_array($c[8])) {

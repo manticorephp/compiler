@@ -110,6 +110,9 @@ final class Index
 
     private string $curNs = '';
 
+    /** Path of the file being collected. */
+    private string $curPath = '';
+
     private ?ParsedFile $curFile = null;
 
     /** @param ParsedFile[] $files */
@@ -137,6 +140,7 @@ final class Index
     public function replaceFile(ParsedFile $pf): void
     {
         $path = $pf->path;
+        $this->curPath = $path;
         /** @var array<string, int> $fnPos */
         $fnPos = [];
         /** @var array<string, int> $classPos */
@@ -478,8 +482,15 @@ final class Index
     {
         if ($d->name === '') { return; }
         $l = \strtolower($d->name);
-        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $this->docTag($d->docComment, '@return', $d->name, \Semantic\DocNames::templates($d->docComment)), $this->paramDocs($d->docComment, $d->params, $d->name, []), $this->tplSig($d->docComment, $d->params, $d->name, []));
+        $this->curFns[$l] = new FnInfo($d->name, $d->params, $d->returnType, $this->docTag($d->docComment, '@return', $d->name, \Semantic\DocNames::templates($d->docComment)), $this->paramDocs($d->docComment, $d->params, $d->name, []), $this->tplSig($d->docComment, $d->params, $d->name, []), self::isStdlibPath($this->curPath));
         $this->curFnSpans[$l] = $d->span;
+    }
+
+    /** A stdlib stub section (`stdlib/…`, `stubs/stdlib.php`), with or without the `lib:` prefix. */
+    private static function isStdlibPath(string $path): bool
+    {
+        if (\str_starts_with($path, 'lib:')) { $path = \substr($path, 4); }
+        return \str_starts_with($path, 'stdlib/') || \str_starts_with($path, 'stubs/');
     }
 
     private function addClass(ClassDecl $d): void
