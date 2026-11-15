@@ -243,6 +243,7 @@ function parse_ini_file(string $filename, bool $process_sections = false, int $s
  * session extension reads its whole configuration through `ini_get`/`ini_set`
  * rather than keeping a second copy of it.
  */
+/** @return array<string,string> */
 function __mc_ini_table(): array
 {
     return [

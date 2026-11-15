@@ -80,6 +80,16 @@ final class DocType
     }
 
     /**
+     * A promoted constructor param's own `@var` (`/** @var T[] *\/ public array $x`), named or bare;
+     * null for a param that is not promoted. The constructor's `@param` for it wins — callers try that first.
+     */
+    public static function promotedVar(\Parser\Ast\Param $p): ?string
+    {
+        if (($p->promoted === '' && !$p->promotedReadonly) || $p->docComment === null) { return null; }
+        return self::tag($p->docComment, '@var', $p->name) ?? self::tag($p->docComment, '@var', '', true);
+    }
+
+    /**
      * A tag follows whitespace, the `*` gutter or `/**`, and is not inside a backtick code span
      * of its line — prose that quotes `@var T` is not a tag; `/** Text. @param T $x *\/` is.
      */

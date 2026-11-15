@@ -232,6 +232,7 @@ final class VarIndex
         }
     }
 
+    /** @param \Parser\Ast\Stmt[] $stmts */
     private function newScope(string $kind, ?Span $span, array $stmts, ?Expr $exprBody, ?Expr $node, int $parent, bool $static): int
     {
         $id = \count($this->scKind);
@@ -283,7 +284,10 @@ final class VarIndex
         $this->discover($this->scStmts[$sid]);
     }
 
-    /** Opens scopes for the functions, classes (methods, property hooks) declared in a statement list, at any nesting depth short of another body. */
+    /**
+     * Opens scopes for the functions, classes (methods, property hooks) declared in a statement list, at any nesting depth short of another body.
+     * @param \Parser\Ast\Stmt[] $stmts
+     */
     private function discover(array $stmts): void
     {
         foreach ($stmts as $s) {

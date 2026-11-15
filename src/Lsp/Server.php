@@ -40,6 +40,7 @@ final class Server
     {
         $this->send = $send;
         $this->closed = new ClosedFiles($ws, fn(): array => $this->docs, $closedMax);
+        $this->closed->setDiscover(fn(): array => $this->diskFiles());
     }
 
     public function exitCode(): ?int
@@ -81,7 +82,7 @@ final class Server
             }
             return [
                 'capabilities' => [
-                    'textDocumentSync' => ['openClose' => true, 'change' => 2],
+                    'textDocumentSync' => ['openClose' => true, 'change' => 2, 'save' => ['includeText' => false]],
                     'hoverProvider' => true,
                     'definitionProvider' => true,
                     'referencesProvider' => true,
@@ -195,6 +196,15 @@ final class Server
             $this->republish($uri);
             return null;
         });
+        $d->on('textDocument/didSave', function (array $p): mixed {
+            $uri = $p['textDocument']['uri'] ?? null;
+            $uri = is_string($uri) ? Uri::normalize($uri) : null;
+            if ($uri !== null && !isset($this->docs[$uri]) && str_ends_with($uri, '.php')) {
+                $this->closed->reindex($uri);
+                $this->republishAll();
+            }
+            return null;
+        });
         $d->on('textDocument/didClose', function (array $p): mixed {
             $uri = $p['textDocument']['uri'] ?? null;
             $uri = is_string($uri) ? Uri::normalize($uri) : null;
@@ -209,8 +219,8 @@ final class Server
         });
     }
 
-    /** Index every PHP file under the root (and workspace folders) that is not open: parse, keep the index entries, drop the AST. */
-    private function scan(): void
+    /** @return string[] uris of every PHP file under the root and workspace folders that is not open */
+    private function diskFiles(): array
     {
         $roots = $this->folders;
         if ($this->rootUri !== '') { $roots[] = $this->rootUri; }
@@ -220,12 +230,17 @@ final class Server
             if ($dir === null) { continue; }
             foreach (WorkspaceScan::phpFiles($dir) as $path) {
                 $uri = Uri::fromPath($path);
-                if (isset($seen[$uri]) || isset($this->docs[$uri])) { continue; }
+                if (isset($seen[$uri]) || isset($this->docs[$uri]) || !@is_file($path)) { continue; }
                 $seen[$uri] = true;
-                if (!@is_file($path)) { continue; }
-                $this->closed->reindex($uri);
             }
         }
+        return \array_keys($seen);
+    }
+
+    /** Index every PHP file under the root (and workspace folders) that is not open: parse, keep the index entries, drop the AST. */
+    private function scan(): void
+    {
+        foreach ($this->diskFiles() as $uri) { $this->closed->reindex($uri); }
     }
 
     private function republishAll(): void

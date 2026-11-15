@@ -2002,7 +2002,10 @@ trait EmitLlvmRuntime
         return isset($this->reflectNames[$name]);
     }
 
-    /** Build lightweight dynamic-method metadata for one class. */
+    /**
+     * Build lightweight dynamic-method metadata for one class.
+     * @return string[] [definition IR, `ptr` operand]
+     */
     private function dynamicMethodTableForClass(\Compile\Mir\ClassDef $cls, string $id): array
     {
         if ($cls->isStruct || $cls->isPreludeClass) { return ['', 'ptr null']; }

@@ -1064,6 +1064,9 @@ trait EmitLlvmExceptions
         return new \Compile\Mir\EhLowerIr($syms);
     }
 
+    /**
+     * @param array<string, string> $last
+     */
     private function ehPhiRetarget(string $line, array $last): string
     {
         return \Compile\Mir\EhLowerIr::phiRetarget($line, $last);

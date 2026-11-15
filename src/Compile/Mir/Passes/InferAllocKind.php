@@ -50,6 +50,7 @@ final class InferAllocKind implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [InferEffects::NAME]; }
 
     /** @var array<string, bool> locals whose value may escape the frame */

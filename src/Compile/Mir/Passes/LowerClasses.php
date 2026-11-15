@@ -281,6 +281,10 @@ trait LowerClasses
         return $out;
     }
 
+    /**
+     * @param array<string, array{get: ?string, set: ?string}> $propHooks
+     * @return array<string,bool>
+     */
     private function maybeUninitProps(\Parser\Ast\ClassDecl $decl, string $parent, array $propHooks): array
     {
         $out = [];
@@ -563,7 +567,7 @@ trait LowerClasses
                         // A promoted param that REDECLARES an inherited property
                         // keeps the parent's slot — see the note below.
                         if (!isset($types[$p->name])) { $names[] = $p->name; $promNew[] = $p->name; }
-                        $pdoc = $this->docTagType($m->docComment, '@param', $p->name);
+                        $pdoc = $this->docTagType($m->docComment, '@param', $p->name) ?? \Analyze\DocType::promotedVar($p);
                         $peff = $this->effectiveHint($p->typeHint, $pdoc);
                         $types[$p->name] = $this->lowerTypeHint($peff);
                         // untyped promoted param is `mixed`, same as an untyped property

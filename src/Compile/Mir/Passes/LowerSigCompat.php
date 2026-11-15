@@ -327,6 +327,9 @@ trait LowerSigCompat
         return $req;
     }
 
+    /**
+     * @return string[]|null
+     */
     private function lspParamType(\Parser\Ast\Param $par, string $scope): ?array
     {
         $h = $par->typeHint;

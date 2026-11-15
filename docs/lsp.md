@@ -59,6 +59,7 @@ opens the real `prelude/<name>.php` when it is on disk, and otherwise a copy of 
 |---|---|
 | `initialize`, `initialized`, `shutdown`, `exit` | `rootUri` (or the first workspace folder) is scanned at startup |
 | `textDocument/didOpen`, `didChange`, `didClose` | incremental sync (UTF-16 ranges; a change without a range replaces the text) |
+| `textDocument/didSave` | a saved file that is not open is re-indexed from disk (an open file is already current) |
 | `workspace/didChangeWatchedFiles` | created / changed / deleted `.php` files (a deleted directory too) refresh the index; registered dynamically for `**/*.php` when the client allows it |
 | `textDocument/publishDiagnostics` | pushed on open and change |
 | `textDocument/hover` | members, functions, variables and expressions (types; see Hover) |
@@ -133,7 +134,7 @@ At startup the server walks the workspace root and indexes every `*.php` file, *
 
 - Files over **2 MiB** are skipped.
 - `.gitignore` is not read; everything under the root is walked.
-- Files created after startup are not in the index until opened.
+- Files created or changed after startup reach the index through `workspace/didChangeWatchedFiles` / `didSave`; rename also re-checks mtime and size of every closed file and rescans the root before it edits (see [Rename](#rename)).
 
 Only open files carry a full AST. Closed files are searched from their text on demand (see
 [Rename](#rename)).
@@ -176,6 +177,8 @@ declarations.
   (`use ... as U2; new U2()`) is left alone; the `use` line is renamed. Before editing, every
   site's text is checked against the symbol's name; if the file changed on disk since it was
   indexed, the rename fails with `index out of date for <file>` instead of editing wrong bytes.
+- **Disk changes are picked up before a rename.** Every rename first compares mtime and size of each closed file with the values recorded at index time, re-reads the ones that differ, drops deleted ones and indexes new files under the root. The one-second mtime granularity means a same-size edit within the second of indexing is only caught by the watcher events.
+- **Magic and implicit interface methods are refused.** Renaming a `__*` method, or a method of `ArrayAccess`, `Iterator`, `IteratorAggregate`, `Countable` or `JsonSerializable` (a class that implements them, or an override family reaching one) fails with `magic-method` / `implicit-interface-method:<Interface>`: PHP calls these implicitly (`new`, `$f()`, `$a[..]`, casts, `foreach`, `count()`), so their callers cannot be found. References to them may miss those implicit sites.
 - **Closing a file** re-reads it from disk into the index, so discarded edits do not leave stale
   positions; a closed file that no longer exists is dropped from the index.
 - **Parameters:** renaming a parameter is refused while a named argument spelled like it exists
@@ -183,15 +186,15 @@ declarations.
 - **Sigils** (`$`) are decided per location from the source text, so renaming a property or
   static property never corrupts `$` and a leading `$` in the new name is stripped.
 
-Known limit: an **interpolating** heredoc (a body containing `$name` or `{$`) anywhere in the
-workspace blocks **all** renames (`Workspace::renameBlockers` reports `heredoc-interpolation`),
-because interpolation parts inside heredocs share one range. Heredocs without interpolation do
-not block.
+Known limit: an **interpolating** heredoc (a body containing `$name` or `{$`) blocks a rename
+(`heredoc-interpolation`), because interpolation parts inside heredocs share one range. Only a heredoc in
+the file under the cursor, or in a file whose text contains the symbol's name (case-insensitive), counts; the same
+scoping applies to a file with a parse error (`parse-error-region`). Heredocs without interpolation do not block.
 
 ## Known ceilings
 
 - Every change re-parses the whole file (incremental sync saves transfer, not parsing).
-- The server is single-threaded: one request at a time. `$/cancelRequest` stops a request still queued, or a member query between closed files; it cannot interrupt one parse or the final analysis step. No `didSave` handling: an open file is already current, and disk changes arrive as watched-file events.
+- The server is single-threaded: one request at a time. `$/cancelRequest` stops a request still queued, or a member query between closed files; it cannot interrupt one parse or the final analysis step.
 - A bare binary navigates into stub copies, not the prelude source (it has none).
 - Stubs come from the build: in a checkout, an edited prelude file is re-stubbed on start-up, but a
   changed stdlib signature shows only after `bin/build`.
@@ -200,13 +203,6 @@ not block.
   `parent::__construct` are not offered; keywords are not offered; capped at 200 items
   (`isIncomplete`).
 - Member references are the slowest operation (below): they re-parse the closed files.
-- Class, function and constant renames trust the startup index for closed files. A file that
-  gained a reference after startup (git checkout, external edit) is not re-read, so that site is
-  omitted. Stale sites already in the index are detected and refuse the rename; new ones are not.
-  There is no `didChangeWatchedFiles` / `didSave` handling yet. Restart the server after a branch switch.
-- Renaming a magic method (`__construct`, `__invoke`, …) or an interface method called implicitly
-  (`offsetGet`, `current`, `count`, `getIterator`, …) edits the declaration and not the implicit
-  callers; references miss them too. Do not rename these through the editor.
 
 ## Latency
 

@@ -55,6 +55,7 @@ final class AnalysisContext
         $this->barriers = InferenceBarriers::scan($module);
     }
 
+    /** @return string[] */
     public function invalidated(): array
     {
         return $this->dependencies->invalidateChanges($this->changes);

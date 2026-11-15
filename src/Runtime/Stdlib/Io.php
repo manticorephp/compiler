@@ -892,7 +892,11 @@ function stream_get_meta_data(\Resource $stream): array
     ];
 }
 
-/** The stream wrappers (schemes) fopen/file_get_contents understand here. */
+/**
+ * The stream wrappers (schemes) fopen/file_get_contents understand here.
+ *
+ * @return string[]
+ */
 function stream_get_wrappers(): array
 {
     return ['php', 'file', 'http', 'https'];

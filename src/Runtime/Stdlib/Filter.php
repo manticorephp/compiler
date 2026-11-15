@@ -22,6 +22,7 @@ function __mc_filter_ids(): array
     return [257, 258, 259, 272, 277, 273, 274, 275, 276, 513, 513, 514, 515, 522, 516, 517, 518, 519, 520, 523, 1024];
 }
 
+/** @return string[] */
 function filter_list(): array
 {
     return __mc_filter_names();
@@ -65,13 +66,18 @@ function __mc_filter_trim(string $s): string
     return \trim($s, " \t\n\r\v");
 }
 
+/** @param array<string,mixed> $o */
 function __mc_filter_opt_int(array $o, string $k): ?int
 {
     if (!\array_key_exists($k, $o)) { return null; }
     return (int)$o[$k];
 }
 
-/** 0 = fail, else the parsed int (null = fail) */
+/**
+ * 0 = fail, else the parsed int (null = fail)
+ *
+ * @param array<string,mixed> $o
+ */
 function __mc_filter_int(string $v, int $flags, array $o): ?int
 {
     $s = __mc_filter_trim($v);
@@ -124,6 +130,7 @@ function __mc_filter_int(string $v, int $flags, array $o): ?int
     return $r;
 }
 
+/** @param array<string,mixed> $o */
 function __mc_filter_float(string $fn, string $v, int $flags, array $o): ?float
 {
     $dec = '.';
@@ -219,6 +226,7 @@ function __mc_filter_domain_ok(string $s, bool $hostname): bool
     return true;
 }
 
+/** @return int[]|null */
 function __mc_filter_ipv4_parts(string $s): ?array
 {
     if (\preg_match('/^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$/', $s, $m) !== 1) { return null; }
@@ -321,6 +329,7 @@ function __mc_filter_hex_ok(string $s): bool
     return $s !== '' && \ctype_xdigit($s);
 }
 
+/** @param array<string,mixed> $o */
 function __mc_filter_mac(string $fn, string $v, array $o): ?string
 {
     $exp = '';

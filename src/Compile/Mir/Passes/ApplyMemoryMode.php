@@ -40,6 +40,7 @@ final class ApplyMemoryMode implements Pass
 
     public function name(): string { return self::NAME; }
 
+    /** @return string[] */
     public function requires(): array { return [InferAllocKind::NAME]; }
 
     public function run(Module $module): Module

@@ -1,0 +1,2 @@
+enum(Level::Debug)
+enum(Level::Info)

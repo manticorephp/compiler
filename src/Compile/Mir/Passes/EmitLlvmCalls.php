@@ -3399,6 +3399,13 @@ trait EmitLlvmCalls
             // once the closure returns: a closure BORROWS its params, retaining
             // what it keeps. A box the call site owns consumed it instead.
             $af = $ownsBox ? '' : $this->freshRcArgFlavor($a);
+            if ($known && !$ownsBox && $this->enumOrdinalsIntoErased($a->type, $pt)
+                && $a->type->element !== null && $this->isEnumType($a->type->element)) {
+                // Enum ordinals into a bare-`array` closure param (#513): the
+                // rebuild consumes an owned temp and is itself the call's temp.
+                $out .= $this->rebuildEnumOrdinals($a);
+                $af = $this->discardReleaseFlavor(Type::vec(Type::cell()));
+            }
             if ($packNode !== null && $a === $packNode && $packTarget !== null) {
                 // The cell-built pack is rebuilt into the typed vec, MOVING
                 // every value: its bare buffer is dead now, and the rebuilt vec
@@ -4867,6 +4874,7 @@ trait EmitLlvmCalls
      * @param string[] $slots
      * @param string[] $tmps
      * @param string[] $bits
+     * @param bool[] $unbox
      */
     private function emitDynByRefRebox(array $slots, array $tmps, array $bits, array $unbox = []): string
     {
@@ -5139,6 +5147,7 @@ trait EmitLlvmCalls
      * callee's param declares an erased or cell element (a bare `array &`, a
      * `mixed[] &`), so its writes are what the callee's channel makes them.
      * A callee that declares the same concrete element writes raw words already.
+     * @param Type[] $ptypes
      */
     private function byRefConformKind(Node $a, array $ptypes, int $ai): ?int
     {
@@ -6309,6 +6318,23 @@ trait EmitLlvmCalls
             $out .= $this->coerceToI64();
             $this->litElemDropRegs[] = $this->lastValue;
             $this->litElemDropFlavors[] = '!' . $this->discardReleaseFlavor($paramType);
+        } elseif ($paramType !== null && $this->enumOrdinalsIntoErased($a->type, $paramType)
+            && $a->type->element !== null && $this->isEnumType($a->type->element)
+            && ($collect || $this->cellifySourceFlavor($a) !== '')) {
+            // Enum ordinals into a bare-`array` param (#513): the callee reads by
+            // the buffer's hint and an ordinal has none, so it gets a rebuild with
+            // each ordinal resolved to its singleton. An owned temp is consumed by
+            // the rebuild and the arg's own post-call release then drops the
+            // rebuild; a borrowed source keeps its owner, so the rebuild is the
+            // call's own temp and goes after the call.
+            // Direct elements only: a NESTED rebuild co-owns fresh inner copies that
+            // a literal arg's buffer-only post-call release would leak.
+            $owned = $this->cellifySourceFlavor($a) !== '';
+            $out .= $this->rebuildEnumOrdinals($a);
+            if (!$owned) {
+                $this->litElemDropRegs[] = $this->lastValue;
+                $this->litElemDropFlavors[] = '!' . $this->discardReleaseFlavor(Type::vec(Type::cell()));
+            }
         }
         // An int/bool arg to a declared `float` param converts numerically
         // (sitofp) — else the integer bits bitcast through the i64 ABI carrier

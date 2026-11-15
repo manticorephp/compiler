@@ -126,6 +126,21 @@ final class DocNames
         return self::qualify($raw, $ns, $uses);
     }
 
+    /**
+     * A param's qualified docblock type: the function's `@param`, else, for a promoted constructor
+     * param, its own `@var` (\Analyze\DocType::promotedVar).
+     *
+     * @param array<string, string> $uses
+     * @param string[] $templates
+     */
+    public static function paramType(?string $fnDoc, \Parser\Ast\Param $p, string $ns, array $uses, array $templates): ?string
+    {
+        $t = self::tagType($fnDoc, '@param', $p->name, $ns, $uses, $templates);
+        if ($t !== null || \Analyze\DocType::promotedVar($p) === null) { return $t; }
+        return self::tagType($p->docComment, '@var', $p->name, $ns, $uses, $templates)
+            ?? self::tagType($p->docComment, '@var', '', $ns, $uses, $templates);
+    }
+
     /** The tag text with `@phpstan-` then `@psalm-` spellings beating the plain tag. */
     public static function rawTag(?string $doc, string $tag, string $var): ?string
     {

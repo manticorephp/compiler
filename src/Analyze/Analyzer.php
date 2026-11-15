@@ -28,6 +28,7 @@ final class Analyzer
      * @param bool $checkUndefined  run closed-world undefined-symbol rules (only
      *                              safe in whole-project mode)
      * @param ?Index $libIndex    the libFiles already indexed (a cached prelude index), used instead of them
+     * @param string[] $stdlibFns  lowercased stdlib function names
      * @return Diagnostic[]
      */
     public function run(array $files, array $libFiles = [], bool $checkUndefined = false, array $stdlibFns = [], ?Index $libIndex = null): array

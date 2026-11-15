@@ -23,6 +23,10 @@ final class ClosedFiles
     private $docs;
     /** @var callable|null runs between files of a long query; throws to abandon it */
     private $check = null;
+    /** @var array<string, string> uri => `mtime:size` of the file when it was indexed */
+    private array $sig = [];
+    /** @var callable|null returns the uris of every PHP file currently under the workspace roots */
+    private $discover = null;
 
     /** @param callable $docs returns array<string, string> uri => open text */
     public function __construct(private Workspace $ws, callable $docs, private int $max = self::MAX)
@@ -33,6 +37,11 @@ final class ClosedFiles
     public function setCheck(callable $check): void
     {
         $this->check = $check;
+    }
+
+    public function setDiscover(callable $discover): void
+    {
+        $this->discover = $discover;
     }
 
     public function add(string $uri): void
@@ -63,7 +72,7 @@ final class ClosedFiles
     public function forget(string $uri): void
     {
         $this->ws->remove($uri);
-        unset($this->scanned[$uri], $this->unindexed[$uri]);
+        unset($this->scanned[$uri], $this->unindexed[$uri], $this->sig[$uri]);
     }
 
     /** Refresh the index entry of a closed file from disk; a file that is gone is forgotten. */
@@ -74,6 +83,7 @@ final class ClosedFiles
             $this->forget($uri);
             return;
         }
+        $this->sig[$uri] = self::sigOf($path) ?? '';
         $size = @\filesize($path);
         $text = $size === false || $size > self::MAX_BYTES ? false : @\file_get_contents($path);
         if ($text === false) {
@@ -89,6 +99,40 @@ final class ClosedFiles
             $this->scanned[$uri] = true;
             $this->unindexed[$uri] = true;
         }
+    }
+
+    private static function sigOf(string $path): ?string
+    {
+        \clearstatcache();
+        $st = @\stat($path);
+        return $st === false ? null : $st['mtime'] . ':' . $st['size'];
+    }
+
+    /**
+     * Bring the index in line with the disk before a query that trusts it: a closed file whose mtime or size changed since
+     * it was indexed is re-read, a deleted one forgotten, a new one under the roots indexed. Returns how many files changed.
+     * ponytail: mtime has one-second granularity, so a same-size edit within the second of indexing is missed; the watcher covers it.
+     */
+    public function refresh(): int
+    {
+        $n = 0;
+        /** @var array<string, string> $open */
+        $open = ($this->docs)();
+        foreach (\array_keys($this->scanned) as $uri) {
+            if (isset($open[$uri])) { continue; }
+            $path = Uri::toPath($uri);
+            $sig = $path === null ? null : self::sigOf($path);
+            if ($sig === null) { $this->forget($uri); $n++; continue; }
+            if (($this->sig[$uri] ?? '') !== $sig) { $this->reindex($uri); $n++; }
+        }
+        if ($this->discover !== null) {
+            foreach (($this->discover)() as $uri) {
+                if (isset($this->scanned[$uri]) || isset($open[$uri])) { continue; }
+                $this->reindex($uri);
+                $n++;
+            }
+        }
+        return $n;
     }
 
     /** Forget every scanned file under a deleted directory URI prefix (ending in /). */

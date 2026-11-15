@@ -36,5 +36,7 @@ final class Param
         public readonly bool $promotedReadonly,
         public readonly array $attributes,
         public readonly Span $span,
+        /** The param's own docblock: a promoted param's inline `@var` ({@see \Analyze\DocType::promotedVar}). */
+        public readonly ?string $docComment = null,
     ) {}
 }

@@ -12,6 +12,7 @@ namespace Parser\Ast;
  */
 final class EnumCase
 {
+    /** @param AttributeNode[] $attributes */
     public function __construct(
         public readonly string $name,
         public readonly ?Expr $value,

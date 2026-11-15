@@ -607,6 +607,9 @@ trait LowerPrelude
         return $out;
     }
 
+    /**
+     * @return array<string,bool>
+     */
     private function maybeUninitIn(\Compile\Mir\ClassDef $cd): array
     {
         if ($cd->isPreludeClass || $cd->isExternClass || $cd->isStruct) { return []; }
@@ -659,7 +662,10 @@ trait LowerPrelude
         return $p !== false && isset($this->walkerReachableClasses[\substr($cname, $p + 1)]);
     }
 
-    /** @param bool $all every class, not only the ones a walker reaches (a `__toString` arm must not depend on reachability) */
+    /**
+     * @param bool $all every class, not only the ones a walker reaches (a `__toString` arm must not depend on reachability)
+     * @return string[]
+     */
     private function walkableClassesDerivedFirst(bool $all = false): array
     {
         $names = [];
@@ -1531,6 +1537,10 @@ trait LowerPrelude
         return $alloc . $fill . $enum;
     }
 
+    /**
+     * @param Node[] $mainStmts
+     * @return Node[]
+     */
     private function injectCliSuperglobals(array $mainStmts): array
     {
         $readArgv = false; $readArgc = false;

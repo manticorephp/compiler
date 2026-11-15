@@ -412,6 +412,7 @@ trait LowerAttrChecks
      * `, <message>`, each optional. Constructor order is
      * `(?string $message, ?string $since)`, so positional 0 is the MESSAGE.
      * Only string literals are read; anything else is ignored.
+     * @return array<string,string>
      */
     private function attrStrArgs(\Parser\Ast\AttributeNode $a): array
     {

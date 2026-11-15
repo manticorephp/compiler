@@ -313,7 +313,7 @@ check('M1: property hooks get their own scope; set binds $value', function () {
 });
 
 check('M2: parse-error-region blocker for variable, member and class renames; none when clean', function () {
-    $bad = "<?php\nclass {\n";
+    $bad = "<?php\nclass {\n// m A\n";
     $good = "<?php\nclass A { public function m(\$a) { return \$a; } }\nfunction f(\$z) { return (new A)->m(\$z); }\n";
     $w = ws(['good.php' => $good, 'bad.php' => $bad]);
     $has = fn($bl, $f) => in_array('parse-error-region:' . $f, $bl, true);

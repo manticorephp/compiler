@@ -81,6 +81,24 @@ for m in "$WORK/opt/bin/manticore" "$WORK/bare/bin/manticore"; do
     fi
 done
 
+# `manticore lsp` must initialize and shut down from any cwd, through a symlink, and
+# from a bare copy (embedded library stubs).
+lsp_frame() { printf 'Content-Length: %d\r\n\r\n%s' "${#1}" "$1"; }
+{
+    lsp_frame '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":null,"capabilities":{}}}'
+    lsp_frame '{"jsonrpc":"2.0","id":2,"method":"shutdown"}'
+    lsp_frame '{"jsonrpc":"2.0","method":"exit"}'
+} > "$WORK/lsp.in"
+lsp_check() { # what, binary
+    local rc=0
+    ( cd / && "$2" lsp < "$WORK/lsp.in" > "$WORK/lsp.out" 2> "$WORK/lsp.err" ) || rc=$?
+    if [ "$rc" = 0 ] && grep -q '"serverInfo"' "$WORK/lsp.out"; then echo "PASS lsp initialize/shutdown: $1"
+    else echo "FAIL lsp initialize/shutdown: $1 (rc $rc)"; head -c 400 "$WORK/lsp.err"; fail=1; fi
+}
+lsp_check "installed layout, cwd /" "$WORK/opt/bin/manticore"
+lsp_check "symlink" "$WORK/sym/manticore"
+lsp_check "bare copy (embedded stubs)" "$WORK/bare/bin/manticore"
+
 # The blocking-offload pool is pay-for-use: a program that never names Async\
 # carries no worker thread code. An Async\ program is the control that the
 # symbol names still match.

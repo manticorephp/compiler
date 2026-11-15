@@ -31,6 +31,13 @@ final class Workspace
 {
     private const BLOCKER_CAP = 50;
 
+    /** Methods of php's built-in interfaces that the engine calls implicitly (`$a[..]`, `foreach`, `count()`, `json_encode`, string casts): lower-cased method => interface. */
+    private const IMPLICIT_METHODS = [
+        'offsetexists' => 'ArrayAccess', 'offsetget' => 'ArrayAccess', 'offsetset' => 'ArrayAccess', 'offsetunset' => 'ArrayAccess',
+        'current' => 'Iterator', 'key' => 'Iterator', 'next' => 'Iterator', 'rewind' => 'Iterator', 'valid' => 'Iterator',
+        'getiterator' => 'IteratorAggregate', 'count' => 'Countable', 'jsonserialize' => 'JsonSerializable',
+    ];
+
     private Index $index;
     private NameIndex $names;
 
@@ -54,6 +61,9 @@ final class Workspace
 
     /** @var array<string, Diagnostic[]> uri => parse errors of a file whose text does not parse (kept after close) */
     private array $parseErrors = [];
+
+    /** @var array<string, string> uri => lower-cased text of a file with a parse error or a heredoc (kept after close): a blocker from such a file applies only to a symbol whose name the text contains */
+    private array $scopeText = [];
 
     /** @var array<string, string> uri => open text (completion reads the line before the cursor) */
     private array $texts = [];
@@ -86,6 +96,7 @@ final class Workspace
             unset($this->parseErrors[$uri]);
         }
         unset($this->unitLookups[$uri], $this->varIndexes[$uri]);
+        if ($pf->hasErrors || \str_contains($text, '<<<')) { $this->scopeText[$uri] = \strtolower($text); } else { unset($this->scopeText[$uri]); }
         $this->siteCache = [];
         $this->asts[$uri] = $pf;
         $this->lines[$uri] = new LineIndex($text);
@@ -135,7 +146,7 @@ final class Workspace
     public function remove(string $uri): void
     {
         self::assertUserUri($uri);
-        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->varIndexes[$uri], $this->parseErrors[$uri], $this->texts[$uri]);
+        unset($this->asts[$uri], $this->lines[$uri], $this->exprAt[$uri], $this->unitLookups[$uri], $this->varIndexes[$uri], $this->parseErrors[$uri], $this->texts[$uri], $this->scopeText[$uri]);
         $this->siteCache = [];
         $this->index->removeFile($uri);
         $this->names->removeFile($uri);
@@ -384,7 +395,11 @@ final class Workspace
             if ($o !== null) { return []; }
         }
         if ($o === null) { return []; }
-        $out = $this->names->uncertainSites($o->resolvedLower);
+        $needle = self::needleOf($o);
+        $out = [];
+        foreach ($this->names->uncertainSites($o->resolvedLower) as $s) {
+            if ($this->heredocApplies($s, $uri, $needle)) { $out[] = $s; }
+        }
         if ($o->kind !== 'member') { return $out; }
         foreach ($this->membersOf($o) ?? [] as $m) {
             foreach ($this->index->familyAdaptations($m) as $a) { $out[] = new UncertainSite($a[0], $a[1], $a[2], 'trait-adaptation'); }
@@ -875,19 +890,51 @@ final class Workspace
             if ($ms === null) { $out[] = $o->isDecl ? 'owner-unknown' : 'unresolved-member'; }
             foreach ($ms ?? [] as $m) {
                 if ($m->implicit) { $out[] = 'implicit-member'; }
+                if ($m->kind === 'method') {
+                    $lm = \strtolower($m->name);
+                    if (\str_starts_with($lm, '__')) { $out[] = 'magic-method'; }
+                    foreach ($this->index->memberFamily($m) as $fm) {
+                        $iface = self::IMPLICIT_METHODS[\strtolower($fm->name)] ?? null;
+                        if ($iface !== null && $this->index->isSubtype($fm->declClass, $iface)) { $out[] = 'implicit-interface-method:' . $iface; break; }
+                    }
+                }
                 if (\str_starts_with($m->file, LibrarySymbols::LABEL_PREFIX)) { $out[] = 'library-declaration'; }
                 $d = $this->names->occurrenceAt($m->file, $m->line, $m->col);
                 if ($d !== null && $d->isDecl && $d->owner === '') { $out[] = 'owner-unknown'; }
                 foreach ($this->index->familyAdaptations($m) as $a) { $out[] = 'trait-adaptation:' . $a[0] . ':' . $a[1] . ':' . $a[2]; }
             }
         }
-        foreach (\array_keys($this->parseErrors) as $bad) { $out[] = 'parse-error-region:' . $bad; }
+        $needle = self::needleOf($o);
+        foreach (\array_keys($this->parseErrors) as $bad) {
+            if ($bad === $uri || $this->mentions($bad, $needle)) { $out[] = 'parse-error-region:' . $bad; }
+        }
         foreach ($this->names->uncertainSites('') as $s) {
+            if (!$this->heredocApplies($s, $uri, $needle)) { continue; }
             if ($s->reason === 'heredoc-interpolation') { $out[] = 'heredoc-interpolation:' . $s->file . ':' . $s->line . ':' . $s->col; }
             if ($s->reason === 'heredoc-scan-failed') { $out[] = 'heredoc-scan-failed:' . $s->file; }
         }
         foreach ($this->capped($this->uncertainSitesFor($uri, $line, $col), $out) as $b) { $out[] = $b; }
         return \array_values(\array_unique($out));
+    }
+
+    /** Lower-cased name a file must spell to hold a use of the symbol (the bare name: the namespace part is never the only spelling). */
+    private static function needleOf(NameOccurrence $o): string
+    {
+        return $o->kind === 'member' ? \strtolower(\ltrim($o->resolved, '$')) : self::bareName($o->resolvedLower);
+    }
+
+    /** Does a file that is a blocker source (parse error, heredoc) contain the needle? Unknown text answers yes. */
+    private function mentions(string $file, string $needle): bool
+    {
+        $t = $this->scopeText[$file] ?? null;
+        return $t === null || $needle === '' || \str_contains($t, $needle);
+    }
+
+    /** A heredoc site counts only in the file under the cursor or in a file that mentions the symbol; other site kinds always count. */
+    private function heredocApplies(UncertainSite $s, string $uri, string $needle): bool
+    {
+        if ($s->reason !== 'heredoc-interpolation' && $s->reason !== 'heredoc-scan-failed') { return true; }
+        return $s->file === $uri || $this->mentions($s->file, $needle);
     }
 
     /**

@@ -149,6 +149,8 @@ check('compiler_grammar_forms', function () {
         ['ReflectionClass<covariant T>', 'ReflectionClass<T>'],
         ['non-empty-array{a: int}', 'non-empty-array{a:int}'], ['non-empty-list{int, string}', 'non-empty-list{0:int,1:string}'],
         ['array{1: int, string}', 'array{1:int,2:string}'], ['?string[]|null', '?array<string>'],
+        ['(A|null)[]', 'array<?A>'], ['(A|B)[]', 'array<A|B>'], ['?A[]', '?array<A>'], ['(A)[]', 'array<A>'],
+        ['array<(A|B)>', 'array<A|B>'], ['list<(A|B)>', 'list<A|B>'], ['(A|B)[][]', 'array<array<A|B>>'],
     ];
     foreach ($rows as [$in, $want]) {
         $t = SourceTypeParser::fromHint($in);

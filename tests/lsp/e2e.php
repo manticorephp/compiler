@@ -57,7 +57,7 @@ function check(string $name, bool $ok, string $extra = ''): void
 }
 
 [$got, $code, $rest, $err] = session($bin, [
-    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///tmp']],
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///nonexistent-e2e']],
     ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
     ['jsonrpc' => '2.0', 'id' => 2, 'method' => 'shutdown'],
     ['jsonrpc' => '2.0', 'method' => 'exit'],
@@ -114,7 +114,7 @@ check('rename round trip edits main.php and lib.php', ($got[2]['id'] ?? null) ==
 
 $uri = 'file:///tmp/lspe2e_sym.php';
 [$got, $code, $rest, $err] = session($bin, [
-    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///tmp']],
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///nonexistent-e2e']],
     ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
     ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nclass Foo {\n    public function bar() {}\n}\n"]]],
     ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/documentSymbol', 'params' => ['textDocument' => ['uri' => $uri]]],
@@ -128,7 +128,7 @@ check('documentSymbol round trip: class Foo with method bar', ($got[2]['id'] ?? 
 
 $uri = 'file:///tmp/lspe2e_comp.php';
 [$got, $code, $rest, $err] = session($bin, [
-    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///tmp']],
+    ['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize', 'params' => ['rootUri' => 'file:///nonexistent-e2e']],
     ['jsonrpc' => '2.0', 'method' => 'initialized', 'params' => new stdClass()],
     ['jsonrpc' => '2.0', 'method' => 'textDocument/didOpen', 'params' => ['textDocument' => ['uri' => $uri, 'text' => "<?php\nclass Foo {\n    public \$pub;\n    private \$priv;\n    public function bar() {}\n}\nfunction t(Foo \$a) {\n    \$a->\n}\n"]]],
     ['jsonrpc' => '2.0', 'id' => 3, 'method' => 'textDocument/completion', 'params' => ['textDocument' => ['uri' => $uri], 'position' => ['line' => 7, 'character' => 8]]],

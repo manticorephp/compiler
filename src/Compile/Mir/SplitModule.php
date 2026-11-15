@@ -672,6 +672,7 @@ final class SplitModule
      * @param array<string, bool>                 $internal
      * @param string[]                            $globalOrder
      * @param array<string, string>               $globals
+     * @param array<string, bool>                 $owned globals already defined by an earlier part
      */
     private function closePart(int $p, array $defOrder, array $defRefs, array $defSize,
                                array $assign, array $internal, array $globalOrder,
