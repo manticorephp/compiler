@@ -125,16 +125,38 @@ final class LibrarySymbols
         return $out;
     }
 
+    /**
+     * Stdlib function names from the stdlib stub section, for a binary with no `.sig` beside it
+     * (a bare copy): the names a user program can call, less the internal ones the stubs leave out.
+     *
+     * @return string[]
+     */
+    private static function stubFunctionNames(): array
+    {
+        $src = self::sections()[self::STDLIB_LABEL] ?? null;
+        if ($src === null) {
+            return [];
+        }
+        try {
+            /** @var string[] $declNames */
+            $declNames = [];
+            $idx = \Analyze\Index::build([new ParsedFile(self::LABEL_PREFIX . self::STDLIB_LABEL, \Parser\Parser::parseSource($src))]);
+            foreach ($idx->functions as $fn) {
+                $declNames[] = $fn->name;
+            }
+            return self::normalizeNames($declNames);
+        } catch (\Throwable $e) {
+            return [];
+        }
+    }
+
     /** @return string[] */
     private static function readStdlibNames(): array
     {
         $path = \Manticore\find_stdlib_sig();
-        if ($path === "") {
-            return [];
-        }
-        $json = \Manticore\read_file($path);
+        $json = $path === "" ? null : \Manticore\read_file($path);
         if ($json === null) {
-            return [];
+            return self::stubFunctionNames();
         }
         try {
             /** @var string[] $declNames */
