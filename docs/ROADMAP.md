@@ -149,7 +149,9 @@ Known semantic gaps in detail: [`gaps.md`](gaps.md).
 - [x] `manticore doctor`, `manticore completions`, `manticore version --check`
 - [x] Every front-end error and reachable undeclared name reported in one pass (`--check`, #627, #489 steps 1–3)
 - [x] `manticore lsp`: language server (diagnostics, hover, definition, references, rename, outline, completion) + VS Code client ([`lsp.md`](lsp.md))
-- [ ] LSP: incremental sync, lazy reparse of closed files, library navigation
+- [x] LSP + `analyze` read library stubs (`manticore stubs --library`, embedded in the binary): a bare binary works, library navigation opens the prelude source
+- [x] `manticore stubs`: declaration-only stubs of any PHP code ([`cli.md`](cli.md#stubs))
+- [ ] LSP: incremental sync, lazy reparse of closed files
 - [x] One version source: `COMPILER_VERSION`, checked in CI and at release
 - [ ] Surface the ABI version in `manticore version`
 - [ ] Dependency fetching and a shared module cache (design exists, not built)
