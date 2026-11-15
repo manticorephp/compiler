@@ -256,6 +256,8 @@ final class PreludeDemand
     public static function definedFunctions(string $src): array
     {
         if ($src === '') { return []; }
+        // A small file scans faster than its cache entry is looked up, and every new program would leave one.
+        if (\strlen($src) < 8192) { return self::scanDefinedFunctions($src); }
         $path = '';
         try {
             $exe = \Manticore\self_exe_id();

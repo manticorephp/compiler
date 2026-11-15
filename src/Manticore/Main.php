@@ -1018,9 +1018,10 @@ function obj_cache_prune(): void
         if (!\is_dir($d)) {
             continue;
         }
+        // Detached: the listing of a multi-GB cache sat between clang and the link.
         system(
-            'cd ' . $d . ' && ls -lt | awk -v cap=' . (string)$cap
-            . " 'NR>1 && \$9 ~ /\\.o\$/ { s += \$5; if (s > cap) print \$9 }' | xargs rm -f"
+            '(cd ' . \escapeshellarg($d) . ' && ls -lt | awk -v cap=' . (string)$cap
+            . " 'NR>1 && \$9 ~ /\\.o\$/ { s += \$5; if (s > cap) print \$9 }' | xargs rm -f) >/dev/null 2>&1 &"
         );
     }
 }
@@ -1030,7 +1031,9 @@ function obj_cache_prune(): void
  * that nothing has written for two weeks. Their keys carry the compiler's
  * identity, so every rebuild leaves the previous set unread for good; a live
  * entry that ages out is simply recomputed once. Runs when a new entry is
- * stored, at most once per directory per process; any error is ignored.
+ * stored, at most once per directory per day, in a detached `find`: the
+ * directory holds hundreds of thousands of entries after a few weeks of
+ * rebuilds, and a synchronous scan cost seconds per compile. Errors are ignored.
  */
 function side_cache_prune(string $dir): void
 {
@@ -1040,17 +1043,15 @@ function side_cache_prune(string $dir): void
     }
     $done[$dir] = true;
     try {
-        $cut = \time() - 14 * 86400;
-        foreach (\scandir($dir) ?: [] as $e) {
-            $e = (string)$e;
-            if (\preg_match('/^[0-9a-f]{40}\.(json|txt)(\.tmp[0-9_]*)?$/', $e) !== 1) {
-                continue;
-            }
-            $m = \filemtime($dir . '/' . $e);
-            if ($m !== false && $m < $cut) {
-                \unlink($dir . '/' . $e);
-            }
+        $stamp = $dir . '/.pruned';
+        if (\file_exists($stamp) && \filemtime($stamp) > \time() - 86400) {
+            return;
         }
+        \touch($stamp);
+        system(
+            'find ' . \escapeshellarg($dir) . " -maxdepth 1 -type f -mtime +14"
+            . " \\( -name '*.json' -o -name '*.txt' -o -name '*.tmp*' \\) -delete >/dev/null 2>&1 &"
+        );
     } catch (\Throwable $e) {
         // best effort
     }
