@@ -717,7 +717,16 @@ trait InferNodes
             && $fn->params[0]->type->isArray()) {
             $in = $fn->params[0]->type;
             $rt = null;
-            if (!$in->isAssoc() && !$in->hasShape()) {
+            if ($u->key !== null) {
+                // The key the store loop BUILDS wins: a foreach over a list of cells or
+                // over a string-keyed array binds its key as a cell (a hashed buffer;
+                // php turns a numeric-string key into an int), so `$o[$k] = …` builds a
+                // cell-keyed result. NarrowReturns keys the return from the same body;
+                // typing it from the input instead re-typed it against NarrowReturns
+                // every sweep, one "narrowed" function per round up to the round cap
+                // (symfony-app: ~12k rounds, 18 minutes).
+                $rt = Type::assoc($u->key, $u->element);
+            } elseif (!$in->isAssoc() && !$in->hasShape()) {
                 $rt = Type::vec($u->element);
             } elseif ($in->key !== null && ($in->key->kind === Type::KIND_STRING || $in->key->kind === Type::KIND_INT)) {
                 $rt = Type::assoc($in->key, $u->element);

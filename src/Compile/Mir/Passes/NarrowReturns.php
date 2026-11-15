@@ -113,6 +113,8 @@ final class NarrowReturns implements Pass
         $closeOnFull = !$this->concreteOnly;
         $lastRunMoved = false;
         $max = \count($module->functions) + 2;
+        /** @var array<string, bool> $narrowedNames */
+        $narrowedNames = [];
         while ($iters < $max) {
             $iters = $iters + 1;
             $roundT = \Compile\Stats::begin('  narrow round ' . (string)$iters);
@@ -265,7 +267,13 @@ final class NarrowReturns implements Pass
                 $inferT, \count($module->functions), -1);
         }
         if ($iters >= $max) {
-            \Compile\Stats::line('narrow: HIT THE ROUND CAP (' . (string)$max . ')');
+            // Every productive sweep narrows monotonically, so the function count
+            // bounds the rounds: reaching it means two owners re-type a return
+            // against each other, and the module is NOT at a fixpoint. That once
+            // cost symfony-app 18 minutes in silence (a fused array_map keyed one
+            // way by inference and another by this pass); fail loudly instead.
+            throw new \RuntimeException('NarrowReturns: no fixpoint after ' . (string)$max
+                . ' rounds; still re-typed: ' . \implode(' ', \array_slice(\array_keys($narrowedNames), 0, 12)));
         }
         $module->markPassApplied(self::NAME);
         return $module;
