@@ -1,0 +1,6 @@
+ok: foo
+param: param: TypeError: Locator::get(): Return value must be of type Bar, Foo returned
+property: property: TypeError: Locator::get(): Return value must be of type Bar, Foo returned
+concrete: concrete: TypeError: Locator::get(): Return value must be of type Bar, Foo returned
+abstract: abstract: TypeError: Finder::find(): Return value must be of type ?Bar, Foo returned
+done

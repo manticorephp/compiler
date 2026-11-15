@@ -440,7 +440,7 @@ element/key fidelity gap); float formatting precision (`var_dump(0.1+0.2)` →
 ## Array shapes (2026-09-21)
 
 A docblock `array{k:T, k2?:U, V}` / `list{…}` / `non-empty-*{…}` lowers
-(`LowerTypes::lowerArrayShape`, depth-aware `splitTopLevel` counting `{}`) to
+(`Semantic\SourceTypeParser` SHAPE node → `LowerTypes::lowerSourceShape`) to
 `Type::$fields`, keyed by `Type::shapeKey` (`i<n>` / `s<name>`, php-canonicalised
 numeric strings — never a mixed int|string PHP map, which the self-hosted
 compiler cannot read back), plus `Type::$nullableFields` (`key?:` or `?T`/`T|null`)

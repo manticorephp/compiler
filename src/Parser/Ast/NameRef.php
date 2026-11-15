@@ -7,7 +7,14 @@ namespace Parser\Ast;
  * parser statically resolved it to. $kind is class | function | constant |
  * namespace | use. $globalFallback is true for an unqualified function or
  * constant name that PHP falls back to the global namespace for at run time
- * (the parser cannot know whether that global symbol exists).
+ * (the parser cannot know whether that global symbol exists). $role is empty,
+ * the imported kind (class | function | constant) on a `use` entry, or `decl` on a
+ * declaration name (then $kind is class | function | member; enum cases, class constants,
+ * methods and properties are members, never global constants).
+ * At declNames >= 2 a `member` entry with role prop | method | const | sprop is a USE of
+ * `->p`, `->m()`, `::m()`, `::C`, `::$p` (`written` is the lexeme, `$p` for sprop; `resolved` is the bare
+ * name; an enum case reads as `const`; `::class` and the dynamic forms `->$p`, `->{'x'}`, `A::{e}()`, `A::$f()` emit nothing), and a `variable` entry with role
+ * param | catch | global | static is a variable DECLARATION (`written` keeps the `$`).
  */
 final class NameRef
 {
@@ -17,5 +24,6 @@ final class NameRef
         public readonly string $resolved,
         public readonly string $kind,
         public readonly bool $globalFallback,
+        public readonly string $role = '',
     ) {}
 }

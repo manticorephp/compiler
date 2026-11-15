@@ -20,20 +20,20 @@ Program
           Expr:BinaryOp @3:6-5:1
             op: "."
             left:
-              Expr:BinaryOp @3:6-5:1
+              Expr:BinaryOp @3:6-4:3
                 op: "."
                 left:
-                  Expr:StringLiteral @3:6-5:1
+                  Expr:StringLiteral @3:7-4:1
                     value: "abc
 "
                 right:
-                  Expr:Cast @3:6-5:1
+                  Expr:Cast @4:1-4:3
                     cast: "string"
                     operand:
-                      Expr:Variable @3:6-5:1
+                      Expr:Variable @4:1-4:3
                         name: "t"
             right:
-              Expr:StringLiteral @3:6-5:1
+              Expr:StringLiteral @4:3-4:8
                 value: " = 2;"
     docComment: null
     attributes: [0]

@@ -1,0 +1,3 @@
+tests/analyze/cases/dup_decl_user/b.php:5:1: warning: too many arguments to d(): 1 passed, at most 0 expected
+
+Found 0 error(s), 1 warning(s).

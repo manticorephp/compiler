@@ -406,6 +406,13 @@ bash tests/parser/run.sh > "$MC_LOGDIR/parser.log" 2>&1
 parser_rc=$?
 tail -5 "$MC_LOGDIR/parser.log"
 
+# The analyzer library (Semantic\Workspace and friends), compiled natively with bin/manticore.
+echo
+echo "=== tests/semantic/run.sh (analyzer library, native) ==="
+bash tests/semantic/run.sh > "$MC_LOGDIR/semantic.log" 2>&1
+semantic_rc=$?
+tail -5 "$MC_LOGDIR/semantic.log"
+
 # Every array in src/ names its element type (a bare `array` erases it); known exceptions are baselined.
 echo
 echo "=== src/ array element types (analyze --only array.no-value-type) ==="
@@ -414,7 +421,7 @@ arraytypes_rc=$?
 
 else
     echo "=== smokes skipped (MC_SMOKES=0) — the build job ran them ==="
-    install_rc=0; lib_rc=0; refpack_rc=0; lazy_rc=0; twins_rc=0; cli_rc=0; parser_rc=0; arraytypes_rc=0
+    install_rc=0; lib_rc=0; refpack_rc=0; lazy_rc=0; twins_rc=0; cli_rc=0; parser_rc=0; semantic_rc=0; arraytypes_rc=0
 fi
 echo
 suite_rc=0
@@ -481,8 +488,8 @@ fi
 
 if [ "$MC_DIFFTEST" != "1" ] && [ "$MC_FIXPOINT" != "1" ]; then
     echo
-    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc liblazyunits=$lazy_rc libbuiltintwins=$twins_rc cli=$cli_rc parser=$parser_rc arraytypes=$arraytypes_rc known-bugs=[$XFAIL_LABEL] ==="
-    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$lazy_rc" = "0" ] && [ "$twins_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$parser_rc" = "0" ] && [ "$arraytypes_rc" = "0" ] && [ "$xfail_rc" = "0" ] || exit 1
+    echo "=== RESULT: suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc liblazyunits=$lazy_rc libbuiltintwins=$twins_rc cli=$cli_rc parser=$parser_rc semantic=$semantic_rc arraytypes=$arraytypes_rc known-bugs=[$XFAIL_LABEL] ==="
+    [ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$lazy_rc" = "0" ] && [ "$twins_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$parser_rc" = "0" ] && [ "$semantic_rc" = "0" ] && [ "$arraytypes_rc" = "0" ] && [ "$xfail_rc" = "0" ] || exit 1
     exit 0
 fi
 
@@ -507,6 +514,6 @@ if [ "$MC_FIXPOINT" = "1" ]; then
 fi
 
 echo
-echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc liblazyunits=$lazy_rc libbuiltintwins=$twins_rc cli=$cli_rc parser=$parser_rc arraytypes=$arraytypes_rc difftest=$diff_rc fixpoint=$fix_rc known-bugs=[$XFAIL_LABEL] ==="
-[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$lazy_rc" = "0" ] && [ "$twins_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$parser_rc" = "0" ] && [ "$arraytypes_rc" = "0" ] && [ "$xfail_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
+echo "=== RESULT (gate): suite=${SUITE_LABEL:-$suite_rc} install_smoke=$install_rc libsuperglobal=$lib_rc librefpack=$refpack_rc liblazyunits=$lazy_rc libbuiltintwins=$twins_rc cli=$cli_rc parser=$parser_rc semantic=$semantic_rc arraytypes=$arraytypes_rc difftest=$diff_rc fixpoint=$fix_rc known-bugs=[$XFAIL_LABEL] ==="
+[ "$suite_rc" = "0" ] && [ "$install_rc" = "0" ] && [ "$lib_rc" = "0" ] && [ "$refpack_rc" = "0" ] && [ "$lazy_rc" = "0" ] && [ "$twins_rc" = "0" ] && [ "$cli_rc" = "0" ] && [ "$parser_rc" = "0" ] && [ "$semantic_rc" = "0" ] && [ "$arraytypes_rc" = "0" ] && [ "$xfail_rc" = "0" ] && [ "$diff_rc" = "0" ] && [ "$fix_rc" = "0" ] || exit 1
 exit 0

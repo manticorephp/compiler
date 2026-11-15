@@ -46,20 +46,20 @@ final class UndefinedClassConst
                     if ($low === 'self' || $low === 'static' || $low === 'parent') { continue; }
                     $ci = $idx->findClass($e->class);
                     if ($ci === null) { continue; }
-                    $this->check($pf, $idx, $ci->fqn, $e->name, $e->span->line, $e->span->column);
+                    $this->check($pf, $idx, $ci->fqn, $e->name, $e->span);
                 } elseif ($e instanceof DynamicStaticAccess) {
                     $infer = new Infer($idx, $flow->scopes[$scopeIdx]);
                     $recv = $infer->of($e->receiver);
                     if ($recv->kind !== Ty::KIND_OBJECT || $recv->className === '') { continue; }
                     if ($idx->findClass($recv->className) === null) { continue; }
-                    $this->check($pf, $idx, $recv->className, $e->name, $e->span->line, $e->span->column);
+                    $this->check($pf, $idx, $recv->className, $e->name, $e->span);
                 }
             }
         }
         return $this->diags;
     }
 
-    private function check(ParsedFile $pf, Index $idx, string $class, string $name, int $line, int $col): void
+    private function check(ParsedFile $pf, Index $idx, string $class, string $name, \Parser\Ast\Span $span): void
     {
         if ($name === 'class' || $name === '') { return; }
         if (\substr($name, 0, 1) === '$') { return; }   // static property, not a constant
@@ -67,8 +67,8 @@ final class UndefinedClassConst
         // may be inherited from a built-in base we don't model.
         if (!$idx->fullHierarchyKnown($class, 0)) { return; }
         if ($idx->constExists($class, $name, 0)) { return; }
-        $this->diags[] = Diagnostic::error(
-            $pf->path, $line, $col, 'undefined.constant',
+        $this->diags[] = Diagnostic::at(
+            $pf->path, $span, Diagnostic::SEV_ERROR, 'undefined.constant',
             'unknown constant ' . $class . '::' . $name
         );
     }

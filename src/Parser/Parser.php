@@ -64,6 +64,7 @@ final class Parser
 
     /** 1 when the written-name table is collected (an int, not a bool: see Lexer::scan()). */
     private int $collectNames = 0;
+    private int $declNames = 0;
 
     /** 1 when the tokens are RangedTokens (ranges or names on); only then are token ends read. */
     private int $ends = 0;
@@ -176,7 +177,7 @@ final class Parser
         return $p->parseProgram();
     }
 
-    public static function parseTolerant(string $source, string $file = '', bool $ranges = true, bool $names = true): ParseResult
+    public static function parseTolerant(string $source, string $file = '', bool $ranges = true, bool $names = true, int $declNames = 0): ParseResult
     {
         $lexer = new Lexer();
         $errors = [];
@@ -190,6 +191,7 @@ final class Parser
             $p->ends = ($ranges || $names) ? 1 : 0;
             $p->tolerant = 1;
             $p->collectNames = $names ? 1 : 0;
+            $p->declNames = $declNames;
             // Lexer errors are recorded first: the cap keeps the first 100 in discovery order (not by position), so lexer errors alone can fill it and drop the parser errors.
             foreach ($lexer->errors as $le) { $p->record($le); }
             $program = $p->parseProgram();
@@ -638,11 +640,11 @@ final class Parser
      * Build a UseItem from a fully-resolved FQN string already in
      * hand. Mirrors parseUseItem's `as`-alias + alias-table wiring.
      */
-    private function finishUseItem(string $fqn, string $kind, Token $first, ?string $written = null): UseItem
+    private function finishUseItem(string $fqn, string $kind, Token $first, ?string $written = null, ?Token $nameFirst = null): UseItem
     {
         if ($this->collectNames === 1 && $fqn !== '') {
-            $this->setNameRange($first, $this->prevEndLine, $this->prevEndColumn);
-            $this->noteName($written ?? $fqn, \ltrim($fqn, '\\'), 'use', false);
+            $this->setNameRange($nameFirst ?? $first, $this->prevEndLine, $this->prevEndColumn);
+            $this->noteName($written ?? $fqn, \ltrim($fqn, '\\'), 'use', false, $this->useRole($kind));
         }
         $fqn = \ltrim($fqn, '\\');
         $alias = null;
@@ -677,18 +679,19 @@ final class Parser
             if ($this->checkKeyword('function')) { $this->advance(); $kind = 'function'; }
             elseif ($this->checkKeyword('const')) { $this->advance(); $kind = 'const'; }
         }
+        $nameFirst = $this->peek();
         $tail = $this->parseClassNameLiteral();
         $written = $tail;
         $tail = \ltrim($tail, '\\');
         $fqn = $prefix === '' ? $tail : ($prefix . '\\' . $tail);
-        return $this->finishUseItem($fqn, $kind, $first, $written);
+        return $this->finishUseItem($fqn, $kind, $first, $written, $nameFirst);
     }
 
     private function parseUseItem(string $kind): UseItem
     {
         $first = $this->peek();
         $written = $this->parseClassNameLiteral();
-        if ($this->collectNames === 1) { $this->noteName($written, ltrim($written, '\\'), 'use', false); }
+        if ($this->collectNames === 1) { $this->noteName($written, ltrim($written, '\\'), 'use', false, $this->useRole($kind)); }
         $fqn = ltrim($written, '\\');
         $alias = null;
         if ($this->checkKeyword('as')) {
@@ -749,6 +752,7 @@ final class Parser
         if ($this->currentNamespace !== '') {
             $name = $this->currentNamespace . '\\' . $name;
         }
+        $this->noteDecl($nameTok, $name, 'class', 1);
 
         $decl = $this->finishClassDecl($kindKw, $name, $attributes, $isFinal, $isAbstract, $isReadonly, $span, $docComment, $first);
         return Stmt::class_($decl, $decl->span);
@@ -818,6 +822,7 @@ final class Parser
             $acc->traitAdaptations,
             $docComment,
             $acc->useDocs,
+            $acc->errorMembers,
         );
     }
 
@@ -863,6 +868,7 @@ final class Parser
         if ($this->checkKeyword('case') && $kindKw === 'enum') {
             $this->advance();
             $caseNameTok = $this->expectMemberName('expected enum case name');
+            $this->noteDecl($caseNameTok, $caseNameTok->lexeme, 'member', 1);
             $value = null;
             if ($this->match(TokenKind::Equals)) {
                 $value = $this->parseExpression();
@@ -874,7 +880,7 @@ final class Parser
         }
 
         if ($this->checkKeyword('const')) {
-            foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan, $memberFirst) as $const) {
+            foreach ($this->parseClassConsts($modifiers, $memberAttrs, $memberSpan, $memberFirst, $memberDoc) as $const) {
                 $acc->consts[] = $const;
             }
             return;
@@ -908,6 +914,7 @@ final class Parser
             }
             $iterPos = $this->pos;
             $memberStart = $this->pos;
+            $memberAnchor = $this->span();
             $memberDepth = $this->depth;
             try {
                 $this->parseClassMember($kindKw, $acc);
@@ -915,6 +922,7 @@ final class Parser
                 $this->depth = $memberDepth;
                 $this->record($e);
                 $this->skipToSync($memberStart, true);
+                $acc->errorMembers[] = new \Parser\Ast\ErrorMember($this->endFrom($memberAnchor, $this->tokens[$memberStart]), $this->pos - $memberStart);
             }
         }
     }
@@ -1035,6 +1043,7 @@ final class Parser
         while (true) {
             $varTok = $this->expect(TokenKind::Variable, 'expected $property');
             $name = substr($varTok->lexeme, 1);
+            $this->noteDecl($varTok, $name, 'member', 2);
             $default = null;
             if ($this->match(TokenKind::Equals)) {
                 $default = $this->parseExpression();
@@ -1122,7 +1131,7 @@ final class Parser
      * @param AttributeNode[] $attrs
      * @return ConstDecl[]
      */
-    private function parseClassConsts(MemberModifiers $modifiers, array $attrs, Span $span, ?Token $first = null): array
+    private function parseClassConsts(MemberModifiers $modifiers, array $attrs, Span $span, ?Token $first = null, ?string $docComment = null): array
     {
         $this->advance(); // 'const'
         $typeHint = null;
@@ -1141,6 +1150,7 @@ final class Parser
         $consts = [];
         while (true) {
             $nameTok = $this->expectMemberName('expected const name');
+            $this->noteDecl($nameTok, $nameTok->lexeme, 'member', 2);
             $this->expect(TokenKind::Equals, "expected '=' in const");
             $value = $this->parseExpression();
             $last = !$this->check(TokenKind::Comma);
@@ -1155,6 +1165,7 @@ final class Parser
                 $attrs,
                 $consts === [] && $first !== null ? $this->endFrom($span, $first) : $this->endFrom($span, $nameTok),
                 $modifiers->isFinal,
+                $docComment,
             );
             if ($last) { return $consts; }
             $this->advance(); // ','
@@ -1172,6 +1183,7 @@ final class Parser
         if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword) {
             throw $this->error('expected method name');
         }
+        $this->noteDecl($nameTok, $nameTok->lexeme, 'member', 2);
         $this->expect(TokenKind::OpenParen, "expected '(' after method name");
         $params = [];
         if (!$this->check(TokenKind::CloseParen)) {
@@ -1231,6 +1243,7 @@ final class Parser
         $returnsByRef = $this->match(TokenKind::Ampersand);
 
         $nameTok = $this->expect(TokenKind::Identifier, 'expected function name');
+        $this->noteDecl($nameTok, $this->currentNamespace !== '' ? $this->currentNamespace . '\\' . $nameTok->lexeme : $nameTok->lexeme, 'function', 1);
         $this->expect(TokenKind::OpenParen, "expected '(' after function name");
 
         $params = [];
@@ -1327,6 +1340,8 @@ final class Parser
 
         $varTok = $this->expect(TokenKind::Variable, 'expected $variable in parameter list');
         $name = substr($varTok->lexeme, 1);
+        $this->noteVarDecl($varTok, 'param');
+        if ($this->collectNames === 1 && ($promoted !== '' || $promotedReadonly)) { $this->noteDecl($varTok, $name, 'member', 2); }
 
         $default = null;
         if ($this->match(TokenKind::Equals)) {
@@ -1867,6 +1882,7 @@ final class Parser
         while (true) {
             $tok = $this->expect(TokenKind::Variable, "expected variable after 'static'");
             $name = ltrim($tok->lexeme, '$');
+            $this->noteVarDecl($tok, 'static');
             $default = null;
             if ($this->match(TokenKind::Equals)) {
                 $default = $this->parseExpression();
@@ -1926,6 +1942,7 @@ final class Parser
         while (true) {
             $tok = $this->expect(TokenKind::Variable, "expected variable after 'global'");
             $names[] = ltrim($tok->lexeme, '$');
+            $this->noteVarDecl($tok, 'global');
             if (!$this->match(TokenKind::Comma)) { break; }
         }
         $this->expect(TokenKind::Semicolon, "expected ';' after global declaration");
@@ -1947,7 +1964,9 @@ final class Parser
             }
             $variableName = null;
             if ($this->check(TokenKind::Variable)) {
-                $variableName = substr($this->advance()->lexeme, 1);
+                $vt = $this->advance();
+                $variableName = substr($vt->lexeme, 1);
+                $this->noteVarDecl($vt, 'catch');
             }
             $this->expect(TokenKind::CloseParen, "expected ')' after catch params");
             $catchBody = $this->parseBlock();
@@ -2754,6 +2773,7 @@ final class Parser
                     throw $this->error('expected member name after ->');
                 }
                 $name = $nameTok->lexeme;
+                if ($this->collectNames === 1) { $this->noteMemberUse($nameTok, $this->check(TokenKind::OpenParen) ? 'method' : 'prop'); }
                 if ($this->check(TokenKind::OpenParen)) {
                     $args = $this->parseArgList();
                     $left = Expr::methodCall($left, $name, $args, $nullsafe, $this->end($span, $left));
@@ -2790,6 +2810,7 @@ final class Parser
                 $this->advance();
                 $memberTok = $this->advance();
                 $memberName = $memberTok->lexeme;
+                $this->noteStaticMember($memberTok);
                 // `$v::{$m}(...)` is `$v::$m(...)` when the braces wrap a plain variable (laravel HigherOrderCollectionProxy).
                 if ($memberTok->kind === TokenKind::OpenBrace) {
                     $nameExpr = $this->parseExpression();
@@ -2944,15 +2965,60 @@ final class Parser
     }
 
     /** Record the name parseClassNameLiteral() read last (call before anything else is consumed). */
-    private function noteName(string $written, string $resolved, string $kind, bool $globalFallback): void
+    private function noteName(string $written, string $resolved, string $kind, bool $globalFallback, string $role = ''): void
     {
-        $this->names[(string)$this->nmLine . ':' . (string)$this->nmColumn . ':' . $kind] = new NameRef(
+        $this->names[(string)$this->nmLine . ':' . (string)$this->nmColumn . ':' . $kind . $role] = new NameRef(
             new RangedSpan($this->nmLine, $this->nmColumn, $this->sourceFile, $this->nmEndLine, $this->nmEndColumn),
             $written,
             $resolved,
             $kind,
             $globalFallback,
+            $role,
         );
+    }
+
+    /** A declaration name token: level 1 = class-likes, functions, enum cases (a member kind); level 2 adds methods, properties and class constants. */
+    private function noteDecl(Token $tok, string $resolved, string $kind, int $level): void
+    {
+        if ($this->collectNames !== 1 || $this->declNames < $level) { return; }
+        $this->setNameRange($tok, $tok->line, $tok->column + \strlen($tok->lexeme));
+        $this->noteName($tok->lexeme, $resolved, $kind, false, 'decl');
+    }
+
+    /** A member-name USE (level 2): role prop | method | const | sprop | case; `resolved` is the bare name, `written` the lexeme (`$p` for sprop). */
+    private function noteMemberUse(Token $tok, string $role): void
+    {
+        if ($this->collectNames !== 1 || $this->declNames < 2) { return; }
+        $this->setNameRange($tok, $tok->line, $tok->column + \strlen($tok->lexeme));
+        $this->noteName($tok->lexeme, \ltrim($tok->lexeme, '$'), 'member', false, $role);
+    }
+
+    /** The member token after `::` (call before `(` is consumed). Enum cases are class constants syntactically: they read as `const`. `::class` is no member. */
+    private function noteStaticMember(Token $tok): void
+    {
+        if ($this->collectNames !== 1 || $this->declNames < 2) { return; }
+        if ($tok->kind === TokenKind::Variable) {
+            if ($tok->lexeme !== '$' && !$this->check(TokenKind::OpenParen)) { $this->noteMemberUse($tok, 'sprop'); }
+            return;
+        }
+        if ($tok->kind !== TokenKind::Identifier && $tok->kind !== TokenKind::Keyword && $tok->kind !== TokenKind::MagicConstant) { return; }
+        if ($this->check(TokenKind::OpenParen)) { $this->noteMemberUse($tok, 'method'); return; }
+        if (\strtolower($tok->lexeme) === 'class') { return; }
+        $this->noteMemberUse($tok, 'const');
+    }
+
+    /** A variable DECLARATION (level 2): role param | catch | global | static; `written` is the lexeme with its `$`, `resolved` without. */
+    private function noteVarDecl(Token $tok, string $role): void
+    {
+        if ($this->collectNames !== 1 || $this->declNames < 2 || $tok->lexeme === '') { return; }
+        $this->setNameRange($tok, $tok->line, $tok->column + \strlen($tok->lexeme));
+        $this->noteName($tok->lexeme, \ltrim($tok->lexeme, '$'), 'variable', false, $role);
+    }
+
+    private function useRole(string $kind): string
+    {
+        if ($this->declNames === 0) { return ''; }
+        return $kind === 'const' ? 'constant' : $kind;
     }
 
     /** A class reference: scalar / pseudo type names are not names. */
@@ -3084,7 +3150,7 @@ final class Parser
         if ($tok->kind === TokenKind::StringLiteral) {
             $this->advance();
             if ($this->needsInterp($tok->lexeme)) {
-                return $this->parseInterpolated($tok->lexeme, $this->end($span));
+                return $this->parseInterpolated($tok->lexeme, $this->end($span), $tok);
             }
             return Expr::string($this->unquoteString($tok->lexeme), $this->end($span));
         }
@@ -3395,7 +3461,7 @@ final class Parser
         }
         if ($this->collectNames === 1) { $this->noteClass($literal, $this->resolveClassName($literal)); }
         $this->advance();
-        $this->advance();
+        $this->noteMemberUse($this->advance(), 'sprop');
         $classExpr = Expr::staticAccess($this->resolveClassName($literal), $pv->lexeme, $this->endFrom($span, $this->tokens[$save]));
         while ($this->check(TokenKind::OpenBracket)) {
             $bspan = $this->span();
@@ -3456,6 +3522,7 @@ final class Parser
                     if ($nameTok->kind !== TokenKind::Identifier && $nameTok->kind !== TokenKind::Keyword && $nameTok->kind !== TokenKind::MagicConstant) {
                         throw $this->error('expected member name after ->');
                     }
+                    $this->noteMemberUse($nameTok, 'prop');
                     $classExpr = Expr::propertyAccess($classExpr, $nameTok->lexeme, $nullsafe, $this->end($mspan, $classExpr));
                     continue;
                 }
@@ -3647,6 +3714,7 @@ final class Parser
                 return new \Parser\Ast\DynamicStaticMethodCall($name, $nameExpr, $this->parseArgList(), $this->end($span));
             }
             // `Class::method(...)`
+            $this->noteStaticMember($member);
             if ($this->check(TokenKind::OpenParen)) {
                 $args = $this->parseArgList();
                 return Expr::staticCall($name, $member->lexeme, $args, $this->end($span));
@@ -3802,6 +3870,11 @@ final class Parser
     /** chars consumed AFTER the backslash by the last {@see decodeEscapeSeq}. */
     private int $escapeLen = 0;
 
+    /** Interpolation cursor: byte offset into the raw string lexeme and the file line/column there (tolerant + ranges). */
+    private int $ipOff = 0;
+    private int $ipLine = 0;
+    private int $ipCol = 0;
+
     /** One code point as UTF-8 bytes, for the `\u{…}` escape. */
     private function utf8Encode(int $cp): string
     {
@@ -3902,79 +3975,186 @@ final class Parser
      * Parse a double-quoted string with interpolation into a concat chain.
      * Supports PHP's simple syntax (`$v`, `$v->prop`, `$v[idx]` where idx is a
      * bareword/int/`$var`) and the complex `{$expr}` form (any expression).
+     *
+     * Tolerant + ranges: every part gets its own range, computed by walking the
+     * RAW lexeme from the string token's start (columns are bytes, a newline
+     * resets the column, exactly like the lexer), and the `{$expr}` body is
+     * lexed at its real position so its nodes and written names are real too.
+     * A heredoc lexeme is normalised (opener and indentation gone), so its walk
+     * does not end where the token does: those strings keep the whole-string
+     * range on every part. `${x}` stays literal text, as in the strict parser.
      */
-    private function parseInterpolated(string $lex, Span $span): Expr
+    private function parseInterpolated(string $lex, Span $span, ?Token $tok = null): Expr
     {
+        $exact = false;
+        if ($tok !== null && $this->tolerant === 1 && $this->ranges === 1) {
+            $this->ipOff = 0;
+            $this->ipLine = $tok->line;
+            $this->ipCol = $tok->column;
+            $this->interpAt($lex, \strlen($lex));
+            $exact = $this->ipLine === $tok->endLine() && $this->ipCol === $tok->endColumn();
+            $this->ipOff = 0;
+            $this->ipLine = $tok->line;
+            $this->ipCol = $tok->column;
+        }
         $body = \substr($lex, 1, \strlen($lex) - 2);
         $n = \strlen($body);
         $parts = [];
+        /** @var Expr[] $inners */
+        $inners = [];
+        /** @var int[] $endLines */
+        $endLines = [];
+        /** @var int[] $endCols */
+        $endCols = [];
+        /** @var string[] literal text of a literal part, '' for any other */
+        $litVals = [];
         $lit = '';
+        $litStart = 0;
         $i = 0;
         while ($i < $n) {
             $c = \substr($body, $i, 1);
             if ($c === '\\' && $i + 1 < $n) {
+                if ($lit === '') { $litStart = $i; }
                 $lit .= $this->decodeEscapeSeq($body, $n, $i + 1);
                 $i = $i + 1 + $this->escapeLen;
                 continue;
             }
             // Complex: {$expr}
             if ($c === '{' && $i + 1 < $n && \substr($body, $i + 1, 1) === '$') {
-                if ($lit !== '') { $parts[] = Expr::string($lit, $span); $lit = ''; }
+                if ($lit !== '') { $parts[] = $this->interpLit($lex, $lit, $litStart, $i, $span, $exact); $inners[] = $parts[\count($parts) - 1]; $litVals[] = $lit; $endLines[] = $this->ipLine; $endCols[] = $this->ipCol; $lit = ''; }
                 $j = $this->interpClose($body, $n, $i + 1);
                 $inner = \substr($body, $i + 1, $j - $i - 1);
-                $parts[] = $this->parseSubExpr($inner, $span);
+                if ($exact) {
+                    $this->interpAt($lex, $i + 1);
+                    $sl = $this->ipLine;
+                    $sc = $this->ipCol;
+                    $this->interpAt($lex, $i + 2);
+                    $part = $this->parseSubExpr($inner, $span, $this->ipLine, $this->ipCol);
+                    if ($j >= $n) {
+                        $this->interpAt($lex, $j + 1);
+                        $this->record(new ParseError('Unterminated "{$" interpolation', $sl, $sc, $this->ipLine, $this->ipCol));
+                    } else {
+                        $this->interpAt($lex, $j + 2);
+                    }
+                } else {
+                    $part = $this->parseSubExpr($inner, $span);
+                }
+                $parts[] = Expr::cast('string', $part, $exact ? $part->span : $span);
+                $inners[] = $part;
+                $litVals[] = '';
+                $endLines[] = $this->ipLine;
+                $endCols[] = $this->ipCol;
                 $i = $j + 1;
                 continue;
             }
             // Legacy: ${name}, ${name[expr]}, ${expr}
             if ($c === '$' && $i + 1 < $n && \substr($body, $i + 1, 1) === '{') {
-                if ($lit !== '') { $parts[] = Expr::string($lit, $span); $lit = ''; }
+                if ($lit !== '') { $parts[] = $this->interpLit($lex, $lit, $litStart, $i, $span, $exact); $inners[] = $parts[\count($parts) - 1]; $litVals[] = $lit; $endLines[] = $this->ipLine; $endCols[] = $this->ipCol; $lit = ''; }
                 $j = $this->interpClose($body, $n, $i + 2);
                 $inner = \substr($body, $i + 2, $j - $i - 2);
                 $k = 0;
                 $il = \strlen($inner);
                 while ($k < $il && $this->isIdentChar(\substr($inner, $k, 1))) { $k = $k + 1; }
-                if ($k > 0 && $this->isIdentStart(\substr($inner, 0, 1)) && ($k === $il || \substr($inner, $k, 1) === '[')) {
-                    $parts[] = $this->parseSubExpr('$' . $inner, $span);
+                $plain = $k > 0 && $this->isIdentStart(\substr($inner, 0, 1)) && ($k === $il || \substr($inner, $k, 1) === '[');
+                $src = $plain ? '$' . $inner : '${' . $inner . '}';
+                if ($exact) {
+                    // `${name…}` reparses as `$name…` laid over `{name…`, so every byte after the sigil keeps its column.
+                    $this->interpAt($lex, $plain ? $i + 2 : $i + 1);
+                    $part = $this->parseSubExpr($src, $span, $this->ipLine, $this->ipCol);
+                    $this->interpAt($lex, \min($j + 2, $n + 1));
                 } else {
-                    $parts[] = $this->parseSubExpr('${' . $inner . '}', $span);
+                    $part = $this->parseSubExpr($src, $span);
                 }
+                $parts[] = Expr::cast('string', $part, $exact ? $part->span : $span);
+                $inners[] = $part;
+                $litVals[] = '';
+                $endLines[] = $this->ipLine;
+                $endCols[] = $this->ipCol;
                 $i = $j + 1;
                 continue;
             }
             // Simple: $name [-> prop | [idx]]
             if ($c === '$' && $i + 1 < $n && $this->isIdentStart(\substr($body, $i + 1, 1))) {
-                if ($lit !== '') { $parts[] = Expr::string($lit, $span); $lit = ''; }
+                if ($lit !== '') { $parts[] = $this->interpLit($lex, $lit, $litStart, $i, $span, $exact); $inners[] = $parts[\count($parts) - 1]; $litVals[] = $lit; $endLines[] = $this->ipLine; $endCols[] = $this->ipCol; $lit = ''; }
+                $a = $i;
                 $i = $i + 1;
                 $ns = $i;
                 while ($i < $n && $this->isIdentChar(\substr($body, $i, 1))) { $i = $i + 1; }
-                $expr = Expr::variable(\substr($body, $ns, $i - $ns), $span);
+                $vSpan = $span;
+                $sl = 0;
+                $sc = 0;
+                if ($exact) {
+                    $this->interpAt($lex, $a + 1);
+                    $sl = $this->ipLine;
+                    $sc = $this->ipCol;
+                    $this->interpAt($lex, $i + 1);
+                    $vSpan = $this->interpRange($span, $sl, $sc);
+                }
+                $expr = Expr::variable(\substr($body, $ns, $i - $ns), $vSpan);
                 if ($i + 2 < $n && \substr($body, $i, 1) === '-' && \substr($body, $i + 1, 1) === '>'
                     && $this->isIdentStart(\substr($body, $i + 2, 1))) {
                     $i = $i + 2;
                     $ps = $i;
                     while ($i < $n && $this->isIdentChar(\substr($body, $i, 1))) { $i = $i + 1; }
-                    $expr = Expr::propertyAccess($expr, \substr($body, $ps, $i - $ps), false, $span);
+                    $aSpan = $span;
+                    if ($exact) {
+                        $this->interpAt($lex, $i + 1);
+                        $aSpan = $this->interpRange($span, $sl, $sc);
+                        if ($this->collectNames === 1 && $this->declNames >= 2) {
+                            $pn = \substr($body, $ps, $i - $ps);
+                            $this->nmLine = $this->ipLine;
+                            $this->nmColumn = $this->ipCol - \strlen($pn);
+                            $this->nmEndLine = $this->ipLine;
+                            $this->nmEndColumn = $this->ipCol;
+                            $this->noteName($pn, $pn, 'member', false, 'prop');
+                        }
+                    }
+                    $expr = Expr::propertyAccess($expr, \substr($body, $ps, $i - $ps), false, $aSpan);
                 } elseif ($i < $n && \substr($body, $i, 1) === '[') {
                     $i = $i + 1;
                     $ks = $i;
                     while ($i < $n && \substr($body, $i, 1) !== ']') { $i = $i + 1; }
                     $key = \substr($body, $ks, $i - $ks);
+                    $kSpan = $span;
+                    if ($exact) {
+                        $this->interpAt($lex, $ks + 1);
+                        $kl = $this->ipLine;
+                        $kc = $this->ipCol;
+                        $this->interpAt($lex, $i + 1);
+                        $kSpan = $this->interpRange($span, $kl, $kc);
+                    }
                     if ($i < $n) { $i = $i + 1; }
-                    $expr = Expr::arrayAccess($expr, $this->interpArrayKey($key, $span), $span);
+                    $aSpan = $span;
+                    if ($exact) {
+                        $this->interpAt($lex, $i + 1);
+                        $aSpan = $this->interpRange($span, $sl, $sc);
+                    }
+                    $expr = Expr::arrayAccess($expr, $this->interpArrayKey($key, $kSpan), $aSpan);
                 }
-                $parts[] = Expr::cast('string', $expr, $span);
+                $parts[] = Expr::cast('string', $expr, $exact ? $expr->span : $span);
+                $inners[] = $expr;
+                $litVals[] = '';
+                $endLines[] = $this->ipLine;
+                $endCols[] = $this->ipCol;
                 continue;
             }
+            if ($lit === '') { $litStart = $i; }
             $lit .= $c;
             $i = $i + 1;
         }
-        if ($lit !== '') { $parts[] = Expr::string($lit, $span); }
+        if ($lit !== '') { $parts[] = $this->interpLit($lex, $lit, $litStart, $n, $span, $exact); $inners[] = $parts[\count($parts) - 1]; $litVals[] = $lit; $endLines[] = $this->ipLine; $endCols[] = $this->ipCol; }
         if (\count($parts) === 0) { return Expr::string('', $span); }
+        if ($exact && \count($parts) === 1) {
+            return $litVals[0] !== '' ? Expr::string($litVals[0], $span) : Expr::cast('string', $inners[0], $span);
+        }
         $result = $parts[0];
         $k = 1;
         while ($k < \count($parts)) {
-            $result = Expr::binary('.', $result, $parts[$k], $span);
+            $bSpan = $span;
+            if ($exact && $k + 1 < \count($parts)) {
+                $bSpan = new RangedSpan($span->line, $span->column, $span->file, $endLines[$k], $endCols[$k], $span->startLine(), $span->startColumn());
+            }
+            $result = Expr::binary('.', $result, $parts[$k], $bSpan);
             $k = $k + 1;
         }
         return $result;
@@ -4004,6 +4184,38 @@ final class Parser
         return $j;
     }
 
+    /** Literal run of an interpolated string, [$from, $to) in body offsets; leaves the cursor at its end. */
+    private function interpLit(string $lex, string $lit, int $from, int $to, Span $span, bool $exact): Expr
+    {
+        if (!$exact) { return Expr::string($lit, $span); }
+        $this->interpAt($lex, $from + 1);
+        $sl = $this->ipLine;
+        $sc = $this->ipCol;
+        $this->interpAt($lex, $to + 1);
+        return Expr::string($lit, $this->interpRange($span, $sl, $sc));
+    }
+
+    /** Move the interpolation cursor forward over the raw lexeme to byte offset $off, counting lines and byte columns like the lexer. */
+    private function interpAt(string $lex, int $off): void
+    {
+        $i = $this->ipOff;
+        $l = $this->ipLine;
+        $c = $this->ipCol;
+        while ($i < $off) {
+            if (\ord(\substr($lex, $i, 1)) === 10) { $l = $l + 1; $c = 1; } else { $c = $c + 1; }
+            $i = $i + 1;
+        }
+        $this->ipOff = $i;
+        $this->ipLine = $l;
+        $this->ipCol = $c;
+    }
+
+    /** Range from ($sl, $sc) to the cursor, anchored at its start. */
+    private function interpRange(Span $whole, int $sl, int $sc): Span
+    {
+        return new RangedSpan($sl, $sc, $whole->file, $this->ipLine, $this->ipCol, $sl, $sc);
+    }
+
     /** Simple-syntax array key: `$var` → variable, all-digits → int, else bareword string. */
     private function interpArrayKey(string $key, Span $span): Expr
     {
@@ -4022,9 +4234,31 @@ final class Parser
         return Expr::string($key, $span);
     }
 
-    /** Sub-lex + parse an interpolation `{$expr}` body into a (string)-cast expression. */
-    private function parseSubExpr(string $src, Span $span): Expr
+    /**
+     * Sub-lex + parse an interpolation `{$expr}` body. With a position base
+     * ($line > 0, tolerant + ranges) the body is lexed where it sits in the file
+     * and its names are collected; otherwise its positions are relative to the
+     * body and every node carries the whole string's range.
+     */
+    private function parseSubExpr(string $src, Span $span, int $line = 0, int $col = 0): Expr
     {
+        if ($line > 0) {
+            $sub = new self((new Lexer())->scan($src, true, false, true, $line, $col), '', $this->sourceFile);
+            $sub->ranges = 1;
+            $sub->ends = 1;
+            $sub->tolerant = 1;
+            $sub->depth = $this->depth;
+            $sub->collectNames = $this->collectNames;
+            $sub->declNames = $this->declNames;
+            $sub->currentNamespace = $this->currentNamespace;
+            $sub->useAliases = $this->useAliases;
+            $sub->useFnAliases = $this->useFnAliases;
+            $sub->useConstAliases = $this->useConstAliases;
+            $inner = $sub->parseExpression();
+            foreach ($sub->names as $key => $ref) { $this->names[$key] = $ref; }
+            foreach ($sub->errors as $e) { $this->record($e); }
+            return $inner;
+        }
         $tokens = (new Lexer())->scan($src, true, false, $this->ranges === 1);
         $sub = new self($tokens);
         $sub->ranges = $this->ranges;
@@ -4039,7 +4273,7 @@ final class Parser
         foreach ($sub->errors as $e) {
             $this->record(new ParseError($e->reason, $span->line, $span->column, $span->line, $span->column));
         }
-        return Expr::cast('string', $inner, $span);
+        return $inner;
     }
 
     // ── Token helpers ────────────────────────────────────────────────────────
@@ -4183,7 +4417,22 @@ final class Parser
             $this->record($this->error('unexpected token: ' . $this->tokens[$this->pos]->kind));
             $this->advance();
         }
-        return new \Parser\Ast\ErrorStmt($this->endFrom($anchor, $this->tokens[$start]), $this->pos - $start);
+        return new \Parser\Ast\ErrorStmt($this->endFrom($anchor, $this->tokens[$start]), $this->pos - $start, $thrown ? $this->declNameAt($start) : null);
+    }
+
+    /** Best-effort name of a declaration whose header failed: `[modifiers] class|interface|trait|enum|function [&] Name` at token $i. */
+    private function declNameAt(int $i): ?string
+    {
+        $n = \count($this->tokens);
+        while ($i < $n && $this->tokens[$i]->kind === TokenKind::Keyword) {
+            $kw = \strtolower($this->tokens[$i]->lexeme);
+            if ($kw === 'final' || $kw === 'abstract' || $kw === 'readonly') { $i = $i + 1; continue; }
+            if ($kw !== 'class' && $kw !== 'interface' && $kw !== 'trait' && $kw !== 'enum' && $kw !== 'function') { return null; }
+            $i = $i + 1;
+            if ($i < $n && $this->tokens[$i]->kind === TokenKind::Identifier) { return $this->tokens[$i]->lexeme; }
+            return null;
+        }
+        return null;
     }
 
     /**

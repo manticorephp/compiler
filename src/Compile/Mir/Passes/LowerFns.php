@@ -235,6 +235,7 @@ trait LowerFns
         $fn->isGenerator = $isGen;
         $fn->usesFuncArgs = $usesFuncArgs;
         $fn->returnArrayHinted = $this->isBareArrayReturnHint($decl->returnType);
+        $this->recordClassTemplate($fn, $decl->docComment, $decl->params);
         if ($fn->isGenerator) {
             // A generator CALL returns a Generator (its frame ptr); type it so
             // foreach / InferTypes route through the iterator-protocol path.

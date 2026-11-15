@@ -1,0 +1,3 @@
+foo
+foo
+TypeError: Locator::get(): Return value must be of type Bar, Foo returned
