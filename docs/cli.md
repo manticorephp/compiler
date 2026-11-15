@@ -33,6 +33,7 @@ manticore <command> [options...]
 | `dump-llvm-mir` | Parse PHP, run MIR pipeline + EmitLlvm, print LLVM IR |
 | `dump-sig` | Parse PHP, print the module-interface `.sig` (exported symbol table) |
 | `split-ir` | Split a staged `.ll` module into N part files (dev tool) |
+| `stubs` | Export declaration-only stubs of PHP code |
 | `version` | Print compiler version |
 | `upgrade` | Update the installed compiler to the latest release (`--check` only reports) |
 | `doctor` | Check that this compiler and its toolchain work; exit 1 on a failure |
@@ -249,6 +250,37 @@ manticore split-ir <module.ll> <parts> <outbase>
 
 Exit codes: `0` ok; `64` usage; `66` module unreadable; `65` split failed.
 
+## stubs
+
+```
+manticore stubs [options] <paths…>
+```
+
+Declaration-only stubs, phpstorm-stubs style: namespaces, `use` statements, classes, interfaces,
+traits and enums (cases, constants, properties, promoted constructor parameters, method signatures),
+functions, `const` and static `define()` constants. What is kept is sliced from the source, so
+docblocks, attributes and defaults (heredocs included) stay byte-exact; function and method bodies
+become `{}` and every other top-level statement goes. An `if`/`try` that declares something keeps its
+shape (`if (!function_exists(f)) { function f() {} }`). Directories are searched for `*.php`
+recursively, in sorted order.
+
+One input file keeps its own shape. Several merge into one file of braced `namespace X { … }` blocks,
+each opened by a `/* stub: <path> */` marker.
+
+| Option | Value | Effect |
+|---|---|---|
+| `-o` | `<path>` | Write here instead of stdout (with `--split`: the output directory) |
+| `--split` | | One stub per input file, at its path under the `-o` directory |
+| `--keep-lines` | | Keep every declaration on its source line (removed code leaves its newlines) |
+| `--library` | | Write the library stubs `analyze` and `lsp` read: the prelude, then the stdlib source given as paths (`src/Runtime`) filtered to what its `.sig` exports, with `.sig` signatures for the rest (`bin/build` ships them as `lib/manticore.stubs.php` and embeds them in the compiler; see [`lsp.md`](lsp.md#library-symbols)) |
+
+Exit codes: `0` ok; `64` usage; `66` input cannot be read; `65` a file does not lex; `73` output
+cannot be written.
+
+```bash
+manticore stubs vendor/acme/lib/src -o acme.stubs.php
+```
+
 ## version, upgrade
 
 ```
@@ -429,6 +461,7 @@ timings (longest first):
 | `MANTICORE_OBJ_CACHE` | Content-addressed object cache: on by default for split builds, off for a single unit unless `1`; `0` disables it everywhere |
 | `MANTICORE_OBJ_CACHE_DIR`, `MANTICORE_OBJ_CACHE_MAX_MB` | Cache directory and size bound (default 2048 MB) |
 | `MANTICORE_STATS` | Non-empty and not `0`: full compile-time profile on stderr; progress `auto` then picks `plain` on a TTY or under `CI`, else `off` |
+| `MANTICORE_STUBS` | Library stubs file for `analyze` and `lsp`, instead of `lib/manticore.stubs.php` or the embedded copy |
 | `MANTICORE_PHASE_TRACE` | Non-empty and not `0`: per-phase timeline only |
 | `CI` | Non-empty: `--progress=auto` picks `plain` when stderr is not a terminal |
 | `NO_COLOR` | Non-empty: progress colour off, even with `--color=always` 

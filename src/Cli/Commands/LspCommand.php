@@ -23,12 +23,10 @@ final class LspCommand extends Command
         $lib = LibrarySymbols::load();
         if (count($lib->preludeFiles()) === 0 || count($lib->stdlibFunctionNames()) === 0) {
             $dir = \Manticore\self_dir();
-            fwrite(STDERR, "manticore lsp: the prelude or the stdlib signatures were not found.\n"
-                . "  The language server reads them from the installed layout beside the binary:\n"
-                . "    " . $dir . "/../lib/prelude/*.php  (or " . $dir . "/../prelude, " . $dir . "/lib/prelude)\n"
-                . "    " . $dir . "/../lib/manticore_stdlib.o.sig  (or " . $dir . "/lib/manticore_stdlib.o.sig)\n"
-                . "  A bare copy of bin/manticore does not carry them: install with install.sh, or symlink the binary\n"
-                . "  from the install instead of copying it. MANTICORE_PRELUDE and MANTICORE_STDLIB_SIG override the paths.\n");
+            fwrite(STDERR, "manticore lsp: the library stubs were not found.\n"
+                . "  The language server reads them from MANTICORE_STUBS, then " . $dir . "/../lib/manticore.stubs.php,\n"
+                . "  then the copy embedded in the binary (empty in a compiler built by a release without `stubs`:\n"
+                . "  rebuild with bin/build). MANTICORE_PRELUDE and MANTICORE_STDLIB_SIG still override the sources.\n");
             return 1;
         }
         try {

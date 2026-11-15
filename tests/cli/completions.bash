@@ -10,7 +10,7 @@ _manticore() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "compile build dump-llvm dump-ast analyze dump-mir dump-llvm-mir split-ir dump-sig version lsp upgrade doctor cache completions help --version --help" -- "$cur"))
+        COMPREPLY=($(compgen -W "compile build dump-llvm dump-ast analyze dump-mir dump-llvm-mir split-ir dump-sig version lsp stubs upgrade doctor cache completions help --version --help" -- "$cur"))
         return 0
     fi
     cmd="${COMP_WORDS[1]}"
@@ -120,6 +120,16 @@ _manticore() {
         lsp)
             if [[ "$cur" == -* ]]; then
                 COMPREPLY=($(compgen -W "--help" -- "$cur"))
+            else
+                _manticore_files "$cur"
+            fi
+            ;;
+        stubs)
+            case "$prev" in
+                -o) _manticore_files "$cur"; return 0 ;;
+            esac
+            if [[ "$cur" == -* ]]; then
+                COMPREPLY=($(compgen -W "--help -o --split --keep-lines --library" -- "$cur"))
             else
                 _manticore_files "$cur"
             fi

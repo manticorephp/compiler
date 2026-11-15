@@ -66,9 +66,23 @@ check "symlink from another dir" "$WORK/sym/manticore"
 # The dev-tree shape, which is the one that already worked.
 check "explicit path" "$WORK/opt/bin/manticore"
 
-# `manticore lsp` reads the prelude and the stdlib .sig from the installed layout: it
-# must initialize and shut down from any cwd, through a symlink, and a bare copy must
-# fail with a message that names the expected paths (not "the prelude is empty").
+# analyze / lsp need only the library stubs: an installed binary reads
+# lib/manticore.stubs.php, a bare copy (no lib/, no prelude) its embedded copy.
+mkdir -p "$WORK/bare/bin" "$WORK/proj"
+cp "$MC" "$WORK/bare/bin/manticore"
+printf '<?php\nfunction f(): RuntimeException { return new RuntimeException(str_pad("a", 3)); }\n' > "$WORK/proj/a.php"
+printf '<?php\necho f()->getMessage(), "\\n";\n' > "$WORK/proj/b.php"
+for m in "$WORK/opt/bin/manticore" "$WORK/bare/bin/manticore"; do
+    if out="$(env -u MANTICORE_PRELUDE -u MANTICORE_STUBS "$m" analyze --only undefined. "$WORK/proj" 2>&1)"; then
+        echo "PASS analyze knows the library ($m)"
+    else
+        echo "FAIL analyze knows the library ($m): $(printf '%s\n' "$out" | head -3)"
+        fail=1
+    fi
+done
+
+# `manticore lsp` must initialize and shut down from any cwd, through a symlink, and
+# from a bare copy (embedded library stubs).
 lsp_frame() { printf 'Content-Length: %d\r\n\r\n%s' "${#1}" "$1"; }
 {
     lsp_frame '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":null,"capabilities":{}}}'
@@ -83,15 +97,8 @@ lsp_check() { # what, binary
 }
 lsp_check "installed layout, cwd /" "$WORK/opt/bin/manticore"
 lsp_check "symlink" "$WORK/sym/manticore"
-mkdir -p "$WORK/bare"
-cp "$MC" "$WORK/bare/manticore"
-rc=0
-( cd / && "$WORK/bare/manticore" lsp < "$WORK/lsp.in" > "$WORK/lsp.out" 2> "$WORK/lsp.err" ) || rc=$?
-if [ "$rc" = 1 ] && grep -q 'lib/prelude' "$WORK/lsp.err" && grep -q 'manticore_stdlib.o.sig' "$WORK/lsp.err"; then
-    echo "PASS lsp bare copy: clear error naming the expected layout"
-else
-    echo "FAIL lsp bare copy: expected rc 1 and a layout message (rc $rc)"; head -c 400 "$WORK/lsp.err"; fail=1
-fi
+lsp_check "bare copy (embedded stubs)" "$WORK/bare/bin/manticore"
+
 # The blocking-offload pool is pay-for-use: a program that never names Async\
 # carries no worker thread code. An Async\ program is the control that the
 # symbol names still match.

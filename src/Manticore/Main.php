@@ -2291,8 +2291,14 @@ function prelude_src_or_empty(string $file): string
     }
 }
 
-function find_prelude_src(string $file): string
+/**
+ * Where {@see find_prelude_src} looks for `$file`, in order.
+ *
+ * @return string[]
+ */
+function prelude_candidates(string $file): array
 {
+    /** @var string[] $cands */
     $cands = [];
     $envDir = \getenv("MANTICORE_PRELUDE");
     if (\is_string($envDir) && $envDir !== "") {
@@ -2308,7 +2314,27 @@ function find_prelude_src(string $file): string
         $cands[] = $selfDir . "/../lib/prelude/" . $file;
         $cands[] = $selfDir . "/lib/prelude/" . $file;
     }
-    foreach ($cands as $path) {
+    return $cands;
+}
+
+/** The prelude file the compiler reads for `$file` (the first readable candidate), or "". */
+function find_prelude_path(string $file): string
+{
+    try {
+        foreach (prelude_candidates($file) as $path) {
+            if (\is_file($path)) {
+                return $path;
+            }
+        }
+    } catch (\Throwable $e) {
+        return "";
+    }
+    return "";
+}
+
+function find_prelude_src(string $file): string
+{
+    foreach (prelude_candidates($file) as $path) {
         // `\file_get_contents` (global) works in BOTH worlds: PHP's builtin
         // under the Zend cold-seed (where the libc `read_file`/`file_exists`
         // bindings are empty stubs), and the stdlib implementation in the native
@@ -6351,18 +6377,17 @@ function compile_via_mir(array $sources, array $paths = []): ?string
  * @param string[] $args
  */
 /**
- * Parse the prelude sources into the analyzer's symbol universe so its built-in
- * classes (the Throwable/Exception/Error hierarchy, Resource, Reflection) and
- * functions are KNOWN — otherwise the closed-world undefined-symbol rules would
- * flag every `catch (Exception)` / `new RuntimeException`. Resolved the same way
- * the compiler resolves the prelude (`prelude_src_or_empty`). Best-effort: a
- * missing / unparseable prelude file is skipped, not fatal.
+ * The prelude, as its declaration stubs ({@see \Semantic\LibrarySymbols::sections}), for the
+ * analyzer's symbol universe: its built-in classes (the Throwable/Exception/Error hierarchy,
+ * Resource, Reflection) and functions are KNOWN — otherwise the closed-world undefined-symbol
+ * rules would flag every `catch (Exception)` / `new RuntimeException`. Best-effort: a missing
+ * or unparseable prelude file is skipped, not fatal.
  *
- * @return array<string, string> prelude file name => contents
+ * @return array<string, string> library label => stub source
  */
 function analyze_prelude_sources(): array
 {
-    return \Semantic\LibrarySymbols::preludeSources();
+    return \Semantic\LibrarySymbols::librarySources();
 }
 
 /**
@@ -6376,11 +6401,9 @@ function analyze_prelude_files(array $sources): array
     /** @var \Analyze\ParsedFile[] $out */
     $out = [];
     foreach ($sources as $name => $src) {
-        // `prelude_src_or_empty` strips the opening `<?php` (it is built to append
-        // after a prelude header); re-add it so this parses as a standalone file.
         try {
-            $program = \Parser\Parser::parseSource("<?php\n" . $src);
-            $out[] = new \Analyze\ParsedFile("prelude/" . (string)$name, $program);
+            $program = \Parser\Parser::parseSource($src);
+            $out[] = new \Analyze\ParsedFile((string)$name, $program);
         } catch (\Throwable $e) {
             // A prelude file that does not parse standalone is simply skipped.
         }
@@ -6550,6 +6573,7 @@ function main_driver(): int
     $cli->add(new \Cli\Commands\DumpSigCommand());
     $cli->add(new \Cli\Commands\VersionCommand());
     $cli->add(new \Cli\Commands\LspCommand());
+    $cli->add(new \Cli\Commands\StubsCommand());
     $cli->add(new \Cli\Commands\UpgradeCommand());
     $cli->add(new \Cli\Commands\DoctorCommand());
     $cli->add(new \Cli\Commands\CacheCommand());

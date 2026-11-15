@@ -52,7 +52,7 @@ final class ArgType
                     if (!$this->countable($e->args)) { continue; }
                     $fn = $idx->resolveFunction($e->function);
                     if ($fn === null) { continue; }
-                    $this->verify($pf, $idx, $infer, $e->function . '()', $fn->params, $e->args);
+                    $this->verify($pf, $idx, $infer, $e->function . '()', $fn->params, $e->args, $fn->internal);
                 } elseif ($e instanceof NewExpr) {
                     if (!$this->countable($e->args)) { continue; }
                     $cls = \strtolower($e->class);
@@ -97,7 +97,7 @@ final class ArgType
      * @param Param[] $params
      * @param Expr[]  $args
      */
-    private function verify(ParsedFile $pf, Index $idx, Infer $infer, string $label, array $params, array $args): void
+    private function verify(ParsedFile $pf, Index $idx, Infer $infer, string $label, array $params, array $args, bool $internal = false): void
     {
         $nParams = \count($params);
         $ai = 0;
@@ -114,12 +114,24 @@ final class ArgType
             $target = Ty::fromHint($p->typeHint);
             $src = $infer->of($arg);
             if (Ty::assignable($target, $src, $idx) || Ty::coercedScalars($target, $src, $pf->path)) { continue; }
+            if ($internal && self::internalCoerces($target, $src, $idx)) { continue; }
             $this->diags[] = Diagnostic::at(
                 $pf->path, $arg->span, Diagnostic::SEV_ERROR, 'arg.type',
                 'argument ' . (string)$ai . ' of ' . $label . ': ' . $src->display()
                     . ' given, ' . $target->display() . ' expected'
             );
         }
+    }
+
+    /** php's internal-function parameter rules: null passes a scalar parameter (deprecated, coerced), a Stringable object a string one. */
+    private static function internalCoerces(Ty $target, Ty $src, Index $idx): bool
+    {
+        $t = $target->kind;
+        if ($src->kind === Ty::KIND_NULL) {
+            return $t === Ty::KIND_BOOL || $t === Ty::KIND_INT || $t === Ty::KIND_FLOAT || $t === Ty::KIND_STRING;
+        }
+        return $t === Ty::KIND_STRING && $src->kind === Ty::KIND_OBJECT && $src->className !== ''
+            && $idx->findMethod($src->className, '__tostring', 0) !== null;
     }
 
     /** @param Expr[] $args */

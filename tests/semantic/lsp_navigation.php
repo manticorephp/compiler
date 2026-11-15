@@ -129,10 +129,15 @@ check('prelude class definition opens a readable cached file', function (): bool
     }
 });
 check('prelude definition without a text source stays null', function (): bool|string {
-    $d = rig(new Sink());
-    open($d, 'file:///t/a.php', "<?php\n\$x = new Countable();\n");
-    $r = ask($d, 'textDocument/definition', 'file:///t/a.php', 1, 12);
-    return $r === null ?: json_encode($r);
+    \Lsp\LocationMap::$libText = fn(string $n): ?string => null;
+    try {
+        $d = rig(new Sink());
+        open($d, 'file:///t/a.php', "<?php\n\$x = new Countable();\n");
+        $r = ask($d, 'textDocument/definition', 'file:///t/a.php', 1, 12);
+        return $r === null ?: json_encode($r);
+    } finally {
+        \Lsp\LocationMap::$libText = null;
+    }
 });
 check('request on a doc that is not open is null', function (): bool|string {
     $d = rig(new Sink());

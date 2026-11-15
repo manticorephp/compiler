@@ -17,6 +17,8 @@ mkdir -p "$W/src/SemTest"
 # src minus main.php: its top-level call would run the compiler driver.
 (cd "$ROOT/src" && find . -name '*.php' ! -path './main.php' | while read -r f; do
     mkdir -p "$W/src/$(dirname "$f")"; cp "$f" "$W/src/$f"; done)
+# bin/build generates the embedded library stubs; a checkout that never ran it has none.
+[ -f "$W/src/Manticore/EmbeddedStubs.php" ] || printf '<?php\nnamespace Manticore;\nfinal class EmbeddedStubs\n{\n    public const TEXT = %s;\n}\n' "''" > "$W/src/Manticore/EmbeddedStubs.php"
 
 names=()
 for f in "$HERE"/*.php; do

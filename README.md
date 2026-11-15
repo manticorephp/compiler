@@ -206,6 +206,7 @@ Everything else is inspection — every stage of the pipeline is dumpable:
 | `dump-llvm` | LLVM IR from stdin |
 | `dump-sig <files>` | the module interface (exported symbol table) |
 | `split-ir` | split a staged `.ll` module into N parts (dev tool behind `build -j`) |
+| `stubs <paths>` | declaration-only stubs of PHP code (`-o out.php`); [`docs/cli.md`](docs/cli.md#stubs) |
 | `version` / `help` | — |
 
 Flags: `-o <out>`, `-O<0|1|2|3|s|z>` (clang opt level, default `-O2`),

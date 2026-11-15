@@ -18,5 +18,7 @@ final class FnInfo
         public ?string $docType = null,
         public array $paramDocs = [],
         public ?TemplateSig $tpl = null,
+        /** A stdlib function: php's internal-function rules apply at its call sites (surplus arguments, null and Stringable coerced). */
+        public bool $internal = false,
     ) {}
 }
