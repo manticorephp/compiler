@@ -425,6 +425,7 @@ final class ErrorStmt extends Stmt
     public function __construct(
         Span $span,
         public readonly int $skipped = 0,
+        public readonly ?string $declName = null,
     ) {
         parent::__construct('Error', $span);
     }

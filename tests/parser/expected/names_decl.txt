@@ -1,0 +1,33 @@
+names:
+  @2:11-2:19 namespace App\Core -> App\Core
+  @4:5-4:13 use:class Lib\Util -> Lib\Util
+  @5:14-5:24 use:function Lib\helper -> Lib\helper
+  @6:11-6:20 use:constant Lib\LIMIT -> Lib\LIMIT
+  @7:5-7:14 namespace Lib\Group -> Lib\Group
+  @7:16-7:21 use:class Alpha -> Lib\Group\Alpha
+  @7:32-7:34 use:function gf -> Lib\Group\gf
+  @7:42-7:44 use:constant GC -> Lib\Group\GC
+  @9:11-9:16 class:decl Shape -> App\Core\Shape
+  @11:7-11:11 class:decl Loud -> App\Core\Loud
+  @13:12-13:19 member:decl $volume -> volume
+  @14:23-14:29 member:decl $count -> count
+  @14:35-14:39 member:decl $max -> max
+  @17:6-17:10 class:decl Suit -> App\Core\Suit
+  @19:10-19:16 member:decl Hearts -> Hearts
+  @20:10-20:16 member:decl Spades -> Spades
+  @21:11-21:15 member:decl Wild -> Wild
+  @21:18-21:22 class self -> self
+  @24:16-24:20 class:decl Base -> App\Core\Base
+  @26:11-26:12 member:decl A -> A
+  @26:18-26:19 member:decl B -> B
+  @27:30-27:33 member:decl run -> run
+  @30:13-30:16 class:decl Box -> App\Core\Box
+  @30:25-30:29 class Base -> App\Core\Base
+  @30:41-30:46 class Shape -> App\Core\Shape
+  @32:21-32:24 member:decl run -> run
+  @34:33-34:35 member:decl $q -> q
+  @34:46-34:51 member:decl inner -> inner
+  @35:32-35:36 class Base -> App\Core\Base
+  @35:48-35:51 member:decl run -> run
+  @39:10-39:16 function:decl helper -> App\Core\helper
+

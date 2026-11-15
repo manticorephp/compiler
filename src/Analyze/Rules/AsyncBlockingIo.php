@@ -62,8 +62,8 @@ final class AsyncBlockingIo
 
     private function report(ParsedFile $pf, CallExpr $e, string $fn, string $what): void
     {
-        $this->diags[] = Diagnostic::warning(
-            $pf->path, $e->span->line, $e->span->column, 'async.blocking-io',
+        $this->diags[] = Diagnostic::at(
+            $pf->path, $e->span, Diagnostic::SEV_WARNING, 'async.blocking-io',
             $fn . '() ' . $what . ' inline, which BLOCKS the whole scheduler'
             . ' (the blocking pool does not cover it) — Async\\readFile() + Async\\writeFile() chunk and yield'
         );

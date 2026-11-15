@@ -86,13 +86,13 @@ final class Lexer
      *
      * @return Token[]
      */
-    public function scan(string $source, bool $startInPhp = false, bool $tolerant = false, bool $ranges = false): array
+    public function scan(string $source, bool $startInPhp = false, bool $tolerant = false, bool $ranges = false, int $line = 1, int $col = 1): array
     {
         $this->src = $source;
         $this->len = strlen($source);
         $this->pos = 0;
-        $this->line = 1;
-        $this->col = 1;
+        $this->line = $line;
+        $this->col = $col;
         $this->tokens = [];
         $this->errors = [];
         $this->tolerant = $tolerant ? 1 : 0;
