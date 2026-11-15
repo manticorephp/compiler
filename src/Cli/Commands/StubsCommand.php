@@ -28,7 +28,7 @@ final class StubsCommand extends Command
             new Option('o', \Cli\ArgParse::VALUE, 'Write to this file (with --split: directory) instead of stdout', 'path'),
             new Option('split', \Cli\ArgParse::FLAG, 'One stub file per input file, under the -o directory'),
             new Option('keep-lines', \Cli\ArgParse::FLAG, 'Keep every declaration on its source line (bodies become blank lines)'),
-            new Option('library', \Cli\ArgParse::FLAG, 'Write the library stubs the analyzer and LSP read (prelude + stdlib)'),
+            new Option('library', \Cli\ArgParse::FLAG, 'Write the library stubs the analyzer and LSP read (prelude + stdlib; paths = stdlib source)'),
         ];
     }
 
@@ -37,7 +37,21 @@ final class StubsCommand extends Command
         $out = $args->value('o', '');
         if ($args->flag('library')) {
             try {
-                return self::emit($out, LibrarySymbols::generate());
+                /** @var array<string, string> $std */
+                $std = [];
+                foreach ($args->positional as $root) {
+                    // Keyed by the path under the argument, the section label of each file.
+                    $files = \Manticore\resolve_source_files([$root]);
+                    if ($files === null) {
+                        return 66;
+                    }
+                    $prefix = \rtrim($root, '/') . '/';
+                    foreach ($files as $sf) {
+                        $p = \Manticore\__mc_source_path($sf);
+                        $std[\str_starts_with($p, $prefix) ? \substr($p, \strlen($prefix)) : \basename($p)] = \Manticore\__mc_source_contents($sf);
+                    }
+                }
+                return self::emit($out, LibrarySymbols::generate($std));
             } catch (\Throwable $e) {
                 \Manticore\dprint('stubs: ' . $e->getMessage());
                 return 65;

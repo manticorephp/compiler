@@ -170,15 +170,16 @@ supports_flag() {
 # EMBEDDED in the compiler (src/Manticore/EmbeddedStubs.php, generated, gitignored)
 # so a bare copied binary still has them. The embedded copy is source the compiler
 # compiles, so it must exist before pass 1, and it is produced by a compiler (the
-# `stubs` command). `gen_stubs <compiler>` writes both from the prelude in this tree
-# and the .sig in lib/; it fails on a compiler that predates the command.
+# `stubs` command). `gen_stubs <compiler>` writes both from the prelude in this tree and
+# the stdlib source (src/Runtime, filtered by the .sig in lib/); it fails on a
+# compiler that predates the command.
 # `embed_stubs` rewrites the PHP file only when its content changes (returns 0 then),
 # so an unchanged tree compiles to the same binary.
 EMBEDDED_STUBS="src/Manticore/EmbeddedStubs.php"
 gen_stubs() {
     local tmp="lib/manticore.stubs.php.$$"
     mkdir -p lib
-    if MANTICORE_STDLIB_SIG="$ROOT/lib/manticore_stdlib.o.sig" "$1" stubs --library -o "$tmp" >/dev/null 2>&1 && [[ -s "$tmp" ]]; then
+    if MANTICORE_STDLIB_SIG="$ROOT/lib/manticore_stdlib.o.sig" "$1" stubs --library -o "$tmp" src/Runtime >/dev/null 2>&1 && [[ -s "$tmp" ]]; then
         mv "$tmp" lib/manticore.stubs.php
         return 0
     fi

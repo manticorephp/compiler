@@ -6363,11 +6363,11 @@ function compile_via_mir(array $sources, array $paths = []): ?string
  * rules would flag every `catch (Exception)` / `new RuntimeException`. Best-effort: a missing
  * or unparseable prelude file is skipped, not fatal.
  *
- * @return array<string, string> prelude file name => contents
+ * @return array<string, string> library label => stub source
  */
 function analyze_prelude_sources(): array
 {
-    return \Semantic\LibrarySymbols::preludeSources();
+    return \Semantic\LibrarySymbols::librarySources();
 }
 
 /**
@@ -6383,7 +6383,7 @@ function analyze_prelude_files(array $sources): array
     foreach ($sources as $name => $src) {
         try {
             $program = \Parser\Parser::parseSource($src);
-            $out[] = new \Analyze\ParsedFile("prelude/" . (string)$name, $program);
+            $out[] = new \Analyze\ParsedFile((string)$name, $program);
         } catch (\Throwable $e) {
             // A prelude file that does not parse standalone is simply skipped.
         }

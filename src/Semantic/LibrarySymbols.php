@@ -133,14 +133,17 @@ final class LibrarySymbols
      */
     private static function stubFunctionNames(): array
     {
-        $src = self::sections()[self::STDLIB_LABEL] ?? null;
-        if ($src === null) {
-            return [];
-        }
+        /** @var ParsedFile[] $files */
+        $files = [];
         try {
+            foreach (self::sections() as $label => $src) {
+                if (!\str_starts_with((string)$label, "prelude/")) {
+                    $files[] = new ParsedFile(self::LABEL_PREFIX . (string)$label, \Parser\Parser::parseSource($src));
+                }
+            }
             /** @var string[] $declNames */
             $declNames = [];
-            $idx = \Analyze\Index::build([new ParsedFile(self::LABEL_PREFIX . self::STDLIB_LABEL, \Parser\Parser::parseSource($src))]);
+            $idx = \Analyze\Index::build($files);
             foreach ($idx->functions as $fn) {
                 $declNames[] = $fn->name;
             }
@@ -172,30 +175,24 @@ final class LibrarySymbols
     }
 
     /**
-     * The prelude files the analyzer knows, as their stubs; a missing file is left out.
+     * The library the analyzer knows, as stub sources: the prelude files and the stdlib.
      *
-     * @return array<string, string> prelude file name => stub source (a whole PHP file)
+     * @return array<string, string> label (`prelude/<name>.php`, `stdlib/<File>.php`, `stubs/stdlib.php`) => stub source
      */
-    public static function preludeSources(): array
+    public static function librarySources(): array
     {
-        /** @var array<string, string> $out */
-        $out = [];
-        foreach (self::sections() as $label => $src) {
-            if (\str_starts_with((string)$label, "prelude/")) {
-                $out[\substr((string)$label, 8)] = $src;
-            }
-        }
-        return $out;
+        return self::sections();
     }
 
-    /** The stub source of one library label (`prelude/<name>.php`, `stubs/stdlib.php`), or null. */
+    /** The stub source of one library label (`prelude/<name>.php`, `stdlib/<File>.php`, `stubs/stdlib.php`), or null. */
     public static function sectionSource(string $label): ?string
     {
         return self::sections()[$label] ?? null;
     }
 
     /**
-     * The library stubs, one section per prelude file and one for the stdlib `.sig`.
+     * The library stubs: one section per prelude file, one per stdlib source file, and one of
+     * `.sig` signatures for the stdlib names the source did not cover.
      *
      * Read from the stubs file (MANTICORE_STUBS, else `manticore.stubs.php` beside the binary,
      * else the copy embedded in it), then checked against the prelude the compiler would read:
@@ -235,9 +232,10 @@ final class LibrarySymbols
             }
             if (isset($have[$label])) { $out[$label] = $have[$label]; }
         }
-        if (isset($have[self::STDLIB_LABEL])) {
-            $out[self::STDLIB_LABEL] = $have[self::STDLIB_LABEL];
-        } elseif ($text === "") {
+        foreach ($have as $label => $src) {
+            if (!\str_starts_with((string)$label, "prelude/")) { $out[(string)$label] = $src; }
+        }
+        if ($text === "") {
             $sig = self::stdlibSection($st);
             if ($sig !== "") {
                 $one = Stubber::split("<?php\n" . $sig);
@@ -249,11 +247,15 @@ final class LibrarySymbols
     }
 
     /**
-     * The library stubs file, generated from the prelude and the stdlib `.sig` the compiler
-     * resolves: `manticore stubs --library`, which `bin/build` runs. Throws when a prelude
-     * file does not lex.
+     * The library stubs file: `manticore stubs --library [stdlib sources…]`, which `bin/build`
+     * runs. The prelude the compiler resolves, line for line; then the stdlib from its source
+     * ($stdlibFiles, path => contents), only what its `.sig` exports, docblocks and exact types
+     * kept; then signatures from the `.sig` for every exported name the source did not declare
+     * (all of them when no source is given). Throws when a file does not lex.
+     *
+     * @param array<string, string> $stdlibFiles
      */
-    public static function generate(): string
+    public static function generate(array $stdlibFiles = []): string
     {
         $st = new Stubber();
         /** @var string[] $parts */
@@ -264,6 +266,22 @@ final class LibrarySymbols
             if (\is_string($src) && $src !== "") {
                 $parts[] = $st->stubFile($src, true, "prelude/" . $name);
             }
+        }
+        $path = \Manticore\find_stdlib_sig();
+        $json = $path === "" ? null : \Manticore\read_file($path);
+        if ($json !== null && $json !== "" && \count($stdlibFiles) > 0) {
+            $fns = Stubber::exportedFunctions($json);
+            foreach ($st->functions as $k => $_) { unset($fns[$k]); }
+            $classes = Stubber::exportedClasses($json);
+            foreach ($st->classes as $k => $_) { unset($classes[$k]); }
+            $st->onlyFns = $fns;
+            $st->onlyClasses = $classes;
+            foreach ($stdlibFiles as $file => $src) {
+                $part = $st->stubFile($src, false, "stdlib/" . (string)$file);
+                if ($part !== "") { $parts[] = $part; }
+            }
+            $st->onlyFns = null;
+            $st->onlyClasses = null;
         }
         $sig = self::stdlibSection($st);
         if ($sig !== "") { $parts[] = $sig; }

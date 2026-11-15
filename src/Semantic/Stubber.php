@@ -50,6 +50,17 @@ final class Stubber
 
     private int $kept = 0;
 
+    /**
+     * When set, only these function / class-like declarations (lowercased FQN) are kept and every
+     * other one goes, `const`/`define` included: a library's exported surface out of its source.
+     *
+     * @var array<string, bool>|null
+     */
+    public ?array $onlyFns = null;
+
+    /** @var array<string, bool>|null */
+    public ?array $onlyClasses = null;
+
     private string $ns = '';
 
     /**
@@ -81,6 +92,7 @@ final class Stubber
                 if ($k === TokenKind::Identifier || $k === TokenKind::OpenBrace) { $hasNs = true; }
             }
         }
+        $keptAtStart = $this->kept;
         $i = 0;
         $opened = false;
         while ($i < $tc && $this->toks[$i]->kind !== TokenKind::Eof) {
@@ -112,7 +124,7 @@ final class Stubber
         }
         $out = $this->apply();
         if ($section) {
-            if (!$opened) { return ''; }
+            if (!$opened || ($this->onlyFns !== null && $this->kept === $keptAtStart)) { return ''; }
             if ($out !== '' && !\str_ends_with($out, "\n")) { $out .= "\n"; }
             if (!$hasNs || $unbraced > 0) { $out .= "}\n"; }
         }
@@ -222,9 +234,42 @@ final class Stubber
             $txt .= 'function ' . $bare . '(' . \implode(', ', $ps) . ')' . ($rh === '' ? '' : ': ' . $rh) . " {}\n";
             $blocks[$ns] = ($blocks[$ns] ?? '') . $txt;
         }
+        if (\count($blocks) === 0) {
+            return '';
+        }
         $out = self::MARKER . $label . " */\n";
         foreach ($blocks as $ns => $body) {
             $out .= 'namespace' . ($ns === '' ? '' : ' ' . (string)$ns) . " {\n" . $body . "}\n";
+        }
+        return $out;
+    }
+
+    /**
+     * The functions a library `.sig` exports that a stub declares (lowercased FQN), for {@see $onlyFns}.
+     *
+     * @return array<string, bool>
+     */
+    public static function exportedFunctions(string $json): array
+    {
+        /** @var array<string, bool> $out */
+        $out = [];
+        foreach (\Manticore\Sig::declsFromJson($json) as $f) {
+            if (self::plainName(self::splitName($f->name)[1])) { $out[\strtolower($f->name)] = true; }
+        }
+        return $out;
+    }
+
+    /**
+     * The classes a library `.sig` exports that a stub declares (lowercased FQN), for {@see $onlyClasses}.
+     *
+     * @return array<string, bool>
+     */
+    public static function exportedClasses(string $json): array
+    {
+        /** @var array<string, bool> $out */
+        $out = [];
+        foreach (\Manticore\Sig::classDeclsFromJson($json) as $c) {
+            if (self::plainName(self::splitName($c->name)[1])) { $out[\strtolower($c->name)] = true; }
         }
         return $out;
     }
@@ -294,16 +339,30 @@ final class Stubber
             if ($this->toks[$nm]->kind === TokenKind::Ampersand) { $nm++; }
             $nt = $this->toks[$nm];
             if (($nt->kind === TokenKind::Identifier || $nt->kind === TokenKind::Keyword) && $this->toks[$nm + 1]->kind === TokenKind::OpenParen) {
-                $this->functions[\strtolower($this->qualify($nt->lexeme))] = true;
+                $fqn = \strtolower($this->qualify($nt->lexeme));
+                if ($this->onlyFns !== null && !isset($this->onlyFns[$fqn])) {
+                    $mark = \count($this->cutFrom);
+                    $end = $this->signatureAndBody($nm + 1);
+                    $this->rollback($mark);
+                    return $this->drop($i, $end);
+                }
+                $this->functions[$fqn] = true;
                 $this->kept++;
                 return $this->signatureAndBody($nm + 1);
             }
         }
         if ($hk === TokenKind::Keyword && ($lex === 'class' || $lex === 'interface' || $lex === 'trait' || $lex === 'enum')
             && $this->toks[$j + 1]->kind === TokenKind::Identifier) {
-            $this->classes[\strtolower($this->qualify($this->toks[$j + 1]->lexeme))] = true;
+            $cfqn = \strtolower($this->qualify($this->toks[$j + 1]->lexeme));
             $b = $j + 2;
             while ($this->toks[$b]->kind !== TokenKind::OpenBrace && $this->toks[$b]->kind !== TokenKind::Eof) { $b++; }
+            if ($this->onlyClasses !== null && !isset($this->onlyClasses[$cfqn])) {
+                $mark = \count($this->cutFrom);
+                $end = $this->classBody($b + 1) + 1;
+                $this->rollback($mark);
+                return $this->drop($i, $end);
+            }
+            $this->classes[$cfqn] = true;
             $this->kept++;
             return $this->classBody($b + 1) + 1;
         }
@@ -324,13 +383,16 @@ final class Stubber
             $this->ns = $name;
             return $this->toEnd($j);
         }
-        if ($hk === TokenKind::Keyword && ($lex === 'use' || $lex === 'const')) {
-            if ($lex === 'const') { $this->kept++; }
+        if ($hk === TokenKind::Keyword && $lex === 'use') {
+            return $this->toEnd($j);
+        }
+        if ($hk === TokenKind::Keyword && $lex === 'const' && $this->onlyFns === null) {
+            $this->kept++;
             return $this->toEnd($j);
         }
         if ($this->isDefine($j)) {
             $end = $this->toEnd($j);
-            if ($this->staticArgs($j, $end)) {
+            if ($this->onlyFns === null && $this->staticArgs($j, $end)) {
                 $this->kept++;
                 return $end;
             }

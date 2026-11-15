@@ -272,7 +272,7 @@ each opened by a `/* stub: <path> */` marker.
 | `-o` | `<path>` | Write here instead of stdout (with `--split`: the output directory) |
 | `--split` | | One stub per input file, at its path under the `-o` directory |
 | `--keep-lines` | | Keep every declaration on its source line (removed code leaves its newlines) |
-| `--library` | | Write the library stubs `analyze` and `lsp` read: the prelude and the stdlib `.sig` (`bin/build` ships them as `lib/manticore.stubs.php` and embeds them in the compiler; see [`lsp.md`](lsp.md#library-symbols)) |
+| `--library` | | Write the library stubs `analyze` and `lsp` read: the prelude, then the stdlib source given as paths (`src/Runtime`) filtered to what its `.sig` exports, with `.sig` signatures for the rest (`bin/build` ships them as `lib/manticore.stubs.php` and embeds them in the compiler; see [`lsp.md`](lsp.md#library-symbols)) |
 
 Exit codes: `0` ok; `64` usage; `66` input cannot be read; `65` a file does not lex; `73` output
 cannot be written.
