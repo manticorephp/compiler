@@ -63,6 +63,9 @@ final class EhLowerIr
     /** @var string[] */
     private array $out = [];
     private ?\Ffi\Ptr $outFile = null;
+    /** @var string[] lines awaiting one batched fwrite */
+    private array $wl = [];
+    private int $wn = 0;
     private bool $writeOk = true;
 
     // sweep-1 state
@@ -140,6 +143,7 @@ final class EhLowerIr
         if ($this->outFile === null) { return false; }
         $this->writeOk = true;
         $ok = $this->eachLine($path, false);
+        $this->flushOut();
         $tail = $this->tail() . "\n";
         if (\Manticore\fwrite($tail, 1, \strlen($tail), $this->outFile) !== \strlen($tail)) { $ok = false; }
         $this->bytes = $this->bytes + \strlen($tail);
@@ -164,7 +168,7 @@ final class EhLowerIr
             $chunk = \cstr_to_str($p);
             $n = \strlen($chunk);
             if ($n === 0 || $chunk[$n - 1] !== "\n") { $pend .= $chunk; continue; }
-            $line = $pend . \substr($chunk, 0, $n - 1);
+            $line = $pend === '' ? \substr($chunk, 0, $n - 1) : $pend . \substr($chunk, 0, $n - 1);
             $pend = '';
             if ($scan) { $this->scan($line); } else { $this->lower($line); }
         }
@@ -207,7 +211,7 @@ final class EhLowerIr
             return;
         }
         if ($l === '}') { $this->scanFn = ''; return; }
-        if (\strpos($l, 'call ') === false && \strpos($l, 'invoke ') === false) { return; }
+        if (!self::hot($l)) { return; }
         $c = self::callee(self::invokeAsCall($l));
         if ($c === null) { return; }
         if ($c === '' || $c === '@__mc_throw') {
@@ -216,6 +220,29 @@ final class EhLowerIr
             return;
         }
         $this->callees[$this->scanFn][] = $c;
+    }
+
+    /**
+     * Cheap reject: does the instruction's opcode (after an optional `%r = `) start a
+     * call / tail call / invoke / landingpad / resume? Every other line is copied as is.
+     */
+    private static function hot(string $l): bool
+    {
+        $n = \strlen($l);
+        if ($n < 8 || $l[0] !== ' ') { return false; }
+        $o = 2;
+        if ($l[2] === '%') {
+            $eq = \strpos($l, ' = ');
+            if ($eq === false) { return false; }
+            $o = $eq + 3;
+        }
+        if ($o + 3 > $n) { return false; }
+        $a = $l[$o];
+        $b = $l[$o + 1];
+        if ($a === 'c' || $a === 't') { return $b === 'a'; }
+        if ($a === 'i') { return $b === 'n' && $l[$o + 2] === 'v'; }
+        if ($a === 'l') { return $b === 'a'; }
+        return $a === 'r' && $b === 'e' && $l[$o + 2] === 's';
     }
 
     private function solve(): void
@@ -381,8 +408,19 @@ final class EhLowerIr
     private function put(string $l): void
     {
         if ($this->outFile === null) { $this->out[] = $l; return; }
-        $s = $l . "\n";
-        $this->bytes = $this->bytes + \strlen($s);
+        $this->bytes = $this->bytes + \strlen($l) + 1;
+        $this->wl[] = $l;
+        $this->wn = $this->wn + 1;
+        if ($this->wn >= 16384) { $this->flushOut(); }
+    }
+
+    private function flushOut(): void
+    {
+        if ($this->wn === 0 || $this->outFile === null) { return; }
+        $this->wl[] = '';
+        $s = \implode("\n", $this->wl);
+        $this->wl = [];
+        $this->wn = 0;
         if (\Manticore\fwrite($s, 1, \strlen($s), $this->outFile) !== \strlen($s)) { $this->writeOk = false; }
     }
 
@@ -436,6 +474,7 @@ final class EhLowerIr
             $this->emit($l);
             return;
         }
+        if (!self::hot($l)) { $this->emit($l); return; }
         $lp = \strpos($l, ' = landingpad ');
         if ($lp !== false) {
             $reg = \trim(\substr($l, 0, $lp));
