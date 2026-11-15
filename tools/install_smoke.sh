@@ -66,6 +66,32 @@ check "symlink from another dir" "$WORK/sym/manticore"
 # The dev-tree shape, which is the one that already worked.
 check "explicit path" "$WORK/opt/bin/manticore"
 
+# `manticore lsp` reads the prelude and the stdlib .sig from the installed layout: it
+# must initialize and shut down from any cwd, through a symlink, and a bare copy must
+# fail with a message that names the expected paths (not "the prelude is empty").
+lsp_frame() { printf 'Content-Length: %d\r\n\r\n%s' "${#1}" "$1"; }
+{
+    lsp_frame '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":null,"capabilities":{}}}'
+    lsp_frame '{"jsonrpc":"2.0","id":2,"method":"shutdown"}'
+    lsp_frame '{"jsonrpc":"2.0","method":"exit"}'
+} > "$WORK/lsp.in"
+lsp_check() { # what, binary
+    local rc=0
+    ( cd / && "$2" lsp < "$WORK/lsp.in" > "$WORK/lsp.out" 2> "$WORK/lsp.err" ) || rc=$?
+    if [ "$rc" = 0 ] && grep -q '"serverInfo"' "$WORK/lsp.out"; then echo "PASS lsp initialize/shutdown: $1"
+    else echo "FAIL lsp initialize/shutdown: $1 (rc $rc)"; head -c 400 "$WORK/lsp.err"; fail=1; fi
+}
+lsp_check "installed layout, cwd /" "$WORK/opt/bin/manticore"
+lsp_check "symlink" "$WORK/sym/manticore"
+mkdir -p "$WORK/bare"
+cp "$MC" "$WORK/bare/manticore"
+rc=0
+( cd / && "$WORK/bare/manticore" lsp < "$WORK/lsp.in" > "$WORK/lsp.out" 2> "$WORK/lsp.err" ) || rc=$?
+if [ "$rc" = 1 ] && grep -q 'lib/prelude' "$WORK/lsp.err" && grep -q 'manticore_stdlib.o.sig' "$WORK/lsp.err"; then
+    echo "PASS lsp bare copy: clear error naming the expected layout"
+else
+    echo "FAIL lsp bare copy: expected rc 1 and a layout message (rc $rc)"; head -c 400 "$WORK/lsp.err"; fail=1
+fi
 # The blocking-offload pool is pay-for-use: a program that never names Async\
 # carries no worker thread code. An Async\ program is the control that the
 # symbol names still match.
