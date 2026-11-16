@@ -1,0 +1,41 @@
+child: O:5:"Child":7:{s:3:"pub";i:1;s:7:"~*~prot";s:1:"p";s:10:"~Base~priv";s:4:"base";s:12:"~Base~shadow";i:10;s:13:"~Child~shadow";i:20;s:3:"nul";N;s:1:"f";d:0.5;}
+  rt: ok
+lazy: O:4:"Lazy":2:{s:1:"b";N;s:1:"c";s:3:"set";}
+  rt: ok
+lazy-empty: O:4:"Lazy":1:{s:1:"c";s:3:"set";}
+  rt: ok
+bag: O:3:"Bag":5:{s:1:"x";i:1;s:6:"~Bag~y";s:1:"y";s:5:"extra";a:2:{i:0;i:1;i:1;i:2;}s:1:"5";s:4:"five";s:1:"z";O:4:"Node":2:{s:4:"next";N;s:4:"name";s:1:"z";}}
+  rt: ok
+same: a:5:{i:0;O:4:"Node":2:{s:4:"next";O:4:"Node":2:{s:4:"next";N;s:4:"name";s:1:"b";}s:4:"name";s:1:"a";}i:1;r:3;i:2;r:2;i:3;i:3;i:4;r:3;}
+  rt: ok
+deep: a:3:{i:0;a:2:{i:0;i:1;i:1;a:1:{i:0;O:4:"Node":2:{s:4:"next";N;s:4:"name";s:1:"b";}}}i:1;a:1:{s:1:"k";a:2:{i:0;O:4:"Node":2:{s:4:"next";r:5;s:4:"name";s:1:"a";}s:1:"x";a:2:{i:0;r:5;i:1;r:10;}}}i:2;r:10;}
+  rt: ok
+cycle: O:4:"Node":2:{s:4:"next";r:1;s:4:"name";s:3:"cyc";}
+  rt: ok
+enums: a:4:{i:0;E:11:"Suit:Hearts";i:1;r:2;i:2;E:6:"Code:A";i:3;O:6:"Holder":3:{s:4:"suit";E:11:"Suit:Spades";s:4:"code";E:6:"Code:B";s:4:"list";a:0:{}}}
+  rt: ok
+holder: O:6:"Holder":3:{s:4:"suit";E:11:"Suit:Spades";s:4:"code";E:6:"Code:B";s:4:"list";a:3:{i:0;E:11:"Suit:Hearts";i:1;O:4:"Node":2:{s:4:"next";O:4:"Node":2:{s:4:"next";N;s:4:"name";s:1:"b";}s:4:"name";s:1:"a";}i:2;r:6;}}
+  rt: ok
+std: O:8:"stdClass":3:{s:1:"a";i:1;s:1:"7";s:5:"seven";s:5:"inner";O:8:"stdClass":0:{}}
+  rt: ok
+cast: O:8:"stdClass":3:{s:1:"0";s:1:"x";s:1:"1";s:1:"y";s:1:"k";b:1;}
+  rt: ok
+ro: O:2:"Ro":2:{s:2:"id";i:5;s:3:"tag";s:1:"r";}
+  rt: ok
+hooked: O:6:"Hooked":1:{s:4:"name";s:3:"ABC";}
+  rt: ok
+custom: a:2:{i:0;O:6:"Custom":3:{s:1:"a";i:1;i:7;s:5:"seven";s:3:"obj";O:4:"Node":2:{s:4:"next";N;s:4:"name";s:2:"in";}}i:1;O:6:"Custom":3:{s:1:"a";i:1;i:7;s:5:"seven";s:3:"obj";O:4:"Node":2:{s:4:"next";N;s:4:"name";s:2:"in";}}}
+  rt: ok
+mixed-custom: a:3:{i:0;O:4:"Node":2:{s:4:"next";O:4:"Node":2:{s:4:"next";N;s:4:"name";s:1:"b";}s:4:"name";s:1:"a";}i:1;O:6:"Custom":3:{s:1:"a";i:1;i:7;s:5:"seven";s:3:"obj";O:4:"Node":2:{s:4:"next";N;s:4:"name";s:2:"in";}}i:2;r:2;}
+  rt: ok
+floats: O:6:"Floats":7:{s:1:"a";d:1;s:1:"b";d:-0;s:1:"c";d:0.1;s:1:"d";d:1.0E+100;s:1:"e";d:-1.5E-7;s:1:"i";d:INF;s:1:"n";d:-INF;}
+  rt: ok
+scalars: a:12:{i:0;N;i:1;b:1;i:2;b:0;i:3;i:0;i:4;i:-7;i:5;i:9223372036854775807;i:6;i:-9223372036854775808;i:7;d:1.5;i:8;d:NAN;i:9;s:0:"";i:10;s:3:"a~b";i:11;s:2:"ü";}
+  rt: ok
+Exception: Serialization of 'Closure' is not allowed
+Exception: Serialization of 'Closure' is not allowed
+bool(true)
+float(0.5)
+NULL
+bool(true)
+string(1) "b"

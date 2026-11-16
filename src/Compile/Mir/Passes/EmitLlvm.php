@@ -969,6 +969,7 @@ final class EmitLlvm implements EmitVisitor
         $this->needsObjectVarsFn = false;
         $this->needsObjectVarsMgFn = false;
         $this->needsGetClassFn = false;
+        $this->needsSerObjFn = false;
         $this->needsBagOfFn = false;
         $this->needsBoxUnknownFn = false;
         $this->eidxNeeded = [];
@@ -1372,6 +1373,7 @@ final class EmitLlvm implements EmitVisitor
         if ($this->needsObjectVarsFn) { $extraBodies .= $this->emitObjectVarsFn(); }
         if ($this->needsObjectVarsMgFn) { $extraBodies .= $this->emitObjectVarsFn(true); }
         if ($this->needsGetClassFn) { $extraBodies .= $this->emitGetClassFn(); }
+        if ($this->needsSerObjFn) { $extraBodies .= $this->emitSerObjFn(); }
         if ($this->needsBagOfFn) { $extraBodies .= $this->emitBagOfFn(); }
         if ($this->needsBoxUnknownFn) { $extraBodies .= $this->emitBoxUnknownFn(); }
         $extraBodies .= $this->emitErasedIfaceFns();
@@ -2489,6 +2491,9 @@ final class EmitLlvm implements EmitVisitor
 
     /** A site asked for the erased `get_class()` body. */
     private bool $needsGetClassFn = false;
+
+    /** A `serialize()` site asked for the per-class object writers. */
+    private bool $needsSerObjFn = false;
 
     /** A site asked for the unknown-class dynamic-property-bag body. */
     private bool $needsBagOfFn = false;

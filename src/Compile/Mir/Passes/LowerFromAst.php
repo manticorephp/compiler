@@ -1370,8 +1370,8 @@ final class LowerFromAst implements Pass
         }
 
         // serialize()'s object arm — same point and pattern as __mir_dump_object,
-        // and for the same reason: one `instanceof` arm per class, written from
-        // the now-complete class table.
+        // written once the class table is complete (it asks whether any class
+        // declares __serialize); the per-class writers are native IR.
         if ($this->includeSerialize) {
             $serProg = \Parser\Parser::parseSource("<?php\n" . $this->serObjectSrc());
             foreach ($serProg->statements as $sstmt) {
