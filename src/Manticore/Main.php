@@ -103,6 +103,25 @@ function sys_rename(string $from, string $to): int
     return 0;
 }
 
+// Forked workers of the staged exception lowering ({@see \Compile\Mir\EhLowerIr::runFile}).
+#[Library('c'), Symbol('fork'), CType('int')]
+function sys_fork(): int
+{
+    return -1;
+}
+
+#[Library('c'), Symbol('waitpid'), CType('int')]
+function sys_waitpid(#[CType('int')] int $pid, \Ffi\Ptr $status, #[CType('int')] int $options): int
+{
+    return -1;
+}
+
+// Leaves a forked worker without atexit handlers or a flush of the parent's stdio buffers.
+#[Library('c'), Symbol('_exit')]
+function sys_exit_raw(#[CType('int')] int $status): void
+{
+}
+
 // Poll interval of the progress-aware split assembly ({@see clang_run_counted}).
 #[Library('c'), Symbol('usleep'), CType('int')]
 function sys_usleep(#[CType('unsigned int')] int $usec): int

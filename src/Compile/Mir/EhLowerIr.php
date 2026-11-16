@@ -31,6 +31,8 @@ final class EhLowerIr
     public int $checks = 0;
     /** Defined functions that may leave with the slot set. */
     public int $mayThrow = 0;
+    /** Byte ranges the last {@see runFile} split the module into (one worker each). */
+    public int $ranges = 1;
     /** Bytes the last {@see runFile} wrote. */
     public int $bytes = 0;
 
@@ -134,15 +136,80 @@ final class EhLowerIr
         return \implode("\n", $this->out) . "\n";
     }
 
-    /** Lower a staged module file into `$outPath`; false on an I/O failure. */
+    /** Smallest byte range worth a forked worker. */
+    private const MIN_RANGE = 16777216;
+
+    /**
+     * Lower a staged module file into `$outPath`; false on an I/O failure.
+     *
+     * Both sweeps run over byte ranges cut at function ends ({@see bounds}), one
+     * forked worker per range after the first, which this process takes itself.
+     * Sweep 1 workers hand back their functions' callee lists in file order, so
+     * the merged graph, {@see solve} and every table it fills are the serial ones.
+     * Sweep 2 is local per function: each worker lowers its range into a file this
+     * process appends in range order — the module is the serial one byte for byte,
+     * whatever the worker count. A range whose fork fails is done here, in order.
+     */
     public function runFile(string $path, string $outPath): bool
     {
-        if (!$this->eachLine($path, true)) { return false; }
+        $b = self::bounds($path, \Manticore\CompileArgs::$jobs >= 2 ? \Manticore\CompileArgs::$jobs : \Manticore\host_jobs());
+        if ($b === []) { return false; }
+        $n = \count($b) - 1;
+        $this->ranges = $n;
+        /** @var int[] */
+        $pids = [0];
+        for ($i = 1; $i < $n; $i = $i + 1) {
+            $pid = \Manticore\sys_fork();
+            if ($pid === 0) {
+                $ok = false;
+                try {
+                    $ok = $this->eachLine($path, $b[$i], $b[$i + 1], true) && $this->scanDump($outPath . '.s' . (string)$i);
+                } catch (\Throwable $e) {
+                    \fwrite(\STDERR, 'EhLowerIr worker: ' . $e->getMessage() . "\n");
+                }
+                \Manticore\sys_exit_raw($ok ? 0 : 1);
+            }
+            $pids[] = $pid;
+        }
+        $ok = true;
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            if ($pids[$i] <= 0) {
+                if ($ok && !$this->eachLine($path, $b[$i], $b[$i + 1], true)) { $ok = false; }
+                continue;
+            }
+            $f = $outPath . '.s' . (string)$i;
+            if (!self::reap($pids[$i]) || !$ok || !$this->scanMerge($f)) { $ok = false; }
+            \Manticore\sys_unlink($f);
+        }
+        if (!$ok) { return false; }
         $this->solve();
+        $pids = [0];
+        for ($i = 1; $i < $n; $i = $i + 1) {
+            $pid = \Manticore\sys_fork();
+            if ($pid === 0) {
+                $ok = false;
+                try {
+                    $ok = $this->lowerPart($path, $b[$i], $b[$i + 1], $outPath . '.w' . (string)$i);
+                } catch (\Throwable $e) {
+                    \fwrite(\STDERR, 'EhLowerIr worker: ' . $e->getMessage() . "\n");
+                }
+                \Manticore\sys_exit_raw($ok ? 0 : 1);
+            }
+            $pids[] = $pid;
+        }
         $this->outFile = \Manticore\fopen($outPath, 'wb');
+        $this->writeOk = $this->outFile !== null;
+        for ($i = 0; $i < $n; $i = $i + 1) {
+            if ($pids[$i] <= 0) {
+                if ($ok && $this->writeOk && !$this->eachLine($path, $b[$i], $b[$i + 1], false)) { $ok = false; }
+                continue;
+            }
+            $f = $outPath . '.w' . (string)$i;
+            if (!self::reap($pids[$i]) || !$ok || !$this->writeOk || !$this->partMerge($f)) { $ok = false; }
+            \Manticore\sys_unlink($f);
+            \Manticore\sys_unlink($f . '.m');
+        }
         if ($this->outFile === null) { return false; }
-        $this->writeOk = true;
-        $ok = $this->eachLine($path, false);
         $this->flushOut();
         $tail = $this->tail() . "\n";
         if (\Manticore\fwrite($tail, 1, \strlen($tail), $this->outFile) !== \strlen($tail)) { $ok = false; }
@@ -154,28 +221,200 @@ final class EhLowerIr
         return $ok;
     }
 
-    /** Feed every line of `$path` (no trailing newline) to scan or lower. */
-    private function eachLine(string $path, bool $scan): bool
+    /**
+     * Range starts of `$path` plus its size; [] when it cannot be read. A cut sits
+     * right after a `}` line — between functions, where both sweeps start clean.
+     * @return int[]
+     */
+    private static function bounds(string $path, int $jobs): array
+    {
+        $in = \Manticore\fopen($path, 'rb');
+        if ($in === null) { return []; }
+        \Manticore\fseek($in, 0, 2);
+        $size = \Manticore\ftell($in);
+        $n = \intdiv($size, self::MIN_RANGE);
+        if ($n > $jobs) { $n = $jobs; }
+        /** @var int[] */
+        $b = [0];
+        $cap = 1048576;
+        $buf = \Manticore\malloc($cap);
+        for ($i = 1; $i < $n; $i = $i + 1) {
+            $t = \intdiv($size * $i, $n);
+            if ($t <= $b[\count($b) - 1]) { continue; }
+            \Manticore\fseek($in, $t, 0);
+            $pos = $t;
+            // The first read is the rest of a line cut anywhere: never a `}` line.
+            $atStart = false;
+            $found = false;
+            while (true) {
+                $p = \Manticore\fgets($buf, $cap, $in);
+                if ($p === 0) { break; }
+                $chunk = \cstr_to_str($p);
+                $len = \strlen($chunk);
+                if ($len === 0) { break; }
+                $pos = $pos + $len;
+                if ($atStart && $chunk === "}\n") { $found = true; break; }
+                $atStart = $chunk[$len - 1] === "\n";
+            }
+            if (!$found || $pos >= $size) { break; }
+            $b[] = $pos;
+        }
+        \Manticore\free($buf);
+        \Manticore\fclose($in);
+        $b[] = $size;
+        return $b;
+    }
+
+    /** waitpid until `$pid` is reaped; true when it exited 0. */
+    private static function reap(int $pid): bool
+    {
+        $st = \Manticore\calloc(1, 8);
+        $r = \Manticore\sys_waitpid($pid, $st, 0);
+        $status = \peek_i32($st, 0);
+        \Manticore\free($st);
+        return $r === $pid && $status === 0;
+    }
+
+    /** A sweep-1 worker's result: its functions in file order, callees deduplicated in first-seen order. */
+    private function scanDump(string $file): bool
+    {
+        /** @var string[] */
+        $o = [];
+        $o[] = "H\t" . ($this->hasWrite ? '1' : '0') . ($this->hasTrap ? '1' : '0') . ($this->hasUncaught ? '1' : '0');
+        foreach ($this->ccallable as $c) { $o[] = "C\t" . $c; }
+        foreach ($this->callees as $f => $cs) {
+            $row = "F\t" . $f . "\t" . (isset($this->inline[$f]) ? '1' : '0') . "\t" . ($this->may[$f] ? ($this->why[$f] ?? '') : '');
+            /** @var array<string, bool> */
+            $seen = [];
+            foreach ($cs as $c) {
+                if (isset($seen[$c])) { continue; }
+                $seen[$c] = true;
+                $row .= "\t" . $c;
+            }
+            $o[] = $row;
+        }
+        $o[] = '';
+        return \Manticore\write_file($file, \implode("\n", $o));
+    }
+
+    /** Append a sweep-1 worker's result, as if its range had been scanned here. */
+    private function scanMerge(string $file): bool
+    {
+        $txt = \Manticore\read_file($file);
+        if ($txt === null || !\str_starts_with($txt, "H\t")) { return false; }
+        foreach (\explode("\n", $txt) as $line) {
+            $l = (string)$line;
+            if ($l === '') { continue; }
+            $p = \explode("\t", $l);
+            $k = (string)$p[0];
+            if ($k === 'F') {
+                $f = (string)$p[1];
+                if ($p[2] === '1') { $this->inline[$f] = true; }
+                $w = (string)$p[3];
+                $this->may[$f] = $w !== '';
+                if ($w !== '') { $this->why[$f] = $w; }
+                /** @var string[] */
+                $cs = [];
+                $m = \count($p);
+                for ($j = 4; $j < $m; $j = $j + 1) { $cs[] = (string)$p[$j]; }
+                $this->callees[$f] = $cs;
+            } elseif ($k === 'C') {
+                $this->ccallable[] = (string)$p[1];
+            } elseif ($k === 'H') {
+                $h = (string)$p[1];
+                if ($h[0] === '1') { $this->hasWrite = true; }
+                if ($h[1] === '1') { $this->hasTrap = true; }
+                if ($h[2] === '1') { $this->hasUncaught = true; }
+            }
+        }
+        return true;
+    }
+
+    /** Sweep-2 worker: lower one range into `$file`, its counters into `$file.m`. */
+    private function lowerPart(string $path, int $from, int $to, string $file): bool
+    {
+        $this->outFile = \Manticore\fopen($file, 'wb');
+        if ($this->outFile === null) { return false; }
+        $this->writeOk = true;
+        $ok = $this->eachLine($path, $from, $to, false);
+        $this->flushOut();
+        if (\Manticore\fclose($this->outFile) !== 0) { $ok = false; }
+        $this->outFile = null;
+        $m = (string)$this->checks . "\t" . ($this->usedUncaught ? '1' : '0') . "\n";
+        foreach ($this->assertMsg as $c => $unused) { $m .= $c . "\n"; }
+        return $ok && $this->writeOk && \Manticore\write_file($file . '.m', $m);
+    }
+
+    /** Append a sweep-2 worker's text to the output and fold in its counters. */
+    private function partMerge(string $file): bool
+    {
+        $m = \Manticore\read_file($file . '.m');
+        if ($m === null || $m === '') { return false; }
+        $first = true;
+        foreach (\explode("\n", $m) as $line) {
+            $l = (string)$line;
+            if ($first) {
+                $first = false;
+                $t = \strpos($l, "\t");
+                if ($t === false) { return false; }
+                $this->checks = $this->checks + (int)\substr($l, 0, $t);
+                if (\substr($l, $t + 1) === '1') { $this->usedUncaught = true; }
+                continue;
+            }
+            if ($l !== '' && !isset($this->assertMsg[$l])) { $this->assertMsg[$l] = '@".mc.ea.' . \trim(\substr($l, 1), '"') . '"'; }
+        }
+        $this->flushOut();
+        $in = \Manticore\fopen($file, 'rb');
+        if ($in === null || $this->outFile === null) { return false; }
+        $cap = 4194304;
+        $buf = \Manticore\malloc($cap);
+        while (true) {
+            $k = \Manticore\fread($buf, 1, $cap, $in);
+            if ($k <= 0) { break; }
+            if (\Manticore\fwrite_buf($buf, 1, $k, $this->outFile) !== $k) { $this->writeOk = false; break; }
+            $this->bytes = $this->bytes + $k;
+        }
+        \Manticore\free($buf);
+        \Manticore\fclose($in);
+        return $this->writeOk;
+    }
+
+    /** Feed every line of `$path` in [`$from`, `$to`) (no trailing newline) to scan or lower. */
+    private function eachLine(string $path, int $from, int $to, bool $scan): bool
     {
         $in = \Manticore\fopen($path, 'rb');
         if ($in === null) { return false; }
-        $cap = 1048576;
+        if ($from > 0) { \Manticore\fseek($in, $from, 0); }
+        $cap = 4194304;
         $buf = \Manticore\malloc($cap);
+        $left = $to - $from;
         $pend = '';
-        while (true) {
-            $p = \Manticore\fgets($buf, $cap, $in);
-            if ($p === 0) { break; }
-            $chunk = \cstr_to_str($p);
-            $n = \strlen($chunk);
-            if ($n === 0 || $chunk[$n - 1] !== "\n") { $pend .= $chunk; continue; }
-            $line = $pend === '' ? \substr($chunk, 0, $n - 1) : $pend . \substr($chunk, 0, $n - 1);
-            $pend = '';
-            if ($scan) { $this->scan($line); } else { $this->lower($line); }
+        while ($left > 0) {
+            $k = \Manticore\fread($buf, 1, $left < $cap ? $left : $cap, $in);
+            if ($k <= 0) { break; }
+            $left = $left - $k;
+            $blk = \str_from_buffer($buf, $k);
+            $p = 0;
+            if ($pend !== '') {
+                $nl = \strpos($blk, "\n");
+                if ($nl === false) { $pend .= $blk; continue; }
+                $line = $pend . \substr($blk, 0, $nl);
+                if ($scan) { $this->scan($line); } else { $this->lower($line); }
+                $p = $nl + 1;
+            }
+            while (true) {
+                $nl = \strpos($blk, "\n", $p);
+                if ($nl === false) { break; }
+                $line = \substr($blk, $p, $nl - $p);
+                if ($scan) { $this->scan($line); } else { $this->lower($line); }
+                $p = $nl + 1;
+            }
+            $pend = \substr($blk, $p);
         }
         if ($pend !== '') { if ($scan) { $this->scan($pend); } else { $this->lower($pend); } }
         \Manticore\free($buf);
         \Manticore\fclose($in);
-        return true;
+        return $left === 0;
     }
 
     private static function defineName(string $l): string
