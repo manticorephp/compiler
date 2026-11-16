@@ -1168,11 +1168,59 @@ function clang_tuning_flags(): string
     if (\Compile\Debug::$asan) {
         return $f . ' -fsanitize=address -mllvm -asan-stack=0 -mllvm -asan-globals=0';
     }
+    $f .= pgo_compile_flags();
     $e = \getenv("MANTICORE_FAT_FUNCTION_SPLIT");
     if ($e !== false && $e !== "" && $e !== "0" && $e !== "off") {
         return $f . " -mllvm -enable-split-machine-functions";
     }
     return $f;
+}
+
+/**
+ * Profile-guided optimisation of the program being built. `MANTICORE_PGO_GEN=1`
+ * instruments it (IR-level `-fprofile-generate`: the input is LLVM IR, which
+ * front-end `-fprofile-instr-generate` leaves alone; runs write `LLVM_PROFILE_FILE`),
+ * `MANTICORE_PGO_USE=<merged.profdata>` optimises with the profile, which reaches
+ * clang under its content hash ({@see pgo_profile_path}), so a regenerated
+ * profile is a new object-cache key. `bin/build --pgo` does all of it for the
+ * compiler; docs/pgo.md covers a user program.
+ */
+function pgo_compile_flags(): string
+{
+    $g = \getenv('MANTICORE_PGO_GEN');
+    if ($g !== false && $g !== '' && $g !== '0') { return ' -fprofile-generate'; }
+    $u = \getenv('MANTICORE_PGO_USE');
+    if ($u !== false && $u !== '') {
+        return ' -fprofile-use=' . \escapeshellarg(pgo_profile_path($u))
+            . ' -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin';
+    }
+    return '';
+}
+
+/**
+ * The profile under a CONTENT-addressed name in the object cache: the flags are
+ * every object's cache key, so a profile regenerated at the same path would
+ * otherwise hand back objects optimised with the old one. Copied once per process.
+ */
+function pgo_profile_path(string $u): string
+{
+    static $resolved = [];
+    if (isset($resolved[$u])) { return $resolved[$u]; }
+    $h = \is_file($u) ? \sha1_file($u) : false;
+    if (!\is_string($h) || $h === '') { $resolved[$u] = $u; return $u; }
+    $dir = obj_cache_dir();
+    if (!\is_dir($dir)) { @\mkdir($dir, 0777, true); }
+    $dst = $dir . '/pgo-' . $h . '.profdata';
+    if (!\is_file($dst) && !\copy($u, $dst)) { $dst = $u; }
+    $resolved[$u] = $dst;
+    return $dst;
+}
+
+/** The link half of {@see pgo_compile_flags}: an instrumented program links the profile runtime. */
+function pgo_link_flags(): string
+{
+    $g = \getenv('MANTICORE_PGO_GEN');
+    return ($g !== false && $g !== '' && $g !== '0') ? ' -fprofile-generate' : '';
 }
 
 /**
@@ -3969,7 +4017,7 @@ function build_compile_module(
     // Under ThinLTO the -O2 work moves INTO the link, so the link is where the
     // cache pays: between self-host generations most modules are unchanged and
     // their backend output can be reused wholesale.
-    $tail = $tail . thinlto_link_flags() . debug_link_flags();
+    $tail = $tail . thinlto_link_flags() . debug_link_flags() . pgo_link_flags();
     // Probed, not cached: a failed link here is usually the program's own
     // (an undefined symbol), and a retry would rerun the whole ThinLTO link.
     $linkExtra = $preLib . ffi_link_flags_probe($libs, $linkFlags) . $tail;

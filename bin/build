@@ -2,7 +2,7 @@
 #
 # Canonical compiler rebuild — SELF-HOST by default.
 #
-#   bin/build [--verify] [--fast] [output]
+#   bin/build [--verify] [--fast] [--pgo] [output]
 #
 # Manticore builds Manticore. The self-built `bin/manticore` is the
 # canonical builder. With no binary yet, the build starts from the PINNED
@@ -21,6 +21,9 @@
 #                  2026-09-07: 71 s vs 83 s). A green --fast build is NOT
 #                  gate evidence: the sjlj-locals bug was right at -O0 and
 #                  wrong at -O2.
+#   --pgo          after rebuilding, rebuild the compiler once more with a
+#                  profile from its own self-build (~15% less CPU in every
+#                  later compile; ~4 more minutes). Needs llvm-profdata.
 #   output         target path (default bin/manticore)
 #
 # The self build goes to a temp path, is smoke-tested (compile+run a
@@ -92,12 +95,14 @@ CELLGUARD_PASS2="${CELLGUARD_PASS2:-strict}"
 
 VERIFY=0
 FAST=0
+PGO=0
 OUT="bin/manticore"
 OUT_GIVEN=0
 for arg in "$@"; do
     case "$arg" in
         --verify)    VERIFY=1 ;;
         --fast)      FAST=1 ;;
+        --pgo)       PGO=1 ;;
         -*)          echo "unknown flag: $arg" >&2; exit 2 ;;
         *)           OUT="$arg"; OUT_GIVEN=1 ;;
     esac
@@ -117,6 +122,11 @@ if [[ $FAST -eq 1 ]]; then
     if [[ $VERIFY -eq 1 ]]; then
         echo "bin/build: --fast and --verify are contradictory — a -O1 build is not" >&2
         echo "  gate evidence (sjlj-locals was right at -O0 and wrong at -O2)." >&2
+        exit 2
+    fi
+    if [[ $PGO -eq 1 ]]; then
+        echo "bin/build: --fast and --pgo are contradictory — --pgo optimises the canonical" >&2
+        echo "  compiler, --fast builds a throwaway -O1 one." >&2
         exit 2
     fi
 fi
@@ -311,6 +321,52 @@ cp prelude/*.php lib/prelude/
 if [[ $STAGE0 -eq 1 ]]; then
     echo "── stage0 built generation 1 — generation 1 rebuilds itself ──"
     exec "$0" "$@"
+fi
+
+# --pgo: profile-guided optimisation of the compiler binary (~15% less CPU across
+# the whole front end; measured 2026-11-16 on symfony-app, the compiler's own
+# --check and its -O0 self-build). Instrument, train on the compiler building
+# itself (the one workload every checkout has), rebuild with the profile. The
+# emitted IR does not change, so lib/*.o and the fixpoint gate are unaffected;
+# only this binary's own machine code is. The final generation only: a stage0
+# run re-execs above before it gets here.
+if [[ $PGO -eq 1 ]]; then
+    echo "── pgo: instrument, train on the self-build, rebuild with the profile ──"
+    PROFDATA="$(command -v llvm-profdata || true)"
+    if [[ -z "$PROFDATA" ]] && command -v xcrun >/dev/null 2>&1; then PROFDATA="$(xcrun -f llvm-profdata 2>/dev/null || true)"; fi
+    if [[ -z "$PROFDATA" ]]; then PROFDATA="$(ls /usr/bin/llvm-profdata-* /usr/lib/llvm-*/bin/llvm-profdata 2>/dev/null | sort -V | tail -1 || true)"; fi
+    if [[ -z "$PROFDATA" || ! -x "$PROFDATA" ]]; then
+        echo "bin/build: --pgo needs llvm-profdata (the one matching this clang); none found." >&2
+        exit 1
+    fi
+    PGO_DIR="$(mktemp -d)"
+    # Beside the other binaries: a compiler finds prelude/ and lib/ from its own path.
+    PGO_GEN="bin/.manticore.pgogen"
+    PGO_MANIFEST="$PWD/.manticore.pgo.$$.json"
+    trap 'rm -f "$TMP_MANIFEST" "$PGO_MANIFEST" "$PGO_GEN"; rm -rf "$PGO_DIR"' EXIT
+    sed "s#\"$MANIFEST_OUT\"#\"$PGO_GEN\"#" manticore.json > "$PGO_MANIFEST"
+    rm -f "$PGO_GEN"
+    MANTICORE_PGO_GEN=1 "$OUT" build --apps-only --quiet "$PGO_MANIFEST" \
+        || { echo "fatal: --pgo: instrumented build failed" >&2; exit 1; }
+    sed "s#\"$MANIFEST_OUT\"#\"$PGO_DIR/train.out\"#" manticore.json > "$PGO_MANIFEST"
+    LLVM_PROFILE_FILE="$PGO_DIR/p%p.profraw" "$PGO_GEN" build --apps-only -O0 --quiet "$PGO_MANIFEST" \
+        || { echo "fatal: --pgo: training run failed" >&2; exit 1; }
+    "$PROFDATA" merge -o "$PGO_DIR/compiler.profdata" "$PGO_DIR"/p*.profraw \
+        || { echo "fatal: --pgo: llvm-profdata merge failed" >&2; exit 1; }
+    PGO_TMP="$PGO_DIR/manticore_pgo"
+    sed "s#\"$MANIFEST_OUT\"#\"$PGO_TMP\"#" manticore.json > "$PGO_MANIFEST"
+    MANTICORE_PGO_USE="$PGO_DIR/compiler.profdata" "$OUT" build --apps-only --quiet "$PGO_MANIFEST" \
+        || { echo "fatal: --pgo: profile-guided build failed" >&2; exit 1; }
+    echo '<?php echo "selfhost-ok\n";' > "$PGO_DIR/smoke.php"
+    if ! "$PGO_TMP" compile "$PGO_DIR/smoke.php" -o "$PGO_DIR/smoke" >/dev/null 2>&1 \
+        || [[ "$("$PGO_DIR/smoke" || true)" != "selfhost-ok" ]]; then
+        echo "fatal: --pgo: the profile-guided compiler fails the smoke test; $OUT left as it was" >&2
+        exit 1
+    fi
+    cp "$OUT" "bin/.manticore.prev"
+    rm -f "$OUT"
+    mv "$PGO_TMP" "$OUT"
+    echo "ok: $OUT (profile-guided, smoke-tested)"
 fi
 
 if [[ $VERIFY -eq 1 ]]; then
