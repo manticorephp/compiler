@@ -5870,7 +5870,12 @@ trait EmitLlvmCalls
         $out .= '  br i1 ' . $bad . ', label %' . $badL . ', label %' . $okL . "\n" . $badL . ":\n";
         $tbl = $this->spreadNamesTable($names);
         $sym = $this->spreadBadKeyHelper();
-        $site = $this->siteTraceArgs(0, $out);
+        // A shared helper has no call site of its own: the module's source file, as raiseHelper does,
+        // not the NUL file siteTraceArgs answers there.
+        $inSite = $this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa;
+        $site = !$inSite && $this->cellSinkFnOverride !== null
+            ? 'i64 0, ptr ' . $this->strLitId($this->pool->intern($this->sourceFile))
+            : $this->siteTraceArgs(0, $out);
         $r = $this->ssa->allocReg();
         $out .= '  ' . $r . ' = call i64 ' . $sym . '(ptr ' . $arrReg . ', i64 ' . $npos . ', i64 ' . $cnt . ', ptr ' . $tbl
             . ', i64 ' . (string)\count($names) . ', ' . $site . ")\n  unreachable\n" . $okL . ":\n";
