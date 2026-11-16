@@ -477,6 +477,17 @@ trait LowerPrelude
         $arm = 0;
         foreach ($names as $cname) {
             $cd = $this->classTable[$cname];
+            if ($this->declaresMethod($cname, '__debugInfo')) { $sawDebugInfo = true; }
+            // Most classes print through the generic walk below. An arm is only
+            // for what the (array) view cannot say: a slot that may be
+            // uninitialized (printed `uninitialized(T)`, by its declared type)
+            // and an erased #[TypeDef] slot rebuilt from its carrier.
+            $needsArm = $this->maybeUninitIn($cd) !== [];
+            foreach ($cd->propertyTypes as $pt) {
+                $tdc0 = $pt->typeDefClass();
+                if ($tdc0 !== null && isset($this->classTable[$tdc0]) && $this->classTable[$tdc0]->typeDefProp !== '') { $needsArm = true; }
+            }
+            if (!$needsArm) { continue; }
             $props = $this->visibleProps($cd);
             $pc = (string)\count($props);
             $helper = '__mir_dump_object_arm_' . (string)$arm;
@@ -549,7 +560,26 @@ trait LowerPrelude
             $dispatch .= "    case " . (string)$cd->classId . ": " . $helper . "(\$v, \$indent, \$pad); return;\n";
             $arm = $arm + 1;
         }
-        $dispatch .= "  }\n"
+        $dispatch .= "  }\n";
+        // The generic walk: php's own form is the (array) view, declared slots in
+        // order under visibility-mangled keys, the bag last, and its count.
+        $dispatch .= "  if (!(\$v instanceof \\stdClass)) {\n";
+        if ($sawDebugInfo) {
+            $dispatch .= "    if (method_exists(\$v, '__debugInfo')) {\n"
+                . "      \$dd = \$v->__debugInfo();\n"
+                . "      echo 'object(', get_class(\$v), ')#', (string)spl_object_id(\$v), ' (', (string)count(\$dd), \") {\\n\";\n"
+                . "      __mir_dump_debug_body(\$dd, \$indent);\n"
+                . "      echo \$pad, \"}\\n\"; return;\n"
+                . "    }\n";
+        }
+        $dispatch .= "    \$view = (array)\$v;\n"
+            . "    echo 'object(', get_class(\$v), ')#', (string)spl_object_id(\$v), ' (', (string)count(\$view), \") {\\n\";\n"
+            . "    foreach (\$view as \$k => \$val) {\n"
+            . "      echo \$pad, '  [', __mir_dump_debug_key((string)\$k), \"]=>\\n\", \$pad, '  ';\n"
+            . "      __mir_var_dump(\$val, \$indent + 1);\n"
+            . "    }\n"
+            . "    echo \$pad, \"}\\n\"; return;\n"
+            . "  }\n"
             . "  \$arr = \\__mir_obj_bag(\$v);\n"
             . "  echo 'object(stdClass)#', (string)spl_object_id(\$v), ' (', (string)count(\$arr), \") {\\n\";\n"
             . "  foreach (\$arr as \$k => \$val) {\n"
@@ -570,10 +600,12 @@ trait LowerPrelude
                 . "    if (is_int(\$k)) { echo \$pad, '  [', (string)\$k, \"]=>\\n\", \$pad, '  '; }\n"
                 . "    else { echo \$pad, '  [', __mir_dump_debug_key((string)\$k), \"]=>\\n\", \$pad, '  '; }\n"
                 . "    __mir_var_dump(\$val, \$indent + 1);\n"
-                . "  }\n}\n"
-                // A mangled key names a non-public property, as in php's own
-                // debug table: "\0*\0p" protected, "\0Class\0p" private.
-                . "function __mir_dump_debug_key(string \$k): string {\n"
+                . "  }\n}\n";
+        }
+        // A mangled key names a non-public property, as in php's own debug
+        // table: "\0*\0p" protected, "\0Class\0p" private. The generic walk
+        // reads every key through it.
+        $body .= "function __mir_dump_debug_key(string \$k): string {\n"
                 . "  if (\$k === '' || \$k[0] !== \"\\0\") { return '\"' . \$k . '\"'; }\n"
                 . "  \$p = strpos(\$k, \"\\0\", 1);\n"
                 . "  if (\$p === false) { return '\"' . \$k . '\"'; }\n"
@@ -581,7 +613,6 @@ trait LowerPrelude
                 . "  \$n = substr(\$k, \$p + 1);\n"
                 . "  if (\$c === '*') { return '\"' . \$n . '\":protected'; }\n"
                 . "  return '\"' . \$n . '\":\"' . \$c . '\":private';\n}\n";
-        }
         return $body . $dispatch;
     }
 
@@ -1161,7 +1192,7 @@ trait LowerPrelude
             . "  if (\$en !== '') { return \$lead . '\\\\' . \$en; }\n";
         // A VIRTUAL hooked property is in var_export's output (read through its
         // get hook) but not in the (array) view, so a class that has one keeps
-        // its own arm. Derived first: an instanceof test must not stop at a base.
+        // its own arm.
         foreach ($this->walkableClassesDerivedFirst() as $cname) {
             $cd = $this->classTable[$cname];
             if ($cd->virtualProps === []) { continue; }
@@ -1181,7 +1212,9 @@ trait LowerPrelude
                     . "  }\n";
             }
             $body .= "  return \$out . \$pad . '))';\n}\n";
-            $dispatch .= "  if (\$v instanceof \\" . $cname . ") { return " . $helper . "(\$v, \$indent, \$pad, \$ipad, \$lead); }\n";
+            // The EXACT class: a subclass without its own arm must not print
+            // through its parent's slot list.
+            $dispatch .= "  if (__mir_object_class_id(\$v) === " . (string)$cd->classId . ") { return " . $helper . "(\$v, \$indent, \$pad, \$ipad, \$lead); }\n";
         }
         $dispatch .= "  if (!(\$v instanceof \\stdClass) && !(\$v instanceof \\Closure)) {\n"
             . "    \$out = \$lead . '\\\\' . get_class(\$v) . \"::__set_state(array(\\n\";\n"
