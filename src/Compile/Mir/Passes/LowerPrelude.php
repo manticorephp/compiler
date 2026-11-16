@@ -1082,17 +1082,19 @@ trait LowerPrelude
      */
     private function printRObjectSrc(): string
     {
-        $names = $this->walkableClassesDerivedFirst();
+        // One generic walk over the object's `(array)` view, php's own definition
+        // of print_r's object form: declared properties in order with mangled
+        // keys (`\0*\0p`, `\0Class\0p`, which __mir_print_r_debug_key renders as
+        // `p:protected` / `p:Class:private`), uninitialized ones left out, the
+        // dynamic bag last. It replaced one generated arm per class: 1225 of
+        // them on a Symfony app, 16% of the generated MIR every inference run
+        // walked and ~24 MB of IR.
         $body = "function __mir_print_r_obj_map(string \$head, mixed \$d, int \$indent, string \$pad): string {\n"
             . "  \$out = \$head . \"\\n\" . \$pad . \"(\\n\";\n"
             . "  foreach (\$d as \$k => \$val) {\n"
             . "    \$out = \$out . \$pad . '    [' . __mir_print_r_debug_key((string)\$k) . '] => ' . __mir_print_r_str(\$val, \$indent + 8) . \"\\n\";\n"
             . "  }\n"
             . "  return \$out . \$pad . \")\\n\";\n}\n"
-            // One property line, as a call: inlined per property the concatenation costs ~5 KB of IR,
-            // times every property of every class of the program.
-            . "function __mir_print_r_line(string \$out, string \$pad, string \$key, mixed \$val, int \$indent): string {\n"
-            . "  return \$out . \$pad . '    [' . \$key . '] => ' . __mir_print_r_str(\$val, \$indent + 8) . \"\\n\";\n}\n"
             // A mangled key ({@see dumpObjectSrc}): `p:protected`, `p:Class:private`.
             . "function __mir_print_r_debug_key(string \$k): string {\n"
             . "  if (\$k === '' || \$k[0] !== \"\\0\") { return \$k; }\n"
@@ -1114,60 +1116,15 @@ trait LowerPrelude
             . "    if (array_key_exists('value', \$d)) { \$head = \$head . (is_int(\$d['value']) ? ':int' : ':string'); }\n"
             . "    return __mir_print_r_obj_map(\$head, \$d, \$indent, \$pad);\n"
             . "  }\n"
-            ;
-        /** @var array<int, string> $cases class id => its arm call */
-        $cases = [];
-        $arm = 0;
-        foreach ($names as $cname) {
-            $cd = $this->classTable[$cname];
-            $helper = '__mir_print_r_object_arm_' . (string)$arm;
-            $head = $this->dqBody($cd->display() . ' Object');
-            $body .= "function " . $helper . "(mixed \$v, int \$indent, string \$pad): string {\n"
-                . "  if (\$v instanceof \\" . $cname . ") {\n";
-            if ($this->declaresMethod($cname, '__debugInfo')) {
-                // Through a local, then a `mixed` parameter: a bare-`array`
-                // return erases its element ({@see dumpObjectSrc}).
-                $body .= "    \$d = \$v->__debugInfo();\n"
-                    . "    return __mir_print_r_obj_map(\"" . $head . "\", \$d, \$indent, \$pad);\n";
-            } else {
-                $body .= "    \$out = \"" . $head . "\\n\" . \$pad . \"(\\n\";\n";
-                foreach ($this->visibleProps($cd) as $p) {
-                    $shown = $cd->propDisplayName($p);
-                    $key = $shown;
-                    if (isset($cd->propertyMeta[$p])) {
-                        $pm = $cd->propertyMeta[$p];
-                        if ($pm->visibility === 'protected') { $key = $shown . ':protected'; }
-                        if ($pm->visibility === 'private') {
-                            $key = $shown . ':' . \ltrim($pm->declaringClass !== '' ? $pm->declaringClass : $cname, '\\') . ':private';
-                        }
-                    }
-                    $line = "\$out = __mir_print_r_line(\$out, \$pad, \"" . $this->dqBody($key) . "\", \$v->"
-                        . $p . ", \$indent);";
-                    $body .= isset($this->maybeUninitIn($cd)[$p])
-                        ? "    if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
-                        : "    " . $line . "\n";
-                }
-                if ($cd->usesBag()) {
-                    $body .= "    foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
-                        . "      \$out = \$out . \$pad . '    [' . \$bk . '] => ' . __mir_print_r_str(\$bv, \$indent + 8) . \"\\n\";\n"
-                        . "    }\n";
-                }
-                $body .= "    return \$out . \$pad . \")\\n\";\n";
-            }
-            $body .= "  }\n  return '';\n}\n";
-            $cases[$cd->classId] = 'return ' . $helper . '($v, $indent, $pad);';
-            $arm = $arm + 1;
-        }
-        if ($cases !== []) {
-            [$bfns, $pick] = self::bucketTreeSrc('__mir_print_r_object', 'mixed $v, int $cid, int $indent, string $pad',
-                '$v, $cid, $indent, $pad', '?string', '$cid', $cases, true);
-            $body .= $bfns;
-            $dispatch .= "  \$cid = __mir_object_class_id(\$v);\n" . $pick;
-        }
-        // A closure carries no property table; everything else left is a
-        // dynamic (stdClass / bag) object.
-        $dispatch .= "  if (\$v instanceof \\Closure) { return \"Closure Object\\n\" . \$pad . \"(\\n\" . \$pad . \")\\n\"; }\n"
-            . "  return __mir_print_r_obj_map(get_class(\$v) . ' Object', \\__mir_obj_bag(\$v), \$indent, \$pad);\n}\n";
+            // A closure carries no property table.
+            . "  if (\$v instanceof \\Closure) { return \"Closure Object\\n\" . \$pad . \"(\\n\" . \$pad . \")\\n\"; }\n"
+            // `__debugInfo()` replaces the walk. Through a local, then a `mixed`
+            // parameter: a bare-`array` return erases its element ({@see dumpObjectSrc}).
+            . "  if (method_exists(\$v, '__debugInfo')) {\n"
+            . "    \$d = \$v->__debugInfo();\n"
+            . "    return __mir_print_r_obj_map(get_class(\$v) . ' Object', \$d, \$indent, \$pad);\n"
+            . "  }\n"
+            . "  return __mir_print_r_obj_map(get_class(\$v) . ' Object', (array)\$v, \$indent, \$pad);\n}\n";
         return $body . $dispatch;
     }
 
@@ -1188,49 +1145,54 @@ trait LowerPrelude
      */
     private function exportObjectSrc(): string
     {
-        $names = $this->walkableClassesDerivedFirst();
-        // One property line, as a call (see __mir_print_r_line).
-        $body = "function __mir_export_prop(string \$out, string \$ipad, string \$key, mixed \$val, int \$indent): string {\n"
-            . "  return \$out . \$ipad . \"'\" . \$key . \"' => \" . __mir_var_export(\$val, \$indent + 2) . \",\\n\";\n}\n";
+        // One generic walk over the object's `(array)` view, as {@see printRObjectSrc}:
+        // var_export prints every slot by its bare name (the mangled visibility
+        // prefix dropped) and a dynamic key quoted, in the view's order. It
+        // replaced one generated arm per class (1225 on a Symfony app).
+        $body = "function __mir_export_key(string \$k): string {\n"
+            . "  if (\$k === '' || \$k[0] !== \"\\0\") { return \$k; }\n"
+            . "  \$p = strpos(\$k, \"\\0\", 1);\n"
+            . "  return \$p === false ? \$k : substr(\$k, \$p + 1);\n}\n";
         $dispatch = "function __mir_export_object(mixed \$v, int \$indent): string {\n"
             . "  \$pad = str_repeat(' ', \$indent);\n"
             . "  \$ipad = \$pad . '   ';\n"
             . "  \$lead = \$indent > 0 ? (\"\\n\" . \$pad) : '';\n"
             . "  \$en = __mir_enum_name(\$v);\n"
             . "  if (\$en !== '') { return \$lead . '\\\\' . \$en; }\n";
-        /** @var array<int, string> $cases class id => its arm call */
-        $cases = [];
-        $arm = 0;
-        foreach ($names as $cname) {
+        // A VIRTUAL hooked property is in var_export's output (read through its
+        // get hook) but not in the (array) view, so a class that has one keeps
+        // its own arm. Derived first: an instanceof test must not stop at a base.
+        foreach ($this->walkableClassesDerivedFirst() as $cname) {
             $cd = $this->classTable[$cname];
-            $disp = $cd->display();
-            $helper = '__mir_export_object_arm_' . (string)$arm;
+            if ($cd->virtualProps === []) { continue; }
+            $helper = '__mir_export_object_hooked_' . (string)$cd->classId;
             $body .= "function " . $helper . "(mixed \$v, int \$indent, string \$pad, string \$ipad, string \$lead): string {\n"
-                . "  if (\$v instanceof \\" . $cname . ") {\n"
-                . "  \$out = \$lead . \"\\\\" . $this->dqBody($disp) . "::__set_state(array(\\n\";\n";
+                . "  \$out = \$lead . \"\\\\" . $this->dqBody($cd->display()) . "::__set_state(array(\\n\";\n";
             foreach ($cd->propertyNames as $p) {
-                $line = "\$out = __mir_export_prop(\$out, \$ipad, \"" . $cd->propDisplayName($p) . "\", \$v->"
-                    . $p . ", \$indent);";
+                $line = "\$out = \$out . \$ipad . \"'" . $cd->propDisplayName($p) . "' => \" . __mir_var_export(\$v->"
+                    . $p . ", \$indent + 2) . \",\\n\";";
                 $body .= isset($this->maybeUninitIn($cd)[$p])
-                    ? "    if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
-                    : "    " . $line . "\n";
+                    ? "  if (__mir_prop_inited(\$v, '" . $p . "')) { " . $line . " }\n"
+                    : "  " . $line . "\n";
             }
             if ($cd->usesBag()) {
                 $body .= "  foreach (\\__mir_obj_bag(\$v) as \$bk => \$bv) {\n"
-                    . "    \$ks = is_int(\$bk) ? (string)\$bk : (\"'\" . __mc_var_export_qstr((string)\$bk) . \"'\");\n"
-                    . "    \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$bv, \$indent + 2) . \",\\n\";\n"
+                    . "    \$out = \$out . \$ipad . \"'\" . __mc_var_export_qstr((string)\$bk) . \"' => \" . __mir_var_export(\$bv, \$indent + 2) . \",\\n\";\n"
                     . "  }\n";
             }
-            $body .= "  return \$out . \$pad . '))';\n  }\n}\n";
-            $cases[$cd->classId] = 'return ' . $helper . '($v, $indent, $pad, $ipad, $lead);';
-            $arm = $arm + 1;
+            $body .= "  return \$out . \$pad . '))';\n}\n";
+            $dispatch .= "  if (\$v instanceof \\" . $cname . ") { return " . $helper . "(\$v, \$indent, \$pad, \$ipad, \$lead); }\n";
         }
-        if ($cases !== []) {
-            [$bfns, $pick] = self::bucketTreeSrc('__mir_export_object', 'mixed $v, int $cid, int $indent, string $pad, string $ipad, string $lead',
-                '$v, $cid, $indent, $pad, $ipad, $lead', '?string', '$cid', $cases, true);
-            $body .= $bfns;
-            $dispatch .= "  \$cid = __mir_object_class_id(\$v);\n" . $pick;
-        }
+        $dispatch .= "  if (!(\$v instanceof \\stdClass) && !(\$v instanceof \\Closure)) {\n"
+            . "    \$out = \$lead . '\\\\' . get_class(\$v) . \"::__set_state(array(\\n\";\n"
+            . "    foreach ((array)\$v as \$k => \$val) {\n"
+            // A property name is a string to php, `7` included: the (array) view
+            // made a numeric one an int key, var_export still quotes it.
+            . "      \$ks = \"'\" . __mc_var_export_qstr(__mir_export_key((string)\$k)) . \"'\";\n"
+            . "      \$out = \$out . \$ipad . \$ks . ' => ' . __mir_var_export(\$val, \$indent + 2) . \",\\n\";\n"
+            . "    }\n"
+            . "    return \$out . \$pad . '))';\n"
+            . "  }\n";
         $dispatch = $dispatch
             . "  \$out = \$lead . \"(object) array(\\n\";\n"
             . "  foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
