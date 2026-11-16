@@ -888,8 +888,7 @@ trait LowerPrelude
                     }
                     if ($cd->usesBag()) {
                         $body .= "        foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
-                            . "          if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
-                            . "          else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                            . "          \$b = \$b . __mc_ser_str((string)\$k);\n"
                             . "          \$b = \$b . __mc_ser_val(\$val, \$st);\n"
                             . "          \$cnt = \$cnt + 1;\n"
                             . "        }\n";
@@ -908,8 +907,7 @@ trait LowerPrelude
                     $body .= "        \$b = ''\n" . $entries . "          ;\n"
                         . "        \$cnt = " . (string)count($props) . ";\n"
                         . "        foreach (\\__mir_obj_bag(\$v) as \$k => \$val) {\n"
-                        . "          if (is_int(\$k)) { \$b = \$b . 'i:' . (string)\$k . ';'; }\n"
-                        . "          else { \$b = \$b . __mc_ser_str((string)\$k); }\n"
+                        . "          \$b = \$b . __mc_ser_str((string)\$k);\n"
                         . "          \$b = \$b . __mc_ser_val(\$val, \$st);\n"
                         . "          \$cnt = \$cnt + 1;\n"
                         . "        }\n"
@@ -1469,43 +1467,81 @@ trait LowerPrelude
         // enum property got the singleton pointer instead of its ordinal. Crossing
         // a `mixed` parameter makes the value a CELL by construction, which is the
         // one shape the typed-slot store knows how to unbox.
-        $fillDispatch = "function __mc_unser_set(mixed \$o, string \$k, mixed \$v): void {\n"
-            . "  switch (__mir_object_class_id(\$o)) {\n";
-        $fillBody = '';
+        // ONE function for every class instead of one arm per class (917 arms,
+        // ~97k MIR nodes and ~51 MB of IR on a Symfony app). A key is a property
+        // NAME: demangled, it maps through one constant table to an id, and the
+        // id's leaf is `$o->name = $v`, the module's shared writer for that name,
+        // which already switches on the class and stores into the typed slot. Only
+        // a SHADOWED slot (a private parent slot under a name the child redeclares)
+        // needs the mangled key and its class, so only such a class keeps an arm.
+        // The stores run in frames named `__mc_unser_set*`: the writer skips the
+        // readonly guard and the set hook there, as php's unserialize does.
+        /** @var array<string, int> $ids */
+        $ids = [];
+        /** @var array<int, string> $leaves */
+        $leaves = [];
+        $shadowArms = '';
+        $shadowDispatch = '';
+        /** @var string[] $noBagIds */
+        $noBagIds = [];
+        foreach ($names as $cname) {
+            $cd = $this->classTable[$cname];
+            if ($this->declaresMethod($cname, '__unserialize')) { continue; }
+            if (!$cd->usesBag()) { $noBagIds[] = (string)$cd->classId . ' => true'; }
+            $shadow = '';
+            foreach ($cd->propertyNames as $p) {
+                if (isset($cd->virtualProps[$p])) { continue; }
+                if ($cd->isShadowSlot($p)) {
+                    $shadow .="    if (\$k === \"" . $this->dqBody($this->serPropKey($cname, $p)) . "\") { \$o->" . $p . " = \$v; return true; }\n";
+                    continue;
+                }
+                if (isset($ids[$p])) { continue; }
+                $id = \count($ids);
+                $ids[$p] = $id;
+                $leaves[$id] = '$o->' . $p . ' = $v; return true;';
+            }
+            if ($shadow !== '') {
+                $helper = '__mc_unser_set_shadow_' . (string)$cd->classId;
+                $shadowArms .= "function " . $helper . "(mixed \$o, string \$k, mixed \$v): bool {\n"
+                    . "  if (\$o instanceof \\" . $cname . ") {\n" . $shadow . "  }\n  return false;\n}\n";
+                $shadowDispatch .= "  if (\$cid === " . (string)$cd->classId . " && " . $helper . "(\$o, \$k, \$v)) { return; }\n";
+            }
+        }
+        $named = '';
+        $pick = '';
+        if ($leaves !== []) {
+            [$bfns, $pick] = self::bucketTreeSrc('__mc_unser_set_named', 'mixed $o, int $id, mixed $v',
+                '$o, $id, $v', '?bool', '$id', $leaves, true);
+            $named = $bfns . "function __mc_unser_set_named(mixed \$o, int \$id, mixed \$v): ?bool {\n" . $pick . "  return null;\n}\n";
+        }
+        $table = [];
+        foreach ($ids as $p => $id) { $table[] = "'" . $p . "' => " . (string)$id; }
+        $fillDispatch = $shadowArms . $named
+            . "function __mc_unser_set(mixed \$o, string \$k, mixed \$v): void {\n"
+            . "  \$cid = __mir_object_class_id(\$o);\n"
+            . $shadowDispatch
+            . "  \$k = __mc_un_demangle(\$k);\n";
+        if ($leaves !== []) {
+            $fillDispatch .= "  \$ids = [" . \implode(', ', $table) . "];\n"
+                . "  \$id = \$ids[\$k] ?? -1;\n"
+                . "  if (\$id >= 0 && __mc_unser_set_named(\$o, \$id, \$v) !== null) { return; }\n";
+        }
+        // A name no class declares is a dynamic property: a known class without a
+        // bag drops it, as its own fill did; stdClass, a bag class and a class
+        // outside the table take it.
+        $fillDispatch .= ($noBagIds === [] ? "  \$o->\$k = \$v;\n"
+                : "  \$nobag = [" . \implode(', ', $noBagIds) . "];\n"
+                . "  if (!isset(\$nobag[\$cid])) { \$o->\$k = \$v; }\n")
+            . "}\n";
+        // __unserialize keeps an arm per declaring class (few): the call goes to a
+        // TYPED receiver, so each declaration's own `array<K, V>` parameter takes
+        // the array; one erased call site coerced it to the first one's element.
         $magic = "function __mc_unser_has_magic(mixed \$o): bool {\n"
             . "  switch (__mir_object_class_id(\$o)) {\n";
         $call = "function __mc_unser_magic(mixed \$o, array \$props): void {\n"
             . "  switch (__mir_object_class_id(\$o)) {\n";
         $callBody = '';
         $magicArm = 0;
-        $arm = 0;
-        foreach ($names as $cname) {
-            $cd = $this->classTable[$cname];
-            if ($this->declaresMethod($cname, '__unserialize')) { continue; }
-            if ($cd->propertyNames === [] && !$cd->usesBag()) { continue; }
-            $helper = '__mc_unser_set_arm_' . (string)$arm;
-            $fillDispatch .= "    case " . (string)$cd->classId . ": " . $helper . "(\$o, \$k, \$v); return;\n";
-            $fillBody .= "function " . $helper . "(mixed \$o, string \$k, mixed \$v): void {\n"
-                . "  if (\$o instanceof \\" . $cname . ") {\n";
-            foreach ($cd->propertyNames as $p) {
-                if (!$cd->isShadowSlot($p)) { continue; }
-                $fillBody .= "  if (\$k === \"" . $this->dqBody($this->serPropKey($cname, $p)) . "\") { \$o->" . $p . " = \$v; return; }\n";
-            }
-            $fillBody .= "  \$k = __mc_un_demangle(\$k);\n";
-            foreach ($cd->propertyNames as $p) {
-                if ($cd->isShadowSlot($p)) { continue; }
-                $fillBody .= "  if (\$k === '" . $p . "') { \$o->" . $p . " = \$v; return; }\n";
-            }
-            if ($cd->usesBag()) {
-                $fillBody .= "  \$o->\$k = \$v;\n";
-            }
-            $fillBody .= "  }\n}\n";
-            $arm = $arm + 1;
-        }
-        $fillDispatch = $fillBody . $fillDispatch
-            . "  }\n"
-            . "  \$k = __mc_un_demangle(\$k);\n"
-            . "  \$o->\$k = \$v;\n}\n";
         foreach ($names as $cname) {
             if (!$this->declaresMethod($cname, '__unserialize')) { continue; }
             $cd = $this->classTable[$cname];

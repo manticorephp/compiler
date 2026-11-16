@@ -2583,7 +2583,9 @@ trait EmitLlvmObjects
         // A user-level store ($dropBoxed) into a property with a set hook runs the
         // hook, as the class-typed path does; the caller's retain of the value
         // goes back, since the hook borrows its argument.
-        $setHook = $dropBoxed ? ($cd->propHooks[$prop]['set'] ?? '') : '';
+        // unserialize restores the slot itself, as php does: no hook there.
+        $setHook = $dropBoxed && !\str_starts_with($this->frame->name, '__mc_unser_set')
+            ? ($cd->propHooks[$prop]['set'] ?? '') : '';
         if ($setHook !== '') {
             return $this->emitCellHookSet($obj, $cd, $prop, $setHook, $cellVal);
         }
@@ -4852,19 +4854,22 @@ trait EmitLlvmObjects
      */
     private function cellPropertyWriteHelper(string $prop, string $within = '', bool $dropOld = false, bool $dropBoxed = false, bool $hooks = false): string
     {
-        // a user-level store ($dropBoxed, or $hooks for one that keeps the old slot value) runs a set hook
-        $hooks = $hooks || $dropBoxed;
+        // a user-level store ($dropBoxed, or $hooks for one that keeps the old slot value) runs a set hook;
+        // unserialize restores the slot itself, as php does, without the hook
+        $unser = \str_starts_with($this->frame->name, '__mc_unser_set');
+        $hooks = !$unser && ($hooks || $dropBoxed);
         // a user-level store re-initialising a readonly slot is php's Error (not in __clone / unserialize)
         $roGuard = $hooks && !\str_ends_with($this->frame->name, '__clone') && !\str_starts_with($this->frame->name, '__mc_unser_set');
         $key = '__mc_prop_write_' . $this->mangle($prop) . ($roGuard ? '__ro' : '')
              . ($within === '' ? '' : '__in_' . $this->mangle($within))
-             . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '') . ($hooks ? 'h' : '');
+             . ($dropOld ? '__drop' : '') . ($dropBoxed ? 'b' : '') . ($hooks ? 'h' : '') . ($unser ? 'u' : '');
         $sym = '@' . $this->mirHelperSym('manticore_' . $key);
         if (isset($this->propertyReadHelpers[$key])) { return $sym; }
 
         $fixed = $this->fixedPropertyHolders($prop);
         $hasBag = $this->bagClassNames() !== [];
-        $magic = $this->magicPropHolders($prop, '__set');
+        // unserialize writes the slot or the bag, never through __set (php's rule)
+        $magic = $unser ? [] : $this->magicPropHolders($prop, '__set');
         if ($within !== '') { $this->holdersWithin($within, $fixed, $magic, $hasBag); }
 
         $oldSsa = $this->ssa;
@@ -4952,7 +4957,25 @@ trait EmitLlvmObjects
         $switch .= "  ]\n";
         $out .= $switch . $bodies . $def . ":\n";
         if ($magicLbl !== '') { $out .= $this->magicHolderBranch('__set', $cid, $magicLbl); }
-        if ($hasBag) { $out .= $this->emitCellBagStoreByName($prop, $obj, $cellVal); }
+        if ($hasBag && $unser) {
+            // unserialize hands every class every NAME the module declares, so a
+            // class that does not hold `$prop` lands here. Only an object that
+            // HAS a bag takes the key; any other one drops it, as php's per-class
+            // fill did. The unguarded bag store takes stdClass's offset for a
+            // class without a bag, and would write into one of its own slots.
+            $isBag = 'false';
+            foreach ($this->classes as $bcd) {
+                if (!$bcd->usesBag() && $bcd->name !== 'stdClass') { continue; }
+                $eq = $this->ssa->allocReg();
+                $out .= '  ' . $eq . ' = icmp eq i64 ' . $cid . ', ' . (string)$bcd->classId . "\n";
+                $or = $this->ssa->allocReg();
+                $out .= '  ' . $or . ' = or i1 ' . $isBag . ', ' . $eq . "\n";
+                $isBag = $or;
+            }
+            $bagL = $this->ssa->allocLabel('pw.bag');
+            $out .= '  br i1 ' . $isBag . ', label %' . $bagL . ', label %' . $end . "\n" . $bagL . ":\n";
+            $out .= $this->emitCellBagStoreByName($prop, $obj, $cellVal);
+        } elseif ($hasBag) { $out .= $this->emitCellBagStoreByName($prop, $obj, $cellVal); }
         $out .= '  br label %' . $end . "\n";
         $out .= $end . ":\n  ret void\n}\n\n";
         $this->propertyReadHelpers[$key] = $out;
