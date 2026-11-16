@@ -87,6 +87,7 @@ trait InferNodes
      */
     private function inferFunction(FunctionDef $fn): void
     {
+        $this->touchBody($fn->name);
         $this->inferFnBody = $fn->body;
         $this->collectSharedWordLocals($fn);
         $this->cellLoopLocals = [];
@@ -110,6 +111,7 @@ trait InferNodes
             }
             $this->coercePromotedParams($fn);
         }
+        $this->touchBody($fn->name);
     }
 
     /**
