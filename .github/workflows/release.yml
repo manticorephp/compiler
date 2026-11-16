@@ -222,9 +222,11 @@ jobs:
 
       # A fresh runner has no bin/manticore, so bin/build fetches the pinned
       # release (BOOTSTRAP_VERSION), builds this tree with it, and lets that
-      # compiler rebuild itself — no php on this runner at all.
+      # compiler rebuild itself — no php on this runner at all. --pgo then
+      # rebuilds the shipped compiler with a profile of its own self-build
+      # (~15% less CPU per compile, docs/pgo.md); Xcode carries llvm-profdata.
       - name: Build the compiler
-        run: bin/build
+        run: bin/build --pgo
 
       - name: Installed layout holds
         run: bash tools/install_smoke.sh
