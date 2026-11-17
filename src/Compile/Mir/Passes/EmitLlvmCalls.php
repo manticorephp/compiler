@@ -5526,8 +5526,10 @@ trait EmitLlvmCalls
      * @return array{0:string,1:string[]}
      */
     private function emitSpreadFill(string $arrReg, int $firstParam, array $ptypes,
-                                    array $tmask, ?Type $elemType, string $fnKey = '', ?Type $arrType = null): array
+                                    array $tmask, ?Type $elemType, string $fnKey = '', ?Type $arrType = null,
+                                    string $outBuf = ''): array
     {
+        $this->spreadBindFilled = -1;
         $out = '';
         $regs = [];
         $n = \count($ptypes);
@@ -5583,6 +5585,8 @@ trait EmitLlvmCalls
         // parameter goes to the variadic, keyed — or, without one, is php's Error.
         $keyed = $this->spreadMayBeKeyed($arrType) && $fnKey !== '' && isset($this->sigs->paramNames[$fnKey]);
         $pnames = $keyed ? $this->sigs->paramNames[$fnKey] : [];
+        $bound = $this->emitSpreadBind($arrReg, $firstParam, $ptypes, $tmask, $elemType, $fnKey, $keyed, $pnames, $outBuf);
+        if ($bound !== null) { return $bound; }
         $hit = [];
         $npos = '';
         /** @var array<int,string> $byK */
@@ -5807,6 +5811,395 @@ trait EmitLlvmCalls
      * caller's arg list is already non-empty (so the suffix needs a leading
      * comma); false for a zero-arg call whose first pad value opens the list.
      */
+    /** Words the binder stored to {@see emitSpreadFill}'s `$outBuf` (its whole result), or -1. */
+    private int $spreadBindFilled = -1;
+
+    /**
+     * {@see emitSpreadFill}'s fixed parameters bound by the module's table-driven binder
+     * ({@see spreadBindHelper}): one call with a content-named descriptor, then a load per
+     * parameter and a select per defaulted one, instead of the decode, coercion and arity IR per
+     * parameter. Null when the fill keeps its inline form: a concrete pack element (boxed or
+     * coerced per kind), a by-ref parameter, a default that is not a scalar constant (it would
+     * run after the later parameters' coercions), or a boundary state the binder does not model.
+     *
+     * With `$outBuf` the words go to that buffer and {@see $spreadBindFilled} says how many.
+     *
+     * @param Type[] $ptypes
+     * @param array<int,bool> $tmask
+     * @param array<int,string> $pnames
+     * @return array{0:string,1:string[]}|null
+     */
+    private function emitSpreadBind(string $arrReg, int $firstParam, array $ptypes, array $tmask, ?Type $elemType,
+                                    string $fnKey, bool $keyed, array $pnames, string $outBuf): ?array
+    {
+        if ($elemType !== null && $elemType->kind !== Type::KIND_CELL && $elemType->kind !== Type::KIND_UNKNOWN) { return null; }
+        if ($this->collectCellStrOwn || $this->intGuardOff || $this->unboxPropCtx !== '') { return null; }
+        $n = \count($ptypes);
+        $vmask = $fnKey !== '' ? ($this->sigs->variadicParams[$fnKey] ?? []) : [];
+        $refs = $fnKey !== '' ? ($this->sigs->refParams[$fnKey] ?? []) : [];
+        $pdefs = $fnKey !== '' ? ($this->sigs->paramDefaults[$fnKey] ?? []) : [];
+        $end = $n;
+        for ($k = $n - 1; $k > $firstParam; $k = $k - 1) {
+            if ($vmask[$k] ?? false) { $end = $k; }
+        }
+        $hasVariadic = $end < $n;
+        $m = $end - $firstParam;
+        if ($m < 1 || $m > 62) { return null; }
+        for ($k = $firstParam; $k < $end; $k = $k + 1) {
+            if ($refs[$k] ?? false) { return null; }
+            $def = $pdefs[$k] ?? null;
+            if ($def !== null && !$this->isScalarConstNode($def)) { return null; }
+        }
+        $fn = $this->spreadBindHelper();
+        if ($fn === '') { return null; }
+        $slots = [];
+        /** @var array<int,string> $byK */
+        $byK = [];
+        $anyReq = false;
+        for ($k = $firstParam; $k < $end; $k = $k + 1) {
+            $pt = $ptypes[$k] ?? null;
+            $needBox = ($tmask[$k] ?? false) || ($pt !== null && $pt->kind === Type::KIND_CELL);
+            $info = \Compile\MemoryAbi::SPREAD_BIND_KIND_NONE;
+            if (!$needBox && $pt !== null) {
+                $info = $this->spreadBindKind($pt);
+                if ($this->rt->needsRefCells) { $info = $info | \Compile\MemoryAbi::SPREAD_BIND_DEREF; }
+            }
+            if (($pdefs[$k] ?? null) === null && $fnKey !== '') {
+                $info = $info | \Compile\MemoryAbi::SPREAD_BIND_REQUIRED;
+                $anyReq = true;
+            }
+            $pn = $keyed ? ($pnames[$k] ?? '') : '';
+            if ($pn !== '') { $byK[$k] = $pn; }
+            $slots[] = 'i64 ' . (string)$info;
+            $slots[] = $pn !== '' ? 'i64 ptrtoint (ptr ' . $this->litStr($pn) . ' to i64)' : 'i64 0';
+        }
+        $flags = 0;
+        $bk = 'i64 0';
+        $bkc = 0;
+        if ($keyed) {
+            $flags = \Compile\MemoryAbi::SPREAD_BIND_FLAG_KEYED;
+            if (!$hasVariadic) {
+                $flags = $flags | \Compile\MemoryAbi::SPREAD_BIND_FLAG_CHECK_NAMES;
+                $bk = 'i64 ptrtoint (ptr ' . $this->spreadNamesTable($byK) . ' to i64)';
+                $bkc = \count($byK);
+            }
+        }
+        $ace = $anyReq
+            ? 'i64 ptrtoint (ptr ' . $this->litStr('Too few arguments to function ' . $this->fnDisplayName($fnKey) . '()') . ' to i64)'
+            : 'i64 0';
+        $words = ['i64 ' . (string)$m, 'i64 ' . (string)$flags, $bk, 'i64 ' . (string)$bkc, $ace];
+        foreach ($slots as $s) { $words[] = $s; }
+        $init = '[' . (string)\count($words) . ' x i64] [' . \implode(', ', $words) . ']';
+        $desc = $this->litTableSym('@.spb.', $init);
+        if ($desc[1]) {
+            $this->litTableBodies .= $desc[0] . ' = private unnamed_addr constant ' . $init . ", align 8\n";
+        }
+        $out = '';
+        $site = 'i64 0, ptr null';
+        if (($flags & \Compile\MemoryAbi::SPREAD_BIND_FLAG_CHECK_NAMES) !== 0) {
+            // As {@see emitSpreadUnknownNameCheck}: the binder raises the name Error at this site.
+            $inSite = $this->btLineOverride !== '' && $this->ssa === $this->btLineOverrideSsa;
+            $site = !$inSite && $this->cellSinkFnOverride !== null
+                ? 'i64 0, ptr ' . $this->strLitId($this->pool->intern($this->sourceFile))
+                : $this->siteTraceArgs(0, $out);
+        }
+        $buf = $outBuf;
+        if ($buf === '') {
+            $buf = $this->ssa->allocReg();
+            $out .= '  ' . $buf . ' = alloca [' . (string)$m . " x i64]\n";
+        }
+        $mask = $this->ssa->allocReg();
+        $out .= '  ' . $mask . ' = call i64 ' . $fn . '(ptr ' . $arrReg . ', ptr ' . $desc[0] . ', ptr ' . $buf . ', ' . $site . ")\n";
+        $regs = [];
+        for ($j = 0; $j < $m; $j = $j + 1) {
+            $k = $firstParam + $j;
+            $def = $pdefs[$k] ?? null;
+            if ($outBuf !== '' && $def === null) { continue; }
+            $gp = $this->ssa->allocReg();
+            $v = $this->ssa->allocReg();
+            $out .= '  ' . $gp . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)$j . "\n";
+            $out .= '  ' . $v . ' = load i64, ptr ' . $gp . "\n";
+            if ($def !== null) {
+                $out .= $this->emitParamDefault($def, $ptypes[$k] ?? null, $tmask[$k] ?? false);
+                $dv = $this->lastValue;
+                $sh = $this->ssa->allocReg();
+                $bit = $this->ssa->allocReg();
+                $sel = $this->ssa->allocReg();
+                $out .= '  ' . $sh . ' = lshr i64 ' . $mask . ', ' . (string)$j . "\n";
+                $out .= '  ' . $bit . ' = trunc i64 ' . $sh . " to i1\n";
+                $out .= '  ' . $sel . ' = select i1 ' . $bit . ', i64 ' . $v . ', i64 ' . $dv . "\n";
+                $v = $sel;
+                if ($outBuf !== '') {
+                    $out .= '  store i64 ' . $v . ', ptr ' . $gp . "\n";
+                    continue;
+                }
+            }
+            $regs[] = $v;
+        }
+        $filled = $m;
+        if ($hasVariadic) {
+            // The rest of the pack, renumbered, is the variadic's ONE vec argument (as the inline fill).
+            $tel = $ptypes[$end]->element ?? null;
+            if ($tel === null || $tel->kind === Type::KIND_UNKNOWN) {
+                $tel = $elemType !== null && $elemType->kind !== Type::KIND_UNKNOWN ? $elemType : Type::cell();
+            }
+            $srcI = $this->ssa->allocReg();
+            $out .= '  ' . $srcI . ' = ptrtoint ptr ' . $arrReg . " to i64\n";
+            $this->lastValue = $srcI;
+            $this->lastValueType = 'i64';
+            $out .= $this->emitCellArrayToTyped(Type::vec($tel), true, (string)$m, '',
+                $keyed ? \array_values($byK) : null);
+            $out .= $this->coerceToI64();
+            $this->spreadFillOwned[] = [$this->lastValue, $this->discardReleaseFlavor(Type::vec($tel))];
+            if ($outBuf !== '') {
+                $gp = $this->ssa->allocReg();
+                $out .= '  ' . $gp . ' = getelementptr inbounds i64, ptr ' . $buf . ', i64 ' . (string)$m . "\n";
+                $out .= '  store i64 ' . $this->lastValue . ', ptr ' . $gp . "\n";
+            } else {
+                $regs[] = $this->lastValue;
+            }
+            $filled = $filled + 1;
+        }
+        if ($outBuf !== '') {
+            $this->spreadBindFilled = $filled;
+            return [$out, []];
+        }
+        return [$out, $regs];
+    }
+
+    /**
+     * A default {@see emitSpreadBind} may evaluate after the binder ran: a scalar literal, or a
+     * `[]` that is the immortal empty-array singleton ({@see emitArrayLitUnified}).
+     */
+    private function isScalarConstNode(Node $n): bool
+    {
+        $k = $n->kind;
+        if ($n instanceof ArrayLit) {
+            return \count($n->elements) === 0 && $n->allocKind !== \Compile\Mir\AllocationKind::ARENA
+                && \Compile\Debug::$emptyArraySingleton;
+        }
+        return $k === Node::KIND_INT_CONST || $k === Node::KIND_FLOAT_CONST || $k === Node::KIND_STRING_CONST
+            || $k === Node::KIND_BOOL_CONST || $k === Node::KIND_NULL_CONST;
+    }
+
+    /**
+     * The binder's kind (+ array conform code) for a cell bound to `$pt`: the arms of
+     * {@see unboxCellToTypeRaw}, in its order.
+     */
+    private function spreadBindKind(Type $pt): int
+    {
+        $pk = $pt->kind;
+        if ($pk === Type::KIND_BOOL) { return \Compile\MemoryAbi::SPREAD_BIND_KIND_BOOL; }
+        if ($pk === Type::KIND_INT) { return \Compile\MemoryAbi::SPREAD_BIND_KIND_INT; }
+        if ($pk === Type::KIND_FLOAT) { return \Compile\MemoryAbi::SPREAD_BIND_KIND_FLOAT; }
+        if ($pk === Type::KIND_OBJ && $pt->class !== null && isset($this->enums[$pt->class])) {
+            return \Compile\MemoryAbi::SPREAD_BIND_KIND_ENUM;
+        }
+        if ($pk === Type::KIND_STRING) { return \Compile\MemoryAbi::SPREAD_BIND_KIND_STRING; }
+        if ($pk === Type::KIND_CLOSURE && ($pt->class ?? '') === '') { return \Compile\MemoryAbi::SPREAD_BIND_KIND_CALLABLE; }
+        if ($pk === Type::KIND_ARRAY || $pk === Type::KIND_OBJ || $pk === Type::KIND_CLOSURE || $pk === Type::KIND_UNION) {
+            $code = 0;
+            if (($pt->isVec() || $pt->isAssoc()) && !$pt->isShape() && $pt->element !== null) {
+                $c = $this->elementHintCodeForType($pt->element);
+                if ($c !== null && $c !== \Compile\MemoryAbi::ARRAY_ELEM_HINT_CELL) { $code = $c; }
+            }
+            return \Compile\MemoryAbi::SPREAD_BIND_KIND_PTR | ($code << \Compile\MemoryAbi::SPREAD_BIND_CONFORM_SHIFT);
+        }
+        return \Compile\MemoryAbi::SPREAD_BIND_KIND_NONE;
+    }
+
+    /**
+     * `i64 (ptr arr, ptr desc, ptr out, i64 btline, ptr btfile)`, once per module: bind an erased
+     * pack to the fixed parameters a {@see emitSpreadBind} descriptor lists, in the inline fill's
+     * order — the string keys naming parameters (php's Error for an unbound one), then per
+     * parameter its positional or named element, decoded, coerced by kind through the same helpers
+     * {@see unboxCellToTypeRaw} calls, and ArgumentCountError for a required one the pack lacks.
+     * Stores the words to `out`, returns the mask of parameters the pack supplied. Module-internal:
+     * the int coercion and the raise helpers it calls are.
+     * '' when TypeError or ArgumentCountError has no raise helper.
+     */
+    private function spreadBindHelper(): string
+    {
+        $key = 'spbind';
+        if (isset($this->dynamicMethodHelpers[$key])) {
+            return $this->dynamicMethodHelpers[$key] === '' ? '' : '@' . $this->mirHelperSym('__mc_spbind');
+        }
+        $coInt = $this->coIntHelper();
+        $raise = $this->raiseHelper('ArgumentCountError');
+        if ($coInt === '' || $raise === '') {
+            $this->dynamicMethodHelpers[$key] = '';
+            return '';
+        }
+        $sym = '@' . $this->mirHelperSym('__mc_spbind');
+        $badkey = $this->spreadBadKeyHelper();
+        $msgs = $this->coerceMsgTable(['Argument must be of type int, null given',
+            'Argument must be of type int, array given', 'Argument must be of type int, string given']);
+        $this->rt->needsTagged = true;
+        $this->rt->needsCellToIntArg = true;
+        $this->rt->needsStrtol = true;
+        $this->rt->needsCellToStrPtr = true;
+        $this->rt->needsTaggedToStr = true;
+        $this->rt->needsTaggedToFloat = true;
+        $miss = '@' . \Compile\MemoryAbi::ARRAY_LOOKUP_MISS_SYMBOL;
+        $mask = (string)\Compile\MemoryAbi::CELL_PAYLOAD_MASK;
+        $slot0 = \Compile\MemoryAbi::SPREAD_BIND_SLOTS;
+        // Optimized, each site inlines it against its constant descriptor and the loop folds away
+        // to the straight-line fill: called, the frame and spills cost a dynamic static call 4 %.
+        $attr = \Manticore\CompileArgs::$optLevel === '0' ? '' : ' alwaysinline';
+        $ir = 'define internal i64 ' . $sym . "(ptr %arr, ptr %d, ptr %out, i64 %btline, ptr %btfile)" . $attr . " {\nentry:\n"
+            . '  %np0 = getelementptr inbounds i64, ptr %d, i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_COUNT . "\n"
+            . "  %n = load i64, ptr %np0\n"
+            . '  %flp = getelementptr inbounds i64, ptr %d, i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_FLAGS . "\n"
+            . "  %fl = load i64, ptr %flp\n"
+            . "  %isnull = icmp eq ptr %arr, null\n"
+            . "  %safe = select i1 %isnull, ptr @__mir_zero_word, ptr %arr\n"
+            . "  %phys = load i64, ptr %safe\n"
+            . '  %fwp = getelementptr inbounds i8, ptr %safe, i64 ' . (string)\Compile\MemoryAbi::ARRAY_FLAGS_OFFSET . "\n"
+            . "  %fw = load i64, ptr %fwp\n"
+            . '  %tsh = lshr i64 %fw, ' . (string)\Compile\MemoryAbi::ARRAY_TOMB_SHIFT . "\n"
+            . '  %tm0 = and i64 %tsh, ' . (string)\Compile\MemoryAbi::ARRAY_TOMB_VALUE_MASK . "\n"
+            . "  %tm = select i1 %isnull, i64 0, i64 %tm0\n"
+            . "  %cnt = sub i64 %phys, %tm\n"
+            . '  %kf = and i64 %fl, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_FLAG_KEYED . "\n"
+            . "  %iskeyed = icmp ne i64 %kf, 0\n"
+            . "  br i1 %iskeyed, label %nhead, label %bhead\n"
+            . "nhead:\n"
+            . "  %nj = phi i64 [ 0, %entry ], [ %nj1, %nnext ]\n"
+            . "  %nsum = phi i64 [ 0, %entry ], [ %nsum1, %nnext ]\n"
+            . "  %nmore = icmp ult i64 %nj, %n\n"
+            . "  br i1 %nmore, label %nbody, label %ndone\n"
+            . "nbody:\n"
+            . "  %nix0 = shl i64 %nj, 1\n"
+            . '  %nix = add i64 %nix0, ' . (string)($slot0 + 1) . "\n"
+            . "  %nmp = getelementptr inbounds i64, ptr %d, i64 %nix\n"
+            . "  %nmw = load i64, ptr %nmp\n"
+            . "  %hasnm = icmp ne i64 %nmw, 0\n"
+            . "  br i1 %hasnm, label %nlook, label %nnext\n"
+            . "nlook:\n"
+            . "  %nmptr = inttoptr i64 %nmw to ptr\n"
+            . "  %lp = call ptr @__mir_array_lookup_str(ptr %arr, ptr %nmptr, i64 0, i64 0)\n"
+            . "  br label %nnext\n"
+            . "nnext:\n"
+            . '  %lpx = phi ptr [ %lp, %nlook ], [ ' . $miss . ", %nbody ]\n"
+            . '  %hit = icmp ne ptr %lpx, ' . $miss . "\n"
+            . "  %hz = zext i1 %hit to i64\n"
+            . "  %nsum1 = add i64 %nsum, %hz\n"
+            . "  %nop = getelementptr inbounds i64, ptr %out, i64 %nj\n"
+            . "  %lpi = ptrtoint ptr %lpx to i64\n"
+            . "  store i64 %lpi, ptr %nop\n"
+            . "  %nj1 = add i64 %nj, 1\n"
+            . "  br label %nhead\n"
+            . "ndone:\n"
+            . "  %npos = call i64 @__mir_array_pos_prefix(ptr %arr)\n"
+            . '  %cf = and i64 %fl, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_FLAG_CHECK_NAMES . "\n"
+            . "  %docheck = icmp ne i64 %cf, 0\n"
+            . "  %want = add i64 %npos, %nsum\n"
+            . "  %bad = icmp ne i64 %want, %cnt\n"
+            . "  %isbad = and i1 %docheck, %bad\n"
+            . "  br i1 %isbad, label %bk, label %bhead\n"
+            . "bk:\n"
+            . '  %bkp = getelementptr inbounds i64, ptr %d, i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_BK_NAMES . "\n"
+            . "  %bkw = load i64, ptr %bkp\n"
+            . "  %bkn = inttoptr i64 %bkw to ptr\n"
+            . '  %bcp = getelementptr inbounds i64, ptr %d, i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_BK_COUNT . "\n"
+            . "  %bkc = load i64, ptr %bcp\n"
+            . '  %bkr = call i64 ' . $badkey . "(ptr %arr, i64 %npos, i64 %cnt, ptr %bkn, i64 %bkc, i64 %btline, ptr %btfile)\n"
+            . "  unreachable\n"
+            . "bhead:\n"
+            . "  %np = phi i64 [ 0, %entry ], [ %npos, %ndone ]\n"
+            . "  br label %head\n"
+            . "head:\n"
+            . "  %j = phi i64 [ 0, %bhead ], [ %j1, %next ]\n"
+            . "  %acc = phi i64 [ 0, %bhead ], [ %acc1, %next ]\n"
+            . "  %more = icmp ult i64 %j, %n\n"
+            . "  br i1 %more, label %body, label %done\n"
+            . "body:\n"
+            . "  %ix0 = shl i64 %j, 1\n"
+            . '  %ix = add i64 %ix0, ' . (string)$slot0 . "\n"
+            . "  %ip = getelementptr inbounds i64, ptr %d, i64 %ix\n"
+            . "  %info = load i64, ptr %ip\n"
+            . "  %nmp2 = getelementptr inbounds i64, ptr %ip, i64 1\n"
+            . "  %nmw2 = load i64, ptr %nmp2\n"
+            . "  %ev = call i64 @__mir_array_value_at(ptr %arr, i64 %j)\n"
+            . "  %op = getelementptr inbounds i64, ptr %out, i64 %j\n"
+            . "  %real0 = icmp ugt i64 %cnt, %j\n"
+            . "  %named0 = icmp ne i64 %nmw2, 0\n"
+            . "  %named = and i1 %named0, %iskeyed\n"
+            . "  br i1 %named, label %byname, label %pick\n"
+            . "byname:\n"
+            . "  %lpw = load i64, ptr %op\n"
+            . "  %lpp = inttoptr i64 %lpw to ptr\n"
+            . '  %hit2 = icmp ne ptr %lpp, ' . $miss . "\n"
+            . "  %poshas = icmp ugt i64 %np, %j\n"
+            . "  %nw = load i64, ptr %lpp\n"
+            . "  %bn = select i1 %hit2, i64 %nw, i64 %ev\n"
+            . "  %pk = select i1 %poshas, i64 %ev, i64 %bn\n"
+            . "  %hasn = or i1 %poshas, %hit2\n"
+            . "  br label %pick\n"
+            . "pick:\n"
+            . "  %w = phi i64 [ %ev, %body ], [ %pk, %byname ]\n"
+            . "  %hitm = phi i1 [ false, %body ], [ %hit2, %byname ]\n"
+            . "  %has = phi i1 [ %real0, %body ], [ %hasn, %byname ]\n"
+            . "  %real = or i1 %real0, %hitm\n"
+            . "  br i1 %real, label %dec, label %bind\n"
+            . "dec:\n"
+            . "  %dv = call i64 @__mir_elem_decode(ptr %arr, i64 %w)\n"
+            . '  %drf = and i64 %info, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_DEREF . "\n"
+            . "  %isdr = icmp ne i64 %drf, 0\n"
+            . "  br i1 %isdr, label %dr, label %kind\n"
+            . "dr:\n"
+            . "  %dd = call i64 @__manticore_deref(i64 %dv)\n"
+            . "  br label %kind\n"
+            . "kind:\n"
+            . "  %v = phi i64 [ %dv, %dec ], [ %dd, %dr ]\n"
+            . '  %k = and i64 %info, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_KIND_MASK . "\n"
+            . "  switch i64 %k, label %bind [\n"
+            . '    i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_KIND_BOOL . ", label %kb\n"
+            . '    i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_KIND_INT . ", label %ki\n"
+            . '    i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_KIND_FLOAT . ", label %kfl\n"
+            . '    i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_KIND_ENUM . ", label %ke\n"
+            . '    i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_KIND_STRING . ", label %ks\n"
+            . '    i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_KIND_CALLABLE . ", label %kc\n"
+            . '    i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_KIND_PTR . ", label %kp\n"
+            . "  ]\n"
+            . "kb:\n  %rb = and i64 %v, 1\n  br label %bind\n"
+            . 'ki:' . "\n  %ri = call i64 " . $coInt . '(i64 %v, ptr ' . $msgs . ")\n  br label %bind\n"
+            . "kfl:\n  %rfd = call double @__manticore_tagged_to_double(i64 %v)\n  %rf = bitcast double %rfd to i64\n  br label %bind\n"
+            . "ke:\n  %em = and i64 %v, " . $mask . "\n  %ep = inttoptr i64 %em to ptr\n"
+            . '  %eg = getelementptr i8, ptr %ep, i64 ' . (string)\Compile\MemoryAbi::ENUM_ORDINAL_OFFSET . "\n"
+            . "  %re = load i64, ptr %eg\n  br label %bind\n"
+            . "ks:\n  %rs = call i64 @__manticore_cell_to_strw(i64 %v)\n  br label %bind\n"
+            . "kc:\n  %ct = lshr i64 %v, 48\n  %cis = icmp eq i64 %ct, 65524\n  %cm = and i64 %v, " . $mask . "\n"
+            . "  %rc = select i1 %cis, i64 %v, i64 %cm\n  br label %bind\n"
+            . "kp:\n  %rp = and i64 %v, " . $mask . "\n"
+            . '  %cc = lshr i64 %info, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_CONFORM_SHIFT . "\n"
+            . "  %hc = icmp ne i64 %cc, 0\n  br i1 %hc, label %kpc, label %bind\n"
+            . "kpc:\n  %pp = inttoptr i64 %rp to ptr\n  call void @__mir_array_conform(ptr %pp, i64 %cc)\n  br label %bind\n"
+            . "bind:\n"
+            . "  %r = phi i64 [ 0, %pick ], [ %v, %kind ], [ %rb, %kb ], [ %ri, %ki ], [ %rf, %kfl ], [ %re, %ke ], [ %rs, %ks ], [ %rc, %kc ], [ %rp, %kp ], [ %rp, %kpc ]\n"
+            . '  %rq = and i64 %info, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_REQUIRED . "\n"
+            . "  %isrq = icmp ne i64 %rq, 0\n"
+            . "  %short = xor i1 %has, true\n"
+            . "  %ace = and i1 %isrq, %short\n"
+            . "  br i1 %ace, label %raise, label %next\n"
+            . "raise:\n"
+            . '  %mp = getelementptr inbounds i64, ptr %d, i64 ' . (string)\Compile\MemoryAbi::SPREAD_BIND_ACE_MSG . "\n"
+            . "  %mw = load i64, ptr %mp\n"
+            . '  call void ' . $raise . "(i64 %mw, i64 0)\n"
+            . "  unreachable\n"
+            . "next:\n"
+            . "  store i64 %r, ptr %op\n"
+            . "  %hb = zext i1 %has to i64\n"
+            . "  %hs = shl i64 %hb, %j\n"
+            . "  %acc1 = or i64 %acc, %hs\n"
+            . "  %j1 = add i64 %j, 1\n"
+            . "  br label %head\n"
+            . "done:\n"
+            . "  ret i64 %acc\n}\n\n";
+        $this->dynamicMethodHelpers[$key] = $ir;
+        return $sym;
+    }
+
     /** Only a vec of a concrete element is certainly a list; a cell/erased vec may carry string keys. */
     private function spreadMayBeKeyed(?Type $t): bool
     {

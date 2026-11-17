@@ -1253,4 +1253,37 @@ final class MemoryAbi
     public const HMAP_SLOT_EMPTY     = -1;  // u32 0xFFFFFFFF
     public const HMAP_SLOT_DEAD      = -2;  // u32 0xFFFFFFFE: deleted slot, probes continue past it; an insert may reuse it
     public const HMAP_MIN_CAP        = 8;
+
+    /** An enum case singleton's ordinal word (descriptor at +0). */
+    public const ENUM_ORDINAL_OFFSET = 16;
+
+    /**
+     * Spread-bind descriptor: a `[N x i64]` constant the module's spread binder reads to bind an
+     * erased `...$pack` to a known callee's fixed parameters ({@see
+     * \Compile\Mir\Passes\EmitLlvmCalls::spreadBindHelper}). Named by content. Header words, then
+     * {@see SPREAD_BIND_SLOT_WORDS} words per parameter: `{ info, name }`, `name` a string pointer
+     * (the parameter's name when the pack may carry string keys) or 0.
+     */
+    public const SPREAD_BIND_COUNT    = 0;   // parameters bound (out words)
+    public const SPREAD_BIND_FLAGS    = 1;
+    public const SPREAD_BIND_BK_NAMES = 2;   // ptr [n x ptr] for the unknown-name check, or 0
+    public const SPREAD_BIND_BK_COUNT = 3;
+    public const SPREAD_BIND_ACE_MSG  = 4;   // ptr: ArgumentCountError text, or 0
+    public const SPREAD_BIND_SLOTS    = 5;
+    public const SPREAD_BIND_SLOT_WORDS = 2;
+    public const SPREAD_BIND_FLAG_KEYED = 1;       // look the named parameters up among string keys
+    public const SPREAD_BIND_FLAG_CHECK_NAMES = 2; // no variadic: an unbound key is an Error
+    /** info: bits 0-7 kind, bit 8 required, bit 9 deref first, bits 16+ array conform code. */
+    public const SPREAD_BIND_KIND_MASK = 255;
+    public const SPREAD_BIND_REQUIRED = 256;
+    public const SPREAD_BIND_DEREF = 512;
+    public const SPREAD_BIND_CONFORM_SHIFT = 16;
+    public const SPREAD_BIND_KIND_NONE = 0;
+    public const SPREAD_BIND_KIND_BOOL = 1;
+    public const SPREAD_BIND_KIND_INT = 2;
+    public const SPREAD_BIND_KIND_FLOAT = 3;
+    public const SPREAD_BIND_KIND_ENUM = 4;
+    public const SPREAD_BIND_KIND_STRING = 5;
+    public const SPREAD_BIND_KIND_CALLABLE = 6;
+    public const SPREAD_BIND_KIND_PTR = 7;
 }

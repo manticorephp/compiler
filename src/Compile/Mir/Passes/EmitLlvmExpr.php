@@ -7274,7 +7274,7 @@ trait EmitLlvmExpr
             $p = $this->ssa->allocReg();
             $out .= '  ' . $p . ' = inttoptr i64 ' . $m . " to ptr\n";
             $g = $this->ssa->allocReg();
-            $out .= '  ' . $g . ' = getelementptr i8, ptr ' . $p . ", i64 16\n";
+            $out .= '  ' . $g . ' = getelementptr i8, ptr ' . $p . ", i64 " . (string)\Compile\MemoryAbi::ENUM_ORDINAL_OFFSET . "\n";
             $r = $this->ssa->allocReg();
             $out .= '  ' . $r . ' = load i64, ptr ' . $g . "\n";
             $this->lastValue = $r;

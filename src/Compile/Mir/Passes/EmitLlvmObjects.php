@@ -9612,7 +9612,8 @@ trait EmitLlvmObjects
         $this->cf = new ControlFlow();
         $this->arena = new ArenaContext();
 
-        [$body, $regs] = $this->emitSpreadFill('%arr', $first, $ptypes, $tmask, $elemType, $sym);
+        [$body, $regs] = $this->emitSpreadFill('%arr', $first, $ptypes, $tmask, $elemType, $sym, null, '%out');
+        $filled = $this->spreadBindFilled;
         foreach ($regs as $i => $rg) {
             $gp = $this->ssa->allocReg();
             $body .= '  ' . $gp . ' = getelementptr inbounds i64, ptr %out, i64 ' . (string)$i . "\n";
@@ -9624,7 +9625,7 @@ trait EmitLlvmObjects
         // which would not outlive the helper.
         if ($this->irIsClosed($body) && !\str_contains($body, ' = alloca ')) {
             $this->dynamicMethodHelpers['spfill|' . $key] = 'define internal void ' . $fsym . "(ptr %arr, ptr %out) {\nentry:\n" . $body . "}\n\n";
-            $result = [$fsym, \count($regs)];
+            $result = [$fsym, $filled >= 0 ? $filled : \count($regs)];
         }
 
         $this->ssa = $oldSsa;
