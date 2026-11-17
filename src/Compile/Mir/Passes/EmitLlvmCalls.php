@@ -5530,6 +5530,7 @@ trait EmitLlvmCalls
                                     string $outBuf = ''): array
     {
         $this->spreadBindFilled = -1;
+        $this->spreadBindDirect = null;
         $out = '';
         $regs = [];
         $n = \count($ptypes);
@@ -5815,6 +5816,13 @@ trait EmitLlvmCalls
     private int $spreadBindFilled = -1;
 
     /**
+     * Set with {@see $spreadBindFilled} when the fill is the binder call alone: its descriptor and
+     * site operands, so the caller can make that call itself instead of through a fill helper.
+     * @var array{0:string,1:string}|null
+     */
+    private ?array $spreadBindDirect = null;
+
+    /**
      * {@see emitSpreadFill}'s fixed parameters bound by the module's table-driven binder
      * ({@see spreadBindHelper}): one call with a content-named descriptor, then a load per
      * parameter and a select per defaulted one, instead of the decode, coercion and arity IR per
@@ -5856,6 +5864,8 @@ trait EmitLlvmCalls
         /** @var array<int,string> $byK */
         $byK = [];
         $anyReq = false;
+        /** @var array<int,bool> $constDef */
+        $constDef = [];
         for ($k = $firstParam; $k < $end; $k = $k + 1) {
             $pt = $ptypes[$k] ?? null;
             $needBox = ($tmask[$k] ?? false) || ($pt !== null && $pt->kind === Type::KIND_CELL);
@@ -5864,14 +5874,24 @@ trait EmitLlvmCalls
                 $info = $this->spreadBindKind($pt);
                 if ($this->rt->needsRefCells) { $info = $info | \Compile\MemoryAbi::SPREAD_BIND_DEREF; }
             }
-            if (($pdefs[$k] ?? null) === null && $fnKey !== '') {
+            $def = $pdefs[$k] ?? null;
+            $cd = 'i64 0';
+            if ($def === null && $fnKey !== '') {
                 $info = $info | \Compile\MemoryAbi::SPREAD_BIND_REQUIRED;
                 $anyReq = true;
+            } elseif ($def !== null) {
+                $c = $this->spreadBindConstDefault($def, $pt, $tmask[$k] ?? false);
+                if ($c !== null) {
+                    $info = $info | \Compile\MemoryAbi::SPREAD_BIND_HAS_DEFAULT;
+                    $cd = 'i64 ' . $c;
+                    $constDef[$k] = true;
+                }
             }
             $pn = $keyed ? ($pnames[$k] ?? '') : '';
             if ($pn !== '') { $byK[$k] = $pn; }
             $slots[] = 'i64 ' . (string)$info;
             $slots[] = $pn !== '' ? 'i64 ptrtoint (ptr ' . $this->litStr($pn) . ' to i64)' : 'i64 0';
+            $slots[] = $cd;
         }
         $flags = 0;
         $bk = 'i64 0';
@@ -5908,12 +5928,14 @@ trait EmitLlvmCalls
             $buf = $this->ssa->allocReg();
             $out .= '  ' . $buf . ' = alloca [' . (string)$m . " x i64]\n";
         }
+        $direct = $outBuf !== '' && $out === '' && !$hasVariadic;
         $mask = $this->ssa->allocReg();
         $out .= '  ' . $mask . ' = call i64 ' . $fn . '(ptr ' . $arrReg . ', ptr ' . $desc[0] . ', ptr ' . $buf . ', ' . $site . ")\n";
         $regs = [];
         for ($j = 0; $j < $m; $j = $j + 1) {
             $k = $firstParam + $j;
-            $def = $pdefs[$k] ?? null;
+            $def = isset($constDef[$k]) ? null : ($pdefs[$k] ?? null);
+            if ($def !== null) { $direct = false; }
             if ($outBuf !== '' && $def === null) { continue; }
             $gp = $this->ssa->allocReg();
             $v = $this->ssa->allocReg();
@@ -5962,9 +5984,30 @@ trait EmitLlvmCalls
         }
         if ($outBuf !== '') {
             $this->spreadBindFilled = $filled;
+            $this->spreadBindDirect = $direct ? [$desc[0], $site] : null;
             return [$out, []];
         }
         return [$out, $regs];
+    }
+
+    /**
+     * A default the descriptor can carry: what {@see emitParamDefault} leaves for it as a
+     * constant — a literal word, or one cast of a constant expression — else null (the site keeps
+     * its select). The probe's IR is discarded.
+     */
+    private function spreadBindConstDefault(Node $def, ?Type $pt, bool $tagged): ?string
+    {
+        $keep = $this->lastValue;
+        $keepT = $this->lastValueType;
+        $ir = $this->emitParamDefault($def, $pt, $tagged);
+        $v = $this->lastValue;
+        $this->lastValue = $keep;
+        $this->lastValueType = $keepT;
+        if ($ir === '') { return \preg_match('/^-?[0-9]+$/', $v) === 1 ? $v : null; }
+        if (\preg_match('/^  (%[A-Za-z0-9_.]+) = (ptrtoint|bitcast) (ptr|double) ([^\n]+) to i64\n$/', $ir, $mm) === 1 && $mm[1] === $v) {
+            return $mm[2] . ' (' . $mm[3] . ' ' . $mm[4] . ' to i64)';
+        }
+        return null;
     }
 
     /**
@@ -6069,7 +6112,7 @@ trait EmitLlvmCalls
             . "  %nmore = icmp ult i64 %nj, %n\n"
             . "  br i1 %nmore, label %nbody, label %ndone\n"
             . "nbody:\n"
-            . "  %nix0 = shl i64 %nj, 1\n"
+            . '  %nix0 = mul i64 %nj, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_SLOT_WORDS . "\n"
             . '  %nix = add i64 %nix0, ' . (string)($slot0 + 1) . "\n"
             . "  %nmp = getelementptr inbounds i64, ptr %d, i64 %nix\n"
             . "  %nmw = load i64, ptr %nmp\n"
@@ -6114,7 +6157,7 @@ trait EmitLlvmCalls
             . "  %more = icmp ult i64 %j, %n\n"
             . "  br i1 %more, label %body, label %done\n"
             . "body:\n"
-            . "  %ix0 = shl i64 %j, 1\n"
+            . '  %ix0 = mul i64 %j, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_SLOT_WORDS . "\n"
             . '  %ix = add i64 %ix0, ' . (string)$slot0 . "\n"
             . "  %ip = getelementptr inbounds i64, ptr %d, i64 %ix\n"
             . "  %info = load i64, ptr %ip\n"
@@ -6188,7 +6231,11 @@ trait EmitLlvmCalls
             . '  call void ' . $raise . "(i64 %mw, i64 0)\n"
             . "  unreachable\n"
             . "next:\n"
-            . "  store i64 %r, ptr %op\n"
+            . '  %hd = and i64 %info, ' . (string)\Compile\MemoryAbi::SPREAD_BIND_HAS_DEFAULT . "\n"
+            . "  %ishd = icmp ne i64 %hd, 0\n  %usedef = and i1 %short, %ishd\n"
+            . "  %dfp = getelementptr inbounds i64, ptr %ip, i64 2\n  %dfw = load i64, ptr %dfp\n"
+            . "  %fin = select i1 %usedef, i64 %dfw, i64 %r\n"
+            . "  store i64 %fin, ptr %op\n"
             . "  %hb = zext i1 %has to i64\n"
             . "  %hs = shl i64 %hb, %j\n"
             . "  %acc1 = or i64 %acc, %hs\n"

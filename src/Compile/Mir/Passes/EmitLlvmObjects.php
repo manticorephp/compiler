@@ -9557,7 +9557,13 @@ trait EmitLlvmObjects
             [$fsym, $cnt] = $fill;
             $buf = $this->ssa->allocReg();
             $out = '  ' . $buf . ' = alloca [' . (string)\max(1, $cnt) . " x i64]\n";
-            $out .= '  call void ' . $fsym . '(ptr ' . $tail[0] . ', ptr ' . $buf . ")\n";
+            if ($fill[2] !== '') {
+                // The fill is the spread binder alone: called here with its own descriptor.
+                $mr = $this->ssa->allocReg();
+                $out .= '  ' . $mr . ' = call i64 ' . $fsym . '(ptr ' . $tail[0] . ', ptr ' . $fill[2] . ', ptr ' . $buf . ', ' . $fill[3] . ")\n";
+            } else {
+                $out .= '  call void ' . $fsym . '(ptr ' . $tail[0] . ', ptr ' . $buf . ")\n";
+            }
             for ($i = 0; $i < $cnt; $i = $i + 1) {
                 $gp = $this->ssa->allocReg();
                 $rg = $this->ssa->allocReg();
@@ -9574,7 +9580,7 @@ trait EmitLlvmObjects
         return $out;
     }
 
-    /** @var array<string, array{0: string, 1: int}|null> spread-fill shape => [symbol, register count], null when it does not close */
+    /** @var array<string, array{0: string, 1: int, 2: string, 3: string}|null> spread-fill shape => [symbol, register count, binder descriptor, binder site], null when it does not close */
     private array $spreadFillSyms = [];
 
     /**
@@ -9584,7 +9590,7 @@ trait EmitLlvmObjects
      *
      * @param array<int, Type> $ptypes
      * @param array<int, bool> $tmask
-     * @return array{0: string, 1: int}|null
+     * @return array{0: string, 1: int, 2: string, 3: string}|null
      */
     private function spreadFillHelper(string $sym, int $first, array $ptypes, array $tmask, ?Type $elemType): ?array
     {
@@ -9614,6 +9620,7 @@ trait EmitLlvmObjects
 
         [$body, $regs] = $this->emitSpreadFill('%arr', $first, $ptypes, $tmask, $elemType, $sym, null, '%out');
         $filled = $this->spreadBindFilled;
+        $direct = $this->spreadBindDirect;
         foreach ($regs as $i => $rg) {
             $gp = $this->ssa->allocReg();
             $body .= '  ' . $gp . ' = getelementptr inbounds i64, ptr %out, i64 ' . (string)$i . "\n";
@@ -9623,9 +9630,11 @@ trait EmitLlvmObjects
         $result = null;
         // A by-reference parameter is filled with the address of a slot of this frame,
         // which would not outlive the helper.
-        if ($this->irIsClosed($body) && !\str_contains($body, ' = alloca ')) {
+        if ($direct !== null) {
+            $result = [$this->spreadBindHelper(), $filled, $direct[0], $direct[1]];
+        } elseif ($this->irIsClosed($body) && !\str_contains($body, ' = alloca ')) {
             $this->dynamicMethodHelpers['spfill|' . $key] = 'define internal void ' . $fsym . "(ptr %arr, ptr %out) {\nentry:\n" . $body . "}\n\n";
-            $result = [$fsym, $filled >= 0 ? $filled : \count($regs)];
+            $result = [$fsym, $filled >= 0 ? $filled : \count($regs), '', ''];
         }
 
         $this->ssa = $oldSsa;
