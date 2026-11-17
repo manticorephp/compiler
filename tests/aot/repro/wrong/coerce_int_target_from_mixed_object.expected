@@ -1,0 +1,3 @@
+param: i(): Argument #1 ($x) must be of type int, Foo given
+return: r(): Return value must be of type int, Foo returned
+prop: Cannot assign Foo to property Foo::$n of type int
