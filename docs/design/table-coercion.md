@@ -388,3 +388,28 @@ Left: the trampolines (21 MB of decode, the largest item). They are PHP source w
 coerces through `unboxCellArg`, which the binder does not model: the object guard with a php
 head, an owned rendered string released after the call, the `$a[k]` int-key read (not the
 positional one), `__mc_pdef_*` factories with their backtrace site, and `__mc_tramp_too_few`.
+
+### S6 trampolines (as built)
+
+At `-O0` a trampoline's call arguments (`$a[j]`, `$n > j ? $a[j] : \__mc_pdef_…()`) come from one
+call to `__mc_tbind` with a content-named descriptor (`MemoryAbi::TRAMP_BIND_*`: optional /
+decode / deref flags, factory pointer, trace-site name) and a load per argument. `emitNode`
+answers the argument nodes with those words, so `unboxCellArg`, `Cast`, temp ownership and the
+drops after the call run unchanged: the binder does not re-implement coercion. All reads and
+factory calls then happen where the first argument was read; the binder is used only where that
+is unobservable (no argument that may throw while coerced precedes an optional one, unless that
+one's default is a literal), and only with an optional argument or 8+ required ones.
+
+Optimized builds keep the inline form. Measured on `$o->$m($i)` into `m(int, int = 2, string =
+'x')` with reflection linked, `-O2`, min of 5: called 41 → 54 ms (+32 %), alwaysinline 41 → 52 ms
+(+27 %; the descriptor loop does not fold); the called form made the cold `-O2` symfony binary
+0.9 MB smaller (140.3 → 139.4 MB). The guard and the optional arms now share one `count($a)`.
+
+| step | commit | symfony defines MB | `-O0` binary MB |
+|---|---|---:|---:|
+| trampoline binder (`-O0`) | a769d188 | 543.7 | 154.3 |
+| one count per trampoline | 3e06272f | 541.6 | 154.0 |
+
+Decode left (same classifier): rtramp 17.5 MB (ctor `__mc_ctorg` glue and calls whose typed
+argument precedes an optional one with a non-literal default), static_callable 4.7, spfill 2.8,
+dynf 1.9, dynarm 1.5 — 28.5 MB of 541.6.
